@@ -181,3 +181,19 @@ Same path-safe `--` form as the TypeScript helpers. Used by ratatui `s` / `u` / 
 | `remove_untracked_file` | `clean -f -- <path>` | Delete one untracked file after confirm |
 
 Repo, dir, and workspace rows do not bulk-stage in the Rust TUI. Hidden ignored files stay out of these writes unless `.` / `-a` shows them.
+
+## Rust TUI (`crates/workspace-status`)
+
+`crates/workspace-status/src/git.rs` mirrors the Ink helpers the ratatui TUI needs. Same git binary rule. Same no-force push. Stash create uses `stash push -u` and treats an unchanged stash list as failure.
+
+| Function | Command | Purpose |
+| --- | --- | --- |
+| `push_quiet` | `push --quiet`, or `push -u <remote> HEAD --quiet` | TUI `P` on the focused visible checkout |
+| `stash_push` | `stash push -u [-- <paths>]` | Stash menu `s` |
+| `stash_apply` / `stash_pop` / `stash_drop` | `stash apply` / `pop` / `drop <ref>` | Stash menu `a` / `p` / `d` (pop and drop confirm first) |
+| `list_stash_refs` / `latest_stash_ref` | `stash list --format=%gd` | Latest stash for the menu |
+| `list_local_branches` | `for-each-ref` on `refs/heads/` | Branch picker `b` |
+| `create_branch_checkout` | `checkout -b <name> --quiet` | Picker `C` or Enter on a new name |
+| `origin_out_of_sync` | compare `rev-parse` of local vs `origin/<branch>` | Checkout confirm when tips differ |
+
+Hidden ignored checkouts stay out of `P` / `S` / `b` unless shown. Linked worktrees are included only when that row is focused. See [tui-rust.md](./tui-rust.md).

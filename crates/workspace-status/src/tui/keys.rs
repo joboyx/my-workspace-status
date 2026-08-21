@@ -13,6 +13,9 @@ pub enum InputMode {
     SearchPrompt,
     Confirm,
     Help,
+    StashMenu,
+    BranchPicker,
+    CreateBranch,
 }
 
 /// Map one terminal event to an [`Action`].
@@ -29,7 +32,15 @@ pub fn event_to_action(
             key_to_action(*key, mode, right_is_diff, focus_right)
         }
         Event::Mouse(mouse) => {
-            if matches!(mode, InputMode::SearchPrompt | InputMode::Confirm | InputMode::Help) {
+            if matches!(
+                mode,
+                InputMode::SearchPrompt
+                    | InputMode::Confirm
+                    | InputMode::Help
+                    | InputMode::StashMenu
+                    | InputMode::BranchPicker
+                    | InputMode::CreateBranch
+            ) {
                 Action::None
             } else {
                 mouse_to_action(*mouse)
@@ -67,6 +78,35 @@ fn key_to_action(
             }
             _ => Action::None,
         },
+        InputMode::StashMenu => match key.code {
+            KeyCode::Esc => Action::StashMenuCancel,
+            KeyCode::Enter => Action::StashMenuEnter,
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::StashMenuChar(c)
+            }
+            _ => Action::None,
+        },
+        InputMode::BranchPicker => match key.code {
+            KeyCode::Esc => Action::BranchCancel,
+            KeyCode::Enter => Action::BranchSubmit,
+            KeyCode::Backspace => Action::BranchBackspace,
+            KeyCode::Char('j') | KeyCode::Down => Action::BranchMove(1),
+            KeyCode::Char('k') | KeyCode::Up => Action::BranchMove(-1),
+            KeyCode::Char('C') => Action::CreateBranchStart,
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::BranchChar(c)
+            }
+            _ => Action::None,
+        },
+        InputMode::CreateBranch => match key.code {
+            KeyCode::Esc => Action::CreateBranchCancel,
+            KeyCode::Enter => Action::CreateBranchSubmit,
+            KeyCode::Backspace => Action::CreateBranchBackspace,
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::CreateBranchChar(c)
+            }
+            _ => Action::None,
+        },
         InputMode::Normal { search_active } => {
             normal_key(key, search_active, right_is_diff, focus_right)
         }
@@ -94,6 +134,9 @@ fn normal_key(
         KeyCode::Char('u') => Action::Unstage,
         KeyCode::Char('x') => Action::Revert,
         KeyCode::Char('e') => Action::Edit,
+        KeyCode::Char('P') => Action::Push,
+        KeyCode::Char('S') => Action::StashMenu,
+        KeyCode::Char('b') => Action::Branch,
         KeyCode::Char('n') if search_active => Action::SearchNext,
         KeyCode::Char('N') if search_active => Action::SearchPrev,
         KeyCode::Tab => {
@@ -250,6 +293,33 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Char(' ')), normal(), false, false),
             Action::ToggleReviewed
+        );
+    }
+
+    #[test]
+    fn stash_push_branch_keys() {
+        assert_eq!(event_to_action(&key(KeyCode::Char('S')), normal(), false, false), Action::StashMenu);
+        assert_eq!(event_to_action(&key(KeyCode::Char('P')), normal(), false, false), Action::Push);
+        assert_eq!(event_to_action(&key(KeyCode::Char('b')), normal(), false, false), Action::Branch);
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('p')), InputMode::StashMenu, false, false),
+            Action::StashMenuChar('p')
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Esc), InputMode::StashMenu, false, false),
+            Action::StashMenuCancel
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('C')), InputMode::BranchPicker, false, false),
+            Action::CreateBranchStart
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('j')), InputMode::BranchPicker, false, false),
+            Action::BranchMove(1)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Enter), InputMode::CreateBranch, false, false),
+            Action::CreateBranchSubmit
         );
     }
 }

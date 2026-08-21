@@ -18,7 +18,10 @@ use crate::actions::{pull_behind_repos, switch_repo_to_default_branch};
 use crate::config::WorkspaceStatusConfig;
 use crate::discovery::collect_snapshots;
 use crate::git::{
-    exec_git_checked, remove_untracked_file, revert_tracked_file, stage_file, unstage_file,
+    checkout_branch, create_branch_checkout, exec_git_checked, latest_stash_ref,
+    list_local_branches, origin_out_of_sync, pull_quiet, push_quiet, remove_untracked_file,
+    revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop, stash_push,
+    unstage_file,
 };
 use crate::snapshot::{build_workspace_snapshot, WorkspaceSnapshot};
 
@@ -255,6 +258,114 @@ fn apply_effect(
             );
             let _changed = state.apply_watch_snapshot(snapshot);
             load_right(state);
+        }
+        Effect::Push { repos } => {
+            let mut ok = 0;
+            let mut failed = 0;
+            for repo in &repos {
+                match push_quiet(&opts.cwd.join(repo)) {
+                    Ok(()) => ok += 1,
+                    Err(_) => failed += 1,
+                }
+            }
+            reload_snapshot(state, opts);
+            state.status = if failed > 0 && ok == 0 {
+                format!("push: {failed} failed")
+            } else if failed > 0 {
+                format!("Pushed {ok} · {failed} failed")
+            } else if ok == 1 {
+                "Pushed".into()
+            } else {
+                format!("Pushed {ok}")
+            };
+            load_right(state);
+        }
+        Effect::PrepareStashMenu { repo } => {
+            let latest = latest_stash_ref(&opts.cwd.join(&repo));
+            state.open_stash_menu(repo, latest);
+        }
+        Effect::StashCreate { repo, paths } => {
+            match stash_push(&opts.cwd.join(&repo), &paths) {
+                Ok(()) => {
+                    reload_snapshot(state, opts);
+                    state.status = if paths.len() == 1 {
+                        "Stashed 1 file".into()
+                    } else if paths.is_empty() {
+                        "Stashed".into()
+                    } else {
+                        format!("Stashed {} files", paths.len())
+                    };
+                    load_right(state);
+                }
+                Err(err) => state.status = format!("stash failed: {err}"),
+            }
+        }
+        Effect::StashApply { repo, stash_ref } => {
+            match stash_apply(&opts.cwd.join(&repo), &stash_ref) {
+                Ok(()) => {
+                    reload_snapshot(state, opts);
+                    state.status = format!("applied {stash_ref}");
+                    load_right(state);
+                }
+                Err(err) => state.status = format!("apply failed: {err}"),
+            }
+        }
+        Effect::StashPop { repo, stash_ref } => {
+            match stash_pop(&opts.cwd.join(&repo), &stash_ref) {
+                Ok(()) => {
+                    reload_snapshot(state, opts);
+                    state.status = format!("popped {stash_ref}");
+                    load_right(state);
+                }
+                Err(err) => state.status = format!("pop failed: {err}"),
+            }
+        }
+        Effect::StashDrop { repo, stash_ref } => {
+            match stash_drop(&opts.cwd.join(&repo), &stash_ref) {
+                Ok(()) => {
+                    reload_snapshot(state, opts);
+                    state.status = format!("dropped {stash_ref}");
+                    load_right(state);
+                }
+                Err(err) => state.status = format!("drop failed: {err}"),
+            }
+        }
+        Effect::PrepareBranchPicker { repo } => {
+            let branches = list_local_branches(&opts.cwd.join(&repo));
+            state.open_branch_picker(repo, branches);
+        }
+        Effect::CheckoutBranch {
+            repo,
+            branch,
+            pull_after,
+        } => {
+            let dir = opts.cwd.join(&repo);
+            if !pull_after {
+                if let Some(remote) = origin_out_of_sync(&dir, &branch) {
+                    let _ = state.confirm_checkout_if_out_of_sync(repo, branch, Some(remote));
+                    return;
+                }
+            }
+            if checkout_branch(&branch, &dir) {
+                if pull_after {
+                    let _ = pull_quiet(&dir);
+                }
+                reload_snapshot(state, opts);
+                state.status = format!("checked out {branch}");
+                load_right(state);
+            } else {
+                state.status = format!("checkout failed: {branch}");
+            }
+        }
+        Effect::CreateBranch { repo, name } => {
+            match create_branch_checkout(&opts.cwd.join(&repo), &name) {
+                Ok(()) => {
+                    reload_snapshot(state, opts);
+                    state.status = format!("created {name}");
+                    load_right(state);
+                }
+                Err(err) => state.status = format!("create branch failed: {err}"),
+            }
         }
     }
 }

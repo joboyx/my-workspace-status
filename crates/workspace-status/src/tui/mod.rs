@@ -5,6 +5,7 @@
 
 mod action;
 mod app;
+mod branches;
 mod diff;
 pub(crate) mod editor;
 mod graph_load;
@@ -12,6 +13,7 @@ mod keys;
 mod ops;
 mod render;
 pub(crate) mod search;
+mod stash;
 mod state;
 mod tree;
 pub(crate) mod watch;
