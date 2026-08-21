@@ -72,6 +72,12 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
 
     if state.help_open {
         draw_help(frame, area);
+    } else if state.stash_menu.is_some() {
+        draw_stash_menu(frame, area, state);
+    } else if state.create_branch.is_some() {
+        draw_create_branch(frame, area, state);
+    } else if state.branch_picker.is_some() {
+        draw_branch_picker(frame, area, state);
     }
 }
 
@@ -185,7 +191,7 @@ fn diff_style(line: &str) -> Style {
 
 fn draw_help(frame: &mut Frame<'_>, area: Rect) {
     let width = 48.min(area.width.saturating_sub(4));
-    let height = 16.min(area.height.saturating_sub(2));
+    let height = 18.min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let rect = Rect::new(x, y, width, height);
@@ -200,10 +206,115 @@ s  stage                u  unstage
 x  revert (y/n)         e  edit
 f  fetch                p  pull behind
 d  default branch       r  refresh
+P  push                 S  stash menu
+b  branch picker        C  create (in picker)
 Tab  other pane         click  select row";
     frame.render_widget(
         Paragraph::new(body)
             .block(Block::default().borders(Borders::ALL).title(" keys "))
+            .wrap(Wrap { trim: false }),
+        rect,
+    );
+}
+
+fn overlay_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width.saturating_sub(2)).max(10);
+    let height = height.min(area.height.saturating_sub(2)).max(4);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    Rect::new(x, y, width, height)
+}
+
+fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let Some(ops) = state.stash_menu.as_ref() else {
+        return;
+    };
+    let height = (ops.len() as u16).saturating_add(4).min(12);
+    let rect = overlay_rect(area, 48, height);
+    frame.render_widget(Clear, rect);
+    let mut lines = vec![Line::from(Span::styled(
+        " Stash ",
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    ))];
+    for op in ops {
+        let detail = op
+            .stash_ref
+            .as_deref()
+            .unwrap_or("");
+        let text = if detail.is_empty() {
+            format!(" {}  {}", op.key, op.label)
+        } else {
+            format!(" {}  {}  {}", op.key, op.label, detail)
+        };
+        lines.push(Line::from(text));
+    }
+    lines.push(Line::from(Span::styled(
+        " Esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" stash "))
+            .wrap(Wrap { trim: false }),
+        rect,
+    );
+}
+
+fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let Some(picker) = state.branch_picker.as_ref() else {
+        return;
+    };
+    let visible = picker.visible();
+    let height = (visible.len() as u16).saturating_add(5).min(16);
+    let rect = overlay_rect(area, 52, height);
+    frame.render_widget(Clear, rect);
+    let mut lines = vec![Line::from(format!(
+        " Branch {}  filter: {}",
+        picker.repo,
+        if picker.filter.is_empty() {
+            "…".into()
+        } else {
+            picker.filter.clone()
+        }
+    ))];
+    if visible.is_empty() {
+        lines.push(Line::from("  No matching branches"));
+    } else {
+        for (i, branch) in visible.iter().enumerate() {
+            let mark = if branch.current { "* " } else { "  " };
+            let cursor = if i == picker.cursor { "❯ " } else { "  " };
+            lines.push(Line::from(format!("{cursor}{mark}{}", branch.name)));
+        }
+    }
+    lines.push(Line::from(Span::styled(
+        " j/k move · type to filter · Enter checkout · C create · Esc close",
+        Style::default().fg(Color::DarkGray),
+    )));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" branch "))
+            .wrap(Wrap { trim: false }),
+        rect,
+    );
+}
+
+fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let Some(create) = state.create_branch.as_ref() else {
+        return;
+    };
+    let rect = overlay_rect(area, 48, 6);
+    frame.render_widget(Clear, rect);
+    let body = format!(
+        " Create branch\n  name: {}\n Enter confirm · Esc cancel",
+        if create.name.is_empty() {
+            "…"
+        } else {
+            create.name.as_str()
+        }
+    );
+    frame.render_widget(
+        Paragraph::new(body)
+            .block(Block::default().borders(Borders::ALL).title(" create "))
             .wrap(Wrap { trim: false }),
         rect,
     );
@@ -303,6 +414,8 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("q  quit"), "{text}");
         assert!(text.contains(".  show ignored"), "{text}");
+        assert!(text.contains("S  stash menu"), "{text}");
+        assert!(text.contains("P  push"), "{text}");
         assert!(!text.contains("EasyMotion"), "{text}");
     }
 }

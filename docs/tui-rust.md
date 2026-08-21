@@ -25,6 +25,9 @@ The TypeScript Ink app stays in this repository. Use it when you need a feature 
 | `f` | Fetch visible targets |
 | `p` | Pull visible targets that are behind |
 | `d` | Switch visible targets to the default branch |
+| `P` | Push the focused visible repo or checkout |
+| `S` | Stash menu (`s` create, `a` apply, `p` pop, `d` drop) |
+| `b` | Branch picker (list, filter, checkout, `C` create) |
 | `r` | Reload the workspace snapshot |
 | `space` | Mark a dirty file as reviewed (in memory only) |
 | `Tab` | Focus the other pane |
@@ -44,6 +47,9 @@ The TypeScript Ink app stays in this repository. Use it when you need a feature 
 - Stage / unstage / revert act on the focused dirty file only. Repo, dir, and workspace rows are a no-op. Revert asks `y` / `n` before it writes. Stage and unstage do not confirm
 - `e` uses config `editor`, then `$EDITOR`, then `$VISUAL`, then `vim`. A TTY editor leaves the alternate screen and returns to the same fold, focus, and scroll. GUI editors (`cursor`, `code`) spawn without a remount. Resume drains leftover raw-mode keys
 - Fetch / pull / default do not fan out to linked worktrees unless the focused row is that worktree
+- `P` pushes the focused visible repo or checkout only. Hidden ignored stay out. Linked worktrees push only when that row is focused
+- `S` opens a stash overlay. `s` creates a stash (pathspec when a dirty file is focused). `a` applies the latest stash. `p` pop and `d` drop ask `y` / `n` first, same as revert. Drop targets the latest stash
+- `b` opens the local branch picker on a checkout or flat repo. Type to filter. Enter checks out. `C` creates a branch at HEAD. When the local branch is out of sync with `origin/*`, checkout asks `y` / `n` then pulls
 - Action / Effect loop: crossterm events become `Action`, dispatch updates state and returns an `Effect`
 - Mouse is optional. Keys work without it
 - `--plain` / `--json` / `-v` / `-p` / `-d` stay headless
@@ -54,8 +60,6 @@ Reviewed marks last for this process only. They do not write the Ink viewed-file
 
 These stay in the TypeScript app:
 
-- Stash pop / drop / stash menu
-- Branch picker and graph checkout / create branch
 - Worktree remove
 - In-diff drag split and side-by-side resize
 - Commit-files drill (depth 1 / depth 2)
@@ -63,7 +67,8 @@ These stay in the TypeScript app:
 - Background fetch timer (`WS_STATUS_FETCH_MS`)
 - Ink-testing e2e suite
 - Multi-lane graph gutter (the crate still paints a single lane)
-- EasyMotion, theme cycle, push (`P`)
+- EasyMotion, theme cycle
+- Graph-row stash focus (drop a non-latest stash by focusing that graph row)
 
 See [tui-model.md](./tui-model.md) for the Ink keymap.
 

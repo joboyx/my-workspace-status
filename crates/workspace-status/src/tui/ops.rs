@@ -67,6 +67,34 @@ fn include_if_visible(repo: &str, visible: &[&WorkspaceRepoSnapshot]) -> Vec<Str
     }
 }
 
+/// Push targets the focused visible checkout only.
+///
+/// Workspace and group rows do not fan out. Hidden ignored stay out.
+/// A linked worktree is included only when that row is focused.
+pub fn push_targets(
+    snapshot: &WorkspaceSnapshot,
+    focused: Option<&VisibleRow>,
+    show_ignored: bool,
+) -> Vec<String> {
+    let Some(row) = focused else {
+        return Vec::new();
+    };
+    match row.kind {
+        NodeKind::Workspace | NodeKind::Group | NodeKind::File => Vec::new(),
+        NodeKind::Repo | NodeKind::Checkout => {
+            let visible: Vec<&WorkspaceRepoSnapshot> = snapshot
+                .repos
+                .iter()
+                .filter(|repo| show_ignored || !repo.ignored)
+                .collect();
+            let Some(repo) = row.repo.as_deref() else {
+                return Vec::new();
+            };
+            include_if_visible(repo, &visible)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,5 +243,50 @@ mod tests {
         row.ignored = true;
         let targets = op_targets(&snapshot, Some(&row), true, Op::Fetch);
         assert_eq!(targets, vec!["notes"]);
+    }
+
+    fn repo_row(repo: &str) -> VisibleRow {
+        VisibleRow {
+            id: format!("repo:{repo}"),
+            depth: 1,
+            kind: NodeKind::Repo,
+            label: repo.into(),
+            repo: Some(repo.into()),
+            primary_repo: None,
+            ignored: false,
+            file: None,
+            foldable: false,
+            folded: false,
+        }
+    }
+
+    #[test]
+    fn push_skips_workspace_and_hidden_ignored() {
+        let snapshot = built();
+        assert!(push_targets(&snapshot, Some(&workspace_row()), false).is_empty());
+        let mut notes = repo_row("notes");
+        notes.ignored = true;
+        assert!(push_targets(&snapshot, Some(&notes), false).is_empty());
+        notes.ignored = true;
+        assert_eq!(push_targets(&snapshot, Some(&notes), true), vec!["notes"]);
+    }
+
+    #[test]
+    fn push_worktree_only_when_focused() {
+        let snapshot = built();
+        assert_eq!(
+            push_targets(&snapshot, Some(&repo_row("app")), false),
+            vec!["app"]
+        );
+        assert_eq!(
+            push_targets(
+                &snapshot,
+                Some(&checkout_row(".worktrees/app/feat")),
+                false
+            ),
+            vec![".worktrees/app/feat"]
+        );
+        assert!(!push_targets(&snapshot, Some(&repo_row("app")), false)
+            .contains(&".worktrees/app/feat".to_string()));
     }
 }
