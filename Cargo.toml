@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["crates/workspace-status-graph"]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/joboyx/my-workspace-status"
+rust-version = "1.85"

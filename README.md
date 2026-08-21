@@ -3,6 +3,8 @@
 `workspace-status.sh` is the workspace-level git status contract for this tool.
 The implementation is TypeScript under `src/` (`src/index.ts` → `dist/index.js`); git subprocesses use [`zx`](https://google.github.io/zx/) `$` (run via Node, not the zx CLI). The `.sh` launcher runs `npm ci` and `npm run build` when needed.
 
+`crates/workspace-status-graph` is a ratatui widget for the git graph (HEAD, sync, stash, worktrees). The TypeScript Ink app is still the interactive TUI.
+
 It is intentionally treated as a black-box CLI:
 
 - the output format is the user-facing contract
@@ -11,7 +13,7 @@ It is intentionally treated as a black-box CLI:
 
 ## Install
 
-Requires Node 20 or later, npm, and git.
+Requires Node 20 or later, npm, and git. The graph crate also needs a recent stable Rust toolchain.
 
 Clone this repository, then install and link commands:
 
@@ -86,6 +88,7 @@ Pass one or more repo paths to limit output (e.g. `workspace-status.sh app vendo
 
 ```bash
 npm test
+cargo test
 ```
 
 Optional environment variables:
@@ -146,6 +149,7 @@ Several graph features — including checkout confirm when a local branch is out
 | [docs/snapshot.md](./docs/snapshot.md) | Workspace snapshot contract for `--plain`, `--json`, and the TUI |
 | [docs/tui-model.md](./docs/tui-model.md) | Tree model, row kinds, session state, action registry |
 | [docs/git-graph-topology.md](./docs/git-graph-topology.md) | Graph gutter glyphs, junctions, densify rails, stash leaf tips |
+| [docs/graph.md](./docs/graph.md) | Ratatui workspace-status-graph widget contract |
 | [docs/diff-rendering.md](./docs/diff-rendering.md) | Diff pipeline and syntax highlighting |
 | [docs/git-operations.md](./docs/git-operations.md) | Git commands, operation semantics, safety rules |
 | [docs/configuration.md](./docs/configuration.md) | Environment variables, workspace config, keymap |

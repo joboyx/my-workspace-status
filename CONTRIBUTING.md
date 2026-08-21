@@ -3,8 +3,9 @@
 ## Setup
 
 1. Install Node 20 or later, npm, and git.
-2. Clone this repository.
-3. Run `npm ci` in the repository root.
+2. Install a stable Rust toolchain (rustc and cargo) for the graph crate.
+3. Clone this repository.
+4. Run `npm ci` in the repository root.
 
 The launcher also installs and builds when node_modules or dist is missing or stale.
 
@@ -16,6 +17,7 @@ Run the same suite that CI runs:
 
 ```bash
 npm test
+cargo test
 ```
 
 Build with `npm run build`.
@@ -26,7 +28,7 @@ Agents and CI must use --plain. A TTY run without --plain opens the TUI.
 
 ## Pull requests
 
-Open a pull request against main. GitHub Actions runs `npm test` on pull requests and on main.
+Open a pull request against main. GitHub Actions runs `cargo test` and `npm test` on pull requests and on main.
 
 Keep SAMPLE_OUTPUT.md in sync with test/workspace-status.e2e.ts when output changes.
 
