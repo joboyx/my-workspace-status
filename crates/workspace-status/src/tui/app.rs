@@ -3,7 +3,8 @@
 use std::collections::BTreeSet;
 use std::io::{self, stdout};
 use std::path::Path;
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use crossterm::execute;
@@ -16,15 +17,19 @@ use ratatui::Terminal;
 use crate::actions::{pull_behind_repos, switch_repo_to_default_branch};
 use crate::config::WorkspaceStatusConfig;
 use crate::discovery::collect_snapshots;
-use crate::git::exec_git_checked;
+use crate::git::{
+    exec_git_checked, remove_untracked_file, revert_tracked_file, stage_file, unstage_file,
+};
 use crate::snapshot::{build_workspace_snapshot, WorkspaceSnapshot};
 
 use super::action::{Action, Effect};
 use super::diff::load_file_diff;
+use super::editor::{editor_command, is_detached_editor, resolve_editor};
 use super::graph_load::load_graph_model;
 use super::keys::event_to_action;
 use super::render::draw;
 use super::state::AppState;
+use super::watch::watch_interval_ms;
 
 /// Options for the interactive TUI.
 pub struct TuiOpts {
@@ -71,20 +76,28 @@ fn run_loop(
     state: &mut AppState,
     opts: &TuiOpts,
 ) -> Result<(), u8> {
-    apply_effect(state, Effect::LoadRightPane, opts);
+    apply_effect(state, Effect::LoadRightPane, opts, terminal);
     terminal
         .draw(|frame| draw(frame, state))
         .map_err(|_| 1u8)?;
     if opts.start_fetch {
         let effect = state.dispatch(Action::Fetch);
-        apply_effect(state, effect, opts);
+        apply_effect(state, effect, opts, terminal);
         terminal
             .draw(|frame| draw(frame, state))
             .map_err(|_| 1u8)?;
     }
 
+    let watch_ms = watch_interval_ms(std::env::var("WS_STATUS_WATCH_MS").ok().as_deref());
+    let mut last_watch = Instant::now();
     loop {
-        if event::poll(Duration::from_millis(200)).unwrap_or(false) {
+        let timeout = if watch_ms == 0 {
+            Duration::from_millis(200)
+        } else {
+            let remain = watch_ms.saturating_sub(last_watch.elapsed().as_millis() as u64);
+            Duration::from_millis(remain.min(200).max(10))
+        };
+        if event::poll(timeout).unwrap_or(false) {
             let Ok(event) = event::read() else {
                 continue;
             };
@@ -94,7 +107,7 @@ fn run_loop(
             }
             let action = event_to_action(
                 &event,
-                state.help_open,
+                state.input_mode(),
                 state.right_is_diff(),
                 matches!(state.focus, super::state::FocusPane::Right),
             );
@@ -102,7 +115,11 @@ fn run_loop(
             if matches!(effect, Effect::Quit) {
                 return Ok(());
             }
-            apply_effect(state, effect, opts);
+            apply_effect(state, effect, opts, terminal);
+        } else if watch_ms > 0 && last_watch.elapsed().as_millis() as u64 >= watch_ms {
+            let effect = state.dispatch(Action::WatchTick);
+            apply_effect(state, effect, opts, terminal);
+            last_watch = Instant::now();
         }
         terminal
             .draw(|frame| draw(frame, state))
@@ -110,7 +127,12 @@ fn run_loop(
     }
 }
 
-fn apply_effect(state: &mut AppState, effect: Effect, opts: &TuiOpts) {
+fn apply_effect(
+    state: &mut AppState,
+    effect: Effect,
+    opts: &TuiOpts,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) {
     match effect {
         Effect::None | Effect::Quit => {}
         Effect::Fetch { repos } => {
@@ -149,6 +171,137 @@ fn apply_effect(state: &mut AppState, effect: Effect, opts: &TuiOpts) {
             load_right(state);
         }
         Effect::LoadRightPane => load_right(state),
+        Effect::Stage { repo, paths } => {
+            let dir = opts.cwd.join(&repo);
+            for path in &paths {
+                if let Err(err) = stage_file(&dir, path) {
+                    state.status = format!("stage failed: {err}");
+                    return;
+                }
+            }
+            reload_snapshot(state, opts);
+            state.status = format!("staged {}", paths.last().map(String::as_str).unwrap_or(""));
+            load_right(state);
+        }
+        Effect::Unstage { repo, paths } => {
+            let dir = opts.cwd.join(&repo);
+            for path in &paths {
+                if let Err(err) = unstage_file(&dir, path) {
+                    state.status = format!("unstage failed: {err}");
+                    return;
+                }
+            }
+            reload_snapshot(state, opts);
+            state.status = format!("unstaged {}", paths.last().map(String::as_str).unwrap_or(""));
+            load_right(state);
+        }
+        Effect::Revert {
+            repo,
+            paths,
+            untracked,
+        } => {
+            let dir = opts.cwd.join(&repo);
+            for path in &paths {
+                let result = if untracked {
+                    remove_untracked_file(&dir, path)
+                } else {
+                    revert_tracked_file(&dir, path)
+                };
+                if let Err(err) = result {
+                    state.status = format!("revert failed: {err}");
+                    return;
+                }
+            }
+            reload_snapshot(state, opts);
+            state.status = if untracked {
+                format!("deleted {}", paths.last().map(String::as_str).unwrap_or(""))
+            } else {
+                format!("reverted {}", paths.last().map(String::as_str).unwrap_or(""))
+            };
+            load_right(state);
+        }
+        Effect::EditFile { repo, path } => {
+            let editor = resolve_editor(
+                opts.config.editor.as_deref(),
+                std::env::var("EDITOR").ok().as_deref(),
+                std::env::var("VISUAL").ok().as_deref(),
+            );
+            let abs = opts.cwd.join(&repo).join(&path);
+            let (cmd, args) = editor_command(&editor, &abs.to_string_lossy(), None);
+            if is_detached_editor(&editor) {
+                let _ = Command::new(&cmd)
+                    .args(&args)
+                    .current_dir(opts.cwd.join(&repo))
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn();
+                state.status = format!("opened {path}");
+            } else if let Err(err) = run_blocking_editor(terminal, &cmd, &args, &opts.cwd.join(&repo))
+            {
+                state.status = format!("edit failed: {err}");
+            } else {
+                state.status = format!("edited {path}");
+                drain_pending_events();
+            }
+        }
+        Effect::WatchRefresh => {
+            let snapshot = collect_full_snapshot(
+                &opts.cwd,
+                &opts.config,
+                &state.snapshot.filter_repos,
+                state.show_ignored,
+                false,
+            );
+            let _changed = state.apply_watch_snapshot(snapshot);
+            load_right(state);
+        }
+    }
+}
+
+fn drain_pending_events() {
+    while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+        let _ = event::read();
+    }
+}
+
+fn resume_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), String> {
+    enable_raw_mode().map_err(|e| e.to_string())?;
+    let mut out = stdout();
+    execute!(out, EnterAlternateScreen, EnableMouseCapture).map_err(|e| e.to_string())?;
+    let _ = terminal.hide_cursor();
+    let _ = terminal.clear();
+    drain_pending_events();
+    Ok(())
+}
+
+fn run_blocking_editor(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    cmd: &str,
+    args: &[String],
+    cwd: &Path,
+) -> Result<(), String> {
+    let _ = disable_raw_mode();
+    let mut out = stdout();
+    let _ = execute!(out, DisableMouseCapture, LeaveAlternateScreen);
+    let _ = terminal.show_cursor();
+    drain_pending_events();
+    let spawn = Command::new(cmd)
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status();
+    let restore = resume_tui(terminal);
+    match (spawn, restore) {
+        (Ok(status), Ok(())) if status.success() => Ok(()),
+        (Ok(status), Ok(())) => Err(format!(
+            "editor exited {}",
+            status.code().unwrap_or(-1)
+        )),
+        (Err(err), Ok(())) => Err(err.to_string()),
+        (Ok(_), Err(err)) | (Err(_), Err(err)) => Err(err),
     }
 }
 

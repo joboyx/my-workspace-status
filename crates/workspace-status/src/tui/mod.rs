@@ -6,12 +6,15 @@
 mod action;
 mod app;
 mod diff;
+pub(crate) mod editor;
 mod graph_load;
 mod keys;
 mod ops;
 mod render;
+pub(crate) mod search;
 mod state;
 mod tree;
+pub(crate) mod watch;
 
 pub use app::{collect_full_snapshot, run_tui, TuiOpts};
 

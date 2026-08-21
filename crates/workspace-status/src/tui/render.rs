@@ -7,8 +7,11 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 use ratatui::Frame;
 use workspace_status_graph::GraphWidget;
 
+use std::time::Instant;
+
 use super::state::{AppState, FocusPane};
 use super::tree::NodeKind;
+use super::watch::flash_active;
 
 /// Draw one frame. Updates `state.layout` for mouse hits.
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
@@ -116,7 +119,13 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         if i == cursor {
             style = style.add_modifier(Modifier::REVERSED);
         }
-        if row.ignored {
+        let flashing = state
+            .flashes
+            .get(&row.id)
+            .is_some_and(|at| flash_active(Instant::now().saturating_duration_since(*at)));
+        if flashing && i != cursor {
+            style = style.fg(Color::LightYellow).add_modifier(Modifier::BOLD);
+        } else if row.ignored {
             style = style.fg(Color::DarkGray);
         } else if row.kind == NodeKind::File {
             style = style.fg(Color::Yellow);
@@ -176,7 +185,7 @@ fn diff_style(line: &str) -> Style {
 
 fn draw_help(frame: &mut Frame<'_>, area: Rect) {
     let width = 48.min(area.width.saturating_sub(4));
-    let height = 14.min(area.height.saturating_sub(2));
+    let height = 16.min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let rect = Rect::new(x, y, width, height);
@@ -186,10 +195,12 @@ q  quit                 ?  close this help
 j/k  move               arrows  same
 z  fold                 h/l  close / open
 .  show ignored         space  mark reviewed
+/  search               n/N  next / prev
+s  stage                u  unstage
+x  revert (y/n)         e  edit
 f  fetch                p  pull behind
 d  default branch       r  refresh
-Tab  other pane         click  select row
-PageUp/Down  page       G / g  end / start";
+Tab  other pane         click  select row";
     frame.render_widget(
         Paragraph::new(body)
             .block(Block::default().borders(Borders::ALL).title(" keys "))

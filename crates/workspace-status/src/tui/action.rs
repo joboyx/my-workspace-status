@@ -23,6 +23,20 @@ pub enum Action {
     ScrollDiff(i32),
     Click { col: u16, row: u16 },
     ScrollWheel { col: u16, row: u16, delta: i32 },
+    SearchStart,
+    SearchChar(char),
+    SearchBackspace,
+    SearchSubmit,
+    SearchCancel,
+    SearchNext,
+    SearchPrev,
+    Stage,
+    Unstage,
+    Revert,
+    ConfirmYes,
+    ConfirmNo,
+    Edit,
+    WatchTick,
     None,
 }
 
@@ -36,4 +50,22 @@ pub enum Effect {
     DefaultBranch { repos: Vec<String> },
     ReloadSnapshot,
     LoadRightPane,
+    Stage {
+        repo: String,
+        paths: Vec<String>,
+    },
+    Unstage {
+        repo: String,
+        paths: Vec<String>,
+    },
+    Revert {
+        repo: String,
+        paths: Vec<String>,
+        untracked: bool,
+    },
+    EditFile {
+        repo: String,
+        path: String,
+    },
+    WatchRefresh,
 }
