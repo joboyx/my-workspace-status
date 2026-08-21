@@ -144,3 +144,6 @@ vite.config.ts.timestamp-*
 
 # Local git worktrees
 .worktrees/
+
+# Rust
+/target/
