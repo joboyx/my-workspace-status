@@ -2,18 +2,23 @@
 
 State of the code as it stands today.
 
-## Two output paths
+## One snapshot, three renderers
 
 ```
-src/index.ts ──┬─► src/render.ts        plain text report (stdout lines)
-               └─► src/tui/run.ts       Ink TUI (React)
+src/index.ts ── collectSnapshotsWithConfig
+             ├── buildWorkspaceSnapshot
+             │      ├─► src/render.ts                 --plain
+             │      └─► serializeWorkspaceSnapshot    --json
+             └── src/tui/run.ts                       Ink TUI (same collected snapshots)
 ```
+
+`--plain` and `--json` print the same workspace snapshot. The TUI uses the same `collectSnapshotsWithConfig` path, then paints Ink views. Display differs. See [snapshot.md](./snapshot.md).
 
 `main()` in `src/index.ts` picks with:
 
 ```ts
 const wantTui =
-  (flags.forceTui || (process.stdout.isTTY && !flags.forcePlain)) &&
+  (flags.forceTui || (process.stdout.isTTY && !flags.forcePlain && !flags.forceJson)) &&
   !flags.verbose &&
   !flags.doPull &&
   !flags.doDefaultBranch;
@@ -21,9 +26,10 @@ const wantTui =
 
 | Input            | Effect                                                                                                  |
 | ---------------- | ------------------------------------------------------------------------------------------------------- |
-| stdout is a TTY  | TUI (the default) — **agents must pass `--plain`** (TTY without it hangs waiting for keyboard input)    |
+| stdout is a TTY  | TUI (the default) — **agents must pass `--plain` or `--json`** (TTY without one hangs on keyboard input) |
 | `-i` / `--tui`   | TUI even without a TTY (humans only)                                                                    |
-| `--plain`        | plain report (required for agent runs)                                                                  |
+| `--plain`        | plain report (required for agent runs unless `--json`)                                                  |
+| `--json`         | workspace snapshot JSON on stdout (progress from `-f`/`-p`/`-d` goes to stderr)                         |
 | `-v`, `-p`, `-d` | plain report — these flags print progress logs mid-run, which cannot coexist with Ink owning the screen |
 
 `src/tui/run.ts` is loaded with a dynamic `import()` so the plain path never pays for React/Ink/`cli-highlight`. On a TTY it wraps the mount loop with `withAlternateScreen` (`tui/alternateScreen.ts`, DEC 1049) so Ink frames stay off the primary scrollback; leave/re-enter brackets a blocking TTY `$EDITOR` (vim). GUI editors such as Cursor spawn detached and stay on the mounted TUI. Leave also shows the cursor and registers `beforeExit`/`exit` hooks so abrupt process exit still restores the primary buffer.
@@ -35,6 +41,7 @@ const wantTui =
 | Config         | `config.ts`                                                                         | `WorkspaceStatusConfig` (`ignoredRepos`, `maxDepth`, `defaultBranches`)                                                                                                  |
 | Discovery      | `discovery.ts` — `findReposWithConfig` + linked via `git worktree list --porcelain` | primary paths up to `maxDepth`, then linked worktrees under cwd (dot dirs still skipped by walk)                                                                         |
 | Snapshot       | `discovery.ts` — `processRepo`                                                      | `RepoSnapshot` per path (`checkoutKind`, `primaryRepo?`, `mergedIntoDefault`) from status + merge-base probe                                                             |
+| Workspace      | `snapshot.ts` — `buildWorkspaceSnapshot`                                            | Workspace snapshot (`docs/snapshot.md`): repos, ignore, branch/sync/checkout, file changes. `--json` prints it. Hidden ignored repos stay out of `repos` unless shown         |
 | Aggregation    | `snapshot.ts`                                                                       | `SummaryState` (incl. `linkedWorktrees`), `VerboseRow[]` with `files` column + `🔗` / merge marks; bucket sort uses `compareRepoPathsForDisplay` (same adjacency as TUI) |
 | Per-file parse | `changes.ts` — `fileChangesFromSnapshot`                                            | `FileChange[]`, one row per path, merged across staged/unstaged/untracked                                                                                                |
 | Output         | `render.ts` or `tui/model/tree.ts` — `buildTree`                                    | plain report (`Files` header, Linked summary) or a `WorkspaceNode` tree                                                                                                  |
@@ -112,6 +119,7 @@ Graph checkout confirm (and several other graph UX choices) is inspired by [Git 
 | New pane / overlay    | `src/tui/` component + `bottomChromeRows` (`src/tui/bottomChrome.ts`) + `App.tsx` layout arithmetic                                                                       |
 | Nav shell / ViewStack | `src/tui/nav/` (`stack.ts` transitions, `drill.ts` row→context) + `Breadcrumb.tsx` + `RightPaneHost.tsx`                                                                  |
 | New CLI flag          | `src/cli.ts` (`parseArgs`, `HELP`) + `src/types.ts` (`CliFlags`)                                                                                                          |
+| Snapshot contract     | `src/snapshot.ts` (`buildWorkspaceSnapshot`) + `docs/snapshot.md` + `test/snapshot-contract.e2e.ts`                                                                       |
 | New key binding       | `src/tui/keys.ts` (`Action`, `handleKey`) + `useAppState.ts` (`runAction`) + `StatusBar.tsx` (`HELP_GROUPS`) + `activeContext.ts` / registry if the key is row-scoped     |
 
 Adding a node kind means editing four files that each `switch` on `kind`. TypeScript catches three of them exhaustively; `flatten.ts`'s `hasChildren` is a boolean predicate and will silently treat the new kind as a leaf.

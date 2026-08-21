@@ -26,11 +26,14 @@ npm link
 
 The launcher also installs dependencies and builds dist when they are missing or stale.
 
-## Use --plain from agents
+## Use --plain or --json from agents
 
-On a TTY, a run without --plain opens the interactive TUI and waits for keyboard input.
+On a TTY, a run without --plain or --json opens the interactive TUI and waits for keyboard input.
 That hang is the TUI, not a crash.
-Agents must pass --plain on every run. Do not rely on a non-TTY stdin.
+Agents must pass --plain or --json on every run. Do not rely on a non-TTY stdin.
+
+`--plain` is the human text of the workspace snapshot.
+`--json` prints the same snapshot as JSON. See [docs/snapshot.md](./docs/snapshot.md).
 
 ## Nerd Font
 
@@ -41,7 +44,9 @@ Set WS_STATUS_GLYPHS=ascii to use plain markers.
 ## Reference contract
 
 - Desired output shapes live in [SAMPLE_OUTPUT.md](./SAMPLE_OUTPUT.md).
+- The workspace snapshot contract (`--json` and `--plain`) lives in [docs/snapshot.md](./docs/snapshot.md).
 - The executable end-to-end suite lives in [test/workspace-status.e2e.ts](./test/workspace-status.e2e.ts).
+- The snapshot fixture e2e lives in [test/snapshot-contract.e2e.ts](./test/snapshot-contract.e2e.ts).
 
 ## Workspace config
 
@@ -94,7 +99,8 @@ The E2E suite covers the full sample-scenario surface plus the main operational 
 
 | Area                  | Covered behavior                                                                                                                                                                                |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| CLI contract          | `--help` documents `--all`, `--fetch`, `--verbose`, `--pull`, and `--default-branch`                                                                                                            |
+| CLI contract          | `--help` documents `--all`, `--fetch`, `--verbose`, `--pull`, `--default-branch`, `--plain`, and `--json`                                                                                       |
+| Snapshot contract     | `--json` and `--plain` share one workspace snapshot; fixture e2e builds a temp workspace and asserts both without a TTY                                                                         |
 | Clean summary         | all-clean default-branch workspaces and mixed clean default/non-default workspaces                                                                                                              |
 | Verbose table         | category ordering, default/non-default grouping, `no-upstream` display, detached HEAD display, and mixed-state table output                                                                     |
 | File changes          | unstaged-only, untracked-only, staged-only, staged+unstaged, staged+unstaged+untracked, rename, delete, and ticket-aware repo labels                                                            |
@@ -122,7 +128,7 @@ That isolation is deliberate. Refactors should be able to change implementation 
 
 ## Interactive TUI
 
-On a TTY (without `-v` / `-p` / `-d` / `--plain`), the script opens an Ink TUI that blocks on keyboard input. **Agents must always pass `--plain`** — do not rely on non-TTY alone; a hung agent shell is the failure mode. Force the TUI with `-i` / `--tui` for humans only.
+On a TTY (without `-v` / `-p` / `-d` / `--plain` / `--json`), the script opens an Ink TUI that blocks on keyboard input. **Agents must always pass `--plain` or `--json`** — do not rely on non-TTY alone; a hung agent shell is the failure mode. Force the TUI with `-i` / `--tui` for humans only.
 
 The interactive TUI uses the terminal **alternate screen** (DEC 1049, same idea as Vim/less) while mounted, so frames do not remain in primary scrollback after a normal exit (double Ctrl+C). Leave also shows the cursor and hooks `beforeExit`/`exit` so abrupt process exit still restores the primary buffer. Before `$EDITOR` (`e`) it leaves that buffer and re-enters on remount. `SIGKILL` skips that restore (leave hooks do not run).
 
@@ -137,6 +143,7 @@ Several graph features — including checkout confirm when a local branch is out
 | Document | Contents |
 | --- | --- |
 | [docs/architecture.md](./docs/architecture.md) | Module map, data flow, where to add new behaviour |
+| [docs/snapshot.md](./docs/snapshot.md) | Workspace snapshot contract for `--plain`, `--json`, and the TUI |
 | [docs/tui-model.md](./docs/tui-model.md) | Tree model, row kinds, session state, action registry |
 | [docs/git-graph-topology.md](./docs/git-graph-topology.md) | Graph gutter glyphs, junctions, densify rails, stash leaf tips |
 | [docs/diff-rendering.md](./docs/diff-rendering.md) | Diff pipeline and syntax highlighting |

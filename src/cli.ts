@@ -38,6 +38,7 @@ OPTIONS:
     -d, --default-branch     Switch non-default branches to default branch and pull
     -i, --tui                Force interactive TUI (even when stdout is not a TTY)
         --plain              Force plain text report (required for agents; disables TUI)
+        --json               Print the workspace snapshot as JSON (disables TUI)
     -h, --help               Show this help message
 
 EXAMPLES:
@@ -50,6 +51,7 @@ EXAMPLES:
     workspace-status.sh -d                 # Switch non-default branches to default
     workspace-status.sh -f -v              # Fetch and show verbose output
     workspace-status.sh --plain            # Plain text report (no TUI)
+    workspace-status.sh --json             # Workspace snapshot as JSON (no TUI)
     workspace-status.sh -i                 # Force TUI
 
 OUTPUT:
@@ -60,10 +62,11 @@ OUTPUT:
 
     With --verbose, it also shows an aligned repo table with branch, sync, and change indicators.
 
-    On a TTY (without -v/-p/-d/--plain), an interactive TUI is used instead.
+    On a TTY (without -v/-p/-d/--plain/--json), an interactive TUI is used instead.
     TUI keys: j/k move · h/l fold · s/u/x stage/unstage/revert · i diff mode ·
     t tree · r refresh · / filter · ? help · Ctrl-C twice quit.
-    Agents MUST pass --plain (TTY without it hangs the shell on the TUI).
+    Agents MUST pass --plain or --json (TTY without one hangs the shell on the TUI).
+    --plain is the human renderer of the snapshot. --json prints the same snapshot.
 
 TUI REQUIREMENTS:
     The TUI needs a Nerd Font in the terminal. Without one, file-type icons and
@@ -93,6 +96,7 @@ export function parseArgs(argv: string[]): CliFlags {
     doDefaultBranch: false,
     includeAll: false,
     forcePlain: false,
+    forceJson: false,
     forceTui: false,
     filterRepos: [],
   };
@@ -125,6 +129,7 @@ export function parseArgs(argv: string[]): CliFlags {
     else if (arg === '--pull') flags.doPull = true;
     else if (arg === '--default-branch') flags.doDefaultBranch = true;
     else if (arg === '--plain') flags.forcePlain = true;
+    else if (arg === '--json') flags.forceJson = true;
     else if (arg === '--tui') flags.forceTui = true;
     else if (arg.startsWith('-') && arg.length > 1) {
       for (const flag of arg.slice(1)) applyShortFlag(flag);
