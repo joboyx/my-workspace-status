@@ -25,6 +25,7 @@ Do **not** invent spur heuristics (`parent.lane + 1`, spine `◇─╯`, mid-rai
 | Workspace snapshot fields or `--json` / `--plain` contract | `docs/snapshot.md` and `test/snapshot-contract.e2e.ts` |
 | Tree nodes, row kinds, fold behaviour, keymap, session state, action registry | `docs/tui-model.md` |
 | Graph gutter topology, glyphs, junctions, densify rails, stash leaf tips | `docs/git-graph-topology.md` (+ architecture / tui-model pointers) |
+| Ratatui graph widget model, rows, or paint | `docs/graph.md` + `crates/workspace-status-graph` |
 | Diff parsing, layout, or syntax highlighting | `docs/diff-rendering.md` |
 | Any git command or operation semantics | `docs/git-operations.md` |
 | Environment variables, workspace config, keybindings, themes | `docs/configuration.md` |
@@ -36,5 +37,6 @@ A change is not complete while its documentation is stale.
 
 - ESM: import with `.js` extensions from TypeScript sources.
 - Tests use `node:test` + `tsx`. New test files must be listed in the `test` script in `package.json`.
+- The graph crate uses `cargo test` at the repository root. Keep both Node and Rust checks green.
 - Exported symbols need multi-line JSDoc.
 - The plain-text report is a user-facing contract — changing it means updating `SAMPLE_OUTPUT.md` and the E2E suite.

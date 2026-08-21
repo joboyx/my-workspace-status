@@ -124,6 +124,17 @@ Graph checkout confirm (and several other graph UX choices) is inspired by [Git 
 
 Adding a node kind means editing four files that each `switch` on `kind`. TypeScript catches three of them exhaustively; `flatten.ts`'s `hasChildren` is a boolean predicate and will silently treat the new kind as a leaf.
 
+## Rust graph crate
+
+`crates/workspace-status-graph` is a ratatui widget for one git graph window.
+The Ink TUI still paints the interactive graph.
+
+Callers feed a `GraphModel` (commits, HEAD, sync, stash, worktrees).
+`GraphWidget` implements ratatui `Widget`. Hidden ignored worktrees stay
+out of `visible_rows` unless `show_ignored` is true.
+
+See [graph.md](./graph.md).
+
 ## Decisions
 
 **Ink over hand-rolled ANSI.** The TUI is stateful — fold sets, cursor identity tracking, an async diff cache, a poll loop, decaying flash timers. React's re-render-from-state model handles that; a hand-rolled ANSI renderer would mean owning diffing and cursor placement by hand for no gain. The cost is real: Ink does not re-render on `SIGWINCH`, so `App.tsx` tracks terminal size itself.
