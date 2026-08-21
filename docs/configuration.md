@@ -58,7 +58,7 @@ Repos without a key keep prior behaviour: classification still treats `main` / `
 
 Optional command string for TUI `e`, same shape as `$EDITOR` (`"vim"`, `"nvim"`, `"cursor"`, `"cursor --wait"`, `"code --wait"`). Not a closed list of names. `"cursor"` already opens at `path:line` via `-g`.
 
-- Omit the key, or set `"editor": "vim"`, for **vim** (the default when `$EDITOR` / `$VISUAL` are also unset). vim takes the TTY (Ink unmounts, then remounts with the same session).
+- Omit the key, or set `"editor": "vim"`, for **vim** (the default when `$EDITOR` / `$VISUAL` are also unset). vim takes the TTY. The Rust TUI leaves the alternate screen and resumes the same fold, focus, and scroll. Ink unmounts, then remounts with the same session.
 - `"editor": "cursor"` opens Cursor IDE without changing the shell `$EDITOR`. Cursor / VS Code stay mounted, so fold, focus, and scroll do not rebuild.
 - Non-blank config `editor` overrides `$EDITOR` / `$VISUAL`. Blank / whitespace-only is treated as unset (fall through). Non-string values throw.
 
@@ -74,7 +74,7 @@ The two overrides differ in the TUI. `-a` replaces the ignored list before `runT
 | Variable                  | Default                                                 | Effect                                                                                                                                                                                            |
 | ------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `WS_STATUS_GLYPHS`        | unset                                                   | `ascii` replaces every Nerd Font glyph with a one-column ASCII marker (`icons.ts`, read once at module load). Any other value is ignored.                                                         |
-| `WS_STATUS_WATCH_MS`      | `3000` (`DEFAULT_WATCH_MS`)                             | Live-refresh poll period. `0` disables the poll loop. Values below `MIN_WATCH_MS` (500) are clamped up. Non-numeric, negative, or empty falls back to the default.                                |
+| `WS_STATUS_WATCH_MS`      | `3000` (`DEFAULT_WATCH_MS`)                             | Live-refresh poll period for Ink and the Rust TUI. `0` disables the poll. Values below `MIN_WATCH_MS` (500) are clamped up. Non-numeric, negative, or empty falls back to the default. The Rust TUI polls local git only (no fetch) and keeps fold, focus, and scroll.                                |
 | `WS_STATUS_FETCH_MS`      | `300000` (`DEFAULT_FETCH_MS`)                           | Background `git fetch` period for the TUI. `0` disables. Values below `MIN_FETCH_MS` (30000) are clamped up when enabled. Non-numeric, negative, or empty falls back to the default.              |
 | `WS_STATUS_THEME`         | `tokyo-night`                                           | Built-in TUI theme id: `tokyo-night`, `monokai`, `dracula`, `gruvbox-dark`, `catppuccin-mocha`. Unknown values fall back to `tokyo-night`.                                                        |
 | `EDITOR`                  | unset                                                   | Fallback editor for `e` when config `editor` is omitted or blank. Blank values are ignored. May include fixed args (`code --wait`, `nvim -p`); simple quoting is supported for paths with spaces. |

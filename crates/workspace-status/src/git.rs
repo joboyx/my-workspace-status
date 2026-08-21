@@ -218,12 +218,95 @@ pub fn list_worktrees_porcelain(cwd: &Path) -> String {
     exec_git(&["worktree", "list", "--porcelain"], cwd)
 }
 
+/// Stage one path (`git add --`).
+pub fn stage_file(cwd: &Path, file_path: &str) -> Result<(), String> {
+    exec_git_checked(&["add", "--", file_path], cwd)
+}
+
+/// Unstage one path (`git restore --staged --`).
+pub fn unstage_file(cwd: &Path, file_path: &str) -> Result<(), String> {
+    exec_git_checked(&["restore", "--staged", "--", file_path], cwd)
+}
+
+/// Discard worktree changes to a tracked path (`git restore --`).
+pub fn revert_tracked_file(cwd: &Path, file_path: &str) -> Result<(), String> {
+    exec_git_checked(&["restore", "--", file_path], cwd)
+}
+
+/// Delete an untracked path (`git clean -f --`). Destructive.
+pub fn remove_untracked_file(cwd: &Path, file_path: &str) -> Result<(), String> {
+    exec_git_checked(&["clean", "-f", "--", file_path], cwd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn git_binary_is_nonempty() {
         assert!(!git_binary().as_os_str().is_empty());
+    }
+
+    fn git_env() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("GIT_AUTHOR_NAME", "workspace-status test"),
+            ("GIT_AUTHOR_EMAIL", "workspace-status-test@example.invalid"),
+            ("GIT_COMMITTER_NAME", "workspace-status test"),
+            ("GIT_COMMITTER_EMAIL", "workspace-status-test@example.invalid"),
+        ]
+    }
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let mut cmd = Command::new(git_binary());
+        cmd.args(args).current_dir(cwd);
+        for (k, v) in git_env() {
+            cmd.env(k, v);
+        }
+        let status = cmd.status().expect("git");
+        assert!(status.success(), "git {args:?}");
+    }
+
+    fn porcelain(cwd: &Path) -> String {
+        exec_git(&["status", "--porcelain=v1"], cwd)
+    }
+
+    #[test]
+    fn stage_unstage_revert_on_fixture() {
+        let dir = std::env::temp_dir().join(format!(
+            "ws-git-ops-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let init = Command::new(git_binary())
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&dir)
+            .status();
+        if init.map(|s| s.success()).unwrap_or(false) == false {
+            git(&dir, &["init", "-q"]);
+            git(&dir, &["checkout", "-q", "-b", "main"]);
+        }
+        fs::write(dir.join("README.md"), "# seed\n").unwrap();
+        git(&dir, &["add", "README.md"]);
+        git(&dir, &["commit", "-q", "-m", "seed"]);
+        fs::write(dir.join("README.md"), "# dirty\n").unwrap();
+        assert_ne!(exec_git_status(&["diff", "--quiet"], &dir), 0);
+        stage_file(&dir, "README.md").unwrap();
+        assert_ne!(exec_git_status(&["diff", "--cached", "--quiet"], &dir), 0);
+        unstage_file(&dir, "README.md").unwrap();
+        assert_eq!(exec_git_status(&["diff", "--cached", "--quiet"], &dir), 0);
+        assert_ne!(exec_git_status(&["diff", "--quiet"], &dir), 0);
+        revert_tracked_file(&dir, "README.md").unwrap();
+        assert_eq!(exec_git_status(&["diff", "--quiet"], &dir), 0);
+        let _ = porcelain(&dir);
+        fs::write(dir.join("tmp-untracked.txt"), "x\n").unwrap();
+        remove_untracked_file(&dir, "tmp-untracked.txt").unwrap();
+        assert!(!dir.join("tmp-untracked.txt").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

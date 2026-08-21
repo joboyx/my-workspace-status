@@ -6,30 +6,79 @@ use crossterm::event::{
 
 use super::action::Action;
 
+/// How the keymap reads the next key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputMode {
+    Normal { search_active: bool },
+    SearchPrompt,
+    Confirm,
+    Help,
+}
+
 /// Map one terminal event to an [`Action`].
 ///
-/// Key release / repeat events are ignored. Help overlay swallows
-/// everything except `q`, `Esc`, and `?`.
-pub fn event_to_action(event: &Event, help_open: bool, right_is_diff: bool, focus_right: bool) -> Action {
+/// Key release events are ignored. Repeat is accepted for movement.
+pub fn event_to_action(
+    event: &Event,
+    mode: InputMode,
+    right_is_diff: bool,
+    focus_right: bool,
+) -> Action {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
-            key_to_action(*key, help_open, right_is_diff, focus_right)
+            key_to_action(*key, mode, right_is_diff, focus_right)
         }
-        Event::Mouse(mouse) => mouse_to_action(*mouse),
+        Event::Mouse(mouse) => {
+            if matches!(mode, InputMode::SearchPrompt | InputMode::Confirm | InputMode::Help) {
+                Action::None
+            } else {
+                mouse_to_action(*mouse)
+            }
+        }
         _ => Action::None,
     }
 }
 
-fn key_to_action(key: KeyEvent, help_open: bool, right_is_diff: bool, focus_right: bool) -> Action {
+fn key_to_action(
+    key: KeyEvent,
+    mode: InputMode,
+    right_is_diff: bool,
+    focus_right: bool,
+) -> Action {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Action::Quit;
     }
-    if help_open {
-        return match key.code {
+    match mode {
+        InputMode::Help => match key.code {
             KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('?') => Action::ToggleHelp,
             _ => Action::None,
-        };
+        },
+        InputMode::Confirm => match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::ConfirmYes,
+            KeyCode::Char('n') | KeyCode::Esc => Action::ConfirmNo,
+            _ => Action::None,
+        },
+        InputMode::SearchPrompt => match key.code {
+            KeyCode::Esc => Action::SearchCancel,
+            KeyCode::Enter => Action::SearchSubmit,
+            KeyCode::Backspace => Action::SearchBackspace,
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::SearchChar(c)
+            }
+            _ => Action::None,
+        },
+        InputMode::Normal { search_active } => {
+            normal_key(key, search_active, right_is_diff, focus_right)
+        }
     }
+}
+
+fn normal_key(
+    key: KeyEvent,
+    search_active: bool,
+    right_is_diff: bool,
+    focus_right: bool,
+) -> Action {
     match key.code {
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Char('?') => Action::ToggleHelp,
@@ -40,6 +89,13 @@ fn key_to_action(key: KeyEvent, help_open: bool, right_is_diff: bool, focus_righ
         KeyCode::Char('r') => Action::Refresh,
         KeyCode::Char(' ') => Action::ToggleReviewed,
         KeyCode::Char('z') => Action::FoldToggle,
+        KeyCode::Char('/') => Action::SearchStart,
+        KeyCode::Char('s') => Action::Stage,
+        KeyCode::Char('u') => Action::Unstage,
+        KeyCode::Char('x') => Action::Revert,
+        KeyCode::Char('e') => Action::Edit,
+        KeyCode::Char('n') if search_active => Action::SearchNext,
+        KeyCode::Char('N') if search_active => Action::SearchPrev,
         KeyCode::Tab => {
             if focus_right {
                 Action::FocusLeft
@@ -114,36 +170,77 @@ mod tests {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
+    fn normal() -> InputMode {
+        InputMode::Normal {
+            search_active: false,
+        }
+    }
+
     #[test]
     fn daily_keys() {
-        assert_eq!(event_to_action(&key(KeyCode::Char('q')), false, false, false), Action::Quit);
-        assert_eq!(event_to_action(&key(KeyCode::Char('?')), false, false, false), Action::ToggleHelp);
-        assert_eq!(event_to_action(&key(KeyCode::Char('.')), false, false, false), Action::ToggleShowIgnored);
-        assert_eq!(event_to_action(&key(KeyCode::Char('f')), false, false, false), Action::Fetch);
-        assert_eq!(event_to_action(&key(KeyCode::Char('p')), false, false, false), Action::Pull);
-        assert_eq!(event_to_action(&key(KeyCode::Char('d')), false, false, false), Action::DefaultBranch);
-        assert_eq!(event_to_action(&key(KeyCode::Char('j')), false, false, false), Action::Move(1));
-        assert_eq!(event_to_action(&key(KeyCode::Char('k')), false, false, false), Action::Move(-1));
-        assert_eq!(event_to_action(&key(KeyCode::Char('z')), false, false, false), Action::FoldToggle);
-        assert_eq!(event_to_action(&key(KeyCode::Left), false, false, false), Action::FoldClose);
-        assert_eq!(event_to_action(&key(KeyCode::Right), false, false, false), Action::FoldOpen);
+        assert_eq!(event_to_action(&key(KeyCode::Char('q')), normal(), false, false), Action::Quit);
+        assert_eq!(event_to_action(&key(KeyCode::Char('?')), normal(), false, false), Action::ToggleHelp);
+        assert_eq!(event_to_action(&key(KeyCode::Char('.')), normal(), false, false), Action::ToggleShowIgnored);
+        assert_eq!(event_to_action(&key(KeyCode::Char('f')), normal(), false, false), Action::Fetch);
+        assert_eq!(event_to_action(&key(KeyCode::Char('p')), normal(), false, false), Action::Pull);
+        assert_eq!(event_to_action(&key(KeyCode::Char('d')), normal(), false, false), Action::DefaultBranch);
+        assert_eq!(event_to_action(&key(KeyCode::Char('j')), normal(), false, false), Action::Move(1));
+        assert_eq!(event_to_action(&key(KeyCode::Char('k')), normal(), false, false), Action::Move(-1));
+        assert_eq!(event_to_action(&key(KeyCode::Char('z')), normal(), false, false), Action::FoldToggle);
+        assert_eq!(event_to_action(&key(KeyCode::Left), normal(), false, false), Action::FoldClose);
+        assert_eq!(event_to_action(&key(KeyCode::Right), normal(), false, false), Action::FoldOpen);
+    }
+
+    #[test]
+    fn search_and_file_keys() {
+        assert_eq!(event_to_action(&key(KeyCode::Char('/')), normal(), false, false), Action::SearchStart);
+        assert_eq!(event_to_action(&key(KeyCode::Char('s')), normal(), false, false), Action::Stage);
+        assert_eq!(event_to_action(&key(KeyCode::Char('u')), normal(), false, false), Action::Unstage);
+        assert_eq!(event_to_action(&key(KeyCode::Char('x')), normal(), false, false), Action::Revert);
+        assert_eq!(event_to_action(&key(KeyCode::Char('e')), normal(), false, false), Action::Edit);
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('n')), normal(), false, false),
+            Action::None
+        );
+        let armed = InputMode::Normal {
+            search_active: true,
+        };
+        assert_eq!(event_to_action(&key(KeyCode::Char('n')), armed, false, false), Action::SearchNext);
+        assert_eq!(event_to_action(&key(KeyCode::Char('N')), armed, false, false), Action::SearchPrev);
+    }
+
+    #[test]
+    fn search_prompt_eats_chars() {
+        let mode = InputMode::SearchPrompt;
+        assert_eq!(event_to_action(&key(KeyCode::Char('s')), mode, false, false), Action::SearchChar('s'));
+        assert_eq!(event_to_action(&key(KeyCode::Enter), mode, false, false), Action::SearchSubmit);
+        assert_eq!(event_to_action(&key(KeyCode::Esc), mode, false, false), Action::SearchCancel);
+        assert_eq!(event_to_action(&key(KeyCode::Backspace), mode, false, false), Action::SearchBackspace);
+    }
+
+    #[test]
+    fn confirm_y_n() {
+        let mode = InputMode::Confirm;
+        assert_eq!(event_to_action(&key(KeyCode::Char('y')), mode, false, false), Action::ConfirmYes);
+        assert_eq!(event_to_action(&key(KeyCode::Char('n')), mode, false, false), Action::ConfirmNo);
+        assert_eq!(event_to_action(&key(KeyCode::Char('s')), mode, false, false), Action::None);
     }
 
     #[test]
     fn help_overlay_swallows_ops() {
-        assert_eq!(event_to_action(&key(KeyCode::Char('f')), true, false, false), Action::None);
-        assert_eq!(event_to_action(&key(KeyCode::Char('?')), true, false, false), Action::ToggleHelp);
-        assert_eq!(event_to_action(&key(KeyCode::Esc), true, false, false), Action::ToggleHelp);
+        assert_eq!(event_to_action(&key(KeyCode::Char('f')), InputMode::Help, false, false), Action::None);
+        assert_eq!(event_to_action(&key(KeyCode::Char('?')), InputMode::Help, false, false), Action::ToggleHelp);
+        assert_eq!(event_to_action(&key(KeyCode::Esc), InputMode::Help, false, false), Action::ToggleHelp);
     }
 
     #[test]
     fn right_diff_j_scrolls() {
         assert_eq!(
-            event_to_action(&key(KeyCode::Char('j')), false, true, true),
+            event_to_action(&key(KeyCode::Char('j')), normal(), true, true),
             Action::ScrollDiff(1)
         );
         assert_eq!(
-            event_to_action(&key(KeyCode::Char('j')), false, true, false),
+            event_to_action(&key(KeyCode::Char('j')), normal(), true, false),
             Action::Move(1)
         );
     }
@@ -151,7 +248,7 @@ mod tests {
     #[test]
     fn space_is_reviewed_not_fold() {
         assert_eq!(
-            event_to_action(&key(KeyCode::Char(' ')), false, false, false),
+            event_to_action(&key(KeyCode::Char(' ')), normal(), false, false),
             Action::ToggleReviewed
         );
     }

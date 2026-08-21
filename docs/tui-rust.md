@@ -16,6 +16,12 @@ The TypeScript Ink app stays in this repository. Use it when you need a feature 
 | `z` | Toggle fold |
 | `h` / `l` or left / right | Close / open fold. Space does not fold |
 | `.` | Show or hide ignored repos |
+| `/` | Search prompt. Enter arms the query. Esc cancels |
+| `n` / `N` | Next / previous search match (previous is `N`, not `p`) |
+| `s` | Stage the focused dirty file |
+| `u` | Unstage the focused dirty file |
+| `x` | Revert the focused dirty file (confirm `y` / `n`) |
+| `e` | Edit the focused file (`$EDITOR` or config `editor`) |
 | `f` | Fetch visible targets |
 | `p` | Pull visible targets that are behind |
 | `d` | Switch visible targets to the default branch |
@@ -27,11 +33,16 @@ The TypeScript Ink app stays in this repository. Use it when you need a feature 
 
 `-a` starts with ignored repos shown. `-f` starts a fetch after the first paint. First paint does not wait on a network fetch.
 
+`WS_STATUS_WATCH_MS` polls local git and refreshes the snapshot. Default is `3000`. `0` disables the poll. Fold, focus, and scroll stay put. Only rows whose identity actually changed flash.
+
 ## What this TUI does
 
 - Tree of repos, linked worktrees, and dirty files from the same snapshot builder as `--plain` / `--json`
 - Right pane: file diff when a dirty file is focused. Graph pane via `workspace-status-graph` when a repo or worktree is focused
-- Hidden ignored repos stay out of the tree and out of fetch / pull / default unless you show them
+- Hidden ignored repos stay out of the tree, search, stage / unstage / revert, and fetch / pull / default unless you show them
+- Search matches include folded rows. Focusing a match unfolds its ancestors
+- Stage / unstage / revert act on the focused dirty file only. Repo, dir, and workspace rows are a no-op. Revert asks `y` / `n` before it writes. Stage and unstage do not confirm
+- `e` uses config `editor`, then `$EDITOR`, then `$VISUAL`, then `vim`. A TTY editor leaves the alternate screen and returns to the same fold, focus, and scroll. GUI editors (`cursor`, `code`) spawn without a remount. Resume drains leftover raw-mode keys
 - Fetch / pull / default do not fan out to linked worktrees unless the focused row is that worktree
 - Action / Effect loop: crossterm events become `Action`, dispatch updates state and returns an `Effect`
 - Mouse is optional. Keys work without it
@@ -46,14 +57,13 @@ These stay in the TypeScript app:
 - Stash pop / drop / stash menu
 - Branch picker and graph checkout / create branch
 - Worktree remove
-- Edit in editor and remount
 - In-diff drag split and side-by-side resize
 - Commit-files drill (depth 1 / depth 2)
 - Persisted reviewed store
-- Live watch poll and background fetch timer
+- Background fetch timer (`WS_STATUS_FETCH_MS`)
 - Ink-testing e2e suite
 - Multi-lane graph gutter (the crate still paints a single lane)
-- Search (`/` `n` `N`), EasyMotion, theme cycle, stage / unstage / revert, push (`P`)
+- EasyMotion, theme cycle, push (`P`)
 
 See [tui-model.md](./tui-model.md) for the Ink keymap.
 
@@ -74,4 +84,4 @@ Left pane: workspace tree. Clean default-branch repos sit under a folded `No upd
 
 Right pane: graph for a repo or worktree, or a unified diff for a dirty file.
 
-Bottom line: short status. `?` opens a small overlay of the keys above.
+Bottom line: short status. `?` opens a small overlay of the keys above. `/` uses that line as the search prompt.
