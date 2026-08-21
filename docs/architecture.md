@@ -124,6 +124,20 @@ Graph checkout confirm (and several other graph UX choices) is inspired by [Git 
 
 Adding a node kind means editing four files that each `switch` on `kind`. TypeScript catches three of them exhaustively; `flatten.ts`'s `hasChildren` is a boolean predicate and will silently treat the new kind as a leaf.
 
+
+## Rust CLI crate
+
+
+crates/workspace-status is the headless CLI (workspace-status and ws).
+It implements discovery, --plain, --json, -a/--all, repo filters, and ignored-repo visibility from snapshot.md.
+
+Git calls use a subprocess. The binary prefers /usr/bin/git so WSL does not pick a Windows git.exe. Set WORKSPACE_STATUS_GIT to override.
+
+--fetch, --pull, and --default-branch write progress to stderr when --json is set. --json wins when both --json and --plain are set. -v applies to --plain only.
+
+This crate does not open a TUI. A run without --plain or --json prints the --plain report. The TypeScript Ink app is still the interactive TUI.
+
+
 ## Rust graph crate
 
 `crates/workspace-status-graph` is a ratatui widget for one git graph window.
