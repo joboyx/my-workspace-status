@@ -37,6 +37,22 @@ pub enum Action {
     ConfirmNo,
     Edit,
     WatchTick,
+    Push,
+    StashMenu,
+    StashMenuChar(char),
+    StashMenuEnter,
+    StashMenuCancel,
+    Branch,
+    BranchMove(i32),
+    BranchChar(char),
+    BranchBackspace,
+    BranchSubmit,
+    BranchCancel,
+    CreateBranchStart,
+    CreateBranchChar(char),
+    CreateBranchBackspace,
+    CreateBranchSubmit,
+    CreateBranchCancel,
     None,
 }
 
@@ -68,4 +84,32 @@ pub enum Effect {
         path: String,
     },
     WatchRefresh,
+    Push { repos: Vec<String> },
+    PrepareStashMenu { repo: String },
+    StashCreate {
+        repo: String,
+        paths: Vec<String>,
+    },
+    StashApply {
+        repo: String,
+        stash_ref: String,
+    },
+    StashPop {
+        repo: String,
+        stash_ref: String,
+    },
+    StashDrop {
+        repo: String,
+        stash_ref: String,
+    },
+    PrepareBranchPicker { repo: String },
+    CheckoutBranch {
+        repo: String,
+        branch: String,
+        pull_after: bool,
+    },
+    CreateBranch {
+        repo: String,
+        name: String,
+    },
 }

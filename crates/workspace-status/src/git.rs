@@ -238,6 +238,160 @@ pub fn remove_untracked_file(cwd: &Path, file_path: &str) -> Result<(), String> 
     exec_git_checked(&["clean", "-f", "--", file_path], cwd)
 }
 
+
+/// `git push --quiet`. First publish uses `git push -u <remote> HEAD`.
+pub fn push_quiet(cwd: &Path) -> Result<(), String> {
+    let branch = exec_git(&["branch", "--show-current"], cwd);
+    if branch.is_empty() {
+        return Err("detached HEAD cannot push".into());
+    }
+    if needs_upstream_publish(cwd, &branch) {
+        let remote = push_remote_name(cwd, &branch);
+        exec_git_checked(&["push", "-u", &remote, "HEAD", "--quiet"], cwd)
+    } else {
+        exec_git_checked(&["push", "--quiet"], cwd)
+    }
+}
+
+fn needs_upstream_publish(cwd: &Path, branch: &str) -> bool {
+    let upstream = exec_git(&["rev-parse", "--abbrev-ref", "@{upstream}"], cwd);
+    if upstream.is_empty() {
+        return true;
+    }
+    let key = format!("branch.{branch}.remote");
+    let remote = exec_git(&["config", "--get", &key], cwd);
+    let remote = if remote.is_empty() {
+        "origin".to_string()
+    } else {
+        remote
+    };
+    let prefix = format!("{remote}/");
+    if !upstream.starts_with(&prefix) {
+        return true;
+    }
+    &upstream[prefix.len()..] != branch
+}
+
+fn push_remote_name(cwd: &Path, branch: &str) -> String {
+    let key = format!("branch.{branch}.remote");
+    let configured = exec_git(&["config", "--get", &key], cwd);
+    if !configured.is_empty() {
+        return configured;
+    }
+    let remotes = exec_git(&["remote"], cwd);
+    remotes
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("origin")
+        .to_string()
+}
+
+/// Stash worktree changes. Includes untracked files (`-u`).
+pub fn stash_push(cwd: &Path, paths: &[String]) -> Result<(), String> {
+    let before = exec_git(&["stash", "list"], cwd);
+    let mut args: Vec<&str> = vec!["stash", "push", "-u"];
+    if !paths.is_empty() {
+        args.push("--");
+        for path in paths {
+            args.push(path);
+        }
+    }
+    exec_git_checked(&args, cwd)?;
+    let after = exec_git(&["stash", "list"], cwd);
+    if after == before {
+        return Err("no local changes to save".into());
+    }
+    Ok(())
+}
+
+/// Apply a stash and keep the entry.
+pub fn stash_apply(cwd: &Path, stash_ref: &str) -> Result<(), String> {
+    exec_git_checked(&["stash", "apply", stash_ref], cwd)
+}
+
+/// Pop a stash entry (apply then drop).
+pub fn stash_pop(cwd: &Path, stash_ref: &str) -> Result<(), String> {
+    exec_git_checked(&["stash", "pop", stash_ref], cwd)
+}
+
+/// Drop a stash entry.
+pub fn stash_drop(cwd: &Path, stash_ref: &str) -> Result<(), String> {
+    exec_git_checked(&["stash", "drop", stash_ref], cwd)
+}
+
+/// Stash refs newest first (`stash@{0}`, …).
+pub fn list_stash_refs(cwd: &Path) -> Vec<String> {
+    exec_git(&["stash", "list", "--format=%gd"], cwd)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Newest stash ref, if any.
+pub fn latest_stash_ref(cwd: &Path) -> Option<String> {
+    list_stash_refs(cwd).into_iter().next()
+}
+
+/// One local branch for the picker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalBranch {
+    pub name: String,
+    pub current: bool,
+    pub authordate: i64,
+}
+
+/// Local branches only (no remotes).
+pub fn list_local_branches(cwd: &Path) -> Vec<LocalBranch> {
+    let raw = exec_git(
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)\t%(authordate:unix)\t%(HEAD)",
+            "refs/heads/",
+        ],
+        cwd,
+    );
+    raw.lines()
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let name = parts.next()?.to_string();
+            if name.is_empty() {
+                return None;
+            }
+            let authordate = parts
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let current = parts.next() == Some("*");
+            Some(LocalBranch {
+                name,
+                current,
+                authordate,
+            })
+        })
+        .collect()
+}
+
+/// `origin/<branch>` when that ref exists and differs from the local tip.
+pub fn origin_out_of_sync(cwd: &Path, branch: &str) -> Option<String> {
+    let origin = format!("origin/{branch}");
+    let local = rev_parse_quiet(branch, cwd)?;
+    let remote = rev_parse_quiet(&origin, cwd)?;
+    if local == remote {
+        None
+    } else {
+        Some(origin)
+    }
+}
+
+/// Create and check out a new branch at HEAD.
+pub fn create_branch_checkout(cwd: &Path, name: &str) -> Result<(), String> {
+    exec_git_checked(&["checkout", "-b", name, "--quiet"], cwd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,6 +456,79 @@ mod tests {
         fs::write(dir.join("tmp-untracked.txt"), "x\n").unwrap();
         remove_untracked_file(&dir, "tmp-untracked.txt").unwrap();
         assert!(!dir.join("tmp-untracked.txt").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stash_and_branch_on_fixture() {
+        let dir = std::env::temp_dir().join(format!(
+            "ws-git-stash-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let init = Command::new(git_binary())
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&dir)
+            .status();
+        if init.map(|s| s.success()).unwrap_or(false) == false {
+            git(&dir, &["init", "-q"]);
+            git(&dir, &["checkout", "-q", "-b", "main"]);
+        }
+        fs::write(dir.join("README.md"), "# seed\n").unwrap();
+        git(&dir, &["add", "README.md"]);
+        git(&dir, &["commit", "-q", "-m", "seed"]);
+        fs::write(dir.join("README.md"), "# dirty\n").unwrap();
+        stash_push(&dir, &[]).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("README.md")).unwrap(), "# seed\n");
+        let latest = latest_stash_ref(&dir).expect("stash");
+        stash_apply(&dir, &latest).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("README.md")).unwrap(), "# dirty\n");
+        stash_drop(&dir, &latest).unwrap();
+        assert!(latest_stash_ref(&dir).is_none());
+        fs::write(dir.join("README.md"), "# dirty2\n").unwrap();
+        stash_push(&dir, &["README.md".into()]).unwrap();
+        let latest = latest_stash_ref(&dir).expect("stash2");
+        stash_pop(&dir, &latest).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("README.md")).unwrap(), "# dirty2\n");
+        assert!(latest_stash_ref(&dir).is_none());
+
+        create_branch_checkout(&dir, "feature/x").unwrap();
+        let branches = list_local_branches(&dir);
+        assert!(branches.iter().any(|b| b.name == "feature/x" && b.current));
+        assert!(checkout_branch("main", &dir));
+        assert_eq!(exec_git(&["branch", "--show-current"], &dir), "main");
+
+        let remote = dir.join("remote.git");
+        Command::new(git_binary())
+            .args(["init", "-q", "--bare", remote.to_str().unwrap()])
+            .status()
+            .unwrap();
+        git(&dir, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(&dir, &["push", "-u", "origin", "main", "--quiet"]);
+        git(&dir, &["checkout", "-q", "-b", "feature/behind"]);
+        fs::write(dir.join("README.md"), "# behind-local\n").unwrap();
+        git(&dir, &["add", "README.md"]);
+        git(&dir, &["commit", "-q", "-m", "local"]);
+        git(&dir, &["push", "-u", "origin", "feature/behind", "--quiet"]);
+        // advance origin
+        let other = dir.join("other");
+        Command::new(git_binary())
+            .args(["clone", "-q", remote.to_str().unwrap(), other.to_str().unwrap()])
+            .status()
+            .unwrap();
+        git(&other, &["checkout", "-q", "feature/behind"]);
+        fs::write(other.join("README.md"), "# origin-ahead\n").unwrap();
+        git(&other, &["add", "README.md"]);
+        git(&other, &["commit", "-q", "-m", "remote"]);
+        git(&other, &["push", "--quiet"]);
+        git(&dir, &["fetch", "--quiet"]);
+        assert_eq!(
+            origin_out_of_sync(&dir, "feature/behind").as_deref(),
+            Some("origin/feature/behind")
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }
