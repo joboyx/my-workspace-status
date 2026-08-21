@@ -1,9 +1,12 @@
 # workspace-status
 
-Headless CLI for the workspace snapshot contract.
+Rust CLI for the workspace snapshot contract.
 
+On a TTY, `workspace-status` and `ws` open a ratatui TUI.
 `--plain` prints human text. `--json` prints the same snapshot as JSON.
-The TypeScript Ink app is still the interactive TUI.
+`-v`, `-p`, and `-d` stay headless. A non-TTY run without those flags prints `--plain`.
+
+The TypeScript Ink app is still in this repository for features the Rust TUI does not cover. See [docs/tui-rust.md](../../docs/tui-rust.md).
 
 Install from this crate:
 

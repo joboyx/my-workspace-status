@@ -1,4 +1,4 @@
-//! Headless workspace-status library: discovery, snapshot, --plain/--json.
+//! Workspace-status library: discovery, snapshot, --plain/--json, ratatui TUI.
 
 pub mod actions;
 pub mod cli;
@@ -8,6 +8,7 @@ pub mod git;
 pub mod helpers;
 pub mod render;
 pub mod snapshot;
+pub mod tui;
 pub mod worktrees;
 
 pub use cli::cli_main;
@@ -17,3 +18,4 @@ pub use snapshot::{
     build_workspace_snapshot, serialize_workspace_snapshot, visible_workspace_snapshot,
     WorkspaceSnapshot,
 };
+pub use tui::{should_open_tui, HeadlessFlags};
