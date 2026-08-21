@@ -42,15 +42,28 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
     let mut state = AppState::new(opts.cwd.clone(), opts.snapshot.clone(), ascii);
     enable_raw_mode().map_err(|_| 1u8)?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture).map_err(|_| 1u8)?;
+    if execute!(out, EnterAlternateScreen, EnableMouseCapture).is_err() {
+        let _ = disable_raw_mode();
+        return Err(1);
+    }
     let backend = CrosstermBackend::new(out);
-    let mut terminal = Terminal::new(backend).map_err(|_| 1u8)?;
+    let mut terminal = match Terminal::new(backend) {
+        Ok(t) => t,
+        Err(_) => {
+            restore_terminal();
+            return Err(1);
+        }
+    };
     let result = run_loop(&mut terminal, &mut state, &opts);
+    restore_terminal();
+    let _ = terminal.show_cursor();
+    result
+}
+
+fn restore_terminal() {
     let _ = disable_raw_mode();
     let mut end = stdout();
     let _ = execute!(end, DisableMouseCapture, LeaveAlternateScreen);
-    let _ = terminal.show_cursor();
-    result
 }
 
 fn run_loop(
