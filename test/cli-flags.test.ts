@@ -4,15 +4,23 @@ import { describe, it } from 'node:test';
 import { parseArgs } from '../src/cli.js';
 
 describe('parseArgs', () => {
-  it('defaults forcePlain and forceTui to false', () => {
+  it('defaults forcePlain, forceJson, and forceTui to false', () => {
     const flags = parseArgs([]);
     assert.equal(flags.forcePlain, false);
+    assert.equal(flags.forceJson, false);
     assert.equal(flags.forceTui, false);
   });
 
   it('sets forcePlain for --plain', () => {
     const flags = parseArgs(['--plain']);
     assert.equal(flags.forcePlain, true);
+    assert.equal(flags.forceTui, false);
+  });
+
+  it('sets forceJson for --json', () => {
+    const flags = parseArgs(['--json']);
+    assert.equal(flags.forceJson, true);
+    assert.equal(flags.forcePlain, false);
     assert.equal(flags.forceTui, false);
   });
 
