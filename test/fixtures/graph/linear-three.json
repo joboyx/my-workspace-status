@@ -1,0 +1,26 @@
+[
+  {
+    "id": "aaa111",
+    "parents": ["bbb222"],
+    "subject": "tip",
+    "authorName": "Ada",
+    "authorDateUnix": 1700000002,
+    "refs": [{ "kind": "local", "name": "main", "commitId": "aaa111" }]
+  },
+  {
+    "id": "bbb222",
+    "parents": ["ccc333"],
+    "subject": "mid",
+    "authorName": "Ada",
+    "authorDateUnix": 1700000001,
+    "refs": []
+  },
+  {
+    "id": "ccc333",
+    "parents": [],
+    "subject": "root",
+    "authorName": "Ada",
+    "authorDateUnix": 1700000000,
+    "refs": []
+  }
+]

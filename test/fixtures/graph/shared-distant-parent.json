@@ -1,0 +1,42 @@
+[
+  {
+    "id": "tip1",
+    "parents": ["ancestor"],
+    "subject": "tip one",
+    "authorName": "Ada",
+    "authorDateUnix": 1700000040,
+    "refs": [{ "kind": "local", "name": "a", "commitId": "tip1" }]
+  },
+  {
+    "id": "tip2",
+    "parents": ["ancestor"],
+    "subject": "tip two",
+    "authorName": "Ada",
+    "authorDateUnix": 1700000030,
+    "refs": [{ "kind": "local", "name": "b", "commitId": "tip2" }]
+  },
+  {
+    "id": "tip3",
+    "parents": ["ancestor"],
+    "subject": "tip three",
+    "authorName": "Ada",
+    "authorDateUnix": 1700000020,
+    "refs": [{ "kind": "local", "name": "c", "commitId": "tip3" }]
+  },
+  {
+    "id": "tip4",
+    "parents": ["ancestor"],
+    "subject": "tip four",
+    "authorName": "Ada",
+    "authorDateUnix": 1700000010,
+    "refs": [{ "kind": "local", "name": "d", "commitId": "tip4" }]
+  },
+  {
+    "id": "ancestor",
+    "parents": [],
+    "subject": "shared root",
+    "authorName": "Ada",
+    "authorDateUnix": 1700000000,
+    "refs": []
+  }
+]
