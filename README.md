@@ -3,7 +3,10 @@
 `workspace-status.sh` is the workspace-level git status contract for this tool.
 The implementation is TypeScript under `src/` (`src/index.ts` → `dist/index.js`); git subprocesses use [`zx`](https://google.github.io/zx/) `$` (run via Node, not the zx CLI). The `.sh` launcher runs `npm ci` and `npm run build` when needed.
 
-`crates/workspace-status-graph` is a ratatui widget for the git graph (HEAD, sync, stash, worktrees). The TypeScript Ink app is still the interactive TUI.
+`crates/workspace-status` is the headless Rust CLI (`workspace-status` and `ws`. They launch the TypeScript app..
+It reads the same snapshot contract as `--plain` / `--json`.
+`crates/workspace-status-graph` is a ratatui widget for the git graph (HEAD, sync, stash, worktrees).
+The TypeScript Ink app is still the interactive TUI.
 
 It is intentionally treated as a black-box CLI:
 
@@ -13,7 +16,9 @@ It is intentionally treated as a black-box CLI:
 
 ## Install
 
-Requires Node 20 or later, npm, and git. The graph crate also needs a recent stable Rust toolchain.
+Requires Node 20 or later, npm, and git. The Rust crates need rustc 1.85 or later.
+
+### TypeScript app (TUI + current ws wrapper)
 
 Clone this repository, then install and link commands:
 
@@ -24,15 +29,31 @@ npm ci
 npm link
 ```
 
-`npm link` installs two commands: `workspace-status` and `ws`.
+`npm link` installs two commands: `workspace-status` and `ws`. They launch the TypeScript app.
 
 The launcher also installs dependencies and builds dist when they are missing or stale.
 
+### Rust CLI (headless --plain / --json)
+
+This repository is a Cargo workspace. Name the package when you install from git:
+
+    cargo install --git https://github.com/joboyx/my-workspace-status --locked --package workspace-status
+
+From a local clone:
+
+    cargo install --path crates/workspace-status --locked
+
+Both commands install workspace-status and ws into Cargo bin.
+The Rust ws is the headless CLI. It prints --plain when you omit --plain and --json.
+It does not open the Ink TUI. Keep the TypeScript app for interactive use.
+
 ## Use --plain or --json from agents
 
-On a TTY, a run without --plain or --json opens the interactive TUI and waits for keyboard input.
+On a TTY, the TypeScript app without --plain or --json opens the interactive TUI and waits for keyboard input.
 That hang is the TUI, not a crash.
 Agents must pass --plain or --json on every run. Do not rely on a non-TTY stdin.
+
+The Rust CLI never opens the TUI. A run without those flags prints the --plain report.
 
 `--plain` is the human text of the workspace snapshot.
 `--json` prints the same snapshot as JSON. See [docs/snapshot.md](./docs/snapshot.md).
