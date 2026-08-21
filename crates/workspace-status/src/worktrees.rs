@@ -196,6 +196,77 @@ pub fn linked_worktrees_under_cwd(
     out
 }
 
+
+/// Paths git accepts for `worktree remove` when the TUI path is a bind-mount alias.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeRemoveTarget {
+    pub git_cwd: PathBuf,
+    pub git_path: PathBuf,
+}
+
+fn resolve_abs(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
+
+fn listed_worktree_path(entries: &[GitWorktreeListEntry], worktree_abs: &Path) -> PathBuf {
+    let wt = resolve_abs(worktree_abs);
+    for entry in entries {
+        if entry.bare {
+            continue;
+        }
+        if resolve_abs(&entry.path) == wt {
+            return wt;
+        }
+    }
+    let wt_id = identity(&wt);
+    if wt_id.is_none() {
+        return wt;
+    }
+    for entry in entries {
+        if entry.bare {
+            continue;
+        }
+        let listed = resolve_abs(&entry.path);
+        if same_identity(identity(&listed), wt_id) {
+            return listed;
+        }
+    }
+    wt
+}
+
+fn registered_primary_abs(abs: &Path, primary_abs: &Path) -> Option<PathBuf> {
+    let primary_id = identity(&resolve_abs(primary_abs))?;
+    let mut cur = resolve_abs(abs);
+    loop {
+        if same_identity(identity(&cur), Some(primary_id)) {
+            return Some(cur);
+        }
+        match cur.parent() {
+            Some(parent) if parent != cur => cur = parent.to_path_buf(),
+            _ => return None,
+        }
+    }
+}
+
+/// `gitPath` is the porcelain worktree line (inode match when prefixes differ).
+/// `gitCwd` is the registered primary prefix so gitdir back-pointers match.
+pub fn resolve_worktree_remove_target(
+    entries: &[GitWorktreeListEntry],
+    primary_abs: &Path,
+    worktree_abs: &Path,
+) -> WorktreeRemoveTarget {
+    let git_path = listed_worktree_path(entries, worktree_abs);
+    let git_cwd = registered_primary_abs(&git_path, primary_abs)
+        .unwrap_or_else(|| resolve_abs(primary_abs));
+    WorktreeRemoveTarget { git_cwd, git_path }
+}
+
 pub fn classify_merged_into_default(
     branch: &str,
     default_branch: &str,
@@ -213,6 +284,7 @@ pub fn classify_merged_into_default(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn parse_porcelain_branch_and_detached() {
@@ -245,5 +317,43 @@ detached
             classify_merged_into_default("feature/x", "main", Some(true)),
             Some(true)
         );
+    }
+
+    #[test]
+    fn resolve_remove_target_uses_listed_path() {
+        let entries = vec![
+            GitWorktreeListEntry {
+                path: PathBuf::from("/tmp/app"),
+                head: None,
+                branch: Some("main".into()),
+                bare: false,
+                detached: false,
+            },
+            GitWorktreeListEntry {
+                path: PathBuf::from("/tmp/app/.worktrees/feat"),
+                head: None,
+                branch: Some("feature/x".into()),
+                bare: false,
+                detached: false,
+            },
+        ];
+        let target = resolve_worktree_remove_target(
+            &entries,
+            Path::new("/tmp/app"),
+            Path::new("/tmp/app/.worktrees/feat"),
+        );
+        assert_eq!(target.git_path, PathBuf::from("/tmp/app/.worktrees/feat"));
+        assert_eq!(target.git_cwd, PathBuf::from("/tmp/app"));
+    }
+
+    #[test]
+    fn resolve_remove_target_falls_back_when_unlisted() {
+        let target = resolve_worktree_remove_target(
+            &[],
+            Path::new("/tmp/app"),
+            Path::new("/tmp/app/.worktrees/feat"),
+        );
+        assert_eq!(target.git_path, PathBuf::from("/tmp/app/.worktrees/feat"));
+        assert_eq!(target.git_cwd, PathBuf::from("/tmp/app"));
     }
 }

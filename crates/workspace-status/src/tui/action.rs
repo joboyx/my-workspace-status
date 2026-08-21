@@ -37,6 +37,8 @@ pub enum Action {
     ConfirmNo,
     Edit,
     WatchTick,
+    FetchTick,
+    RemoveWorktree,
     Push,
     StashMenu,
     StashMenuChar(char),
@@ -111,5 +113,10 @@ pub enum Effect {
     CreateBranch {
         repo: String,
         name: String,
+    },
+    RemoveWorktree {
+        primary: String,
+        path: String,
+        force: bool,
     },
 }
