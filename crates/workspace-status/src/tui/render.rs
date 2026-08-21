@@ -114,13 +114,15 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         } else {
             " "
         };
-        let eye = if row.kind == NodeKind::File && state.reviewed.contains(&row.id) {
-            if state.ascii { "o " } else { "◉ " }
+        let mark = if row.kind == NodeKind::File && state.reviewed.contains(&row.id) {
+            if state.ascii { "* " } else { "◉ " }
+        } else if row.id == "group:no-updates" {
+            if state.ascii { ". " } else { "✓ " }
         } else {
             ""
         };
         let indent = "  ".repeat(row.depth);
-        let text = format!("{indent}{chevron} {eye}{}", row.label);
+        let text = format!("{indent}{chevron} {mark}{}", row.label);
         let mut style = Style::default();
         if i == cursor {
             style = style.add_modifier(Modifier::REVERSED);
@@ -191,7 +193,7 @@ fn diff_style(line: &str) -> Style {
 
 fn draw_help(frame: &mut Frame<'_>, area: Rect) {
     let width = 48.min(area.width.saturating_sub(4));
-    let height = 18.min(area.height.saturating_sub(2));
+    let height = 19.min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let rect = Rect::new(x, y, width, height);
@@ -208,7 +210,8 @@ f  fetch                p  pull behind
 d  default branch       r  refresh
 P  push                 S  stash menu
 b  branch picker        C  create (in picker)
-Tab  other pane         click  select row";
+W  remove worktree      Tab  other pane
+click  select row";
     frame.render_widget(
         Paragraph::new(body)
             .block(Block::default().borders(Borders::ALL).title(" keys "))
@@ -416,6 +419,7 @@ mod tests {
         assert!(text.contains(".  show ignored"), "{text}");
         assert!(text.contains("S  stash menu"), "{text}");
         assert!(text.contains("P  push"), "{text}");
+        assert!(text.contains("W  remove worktree"), "{text}");
         assert!(!text.contains("EasyMotion"), "{text}");
     }
 }

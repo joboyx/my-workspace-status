@@ -16,6 +16,8 @@ pub(crate) mod search;
 mod stash;
 mod state;
 mod tree;
+pub(crate) mod viewed;
+pub(crate) mod fetch;
 pub(crate) mod watch;
 
 pub use app::{collect_full_snapshot, run_tui, TuiOpts};

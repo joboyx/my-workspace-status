@@ -20,8 +20,8 @@ use crate::discovery::collect_snapshots;
 use crate::git::{
     checkout_branch, create_branch_checkout, exec_git_checked, latest_stash_ref,
     list_local_branches, origin_out_of_sync, pull_quiet, push_quiet, remove_untracked_file,
-    revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop, stash_push,
-    unstage_file,
+    remove_worktree, revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop,
+    stash_push, unstage_file,
 };
 use crate::snapshot::{build_workspace_snapshot, WorkspaceSnapshot};
 
@@ -32,6 +32,7 @@ use super::graph_load::load_graph_model;
 use super::keys::event_to_action;
 use super::render::draw;
 use super::state::AppState;
+use super::fetch::fetch_interval_ms;
 use super::watch::watch_interval_ms;
 
 /// Options for the interactive TUI.
@@ -92,14 +93,21 @@ fn run_loop(
     }
 
     let watch_ms = watch_interval_ms(std::env::var("WS_STATUS_WATCH_MS").ok().as_deref());
+    let fetch_ms = fetch_interval_ms(std::env::var("WS_STATUS_FETCH_MS").ok().as_deref());
     let mut last_watch = Instant::now();
+    let mut last_fetch = Instant::now();
     loop {
-        let timeout = if watch_ms == 0 {
-            Duration::from_millis(200)
+        let remain_watch = if watch_ms == 0 {
+            u64::MAX
         } else {
-            let remain = watch_ms.saturating_sub(last_watch.elapsed().as_millis() as u64);
-            Duration::from_millis(remain.min(200).max(10))
+            watch_ms.saturating_sub(last_watch.elapsed().as_millis() as u64)
         };
+        let remain_fetch = if fetch_ms == 0 {
+            u64::MAX
+        } else {
+            fetch_ms.saturating_sub(last_fetch.elapsed().as_millis() as u64)
+        };
+        let timeout = Duration::from_millis(remain_watch.min(remain_fetch).min(200).max(10));
         if event::poll(timeout).unwrap_or(false) {
             let Ok(event) = event::read() else {
                 continue;
@@ -119,10 +127,17 @@ fn run_loop(
                 return Ok(());
             }
             apply_effect(state, effect, opts, terminal);
-        } else if watch_ms > 0 && last_watch.elapsed().as_millis() as u64 >= watch_ms {
-            let effect = state.dispatch(Action::WatchTick);
-            apply_effect(state, effect, opts, terminal);
-            last_watch = Instant::now();
+        } else {
+            if watch_ms > 0 && last_watch.elapsed().as_millis() as u64 >= watch_ms {
+                let effect = state.dispatch(Action::WatchTick);
+                apply_effect(state, effect, opts, terminal);
+                last_watch = Instant::now();
+            }
+            if fetch_ms > 0 && last_fetch.elapsed().as_millis() as u64 >= fetch_ms {
+                let effect = state.dispatch(Action::FetchTick);
+                apply_effect(state, effect, opts, terminal);
+                last_fetch = Instant::now();
+            }
         }
         terminal
             .draw(|frame| draw(frame, state))
@@ -365,6 +380,20 @@ fn apply_effect(
                     load_right(state);
                 }
                 Err(err) => state.status = format!("create branch failed: {err}"),
+            }
+        }
+        Effect::RemoveWorktree {
+            primary,
+            path,
+            force,
+        } => {
+            match remove_worktree(&opts.cwd.join(&primary), &opts.cwd.join(&path), force) {
+                Ok(()) => {
+                    reload_snapshot(state, opts);
+                    state.status = format!("removed worktree {path}");
+                    load_right(state);
+                }
+                Err(err) => state.status = format!("remove worktree failed: {err}"),
             }
         }
     }

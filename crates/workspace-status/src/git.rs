@@ -387,6 +387,20 @@ pub fn origin_out_of_sync(cwd: &Path, branch: &str) -> Option<String> {
     }
 }
 
+
+/// Drop a linked worktree. Runs `git worktree remove [--force] <path>` from the primary.
+pub fn remove_worktree(primary_abs: &Path, worktree_abs: &Path, force: bool) -> Result<(), String> {
+    let porcelain = list_worktrees_porcelain(primary_abs);
+    let entries = crate::worktrees::parse_worktree_list_porcelain(&porcelain);
+    let target = crate::worktrees::resolve_worktree_remove_target(&entries, primary_abs, worktree_abs);
+    let path = target.git_path.to_string_lossy().into_owned();
+    if force {
+        exec_git_checked(&["worktree", "remove", "--force", &path], &target.git_cwd)
+    } else {
+        exec_git_checked(&["worktree", "remove", &path], &target.git_cwd)
+    }
+}
+
 /// Create and check out a new branch at HEAD.
 pub fn create_branch_checkout(cwd: &Path, name: &str) -> Result<(), String> {
     exec_git_checked(&["checkout", "-b", name, "--quiet"], cwd)
@@ -529,6 +543,36 @@ mod tests {
             origin_out_of_sync(&dir, "feature/behind").as_deref(),
             Some("origin/feature/behind")
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_worktree_linked_fixture() {
+        let dir = std::env::temp_dir().join(format!(
+            "ws-git-wt-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let init = Command::new(git_binary())
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&dir)
+            .status();
+        if init.map(|s| s.success()).unwrap_or(false) == false {
+            git(&dir, &["init", "-q"]);
+            git(&dir, &["checkout", "-q", "-b", "main"]);
+        }
+        fs::write(dir.join("README.md"), "# seed\n").unwrap();
+        git(&dir, &["add", "README.md"]);
+        git(&dir, &["commit", "-q", "-m", "seed"]);
+        let wt = dir.join(".worktrees").join("feat");
+        fs::create_dir_all(dir.join(".worktrees")).unwrap();
+        git(&dir, &["worktree", "add", "-b", "feature/x", wt.to_str().unwrap()]);
+        assert!(wt.join(".git").exists() || wt.exists());
+        remove_worktree(&dir, &wt, false).unwrap();
+        assert!(!wt.exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }
