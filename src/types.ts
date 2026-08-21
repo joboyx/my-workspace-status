@@ -55,6 +55,8 @@ export interface CliFlags {
   includeAll: boolean;
   /** Force plain text report (disable TUI). */
   forcePlain: boolean;
+  /** Print the workspace snapshot as JSON (disable TUI). */
+  forceJson: boolean;
   /** Force interactive TUI even when stdout is not a TTY. */
   forceTui: boolean;
   /** Repo paths relative to workspace root; empty means all repos. */
@@ -108,4 +110,40 @@ export interface SummaryState {
   branchUnknown: Set<string>;
   /** Workspace-relative paths of linked git worktree checkouts. */
   linkedWorktrees: Set<string>;
+}
+
+/** Documented workspace snapshot version printed by `--json`. */
+export const WORKSPACE_SNAPSHOT_VERSION = 1 as const;
+
+/**
+ * One repo in the workspace snapshot contract.
+ * File lists are `FileChange` rows, not discovery `|||` strings.
+ */
+export interface WorkspaceRepoSnapshot {
+  repo: string;
+  /** True when this path is listed in workspace `ignoredRepos`. */
+  ignored: boolean;
+  branch: string;
+  syncStatus: SyncStatus;
+  syncNote: string;
+  checkoutKind: 'primary' | 'linked';
+  primaryRepo?: string;
+  mergedIntoDefault: boolean | null;
+  defaultBranchOverride?: string;
+  hasUnstaged: boolean;
+  hasStaged: boolean;
+  hasUntracked: boolean;
+  changes: FileChange[];
+}
+
+/**
+ * Workspace snapshot printed by `--json` and rendered by `--plain`.
+ * Hidden ignored repos are omitted from `repos` unless shown (`-a` / named filter).
+ */
+export interface WorkspaceSnapshot {
+  version: typeof WORKSPACE_SNAPSHOT_VERSION;
+  showIgnored: boolean;
+  filterRepos: string[];
+  ignoredRepos: string[];
+  repos: WorkspaceRepoSnapshot[];
 }

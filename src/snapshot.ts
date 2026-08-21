@@ -2,7 +2,17 @@
  * Snapshot aggregation: build verbose rows and summary state from repo snapshots.
  */
 
-import type { RepoSnapshot, SummaryState, SyncStatus, VerboseRow } from './types.js';
+import { fileChangesFromSnapshot, fileChangesToSnapshotFields } from './changes.js';
+import type {
+  FileChange,
+  RepoSnapshot,
+  SummaryState,
+  SyncStatus,
+  VerboseRow,
+  WorkspaceRepoSnapshot,
+  WorkspaceSnapshot,
+} from './types.js';
+import { WORKSPACE_SNAPSHOT_VERSION } from './types.js';
 import {
   compareRepoPathsForDisplay,
   formatBranchWithMerge,
@@ -173,4 +183,137 @@ export function nonDefaultBranchRepos(summary: SummaryState): string[] {
     ...summary.branchRelease,
     ...summary.branchUnknown,
   ]);
+}
+
+
+function isIgnoredPath(repoPath: string, ignoredRepos: Set<string>): boolean {
+  return ignoredRepos.has(repoPath);
+}
+
+function serializeFileChange(change: FileChange): FileChange {
+  const out: FileChange = { path: change.path };
+  if (change.stagedStatus) out.stagedStatus = change.stagedStatus;
+  if (change.unstagedStatus) out.unstagedStatus = change.unstagedStatus;
+  if (change.untracked) out.untracked = true;
+  if (change.oldPath) out.oldPath = change.oldPath;
+  return out;
+}
+
+function toWorkspaceRepoSnapshot(
+  snapshot: RepoSnapshot,
+  ignoredRepos: Set<string>,
+): WorkspaceRepoSnapshot {
+  const row: WorkspaceRepoSnapshot = {
+    repo: snapshot.repo,
+    ignored: isIgnoredPath(snapshot.repo, ignoredRepos),
+    branch: snapshot.branch,
+    syncStatus: snapshot.syncStatus,
+    syncNote: snapshot.syncNote,
+    checkoutKind: snapshot.checkoutKind,
+    mergedIntoDefault: snapshot.mergedIntoDefault,
+    hasUnstaged: snapshot.hasUnstaged,
+    hasStaged: snapshot.hasStaged,
+    hasUntracked: snapshot.hasUntracked,
+    changes: fileChangesFromSnapshot(snapshot).map(serializeFileChange),
+  };
+  if (snapshot.primaryRepo) row.primaryRepo = snapshot.primaryRepo;
+  if (snapshot.defaultBranchOverride) row.defaultBranchOverride = snapshot.defaultBranchOverride;
+  return row;
+}
+
+/**
+ * Build the workspace snapshot both `--plain` and the TUI read.
+ * Includes every collected repo. Call `visibleWorkspaceSnapshot` before ops
+ * or `--json` so hidden ignored repos stay out of scope.
+ */
+export function buildWorkspaceSnapshot(input: {
+  snapshots: RepoSnapshot[];
+  ignoredRepos: string[];
+  showIgnored: boolean;
+  filterRepos: string[];
+}): WorkspaceSnapshot {
+  const ignoredRepos = sortedUnique(input.ignoredRepos);
+  const filterRepos = sortedUnique(input.filterRepos);
+  const ignoredSet = new Set(ignoredRepos);
+  const repos = [...input.snapshots]
+    .sort(compareRepoPathsForDisplay)
+    .map((snapshot) => toWorkspaceRepoSnapshot(snapshot, ignoredSet));
+  return {
+    version: WORKSPACE_SNAPSHOT_VERSION,
+    showIgnored: input.showIgnored,
+    filterRepos,
+    ignoredRepos,
+    repos,
+  };
+}
+
+/**
+ * Snapshot used by `--plain`, `--json`, and git ops.
+ * Hidden ignored repos stay out unless shown (`-a`) or named in the filter.
+ */
+export function visibleWorkspaceSnapshot(snapshot: WorkspaceSnapshot): WorkspaceSnapshot {
+  const named = new Set(snapshot.filterRepos);
+  const repos = snapshot.repos.filter(
+    (repo) => snapshot.showIgnored || !repo.ignored || named.has(repo.repo),
+  );
+  return { ...snapshot, repos };
+}
+
+/**
+ * Convert contract repos back to discovery `RepoSnapshot` rows for render / TUI.
+ */
+export function repoSnapshotsFromWorkspace(snapshot: WorkspaceSnapshot): RepoSnapshot[] {
+  return snapshot.repos.map((repo) => {
+    const fields = fileChangesToSnapshotFields(repo.changes);
+    const out: RepoSnapshot = {
+      repo: repo.repo,
+      branch: repo.branch,
+      syncStatus: repo.syncStatus,
+      syncNote: repo.syncNote,
+      hasUnstaged: repo.hasUnstaged,
+      hasStaged: repo.hasStaged,
+      hasUntracked: repo.hasUntracked,
+      unstagedInfo: '',
+      stagedFiles: fields.stagedFiles,
+      unstagedFiles: fields.unstagedFiles,
+      untrackedFiles: fields.untrackedFiles,
+      checkoutKind: repo.checkoutKind,
+      mergedIntoDefault: repo.mergedIntoDefault,
+    };
+    if (repo.primaryRepo) out.primaryRepo = repo.primaryRepo;
+    if (repo.defaultBranchOverride) out.defaultBranchOverride = repo.defaultBranchOverride;
+    return out;
+  });
+}
+
+/**
+ * Stable JSON for `--json`. Key order matches `docs/snapshot.md`.
+ */
+export function serializeWorkspaceSnapshot(snapshot: WorkspaceSnapshot): string {
+  const published = visibleWorkspaceSnapshot(snapshot);
+  const body = {
+    version: published.version,
+    showIgnored: published.showIgnored,
+    filterRepos: published.filterRepos,
+    ignoredRepos: published.ignoredRepos,
+    repos: published.repos.map((repo) => {
+      const row: Record<string, unknown> = {
+        repo: repo.repo,
+        ignored: repo.ignored,
+        branch: repo.branch,
+        syncStatus: repo.syncStatus,
+        syncNote: repo.syncNote,
+        checkoutKind: repo.checkoutKind,
+      };
+      if (repo.primaryRepo) row.primaryRepo = repo.primaryRepo;
+      row.mergedIntoDefault = repo.mergedIntoDefault;
+      if (repo.defaultBranchOverride) row.defaultBranchOverride = repo.defaultBranchOverride;
+      row.hasUnstaged = repo.hasUnstaged;
+      row.hasStaged = repo.hasStaged;
+      row.hasUntracked = repo.hasUntracked;
+      row.changes = repo.changes;
+      return row;
+    }),
+  };
+  return `${JSON.stringify(body, null, 2)}\n`;
 }

@@ -4,6 +4,8 @@
 
 Read from the workspace root (the cwd the script runs in), by `loadWorkspaceStatusConfig` in `src/config.ts`. A missing file means nothing is ignored and discovery uses the default depth.
 
+`--plain` and `--json` read one workspace snapshot. See [snapshot.md](./snapshot.md).
+
 ```json
 {
   "ignoredRepos": ["notes"],

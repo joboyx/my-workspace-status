@@ -25,7 +25,7 @@ You are helping the user review the status of all git repositories in the curren
 
 - Run the sibling script that lives next to this file: `workspace-status.sh` (short alias: `ws`)
 - Resolve the script path relative to this `SKILL.md`; do not assume a hardcoded `~/.claude/...` location
-- **Always pass `--plain` for agent runs.** On a TTY without `--plain`, the script opens an interactive Ink TUI that waits for keyboard input and will hang the agent shell until killed. Do not rely on “non-TTY” alone — some harnesses allocate a TTY. Never use `-i` / `--tui` from an agent.
+- **Always pass `--plain` or `--json` for agent runs.** On a TTY without one of those flags, the script opens an interactive Ink TUI that waits for keyboard input and will hang the agent shell until killed. Do not rely on “non-TTY” alone — some harnesses allocate a TTY. Never use `-i` / `--tui` from an agent. `--plain` is the human renderer. `--json` prints the same workspace snapshot. See [docs/snapshot.md](./docs/snapshot.md).
 - The script reads `.workspace-status-config.json` from the current workspace root; repos in `ignoredRepos` are skipped unless `-a` or `--all` is passed
 - Optional `defaultBranches` map (repo path → branch) overrides the default branch for classification, markers, ordering, and `--default-branch` / TUI `d`; without an entry, defaults are derived as today
 - `maxDepth` (default **3**) controls how many path segments below cwd are searched for git repos (so `acme/light-modules/*` is included by default)
@@ -66,10 +66,11 @@ The script produces:
 - `--verbose`: Show the aligned table before the summary
 - `--pull`: Pull repos that are behind their upstream (auto-stashes dirty worktrees, then reapplies)
 - `--default-branch`: Switch non-default branches to their default branch, then pull
-- `--plain`: Force plain text report (required for agent runs — avoids interactive TUI hang)
+- `--plain`: Force plain text report (required for agent runs unless `--json` — avoids interactive TUI hang)
+- `--json`: Print the workspace snapshot as JSON (also disables the TUI)
 - `-i` / `--tui`: Force interactive TUI (humans only; never from agents)
 
-**Interactive TUI (humans only):** On a TTY (without `-v` / `-p` / `-d` / `--plain`), the script opens an Ink viewer and blocks on keyboard input. Agents must always pass `--plain` (see Instructions). Force TUI with `-i` / `--tui` only for interactive human use.
+**Interactive TUI (humans only):** On a TTY (without `-v` / `-p` / `-d` / `--plain` / `--json`), the script opens an Ink viewer and blocks on keyboard input. Agents must always pass `--plain` or `--json` (see Instructions). Force TUI with `-i` / `--tui` only for interactive human use.
 
 The TUI requires a **Nerd Font** — recommended `MesloLGM Nerd Font Mono` (the **Mono** variant; the proportional build breaks column alignment). In VS Code / Cursor set `terminal.integrated.fontFamily` in **User Settings**, since the terminal font is resolved on the client rather than in WSL. `WS_STATUS_GLYPHS=ascii` swaps in plain markers.
 

@@ -327,6 +327,8 @@ describe('workspace-status e2e', () => {
     assertContains(output, '-v, --verbose');
     assertContains(output, '-p, --pull');
     assertContains(output, '-d, --default-branch');
+    assertContains(output, '--plain');
+    assertContains(output, '--json');
   });
 
   it('clustered short flags are parsed like separate short flags', () => {

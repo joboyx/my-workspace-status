@@ -22,6 +22,7 @@ Do **not** invent spur heuristics (`parent.lane + 1`, spine `◇─╯`, mid-rai
 | When you change | Update |
 | --- | --- |
 | Module boundaries, data flow, new top-level module | `docs/architecture.md` |
+| Workspace snapshot fields or `--json` / `--plain` contract | `docs/snapshot.md` and `test/snapshot-contract.e2e.ts` |
 | Tree nodes, row kinds, fold behaviour, keymap, session state, action registry | `docs/tui-model.md` |
 | Graph gutter topology, glyphs, junctions, densify rails, stash leaf tips | `docs/git-graph-topology.md` (+ architecture / tui-model pointers) |
 | Diff parsing, layout, or syntax highlighting | `docs/diff-rendering.md` |
