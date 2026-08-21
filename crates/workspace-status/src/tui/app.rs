@@ -265,6 +265,16 @@ fn drain_pending_events() {
     }
 }
 
+fn resume_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), String> {
+    enable_raw_mode().map_err(|e| e.to_string())?;
+    let mut out = stdout();
+    execute!(out, EnterAlternateScreen, EnableMouseCapture).map_err(|e| e.to_string())?;
+    let _ = terminal.hide_cursor();
+    let _ = terminal.clear();
+    drain_pending_events();
+    Ok(())
+}
+
 fn run_blocking_editor(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     cmd: &str,
@@ -276,27 +286,22 @@ fn run_blocking_editor(
     let _ = execute!(out, DisableMouseCapture, LeaveAlternateScreen);
     let _ = terminal.show_cursor();
     drain_pending_events();
-    let status = Command::new(cmd)
+    let spawn = Command::new(cmd)
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .status()
-        .map_err(|e| e.to_string())?;
-    enable_raw_mode().map_err(|e| e.to_string())?;
-    let mut out = stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture).map_err(|e| e.to_string())?;
-    let _ = terminal.hide_cursor();
-    let _ = terminal.clear();
-    drain_pending_events();
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
+        .status();
+    let restore = resume_tui(terminal);
+    match (spawn, restore) {
+        (Ok(status), Ok(())) if status.success() => Ok(()),
+        (Ok(status), Ok(())) => Err(format!(
             "editor exited {}",
             status.code().unwrap_or(-1)
-        ))
+        )),
+        (Err(err), Ok(())) => Err(err.to_string()),
+        (Ok(_), Err(err)) | (Err(_), Err(err)) => Err(err),
     }
 }
 

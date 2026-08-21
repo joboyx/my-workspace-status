@@ -269,10 +269,6 @@ mod tests {
         assert!(status.success(), "git {args:?}");
     }
 
-    fn porcelain(cwd: &Path) -> String {
-        exec_git(&["status", "--porcelain=v1"], cwd)
-    }
-
     #[test]
     fn stage_unstage_revert_on_fixture() {
         let dir = std::env::temp_dir().join(format!(
@@ -303,7 +299,6 @@ mod tests {
         assert_ne!(exec_git_status(&["diff", "--quiet"], &dir), 0);
         revert_tracked_file(&dir, "README.md").unwrap();
         assert_eq!(exec_git_status(&["diff", "--quiet"], &dir), 0);
-        let _ = porcelain(&dir);
         fs::write(dir.join("tmp-untracked.txt"), "x\n").unwrap();
         remove_untracked_file(&dir, "tmp-untracked.txt").unwrap();
         assert!(!dir.join("tmp-untracked.txt").exists());
