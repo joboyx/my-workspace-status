@@ -137,6 +137,7 @@ fn normal_key(
         KeyCode::Char('P') => Action::Push,
         KeyCode::Char('S') => Action::StashMenu,
         KeyCode::Char('b') => Action::Branch,
+        KeyCode::Char('w') | KeyCode::Char('W') => Action::RemoveWorktree,
         KeyCode::Char('n') if search_active => Action::SearchNext,
         KeyCode::Char('N') if search_active => Action::SearchPrev,
         KeyCode::Tab => {
@@ -301,6 +302,8 @@ mod tests {
         assert_eq!(event_to_action(&key(KeyCode::Char('S')), normal(), false, false), Action::StashMenu);
         assert_eq!(event_to_action(&key(KeyCode::Char('P')), normal(), false, false), Action::Push);
         assert_eq!(event_to_action(&key(KeyCode::Char('b')), normal(), false, false), Action::Branch);
+        assert_eq!(event_to_action(&key(KeyCode::Char('w')), normal(), false, false), Action::RemoveWorktree);
+        assert_eq!(event_to_action(&key(KeyCode::Char('W')), normal(), false, false), Action::RemoveWorktree);
         assert_eq!(
             event_to_action(&key(KeyCode::Char('p')), InputMode::StashMenu, false, false),
             Action::StashMenuChar('p')

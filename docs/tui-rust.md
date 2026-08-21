@@ -29,7 +29,8 @@ The TypeScript Ink app stays in this repository. Use it when you need a feature 
 | `S` | Stash menu (`s` create, `a` apply, `p` pop, `d` drop) |
 | `b` | Branch picker (list, filter, checkout, `C` create) |
 | `r` | Reload the workspace snapshot |
-| `space` | Mark a dirty file as reviewed (in memory only) |
+| `space` | Mark a dirty file as reviewed. Writes the same viewed-files store as the Ink app |
+| `w` / `W` | Remove the focused linked worktree after `y` / `n` |
 | `Tab` | Focus the other pane |
 | click | Select a tree row, or focus the right pane |
 | `g` / `G` | First / last tree row |
@@ -37,6 +38,8 @@ The TypeScript Ink app stays in this repository. Use it when you need a feature 
 `-a` starts with ignored repos shown. `-f` starts a fetch after the first paint. First paint does not wait on a network fetch.
 
 `WS_STATUS_WATCH_MS` polls local git and refreshes the snapshot. Default is `3000`. `0` disables the poll. Fold, focus, and scroll stay put. Only rows whose identity actually changed flash.
+
+`WS_STATUS_FETCH_MS` runs `git fetch` on visible primary checkouts. Default is `300000` (5 minutes). `0` disables it. The watch poll stays a separate timer. Hidden ignored repos stay out. Linked worktrees are not fetched unless you focus that row and press `f`.
 
 ## What this TUI does
 
@@ -50,21 +53,19 @@ The TypeScript Ink app stays in this repository. Use it when you need a feature 
 - `P` pushes the focused visible repo or checkout only. Hidden ignored stay out. Linked worktrees push only when that row is focused
 - `S` opens a stash overlay. `s` creates a stash (pathspec when a dirty file is focused). `a` applies the latest stash. `p` pop and `d` drop ask `y` / `n` first, same as revert. Drop targets the latest stash
 - `b` opens the local branch picker on a checkout or flat repo. Type to filter. Enter checks out. `C` creates a branch at HEAD. When the local branch is out of sync with `origin/*`, checkout asks `y` / `n` then pulls
+- `w` / `W` removes the focused linked worktree. Workspace, repo family, file, and hidden ignored rows are a no-op. Confirm with `y` / `n`. The command is `git worktree remove [--force]` from the primary. Bind-mount aliases remap the same way as in the TypeScript app. Ink uses the same keys
 - Action / Effect loop: crossterm events become `Action`, dispatch updates state and returns an `Effect`
 - Mouse is optional. Keys work without it
 - `--plain` / `--json` / `-v` / `-p` / `-d` stay headless
 
-Reviewed marks last for this process only. They do not write the Ink viewed-files store.
+Reviewed marks use `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (same identity and fingerprint as Ink). A mark drops when the file fingerprint changes. Space toggles dirty file rows only. The viewed glyph is `◉` / `*`, not the clean `✓`. Clean `✓` paints only on the No updates group.
 
 ## Still Ink only
 
 These stay in the TypeScript app:
 
-- Worktree remove
 - In-diff drag split and side-by-side resize
 - Commit-files drill (depth 1 / depth 2)
-- Persisted reviewed store
-- Background fetch timer (`WS_STATUS_FETCH_MS`)
 - Ink-testing e2e suite
 - Multi-lane graph gutter (the crate still paints a single lane)
 - EasyMotion, theme cycle

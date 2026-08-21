@@ -13,6 +13,7 @@ use super::branches::{
     can_open_branch_picker, is_valid_branch_name, BranchPickerState, CreateBranchState,
 };
 use super::keys::InputMode;
+use super::fetch::background_fetch_targets;
 use super::ops::{op_targets, push_targets, Op};
 use super::search::focus_tree_search;
 use super::stash::{
@@ -22,7 +23,15 @@ use super::stash::{
 use super::tree::{
     build_tree, default_folds, flatten, visible_for_tree, NodeKind, TreeNode, VisibleRow,
 };
+use super::viewed::{
+    collect_current_fingerprints, fingerprint_file_change, is_viewed, load_viewed_store,
+    reconcile_viewed, save_viewed_store, toggle_viewed, viewed_identity, viewed_row_ids,
+    ViewedStore,
+};
+#[cfg(not(test))]
+use super::viewed::viewed_store_path;
 use super::watch::{changed_row_ids, tree_signatures};
+use crate::snapshot::CheckoutKind;
 
 /// Which pane has keyboard focus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +85,11 @@ pub enum PendingConfirm {
         branch: String,
         remote_ref: String,
     },
+    RemoveWorktree {
+        primary: String,
+        path: String,
+        force: bool,
+    },
 }
 
 /// Interactive session state. Dispatch is pure besides the returned [`Effect`].
@@ -99,6 +113,8 @@ pub struct AppState {
     pub diff_repo: Option<String>,
     pub diff_path: Option<String>,
     pub reviewed: HashSet<String>,
+    pub viewed_store: ViewedStore,
+    pub viewed_path: PathBuf,
     pub layout: LayoutHit,
     pub ascii: bool,
     pub search_mode: bool,
@@ -122,7 +138,9 @@ impl AppState {
         let rows = flatten(&tree, &folds);
         let cursor = initial_cursor(&rows);
         let signatures = tree_signatures(&tree);
-        Self {
+        let viewed_path = default_viewed_path();
+        let viewed_store = load_viewed_store(&viewed_path);
+        let mut state = Self {
             cwd,
             snapshot,
             show_ignored,
@@ -141,6 +159,8 @@ impl AppState {
             diff_repo: None,
             diff_path: None,
             reviewed: HashSet::new(),
+            viewed_store,
+            viewed_path,
             layout: LayoutHit::default(),
             ascii,
             search_mode: false,
@@ -153,7 +173,9 @@ impl AppState {
             create_branch: None,
             flashes: HashMap::new(),
             signatures,
-        }
+        };
+        state.reconcile_viewed_store();
+        state
     }
 
     pub fn input_mode(&self) -> InputMode {
@@ -207,6 +229,7 @@ impl AppState {
         self.snapshot.show_ignored = self.show_ignored;
         self.rebuild_rows();
         self.signatures = tree_signatures(&self.tree);
+        self.reconcile_viewed_store();
     }
 
     /// Apply a watch poll. Keeps fold / focus / scroll. Flashes only rows
@@ -289,17 +312,7 @@ impl AppState {
             Action::Pull => self.op_effect(Op::Pull),
             Action::DefaultBranch => self.op_effect(Op::DefaultBranch),
             Action::Refresh => Effect::ReloadSnapshot,
-            Action::ToggleReviewed => {
-                if let Some(row) = self.focused_row() {
-                    if row.kind == NodeKind::File {
-                        let id = row.id.clone();
-                        if !self.reviewed.remove(&id) {
-                            self.reviewed.insert(id);
-                        }
-                    }
-                }
-                Effect::None
-            }
+            Action::ToggleReviewed => self.toggle_reviewed(),
             Action::FocusLeft => {
                 self.focus = FocusPane::Left;
                 Effect::None
@@ -395,6 +408,7 @@ impl AppState {
                         PendingConfirm::StashPop { .. } => "pop cancelled".into(),
                         PendingConfirm::StashDrop { .. } => "drop cancelled".into(),
                         PendingConfirm::CheckoutOutOfSync { .. } => "checkout cancelled".into(),
+                        PendingConfirm::RemoveWorktree { .. } => "remove worktree cancelled".into(),
                     };
                 }
                 Effect::None
@@ -412,6 +426,8 @@ impl AppState {
                 }
             }
             Action::WatchTick => Effect::WatchRefresh,
+            Action::FetchTick => self.fetch_tick_effect(),
+            Action::RemoveWorktree => self.begin_remove_worktree(),
             Action::Push => self.push_effect(),
             Action::StashMenu => self.begin_stash_menu(),
             Action::StashMenuChar(c) => self.stash_menu_key(Some(c), false, false),
@@ -782,8 +798,97 @@ impl AppState {
                     pull_after: true,
                 }
             }
+            Some(PendingConfirm::RemoveWorktree {
+                primary,
+                path,
+                force,
+            }) => {
+                self.status = format!("remove worktree {path}");
+                Effect::RemoveWorktree {
+                    primary,
+                    path,
+                    force,
+                }
+            }
             None => Effect::None,
         }
+    }
+
+    fn toggle_reviewed(&mut self) -> Effect {
+        let Some(row) = self.focused_row().cloned() else {
+            return Effect::None;
+        };
+        if row.kind != NodeKind::File {
+            return Effect::None;
+        }
+        let Some(repo) = row.repo.as_deref() else {
+            return Effect::None;
+        };
+        let Some(file) = row.file.as_ref() else {
+            return Effect::None;
+        };
+        let identity = viewed_identity(repo, &file.path);
+        let fingerprint = fingerprint_file_change(&self.cwd, repo, file);
+        self.viewed_store = toggle_viewed(&self.viewed_store, &identity, &fingerprint);
+        save_viewed_store(&self.viewed_store, &self.viewed_path);
+        if is_viewed(&self.viewed_store, &identity, &fingerprint) {
+            self.reviewed.insert(row.id);
+        } else {
+            self.reviewed.remove(&row.id);
+        }
+        Effect::None
+    }
+
+    fn reconcile_viewed_store(&mut self) {
+        let current = collect_current_fingerprints(&self.snapshot, &self.cwd);
+        let next = reconcile_viewed(&self.viewed_store, &current);
+        if next != self.viewed_store {
+            self.viewed_store = next;
+            save_viewed_store(&self.viewed_store, &self.viewed_path);
+        }
+        self.reviewed = viewed_row_ids(&self.snapshot, &self.viewed_store, &self.cwd);
+    }
+
+    fn begin_remove_worktree(&mut self) -> Effect {
+        let Some(row) = self.focused_row() else {
+            return Effect::None;
+        };
+        if row_is_hidden_ignored(row, self.show_ignored) {
+            return Effect::None;
+        }
+        if !matches!(row.kind, NodeKind::Checkout | NodeKind::Repo) {
+            return Effect::None;
+        }
+        let Some(repo_path) = row.repo.as_deref() else {
+            return Effect::None;
+        };
+        let Some(snap) = self.snapshot.repos.iter().find(|r| r.repo == repo_path) else {
+            return Effect::None;
+        };
+        if snap.checkout_kind != CheckoutKind::Linked {
+            return Effect::None;
+        }
+        let Some(primary) = snap.primary_repo.clone() else {
+            return Effect::None;
+        };
+        let force = snap.has_unstaged || snap.has_staged || snap.has_untracked;
+        let path = snap.repo.clone();
+        self.confirm = Some(PendingConfirm::RemoveWorktree {
+            primary,
+            path: path.clone(),
+            force,
+        });
+        self.status = format!("remove worktree {path}? y/n");
+        Effect::None
+    }
+
+    fn fetch_tick_effect(&mut self) -> Effect {
+        let targets = background_fetch_targets(&self.snapshot, self.show_ignored);
+        if targets.is_empty() {
+            return Effect::None;
+        }
+        self.status = format!("fetch {}", targets.join(" "));
+        Effect::Fetch { repos: targets }
     }
 
     fn focused_checkout_if_shown(&self) -> Option<String> {
@@ -1057,6 +1162,22 @@ enum FoldOp {
     Open,
 }
 
+#[allow(dead_code)]
+fn default_viewed_path() -> PathBuf {
+    #[cfg(test)]
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        return std::env::temp_dir().join(format!(
+            "ws-viewed-test-{}-{}.json",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+    }
+    #[cfg(not(test))]
+    viewed_store_path()
+}
+
 fn visible_snapshot(snapshot: &WorkspaceSnapshot, show_ignored: bool) -> WorkspaceSnapshot {
     let mut copy = snapshot.clone();
     copy.show_ignored = show_ignored;
@@ -1067,7 +1188,7 @@ fn visible_snapshot(snapshot: &WorkspaceSnapshot, show_ignored: bool) -> Workspa
 mod tests {
     use super::*;
     use crate::tui::watch::watch_interval_ms;
-    use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus};
+    use crate::snapshot::{build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus};
 
     fn repo(name: &str, dirty: bool) -> RepoSnapshot {
         RepoSnapshot {
@@ -1775,6 +1896,176 @@ mod tests {
             crate::git::exec_git(&["branch", "--show-current"], &repo_dir),
             "feature/pick"
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn linked_snapshot() -> crate::snapshot::WorkspaceSnapshot {
+        build_workspace_snapshot(
+            &[
+                repo("app", true),
+                RepoSnapshot {
+                    repo: "app/.worktrees/feat".into(),
+                    branch: "feature/x".into(),
+                    sync_status: SyncStatus::NoUpstream,
+                    sync_note: String::new(),
+                    has_unstaged: false,
+                    has_staged: false,
+                    has_untracked: false,
+                    changes: Vec::new(),
+                    checkout_kind: CheckoutKind::Linked,
+                    primary_repo: Some("app".into()),
+                    merged_into_default: Some(false),
+                    default_branch_override: None,
+                },
+                repo("notes", true),
+            ],
+            &["notes".into()],
+            false,
+            &[],
+        )
+    }
+
+    fn focus_checkout(app: &mut AppState, name: &str) {
+        let idx = app
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::Checkout && r.repo.as_deref() == Some(name))
+            .expect("checkout row");
+        app.cursor = idx;
+    }
+
+    #[test]
+    fn remove_worktree_linked_only_confirm_cancel_and_apply() {
+        let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        app.cursor = 0;
+        assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
+        assert!(app.confirm.is_none());
+        focus_repo(&mut app, "app");
+        assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
+        let file_idx = app
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::File)
+            .expect("file");
+        app.cursor = file_idx;
+        assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
+        focus_checkout(&mut app, "app/.worktrees/feat");
+        assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
+        assert!(matches!(
+            app.confirm,
+            Some(PendingConfirm::RemoveWorktree { ref path, force, .. })
+                if path == "app/.worktrees/feat" && !force
+        ));
+        app.dispatch(Action::ConfirmNo);
+        assert!(app.confirm.is_none());
+        assert!(app.status.contains("cancelled"));
+        focus_checkout(&mut app, "app/.worktrees/feat");
+        app.dispatch(Action::RemoveWorktree);
+        match app.dispatch(Action::ConfirmYes) {
+            Effect::RemoveWorktree {
+                primary,
+                path,
+                force,
+            } => {
+                assert_eq!(primary, "app");
+                assert_eq!(path, "app/.worktrees/feat");
+                assert!(!force);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_worktree_hidden_ignored_is_noop() {
+        let snapshot = build_workspace_snapshot(
+            &[RepoSnapshot {
+                repo: "notes/.worktrees/feat".into(),
+                branch: "feature/x".into(),
+                sync_status: SyncStatus::NoUpstream,
+                sync_note: String::new(),
+                has_unstaged: false,
+                has_staged: false,
+                has_untracked: false,
+                changes: Vec::new(),
+                checkout_kind: CheckoutKind::Linked,
+                primary_repo: Some("notes".into()),
+                merged_into_default: None,
+                default_branch_override: None,
+            }],
+            &["notes/.worktrees/feat".into()],
+            false,
+            &[],
+        );
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        assert!(app.rows.iter().all(|r| r.repo.as_deref() != Some("notes/.worktrees/feat")));
+        assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
+        app.dispatch(Action::ToggleShowIgnored);
+        if let Some(idx) = app
+            .rows
+            .iter()
+            .position(|r| r.repo.as_deref() == Some("notes/.worktrees/feat"))
+        {
+            app.cursor = idx;
+            app.show_ignored = false;
+            assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
+        }
+    }
+
+    #[test]
+    fn fetch_tick_visible_primaries_only_and_watch_stays_independent() {
+        let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        match app.dispatch(Action::FetchTick) {
+            Effect::Fetch { repos } => {
+                assert_eq!(repos, vec!["app"]);
+                assert!(!repos.iter().any(|r| r.contains("worktrees") || r == "notes"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(app.dispatch(Action::WatchTick), Effect::WatchRefresh);
+        assert_eq!(watch_interval_ms(Some("0")), 0);
+        assert_ne!(
+            crate::tui::fetch::fetch_interval_ms(Some("0")),
+            watch_interval_ms(Some("0")) + 1
+        );
+        assert_eq!(crate::tui::fetch::fetch_interval_ms(Some("0")), 0);
+        assert_eq!(watch_interval_ms(None), crate::tui::watch::DEFAULT_WATCH_MS);
+        assert_eq!(
+            crate::tui::fetch::fetch_interval_ms(None),
+            crate::tui::fetch::DEFAULT_FETCH_MS
+        );
+        assert_ne!(
+            crate::tui::fetch::DEFAULT_FETCH_MS,
+            crate::tui::watch::DEFAULT_WATCH_MS
+        );
+    }
+
+    #[test]
+    fn reviewed_persists_and_drops_on_fingerprint_change() {
+        use crate::tui::viewed::{load_viewed_store, viewed_identity};
+        use std::fs;
+        let root = std::env::temp_dir().join(format!(
+            "ws-reviewed-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("ws");
+        let repo_dir = workspace.join("app");
+        fs::create_dir_all(&repo_dir).unwrap();
+        fs::write(repo_dir.join("README.md"), "# dirty\n").unwrap();
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut app = AppState::new(workspace.clone(), snapshot.clone(), true);
+        focus_file(&mut app, "README.md");
+        let id = app.focused_row().unwrap().id.clone();
+        assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
+        assert!(app.reviewed.contains(&id));
+        let loaded = load_viewed_store(&app.viewed_path);
+        assert!(loaded.contains_key(&viewed_identity("app", "README.md")));
+        fs::write(repo_dir.join("README.md"), "# changed\n").unwrap();
+        app.apply_snapshot(snapshot);
+        assert!(!app.reviewed.contains(&id));
+        assert!(load_viewed_store(&app.viewed_path).is_empty());
         let _ = fs::remove_dir_all(&root);
     }
 }
