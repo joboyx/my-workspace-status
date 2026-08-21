@@ -3,10 +3,10 @@
 `workspace-status.sh` is the workspace-level git status contract for this tool.
 The implementation is TypeScript under `src/` (`src/index.ts` → `dist/index.js`); git subprocesses use [`zx`](https://google.github.io/zx/) `$` (run via Node, not the zx CLI). The `.sh` launcher runs `npm ci` and `npm run build` when needed.
 
-`crates/workspace-status` is the headless Rust CLI (`workspace-status` and `ws`. They launch the TypeScript app..
-It reads the same snapshot contract as `--plain` / `--json`.
-`crates/workspace-status-graph` is a ratatui widget for the git graph (HEAD, sync, stash, worktrees).
-The TypeScript Ink app is still the interactive TUI.
+`crates/workspace-status` is the Rust CLI (`workspace-status` and `ws`).
+On a TTY it opens a ratatui TUI. `--plain` and `--json` print the same snapshot.
+`crates/workspace-status-graph` is the ratatui git-graph widget used by that TUI.
+The TypeScript Ink app is still in this repository for features the Rust TUI does not cover yet. See [docs/tui-rust.md](./docs/tui-rust.md).
 
 It is intentionally treated as a black-box CLI:
 
@@ -33,7 +33,7 @@ npm link
 
 The launcher also installs dependencies and builds dist when they are missing or stale.
 
-### Rust CLI (headless --plain / --json)
+### Rust CLI (TUI + --plain / --json)
 
 This repository is a Cargo workspace. Name the package when you install from git:
 
@@ -44,8 +44,9 @@ From a local clone:
     cargo install --path crates/workspace-status --locked
 
 Both commands install workspace-status and ws into Cargo bin.
-The Rust ws is the headless CLI. It prints --plain when you omit --plain and --json.
-It does not open the Ink TUI. Keep the TypeScript app for interactive use.
+On a TTY the Rust binary opens the ratatui TUI. Pass --plain or --json for agents.
+A non-TTY run without those flags prints --plain.
+The TypeScript app stays available for Ink-only features.
 
 ## Use --plain or --json from agents
 
@@ -53,7 +54,7 @@ On a TTY, the TypeScript app without --plain or --json opens the interactive TUI
 That hang is the TUI, not a crash.
 Agents must pass --plain or --json on every run. Do not rely on a non-TTY stdin.
 
-The Rust CLI never opens the TUI. A run without those flags prints the --plain report.
+The Rust CLI opens the TUI on a TTY. A non-TTY run without those flags prints the --plain report.
 
 `--plain` is the human text of the workspace snapshot.
 `--json` prints the same snapshot as JSON. See [docs/snapshot.md](./docs/snapshot.md).

@@ -1,7 +1,7 @@
 //! Headless workspace-status CLI (`workspace-status` / `ws`).
 
 use std::collections::BTreeSet;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -19,11 +19,11 @@ use crate::snapshot::{
 #[derive(Parser, Debug)]
 #[command(
     name = "workspace-status",
-    about = "Workspace git status. Headless --plain / --json snapshot CLI.",
+    about = "Workspace git status. TUI on a TTY. --plain / --json for agents.",
     long_about = "Display git repository status across repos in the workspace.\n\n\
-This binary is the headless CLI. Agents must pass --plain or --json.\n\
-When neither flag is set, this binary prints --plain (it does not open a TUI).\n\
-The TypeScript Ink app is still the interactive TUI.\n\n\
+On a TTY, this binary opens a ratatui TUI unless you pass --plain, --json,\n\
+-v, -p, or -d. Agents must pass --plain or --json.\n\
+A non-TTY run without those flags prints --plain.\n\n\
 --json pretty-prints the snapshot on stdout. Progress from --fetch, --pull,\n\
 or --default-branch goes to stderr. --json wins when both --json and --plain\n\
 are set. -v applies to --plain only."
@@ -117,6 +117,29 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
     let mut config = loaded.clone();
     if cli.all {
         config.ignored_repos = Vec::new();
+    }
+
+    let flags = crate::tui::HeadlessFlags {
+        plain: cli.plain,
+        json: cli.json,
+        verbose: cli.verbose,
+        pull: cli.pull,
+        default_branch: cli.default_branch,
+    };
+    if crate::tui::should_open_tui(io::stdout().is_terminal(), flags) {
+        let snapshot = crate::tui::collect_full_snapshot(
+            &cwd,
+            &loaded,
+            &filter_repos,
+            cli.all,
+            false,
+        );
+        return crate::tui::run_tui(crate::tui::TuiOpts {
+            cwd,
+            snapshot,
+            config: loaded,
+            start_fetch: cli.fetch,
+        });
     }
 
     let force_json = cli.json;

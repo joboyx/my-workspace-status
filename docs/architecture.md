@@ -12,7 +12,11 @@ src/index.ts ── collectSnapshotsWithConfig
              └── src/tui/run.ts                       Ink TUI (same collected snapshots)
 ```
 
-`--plain` and `--json` print the same workspace snapshot. The TUI uses the same `collectSnapshotsWithConfig` path, then paints Ink views. Display differs. See [snapshot.md](./snapshot.md).
+`--plain` and `--json` print the same workspace snapshot. Display differs. See [snapshot.md](./snapshot.md).
+
+The TypeScript app still paints Ink from `src/tui/run.ts`.
+The Rust binary paints a ratatui TUI from `crates/workspace-status/src/tui` on a TTY.
+Both read the same snapshot builder. See [tui-rust.md](./tui-rust.md).
 
 `main()` in `src/index.ts` picks with:
 
