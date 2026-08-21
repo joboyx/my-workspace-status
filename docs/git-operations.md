@@ -167,3 +167,17 @@ Revert, stash drop, and origin-out-of-sync graph checkout use modal `KeyState` `
 ## Write serialisation
 
 `busyRef` in `useAppState.ts` is a single boolean shared by refresh, every write (including TUI `p` / `d`), background/manual fetch, and the watch poll. Concurrent git writes against the same index would race on `.git/index.lock`; the gate makes the second one report `Busy…` instead. A poll tick that lands while a write or fetch is in flight is dropped, not queued. Graph `b` checkout (local, and confirm Yes) holds the lock for the git write only, then `runBusyThenRefresh` releases it before the snapshot refresh so that follow-up is not a Busy no-op.
+
+
+## `crates/workspace-status/src/git.rs` (Rust TUI writes)
+
+Same path-safe `--` form as the TypeScript helpers. Used by ratatui `s` / `u` / `x`.
+
+| Function | Command | Purpose |
+| --- | --- | --- |
+| `stage_file` | `add -- <path>` | Stage one focused dirty file |
+| `unstage_file` | `restore --staged -- <path>` | Unstage one focused dirty file |
+| `revert_tracked_file` | `restore -- <path>` | Discard worktree changes. Confirm first |
+| `remove_untracked_file` | `clean -f -- <path>` | Delete one untracked file after confirm |
+
+Repo, dir, and workspace rows do not bulk-stage in the Rust TUI. Hidden ignored files stay out of these writes unless `.` / `-a` shows them.
