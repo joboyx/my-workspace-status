@@ -3,13 +3,13 @@
 ## Setup
 
 1. Install Node 20 or later, npm, and git.
-2. Install a stable Rust toolchain (rustc and cargo) for the graph crate.
+2. Install a stable Rust toolchain (rustc 1.85 or later, and cargo) for the Rust crates.
 3. Clone this repository.
 4. Run `npm ci` in the repository root.
 
 The launcher also installs and builds when node_modules or dist is missing or stale.
 
-After npm link, the commands are workspace-status and ws.
+After npm link, the TypeScript commands are workspace-status and ws.
 
 ## Checks
 
@@ -22,9 +22,9 @@ cargo test
 
 Build with `npm run build`.
 
-Run the tool with `./workspace-status.sh --plain`.
+Run the TypeScript tool with `./workspace-status.sh --plain`.
 
-Agents and CI must use --plain. A TTY run without --plain opens the TUI.
+Agents and CI must use --plain or --json. A TTY run of the TypeScript app without those flags opens the TUI.
 
 ## Pull requests
 

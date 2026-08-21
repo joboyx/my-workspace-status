@@ -37,6 +37,6 @@ A change is not complete while its documentation is stale.
 
 - ESM: import with `.js` extensions from TypeScript sources.
 - Tests use `node:test` + `tsx`. New test files must be listed in the `test` script in `package.json`.
-- The graph crate uses `cargo test` at the repository root. Keep both Node and Rust checks green.
+- `cargo test` at the repository root covers workspace-status and workspace-status-graph. Keep both Node and Rust checks green.
 - Exported symbols need multi-line JSDoc.
 - The plain-text report is a user-facing contract — changing it means updating `SAMPLE_OUTPUT.md` and the E2E suite.
