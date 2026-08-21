@@ -24,6 +24,7 @@ Do **not** invent spur heuristics (`parent.lane + 1`, spine `◇─╯`, mid-rai
 | Module boundaries, data flow, new top-level module | `docs/architecture.md` |
 | Workspace snapshot fields or `--json` / `--plain` contract | `docs/snapshot.md` and `test/snapshot-contract.e2e.ts` |
 | Tree nodes, row kinds, fold behaviour, keymap, session state, action registry | `docs/tui-model.md` |
+| Rust ratatui TUI (ported vs Ink-only) | `docs/tui-rust.md` |
 | Graph gutter topology, glyphs, junctions, densify rails, stash leaf tips | `docs/git-graph-topology.md` (+ architecture / tui-model pointers) |
 | Ratatui graph widget model, rows, or paint | `docs/graph.md` + `crates/workspace-status-graph` |
 | Diff parsing, layout, or syntax highlighting | `docs/diff-rendering.md` |

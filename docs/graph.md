@@ -3,7 +3,8 @@
 `workspace-status-graph` is a ratatui widget for one git graph window.
 
 It paints HEAD, sync, stash, and worktree markers from a `GraphModel`.
-It does not run a terminal app and it does not replace the Ink TUI.
+The Rust TUI paints this widget in the right pane when a repo or worktree is focused.
+The crate itself does not run a terminal app. The TypeScript Ink TUI still has its own graph paint.
 
 Interactive and headless callers share `GraphModel::visible_rows` and
 `format_row` / `format_sync`. Display differs.
