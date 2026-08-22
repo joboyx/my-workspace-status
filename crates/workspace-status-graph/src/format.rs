@@ -21,7 +21,8 @@ pub fn format_sync(sync: &SyncState, glyphs: &GlyphSet) -> String {
     parts.join(" ")
 }
 
-/// Format one visible row. Widget and tests share this function.
+/// Format one visible row. Headless callers share this function.
+/// The widget paints a multi-lane gutter and uses [`format_label`].
 pub fn format_row(row: &GraphRow, glyphs: &GlyphSet) -> String {
     match row {
         GraphRow::Uncommitted => format!("{} dirty", glyphs.uncommitted),
@@ -35,8 +36,43 @@ pub fn format_row(row: &GraphRow, glyphs: &GlyphSet) -> String {
     }
 }
 
+/// Label after the gutter. Commit and stash drop the node glyph because
+/// the gutter already paints it.
+pub fn format_label(row: &GraphRow, glyphs: &GlyphSet) -> String {
+    match row {
+        GraphRow::Uncommitted | GraphRow::Worktree(_) => format_row(row, glyphs),
+        GraphRow::Stash(stash) => format!("{}  {}", stash.stash_ref, stash.subject),
+        GraphRow::Commit {
+            commit,
+            is_head,
+            worktrees,
+        } => format_commit_text(commit, *is_head, worktrees, glyphs),
+    }
+}
+
 fn format_stash(stash: &Stash, glyphs: &GlyphSet) -> String {
     format!("{} {}  {}", glyphs.stash, stash.stash_ref, stash.subject)
+}
+
+fn format_commit_text(
+    commit: &Commit,
+    is_head: bool,
+    worktrees: &[Worktree],
+    glyphs: &GlyphSet,
+) -> String {
+    let mut line = format!("{}  {}", short_id(&commit.id), commit.subject);
+    if is_head {
+        line.push_str("  [HEAD]");
+    }
+    for name in &commit.refs {
+        line.push_str("  ");
+        line.push_str(name);
+    }
+    for worktree in worktrees {
+        line.push_str("  ");
+        line.push_str(&worktree_mark(worktree, glyphs));
+    }
+    line
 }
 
 fn format_commit(
@@ -50,19 +86,7 @@ fn format_commit(
     } else {
         glyphs.commit
     };
-    let mut line = format!("{} {}  {}", node, short_id(&commit.id), commit.subject);
-    if is_head {
-        line.push_str("  [HEAD]");
-    }
-    for name in &commit.refs {
-        line.push_str("  ");
-        line.push_str(name);
-    }
-    for worktree in worktrees {
-        line.push_str("  ");
-        line.push_str(&worktree_mark(worktree, glyphs));
-    }
-    line
+    format!("{} {}", node, format_commit_text(commit, is_head, worktrees, glyphs))
 }
 
 fn format_worktree(worktree: &Worktree, glyphs: &GlyphSet) -> String {

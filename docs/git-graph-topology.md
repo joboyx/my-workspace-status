@@ -220,6 +220,7 @@ name; not stash leaf paint).
 | Stash model (`parentId` = `stash^1`); fetch missing parents | `src/git.ts` (`listStashes`, `gitLogCommitsByIds`) / `src/tui/graph/load.ts` |
 | Gutter clip window (node + stash join cols) | `src/tui/graph/gutterBudget.ts` (`sliceCellsAroundLane`) |
 | Regression tests (S0–S7 + park order + gutter dump) | `test/tui-graph-list.test.ts` (also rows / load / git-graph tests when changing cell paint or window load) |
+| Rust ratatui gutter (same lane model) | `crates/workspace-status-graph` (`layout.rs`, `topology.rs`, `stash.rs`, `paint.rs`) |
 
 Canonical skill tree: `ai/common/skills/my-workspace-status/` only.
 
