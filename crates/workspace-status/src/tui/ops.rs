@@ -5,7 +5,7 @@ use crate::snapshot::{
     CheckoutKind, FileChange, SyncStatus, WorkspaceRepoSnapshot, WorkspaceSnapshot,
 };
 
-use super::tree::{NodeKind, VisibleRow};
+use super::tree::{dir_path_from_id, path_under_dir, NodeKind, VisibleRow};
 
 /// One dirty file in the focused write scope.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,10 +41,11 @@ fn files_for_repo(snapshot: &WorkspaceSnapshot, repo: &str) -> Vec<ScopedFile> {
 
 /// Dirty files a stage / unstage / revert should touch for the focused row.
 ///
-/// File rows stay single-file. Repo and checkout rows walk every dirty file
-/// in that checkout. Family containers yield no files. Workspace rows walk
-/// visible primary checkouts. Hidden ignored stay out unless shown. Linked
-/// worktrees are included only when that checkout is focused.
+/// File rows stay single-file. Dir rows walk dirty files under that dir
+/// (the dir path itself and its children). Repo and checkout rows walk every
+/// dirty file in that checkout. Family containers yield no files. Workspace
+/// rows walk visible primary checkouts. Hidden ignored stay out unless shown.
+/// Linked worktrees are included only when that checkout is focused.
 pub fn collect_write_files(
     snapshot: &WorkspaceSnapshot,
     focused: Option<&VisibleRow>,
@@ -65,6 +66,18 @@ pub fn collect_write_files(
                 repo,
                 change: file.clone(),
             }]
+        }
+        NodeKind::Dir => {
+            let Some(repo) = row.repo.as_deref() else {
+                return Vec::new();
+            };
+            let Some(dir) = dir_path_from_id(&row.id, repo) else {
+                return Vec::new();
+            };
+            files_for_repo(snapshot, repo)
+                .into_iter()
+                .filter(|file| path_under_dir(&file.change.path, &dir))
+                .collect()
         }
         NodeKind::Checkout => {
             let Some(repo) = row.repo.as_deref() else {
@@ -157,7 +170,7 @@ pub fn op_targets(
             };
             include_if_visible(repo, &visible)
         }
-        NodeKind::Checkout | NodeKind::File => {
+        NodeKind::Checkout | NodeKind::File | NodeKind::Dir => {
             let Some(repo) = row.repo.as_deref() else {
                 return Vec::new();
             };
@@ -195,7 +208,7 @@ pub fn push_targets(
         return Vec::new();
     };
     match row.kind {
-        NodeKind::Workspace | NodeKind::Group | NodeKind::File => Vec::new(),
+        NodeKind::Workspace | NodeKind::Group | NodeKind::File | NodeKind::Dir => Vec::new(),
         NodeKind::Repo | NodeKind::Checkout => {
             let visible: Vec<&WorkspaceRepoSnapshot> = snapshot
                 .repos
@@ -530,5 +543,49 @@ mod tests {
         assert!(!should_delete_untracked(&[false, true], false));
         assert!(should_delete_untracked(&[true], false));
         assert!(should_delete_untracked(&[false, true], true));
+    }
+
+    fn dir_row(repo: &str, dir: &str) -> VisibleRow {
+        VisibleRow {
+            id: format!("dir:{repo}:{dir}"),
+            depth: 2,
+            kind: NodeKind::Dir,
+            label: dir.into(),
+            repo: Some(repo.into()),
+            primary_repo: None,
+            ignored: false,
+            file: None,
+            foldable: true,
+            folded: false,
+        }
+    }
+
+    #[test]
+    fn collect_write_files_dir_is_prefix_only() {
+        let snapshot = build_workspace_snapshot(
+            &[dirty("app", false, false, &["README.md", "src/lib.rs", "src/main.rs"])],
+            &[],
+            false,
+            &[],
+        );
+        let files = collect_write_files(&snapshot, Some(&dir_row("app", "src")), false);
+        let mut paths: Vec<_> = files.iter().map(|f| f.change.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["src/lib.rs", "src/main.rs"]);
+        assert!(files.iter().all(|f| f.repo == "app"));
+    }
+
+    #[test]
+    fn collect_write_files_family_container_stays_noop() {
+        let snapshot = build_workspace_snapshot(
+            &[
+                dirty("app", false, false, &["README.md", "src/lib.rs"]),
+                dirty(".worktrees/app/feat", false, true, &["wt.md"]),
+            ],
+            &[],
+            false,
+            &[],
+        );
+        assert!(collect_write_files(&snapshot, Some(&repo_row("app")), false).is_empty());
     }
 }

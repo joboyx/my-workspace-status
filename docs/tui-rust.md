@@ -17,6 +17,7 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 | `?` | Help overlay (short list, not a wall of text) |
 | `j` / `k` or arrows | Move the tree. On a focused graph, move the graph cursor. On a file list, move the file. On a focused file diff, scroll the diff |
 | `z` | Toggle fold |
+| `t` | Toggle directory tree / flat paths on the workspace tree. Status is `Directory tree` / `Flat paths`. No-op in a commit-files or commit-diff drill |
 | `h` / `l` or left / right | Close / open fold. Space does not fold |
 | `.` | Show or hide ignored repos |
 | `/` | Search prompt. Enter arms the query. Esc cancels |
@@ -54,10 +55,13 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 ## What this TUI does
 
 - Tree of repos, linked worktrees, and dirty files from the same snapshot builder as `--plain` / `--json`
+- Files sit in a directory trie by default. `t` toggles tree / flat on the workspace. Status is `Directory tree` / `Flat paths`
+- Dir rows fold with `z` / `h` / `l`. A dir `s` / `u` / `x` writes files under that dir
+- Tree / flat stays in this session. Rust has no session store. Commit-file lists stay flat
 - Right pane: file diff when a dirty file is focused. Graph pane via `workspace-status-graph` when a repo or worktree is focused
 - Hidden ignored repos stay out of the tree, search, stage / unstage / revert, and fetch / pull / push / default unless you show them
 - Search matches include folded rows. Focusing a match unfolds its ancestors
-- Stage / unstage / revert act on every dirty file in the focused scope (file, flat repo, dir, checkout, or workspace), including every scoped file across repos. A file row stays single-file. Family containers do not mix linked worktree files. Hidden ignored stay out unless shown. Revert asks `y` / `Y` / `n` on the status line. `y` discards tracked and keeps untracked, except a sole untracked file which still deletes. `Y` also deletes untracked. Stage and unstage do not confirm
+- Stage / unstage / revert act on every dirty file in the focused scope (file, dir, flat repo, checkout, or workspace), including every scoped file across repos. A file row stays single-file. A dir row writes the dir path and its children. Family containers do not mix linked worktree files. Hidden ignored stay out unless shown. Revert asks `y` / `Y` / `n` on the status line. `y` discards tracked and keeps untracked, except a sole untracked file which still deletes. `Y` also deletes untracked. Stage and unstage do not confirm
 - `e` uses config `editor`, then `$EDITOR`, then `$VISUAL`, then `vim`. A TTY editor leaves the alternate screen and returns to the same fold, focus, and scroll. GUI editors (`cursor`, `code`) spawn without a remount. Resume drains leftover raw-mode keys
 - Fetch / pull / default do not fan out to linked worktrees unless the focused row is that worktree
 - `P` pushes the focused visible repo or checkout only when it is ahead, diverged, or has no upstream. In-sync is a no-op. Workspace never fans out. Hidden ignored stay out. Linked worktrees push only when that row is focused

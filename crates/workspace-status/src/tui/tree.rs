@@ -12,6 +12,7 @@ pub enum NodeKind {
     Repo,
     Checkout,
     Group,
+    Dir,
     File,
 }
 
@@ -45,7 +46,8 @@ pub struct VisibleRow {
 }
 
 /// Build the workspace tree from a snapshot (ignored repos may still be present).
-pub fn build_tree(snapshot: &WorkspaceSnapshot) -> TreeNode {
+/// `tree_mode` true is a directory trie (Ink default). False is a flat path list.
+pub fn build_tree(snapshot: &WorkspaceSnapshot, tree_mode: bool) -> TreeNode {
     let mut families: BTreeMap<String, Vec<&WorkspaceRepoSnapshot>> = BTreeMap::new();
     for repo in &snapshot.repos {
         let key = repo.primary_repo.clone().unwrap_or_else(|| repo.repo.clone());
@@ -56,9 +58,9 @@ pub fn build_tree(snapshot: &WorkspaceSnapshot) -> TreeNode {
     let mut idle = Vec::new();
     for (primary, members) in families {
         if family_needs_attention(&members) {
-            attention.push(family_node(&primary, members));
+            attention.push(family_node(&primary, members, tree_mode));
         } else {
-            idle.push(family_node(&primary, members));
+            idle.push(family_node(&primary, members, tree_mode));
         }
     }
 
@@ -116,7 +118,11 @@ fn checkout_needs_attention(repo: &WorkspaceRepoSnapshot) -> bool {
     ) || is_attention_sync_note(&repo.sync_note)
 }
 
-fn family_node(primary: &str, mut members: Vec<&WorkspaceRepoSnapshot>) -> TreeNode {
+fn family_node(
+    primary: &str,
+    mut members: Vec<&WorkspaceRepoSnapshot>,
+    tree_mode: bool,
+) -> TreeNode {
     members.sort_by(|a, b| {
         let a_linked = i32::from(a.checkout_kind == CheckoutKind::Linked);
         let b_linked = i32::from(b.checkout_kind == CheckoutKind::Linked);
@@ -127,11 +133,11 @@ fn family_node(primary: &str, mut members: Vec<&WorkspaceRepoSnapshot>) -> TreeN
         .any(|m| m.checkout_kind == CheckoutKind::Linked);
     if !has_linked {
         let repo = members[0];
-        return repo_or_checkout(repo, NodeKind::Repo);
+        return repo_or_checkout(repo, NodeKind::Repo, tree_mode);
     }
     let children = members
         .iter()
-        .map(|m| repo_or_checkout(m, NodeKind::Checkout))
+        .map(|m| repo_or_checkout(m, NodeKind::Checkout, tree_mode))
         .collect();
     let ignored = members.iter().all(|m| m.ignored);
     TreeNode {
@@ -146,21 +152,8 @@ fn family_node(primary: &str, mut members: Vec<&WorkspaceRepoSnapshot>) -> TreeN
     }
 }
 
-fn repo_or_checkout(repo: &WorkspaceRepoSnapshot, kind: NodeKind) -> TreeNode {
-    let files = repo
-        .changes
-        .iter()
-        .map(|change| TreeNode {
-            id: format!("file:{}:{}", repo.repo, change.path),
-            kind: NodeKind::File,
-            label: file_label(change),
-            repo: Some(repo.repo.clone()),
-            primary_repo: repo.primary_repo.clone(),
-            ignored: repo.ignored,
-            file: Some(change.clone()),
-            children: Vec::new(),
-        })
-        .collect();
+fn repo_or_checkout(repo: &WorkspaceRepoSnapshot, kind: NodeKind, tree_mode: bool) -> TreeNode {
+    let files = materialize_change_forest(repo, tree_mode);
     let prefix = if repo.checkout_kind == CheckoutKind::Linked {
         "wt "
     } else {
@@ -190,7 +183,7 @@ fn repo_or_checkout(repo: &WorkspaceRepoSnapshot, kind: NodeKind) -> TreeNode {
     }
 }
 
-fn file_label(change: &FileChange) -> String {
+fn file_label(change: &FileChange, tree_mode: bool) -> String {
     let mark = if change.untracked {
         "?"
     } else if change.staged_status.is_some() && change.unstaged_status.is_some() {
@@ -202,7 +195,131 @@ fn file_label(change: &FileChange) -> String {
     } else {
         "M"
     };
-    format!("{mark} {}", change.path)
+    let name = if tree_mode {
+        change
+            .path
+            .rsplit('/')
+            .next()
+            .filter(|part| !part.is_empty())
+            .unwrap_or(change.path.as_str())
+    } else {
+        change.path.as_str()
+    };
+    format!("{mark} {name}")
+}
+
+#[derive(Default)]
+struct MutableDir {
+    dirs: BTreeMap<String, MutableDir>,
+    files: Vec<FileChange>,
+}
+
+fn add_change(root: &mut MutableDir, change: &FileChange) {
+    let mut parts: Vec<&str> = change.path.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.pop().is_none() {
+        return;
+    }
+    let mut node = root;
+    for dir in parts {
+        node = node
+            .dirs
+            .entry(dir.to_string())
+            .or_insert_with(MutableDir::default);
+    }
+    node.files.push(change.clone());
+}
+
+fn collapse_dir(name: String, mut node: MutableDir) -> (String, MutableDir) {
+    let mut collapsed_name = name;
+    while node.files.is_empty() && node.dirs.len() == 1 {
+        let (child_name, child_node) = node.dirs.into_iter().next().expect("one child dir");
+        collapsed_name = format!("{collapsed_name}/{child_name}");
+        node = child_node;
+    }
+    (collapsed_name, node)
+}
+
+fn make_file_node(
+    repo: &WorkspaceRepoSnapshot,
+    change: &FileChange,
+    tree_mode: bool,
+) -> TreeNode {
+    TreeNode {
+        id: format!("file:{}:{}", repo.repo, change.path),
+        kind: NodeKind::File,
+        label: file_label(change, tree_mode),
+        repo: Some(repo.repo.clone()),
+        primary_repo: repo.primary_repo.clone(),
+        ignored: repo.ignored,
+        file: Some(change.clone()),
+        children: Vec::new(),
+    }
+}
+
+fn materialize_dir(
+    repo: &WorkspaceRepoSnapshot,
+    dir_path: &str,
+    node: MutableDir,
+    tree_mode: bool,
+) -> Vec<TreeNode> {
+    let mut dir_entries: Vec<(String, MutableDir)> = node
+        .dirs
+        .into_iter()
+        .map(|(name, child)| collapse_dir(name, child))
+        .collect();
+    dir_entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut file_entries = node.files;
+    file_entries.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let mut children = Vec::new();
+    for (name, child) in dir_entries {
+        let full_path = if dir_path.is_empty() {
+            name.clone()
+        } else {
+            format!("{dir_path}/{name}")
+        };
+        children.push(TreeNode {
+            id: format!("dir:{}:{full_path}", repo.repo),
+            kind: NodeKind::Dir,
+            label: name,
+            repo: Some(repo.repo.clone()),
+            primary_repo: repo.primary_repo.clone(),
+            ignored: repo.ignored,
+            file: None,
+            children: materialize_dir(repo, &full_path, child, tree_mode),
+        });
+    }
+    for change in file_entries {
+        children.push(make_file_node(repo, &change, tree_mode));
+    }
+    children
+}
+
+/// File / dir forest under a checkout. Matches Ink `materializeChangeForest`.
+fn materialize_change_forest(repo: &WorkspaceRepoSnapshot, tree_mode: bool) -> Vec<TreeNode> {
+    if !tree_mode {
+        return repo
+            .changes
+            .iter()
+            .map(|change| make_file_node(repo, change, false))
+            .collect();
+    }
+    let mut root = MutableDir::default();
+    for change in &repo.changes {
+        add_change(&mut root, change);
+    }
+    materialize_dir(repo, "", root, true)
+}
+
+/// True when `path` is the dir itself or a child of it.
+pub fn path_under_dir(path: &str, dir: &str) -> bool {
+    path == dir || path.starts_with(&format!("{dir}/"))
+}
+
+/// Dir path from a `dir:{{repo}}:{{fullPath}}` row id.
+pub fn dir_path_from_id(id: &str, repo: &str) -> Option<String> {
+    let prefix = format!("dir:{repo}:");
+    id.strip_prefix(&prefix).map(str::to_string)
 }
 
 /// Default folds: the No updates group starts closed.
@@ -303,7 +420,7 @@ mod tests {
             false,
             &[],
         );
-        let tree = build_tree(&visible_for_tree(&built));
+        let tree = build_tree(&visible_for_tree(&built), true);
         let rows = flatten(&tree, &HashSet::new());
         assert!(rows.iter().any(|r| r.label.contains("app")));
         assert!(rows.iter().all(|r| !r.label.contains("notes")));
@@ -317,7 +434,7 @@ mod tests {
             true,
             &[],
         );
-        let tree = build_tree(&visible_for_tree(&built));
+        let tree = build_tree(&visible_for_tree(&built), true);
         let rows = flatten(&tree, &HashSet::new());
         assert!(rows.iter().any(|r| r.label.contains("notes")));
     }
@@ -330,11 +447,103 @@ mod tests {
             false,
             &[],
         );
-        let tree = build_tree(&visible_for_tree(&built));
+        let tree = build_tree(&visible_for_tree(&built), true);
         let folds = default_folds(&tree);
         assert!(folds.contains("group:no-updates"));
         let rows = flatten(&tree, &folds);
         assert!(rows.iter().any(|r| r.id == "group:no-updates" && r.folded));
         assert!(rows.iter().all(|r| !r.label.contains("lib  main") || r.id == "group:no-updates"));
+    }
+
+    fn dirty_repo(name: &str, paths: &[&str]) -> RepoSnapshot {
+        let mut snap = repo(name, true, false);
+        snap.has_untracked = paths.iter().any(|p| *p != "README.md" && *p != "src/lib.rs");
+        snap.changes = paths
+            .iter()
+            .map(|path| FileChange {
+                path: (*path).into(),
+                staged_status: None,
+                unstaged_status: Some("M".into()),
+                untracked: false,
+                old_path: None,
+            })
+            .collect();
+        snap
+    }
+
+    #[test]
+    fn tree_mode_inserts_dir_and_basename_file() {
+        let built = build_workspace_snapshot(
+            &[dirty_repo("app", &["src/lib.rs", "README.md"])],
+            &[],
+            false,
+            &[],
+        );
+        let tree = build_tree(&visible_for_tree(&built), true);
+        let rows = flatten(&tree, &HashSet::new());
+        let dir = rows
+            .iter()
+            .find(|r| r.id == "dir:app:src")
+            .expect("dir:app:src");
+        assert_eq!(dir.kind, NodeKind::Dir);
+        assert!(dir.foldable);
+        assert_eq!(dir.label, "src");
+        let lib = rows
+            .iter()
+            .find(|r| r.id == "file:app:src/lib.rs")
+            .expect("lib.rs");
+        assert_eq!(lib.kind, NodeKind::File);
+        assert!(lib.label.contains("lib.rs"));
+        assert!(!lib.label.contains("src/lib.rs"));
+        let readme = rows
+            .iter()
+            .find(|r| r.id == "file:app:README.md")
+            .expect("README.md");
+        assert!(readme.label.contains("README.md"));
+        let dir_idx = rows.iter().position(|r| r.id == "dir:app:src").unwrap();
+        let readme_idx = rows.iter().position(|r| r.id == "file:app:README.md").unwrap();
+        let repo_idx = rows.iter().position(|r| r.id == "repo:app").unwrap();
+        assert!(dir_idx < readme_idx);
+        assert_eq!(rows[dir_idx + 1].id, "file:app:src/lib.rs");
+        assert!(repo_idx < dir_idx);
+    }
+
+    #[test]
+    fn flat_mode_is_full_paths_without_dir_rows() {
+        let built = build_workspace_snapshot(
+            &[dirty_repo("app", &["src/lib.rs", "README.md"])],
+            &[],
+            false,
+            &[],
+        );
+        let tree = build_tree(&visible_for_tree(&built), false);
+        let rows = flatten(&tree, &HashSet::new());
+        assert!(rows.iter().all(|r| r.kind != NodeKind::Dir));
+        let lib = rows
+            .iter()
+            .find(|r| r.id == "file:app:src/lib.rs")
+            .expect("lib.rs");
+        assert!(lib.label.contains("src/lib.rs"));
+        assert!(rows.iter().any(|r| r.id == "file:app:README.md"));
+    }
+
+    #[test]
+    fn collapse_single_child_dirs() {
+        let built = build_workspace_snapshot(
+            &[dirty_repo("app", &["src/foo/bar.rs"])],
+            &[],
+            false,
+            &[],
+        );
+        let tree = build_tree(&visible_for_tree(&built), true);
+        let rows = flatten(&tree, &HashSet::new());
+        assert!(rows.iter().any(|r| r.id == "dir:app:src/foo" && r.label == "src/foo"));
+        assert!(rows.iter().all(|r| r.id != "dir:app:src"));
+        let file = rows
+            .iter()
+            .find(|r| r.id == "file:app:src/foo/bar.rs")
+            .expect("bar.rs");
+        assert!(file.label.contains("bar.rs"));
+        assert!(!file.label.contains("src/foo/bar.rs"));
     }
 }

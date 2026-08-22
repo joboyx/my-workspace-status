@@ -15,6 +15,7 @@ pub enum Action {
     FoldClose,
     FoldOpen,
     ToggleShowIgnored,
+    ToggleTreeMode,
     Fetch,
     Pull,
     DefaultBranch,
