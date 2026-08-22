@@ -65,6 +65,10 @@ pub enum Action {
     GraphStashApply,
     GraphStashPop,
     GraphStashDrop,
+    EasyMotionStart,
+    EasyMotionChar(char),
+    EasyMotionCancel,
+    CycleTheme,
     None,
 }
 
