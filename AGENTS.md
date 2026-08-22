@@ -31,6 +31,7 @@ Do **not** invent spur heuristics (`parent.lane + 1`, spine `◇─╯`, mid-rai
 | Any git command or operation semantics | `docs/git-operations.md` |
 | Environment variables, workspace config, keybindings, themes | `docs/configuration.md` |
 | Output format of the plain report | `SAMPLE_OUTPUT.md` and `test/workspace-status.e2e.ts` |
+| Demo workspace seed or screenshot frames | `docs/demo.md` + `scripts/seed-demo-workspace.sh` |
 
 A change is not complete while its documentation is stale.
 
@@ -41,3 +42,7 @@ A change is not complete while its documentation is stale.
 - `cargo test` at the repository root covers workspace-status and workspace-status-graph. Keep both Node and Rust checks green.
 - Exported symbols need multi-line JSDoc.
 - The plain-text report is a user-facing contract — changing it means updating `SAMPLE_OUTPUT.md` and the E2E suite.
+
+## Demo / screenshots
+
+When capturing TUI stills or a recording, seed with `./scripts/seed-demo-workspace.sh` and follow [docs/demo.md](./docs/demo.md). Do not invent a new fixture.
