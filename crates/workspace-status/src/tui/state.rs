@@ -19,6 +19,11 @@ use super::keys::InputMode;
 use super::fetch::background_fetch_targets;
 use super::ops::{op_targets, push_targets, Op};
 use super::search::focus_tree_search;
+use super::split::{
+    clamp_tree_fraction, diff_split_fraction_from_col, hit_split, is_side_by_side_split,
+    pair_unified_lines, tree_fraction_from_col, DiffMode, SplitDrag, SplitHit, SplitLayout,
+    DIFF_SPLIT_FRACTION, TREE_WIDTH_FRACTION,
+};
 use super::stash::{
     checkout_path, resolve_stash_menu_key, row_is_hidden_ignored, stash_dirty_for_row,
     stash_ops_for_context, StashMenuKeyResult, StashOp, StashOpId, StashOpsContext,
@@ -52,6 +57,12 @@ pub struct LayoutHit {
     pub tree_height: u16,
     pub right_x: u16,
     pub list_offset: usize,
+    pub term_cols: u16,
+    pub pane_height: u16,
+    pub outer_tree_width: u16,
+    pub diff_pane_width: u16,
+    pub diff_content_x: u16,
+    pub diff_split_rule_x: Option<u16>,
 }
 
 impl Default for LayoutHit {
@@ -63,6 +74,12 @@ impl Default for LayoutHit {
             tree_height: 20,
             right_x: 40,
             list_offset: 0,
+            term_cols: 120,
+            pane_height: 22,
+            outer_tree_width: 48,
+            diff_pane_width: 70,
+            diff_content_x: 50,
+            diff_split_rule_x: None,
         }
     }
 }
@@ -132,6 +149,10 @@ pub struct AppState {
     pub create_branch: Option<CreateBranchState>,
     pub flashes: HashMap<String, Instant>,
     pub signatures: BTreeMap<String, String>,
+    pub tree_fraction: f64,
+    pub diff_split_fraction: f64,
+    pub diff_mode: DiffMode,
+    pub drag: SplitDrag,
 }
 
 impl AppState {
@@ -180,6 +201,10 @@ impl AppState {
             create_branch: None,
             flashes: HashMap::new(),
             signatures,
+            tree_fraction: TREE_WIDTH_FRACTION,
+            diff_split_fraction: DIFF_SPLIT_FRACTION,
+            diff_mode: DiffMode::SideBySide,
+            drag: SplitDrag::None,
         };
         state.reconcile_viewed_store();
         state
@@ -280,6 +305,7 @@ impl AppState {
         match action {
             Action::Quit => Effect::Quit,
             Action::ToggleHelp => {
+                self.drag = SplitDrag::None;
                 self.help_open = !self.help_open;
                 Effect::None
             }
@@ -331,6 +357,12 @@ impl AppState {
                 Effect::None
             }
             Action::Click { col, row } => self.click(col, row),
+            Action::Drag { col, row } => self.drag_split(col, row),
+            Action::Release => {
+                self.drag = SplitDrag::None;
+                Effect::None
+            }
+            Action::ToggleDiffMode => self.toggle_diff_mode(),
             Action::ScrollWheel { col, row: _, delta } => {
                 if col >= self.layout.right_x {
                     self.focus = FocusPane::Right;
@@ -343,6 +375,7 @@ impl AppState {
                 }
             }
             Action::SearchStart => {
+                self.drag = SplitDrag::None;
                 self.search_mode = true;
                 self.search_active = false;
                 self.search_query.clear();
@@ -404,7 +437,10 @@ impl AppState {
             }
             Action::Stage => self.file_write_effect(FileWrite::Stage),
             Action::Unstage => self.file_write_effect(FileWrite::Unstage),
-            Action::Revert => self.begin_revert(),
+            Action::Revert => {
+                self.drag = SplitDrag::None;
+                self.begin_revert()
+            }
             Action::ConfirmYes => self.confirm_yes(),
             Action::ConfirmNo => {
                 if let Some(pending) = self.confirm.take() {
@@ -432,13 +468,22 @@ impl AppState {
             }
             Action::WatchTick => Effect::WatchRefresh,
             Action::FetchTick => self.fetch_tick_effect(),
-            Action::RemoveWorktree => self.begin_remove_worktree(),
+            Action::RemoveWorktree => {
+                self.drag = SplitDrag::None;
+                self.begin_remove_worktree()
+            }
             Action::Push => self.push_effect(),
-            Action::StashMenu => self.begin_stash_menu(),
+            Action::StashMenu => {
+                self.drag = SplitDrag::None;
+                self.begin_stash_menu()
+            }
             Action::StashMenuChar(c) => self.stash_menu_key(Some(c), false, false),
             Action::StashMenuEnter => self.stash_menu_key(None, true, false),
             Action::StashMenuCancel => self.stash_menu_key(None, false, true),
-            Action::Branch => self.begin_branch_picker(),
+            Action::Branch => {
+                self.drag = SplitDrag::None;
+                self.begin_branch_picker()
+            }
             Action::BranchMove(delta) => {
                 if let Some(picker) = self.branch_picker.as_mut() {
                     picker.move_cursor(delta);
@@ -469,7 +514,10 @@ impl AppState {
                 self.status = "branch cancelled".into();
                 Effect::None
             }
-            Action::CreateBranchStart => self.begin_create_branch(),
+            Action::CreateBranchStart => {
+                self.drag = SplitDrag::None;
+                self.begin_create_branch()
+            }
             Action::CreateBranchChar(c) => {
                 if let Some(create) = self.create_branch.as_mut() {
                     create.name.push(c);
@@ -596,13 +644,13 @@ impl AppState {
 
     fn scroll_right(&mut self, delta: i32) {
         if let DrillView::Diff { lines, .. } = &self.drill {
-            let max = lines.len().saturating_sub(1) as i32;
+            let max = self.diff_scroll_max(lines) as i32;
             let next = self.diff_scroll as i32 + delta;
             self.diff_scroll = next.clamp(0, max) as u16;
             return;
         }
         if self.right_is_diff() {
-            let max = self.diff_lines.len().saturating_sub(1) as i32;
+            let max = self.diff_scroll_max(&self.diff_lines) as i32;
             let next = self.diff_scroll as i32 + delta;
             self.diff_scroll = next.clamp(0, max) as u16;
         } else {
@@ -611,7 +659,54 @@ impl AppState {
         }
     }
 
+    fn diff_scroll_max(&self, lines: &[String]) -> usize {
+        let count = if is_side_by_side_split(self.diff_mode, self.layout.diff_pane_width) {
+            pair_unified_lines(lines).len()
+        } else {
+            lines.len()
+        };
+        count.saturating_sub(1)
+    }
+
+    fn split_layout(&self) -> SplitLayout {
+        SplitLayout {
+            term_cols: self.layout.term_cols.max(1),
+            term_rows: self.layout.pane_height.saturating_add(2).max(1),
+            pane_height: self.layout.pane_height.max(1),
+            tree_width: self.layout.outer_tree_width.max(1),
+            diff_pane_width: self.layout.diff_pane_width,
+            diff_content_x: self.layout.diff_content_x,
+            diff_split_rule_x: self.layout.diff_split_rule_x,
+        }
+    }
+
+    fn apply_tree_fraction_from_col(&mut self, col: u16) {
+        let cols = self.layout.term_cols.max(1);
+        self.tree_fraction = clamp_tree_fraction(cols, tree_fraction_from_col(cols, col));
+    }
+
+    fn apply_diff_fraction_from_col(&mut self, col: u16) {
+        self.diff_split_fraction = diff_split_fraction_from_col(
+            self.layout.outer_tree_width.max(1),
+            self.layout.diff_pane_width.max(1),
+            col,
+        );
+    }
+
     fn click(&mut self, col: u16, row: u16) -> Effect {
+        match hit_split(self.split_layout(), col, row) {
+            SplitHit::Pane => {
+                self.drag = SplitDrag::Pane;
+                self.apply_tree_fraction_from_col(col);
+                return Effect::None;
+            }
+            SplitHit::DiffSplit => {
+                self.drag = SplitDrag::Diff;
+                self.apply_diff_fraction_from_col(col);
+                return Effect::None;
+            }
+            SplitHit::Other => {}
+        }
         if col >= self.layout.right_x {
             self.focus = FocusPane::Right;
             return Effect::None;
@@ -625,6 +720,27 @@ impl AppState {
             self.cursor = idx;
             return Effect::LoadRightPane;
         }
+        Effect::None
+    }
+
+    fn drag_split(&mut self, col: u16, _row: u16) -> Effect {
+        match self.drag {
+            SplitDrag::Pane => self.apply_tree_fraction_from_col(col),
+            SplitDrag::Diff => self.apply_diff_fraction_from_col(col),
+            SplitDrag::None => {}
+        }
+        Effect::None
+    }
+
+    fn toggle_diff_mode(&mut self) -> Effect {
+        self.diff_mode = match self.diff_mode {
+            DiffMode::SideBySide => DiffMode::Inline,
+            DiffMode::Inline => DiffMode::SideBySide,
+        };
+        self.status = match self.diff_mode {
+            DiffMode::SideBySide => "Diff: split".into(),
+            DiffMode::Inline => "Diff: inline".into(),
+        };
         Effect::None
     }
 
@@ -1483,6 +1599,7 @@ fn visible_snapshot(snapshot: &WorkspaceSnapshot, show_ignored: bool) -> Workspa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::split::{pane_widths, side_by_side_column_widths, DIFF_SPLIT_FRACTION};
     use crate::tui::watch::watch_interval_ms;
     use crate::snapshot::{build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus};
     use workspace_status_graph::{Commit, Stash};
@@ -2573,6 +2690,95 @@ mod tests {
         assert!(ops.iter().all(|op| {
             op.stash_ref.is_none() || op.stash_ref.as_deref() == Some("stash@{1}")
         }));
+    }
+
+    fn wide_split_layout() -> super::LayoutHit {
+        let mut layout = super::LayoutHit::default();
+        layout.term_cols = 160;
+        layout.pane_height = 22;
+        layout.outer_tree_width = 48;
+        layout.right_x = 48;
+        layout.diff_pane_width = 110;
+        layout.diff_content_x = 50;
+        let left = side_by_side_column_widths(110, DIFF_SPLIT_FRACTION).left_width;
+        layout.diff_split_rule_x = Some(50 + left);
+        layout
+    }
+
+    #[test]
+    fn pane_drag_updates_ratio_and_release_ends_drag() {
+        let mut app = state();
+        app.layout = wide_split_layout();
+        let start = pane_widths(160, app.tree_fraction).tree_width;
+        assert_eq!(app.dispatch(Action::Click { col: 47, row: 5 }), Effect::None);
+        assert_eq!(app.drag, SplitDrag::Pane);
+        assert_eq!(app.dispatch(Action::Drag { col: 70, row: 8 }), Effect::None);
+        let after = pane_widths(160, app.tree_fraction).tree_width;
+        assert!(after > start, "start={start} after={after}");
+        assert_eq!(after, 71);
+        assert_eq!(app.drag, SplitDrag::Pane);
+        assert_eq!(app.dispatch(Action::Release), Effect::None);
+        assert_eq!(app.drag, SplitDrag::None);
+        assert_eq!(pane_widths(160, app.tree_fraction).tree_width, after);
+    }
+
+    #[test]
+    fn in_diff_drag_updates_ratio_and_release_ends_drag() {
+        let mut app = state();
+        app.layout = wide_split_layout();
+        let rule = app.layout.diff_split_rule_x.expect("rule");
+        let start = side_by_side_column_widths(110, app.diff_split_fraction).left_width;
+        assert_eq!(app.dispatch(Action::Click { col: rule, row: 6 }), Effect::None);
+        assert_eq!(app.drag, SplitDrag::Diff);
+        assert_eq!(app.dispatch(Action::Drag { col: rule + 20, row: 6 }), Effect::None);
+        let after = side_by_side_column_widths(110, app.diff_split_fraction).left_width;
+        assert!(after > start, "start={start} after={after}");
+        assert_eq!(app.drag, SplitDrag::Diff);
+        assert_eq!(app.dispatch(Action::Release), Effect::None);
+        assert_eq!(app.drag, SplitDrag::None);
+        assert_eq!(
+            side_by_side_column_widths(110, app.diff_split_fraction).left_width,
+            after
+        );
+    }
+
+    #[test]
+    fn drag_clamp_keeps_panes_nonzero() {
+        let mut app = state();
+        app.layout = wide_split_layout();
+        app.dispatch(Action::Click { col: 47, row: 4 });
+        app.dispatch(Action::Drag { col: 0, row: 4 });
+        let w = pane_widths(160, app.tree_fraction);
+        assert!(w.tree_width >= 20);
+        assert!(w.diff_width >= 20);
+        app.dispatch(Action::Release);
+        let rule = app.layout.diff_split_rule_x.expect("rule");
+        app.dispatch(Action::Click { col: rule, row: 4 });
+        app.dispatch(Action::Drag { col: 0, row: 4 });
+        let s = side_by_side_column_widths(110, app.diff_split_fraction);
+        assert!(s.left_width >= 1);
+        assert!(s.right_width >= 1);
+    }
+
+    #[test]
+    fn click_on_tree_is_not_a_split_drag() {
+        let mut app = state();
+        app.layout = wide_split_layout();
+        assert!(!app.rows.is_empty());
+        let effect = app.dispatch(Action::Click { col: 10, row: app.layout.tree_y });
+        assert_eq!(app.drag, SplitDrag::None);
+        assert_eq!(effect, Effect::LoadRightPane);
+        assert_eq!(app.cursor, app.layout.list_offset);
+    }
+
+    #[test]
+    fn i_toggles_inline_without_mouse() {
+        let mut app = state();
+        assert_eq!(app.diff_mode, DiffMode::SideBySide);
+        app.dispatch(Action::ToggleDiffMode);
+        assert_eq!(app.diff_mode, DiffMode::Inline);
+        app.dispatch(Action::ToggleDiffMode);
+        assert_eq!(app.diff_mode, DiffMode::SideBySide);
     }
 
 }

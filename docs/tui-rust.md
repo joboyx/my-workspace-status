@@ -38,6 +38,8 @@ Screenshots of the daily views live in the [root README](../README.md#screenshot
 | `w` / `W` | Remove the focused linked worktree after `y` / `n` |
 | `Tab` | Focus the other pane |
 | click | Select a tree row, or focus the right pane |
+| drag | Resize the tree / right pane split, or the in-diff side-by-side RULE |
+| `i` | Toggle inline / split on a file diff. Split falls back to inline below 100 columns |
 | `g` / `G` | First / last tree row |
 
 `-a` starts with ignored repos shown. `-f` starts a fetch after the first paint. First paint does not wait on a network fetch.
@@ -62,7 +64,8 @@ Screenshots of the daily views live in the [root README](../README.md#screenshot
 - `b` opens the local branch picker on a checkout or flat repo. Type to filter. Enter checks out. `C` creates a branch at HEAD. When the local branch is out of sync with `origin/*`, checkout asks `y` / `n` then pulls
 - `w` / `W` removes the focused linked worktree. Workspace, repo family, file, and hidden ignored rows are a no-op. Confirm with `y` / `n`. The command is `git worktree remove [--force]` from the primary. Bind-mount aliases remap the same way as in the TypeScript app. Ink uses the same keys
 - Action / Effect loop: crossterm events become `Action`, dispatch updates state and returns an `Effect`
-- Mouse is optional. Keys work without it
+- Mouse is optional. Keys work without it. Drag the tree / right splitter, or the in-diff RULE in split mode, to resize. `i` toggles inline / split without a mouse
+- Tree / right and in-diff split ratios stay in the current session only. They reset on the next launch (Ink does not persist them either)
 - `--plain` / `--json` / `-v` / `-p` / `-d` stay headless
 
 Reviewed marks use `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (same identity and fingerprint as Ink). A mark drops when the file fingerprint changes. Space toggles dirty file rows only. The viewed glyph is `◉` / `*`, not the clean `✓`. Clean `✓` paints only on the No updates group.
@@ -71,7 +74,6 @@ Reviewed marks use `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (same
 
 These stay in the TypeScript app:
 
-- In-diff drag split and side-by-side resize
 - Ink-testing e2e suite
 - EasyMotion, theme cycle
 
@@ -92,6 +94,8 @@ See [tui-model.md](./tui-model.md) for the Ink keymap.
 
 Left pane: workspace tree. Clean default-branch repos sit under a folded `No updates` group.
 
-Right pane: graph for a repo or worktree, a unified diff for a dirty file, or the commit-files drill (file list, then that file's commit diff).
+Right pane: graph for a repo or worktree, a unified or side-by-side diff for a dirty file, or the commit-files drill (file list, then that file's commit diff).
+
+The tree / right split defaults to 40% tree. The in-diff RULE defaults to 50/50. Drag either splitter (3-column grab band). Neither pane or column can collapse to zero. Both ratios are session-only.
 
 Bottom line: short status. `?` opens a small overlay of the keys above. `/` uses that line as the search prompt.
