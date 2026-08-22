@@ -24,6 +24,10 @@ pub enum Action {
     FocusLeft,
     FocusRight,
     ScrollDiff(i32),
+    /// Horizontal pan on a focused file diff. Positive looks right.
+    PanDiff(i32),
+    /// Toggle unlimited `-U` context on the focused file diff.
+    ToggleFullContext,
     Click { col: u16, row: u16 },
     Drag { col: u16, row: u16 },
     Release,

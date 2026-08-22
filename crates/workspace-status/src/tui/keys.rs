@@ -180,6 +180,9 @@ fn normal_key(
     if is_easy_motion_start(key) {
         return Action::EasyMotionStart;
     }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o') {
+        return Action::ToggleFullContext;
+    }
     match key.code {
         KeyCode::Char('T') => Action::CycleTheme,
         KeyCode::Char('t') => Action::ToggleTreeMode,
@@ -243,8 +246,24 @@ fn normal_key(
                 Action::Move(-1)
             }
         }
-        KeyCode::Char('h') | KeyCode::Left => Action::FoldClose,
-        KeyCode::Char('l') | KeyCode::Right => Action::FoldOpen,
+        KeyCode::Char('h') | KeyCode::Left => {
+            if focus_right && right_is_diff {
+                Action::PanDiff(-1)
+            } else if focus_right {
+                Action::None
+            } else {
+                Action::FoldClose
+            }
+        }
+        KeyCode::Char('l') | KeyCode::Right => {
+            if focus_right && right_is_diff {
+                Action::PanDiff(1)
+            } else if focus_right {
+                Action::None
+            } else {
+                Action::FoldOpen
+            }
+        }
         KeyCode::Enter => Action::NavEnter,
         KeyCode::Esc => Action::NavEsc,
         _ => Action::None,
@@ -545,6 +564,50 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Char('q')), InputMode::EasyMotion, false, false),
             Action::EasyMotionChar('q')
+        );
+    }
+
+    #[test]
+    fn ctrl_o_and_diff_pan_keys() {
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('o')), normal(), true, true),
+            Action::ToggleFullContext
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('h')), normal(), true, true),
+            Action::PanDiff(-1)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('l')), normal(), true, true),
+            Action::PanDiff(1)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('h')), normal(), false, false),
+            Action::FoldClose
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('l')), normal(), false, false),
+            Action::FoldOpen
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('h')), normal(), false, true),
+            Action::None
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('l')), normal(), false, true),
+            Action::None
+        );
+    }
+
+    #[test]
+    fn help_slash_does_not_start_help_search() {
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('/')), InputMode::Help, false, false),
+            Action::None
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('/')), InputMode::Help, true, true),
+            Action::None
         );
     }
 }
