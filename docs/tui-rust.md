@@ -14,7 +14,7 @@ Screenshots of the daily views live in the [root README](../README.md#screenshot
 | --- | --- |
 | `q` | Quit |
 | `?` | Help overlay (short list, not a wall of text) |
-| `j` / `k` or arrows | Move the tree. On a focused file diff, scroll the diff |
+| `j` / `k` or arrows | Move the tree. On a focused graph, move the graph cursor. On a file list, move the file. On a focused file diff, scroll the diff |
 | `z` | Toggle fold |
 | `h` / `l` or left / right | Close / open fold. Space does not fold |
 | `.` | Show or hide ignored repos |
@@ -28,7 +28,10 @@ Screenshots of the daily views live in the [root README](../README.md#screenshot
 | `p` | Pull visible targets that are behind |
 | `d` | Switch visible targets to the default branch |
 | `P` | Push the focused visible repo or checkout |
-| `S` | Stash menu (`s` create, `a` apply, `p` pop, `d` drop) |
+| `S` | Stash menu (`s` create, `a` apply, `p` pop, `d` drop). From a repo or file row this targets the latest stash. From a focused graph stash row it targets that `stash@{n}` |
+| `Enter` | Focus the right pane, or drill: graph commit → file list → commit diff |
+| `Esc` | Pop one drill level, or return focus to the tree |
+| `a` / `p` / `D` | Apply / pop / drop the focused graph stash row. Drop asks `y` / `n` |
 | `b` | Branch picker (list, filter, checkout, `C` create) |
 | `r` | Reload the workspace snapshot |
 | `space` | Mark a dirty file as reviewed. Writes the same viewed-files store as the Ink app |
@@ -53,7 +56,9 @@ Screenshots of the daily views live in the [root README](../README.md#screenshot
 - `e` uses config `editor`, then `$EDITOR`, then `$VISUAL`, then `vim`. A TTY editor leaves the alternate screen and returns to the same fold, focus, and scroll. GUI editors (`cursor`, `code`) spawn without a remount. Resume drains leftover raw-mode keys
 - Fetch / pull / default do not fan out to linked worktrees unless the focused row is that worktree
 - `P` pushes the focused visible repo or checkout only. Hidden ignored stay out. Linked worktrees push only when that row is focused
-- `S` opens a stash overlay. `s` creates a stash (pathspec when a dirty file is focused). `a` applies the latest stash. `p` pop and `d` drop ask `y` / `n` first, same as revert. Drop targets the latest stash
+- `S` opens a stash overlay. `s` creates a stash (pathspec when a dirty file is focused). From a repo or file row, `a` / `p` / `d` target the latest stash. From a focused graph stash row they target that `stash@{n}`. Pop and drop ask `y` / `n` first, same as revert
+- `Enter` on a graph commit (or stash / uncommitted row) opens that object's file list. `Enter` on a file opens the commit diff. `Esc` pops each level. Hidden ignored repos stay out of the drill unless shown
+- Graph stash rows are first-class: `a` apply, `p` pop, and `D` drop the focused `stash@{n}`. Drop asks `y` / `n`
 - `b` opens the local branch picker on a checkout or flat repo. Type to filter. Enter checks out. `C` creates a branch at HEAD. When the local branch is out of sync with `origin/*`, checkout asks `y` / `n` then pulls
 - `w` / `W` removes the focused linked worktree. Workspace, repo family, file, and hidden ignored rows are a no-op. Confirm with `y` / `n`. The command is `git worktree remove [--force]` from the primary. Bind-mount aliases remap the same way as in the TypeScript app. Ink uses the same keys
 - Action / Effect loop: crossterm events become `Action`, dispatch updates state and returns an `Effect`
@@ -67,10 +72,8 @@ Reviewed marks use `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (same
 These stay in the TypeScript app:
 
 - In-diff drag split and side-by-side resize
-- Commit-files drill (depth 1 / depth 2)
 - Ink-testing e2e suite
 - EasyMotion, theme cycle
-- Graph-row stash focus (drop a non-latest stash by focusing that graph row)
 
 See [tui-model.md](./tui-model.md) for the Ink keymap.
 
@@ -89,6 +92,6 @@ See [tui-model.md](./tui-model.md) for the Ink keymap.
 
 Left pane: workspace tree. Clean default-branch repos sit under a folded `No updates` group.
 
-Right pane: graph for a repo or worktree, or a unified diff for a dirty file.
+Right pane: graph for a repo or worktree, a unified diff for a dirty file, or the commit-files drill (file list, then that file's commit diff).
 
 Bottom line: short status. `?` opens a small overlay of the keys above. `/` uses that line as the search prompt.
