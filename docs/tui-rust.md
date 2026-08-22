@@ -29,7 +29,7 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 | `p` | Pull visible targets that are behind |
 | `d` | Switch visible targets that are off the default branch. Already-default is a no-op (does not pull) |
 | `P` | Push the focused visible repo or checkout when it is ahead, diverged, or has no upstream. In-sync is a no-op |
-| `S` | Stash menu (`s` create, `a` apply, `p` pop). Apply / pop use the latest stash from a file or repo row. Drop (`d`) only when a graph stash row is focused |
+| `S` | Stash menu. On a dirty file or repo this is create-only (`s`). On a clean repo it is a no-op. Apply / pop / drop only from a focused graph stash row (`a` / `p` / `D`, or `S` there) |
 | `Enter` | Focus the right pane, or drill: graph commit → file list → commit diff |
 | `Esc` | Pop one drill level, or return focus to the tree |
 | `a` / `p` / `D` | Apply / pop / drop the focused graph stash row. Drop asks `y` / `n` |
@@ -61,7 +61,7 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 - `e` uses config `editor`, then `$EDITOR`, then `$VISUAL`, then `vim`. A TTY editor leaves the alternate screen and returns to the same fold, focus, and scroll. GUI editors (`cursor`, `code`) spawn without a remount. Resume drains leftover raw-mode keys
 - Fetch / pull / default do not fan out to linked worktrees unless the focused row is that worktree
 - `P` pushes the focused visible repo or checkout only when it is ahead, diverged, or has no upstream. In-sync is a no-op. Workspace never fans out. Hidden ignored stay out. Linked worktrees push only when that row is focused
-- `S` opens a stash overlay. `s` creates a stash (pathspec when a dirty file is focused). From a repo or file row, `a` / `p` target the latest stash. Drop is only listed when a graph stash row is focused. Never drop-latest from a file or repo row. Graph-row `D` still drops that `stash@{n}` after `y` / `n`. Pop and drop ask `y` / `n` first
+- `S` on a dirty file or repo is create-only (`s stash`). `S` on a clean repo that has `stash@{0}` is a no-op. Apply / pop / drop only from a focused graph stash row (`a` / `p` / `D`, plus `S` there). Never drop latest from a file or repo row. Pop and drop ask `y` / `n` first
 - `d` switches visible targets that are off the default branch. Already-default is a no-op and does not pull. Dirty trees still skip
 - `Enter` on a graph commit (or stash / uncommitted row) opens that object's file list. `Enter` on a file opens the commit diff. `Esc` pops each level. Hidden ignored repos stay out of the drill unless shown
 - Graph stash rows are first-class: `a` apply, `p` pop, and `D` drop the focused `stash@{n}`. Drop asks `y` / `n`

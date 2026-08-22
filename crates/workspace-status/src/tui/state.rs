@@ -1335,10 +1335,10 @@ impl AppState {
                 None => (false, None),
             }
         };
+        let _ = latest_stash_ref;
         let ops = stash_ops_for_context(&StashOpsContext {
             dirty,
             dirty_paths,
-            latest_stash_ref,
             focused_stash_ref: focused_stash,
         });
         if ops.is_empty() {
@@ -1349,13 +1349,10 @@ impl AppState {
         }
         self.stash_repo = Some(repo);
         self.stash_menu = Some(ops);
-        let has_drop = self.stash_menu.as_ref().is_some_and(|ops| {
-            ops.iter().any(|op| op.id == StashOpId::Drop)
-        });
-        self.status = if has_drop {
+        self.status = if self.focused_graph_stash_ref().is_some() {
             "stash  s create  a apply  p pop  d drop".into()
         } else {
-            "stash  s create  a apply  p pop".into()
+            "stash  s create".into()
         };
     }
 
@@ -2425,9 +2422,8 @@ mod tests {
         let ops = app.stash_menu.clone().expect("file menu");
         assert_eq!(
             ops.iter().map(|op| op.id).collect::<Vec<_>>(),
-            vec![StashOpId::Create, StashOpId::Apply, StashOpId::Pop]
+            vec![StashOpId::Create]
         );
-        assert!(ops.iter().all(|op| op.id != StashOpId::Drop));
         assert_eq!(app.dispatch(Action::StashMenuCancel), Effect::None);
         assert!(app.stash_menu.is_none());
         assert!(app.status.contains("cancelled"));
@@ -2438,21 +2434,10 @@ mod tests {
             paths: vec!["README.md".into()],
         });
         app.open_stash_menu("app".into(), Some("stash@{0}".into()));
-        match app.dispatch(Action::StashMenuChar('a')) {
-            Effect::StashApply { repo, stash_ref } => {
-                assert_eq!(repo, "app");
-                assert_eq!(stash_ref, "stash@{0}");
-            }
-            other => panic!("{other:?}"),
-        }
-        app.open_stash_menu("app".into(), Some("stash@{0}".into()));
+        assert_eq!(app.dispatch(Action::StashMenuChar('a')), Effect::None);
+        assert!(app.confirm.is_none());
         assert_eq!(app.dispatch(Action::StashMenuChar('p')), Effect::None);
-        assert!(matches!(
-            app.confirm,
-            Some(PendingConfirm::StashPop { ref stash_ref, .. }) if stash_ref == "stash@{0}"
-        ));
-        app.dispatch(Action::ConfirmNo);
-        app.open_stash_menu("app".into(), Some("stash@{0}".into()));
+        assert!(app.confirm.is_none());
         assert_eq!(app.dispatch(Action::StashMenuChar('d')), Effect::None);
         assert!(app.confirm.is_none());
 
@@ -2461,12 +2446,8 @@ mod tests {
         focus_repo(&mut app, "lib");
         app.focus = FocusPane::Left;
         app.open_stash_menu("lib".into(), Some("stash@{0}".into()));
-        let ops = app.stash_menu.clone().expect("clean repo latest");
-        assert_eq!(
-            ops.iter().map(|op| op.id).collect::<Vec<_>>(),
-            vec![StashOpId::Apply, StashOpId::Pop]
-        );
-        assert!(ops.iter().all(|op| op.id != StashOpId::Drop));
+        assert!(app.stash_menu.is_none());
+        assert!(app.status.contains("nothing to stash"));
 
         focus_repo(&mut app, "app");
         install_graph(
@@ -3101,7 +3082,7 @@ mod tests {
     }
 
     #[test]
-    fn stash_menu_from_repo_or_file_stays_latest_only() {
+    fn stash_menu_from_repo_or_file_is_create_only() {
         let mut app = state();
         focus_file(&mut app, "README.md");
         app.focus = FocusPane::Left;
@@ -3109,12 +3090,9 @@ mod tests {
         let ops = app.stash_menu.clone().expect("menu");
         assert_eq!(
             ops.iter().map(|op| op.id).collect::<Vec<_>>(),
-            vec![StashOpId::Create, StashOpId::Apply, StashOpId::Pop]
+            vec![StashOpId::Create]
         );
-        assert!(ops.iter().all(|op| op.id != StashOpId::Drop));
-        assert!(ops.iter().all(|op| {
-            op.stash_ref.is_none() || op.stash_ref.as_deref() == Some("stash@{0}")
-        }));
+        assert!(ops.iter().all(|op| op.stash_ref.is_none()));
         app.stash_menu = None;
         focus_repo(&mut app, "app");
         install_graph(
