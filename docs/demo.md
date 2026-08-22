@@ -18,10 +18,12 @@ Both go away when DEST is wiped.
 ## Launch
 
     cd tmp/demo-workspace
+    unset NO_COLOR FORCE_COLOR
     WS_STATUS_WATCH_MS=0 WS_STATUS_FETCH_MS=0 workspace-status
 
 - Theme: default Tokyo Night. Do not press `T`.
-- Font: MesloLGM Nerd Font Mono (the Mono cut). Set `WS_STATUS_GLYPHS=ascii` only if that font is missing.
+- Font: MesloLGM Nerd Font Mono (the Mono cut). Do not set `WS_STATUS_GLYPHS=ascii` when that font is present. Set it only if the font is missing.
+- Some hosts export `NO_COLOR=1`, which paints the first frame gray. Unset `NO_COLOR` and `FORCE_COLOR` before launch.
 - Terminal: at least 140x40. Side-by-side diff needs 100 or more columns. Stay in the default inline diff for stills.
 - Watch and background fetch stay off so frames do not flicker.
 - Re-run the seed script after any write (`s` / `u` / `x`, stash apply/pop/drop, checkout, reviewed mark).
