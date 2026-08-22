@@ -41,6 +41,8 @@ Screenshots of the daily views live in the [root README](../README.md#screenshot
 | drag | Resize the tree / right pane split, or the in-diff side-by-side RULE |
 | `i` | Toggle inline / split on a file diff. Split falls back to inline below 100 columns |
 | `g` / `G` | First / last tree row |
+| `;` or Ctrl+Space | EasyMotion on the focused list (tree, graph, or commit files). Labels `a`–`z` then `aa`… on the current viewport only. Type a label to jump. Esc cancels. Diff-focused start is a no-op |
+| `T` | Cycle the built-in colour theme. Wraps. Seed from `WS_STATUS_THEME`; the cycle stays in this session (same as Ink — there is no theme file) |
 
 `-a` starts with ignored repos shown. `-f` starts a fetch after the first paint. First paint does not wait on a network fetch.
 
@@ -64,6 +66,8 @@ Screenshots of the daily views live in the [root README](../README.md#screenshot
 - `b` opens the local branch picker on a checkout or flat repo. Type to filter. Enter checks out. `C` creates a branch at HEAD. When the local branch is out of sync with `origin/*`, checkout asks `y` / `n` then pulls
 - `w` / `W` removes the focused linked worktree. Workspace, repo family, file, and hidden ignored rows are a no-op. Confirm with `y` / `n`. The command is `git worktree remove [--force]` from the primary. Bind-mount aliases remap the same way as in the TypeScript app. Ink uses the same keys
 - Action / Effect loop: crossterm events become `Action`, dispatch updates state and returns an `Effect`
+- EasyMotion (`;` / Ctrl+Space) labels the currently visible rows on the focused list (tree, graph, or commit files). Prefix matching is partial / hit / miss. Hit jumps. Esc or a miss cancels and keeps the cursor. A focused diff does not start the overlay
+- `T` cycles Tokyo Night → Monokai → Dracula → Gruvbox Dark → Catppuccin Mocha → Tokyo Night. Launch seed is `WS_STATUS_THEME`. The cycle stays in the current session; neither this TUI nor Ink writes a theme file
 - Mouse is optional. Keys work without it. Drag the tree / right splitter, or the in-diff RULE in split mode, to resize. `i` toggles inline / split without a mouse
 - Tree / right and in-diff split ratios stay in the current session only. They reset on the next launch (Ink does not persist them either)
 - `--plain` / `--json` / `-v` / `-p` / `-d` stay headless
@@ -75,7 +79,6 @@ Reviewed marks use `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (same
 These stay in the TypeScript app:
 
 - Ink-testing e2e suite
-- EasyMotion, theme cycle
 
 See [tui-model.md](./tui-model.md) for the Ink keymap.
 
