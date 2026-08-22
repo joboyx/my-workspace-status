@@ -45,4 +45,4 @@ A change is not complete while its documentation is stale.
 
 ## Demo / screenshots
 
-When capturing TUI stills or a recording, seed with `./scripts/seed-demo-workspace.sh` and follow [docs/demo.md](./docs/demo.md). Do not invent a new fixture.
+When capturing TUI stills or a recording, seed with `./scripts/seed-demo-workspace.sh` and follow [docs/demo.md](./docs/demo.md). Do not invent a new fixture. Use font `MesloLGS NF` (romkatv/powerlevel10k-media). Do not use MesloLGM Nerd Font Mono — it letter-spaces in xfce4-terminal.
