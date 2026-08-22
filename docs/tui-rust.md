@@ -1,6 +1,6 @@
 # Rust TUI
 
-`workspace-status` and `ws` from `crates/workspace-status` open a ratatui TUI when stdout is a TTY and you did not pass `--plain`, `--json`, `-v`, `-p`, or `-d`.
+`workspace-status` and `ws` from `crates/workspace-status` open a ratatui TUI when stdout is a TTY (or you pass `-i` / `--tui`) and you did not pass `--plain`, `--json`, `-v`, `-p`, or `-d`. Those headless flags still win over `--tui`.
 
 A non-TTY run without those flags still prints `--plain`. Agents must pass `--plain` or `--json`.
 
@@ -16,12 +16,14 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 | `q` | Quit |
 | `?` | Help overlay (short list, not a wall of text) |
 | `j` / `k` or arrows | Move the tree. On a focused graph, move the graph cursor. On a file list, move the file. On a focused file diff, scroll the diff |
-| `z` | Toggle fold |
+| `z` | Toggle fold on this row |
+| `zz` | Second `z` within ~400ms folds or unfolds the focused subtree (parent + foldable descendants). A late second `z` is a new single toggle |
 | `t` | Toggle directory tree / flat paths. On the workspace tree this is `tree_mode`. In a commit-files or commit-diff drill this is an independent commit-file tree mode (default tree). Status is `Directory tree` / `Flat paths` |
 | `h` / `l` or left / right | Tree focused: close / open fold. Focused file diff: pan left / right. Graph or commit-file list focused: no-op (does not fold the tree). Space does not fold |
 | `.` | Show or hide ignored repos |
-| `/` | Search the focused pane (workspace tree, graph, commit-file list, or file diff). Enter arms the query. Esc clears |
-| `n` / `N` | Next / previous match on the pane bound at `/` (previous is `N`, not `p`) |
+| `/` | Search the focused pane (workspace tree, graph, commit-file list, or file diff). Enter arms the query. Esc clears. When `?` help is open, `/` searches help instead (highlight only). Enter arms help search; `n` / `N` step matches; Esc clears help search (help stays). A second Esc (or `?` / `q`) closes help |
+| `n` / `N` | Next / previous match on the pane bound at `/` (previous is `N`, not `p`). Same keys step help matches when help search is armed |
+| `Ctrl+u` / `Ctrl+d` | Move the focused list ±5 rows (tree, graph, or commit-files). On a focused file diff, scroll ±5. PageUp / PageDown stay one viewport |
 | `Ctrl+O` | Toggle unlimited `-U` context on the focused file diff. A second press restores the previous context. No-op on tree, graph, or a commit-file list |
 | `s` | Stage dirty files in the focused scope (file, repo, dir, checkout, or workspace). Workspace writes every scoped file across repos |
 | `u` | Unstage dirty files in the focused scope |
@@ -41,7 +43,9 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 | `space` | Mark a dirty file as reviewed. Writes the same viewed-files store as the Ink app |
 | `w` / `W` | Remove the focused linked worktree after `y` / `n` |
 | `Tab` | Focus the other pane |
-| click | Select a tree row, or focus the right pane |
+| click | Select a tree, graph, or commit-file row, or focus the right pane. Click the fold chevron to toggle that row's fold |
+| double-click | Same as Enter / drill on the clicked cell. A chevron double-click still folds |
+| `m` | Toggle mouse capture. Off ignores click / drag / wheel |
 | drag | Resize the tree / right pane split, or the in-diff side-by-side RULE |
 | `i` | Toggle inline / split on a file diff. Split falls back to inline below 100 columns |
 | `g` / `G` | First / last tree row |
@@ -58,11 +62,11 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 
 - Tree of repos, linked worktrees, and dirty files from the same snapshot builder as `--plain` / `--json`
 - Files sit in a directory trie by default. `t` toggles tree / flat on the workspace. Status is `Directory tree` / `Flat paths`
-- Dir rows fold with `z` / `h` / `l`. A dir `s` / `u` / `x` writes files under that dir
+- Dir rows fold with `z` / `h` / `l`. `zz` within ~400ms folds or unfolds the focused subtree. A dir `s` / `u` / `x` writes files under that dir
 - Tree / flat stays in this session. Rust has no session store. Commit-file lists have their own `t` toggle and the same dir-trie collapse
 - Right pane at depth 0: file diff when a dirty file is focused. Graph pane via `workspace-status-graph` when a repo or worktree is focused
 - Hidden ignored repos stay out of the tree, search, stage / unstage / revert, and fetch / pull / push / default unless you show them
-- `/` searches the focused pane. Tree matches include folded rows and unfold ancestors. Graph search matches commit subjects and ref names. Commit-file search matches paths. Diff search matches painted line text. Help `/` is not implemented
+- `/` searches the focused pane. Tree matches include folded rows and unfold ancestors. Graph search matches commit subjects and ref names. Commit-file search matches paths. Diff search matches painted line text. When `?` help is open, `/` searches the help overlay instead
 - `Ctrl+O` on a focused file diff reloads it with unlimited unified context and keeps the current hunk in view
 - `h` / `l` on a focused file diff pan long lines. They still fold when the tree is focused
 - Stage / unstage / revert act on every dirty file in the focused scope (file, dir, flat repo, checkout, or workspace), including every scoped file across repos. A file row stays single-file. A dir row writes the dir path and its children. Family containers do not mix linked worktree files. Hidden ignored stay out unless shown. Revert asks `y` / `Y` / `n` on the status line. `y` discards tracked and keeps untracked, except a sole untracked file which still deletes. `Y` also deletes untracked. Stage and unstage do not confirm
@@ -80,7 +84,7 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 - Action / Effect loop: crossterm events become `Action`, dispatch updates state and returns an `Effect`
 - EasyMotion (`;` / Ctrl+Space) labels the currently visible rows on the focused list (tree, graph, or commit files). Prefix matching is partial / hit / miss. Hit jumps. Esc or a miss cancels and keeps the cursor. A focused diff does not start the overlay
 - `T` cycles Tokyo Night → Monokai → Dracula → Gruvbox Dark → Catppuccin Mocha → Tokyo Night. Launch seed is `WS_STATUS_THEME`. The cycle stays in the current session; neither this TUI nor Ink writes a theme file
-- Mouse is optional. Keys work without it. Drag the tree / right splitter, or the in-diff RULE in split mode, to resize. `i` toggles inline / split without a mouse
+- Mouse is optional. Keys work without it. `m` toggles capture. Double-click is Enter. Click a fold chevron to toggle fold. Drag the tree / right splitter, or the in-diff RULE in split mode, to resize. `i` toggles inline / split without a mouse
 - Tree / right and in-diff split ratios stay in the current session only. They reset on the next launch (Ink does not persist them either)
 - `--plain` / `--json` / `-v` / `-p` / `-d` stay headless
 
@@ -99,9 +103,10 @@ See [tui-model.md](./tui-model.md) for the Ink keymap.
 | Input | Effect |
 | --- | --- |
 | TTY, no headless flags | Ratatui TUI |
-| `--plain` or `--json` | Snapshot text / JSON |
-| `-v`, `-p`, `-d` | Headless `--plain` path (with that flag) |
-| Non-TTY | Headless `--plain` unless `--json` |
+| `-i` / `--tui` | Ratatui TUI even when stdout is not a TTY |
+| `--plain` or `--json` | Snapshot text / JSON (wins over `--tui`) |
+| `-v`, `-p`, `-d` | Headless `--plain` path (with that flag; wins over `--tui`) |
+| Non-TTY without `--tui` | Headless `--plain` unless `--json` |
 
 ## Layout
 

@@ -45,6 +45,7 @@ From a local clone:
 
 Both commands install workspace-status and ws into Cargo bin.
 On a TTY the Rust binary opens the ratatui TUI. Pass --plain or --json for agents.
+`-i` / `--tui` forces the TUI when stdout is not a TTY. `-v` / `-p` / `-d` / `--plain` / `--json` still stay headless.
 A non-TTY run without those flags prints --plain.
 The TypeScript app stays available for Ink-only features.
 

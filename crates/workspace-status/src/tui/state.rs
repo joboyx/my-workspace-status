@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use workspace_status_graph::{GraphModel, GraphRow};
 
@@ -10,7 +10,8 @@ use crate::snapshot::{FileChange, WorkspaceSnapshot};
 
 use super::action::{Action, Effect};
 use super::commit_files::{
-    ancestor_dir_ids, flatten_commit_files, CommitFileRow,
+    ancestor_dir_ids, collect_foldable_subtree_ids as collect_commit_subtree_ids,
+    flatten_commit_files, CommitFileRow,
 };
 use super::drill::{
     source_from_graph_row, stash_ref_from_graph_row, CommitFile, CommitFileSource, DrillView,
@@ -41,8 +42,10 @@ use super::stash::{
     checkout_path, resolve_stash_menu_key, row_is_hidden_ignored, stash_dirty_for_row,
     stash_ops_for_context, StashMenuKeyResult, StashOp, StashOpId, StashOpsContext,
 };
+use super::help::{help_match_indices, step_help_match};
 use super::tree::{
-    build_tree, default_folds, flatten, visible_for_tree, NodeKind, TreeNode, VisibleRow,
+    build_tree, collect_foldable_subtree_ids, default_folds, flatten, visible_for_tree, NodeKind,
+    TreeNode, VisibleRow,
 };
 use super::viewed::{
     collect_current_fingerprints, fingerprint_file_change, is_viewed, load_viewed_store,
@@ -76,6 +79,9 @@ pub struct LayoutHit {
     pub diff_pane_width: u16,
     pub diff_content_x: u16,
     pub diff_split_rule_x: Option<u16>,
+    pub right_y: u16,
+    pub files_list_y: u16,
+    pub files_list_offset: usize,
 }
 
 impl Default for LayoutHit {
@@ -93,6 +99,9 @@ impl Default for LayoutHit {
             diff_pane_width: 70,
             diff_content_x: 50,
             diff_split_rule_x: None,
+            right_y: 1,
+            files_list_y: 3,
+            files_list_offset: 0,
         }
     }
 }
@@ -163,6 +172,9 @@ pub struct AppState {
     pub rows: Vec<VisibleRow>,
     pub cursor: usize,
     pub help_open: bool,
+    pub help_search_query: Option<String>,
+    pub help_search_armed: bool,
+    pub help_search_hit: Option<usize>,
     pub focus: FocusPane,
     pub status: String,
     pub graph: Option<GraphModel>,
@@ -203,6 +215,9 @@ pub struct AppState {
     pub drag: SplitDrag,
     pub easy_motion: Option<EasyMotion>,
     pub theme: ThemeId,
+    pub mouse_enabled: bool,
+    pub(crate) z_pending_at: Option<Instant>,
+    last_click: Option<(u16, u16, Instant)>,
 }
 
 impl AppState {
@@ -238,6 +253,9 @@ impl AppState {
             rows,
             cursor,
             help_open: false,
+            help_search_query: None,
+            help_search_armed: false,
+            help_search_hit: None,
             focus: FocusPane::Left,
             status: "q quit  ? help  . ignored  f fetch  p pull  d default".into(),
             graph: None,
@@ -275,6 +293,9 @@ impl AppState {
             drag: SplitDrag::None,
             easy_motion: None,
             theme: theme_from_env(),
+            mouse_enabled: true,
+            z_pending_at: None,
+            last_click: None,
         };
         state.reconcile_viewed_store();
         state
@@ -290,7 +311,13 @@ impl AppState {
         } else if self.branch_picker.is_some() {
             InputMode::BranchPicker
         } else if self.help_open {
-            InputMode::Help
+            if self.help_search_query.is_some() {
+                InputMode::HelpSearch {
+                    armed: self.help_search_armed,
+                }
+            } else {
+                InputMode::Help
+            }
         } else if self.search_mode {
             InputMode::SearchPrompt
         } else if self.easy_motion.is_some() {
@@ -560,11 +587,15 @@ impl AppState {
     }
 
     pub fn dispatch(&mut self, action: Action) -> Effect {
+        if !matches!(action, Action::FoldToggle) {
+            self.z_pending_at = None;
+        }
         match action {
             Action::Quit => Effect::Quit,
             Action::ToggleHelp => {
                 self.drag = SplitDrag::None;
                 self.help_open = !self.help_open;
+                self.clear_help_search();
                 Effect::None
             }
             Action::Move(delta) => self.move_focused(delta),
@@ -574,10 +605,7 @@ impl AppState {
                 let height = self.layout.tree_height.max(1) as i32;
                 self.move_focused(pages * height)
             }
-            Action::FoldToggle => {
-                self.fold_op(FoldOp::Toggle);
-                Effect::None
-            }
+            Action::FoldToggle => self.fold_toggle_or_zz(),
             Action::FoldClose => {
                 self.fold_op(FoldOp::Close);
                 Effect::None
@@ -620,14 +648,42 @@ impl AppState {
                 Effect::None
             }
             Action::ToggleFullContext => self.toggle_full_context(),
-            Action::Click { col, row } => self.click(col, row),
-            Action::Drag { col, row } => self.drag_split(col, row),
+            Action::Click { col, row } => {
+                if !self.mouse_enabled {
+                    Effect::None
+                } else {
+                    self.click(col, row)
+                }
+            }
+            Action::Drag { col, row } => {
+                if !self.mouse_enabled {
+                    Effect::None
+                } else {
+                    self.drag_split(col, row)
+                }
+            }
             Action::Release => {
-                self.drag = SplitDrag::None;
-                Effect::None
+                if !self.mouse_enabled {
+                    Effect::None
+                } else {
+                    self.drag = SplitDrag::None;
+                    Effect::None
+                }
             }
             Action::ToggleDiffMode => self.toggle_diff_mode(),
+            Action::ToggleMouse => {
+                self.mouse_enabled = !self.mouse_enabled;
+                self.status = if self.mouse_enabled {
+                    "Mouse on".into()
+                } else {
+                    "Mouse off".into()
+                };
+                Effect::None
+            }
             Action::ScrollWheel { col, row: _, delta } => {
+                if !self.mouse_enabled {
+                    return Effect::None;
+                }
                 if col >= self.layout.right_x {
                     self.focus = FocusPane::Right;
                     if self.drill.is_files() {
@@ -648,16 +704,30 @@ impl AppState {
             }
             Action::SearchStart => {
                 self.drag = SplitDrag::None;
-                self.search_mode = true;
-                self.search_active = false;
-                self.search_query.clear();
-                self.search_hit = None;
-                self.search_target = self.current_search_pane();
-                self.status = "/".into();
-                Effect::None
+                if self.help_open {
+                    self.help_search_query = Some(String::new());
+                    self.help_search_armed = false;
+                    self.help_search_hit = None;
+                    self.status = "/".into();
+                    Effect::None
+                } else {
+                    self.search_mode = true;
+                    self.search_active = false;
+                    self.search_query.clear();
+                    self.search_hit = None;
+                    self.search_target = self.current_search_pane();
+                    self.status = "/".into();
+                    Effect::None
+                }
             }
             Action::SearchChar(c) => {
-                if self.search_mode {
+                if self.help_open && self.help_search_query.is_some() {
+                    if let Some(q) = &mut self.help_search_query {
+                        q.push(c);
+                    }
+                    self.refresh_help_search(0);
+                    Effect::None
+                } else if self.search_mode {
                     self.search_query.push(c);
                     self.apply_search(0);
                     self.search_load_effect()
@@ -666,7 +736,13 @@ impl AppState {
                 }
             }
             Action::SearchBackspace => {
-                if self.search_mode {
+                if self.help_open && self.help_search_query.is_some() {
+                    if let Some(q) = &mut self.help_search_query {
+                        q.pop();
+                    }
+                    self.refresh_help_search(0);
+                    Effect::None
+                } else if self.search_mode {
                     self.search_query.pop();
                     self.apply_search(0);
                     self.search_load_effect()
@@ -675,29 +751,55 @@ impl AppState {
                 }
             }
             Action::SearchSubmit => {
-                self.search_mode = false;
-                if self.search_query.trim().is_empty() {
-                    self.search_active = false;
-                    self.search_query.clear();
-                    self.search_hit = None;
-                    self.status = "search cleared".into();
+                if self.help_open && self.help_search_query.is_some() {
+                    let empty = self
+                        .help_search_query
+                        .as_deref()
+                        .map(|q| q.trim().is_empty())
+                        .unwrap_or(true);
+                    if empty {
+                        self.help_search_armed = false;
+                        self.help_search_hit = None;
+                        self.status = "/".into();
+                    } else {
+                        self.help_search_armed = true;
+                        self.refresh_help_search(0);
+                    }
                     Effect::None
                 } else {
-                    self.search_active = true;
-                    self.apply_search(0);
-                    self.search_load_effect()
+                    self.search_mode = false;
+                    if self.search_query.trim().is_empty() {
+                        self.search_active = false;
+                        self.search_query.clear();
+                        self.search_hit = None;
+                        self.status = "search cleared".into();
+                        Effect::None
+                    } else {
+                        self.search_active = true;
+                        self.apply_search(0);
+                        self.search_load_effect()
+                    }
                 }
             }
             Action::SearchCancel => {
-                self.search_mode = false;
-                self.search_active = false;
-                self.search_query.clear();
-                self.search_hit = None;
-                self.status = "search cancelled".into();
-                Effect::None
+                if self.help_open && self.help_search_query.is_some() {
+                    self.clear_help_search();
+                    self.status = "help search cleared".into();
+                    Effect::None
+                } else {
+                    self.search_mode = false;
+                    self.search_active = false;
+                    self.search_query.clear();
+                    self.search_hit = None;
+                    self.status = "search cancelled".into();
+                    Effect::None
+                }
             }
             Action::SearchNext => {
-                if self.search_active && !self.search_query.trim().is_empty() {
+                if self.help_open && self.help_search_armed {
+                    self.refresh_help_search(1);
+                    Effect::None
+                } else if self.search_active && !self.search_query.trim().is_empty() {
                     self.apply_search(1);
                     self.search_load_effect()
                 } else {
@@ -705,7 +807,10 @@ impl AppState {
                 }
             }
             Action::SearchPrev => {
-                if self.search_active && !self.search_query.trim().is_empty() {
+                if self.help_open && self.help_search_armed {
+                    self.refresh_help_search(-1);
+                    Effect::None
+                } else if self.search_active && !self.search_query.trim().is_empty() {
                     self.apply_search(-1);
                     self.search_load_effect()
                 } else {
@@ -1046,6 +1151,92 @@ impl AppState {
         self.cursor = next.clamp(0, self.rows.len() as i32 - 1) as usize;
     }
 
+    fn clear_help_search(&mut self) {
+        self.help_search_query = None;
+        self.help_search_armed = false;
+        self.help_search_hit = None;
+    }
+
+    fn refresh_help_search(&mut self, dir: i32) {
+        let query = self.help_search_query.as_deref().unwrap_or("");
+        let hits = help_match_indices(query);
+        self.help_search_hit = if dir == 0 {
+            hits.first().copied()
+        } else {
+            step_help_match(&hits, self.help_search_hit, dir)
+        };
+        if let Some(q) = &self.help_search_query {
+            if q.trim().is_empty() {
+                self.status = "/".into();
+            } else if let Some(hit) = self.help_search_hit {
+                self.status = format!("/{q}  {}/{}", hits.iter().position(|&h| h == hit).unwrap_or(0) + 1, hits.len());
+            } else {
+                self.status = format!("/{q}  no match");
+            }
+        }
+    }
+
+    fn fold_toggle_or_zz(&mut self) -> Effect {
+        if let Some(at) = self.z_pending_at {
+            if at.elapsed() <= Duration::from_millis(400) {
+                self.z_pending_at = None;
+                self.fold_op(FoldOp::Toggle);
+                self.fold_subtree();
+                return Effect::None;
+            }
+        }
+        self.fold_op(FoldOp::Toggle);
+        self.z_pending_at = Some(Instant::now());
+        Effect::None
+    }
+
+    fn fold_subtree(&mut self) {
+        if self.drill.is_files() && self.focus == FocusPane::Right {
+            let Some(row) = self.focused_commit_file_row() else {
+                return;
+            };
+            let id = row.id.clone();
+            let path = row.path.clone();
+            let files = match &self.drill {
+                DrillView::Files { files, .. } => files.clone(),
+                _ => return,
+            };
+            let ids = collect_commit_subtree_ids(&files, self.commit_tree_mode, &id);
+            if ids.is_empty() {
+                return;
+            }
+            let opening = self.commit_file_folds.contains(&id);
+            for sid in ids {
+                if opening {
+                    self.commit_file_folds.remove(&sid);
+                } else {
+                    self.commit_file_folds.insert(sid);
+                }
+            }
+            self.restore_commit_file_cursor(Some(&path));
+            return;
+        }
+        if self.focus != FocusPane::Left || self.in_commit_drill() {
+            return;
+        }
+        let Some(row) = self.focused_row().cloned() else {
+            return;
+        };
+        let ids = collect_foldable_subtree_ids(&self.tree, &row.id);
+        if ids.is_empty() {
+            return;
+        }
+        let opening = self.folds.contains(&row.id);
+        for sid in ids {
+            if opening {
+                self.folds.remove(&sid);
+            } else {
+                self.folds.insert(sid);
+            }
+        }
+        self.rebuild_rows();
+    }
+
     fn fold_op(&mut self, op: FoldOp) {
         if self.drill.is_files() && self.focus == FocusPane::Right {
             self.fold_commit_file(op);
@@ -1155,30 +1346,113 @@ impl AppState {
             SplitHit::Pane => {
                 self.drag = SplitDrag::Pane;
                 self.apply_tree_fraction_from_col(col);
+                self.last_click = None;
                 return Effect::None;
             }
             SplitHit::DiffSplit => {
                 self.drag = SplitDrag::Diff;
                 self.apply_diff_fraction_from_col(col);
+                self.last_click = None;
                 return Effect::None;
             }
             SplitHit::Other => {}
         }
+        let now = Instant::now();
+        let is_double = self.last_click.as_ref().is_some_and(|(c, r, at)| {
+            *c == col && *r == row && at.elapsed() <= Duration::from_millis(400)
+        });
+        self.last_click = Some((col, row, now));
         if col >= self.layout.right_x {
             self.focus = FocusPane::Right;
+            if self.drill.is_files() {
+                return self.click_commit_files(col, row, is_double);
+            }
+            if !self.right_is_diff() && self.graph.is_some() {
+                return self.click_graph(row, is_double, true);
+            }
+            if is_double {
+                return self.nav_enter();
+            }
             return Effect::None;
         }
         self.focus = FocusPane::Left;
         if self.in_commit_drill() {
-            return Effect::None;
+            return self.click_graph(row, is_double, false);
         }
         if row < self.layout.tree_y {
             return Effect::None;
         }
         let idx = self.layout.list_offset + (row - self.layout.tree_y) as usize;
-        if idx < self.rows.len() {
-            self.cursor = idx;
+        if idx >= self.rows.len() {
+            return Effect::None;
+        }
+        let tree_row = self.rows[idx].clone();
+        self.cursor = idx;
+        if tree_row.foldable && self.is_tree_chevron(col, tree_row.depth) {
+            self.fold_op(FoldOp::Toggle);
             return Effect::LoadRightPane;
+        }
+        if is_double {
+            return self.nav_enter();
+        }
+        Effect::LoadRightPane
+    }
+
+    fn is_tree_chevron(&self, col: u16, depth: usize) -> bool {
+        let prefix = if self.easy_motion.is_some() { 2 } else { 0 };
+        col == self.layout.tree_x + prefix + (depth as u16) * 2
+    }
+
+    fn is_files_chevron(&self, col: u16, depth: usize) -> bool {
+        let prefix = if self.easy_motion.is_some() { 2 } else { 0 };
+        col == self.layout.diff_content_x + prefix + (depth as u16) * 2
+    }
+
+    fn click_graph(&mut self, row: u16, is_double: bool, right: bool) -> Effect {
+        let y = if right {
+            self.layout.right_y
+        } else {
+            self.layout.tree_y
+        };
+        if row < y {
+            return Effect::None;
+        }
+        let idx = self.graph_scroll as usize + (row - y) as usize;
+        let n = self
+            .graph
+            .as_ref()
+            .map(|g| g.visible_rows().len())
+            .unwrap_or(0);
+        if idx < n {
+            self.graph_cursor = idx;
+            if is_double {
+                return self.nav_enter();
+            }
+        }
+        Effect::None
+    }
+
+    fn click_commit_files(&mut self, col: u16, row: u16, is_double: bool) -> Effect {
+        if row < self.layout.files_list_y {
+            return Effect::None;
+        }
+        let idx = self.layout.files_list_offset + (row - self.layout.files_list_y) as usize;
+        let n = self.commit_file_rows().len();
+        if idx >= n {
+            return Effect::None;
+        }
+        if let DrillView::Files { cursor, .. } = &mut self.drill {
+            *cursor = idx;
+        }
+        let Some(file_row) = self.commit_file_rows().get(idx).cloned() else {
+            return Effect::None;
+        };
+        if file_row.foldable && self.is_files_chevron(col, file_row.depth) {
+            self.fold_commit_file(FoldOp::Toggle);
+            return Effect::None;
+        }
+        if is_double {
+            return self.nav_enter();
         }
         Effect::None
     }
@@ -4639,7 +4913,7 @@ mod tests {
     }
 
     #[test]
-    fn help_then_slash_does_not_start_help_search() {
+    fn help_then_slash_starts_help_search_not_pane_search() {
         let mut app = state();
         app.dispatch(Action::ToggleHelp);
         assert!(app.help_open);
@@ -4654,10 +4928,43 @@ mod tests {
                 false,
                 false,
             ),
-            Action::None
+            Action::SearchStart
         );
+        app.dispatch(Action::SearchStart);
+        assert!(app.help_search_query.is_some());
         assert!(!app.search_mode);
         assert!(!app.search_active);
+        assert_eq!(
+            app.input_mode(),
+            InputMode::HelpSearch { armed: false }
+        );
+        app.dispatch(Action::SearchChar('q'));
+        app.dispatch(Action::SearchChar('u'));
+        app.dispatch(Action::SearchChar('i'));
+        assert_eq!(app.help_search_query.as_deref(), Some("qui"));
+        assert!(!app.search_mode);
+        app.dispatch(Action::SearchSubmit);
+        assert!(app.help_search_armed);
+        assert!(app.help_search_hit.is_some());
+        app.dispatch(Action::SearchNext);
+        app.dispatch(Action::SearchPrev);
+        app.dispatch(Action::SearchCancel);
+        assert!(app.help_open);
+        assert!(app.help_search_query.is_none());
+        assert!(!app.help_search_armed);
+    }
+
+    #[test]
+    fn slash_without_help_still_starts_pane_search() {
+        let mut app = state();
+        assert!(!app.help_open);
+        app.dispatch(Action::SearchStart);
+        assert!(app.search_mode);
+        assert!(app.help_search_query.is_none());
+        app.dispatch(Action::SearchChar('R'));
+        app.dispatch(Action::SearchSubmit);
+        assert!(app.search_active);
+        assert!(!app.search_mode);
     }
 
     #[test]
@@ -4750,4 +5057,125 @@ mod tests {
         assert!(app.commit_tree_mode);
         assert!(app.drill.is_graph());
     }
+    #[test]
+    fn single_z_folds_only_focused_row() {
+        let mut app = tree_app();
+        focus_id(&mut app, "dir:app:src");
+        assert!(app.rows.iter().any(|r| r.id == "file:app:src/lib.rs"));
+        app.dispatch(Action::FoldToggle);
+        assert!(app.folds.contains("dir:app:src"));
+        assert!(!app.folds.contains("repo:app"));
+        assert!(app.rows.iter().all(|r| r.id != "file:app:src/lib.rs"));
+        assert!(app.rows.iter().any(|r| r.id == "file:app:README.md"));
+    }
+
+    #[test]
+    fn zz_within_400ms_folds_subtree() {
+        let mut app = tree_app();
+        focus_id(&mut app, "repo:app");
+        app.dispatch(Action::FoldToggle);
+        assert!(app.folds.contains("repo:app"));
+        assert!(!app.folds.contains("dir:app:src"));
+        app.dispatch(Action::FoldToggle);
+        assert!(app.folds.contains("repo:app"));
+        assert!(app.folds.contains("dir:app:src"));
+        assert!(app.rows.iter().all(|r| r.id != "file:app:src/lib.rs"));
+        assert!(app.rows.iter().all(|r| r.id != "file:app:README.md"));
+    }
+
+    #[test]
+    fn expired_z_is_a_new_single_toggle() {
+        let mut app = tree_app();
+        focus_id(&mut app, "dir:app:src");
+        app.dispatch(Action::FoldToggle);
+        assert!(app.folds.contains("dir:app:src"));
+        app.z_pending_at = Some(Instant::now() - Duration::from_millis(500));
+        app.dispatch(Action::FoldToggle);
+        assert!(!app.folds.contains("dir:app:src"));
+        assert!(!app.folds.contains("repo:app"));
+    }
+
+    #[test]
+    fn ctrl_d_moves_five_and_pgdn_uses_page_height() {
+        let mut app = tree_app();
+        assert!(app.rows.len() >= 5, "need a list long enough for +5");
+        app.cursor = 0;
+        app.layout.tree_height = 2;
+        app.dispatch(Action::Move(5));
+        assert_eq!(app.cursor, 5.min(app.rows.len() - 1));
+        app.cursor = 0;
+        app.dispatch(Action::PageMove(1));
+        assert_eq!(app.cursor, 2);
+        app.cursor = 4;
+        app.dispatch(Action::Move(-5));
+        assert_eq!(app.cursor, 0);
+    }
+
+    #[test]
+    fn double_click_dispatches_enter() {
+        let mut app = tree_app();
+        app.layout.tree_x = 0;
+        app.layout.tree_y = 1;
+        app.layout.list_offset = 0;
+        app.layout.right_x = 40;
+        let idx = app
+            .rows
+            .iter()
+            .position(|r| r.id == "repo:app")
+            .expect("repo");
+        let row = app.layout.tree_y + idx as u16;
+        // click on the label, not the chevron (depth 1 => chevron at x=2)
+        let col = 8;
+        app.dispatch(Action::Click { col, row });
+        assert_eq!(app.cursor, idx);
+        assert_eq!(app.focus, FocusPane::Left);
+        let effect = app.dispatch(Action::Click { col, row });
+        assert_eq!(app.focus, FocusPane::Right);
+        assert_eq!(effect, Effect::None);
+    }
+
+    #[test]
+    fn chevron_click_toggles_fold() {
+        let mut app = tree_app();
+        app.layout.tree_x = 0;
+        app.layout.tree_y = 1;
+        app.layout.list_offset = 0;
+        app.layout.right_x = 40;
+        let idx = app
+            .rows
+            .iter()
+            .position(|r| r.id == "dir:app:src")
+            .expect("dir");
+        let depth = app.rows[idx].depth;
+        let col = app.layout.tree_x + (depth as u16) * 2;
+        let row = app.layout.tree_y + idx as u16;
+        assert!(app.rows.iter().any(|r| r.id == "file:app:src/lib.rs"));
+        app.dispatch(Action::Click { col, row });
+        assert!(app.folds.contains("dir:app:src"));
+        assert_eq!(app.cursor, app.rows.iter().position(|r| r.id == "dir:app:src").unwrap());
+        assert!(app.rows.iter().all(|r| r.id != "file:app:src/lib.rs"));
+    }
+
+    #[test]
+    fn m_toggles_mouse_and_ignores_clicks_when_off() {
+        let mut app = tree_app();
+        app.layout.tree_x = 0;
+        app.layout.tree_y = 1;
+        app.layout.list_offset = 0;
+        app.layout.right_x = 40;
+        assert!(app.mouse_enabled);
+        app.dispatch(Action::ToggleMouse);
+        assert!(!app.mouse_enabled);
+        assert!(app.status.contains("off"));
+        let start = app.cursor;
+        app.dispatch(Action::Click {
+            col: 8,
+            row: app.layout.tree_y,
+        });
+        assert_eq!(app.cursor, start);
+        app.dispatch(Action::ToggleMouse);
+        assert!(app.mouse_enabled);
+        assert!(app.status.contains("on"));
+    }
+
 }
