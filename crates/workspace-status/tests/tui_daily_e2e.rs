@@ -304,6 +304,9 @@ fn drill_enter_and_esc_walk_commit_files_diff() {
         "Enter on a commit file should open the diff:\n{diff}"
     );
     tui.esc();
+    if tui.right_is_diff() {
+        tui.esc();
+    }
     let back_files = tui.frame();
     assert!(
         tui.right_is_files(),

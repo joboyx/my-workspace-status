@@ -18,10 +18,11 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 | `j` / `k` or arrows | Move the tree. On a focused graph, move the graph cursor. On a file list, move the file. On a focused file diff, scroll the diff |
 | `z` | Toggle fold |
 | `t` | Toggle directory tree / flat paths on the workspace tree. Status is `Directory tree` / `Flat paths`. No-op in a commit-files or commit-diff drill |
-| `h` / `l` or left / right | Close / open fold. Space does not fold |
+| `h` / `l` or left / right | Tree focused: close / open fold. Focused file diff: pan left / right. Graph or commit-file list focused: no-op (does not fold the tree). Space does not fold |
 | `.` | Show or hide ignored repos |
-| `/` | Search prompt. Enter arms the query. Esc cancels |
-| `n` / `N` | Next / previous search match (previous is `N`, not `p`) |
+| `/` | Search the focused pane (workspace tree, graph, commit-file list, or file diff). Enter arms the query. Esc clears |
+| `n` / `N` | Next / previous match on the pane bound at `/` (previous is `N`, not `p`) |
+| `Ctrl+O` | Toggle unlimited `-U` context on the focused file diff. A second press restores the previous context. No-op on tree, graph, or a commit-file list |
 | `s` | Stage dirty files in the focused scope (file, repo, dir, checkout, or workspace). Workspace writes every scoped file across repos |
 | `u` | Unstage dirty files in the focused scope |
 | `x` | Revert dirty files in the focused scope. `y` discards tracked (keeps untracked except a sole untracked file). `Y` also deletes untracked |
@@ -61,7 +62,9 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 - Tree / flat stays in this session. Rust has no session store. Commit-file lists stay flat
 - Right pane: file diff when a dirty file is focused. Graph pane via `workspace-status-graph` when a repo or worktree is focused
 - Hidden ignored repos stay out of the tree, search, stage / unstage / revert, and fetch / pull / push / default unless you show them
-- Search matches include folded rows. Focusing a match unfolds its ancestors
+- `/` searches the focused pane. Tree matches include folded rows and unfold ancestors. Graph search matches commit subjects and ref names. Commit-file search matches paths. Diff search matches painted line text. Help `/` is not implemented
+- `Ctrl+O` on a focused file diff reloads it with unlimited unified context and keeps the current hunk in view
+- `h` / `l` on a focused file diff pan long lines. They still fold when the tree is focused
 - Stage / unstage / revert act on every dirty file in the focused scope (file, dir, flat repo, checkout, or workspace), including every scoped file across repos. A file row stays single-file. A dir row writes the dir path and its children. Family containers do not mix linked worktree files. Hidden ignored stay out unless shown. Revert asks `y` / `Y` / `n` on the status line. `y` discards tracked and keeps untracked, except a sole untracked file which still deletes. `Y` also deletes untracked. Stage and unstage do not confirm
 - `e` uses config `editor`, then `$EDITOR`, then `$VISUAL`, then `vim`. A TTY editor leaves the alternate screen and returns to the same fold, focus, and scroll. GUI editors (`cursor`, `code`) spawn without a remount. Resume drains leftover raw-mode keys
 - Fetch / pull / default do not fan out to linked worktrees unless the focused row is that worktree

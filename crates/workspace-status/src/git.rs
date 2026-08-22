@@ -527,10 +527,40 @@ fn lines_or_empty_diff(text: &str) -> Vec<String> {
     }
 }
 
+/// Context large enough to show a typical source file in one hunk (Ink).
+pub const FULL_DIFF_CONTEXT_LINES: u32 = 999_999;
+
+/// Build `git diff` argv, inserting `-U{n}` when `context` is set.
+pub fn git_diff_args(base: &[&str], path: &str, context: Option<u32>) -> Vec<String> {
+    let mut args: Vec<String> = base.iter().map(|s| (*s).to_string()).collect();
+    if let Some(n) = context {
+        args.push(format!("-U{n}"));
+    }
+    args.push("--".into());
+    args.push(path.into());
+    args
+}
+
+fn exec_git_owned(args: &[String], cwd: &Path) -> String {
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    exec_git(&refs, cwd)
+}
+
 /// First-parent unified diff for one path in a commit.
 pub fn diff_commit_file(cwd: &Path, commit_id: &str, path: &str) -> Vec<String> {
+    diff_commit_file_ctx(cwd, commit_id, path, None)
+}
+
+/// First-parent unified diff with optional `-U` context.
+pub fn diff_commit_file_ctx(
+    cwd: &Path,
+    commit_id: &str,
+    path: &str,
+    context: Option<u32>,
+) -> Vec<String> {
     let parent = format!("{commit_id}^");
-    let primary = exec_git(&["diff", &parent, commit_id, "--", path], cwd);
+    let args = git_diff_args(&["diff", &parent, commit_id], path, context);
+    let primary = exec_git_owned(&args, cwd);
     if !primary.is_empty() {
         return primary.lines().map(str::to_string).collect();
     }
@@ -542,8 +572,19 @@ pub fn diff_commit_file(cwd: &Path, commit_id: &str, path: &str) -> Vec<String> 
 
 /// First-parent unified diff for one path inside a stash.
 pub fn diff_stash_file(cwd: &Path, stash_ref: &str, path: &str) -> Vec<String> {
+    diff_stash_file_ctx(cwd, stash_ref, path, None)
+}
+
+/// Stash-file unified diff with optional `-U` context.
+pub fn diff_stash_file_ctx(
+    cwd: &Path,
+    stash_ref: &str,
+    path: &str,
+    context: Option<u32>,
+) -> Vec<String> {
     let parent = format!("{stash_ref}^1");
-    lines_or_empty_diff(&exec_git(&["diff", &parent, stash_ref, "--", path], cwd))
+    let args = git_diff_args(&["diff", &parent, stash_ref], path, context);
+    lines_or_empty_diff(&exec_git_owned(&args, cwd))
 }
 
 
@@ -557,6 +598,22 @@ mod tests {
     #[test]
     fn git_binary_is_nonempty() {
         assert!(!git_binary().as_os_str().is_empty());
+    }
+
+    #[test]
+    fn git_diff_args_inserts_full_context() {
+        let normal = git_diff_args(&["diff"], "README.md", None);
+        assert_eq!(normal, vec!["diff", "--", "README.md"]);
+        let full = git_diff_args(&["diff"], "README.md", Some(FULL_DIFF_CONTEXT_LINES));
+        assert_eq!(
+            full,
+            vec![
+                "diff".to_string(),
+                format!("-U{FULL_DIFF_CONTEXT_LINES}"),
+                "--".into(),
+                "README.md".into(),
+            ]
+        );
     }
 
     fn git_env() -> Vec<(&'static str, &'static str)> {

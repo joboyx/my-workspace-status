@@ -23,7 +23,12 @@ use super::fetch::background_fetch_targets;
 use super::ops::{
     collect_write_files, op_targets, push_targets, should_delete_untracked, ScopedFile, Op,
 };
-use super::search::focus_tree_search;
+use super::search::{
+    apply_pan, focus_commit_file_search, focus_diff_search,
+    focus_graph_search, focus_tree_search, hunk_anchor, max_col_offset, scroll_to_keep_anchor,
+    SearchPane,
+};
+use crate::git::FULL_DIFF_CONTEXT_LINES;
 use super::split::{
     clamp_tree_fraction, diff_split_fraction_from_col, hit_split, is_side_by_side_split,
     pair_unified_lines, tree_fraction_from_col, DiffMode, SplitDrag, SplitHit, SplitLayout,
@@ -170,6 +175,14 @@ pub struct AppState {
     pub search_mode: bool,
     pub search_active: bool,
     pub search_query: String,
+    /// Pane bound when `/` started. `n`/`N` stay on this pane.
+    pub search_target: SearchPane,
+    /// Current matching diff line, when the bound pane is a diff.
+    pub search_hit: Option<usize>,
+    pub diff_col_offset: u16,
+    /// File identities currently shown with unlimited `-U` context.
+    pub full_context: HashSet<String>,
+    pending_hunk_anchor: Option<String>,
     pub confirm: Option<PendingConfirm>,
     pub stash_menu: Option<Vec<StashOp>>,
     pub stash_repo: Option<String>,
@@ -234,6 +247,11 @@ impl AppState {
             search_mode: false,
             search_active: false,
             search_query: String::new(),
+            search_target: SearchPane::Tree,
+            search_hit: None,
+            diff_col_offset: 0,
+            full_context: HashSet::new(),
+            pending_hunk_anchor: None,
             confirm: None,
             stash_menu: None,
             stash_repo: None,
@@ -446,6 +464,11 @@ impl AppState {
                 self.scroll_right(delta);
                 Effect::None
             }
+            Action::PanDiff(delta) => {
+                self.pan_diff(delta);
+                Effect::None
+            }
+            Action::ToggleFullContext => self.toggle_full_context(),
             Action::Click { col, row } => self.click(col, row),
             Action::Drag { col, row } => self.drag_split(col, row),
             Action::Release => {
@@ -469,6 +492,8 @@ impl AppState {
                 self.search_mode = true;
                 self.search_active = false;
                 self.search_query.clear();
+                self.search_hit = None;
+                self.search_target = self.current_search_pane();
                 self.status = "/".into();
                 Effect::None
             }
@@ -476,7 +501,7 @@ impl AppState {
                 if self.search_mode {
                     self.search_query.push(c);
                     self.apply_search(0);
-                    Effect::LoadRightPane
+                    self.search_load_effect()
                 } else {
                     Effect::None
                 }
@@ -485,7 +510,7 @@ impl AppState {
                 if self.search_mode {
                     self.search_query.pop();
                     self.apply_search(0);
-                    Effect::LoadRightPane
+                    self.search_load_effect()
                 } else {
                     Effect::None
                 }
@@ -495,24 +520,27 @@ impl AppState {
                 if self.search_query.trim().is_empty() {
                     self.search_active = false;
                     self.search_query.clear();
+                    self.search_hit = None;
                     self.status = "search cleared".into();
+                    Effect::None
                 } else {
                     self.search_active = true;
                     self.apply_search(0);
+                    self.search_load_effect()
                 }
-                Effect::LoadRightPane
             }
             Action::SearchCancel => {
                 self.search_mode = false;
                 self.search_active = false;
                 self.search_query.clear();
+                self.search_hit = None;
                 self.status = "search cancelled".into();
                 Effect::None
             }
             Action::SearchNext => {
                 if self.search_active && !self.search_query.trim().is_empty() {
                     self.apply_search(1);
-                    Effect::LoadRightPane
+                    self.search_load_effect()
                 } else {
                     Effect::None
                 }
@@ -520,7 +548,7 @@ impl AppState {
             Action::SearchPrev => {
                 if self.search_active && !self.search_query.trim().is_empty() {
                     self.apply_search(-1);
-                    Effect::LoadRightPane
+                    self.search_load_effect()
                 } else {
                     Effect::None
                 }
@@ -630,7 +658,17 @@ impl AppState {
                 Effect::None
             }
             Action::NavEnter => self.nav_enter(),
-            Action::NavEsc => self.nav_esc(),
+            Action::NavEsc => {
+                if self.search_active {
+                    self.search_active = false;
+                    self.search_query.clear();
+                    self.search_hit = None;
+                    self.status = "search cleared".into();
+                    Effect::None
+                } else {
+                    self.nav_esc()
+                }
+            }
             Action::GraphStashApply => self.graph_stash_op(StashOpId::Apply),
             Action::GraphStashPop => self.graph_stash_op(StashOpId::Pop),
             Action::GraphStashDrop => self.graph_stash_op(StashOpId::Drop),
@@ -999,10 +1037,12 @@ impl AppState {
             && self.diff_path.as_deref() == Some(path.as_str());
         if !same {
             self.diff_scroll = 0;
+            self.diff_col_offset = 0;
         }
         self.diff_repo = Some(repo);
         self.diff_path = Some(path);
         self.diff_lines = lines;
+        self.apply_pending_hunk_anchor();
         if self.drill.is_graph() {
             self.graph = None;
         }
@@ -1039,6 +1079,7 @@ impl AppState {
         lines: Vec<String>,
     ) {
         self.diff_scroll = 0;
+        self.diff_col_offset = 0;
         self.status = format!("diff {path}");
         self.drill = DrillView::Diff {
             repo,
@@ -1048,6 +1089,7 @@ impl AppState {
             path,
             lines,
         };
+        self.apply_pending_hunk_anchor();
     }
 
     pub fn focused_file(&self) -> Option<(String, FileChange)> {
@@ -1064,7 +1106,58 @@ impl AppState {
         }
     }
 
+    fn search_load_effect(&self) -> Effect {
+        if self.search_target == SearchPane::Tree {
+            Effect::LoadRightPane
+        } else {
+            Effect::None
+        }
+    }
+
+    fn current_search_pane(&self) -> SearchPane {
+        if self.focus == FocusPane::Left {
+            return SearchPane::Tree;
+        }
+        if self.drill.is_files() {
+            return SearchPane::CommitFiles;
+        }
+        if self.right_is_diff() {
+            return SearchPane::Diff;
+        }
+        SearchPane::Graph
+    }
+
+    fn current_diff_lines(&self) -> &[String] {
+        match &self.drill {
+            DrillView::Diff { lines, .. } => lines,
+            _ => &self.diff_lines,
+        }
+    }
+
+    fn set_search_status(&mut self, hit: bool) {
+        if self.search_query.trim().is_empty() {
+            self.status = "/".into();
+        } else if hit {
+            self.status = if self.search_mode {
+                format!("/{}", self.search_query)
+            } else {
+                format!("/{}  n next  N prev", self.search_query)
+            };
+        } else {
+            self.status = format!("/{}  no match", self.search_query);
+        }
+    }
+
     fn apply_search(&mut self, dir: i32) {
+        match self.search_target {
+            SearchPane::Tree => self.apply_tree_search(dir),
+            SearchPane::Graph => self.apply_graph_search(dir),
+            SearchPane::CommitFiles => self.apply_commit_file_search(dir),
+            SearchPane::Diff => self.apply_diff_search(dir),
+        }
+    }
+
+    fn apply_tree_search(&mut self, dir: i32) {
         let current = self.focused_row().map(|r| r.id.clone());
         let (folds, focus_id) = focus_tree_search(
             &self.tree,
@@ -1079,16 +1172,151 @@ impl AppState {
             if let Some(idx) = self.rows.iter().position(|r| r.id == id) {
                 self.cursor = idx;
             }
-            self.status = if self.search_mode {
-                format!("/{}", self.search_query)
-            } else {
-                format!("/{}  n next  N prev", self.search_query)
-            };
-        } else if self.search_query.trim().is_empty() {
-            self.status = "/".into();
+            self.set_search_status(true);
         } else {
-            self.status = format!("/{}  no match", self.search_query);
+            self.set_search_status(false);
         }
+    }
+
+    fn apply_graph_search(&mut self, dir: i32) {
+        let Some(model) = self.graph.as_ref() else {
+            self.set_search_status(false);
+            return;
+        };
+        let rows = model.visible_rows();
+        let Some(idx) = focus_graph_search(&rows, &self.search_query, self.graph_cursor, dir) else {
+            self.set_search_status(false);
+            return;
+        };
+        self.graph_cursor = idx;
+        if (self.graph_cursor as u16) < self.graph_scroll {
+            self.graph_scroll = self.graph_cursor as u16;
+        }
+        self.set_search_status(true);
+    }
+
+    fn apply_commit_file_search(&mut self, dir: i32) {
+        let DrillView::Files { files, cursor, .. } = &self.drill else {
+            self.set_search_status(false);
+            return;
+        };
+        let current = *cursor;
+        let Some(idx) = focus_commit_file_search(files, &self.search_query, current, dir) else {
+            self.set_search_status(false);
+            return;
+        };
+        if let DrillView::Files { cursor, .. } = &mut self.drill {
+            *cursor = idx;
+        }
+        self.set_search_status(true);
+    }
+
+    fn apply_diff_search(&mut self, dir: i32) {
+        let lines = self.current_diff_lines().to_vec();
+        let Some(idx) = focus_diff_search(&lines, &self.search_query, self.search_hit, dir) else {
+            self.search_hit = None;
+            self.set_search_status(false);
+            return;
+        };
+        self.search_hit = Some(idx);
+        let view_h = self.layout.pane_height.max(1);
+        self.diff_scroll = scroll_to_keep_anchor(&lines, &lines[idx], view_h);
+        self.set_search_status(true);
+    }
+
+    fn pan_diff(&mut self, delta: i32) {
+        if self.focus != FocusPane::Right || !self.right_is_diff() {
+            return;
+        }
+        let lines = self.current_diff_lines();
+        let lens: Vec<usize> = lines.iter().map(|l| l.chars().count()).collect();
+        let viewport = self.layout.diff_pane_width.max(1) as usize;
+        let max = max_col_offset(&lens, viewport);
+        self.diff_col_offset = apply_pan(self.diff_col_offset, delta, max);
+    }
+
+    fn file_context_id(repo: &str, path: &str) -> String {
+        format!("file:{repo}:{path}")
+    }
+
+    fn commit_context_id(repo: &str, path: &str) -> String {
+        format!("commit:{repo}:{path}")
+    }
+
+    fn displayed_diff_id(&self) -> Option<String> {
+        match &self.drill {
+            DrillView::Diff { repo, path, .. } => Some(Self::commit_context_id(repo, path)),
+            DrillView::Graph => {
+                let (repo, file) = self.focused_file()?;
+                Some(Self::file_context_id(&repo, &file.path))
+            }
+            DrillView::Files { .. } => None,
+        }
+    }
+
+    /// `Some(n)` means `-Un` for this identity. `None` is git's default.
+    pub fn diff_context_for(&self, id: &str) -> Option<u32> {
+        if self.full_context.contains(id) {
+            Some(FULL_DIFF_CONTEXT_LINES)
+        } else {
+            None
+        }
+    }
+
+    /// Workspace dirty-file context, independent of pane focus.
+    pub fn workspace_diff_context(&self, repo: &str, path: &str) -> Option<u32> {
+        self.diff_context_for(&Self::file_context_id(repo, path))
+    }
+
+    /// Commit-file (or stash-file) context, independent of pane focus.
+    pub fn commit_diff_context(&self, repo: &str, path: &str) -> Option<u32> {
+        self.diff_context_for(&Self::commit_context_id(repo, path))
+    }
+
+    /// Context for the file currently shown in the right pane.
+    /// Survives tree focus so a reload does not drop unlimited `-U`.
+    pub fn diff_context_lines(&self) -> Option<u32> {
+        let id = self.displayed_diff_id()?;
+        self.diff_context_for(&id)
+    }
+
+    #[allow(dead_code)]
+    pub fn full_context_active(&self) -> bool {
+        self.diff_context_lines().is_some()
+    }
+
+    fn toggle_full_context(&mut self) -> Effect {
+        if self.focus != FocusPane::Right || !self.right_is_diff() {
+            return Effect::None;
+        }
+        let Some(id) = self.displayed_diff_id() else {
+            return Effect::None;
+        };
+        let lines = self.current_diff_lines();
+        self.pending_hunk_anchor = hunk_anchor(lines, self.diff_scroll as usize);
+        if !self.full_context.remove(&id) {
+            self.full_context.insert(id);
+        }
+        match &self.drill {
+            DrillView::Diff {
+                repo, source, path, ..
+            } => Effect::LoadCommitDiff {
+                repo: repo.clone(),
+                source: source.clone(),
+                path: path.clone(),
+            },
+            DrillView::Graph => Effect::LoadRightPane,
+            DrillView::Files { .. } => Effect::None,
+        }
+    }
+
+    fn apply_pending_hunk_anchor(&mut self) {
+        let Some(anchor) = self.pending_hunk_anchor.take() else {
+            return;
+        };
+        let lines = self.current_diff_lines().to_vec();
+        let view_h = self.layout.pane_height.max(1);
+        self.diff_scroll = scroll_to_keep_anchor(&lines, &anchor, view_h);
     }
 
     fn focused_file_if_shown(&self) -> Option<(String, FileChange)> {
@@ -3901,5 +4129,271 @@ mod tests {
             "{}",
             focused.id
         );
+    }
+
+    fn type_search(app: &mut AppState, query: &str) {
+        assert_eq!(app.dispatch(Action::SearchStart), Effect::None);
+        for c in query.chars() {
+            app.dispatch(Action::SearchChar(c));
+        }
+        app.dispatch(Action::SearchSubmit);
+    }
+
+    fn install_two_graph_commits(app: &mut AppState) {
+        let model = GraphModel {
+            commits: vec![
+                graph_commit("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "alpha unique"),
+                graph_commit("ccc3333dddddddddddddddddddddddddddddd", "beta unique"),
+            ],
+            stashes: Vec::new(),
+            worktrees: Vec::new(),
+            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            sync: None,
+            show_ignored: app.show_ignored,
+            uncommitted: false,
+        };
+        app.set_graph(
+            model,
+            "app".into(),
+            "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        );
+        app.focus = FocusPane::Right;
+        app.drill = DrillView::Graph;
+    }
+
+    #[test]
+    fn graph_search_enter_focuses_subject_and_n_cycles() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_two_graph_commits(&mut app);
+        type_search(&mut app, "unique");
+        assert!(app.search_active);
+        assert_eq!(app.search_target, SearchPane::Graph);
+        assert_eq!(app.graph_cursor, 0);
+        app.dispatch(Action::SearchNext);
+        assert_eq!(app.graph_cursor, 1);
+        app.dispatch(Action::SearchPrev);
+        assert_eq!(app.graph_cursor, 0);
+        app.dispatch(Action::SearchNext);
+        app.dispatch(Action::SearchNext);
+        assert_eq!(app.graph_cursor, 0);
+    }
+
+    #[test]
+    fn commit_files_search_focuses_matching_path() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        app.focus = FocusPane::Right;
+        app.open_commit_files(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![
+                CommitFile {
+                    status: "M".into(),
+                    path: "README.md".into(),
+                    old_path: None,
+                },
+                CommitFile {
+                    status: "A".into(),
+                    path: "src/lib.rs".into(),
+                    old_path: None,
+                },
+            ],
+        );
+        type_search(&mut app, "lib");
+        match &app.drill {
+            DrillView::Files { cursor, files, .. } => {
+                assert_eq!(*cursor, 1);
+                assert_eq!(files[*cursor].path, "src/lib.rs");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(app.search_target, SearchPane::CommitFiles);
+    }
+
+    #[test]
+    fn diff_search_sets_hit_and_scrolls() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.focus = FocusPane::Right;
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            vec![
+                "diff --git a/README.md b/README.md".into(),
+                "@@ -1,3 +1,4 @@".into(),
+                " context".into(),
+                "+needle-unique".into(),
+                " more".into(),
+            ],
+        );
+        type_search(&mut app, "needle-unique");
+        assert_eq!(app.search_target, SearchPane::Diff);
+        assert_eq!(app.search_hit, Some(3));
+        assert!(app.diff_scroll <= 3);
+    }
+
+    #[test]
+    fn tree_search_still_unfolds_parents() {
+        let mut app = state();
+        app.folds.insert("repo:app".into());
+        app.rebuild_rows();
+        assert!(app.rows.iter().all(|r| r.id != "file:app:README.md"));
+        type_search(&mut app, "README");
+        assert!(app.rows.iter().any(|r| r.id == "file:app:README.md"));
+        assert_eq!(
+            app.focused_row().map(|r| r.id.as_str()),
+            Some("file:app:README.md")
+        );
+    }
+
+    #[test]
+    fn ctrl_o_toggles_unlimited_context_and_restores() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.focus = FocusPane::Right;
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            vec!["@@ -1,1 +1,2 @@".into(), "+line".into()],
+        );
+        assert_eq!(app.diff_context_lines(), None);
+        assert!(!app.full_context_active());
+        match app.dispatch(Action::ToggleFullContext) {
+            Effect::LoadRightPane => {}
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(app.diff_context_lines(), Some(FULL_DIFF_CONTEXT_LINES));
+        assert!(app.full_context_active());
+        match app.dispatch(Action::ToggleFullContext) {
+            Effect::LoadRightPane => {}
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(app.diff_context_lines(), None);
+        assert!(!app.full_context_active());
+    }
+
+    #[test]
+    fn ctrl_o_on_tree_or_graph_is_noop() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        app.focus = FocusPane::Left;
+        assert_eq!(app.dispatch(Action::ToggleFullContext), Effect::None);
+        install_graph(&mut app, Vec::new());
+        app.focus = FocusPane::Right;
+        assert_eq!(app.dispatch(Action::ToggleFullContext), Effect::None);
+    }
+
+    #[test]
+    fn focused_diff_l_increases_pan_h_decreases_tree_still_folds() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.focus = FocusPane::Right;
+        app.layout.diff_pane_width = 8;
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            vec!["+".to_string() + &"x".repeat(40)],
+        );
+        assert_eq!(app.diff_col_offset, 0);
+        app.dispatch(Action::PanDiff(1));
+        assert!(app.diff_col_offset > 0, "l increases pan offset");
+        let after_l = app.diff_col_offset;
+        app.dispatch(Action::PanDiff(-1));
+        assert!(app.diff_col_offset < after_l, "h decreases pan offset");
+        app.dispatch(Action::PanDiff(-1));
+        app.dispatch(Action::PanDiff(-1));
+        assert_eq!(app.diff_col_offset, 0);
+
+        let mut tree = state();
+        focus_repo(&mut tree, "app");
+        tree.focus = FocusPane::Left;
+        tree.dispatch(Action::FoldClose);
+        assert!(tree.folds.contains("repo:app"));
+        tree.dispatch(Action::FoldOpen);
+        assert!(!tree.folds.contains("repo:app"));
+    }
+
+    #[test]
+    fn full_context_survives_tree_focus_and_commit_file_list() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.focus = FocusPane::Right;
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            vec!["@@ -1,1 +1,2 @@".into(), "+line".into()],
+        );
+        assert_eq!(app.dispatch(Action::ToggleFullContext), Effect::LoadRightPane);
+        app.focus = FocusPane::Left;
+        assert_eq!(app.diff_context_lines(), Some(FULL_DIFF_CONTEXT_LINES));
+        assert_eq!(
+            app.workspace_diff_context("app", "README.md"),
+            Some(FULL_DIFF_CONTEXT_LINES)
+        );
+        assert_eq!(app.dispatch(Action::ToggleFullContext), Effect::None);
+
+        let mut commit = state();
+        focus_repo(&mut commit, "app");
+        commit.focus = FocusPane::Right;
+        commit.open_commit_diff(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+            }],
+            0,
+            "README.md".into(),
+            vec!["@@ -1,1 +1,2 @@".into(), "+line".into()],
+        );
+        match commit.dispatch(Action::ToggleFullContext) {
+            Effect::LoadCommitDiff { path, .. } => assert_eq!(path, "README.md"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(commit.diff_context_lines(), Some(FULL_DIFF_CONTEXT_LINES));
+        commit.open_commit_files(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+            }],
+        );
+        assert_eq!(commit.diff_context_lines(), None);
+        assert_eq!(
+            commit.commit_diff_context("app", "README.md"),
+            Some(FULL_DIFF_CONTEXT_LINES)
+        );
+    }
+
+    #[test]
+    fn help_then_slash_does_not_start_help_search() {
+        let mut app = state();
+        app.dispatch(Action::ToggleHelp);
+        assert!(app.help_open);
+        assert_eq!(app.input_mode(), InputMode::Help);
+        assert_eq!(
+            crate::tui::keys::event_to_action(
+                &crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char('/'),
+                    crossterm::event::KeyModifiers::NONE,
+                )),
+                app.input_mode(),
+                false,
+                false,
+            ),
+            Action::None
+        );
+        assert!(!app.search_mode);
+        assert!(!app.search_active);
     }
 }
