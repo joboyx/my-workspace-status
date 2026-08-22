@@ -7,7 +7,8 @@ The Rust TUI paints this widget in the right pane when a repo or worktree is foc
 The crate itself does not run a terminal app. The TypeScript Ink TUI still has its own graph paint.
 
 Interactive and headless callers share `GraphModel::visible_rows` and
-`format_row` / `format_sync`. Display differs.
+`format_row` / `format_sync`. Display differs. The widget paints a
+multi-lane gutter from the same model.
 
 ## Types
 
@@ -19,12 +20,17 @@ Interactive and headless callers share `GraphModel::visible_rows` and
 | `Worktree` | Path, HEAD id, branch, `ignored`, `is_current` |
 | `SyncState` | Branch, status, ahead, behind |
 | `GraphRow` | One visible row: uncommitted, stash, commit, or worktree |
+| `GraphCell` | One gutter column: glyph, colour lane, role |
+| `LaidOutCommit` | Lane assignment plus stem metadata for one commit |
 | `GraphWidget` | Ratatui `Widget` over a `GraphModel` |
 | `Action` | `ToggleShowIgnored` and `SetShowIgnored` |
 | `Effect` | `None` today. Dispatch stays pure. |
 
 `GraphModel::dispatch` applies an `Action` and returns an `Effect`.
 This crate does not bind keys or run an event loop.
+
+`GraphWidget::gutter_width` caps painted gutter columns. Topology still
+uses the full lane model.
 
 ## Visible rows
 
@@ -41,8 +47,14 @@ stay out of ops unless shown.
 
 ## Paint
 
-`GraphWidget` writes one line per visible row, plus a sync header when
-`sync` is set.
+`GraphWidget` writes a sync header when `sync` is set, then one gutter
+plus label per visible row. Commit and stash rows also paint a spacer
+line under the node (densify rails, or the stash spur).
+
+Lane assignment, parent planning, densify-left, and the
+connection-to-glyph map match the Ink graph
+(`docs/git-graph-topology.md`). A stash leaf sits on a free spur,
+coloured by `stash^1`. It is not a fake DAG lane.
 
 | Role | Unicode | ASCII |
 | --- | --- | --- |
@@ -54,11 +66,8 @@ stay out of ops unless shown.
 | Ahead | `↑` | `^` |
 | Behind | `↓` | `v` |
 
-Unicode matches `docs/git-graph-topology.md` for node glyphs.
-This widget uses a single lane. Multi-lane gutter topology stays in
-the TypeScript graph under `src/tui/graph/`.
-
-Tests paint with ratatui TestBackend. They do not open a TTY.
+Junction glyphs use the same map as Ink (`│─╮╭╯╰┤├┬┴┼` /
+`|-/\+`). Tests paint with ratatui TestBackend. They do not open a TTY.
 
 ## Test
 

@@ -1,7 +1,11 @@
-//! Graph node and sync glyphs.
+//! Graph node, rail, and sync glyphs.
 //!
 //! Unicode matches the Ink graph (`docs/git-graph-topology.md`).
-//! ASCII matches `WS_STATUS_GLYPHS=ascii`.
+//! ASCII matches `WS_STATUS_GLYPHS=ascii`. Topology is the same; only
+//! the glyph map changes.
+
+/// Columns occupied per logical lane (glyph + spacer / horizontal).
+pub const CELL_W: usize = 2;
 
 /// One paint mode for nodes, rails, and sync marks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +24,28 @@ pub struct GlyphSet {
     pub ahead: &'static str,
     /// Behind upstream.
     pub behind: &'static str,
+    /// Vertical through-rail.
+    pub vertical: &'static str,
+    /// Horizontal parent edge.
+    pub horizontal: &'static str,
+    /// Open lane to the right of the node (`╮` / `\`).
+    pub corner_down_right: &'static str,
+    /// Open lane to the left of the node (`╭` / `/`).
+    pub corner_down_left: &'static str,
+    /// Close lane into the node from the right (`╯` / `/`).
+    pub corner_up_right: &'static str,
+    /// Close lane into the node from the left (`╰` / `\`).
+    pub corner_up_left: &'static str,
+    /// Tee pointing left (`┤` / `+`).
+    pub tee_left: &'static str,
+    /// Tee pointing right (`├` / `+`).
+    pub tee_right: &'static str,
+    /// Tee pointing down (`┬` / `+`).
+    pub tee_down: &'static str,
+    /// Tee pointing up (`┴` / `+`).
+    pub tee_up: &'static str,
+    /// Four-way cross (`┼` / `+`).
+    pub cross: &'static str,
 }
 
 /// Unicode glyphs used by the default widget.
@@ -31,6 +57,17 @@ pub const UNICODE: GlyphSet = GlyphSet {
     worktree: "🔗",
     ahead: "↑",
     behind: "↓",
+    vertical: "│",
+    horizontal: "─",
+    corner_down_right: "╮",
+    corner_down_left: "╭",
+    corner_up_right: "╯",
+    corner_up_left: "╰",
+    tee_left: "┤",
+    tee_right: "├",
+    tee_down: "┬",
+    tee_up: "┴",
+    cross: "┼",
 };
 
 /// ASCII glyphs for terminals without the default font.
@@ -42,4 +79,15 @@ pub const ASCII: GlyphSet = GlyphSet {
     worktree: "wt",
     ahead: "^",
     behind: "v",
+    vertical: "|",
+    horizontal: "-",
+    corner_down_right: "\\",
+    corner_down_left: "/",
+    corner_up_right: "/",
+    corner_up_left: "\\",
+    tee_left: "+",
+    tee_right: "+",
+    tee_down: "+",
+    tee_up: "+",
+    cross: "+",
 };
