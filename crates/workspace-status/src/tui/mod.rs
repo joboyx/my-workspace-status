@@ -8,6 +8,7 @@ mod app;
 mod headless;
 mod branches;
 mod diff;
+mod commit_files;
 mod drill;
 mod easy_motion;
 pub(crate) mod editor;
