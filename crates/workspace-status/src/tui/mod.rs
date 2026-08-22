@@ -14,6 +14,7 @@ mod keys;
 mod ops;
 mod render;
 pub(crate) mod search;
+mod split;
 mod stash;
 mod state;
 mod tree;
