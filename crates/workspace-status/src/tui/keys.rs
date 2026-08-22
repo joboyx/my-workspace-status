@@ -160,6 +160,7 @@ fn normal_key(
         KeyCode::Char('S') => Action::StashMenu,
         KeyCode::Char('b') => Action::Branch,
         KeyCode::Char('w') | KeyCode::Char('W') => Action::RemoveWorktree,
+        KeyCode::Char('i') => Action::ToggleDiffMode,
         KeyCode::Char('n') if search_active => Action::SearchNext,
         KeyCode::Char('N') if search_active => Action::SearchPrev,
         KeyCode::Tab => {
@@ -215,6 +216,11 @@ fn mouse_to_action(mouse: MouseEvent) -> Action {
             col: mouse.column,
             row: mouse.row,
         },
+        MouseEventKind::Drag(MouseButton::Left) => Action::Drag {
+            col: mouse.column,
+            row: mouse.row,
+        },
+        MouseEventKind::Up(MouseButton::Left) => Action::Release,
         MouseEventKind::ScrollDown => Action::ScrollWheel {
             col: mouse.column,
             row: mouse.row,
@@ -368,6 +374,50 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Enter), InputMode::CreateBranch, false, false),
             Action::CreateBranchSubmit
+        );
+    }
+
+    fn mouse(kind: MouseEventKind, col: u16, row: u16) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn mouse_drag_and_release_and_inline_key() {
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('i')), normal(), true, true),
+            Action::ToggleDiffMode
+        );
+        assert_eq!(
+            event_to_action(
+                &mouse(MouseEventKind::Drag(MouseButton::Left), 40, 4),
+                normal(),
+                false,
+                false
+            ),
+            Action::Drag { col: 40, row: 4 }
+        );
+        assert_eq!(
+            event_to_action(
+                &mouse(MouseEventKind::Up(MouseButton::Left), 40, 4),
+                normal(),
+                false,
+                false
+            ),
+            Action::Release
+        );
+        assert_eq!(
+            event_to_action(
+                &mouse(MouseEventKind::Drag(MouseButton::Left), 40, 4),
+                InputMode::Help,
+                false,
+                false
+            ),
+            Action::None
         );
     }
 }

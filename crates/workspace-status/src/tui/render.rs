@@ -10,6 +10,10 @@ use workspace_status_graph::GraphWidget;
 use std::time::Instant;
 
 use super::drill::DrillView;
+use super::split::{
+    diff_split_rule_x, is_side_by_side_split, pad_trunc, pair_unified_lines, pane_widths,
+    side_by_side_column_widths, MIN_PANE_COLS,
+};
 use super::state::{AppState, FocusPane};
 use super::tree::NodeKind;
 use super::watch::flash_active;
@@ -21,9 +25,13 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(1)])
         .split(area);
+    let widths = pane_widths(area.width, state.tree_fraction);
     let panes = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .constraints([
+            Constraint::Length(widths.tree_width),
+            Constraint::Min(MIN_PANE_COLS),
+        ])
         .split(chunks[0]);
 
     let tree_block = Block::default()
@@ -69,6 +77,19 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.tree_width = tree_inner.width;
     state.layout.tree_height = tree_inner.height;
     state.layout.right_x = panes[1].x;
+    state.layout.term_cols = area.width;
+    state.layout.pane_height = chunks[0].height;
+    state.layout.outer_tree_width = panes[0].width;
+    state.layout.diff_pane_width = right_inner.width;
+    state.layout.diff_content_x = right_inner.x;
+    state.layout.diff_split_rule_x = if state.right_is_diff()
+        && is_side_by_side_split(state.diff_mode, right_inner.width)
+    {
+        let split = side_by_side_column_widths(right_inner.width, state.diff_split_fraction);
+        Some(diff_split_rule_x(panes[0].width, split.left_width).saturating_sub(1))
+    } else {
+        None
+    };
 
     if state.help_open {
         draw_help(frame, area);
@@ -179,14 +200,7 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 frame.render_widget(Paragraph::new(format!("no diff for {path}")), area);
                 return;
             }
-            let skip = state.diff_scroll as usize;
-            let painted: Vec<Line> = lines
-                .iter()
-                .skip(skip)
-                .take(area.height as usize)
-                .map(|line| Line::from(Span::styled(line.clone(), diff_style(line))))
-                .collect();
-            frame.render_widget(Paragraph::new(painted), area);
+            draw_diff_lines(frame, area, state, lines);
             return;
         }
         DrillView::Graph => {}
@@ -196,15 +210,7 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             frame.render_widget(Paragraph::new("select a dirty file"), area);
             return;
         }
-        let skip = state.diff_scroll as usize;
-        let lines: Vec<Line> = state
-            .diff_lines
-            .iter()
-            .skip(skip)
-            .take(area.height as usize)
-            .map(|line| Line::from(Span::styled(line.clone(), diff_style(line))))
-            .collect();
-        frame.render_widget(Paragraph::new(lines), area);
+        draw_diff_lines(frame, area, state, &state.diff_lines);
         return;
     }
     if let Some(model) = &state.graph {
@@ -219,6 +225,37 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Paragraph::new("focus a repo for the graph, or a file for its diff"),
         area,
     );
+}
+
+fn draw_diff_lines(frame: &mut Frame<'_>, area: Rect, state: &AppState, lines: &[String]) {
+    let skip = state.diff_scroll as usize;
+    if is_side_by_side_split(state.diff_mode, area.width) {
+        let split = side_by_side_column_widths(area.width, state.diff_split_fraction);
+        let rows = pair_unified_lines(lines);
+        let painted: Vec<Line> = rows
+            .iter()
+            .skip(skip)
+            .take(area.height as usize)
+            .map(|row| {
+                let left = pad_trunc(&row.left, split.left_width);
+                let right = pad_trunc(&row.right, split.right_width);
+                Line::from(vec![
+                    Span::styled(left, diff_style(&row.left)),
+                    Span::styled("│", Style::default().fg(Color::DarkGray)),
+                    Span::styled(right, diff_style(&row.right)),
+                ])
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(painted), area);
+        return;
+    }
+    let painted: Vec<Line> = lines
+        .iter()
+        .skip(skip)
+        .take(area.height as usize)
+        .map(|line| Line::from(Span::styled(line.clone(), diff_style(line))))
+        .collect();
+    frame.render_widget(Paragraph::new(painted), area);
 }
 
 fn diff_style(line: &str) -> Style {
@@ -237,7 +274,7 @@ fn diff_style(line: &str) -> Style {
 
 fn draw_help(frame: &mut Frame<'_>, area: Rect) {
     let width = 48.min(area.width.saturating_sub(4));
-    let height = 21.min(area.height.saturating_sub(2));
+    let height = 22.min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let rect = Rect::new(x, y, width, height);
@@ -256,7 +293,8 @@ P  push                 S  stash menu
 b  branch picker        C  create (in picker)
 W  remove worktree      Tab  other pane
 Enter  drill            Esc  back
-a/p/D  focused stash    click  select row";
+a/p/D  focused stash    click  select row
+i  inline / split       drag  resize split";
     frame.render_widget(
         Paragraph::new(body)
             .block(Block::default().borders(Borders::ALL).title(" keys "))
@@ -466,5 +504,37 @@ mod tests {
         assert!(text.contains("P  push"), "{text}");
         assert!(text.contains("W  remove worktree"), "{text}");
         assert!(!text.contains("EasyMotion"), "{text}");
+    }
+
+    #[test]
+    fn paints_draggable_side_by_side_rule_on_wide_diff() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.diff_mode = crate::tui::split::DiffMode::SideBySide;
+        let file = state
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::File)
+            .expect("file row");
+        state.cursor = file;
+        state.set_diff(
+            "app".into(),
+            "README.md".into(),
+            vec![
+                "@@ -1,1 +1,1 @@".into(),
+                "-old line".into(),
+                "+new line".into(),
+            ],
+        );
+        let backend = TestBackend::new(220, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &mut state))
+            .unwrap();
+        assert!(state.layout.diff_split_rule_x.is_some(), "rule missing");
+        assert!(state.layout.outer_tree_width >= 20);
+        let text = buffer_text(&terminal);
+        assert!(text.contains("│") || text.contains("|"), "{text}");
+        assert!(text.contains("old") || text.contains("new") || text.contains("README"), "{text}");
     }
 }
