@@ -147,3 +147,6 @@ vite.config.ts.timestamp-*
 
 # Rust
 /target/
+
+# Local demo seed (scripts/seed-demo-workspace.sh)
+tmp/

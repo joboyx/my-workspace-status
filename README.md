@@ -155,6 +155,8 @@ That isolation is deliberate. Refactors should be able to change implementation 
 
 Ratatui TUI (`workspace-status` / `ws` on a TTY).
 
+To rebuild these frames, seed the demo workspace and follow [docs/demo.md](./docs/demo.md).
+
 **Tree + file diff** — focus a dirty file; the right pane loads its unified diff.
 
 ![Tree and file diff](docs/images/01-file-diff.png)
@@ -214,6 +216,7 @@ Several graph features — including checkout confirm when a local branch is out
 | [docs/graph.md](./docs/graph.md) | Ratatui workspace-status-graph widget contract |
 | [docs/diff-rendering.md](./docs/diff-rendering.md) | Diff pipeline and syntax highlighting |
 | [docs/git-operations.md](./docs/git-operations.md) | Git commands, operation semantics, safety rules |
+| [docs/demo.md](./docs/demo.md) | Demo workspace and screenshot frames |
 | [docs/configuration.md](./docs/configuration.md) | Environment variables, workspace config, keymap |
 
 ## License
