@@ -151,6 +151,46 @@ Each test scenario:
 
 That isolation is deliberate. Refactors should be able to change implementation details while preserving the observable contract.
 
+## Screenshots
+
+Ratatui TUI (`workspace-status` / `ws` on a TTY).
+
+**Tree + file diff** — focus a dirty file; the right pane loads its unified diff.
+
+![Tree and file diff](docs/images/01-file-diff.png)
+
+**Git graph** — focus a repo or worktree. Dirty `○`, HEAD `⊙`, stash `◇`, linked worktree `🔗`.
+
+![Git graph](docs/images/02-git-graph.png)
+
+**Help overlay** — `?` is a short key list.
+
+![Help overlay](docs/images/03-help.png)
+
+**Search** — `/` then Enter. `n` / `N` step matches without hiding rows.
+
+![Search](docs/images/04-search.png)
+
+**Stash menu** — `S` for create / apply / pop / drop.
+
+![Stash menu](docs/images/05-stash-menu.png)
+
+**Branch picker** — `b` lists local branches. Type to filter. `C` creates one at HEAD.
+
+![Branch picker](docs/images/06-branch-picker.png)
+
+**Create branch** — name overlay from the picker.
+
+![Create branch](docs/images/07-create-branch.png)
+
+**Reviewed mark** — Space on a dirty file writes `◉` (same store as the Ink app).
+
+![Reviewed mark](docs/images/08-reviewed.png)
+
+**Ignored repos** — `.` shows or hides config `ignoredRepos`.
+
+![Show ignored](docs/images/09-show-ignored.png)
+
 ## Interactive TUI
 
 On a TTY (without `-v` / `-p` / `-d` / `--plain` / `--json`), the script opens an Ink TUI that blocks on keyboard input. **Agents must always pass `--plain` or `--json`** — do not rely on non-TTY alone; a hung agent shell is the failure mode. Force the TUI with `-i` / `--tui` for humans only.
