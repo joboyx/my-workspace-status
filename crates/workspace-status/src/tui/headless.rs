@@ -151,6 +151,7 @@ impl HeadlessTui {
             self.state.right_is_diff(),
             matches!(self.state.focus, FocusPane::Right),
             self.state.graph_stash_focused(),
+            self.state.graph_commit_focused(),
         );
         let effect = self.state.dispatch(action);
         apply_headless_effect(&mut self.state, effect, &self.opts);

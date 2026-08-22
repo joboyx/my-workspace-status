@@ -1,5 +1,7 @@
 //! Local branch picker (`b`): list, filter, create, checkout.
 
+use workspace_status_graph::{GraphRef, RefKind};
+
 use crate::git::LocalBranch;
 use crate::snapshot::{CheckoutKind, WorkspaceSnapshot};
 
@@ -42,6 +44,50 @@ pub fn is_valid_branch_name(name: &str) -> bool {
     !t.is_empty() && !t.contains(char::is_whitespace) && !t.starts_with('-')
 }
 
+/// True iff `name` is an origin remote-tracking ref (`origin/...`).
+pub fn is_origin_remote_ref(name: &str) -> bool {
+    name.starts_with("origin/")
+}
+
+/// Local short name for an origin remote-tracking ref.
+pub fn local_name_from_origin_ref(name: &str) -> &str {
+    name.strip_prefix("origin/").unwrap_or(name)
+}
+
+/// Local and `origin/*` names `b` may checkout at a graph commit.
+///
+/// Locals first, then remotes. Each group is unique and sorted.
+/// Tags and non-origin remotes stay out (same set as Ink `checkoutableBranchNames`).
+pub fn checkoutable_branch_names(refs: &[GraphRef]) -> Vec<String> {
+    let mut locals: Vec<String> = refs
+        .iter()
+        .filter(|graph_ref| graph_ref.kind == RefKind::Local)
+        .map(|graph_ref| graph_ref.name.clone())
+        .collect();
+    locals.sort();
+    locals.dedup();
+    let mut remotes: Vec<String> = refs
+        .iter()
+        .filter(|graph_ref| {
+            graph_ref.kind == RefKind::Remote && is_origin_remote_ref(&graph_ref.name)
+        })
+        .map(|graph_ref| graph_ref.name.clone())
+        .collect();
+    remotes.sort();
+    remotes.dedup();
+    locals.extend(remotes);
+    locals
+}
+
+/// Branch to check out for a picker or single-name selection.
+pub fn checkout_name_for_ref(selected: &str) -> String {
+    if is_origin_remote_ref(selected) {
+        local_name_from_origin_ref(selected).to_string()
+    } else {
+        selected.to_string()
+    }
+}
+
 /// True when `b` may open on this row (checkout or flat repo, not a family).
 pub fn can_open_branch_picker(snapshot: &WorkspaceSnapshot, row: &VisibleRow) -> bool {
     match row.kind {
@@ -81,6 +127,19 @@ impl BranchPickerState {
         }
     }
 
+    /// Graph `b` picker: only the names on the focused commit.
+    pub fn from_names(repo: String, names: Vec<String>) -> Self {
+        let branches = names
+            .into_iter()
+            .map(|name| LocalBranch {
+                name,
+                current: false,
+                authordate: 0,
+            })
+            .collect();
+        Self::new(repo, branches)
+    }
+
     pub fn visible(&self) -> Vec<&LocalBranch> {
         filter_branches(&self.branches, &self.filter)
     }
@@ -111,11 +170,13 @@ impl BranchPickerState {
     }
 }
 
-/// Name prompt after `C` in the picker, or Enter on a new filter.
+/// Name prompt after `C` in the picker, graph `c`, or Enter on a new filter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreateBranchState {
     pub repo: String,
     pub name: String,
+    /// Graph `c` sets this. Picker `C` leaves it `None` (create+checkout at HEAD).
+    pub commit_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -160,6 +221,32 @@ mod tests {
         assert!(!is_valid_branch_name(""));
         assert!(!is_valid_branch_name("has space"));
         assert!(!is_valid_branch_name("-bad"));
+    }
+
+    #[test]
+    fn checkoutable_names_locals_then_origin() {
+        let names = checkoutable_branch_names(&[
+            "origin/z".into(),
+            "topic".into(),
+            "main".into(),
+            "origin/main".into(),
+            "topic".into(),
+        ]);
+        assert_eq!(names, vec!["main", "topic", "origin/main", "origin/z"]);
+        assert_eq!(checkout_name_for_ref("origin/main"), "main");
+        assert_eq!(checkout_name_for_ref("feature/x"), "feature/x");
+    }
+
+    #[test]
+    fn checkoutable_names_skip_tags_and_non_origin() {
+        use workspace_status_graph::GraphRef;
+        let names = checkoutable_branch_names(&[
+            GraphRef::tag("v1.0"),
+            GraphRef::remote("upstream/main"),
+            GraphRef::local("topic"),
+            GraphRef::remote("origin/topic"),
+        ]);
+        assert_eq!(names, vec!["topic", "origin/topic"]);
     }
 
     #[test]

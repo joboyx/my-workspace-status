@@ -64,9 +64,9 @@ fn format_commit_text(
     if is_head {
         line.push_str("  [HEAD]");
     }
-    for name in &commit.refs {
+    for graph_ref in &commit.refs {
         line.push_str("  ");
-        line.push_str(name);
+        line.push_str(&graph_ref.name);
     }
     for worktree in worktrees {
         line.push_str("  ");

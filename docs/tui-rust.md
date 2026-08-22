@@ -34,7 +34,8 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 | `Enter` | Focus the right pane, or drill: graph commit → file list → commit diff |
 | `Esc` | Pop one drill level, or return focus to the tree |
 | `a` / `p` / `D` | Apply / pop / drop the focused graph stash row. Drop asks `y` / `n` |
-| `b` | Branch picker (list, filter, checkout, `C` create) |
+| `b` | Tree: local branch picker (list, filter, checkout, `C` create at HEAD). Graph commit: checkout refs on that commit (one name checks out, several open a name picker). Dirty tree refuses with commit-or-stash |
+| `c` | Graph commit: create a branch at that commit (`git branch -- name commitId`). No checkout. No-op when a graph commit is not focused |
 | `r` | Reload the workspace snapshot |
 | `space` | Mark a dirty file as reviewed. Writes the same viewed-files store as the Ink app |
 | `w` / `W` | Remove the focused linked worktree after `y` / `n` |
@@ -69,7 +70,9 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 - `d` switches visible targets that are off the default branch. Already-default is a no-op and does not pull. Dirty trees still skip
 - `Enter` on a graph commit (or stash / uncommitted row) opens that object's file list. `Enter` on a file opens the commit diff. `Esc` pops each level. Hidden ignored repos stay out of the drill unless shown
 - Graph stash rows are first-class: `a` apply, `p` pop, and `D` drop the focused `stash@{n}`. Drop asks `y` / `n`
-- `b` opens the local branch picker on a checkout or flat repo. Type to filter. Enter checks out. `C` creates a branch at HEAD. When the local branch is out of sync with `origin/*`, checkout asks `y` / `n` then pulls
+- `b` on a tree checkout or flat repo opens the local branch picker. Type to filter. Enter checks out. `C` creates a branch at HEAD and checks it out. When the local branch is out of sync with `origin/*`, checkout asks `y` / `n` then pulls
+- `b` on a focused graph commit checks out that commit's local and `origin/*` refs. One name checks out. Several names open a picker of those names only. Tags and other remotes stay out. A dirty tree refuses (`Dirty worktree — commit or stash first`). Scope is the checkout that owns the graph. Hidden ignored stay out
+- `c` on a focused graph commit opens a name prompt and runs `git branch -- <name> <commitId>`. It does not check the new branch out. `c` is a no-op on a tree, file, or workspace row. Picker `C` still creates and checks out at HEAD
 - `w` / `W` removes the focused linked worktree. Workspace, repo family, file, and hidden ignored rows are a no-op. Confirm with `y` / `n`. The command is `git worktree remove [--force]` from the primary. Bind-mount aliases remap the same way as in the TypeScript app. Ink uses the same keys
 - Action / Effect loop: crossterm events become `Action`, dispatch updates state and returns an `Effect`
 - EasyMotion (`;` / Ctrl+Space) labels the currently visible rows on the focused list (tree, graph, or commit files). Prefix matching is partial / hit / miss. Hit jumps. Esc or a miss cancels and keeps the cursor. A focused diff does not start the overlay

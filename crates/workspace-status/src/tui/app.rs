@@ -18,7 +18,7 @@ use crate::actions::{pull_behind_repos, switch_repo_to_default_branch};
 use crate::config::WorkspaceStatusConfig;
 use crate::discovery::collect_snapshots;
 use crate::git::{
-    checkout_branch, create_branch_checkout, diff_commit_file, diff_stash_file, exec_git_checked,
+    checkout_branch, create_branch_at, create_branch_checkout, diff_commit_file, diff_stash_file, exec_git_checked,
     latest_stash_ref, list_commit_name_status, list_local_branches, list_stash_name_status,
     list_worktree_name_status, origin_out_of_sync, pull_quiet, push_quiet, remove_untracked_file,
     remove_worktree, revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop,
@@ -124,6 +124,7 @@ fn run_loop(
                 state.right_is_diff(),
                 matches!(state.focus, super::state::FocusPane::Right),
                 state.graph_stash_focused(),
+                state.graph_commit_focused(),
             );
             let effect = state.dispatch(action);
             if matches!(effect, Effect::Quit) {
@@ -394,6 +395,21 @@ fn apply_effect(
                 Ok(()) => {
                     reload_snapshot(state, opts);
                     state.status = format!("created {name}");
+                    load_right(state);
+                }
+                Err(err) => state.status = format!("create branch failed: {err}"),
+            }
+        }
+        Effect::CreateBranchAt {
+            repo,
+            name,
+            commit_id,
+        } => {
+            match create_branch_at(&opts.cwd.join(&repo), &name, &commit_id) {
+                Ok(()) => {
+                    reload_snapshot(state, opts);
+                    let short = commit_id.get(..7).unwrap_or(&commit_id);
+                    state.status = format!("created {name} at {short}");
                     load_right(state);
                 }
                 Err(err) => state.status = format!("create branch failed: {err}"),
