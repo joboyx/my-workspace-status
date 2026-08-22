@@ -199,6 +199,7 @@ Workspace, repo, dir, and checkout rows write every scoped file across repos. Fa
 | `diff_stash_file` | `diff <stash>^1 <stash> -- <path>` | Stash-file drill diff |
 | `list_local_branches` | `for-each-ref` on `refs/heads/` | Branch picker `b` |
 | `create_branch_checkout` | `checkout -b <name> --quiet` | Picker `C` or Enter on a new name |
+| `create_branch_at` | `branch -- <name> <commitId>` | Graph `c` — create a ref at the focused commit. No checkout |
 | `origin_out_of_sync` | compare `rev-parse` of local vs `origin/<branch>` | Checkout confirm when tips differ |
 
 Hidden ignored checkouts stay out of `P` / `S` / `b` unless shown. Linked worktrees are included only when that row is focused. See [tui-rust.md](./tui-rust.md).

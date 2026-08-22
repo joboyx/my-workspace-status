@@ -29,20 +29,28 @@ pub fn event_to_action(
     right_is_diff: bool,
     focus_right: bool,
 ) -> Action {
-    event_to_action_ex(event, mode, right_is_diff, focus_right, false)
+    event_to_action_ex(event, mode, right_is_diff, focus_right, false, false)
 }
 
-/// Map one terminal event to an [`Action`], including graph-stash keys.
+/// Map one terminal event to an [`Action`], including graph-stash and graph-commit keys.
 pub fn event_to_action_ex(
     event: &Event,
     mode: InputMode,
     right_is_diff: bool,
     focus_right: bool,
     graph_stash_focused: bool,
+    graph_commit_focused: bool,
 ) -> Action {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
-            key_to_action(*key, mode, right_is_diff, focus_right, graph_stash_focused)
+            key_to_action(
+                *key,
+                mode,
+                right_is_diff,
+                focus_right,
+                graph_stash_focused,
+                graph_commit_focused,
+            )
         }
         Event::Mouse(mouse) => {
             if matches!(
@@ -70,6 +78,7 @@ fn key_to_action(
     right_is_diff: bool,
     focus_right: bool,
     graph_stash_focused: bool,
+    graph_commit_focused: bool,
 ) -> Action {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Action::Quit;
@@ -133,7 +142,14 @@ fn key_to_action(
             _ => Action::None,
         },
         InputMode::Normal { search_active } => {
-            normal_key(key, search_active, right_is_diff, focus_right, graph_stash_focused)
+            normal_key(
+                key,
+                search_active,
+                right_is_diff,
+                focus_right,
+                graph_stash_focused,
+                graph_commit_focused,
+            )
         }
     }
 }
@@ -144,12 +160,20 @@ fn normal_key(
     right_is_diff: bool,
     focus_right: bool,
     graph_stash_focused: bool,
+    graph_commit_focused: bool,
 ) -> Action {
     if graph_stash_focused {
         match key.code {
             KeyCode::Char('a') => return Action::GraphStashApply,
             KeyCode::Char('p') => return Action::GraphStashPop,
             KeyCode::Char('D') => return Action::GraphStashDrop,
+            _ => {}
+        }
+    }
+    if graph_commit_focused {
+        match key.code {
+            KeyCode::Char('b') => return Action::GraphCheckout,
+            KeyCode::Char('c') => return Action::GraphCreateBranch,
             _ => {}
         }
     }
@@ -383,20 +407,40 @@ mod tests {
         assert_eq!(event_to_action(&key(KeyCode::Enter), normal(), false, true), Action::NavEnter);
         assert_eq!(event_to_action(&key(KeyCode::Esc), normal(), false, true), Action::NavEsc);
         assert_eq!(
-            event_to_action_ex(&key(KeyCode::Char('a')), normal(), false, true, true),
+            event_to_action_ex(&key(KeyCode::Char('a')), normal(), false, true, true, false),
             Action::GraphStashApply
         );
         assert_eq!(
-            event_to_action_ex(&key(KeyCode::Char('p')), normal(), false, true, true),
+            event_to_action_ex(&key(KeyCode::Char('p')), normal(), false, true, true, false),
             Action::GraphStashPop
         );
         assert_eq!(
-            event_to_action_ex(&key(KeyCode::Char('D')), normal(), false, true, true),
+            event_to_action_ex(&key(KeyCode::Char('D')), normal(), false, true, true, false),
             Action::GraphStashDrop
         );
         assert_eq!(
-            event_to_action_ex(&key(KeyCode::Char('p')), normal(), false, true, false),
+            event_to_action_ex(&key(KeyCode::Char('p')), normal(), false, true, false, false),
             Action::Pull
+        );
+        assert_eq!(
+            event_to_action_ex(&key(KeyCode::Char('b')), normal(), false, true, false, true),
+            Action::GraphCheckout
+        );
+        assert_eq!(
+            event_to_action_ex(&key(KeyCode::Char('c')), normal(), false, true, false, true),
+            Action::GraphCreateBranch
+        );
+        assert_eq!(
+            event_to_action_ex(&key(KeyCode::Char('b')), normal(), false, true, true, false),
+            Action::Branch
+        );
+        assert_eq!(
+            event_to_action_ex(&key(KeyCode::Char('c')), normal(), false, true, true, false),
+            Action::None
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('c')), normal(), false, false),
+            Action::None
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('j')), InputMode::BranchPicker, false, false),

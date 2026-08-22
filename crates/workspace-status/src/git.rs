@@ -406,6 +406,16 @@ pub fn create_branch_checkout(cwd: &Path, name: &str) -> Result<(), String> {
     exec_git_checked(&["checkout", "-b", name, "--quiet"], cwd)
 }
 
+/// Argv for `git branch -- <name> <commitId>` (ref only, no checkout).
+pub fn create_branch_at_args<'a>(name: &'a str, commit_id: &'a str) -> [&'a str; 4] {
+    ["branch", "--", name, commit_id]
+}
+
+/// Create a local branch at `commit_id` without checking it out.
+pub fn create_branch_at(cwd: &Path, name: &str, commit_id: &str) -> Result<(), String> {
+    exec_git_checked(&create_branch_at_args(name, commit_id), cwd)
+}
+
 /// One path from `git diff --name-status` / `diff-tree` / `stash show`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NameStatus {
@@ -645,6 +655,14 @@ mod tests {
         assert!(branches.iter().any(|b| b.name == "feature/x" && b.current));
         assert!(checkout_branch("main", &dir));
         assert_eq!(exec_git(&["branch", "--show-current"], &dir), "main");
+        let head = exec_git(&["rev-parse", "HEAD"], &dir);
+        assert_eq!(
+            create_branch_at_args("feature/at", &head),
+            ["branch", "--", "feature/at", head.as_str()]
+        );
+        create_branch_at(&dir, "feature/at", &head).unwrap();
+        assert_eq!(exec_git(&["branch", "--show-current"], &dir), "main");
+        assert_eq!(exec_git(&["rev-parse", "feature/at"], &dir), head);
 
         let remote = dir.join("remote.git");
         Command::new(git_binary())

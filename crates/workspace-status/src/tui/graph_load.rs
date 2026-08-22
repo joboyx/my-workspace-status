@@ -104,6 +104,7 @@ fn load_refs(repo_dir: &Path) -> Vec<(String, String)> {
             "for-each-ref",
             "--format=%(objectname)%00%(refname:short)",
             "refs/heads",
+            "refs/remotes",
             "refs/tags",
         ],
         repo_dir,
@@ -111,6 +112,9 @@ fn load_refs(repo_dir: &Path) -> Vec<(String, String)> {
     raw.lines()
         .filter_map(|line| {
             let (sha, name) = line.split_once('\0')?;
+            if name.ends_with("/HEAD") {
+                return None;
+            }
             Some((sha.to_string(), name.to_string()))
         })
         .collect()

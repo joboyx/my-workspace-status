@@ -496,8 +496,13 @@ fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     };
     let rect = overlay_rect(area, 48, 6);
     frame.render_widget(Clear, rect);
+    let at = create
+        .commit_id
+        .as_deref()
+        .map(|id| format!(" at {}", id.get(..7).unwrap_or(id)))
+        .unwrap_or_default();
     let body = format!(
-        " Create branch\n  name: {}\n Enter confirm · Esc cancel",
+        " Create branch{at}\n  name: {}\n Enter confirm · Esc cancel",
         if create.name.is_empty() {
             "…"
         } else {

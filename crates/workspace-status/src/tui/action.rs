@@ -67,6 +67,8 @@ pub enum Action {
     GraphStashApply,
     GraphStashPop,
     GraphStashDrop,
+    GraphCheckout,
+    GraphCreateBranch,
     EasyMotionStart,
     EasyMotionChar(char),
     EasyMotionCancel,
@@ -133,6 +135,11 @@ pub enum Effect {
     CreateBranch {
         repo: String,
         name: String,
+    },
+    CreateBranchAt {
+        repo: String,
+        name: String,
+        commit_id: String,
     },
     RemoveWorktree {
         primary: String,
