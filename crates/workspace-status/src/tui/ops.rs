@@ -1,8 +1,123 @@
 //! Fetch / pull / default targets. Hidden ignored stay out unless shown.
 
-use crate::snapshot::{CheckoutKind, WorkspaceRepoSnapshot, WorkspaceSnapshot};
+use crate::helpers::{is_detached_head_branch, DETACHED_HEAD_BRANCH};
+use crate::snapshot::{
+    CheckoutKind, FileChange, SyncStatus, WorkspaceRepoSnapshot, WorkspaceSnapshot,
+};
 
 use super::tree::{NodeKind, VisibleRow};
+
+/// One dirty file in the focused write scope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScopedFile {
+    pub repo: String,
+    pub change: FileChange,
+}
+
+fn is_family_container(snapshot: &WorkspaceSnapshot, repo: &str) -> bool {
+    snapshot.repos.iter().any(|member| {
+        member.checkout_kind == CheckoutKind::Linked
+            && member.primary_repo.as_deref() == Some(repo)
+    })
+}
+
+fn files_for_repo(snapshot: &WorkspaceSnapshot, repo: &str) -> Vec<ScopedFile> {
+    snapshot
+        .repos
+        .iter()
+        .find(|member| member.repo == repo)
+        .map(|member| {
+            member
+                .changes
+                .iter()
+                .map(|change| ScopedFile {
+                    repo: repo.to_string(),
+                    change: change.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Dirty files a stage / unstage / revert should touch for the focused row.
+///
+/// File rows stay single-file. Repo and checkout rows walk every dirty file
+/// in that checkout. Family containers yield no files. Workspace rows walk
+/// visible primary checkouts. Hidden ignored stay out unless shown. Linked
+/// worktrees are included only when that checkout is focused.
+pub fn collect_write_files(
+    snapshot: &WorkspaceSnapshot,
+    focused: Option<&VisibleRow>,
+    show_ignored: bool,
+) -> Vec<ScopedFile> {
+    let Some(row) = focused else {
+        return Vec::new();
+    };
+    if row.ignored && !show_ignored {
+        return Vec::new();
+    }
+    match row.kind {
+        NodeKind::File => {
+            let (Some(file), Some(repo)) = (row.file.as_ref(), row.repo.clone()) else {
+                return Vec::new();
+            };
+            vec![ScopedFile {
+                repo,
+                change: file.clone(),
+            }]
+        }
+        NodeKind::Checkout => {
+            let Some(repo) = row.repo.as_deref() else {
+                return Vec::new();
+            };
+            files_for_repo(snapshot, repo)
+        }
+        NodeKind::Repo => {
+            let Some(repo) = row.repo.as_deref() else {
+                return Vec::new();
+            };
+            if is_family_container(snapshot, repo) {
+                return Vec::new();
+            }
+            files_for_repo(snapshot, repo)
+        }
+        NodeKind::Workspace => snapshot
+            .repos
+            .iter()
+            .filter(|member| member.checkout_kind == CheckoutKind::Primary)
+            .filter(|member| show_ignored || !member.ignored)
+            .flat_map(|member| {
+                member.changes.iter().map(|change| ScopedFile {
+                    repo: member.repo.clone(),
+                    change: change.clone(),
+                })
+            })
+            .collect(),
+        NodeKind::Group => Vec::new(),
+    }
+}
+
+/// True when `P` may push this checkout (ahead / diverged / no-upstream).
+pub fn snapshot_pushable(snap: &WorkspaceRepoSnapshot) -> bool {
+    if is_detached_head_branch(&snap.branch) || snap.branch == DETACHED_HEAD_BRANCH {
+        return false;
+    }
+    if snap.branch == "(unknown)" {
+        return false;
+    }
+    matches!(
+        snap.sync_status,
+        SyncStatus::Ahead | SyncStatus::Diverged | SyncStatus::NoUpstream
+    )
+}
+
+/// `Y` always deletes untracked. Plain `y` deletes only a sole untracked file.
+pub fn should_delete_untracked(untracked_flags: &[bool], clean: bool) -> bool {
+    if clean {
+        return true;
+    }
+    untracked_flags.len() == 1 && untracked_flags[0]
+}
 
 /// Workspace ops that must skip hidden ignored repos and unfocused worktrees.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +206,14 @@ pub fn push_targets(
                 return Vec::new();
             };
             include_if_visible(repo, &visible)
+                .into_iter()
+                .filter(|path| {
+                    snapshot
+                        .repos
+                        .iter()
+                        .any(|r| r.repo == *path && snapshot_pushable(r))
+                })
+                .collect()
         }
     }
 }
@@ -260,9 +383,22 @@ mod tests {
         }
     }
 
+    fn built_pushable() -> WorkspaceSnapshot {
+        build_workspace_snapshot(
+            &[
+                snap("app", false, false, false),
+                snap(".worktrees/app/feat", false, true, false),
+                snap("notes", true, false, false),
+            ],
+            &["notes".into()],
+            false,
+            &[],
+        )
+    }
+
     #[test]
     fn push_skips_workspace_and_hidden_ignored() {
-        let snapshot = built();
+        let snapshot = built_pushable();
         assert!(push_targets(&snapshot, Some(&workspace_row()), false).is_empty());
         let mut notes = repo_row("notes");
         notes.ignored = true;
@@ -273,7 +409,7 @@ mod tests {
 
     #[test]
     fn push_worktree_only_when_focused() {
-        let snapshot = built();
+        let snapshot = built_pushable();
         assert_eq!(
             push_targets(&snapshot, Some(&repo_row("app")), false),
             vec!["app"]
@@ -288,5 +424,111 @@ mod tests {
         );
         assert!(!push_targets(&snapshot, Some(&repo_row("app")), false)
             .contains(&".worktrees/app/feat".to_string()));
+    }
+
+    fn up_to_date(name: &str) -> RepoSnapshot {
+        let mut row = snap(name, false, false, false);
+        row.sync_status = SyncStatus::NoUpstream;
+        row.sync_status = crate::snapshot::SyncStatus::UpToDate;
+        row.sync_note = String::new();
+        row.branch = "main".into();
+        row
+    }
+
+    #[test]
+    fn push_in_sync_is_empty_ahead_and_diverged_and_no_upstream_allowed() {
+        let mut ahead = snap("app", false, false, false);
+        ahead.sync_status = SyncStatus::Ahead;
+        ahead.sync_note = "ahead 1".into();
+        let mut diverged = snap("lib", false, false, false);
+        diverged.repo = "lib".into();
+        diverged.sync_status = SyncStatus::Diverged;
+        diverged.sync_note = "diverged".into();
+        let snapshot = build_workspace_snapshot(
+            &[ahead, diverged, up_to_date("notes")],
+            &[],
+            false,
+            &[],
+        );
+        assert_eq!(
+            push_targets(&snapshot, Some(&repo_row("app")), false),
+            vec!["app"]
+        );
+        assert_eq!(
+            push_targets(&snapshot, Some(&repo_row("lib")), false),
+            vec!["lib"]
+        );
+        assert!(push_targets(&snapshot, Some(&repo_row("notes")), false).is_empty());
+        assert!(push_targets(&snapshot, Some(&workspace_row()), false).is_empty());
+    }
+
+    fn dirty(name: &str, ignored: bool, linked: bool, paths: &[&str]) -> RepoSnapshot {
+        let mut row = snap(name, ignored, linked, true);
+        row.has_unstaged = true;
+        row.has_untracked = paths.iter().any(|p| *p != "README.md");
+        row.changes = paths
+            .iter()
+            .map(|path| FileChange {
+                path: (*path).into(),
+                staged_status: None,
+                unstaged_status: if *path == "README.md" {
+                    Some("M".into())
+                } else {
+                    None
+                },
+                untracked: *path != "README.md",
+                old_path: None,
+            })
+            .collect();
+        row
+    }
+
+    #[test]
+    fn collect_write_files_repo_and_workspace_skip_hidden_and_worktrees() {
+        let snapshot = build_workspace_snapshot(
+            &[
+                dirty("app", false, false, &["README.md", "src/lib.rs"]),
+                dirty(".worktrees/app/feat", false, true, &["wt.md"]),
+                dirty("notes", true, false, &["secret.md"]),
+                dirty("lib", false, false, &["a.rs"]),
+            ],
+            &["notes".into()],
+            false,
+            &[],
+        );
+        // Family container (app has a linked worktree): no mixed files.
+        assert!(collect_write_files(&snapshot, Some(&repo_row("app")), false).is_empty());
+        let files = collect_write_files(&snapshot, Some(&repo_row("lib")), false);
+        assert_eq!(
+            files.iter().map(|f| f.change.path.as_str()).collect::<Vec<_>>(),
+            vec!["a.rs"]
+        );
+        assert!(files.iter().all(|f| f.repo == "lib"));
+        let workspace = collect_write_files(&snapshot, Some(&workspace_row()), false);
+        assert_eq!(
+            workspace
+                .iter()
+                .map(|f| (f.repo.as_str(), f.change.path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("app", "README.md"),
+                ("app", "src/lib.rs"),
+                ("lib", "a.rs"),
+            ]
+        );
+        assert!(workspace.iter().all(|f| f.repo != "notes"));
+        assert!(workspace
+            .iter()
+            .all(|f| f.repo != ".worktrees/app/feat"));
+        let file = collect_write_files(&snapshot, Some(&file_row("app")), false);
+        assert_eq!(file.len(), 1);
+        assert_eq!(file[0].change.path, "README.md");
+    }
+
+    #[test]
+    fn y_deletes_only_sole_untracked() {
+        assert!(!should_delete_untracked(&[false, true], false));
+        assert!(should_delete_untracked(&[true], false));
+        assert!(should_delete_untracked(&[false, true], true));
     }
 }

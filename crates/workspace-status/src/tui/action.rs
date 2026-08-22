@@ -39,6 +39,7 @@ pub enum Action {
     Unstage,
     Revert,
     ConfirmYes,
+    ConfirmYesClean,
     ConfirmNo,
     Edit,
     WatchTick,
@@ -92,8 +93,8 @@ pub enum Effect {
     },
     Revert {
         repo: String,
-        paths: Vec<String>,
-        untracked: bool,
+        tracked: Vec<String>,
+        untracked: Vec<String>,
     },
     EditFile {
         repo: String,

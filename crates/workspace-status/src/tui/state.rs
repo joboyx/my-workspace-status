@@ -19,7 +19,9 @@ use super::branches::{
 };
 use super::keys::InputMode;
 use super::fetch::background_fetch_targets;
-use super::ops::{op_targets, push_targets, Op};
+use super::ops::{
+    collect_write_files, op_targets, push_targets, should_delete_untracked, ScopedFile, Op,
+};
 use super::search::focus_tree_search;
 use super::split::{
     clamp_tree_fraction, diff_split_fraction_from_col, hit_split, is_side_by_side_split,
@@ -104,9 +106,7 @@ enum EasyMotionList {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PendingConfirm {
     Revert {
-        repo: String,
-        path: String,
-        untracked: bool,
+        targets: Vec<RevertTarget>,
     },
     StashPop {
         repo: String,
@@ -126,6 +126,15 @@ pub enum PendingConfirm {
         path: String,
         force: bool,
     },
+}
+
+/// One path in a pending revert confirm.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevertTarget {
+    pub repo: String,
+    pub path: String,
+    pub untracked: bool,
+    pub old_path: Option<String>,
 }
 
 /// Interactive session state. Dispatch is pure besides the returned [`Effect`].
@@ -471,7 +480,8 @@ impl AppState {
                 self.drag = SplitDrag::None;
                 self.begin_revert()
             }
-            Action::ConfirmYes => self.confirm_yes(),
+            Action::ConfirmYes => self.confirm_yes(false),
+            Action::ConfirmYesClean => self.confirm_yes(true),
             Action::ConfirmNo => {
                 if let Some(pending) = self.confirm.take() {
                     self.status = match pending {
@@ -744,23 +754,18 @@ impl AppState {
                 }
             }
             Op::DefaultBranch => {
-                let kind = self.focused_row().map(|r| r.kind);
-                let repos = if matches!(kind, Some(NodeKind::Workspace | NodeKind::Group) | None) {
-                    targets
-                        .into_iter()
-                        .filter(|repo| {
-                            self.snapshot.repos.iter().any(|r| {
-                                r.repo == *repo
-                                    && !crate::helpers::is_default_branch(
-                                        &r.branch,
-                                        r.default_branch_override.as_deref(),
-                                    )
-                            })
+                let repos = targets
+                    .into_iter()
+                    .filter(|repo| {
+                        self.snapshot.repos.iter().any(|r| {
+                            r.repo == *repo
+                                && !crate::helpers::is_default_branch(
+                                    &r.branch,
+                                    r.default_branch_override.as_deref(),
+                                )
                         })
-                        .collect()
-                } else {
-                    targets
-                };
+                    })
+                    .collect::<Vec<_>>();
                 if repos.is_empty() {
                     self.status = "no non-default branches to switch".into();
                     Effect::None
@@ -1039,84 +1044,137 @@ impl AppState {
     }
 
     fn file_write_effect(&mut self, write: FileWrite) -> Effect {
-        let Some((repo, change)) = self.focused_file_if_shown() else {
+        let scoped = collect_write_files(&self.snapshot, self.focused_row(), self.show_ignored);
+        let selected: Vec<ScopedFile> = scoped
+            .into_iter()
+            .filter(|file| match write {
+                FileWrite::Stage => is_stageable(&file.change),
+                FileWrite::Unstage => is_unstageable(&file.change),
+            })
+            .collect();
+        if selected.is_empty() {
             self.status = match write {
-                FileWrite::Stage => "focus a dirty file to stage".into(),
-                FileWrite::Unstage => "focus a dirty file to unstage".into(),
+                FileWrite::Stage => "nothing to stage".into(),
+                FileWrite::Unstage => "nothing to unstage".into(),
             };
             return Effect::None;
-        };
-        let paths = op_paths(&change);
+        }
+        let repo = selected[0].repo.clone();
+        let mut paths = Vec::new();
+        for file in selected.iter().filter(|file| file.repo == repo) {
+            for path in op_paths(&file.change) {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
         match write {
             FileWrite::Stage => {
-                if !is_stageable(&change) {
-                    self.status = "nothing to stage".into();
-                    return Effect::None;
-                }
-                self.status = format!("stage {}", change.path);
+                self.status = if paths.len() == 1 {
+                    format!("stage {}", paths[0])
+                } else {
+                    format!("stage {} files", paths.len())
+                };
                 Effect::Stage { repo, paths }
             }
             FileWrite::Unstage => {
-                if !is_unstageable(&change) {
-                    self.status = "nothing to unstage".into();
-                    return Effect::None;
-                }
-                self.status = format!("unstage {}", change.path);
+                self.status = if paths.len() == 1 {
+                    format!("unstage {}", paths[0])
+                } else {
+                    format!("unstage {} files", paths.len())
+                };
                 Effect::Unstage { repo, paths }
             }
         }
     }
 
     fn begin_revert(&mut self) -> Effect {
-        let Some((repo, change)) = self.focused_file_if_shown() else {
-            self.status = "focus a dirty file to revert".into();
-            return Effect::None;
-        };
-        if !is_revertible(&change) {
-            self.status = if change.staged_status.is_some() {
+        let scoped = collect_write_files(&self.snapshot, self.focused_row(), self.show_ignored);
+        let selected: Vec<ScopedFile> = scoped
+            .into_iter()
+            .filter(|file| is_revertible(&file.change))
+            .collect();
+        if selected.is_empty() {
+            let staged_only = self.focused_file_if_shown().is_some_and(|(_, change)| {
+                change.staged_status.is_some()
+                    && change.unstaged_status.is_none()
+                    && !change.untracked
+            });
+            self.status = if staged_only {
                 "nothing to discard (staged only)".into()
             } else {
                 "nothing to discard".into()
             };
             return Effect::None;
         }
+        let targets: Vec<RevertTarget> = selected
+            .iter()
+            .map(|file| RevertTarget {
+                repo: file.repo.clone(),
+                path: file.change.path.clone(),
+                untracked: file.change.untracked,
+                old_path: file.change.old_path.clone(),
+            })
+            .collect();
+        let tracked = targets.iter().filter(|t| !t.untracked).count();
+        let untracked = targets.iter().filter(|t| t.untracked).count();
         self.confirm = Some(PendingConfirm::Revert {
-            repo,
-            path: change.path.clone(),
-            untracked: change.untracked,
+            targets: targets.clone(),
         });
-        self.status = if change.untracked {
-            format!("delete {}? y/n", change.path)
+        self.status = if targets.len() == 1 {
+            if targets[0].untracked {
+                format!("delete {}? y/n", targets[0].path)
+            } else {
+                format!("revert {}? y/n", targets[0].path)
+            }
         } else {
-            format!("revert {}? y/n", change.path)
+            format!("revert {tracked} tracked, {untracked} untracked? y/Y/n")
         };
         Effect::None
     }
 
-    fn confirm_yes(&mut self) -> Effect {
+    fn confirm_yes(&mut self, clean: bool) -> Effect {
         match self.confirm.take() {
-            Some(PendingConfirm::Revert {
-                repo,
-                path,
-                untracked,
-            }) => {
-                let paths = if let Some((_, change)) = self.focused_file_if_shown() {
-                    if change.path == path {
-                        op_paths(&change)
+            Some(PendingConfirm::Revert { targets }) => {
+                if targets.is_empty() {
+                    return Effect::None;
+                }
+                let flags: Vec<bool> = targets.iter().map(|t| t.untracked).collect();
+                let delete_untracked = should_delete_untracked(&flags, clean);
+                let repo = targets[0].repo.clone();
+                let mut tracked = Vec::new();
+                let mut untracked = Vec::new();
+                for target in targets.iter().filter(|t| t.repo == repo) {
+                    let paths = match &target.old_path {
+                        Some(old) if old != &target.path => {
+                            vec![old.clone(), target.path.clone()]
+                        }
+                        _ => vec![target.path.clone()],
+                    };
+                    if target.untracked {
+                        if delete_untracked {
+                            untracked.extend(paths);
+                        }
                     } else {
-                        vec![path.clone()]
+                        tracked.extend(paths);
+                    }
+                }
+                self.status = if tracked.len() + untracked.len() == 1 {
+                    if untracked.len() == 1 {
+                        format!("delete {}", untracked[0])
+                    } else {
+                        format!("revert {}", tracked[0])
                     }
                 } else {
-                    vec![path.clone()]
-                };
-                self.status = if untracked {
-                    format!("delete {path}")
-                } else {
-                    format!("revert {path}")
+                    format!(
+                        "revert {} tracked, {} untracked",
+                        tracked.len(),
+                        untracked.len()
+                    )
                 };
                 Effect::Revert {
                     repo,
-                    paths,
+                    tracked,
                     untracked,
                 }
             }
@@ -1244,7 +1302,7 @@ impl AppState {
     fn push_effect(&mut self) -> Effect {
         let targets = push_targets(&self.snapshot, self.focused_row(), self.show_ignored);
         if targets.is_empty() {
-            self.status = "focus a visible repo to push".into();
+            self.status = "nothing to push".into();
             return Effect::None;
         }
         self.status = format!("push {}", targets.join(" "));
@@ -1277,10 +1335,11 @@ impl AppState {
                 None => (false, None),
             }
         };
+        let _ = latest_stash_ref;
         let ops = stash_ops_for_context(&StashOpsContext {
             dirty,
             dirty_paths,
-            latest_stash_ref: focused_stash.or(latest_stash_ref),
+            focused_stash_ref: focused_stash,
         });
         if ops.is_empty() {
             self.stash_menu = None;
@@ -1290,7 +1349,11 @@ impl AppState {
         }
         self.stash_repo = Some(repo);
         self.stash_menu = Some(ops);
-        self.status = "stash  s create  a apply  p pop  d drop".into();
+        self.status = if self.focused_graph_stash_ref().is_some() {
+            "stash  s create  a apply  p pop  d drop".into()
+        } else {
+            "stash  s create".into()
+        };
     }
 
     fn stash_menu_key(&mut self, input: Option<char>, enter: bool, escape: bool) -> Effect {
@@ -1874,6 +1937,150 @@ mod tests {
     }
 
     #[test]
+    fn default_branch_on_focused_default_repo_is_noop() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        assert_eq!(app.dispatch(Action::DefaultBranch), Effect::None);
+        assert!(app.status.contains("no non-default"));
+        let snapshot = build_workspace_snapshot(
+            &[RepoSnapshot {
+                repo: "app".into(),
+                branch: "feature/x".into(),
+                sync_status: SyncStatus::NoUpstream,
+                sync_note: String::new(),
+                has_unstaged: false,
+                has_staged: false,
+                has_untracked: false,
+                changes: Vec::new(),
+                checkout_kind: CheckoutKind::Primary,
+                primary_repo: None,
+                merged_into_default: None,
+                default_branch_override: None,
+            }],
+            &[],
+            false,
+            &[],
+        );
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        focus_repo(&mut app, "app");
+        match app.dispatch(Action::DefaultBranch) {
+            Effect::DefaultBranch { repos } => assert_eq!(repos, vec!["app"]),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn two_file_repo() -> RepoSnapshot {
+        RepoSnapshot {
+            repo: "app".into(),
+            branch: "main".into(),
+            sync_status: SyncStatus::NoUpstream,
+            sync_note: String::new(),
+            has_unstaged: true,
+            has_staged: false,
+            has_untracked: true,
+            changes: vec![
+                FileChange {
+                    path: "README.md".into(),
+                    staged_status: None,
+                    unstaged_status: Some("M".into()),
+                    untracked: false,
+                    old_path: None,
+                },
+                FileChange {
+                    path: "new.txt".into(),
+                    staged_status: None,
+                    unstaged_status: None,
+                    untracked: true,
+                    old_path: None,
+                },
+            ],
+            checkout_kind: CheckoutKind::Primary,
+            primary_repo: None,
+            merged_into_default: None,
+            default_branch_override: None,
+        }
+    }
+
+    #[test]
+    fn bulk_stage_on_repo_and_workspace_rows() {
+        let snapshot = build_workspace_snapshot(
+            &[two_file_repo(), repo("notes", true)],
+            &["notes".into()],
+            false,
+            &[],
+        );
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        app.cursor = 0;
+        match app.dispatch(Action::Stage) {
+            Effect::Stage { repo, mut paths } => {
+                assert_eq!(repo, "app");
+                paths.sort();
+                assert_eq!(paths, vec!["README.md", "new.txt"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        focus_repo(&mut app, "app");
+        match app.dispatch(Action::Stage) {
+            Effect::Stage { repo, mut paths } => {
+                assert_eq!(repo, "app");
+                paths.sort();
+                assert_eq!(paths, vec!["README.md", "new.txt"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        focus_file(&mut app, "README.md");
+        match app.dispatch(Action::Stage) {
+            Effect::Stage { paths, .. } => assert_eq!(paths, vec!["README.md"]),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn revert_y_keeps_untracked_on_mixed_scope_y_clean_deletes() {
+        let snapshot = build_workspace_snapshot(&[two_file_repo()], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        focus_repo(&mut app, "app");
+        assert_eq!(app.dispatch(Action::Revert), Effect::None);
+        match app.dispatch(Action::ConfirmYes) {
+            Effect::Revert { tracked, untracked, .. } => {
+                assert_eq!(tracked, vec!["README.md"]);
+                assert!(untracked.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+        focus_repo(&mut app, "app");
+        app.dispatch(Action::Revert);
+        match app.dispatch(Action::ConfirmYesClean) {
+            Effect::Revert { tracked, untracked, .. } => {
+                assert_eq!(tracked, vec!["README.md"]);
+                assert_eq!(untracked, vec!["new.txt"]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_in_sync_is_noop_ahead_allowed() {
+        let mut in_sync = repo("app", false);
+        in_sync.sync_status = SyncStatus::UpToDate;
+        let mut ahead = repo("lib", false);
+        ahead.sync_status = SyncStatus::Ahead;
+        ahead.sync_note = "ahead 1".into();
+        let snapshot = build_workspace_snapshot(&[in_sync, ahead], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        app.folds.remove("group:no-updates");
+        app.rebuild_rows();
+        focus_repo(&mut app, "app");
+        assert_eq!(app.dispatch(Action::Push), Effect::None);
+        assert!(app.status.contains("nothing to push"));
+        focus_repo(&mut app, "lib");
+        match app.dispatch(Action::Push) {
+            Effect::Push { repos } => assert_eq!(repos, vec!["lib"]),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn help_toggle_does_not_quit() {
         let mut app = state();
         assert_eq!(app.dispatch(Action::ToggleHelp), Effect::None);
@@ -1923,8 +2130,13 @@ mod tests {
         app.dispatch(Action::SearchCancel);
         assert!(app.rows.iter().all(|r| !r.label.contains("notes")));
         app.cursor = 0;
-        assert_eq!(app.dispatch(Action::Stage), Effect::None);
-        assert!(app.status.contains("focus a dirty file"));
+        match app.dispatch(Action::Stage) {
+            Effect::Stage { repo, paths } => {
+                assert_eq!(repo, "app");
+                assert_eq!(paths, vec!["README.md"]);
+            }
+            other => panic!("{other:?}"),
+        }
         app.dispatch(Action::ToggleShowIgnored);
         assert!(app.rows.iter().any(|r| r.label.contains("notes")));
         focus_file(&mut app, "README.md");
@@ -1944,8 +2156,6 @@ mod tests {
     #[test]
     fn stage_unstage_revert_on_file_only() {
         let mut app = state();
-        app.cursor = 0;
-        assert_eq!(app.dispatch(Action::Stage), Effect::None);
         focus_file(&mut app, "README.md");
         match app.dispatch(Action::Stage) {
             Effect::Stage { repo, paths } => {
@@ -1985,12 +2195,12 @@ mod tests {
         match app.dispatch(Action::ConfirmYes) {
             Effect::Revert {
                 repo,
-                paths,
+                tracked,
                 untracked,
             } => {
                 assert_eq!(repo, "app");
-                assert_eq!(paths, vec!["README.md"]);
-                assert!(!untracked);
+                assert_eq!(tracked, vec!["README.md"]);
+                assert!(untracked.is_empty());
             }
             other => panic!("{other:?}"),
         }
@@ -2107,9 +2317,9 @@ mod tests {
         );
         app.dispatch(Action::Revert);
         match app.dispatch(Action::ConfirmYes) {
-            Effect::Revert { paths, untracked, .. } => {
-                assert!(!untracked);
-                revert_tracked_file(&repo_dir, &paths[0]).unwrap();
+            Effect::Revert { tracked, untracked, .. } => {
+                assert!(untracked.is_empty());
+                revert_tracked_file(&repo_dir, &tracked[0]).unwrap();
             }
             other => panic!("{other:?}"),
         }
@@ -2207,8 +2417,13 @@ mod tests {
     fn stash_pop_drop_confirm_cancel_and_apply() {
         let mut app = state();
         focus_file(&mut app, "README.md");
+        app.focus = FocusPane::Left;
         app.open_stash_menu("app".into(), Some("stash@{0}".into()));
-        assert!(app.stash_menu.is_some());
+        let ops = app.stash_menu.clone().expect("file menu");
+        assert_eq!(
+            ops.iter().map(|op| op.id).collect::<Vec<_>>(),
+            vec![StashOpId::Create]
+        );
         assert_eq!(app.dispatch(Action::StashMenuCancel), Effect::None);
         assert!(app.stash_menu.is_none());
         assert!(app.status.contains("cancelled"));
@@ -2218,36 +2433,58 @@ mod tests {
             repo: "app".into(),
             paths: vec!["README.md".into()],
         });
-
         app.open_stash_menu("app".into(), Some("stash@{0}".into()));
-        match app.dispatch(Action::StashMenuChar('a')) {
+        assert_eq!(app.dispatch(Action::StashMenuChar('a')), Effect::None);
+        assert!(app.confirm.is_none());
+        assert_eq!(app.dispatch(Action::StashMenuChar('p')), Effect::None);
+        assert!(app.confirm.is_none());
+        assert_eq!(app.dispatch(Action::StashMenuChar('d')), Effect::None);
+        assert!(app.confirm.is_none());
+
+        app.folds.remove("group:no-updates");
+        app.rebuild_rows();
+        focus_repo(&mut app, "lib");
+        app.focus = FocusPane::Left;
+        app.open_stash_menu("lib".into(), Some("stash@{0}".into()));
+        assert!(app.stash_menu.is_none());
+        assert!(app.status.contains("nothing to stash"));
+
+        focus_repo(&mut app, "app");
+        install_graph(
+            &mut app,
+            vec![Stash {
+                stash_ref: "stash@{0}".into(),
+                subject: "latest".into(),
+                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            }],
+        );
+        let idx = app
+            .graph
+            .as_ref()
+            .unwrap()
+            .visible_rows()
+            .iter()
+            .position(|r| matches!(r, GraphRow::Stash(s) if s.stash_ref == "stash@{0}"))
+            .expect("stash");
+        app.graph_cursor = idx;
+        match app.dispatch(Action::GraphStashApply) {
             Effect::StashApply { repo, stash_ref } => {
                 assert_eq!(repo, "app");
                 assert_eq!(stash_ref, "stash@{0}");
             }
             other => panic!("{other:?}"),
         }
-
-        app.open_stash_menu("app".into(), Some("stash@{0}".into()));
-        assert_eq!(app.dispatch(Action::StashMenuChar('p')), Effect::None);
+        assert_eq!(app.dispatch(Action::GraphStashDrop), Effect::None);
         assert!(app.confirm.is_some());
         assert_eq!(app.dispatch(Action::ConfirmNo), Effect::None);
-        assert!(app.status.contains("pop cancelled"));
-
-        app.open_stash_menu("app".into(), Some("stash@{0}".into()));
-        app.dispatch(Action::StashMenuChar('p'));
-        match app.dispatch(Action::ConfirmYes) {
-            Effect::StashPop { stash_ref, .. } => assert_eq!(stash_ref, "stash@{0}"),
-            other => panic!("{other:?}"),
-        }
-
-        app.open_stash_menu("app".into(), Some("stash@{0}".into()));
-        app.dispatch(Action::StashMenuChar('d'));
-        assert_eq!(app.dispatch(Action::ConfirmNo), Effect::None);
-        app.open_stash_menu("app".into(), Some("stash@{0}".into()));
-        app.dispatch(Action::StashMenuChar('d'));
+        assert!(app.status.contains("drop cancelled"));
+        app.dispatch(Action::GraphStashDrop);
         match app.dispatch(Action::ConfirmYes) {
             Effect::StashDrop { stash_ref, .. } => assert_eq!(stash_ref, "stash@{0}"),
+            other => panic!("{other:?}"),
+        }
+        match app.dispatch(Action::GraphStashPop) {
+            Effect::StashPop { stash_ref, .. } => assert_eq!(stash_ref, "stash@{0}"),
             other => panic!("{other:?}"),
         }
     }
@@ -2401,8 +2638,25 @@ mod tests {
             "# seed\n"
         );
         let latest = latest_stash_ref(&repo_dir).expect("stash");
-        app.open_stash_menu("app".into(), Some(latest.clone()));
-        match app.dispatch(Action::StashMenuChar('a')) {
+        focus_repo(&mut app, "app");
+        install_graph(
+            &mut app,
+            vec![Stash {
+                stash_ref: latest.clone(),
+                subject: "latest".into(),
+                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            }],
+        );
+        let idx = app
+            .graph
+            .as_ref()
+            .unwrap()
+            .visible_rows()
+            .iter()
+            .position(|r| matches!(r, GraphRow::Stash(s) if s.stash_ref == latest))
+            .expect("stash row");
+        app.graph_cursor = idx;
+        match app.dispatch(Action::GraphStashApply) {
             Effect::StashApply { stash_ref, .. } => stash_apply(&repo_dir, &stash_ref).unwrap(),
             other => panic!("{other:?}"),
         }
@@ -2410,12 +2664,10 @@ mod tests {
             fs::read_to_string(repo_dir.join("README.md")).unwrap(),
             "# dirty\n"
         );
-        app.open_stash_menu("app".into(), Some(latest.clone()));
-        app.dispatch(Action::StashMenuChar('d'));
+        app.dispatch(Action::GraphStashDrop);
         app.dispatch(Action::ConfirmNo);
         assert_eq!(latest_stash_ref(&repo_dir).as_deref(), Some(latest.as_str()));
-        app.open_stash_menu("app".into(), Some(latest.clone()));
-        app.dispatch(Action::StashMenuChar('d'));
+        app.dispatch(Action::GraphStashDrop);
         match app.dispatch(Action::ConfirmYes) {
             Effect::StashDrop { stash_ref, .. } => stash_drop(&repo_dir, &stash_ref).unwrap(),
             other => panic!("{other:?}"),
@@ -2425,16 +2677,28 @@ mod tests {
         fs::write(repo_dir.join("README.md"), "# again\n").unwrap();
         stash_push(&repo_dir, &[]).unwrap();
         let latest = latest_stash_ref(&repo_dir).expect("stash2");
-        app.open_stash_menu("app".into(), Some(latest.clone()));
-        app.dispatch(Action::StashMenuChar('p'));
-        app.dispatch(Action::ConfirmNo);
-        assert_eq!(latest_stash_ref(&repo_dir).as_deref(), Some(latest.as_str()));
-        app.open_stash_menu("app".into(), Some(latest.clone()));
-        app.dispatch(Action::StashMenuChar('p'));
-        match app.dispatch(Action::ConfirmYes) {
-            Effect::StashPop { stash_ref, .. } => stash_pop(&repo_dir, &stash_ref).unwrap(),
-            other => panic!("{other:?}"),
-        }
+        install_graph(
+            &mut app,
+            vec![Stash {
+                stash_ref: latest.clone(),
+                subject: "again".into(),
+                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            }],
+        );
+        let idx = app
+            .graph
+            .as_ref()
+            .unwrap()
+            .visible_rows()
+            .iter()
+            .position(|r| matches!(r, GraphRow::Stash(s) if s.stash_ref == latest))
+            .expect("stash2 row");
+        app.graph_cursor = idx;
+        assert_eq!(app.dispatch(Action::GraphStashPop), Effect::StashPop {
+            repo: "app".into(),
+            stash_ref: latest.clone(),
+        });
+        stash_pop(&repo_dir, &latest).unwrap();
         assert!(latest_stash_ref(&repo_dir).is_none());
 
         focus_repo(&mut app, "app");
@@ -2818,15 +3082,17 @@ mod tests {
     }
 
     #[test]
-    fn stash_menu_from_repo_or_file_stays_latest_only() {
+    fn stash_menu_from_repo_or_file_is_create_only() {
         let mut app = state();
         focus_file(&mut app, "README.md");
         app.focus = FocusPane::Left;
         app.open_stash_menu("app".into(), Some("stash@{0}".into()));
         let ops = app.stash_menu.clone().expect("menu");
-        assert!(ops.iter().all(|op| {
-            op.stash_ref.is_none() || op.stash_ref.as_deref() == Some("stash@{0}")
-        }));
+        assert_eq!(
+            ops.iter().map(|op| op.id).collect::<Vec<_>>(),
+            vec![StashOpId::Create]
+        );
+        assert!(ops.iter().all(|op| op.stash_ref.is_none()));
         app.stash_menu = None;
         focus_repo(&mut app, "app");
         install_graph(
@@ -2848,6 +3114,7 @@ mod tests {
         app.graph_cursor = idx;
         app.open_stash_menu("app".into(), Some("stash@{0}".into()));
         let ops = app.stash_menu.clone().expect("graph menu");
+        assert!(ops.iter().any(|op| op.id == StashOpId::Drop));
         assert!(
             ops.iter().any(|op| op.stash_ref.as_deref() == Some("stash@{1}")),
             "{ops:?}"

@@ -80,7 +80,8 @@ fn key_to_action(
             _ => Action::None,
         },
         InputMode::Confirm => match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::ConfirmYes,
+            KeyCode::Char('Y') => Action::ConfirmYesClean,
+            KeyCode::Char('y') | KeyCode::Enter => Action::ConfirmYes,
             KeyCode::Char('n') | KeyCode::Esc => Action::ConfirmNo,
             _ => Action::None,
         },
@@ -323,6 +324,7 @@ mod tests {
     fn confirm_y_n() {
         let mode = InputMode::Confirm;
         assert_eq!(event_to_action(&key(KeyCode::Char('y')), mode, false, false), Action::ConfirmYes);
+        assert_eq!(event_to_action(&key(KeyCode::Char('Y')), mode, false, false), Action::ConfirmYesClean);
         assert_eq!(event_to_action(&key(KeyCode::Char('n')), mode, false, false), Action::ConfirmNo);
         assert_eq!(event_to_action(&key(KeyCode::Char('s')), mode, false, false), Action::None);
     }

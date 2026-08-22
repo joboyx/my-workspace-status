@@ -21,15 +21,15 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 | `.` | Show or hide ignored repos |
 | `/` | Search prompt. Enter arms the query. Esc cancels |
 | `n` / `N` | Next / previous search match (previous is `N`, not `p`) |
-| `s` | Stage the focused dirty file |
-| `u` | Unstage the focused dirty file |
-| `x` | Revert the focused dirty file (confirm `y` / `n`) |
+| `s` | Stage dirty files in the focused scope (file, repo, checkout, or workspace) |
+| `u` | Unstage dirty files in the focused scope |
+| `x` | Revert dirty files in the focused scope. `y` discards tracked (keeps untracked except a sole untracked file). `Y` also deletes untracked |
 | `e` | Edit the focused file (`$EDITOR` or config `editor`) |
 | `f` | Fetch visible targets |
 | `p` | Pull visible targets that are behind |
-| `d` | Switch visible targets to the default branch |
-| `P` | Push the focused visible repo or checkout |
-| `S` | Stash menu (`s` create, `a` apply, `p` pop, `d` drop). From a repo or file row this targets the latest stash. From a focused graph stash row it targets that `stash@{n}` |
+| `d` | Switch visible targets that are off the default branch. Already-default is a no-op (does not pull) |
+| `P` | Push the focused visible repo or checkout when it is ahead, diverged, or has no upstream. In-sync is a no-op |
+| `S` | Stash menu. On a dirty file or repo this is create-only (`s`). On a clean repo it is a no-op. Apply / pop / drop only from a focused graph stash row (`a` / `p` / `D`, or `S` there) |
 | `Enter` | Focus the right pane, or drill: graph commit → file list → commit diff |
 | `Esc` | Pop one drill level, or return focus to the tree |
 | `a` / `p` / `D` | Apply / pop / drop the focused graph stash row. Drop asks `y` / `n` |
@@ -55,13 +55,14 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 
 - Tree of repos, linked worktrees, and dirty files from the same snapshot builder as `--plain` / `--json`
 - Right pane: file diff when a dirty file is focused. Graph pane via `workspace-status-graph` when a repo or worktree is focused
-- Hidden ignored repos stay out of the tree, search, stage / unstage / revert, and fetch / pull / default unless you show them
+- Hidden ignored repos stay out of the tree, search, stage / unstage / revert, and fetch / pull / push / default unless you show them
 - Search matches include folded rows. Focusing a match unfolds its ancestors
-- Stage / unstage / revert act on the focused dirty file only. Repo, dir, and workspace rows are a no-op. Revert asks `y` / `n` before it writes. Stage and unstage do not confirm
+- Stage / unstage / revert act on every dirty file in the focused scope (file, flat repo, checkout, or workspace). A file row stays single-file. Family containers do not mix linked worktree files. Hidden ignored stay out unless shown. Revert asks `y` / `Y` / `n` on the status line. `y` discards tracked and keeps untracked, except a sole untracked file which still deletes. `Y` also deletes untracked. Stage and unstage do not confirm
 - `e` uses config `editor`, then `$EDITOR`, then `$VISUAL`, then `vim`. A TTY editor leaves the alternate screen and returns to the same fold, focus, and scroll. GUI editors (`cursor`, `code`) spawn without a remount. Resume drains leftover raw-mode keys
 - Fetch / pull / default do not fan out to linked worktrees unless the focused row is that worktree
-- `P` pushes the focused visible repo or checkout only. Hidden ignored stay out. Linked worktrees push only when that row is focused
-- `S` opens a stash overlay. `s` creates a stash (pathspec when a dirty file is focused). From a repo or file row, `a` / `p` / `d` target the latest stash. From a focused graph stash row they target that `stash@{n}`. Pop and drop ask `y` / `n` first, same as revert
+- `P` pushes the focused visible repo or checkout only when it is ahead, diverged, or has no upstream. In-sync is a no-op. Workspace never fans out. Hidden ignored stay out. Linked worktrees push only when that row is focused
+- `S` on a dirty file or repo is create-only (`s stash`). `S` on a clean repo that has `stash@{0}` is a no-op. Apply / pop / drop only from a focused graph stash row (`a` / `p` / `D`, plus `S` there). Never drop latest from a file or repo row. Pop and drop ask `y` / `n` first
+- `d` switches visible targets that are off the default branch. Already-default is a no-op and does not pull. Dirty trees still skip
 - `Enter` on a graph commit (or stash / uncommitted row) opens that object's file list. `Enter` on a file opens the commit diff. `Esc` pops each level. Hidden ignored repos stay out of the drill unless shown
 - Graph stash rows are first-class: `a` apply, `p` pop, and `D` drop the focused `stash@{n}`. Drop asks `y` / `n`
 - `b` opens the local branch picker on a checkout or flat repo. Type to filter. Enter checks out. `C` creates a branch at HEAD. When the local branch is out of sync with `origin/*`, checkout asks `y` / `n` then pulls

@@ -218,27 +218,36 @@ fn apply_effect(
         }
         Effect::Revert {
             repo,
-            paths,
+            tracked,
             untracked,
         } => {
             let dir = opts.cwd.join(&repo);
-            for path in &paths {
-                let result = if untracked {
-                    remove_untracked_file(&dir, path)
-                } else {
-                    revert_tracked_file(&dir, path)
-                };
-                if let Err(err) = result {
+            for path in &tracked {
+                if let Err(err) = revert_tracked_file(&dir, path) {
+                    state.status = format!("revert failed: {err}");
+                    return;
+                }
+            }
+            for path in &untracked {
+                if let Err(err) = remove_untracked_file(&dir, path) {
                     state.status = format!("revert failed: {err}");
                     return;
                 }
             }
             reload_snapshot(state, opts);
-            state.status = if untracked {
-                format!("deleted {}", paths.last().map(String::as_str).unwrap_or(""))
+            if tracked.len() + untracked.len() == 1 {
+                if untracked.len() == 1 {
+                    state.status = format!("deleted {}", untracked[0]);
+                } else {
+                    state.status = format!("reverted {}", tracked[0]);
+                }
             } else {
-                format!("reverted {}", paths.last().map(String::as_str).unwrap_or(""))
-            };
+                state.status = format!(
+                    "reverted {} tracked, {} untracked",
+                    tracked.len(),
+                    untracked.len()
+                );
+            }
             load_right(state);
         }
         Effect::EditFile { repo, path } => {
