@@ -6,6 +6,8 @@ On a TTY, `workspace-status` and `ws` open a ratatui TUI.
 `--plain` prints human text. `--json` prints the same snapshot as JSON.
 `-v`, `-p`, and `-d` stay headless. A non-TTY run without those flags prints `--plain`.
 
+Screenshots of the tree, graph, diff, and overlays: [root README](../../README.md#screenshots).
+
 The TypeScript Ink app is still in this repository for features the Rust TUI does not cover. See [docs/tui-rust.md](../../docs/tui-rust.md).
 
 Install from this crate:
