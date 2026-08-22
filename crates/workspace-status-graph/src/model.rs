@@ -21,6 +21,69 @@ pub struct GraphModel {
     pub uncommitted: bool,
 }
 
+/// Kind of annotated ref on a commit. Same set as Ink `GraphRefKind`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefKind {
+    /// `refs/heads/*`
+    Local,
+    /// `refs/remotes/*` (short name may be `origin/…`)
+    Remote,
+    /// `refs/tags/*`
+    Tag,
+}
+
+/// A branch or tag label pointing at a commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphRef {
+    /// Local, remote, or tag.
+    pub kind: RefKind,
+    /// Short name (`main`, `origin/main`, `v1.0`).
+    pub name: String,
+}
+
+impl GraphRef {
+    pub fn local(name: impl Into<String>) -> Self {
+        Self {
+            kind: RefKind::Local,
+            name: name.into(),
+        }
+    }
+
+    pub fn remote(name: impl Into<String>) -> Self {
+        Self {
+            kind: RefKind::Remote,
+            name: name.into(),
+        }
+    }
+
+    pub fn tag(name: impl Into<String>) -> Self {
+        Self {
+            kind: RefKind::Tag,
+            name: name.into(),
+        }
+    }
+}
+
+impl From<&str> for GraphRef {
+    fn from(name: &str) -> Self {
+        if name.starts_with("origin/") {
+            Self::remote(name)
+        } else {
+            Self::local(name)
+        }
+    }
+}
+
+impl From<String> for GraphRef {
+    fn from(name: String) -> Self {
+        if name.starts_with("origin/") {
+            Self::remote(name)
+        } else {
+            Self::local(name)
+        }
+    }
+}
+
 /// One commit in the loaded window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Commit {
@@ -30,8 +93,8 @@ pub struct Commit {
     pub subject: String,
     /// Parent ids, first parent first.
     pub parents: Vec<String>,
-    /// Branch or tag names that point at this commit.
-    pub refs: Vec<String>,
+    /// Branch or tag labels that point at this commit.
+    pub refs: Vec<GraphRef>,
 }
 
 /// One `git stash` entry.

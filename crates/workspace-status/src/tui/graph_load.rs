@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use workspace_status_graph::{Commit, GraphModel, Stash, SyncState, SyncStatus, Worktree};
+use workspace_status_graph::{
+    Commit, GraphModel, GraphRef, Stash, SyncState, SyncStatus, Worktree,
+};
 
 use crate::git::exec_git;
 use crate::snapshot::{CheckoutKind, WorkspaceRepoSnapshot, WorkspaceSnapshot};
@@ -86,7 +88,7 @@ fn load_commits(repo_dir: &Path) -> Vec<Commit> {
             let commit_refs = refs
                 .iter()
                 .filter(|(sha, _)| sha == &id)
-                .map(|(_, name)| name.clone())
+                .map(|(_, graph_ref)| graph_ref.clone())
                 .collect();
             Some(Commit {
                 id,
@@ -98,20 +100,40 @@ fn load_commits(repo_dir: &Path) -> Vec<Commit> {
         .collect()
 }
 
-fn load_refs(repo_dir: &Path) -> Vec<(String, String)> {
+fn classify_ref(refname: &str, short: &str) -> Option<GraphRef> {
+    if short.ends_with("/HEAD") {
+        return None;
+    }
+    if refname.starts_with("refs/heads/") {
+        Some(GraphRef::local(short))
+    } else if refname.starts_with("refs/remotes/") {
+        Some(GraphRef::remote(short))
+    } else if refname.starts_with("refs/tags/") {
+        Some(GraphRef::tag(short))
+    } else {
+        None
+    }
+}
+
+fn load_refs(repo_dir: &Path) -> Vec<(String, GraphRef)> {
     let raw = exec_git(
         &[
             "for-each-ref",
-            "--format=%(objectname)%00%(refname:short)",
+            "--format=%(objectname)%00%(refname)%00%(refname:short)",
             "refs/heads",
+            "refs/remotes",
             "refs/tags",
         ],
         repo_dir,
     );
     raw.lines()
         .filter_map(|line| {
-            let (sha, name) = line.split_once('\0')?;
-            Some((sha.to_string(), name.to_string()))
+            let mut parts = line.split('\0');
+            let sha = parts.next()?;
+            let refname = parts.next()?;
+            let short = parts.next().unwrap_or("");
+            let graph_ref = classify_ref(refname, short)?;
+            Some((sha.to_string(), graph_ref))
         })
         .collect()
 }
@@ -223,5 +245,26 @@ mod tests {
         );
         assert_eq!(parse_ahead_behind("ahead by 3 commits"), (3, 0));
         assert_eq!(parse_ahead_behind("behind by 4 commits"), (0, 4));
+    }
+
+    #[test]
+    fn classify_ref_kinds() {
+        assert_eq!(
+            classify_ref("refs/heads/main", "main"),
+            Some(GraphRef::local("main"))
+        );
+        assert_eq!(
+            classify_ref("refs/remotes/origin/main", "origin/main"),
+            Some(GraphRef::remote("origin/main"))
+        );
+        assert_eq!(
+            classify_ref("refs/remotes/upstream/main", "upstream/main"),
+            Some(GraphRef::remote("upstream/main"))
+        );
+        assert_eq!(
+            classify_ref("refs/tags/v1.0", "v1.0"),
+            Some(GraphRef::tag("v1.0"))
+        );
+        assert_eq!(classify_ref("refs/remotes/origin/HEAD", "origin/HEAD"), None);
     }
 }

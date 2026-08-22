@@ -15,7 +15,8 @@ use super::drill::{
 use super::easy_motion::{resolve_easy_motion_jump, visible_window, EasyMotionResolve};
 use super::theme::{cycle_theme_id, theme_from_env, ThemeId};
 use super::branches::{
-    can_open_branch_picker, is_valid_branch_name, BranchPickerState, CreateBranchState,
+    can_open_branch_picker, checkout_name_for_ref, checkoutable_branch_names, is_valid_branch_name,
+    BranchPickerState, CreateBranchState,
 };
 use super::keys::InputMode;
 use super::fetch::background_fetch_targets;
@@ -289,6 +290,12 @@ impl AppState {
         self.focus == FocusPane::Right
             && self.drill.is_graph()
             && self.focused_graph_stash_ref().is_some()
+    }
+
+    pub fn graph_commit_focused(&self) -> bool {
+        self.focus == FocusPane::Right
+            && self.drill.is_graph()
+            && matches!(self.focused_graph_row(), Some(GraphRow::Commit { .. }))
     }
 
     pub fn rebuild_rows(&mut self) {
@@ -627,6 +634,14 @@ impl AppState {
             Action::GraphStashApply => self.graph_stash_op(StashOpId::Apply),
             Action::GraphStashPop => self.graph_stash_op(StashOpId::Pop),
             Action::GraphStashDrop => self.graph_stash_op(StashOpId::Drop),
+            Action::GraphCheckout => {
+                self.drag = SplitDrag::None;
+                self.begin_graph_checkout()
+            }
+            Action::GraphCreateBranch => {
+                self.drag = SplitDrag::None;
+                self.begin_graph_create_branch()
+            }
             Action::EasyMotionStart => self.start_easy_motion(),
             Action::EasyMotionChar(c) => self.easy_motion_char(c),
             Action::EasyMotionCancel => self.cancel_easy_motion(),
@@ -1484,7 +1499,7 @@ impl AppState {
         let filter = picker.filter.clone();
         if let Some(selected) = picker.selected().cloned() {
             self.branch_picker = None;
-            return self.checkout_or_confirm(repo, selected.name);
+            return self.checkout_or_confirm(repo, checkout_name_for_ref(&selected.name));
         }
         if is_valid_branch_name(&filter) {
             self.branch_picker = None;
@@ -1535,7 +1550,11 @@ impl AppState {
         };
         let repo = picker.repo.clone();
         let seed = picker.filter.clone();
-        self.create_branch = Some(CreateBranchState { repo, name: seed });
+        self.create_branch = Some(CreateBranchState {
+            repo,
+            name: seed,
+            commit_id: None,
+        });
         self.status = "create branch  Enter confirm  Esc cancel".into();
         Effect::None
     }
@@ -1551,10 +1570,83 @@ impl AppState {
         }
         self.branch_picker = None;
         self.status = format!("create {}", create.name.trim());
-        Effect::CreateBranch {
-            repo: create.repo,
-            name: create.name.trim().to_string(),
+        if let Some(commit_id) = create.commit_id {
+            Effect::CreateBranchAt {
+                repo: create.repo,
+                name: create.name.trim().to_string(),
+                commit_id,
+            }
+        } else {
+            Effect::CreateBranch {
+                repo: create.repo,
+                name: create.name.trim().to_string(),
+            }
         }
+    }
+
+    fn begin_graph_checkout(&mut self) -> Effect {
+        if !self.graph_commit_focused() {
+            return Effect::None;
+        }
+        if self.hidden_ignored_focus() {
+            self.status = "focus a visible repo to checkout".into();
+            return Effect::None;
+        }
+        let Some(repo) = self.focused_graph_repo() else {
+            return Effect::None;
+        };
+        let Some(GraphRow::Commit { commit, .. }) = self.focused_graph_row() else {
+            return Effect::None;
+        };
+        let names = checkoutable_branch_names(&commit.refs);
+        if names.is_empty() {
+            return Effect::None;
+        }
+        if self.graph_repo_is_dirty(&repo) {
+            self.status = "Dirty worktree — commit or stash first".into();
+            return Effect::None;
+        }
+        self.help_open = false;
+        if names.len() == 1 {
+            return self.checkout_or_confirm(repo, checkout_name_for_ref(&names[0]));
+        }
+        self.branch_picker = Some(BranchPickerState::from_names(repo, names));
+        self.status = "j/k move  type filter  Enter checkout  C create".into();
+        Effect::None
+    }
+
+    fn begin_graph_create_branch(&mut self) -> Effect {
+        if !self.graph_commit_focused() {
+            return Effect::None;
+        }
+        if self.hidden_ignored_focus() {
+            self.status = "focus a visible repo to create a branch".into();
+            return Effect::None;
+        }
+        let Some(repo) = self.focused_graph_repo() else {
+            return Effect::None;
+        };
+        let Some(GraphRow::Commit { commit, .. }) = self.focused_graph_row() else {
+            return Effect::None;
+        };
+        let commit_id = commit.id.clone();
+        let short = commit_id.get(..7).unwrap_or(&commit_id).to_string();
+        self.help_open = false;
+        self.create_branch = Some(CreateBranchState {
+            repo,
+            name: String::new(),
+            commit_id: Some(commit_id),
+        });
+        self.status = format!("create branch at {short}  Enter confirm  Esc cancel");
+        Effect::None
+    }
+
+    fn graph_repo_is_dirty(&self, repo: &str) -> bool {
+        self.snapshot
+            .repos
+            .iter()
+            .find(|row| row.repo == repo)
+            .is_some_and(|row| row.has_unstaged || row.has_staged)
     }
 
     fn tree_file_focused(&self) -> bool {
@@ -1944,7 +2036,7 @@ mod tests {
     use crate::tui::split::{pane_widths, side_by_side_column_widths, DIFF_SPLIT_FRACTION};
     use crate::tui::watch::watch_interval_ms;
     use crate::snapshot::{build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus};
-    use workspace_status_graph::{Commit, Stash};
+    use workspace_status_graph::{Commit, GraphRef, Stash};
 
     fn repo(name: &str, dirty: bool) -> RepoSnapshot {
         RepoSnapshot {
@@ -2776,6 +2868,176 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    fn graph_state(dirty: bool) -> AppState {
+        let mut app_repo = repo("app", dirty);
+        if !dirty {
+            app_repo.branch = "feature/x".into();
+        }
+        let snapshot = build_workspace_snapshot(&[app_repo, repo("notes", true)], &["notes".into()], false, &[]);
+        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+    }
+
+    fn install_graph_commit(app: &mut AppState, refs: &[&str]) {
+        install_graph_commit_refs(app, refs.iter().map(|s| GraphRef::from(*s)).collect());
+    }
+
+    fn install_graph_commit_refs(app: &mut AppState, refs: Vec<GraphRef>) {
+        let id = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let model = GraphModel {
+            commits: vec![Commit {
+                id: id.into(),
+                subject: "head".into(),
+                parents: Vec::new(),
+                refs,
+            }],
+            stashes: Vec::new(),
+            worktrees: Vec::new(),
+            head_id: Some(id.into()),
+            sync: None,
+            show_ignored: app.show_ignored,
+            uncommitted: false,
+        };
+        app.set_graph(model, "app".into(), id.into());
+        app.focus = FocusPane::Right;
+        app.drill = DrillView::Graph;
+    }
+
+    #[test]
+    fn graph_commit_b_one_local_ref_checkouts() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_graph_commit(&mut app, &["main"]);
+        match app.dispatch(Action::GraphCheckout) {
+            Effect::CheckoutBranch {
+                repo,
+                branch,
+                pull_after,
+            } => {
+                assert_eq!(repo, "app");
+                assert_eq!(branch, "main");
+                assert!(!pull_after);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn graph_commit_b_several_refs_opens_name_picker() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_graph_commit(&mut app, &["origin/z", "topic", "main", "origin/main"]);
+        assert_eq!(app.dispatch(Action::GraphCheckout), Effect::None);
+        let picker = app.branch_picker.as_ref().expect("picker");
+        let names: Vec<&str> = picker.branches.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, vec!["main", "topic", "origin/main", "origin/z"]);
+        app.dispatch(Action::BranchMove(2));
+        match app.dispatch(Action::BranchSubmit) {
+            Effect::CheckoutBranch { branch, .. } => assert_eq!(branch, "main"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn graph_commit_b_dirty_refuses() {
+        let mut app = graph_state(true);
+        focus_repo(&mut app, "app");
+        install_graph_commit(&mut app, &["main"]);
+        assert_eq!(app.dispatch(Action::GraphCheckout), Effect::None);
+        assert!(app.branch_picker.is_none());
+        assert!(app.status.contains("commit or stash"));
+    }
+
+    #[test]
+    fn graph_commit_b_tag_only_is_noop() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_graph_commit_refs(&mut app, vec![GraphRef::tag("v1.0")]);
+        assert_eq!(app.dispatch(Action::GraphCheckout), Effect::None);
+        assert!(app.branch_picker.is_none());
+    }
+
+    #[test]
+    fn graph_commit_c_creates_at_commit_without_checkout() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_graph_commit(&mut app, &["main"]);
+        assert_eq!(app.dispatch(Action::GraphCreateBranch), Effect::None);
+        assert!(app.create_branch.as_ref().unwrap().commit_id.is_some());
+        for c in "topic/x".chars() {
+            app.dispatch(Action::CreateBranchChar(c));
+        }
+        match app.dispatch(Action::CreateBranchSubmit) {
+            Effect::CreateBranchAt {
+                repo,
+                name,
+                commit_id,
+            } => {
+                assert_eq!(repo, "app");
+                assert_eq!(name, "topic/x");
+                assert_eq!(commit_id, "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn tree_b_still_opens_head_picker() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        assert!(matches!(
+            app.dispatch(Action::Branch),
+            Effect::PrepareBranchPicker { repo } if repo == "app"
+        ));
+        install_graph_commit(&mut app, &["main"]);
+        app.focus = FocusPane::Left;
+        assert!(matches!(
+            app.dispatch(Action::Branch),
+            Effect::PrepareBranchPicker { repo } if repo == "app"
+        ));
+    }
+
+    #[test]
+    fn tree_c_is_noop_on_repo_file_and_workspace() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        assert_eq!(app.dispatch(Action::GraphCreateBranch), Effect::None);
+        assert!(app.create_branch.is_none());
+        focus_file(&mut app, "README.md");
+        assert_eq!(app.dispatch(Action::GraphCreateBranch), Effect::None);
+        app.cursor = 0;
+        assert_eq!(app.dispatch(Action::GraphCreateBranch), Effect::None);
+    }
+
+    #[test]
+    fn graph_stash_b_stays_tree_and_c_is_noop() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_graph(
+            &mut app,
+            vec![Stash {
+                stash_ref: "stash@{0}".into(),
+                subject: "latest".into(),
+                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            }],
+        );
+        let idx = app
+            .graph
+            .as_ref()
+            .unwrap()
+            .visible_rows()
+            .iter()
+            .position(|r| matches!(r, GraphRow::Stash(_)))
+            .expect("stash");
+        app.graph_cursor = idx;
+        assert!(!app.graph_commit_focused());
+        assert!(matches!(
+            app.dispatch(Action::Branch),
+            Effect::PrepareBranchPicker { repo } if repo == "app"
+        ));
+        assert_eq!(app.dispatch(Action::GraphCreateBranch), Effect::None);
+        assert!(app.create_branch.is_none());
     }
 
     #[test]
