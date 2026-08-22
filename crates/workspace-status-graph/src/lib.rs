@@ -23,7 +23,7 @@ pub use action::{Action, Effect};
 pub use format::{format_label, format_row, format_sync};
 pub use glyphs::{GlyphSet, ASCII, CELL_W, UNICODE};
 pub use layout::{layout_commits, GraphStemRef, LaidOutCommit};
-pub use model::{Commit, GraphModel, GraphRow, Stash, SyncState, SyncStatus, Worktree};
+pub use model::{Commit, GraphModel, GraphRef, GraphRow, RefKind, Stash, SyncState, SyncStatus, Worktree};
 pub use paint::{paint_model, PaintedLine};
 pub use topology::{cells_text, CellRole, GraphCell};
 pub use widget::GraphWidget;

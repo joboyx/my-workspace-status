@@ -2036,7 +2036,7 @@ mod tests {
     use crate::tui::split::{pane_widths, side_by_side_column_widths, DIFF_SPLIT_FRACTION};
     use crate::tui::watch::watch_interval_ms;
     use crate::snapshot::{build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus};
-    use workspace_status_graph::{Commit, Stash};
+    use workspace_status_graph::{Commit, GraphRef, Stash};
 
     fn repo(name: &str, dirty: bool) -> RepoSnapshot {
         RepoSnapshot {
@@ -2880,13 +2880,17 @@ mod tests {
     }
 
     fn install_graph_commit(app: &mut AppState, refs: &[&str]) {
+        install_graph_commit_refs(app, refs.iter().map(|s| GraphRef::from(*s)).collect());
+    }
+
+    fn install_graph_commit_refs(app: &mut AppState, refs: Vec<GraphRef>) {
         let id = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let model = GraphModel {
             commits: vec![Commit {
                 id: id.into(),
                 subject: "head".into(),
                 parents: Vec::new(),
-                refs: refs.iter().map(|s| (*s).to_string()).collect(),
+                refs,
             }],
             stashes: Vec::new(),
             worktrees: Vec::new(),
@@ -2943,6 +2947,15 @@ mod tests {
         assert_eq!(app.dispatch(Action::GraphCheckout), Effect::None);
         assert!(app.branch_picker.is_none());
         assert!(app.status.contains("commit or stash"));
+    }
+
+    #[test]
+    fn graph_commit_b_tag_only_is_noop() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_graph_commit_refs(&mut app, vec![GraphRef::tag("v1.0")]);
+        assert_eq!(app.dispatch(Action::GraphCheckout), Effect::None);
+        assert!(app.branch_picker.is_none());
     }
 
     #[test]

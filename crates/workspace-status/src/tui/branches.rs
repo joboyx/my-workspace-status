@@ -1,5 +1,7 @@
 //! Local branch picker (`b`): list, filter, create, checkout.
 
+use workspace_status_graph::{GraphRef, RefKind};
+
 use crate::git::LocalBranch;
 use crate::snapshot::{CheckoutKind, WorkspaceSnapshot};
 
@@ -55,19 +57,21 @@ pub fn local_name_from_origin_ref(name: &str) -> &str {
 /// Local and `origin/*` names `b` may checkout at a graph commit.
 ///
 /// Locals first, then remotes. Each group is unique and sorted.
-/// Tags and other remotes stay out when callers pass only those names.
-pub fn checkoutable_branch_names(refs: &[String]) -> Vec<String> {
+/// Tags and non-origin remotes stay out (same set as Ink `checkoutableBranchNames`).
+pub fn checkoutable_branch_names(refs: &[GraphRef]) -> Vec<String> {
     let mut locals: Vec<String> = refs
         .iter()
-        .filter(|name| !is_origin_remote_ref(name))
-        .cloned()
+        .filter(|graph_ref| graph_ref.kind == RefKind::Local)
+        .map(|graph_ref| graph_ref.name.clone())
         .collect();
     locals.sort();
     locals.dedup();
     let mut remotes: Vec<String> = refs
         .iter()
-        .filter(|name| is_origin_remote_ref(name))
-        .cloned()
+        .filter(|graph_ref| {
+            graph_ref.kind == RefKind::Remote && is_origin_remote_ref(&graph_ref.name)
+        })
+        .map(|graph_ref| graph_ref.name.clone())
         .collect();
     remotes.sort();
     remotes.dedup();
@@ -231,6 +235,18 @@ mod tests {
         assert_eq!(names, vec!["main", "topic", "origin/main", "origin/z"]);
         assert_eq!(checkout_name_for_ref("origin/main"), "main");
         assert_eq!(checkout_name_for_ref("feature/x"), "feature/x");
+    }
+
+    #[test]
+    fn checkoutable_names_skip_tags_and_non_origin() {
+        use workspace_status_graph::GraphRef;
+        let names = checkoutable_branch_names(&[
+            GraphRef::tag("v1.0"),
+            GraphRef::remote("upstream/main"),
+            GraphRef::local("topic"),
+            GraphRef::remote("origin/topic"),
+        ]);
+        assert_eq!(names, vec!["topic", "origin/topic"]);
     }
 
     #[test]
