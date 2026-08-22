@@ -1059,33 +1059,25 @@ impl AppState {
             };
             return Effect::None;
         }
-        let repo = selected[0].repo.clone();
-        let mut paths = Vec::new();
-        for file in selected.iter().filter(|file| file.repo == repo) {
-            for path in op_paths(&file.change) {
-                if !paths.contains(&path) {
-                    paths.push(path);
-                }
-            }
-        }
-        match write {
-            FileWrite::Stage => {
-                self.status = if paths.len() == 1 {
-                    format!("stage {}", paths[0])
-                } else {
-                    format!("stage {} files", paths.len())
-                };
-                Effect::Stage { repo, paths }
-            }
-            FileWrite::Unstage => {
-                self.status = if paths.len() == 1 {
-                    format!("unstage {}", paths[0])
-                } else {
-                    format!("unstage {} files", paths.len())
-                };
-                Effect::Unstage { repo, paths }
-            }
-        }
+        let groups = group_write_paths(&selected);
+        let total: usize = groups.iter().map(|(_, paths)| paths.len()).sum();
+        let verb = match write {
+            FileWrite::Stage => "stage",
+            FileWrite::Unstage => "unstage",
+        };
+        self.status = if total == 1 {
+            format!("{verb} {}", groups[0].1[0])
+        } else {
+            format!("{verb} {total} files")
+        };
+        let effects: Vec<Effect> = groups
+            .into_iter()
+            .map(|(repo, paths)| match write {
+                FileWrite::Stage => Effect::Stage { repo, paths },
+                FileWrite::Unstage => Effect::Unstage { repo, paths },
+            })
+            .collect();
+        single_or_batch(effects)
     }
 
     fn begin_revert(&mut self) -> Effect {
@@ -1141,42 +1133,27 @@ impl AppState {
                 }
                 let flags: Vec<bool> = targets.iter().map(|t| t.untracked).collect();
                 let delete_untracked = should_delete_untracked(&flags, clean);
-                let repo = targets[0].repo.clone();
-                let mut tracked = Vec::new();
-                let mut untracked = Vec::new();
-                for target in targets.iter().filter(|t| t.repo == repo) {
-                    let paths = match &target.old_path {
-                        Some(old) if old != &target.path => {
-                            vec![old.clone(), target.path.clone()]
-                        }
-                        _ => vec![target.path.clone()],
-                    };
-                    if target.untracked {
-                        if delete_untracked {
-                            untracked.extend(paths);
-                        }
+                let groups = group_revert_targets(&targets, delete_untracked);
+                let tracked_n: usize = groups.iter().map(|(_, tracked, _)| tracked.len()).sum();
+                let untracked_n: usize = groups.iter().map(|(_, _, untracked)| untracked.len()).sum();
+                self.status = if tracked_n + untracked_n == 1 {
+                    if untracked_n == 1 {
+                        format!("delete {}", groups[0].2[0])
                     } else {
-                        tracked.extend(paths);
-                    }
-                }
-                self.status = if tracked.len() + untracked.len() == 1 {
-                    if untracked.len() == 1 {
-                        format!("delete {}", untracked[0])
-                    } else {
-                        format!("revert {}", tracked[0])
+                        format!("revert {}", groups[0].1[0])
                     }
                 } else {
-                    format!(
-                        "revert {} tracked, {} untracked",
-                        tracked.len(),
-                        untracked.len()
-                    )
+                    format!("revert {tracked_n} tracked, {untracked_n} untracked")
                 };
-                Effect::Revert {
-                    repo,
-                    tracked,
-                    untracked,
-                }
+                let effects: Vec<Effect> = groups
+                    .into_iter()
+                    .map(|(repo, tracked, untracked)| Effect::Revert {
+                        repo,
+                        tracked,
+                        untracked,
+                    })
+                    .collect();
+                single_or_batch(effects)
             }
             Some(PendingConfirm::StashPop { repo, stash_ref }) => {
                 self.status = format!("pop {stash_ref}");
@@ -1783,6 +1760,67 @@ fn op_paths(change: &FileChange) -> Vec<String> {
     }
 }
 
+fn group_write_paths(files: &[ScopedFile]) -> Vec<(String, Vec<String>)> {
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for file in files {
+        let paths = match groups.iter().position(|(repo, _)| repo == &file.repo) {
+            Some(idx) => &mut groups[idx].1,
+            None => {
+                groups.push((file.repo.clone(), Vec::new()));
+                &mut groups.last_mut().unwrap().1
+            }
+        };
+        for path in op_paths(&file.change) {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    groups
+}
+
+fn group_revert_targets(
+    targets: &[RevertTarget],
+    delete_untracked: bool,
+) -> Vec<(String, Vec<String>, Vec<String>)> {
+    let mut groups: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+    for target in targets {
+        let (tracked, untracked) = match groups.iter().position(|(repo, _, _)| repo == &target.repo)
+        {
+            Some(idx) => {
+                let group = &mut groups[idx];
+                (&mut group.1, &mut group.2)
+            }
+            None => {
+                groups.push((target.repo.clone(), Vec::new(), Vec::new()));
+                let group = groups.last_mut().unwrap();
+                (&mut group.1, &mut group.2)
+            }
+        };
+        let paths = match &target.old_path {
+            Some(old) if old != &target.path => vec![old.clone(), target.path.clone()],
+            _ => vec![target.path.clone()],
+        };
+        if target.untracked {
+            if delete_untracked {
+                untracked.extend(paths);
+            }
+        } else {
+            tracked.extend(paths);
+        }
+    }
+    groups.retain(|(_, tracked, untracked)| !tracked.is_empty() || !untracked.is_empty());
+    groups
+}
+
+fn single_or_batch(effects: Vec<Effect>) -> Effect {
+    match effects.len() {
+        0 => Effect::None,
+        1 => effects.into_iter().next().expect("one effect"),
+        _ => Effect::Batch(effects),
+    }
+}
+
 fn initial_cursor(rows: &[VisibleRow]) -> usize {
     rows.iter()
         .position(|r| r.kind == NodeKind::File)
@@ -2033,6 +2071,95 @@ mod tests {
             Effect::Stage { paths, .. } => assert_eq!(paths, vec!["README.md"]),
             other => panic!("{other:?}"),
         }
+    }
+
+    fn mixed_dirty(name: &str) -> RepoSnapshot {
+        let mut snap = two_file_repo();
+        snap.repo = name.into();
+        snap
+    }
+
+    #[test]
+    fn workspace_stage_and_revert_cover_two_dirty_primaries() {
+        let snapshot = build_workspace_snapshot(
+            &[mixed_dirty("app"), mixed_dirty("api")],
+            &[],
+            false,
+            &[],
+        );
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        app.cursor = 0;
+        assert_eq!(
+            app.focused_row().map(|row| row.kind),
+            Some(NodeKind::Workspace)
+        );
+        match app.dispatch(Action::Stage) {
+            Effect::Batch(children) => {
+                assert_eq!(
+                    children,
+                    vec![
+                        Effect::Stage {
+                            repo: "api".into(),
+                            paths: vec!["README.md".into(), "new.txt".into()],
+                        },
+                        Effect::Stage {
+                            repo: "app".into(),
+                            paths: vec!["README.md".into(), "new.txt".into()],
+                        },
+                    ]
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(app.status, "stage 4 files");
+
+        app.cursor = 0;
+        assert_eq!(app.dispatch(Action::Revert), Effect::None);
+        match app.dispatch(Action::ConfirmYes) {
+            Effect::Batch(children) => {
+                assert_eq!(
+                    children,
+                    vec![
+                        Effect::Revert {
+                            repo: "api".into(),
+                            tracked: vec!["README.md".into()],
+                            untracked: vec![],
+                        },
+                        Effect::Revert {
+                            repo: "app".into(),
+                            tracked: vec!["README.md".into()],
+                            untracked: vec![],
+                        },
+                    ]
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(app.status, "revert 2 tracked, 0 untracked");
+
+        app.cursor = 0;
+        assert_eq!(app.dispatch(Action::Revert), Effect::None);
+        match app.dispatch(Action::ConfirmYesClean) {
+            Effect::Batch(children) => {
+                assert_eq!(
+                    children,
+                    vec![
+                        Effect::Revert {
+                            repo: "api".into(),
+                            tracked: vec!["README.md".into()],
+                            untracked: vec!["new.txt".into()],
+                        },
+                        Effect::Revert {
+                            repo: "app".into(),
+                            tracked: vec!["README.md".into()],
+                            untracked: vec!["new.txt".into()],
+                        },
+                    ]
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(app.status, "revert 2 tracked, 2 untracked");
     }
 
     #[test]

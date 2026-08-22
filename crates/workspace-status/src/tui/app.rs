@@ -156,6 +156,11 @@ fn apply_effect(
 ) {
     match effect {
         Effect::None | Effect::Quit => {}
+        Effect::Batch(effects) => {
+            for child in effects {
+                apply_effect(state, child, opts, terminal);
+            }
+        }
         Effect::Fetch { repos } => {
             for repo in &repos {
                 let _ = exec_git_checked(&["fetch", "--quiet"], &opts.cwd.join(repo));
@@ -421,6 +426,11 @@ fn apply_effect(
 pub(crate) fn apply_headless_effect(state: &mut AppState, effect: Effect, opts: &TuiOpts) {
     match effect {
         Effect::None | Effect::Quit => {}
+        Effect::Batch(effects) => {
+            for child in effects {
+                apply_headless_effect(state, child, opts);
+            }
+        }
         Effect::LoadRightPane => load_right(state),
         Effect::ReloadSnapshot => {
             reload_snapshot(state, opts);

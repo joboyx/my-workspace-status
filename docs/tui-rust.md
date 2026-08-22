@@ -21,7 +21,7 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 | `.` | Show or hide ignored repos |
 | `/` | Search prompt. Enter arms the query. Esc cancels |
 | `n` / `N` | Next / previous search match (previous is `N`, not `p`) |
-| `s` | Stage dirty files in the focused scope (file, repo, checkout, or workspace) |
+| `s` | Stage dirty files in the focused scope (file, repo, dir, checkout, or workspace). Workspace writes every scoped file across repos |
 | `u` | Unstage dirty files in the focused scope |
 | `x` | Revert dirty files in the focused scope. `y` discards tracked (keeps untracked except a sole untracked file). `Y` also deletes untracked |
 | `e` | Edit the focused file (`$EDITOR` or config `editor`) |
@@ -57,7 +57,7 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 - Right pane: file diff when a dirty file is focused. Graph pane via `workspace-status-graph` when a repo or worktree is focused
 - Hidden ignored repos stay out of the tree, search, stage / unstage / revert, and fetch / pull / push / default unless you show them
 - Search matches include folded rows. Focusing a match unfolds its ancestors
-- Stage / unstage / revert act on every dirty file in the focused scope (file, flat repo, checkout, or workspace). A file row stays single-file. Family containers do not mix linked worktree files. Hidden ignored stay out unless shown. Revert asks `y` / `Y` / `n` on the status line. `y` discards tracked and keeps untracked, except a sole untracked file which still deletes. `Y` also deletes untracked. Stage and unstage do not confirm
+- Stage / unstage / revert act on every dirty file in the focused scope (file, flat repo, dir, checkout, or workspace), including every scoped file across repos. A file row stays single-file. Family containers do not mix linked worktree files. Hidden ignored stay out unless shown. Revert asks `y` / `Y` / `n` on the status line. `y` discards tracked and keeps untracked, except a sole untracked file which still deletes. `Y` also deletes untracked. Stage and unstage do not confirm
 - `e` uses config `editor`, then `$EDITOR`, then `$VISUAL`, then `vim`. A TTY editor leaves the alternate screen and returns to the same fold, focus, and scroll. GUI editors (`cursor`, `code`) spawn without a remount. Resume drains leftover raw-mode keys
 - Fetch / pull / default do not fan out to linked worktrees unless the focused row is that worktree
 - `P` pushes the focused visible repo or checkout only when it is ahead, diverged, or has no upstream. In-sync is a no-op. Workspace never fans out. Hidden ignored stay out. Linked worktrees push only when that row is focused

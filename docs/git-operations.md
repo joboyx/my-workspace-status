@@ -180,7 +180,7 @@ Same path-safe `--` form as the TypeScript helpers. Used by ratatui `s` / `u` / 
 | `revert_tracked_file` | `restore -- <path>` | Discard worktree changes. Confirm first |
 | `remove_untracked_file` | `clean -f -- <path>` | Delete one untracked file after confirm |
 
-Repo, dir, and workspace rows do not bulk-stage in the Rust TUI. Hidden ignored files stay out of these writes unless `.` / `-a` shows them.
+Workspace, repo, dir, and checkout rows write every scoped file across repos. Family containers stay a no-op. Hidden ignored files stay out of these writes unless `.` / `-a` shows them.
 
 ## Rust TUI (`crates/workspace-status`)
 
