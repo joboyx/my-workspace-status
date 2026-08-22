@@ -150,7 +150,7 @@ mod tests {
             show_ignored,
             &[],
         );
-        build_tree(&visible_for_tree(&built))
+        build_tree(&visible_for_tree(&built), true)
     }
 
     #[test]

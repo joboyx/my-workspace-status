@@ -158,6 +158,7 @@ fn normal_key(
     }
     match key.code {
         KeyCode::Char('T') => Action::CycleTheme,
+        KeyCode::Char('t') => Action::ToggleTreeMode,
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Char('?') => Action::ToggleHelp,
         KeyCode::Char('.') => Action::ToggleShowIgnored,
@@ -476,6 +477,10 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Char('T')), normal(), false, false),
             Action::CycleTheme
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('t')), normal(), false, false),
+            Action::ToggleTreeMode
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char(' ')), normal(), false, false),

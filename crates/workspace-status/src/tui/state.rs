@@ -143,6 +143,8 @@ pub struct AppState {
     pub cwd: PathBuf,
     pub snapshot: WorkspaceSnapshot,
     pub show_ignored: bool,
+    /// Workspace directory tree vs flat paths. Session-only. Default true.
+    pub tree_mode: bool,
     pub tree: TreeNode,
     pub folds: HashSet<String>,
     pub rows: Vec<VisibleRow>,
@@ -194,8 +196,9 @@ impl AppState {
         viewed_path: PathBuf,
     ) -> Self {
         let show_ignored = snapshot.show_ignored;
+        let tree_mode = true;
         let visible = visible_snapshot(&snapshot, show_ignored);
-        let tree = build_tree(&visible);
+        let tree = build_tree(&visible, tree_mode);
         let folds = default_folds(&tree);
         let rows = flatten(&tree, &folds);
         let cursor = initial_cursor(&rows);
@@ -205,6 +208,7 @@ impl AppState {
             cwd,
             snapshot,
             show_ignored,
+            tree_mode,
             tree,
             folds,
             rows,
@@ -290,7 +294,7 @@ impl AppState {
     pub fn rebuild_rows(&mut self) {
         let focus_id = self.focused_row().map(|r| r.id.clone());
         let visible = visible_snapshot(&self.snapshot, self.show_ignored);
-        self.tree = build_tree(&visible);
+        self.tree = build_tree(&visible, self.tree_mode);
         self.rows = flatten(&self.tree, &self.folds);
         if self.rows.is_empty() {
             self.cursor = 0;
@@ -300,6 +304,45 @@ impl AppState {
             if let Some(idx) = self.rows.iter().position(|r| r.id == id) {
                 self.cursor = idx;
                 return;
+            }
+        }
+        self.cursor = self.cursor.min(self.rows.len() - 1);
+    }
+
+    fn toggle_tree_mode(&mut self) -> Effect {
+        if !self.drill.is_graph() {
+            return Effect::None;
+        }
+        let previous_id = self.focused_row().map(|row| row.id.clone());
+        self.tree_mode = !self.tree_mode;
+        let visible = visible_snapshot(&self.snapshot, self.show_ignored);
+        self.tree = build_tree(&visible, self.tree_mode);
+        self.folds = default_folds(&self.tree);
+        self.rows = flatten(&self.tree, &self.folds);
+        self.restore_focus_after_tree_rebuild(previous_id);
+        self.status = if self.tree_mode {
+            "Directory tree".into()
+        } else {
+            "Flat paths".into()
+        };
+        Effect::LoadRightPane
+    }
+
+    fn restore_focus_after_tree_rebuild(&mut self, previous_id: Option<String>) {
+        if self.rows.is_empty() {
+            self.cursor = 0;
+            return;
+        }
+        if let Some(id) = previous_id {
+            if let Some(idx) = self.rows.iter().position(|row| row.id == id) {
+                self.cursor = idx;
+                return;
+            }
+            for ancestor in focus_ancestor_ids(&id) {
+                if let Some(idx) = self.rows.iter().position(|row| row.id == ancestor) {
+                    self.cursor = idx;
+                    return;
+                }
             }
         }
         self.cursor = self.cursor.min(self.rows.len() - 1);
@@ -378,6 +421,7 @@ impl AppState {
                 };
                 Effect::LoadRightPane
             }
+            Action::ToggleTreeMode => self.toggle_tree_mode(),
             Action::Fetch => self.op_effect(Op::Fetch),
             Action::Pull => self.op_effect(Op::Pull),
             Action::DefaultBranch => self.op_effect(Op::DefaultBranch),
@@ -999,7 +1043,7 @@ impl AppState {
     pub fn focused_graph_repo(&self) -> Option<String> {
         let row = self.focused_row()?;
         match row.kind {
-            NodeKind::Repo | NodeKind::Checkout => row.repo.clone(),
+            NodeKind::Repo | NodeKind::Checkout | NodeKind::Dir => row.repo.clone(),
             NodeKind::File => None,
             NodeKind::Workspace | NodeKind::Group => None,
         }
@@ -1851,6 +1895,38 @@ fn default_viewed_path() -> PathBuf {
     }
     #[cfg(not(test))]
     viewed_store_path()
+}
+
+/// Ancestor ids to try when a tree-mode row disappears in flat mode (Ink `focusAncestorIds`).
+fn focus_ancestor_ids(id: &str) -> Vec<String> {
+    let Some((kind, rest)) = id.split_once(':') else {
+        return Vec::new();
+    };
+    if rest.is_empty() {
+        return Vec::new();
+    }
+    if kind == "checkout" {
+        return vec![format!("repo:{rest}")];
+    }
+    if kind != "file" && kind != "dir" {
+        return Vec::new();
+    }
+    let Some((repo, path)) = rest.split_once(':') else {
+        return Vec::new();
+    };
+    let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    let parent_segs = if segments.is_empty() {
+        &[][..]
+    } else {
+        &segments[..segments.len() - 1]
+    };
+    let mut ids = Vec::new();
+    for len in (1..=parent_segs.len()).rev() {
+        ids.push(format!("dir:{repo}:{}", parent_segs[..len].join("/")));
+    }
+    ids.push(format!("repo:{repo}"));
+    ids.push(format!("checkout:{repo}"));
+    ids
 }
 
 fn visible_snapshot(snapshot: &WorkspaceSnapshot, show_ignored: bool) -> WorkspaceSnapshot {
@@ -3427,4 +3503,141 @@ mod tests {
         assert_eq!(resolve_theme_id(Some("nope")), ThemeId::TokyoNight);
     }
 
+    fn tree_repo() -> RepoSnapshot {
+        RepoSnapshot {
+            repo: "app".into(),
+            branch: "main".into(),
+            sync_status: SyncStatus::NoUpstream,
+            sync_note: String::new(),
+            has_unstaged: true,
+            has_staged: false,
+            has_untracked: false,
+            changes: vec![
+                FileChange {
+                    path: "src/lib.rs".into(),
+                    staged_status: None,
+                    unstaged_status: Some("M".into()),
+                    untracked: false,
+                    old_path: None,
+                },
+                FileChange {
+                    path: "README.md".into(),
+                    staged_status: None,
+                    unstaged_status: Some("M".into()),
+                    untracked: false,
+                    old_path: None,
+                },
+            ],
+            checkout_kind: CheckoutKind::Primary,
+            primary_repo: None,
+            merged_into_default: None,
+            default_branch_override: None,
+        }
+    }
+
+    fn tree_app() -> AppState {
+        let snapshot = build_workspace_snapshot(&[tree_repo()], &[], false, &[]);
+        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+    }
+
+    fn focus_id(app: &mut AppState, id: &str) {
+        app.cursor = app
+            .rows
+            .iter()
+            .position(|row| row.id == id)
+            .unwrap_or_else(|| panic!("missing {id}"));
+    }
+
+    #[test]
+    fn tree_mode_default_has_dir_and_basename() {
+        let app = tree_app();
+        assert!(app.tree_mode);
+        let dir = app
+            .rows
+            .iter()
+            .find(|row| row.id == "dir:app:src")
+            .expect("dir");
+        assert_eq!(dir.kind, NodeKind::Dir);
+        assert!(dir.foldable);
+        let lib = app
+            .rows
+            .iter()
+            .find(|row| row.id == "file:app:src/lib.rs")
+            .expect("lib.rs");
+        assert!(lib.label.contains("lib.rs"));
+        assert!(!lib.label.contains("src/lib.rs"));
+        assert!(app.rows.iter().any(|row| row.id == "file:app:README.md"));
+    }
+
+    #[test]
+    fn t_toggles_flat_full_paths_without_dirs() {
+        let mut app = tree_app();
+        focus_id(&mut app, "file:app:src/lib.rs");
+        assert_eq!(app.dispatch(Action::ToggleTreeMode), Effect::LoadRightPane);
+        assert!(!app.tree_mode);
+        assert_eq!(app.status, "Flat paths");
+        assert!(app.rows.iter().all(|row| row.kind != NodeKind::Dir));
+        let lib = app
+            .rows
+            .iter()
+            .find(|row| row.id == "file:app:src/lib.rs")
+            .expect("lib.rs");
+        assert!(lib.label.contains("src/lib.rs"));
+        assert_eq!(app.focused_row().map(|row| row.id.as_str()), Some("file:app:src/lib.rs"));
+        app.dispatch(Action::ToggleTreeMode);
+        assert!(app.tree_mode);
+        assert_eq!(app.status, "Directory tree");
+        assert!(app.rows.iter().any(|row| row.id == "dir:app:src"));
+        assert_eq!(app.focused_row().map(|row| row.id.as_str()), Some("file:app:src/lib.rs"));
+    }
+
+    #[test]
+    fn z_on_dir_hides_files() {
+        let mut app = tree_app();
+        focus_id(&mut app, "dir:app:src");
+        app.dispatch(Action::FoldToggle);
+        assert!(app.folds.contains("dir:app:src"));
+        assert!(app.rows.iter().all(|row| row.id != "file:app:src/lib.rs"));
+        assert!(app.rows.iter().any(|row| row.id == "file:app:README.md"));
+    }
+
+    #[test]
+    fn stage_on_dir_skips_checkout_root_sibling() {
+        let mut app = tree_app();
+        focus_id(&mut app, "dir:app:src");
+        match app.dispatch(Action::Stage) {
+            Effect::Stage { repo, paths } => {
+                assert_eq!(repo, "app");
+                assert_eq!(paths, vec!["src/lib.rs"]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn t_is_noop_in_commit_files_drill() {
+        let mut app = tree_app();
+        app.drill = DrillView::Files {
+            repo: "app".into(),
+            source: CommitFileSource::Worktree,
+            files: Vec::new(),
+            cursor: 0,
+        };
+        assert_eq!(app.dispatch(Action::ToggleTreeMode), Effect::None);
+        assert!(app.tree_mode);
+        assert!(app.rows.iter().any(|row| row.id == "dir:app:src"));
+    }
+
+    #[test]
+    fn t_from_dir_falls_back_to_checkout() {
+        let mut app = tree_app();
+        focus_id(&mut app, "dir:app:src");
+        app.dispatch(Action::ToggleTreeMode);
+        let focused = app.focused_row().expect("row");
+        assert!(
+            focused.id == "repo:app" || focused.id == "checkout:app",
+            "{}",
+            focused.id
+        );
+    }
 }

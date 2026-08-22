@@ -110,7 +110,7 @@ pub fn resolve_stash_menu_key(
 /// Checkout path for stash / branch / push on the focused row.
 pub fn checkout_path(row: &VisibleRow) -> Option<String> {
     match row.kind {
-        NodeKind::Repo | NodeKind::Checkout | NodeKind::File => row.repo.clone(),
+        NodeKind::Repo | NodeKind::Checkout | NodeKind::File | NodeKind::Dir => row.repo.clone(),
         NodeKind::Workspace | NodeKind::Group => None,
     }
 }
@@ -135,6 +135,26 @@ pub fn stash_dirty_for_row(
             } else {
                 (false, None)
             }
+        }
+        NodeKind::Dir => {
+            let Some(repo) = row.repo.as_deref() else {
+                return (false, None);
+            };
+            let Some(dir) = crate::tui::tree::dir_path_from_id(&row.id, repo) else {
+                return (false, None);
+            };
+            let Some(snap) = snapshot.repos.iter().find(|r| r.repo == repo) else {
+                return (false, None);
+            };
+            let paths: Vec<String> = snap
+                .changes
+                .iter()
+                .filter(|change| {
+                    crate::tui::tree::path_under_dir(&change.path, &dir) && is_stashable(change)
+                })
+                .map(|change| change.path.clone())
+                .collect();
+            (!paths.is_empty(), Some(paths).filter(|p| !p.is_empty()))
         }
         NodeKind::Repo | NodeKind::Checkout => {
             let Some(repo) = row.repo.as_deref() else {
