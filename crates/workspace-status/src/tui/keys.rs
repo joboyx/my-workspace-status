@@ -13,6 +13,8 @@ pub enum InputMode {
     SearchPrompt,
     Confirm,
     Help,
+    /// `?` overlay with `/` help search active.
+    HelpSearch { armed: bool },
     StashMenu,
     BranchPicker,
     CreateBranch,
@@ -58,6 +60,7 @@ pub fn event_to_action_ex(
                 InputMode::SearchPrompt
                     | InputMode::Confirm
                     | InputMode::Help
+                    | InputMode::HelpSearch { .. }
                     | InputMode::StashMenu
                     | InputMode::BranchPicker
                     | InputMode::CreateBranch
@@ -85,7 +88,19 @@ fn key_to_action(
     }
     match mode {
         InputMode::Help => match key.code {
+            KeyCode::Char('/') => Action::SearchStart,
             KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('?') => Action::ToggleHelp,
+            _ => Action::None,
+        },
+        InputMode::HelpSearch { armed } => match key.code {
+            KeyCode::Esc => Action::SearchCancel,
+            KeyCode::Enter => Action::SearchSubmit,
+            KeyCode::Backspace => Action::SearchBackspace,
+            KeyCode::Char('n') if armed => Action::SearchNext,
+            KeyCode::Char('N') if armed => Action::SearchPrev,
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::SearchChar(c)
+            }
             _ => Action::None,
         },
         InputMode::Confirm => match key.code {
@@ -183,6 +198,20 @@ fn normal_key(
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o') {
         return Action::ToggleFullContext;
     }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
+        return if focus_right && right_is_diff {
+            Action::ScrollDiff(-5)
+        } else {
+            Action::Move(-5)
+        };
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d') {
+        return if focus_right && right_is_diff {
+            Action::ScrollDiff(5)
+        } else {
+            Action::Move(5)
+        };
+    }
     match key.code {
         KeyCode::Char('T') => Action::CycleTheme,
         KeyCode::Char('t') => Action::ToggleTreeMode,
@@ -205,6 +234,7 @@ fn normal_key(
         KeyCode::Char('b') => Action::Branch,
         KeyCode::Char('w') | KeyCode::Char('W') => Action::RemoveWorktree,
         KeyCode::Char('i') => Action::ToggleDiffMode,
+        KeyCode::Char('m') => Action::ToggleMouse,
         KeyCode::Char('n') if search_active => Action::SearchNext,
         KeyCode::Char('N') if search_active => Action::SearchPrev,
         KeyCode::Tab => {
@@ -600,14 +630,68 @@ mod tests {
     }
 
     #[test]
-    fn help_slash_does_not_start_help_search() {
+    fn help_slash_starts_help_search() {
         assert_eq!(
             event_to_action(&key(KeyCode::Char('/')), InputMode::Help, false, false),
-            Action::None
+            Action::SearchStart
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('/')), InputMode::Help, true, true),
-            Action::None
+            Action::SearchStart
+        );
+        let searching = InputMode::HelpSearch { armed: false };
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('f')), searching, false, false),
+            Action::SearchChar('f')
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Enter), searching, false, false),
+            Action::SearchSubmit
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Esc), searching, false, false),
+            Action::SearchCancel
+        );
+        let armed = InputMode::HelpSearch { armed: true };
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('n')), armed, false, false),
+            Action::SearchNext
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('N')), armed, false, false),
+            Action::SearchPrev
+        );
+    }
+
+    #[test]
+    fn ctrl_u_d_move_five_and_m_toggles_mouse() {
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('d')), normal(), false, false),
+            Action::Move(5)
+        );
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('u')), normal(), false, false),
+            Action::Move(-5)
+        );
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('d')), normal(), true, true),
+            Action::ScrollDiff(5)
+        );
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('u')), normal(), true, true),
+            Action::ScrollDiff(-5)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('m')), normal(), false, false),
+            Action::ToggleMouse
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('u')), normal(), false, false),
+            Action::Unstage
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::PageDown), normal(), false, false),
+            Action::PageMove(1)
         );
     }
 }

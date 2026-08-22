@@ -77,6 +77,7 @@ pub enum Action {
     EasyMotionChar(char),
     EasyMotionCancel,
     CycleTheme,
+    ToggleMouse,
     None,
 }
 

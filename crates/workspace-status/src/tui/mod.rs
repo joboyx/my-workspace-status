@@ -1,6 +1,6 @@
 //! Ratatui TUI for `workspace-status` / `ws`.
 //!
-//! Opens only when stdout is a TTY and the user did not pass
+//! Opens when stdout is a TTY (or `-i` / `--tui`) and the user did not pass
 //! `--plain`, `--json`, `-v`, `-p`, or `-d`.
 
 mod action;
@@ -13,6 +13,7 @@ mod drill;
 mod easy_motion;
 pub(crate) mod editor;
 mod graph_load;
+mod help;
 mod keys;
 mod ops;
 mod render;
@@ -37,20 +38,20 @@ pub struct HeadlessFlags {
     pub verbose: bool,
     pub pull: bool,
     pub default_branch: bool,
+    /// `-i` / `--tui`: open the TUI even when stdout is not a TTY.
+    pub force_tui: bool,
 }
 
 /// True when the Rust binary should open the ratatui TUI.
 ///
-/// A TTY with none of `--plain` / `--json` / `-v` / `-p` / `-d` opens the TUI.
+/// A TTY (or `-i` / `--tui`) with none of `--plain` / `--json` / `-v` / `-p` / `-d`
+/// opens the TUI. Those headless flags still win over `--tui`.
 /// `-a` and `-f` still open the TUI. `-f` fetches after the first paint.
 pub fn should_open_tui(stdout_is_tty: bool, flags: HeadlessFlags) -> bool {
-    if !stdout_is_tty {
-        return false;
-    }
     if flags.plain || flags.json || flags.verbose || flags.pull || flags.default_branch {
         return false;
     }
-    true
+    stdout_is_tty || flags.force_tui
 }
 
 #[cfg(test)]
@@ -65,6 +66,51 @@ mod tests {
     #[test]
     fn non_tty_stays_headless() {
         assert!(!should_open_tui(false, HeadlessFlags::default()));
+    }
+
+    #[test]
+    fn force_tui_opens_on_non_tty() {
+        assert!(should_open_tui(
+            false,
+            HeadlessFlags {
+                force_tui: true,
+                ..HeadlessFlags::default()
+            },
+        ));
+    }
+
+    #[test]
+    fn headless_flags_win_over_force_tui() {
+        for flags in [
+            HeadlessFlags {
+                force_tui: true,
+                plain: true,
+                ..HeadlessFlags::default()
+            },
+            HeadlessFlags {
+                force_tui: true,
+                json: true,
+                ..HeadlessFlags::default()
+            },
+            HeadlessFlags {
+                force_tui: true,
+                verbose: true,
+                ..HeadlessFlags::default()
+            },
+            HeadlessFlags {
+                force_tui: true,
+                pull: true,
+                ..HeadlessFlags::default()
+            },
+            HeadlessFlags {
+                force_tui: true,
+                default_branch: true,
+                ..HeadlessFlags::default()
+            },
+        ] {
+            assert!(!should_open_tui(false, flags), "{flags:?}");
+            assert!(!should_open_tui(true, flags), "{flags:?}");
+        }
     }
 
     #[test]
