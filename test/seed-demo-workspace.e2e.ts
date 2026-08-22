@@ -1,5 +1,5 @@
 /**
- * Hermetic smoke check for scripts/seed-demo-workspace.sh.
+ * Smoke check for scripts/seed-demo-workspace.sh.
  * Seeds a temp dir, then asserts git state and --plain / --json.
  */
 
@@ -31,7 +31,7 @@ function git(repo: string, args: string[]): string {
   return execFileSync('git', ['-C', repo, ...args], {
     encoding: 'utf-8',
     env: GIT_ENV,
-  }).trim();
+  }).replace(/\n+$/, '');
 }
 
 function runStatus(...args: string[]): string {
@@ -54,38 +54,50 @@ describe('seed-demo-workspace.sh', () => {
     }
   });
 
-  it('builds the shop workspace with the required git states', () => {
-    assert.equal(git(path.join(dest, 'app'), ['branch', '--show-current']), 'feature/checkout');
-    assert.match(git(path.join(dest, 'app'), ['status', '--short', '--branch']), /ahead 1/);
-    const appPorcelain = git(path.join(dest, 'app'), ['status', '--porcelain']);
-    assert.match(appPorcelain, /^M  src\/app\.ts$/m);
-    assert.match(appPorcelain, /^ M src\/checkout\.ts$/m);
-    assert.match(appPorcelain, /^\?\? src\/draft-banner\.ts$/m);
-
-    const worktrees = git(path.join(dest, 'app'), ['worktree', 'list']);
+  it('builds the demo workspace states', () => {
+    const app = path.join(dest, 'app');
+    assert.equal(git(app, ['branch', '--show-current']), 'feature/auth-refresh');
+    assert.match(git(app, ['status', '--short', '--branch']), /ahead 1/);
+    const appPorcelain = git(app, ['status', '--porcelain']);
+    assert.match(appPorcelain, /^ M src\/auth\.ts$/m);
+    assert.match(appPorcelain, /^M  src\/session\.ts$/m);
+    assert.match(appPorcelain, /^\?\? src\/login\.ts$/m);
+    assert.match(git(app, ['stash', 'list']), /WIP: in-memory token cache/);
+    const worktrees = git(app, ['worktree', 'list']);
     assert.match(worktrees, /feat-login/);
-    assert.match(worktrees, /\[feature\/login\]/);
+    assert.match(worktrees, /\[feature\/login-page\]/);
 
-    assert.equal(git(path.join(dest, 'services/api'), ['branch', '--show-current']), 'feature/orders');
-    assert.match(git(path.join(dest, 'services/api'), ['status', '--short', '--branch']), /ahead 1, behind 1/);
-    assert.match(git(path.join(dest, 'services/api'), ['status', '--porcelain']), /src\/server\.ts/);
+    const first = git(app, ['log', '--reverse', '--format=%at %an <%ae> %s']).split('\n')[0];
+    assert.equal(first, '1786928400 Demo User <demo@example.invalid> seed app client');
+    assert.match(fs.readFileSync(path.join(app, 'src/auth.ts'), 'utf-8'), /withRefreshedExpiry/);
 
-    assert.equal(git(path.join(dest, 'lib'), ['branch', '--show-current']), 'main');
-    assert.equal(git(path.join(dest, 'lib'), ['status', '--porcelain']), '');
+    const api = path.join(dest, 'services/api');
+    assert.equal(git(api, ['branch', '--show-current']), 'feature/rate-limit');
+    assert.match(git(api, ['status', '--short', '--branch']), /ahead 1, behind 1/);
+    assert.match(git(api, ['status', '--porcelain']), /src\/server\.ts/);
 
-    assert.equal(git(path.join(dest, 'notes'), ['branch', '--show-current']), 'main');
-    assert.match(git(path.join(dest, 'notes'), ['status', '--porcelain']), /standup\.md/);
+    const lib = path.join(dest, 'lib');
+    assert.equal(git(lib, ['branch', '--show-current']), 'main');
+    assert.equal(git(lib, ['status', '--porcelain']), '');
 
-    assert.equal(git(path.join(dest, 'merger'), ['branch', '--show-current']), 'feature/release-cut');
-    const parents = git(path.join(dest, 'merger'), ['rev-list', '--parents', '-n', '1', 'HEAD']).split(' ');
-    assert.ok(parents.length >= 3, 'expected a merge commit on merger HEAD');
-    assert.match(git(path.join(dest, 'merger'), ['stash', 'list']), /wip: rate limit/);
+    const notes = path.join(dest, 'notes');
+    assert.equal(git(notes, ['branch', '--show-current']), 'main');
+    assert.match(git(notes, ['status', '--porcelain']), /inbox\.md/);
+
+    const merger = path.join(dest, 'merger');
+    assert.equal(git(merger, ['branch', '--show-current']), 'feature/reconciliation');
+    const parents = git(merger, ['rev-list', '--parents', '-n', '1', 'HEAD^']).split(' ');
+    assert.ok(parents.length >= 3, 'expected a merge commit on merger');
+    assert.match(git(merger, ['log', '--oneline', '--decorate']), /merge billing into main/);
+    assert.match(git(merger, ['stash', 'list']), /WIP: reconcile totals/);
 
     const config = JSON.parse(
       fs.readFileSync(path.join(dest, '.workspace-status-config.json'), 'utf-8'),
     );
     assert.deepEqual(config.ignoredRepos, ['notes']);
-    assert.equal(config.maxDepth, 3);
+    assert.equal(config.editor, 'vim');
+    assert.ok(fs.existsSync(path.join(dest, '.remotes', 'app.git')));
+    assert.ok(fs.statSync(path.join(dest, '.scratch')).isDirectory());
   });
 
   it('hides notes in --plain / --json and shows dirty app plus the worktree', () => {
@@ -109,20 +121,30 @@ describe('seed-demo-workspace.sh', () => {
     assert.equal(lib.syncStatus, 'up-to-date');
 
     const app = snapshot.repos.find((r: { repo: string }) => r.repo === 'app');
+    assert.equal(app.branch, 'feature/auth-refresh');
     assert.equal(app.hasUnstaged, true);
     assert.equal(app.hasStaged, true);
     assert.equal(app.hasUntracked, true);
     assert.equal(app.syncStatus, 'ahead');
+    const appFiles = (app.changes ?? []).map((f: { path: string }) => f.path);
+    assert.ok(appFiles.includes('src/auth.ts'));
 
     const api = snapshot.repos.find((r: { repo: string }) => r.repo === 'services/api');
+    assert.equal(api.branch, 'feature/rate-limit');
     assert.equal(api.hasUnstaged, true);
     assert.equal(api.syncStatus, 'diverged');
 
+    const merger = snapshot.repos.find((r: { repo: string }) => r.repo === 'merger');
+    assert.equal(merger.branch, 'feature/reconciliation');
+
     const plain = runStatus('--plain');
     assert.match(plain, /app/);
+    assert.match(plain, /auth\.ts/);
     assert.match(plain, /feat-login/);
     assert.match(plain, /services\/api/);
     assert.match(plain, /merger/);
+    assert.match(plain, /feature\/auth-refresh/);
+    assert.match(plain, /feature\/reconciliation/);
     assert.doesNotMatch(plain, /\bnotes\b/);
   });
 
@@ -132,6 +154,8 @@ describe('seed-demo-workspace.sh', () => {
     assert.ok(notes);
     assert.equal(notes.ignored, true);
     assert.equal(notes.hasUnstaged, true);
-    assert.match(runStatus('--plain', '--all'), /notes/);
+    const plainAll = runStatus('--plain', '--all');
+    assert.match(plainAll, /notes/);
+    assert.match(plainAll, /inbox\.md/);
   });
 });

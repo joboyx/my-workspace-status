@@ -1,82 +1,122 @@
 # Demo workspace
 
-Use one seeded workspace for every screenshot and video of the Rust TUI.
+Seed one workspace, then capture the stills below.
 
 ## Seed
 
-From this repository:
+From the repository root:
 
     ./scripts/seed-demo-workspace.sh
 
-The script wipes and recreates `tmp/demo-workspace` under the repository root.
-Pass a directory to seed somewhere else. Remotes are local bare repos under
-`.remotes/`, so ahead, behind, and diverged states do not need the network.
+The script wipes and recreates `tmp/demo-workspace`.
+Pass a directory as the first argument to seed somewhere else.
+Local remotes live under `DEST/.remotes`. Scratch clones live under `DEST/.scratch`.
+Both go away when DEST is wiped.
 
 `tmp/` is gitignored. Do not commit the seed output.
 
-## Run
+## Launch
 
     cd tmp/demo-workspace
-    workspace-status
+    WS_STATUS_WATCH_MS=0 WS_STATUS_FETCH_MS=0 workspace-status
 
-On a TTY this opens the Rust TUI (`workspace-status` / `ws`).
-Use `--plain` for a smoke check. Keys live in [tui-rust.md](./tui-rust.md).
-Shot steps live in [../scripts/demo-shots.md](../scripts/demo-shots.md).
+- Theme: default Tokyo Night. Do not press `T`.
+- Font: MesloLGM Nerd Font Mono (the Mono cut). Set `WS_STATUS_GLYPHS=ascii` only if that font is missing.
+- Terminal: at least 140x40. Side-by-side diff needs 100 or more columns. Stay in the default inline diff for stills.
+- Watch and background fetch stay off so frames do not flicker.
+- Re-run the seed script after any write (`s` / `u` / `x`, stash apply/pop/drop, checkout, reviewed mark).
+- Reviewed marks live in `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (fallback `~/.local/state/my-workspace-status/viewed-files.json`). Delete that file if a `◉` survives a reseed.
 
-Default theme is Tokyo Night. Leave `WS_STATUS_THEME` unset, or set
-`WS_STATUS_THEME=tokyo-night`.
+Each shot starts from a fresh launch unless noted. The first cursor is `app` → `src/auth.ts` (unstaged `M`) with the file diff on the right.
 
 ## Workspace
 
-| Path | Why it is here |
+| Path | State |
 | --- | --- |
-| `app` | Feature branch, ahead of origin, dirty (staged, unstaged, untracked). Linked worktree at `app/.worktrees/feat-login`. |
-| `services/api` | Feature branch, dirty, diverged from its local remote. |
-| `lib` | Clean default branch. Folds under **No updates**. |
+| `app` | Dirty `feature/auth-refresh`, ahead of origin. Staged `session.ts`, unstaged `auth.ts`, untracked `login.ts`. Linked worktree at `app/.worktrees/feat-login`. |
+| `services/api` | Dirty `feature/rate-limit`, diverged from origin. |
+| `lib` | Clean `main`. Folds under No updates. |
 | `notes` | Dirty and listed in `ignoredRepos`. Hidden until `.` or `-a`. |
-| `merger` | Non-default branch with a merge commit and a stash. Graph shows two lanes and a stash spur. |
+| `merger` | `feature/reconciliation` with a merge commit and a stash. |
 
-Config at the workspace root:
+## 01 — tree + file diff
 
-```json
-{
-  "ignoredRepos": ["notes"],
-  "maxDepth": 3
-}
-```
+Focus stays on `src/auth.ts`. The right pane is the unified diff (refresh window `5m` → `2m`, plus `withRefreshedExpiry`).
 
-## Frames to shoot
+Keys: none (or `g` then `j` onto `auth.ts` if the cursor moved).
 
-Shoot these views only.
+Show: dirty `app` files (`M` / `A` / staged `session.ts`), linked `feat-login`, `services/api`, folded No updates, and the auth diff.
 
-| Frame | Why |
-| --- | --- |
-| Tree + file diff | Focus a dirty file on `app`. The right pane loads the unified diff. |
-| Graph: merge / stash / HEAD | Focus `merger`. The graph shows the merge, HEAD, and stash spur. |
-| Graph: worktree | Focus `app` or `app/.worktrees/feat-login`. The graph shows the linked checkout. |
-| Help | `?` opens the short key list. |
-| Search | `/` then Enter. `n` / `N` step matches. |
-| Stash menu | `S` on `merger`. |
-| Branch picker | `b` on `merger` or `app`. |
-| Reviewed | Space on a dirty file. Glyph is `◉` / `*`, not the clean `✓`. |
-| Show ignored | `.` so `notes` appears. |
-| Commit-files drill | Enter on a `merger` graph commit, Enter on a file, Esc pops. |
-| EasyMotion | `;` or Ctrl+Space on the focused list. |
+## 02 — git graph
 
-Existing stills in [the root README](../README.md#screenshots) cover these frames.
-Do not duplicate them unless you replace a shot from this seed.
+Focus `merger` so the right pane is the graph: merge elbows, stash `◇`, HEAD `⊙`.
 
-## Skip
+Keys: `/` `merger` Enter. If the cursor landed on a file, `k` to the repo row.
 
-Do not shoot these:
+Show: `merge billing into main` join, `stash@{0}` diamond + short spur, `feature/reconciliation` HEAD.
 
-- In-flight fetch, pull, or push
-- `y` / `n` confirms
-- Create-branch prompt
-- Every theme (`T` cycles themes in the session only)
-- Watch poll
+## 03 — help
 
-## Video
+Keys: `?`
 
-Use the same seed. Follow [../scripts/demo-shots.md](../scripts/demo-shots.md)
-for the key sequence of each frame.
+Show: the short key overlay, not a wall of text. Tree + pane still visible behind it.
+
+## 04 — search then next
+
+Keys: `/` `auth` Enter, then `n`.
+
+Show: search prompt / armed query, match highlight on `auth.ts` (and the next hit after `n`). Do not hide rows.
+
+## 05 — stash menu
+
+Focus `merger` (has `stash@{0}`) or `app` (also has one).
+
+Keys: `/` `merger` Enter, then `S`.
+
+Show: stash overlay (`s` create, `a` apply, `p` pop, `d` drop). Do not confirm apply/pop/drop.
+
+## 06 — branch picker
+
+Focus `app`.
+
+Keys: `g`, `k` onto the `app` repo row if needed, then `b`.
+
+Show: local branches (`main`, `feature/auth-refresh`). Type-to-filter is optional. Do not press `C` (create-branch is a skip).
+
+## 07 — reviewed mark
+
+Focus `src/auth.ts`.
+
+Keys: Space.
+
+Show: viewed glyph `◉` / `*` on that dirty file. Not the clean `✓`.
+
+## 08 — show ignored
+
+Keys: `.`
+
+Show: ignored dirty `notes` (`inbox.md`) entering the tree. Press `.` again only if you need the hidden-state contrast. The still is the revealed tree.
+
+## 09 — commit-files drill
+
+Focus `merger`, move the graph cursor onto a commit (the merge or `Start reconciliation job`), then drill.
+
+Keys: `/` `merger` Enter, `j`/`k` to the commit, Enter.
+
+Show: commit file list in the right pane. Do not Enter again into a file diff unless you want a second crop. The named still is the file list.
+
+## 10 — EasyMotion
+
+Focus the tree (Esc until the left pane is active).
+
+Keys: `;`
+
+Show: `a`–`z` labels on the current viewport. Do not type a label (that jumps and dismisses). Esc cancels after the shot.
+
+## Skip as stills
+
+- Fetch / pull / push in-flight (`f`, `p`, `P`)
+- `y`/`n` confirms (revert, pop/drop, worktree remove, out-of-sync checkout)
+- Create-branch prompt (`b` then `C`)
+- Theme cycle (`T`) — stay on Tokyo Night
+- Watch poll (already disabled)

@@ -1,28 +1,33 @@
 #!/usr/bin/env bash
-# Seed a multi-repo workspace for workspace-status screenshots and video.
-# Re-runs wipe and recreate the output directory. Remotes stay local.
+# Seed a multi-repo workspace for workspace-status screenshots.
+# Safe to re-run: wipes DEST (including DEST/.remotes and DEST/.scratch) then reseeds.
+#
+# Usage: seed-demo-workspace.sh [DEST]
+# Default DEST is tmp/demo-workspace under the repository root.
+#
+# Launch after seeding:
+#   cd DEST && WS_STATUS_WATCH_MS=0 WS_STATUS_FETCH_MS=0 workspace-status
+#
+# Commit timestamps are fixed in Asia/Manila (UTC+8) so the graph stays stable.
+
 set -euo pipefail
 
-usage() {
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'USAGE'
-usage: seed-demo-workspace.sh [output-dir]
+usage: seed-demo-workspace.sh [DEST]
 
-Default output dir is tmp/demo-workspace under the repository root.
+Default DEST is tmp/demo-workspace under the repository root.
 The directory is wiped and recreated on every run.
 USAGE
-}
-
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  usage
   exit 0
 fi
 if [[ $# -gt 1 ]]; then
-  usage >&2
+  echo "usage: seed-demo-workspace.sh [DEST]" >&2
   exit 2
 fi
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 if [[ $# -eq 1 ]]; then
   DEST="$1"
@@ -40,257 +45,474 @@ case "$DEST" in
     ;;
 esac
 
-rm -rf "$DEST"
-mkdir -p "$DEST/.remotes"
+WORKSPACE="$DEST"
+REMOTES="$DEST/.remotes"
+SCRATCH="$DEST/.scratch"
+
+rm -rf "$WORKSPACE"
+mkdir -p "$WORKSPACE" "$REMOTES" "$SCRATCH"
 
 export GIT_AUTHOR_NAME="Demo User"
-export GIT_AUTHOR_EMAIL="demo@example.com"
+export GIT_AUTHOR_EMAIL="demo@example.invalid"
 export GIT_COMMITTER_NAME="Demo User"
-export GIT_COMMITTER_EMAIL="demo@example.com"
-export GIT_CONFIG_COUNT=5
-export GIT_CONFIG_KEY_0=user.name
-export GIT_CONFIG_VALUE_0="Demo User"
-export GIT_CONFIG_KEY_1=user.email
-export GIT_CONFIG_VALUE_1="demo@example.com"
-export GIT_CONFIG_KEY_2=commit.gpgsign
-export GIT_CONFIG_VALUE_2=false
-export GIT_CONFIG_KEY_3=init.defaultBranch
-export GIT_CONFIG_VALUE_3=main
-export GIT_CONFIG_KEY_4=advice.detachedHead
-export GIT_CONFIG_VALUE_4=false
+export GIT_COMMITTER_EMAIL="demo@example.invalid"
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_NOSYSTEM=1
 
-# Fixed stamp so every re-run writes the same history.
-DEMO_DATE='2026-08-01T12:00:00 +0000'
-
-git_init() {
-  mkdir -p "$1"
-  git init -q -b main "$1"
+# 2026-08-17 09:00:00 +08, then +1h per commit
+TS=1786928400
+tick() {
+  export GIT_AUTHOR_DATE="${TS} +0800"
+  export GIT_COMMITTER_DATE="${TS} +0800"
+  TS=$((TS + 3600))
 }
 
-git_commit() {
-  local dir="$1"
+git_in() {
+  git -C "$1" "${@:2}"
+}
+
+init_repo() {
+  local repo="$1"
+  mkdir -p "$repo"
+  if ! git init -q -b main "$repo" 2>/dev/null; then
+    git init -q "$repo"
+    git_in "$repo" checkout -q -b main
+  fi
+  git_in "$repo" config user.name "Demo User"
+  git_in "$repo" config user.email "demo@example.invalid"
+  git_in "$repo" config commit.gpgsign false
+}
+
+write_file() {
+  local path="$1"
+  mkdir -p "$(dirname "$path")"
+  cat > "$path"
+}
+
+commit_all() {
+  local repo="$1"
   local msg="$2"
-  GIT_AUTHOR_DATE="$DEMO_DATE" GIT_COMMITTER_DATE="$DEMO_DATE" \
-    git -C "$dir" commit -q -m "$msg"
+  tick
+  git_in "$repo" add -A
+  git_in "$repo" commit -q -m "$msg"
 }
 
-git_add_commit() {
-  local dir="$1"
-  local msg="$2"
-  shift 2
-  git -C "$dir" add -- "$@"
-  git_commit "$dir" "$msg"
-}
-
-attach_origin() {
-  local dir="$1"
+add_origin() {
+  local repo="$1"
   local name="$2"
-  local remote="$DEST/.remotes/${name}.git"
-  git init -q --bare "$remote"
-  git -C "$dir" remote add origin "file://${remote}"
-  git -C "$dir" push -q -u origin main
+  local bare="$REMOTES/${name}.git"
+  if ! git init -q --bare -b main "$bare" 2>/dev/null; then
+    git init -q --bare "$bare"
+  fi
+  git_in "$repo" remote add origin "$bare"
+  git_in "$repo" push -q -u origin HEAD
 }
 
-put() {
-  mkdir -p "$(dirname -- "$1")"
-  printf '%s\n' "$2" >"$1"
-}
-
-# --- app ---
-APP="$DEST/app"
-git_init "$APP"
-put "$APP/README.md" "# Shop checkout
-
-Storefront for the demo shop. Talks to services/api."
-put "$APP/.gitignore" ".worktrees/"
-put "$APP/package.json" '{
-  "name": "shop-app",
-  "private": true
-}'
-put "$APP/src/app.ts" 'import { startCheckout } from "./checkout.ts";
-startCheckout();'
-put "$APP/src/cart.ts" "export function createCart(): string[] {
-  return [];
-}"
-put "$APP/src/checkout.ts" 'export function startCheckout(): void {
-  console.log("checkout");
-}'
-git_add_commit "$APP" "seed shop checkout app" README.md .gitignore package.json src/app.ts src/cart.ts src/checkout.ts
-attach_origin "$APP" app
-
-git -C "$APP" checkout -q -b feature/checkout
-put "$APP/src/checkout.ts" 'export function startCheckout(): void {
-  console.log("checkout");
-  console.log("collect shipping");
-}'
-git_add_commit "$APP" "collect shipping address on checkout" src/checkout.ts
-git -C "$APP" push -q -u origin feature/checkout
-put "$APP/src/promo.ts" 'export function applyPromo(code: string): number {
-  return code === "SHIPFREE" ? 0 : 5;
-}'
-git_add_commit "$APP" "add promo helper" src/promo.ts
-
-git -C "$APP" worktree add -q "$APP/.worktrees/feat-login" -b feature/login
-put "$APP/.worktrees/feat-login/src/login.ts" 'export function login(email: string): boolean {
-  return email.includes("@");
-}'
-git_add_commit "$APP/.worktrees/feat-login" "add login form helper" src/login.ts
-put "$APP/src/checkout.ts" 'export function startCheckout(): void {
-  console.log("checkout");
-  console.log("collect shipping");
-  console.log("offer pickup");
-}'
-put "$APP/src/app.ts" 'import { startCheckout } from "./checkout.ts";
-import { applyPromo } from "./promo.ts";
-console.log(applyPromo("SHIPFREE"));
-startCheckout();'
-git -C "$APP" add src/app.ts
-put "$APP/src/draft-banner.ts" 'export const draftBanner = "Free shipping this week";'
-
-# --- services/api ---
-API="$DEST/services/api"
-git_init "$API"
-put "$API/README.md" "# Shop API
-
-HTTP API for catalog and orders."
-put "$API/package.json" '{
-  "name": "shop-api",
-  "private": true
-}'
-put "$API/src/server.ts" 'import { createServer } from "node:http";
-createServer(() => {}).listen(3000);'
-put "$API/src/routes/health.ts" 'export function handleHealth(): string {
-  return "ok";
-}'
-put "$API/src/routes/orders.ts" "export function listOrders(): unknown[] {
-  return [];
-}"
-git_add_commit "$API" "seed shop API" README.md package.json src/server.ts src/routes/health.ts src/routes/orders.ts
-attach_origin "$API" api
-
-git -C "$API" checkout -q -b feature/orders
-put "$API/src/routes/orders.ts" 'export function listOrders(): unknown[] {
-  return [];
-}
-export function createOrder(): string {
-  return "ord_1";
-}'
-git_add_commit "$API" "accept POST /orders" src/routes/orders.ts
-git -C "$API" push -q -u origin feature/orders
-
-scratch="$(mktemp -d)"
-git clone -q --branch feature/orders "file://${DEST}/.remotes/api.git" "$scratch"
-put "$scratch/src/routes/health.ts" 'export function handleHealth(): string {
-  return "ok v1.1";
-}'
-git_add_commit "$scratch" "report API version on health" src/routes/health.ts
-git -C "$scratch" push -q origin feature/orders
-rm -rf "$scratch"
-
-put "$API/src/routes/orders.ts" 'export function listOrders(): unknown[] {
-  return [];
-}
-export function createOrder(): { id: string; status: string } {
-  return { id: "ord_1", status: "created" };
-}'
-git_add_commit "$API" "return order status on create" src/routes/orders.ts
-git -C "$API" fetch -q origin
-put "$API/src/server.ts" 'import { createServer } from "node:http";
-const port = Number(process.env.PORT ?? 3000);
-createServer(() => {}).listen(port);'
-
-# --- lib ---
-LIB="$DEST/lib"
-git_init "$LIB"
-put "$LIB/README.md" "# Shop lib
-
-Shared money and id helpers."
-put "$LIB/package.json" '{
-  "name": "shop-lib",
-  "private": true
-}'
-put "$LIB/src/index.ts" 'export { formatMoney } from "./money.ts";
-export { newId } from "./ids.ts";'
-put "$LIB/src/money.ts" "export function formatMoney(cents: number): string {
-  return (cents / 100).toFixed(2);
-}"
-put "$LIB/src/ids.ts" 'export function newId(prefix: string): string {
-  return prefix + "_x";
-}'
-git_add_commit "$LIB" "seed shop lib" README.md package.json src/index.ts src/money.ts src/ids.ts
-attach_origin "$LIB" lib
-
-# --- notes ---
-NOTES="$DEST/notes"
-git_init "$NOTES"
-put "$NOTES/README.md" "# Shop notes
-
-Standup and release notes for the demo shop."
-put "$NOTES/standup.md" "# Standup
-
-- Checkout collects a shipping address.
-- API accepts POST /orders."
-put "$NOTES/release-checklist.md" "# Release checklist
-
-- [ ] Cut changelog
-- [ ] Tag lib
-- [ ] Deploy API"
-git_add_commit "$NOTES" "seed shop notes" README.md standup.md release-checklist.md
-attach_origin "$NOTES" notes
-printf '\n- Promo helper is local-only on app.\n' >>"$NOTES/standup.md"
-
-# --- merger ---
-MERGER="$DEST/merger"
-git_init "$MERGER"
-put "$MERGER/README.md" "# Shop release
-
-Release cut and changelog for the demo shop."
-put "$MERGER/changelog.md" "# Changelog
-
-## Unreleased"
-put "$MERGER/src/pipeline.ts" 'export function cutNotes(version: string): string {
-  return "shop " + version;
-}'
-git_add_commit "$MERGER" "seed release pipeline" README.md changelog.md src/pipeline.ts
-attach_origin "$MERGER" merger
-put "$MERGER/src/pipeline.ts" 'export function cutNotes(version: string): string {
-  return "shop " + version + "\n";
-}'
-git_add_commit "$MERGER" "append newline to cut notes" src/pipeline.ts
-git -C "$MERGER" push -q origin main
-
-git -C "$MERGER" checkout -q -b feature/billing
-put "$MERGER/src/billing.ts" "export function invoiceTotal(cents: number): number {
-  return cents;
-}"
-git_add_commit "$MERGER" "add billing invoice helper" src/billing.ts
-
-git -C "$MERGER" checkout -q main
-put "$MERGER/changelog.md" "# Changelog
-
-## Unreleased
-
-- Checkout shipping address"
-git_add_commit "$MERGER" "note shipping address in changelog" changelog.md
-git -C "$MERGER" push -q origin main
-
-git -C "$MERGER" checkout -q -b feature/release-cut
-GIT_AUTHOR_DATE="$DEMO_DATE" GIT_COMMITTER_DATE="$DEMO_DATE" \
-  git -C "$MERGER" merge -q --no-ff feature/billing -m "merge billing into release cut"
-put "$MERGER/src/rate-limit.ts" "export function allow(ip: string): boolean {
-  return ip.length > 0;
-}"
-git -C "$MERGER" add src/rate-limit.ts
-GIT_AUTHOR_DATE="$DEMO_DATE" GIT_COMMITTER_DATE="$DEMO_DATE" \
-  git -C "$MERGER" stash push -q -u -m "wip: rate limit"
-
-put "$DEST/.workspace-status-config.json" '{
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+write_file "$WORKSPACE/.workspace-status-config.json" <<'EOF'
+{
   "ignoredRepos": ["notes"],
-  "maxDepth": 3
-}'
-put "$DEST/README.md" "# Demo shop workspace
+  "editor": "vim"
+}
+EOF
 
-Multi-repo seed for workspace-status screenshots and video."
+# ---------------------------------------------------------------------------
+# app — dirty feature branch, ahead of origin, mixed file states + worktree
+# ---------------------------------------------------------------------------
+APP="$WORKSPACE/app"
+init_repo "$APP"
 
-printf 'Seeded %s\n' "$DEST"
-printf 'Run: cd %s && workspace-status   # TTY, or workspace-status --plain\n' "$DEST"
+write_file "$APP/README.md" <<'EOF'
+# app
+
+Demo web client used by the workspace-status TUI screenshots.
+EOF
+
+write_file "$APP/package.json" <<'EOF'
+{
+  "name": "app",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0"
+}
+EOF
+
+write_file "$APP/.gitignore" <<'EOF'
+.worktrees/
+EOF
+
+write_file "$APP/src/config.ts" <<'EOF'
+export const API_BASE = "/api";
+export const SESSION_TTL_MS = 30 * 60 * 1000;
+EOF
+
+write_file "$APP/src/auth.ts" <<'EOF'
+export type Session = {
+  userId: string;
+  token: string;
+  expiresAt: number;
+};
+
+export function isExpired(session: Session, now = Date.now()): boolean {
+  return now >= session.expiresAt;
+}
+EOF
+
+write_file "$APP/src/session.ts" <<'EOF'
+import { type Session, isExpired } from "./auth.ts";
+
+export function requireSession(session: Session | null): Session {
+  if (!session || isExpired(session)) {
+    throw new Error("unauthorized");
+  }
+  return session;
+}
+EOF
+
+commit_all "$APP" "seed app client"
+add_origin "$APP" "app"
+
+git_in "$APP" checkout -q -b feature/auth-refresh
+
+write_file "$APP/src/auth.ts" <<'EOF'
+export type Session = {
+  userId: string;
+  token: string;
+  expiresAt: number;
+};
+
+const REFRESH_MS = 5 * 60 * 1000;
+
+export function isExpired(session: Session, now = Date.now()): boolean {
+  return now >= session.expiresAt;
+}
+
+export function needsRefresh(session: Session, now = Date.now()): boolean {
+  return session.expiresAt - now < REFRESH_MS;
+}
+EOF
+
+commit_all "$APP" "Add token refresh window"
+git_in "$APP" push -q -u origin HEAD
+
+# Local-only commit so the branch is ahead of origin.
+write_file "$APP/src/session.ts" <<'EOF'
+import { type Session, isExpired, needsRefresh } from "./auth.ts";
+
+export function requireSession(session: Session | null): Session {
+  if (!session || isExpired(session)) {
+    throw new Error("session expired");
+  }
+  return session;
+}
+
+export function shouldRefresh(session: Session): boolean {
+  return needsRefresh(session);
+}
+EOF
+
+commit_all "$APP" "Tighten session expiry"
+
+# Stash a WIP so app has stash@{0} (stash menu + graph spur).
+write_file "$APP/src/tokenCache.ts" <<'EOF'
+const cache = new Map<string, string>();
+
+export function rememberToken(userId: string, token: string): void {
+  cache.set(userId, token);
+}
+EOF
+tick
+git_in "$APP" add src/tokenCache.ts
+git_in "$APP" stash push -q -u -m "WIP: in-memory token cache"
+
+# Unstaged M
+write_file "$APP/src/auth.ts" <<'EOF'
+export type Session = {
+  userId: string;
+  token: string;
+  expiresAt: number;
+};
+
+const REFRESH_MS = 2 * 60 * 1000;
+
+export function isExpired(session: Session, now = Date.now()): boolean {
+  return now >= session.expiresAt;
+}
+
+export function needsRefresh(session: Session, now = Date.now()): boolean {
+  return session.expiresAt - now < REFRESH_MS;
+}
+
+export function withRefreshedExpiry(
+  session: Session,
+  ttlMs: number,
+  now = Date.now(),
+): Session {
+  return { ...session, expiresAt: now + ttlMs };
+}
+EOF
+
+# Staged M
+write_file "$APP/src/session.ts" <<'EOF'
+import { type Session, isExpired, needsRefresh } from "./auth.ts";
+
+export function requireSession(session: Session | null): Session {
+  if (!session || isExpired(session)) {
+    throw new Error("session expired — sign in again");
+  }
+  return session;
+}
+
+export function shouldRefresh(session: Session): boolean {
+  return needsRefresh(session);
+}
+
+export function touch(session: Session, ttlMs: number, now = Date.now()): Session {
+  return { ...session, expiresAt: now + ttlMs };
+}
+EOF
+git_in "$APP" add src/session.ts
+
+# Untracked
+write_file "$APP/src/login.ts" <<'EOF'
+export type LoginForm = {
+  email: string;
+  password: string;
+};
+
+export function emptyLoginForm(): LoginForm {
+  return { email: "", password: "" };
+}
+EOF
+
+# Linked worktree on another branch (slightly dirty).
+mkdir -p "$APP/.worktrees"
+git_in "$APP" worktree add -q -b feature/login-page "$APP/.worktrees/feat-login" main
+write_file "$APP/.worktrees/feat-login/src/LoginPage.tsx" <<'EOF'
+export function LoginPage() {
+  return "<form>email / password</form>";
+}
+EOF
+
+# ---------------------------------------------------------------------------
+# services/api — dirty feature branch, diverged from origin
+# ---------------------------------------------------------------------------
+API="$WORKSPACE/services/api"
+init_repo "$API"
+
+write_file "$API/README.md" <<'EOF'
+# api
+
+Demo HTTP service for workspace-status screenshots.
+EOF
+
+write_file "$API/src/server.ts" <<'EOF'
+import { handleUsers } from "./routes/users.ts";
+
+export function listen(port = 3000): void {
+  console.log(`api listening on ${port}`);
+  handleUsers;
+}
+EOF
+
+write_file "$API/src/routes/users.ts" <<'EOF'
+export function handleUsers(): string {
+  return "ok";
+}
+EOF
+
+commit_all "$API" "seed api service"
+add_origin "$API" "services_api"
+
+git_in "$API" checkout -q -b feature/rate-limit
+
+write_file "$API/src/rateLimit.ts" <<'EOF'
+const hits = new Map<string, number>();
+
+export function allow(key: string, max = 60): boolean {
+  const n = (hits.get(key) ?? 0) + 1;
+  hits.set(key, n);
+  return n <= max;
+}
+EOF
+
+write_file "$API/src/server.ts" <<'EOF'
+import { handleUsers } from "./routes/users.ts";
+import { allow } from "./rateLimit.ts";
+
+export function listen(port = 3000): void {
+  if (!allow("listen")) {
+    throw new Error("rate limited");
+  }
+  console.log(`api listening on ${port}`);
+  handleUsers;
+}
+EOF
+
+commit_all "$API" "Add per-route rate limiter"
+git_in "$API" push -q -u origin HEAD
+
+# Origin advances (local will be behind after fetch).
+ORIGIN_API="$SCRATCH/api-origin"
+git clone -q "$REMOTES/services_api.git" "$ORIGIN_API"
+git_in "$ORIGIN_API" config user.name "Demo User"
+git_in "$ORIGIN_API" config user.email "demo@example.invalid"
+git_in "$ORIGIN_API" checkout -q feature/rate-limit
+write_file "$ORIGIN_API/src/routes/users.ts" <<'EOF'
+export function handleUsers(): string {
+  return "ok";
+}
+
+export function handleUserById(id: string): { id: string } {
+  return { id };
+}
+EOF
+commit_all "$ORIGIN_API" "Add user-by-id route"
+git_in "$ORIGIN_API" push -q origin HEAD
+
+# Local commit on a different file → diverged after fetch.
+write_file "$API/src/rateLimit.ts" <<'EOF'
+const hits = new Map<string, number>();
+
+export function allow(key: string, max = 30): boolean {
+  const n = (hits.get(key) ?? 0) + 1;
+  hits.set(key, n);
+  return n <= max;
+}
+
+export function reset(key: string): void {
+  hits.delete(key);
+}
+EOF
+commit_all "$API" "Lower default rate limit"
+git_in "$API" fetch -q origin
+
+# Unstaged dirty
+write_file "$API/src/server.ts" <<'EOF'
+import { handleUsers } from "./routes/users.ts";
+import { allow } from "./rateLimit.ts";
+
+export function listen(port = 3000): void {
+  if (!allow(`listen:${port}`)) {
+    throw new Error("rate limited");
+  }
+  console.log(`api listening on ${port}`);
+  handleUsers;
+}
+EOF
+
+# ---------------------------------------------------------------------------
+# lib — clean default-branch repo (folded under No updates)
+# ---------------------------------------------------------------------------
+LIB="$WORKSPACE/lib"
+init_repo "$LIB"
+
+write_file "$LIB/README.md" <<'EOF'
+# lib
+
+Shared helpers. Clean on main so it sits under No updates.
+EOF
+
+write_file "$LIB/src/index.ts" <<'EOF'
+export function clamp(n: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, n));
+}
+EOF
+
+commit_all "$LIB" "seed lib"
+add_origin "$LIB" "lib"
+
+# ---------------------------------------------------------------------------
+# notes — ignored dirty repo (`.` reveals it)
+# ---------------------------------------------------------------------------
+NOTES="$WORKSPACE/notes"
+init_repo "$NOTES"
+
+write_file "$NOTES/inbox.md" <<'EOF'
+# Inbox
+
+- screenshot the TUI tree
+EOF
+commit_all "$NOTES" "seed notes"
+write_file "$NOTES/inbox.md" <<'EOF'
+# Inbox
+
+- screenshot the TUI tree
+- capture git graph elbows + stash diamond
+- capture help, search, stash menu
+EOF
+
+# ---------------------------------------------------------------------------
+# merger — non-default branch, merge diamond + stash spur
+# ---------------------------------------------------------------------------
+MERGER="$WORKSPACE/merger"
+init_repo "$MERGER"
+
+write_file "$MERGER/README.md" <<'EOF'
+# merger
+
+Billing + invoices history used to screenshot the multi-lane graph.
+EOF
+
+write_file "$MERGER/src/core.ts" <<'EOF'
+export type Money = { cents: number; currency: "USD" };
+
+export function zero(): Money {
+  return { cents: 0, currency: "USD" };
+}
+EOF
+commit_all "$MERGER" "root"
+
+git_in "$MERGER" checkout -q -b feature/billing
+write_file "$MERGER/src/billing.ts" <<'EOF'
+import { type Money } from "./core.ts";
+
+export function charge(amount: Money): Money {
+  return amount;
+}
+EOF
+commit_all "$MERGER" "left: add billing"
+
+git_in "$MERGER" checkout -q main
+write_file "$MERGER/src/invoices.ts" <<'EOF'
+import { type Money, zero } from "./core.ts";
+
+export function emptyInvoice(): { total: Money; lines: never[] } {
+  return { total: zero(), lines: [] };
+}
+EOF
+commit_all "$MERGER" "right: add invoices"
+
+tick
+git_in "$MERGER" merge --no-ff -m "merge billing into main" feature/billing
+
+git_in "$MERGER" checkout -q -b feature/reconciliation
+write_file "$MERGER/src/reconcile.ts" <<'EOF'
+import { type Money } from "./core.ts";
+
+export function balanced(left: Money, right: Money): boolean {
+  return left.cents === right.cents && left.currency === right.currency;
+}
+EOF
+commit_all "$MERGER" "Start reconciliation job"
+
+write_file "$MERGER/src/wip-totals.ts" <<'EOF'
+import { type Money } from "./core.ts";
+
+export function sum(items: Money[]): number {
+  return items.reduce((n, m) => n + m.cents, 0);
+}
+EOF
+tick
+git_in "$MERGER" add src/wip-totals.ts
+git_in "$MERGER" stash push -q -u -m "WIP: reconcile totals"
+
+add_origin "$MERGER" "merger"
+# Stay on the feature branch (non-default) so the repo stays visible.
+git_in "$MERGER" push -q -u origin feature/reconciliation
+git_in "$MERGER" checkout -q feature/reconciliation
+
+echo "seeded $WORKSPACE"
+echo "cd $WORKSPACE && WS_STATUS_WATCH_MS=0 WS_STATUS_FETCH_MS=0 workspace-status"
