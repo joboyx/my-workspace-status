@@ -16,6 +16,7 @@ pub enum InputMode {
     StashMenu,
     BranchPicker,
     CreateBranch,
+    EasyMotion,
 }
 
 /// Map one terminal event to an [`Action`].
@@ -52,6 +53,7 @@ pub fn event_to_action_ex(
                     | InputMode::StashMenu
                     | InputMode::BranchPicker
                     | InputMode::CreateBranch
+                    | InputMode::EasyMotion
             ) {
                 Action::None
             } else {
@@ -120,6 +122,15 @@ fn key_to_action(
             }
             _ => Action::None,
         },
+        InputMode::EasyMotion => match key.code {
+            KeyCode::Esc => Action::EasyMotionCancel,
+            KeyCode::Char(c)
+                if c.is_ascii_alphabetic() && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                Action::EasyMotionChar(c.to_ascii_lowercase())
+            }
+            _ => Action::None,
+        },
         InputMode::Normal { search_active } => {
             normal_key(key, search_active, right_is_diff, focus_right, graph_stash_focused)
         }
@@ -141,7 +152,11 @@ fn normal_key(
             _ => {}
         }
     }
+    if is_easy_motion_start(key) {
+        return Action::EasyMotionStart;
+    }
     match key.code {
+        KeyCode::Char('T') => Action::CycleTheme,
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Char('?') => Action::ToggleHelp,
         KeyCode::Char('.') => Action::ToggleShowIgnored,
@@ -208,6 +223,19 @@ fn normal_key(
         KeyCode::Esc => Action::NavEsc,
         _ => Action::None,
     }
+}
+
+fn is_easy_motion_start(key: KeyEvent) -> bool {
+    if key.code == KeyCode::Char(';') && !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return true;
+    }
+    if key.code == KeyCode::Null {
+        return true;
+    }
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    matches!(key.code, KeyCode::Char(' ') | KeyCode::Char('`'))
 }
 
 fn mouse_to_action(mouse: MouseEvent) -> Action {
@@ -418,6 +446,54 @@ mod tests {
                 false
             ),
             Action::None
+        );
+    }
+
+    fn ctrl(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL))
+    }
+
+    #[test]
+    fn easy_motion_and_theme_keys() {
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char(';')), normal(), false, false),
+            Action::EasyMotionStart
+        );
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char(' ')), normal(), false, false),
+            Action::EasyMotionStart
+        );
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('`')), normal(), false, false),
+            Action::EasyMotionStart
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Null), normal(), false, false),
+            Action::EasyMotionStart
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('T')), normal(), false, false),
+            Action::CycleTheme
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char(' ')), normal(), false, false),
+            Action::ToggleReviewed
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Esc), InputMode::EasyMotion, false, false),
+            Action::EasyMotionCancel
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('a')), InputMode::EasyMotion, false, false),
+            Action::EasyMotionChar('a')
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('A')), InputMode::EasyMotion, false, false),
+            Action::EasyMotionChar('a')
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('q')), InputMode::EasyMotion, false, false),
+            Action::EasyMotionChar('q')
         );
     }
 }

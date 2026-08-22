@@ -5,16 +5,18 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 use ratatui::Frame;
-use workspace_status_graph::GraphWidget;
+use workspace_status_graph::{paint_model, GraphWidget, ASCII, UNICODE};
 
 use std::time::Instant;
 
 use super::drill::DrillView;
+use super::easy_motion::{easy_motion_labels, visible_window};
 use super::split::{
     diff_split_rule_x, is_side_by_side_split, pad_trunc, pair_unified_lines, pane_widths,
     side_by_side_column_widths, MIN_PANE_COLS,
 };
 use super::state::{AppState, FocusPane};
+use super::theme::Palette;
 use super::tree::NodeKind;
 use super::watch::flash_active;
 
@@ -41,7 +43,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         } else {
             " tree"
         })
-        .border_style(pane_border(state.focus == FocusPane::Left));
+        .border_style(pane_border(state.focus == FocusPane::Left, state.theme.palette()));
     let tree_inner = tree_block.inner(panes[0]);
     frame.render_widget(tree_block, panes[0]);
     draw_tree(frame, tree_inner, state);
@@ -59,7 +61,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     let right_block = Block::default()
         .borders(Borders::ALL)
         .title(right_title)
-        .border_style(pane_border(state.focus == FocusPane::Right));
+        .border_style(pane_border(state.focus == FocusPane::Right, state.theme.palette()));
     let right_inner = right_block.inner(panes[1]);
     frame.render_widget(right_block, panes[1]);
     draw_right(frame, right_inner, state);
@@ -67,7 +69,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             state.status.clone(),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(state.theme.palette().muted),
         ))),
         chunks[1],
     );
@@ -102,11 +104,11 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     }
 }
 
-fn pane_border(focused: bool) -> Style {
+fn pane_border(focused: bool, palette: Palette) -> Style {
     if focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(palette.heading)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(palette.muted)
     }
 }
 
@@ -116,14 +118,17 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     }
     let height = area.height as usize;
     let cursor = state.cursor;
-    let start = if cursor >= height {
-        cursor + 1 - height
-    } else {
-        0
-    };
+    let (start, _) = visible_window(state.rows.len(), cursor, height);
     state.layout.list_offset = start;
+    let motion = tree_easy_motion_labels(state, start, height);
+    let palette = state.theme.palette();
     let mut lines = Vec::new();
     for (i, row) in state.rows.iter().enumerate().skip(start).take(height) {
+        let label = motion
+            .as_ref()
+            .and_then(|labels| labels.get(i - start))
+            .map(|s| format!("{s:<2}"))
+            .unwrap_or_default();
         let chevron = if row.foldable {
             if row.folded {
                 if state.ascii { ">" } else { "▸" }
@@ -143,24 +148,24 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             ""
         };
         let indent = "  ".repeat(row.depth);
-        let text = format!("{indent}{chevron} {mark}{}", row.label);
-        let mut style = Style::default();
-        if i == cursor {
-            style = style.add_modifier(Modifier::REVERSED);
-        }
+        let text = format!("{label}{indent}{chevron} {mark}{}", row.label);
         let flashing = state
             .flashes
             .get(&row.id)
             .is_some_and(|at| flash_active(Instant::now().saturating_duration_since(*at)));
-        if flashing && i != cursor {
-            style = style.fg(Color::LightYellow).add_modifier(Modifier::BOLD);
-        } else if row.ignored {
-            style = style.fg(Color::DarkGray);
+        let style = if i == cursor {
+            Style::default().fg(palette.cursor).bg(palette.cursor_bg)
+        } else if flashing {
+            Style::default().fg(palette.modified).add_modifier(Modifier::BOLD)
+        } else if row.ignored || row.kind == NodeKind::Group {
+            Style::default().fg(palette.muted)
         } else if row.kind == NodeKind::File {
-            style = style.fg(Color::Yellow);
-        } else if row.kind == NodeKind::Group {
-            style = style.fg(Color::DarkGray);
-        }
+            Style::default().fg(palette.file)
+        } else if !label.is_empty() {
+            Style::default().fg(palette.heading)
+        } else {
+            Style::default().fg(palette.repo)
+        };
         lines.push(Line::from(Span::styled(text, style)));
     }
     frame.render_widget(Paragraph::new(lines), area);
@@ -177,17 +182,26 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 return;
             }
             let height = area.height as usize;
-            let start = if *cursor >= height { *cursor + 1 - height } else { 0 };
+            let (start, _) = visible_window(files.len(), *cursor, height);
+            let motion = file_easy_motion_labels(state, start, height);
+            let palette = state.theme.palette();
             let lines: Vec<Line> = files
                 .iter()
                 .enumerate()
                 .skip(start)
                 .take(height)
                 .map(|(i, file)| {
-                    let text = format!("{}  {}", file.status, file.path);
-                    let mut style = Style::default();
+                    let label = motion
+                        .as_ref()
+                        .and_then(|labels| labels.get(i - start))
+                        .map(|s| format!("{s:<2}"))
+                        .unwrap_or_default();
+                    let text = format!("{label}{}  {}", file.status, file.path);
+                    let mut style = Style::default().fg(palette.file);
                     if i == *cursor {
-                        style = style.add_modifier(Modifier::REVERSED);
+                        style = style.fg(palette.cursor).bg(palette.cursor_bg);
+                    } else if !label.is_empty() {
+                        style = style.fg(palette.heading);
                     }
                     Line::from(Span::styled(text, style))
                 })
@@ -219,6 +233,7 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             .selected(Some(state.graph_cursor))
             .scroll(state.graph_scroll)
             .render(area, frame.buffer_mut());
+        overlay_graph_easy_motion(frame, area, state);
         return;
     }
     frame.render_widget(
@@ -240,9 +255,9 @@ fn draw_diff_lines(frame: &mut Frame<'_>, area: Rect, state: &AppState, lines: &
                 let left = pad_trunc(&row.left, split.left_width);
                 let right = pad_trunc(&row.right, split.right_width);
                 Line::from(vec![
-                    Span::styled(left, diff_style(&row.left)),
+                    Span::styled(left, diff_style(&row.left, state.theme.palette())),
                     Span::styled("│", Style::default().fg(Color::DarkGray)),
-                    Span::styled(right, diff_style(&row.right)),
+                    Span::styled(right, diff_style(&row.right, state.theme.palette())),
                 ])
             })
             .collect();
@@ -253,28 +268,28 @@ fn draw_diff_lines(frame: &mut Frame<'_>, area: Rect, state: &AppState, lines: &
         .iter()
         .skip(skip)
         .take(area.height as usize)
-        .map(|line| Line::from(Span::styled(line.clone(), diff_style(line))))
+        .map(|line| Line::from(Span::styled(line.clone(), diff_style(line, state.theme.palette()))))
         .collect();
     frame.render_widget(Paragraph::new(painted), area);
 }
 
-fn diff_style(line: &str) -> Style {
+fn diff_style(line: &str, palette: Palette) -> Style {
     if line.starts_with('+') && !line.starts_with("+++") {
-        Style::default().fg(Color::Green)
+        Style::default().fg(palette.added)
     } else if line.starts_with('-') && !line.starts_with("---") {
-        Style::default().fg(Color::Red)
+        Style::default().fg(palette.deleted)
     } else if line.starts_with("@@") {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(palette.diff_hunk)
     } else if line == "staged" || line == "unstaged" || line.starts_with("untracked") {
-        Style::default().fg(Color::Magenta)
+        Style::default().fg(palette.heading)
     } else {
-        Style::default()
+        Style::default().fg(palette.repo)
     }
 }
 
 fn draw_help(frame: &mut Frame<'_>, area: Rect) {
     let width = 48.min(area.width.saturating_sub(4));
-    let height = 22.min(area.height.saturating_sub(2));
+    let height = 24.min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let rect = Rect::new(x, y, width, height);
@@ -294,13 +309,103 @@ b  branch picker        C  create (in picker)
 W  remove worktree      Tab  other pane
 Enter  drill            Esc  back
 a/p/D  focused stash    click  select row
-i  inline / split       drag  resize split";
+i  inline / split       drag  resize split
+;  EasyMotion           T  cycle theme";
     frame.render_widget(
         Paragraph::new(body)
             .block(Block::default().borders(Borders::ALL).title(" keys "))
             .wrap(Wrap { trim: false }),
         rect,
     );
+}
+
+fn tree_easy_motion_labels(state: &AppState, start: usize, height: usize) -> Option<Vec<String>> {
+    let motion = state.easy_motion.as_ref()?;
+    if state.focus != FocusPane::Left {
+        return None;
+    }
+    let (_win_start, count) = visible_window(state.rows.len(), state.cursor, height);
+    if _win_start != start {
+        return None;
+    }
+    Some(filter_labels(easy_motion_labels(count), &motion.typed))
+}
+
+fn file_easy_motion_labels(state: &AppState, start: usize, height: usize) -> Option<Vec<String>> {
+    let motion = state.easy_motion.as_ref()?;
+    if state.focus != FocusPane::Right || !state.drill.is_files() {
+        return None;
+    }
+    let DrillView::Files { files, cursor, .. } = &state.drill else {
+        return None;
+    };
+    let (_win_start, count) = visible_window(files.len(), *cursor, height);
+    if _win_start != start {
+        return None;
+    }
+    Some(filter_labels(easy_motion_labels(count), &motion.typed))
+}
+
+fn overlay_graph_easy_motion(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let Some(motion) = state.easy_motion.as_ref() else {
+        return;
+    };
+    if state.focus != FocusPane::Right || !state.drill.is_graph() || state.right_is_diff() {
+        return;
+    }
+    let Some(model) = state.graph.as_ref() else {
+        return;
+    };
+    let n = model.visible_rows().len();
+    let height = area.height as usize;
+    let (start, count) = visible_window(n, state.graph_cursor, height);
+    let labels = filter_labels(easy_motion_labels(count), &motion.typed);
+    let palette = state.theme.palette();
+    let glyphs = if state.ascii { &ASCII } else { &UNICODE };
+    let mut y = area.y;
+    let bottom = area.y.saturating_add(area.height);
+    if model.sync.is_some() {
+        y = y.saturating_add(1);
+    }
+    for line in paint_model(model, glyphs, None)
+        .into_iter()
+        .skip(state.graph_scroll as usize)
+    {
+        if y >= bottom {
+            break;
+        }
+        if let Some(idx) = line.row_index {
+            if idx >= start && idx < start + labels.len() {
+                let label = &labels[idx - start];
+                if !label.is_empty() {
+                    frame.buffer_mut().set_stringn(
+                        area.x,
+                        y,
+                        &format!("{label:<2}"),
+                        2,
+                        Style::default().fg(palette.heading),
+                    );
+                }
+            }
+        }
+        y = y.saturating_add(1);
+    }
+}
+
+fn filter_labels(labels: Vec<String>, typed: &str) -> Vec<String> {
+    if typed.is_empty() {
+        return labels;
+    }
+    labels
+        .into_iter()
+        .map(|label| {
+            if label == typed || label.starts_with(typed) {
+                label
+            } else {
+                String::new()
+            }
+        })
+        .collect()
 }
 
 fn overlay_rect(area: Rect, width: u16, height: u16) -> Rect {
@@ -492,7 +597,7 @@ mod tests {
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         state.help_open = true;
-        let backend = TestBackend::new(80, 20);
+        let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| draw(frame, &mut state))
@@ -503,7 +608,24 @@ mod tests {
         assert!(text.contains("S  stash menu"), "{text}");
         assert!(text.contains("P  push"), "{text}");
         assert!(text.contains("W  remove worktree"), "{text}");
-        assert!(!text.contains("EasyMotion"), "{text}");
+        assert!(text.contains("EasyMotion"), "{text}");
+        assert!(text.contains("cycle theme"), "{text}");
+    }
+
+    #[test]
+    fn easy_motion_paints_labels_on_visible_tree_rows() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.dispatch(super::super::action::Action::EasyMotionStart);
+        assert!(state.easy_motion.is_some());
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &mut state))
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("a "), "{text}");
+        assert!(text.contains("b "), "{text}");
     }
 
     #[test]
