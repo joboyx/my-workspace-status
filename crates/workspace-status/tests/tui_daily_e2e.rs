@@ -291,6 +291,10 @@ fn drill_enter_and_esc_walk_commit_files_diff() {
         "Enter on a graph commit should open the file list:\n{files}"
     );
     assert!(
+        files.contains("graph") && (files.contains("merge") || files.contains("left") || files.contains("right")),
+        "depth-1 keeps the graph on the left:\n{files}"
+    );
+    assert!(
         files.contains("left.txt")
             || files.contains("right.txt")
             || files.contains("wip.txt")

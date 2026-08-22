@@ -37,17 +37,25 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         ])
         .split(chunks[0]);
 
+    let left_is_graph = state.in_commit_drill();
+    let left_title = if left_is_graph {
+        if state.focus == FocusPane::Left { " graph " } else { " graph" }
+    } else if state.focus == FocusPane::Left {
+        " tree "
+    } else {
+        " tree"
+    };
     let tree_block = Block::default()
         .borders(Borders::ALL)
-        .title(if state.focus == FocusPane::Left {
-            " tree "
-        } else {
-            " tree"
-        })
+        .title(left_title)
         .border_style(pane_border(state.focus == FocusPane::Left, state.theme.palette()));
     let tree_inner = tree_block.inner(panes[0]);
     frame.render_widget(tree_block, panes[0]);
-    draw_tree(frame, tree_inner, state);
+    if left_is_graph {
+        draw_graph(frame, tree_inner, state);
+    } else {
+        draw_tree(frame, tree_inner, state);
+    }
 
     let focused = state.focus == FocusPane::Right;
     let right_title = if state.drill.is_files() {
@@ -177,37 +185,8 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         return;
     }
     match &state.drill {
-        DrillView::Files { files, cursor, .. } => {
-            if files.is_empty() {
-                frame.render_widget(Paragraph::new("no files in this commit"), area);
-                return;
-            }
-            let height = area.height as usize;
-            let (start, _) = visible_window(files.len(), *cursor, height);
-            let motion = file_easy_motion_labels(state, start, height);
-            let palette = state.theme.palette();
-            let lines: Vec<Line> = files
-                .iter()
-                .enumerate()
-                .skip(start)
-                .take(height)
-                .map(|(i, file)| {
-                    let label = motion
-                        .as_ref()
-                        .and_then(|labels| labels.get(i - start))
-                        .map(|s| format!("{s:<2}"))
-                        .unwrap_or_default();
-                    let text = format!("{label}{}  {}", file.status, file.path);
-                    let mut style = Style::default().fg(palette.file);
-                    if i == *cursor {
-                        style = style.fg(palette.cursor).bg(palette.cursor_bg);
-                    } else if !label.is_empty() {
-                        style = style.fg(palette.heading);
-                    }
-                    Line::from(Span::styled(text, style))
-                })
-                .collect();
-            frame.render_widget(Paragraph::new(lines), area);
+        DrillView::Files { cursor, .. } => {
+            draw_commit_detail(frame, area, state, *cursor);
             return;
         }
         DrillView::Diff { lines, path, .. } => {
@@ -228,19 +207,126 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         draw_diff_lines(frame, area, state, &state.diff_lines);
         return;
     }
-    if let Some(model) = &state.graph {
-        GraphWidget::new(model)
-            .ascii(state.ascii)
-            .selected(Some(state.graph_cursor))
-            .scroll(state.graph_scroll)
-            .render(area, frame.buffer_mut());
-        overlay_graph_easy_motion(frame, area, state);
+    draw_graph(frame, area, state);
+    if state.graph.is_some() {
         return;
     }
     frame.render_widget(
         Paragraph::new("focus a repo for the graph, or a file for its diff"),
         area,
     );
+}
+
+fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let Some(model) = state.graph.as_ref() else {
+        frame.render_widget(Paragraph::new("focus a repo for the graph"), area);
+        return;
+    };
+    GraphWidget::new(model)
+        .ascii(state.ascii)
+        .selected(Some(state.graph_cursor))
+        .scroll(state.graph_scroll)
+        .render(area, frame.buffer_mut());
+    overlay_graph_easy_motion(frame, area, state);
+}
+
+fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, cursor: usize) {
+    let (title, subtitle) = state.commit_detail_meta();
+    let mut header: Vec<String> = Vec::new();
+    if !title.is_empty() {
+        header.push(title);
+    }
+    if let Some(sub) = subtitle {
+        if !sub.is_empty() {
+            header.push(sub);
+        }
+    }
+    if header.is_empty() {
+        header.push(String::new());
+    }
+    let header_h = header.len().min(area.height as usize);
+    let palette = state.theme.palette();
+    let header_lines: Vec<Line> = header
+        .iter()
+        .take(header_h)
+        .enumerate()
+        .map(|(i, line)| {
+            let style = if i == 0 {
+                Style::default().fg(palette.repo)
+            } else {
+                Style::default().fg(palette.muted)
+            };
+            Line::from(Span::styled(line.clone(), style))
+        })
+        .collect();
+    let header_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: header_h as u16,
+    };
+    frame.render_widget(Paragraph::new(header_lines), header_area);
+
+    let list_y = area.y.saturating_add(header_h as u16);
+    let list_h = area.height.saturating_sub(header_h as u16);
+    if list_h == 0 {
+        return;
+    }
+    let list_area = Rect {
+        x: area.x,
+        y: list_y,
+        width: area.width,
+        height: list_h,
+    };
+    let rows = state.commit_file_rows();
+    if rows.is_empty() {
+        frame.render_widget(Paragraph::new("no files in this commit"), list_area);
+        return;
+    }
+    let height = list_h as usize;
+    let (start, _) = visible_window(rows.len(), cursor, height);
+    let motion = file_easy_motion_labels(state, start, height);
+    let lines: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(height)
+        .map(|(i, row)| {
+            let label = motion
+                .as_ref()
+                .and_then(|labels| labels.get(i - start))
+                .map(|s| format!("{s:<2}"))
+                .unwrap_or_default();
+            let chevron = if row.foldable {
+                if row.folded {
+                    if state.ascii { ">" } else { "▸" }
+                } else if state.ascii {
+                    "v"
+                } else {
+                    "▾"
+                }
+            } else {
+                " "
+            };
+            let indent = "  ".repeat(row.depth);
+            let text = format!("{label}{indent}{chevron} {}", row.label);
+            let mut style = if row.is_dir() {
+                Style::default().fg(palette.repo)
+            } else {
+                Style::default().fg(palette.file)
+            };
+            if i == cursor {
+                style = style.fg(palette.cursor).bg(palette.cursor_bg);
+            } else if !label.is_empty() {
+                style = style.fg(palette.heading);
+            }
+            Line::from(Span::styled(text, style))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), list_area);
 }
 
 fn draw_diff_lines(frame: &mut Frame<'_>, area: Rect, state: &AppState, lines: &[String]) {
@@ -350,10 +436,11 @@ fn file_easy_motion_labels(state: &AppState, start: usize, height: usize) -> Opt
     if state.focus != FocusPane::Right || !state.drill.is_files() {
         return None;
     }
-    let DrillView::Files { files, cursor, .. } = &state.drill else {
+    let DrillView::Files { cursor, .. } = &state.drill else {
         return None;
     };
-    let (_win_start, count) = visible_window(files.len(), *cursor, height);
+    let rows = state.commit_file_rows();
+    let (_win_start, count) = visible_window(rows.len(), *cursor, height);
     if _win_start != start {
         return None;
     }
@@ -364,7 +451,7 @@ fn overlay_graph_easy_motion(frame: &mut Frame<'_>, area: Rect, state: &AppState
     let Some(motion) = state.easy_motion.as_ref() else {
         return;
     };
-    if state.focus != FocusPane::Right || !state.drill.is_graph() || state.right_is_diff() {
+    if !state.graph_pane_focused() {
         return;
     }
     let Some(model) = state.graph.as_ref() else {
