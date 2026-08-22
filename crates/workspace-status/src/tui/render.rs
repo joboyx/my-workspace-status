@@ -9,6 +9,7 @@ use workspace_status_graph::GraphWidget;
 
 use std::time::Instant;
 
+use super::drill::DrillView;
 use super::state::{AppState, FocusPane};
 use super::tree::NodeKind;
 use super::watch::flash_active;
@@ -37,13 +38,12 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     frame.render_widget(tree_block, panes[0]);
     draw_tree(frame, tree_inner, state);
 
-    let right_title = if state.right_is_diff() {
-        if state.focus == FocusPane::Right {
-            " diff "
-        } else {
-            " diff"
-        }
-    } else if state.focus == FocusPane::Right {
+    let focused = state.focus == FocusPane::Right;
+    let right_title = if state.drill.is_files() {
+        if focused { " files " } else { " files" }
+    } else if state.drill.is_diff() || state.right_is_diff() {
+        if focused { " diff " } else { " diff" }
+    } else if focused {
         " graph "
     } else {
         " graph"
@@ -149,6 +149,48 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    match &state.drill {
+        DrillView::Files { files, cursor, .. } => {
+            if files.is_empty() {
+                frame.render_widget(Paragraph::new("no files in this commit"), area);
+                return;
+            }
+            let height = area.height as usize;
+            let start = if *cursor >= height { *cursor + 1 - height } else { 0 };
+            let lines: Vec<Line> = files
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(height)
+                .map(|(i, file)| {
+                    let text = format!("{}  {}", file.status, file.path);
+                    let mut style = Style::default();
+                    if i == *cursor {
+                        style = style.add_modifier(Modifier::REVERSED);
+                    }
+                    Line::from(Span::styled(text, style))
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(lines), area);
+            return;
+        }
+        DrillView::Diff { lines, path, .. } => {
+            if lines.is_empty() {
+                frame.render_widget(Paragraph::new(format!("no diff for {path}")), area);
+                return;
+            }
+            let skip = state.diff_scroll as usize;
+            let painted: Vec<Line> = lines
+                .iter()
+                .skip(skip)
+                .take(area.height as usize)
+                .map(|line| Line::from(Span::styled(line.clone(), diff_style(line))))
+                .collect();
+            frame.render_widget(Paragraph::new(painted), area);
+            return;
+        }
+        DrillView::Graph => {}
+    }
     if state.right_is_diff() {
         if state.diff_lines.is_empty() {
             frame.render_widget(Paragraph::new("select a dirty file"), area);
@@ -168,6 +210,8 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     if let Some(model) = &state.graph {
         GraphWidget::new(model)
             .ascii(state.ascii)
+            .selected(Some(state.graph_cursor))
+            .scroll(state.graph_scroll)
             .render(area, frame.buffer_mut());
         return;
     }
@@ -193,7 +237,7 @@ fn diff_style(line: &str) -> Style {
 
 fn draw_help(frame: &mut Frame<'_>, area: Rect) {
     let width = 48.min(area.width.saturating_sub(4));
-    let height = 19.min(area.height.saturating_sub(2));
+    let height = 21.min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let rect = Rect::new(x, y, width, height);
@@ -211,7 +255,8 @@ d  default branch       r  refresh
 P  push                 S  stash menu
 b  branch picker        C  create (in picker)
 W  remove worktree      Tab  other pane
-click  select row";
+Enter  drill            Esc  back
+a/p/D  focused stash    click  select row";
     frame.render_widget(
         Paragraph::new(body)
             .block(Block::default().borders(Borders::ALL).title(" keys "))

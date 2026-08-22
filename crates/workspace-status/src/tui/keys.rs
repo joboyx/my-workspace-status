@@ -21,15 +21,27 @@ pub enum InputMode {
 /// Map one terminal event to an [`Action`].
 ///
 /// Key release events are ignored. Repeat is accepted for movement.
+#[allow(dead_code)]
 pub fn event_to_action(
     event: &Event,
     mode: InputMode,
     right_is_diff: bool,
     focus_right: bool,
 ) -> Action {
+    event_to_action_ex(event, mode, right_is_diff, focus_right, false)
+}
+
+/// Map one terminal event to an [`Action`], including graph-stash keys.
+pub fn event_to_action_ex(
+    event: &Event,
+    mode: InputMode,
+    right_is_diff: bool,
+    focus_right: bool,
+    graph_stash_focused: bool,
+) -> Action {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
-            key_to_action(*key, mode, right_is_diff, focus_right)
+            key_to_action(*key, mode, right_is_diff, focus_right, graph_stash_focused)
         }
         Event::Mouse(mouse) => {
             if matches!(
@@ -55,6 +67,7 @@ fn key_to_action(
     mode: InputMode,
     right_is_diff: bool,
     focus_right: bool,
+    graph_stash_focused: bool,
 ) -> Action {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Action::Quit;
@@ -108,7 +121,7 @@ fn key_to_action(
             _ => Action::None,
         },
         InputMode::Normal { search_active } => {
-            normal_key(key, search_active, right_is_diff, focus_right)
+            normal_key(key, search_active, right_is_diff, focus_right, graph_stash_focused)
         }
     }
 }
@@ -118,7 +131,16 @@ fn normal_key(
     search_active: bool,
     right_is_diff: bool,
     focus_right: bool,
+    graph_stash_focused: bool,
 ) -> Action {
+    if graph_stash_focused {
+        match key.code {
+            KeyCode::Char('a') => return Action::GraphStashApply,
+            KeyCode::Char('p') => return Action::GraphStashPop,
+            KeyCode::Char('D') => return Action::GraphStashDrop,
+            _ => {}
+        }
+    }
     match key.code {
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Char('?') => Action::ToggleHelp,
@@ -181,7 +203,8 @@ fn normal_key(
         }
         KeyCode::Char('h') | KeyCode::Left => Action::FoldClose,
         KeyCode::Char('l') | KeyCode::Right => Action::FoldOpen,
-        KeyCode::Esc => Action::None,
+        KeyCode::Enter => Action::NavEnter,
+        KeyCode::Esc => Action::NavEsc,
         _ => Action::None,
     }
 }
@@ -315,6 +338,28 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Char('C')), InputMode::BranchPicker, false, false),
             Action::CreateBranchStart
+        );
+    }
+
+    #[test]
+    fn enter_esc_and_graph_stash_keys() {
+        assert_eq!(event_to_action(&key(KeyCode::Enter), normal(), false, true), Action::NavEnter);
+        assert_eq!(event_to_action(&key(KeyCode::Esc), normal(), false, true), Action::NavEsc);
+        assert_eq!(
+            event_to_action_ex(&key(KeyCode::Char('a')), normal(), false, true, true),
+            Action::GraphStashApply
+        );
+        assert_eq!(
+            event_to_action_ex(&key(KeyCode::Char('p')), normal(), false, true, true),
+            Action::GraphStashPop
+        );
+        assert_eq!(
+            event_to_action_ex(&key(KeyCode::Char('D')), normal(), false, true, true),
+            Action::GraphStashDrop
+        );
+        assert_eq!(
+            event_to_action_ex(&key(KeyCode::Char('p')), normal(), false, true, false),
+            Action::Pull
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('j')), InputMode::BranchPicker, false, false),
