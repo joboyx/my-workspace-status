@@ -298,6 +298,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
 q  quit                 ?  close this help
 j/k  move               arrows  same
 z  fold                 h/l  close / open
+t  tree / flat          (workspace tree)
 .  show ignored         space  mark reviewed
 /  search               n/N  next / prev
 s  stage                u  unstage
