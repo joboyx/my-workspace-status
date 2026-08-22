@@ -69,7 +69,6 @@ These stay in the TypeScript app:
 - In-diff drag split and side-by-side resize
 - Commit-files drill (depth 1 / depth 2)
 - Ink-testing e2e suite
-- Multi-lane graph gutter (the crate still paints a single lane)
 - EasyMotion, theme cycle
 - Graph-row stash focus (drop a non-latest stash by focusing that graph row)
 
