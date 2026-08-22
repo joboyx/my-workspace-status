@@ -6,6 +6,8 @@ A non-TTY run without those flags still prints `--plain`. Agents must pass `--pl
 
 The TypeScript Ink app stays in this repository. Use it when you need a feature that this TUI does not implement yet.
 
+Screenshots of the daily views live in the [root README](../README.md#screenshots).
+
 ## Daily keys
 
 | Key | Action |
