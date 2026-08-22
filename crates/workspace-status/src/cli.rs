@@ -22,7 +22,8 @@ use crate::snapshot::{
     about = "Workspace git status. TUI on a TTY. --plain / --json for agents.",
     long_about = "Display git repository status across repos in the workspace.\n\n\
 On a TTY, this binary opens a ratatui TUI unless you pass --plain, --json,\n\
--v, -p, or -d. Agents must pass --plain or --json.\n\
+-v, -p, or -d. -i / --tui forces the TUI even when stdout is not a TTY.\n\
+Those headless flags still win over --tui. Agents must pass --plain or --json.\n\
 A non-TTY run without those flags prints --plain.\n\n\
 --json pretty-prints the snapshot on stdout. Progress from --fetch, --pull,\n\
 or --default-branch goes to stderr. --json wins when both --json and --plain\n\
@@ -56,6 +57,10 @@ struct Cli {
     /// Pretty-printed JSON snapshot on stdout.
     #[arg(long = "json")]
     json: bool,
+
+    /// Force the TUI even when stdout is not a TTY.
+    #[arg(short = 'i', long = "tui")]
+    tui: bool,
 
     /// Optional workspace-relative repo filters. Named repos bypass ignoredRepos.
     #[arg(value_name = "REPO")]
@@ -125,6 +130,7 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
         verbose: cli.verbose,
         pull: cli.pull,
         default_branch: cli.default_branch,
+        force_tui: cli.tui,
     };
     if crate::tui::should_open_tui(io::stdout().is_terminal(), flags) {
         let snapshot = crate::tui::collect_full_snapshot(

@@ -335,6 +335,45 @@ pub fn default_folds(tree: &TreeNode) -> HashSet<String> {
     folds
 }
 
+/// Find a node by id.
+pub fn find_node<'a>(node: &'a TreeNode, id: &str) -> Option<&'a TreeNode> {
+    if node.id == id {
+        return Some(node);
+    }
+    for child in &node.children {
+        if let Some(hit) = find_node(child, id) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+fn walk_foldable(node: &TreeNode, out: &mut Vec<String>) {
+    match node.kind {
+        NodeKind::Workspace | NodeKind::Repo | NodeKind::Checkout | NodeKind::Group | NodeKind::Dir => {
+            out.push(node.id.clone());
+            for child in &node.children {
+                walk_foldable(child, out);
+            }
+        }
+        NodeKind::File => {}
+    }
+}
+
+/// Foldable ids for `focus_id` and every foldable descendant under it.
+/// Empty when the id is missing or names a file.
+pub fn collect_foldable_subtree_ids(tree: &TreeNode, focus_id: &str) -> Vec<String> {
+    let Some(found) = find_node(tree, focus_id) else {
+        return Vec::new();
+    };
+    if found.kind == NodeKind::File {
+        return Vec::new();
+    }
+    let mut ids = Vec::new();
+    walk_foldable(found, &mut ids);
+    ids
+}
+
 /// Depth-first flatten, honoring `folds`.
 pub fn flatten(tree: &TreeNode, folds: &HashSet<String>) -> Vec<VisibleRow> {
     let mut out = Vec::new();

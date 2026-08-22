@@ -179,6 +179,47 @@ fn walk(node: &CommitFileNode, depth: usize, folds: &HashSet<String>, out: &mut 
     }
 }
 
+fn find_commit_node<'a>(node: &'a CommitFileNode, id: &str) -> Option<&'a CommitFileNode> {
+    if node.id == id {
+        return Some(node);
+    }
+    for child in &node.children {
+        if let Some(hit) = find_commit_node(child, id) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+fn walk_commit_foldable(node: &CommitFileNode, out: &mut Vec<String>) {
+    if node.kind == CommitFileRowKind::Dir || !node.children.is_empty() {
+        out.push(node.id.clone());
+        for child in &node.children {
+            walk_commit_foldable(child, out);
+        }
+    }
+}
+
+/// Foldable ids for `focus_id` and foldable descendants in the commit-file forest.
+pub fn collect_foldable_subtree_ids(
+    files: &[CommitFile],
+    tree_mode: bool,
+    focus_id: &str,
+) -> Vec<String> {
+    let nodes = materialize_commit_file_forest(files, tree_mode);
+    for node in &nodes {
+        if let Some(found) = find_commit_node(node, focus_id) {
+            if found.kind == CommitFileRowKind::File {
+                return Vec::new();
+            }
+            let mut ids = Vec::new();
+            walk_commit_foldable(found, &mut ids);
+            return ids;
+        }
+    }
+    Vec::new()
+}
+
 /// Dir ids that must unfold so `file_path` is visible.
 pub fn ancestor_dir_ids(file_path: &str) -> Vec<String> {
     let mut parts: Vec<&str> = file_path.split('/').filter(|part| !part.is_empty()).collect();

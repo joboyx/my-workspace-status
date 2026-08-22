@@ -102,8 +102,27 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         None
     };
 
+    state.layout.right_y = right_inner.y;
+    if let super::drill::DrillView::Files { cursor, .. } = &state.drill {
+        let (title, subtitle) = state.commit_detail_meta();
+        let mut header_h = 0u16;
+        if !title.is_empty() {
+            header_h += 1;
+        }
+        if subtitle.as_ref().is_some_and(|s| !s.is_empty()) {
+            header_h += 1;
+        }
+        if header_h == 0 {
+            header_h = 1;
+        }
+        header_h = header_h.min(right_inner.height);
+        state.layout.files_list_y = right_inner.y.saturating_add(header_h);
+        let list_h = right_inner.height.saturating_sub(header_h) as usize;
+        let (start, _) = visible_window(state.commit_file_rows().len(), *cursor, list_h);
+        state.layout.files_list_offset = start;
+    }
     if state.help_open {
-        draw_help(frame, area);
+        draw_help(frame, area, state);
     } else if state.stash_menu.is_some() {
         draw_stash_menu(frame, area, state);
     } else if state.create_branch.is_some() {
@@ -385,35 +404,64 @@ fn diff_style(line: &str, palette: Palette) -> Style {
     }
 }
 
-fn draw_help(frame: &mut Frame<'_>, area: Rect) {
-    let width = 48.min(area.width.saturating_sub(4));
-    let height = 24.min(area.height.saturating_sub(2));
+fn help_span_style(hit: bool, current: bool, palette: Palette) -> Style {
+    if current {
+        Style::default().fg(palette.cursor).bg(palette.cursor_bg)
+    } else if hit {
+        Style::default().fg(palette.heading)
+    } else {
+        Style::default()
+    }
+}
+
+fn help_entry_text(entry: &super::help::HelpEntry) -> String {
+    format!("{}  {}", entry.keys, entry.desc)
+}
+
+fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    use super::help::{help_entry_matches, HELP_ENTRIES};
+    let query = state.help_search_query.as_deref().unwrap_or("");
+    let palette = state.theme.palette();
+    let mut lines = Vec::new();
+    let mut i = 0;
+    while i < HELP_ENTRIES.len() {
+        let left = &HELP_ENTRIES[i];
+        let left_text = format!("{:<22}", help_entry_text(left));
+        let left_hit = help_entry_matches(left.keys, left.desc, query);
+        let left_cur = state.help_search_hit == Some(i);
+        if let Some(right) = HELP_ENTRIES.get(i + 1) {
+            let right_text = help_entry_text(right);
+            let right_hit = help_entry_matches(right.keys, right.desc, query);
+            let right_cur = state.help_search_hit == Some(i + 1);
+            let left_style = help_span_style(left_hit, left_cur, palette);
+            let right_style = help_span_style(right_hit, right_cur, palette);
+            lines.push(Line::from(vec![
+                Span::styled(left_text, left_style),
+                Span::styled(right_text, right_style),
+            ]));
+            i += 2;
+        } else {
+            lines.push(Line::from(Span::styled(
+                left_text.trim_end().to_string(),
+                help_span_style(left_hit, left_cur, palette),
+            )));
+            i += 1;
+        }
+    }
+    let width = 52.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16) + 2).min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let rect = Rect::new(x, y, width, height);
     frame.render_widget(Clear, rect);
-    let body = "\
-q  quit                 ?  close this help
-j/k  move               arrows  same
-z  fold                 h/l  fold tree / pan diff
-t  tree / flat          (workspace tree)
-.  show ignored         space  mark reviewed
-/  pane search          n/N  next / prev
-Ctrl+O  full-file       (focused file diff)
-s  stage                u  unstage
-x  revert (y/n)         e  edit
-f  fetch                p  pull behind
-d  default branch       r  refresh
-P  push                 S  stash menu
-b  branch picker        C  create (in picker)
-W  remove worktree      Tab  other pane
-Enter  drill            Esc  back
-a/p/D  focused stash    click  select row
-i  inline / split       drag  resize split
-;  EasyMotion           T  cycle theme";
+    let title = if let Some(q) = &state.help_search_query {
+        format!(" keys  /{q} ")
+    } else {
+        " keys ".into()
+    };
     frame.render_widget(
-        Paragraph::new(body)
-            .block(Block::default().borders(Borders::ALL).title(" keys "))
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(title))
             .wrap(Wrap { trim: false }),
         rect,
     );

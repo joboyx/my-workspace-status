@@ -127,7 +127,11 @@ fn run_loop(
                 state.graph_stash_focused(),
                 state.graph_commit_focused(),
             );
+            let mouse_before = state.mouse_enabled;
             let effect = state.dispatch(action);
+            if state.mouse_enabled != mouse_before {
+                sync_mouse_capture(state.mouse_enabled);
+            }
             if matches!(effect, Effect::Quit) {
                 return Ok(());
             }
@@ -274,7 +278,13 @@ fn apply_effect(
                     .stderr(Stdio::null())
                     .spawn();
                 state.status = format!("opened {path}");
-            } else if let Err(err) = run_blocking_editor(terminal, &cmd, &args, &opts.cwd.join(&repo))
+            } else if let Err(err) = run_blocking_editor(
+                terminal,
+                &cmd,
+                &args,
+                &opts.cwd.join(&repo),
+                state.mouse_enabled,
+            )
             {
                 state.status = format!("edit failed: {err}");
             } else {
@@ -535,10 +545,26 @@ fn drain_pending_events() {
     }
 }
 
-fn resume_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), String> {
+fn sync_mouse_capture(enabled: bool) {
+    let mut out = stdout();
+    if enabled {
+        let _ = execute!(out, EnableMouseCapture);
+    } else {
+        let _ = execute!(out, DisableMouseCapture);
+    }
+}
+
+fn resume_tui(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    mouse_enabled: bool,
+) -> Result<(), String> {
     enable_raw_mode().map_err(|e| e.to_string())?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture).map_err(|e| e.to_string())?;
+    if mouse_enabled {
+        execute!(out, EnterAlternateScreen, EnableMouseCapture).map_err(|e| e.to_string())?;
+    } else {
+        execute!(out, EnterAlternateScreen).map_err(|e| e.to_string())?;
+    }
     let _ = terminal.hide_cursor();
     let _ = terminal.clear();
     drain_pending_events();
@@ -550,6 +576,7 @@ fn run_blocking_editor(
     cmd: &str,
     args: &[String],
     cwd: &Path,
+    mouse_enabled: bool,
 ) -> Result<(), String> {
     let _ = disable_raw_mode();
     let mut out = stdout();
@@ -563,7 +590,7 @@ fn run_blocking_editor(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status();
-    let restore = resume_tui(terminal);
+    let restore = resume_tui(terminal, mouse_enabled);
     match (spawn, restore) {
         (Ok(status), Ok(())) if status.success() => Ok(()),
         (Ok(status), Ok(())) => Err(format!(
