@@ -39,6 +39,7 @@ pub enum Action {
     Unstage,
     Revert,
     ConfirmYes,
+    ConfirmYesClean,
     ConfirmNo,
     Edit,
     WatchTick,
@@ -77,6 +78,10 @@ pub enum Action {
 pub enum Effect {
     None,
     Quit,
+    /// Per-repo writes applied in first-seen order when the focused scope
+    /// spans more than one repo. A single-repo write stays a plain Stage,
+    /// Unstage, or Revert.
+    Batch(Vec<Effect>),
     Fetch { repos: Vec<String> },
     Pull { repos: Vec<String> },
     DefaultBranch { repos: Vec<String> },
@@ -92,8 +97,8 @@ pub enum Effect {
     },
     Revert {
         repo: String,
-        paths: Vec<String>,
-        untracked: bool,
+        tracked: Vec<String>,
+        untracked: Vec<String>,
     },
     EditFile {
         repo: String,
