@@ -400,63 +400,88 @@ fn apply_effect(
             }
         }
         Effect::LoadCommitFiles { repo, source } => {
-            let dir = opts.cwd.join(&repo);
-            let files = match &source {
-                CommitFileSource::Commit { commit_id } => {
-                    list_commit_name_status(&dir, commit_id)
-                }
-                CommitFileSource::Stash { stash_ref } => {
-                    list_stash_name_status(&dir, stash_ref)
-                }
-                CommitFileSource::Worktree => list_worktree_name_status(&dir),
-            };
-            state.open_commit_files(
-                repo,
-                source,
-                files.into_iter().map(Into::into).collect(),
-            );
+            load_commit_files(state, opts, repo, source);
         }
         Effect::LoadCommitDiff { repo, source, path } => {
-            let dir = opts.cwd.join(&repo);
-            let lines = match &source {
-                CommitFileSource::Commit { commit_id } => {
-                    diff_commit_file(&dir, commit_id, &path)
-                }
-                CommitFileSource::Stash { stash_ref } => {
-                    diff_stash_file(&dir, stash_ref, &path)
-                }
-                CommitFileSource::Worktree => {
-                    if let Some((_, change)) = state.focused_file() {
-                        if change.path == path {
-                            load_file_diff(&state.cwd, &repo, &change)
-                        } else {
-                            crate::git::exec_git(&["diff", "HEAD", "--", &path], &dir)
-                                .lines()
-                                .map(str::to_string)
-                                .collect()
-                        }
-                    } else {
-                        crate::git::exec_git(&["diff", "HEAD", "--", &path], &dir)
-                            .lines()
-                            .map(str::to_string)
-                            .collect()
-                    }
-                }
-            };
-            let (files, file_cursor) = match &state.drill {
-                super::drill::DrillView::Files { files, cursor, .. } => {
-                    (files.clone(), *cursor)
-                }
-                super::drill::DrillView::Diff {
-                    files,
-                    file_cursor,
-                    ..
-                } => (files.clone(), *file_cursor),
-                super::drill::DrillView::Graph => (Vec::new(), 0),
-            };
-            state.open_commit_diff(repo, source, files, file_cursor, path, lines);
+            load_commit_diff(state, opts, repo, source, path);
         }
     }
+}
+
+/// Apply pane-load effects without a TTY. Used by the headless e2e harness.
+pub(crate) fn apply_headless_effect(state: &mut AppState, effect: Effect, opts: &TuiOpts) {
+    match effect {
+        Effect::None | Effect::Quit => {}
+        Effect::LoadRightPane => load_right(state),
+        Effect::ReloadSnapshot => {
+            reload_snapshot(state, opts);
+            state.status = "refreshed".into();
+            load_right(state);
+        }
+        Effect::LoadCommitFiles { repo, source } => {
+            load_commit_files(state, opts, repo, source);
+        }
+        Effect::LoadCommitDiff { repo, source, path } => {
+            load_commit_diff(state, opts, repo, source, path);
+        }
+        _ => {}
+    }
+}
+
+fn load_commit_files(
+    state: &mut AppState,
+    opts: &TuiOpts,
+    repo: String,
+    source: CommitFileSource,
+) {
+    let dir = opts.cwd.join(&repo);
+    let files = match &source {
+        CommitFileSource::Commit { commit_id } => list_commit_name_status(&dir, commit_id),
+        CommitFileSource::Stash { stash_ref } => list_stash_name_status(&dir, stash_ref),
+        CommitFileSource::Worktree => list_worktree_name_status(&dir),
+    };
+    state.open_commit_files(repo, source, files.into_iter().map(Into::into).collect());
+}
+
+fn load_commit_diff(
+    state: &mut AppState,
+    opts: &TuiOpts,
+    repo: String,
+    source: CommitFileSource,
+    path: String,
+) {
+    let dir = opts.cwd.join(&repo);
+    let lines = match &source {
+        CommitFileSource::Commit { commit_id } => diff_commit_file(&dir, commit_id, &path),
+        CommitFileSource::Stash { stash_ref } => diff_stash_file(&dir, stash_ref, &path),
+        CommitFileSource::Worktree => {
+            if let Some((_, change)) = state.focused_file() {
+                if change.path == path {
+                    load_file_diff(&state.cwd, &repo, &change)
+                } else {
+                    crate::git::exec_git(&["diff", "HEAD", "--", &path], &dir)
+                        .lines()
+                        .map(str::to_string)
+                        .collect()
+                }
+            } else {
+                crate::git::exec_git(&["diff", "HEAD", "--", &path], &dir)
+                    .lines()
+                    .map(str::to_string)
+                    .collect()
+            }
+        }
+    };
+    let (files, file_cursor) = match &state.drill {
+        super::drill::DrillView::Files { files, cursor, .. } => (files.clone(), *cursor),
+        super::drill::DrillView::Diff {
+            files,
+            file_cursor,
+            ..
+        } => (files.clone(), *file_cursor),
+        super::drill::DrillView::Graph => (Vec::new(), 0),
+    };
+    state.open_commit_diff(repo, source, files, file_cursor, path, lines);
 }
 
 fn drain_pending_events() {
