@@ -1,12 +1,27 @@
-//! Vim-style `/` search on the workspace tree.
+//! Vim-style `/` search on the focused pane.
 //!
-//! Matches include folded rows. Focusing a match unfolds its ancestors
-//! so the row is visible. Hidden ignored repos are not in the tree unless
-//! shown (`.` / `-a`).
+//! Tree matches include folded rows. Focusing a tree match unfolds its
+//! ancestors so the row is visible. Hidden ignored repos stay out of tree
+//! search unless shown (`.` / `-a`). Graph search matches subject and
+//! decoration text. Commit-file search matches paths. Diff search matches
+//! painted line text.
 
 use std::collections::HashSet;
 
+use workspace_status_graph::GraphRow;
+
+use super::drill::CommitFile;
 use super::tree::{flatten, TreeNode};
+
+/// Pane `/` binds at search start. `n`/`N` stay on this pane.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SearchPane {
+    #[default]
+    Tree,
+    Graph,
+    CommitFiles,
+    Diff,
+}
 
 /// Case-insensitive substring matches on `label`. Empty query → no hits.
 pub fn match_indices(labels: &[&str], query: &str) -> Vec<usize> {
@@ -102,6 +117,163 @@ pub fn focus_tree_search(
         return (folds.clone(), None);
     };
     (unfold_ancestors(tree, folds, &focus_id), Some(focus_id))
+}
+
+
+/// Search text for one graph row: subject plus decoration / ref names.
+pub fn graph_row_search_text(row: &GraphRow) -> String {
+    match row {
+        GraphRow::Uncommitted => "uncommitted".into(),
+        GraphRow::Stash(stash) => format!("{} {}", stash.subject, stash.stash_ref),
+        GraphRow::Worktree(wt) => {
+            let branch = wt.branch.as_deref().unwrap_or("");
+            format!("{} {}", wt.path, branch)
+        }
+        GraphRow::Commit { commit, .. } => {
+            let refs = commit
+                .refs
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if refs.is_empty() {
+                commit.subject.clone()
+            } else {
+                format!("{} {}", commit.subject, refs)
+            }
+        }
+    }
+}
+
+/// Indices of graph rows whose search text matches `query`.
+pub fn collect_graph_match_indices(rows: &[GraphRow], query: &str) -> Vec<usize> {
+    let labels: Vec<String> = rows.iter().map(graph_row_search_text).collect();
+    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    match_indices(&refs, query)
+}
+
+/// Next/prev graph match index with wrap. `dir` 0 = first hit.
+pub fn focus_graph_search(rows: &[GraphRow], query: &str, current: usize, dir: i32) -> Option<usize> {
+    let hits = collect_graph_match_indices(rows, query);
+    if hits.is_empty() {
+        return None;
+    }
+    if dir == 0 {
+        return hits.first().copied();
+    }
+    step_match_index(&hits, current, dir)
+}
+
+/// Indices of commit-file paths that match `query`.
+pub fn collect_commit_file_match_indices(files: &[CommitFile], query: &str) -> Vec<usize> {
+    let labels: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+    match_indices(&labels, query)
+}
+
+/// Next/prev commit-file match index. `dir` 0 = first hit.
+pub fn focus_commit_file_search(
+    files: &[CommitFile],
+    query: &str,
+    current: usize,
+    dir: i32,
+) -> Option<usize> {
+    let hits = collect_commit_file_match_indices(files, query);
+    if hits.is_empty() {
+        return None;
+    }
+    if dir == 0 {
+        return hits.first().copied();
+    }
+    step_match_index(&hits, current, dir)
+}
+
+/// Indices of painted diff lines that contain `query`.
+pub fn match_diff_line_indices(lines: &[String], query: &str) -> Vec<usize> {
+    let labels: Vec<&str> = lines.iter().map(String::as_str).collect();
+    match_indices(&labels, query)
+}
+
+/// Next/prev matching diff line. `dir` 0 = first hit.
+pub fn focus_diff_search(lines: &[String], query: &str, current: Option<usize>, dir: i32) -> Option<usize> {
+    let hits = match_diff_line_indices(lines, query);
+    if hits.is_empty() {
+        return None;
+    }
+    if dir == 0 {
+        return hits.first().copied();
+    }
+    let cur = current.unwrap_or(usize::MAX);
+    step_match_index(&hits, cur, dir)
+}
+
+/// Next/prev match index with wrap. If `current` is not a hit, jump to first
+/// (`dir` > 0) or last (`dir` < 0).
+pub fn step_match_index(indices: &[usize], current: usize, dir: i32) -> Option<usize> {
+    if indices.is_empty() {
+        return None;
+    }
+    let pos = indices.iter().position(|i| *i == current);
+    let Some(pos) = pos else {
+        return if dir < 0 {
+            indices.last().copied()
+        } else {
+            indices.first().copied()
+        };
+    };
+    let len = indices.len() as i32;
+    let next = (pos as i32 + dir).rem_euclid(len) as usize;
+    indices.get(next).copied()
+}
+
+/// Clamp a horizontal pan offset to `[0, max_offset]`.
+pub fn clamp_col_offset(offset: i32, max_offset: usize) -> u16 {
+    let max = max_offset as i32;
+    offset.clamp(0, max.max(0)) as u16
+}
+
+/// Longest line minus the viewport. Never below 0.
+pub fn max_col_offset(line_lens: &[usize], viewport_cols: usize) -> usize {
+    let longest = line_lens.iter().copied().max().unwrap_or(0);
+    longest.saturating_sub(viewport_cols.max(1))
+}
+
+/// Apply a pan delta and clamp.
+pub fn apply_pan(offset: u16, delta: i32, max_offset: usize) -> u16 {
+    clamp_col_offset(offset as i32 + delta, max_offset)
+}
+
+/// Slice `text` from `offset` for `width` columns (Unicode scalars).
+pub fn slice_visible(text: &str, offset: usize, width: usize) -> String {
+    text.chars().skip(offset).take(width).collect()
+}
+
+/// First hunk header at or before `scroll`, else the line at `scroll`.
+pub fn hunk_anchor(lines: &[String], scroll: usize) -> Option<String> {
+    if lines.is_empty() {
+        return None;
+    }
+    let start = scroll.min(lines.len() - 1);
+    for line in lines[..=start].iter().rev() {
+        if line.starts_with("@@") {
+            return Some(line.clone());
+        }
+    }
+    for line in &lines[start..] {
+        if line.starts_with("@@") {
+            return Some(line.clone());
+        }
+    }
+    Some(lines[start].clone())
+}
+
+/// Scroll so `anchor` stays in the upper third of `view_h`.
+pub fn scroll_to_keep_anchor(lines: &[String], anchor: &str, view_h: u16) -> u16 {
+    let Some(idx) = lines.iter().position(|l| l == anchor) else {
+        return 0;
+    };
+    let h = view_h.max(1) as usize;
+    let prefer = h / 3;
+    idx.saturating_sub(prefer) as u16
 }
 
 #[cfg(test)]
@@ -208,5 +380,60 @@ mod tests {
             || flatten(&shown, &HashSet::new())
                 .iter()
                 .any(|r| r.label.contains("notes")));
+    }
+
+    #[test]
+    fn graph_subject_and_ref_are_searchable() {
+        use workspace_status_graph::{Commit, GraphRef};
+        let rows = vec![
+            GraphRow::Commit {
+                commit: Commit {
+                    id: "a".into(),
+                    subject: "fix login timeout".into(),
+                    parents: Vec::new(),
+                    refs: vec![GraphRef::local("main")],
+                },
+                is_head: true,
+                worktrees: Vec::new(),
+            },
+            GraphRow::Commit {
+                commit: Commit {
+                    id: "b".into(),
+                    subject: "docs".into(),
+                    parents: Vec::new(),
+                    refs: vec![GraphRef::local("topic")],
+                },
+                is_head: false,
+                worktrees: Vec::new(),
+            },
+        ];
+        assert_eq!(collect_graph_match_indices(&rows, "login"), vec![0]);
+        assert_eq!(collect_graph_match_indices(&rows, "topic"), vec![1]);
+        assert_eq!(focus_graph_search(&rows, "o", 0, 1), Some(1));
+        assert_eq!(focus_graph_search(&rows, "o", 1, -1), Some(0));
+    }
+
+    #[test]
+    fn commit_file_and_diff_search_and_pan_clamp() {
+        let files = vec![
+            CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+            },
+            CommitFile {
+                status: "A".into(),
+                path: "src/lib.rs".into(),
+                old_path: None,
+            },
+        ];
+        assert_eq!(focus_commit_file_search(&files, "lib", 0, 0), Some(1));
+        let lines = vec!["@@ hunk @@".into(), "+needle line".into(), " context".into()];
+        assert_eq!(focus_diff_search(&lines, "needle", None, 0), Some(1));
+        assert_eq!(apply_pan(0, -1, 4), 0);
+        assert_eq!(apply_pan(0, 1, 4), 1);
+        assert_eq!(apply_pan(4, 1, 4), 4);
+        assert_eq!(hunk_anchor(&lines, 1).as_deref(), Some("@@ hunk @@"));
+        assert_eq!(scroll_to_keep_anchor(&lines, "@@ hunk @@", 9), 0);
     }
 }

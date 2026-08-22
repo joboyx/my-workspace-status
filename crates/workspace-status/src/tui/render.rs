@@ -15,6 +15,7 @@ use super::split::{
     diff_split_rule_x, is_side_by_side_split, pad_trunc, pair_unified_lines, pane_widths,
     side_by_side_column_widths, MIN_PANE_COLS,
 };
+use super::search::slice_visible;
 use super::state::{AppState, FocusPane};
 use super::theme::Palette;
 use super::tree::NodeKind;
@@ -247,13 +248,14 @@ fn draw_diff_lines(frame: &mut Frame<'_>, area: Rect, state: &AppState, lines: &
     if is_side_by_side_split(state.diff_mode, area.width) {
         let split = side_by_side_column_widths(area.width, state.diff_split_fraction);
         let rows = pair_unified_lines(lines);
+        let off = state.diff_col_offset as usize;
         let painted: Vec<Line> = rows
             .iter()
             .skip(skip)
             .take(area.height as usize)
             .map(|row| {
-                let left = pad_trunc(&row.left, split.left_width);
-                let right = pad_trunc(&row.right, split.right_width);
+                let left = pad_trunc(&slice_visible(&row.left, off, split.left_width as usize), split.left_width);
+                let right = pad_trunc(&slice_visible(&row.right, off, split.right_width as usize), split.right_width);
                 Line::from(vec![
                     Span::styled(left, diff_style(&row.left, state.theme.palette())),
                     Span::styled("│", Style::default().fg(Color::DarkGray)),
@@ -264,11 +266,21 @@ fn draw_diff_lines(frame: &mut Frame<'_>, area: Rect, state: &AppState, lines: &
         frame.render_widget(Paragraph::new(painted), area);
         return;
     }
+    let off = state.diff_col_offset as usize;
+    let width = area.width as usize;
     let painted: Vec<Line> = lines
         .iter()
+        .enumerate()
         .skip(skip)
         .take(area.height as usize)
-        .map(|line| Line::from(Span::styled(line.clone(), diff_style(line, state.theme.palette()))))
+        .map(|(i, line)| {
+            let visible = slice_visible(line, off, width);
+            let mut style = diff_style(line, state.theme.palette());
+            if state.search_hit == Some(i) {
+                style = style.bg(state.theme.palette().flash);
+            }
+            Line::from(Span::styled(visible, style))
+        })
         .collect();
     frame.render_widget(Paragraph::new(painted), area);
 }
@@ -297,10 +309,11 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
     let body = "\
 q  quit                 ?  close this help
 j/k  move               arrows  same
-z  fold                 h/l  close / open
+z  fold                 h/l  fold tree / pan diff
 t  tree / flat          (workspace tree)
 .  show ignored         space  mark reviewed
-/  search               n/N  next / prev
+/  pane search          n/N  next / prev
+Ctrl+O  full-file       (focused file diff)
 s  stage                u  unstage
 x  revert (y/n)         e  edit
 f  fetch                p  pull behind

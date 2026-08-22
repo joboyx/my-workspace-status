@@ -18,7 +18,8 @@ use crate::actions::{pull_behind_repos, switch_repo_to_default_branch};
 use crate::config::WorkspaceStatusConfig;
 use crate::discovery::collect_snapshots;
 use crate::git::{
-    checkout_branch, create_branch_at, create_branch_checkout, diff_commit_file, diff_stash_file, exec_git_checked,
+    checkout_branch, create_branch_at, create_branch_checkout, diff_commit_file_ctx,
+    diff_stash_file_ctx, exec_git_checked, git_diff_args,
     latest_stash_ref, list_commit_name_status, list_local_branches, list_stash_name_status,
     list_worktree_name_status, origin_out_of_sync, pull_quiet, push_quiet, remove_untracked_file,
     remove_worktree, revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop,
@@ -486,21 +487,30 @@ fn load_commit_diff(
     path: String,
 ) {
     let dir = opts.cwd.join(&repo);
+    let context = state.commit_diff_context(&repo, &path);
     let lines = match &source {
-        CommitFileSource::Commit { commit_id } => diff_commit_file(&dir, commit_id, &path),
-        CommitFileSource::Stash { stash_ref } => diff_stash_file(&dir, stash_ref, &path),
+        CommitFileSource::Commit { commit_id } => {
+            diff_commit_file_ctx(&dir, commit_id, &path, context)
+        }
+        CommitFileSource::Stash { stash_ref } => {
+            diff_stash_file_ctx(&dir, stash_ref, &path, context)
+        }
         CommitFileSource::Worktree => {
             if let Some((_, change)) = state.focused_file() {
                 if change.path == path {
-                    load_file_diff(&state.cwd, &repo, &change)
+                    load_file_diff(&state.cwd, &repo, &change, context)
                 } else {
-                    crate::git::exec_git(&["diff", "HEAD", "--", &path], &dir)
+                    let args = git_diff_args(&["diff", "HEAD"], &path, context);
+                    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                    crate::git::exec_git(&refs, &dir)
                         .lines()
                         .map(str::to_string)
                         .collect()
                 }
             } else {
-                crate::git::exec_git(&["diff", "HEAD", "--", &path], &dir)
+                let args = git_diff_args(&["diff", "HEAD"], &path, context);
+                let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                crate::git::exec_git(&refs, &dir)
                     .lines()
                     .map(str::to_string)
                     .collect()
@@ -581,7 +591,12 @@ fn load_right(state: &mut AppState) {
         return;
     }
     if let Some((repo, change)) = state.focused_file() {
-        let lines = load_file_diff(&state.cwd, &repo, &change);
+        let lines = load_file_diff(
+            &state.cwd,
+            &repo,
+            &change,
+            state.workspace_diff_context(&repo, &change.path),
+        );
         state.set_diff(repo, change.path, lines);
         return;
     }
