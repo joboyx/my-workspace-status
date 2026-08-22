@@ -5,6 +5,7 @@
 
 mod action;
 mod app;
+mod headless;
 mod branches;
 mod diff;
 mod drill;
@@ -25,6 +26,7 @@ pub(crate) mod fetch;
 pub(crate) mod watch;
 
 pub use app::{collect_full_snapshot, run_tui, TuiOpts};
+pub use headless::HeadlessTui;
 
 /// CLI flags that decide TUI vs headless. Testable without a real TTY.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

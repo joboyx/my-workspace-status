@@ -74,11 +74,9 @@ Screenshots of the daily views live in the [root README](../README.md#screenshot
 
 Reviewed marks use `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (same identity and fingerprint as Ink). A mark drops when the file fingerprint changes. Space toggles dirty file rows only. The viewed glyph is `◉` / `*`, not the clean `✓`. Clean `✓` paints only on the No updates group.
 
-## Still Ink only
+## Optional Ink-only
 
-These stay in the TypeScript app:
-
-- Ink-testing e2e suite
+The TypeScript Ink app stays in this repository, including its ink-testing e2e suite. That suite is optional. Daily-path TUI coverage for agents is `cargo test` (`crates/workspace-status/tests/tui_daily_e2e.rs`) on a TestBackend — no TTY.
 
 See [tui-model.md](./tui-model.md) for the Ink keymap.
 

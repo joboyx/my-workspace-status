@@ -175,6 +175,15 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(cwd: PathBuf, snapshot: WorkspaceSnapshot, ascii: bool) -> Self {
+        Self::with_viewed_path(cwd, snapshot, ascii, default_viewed_path())
+    }
+
+    pub(crate) fn with_viewed_path(
+        cwd: PathBuf,
+        snapshot: WorkspaceSnapshot,
+        ascii: bool,
+        viewed_path: PathBuf,
+    ) -> Self {
         let show_ignored = snapshot.show_ignored;
         let visible = visible_snapshot(&snapshot, show_ignored);
         let tree = build_tree(&visible);
@@ -182,7 +191,6 @@ impl AppState {
         let rows = flatten(&tree, &folds);
         let cursor = initial_cursor(&rows);
         let signatures = tree_signatures(&tree);
-        let viewed_path = default_viewed_path();
         let viewed_store = load_viewed_store(&viewed_path);
         let mut state = Self {
             cwd,
