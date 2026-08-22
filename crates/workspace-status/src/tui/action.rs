@@ -1,5 +1,7 @@
 //! Elm-style Action / Effect for the ratatui TUI.
 
+use super::drill::CommitFileSource;
+
 /// User or system input that changes TUI state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -55,6 +57,11 @@ pub enum Action {
     CreateBranchBackspace,
     CreateBranchSubmit,
     CreateBranchCancel,
+    NavEnter,
+    NavEsc,
+    GraphStashApply,
+    GraphStashPop,
+    GraphStashDrop,
     None,
 }
 
@@ -118,5 +125,14 @@ pub enum Effect {
         primary: String,
         path: String,
         force: bool,
+    },
+    LoadCommitFiles {
+        repo: String,
+        source: CommitFileSource,
+    },
+    LoadCommitDiff {
+        repo: String,
+        source: CommitFileSource,
+        path: String,
     },
 }

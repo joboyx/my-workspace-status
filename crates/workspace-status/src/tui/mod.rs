@@ -7,6 +7,7 @@ mod action;
 mod app;
 mod branches;
 mod diff;
+mod drill;
 pub(crate) mod editor;
 mod graph_load;
 mod keys;

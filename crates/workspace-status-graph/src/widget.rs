@@ -2,7 +2,8 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
 use crate::format::format_sync;
@@ -19,6 +20,8 @@ pub struct GraphWidget<'a> {
     model: &'a GraphModel,
     ascii: bool,
     gutter_width: Option<u16>,
+    selected: Option<usize>,
+    scroll: u16,
 }
 
 impl<'a> GraphWidget<'a> {
@@ -28,6 +31,8 @@ impl<'a> GraphWidget<'a> {
             model,
             ascii: false,
             gutter_width: None,
+            selected: None,
+            scroll: 0,
         }
     }
 
@@ -41,6 +46,18 @@ impl<'a> GraphWidget<'a> {
     /// lane model; paint clips to this width.
     pub fn gutter_width(mut self, width: u16) -> Self {
         self.gutter_width = Some(width);
+        self
+    }
+
+    /// Highlight the visible-row index, if any.
+    pub fn selected(mut self, index: Option<usize>) -> Self {
+        self.selected = index;
+        self
+    }
+
+    /// Skip this many painted lines after the sync header.
+    pub fn scroll(mut self, scroll: u16) -> Self {
+        self.scroll = scroll;
         self
     }
 }
@@ -57,23 +74,30 @@ impl Widget for GraphWidget<'_> {
 
         if let Some(sync) = &self.model.sync {
             if y < bottom {
-                put_line(buf, area.x, y, area.width, &format_sync(sync, glyphs));
+                put_line(buf, area.x, y, area.width, &format_sync(sync, glyphs), false);
                 y = y.saturating_add(1);
             }
         }
 
-        for line in paint_model(self.model, glyphs, cap) {
+        let skip = self.scroll as usize;
+        for line in paint_model(self.model, glyphs, cap).into_iter().skip(skip) {
             if y >= bottom {
                 break;
             }
-            put_line(buf, area.x, y, area.width, &line.text());
+            let selected = self.selected.is_some() && line.row_index == self.selected;
+            put_line(buf, area.x, y, area.width, &line.text(), selected);
             y = y.saturating_add(1);
         }
     }
 }
 
-fn put_line(buf: &mut Buffer, x: u16, y: u16, width: u16, text: &str) {
-    Line::from(text).render(Rect::new(x, y, width, 1), buf);
+fn put_line(buf: &mut Buffer, x: u16, y: u16, width: u16, text: &str, selected: bool) {
+    let style = if selected {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
+    Line::from(Span::styled(text.to_string(), style)).render(Rect::new(x, y, width, 1), buf);
 }
 
 #[cfg(test)]

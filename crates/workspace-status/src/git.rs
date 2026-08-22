@@ -406,6 +406,137 @@ pub fn create_branch_checkout(cwd: &Path, name: &str) -> Result<(), String> {
     exec_git_checked(&["checkout", "-b", name, "--quiet"], cwd)
 }
 
+/// One path from `git diff --name-status` / `diff-tree` / `stash show`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameStatus {
+    pub status: String,
+    pub path: String,
+    pub old_path: Option<String>,
+}
+
+/// Parse newline `name-status` (`M\\tpath` or `R100\\told\\tnew`).
+pub fn parse_name_status_lines(stdout: &str) -> Vec<NameStatus> {
+    let mut out = Vec::new();
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut parts = line.split('\t');
+        let status = parts.next().unwrap_or("").to_string();
+        if status.is_empty() {
+            continue;
+        }
+        if status.starts_with('R') || status.starts_with('C') {
+            let old_path = parts.next().map(str::to_string).filter(|s| !s.is_empty());
+            let Some(path) = parts.next().map(str::to_string).filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            out.push(NameStatus {
+                status: status.chars().next().unwrap_or('M').to_string(),
+                path,
+                old_path,
+            });
+            continue;
+        }
+        let Some(path) = parts.next().map(str::to_string).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        out.push(NameStatus {
+            status: status.chars().next().unwrap_or('M').to_string(),
+            path,
+            old_path: None,
+        });
+    }
+    out
+}
+
+/// First-parent files in `commit_id`. Root commits fall back to `--root`.
+pub fn list_commit_name_status(cwd: &Path, commit_id: &str) -> Vec<NameStatus> {
+    let parent = format!("{commit_id}^");
+    let out = exec_git(
+        &[
+            "diff-tree",
+            "--no-commit-id",
+            "--name-status",
+            "-r",
+            &parent,
+            commit_id,
+        ],
+        cwd,
+    );
+    if !out.is_empty() {
+        return parse_name_status_lines(&out);
+    }
+    let root = exec_git(
+        &[
+            "diff-tree",
+            "--no-commit-id",
+            "--name-status",
+            "-r",
+            "--root",
+            commit_id,
+        ],
+        cwd,
+    );
+    parse_name_status_lines(&root)
+}
+
+/// Files recorded in a stash entry.
+pub fn list_stash_name_status(cwd: &Path, stash_ref: &str) -> Vec<NameStatus> {
+    parse_name_status_lines(&exec_git(
+        &["stash", "show", "--name-status", stash_ref],
+        cwd,
+    ))
+}
+
+/// Worktree + index changes versus HEAD, plus untracked files.
+pub fn list_worktree_name_status(cwd: &Path) -> Vec<NameStatus> {
+    let mut files = parse_name_status_lines(&exec_git(
+        &["diff", "HEAD", "--name-status"],
+        cwd,
+    ));
+    let untracked = exec_git(&["ls-files", "--others", "--exclude-standard"], cwd);
+    for path in untracked.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if files.iter().any(|f| f.path == path) {
+            continue;
+        }
+        files.push(NameStatus {
+            status: "?".into(),
+            path: path.to_string(),
+            old_path: None,
+        });
+    }
+    files
+}
+
+fn lines_or_empty_diff(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        vec!["(no diff)".into()]
+    } else {
+        text.lines().map(str::to_string).collect()
+    }
+}
+
+/// First-parent unified diff for one path in a commit.
+pub fn diff_commit_file(cwd: &Path, commit_id: &str, path: &str) -> Vec<String> {
+    let parent = format!("{commit_id}^");
+    let primary = exec_git(&["diff", &parent, commit_id, "--", path], cwd);
+    if !primary.is_empty() {
+        return primary.lines().map(str::to_string).collect();
+    }
+    lines_or_empty_diff(&exec_git(
+        &["show", "--first-parent", commit_id, "--", path],
+        cwd,
+    ))
+}
+
+/// First-parent unified diff for one path inside a stash.
+pub fn diff_stash_file(cwd: &Path, stash_ref: &str, path: &str) -> Vec<String> {
+    let parent = format!("{stash_ref}^1");
+    lines_or_empty_diff(&exec_git(&["diff", &parent, stash_ref, "--", path], cwd))
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,4 +706,66 @@ mod tests {
         assert!(!wt.exists());
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn parse_name_status_and_commit_files_fixture() {
+        assert_eq!(
+            parse_name_status_lines("M\tsrc/a.rs\nR100\told.rs\tnew.rs\n"),
+            vec![
+                NameStatus {
+                    status: "M".into(),
+                    path: "src/a.rs".into(),
+                    old_path: None,
+                },
+                NameStatus {
+                    status: "R".into(),
+                    path: "new.rs".into(),
+                    old_path: Some("old.rs".into()),
+                },
+            ]
+        );
+        let dir = std::env::temp_dir().join(format!(
+            "ws-git-commit-files-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let init = Command::new(git_binary())
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&dir)
+            .status();
+        if init.map(|s| s.success()).unwrap_or(false) == false {
+            git(&dir, &["init", "-q"]);
+            git(&dir, &["checkout", "-q", "-b", "main"]);
+        }
+        fs::write(dir.join("one.txt"), "one\n").unwrap();
+        git(&dir, &["add", "one.txt"]);
+        git(&dir, &["commit", "-q", "-m", "one"]);
+        fs::write(dir.join("two.txt"), "two\n").unwrap();
+        git(&dir, &["add", "two.txt"]);
+        git(&dir, &["commit", "-q", "-m", "two"]);
+        let head = exec_git(&["rev-parse", "HEAD"], &dir);
+        let files = list_commit_name_status(&dir, &head);
+        assert!(files.iter().any(|f| f.path == "two.txt"), "{files:?}");
+        let diff = diff_commit_file(&dir, &head, "two.txt");
+        assert!(diff.iter().any(|l| l.contains("two")), "{diff:?}");
+        fs::write(dir.join("two.txt"), "dirty\n").unwrap();
+        stash_push(&dir, &[]).unwrap();
+        fs::write(dir.join("two.txt"), "older\n").unwrap();
+        stash_push(&dir, &[]).unwrap();
+        let refs = list_stash_refs(&dir);
+        assert!(refs.len() >= 2, "{refs:?}");
+        let older = refs.iter().find(|r| r.ends_with("{1}")).cloned().unwrap_or_else(|| refs[1].clone());
+        let stash_files = list_stash_name_status(&dir, &older);
+        assert!(stash_files.iter().any(|f| f.path == "two.txt"), "{stash_files:?}");
+        let stash_diff = diff_stash_file(&dir, &older, "two.txt");
+        assert!(!stash_diff.is_empty(), "{stash_diff:?}");
+        fs::write(dir.join("untracked.txt"), "u\n").unwrap();
+        let worktree = list_worktree_name_status(&dir);
+        assert!(worktree.iter().any(|f| f.path == "untracked.txt"), "{worktree:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
 }
