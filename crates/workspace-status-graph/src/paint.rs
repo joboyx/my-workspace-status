@@ -25,6 +25,9 @@ pub struct PaintedLine {
     pub gutter: Vec<GraphCell>,
     /// Text after the gutter (no leading node for commit / stash).
     pub label: String,
+    /// Index into [`GraphModel::visible_rows`] for this content line.
+    /// Spacer rails are `None`.
+    pub row_index: Option<usize>,
 }
 
 impl PaintedLine {
@@ -160,6 +163,7 @@ pub fn paint_model(
                 out.push(PaintedLine {
                     gutter: blank_gutter(paint_width),
                     label: format_label(row, glyphs),
+                    row_index: Some(i),
                 });
             }
             GraphRow::Stash(stash) => {
@@ -172,11 +176,13 @@ pub fn paint_model(
                 out.push(PaintedLine {
                     gutter,
                     label: format_label(row, glyphs),
+                    row_index: Some(i),
                 });
                 if let Some(ctx) = ctx {
                     out.push(PaintedLine {
                         gutter: stash_leaf_rail_cells(paint_width, ctx, glyphs, false, true),
                         label: String::new(),
+                        row_index: None,
                     });
                 }
             }
@@ -189,6 +195,7 @@ pub fn paint_model(
                     out.push(PaintedLine {
                         gutter: blank_gutter(paint_width),
                         label: format_label(row, glyphs),
+                        row_index: Some(i),
                     });
                     continue;
                 };
@@ -216,6 +223,7 @@ pub fn paint_model(
                 out.push(PaintedLine {
                     gutter: cells,
                     label: format_label(row, glyphs),
+                    row_index: Some(i),
                 });
                 let next = next_commit(&rows, i + 1, &laid_by_id);
                 let spacer = if let Some(next) = next {
@@ -226,6 +234,7 @@ pub fn paint_model(
                 out.push(PaintedLine {
                     gutter: spacer,
                     label: String::new(),
+                    row_index: None,
                 });
             }
         }

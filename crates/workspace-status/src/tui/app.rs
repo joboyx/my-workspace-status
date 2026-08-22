@@ -18,8 +18,9 @@ use crate::actions::{pull_behind_repos, switch_repo_to_default_branch};
 use crate::config::WorkspaceStatusConfig;
 use crate::discovery::collect_snapshots;
 use crate::git::{
-    checkout_branch, create_branch_checkout, exec_git_checked, latest_stash_ref,
-    list_local_branches, origin_out_of_sync, pull_quiet, push_quiet, remove_untracked_file,
+    checkout_branch, create_branch_checkout, diff_commit_file, diff_stash_file, exec_git_checked,
+    latest_stash_ref, list_commit_name_status, list_local_branches, list_stash_name_status,
+    list_worktree_name_status, origin_out_of_sync, pull_quiet, push_quiet, remove_untracked_file,
     remove_worktree, revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop,
     stash_push, unstage_file,
 };
@@ -27,9 +28,10 @@ use crate::snapshot::{build_workspace_snapshot, WorkspaceSnapshot};
 
 use super::action::{Action, Effect};
 use super::diff::load_file_diff;
+use super::drill::CommitFileSource;
 use super::editor::{editor_command, is_detached_editor, resolve_editor};
 use super::graph_load::load_graph_model;
-use super::keys::event_to_action;
+use super::keys::event_to_action_ex;
 use super::render::draw;
 use super::state::AppState;
 use super::fetch::fetch_interval_ms;
@@ -116,11 +118,12 @@ fn run_loop(
                 terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
                 continue;
             }
-            let action = event_to_action(
+            let action = event_to_action_ex(
                 &event,
                 state.input_mode(),
                 state.right_is_diff(),
                 matches!(state.focus, super::state::FocusPane::Right),
+                state.graph_stash_focused(),
             );
             let effect = state.dispatch(action);
             if matches!(effect, Effect::Quit) {
@@ -396,6 +399,63 @@ fn apply_effect(
                 Err(err) => state.status = format!("remove worktree failed: {err}"),
             }
         }
+        Effect::LoadCommitFiles { repo, source } => {
+            let dir = opts.cwd.join(&repo);
+            let files = match &source {
+                CommitFileSource::Commit { commit_id } => {
+                    list_commit_name_status(&dir, commit_id)
+                }
+                CommitFileSource::Stash { stash_ref } => {
+                    list_stash_name_status(&dir, stash_ref)
+                }
+                CommitFileSource::Worktree => list_worktree_name_status(&dir),
+            };
+            state.open_commit_files(
+                repo,
+                source,
+                files.into_iter().map(Into::into).collect(),
+            );
+        }
+        Effect::LoadCommitDiff { repo, source, path } => {
+            let dir = opts.cwd.join(&repo);
+            let lines = match &source {
+                CommitFileSource::Commit { commit_id } => {
+                    diff_commit_file(&dir, commit_id, &path)
+                }
+                CommitFileSource::Stash { stash_ref } => {
+                    diff_stash_file(&dir, stash_ref, &path)
+                }
+                CommitFileSource::Worktree => {
+                    if let Some((_, change)) = state.focused_file() {
+                        if change.path == path {
+                            load_file_diff(&state.cwd, &repo, &change)
+                        } else {
+                            crate::git::exec_git(&["diff", "HEAD", "--", &path], &dir)
+                                .lines()
+                                .map(str::to_string)
+                                .collect()
+                        }
+                    } else {
+                        crate::git::exec_git(&["diff", "HEAD", "--", &path], &dir)
+                            .lines()
+                            .map(str::to_string)
+                            .collect()
+                    }
+                }
+            };
+            let (files, file_cursor) = match &state.drill {
+                super::drill::DrillView::Files { files, cursor, .. } => {
+                    (files.clone(), *cursor)
+                }
+                super::drill::DrillView::Diff {
+                    files,
+                    file_cursor,
+                    ..
+                } => (files.clone(), *file_cursor),
+                super::drill::DrillView::Graph => (Vec::new(), 0),
+            };
+            state.open_commit_diff(repo, source, files, file_cursor, path, lines);
+        }
     }
 }
 
@@ -457,6 +517,9 @@ fn reload_snapshot(state: &mut AppState, opts: &TuiOpts) {
 }
 
 fn load_right(state: &mut AppState) {
+    if !state.drill.is_graph() {
+        return;
+    }
     if let Some((repo, change)) = state.focused_file() {
         let lines = load_file_diff(&state.cwd, &repo, &change);
         state.set_diff(repo, change.path, lines);

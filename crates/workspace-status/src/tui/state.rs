@@ -4,11 +4,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use workspace_status_graph::GraphModel;
+use workspace_status_graph::{GraphModel, GraphRow};
 
 use crate::snapshot::{FileChange, WorkspaceSnapshot};
 
 use super::action::{Action, Effect};
+use super::drill::{
+    source_from_graph_row, stash_ref_from_graph_row, CommitFile, CommitFileSource, DrillView,
+};
 use super::branches::{
     can_open_branch_picker, is_valid_branch_name, BranchPickerState, CreateBranchState,
 };
@@ -108,6 +111,8 @@ pub struct AppState {
     pub graph: Option<GraphModel>,
     pub graph_identity: Option<(String, String)>,
     pub graph_scroll: u16,
+    pub graph_cursor: usize,
+    pub drill: DrillView,
     pub diff_lines: Vec<String>,
     pub diff_scroll: u16,
     pub diff_repo: Option<String>,
@@ -154,6 +159,8 @@ impl AppState {
             graph: None,
             graph_identity: None,
             graph_scroll: 0,
+            graph_cursor: 0,
+            drill: DrillView::Graph,
             diff_lines: Vec::new(),
             diff_scroll: 0,
             diff_repo: None,
@@ -203,7 +210,17 @@ impl AppState {
     }
 
     pub fn right_is_diff(&self) -> bool {
-        matches!(self.focused_row().map(|r| r.kind), Some(NodeKind::File))
+        match &self.drill {
+            DrillView::Diff { .. } => true,
+            DrillView::Files { .. } => false,
+            DrillView::Graph => matches!(self.focused_row().map(|r| r.kind), Some(NodeKind::File)),
+        }
+    }
+
+    pub fn graph_stash_focused(&self) -> bool {
+        self.focus == FocusPane::Right
+            && self.drill.is_graph()
+            && self.focused_graph_stash_ref().is_some()
     }
 
     pub fn rebuild_rows(&mut self) {
@@ -266,24 +283,12 @@ impl AppState {
                 self.help_open = !self.help_open;
                 Effect::None
             }
-            Action::Move(delta) => {
-                self.move_cursor(delta);
-                Effect::LoadRightPane
-            }
-            Action::MoveToStart => {
-                self.cursor = 0;
-                Effect::LoadRightPane
-            }
-            Action::MoveToEnd => {
-                if !self.rows.is_empty() {
-                    self.cursor = self.rows.len() - 1;
-                }
-                Effect::LoadRightPane
-            }
+            Action::Move(delta) => self.move_focused(delta),
+            Action::MoveToStart => self.move_focused_edge(false),
+            Action::MoveToEnd => self.move_focused_edge(true),
             Action::PageMove(pages) => {
                 let height = self.layout.tree_height.max(1) as i32;
-                self.move_cursor(pages * height);
-                Effect::LoadRightPane
+                self.move_focused(pages * height)
             }
             Action::FoldToggle => {
                 self.fold_op(FoldOp::Toggle);
@@ -485,6 +490,11 @@ impl AppState {
                 self.status = "create branch cancelled".into();
                 Effect::None
             }
+            Action::NavEnter => self.nav_enter(),
+            Action::NavEsc => self.nav_esc(),
+            Action::GraphStashApply => self.graph_stash_op(StashOpId::Apply),
+            Action::GraphStashPop => self.graph_stash_op(StashOpId::Pop),
+            Action::GraphStashDrop => self.graph_stash_op(StashOpId::Drop),
             Action::None => Effect::None,
         }
     }
@@ -585,6 +595,12 @@ impl AppState {
     }
 
     fn scroll_right(&mut self, delta: i32) {
+        if let DrillView::Diff { lines, .. } = &self.drill {
+            let max = lines.len().saturating_sub(1) as i32;
+            let next = self.diff_scroll as i32 + delta;
+            self.diff_scroll = next.clamp(0, max) as u16;
+            return;
+        }
         if self.right_is_diff() {
             let max = self.diff_lines.len().saturating_sub(1) as i32;
             let next = self.diff_scroll as i32 + delta;
@@ -616,12 +632,24 @@ impl AppState {
         let identity = (repo, head);
         if self.graph_identity.as_ref() != Some(&identity) {
             self.graph_scroll = 0;
+            self.graph_cursor = 0;
+            if !matches!(self.drill, DrillView::Files { .. } | DrillView::Diff { .. }) {
+                self.drill = DrillView::Graph;
+            }
         }
         self.graph_identity = Some(identity);
         self.graph = Some(model);
-        self.diff_lines.clear();
-        self.diff_repo = None;
-        self.diff_path = None;
+        let n = self.graph.as_ref().map(|g| g.visible_rows().len()).unwrap_or(0);
+        if n == 0 {
+            self.graph_cursor = 0;
+        } else {
+            self.graph_cursor = self.graph_cursor.min(n - 1);
+        }
+        if self.drill.is_graph() {
+            self.diff_lines.clear();
+            self.diff_repo = None;
+            self.diff_path = None;
+        }
     }
 
     pub fn set_diff(&mut self, repo: String, path: String, lines: Vec<String>) {
@@ -633,15 +661,51 @@ impl AppState {
         self.diff_repo = Some(repo);
         self.diff_path = Some(path);
         self.diff_lines = lines;
-        self.graph = None;
+        if self.drill.is_graph() {
+            self.graph = None;
+        }
     }
 
     pub fn clear_right(&mut self) {
         self.graph = None;
         self.graph_identity = None;
+        self.graph_cursor = 0;
+        self.drill = DrillView::Graph;
         self.diff_lines.clear();
         self.diff_repo = None;
         self.diff_path = None;
+    }
+
+    pub fn open_commit_files(&mut self, repo: String, source: CommitFileSource, files: Vec<CommitFile>) {
+        let cursor = DrillView::files_cursor(&files, 0);
+        self.status = format!("files {}", files.len());
+        self.drill = DrillView::Files {
+            repo,
+            source,
+            files,
+            cursor,
+        };
+    }
+
+    pub fn open_commit_diff(
+        &mut self,
+        repo: String,
+        source: CommitFileSource,
+        files: Vec<CommitFile>,
+        file_cursor: usize,
+        path: String,
+        lines: Vec<String>,
+    ) {
+        self.diff_scroll = 0;
+        self.status = format!("diff {path}");
+        self.drill = DrillView::Diff {
+            repo,
+            source,
+            files,
+            file_cursor,
+            path,
+            lines,
+        };
     }
 
     pub fn focused_file(&self) -> Option<(String, FileChange)> {
@@ -920,15 +984,25 @@ impl AppState {
 
     /// Fill the stash overlay after git lists the latest stash.
     pub fn open_stash_menu(&mut self, repo: String, latest_stash_ref: Option<String>) {
+        let focused_stash = self.focused_graph_stash_ref();
         let row = self.focused_row();
-        let (dirty, dirty_paths) = match row {
-            Some(row) => stash_dirty_for_row(&self.snapshot, row),
-            None => (false, None),
+        let (dirty, dirty_paths) = if focused_stash.is_some() {
+            let dirty = row
+                .and_then(|r| r.repo.as_deref())
+                .and_then(|repo| self.snapshot.repos.iter().find(|r| r.repo == repo))
+                .map(|snap| snap.has_unstaged || snap.has_staged || snap.has_untracked)
+                .unwrap_or(false);
+            (dirty, None)
+        } else {
+            match row {
+                Some(row) => stash_dirty_for_row(&self.snapshot, row),
+                None => (false, None),
+            }
         };
         let ops = stash_ops_for_context(&StashOpsContext {
             dirty,
             dirty_paths,
-            latest_stash_ref,
+            latest_stash_ref: focused_stash.or(latest_stash_ref),
         });
         if ops.is_empty() {
             self.stash_menu = None;
@@ -1120,6 +1194,228 @@ impl AppState {
             name: create.name.trim().to_string(),
         }
     }
+
+    fn tree_file_focused(&self) -> bool {
+        matches!(self.focused_row().map(|r| r.kind), Some(NodeKind::File))
+    }
+
+    fn hidden_ignored_focus(&self) -> bool {
+        self.focused_row()
+            .is_some_and(|row| row_is_hidden_ignored(row, self.show_ignored))
+    }
+
+    pub fn focused_graph_row(&self) -> Option<GraphRow> {
+        let rows = self.graph.as_ref()?.visible_rows();
+        rows.get(self.graph_cursor).cloned()
+    }
+
+    pub fn focused_graph_stash_ref(&self) -> Option<String> {
+        if self.focus != FocusPane::Right || !self.drill.is_graph() {
+            return None;
+        }
+        stash_ref_from_graph_row(&self.focused_graph_row()?)
+    }
+
+    fn move_graph_cursor(&mut self, delta: i32) {
+        let n = self
+            .graph
+            .as_ref()
+            .map(|g| g.visible_rows().len())
+            .unwrap_or(0);
+        if n == 0 {
+            self.graph_cursor = 0;
+            return;
+        }
+        let next = self.graph_cursor as i32 + delta;
+        self.graph_cursor = next.clamp(0, n as i32 - 1) as usize;
+        if (self.graph_cursor as u16) < self.graph_scroll {
+            self.graph_scroll = self.graph_cursor as u16;
+        }
+    }
+
+    fn move_file_cursor(&mut self, delta: i32) {
+        if let DrillView::Files { cursor, files, .. } = &mut self.drill {
+            if files.is_empty() {
+                *cursor = 0;
+                return;
+            }
+            let next = *cursor as i32 + delta;
+            *cursor = next.clamp(0, files.len() as i32 - 1) as usize;
+        }
+    }
+
+    fn move_focused(&mut self, delta: i32) -> Effect {
+        if self.focus == FocusPane::Right {
+            match &self.drill {
+                DrillView::Files { .. } => {
+                    self.move_file_cursor(delta);
+                    Effect::None
+                }
+                DrillView::Diff { .. } => {
+                    self.scroll_right(delta);
+                    Effect::None
+                }
+                DrillView::Graph => {
+                    if self.tree_file_focused() {
+                        self.scroll_right(delta);
+                    } else {
+                        self.move_graph_cursor(delta);
+                    }
+                    Effect::None
+                }
+            }
+        } else {
+            self.move_cursor(delta);
+            self.drill = DrillView::Graph;
+            Effect::LoadRightPane
+        }
+    }
+
+    fn move_focused_edge(&mut self, end: bool) -> Effect {
+        if self.focus == FocusPane::Right {
+            let tree_file = self.tree_file_focused();
+            match &mut self.drill {
+                DrillView::Files { cursor, files, .. } => {
+                    *cursor = if end { files.len().saturating_sub(1) } else { 0 };
+                    Effect::None
+                }
+                DrillView::Graph if !tree_file => {
+                    let n = self
+                        .graph
+                        .as_ref()
+                        .map(|g| g.visible_rows().len())
+                        .unwrap_or(0);
+                    self.graph_cursor = if end { n.saturating_sub(1) } else { 0 };
+                    Effect::None
+                }
+                _ => Effect::None,
+            }
+        } else if end {
+            if !self.rows.is_empty() {
+                self.cursor = self.rows.len() - 1;
+            }
+            self.drill = DrillView::Graph;
+            Effect::LoadRightPane
+        } else {
+            self.cursor = 0;
+            self.drill = DrillView::Graph;
+            Effect::LoadRightPane
+        }
+    }
+
+    fn nav_enter(&mut self) -> Effect {
+        if self.hidden_ignored_focus() {
+            self.status = "hidden ignored stay out of drill".into();
+            return Effect::None;
+        }
+        if self.focus == FocusPane::Left {
+            self.focus = FocusPane::Right;
+            return Effect::None;
+        }
+        match &self.drill {
+            DrillView::Graph => {
+                let Some(repo) = self.focused_graph_repo() else {
+                    self.status = "focus a repo commit to drill".into();
+                    return Effect::None;
+                };
+                let Some(row) = self.focused_graph_row() else {
+                    self.status = "focus a graph commit to drill".into();
+                    return Effect::None;
+                };
+                let Some(source) = source_from_graph_row(&row) else {
+                    self.status = "focus a graph commit to drill".into();
+                    return Effect::None;
+                };
+                Effect::LoadCommitFiles { repo, source }
+            }
+            DrillView::Files {
+                repo,
+                source,
+                files,
+                cursor,
+            } => {
+                let Some(file) = files.get(*cursor) else {
+                    self.status = "no files in this commit".into();
+                    return Effect::None;
+                };
+                Effect::LoadCommitDiff {
+                    repo: repo.clone(),
+                    source: source.clone(),
+                    path: file.path.clone(),
+                }
+            }
+            DrillView::Diff { .. } => Effect::None,
+        }
+    }
+
+    fn nav_esc(&mut self) -> Effect {
+        match &self.drill {
+            DrillView::Diff {
+                repo,
+                source,
+                files,
+                file_cursor,
+                ..
+            } => {
+                let repo = repo.clone();
+                let source = source.clone();
+                let files = files.clone();
+                let cursor = *file_cursor;
+                self.drill = DrillView::Files {
+                    repo,
+                    source,
+                    files,
+                    cursor,
+                };
+                self.status = "files".into();
+                Effect::None
+            }
+            DrillView::Files { .. } => {
+                self.drill = DrillView::Graph;
+                self.status = "graph".into();
+                Effect::LoadRightPane
+            }
+            DrillView::Graph => {
+                if self.focus == FocusPane::Right {
+                    self.focus = FocusPane::Left;
+                }
+                Effect::None
+            }
+        }
+    }
+
+    fn graph_stash_op(&mut self, id: StashOpId) -> Effect {
+        if self.hidden_ignored_focus() {
+            return Effect::None;
+        }
+        let Some(stash_ref) = self.focused_graph_stash_ref() else {
+            self.status = "focus a graph stash row".into();
+            return Effect::None;
+        };
+        let Some(repo) = self.focused_graph_repo() else {
+            self.status = "focus a visible repo to stash".into();
+            return Effect::None;
+        };
+        match id {
+            StashOpId::Apply => {
+                self.status = format!("apply {stash_ref}");
+                Effect::StashApply { repo, stash_ref }
+            }
+            StashOpId::Pop => {
+                self.status = format!("pop {stash_ref}");
+                Effect::StashPop { repo, stash_ref }
+            }
+            StashOpId::Drop => {
+                self.confirm = Some(PendingConfirm::StashDrop {
+                    repo,
+                    stash_ref: stash_ref.clone(),
+                });
+                self.status = format!("drop {stash_ref}? y/n");
+                Effect::None
+            }
+            StashOpId::Create => Effect::None,
+        }
+    }
 }
 
 enum FileWrite {
@@ -1189,6 +1485,7 @@ mod tests {
     use super::*;
     use crate::tui::watch::watch_interval_ms;
     use crate::snapshot::{build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus};
+    use workspace_status_graph::{Commit, Stash};
 
     fn repo(name: &str, dirty: bool) -> RepoSnapshot {
         RepoSnapshot {
@@ -2068,4 +2365,214 @@ mod tests {
         assert!(load_viewed_store(&app.viewed_path).is_empty());
         let _ = fs::remove_dir_all(&root);
     }
+
+    fn graph_commit(id: &str, subject: &str) -> Commit {
+        Commit {
+            id: id.into(),
+            subject: subject.into(),
+            parents: Vec::new(),
+            refs: Vec::new(),
+        }
+    }
+
+    fn install_graph(app: &mut AppState, stashes: Vec<Stash>) {
+        let model = GraphModel {
+            commits: vec![graph_commit("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "head")],
+            stashes,
+            worktrees: Vec::new(),
+            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            sync: None,
+            show_ignored: app.show_ignored,
+            uncommitted: false,
+        };
+        app.set_graph(model, "app".into(), "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into());
+        app.focus = FocusPane::Right;
+        app.drill = DrillView::Graph;
+    }
+
+    #[test]
+    fn enter_on_graph_commit_opens_files_then_diff_and_esc_pops() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        install_graph(&mut app, Vec::new());
+        match app.dispatch(Action::NavEnter) {
+            Effect::LoadCommitFiles { repo, source } => {
+                assert_eq!(repo, "app");
+                assert_eq!(
+                    source,
+                    CommitFileSource::Commit {
+                        commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()
+                    }
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        app.open_commit_files(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![
+                CommitFile {
+                    status: "M".into(),
+                    path: "README.md".into(),
+                    old_path: None,
+                },
+                CommitFile {
+                    status: "A".into(),
+                    path: "src/lib.rs".into(),
+                    old_path: None,
+                },
+            ],
+        );
+        assert!(app.drill.is_files());
+        app.dispatch(Action::Move(1));
+        match app.dispatch(Action::NavEnter) {
+            Effect::LoadCommitDiff { path, .. } => assert_eq!(path, "src/lib.rs"),
+            other => panic!("{other:?}"),
+        }
+        app.open_commit_diff(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![CommitFile {
+                status: "A".into(),
+                path: "src/lib.rs".into(),
+                old_path: None,
+            }],
+            0,
+            "src/lib.rs".into(),
+            vec!["+fn x() {}".into()],
+        );
+        assert!(app.drill.is_diff());
+        assert_eq!(app.dispatch(Action::NavEsc), Effect::None);
+        assert!(app.drill.is_files());
+        assert_eq!(app.dispatch(Action::NavEsc), Effect::LoadRightPane);
+        assert!(app.drill.is_graph());
+        assert_eq!(app.dispatch(Action::NavEsc), Effect::None);
+        assert_eq!(app.focus, FocusPane::Left);
+    }
+
+    #[test]
+    fn hidden_ignored_is_not_drilled_unless_shown() {
+        let mut app = state();
+        assert!(app.rows.iter().all(|r| !r.label.contains("notes")));
+        app.cursor = 0;
+        app.focus = FocusPane::Right;
+        install_graph(&mut app, Vec::new());
+        // tree still on workspace / app, not hidden notes
+        app.dispatch(Action::ToggleShowIgnored);
+        let notes = app
+            .rows
+            .iter()
+            .position(|r| r.repo.as_deref() == Some("notes"))
+            .expect("notes");
+        app.cursor = notes;
+        app.show_ignored = false;
+        app.focus = FocusPane::Right;
+        assert_eq!(app.dispatch(Action::NavEnter), Effect::None);
+        assert!(app.status.contains("hidden ignored"));
+        app.show_ignored = true;
+        app.rebuild_rows();
+        let notes = app
+            .rows
+            .iter()
+            .position(|r| r.repo.as_deref() == Some("notes"))
+            .expect("notes shown");
+        app.cursor = notes;
+        install_graph(&mut app, Vec::new());
+        match app.dispatch(Action::NavEnter) {
+            Effect::LoadCommitFiles { repo, .. } => assert_eq!(repo, "notes"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn graph_stash_row_apply_pop_drop_target_that_ref() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        install_graph(
+            &mut app,
+            vec![
+                Stash {
+                    stash_ref: "stash@{0}".into(),
+                    subject: "latest".into(),
+                    parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                },
+                Stash {
+                    stash_ref: "stash@{1}".into(),
+                    subject: "older".into(),
+                    parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                },
+            ],
+        );
+        let rows = app.graph.as_ref().unwrap().visible_rows();
+        let idx = rows
+            .iter()
+            .position(|r| matches!(r, GraphRow::Stash(s) if s.stash_ref == "stash@{1}"))
+            .expect("stash@{1}");
+        app.graph_cursor = idx;
+        match app.dispatch(Action::GraphStashApply) {
+            Effect::StashApply { stash_ref, repo } => {
+                assert_eq!(repo, "app");
+                assert_eq!(stash_ref, "stash@{1}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(app.dispatch(Action::GraphStashDrop), Effect::None);
+        assert!(app.status.contains("stash@{1}"));
+        assert_eq!(app.dispatch(Action::ConfirmNo), Effect::None);
+        assert!(app.status.contains("drop cancelled"));
+        app.dispatch(Action::GraphStashDrop);
+        match app.dispatch(Action::ConfirmYes) {
+            Effect::StashDrop { stash_ref, .. } => assert_eq!(stash_ref, "stash@{1}"),
+            other => panic!("{other:?}"),
+        }
+        match app.dispatch(Action::GraphStashPop) {
+            Effect::StashPop { stash_ref, .. } => assert_eq!(stash_ref, "stash@{1}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn stash_menu_from_repo_or_file_stays_latest_only() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.focus = FocusPane::Left;
+        app.open_stash_menu("app".into(), Some("stash@{0}".into()));
+        let ops = app.stash_menu.clone().expect("menu");
+        assert!(ops.iter().all(|op| {
+            op.stash_ref.is_none() || op.stash_ref.as_deref() == Some("stash@{0}")
+        }));
+        app.stash_menu = None;
+        focus_repo(&mut app, "app");
+        install_graph(
+            &mut app,
+            vec![Stash {
+                stash_ref: "stash@{1}".into(),
+                subject: "older".into(),
+                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            }],
+        );
+        let idx = app
+            .graph
+            .as_ref()
+            .unwrap()
+            .visible_rows()
+            .iter()
+            .position(|r| matches!(r, GraphRow::Stash(s) if s.stash_ref == "stash@{1}"))
+            .expect("stash");
+        app.graph_cursor = idx;
+        app.open_stash_menu("app".into(), Some("stash@{0}".into()));
+        let ops = app.stash_menu.clone().expect("graph menu");
+        assert!(
+            ops.iter().any(|op| op.stash_ref.as_deref() == Some("stash@{1}")),
+            "{ops:?}"
+        );
+        assert!(ops.iter().all(|op| {
+            op.stash_ref.is_none() || op.stash_ref.as_deref() == Some("stash@{1}")
+        }));
+    }
+
 }
