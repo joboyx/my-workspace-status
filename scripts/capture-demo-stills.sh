@@ -103,6 +103,8 @@ export WS_STATUS_WATCH_MS=0
 export WS_STATUS_FETCH_MS=0
 export TERM=xterm-256color
 export COLORTERM=truecolor
+export NO_AT_BRIDGE=1
+export GTK_A11Y=none
 exec $(printf '%q' "$BIN")
 EOF
   chmod +x "$LAUNCHER"
@@ -152,7 +154,7 @@ cleanup() {
     kill "$TERM_PID" 2>/dev/null || true
   fi
   pkill -x xfce4-terminal >/dev/null 2>&1 || true
-  pkill -f '/target/release/workspace-status' >/dev/null 2>&1 || true
+  pkill -f "$BIN" >/dev/null 2>&1 || true
   if [[ -n "${XVFB_PID:-}" ]] && kill -0 "$XVFB_PID" 2>/dev/null; then
     kill "$XVFB_PID" 2>/dev/null || true
   fi
@@ -166,7 +168,7 @@ clear_viewed() {
 }
 
 window_id() {
-  xdotool search --name WSDEMO 2>/dev/null | tail -1 || true
+  xdotool search --class xfce4-terminal 2>/dev/null | tail -1 || true
 }
 
 window_alive() {
@@ -175,21 +177,34 @@ window_alive() {
   xdotool getwindowgeometry "$wid" >/dev/null 2>&1
 }
 
-wait_window() {
-  local i wid
-  for i in $(seq 1 80); do
-    wid="$(window_id)"
-    if window_alive "$wid"; then
-      echo "$wid"
-      return 0
-    fi
-    sleep 0.1
-  done
-  die "TUI window never appeared (no TTY/X). Not writing stills."
+tui_pid() {
+  pgrep -f "$BIN" 2>/dev/null | head -1 || true
 }
 
-tui_pid() {
-  pgrep -f '/target/release/workspace-status' 2>/dev/null | head -1 || true
+# After workspace-status is up, resolve the visible 140-col terminal.
+# Prefer a mapped window named WSDEMO with real geometry — pid search can
+# return a tiny VTE child and then every grab retry fails the size check.
+window_for_tui() {
+  local pid="${1:-}"
+  local wid best="" best_a=0 w h area
+  [[ -n "$pid" ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  WIDTH=0 HEIGHT=0
+  for wid in $(xdotool search --class xfce4-terminal 2>/dev/null); do
+    window_alive "$wid" || continue
+    WIDTH=0 HEIGHT=0
+    eval "$(xdotool getwindowgeometry --shell "$wid" 2>/dev/null | grep -E '^(WIDTH|HEIGHT)=' || true)"
+    w="${WIDTH:-0}"
+    h="${HEIGHT:-0}"
+    area=$((w * h))
+    if [[ "$area" -gt "$best_a" ]]; then
+      best="$wid"
+      best_a="$area"
+    fi
+  done
+  # 140x40 cells at 13pt is ~1400x880; reject leftover 1x1 shells.
+  [[ "$best_a" -ge 200000 ]] || return 1
+  echo "$best"
 }
 
 require_tty() {
@@ -211,14 +226,11 @@ tty_size() {
 }
 
 stop_tui() {
-  local wid
-  wid="${WID:-$(window_id)}"
-  if window_alive "$wid"; then
-    xdotool windowfocus --sync "$wid" >/dev/null 2>&1 || true
-    xdotool key --window "$wid" --delay 40 q >/dev/null 2>&1 || true
-    sleep 0.2
+  # Do not send `q` here: X reuses window ids, so an in-flight key can quit the next TUI.
+  if [[ -n "${TERM_PID:-}" ]] && kill -0 "$TERM_PID" 2>/dev/null; then
+    kill "$TERM_PID" 2>/dev/null || true
   fi
-  pkill -f '/target/release/workspace-status' >/dev/null 2>&1 || true
+  pkill -f "$BIN" >/dev/null 2>&1 || true
   pkill -x xfce4-terminal >/dev/null 2>&1 || true
   WID=""
   TERM_PID=""
@@ -228,19 +240,20 @@ stop_tui() {
     if [[ -z "$(window_id)" ]] \
       && [[ -z "$(tui_pid)" ]] \
       && ! pgrep -x xfce4-terminal >/dev/null 2>&1; then
-      sleep 0.15
+      sleep 0.35
       return 0
     fi
     sleep 0.1
   done
   pkill -9 -x xfce4-terminal >/dev/null 2>&1 || true
-  pkill -9 -f '/target/release/workspace-status' >/dev/null 2>&1 || true
-  sleep 0.2
+  pkill -9 -f "$BIN" >/dev/null 2>&1 || true
+  sleep 0.35
 }
 
 launch_tui() {
   echo "capture-demo-stills: stop+launch" >&2
   stop_tui
+  sleep 0.35
   unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE
   if [[ -n "${WS_STATUS_GLYPHS:-}" ]]; then
     die "WS_STATUS_GLYPHS is set; refusing ASCII stills while MesloLGS NF is installed."
@@ -258,15 +271,21 @@ launch_tui() {
   TERM_PID=$!
   disown "$TERM_PID" 2>/dev/null || true
   echo "capture-demo-stills: terminal pid=$TERM_PID" >&2
-  WID="$(wait_window)"
-  echo "capture-demo-stills: wid=$WID" >&2
   local i
-  for i in $(seq 1 50); do
+  for i in $(seq 1 80); do
     WS_PID="$(tui_pid)"
     [[ -n "$WS_PID" ]] && break
     sleep 0.1
   done
   require_tty "$WS_PID"
+  WID=""
+  for i in $(seq 1 80); do
+    WID="$(window_for_tui "$WS_PID" || true)"
+    window_alive "$WID" && break
+    sleep 0.1
+  done
+  window_alive "$WID" || die "TUI window never appeared for pid=$WS_PID (class=$(xdotool search --class xfce4-terminal 2>/dev/null | tr '\n' ' ')). Not writing stills."
+  echo "capture-demo-stills: wid=$WID" >&2
   local rows=0 cols=0
   for i in $(seq 1 30); do
     read -r rows cols <<<"$(tty_size "$WS_PID")"
@@ -280,17 +299,28 @@ launch_tui() {
   fi
   echo "capture-demo-stills: tty=${cols}x${rows} pid=$WS_PID" >&2
   sleep 1.1
-  window_alive "$WID" || die "window vanished after launch (wid=$WID)"
+  if ! window_alive "$WID"; then
+    WID="$(window_for_tui "$WS_PID" || true)"
+  fi
+  window_alive "$WID" || die "window vanished after launch (tui pid=$WS_PID still=$(kill -0 "$WS_PID" 2>/dev/null && echo yes || echo no))"
   xdotool windowfocus --sync "$WID" >/dev/null 2>&1 || true
   xdotool windowactivate --sync "$WID" >/dev/null 2>&1 || true
   sleep 0.2
   echo "capture-demo-stills: focused" >&2
 }
 
+refresh_wid() {
+  if window_alive "$WID"; then
+    return 0
+  fi
+  WID="$(window_for_tui "$WS_PID" || true)"
+  window_alive "$WID" || die "TUI window gone (tui pid=${WS_PID:-empty} still=$(kill -0 "${WS_PID:-0}" 2>/dev/null && echo yes || echo no))"
+}
+
 # Args: xdotool key names, or type:TEXT
 send() {
   local tok
-  window_alive "$WID" || die "window gone while sending keys (wid=${WID:-empty})"
+  refresh_wid
   xdotool windowfocus --sync "$WID" >/dev/null 2>&1 || true
   for tok in "$@"; do
     if [[ "$tok" == type:* ]]; then
@@ -308,17 +338,33 @@ send() {
 
 grab() {
   local dest="$1"
-  window_alive "$WID" || die "window gone while grabbing $dest (wid=${WID:-empty})"
+  local try info ax ay w h
+  refresh_wid
   xdotool windowfocus --sync "$WID" >/dev/null 2>&1 || true
+  xdotool windowactivate --sync "$WID" >/dev/null 2>&1 || true
+  sleep 0.2
   rm -f "$dest"
-  if have import; then
-    import -window "$WID" "$dest"
-  elif have xwd && have convert; then
-    xwd -silent -id "$WID" | convert xwd:- "$dest"
-  else
-    die "need ImageMagick import or xwd+convert to grab the terminal window"
-  fi
-  [[ -s "$dest" ]] || die "empty grab: $dest"
+  have import || die "need ImageMagick import to grab the terminal window"
+  for try in $(seq 1 12); do
+    if import -display "$DISPLAY" -window "$WID" "$dest" 2>/dev/null && [[ -s "$dest" ]]; then
+      return 0
+    fi
+    rm -f "$dest"
+    info="$(xwininfo -id "$WID" 2>/dev/null || true)"
+    ax="$(awk -F: '/Absolute upper-left X/ {gsub(/ /,"",$2); print $2}' <<<"$info")"
+    ay="$(awk -F: '/Absolute upper-left Y/ {gsub(/ /,"",$2); print $2}' <<<"$info")"
+    w="$(awk '/^  Width:/ {print $2}' <<<"$info")"
+    h="$(awk '/^  Height:/ {print $2}' <<<"$info")"
+    if [[ -n "$ax" && -n "$ay" && -n "$w" && -n "$h" && "$w" -ge 800 && "$h" -ge 400 ]]; then
+      if import -display "$DISPLAY" -window root -crop "${w}x${h}+${ax}+${ay}" +repage "$dest" 2>/dev/null \
+        && [[ -s "$dest" ]]; then
+        return 0
+      fi
+    fi
+    sleep 0.25
+    refresh_wid
+  done
+  die "failed to grab terminal $WID into $dest (not writing a desktop-wide still)"
 }
 
 not_gray() {
@@ -380,8 +426,10 @@ seed() {
 cd "$REPO_ROOT"
 # Cloud Agent / CI shells often export these; they paint a gray first frame.
 unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE
+export NO_AT_BRIDGE=1
+export GTK_A11Y=none
 
-apt_install xvfb xfce4-terminal xdotool imagemagick python3-pil x11-apps x11-xserver-utils curl fontconfig dbus-x11 openbox
+apt_install xvfb xfce4-terminal xdotool imagemagick python3-pil x11-apps x11-utils x11-xserver-utils curl fontconfig dbus-x11 openbox
 install_font
 ensure_bin
 rm -rf "$STAGE_DIR"
