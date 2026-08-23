@@ -141,7 +141,7 @@ Git calls use a subprocess. The binary prefers `/usr/bin/git` so WSL does not pi
 
 `--fetch`, `--pull`, and `--default-branch` write progress to stderr when `--json` is set. `--json` wins when both `--json` and `--plain` are set. `-v` applies to `--plain` only.
 
-On a TTY (or `-i` / `--tui`) the binary opens the ratatui TUI. Tree chrome (status letters, Nerd glyphs, workspace wording, linked-checkout labels, sync marks) is ported from Ink: `tui/icons.rs` (glyph registry), `tui/tree.rs` (`node_segments`), `tui/render.rs` (right-aligned trailing + cursor bar). Commit-file lists reuse the same file chrome. See [tui-rust.md](./tui-rust.md).
+On a TTY (or `-i` / `--tui`) the binary opens the ratatui TUI. Tree chrome (status letters, Nerd glyphs, workspace wording, linked-checkout labels, sync marks) is ported from Ink: `tui/icons.rs` (glyph registry), `tui/tree.rs` (`node_segments`), `tui/render.rs` (right-aligned trailing + cursor bar). Bottom chrome (mode pills, hint chips, breadcrumb) lives in `tui/chrome.rs`. Commit-file lists reuse the same file chrome. See [tui-rust.md](./tui-rust.md).
 
 The TypeScript Ink app stays in this repository for features the Rust TUI does not cover yet.
 

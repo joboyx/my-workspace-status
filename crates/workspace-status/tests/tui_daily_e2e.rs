@@ -258,6 +258,9 @@ fn search_n_and_n_unfolds_parents() {
         "first match should mention main, got {}",
         tui.cursor_label()
     );
+    let armed = tui.frame();
+    assert_contains(&armed, "/main");
+    assert_absent(&armed, "n next");
 
     tui.key('n');
     let second = tui.cursor_id();
@@ -286,7 +289,10 @@ fn easy_motion_hit_jumps_visible_row() {
     let before = tui.cursor_id();
     tui.key(';');
     let armed = tui.frame();
-    assert_contains(&armed, "EasyMotion");
+    assert!(
+        armed.contains("EASY") || armed.contains("EasyMotion"),
+        "EasyMotion should arm a status chip:\n{armed}"
+    );
     assert!(
         armed.contains("a ") || armed.contains("a"),
         "viewport labels should paint:\n{armed}"
@@ -346,6 +352,14 @@ fn drill_enter_and_esc_walk_commit_files_diff() {
             || files.contains("README.md"),
         "file list should name a commit path:\n{files}"
     );
+    assert!(
+        files.contains("workspace-stat") || files.contains("Ada") || files.contains('·'),
+        "commit-detail subtitle should include author/date meta:\n{files}"
+    );
+    assert!(
+        files.contains('›') || files.contains("›"),
+        "breadcrumb should join with › :\n{files}"
+    );
     tui.enter();
     let diff = tui.frame();
     assert!(
@@ -377,6 +391,38 @@ fn drill_enter_and_esc_walk_commit_files_diff() {
     assert!(
         tui.right_is_graph(),
         "Esc should pop to the graph:\n{back_graph}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn chrome_pills_breadcrumb_and_armed_search_chip() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    let idle = tui.frame();
+    assert_contains(&idle, "tree");
+    assert!(
+        idle.contains("split") || idle.contains("inline"),
+        "mode pills should name the diff layout:\n{idle}"
+    );
+    assert_contains(&idle, "? help");
+    assert!(
+        idle.contains("q") || idle.contains("Tab") || idle.contains("…"),
+        "Rust extras q/Tab should appear or truncate with …:\n{idle}"
+    );
+
+    tui.search("merger");
+    tui.tab();
+    let graph = tui.frame();
+    assert_contains(&graph, "/merger");
+    assert_absent(&graph, "n next");
+    assert!(
+        graph.contains('›'),
+        "breadcrumb should join workspace › repo:\n{graph}"
+    );
+    assert!(
+        graph.contains("[merger]") || graph.contains("merger"),
+        "breadcrumb should name the focused repo:\n{graph}"
     );
     let _ = fs::remove_dir_all(root);
 }

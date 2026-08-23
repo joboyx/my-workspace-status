@@ -9,6 +9,7 @@ use workspace_status_graph::{graph_chrome_budget, paint_model, GraphWidget, ASCI
 
 use std::time::Instant;
 
+use super::chrome::{bottom_chrome_rows, breadcrumb_line, status_line};
 use super::diff::{
     cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, gutter_width,
     section_header, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
@@ -33,9 +34,15 @@ use crate::helpers::visible_width;
 /// Draw one frame. Updates `state.layout` for mouse hits.
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     let area = frame.area();
+    let chrome = bottom_chrome_rows(state.help_open);
+    let crumb_h = chrome.saturating_sub(1);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(3),
+            Constraint::Length(crumb_h),
+            Constraint::Length(1),
+        ])
         .split(area);
     let widths = pane_widths(area.width, state.tree_fraction);
     let panes = Layout::default()
@@ -104,12 +111,15 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     frame.render_widget(right_block, panes[1]);
     draw_right(frame, right_inner, state);
 
+    if crumb_h > 0 {
+        frame.render_widget(
+            Paragraph::new(breadcrumb_line(state, chunks[1].width)),
+            chunks[1],
+        );
+    }
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            state.status.clone(),
-            Style::default().fg(state.theme.palette().muted),
-        ))),
-        chunks[1],
+        Paragraph::new(status_line(state, chunks[2].width)),
+        chunks[2],
     );
 
     state.layout.tree_x = tree_inner.x;

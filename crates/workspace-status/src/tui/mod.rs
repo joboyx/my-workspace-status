@@ -6,6 +6,7 @@
 mod action;
 mod app;
 mod branches;
+mod chrome;
 mod commit_files;
 mod diff;
 mod drill;

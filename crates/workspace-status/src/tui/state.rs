@@ -2,10 +2,11 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use workspace_status_graph::{
-    graph_chrome_budget, paint_model, GraphChromeBudget, GraphModel, GraphRow, ASCII, UNICODE,
+    format_relative_date, graph_chrome_budget, paint_model, GraphChromeBudget, GraphModel,
+    GraphRow, ASCII, UNICODE,
 };
 
 use crate::snapshot::{FileChange, WorkspaceSnapshot};
@@ -229,6 +230,13 @@ pub struct AppState {
     last_click: Option<(u16, u16, Instant)>,
 }
 
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 impl AppState {
     pub fn new(cwd: PathBuf, snapshot: WorkspaceSnapshot, ascii: bool) -> Self {
         Self::with_viewed_path(cwd, snapshot, ascii, default_viewed_path())
@@ -266,7 +274,7 @@ impl AppState {
             help_search_armed: false,
             help_search_hit: None,
             focus: FocusPane::Left,
-            status: "q quit  ? help  . ignored  f fetch  p pull  d default".into(),
+            status: String::new(),
             graph: None,
             graph_identity: None,
             graph_scroll: 0,
@@ -448,6 +456,13 @@ impl AppState {
         rows.get(self.commit_files_cursor()).cloned()
     }
 
+    /// Kind of the highlighted commit-file row, when the files list is open.
+    pub(crate) fn focused_commit_file_kind(
+        &self,
+    ) -> Option<super::commit_files::CommitFileRowKind> {
+        self.focused_commit_file_row().map(|row| row.kind)
+    }
+
     fn focused_commit_edit_path(&self) -> Option<(String, String)> {
         match &self.drill {
             DrillView::Files { repo, .. } => {
@@ -512,6 +527,14 @@ impl AppState {
                 }
                 if !subject.is_empty() {
                     bits.push(subject.to_string());
+                }
+                if let Some(commit) = commit {
+                    if !commit.author_name.is_empty() {
+                        bits.push(commit.author_name.clone());
+                    }
+                    if commit.author_date_unix != 0 {
+                        bits.push(format_relative_date(commit.author_date_unix, unix_now()));
+                    }
                 }
                 Some(bits.join(" · "))
             }
@@ -1742,15 +1765,12 @@ impl AppState {
 
     fn set_search_status(&mut self, hit: bool) {
         if self.search_query.trim().is_empty() {
-            self.status = "/".into();
+            self.status.clear();
         } else if hit {
-            self.status = if self.search_mode {
-                format!("/{}", self.search_query)
-            } else {
-                format!("/{}  n next  N prev", self.search_query)
-            };
+            // Armed query is a `/query` chip on the idle bar, not `n next N prev`.
+            self.status.clear();
         } else {
-            self.status = format!("/{}  no match", self.search_query);
+            self.status = "no match".into();
         }
     }
 
@@ -5676,6 +5696,11 @@ mod tests {
         let mut app = state();
         focus_repo(&mut app, "app");
         install_graph(&mut app, Vec::new());
+        if let Some(model) = app.graph.as_mut() {
+            model.commits[0].author_name = "Ada".into();
+            model.commits[0].author_date_unix = unix_now() - 3600;
+            model.commits[0].refs = vec![GraphRef::local("main")];
+        }
         app.open_commit_files(
             "app".into(),
             CommitFileSource::Commit {
@@ -5693,7 +5718,13 @@ mod tests {
         assert_eq!(title, "app");
         let subtitle = subtitle.expect("subtitle");
         assert!(subtitle.contains("aaa1111"), "{subtitle}");
+        assert!(subtitle.contains("main"), "{subtitle}");
         assert!(subtitle.contains("head"), "{subtitle}");
+        assert!(subtitle.contains("Ada"), "{subtitle}");
+        assert!(
+            subtitle.contains("1h") || subtitle.contains("59m") || subtitle.contains("just now"),
+            "{subtitle}"
+        );
         assert!(app
             .commit_file_rows()
             .iter()

@@ -32,9 +32,8 @@ impl HeadlessTui {
     /// `show_ignored` is true (`-a`).
     pub fn open(cwd: impl Into<PathBuf>, show_ignored: bool) -> Self {
         let cwd = cwd.into();
-        let config = load_workspace_status_config(&cwd).unwrap_or_else(|_| {
-            WorkspaceStatusConfig::with_defaults()
-        });
+        let config = load_workspace_status_config(&cwd)
+            .unwrap_or_else(|_| WorkspaceStatusConfig::with_defaults());
         let snapshot = collect_full_snapshot(&cwd, &config, &[], show_ignored, false);
         Self::from_snapshot(cwd, snapshot, config)
     }
@@ -66,6 +65,11 @@ impl HeadlessTui {
     /// Send one character through the real keymap.
     pub fn key(&mut self, c: char) {
         self.send(KeyCode::Char(c));
+    }
+
+    /// Send Tab.
+    pub fn tab(&mut self) {
+        self.send(KeyCode::Tab);
     }
 
     /// Send Enter.
