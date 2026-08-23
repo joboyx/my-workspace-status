@@ -89,7 +89,7 @@ pub fn source_from_graph_row(row: &GraphRow) -> Option<CommitFileSource> {
         GraphRow::Stash(stash) => Some(CommitFileSource::Stash {
             stash_ref: stash.stash_ref.clone(),
         }),
-        GraphRow::Uncommitted => Some(CommitFileSource::Worktree),
+        GraphRow::Uncommitted { .. } => Some(CommitFileSource::Worktree),
         GraphRow::Worktree(_) => None,
     }
 }
@@ -142,7 +142,7 @@ mod tests {
             })
         );
         assert_eq!(
-            source_from_graph_row(&GraphRow::Uncommitted),
+            source_from_graph_row(&GraphRow::Uncommitted { has_changes: true }),
             Some(CommitFileSource::Worktree)
         );
         assert_eq!(stash_ref_from_graph_row(&commit_row("abc")), None);

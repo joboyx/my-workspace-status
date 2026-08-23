@@ -10,8 +10,10 @@
 //! visible row list unless [`GraphModel::show_ignored`] is true.
 
 mod action;
+mod chrome;
 mod format;
 mod glyphs;
+mod lane_colors;
 mod layout;
 mod model;
 mod paint;
@@ -20,6 +22,7 @@ mod topology;
 mod widget;
 
 pub use action::{Action, Effect};
+pub use chrome::{graph_chrome_budget, selection_detail_lines, GraphChromeBudget, LOADING_OLDER};
 pub use format::{
     format_commit_ref_chips, format_commit_spacer, format_commit_subject, format_label,
     format_relative_date, format_row, format_stash_spacer, format_sync, meta_column_widths,
@@ -27,9 +30,13 @@ pub use format::{
     CommitSpacerOpts, MetaCols, StashSpacerOpts,
 };
 pub use glyphs::{GlyphSet, ASCII, CELL_W, UNICODE};
+pub use lane_colors::{
+    cells_to_spans, default_lane_colors, hex_color, lane_fg, DEFAULT_LANE_COLORS,
+};
 pub use layout::{layout_commits, GraphStemRef, LaidOutCommit};
 pub use model::{
     Commit, GraphModel, GraphRef, GraphRow, RefKind, Stash, SyncState, SyncStatus, Worktree,
+    DEFAULT_GRAPH_WINDOW,
 };
 pub use paint::{paint_model, paint_model_with, PaintOpts, PaintedLine};
 pub use topology::{cells_text, CellRole, GraphCell};

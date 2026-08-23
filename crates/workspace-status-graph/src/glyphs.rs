@@ -18,7 +18,7 @@ pub struct GlyphSet {
     pub uncommitted: &'static str,
     /// Stash side-leaf tip.
     pub stash: &'static str,
-    /// Linked worktree marker.
+    /// Linked worktree marker. Ink `ICON_LINKED_WORKTREE` (`` / `L`).
     pub worktree: &'static str,
     /// Ahead of upstream.
     pub ahead: &'static str,
@@ -58,7 +58,7 @@ pub const UNICODE: GlyphSet = GlyphSet {
     head_commit: "⊙",
     uncommitted: "○",
     stash: "◇",
-    worktree: "🔗",
+    worktree: "",
     ahead: "↑",
     behind: "↓",
     checkout_mark: "",
@@ -82,7 +82,7 @@ pub const ASCII: GlyphSet = GlyphSet {
     head_commit: "@",
     uncommitted: "o",
     stash: "s",
-    worktree: "wt",
+    worktree: "L",
     ahead: "^",
     behind: "v",
     checkout_mark: "+",

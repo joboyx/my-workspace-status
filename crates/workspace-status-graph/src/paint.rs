@@ -204,7 +204,7 @@ pub fn paint_model_with(
     let mut out = Vec::new();
     for (i, row) in rows.iter().enumerate() {
         match row {
-            GraphRow::Uncommitted | GraphRow::Worktree(_) => {
+            GraphRow::Uncommitted { .. } | GraphRow::Worktree(_) => {
                 out.push(PaintedLine {
                     gutter: blank_gutter(paint_width),
                     label: format_label(row, glyphs),
