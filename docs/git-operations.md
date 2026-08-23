@@ -203,6 +203,9 @@ Workspace, repo, dir, and checkout rows write every scoped file across repos. Fa
 | `list_local_branches` | `for-each-ref` on `refs/heads/` | Branch picker `b` |
 | `create_branch_checkout` | `checkout -b <name> --quiet` | Picker `C` or Enter on a new name |
 | `create_branch_at` | `branch -- <name> <commitId>` | Graph `c` — create a ref at the focused commit. No checkout |
-| `origin_out_of_sync` | compare `rev-parse` of local vs `origin/<branch>` | Checkout confirm when tips differ |
+| `checkout_branch` | `checkout <branch> --quiet`, else `checkout -b <branch> origin/<branch> --quiet` | Tree/graph checkout |
+| `repo_has_local_changes` | `diff --quiet`, then `diff --cached --quiet` | True when either exits non-zero. Untracked files are not counted. Tree-picker and graph `b` dirty refuse |
+| `fast_forward_to_remote_ref` | `merge --ff-only --quiet` of `origin/foo` or `refs/remotes/origin/foo` (no fetch) | Graph confirm Yes: advance HEAD to the selected remote-tracking tip. Ahead/diverged/missing → false; HEAD unchanged. No reset, no pull |
+| `origin_out_of_sync` | compare `rev-parse` of local vs `origin/<branch>` | Helper: `Some(origin/<branch>)` when both refs exist and differ. Checkout confirm uses `plan_graph_checkout` on the selected name instead |
 
 Hidden ignored checkouts stay out of `P` / `S` / `b` unless shown. Linked worktrees are included on `f` / `p` / `P` / `d` only when that row is focused. The background fetch timer (`background_fetch_targets` in `tui/fetch.rs`) includes every snapshot except hidden ignored — linked worktrees and shown ignored repos included. See [tui-rust.md](./tui-rust.md).

@@ -137,8 +137,10 @@ pub enum Effect {
     PrepareBranchPicker { repo: String },
     CheckoutBranch {
         repo: String,
-        branch: String,
-        pull_after: bool,
+        /// Picker or graph selection. May be `origin/<name>`. Confirm Yes uses the local name.
+        selected_name: String,
+        /// After origin confirm Yes: `merge --ff-only` this already-fetched remote-tracking ref.
+        fast_forward_ref: Option<String>,
     },
     CreateBranch {
         repo: String,

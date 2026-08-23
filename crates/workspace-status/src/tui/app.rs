@@ -19,17 +19,21 @@ use crate::config::WorkspaceStatusConfig;
 use crate::discovery::{collect_snapshots, process_repo, RepoCheckoutMeta};
 use crate::git::{
     checkout_branch, create_branch_at, create_branch_checkout, diff_commit_file_ctx,
-    diff_stash_file_ctx, exec_git_checked, git_diff_args, latest_stash_ref,
-    list_commit_name_status, list_local_branches, list_stash_name_status,
-    list_worktree_name_status, origin_out_of_sync, pull_quiet, push_quiet, remove_untracked_file,
-    remove_worktree, revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop,
-    stash_push, unstage_file,
+    diff_stash_file_ctx, exec_git_checked, fast_forward_to_remote_ref, git_diff_args,
+    latest_stash_ref, list_commit_name_status, list_local_branches, list_stash_name_status,
+    list_worktree_name_status, push_quiet, remove_untracked_file, remove_worktree,
+    repo_has_local_changes, rev_parse_quiet, revert_tracked_file, stage_file, stash_apply,
+    stash_drop, stash_pop, stash_push, unstage_file,
 };
 use crate::snapshot::{
     build_workspace_snapshot, repo_snapshots_from_workspace, CheckoutKind, WorkspaceSnapshot,
 };
 
 use super::action::{Action, Effect};
+use super::branches::{
+    checkout_name_for_ref, is_origin_remote_ref, plan_graph_checkout, DIRTY_WORKTREE_STATUS,
+    GraphCheckoutPlan,
+};
 use super::diff::{load_file_diff, DiffContent};
 use super::drill::CommitFileSource;
 use super::editor::{editor_command, is_detached_editor, resolve_editor};
@@ -381,25 +385,12 @@ fn apply_effect(
         }
         Effect::CheckoutBranch {
             repo,
-            branch,
-            pull_after,
+            selected_name,
+            fast_forward_ref,
         } => {
-            let dir = opts.cwd.join(&repo);
-            if !pull_after {
-                if let Some(remote) = origin_out_of_sync(&dir, &branch) {
-                    let _ = state.confirm_checkout_if_out_of_sync(repo, branch, Some(remote));
-                    return;
-                }
-            }
-            if checkout_branch(&branch, &dir) {
-                if pull_after {
-                    let _ = pull_quiet(&dir);
-                }
+            if run_checkout_branch(state, &opts.cwd, repo, selected_name, fast_forward_ref) {
                 reload_snapshot(state, opts);
-                state.status = format!("checked out {branch}");
                 load_right(state);
-            } else {
-                state.status = format!("checkout failed: {branch}");
             }
         }
         Effect::CreateBranch { repo, name } => {
@@ -442,6 +433,73 @@ fn apply_effect(
         }
         Effect::LoadCommitDiff { repo, source, path } => {
             load_commit_diff(state, opts, repo, source, path);
+        }
+    }
+}
+
+/// Run graph/tree checkout. Returns true when HEAD changed and the snapshot should reload.
+///
+/// Origin out-of-sync confirm fires only for a selected `origin/…` name when a
+/// local branch exists with a null or mismatched SHA. After confirm Yes: checkout
+/// then `git merge --ff-only` of the already-fetched remote-tracking ref.
+pub(crate) fn run_checkout_branch(
+    state: &mut AppState,
+    cwd: &Path,
+    repo: String,
+    selected_name: String,
+    fast_forward_ref: Option<String>,
+) -> bool {
+    let dir = cwd.join(&repo);
+    if fast_forward_ref.is_none() && repo_has_local_changes(&dir) {
+        state.status = DIRTY_WORKTREE_STATUS.into();
+        return false;
+    }
+    if let Some(remote_ref) = fast_forward_ref {
+        if !checkout_branch(&selected_name, &dir) {
+            state.branch_picker = None;
+            state.status = format!("Checkout failed: {selected_name}");
+            return false;
+        }
+        let ff = fast_forward_to_remote_ref(&remote_ref, &dir);
+        state.branch_picker = None;
+        state.status = if ff {
+            format!("Checked out {selected_name} and fast-forwarded to {remote_ref}")
+        } else {
+            format!("Checked out {selected_name}; could not fast-forward to {remote_ref}")
+        };
+        return true;
+    }
+
+    let local_name = checkout_name_for_ref(&selected_name);
+    let local_sha = rev_parse_quiet(&format!("refs/heads/{local_name}"), &dir);
+    let remote_sha = if is_origin_remote_ref(&selected_name) {
+        rev_parse_quiet(&format!("refs/remotes/{selected_name}"), &dir)
+    } else {
+        rev_parse_quiet(&format!("refs/remotes/origin/{local_name}"), &dir)
+    };
+    match plan_graph_checkout(
+        &selected_name,
+        local_sha.is_some(),
+        local_sha.as_deref(),
+        remote_sha.as_deref(),
+    ) {
+        GraphCheckoutPlan::ConfirmLocalThenPull {
+            local_branch,
+            remote_ref,
+        } => {
+            state.branch_picker = None;
+            let _ = state.confirm_checkout_if_out_of_sync(repo, local_branch, Some(remote_ref));
+            false
+        }
+        GraphCheckoutPlan::Checkout { branch } => {
+            if checkout_branch(&branch, &dir) {
+                state.branch_picker = None;
+                state.status = format!("Checked out {branch}");
+                true
+            } else {
+                state.status = format!("Checkout failed: {branch}");
+                false
+            }
         }
     }
 }
@@ -683,4 +741,219 @@ pub fn collect_full_snapshot(
         show_ignored,
         filter_repos,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::WorkspaceStatusConfig;
+    use crate::git::{exec_git, git_binary, list_local_branches};
+    use crate::tui::action::Action;
+    use crate::tui::branches::DIRTY_WORKTREE_STATUS;
+    use std::fs;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn git_env() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("GIT_AUTHOR_NAME", "workspace-status test"),
+            ("GIT_AUTHOR_EMAIL", "workspace-status-test@example.invalid"),
+            ("GIT_COMMITTER_NAME", "workspace-status test"),
+            (
+                "GIT_COMMITTER_EMAIL",
+                "workspace-status-test@example.invalid",
+            ),
+        ]
+    }
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let mut cmd = Command::new(git_binary());
+        cmd.args(args).current_dir(cwd);
+        for (k, v) in git_env() {
+            cmd.env(k, v);
+        }
+        let status = cmd.status().expect("git");
+        assert!(status.success(), "git {args:?}");
+    }
+
+    fn init_repo(dir: &Path) {
+        fs::create_dir_all(dir).unwrap();
+        let init = Command::new(git_binary())
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(dir)
+            .status();
+        if init.map(|s| s.success()).unwrap_or(false) == false {
+            git(dir, &["init", "-q"]);
+            git(dir, &["checkout", "-q", "-b", "main"]);
+        }
+        fs::write(dir.join("README.md"), "# seed\n").unwrap();
+        git(dir, &["add", "README.md"]);
+        git(dir, &["commit", "-q", "-m", "seed"]);
+    }
+
+    #[test]
+    fn tree_picker_dirty_refuses_tracked_only() {
+        let root = std::env::temp_dir().join(format!(
+            "ws-tui-checkout-dirty-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let repo_dir = workspace.join("app");
+        init_repo(&repo_dir);
+        git(&repo_dir, &["checkout", "-q", "-b", "feature/x"]);
+        git(&repo_dir, &["checkout", "-q", "main"]);
+        fs::write(repo_dir.join("README.md"), "# dirty\n").unwrap();
+        fs::write(repo_dir.join("untracked.txt"), "u\n").unwrap();
+
+        let config = WorkspaceStatusConfig::with_defaults();
+        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let mut app = AppState::new(workspace.clone(), snapshot, true);
+        app.open_branch_picker("app".into(), list_local_branches(&repo_dir));
+        app.dispatch(Action::BranchChar('f'));
+        match app.dispatch(Action::BranchSubmit) {
+            Effect::CheckoutBranch {
+                repo,
+                selected_name,
+                fast_forward_ref,
+            } => {
+                assert_eq!(selected_name, "feature/x");
+                assert!(fast_forward_ref.is_none());
+                assert!(!run_checkout_branch(
+                    &mut app,
+                    &workspace,
+                    repo,
+                    selected_name,
+                    fast_forward_ref,
+                ));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(app.status, DIRTY_WORKTREE_STATUS);
+        assert!(app.branch_picker.is_some());
+        assert!(app.confirm.is_none());
+        assert_eq!(exec_git(&["branch", "--show-current"], &repo_dir), "main");
+
+        git(&repo_dir, &["checkout", "-q", "--", "README.md"]);
+        assert!(!repo_has_local_changes(&repo_dir));
+        app.open_branch_picker("app".into(), list_local_branches(&repo_dir));
+        app.dispatch(Action::BranchChar('f'));
+        match app.dispatch(Action::BranchSubmit) {
+            Effect::CheckoutBranch {
+                repo,
+                selected_name,
+                fast_forward_ref,
+            } => {
+                assert!(run_checkout_branch(
+                    &mut app,
+                    &workspace,
+                    repo,
+                    selected_name,
+                    fast_forward_ref,
+                ));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            exec_git(&["branch", "--show-current"], &repo_dir),
+            "feature/x"
+        );
+        assert!(repo_dir.join("untracked.txt").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn origin_selection_confirms_then_ff_only_local_does_not() {
+        let root = std::env::temp_dir().join(format!(
+            "ws-tui-checkout-ff-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let repo_dir = workspace.join("app");
+        init_repo(&repo_dir);
+        let remote = root.join("remote.git");
+        Command::new(git_binary())
+            .args(["init", "-q", "--bare", remote.to_str().unwrap()])
+            .status()
+            .unwrap();
+        git(
+            &repo_dir,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&repo_dir, &["push", "-u", "origin", "main", "--quiet"]);
+        git(&repo_dir, &["checkout", "-q", "-b", "foo"]);
+        git(&repo_dir, &["push", "-u", "origin", "foo", "--quiet"]);
+        git(&repo_dir, &["checkout", "-q", "main"]);
+        let other = root.join("other");
+        Command::new(git_binary())
+            .args([
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+        git(&other, &["checkout", "-q", "foo"]);
+        fs::write(other.join("README.md"), "# origin-ahead\n").unwrap();
+        git(&other, &["add", "README.md"]);
+        git(&other, &["commit", "-q", "-m", "remote"]);
+        git(&other, &["push", "--quiet"]);
+        git(&repo_dir, &["fetch", "--quiet"]);
+
+        let local = exec_git(&["rev-parse", "foo"], &repo_dir);
+        let remote_sha = exec_git(&["rev-parse", "origin/foo"], &repo_dir);
+        assert_ne!(local, remote_sha);
+
+        let config = WorkspaceStatusConfig::with_defaults();
+        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let mut app = AppState::new(workspace.clone(), snapshot, true);
+
+        assert!(run_checkout_branch(
+            &mut app,
+            &workspace,
+            "app".into(),
+            "foo".into(),
+            None,
+        ));
+        assert!(app.confirm.is_none());
+        assert_eq!(exec_git(&["branch", "--show-current"], &repo_dir), "foo");
+        assert_eq!(exec_git(&["rev-parse", "HEAD"], &repo_dir), local);
+
+        git(&repo_dir, &["checkout", "-q", "main"]);
+        assert!(!run_checkout_branch(
+            &mut app,
+            &workspace,
+            "app".into(),
+            "origin/foo".into(),
+            None,
+        ));
+        assert!(app.confirm.is_some());
+        match app.dispatch(Action::ConfirmYes) {
+            Effect::CheckoutBranch {
+                selected_name,
+                fast_forward_ref,
+                repo,
+            } => {
+                assert_eq!(selected_name, "foo");
+                assert_eq!(fast_forward_ref.as_deref(), Some("origin/foo"));
+                assert!(run_checkout_branch(
+                    &mut app,
+                    &workspace,
+                    repo,
+                    selected_name,
+                    fast_forward_ref,
+                ));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(exec_git(&["branch", "--show-current"], &repo_dir), "foo");
+        assert_eq!(exec_git(&["rev-parse", "HEAD"], &repo_dir), remote_sha);
+        let _ = fs::remove_dir_all(&root);
+    }
 }
