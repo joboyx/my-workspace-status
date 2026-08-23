@@ -4671,9 +4671,9 @@ mod tests {
         focus_repo(&mut app, "app");
         install_graph(&mut app, vec![graph_stash("stash@{0}", "latest")]);
         if let Some(graph) = app.graph.as_mut() {
-            graph.uncommitted = true;
+            graph.uncommitted = Some(true);
         }
-        focus_graph_row(&mut app, |r| matches!(r, GraphRow::Uncommitted));
+        focus_graph_row(&mut app, |r| matches!(r, GraphRow::Uncommitted { .. }));
         app.open_stash_menu("app".into(), Some("stash@{0}".into()));
         let ops = app.stash_menu.clone().expect("uncommitted menu");
         assert_eq!(
