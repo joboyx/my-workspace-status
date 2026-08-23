@@ -424,7 +424,12 @@ impl AppState {
             DrillView::Files { files, .. } | DrillView::Diff { files, .. } => files.as_slice(),
             DrillView::Graph => return Vec::new(),
         };
-        flatten_commit_files(files, self.commit_tree_mode, &self.commit_file_folds)
+        flatten_commit_files(
+            files,
+            self.commit_tree_mode,
+            &self.commit_file_folds,
+            self.ascii,
+        )
     }
 
     fn commit_files_cursor(&self) -> usize {
@@ -1485,7 +1490,7 @@ impl AppState {
 
     fn is_files_chevron(&self, col: u16, depth: usize) -> bool {
         let prefix = if self.easy_motion.is_some() { 2 } else { 0 };
-        col == self.layout.diff_content_x + prefix + (depth as u16) * 2
+        col == self.layout.diff_content_x + prefix + 1 + (depth as u16) * 2
     }
 
     fn click_graph(&mut self, row: u16, is_double: bool, right: bool) -> Effect {
@@ -1802,10 +1807,14 @@ impl AppState {
             self.set_search_status(false);
             return;
         };
-        let current_path =
-            flatten_commit_files(files, self.commit_tree_mode, &self.commit_file_folds)
-                .get(*cursor)
-                .map(|row| row.path.clone());
+        let current_path = flatten_commit_files(
+            files,
+            self.commit_tree_mode,
+            &self.commit_file_folds,
+            self.ascii,
+        )
+        .get(*cursor)
+        .map(|row| row.path.clone());
         let current_file_idx = current_path
             .as_deref()
             .and_then(|path| files.iter().position(|file| file.path == path))
@@ -5334,7 +5343,13 @@ mod tests {
         assert!(app.rows.iter().any(|row| row.id == "dir:app:src"));
         let rows = app.commit_file_rows();
         assert!(rows.iter().all(|row| !row.is_dir()));
-        assert!(rows.iter().any(|row| row.label.contains("src/lib.rs")));
+        assert!(rows.iter().any(|row| {
+            row.id == "file:src/lib.rs"
+                && row.label.contains("lib.rs")
+                && row.label.contains("src")
+                && !row.label.contains("src/lib.rs")
+                && row.trailing.contains('A')
+        }));
         app.dispatch(Action::ToggleTreeMode);
         assert!(app.commit_tree_mode);
         assert!(app.commit_file_rows().iter().any(|row| row.id == "dir:src"));

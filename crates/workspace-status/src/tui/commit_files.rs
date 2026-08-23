@@ -1,8 +1,14 @@
 //! Commit-file directory trie. Same collapse as the workspace change forest.
+//!
+//! File chrome (icon + trailing status badge) is `tree::file_change_segments`.
 
 use std::collections::{BTreeMap, HashSet};
 
 use super::drill::CommitFile;
+use super::tree::{
+    dir_name_segments, file_change_from_name_status, file_change_segments, segments_search_label,
+    NodeSegments, SegRole, TextSeg,
+};
 
 /// Kind of one painted commit-file row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,6 +24,10 @@ pub struct CommitFileRow {
     pub depth: usize,
     pub kind: CommitFileRowKind,
     pub label: String,
+    /// Right-aligned status badge (files) or empty (dirs).
+    pub trailing: String,
+    pub segments: Vec<TextSeg>,
+    pub trailing_segs: Vec<TextSeg>,
     pub path: String,
     pub foldable: bool,
     pub folded: bool,
@@ -41,9 +51,15 @@ struct MutableDir {
 }
 
 /// Dir / file forest for a commit, stash, or worktree file list.
-pub fn materialize_commit_file_forest(files: &[CommitFile], tree_mode: bool) -> Vec<CommitFileNode> {
+pub fn materialize_commit_file_forest(
+    files: &[CommitFile],
+    tree_mode: bool,
+) -> Vec<CommitFileNode> {
     if !tree_mode {
-        return files.iter().map(|file| make_file_node(file, false)).collect();
+        return files
+            .iter()
+            .map(|file| make_file_node(file, false))
+            .collect();
     }
     let mut root = MutableDir::default();
     for file in files {
@@ -53,15 +69,18 @@ pub fn materialize_commit_file_forest(files: &[CommitFile], tree_mode: bool) -> 
 }
 
 /// Flatten a commit-file forest, honoring `folds`.
+///
+/// `ascii` selects the same glyph fallback as the workspace tree.
 pub fn flatten_commit_files(
     files: &[CommitFile],
     tree_mode: bool,
     folds: &HashSet<String>,
+    ascii: bool,
 ) -> Vec<CommitFileRow> {
     let nodes = materialize_commit_file_forest(files, tree_mode);
     let mut out = Vec::new();
     for node in &nodes {
-        walk(node, 0, folds, &mut out);
+        walk(node, 0, folds, tree_mode, ascii, &mut out);
     }
     out
 }
@@ -78,7 +97,11 @@ pub struct CommitFileNode {
 }
 
 fn add_file(root: &mut MutableDir, file: &CommitFile) {
-    let mut parts: Vec<&str> = file.path.split('/').filter(|part| !part.is_empty()).collect();
+    let mut parts: Vec<&str> = file
+        .path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
     if parts.pop().is_none() {
         return;
     }
@@ -102,24 +125,24 @@ fn collapse_dir(name: String, mut node: MutableDir) -> (String, MutableDir) {
     (collapsed_name, node)
 }
 
-fn file_label(file: &CommitFile, tree_mode: bool) -> String {
-    let name = if tree_mode {
+fn file_node_label(file: &CommitFile, tree_mode: bool) -> String {
+    if tree_mode {
         file.path
             .rsplit('/')
             .next()
             .filter(|part| !part.is_empty())
             .unwrap_or(file.path.as_str())
+            .to_string()
     } else {
-        file.path.as_str()
-    };
-    format!("{}  {name}", file.status)
+        file.path.clone()
+    }
 }
 
 fn make_file_node(file: &CommitFile, tree_mode: bool) -> CommitFileNode {
     CommitFileNode {
         id: format!("file:{}", file.path),
         kind: CommitFileRowKind::File,
-        label: file_label(file, tree_mode),
+        label: file_node_label(file, tree_mode),
         path: file.path.clone(),
         file: Some(file.clone()),
         children: Vec::new(),
@@ -158,14 +181,52 @@ fn materialize_dir(dir_path: &str, node: MutableDir) -> Vec<CommitFileNode> {
     children
 }
 
-fn walk(node: &CommitFileNode, depth: usize, folds: &HashSet<String>, out: &mut Vec<CommitFileRow>) {
+fn commit_file_segments(node: &CommitFileNode, tree_mode: bool, ascii: bool) -> NodeSegments {
+    match node.kind {
+        CommitFileRowKind::Dir => dir_name_segments(&node.label, ascii),
+        CommitFileRowKind::File => match node.file.as_ref() {
+            Some(file) => {
+                let change = file_change_from_name_status(
+                    &file.status,
+                    file.path.clone(),
+                    file.old_path.clone(),
+                );
+                file_change_segments(&change, tree_mode, ascii)
+            }
+            None => NodeSegments {
+                segments: vec![TextSeg {
+                    text: node.label.clone(),
+                    role: SegRole::File,
+                    hex: None,
+                    bold: false,
+                    dim: false,
+                }],
+                trailing: Vec::new(),
+            },
+        },
+    }
+}
+
+fn walk(
+    node: &CommitFileNode,
+    depth: usize,
+    folds: &HashSet<String>,
+    tree_mode: bool,
+    ascii: bool,
+    out: &mut Vec<CommitFileRow>,
+) {
     let foldable = !node.children.is_empty();
     let folded = foldable && folds.contains(&node.id);
+    let segs = commit_file_segments(node, tree_mode, ascii);
+    let (label, trailing) = segments_search_label(&segs);
     out.push(CommitFileRow {
         id: node.id.clone(),
         depth,
         kind: node.kind,
-        label: node.label.clone(),
+        label,
+        trailing,
+        segments: segs.segments,
+        trailing_segs: segs.trailing,
         path: node.path.clone(),
         foldable,
         folded,
@@ -175,7 +236,7 @@ fn walk(node: &CommitFileNode, depth: usize, folds: &HashSet<String>, out: &mut 
         return;
     }
     for child in &node.children {
-        walk(child, depth + 1, folds, out);
+        walk(child, depth + 1, folds, tree_mode, ascii, out);
     }
 }
 
@@ -222,7 +283,10 @@ pub fn collect_foldable_subtree_ids(
 
 /// Dir ids that must unfold so `file_path` is visible.
 pub fn ancestor_dir_ids(file_path: &str) -> Vec<String> {
-    let mut parts: Vec<&str> = file_path.split('/').filter(|part| !part.is_empty()).collect();
+    let mut parts: Vec<&str> = file_path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
     if parts.len() < 2 {
         return Vec::new();
     }
@@ -255,11 +319,11 @@ mod tests {
     #[test]
     fn tree_mode_inserts_dir_and_basename() {
         let files = vec![file("A", "src/lib.rs"), file("M", "README.md")];
-        let rows = flatten_commit_files(&files, true, &HashSet::new());
+        let rows = flatten_commit_files(&files, true, &HashSet::new(), true);
         let dir = rows.iter().find(|r| r.id == "dir:src").expect("dir");
         assert_eq!(dir.kind, CommitFileRowKind::Dir);
         assert!(dir.foldable);
-        assert_eq!(dir.label, "src");
+        assert!(dir.label.contains("src"));
         let lib = rows
             .iter()
             .find(|r| r.id == "file:src/lib.rs")
@@ -267,7 +331,13 @@ mod tests {
         assert_eq!(lib.kind, CommitFileRowKind::File);
         assert!(lib.label.contains("lib.rs"));
         assert!(!lib.label.contains("src/lib.rs"));
-        assert!(rows.iter().any(|r| r.id == "file:README.md"));
+        assert_eq!(lib.trailing.trim(), "A");
+        assert!(!lib.label.contains("A  lib"));
+        let readme = rows
+            .iter()
+            .find(|r| r.id == "file:README.md")
+            .expect("README");
+        assert_eq!(readme.trailing.trim(), "M");
         let dir_idx = rows.iter().position(|r| r.id == "dir:src").unwrap();
         assert_eq!(rows[dir_idx + 1].id, "file:src/lib.rs");
     }
@@ -275,22 +345,25 @@ mod tests {
     #[test]
     fn flat_mode_is_full_paths_without_dirs() {
         let files = vec![file("A", "src/lib.rs"), file("M", "README.md")];
-        let rows = flatten_commit_files(&files, false, &HashSet::new());
+        let rows = flatten_commit_files(&files, false, &HashSet::new(), true);
         assert!(rows.iter().all(|r| r.kind != CommitFileRowKind::Dir));
         let lib = rows
             .iter()
             .find(|r| r.id == "file:src/lib.rs")
             .expect("lib.rs");
-        assert!(lib.label.contains("src/lib.rs"));
+        assert!(lib.label.contains("lib.rs"));
+        assert!(lib.label.contains("src"));
+        assert!(!lib.label.contains("src/lib.rs"));
+        assert_eq!(lib.trailing.trim(), "A");
     }
 
     #[test]
     fn collapse_single_child_dirs() {
         let files = vec![file("A", "src/foo/bar.rs")];
-        let rows = flatten_commit_files(&files, true, &HashSet::new());
+        let rows = flatten_commit_files(&files, true, &HashSet::new(), true);
         assert!(rows
             .iter()
-            .any(|r| r.id == "dir:src/foo" && r.label == "src/foo"));
+            .any(|r| r.id == "dir:src/foo" && r.label.contains("src/foo")));
         assert!(rows.iter().all(|r| r.id != "dir:src"));
         let file_row = rows
             .iter()
@@ -305,7 +378,7 @@ mod tests {
         let files = vec![file("A", "src/lib.rs")];
         let mut folds = HashSet::new();
         folds.insert("dir:src".into());
-        let rows = flatten_commit_files(&files, true, &folds);
+        let rows = flatten_commit_files(&files, true, &folds, true);
         assert!(rows.iter().any(|r| r.id == "dir:src" && r.folded));
         assert!(rows.iter().all(|r| r.id != "file:src/lib.rs"));
     }

@@ -96,11 +96,11 @@ Reviewed marks use `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (same
 
 Daily tree paint matches Ink `src/tui/icons.ts` + `model/tree.ts` + `TreePane.tsx`:
 
-- File rows: type glyph on the left, name, 2-column status badge on the **right** (`A` / `S` / `MS` / `M` / `D` / `R` / `U` / `C`). Untracked is `A`, staged-only is `S`, staged+unstaged is `MS`.
-- Folder / repo / branch / linked-worktree / sync / merge / viewed glyphs from the same registry. `WS_STATUS_GLYPHS=ascii` uses the same fallbacks (`#` `@` `L` `&` `/` `^` `v` `Y` `?` `=` `M` `o` `*`).
+- File rows: type glyph on the left, name, 2-column status badge on the **right** (`A` / `S` / `MS` / `M` / `D` / `R` / `U` / `C`). Untracked is `A`, staged-only is `S`, staged+unstaged is `MS`. Commit-file lists reuse the same chrome (name-status letters stay A/M/D/R/C, not workspace `S`).
+- Folder / repo / branch / linked-worktree / sync / merge / viewed glyphs from the same registry. `WS_STATUS_GLYPHS=ascii` uses the same fallbacks (`#` `@` `L` `&` `/` `^` `v` `Y` `?` `=` `M` `o` `*`). Reviewed is `` / `*` (not `◉`). Ignored is `` / `~` (not `[ignored]`).
 - Workspace header is file-oriented: `{cwd basename}` trailing `{N} changed · {ahead/behind/diverged/attention|all current}`.
-- Linked worktrees under a family are checkout rows labeled by **branch** (Ink), not `wt <path>`. Detached linked checkouts fall back to the short worktree path.
-- Repo / checkout trailing sync marks match Ink (`↑N` / `↓N` / diverged / no-upstream). Merged-into-default / open-vs-default sit next to the branch. Up-to-date `` only inside No updates.
+- Linked worktrees under a family are checkout rows labeled by **branch** (Ink), not `wt <path>`. Detached linked checkouts fall back to the short worktree path. Linked-only snapshots (no primary in the window) stay a flat `Repo` row — no phantom primary container.
+- Repo / checkout trailing sync marks match Ink (`↑N` / `↓N` / diverged / no-upstream). Merged-into-default / open-vs-default sit next to the branch. Up-to-date `` only inside No updates. The No updates count is a trailing number, not `(N)` in the label.
 
 Rust extras stay: `q`, Tab, Home/End, family-row `b`, picker `C`. Confirm `y`/`n` stays on the status line (overlays vs status-line confirm is out of scope). Graph window/autoload, diff section headers, and stash meta are separate.
 
