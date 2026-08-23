@@ -45,7 +45,11 @@ pub fn load_graph_model(
         commits,
         stashes,
         worktrees,
-        head_id: if head.is_empty() { None } else { Some(head.clone()) },
+        head_id: if head.is_empty() {
+            None
+        } else {
+            Some(head.clone())
+        },
         sync: Some(sync_from_snapshot(row)),
         show_ignored,
         uncommitted,
@@ -64,7 +68,7 @@ fn load_commits(repo_dir: &Path) -> Vec<Commit> {
         &[
             "log",
             "--max-count=40",
-            "--pretty=format:%H%x00%s%x00%P",
+            "--pretty=format:%H%x00%P%x00%s%x00%an%x00%at",
         ],
         repo_dir,
     );
@@ -72,32 +76,38 @@ fn load_commits(repo_dir: &Path) -> Vec<Commit> {
     raw.lines()
         .filter(|l| !l.is_empty())
         .take(GRAPH_WINDOW)
-        .filter_map(|line| {
-            let mut parts = line.split('\0');
-            let id = parts.next()?.to_string();
-            if id.is_empty() {
-                return None;
-            }
-            let subject = parts.next().unwrap_or("").to_string();
-            let parents = parts
-                .next()
-                .unwrap_or("")
-                .split_whitespace()
-                .map(str::to_string)
-                .collect();
-            let commit_refs = refs
-                .iter()
-                .filter(|(sha, _)| sha == &id)
-                .map(|(_, graph_ref)| graph_ref.clone())
-                .collect();
-            Some(Commit {
-                id,
-                subject,
-                parents,
-                refs: commit_refs,
-            })
-        })
+        .filter_map(|line| parse_commit_line(line, &refs))
         .collect()
+}
+
+fn parse_commit_line(line: &str, refs: &[(String, GraphRef)]) -> Option<Commit> {
+    let mut parts = line.split('\0');
+    let id = parts.next()?.to_string();
+    if id.is_empty() {
+        return None;
+    }
+    let parents = parts
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let subject = parts.next().unwrap_or("").to_string();
+    let author_name = parts.next().unwrap_or("").to_string();
+    let author_date_unix = parts.next().unwrap_or("0").parse::<i64>().unwrap_or(0);
+    let commit_refs = refs
+        .iter()
+        .filter(|(sha, _)| sha == &id)
+        .map(|(_, graph_ref)| graph_ref.clone())
+        .collect();
+    Some(Commit {
+        id,
+        subject,
+        parents,
+        refs: commit_refs,
+        author_name,
+        author_date_unix,
+    })
 }
 
 fn classify_ref(refname: &str, short: &str) -> Option<GraphRef> {
@@ -239,10 +249,7 @@ mod tests {
 
     #[test]
     fn parse_diverged_counts() {
-        assert_eq!(
-            parse_ahead_behind("diverged (ahead 2, behind 1)"),
-            (2, 1)
-        );
+        assert_eq!(parse_ahead_behind("diverged (ahead 2, behind 1)"), (2, 1));
         assert_eq!(parse_ahead_behind("ahead by 3 commits"), (3, 0));
         assert_eq!(parse_ahead_behind("behind by 4 commits"), (0, 4));
     }
@@ -265,6 +272,20 @@ mod tests {
             classify_ref("refs/tags/v1.0", "v1.0"),
             Some(GraphRef::tag("v1.0"))
         );
-        assert_eq!(classify_ref("refs/remotes/origin/HEAD", "origin/HEAD"), None);
+        assert_eq!(
+            classify_ref("refs/remotes/origin/HEAD", "origin/HEAD"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_commit_line_loads_author_and_date() {
+        let line = "abc123\0parent1 parent2\0fix login\0Ada Lovelace\x001700000000";
+        let commit = parse_commit_line(line, &[]).expect("commit");
+        assert_eq!(commit.id, "abc123");
+        assert_eq!(commit.parents, vec!["parent1", "parent2"]);
+        assert_eq!(commit.subject, "fix login");
+        assert_eq!(commit.author_name, "Ada Lovelace");
+        assert_eq!(commit.author_date_unix, 1_700_000_000);
     }
 }
