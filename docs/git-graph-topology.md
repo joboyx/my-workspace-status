@@ -90,7 +90,10 @@ Every **commit** and **stash** is followed by a non-selectable `spacer`
   `[HEAD]`. Detached HEAD keeps a bold `[HEAD]` chip. Synced local+remote
   pairs put nf-fa-exchange (``, ASCII `=`) **before** the branch name.
   Misc unicode (`⌖` / `⇄`) is avoided — those glyphs bleed in MesloLGM.
-- **Stash row / spacer:** see [stash visual grammar](#stash-rows--visual-grammar).
+- **Stash row:** node + subject (full flex). `stash@{n}` is not on this line.
+- **Stash spacer:** live rails + short spur + `stash@{n}` left + right-anchored
+  hash / date / author (same drop order as commit spacers: hash → date →
+  author). Relative dates match `formatRelativeDate` / `format_relative_date`.
 
 Between consecutive commits the spacer gutter densifies
 (`prev.stemDown` → `next.stemUp`), including when a parked stash leaf sits
@@ -202,7 +205,8 @@ disagrees, fix the code):
    through-rails stay; **no** mid-rail `├─◇` tee; **no** `down` on the tip column.
 4. **Spacer:** live through-rails plus a **short spur** toward the join when
    tip-above-parent (parked stashes always tip-above-parent). Orphans: no spur /
-   no join.
+   no join. Label is `stash@{n}` left + hash / date / author right (same drop
+   order as commit spacers).
 5. **Join:** close elbow on the `stash^1` commit row (`●─╯` / `⊙─╯` family) when
    tip-above-parent; parent outside window → lone free-lane `◇` (no fake spine tee).
 6. Subject: no leading `◇`.
@@ -220,7 +224,7 @@ name; not stash leaf paint).
 | Stash model (`parentId` = `stash^1`); fetch missing parents | `src/git.ts` (`listStashes`, `gitLogCommitsByIds`) / `src/tui/graph/load.ts` |
 | Gutter clip window (node + stash join cols) | `src/tui/graph/gutterBudget.ts` (`sliceCellsAroundLane`) |
 | Regression tests (S0–S7 + park order + gutter dump) | `test/tui-graph-list.test.ts` (also rows / load / git-graph tests when changing cell paint or window load) |
-| Rust ratatui gutter (same lane model) | `crates/workspace-status-graph` (`layout.rs`, `topology.rs`, `stash.rs`, `paint.rs`) |
+| Rust ratatui gutter (same lane model) | `crates/workspace-status-graph` (`layout.rs`, `topology.rs`, `stash.rs`, `paint.rs`, `format.rs`) |
 
 Canonical skill tree: `ai/common/skills/my-workspace-status/` only.
 

@@ -22,8 +22,9 @@ mod widget;
 pub use action::{Action, Effect};
 pub use format::{
     format_commit_ref_chips, format_commit_spacer, format_commit_subject, format_label,
-    format_relative_date, format_row, format_sync, meta_column_widths, meta_columns_text,
-    pick_meta_columns, short_id, CommitSpacerOpts, MetaCols,
+    format_relative_date, format_row, format_stash_spacer, format_sync, meta_column_widths,
+    meta_column_widths_with_stashes, meta_columns_text, pick_meta_columns, short_id,
+    CommitSpacerOpts, MetaCols, StashSpacerOpts,
 };
 pub use glyphs::{GlyphSet, ASCII, CELL_W, UNICODE};
 pub use layout::{layout_commits, GraphStemRef, LaidOutCommit};
