@@ -15,7 +15,7 @@ multi-lane gutter from the same model.
 | Type | Role |
 | --- | --- |
 | `GraphModel` | Commits, stashes, worktrees, HEAD id, sync, `show_ignored`, uncommitted |
-| `Commit` | Id, subject, parents, refs |
+| `Commit` | Id, subject, parents, refs, author name, author date |
 | `Stash` | `stash@{n}`, subject, parent id (`stash^1`) |
 | `Worktree` | Path, HEAD id, branch, `ignored`, `is_current` |
 | `SyncState` | Branch, status, ahead, behind |
@@ -50,6 +50,15 @@ stay out of ops unless shown.
 `GraphWidget` writes a sync header when `sync` is set, then one gutter
 plus label per visible row. Commit and stash rows also paint a spacer
 line under the node (densify rails, or the stash spur).
+
+The commit node line is subject-only. The spacer under it is
+`[refs…][pad][hash][ ][date][ ][author]`: branch / tag chips on the
+left (local + matching `origin/*` merge into one chip; unmatched remotes
+stay as `[origin/…]`), muted short hash / relative date / author on the
+right. Narrow panes drop hash, then date, then author, and keep refs.
+Relative dates match Ink (`just now` / `Nm` / `Nh` / `Nd` / `Nw` / `Ny`).
+The spacer is not a second selectable row; cursor, search, EasyMotion,
+and click treat it as the parent commit.
 
 Lane assignment, parent planning, densify-left, and the
 connection-to-glyph map match the Ink graph

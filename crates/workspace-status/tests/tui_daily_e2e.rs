@@ -189,6 +189,21 @@ fn multi_lane_graph_paints_merge_and_stash_spur() {
     assert_contains(&frame, "merge");
     assert_contains(&frame, "stash@{0}");
     assert!(
+        frame.contains("feature/graph") || frame.contains("[feature/graph]"),
+        "graph should show the checked-out branch:\n{frame}"
+    );
+    assert!(
+        frame.contains("just now")
+            || frame.contains("1m")
+            || frame.contains("1h")
+            || frame.contains("2m"),
+        "graph should show a relative date on the commit spacer:\n{frame}"
+    );
+    assert!(
+        frame.contains("workspace-stat"),
+        "graph should show the commit author:\n{frame}"
+    );
+    assert!(
         frame.contains('╮')
             || frame.contains('╭')
             || frame.contains('╯')

@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::format::format_label;
+use crate::format::{format_commit_spacer, format_label, meta_column_widths, CommitSpacerOpts};
 use crate::glyphs::GlyphSet;
 use crate::layout::{layout_commits, LaidOutCommit};
 use crate::model::{GraphModel, GraphRow};
@@ -18,6 +18,18 @@ use crate::topology::{
     GraphCell,
 };
 
+/// Options for [`paint_model_with`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaintOpts {
+    /// Cap the gutter at this many columns. Topology still uses the full lane model.
+    pub gutter_width: Option<usize>,
+    /// Full painted line width (gutter + gap + label). `None` uses a wide default
+    /// so headless tests keep hash / date / author.
+    pub line_width: Option<usize>,
+    /// Clock for relative dates. `None` uses wall time.
+    pub now_unix: Option<i64>,
+}
+
 /// One painted display line (gutter + label).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaintedLine {
@@ -26,8 +38,10 @@ pub struct PaintedLine {
     /// Text after the gutter (no leading node for commit / stash).
     pub label: String,
     /// Index into [`GraphModel::visible_rows`] for this content line.
-    /// Spacer rails are `None`.
+    /// Spacers keep the parent row index so click / highlight pair with it.
     pub row_index: Option<usize>,
+    /// True on the selectable node line. Spacers are display-only.
+    pub selectable: bool,
 }
 
 impl PaintedLine {
@@ -66,12 +80,48 @@ fn prev_commit<'a>(
     None
 }
 
+fn now_unix_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn spacer_available(gutter: &[GraphCell], line_width: usize) -> usize {
+    if gutter.is_empty() {
+        return line_width;
+    }
+    let gutter_cols = cells_text(gutter).chars().count();
+    line_width.saturating_sub(gutter_cols.saturating_add(1))
+}
+
 /// Paint the model into display lines (sync header is applied by the widget).
 pub fn paint_model(
     model: &GraphModel,
     glyphs: &GlyphSet,
     gutter_width: Option<usize>,
 ) -> Vec<PaintedLine> {
+    paint_model_with(
+        model,
+        glyphs,
+        PaintOpts {
+            gutter_width,
+            ..PaintOpts::default()
+        },
+    )
+}
+
+/// Paint with an explicit line width and clock (widget / tests).
+pub fn paint_model_with(
+    model: &GraphModel,
+    glyphs: &GlyphSet,
+    opts: PaintOpts,
+) -> Vec<PaintedLine> {
+    let gutter_width = opts.gutter_width;
+    let line_width = opts.line_width.unwrap_or(200);
+    let now_unix = opts.now_unix.unwrap_or_else(now_unix_seconds);
+    let head_branch = model.sync.as_ref().map(|s| s.branch.as_str());
+    let (date_width, author_width) = meta_column_widths(&model.commits, now_unix);
     let laid = layout_commits(&model.commits, glyphs);
     let laid_by_id: HashMap<String, LaidOutCommit> = laid
         .into_iter()
@@ -102,10 +152,7 @@ pub fn paint_model(
         let GraphRow::Stash(stash) = row else {
             continue;
         };
-        let parent = stash
-            .parent_id
-            .as_ref()
-            .and_then(|id| laid_by_id.get(id));
+        let parent = stash.parent_id.as_ref().and_then(|id| laid_by_id.get(id));
         let prev = prev_commit(&rows, i, &laid_by_id);
         let next = next_commit(&rows, i + 1, &laid_by_id);
         let mut tip_above_parent = false;
@@ -123,14 +170,8 @@ pub fn paint_model(
             .map(|p| p.commit.id.clone())
             .unwrap_or_else(|| "__orphan__".into());
         let reserved = reserved_by_key.entry(key.clone()).or_default();
-        let ctx = build_stash_rail_context(
-            parent,
-            prev,
-            next,
-            tip_above_parent,
-            reserved,
-            max_lane,
-        );
+        let ctx =
+            build_stash_rail_context(parent, prev, next, tip_above_parent, reserved, max_lane);
         reserved.insert(ctx.leaf_lane);
         if let Some(parent) = parent {
             if tip_above_parent {
@@ -164,6 +205,7 @@ pub fn paint_model(
                     gutter: blank_gutter(paint_width),
                     label: format_label(row, glyphs),
                     row_index: Some(i),
+                    selectable: true,
                 });
             }
             GraphRow::Stash(stash) => {
@@ -177,25 +219,28 @@ pub fn paint_model(
                     gutter,
                     label: format_label(row, glyphs),
                     row_index: Some(i),
+                    selectable: true,
                 });
                 if let Some(ctx) = ctx {
                     out.push(PaintedLine {
                         gutter: stash_leaf_rail_cells(paint_width, ctx, glyphs, false, true),
                         label: String::new(),
-                        row_index: None,
+                        row_index: Some(i),
+                        selectable: false,
                     });
                 }
             }
             GraphRow::Commit {
                 commit,
                 is_head,
-                ..
+                worktrees,
             } => {
                 let Some(laid) = laid_by_id.get(&commit.id) else {
                     out.push(PaintedLine {
                         gutter: blank_gutter(paint_width),
                         label: format_label(row, glyphs),
                         row_index: Some(i),
+                        selectable: true,
                     });
                     continue;
                 };
@@ -224,6 +269,7 @@ pub fn paint_model(
                     gutter: cells,
                     label: format_label(row, glyphs),
                     row_index: Some(i),
+                    selectable: true,
                 });
                 let next = next_commit(&rows, i + 1, &laid_by_id);
                 let spacer = if let Some(next) = next {
@@ -231,10 +277,23 @@ pub fn paint_model(
                 } else {
                     stem_down_rail_cells(paint_width, laid, glyphs)
                 };
+                let available = spacer_available(&spacer, line_width);
+                let label = format_commit_spacer(CommitSpacerOpts {
+                    commit,
+                    is_head: *is_head,
+                    worktrees,
+                    head_branch,
+                    glyphs,
+                    available,
+                    date_width,
+                    author_width,
+                    now_unix,
+                });
                 out.push(PaintedLine {
                     gutter: spacer,
-                    label: String::new(),
-                    row_index: None,
+                    label,
+                    row_index: Some(i),
+                    selectable: false,
                 });
             }
         }

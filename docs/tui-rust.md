@@ -114,6 +114,8 @@ Left pane: workspace tree at depth 0. Clean default-branch repos sit under a fol
 
 Right pane: graph for a repo or worktree at depth 0, a unified or side-by-side diff for a dirty file, or commit detail (meta header plus file tree) / that file's commit diff.
 
+Graph commits paint two lines, matching Ink layout A: subject on the node row; refs / branch chips, short hash, relative date (`just now` / `Nm` / `Nh` / `Nd` / `Nw` / `Ny`), and author on the spacer beneath. Local and `origin/*` names stay visible (matching local+remote tips merge into one chip). The spacer is not a second cursor, search, or EasyMotion target — `j` / `k` / Enter / Esc still treat the commit as one item. When the pane is narrow, meta drops hash, then date, then author, keeping refs.
+
 The tree / right split defaults to 40% tree. The in-diff RULE defaults to 50/50. Drag either splitter (3-column grab band). Neither pane or column can collapse to zero. Both ratios are session-only.
 
 Bottom line: short status. `?` opens a small overlay of the keys above. `/` uses that line as the search prompt.

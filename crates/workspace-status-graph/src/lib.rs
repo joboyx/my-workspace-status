@@ -20,10 +20,16 @@ mod topology;
 mod widget;
 
 pub use action::{Action, Effect};
-pub use format::{format_label, format_row, format_sync};
+pub use format::{
+    format_commit_ref_chips, format_commit_spacer, format_commit_subject, format_label,
+    format_relative_date, format_row, format_sync, meta_column_widths, meta_columns_text,
+    pick_meta_columns, short_id, CommitSpacerOpts, MetaCols,
+};
 pub use glyphs::{GlyphSet, ASCII, CELL_W, UNICODE};
 pub use layout::{layout_commits, GraphStemRef, LaidOutCommit};
-pub use model::{Commit, GraphModel, GraphRef, GraphRow, RefKind, Stash, SyncState, SyncStatus, Worktree};
-pub use paint::{paint_model, PaintedLine};
+pub use model::{
+    Commit, GraphModel, GraphRef, GraphRow, RefKind, Stash, SyncState, SyncStatus, Worktree,
+};
+pub use paint::{paint_model, paint_model_with, PaintOpts, PaintedLine};
 pub use topology::{cells_text, CellRole, GraphCell};
 pub use widget::GraphWidget;

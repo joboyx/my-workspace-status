@@ -523,17 +523,19 @@ fn overlay_graph_easy_motion(frame: &mut Frame<'_>, area: Rect, state: &AppState
         if y >= bottom {
             break;
         }
-        if let Some(idx) = line.row_index {
-            if idx >= start && idx < start + labels.len() {
-                let label = &labels[idx - start];
-                if !label.is_empty() {
-                    frame.buffer_mut().set_stringn(
-                        area.x,
-                        y,
-                        &format!("{label:<2}"),
-                        2,
-                        Style::default().fg(palette.heading),
-                    );
+        if line.selectable {
+            if let Some(idx) = line.row_index {
+                if idx >= start && idx < start + labels.len() {
+                    let label = &labels[idx - start];
+                    if !label.is_empty() {
+                        frame.buffer_mut().set_stringn(
+                            area.x,
+                            y,
+                            &format!("{label:<2}"),
+                            2,
+                            Style::default().fg(palette.heading),
+                        );
+                    }
                 }
             }
         }
@@ -730,6 +732,8 @@ mod tests {
                 subject: "seed".into(),
                 parents: Vec::new(),
                 refs: vec!["main".into()],
+                author_name: "Ada".into(),
+                author_date_unix: 1_700_000_000,
             }],
             head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             uncommitted: true,
