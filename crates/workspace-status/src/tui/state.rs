@@ -133,10 +133,6 @@ pub enum PendingConfirm {
     Revert {
         targets: Vec<RevertTarget>,
     },
-    StashPop {
-        repo: String,
-        stash_ref: String,
-    },
     StashDrop {
         repo: String,
         stash_ref: String,
@@ -836,7 +832,6 @@ impl AppState {
                 if let Some(pending) = self.confirm.take() {
                     self.status = match pending {
                         PendingConfirm::Revert { .. } => "revert cancelled".into(),
-                        PendingConfirm::StashPop { .. } => "pop cancelled".into(),
                         PendingConfirm::StashDrop { .. } => "drop cancelled".into(),
                         PendingConfirm::CheckoutOutOfSync { .. } => "checkout cancelled".into(),
                         PendingConfirm::RemoveWorktree { .. } => "remove worktree cancelled".into(),
@@ -1980,10 +1975,6 @@ impl AppState {
                     })
                     .collect();
                 single_or_batch(effects)
-            }
-            Some(PendingConfirm::StashPop { repo, stash_ref }) => {
-                self.status = format!("pop {stash_ref}");
-                Effect::StashPop { repo, stash_ref }
             }
             Some(PendingConfirm::StashDrop { repo, stash_ref }) => {
                 self.status = format!("drop {stash_ref}");
