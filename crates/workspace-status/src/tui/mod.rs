@@ -14,6 +14,7 @@ mod easy_motion;
 pub(crate) mod editor;
 mod graph_load;
 mod help;
+mod gates;
 mod keys;
 mod ops;
 mod render;
