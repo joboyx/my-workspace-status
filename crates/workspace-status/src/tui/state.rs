@@ -191,6 +191,8 @@ pub struct AppState {
     pub graph_cursor: usize,
     /// True while the next `git log` window is fetching (Ink `loading older…`).
     pub graph_loading_older: bool,
+    /// True while listing commit files (Ink `commitFilesLoading`).
+    pub commit_files_loading: bool,
     pub drill: DrillView,
     pub diff_content: DiffContent,
     pub diff_scroll: u16,
@@ -280,6 +282,7 @@ impl AppState {
             graph_scroll: 0,
             graph_cursor: 0,
             graph_loading_older: false,
+            commit_files_loading: false,
             drill: DrillView::Graph,
             diff_content: DiffContent::default(),
             diff_scroll: 0,
@@ -1653,10 +1656,27 @@ impl AppState {
         self.graph_identity = None;
         self.graph_cursor = 0;
         self.graph_loading_older = false;
+        self.commit_files_loading = false;
         self.drill = DrillView::Graph;
         self.diff_content = DiffContent::default();
         self.diff_repo = None;
         self.diff_path = None;
+    }
+
+    /// Open the commit-files drill before git returns.
+    ///
+    /// Paint uses `loading files…` while `commit_files_loading` is true and
+    /// the list is empty.
+    pub fn begin_commit_files(&mut self, repo: String, source: CommitFileSource) {
+        self.commit_file_folds.clear();
+        self.commit_files_loading = true;
+        self.drill = DrillView::Files {
+            repo,
+            source,
+            files: Vec::new(),
+            cursor: 0,
+        };
+        self.focus = FocusPane::Right;
     }
 
     pub fn open_commit_files(
@@ -1666,6 +1686,7 @@ impl AppState {
         files: Vec<CommitFile>,
     ) {
         self.commit_file_folds.clear();
+        self.commit_files_loading = false;
         self.status = format!("files {}", files.len());
         let cursor = DrillView::files_cursor(&files, 0);
         self.drill = DrillView::Files {

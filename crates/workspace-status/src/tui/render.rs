@@ -31,6 +31,15 @@ use super::tree::{row_segments, NodeKind, NodeSegments, SegRole, TextSeg, Visibl
 use super::watch::flash_active;
 use crate::helpers::visible_width;
 
+/// Empty tree / empty commit-file list (Ink TreePane).
+const NO_MATCHING_ROWS: &str = "No matching rows";
+/// Commit-file list while git is still listing (Ink CommitDetailPane).
+const LOADING_FILES: &str = "loading files…";
+
+fn muted_copy(text: &str, palette: Palette) -> Line<'static> {
+    Line::from(Span::styled(text, Style::default().fg(palette.muted)))
+}
+
 /// Draw one frame. Updates `state.layout` for mouse hits.
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     let area = frame.area();
@@ -183,13 +192,17 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if area.height == 0 || area.width == 0 {
         return;
     }
+    let palette = state.theme.palette();
+    if state.rows.is_empty() {
+        frame.render_widget(Paragraph::new(muted_copy(NO_MATCHING_ROWS, palette)), area);
+        return;
+    }
     let height = area.height as usize;
     let width = area.width as usize;
     let cursor = state.cursor;
     let (start, _) = visible_window(state.rows.len(), cursor, height);
     state.layout.list_offset = start;
     let motion = tree_easy_motion_labels(state, start, height);
-    let palette = state.theme.palette();
     let mut lines = Vec::new();
     for (i, row) in state.rows.iter().enumerate().skip(start).take(height) {
         let motion_label = motion
@@ -504,7 +517,15 @@ fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, curso
     };
     let rows = state.commit_file_rows();
     if rows.is_empty() {
-        frame.render_widget(Paragraph::new("no files in this commit"), list_area);
+        let copy = if state.commit_files_loading {
+            LOADING_FILES
+        } else {
+            NO_MATCHING_ROWS
+        };
+        frame.render_widget(
+            Paragraph::new(muted_copy(copy, state.theme.palette())),
+            list_area,
+        );
         return;
     }
     let height = list_h as usize;
@@ -1217,5 +1238,42 @@ mod tests {
             text.contains("UNSTAGED") || text.contains("STAGED"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn empty_tree_paints_no_matching_rows() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.rows.clear();
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains(NO_MATCHING_ROWS), "{text}");
+        assert!(!text.contains("no files in this commit"), "{text}");
+    }
+
+    #[test]
+    fn empty_commit_files_paint_loading_then_no_matching_rows() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let source = super::super::drill::CommitFileSource::Commit {
+            commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        };
+        state.begin_commit_files("app".into(), source.clone());
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let loading = buffer_text(&terminal);
+        assert!(loading.contains(LOADING_FILES), "{loading}");
+        assert!(!loading.contains(NO_MATCHING_ROWS), "{loading}");
+        assert!(!loading.contains("no files in this commit"), "{loading}");
+
+        state.open_commit_files("app".into(), source, Vec::new());
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let empty = buffer_text(&terminal);
+        assert!(empty.contains(NO_MATCHING_ROWS), "{empty}");
+        assert!(!empty.contains(LOADING_FILES), "{empty}");
+        assert!(!empty.contains("no files in this commit"), "{empty}");
     }
 }

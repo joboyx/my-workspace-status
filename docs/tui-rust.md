@@ -104,7 +104,7 @@ Daily tree paint matches Ink `src/tui/icons.ts` + `model/tree.ts` + `TreePane.ts
 
 Rust extras stay: `q`, Tab, Home/End, family-row `b`, picker `C`. Confirm `y`/`n` stays on the status line (overlays vs status-line confirm is out of scope). Bottom chrome matches Ink: mode pills, contextual hint chips (Rust extras `q` / `Tab` append and truncate with `…`), breadcrumb `workspace › [repo]`, armed search as a `/{query}` chip. Graph window/autoload, diff section headers, and stash meta are separate.
 
-Glyphs live in `crates/workspace-status/src/tui/icons.rs`. Labels are built in `tree.rs` (`node_segments`); `render.rs` right-aligns trailing and paints the cursor bar.
+Glyphs live in `crates/workspace-status/src/tui/icons.rs`. Labels are built in `tree.rs` (`node_segments`); `render.rs` right-aligns trailing and paints the cursor bar. An empty workspace tree paints muted `No matching rows` (Ink TreePane). Commit-file lists do the same when loaded and empty; while git is still listing they paint `loading files…` (Ink CommitDetailPane).
 
 ## Optional Ink-only
 
@@ -128,7 +128,7 @@ See [tui-model.md](./tui-model.md) for the Ink keymap.
 
 Left pane: workspace tree at depth 0. Clean default-branch repos sit under a folded `No updates` group. In a commit-files or commit-diff drill the left pane is the graph list so the graph stays visible.
 
-Right pane: graph for a repo or worktree at depth 0, a numbered file diff when a dirty file is focused, or commit detail (meta header plus file tree) / that file's commit diff.
+Right pane: graph for a repo or worktree at depth 0, a numbered file diff when a dirty file is focused, or commit detail (meta header plus file tree) / that file's commit diff. Commit files still loading with 0 rows paint muted `loading files…`; a loaded empty list paints muted `No matching rows`.
 
 A file diff paints a one-line path header (`{repo}/{path}  inline|split`, plus ` · full` when unlimited `-U` is on, ` · pan N` when panned) then STAGED / UNSTAGED / NEW section labels and a line-number gutter. After a commit drill the left pane is the graph, so that header is how the file path stays visible. Intra-line and syntax highlight stay Ink-only. Overlay confirm vs status-line `y`/`n` is unchanged.
 
