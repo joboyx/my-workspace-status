@@ -208,4 +208,14 @@ Workspace, repo, dir, and checkout rows write every scoped file across repos. Fa
 | `fast_forward_to_remote_ref` | `merge --ff-only --quiet` of `origin/foo` or `refs/remotes/origin/foo` (no fetch) | Graph confirm Yes: advance HEAD to the selected remote-tracking tip. Ahead/diverged/missing → false; HEAD unchanged. No reset, no pull |
 | `origin_out_of_sync` | compare `rev-parse` of local vs `origin/<branch>` | Helper: `Some(origin/<branch>)` when both refs exist and differ. Checkout confirm uses `plan_graph_checkout` on the selected name instead |
 
+### Graph load (`crates/workspace-status/src/tui/graph_load.rs`)
+
+Matches Ink `gitLogGraphWindow` / `loadGraphModel` / `autoloadNext`. Default window is 300 (`DEFAULT_GRAPH_WINDOW`). `--exclude=refs/stash` precedes `--all`.
+
+| Function | Command | Purpose |
+| --- | --- | --- |
+| `load_graph_model_window` | `log --exclude=refs/stash --all --topo-order --date-order --skip --max-count --pretty=%H%x00%P%x00%s%x00%an%x00%at` | One history page. Always sets the working-tree row (`Some(has_changes)`). |
+| extra `stash^1` | `log --no-walk --ignore-missing --pretty=…` | Missing stash parents appended after the log prefix so autoload skip uses `window`, not `commits.len()` |
+| `should_autoload` / `merge_autoload` | next page at `skip + window_count` | Cursor on last loaded row; skip stays at the original window start; `window` grows |
+
 Hidden ignored checkouts stay out of `P` / `S` / `b` unless shown. Linked worktrees are included on `f` / `p` / `P` / `d` only when that row is focused. The background fetch timer (`background_fetch_targets` in `tui/fetch.rs`) includes every snapshot except hidden ignored — linked worktrees and shown ignored repos included. See [tui-rust.md](./tui-rust.md).

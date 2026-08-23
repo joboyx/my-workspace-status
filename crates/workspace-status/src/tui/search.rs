@@ -126,7 +126,7 @@ pub fn focus_tree_search(
 /// Search text for one graph row: subject plus decoration / ref names.
 pub fn graph_row_search_text(row: &GraphRow) -> String {
     match row {
-        GraphRow::Uncommitted => "uncommitted".into(),
+        GraphRow::Uncommitted { .. } => "uncommitted".into(),
         GraphRow::Stash(stash) => format!("{} {}", stash.subject, stash.stash_ref),
         GraphRow::Worktree(wt) => {
             let branch = wt.branch.as_deref().unwrap_or("");

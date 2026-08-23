@@ -5,7 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 use ratatui::Frame;
-use workspace_status_graph::{paint_model, GraphWidget, ASCII, UNICODE};
+use workspace_status_graph::{graph_chrome_budget, paint_model, GraphWidget, ASCII, UNICODE};
 
 use std::time::Instant;
 
@@ -278,6 +278,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         .ascii(state.ascii)
         .selected(Some(state.graph_cursor))
         .scroll(state.graph_scroll)
+        .loading_older(state.graph_loading_older)
         .render(area, frame.buffer_mut());
     overlay_graph_easy_motion(frame, area, state);
 }
@@ -679,21 +680,22 @@ fn overlay_graph_easy_motion(frame: &mut Frame<'_>, area: Rect, state: &AppState
         return;
     };
     let n = model.visible_rows().len();
-    let height = area.height as usize;
-    let (start, count) = visible_window(n, state.graph_cursor, height);
+    let chrome = graph_chrome_budget(area.height, state.graph_loading_older, model.sync.is_some());
+    let list_h = chrome.list_height.max(1) as usize;
+    let (start, count) = visible_window(n, state.graph_cursor, list_h);
     let labels = filter_labels(easy_motion_labels(count), &motion.typed);
     let palette = state.theme.palette();
     let glyphs = if state.ascii { &ASCII } else { &UNICODE };
     let mut y = area.y;
-    let bottom = area.y.saturating_add(area.height);
-    if model.sync.is_some() {
+    if chrome.header {
         y = y.saturating_add(1);
     }
+    let list_bottom = y.saturating_add(chrome.list_height);
     for line in paint_model(model, glyphs, None)
         .into_iter()
         .skip(state.graph_scroll as usize)
     {
-        if y >= bottom {
+        if y >= list_bottom {
             break;
         }
         if line.selectable {
@@ -904,7 +906,7 @@ mod tests {
                 author_date_unix: 1_700_000_000,
             }],
             head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
-            uncommitted: true,
+            uncommitted: Some(true),
             ..GraphModel::default()
         });
         let backend = TestBackend::new(80, 16);

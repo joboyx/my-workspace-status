@@ -52,7 +52,13 @@ pub fn format_relative_date(unix: i64, now_unix: i64) -> String {
 /// The widget paints a multi-lane gutter and uses [`format_label`].
 pub fn format_row(row: &GraphRow, glyphs: &GlyphSet) -> String {
     match row {
-        GraphRow::Uncommitted => format!("{} dirty", glyphs.uncommitted),
+        GraphRow::Uncommitted { has_changes } => {
+            if *has_changes {
+                format!("{} uncommitted changes", glyphs.uncommitted)
+            } else {
+                format!("{} working tree clean", glyphs.uncommitted)
+            }
+        }
         GraphRow::Stash(stash) => format_stash(stash, glyphs),
         GraphRow::Commit {
             commit, is_head, ..
@@ -73,7 +79,7 @@ pub fn format_row(row: &GraphRow, glyphs: &GlyphSet) -> String {
 /// `stash@{n}`, hash, date, and author live on the spacer beneath.
 pub fn format_label(row: &GraphRow, glyphs: &GlyphSet) -> String {
     match row {
-        GraphRow::Uncommitted | GraphRow::Worktree(_) => format_row(row, glyphs),
+        GraphRow::Uncommitted { .. } | GraphRow::Worktree(_) => format_row(row, glyphs),
         GraphRow::Stash(stash) => stash.subject.clone(),
         GraphRow::Commit { commit, .. } => format_commit_subject(commit),
     }
@@ -740,6 +746,15 @@ mod tests {
     }
 
     #[test]
+    fn format_uncommitted_label_is_dirty_or_clean() {
+        let dirty = GraphRow::Uncommitted { has_changes: true };
+        let clean = GraphRow::Uncommitted { has_changes: false };
+        assert_eq!(format_row(&dirty, &UNICODE), "○ uncommitted changes");
+        assert_eq!(format_row(&clean, &UNICODE), "○ working tree clean");
+        assert_eq!(format_label(&clean, &ASCII), "o working tree clean");
+    }
+
+    #[test]
     fn format_label_stash_is_subject_only() {
         let row = GraphRow::Stash(sample_stash());
         assert_eq!(format_label(&row, &UNICODE), "WIP on main");
@@ -816,6 +831,8 @@ mod tests {
             ignored: true,
             is_current: false,
         });
-        assert_eq!(format_row(&row, &UNICODE), "🔗 notes  [ignored]");
+        assert_eq!(format_row(&row, &UNICODE), " notes  [ignored]");
+        assert_eq!(format_row(&row, &ASCII), "L notes  [ignored]");
+        assert!(!format_row(&row, &UNICODE).contains("🔗"));
     }
 }
