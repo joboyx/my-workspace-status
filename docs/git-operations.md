@@ -190,8 +190,8 @@ Workspace, repo, dir, and checkout rows write every scoped file across repos. Fa
 | --- | --- | --- |
 | `push_quiet` | `push --quiet`, or `push -u <remote> HEAD --quiet` | TUI `P` on the focused visible checkout |
 | `stash_push` | `stash push -u [-- <paths>]` | Stash menu `s` |
-| `stash_apply` / `stash_pop` / `stash_drop` | `stash apply` / `pop` / `drop <ref>` | Stash menu `a` / `p` / `d` (pop and drop confirm first) |
-| `list_stash_refs` / `latest_stash_ref` | `stash list --format=%gd` | Latest stash for the menu; graph stash rows use the focused `stash@{n}` |
+| `stash_apply` / `stash_pop` / `stash_drop` | `stash apply` / `pop` / `drop <ref>` | Stash menu `a` / `p` / `d` (drop confirms first; pop runs immediately) |
+| `list_stash_refs` / `latest_stash_ref` | `stash list --format=%gd` | Latest stash for graph `S` apply / pop on a commit or uncommitted row; graph stash rows use the focused `stash@{n}` |
 | `load_stashes` (`graph_load`) | `stash list --format=%gd%x00%H%x00%P%x00%s%x00%at%x00%an` | Graph stash rows: ref, id, first parent (`stash^1`), subject, date, author |
 | `list_commit_name_status` | `diff-tree --name-status -r <commit>^ <commit>`; empty → `--root` | File list for a graph commit |
 | `list_stash_name_status` | `stash show --name-status <ref>` | File list for a graph stash row |
