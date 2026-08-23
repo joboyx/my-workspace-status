@@ -29,6 +29,8 @@ pub struct GraphWidget<'a> {
     now_unix: Option<i64>,
     loading_older: bool,
     lane_colors: &'a [Color],
+    search_matches: &'a [usize],
+    search_bg: Option<Color>,
 }
 
 impl<'a> GraphWidget<'a> {
@@ -43,6 +45,8 @@ impl<'a> GraphWidget<'a> {
             now_unix: None,
             loading_older: false,
             lane_colors: &[],
+            search_matches: &[],
+            search_bg: None,
         }
     }
 
@@ -86,6 +90,16 @@ impl<'a> GraphWidget<'a> {
     /// Per-cell gutter colours. Empty uses [`crate::DEFAULT_LANE_COLORS`].
     pub fn lane_colors(mut self, colors: &'a [Color]) -> Self {
         self.lane_colors = colors;
+        self
+    }
+
+    /// Paint Ink `searchMatchIds` background on selectable graph rows.
+    ///
+    /// `indices` are [`GraphModel::visible_rows`] indexes. Spacers stay
+    /// unhighlighted. [`Self::selected`] still wins over a match.
+    pub fn search_matches(mut self, indices: &'a [usize], bg: Color) -> Self {
+        self.search_matches = indices;
+        self.search_bg = Some(bg);
         self
     }
 }
@@ -142,6 +156,10 @@ impl Widget for GraphWidget<'_> {
                 break;
             }
             let selected = self.selected.is_some() && line.row_index == self.selected;
+            let search_match = line.selectable
+                && line
+                    .row_index
+                    .is_some_and(|i| self.search_matches.contains(&i));
             put_painted_line(
                 buf,
                 area.x,
@@ -149,6 +167,8 @@ impl Widget for GraphWidget<'_> {
                 area.width,
                 &line,
                 selected,
+                search_match,
+                self.search_bg,
                 lane_colors,
                 fallback,
             );
@@ -207,6 +227,8 @@ fn put_painted_line(
     width: u16,
     line: &PaintedLine,
     selected: bool,
+    search_match: bool,
+    search_bg: Option<Color>,
     lane_colors: &[Color],
     fallback: Color,
 ) {
@@ -219,6 +241,10 @@ fn put_painted_line(
     let mut style = Style::default();
     if selected {
         style = style.add_modifier(Modifier::REVERSED);
+    } else if search_match {
+        if let Some(bg) = search_bg {
+            style = style.bg(bg);
+        }
     }
     Line::from(spans)
         .style(style)
@@ -246,7 +272,7 @@ mod tests {
     use super::*;
     use crate::action::Action;
     use crate::action::Effect;
-    use crate::model::{Commit, Stash, SyncState, SyncStatus, Worktree};
+    use crate::model::{Commit, GraphRow, Stash, SyncState, SyncStatus, Worktree};
     use crate::paint::paint_model;
     use crate::topology::cells_text;
     use ratatui::backend::TestBackend;
@@ -862,6 +888,62 @@ mod tests {
             joined.contains("loading older…"),
             "loading older status: {joined}"
         );
+    }
+
+    #[test]
+    fn search_match_paints_bg_on_selectable_row_not_cursor() {
+        let model = sample_model();
+        let rows = model.visible_rows();
+        let stash_idx = rows
+            .iter()
+            .position(|row| matches!(row, GraphRow::Stash(_)))
+            .expect("stash row");
+        let bg = Color::Rgb(187, 154, 247);
+        let matches = [stash_idx];
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .selected(Some(0))
+                    .search_matches(&matches, bg)
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut stash_line_y = None;
+        let mut stash_spacer_y = None;
+        for y in 0..16u16 {
+            let mut line = String::new();
+            for x in 0..80u16 {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            if line.contains("WIP on main") {
+                stash_line_y = Some(y);
+                stash_spacer_y = Some(y.saturating_add(1));
+                break;
+            }
+        }
+        let y = stash_line_y.expect("stash subject line");
+        let mut saw_match_bg = false;
+        for x in 0..80u16 {
+            if buffer[(x, y)].bg == bg {
+                saw_match_bg = true;
+                break;
+            }
+        }
+        assert!(
+            saw_match_bg,
+            "search match should paint filter bg on the stash node"
+        );
+        if let Some(spacer_y) = stash_spacer_y {
+            let spacer_has_match = (0..80u16).any(|x| buffer[(x, spacer_y)].bg == bg);
+            assert!(
+                !spacer_has_match,
+                "stash spacer is not a searchMatchIds target"
+            );
+        }
     }
 
     #[test]

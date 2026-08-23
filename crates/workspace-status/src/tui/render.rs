@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 use ratatui::Frame;
 use workspace_status_graph::{graph_chrome_budget, paint_model, GraphWidget, ASCII, UNICODE};
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use super::chrome::{bottom_chrome_rows, breadcrumb_line, status_line};
@@ -20,7 +21,10 @@ use super::icons::{
     truncate_visible, CURSOR_BAR, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED,
     FOLD_EXPANDED_ASCII,
 };
-use super::search::slice_visible;
+use super::search::{
+    collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids,
+    slice_visible, SearchPane,
+};
 use super::split::{
     diff_split_rule_x, effective_diff_mode, is_side_by_side_split, pane_widths,
     side_by_side_column_widths, MIN_PANE_COLS,
@@ -38,6 +42,25 @@ const LOADING_FILES: &str = "loading files…";
 
 fn muted_copy(text: &'static str, palette: Palette) -> Line<'static> {
     Line::from(Span::styled(text, Style::default().fg(palette.muted)))
+}
+
+/// Cursor → search match → flash. Same stack as Ink `treeRowEmphasis`.
+fn row_match_bg(
+    selected: bool,
+    search_match: bool,
+    flashing: bool,
+    palette: Palette,
+    search_bg: Color,
+) -> Option<Color> {
+    if selected {
+        Some(palette.cursor_bg)
+    } else if search_match {
+        Some(search_bg)
+    } else if flashing {
+        Some(palette.flash)
+    } else {
+        None
+    }
 }
 
 /// Draw one frame. Updates `state.layout` for mouse hits.
@@ -203,6 +226,14 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let (start, _) = visible_window(state.rows.len(), cursor, height);
     state.layout.list_offset = start;
     let motion = tree_easy_motion_labels(state, start, height);
+    let search_bg = state.theme.pills().filter.bg;
+    let match_ids: HashSet<String> = if state.search_target == SearchPane::Tree {
+        collect_match_ids(&state.tree, &state.search_query)
+            .into_iter()
+            .collect()
+    } else {
+        HashSet::new()
+    };
     let mut lines = Vec::new();
     for (i, row) in state.rows.iter().enumerate().skip(start).take(height) {
         let motion_label = motion
@@ -219,6 +250,8 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             width,
             i == cursor,
             flashing,
+            match_ids.contains(&row.id),
+            search_bg,
             state.ascii,
             viewed,
             motion_label.as_deref(),
@@ -233,6 +266,8 @@ fn paint_tree_row(
     width: usize,
     selected: bool,
     flashing: bool,
+    search_match: bool,
+    search_bg: Color,
     ascii: bool,
     viewed: bool,
     motion_label: Option<&str>,
@@ -247,6 +282,8 @@ fn paint_tree_row(
         width,
         selected,
         flashing,
+        search_match,
+        search_bg,
         ascii,
         motion_label,
         palette,
@@ -261,17 +298,13 @@ fn paint_segmented_row(
     width: usize,
     selected: bool,
     flashing: bool,
+    search_match: bool,
+    search_bg: Color,
     ascii: bool,
     motion_label: Option<&str>,
     palette: Palette,
 ) -> Line<'static> {
-    let bg = if selected {
-        Some(palette.cursor_bg)
-    } else if flashing {
-        Some(palette.flash)
-    } else {
-        None
-    };
+    let bg = row_match_bg(selected, search_match, flashing, palette, search_bg);
     let trailing_text: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
     let trailing_width = visible_width(&trailing_text);
     let pad = usize::from(trailing_width > 0);
@@ -458,13 +491,25 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         frame.render_widget(Paragraph::new("focus a repo for the graph"), area);
         return;
     };
+    let matches = graph_search_matches(state);
     GraphWidget::new(model)
         .ascii(state.ascii)
         .selected(Some(state.graph_cursor))
         .scroll(state.graph_scroll)
         .loading_older(state.graph_loading_older)
+        .search_matches(&matches, state.theme.pills().filter.bg)
         .render(area, frame.buffer_mut());
     overlay_graph_easy_motion(frame, area, state);
+}
+
+fn graph_search_matches(state: &AppState) -> Vec<usize> {
+    if state.search_target != SearchPane::Graph {
+        return Vec::new();
+    }
+    let Some(model) = state.graph.as_ref() else {
+        return Vec::new();
+    };
+    collect_graph_match_indices(&model.visible_rows(), &state.search_query)
 }
 
 fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, cursor: usize) {
@@ -532,6 +577,10 @@ fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, curso
     let width = list_area.width as usize;
     let (start, _) = visible_window(rows.len(), cursor, height);
     let motion = file_easy_motion_labels(state, start, height);
+    let search_bg = state.theme.pills().filter.bg;
+    let searching_files =
+        state.search_target == SearchPane::CommitFiles && !state.search_query.trim().is_empty();
+    let match_paths = commit_file_search_match_paths(state);
     let lines: Vec<Line> = rows
         .iter()
         .enumerate()
@@ -546,6 +595,9 @@ fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, curso
                 segments: row.segments.clone(),
                 trailing: row.trailing_segs.clone(),
             };
+            let search_match = searching_files
+                && (match_paths.contains(&row.path)
+                    || commit_file_label_matches(&row.label, &state.search_query));
             paint_segmented_row(
                 row.depth,
                 row.foldable,
@@ -554,6 +606,8 @@ fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, curso
                 width,
                 i == cursor,
                 false,
+                search_match,
+                search_bg,
                 state.ascii,
                 motion_label.as_deref(),
                 palette,
@@ -561,6 +615,24 @@ fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, curso
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), list_area);
+}
+
+fn commit_file_search_match_paths(state: &AppState) -> HashSet<String> {
+    if state.search_target != SearchPane::CommitFiles {
+        return HashSet::new();
+    }
+    let DrillView::Files { files, .. } = &state.drill else {
+        return HashSet::new();
+    };
+    collect_commit_file_match_indices(files, &state.search_query)
+        .into_iter()
+        .filter_map(|i| files.get(i).map(|file| file.path.clone()))
+        .collect()
+}
+
+fn commit_file_label_matches(label: &str, query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    !q.is_empty() && label.to_lowercase().contains(&q)
 }
 
 fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -772,40 +844,62 @@ fn help_entry_text(entry: &super::help::HelpEntry) -> String {
     format!("{}  {}", entry.keys, entry.desc)
 }
 
+fn help_cell_text(text: &str, width: usize) -> String {
+    let mut cell = truncate_visible(text, width);
+    let used = visible_width(&cell);
+    if used < width {
+        cell.push_str(&" ".repeat(width - used));
+    }
+    cell
+}
+
 fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    use super::help::{help_entry_matches, HELP_ENTRIES};
+    use super::help::{help_entry_matches, help_flat_index, HELP_COLUMN_COUNT, HELP_GROUPS};
     let query = state.help_search_query.as_deref().unwrap_or("");
     let palette = state.theme.palette();
-    let mut lines = Vec::new();
-    let mut i = 0;
-    while i < HELP_ENTRIES.len() {
-        let left = &HELP_ENTRIES[i];
-        let left_text = format!("{:<22}", help_entry_text(left));
-        let left_hit = help_entry_matches(left.keys, left.desc, query);
-        let left_cur = state.help_search_hit == Some(i);
-        if let Some(right) = HELP_ENTRIES.get(i + 1) {
-            let right_text = help_entry_text(right);
-            let right_hit = help_entry_matches(right.keys, right.desc, query);
-            let right_cur = state.help_search_hit == Some(i + 1);
-            let left_style = help_span_style(left_hit, left_cur, palette);
-            let right_style = help_span_style(right_hit, right_cur, palette);
-            lines.push(Line::from(vec![
-                Span::styled(left_text, left_style),
-                Span::styled(right_text, right_style),
-            ]));
-            i += 2;
-        } else {
-            lines.push(Line::from(Span::styled(
-                left_text.trim_end().to_string(),
-                help_span_style(left_hit, left_cur, palette),
-            )));
-            i += 1;
-        }
+    let max_rows = HELP_GROUPS
+        .iter()
+        .map(|group| group.entries.len())
+        .max()
+        .unwrap_or(0);
+    let mut lines: Vec<Line> = Vec::new();
+
+    let width = area.width.saturating_sub(2).max(40);
+    let inner = width.saturating_sub(2);
+    let col_w = (inner as usize / HELP_COLUMN_COUNT).max(1);
+
+    let mut title_spans = Vec::new();
+    for group in HELP_GROUPS {
+        title_spans.push(Span::styled(
+            help_cell_text(group.title, col_w),
+            Style::default()
+                .fg(palette.heading)
+                .add_modifier(Modifier::BOLD),
+        ));
     }
-    let width = 52.min(area.width.saturating_sub(4));
-    let height = ((lines.len() as u16) + 2).min(area.height.saturating_sub(2));
+    lines.push(Line::from(title_spans));
+
+    for row in 0..max_rows {
+        let mut spans = Vec::new();
+        for (group_i, group) in HELP_GROUPS.iter().enumerate() {
+            let Some(entry) = group.entries.get(row) else {
+                spans.push(Span::raw(" ".repeat(col_w)));
+                continue;
+            };
+            let flat = help_flat_index(group_i, row);
+            let hit = help_entry_matches(entry.keys, entry.desc, query);
+            let current = flat.is_some_and(|i| state.help_search_hit == Some(i));
+            spans.push(Span::styled(
+                help_cell_text(&help_entry_text(entry), col_w),
+                help_span_style(hit, current, palette),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    let height = ((lines.len() as u16) + 2).min(area.height.saturating_sub(1));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let y = area.y + area.height.saturating_sub(height);
     let rect = Rect::new(x, y, width, height);
     frame.render_widget(Clear, rect);
     let title = if let Some(q) = &state.help_search_query {
@@ -1185,6 +1279,158 @@ mod tests {
         assert!(text.contains("W  remove worktree"), "{text}");
         assert!(text.contains("EasyMotion"), "{text}");
         assert!(text.contains("cycle theme"), "{text}");
+        assert!(text.contains("MOVE"), "{text}");
+        assert!(text.contains("GIT"), "{text}");
+        assert!(text.contains("VIEW"), "{text}");
+        let header = text
+            .lines()
+            .find(|line| line.contains("MOVE") && line.contains("GIT") && line.contains("VIEW"));
+        assert!(
+            header.is_some(),
+            "help overlay should paint MOVE / GIT / VIEW on one row:\n{text}"
+        );
+    }
+
+    #[test]
+    fn row_match_bg_prefers_cursor_then_search_then_flash() {
+        let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
+        let search_bg = crate::tui::theme::ThemeId::TokyoNight.pills().filter.bg;
+        assert_eq!(
+            row_match_bg(true, true, true, palette, search_bg),
+            Some(palette.cursor_bg)
+        );
+        assert_eq!(
+            row_match_bg(false, true, true, palette, search_bg),
+            Some(search_bg)
+        );
+        assert_eq!(
+            row_match_bg(false, false, true, palette, search_bg),
+            Some(palette.flash)
+        );
+        assert_eq!(row_match_bg(false, false, false, palette, search_bg), None);
+    }
+
+    #[test]
+    fn search_match_paints_filter_bg_on_non_cursor_tree_rows() {
+        let mut snapshot = repo("app", true);
+        snapshot.changes = vec![
+            FileChange {
+                path: "a.md".into(),
+                staged_status: None,
+                unstaged_status: Some("M".into()),
+                untracked: false,
+                old_path: None,
+            },
+            FileChange {
+                path: "b.md".into(),
+                staged_status: None,
+                unstaged_status: Some("M".into()),
+                untracked: false,
+                old_path: None,
+            },
+        ];
+        snapshot.has_unstaged = true;
+        let snapshot = build_workspace_snapshot(&[snapshot], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.dispatch(super::super::action::Action::SearchStart);
+        for c in "md".chars() {
+            state.dispatch(super::super::action::Action::SearchChar(c));
+        }
+        let search_bg = state.theme.pills().filter.bg;
+        let cursor_bg = state.theme.palette().cursor_bg;
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let buf = terminal.backend().buffer();
+        let mut a_bg = None;
+        let mut b_bg = None;
+        for y in 0..buf.area().height {
+            let mut line = String::new();
+            for x in 0..buf.area().width {
+                line.push_str(buf[(x, y)].symbol());
+            }
+            if line.contains("a.md") {
+                let col = line.find("a.md").unwrap();
+                a_bg = Some(buf[(col as u16, y)].bg);
+            }
+            if line.contains("b.md") {
+                let col = line.find("b.md").unwrap();
+                b_bg = Some(buf[(col as u16, y)].bg);
+            }
+        }
+        let a_bg = a_bg.expect("a.md row");
+        let b_bg = b_bg.expect("b.md row");
+        assert!(
+            a_bg == cursor_bg || b_bg == cursor_bg,
+            "one match should keep the cursor: a={a_bg:?} b={b_bg:?}"
+        );
+        assert!(
+            a_bg == search_bg || b_bg == search_bg,
+            "the other match should use search bg: a={a_bg:?} b={b_bg:?} search={search_bg:?}"
+        );
+        assert_ne!(a_bg, b_bg, "cursor and search-match paint must differ");
+    }
+
+    #[test]
+    fn search_match_paints_filter_bg_on_non_cursor_commit_file_rows() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.open_commit_files(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![
+                super::super::drill::CommitFile {
+                    status: "M".into(),
+                    path: "a.md".into(),
+                    old_path: None,
+                },
+                super::super::drill::CommitFile {
+                    status: "M".into(),
+                    path: "b.md".into(),
+                    old_path: None,
+                },
+            ],
+        );
+        state.focus = FocusPane::Right;
+        state.dispatch(super::super::action::Action::SearchStart);
+        for c in "md".chars() {
+            state.dispatch(super::super::action::Action::SearchChar(c));
+        }
+        let search_bg = state.theme.pills().filter.bg;
+        let cursor_bg = state.theme.palette().cursor_bg;
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let buf = terminal.backend().buffer();
+        let mut a_bg = None;
+        let mut b_bg = None;
+        for y in 0..buf.area().height {
+            let mut line = String::new();
+            for x in 0..buf.area().width {
+                line.push_str(buf[(x, y)].symbol());
+            }
+            if line.contains("a.md") {
+                let col = line.find("a.md").unwrap();
+                a_bg = Some(buf[(col as u16, y)].bg);
+            }
+            if line.contains("b.md") {
+                let col = line.find("b.md").unwrap();
+                b_bg = Some(buf[(col as u16, y)].bg);
+            }
+        }
+        let a_bg = a_bg.expect("a.md file row");
+        let b_bg = b_bg.expect("b.md file row");
+        assert!(
+            a_bg == cursor_bg || b_bg == cursor_bg,
+            "one file match should keep the cursor: a={a_bg:?} b={b_bg:?}"
+        );
+        assert!(
+            a_bg == search_bg || b_bg == search_bg,
+            "the other file match should use search bg: a={a_bg:?} b={b_bg:?} search={search_bg:?}"
+        );
+        assert_ne!(a_bg, b_bg, "cursor and search-match paint must differ");
     }
 
     #[test]
