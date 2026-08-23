@@ -102,12 +102,18 @@ pub struct Commit {
 }
 
 /// One `git stash` entry.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Stash {
+    /// Full stash commit id (`%H`). Empty when unknown.
+    pub id: String,
     /// `stash@{n}` name.
     pub stash_ref: String,
     /// Stash subject.
     pub subject: String,
+    /// `git stash list` `%an` author name. Empty when unknown.
+    pub author_name: String,
+    /// `git stash list` `%at` author date (unix seconds). `0` when unknown.
+    pub author_date_unix: i64,
     /// First parent (`stash^1`). `None` when git did not report it.
     pub parent_id: Option<String>,
 }

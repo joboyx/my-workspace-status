@@ -418,6 +418,29 @@ mod tests {
     }
 
     #[test]
+    fn graph_stash_search_skips_spacer_meta() {
+        use workspace_status_graph::Stash;
+        let rows = vec![GraphRow::Stash(Stash {
+            id: "deadbeefcafebabe".into(),
+            stash_ref: "stash@{0}".into(),
+            subject: "wip notes".into(),
+            author_name: "UniqueAuthorXYZ".into(),
+            author_date_unix: 1_700_000_000,
+            parent_id: None,
+        })];
+        assert_eq!(collect_graph_match_indices(&rows, "wip"), vec![0]);
+        assert_eq!(collect_graph_match_indices(&rows, "stash@{0}"), vec![0]);
+        assert!(
+            collect_graph_match_indices(&rows, "UniqueAuthorXYZ").is_empty(),
+            "author lives on the spacer, not search"
+        );
+        assert!(
+            collect_graph_match_indices(&rows, "deadbee").is_empty(),
+            "hash lives on the spacer, not search"
+        );
+    }
+
+    #[test]
     fn commit_file_and_diff_search_and_pan_clamp() {
         let files = vec![
             CommitFile {

@@ -174,8 +174,11 @@ mod tests {
                 commit(parent, "prior commit", &[]),
             ],
             stashes: vec![Stash {
+                id: "ccc3333ccccccccccccccccccccccccccccccc".into(),
                 stash_ref: "stash@{0}".into(),
                 subject: "WIP on main".into(),
+                author_name: "Ada Lovelace".into(),
+                author_date_unix: NOW - 86400,
                 parent_id: Some(head.into()),
             }],
             worktrees: vec![
@@ -331,6 +334,59 @@ mod tests {
     }
 
     #[test]
+    fn stash_paints_subject_then_ref_hash_date_author() {
+        let model = sample_model();
+        let lines = render_lines(&model, 120, 16, false);
+        let subject = lines
+            .iter()
+            .position(|l| l.contains("WIP on main"))
+            .expect("stash subject row");
+        assert!(
+            !lines[subject].contains("ccc3333"),
+            "hash must not sit on the subject: {}",
+            lines[subject]
+        );
+        assert!(
+            !lines[subject].contains("stash@{0}"),
+            "stash@{{n}} must not sit on the subject: {}",
+            lines[subject]
+        );
+        let meta = &lines[subject + 1];
+        assert!(meta.contains("stash@{0}"), "stash ref on spacer: {meta}");
+        assert!(meta.contains("ccc3333"), "short hash on spacer: {meta}");
+        let painted = paint_model_with(
+            &model,
+            &UNICODE,
+            PaintOpts {
+                now_unix: Some(NOW),
+                line_width: Some(200),
+                ..PaintOpts::default()
+            },
+        );
+        let subject_line = painted
+            .iter()
+            .find(|l| l.selectable && l.label.contains("WIP on main"))
+            .expect("stash subject painted");
+        assert!(subject_line.selectable);
+        let spacer = painted
+            .iter()
+            .skip_while(|l| !(l.selectable && l.label.contains("WIP on main")))
+            .nth(1)
+            .expect("stash spacer");
+        assert!(!spacer.selectable);
+        assert_eq!(spacer.row_index, subject_line.row_index);
+        assert!(spacer.label.contains("stash@{0}"), "{}", spacer.label);
+        assert!(spacer.label.contains("ccc3333"), "{}", spacer.label);
+        assert!(spacer.label.contains("1d"), "{}", spacer.label);
+        assert!(spacer.label.contains("Ada Lovelace"), "{}", spacer.label);
+        assert!(
+            !subject_line.label.contains("stash@{0}"),
+            "node is subject-only: {}",
+            subject_line.label
+        );
+    }
+
+    #[test]
     fn stash_leaf_sits_on_spur_not_fake_lane() {
         let model = sample_model();
         let lines = render_lines(&model, 120, 16, false);
@@ -338,7 +394,7 @@ mod tests {
         let painted = paint_model(&model, &UNICODE, None);
         let stash_line = painted
             .iter()
-            .find(|l| l.label.contains("stash@{0}"))
+            .find(|l| l.selectable && l.label.contains("WIP on main"))
             .expect("stash painted");
         let diamond_idx = stash_line
             .gutter
@@ -357,7 +413,7 @@ mod tests {
         );
         let spacer = painted
             .iter()
-            .skip_while(|l| !l.label.contains("stash@{0}"))
+            .skip_while(|l| !(l.selectable && l.label.contains("WIP on main")))
             .nth(1)
             .expect("stash spacer");
         assert_eq!(
@@ -366,6 +422,9 @@ mod tests {
             "spacer must carry the short spur, got {}",
             cells_text(&spacer.gutter)
         );
+        assert!(!spacer.selectable);
+        assert_eq!(spacer.row_index, stash_line.row_index);
+        assert!(spacer.label.contains("stash@{0}"), "{}", spacer.label);
         assert!(
             joined.contains('╯') || joined.contains('╰'),
             "join elbow on stash^1: {joined}"

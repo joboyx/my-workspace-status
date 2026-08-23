@@ -5,7 +5,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::format::{format_commit_spacer, format_label, meta_column_widths, CommitSpacerOpts};
+use crate::format::{
+    format_commit_spacer, format_label, format_stash_spacer, meta_column_widths_with_stashes,
+    CommitSpacerOpts, StashSpacerOpts,
+};
 use crate::glyphs::GlyphSet;
 use crate::layout::{layout_commits, LaidOutCommit};
 use crate::model::{GraphModel, GraphRow};
@@ -121,7 +124,8 @@ pub fn paint_model_with(
     let line_width = opts.line_width.unwrap_or(200);
     let now_unix = opts.now_unix.unwrap_or_else(now_unix_seconds);
     let head_branch = model.sync.as_ref().map(|s| s.branch.as_str());
-    let (date_width, author_width) = meta_column_widths(&model.commits, now_unix);
+    let (date_width, author_width) =
+        meta_column_widths_with_stashes(&model.commits, &model.stashes, now_unix);
     let laid = layout_commits(&model.commits, glyphs);
     let laid_by_id: HashMap<String, LaidOutCommit> = laid
         .into_iter()
@@ -222,9 +226,18 @@ pub fn paint_model_with(
                     selectable: true,
                 });
                 if let Some(ctx) = ctx {
+                    let gutter = stash_leaf_rail_cells(paint_width, ctx, glyphs, false, true);
+                    let available = spacer_available(&gutter, line_width);
+                    let label = format_stash_spacer(StashSpacerOpts {
+                        stash,
+                        available,
+                        date_width,
+                        author_width,
+                        now_unix,
+                    });
                     out.push(PaintedLine {
-                        gutter: stash_leaf_rail_cells(paint_width, ctx, glyphs, false, true),
-                        label: String::new(),
+                        gutter,
+                        label,
                         row_index: Some(i),
                         selectable: false,
                     });
