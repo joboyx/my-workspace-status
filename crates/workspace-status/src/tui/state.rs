@@ -245,7 +245,7 @@ impl AppState {
         let folds = default_folds(&tree);
         let rows = flatten(&tree, &folds);
         let cursor = initial_cursor(&rows);
-        let signatures = tree_signatures(&tree);
+        let signatures = tree_signatures(&tree, &cwd);
         let viewed_store = load_viewed_store(&viewed_path);
         let mut state = Self {
             cwd,
@@ -560,7 +560,7 @@ impl AppState {
         self.snapshot = snapshot;
         self.snapshot.show_ignored = self.show_ignored;
         self.rebuild_rows();
-        self.signatures = tree_signatures(&self.tree);
+        self.signatures = tree_signatures(&self.tree, &self.cwd);
         self.reconcile_viewed_store();
     }
 
@@ -4146,14 +4146,12 @@ mod tests {
     }
 
     #[test]
-    fn fetch_tick_visible_primaries_only_and_watch_stays_independent() {
+    fn fetch_tick_includes_linked_worktrees_skips_hidden_ignored() {
         let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
         match app.dispatch(Action::FetchTick) {
             Effect::Fetch { repos } => {
-                assert_eq!(repos, vec!["app"]);
-                assert!(!repos
-                    .iter()
-                    .any(|r| r.contains("worktrees") || r == "notes"));
+                assert_eq!(repos, vec!["app", "app/.worktrees/feat"]);
+                assert!(!repos.iter().any(|r| r == "notes"));
             }
             other => panic!("{other:?}"),
         }
@@ -4357,13 +4355,13 @@ mod tests {
                     stash_ref: "stash@{0}".into(),
                     subject: "latest".into(),
                     parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
-                ..Stash::default()
+                    ..Stash::default()
                 },
                 Stash {
                     stash_ref: "stash@{1}".into(),
                     subject: "older".into(),
                     parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
-                ..Stash::default()
+                    ..Stash::default()
                 },
             ],
         );

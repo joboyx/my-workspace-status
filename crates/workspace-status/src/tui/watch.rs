@@ -1,9 +1,13 @@
 //! Live snapshot poll. `WS_STATUS_WATCH_MS=0` disables.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::fs;
+use std::path::Path;
+use std::time::{Duration, UNIX_EPOCH};
 
-use super::tree::{TreeNode, VisibleRow};
+use crate::snapshot::FileChange;
+
+use super::tree::{NodeKind, TreeNode, VisibleRow};
 
 /// Default poll period. Matches the Ink TUI.
 pub const DEFAULT_WATCH_MS: u64 = 3000;
@@ -32,18 +36,73 @@ pub fn watch_interval_ms(raw: Option<&str>) -> u64 {
     (parsed as u64).max(MIN_WATCH_MS)
 }
 
-/// Semantic signature for one painted row. File rows use git letters only
-/// (watch does not fetch). Chrome rows use branch / sync / child count.
-pub fn row_signature(row: &VisibleRow) -> String {
+/// Ink `statusLetterFromChange`: one letter (or `MS`) for the file row.
+fn status_letter_from_change(change: &FileChange) -> String {
+    if change.unstaged_status.as_deref() == Some("U")
+        || change.staged_status.as_deref() == Some("U")
+    {
+        return "U".into();
+    }
+    if change.staged_status.is_some() && change.unstaged_status.is_some() {
+        return "MS".into();
+    }
+    let status = change
+        .unstaged_status
+        .as_deref()
+        .or(change.staged_status.as_deref());
+    if status == Some("R") {
+        return "R".into();
+    }
+    if status == Some("D") {
+        return "D".into();
+    }
+    if change.untracked || status == Some("A") {
+        return "A".into();
+    }
+    if change.staged_status.is_some() && change.unstaged_status.is_none() {
+        return "S".into();
+    }
+    if status == Some("C") {
+        return "C".into();
+    }
+    "M".into()
+}
+
+/// Ink `changeSignatures` disk token: `size:mtimeMs`, or `gone` when missing.
+fn file_disk_token(cwd: &Path, repo: &str, rel: &str) -> String {
+    let abs = cwd.join(repo).join(rel);
+    match fs::metadata(&abs) {
+        Ok(meta) => {
+            let mtime_ms = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            format!("{}:{mtime_ms}", meta.len())
+        }
+        Err(_) => "gone".into(),
+    }
+}
+
+/// Semantic signature for one painted row.
+///
+/// File rows match Ink `changeSignatures`: status letter plus `size:mtimeMs`
+/// (or `gone`). An in-place save of an already-modified file therefore flashes.
+/// Chrome rows stay label / fold / repo path.
+pub fn row_signature(row: &VisibleRow, cwd: &Path) -> String {
     match row.kind {
-        super::tree::NodeKind::File => {
-            let file = row.file.as_ref();
-            format!(
-                "file:{}:{}:{}",
-                file.and_then(|f| f.staged_status.as_deref()).unwrap_or("-"),
-                file.and_then(|f| f.unstaged_status.as_deref()).unwrap_or("-"),
-                file.map(|f| f.untracked).unwrap_or(false)
-            )
+        NodeKind::File => {
+            let status = row
+                .file
+                .as_ref()
+                .map(status_letter_from_change)
+                .unwrap_or_else(|| "M".into());
+            let disk = match (row.repo.as_deref(), row.file.as_ref()) {
+                (Some(repo), Some(file)) => file_disk_token(cwd, repo, &file.path),
+                _ => "gone".into(),
+            };
+            format!("{status}:{disk}")
         }
         _ => format!(
             "chrome:{}:{}:{}",
@@ -56,11 +115,11 @@ pub fn row_signature(row: &VisibleRow) -> String {
 
 /// Signatures keyed by row id from a full (unfolded) walk so folded files
 /// still participate in change detection.
-pub fn tree_signatures(tree: &TreeNode) -> BTreeMap<String, String> {
+pub fn tree_signatures(tree: &TreeNode, cwd: &Path) -> BTreeMap<String, String> {
     let rows = super::tree::flatten(tree, &std::collections::HashSet::new());
     rows.into_iter()
         .map(|row| {
-            let sig = row_signature(&row);
+            let sig = row_signature(&row, cwd);
             (row.id, sig)
         })
         .collect()
@@ -96,6 +155,42 @@ pub fn flash_active(elapsed: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::FileChange;
+    use std::path::PathBuf;
+
+    fn modified_file_row(repo: &str, path: &str) -> VisibleRow {
+        VisibleRow {
+            id: format!("file:{repo}:{path}"),
+            depth: 2,
+            kind: NodeKind::File,
+            label: format!("M {path}"),
+            repo: Some(repo.into()),
+            primary_repo: None,
+            ignored: false,
+            file: Some(FileChange {
+                path: path.into(),
+                staged_status: None,
+                unstaged_status: Some("M".into()),
+                untracked: false,
+                old_path: None,
+            }),
+            foldable: false,
+            folded: false,
+        }
+    }
+
+    fn tmp_workspace(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn zero_disables() {
@@ -115,11 +210,11 @@ mod tests {
     #[test]
     fn only_changed_ids_flash() {
         let mut before = BTreeMap::new();
-        before.insert("file:app:a".into(), "file:-:M:false".into());
-        before.insert("file:app:b".into(), "file:-:M:false".into());
+        before.insert("file:app:a".into(), "M:12:1".into());
+        before.insert("file:app:b".into(), "M:12:1".into());
         before.insert("repo:app".into(), "chrome:app:false:app".into());
         let mut after = before.clone();
-        after.insert("file:app:a".into(), "file:M:-:false".into());
+        after.insert("file:app:a".into(), "S:12:1".into());
         let changed = changed_row_ids(&before, &after);
         assert_eq!(changed, vec!["file:app:a".to_string()]);
     }
@@ -129,5 +224,39 @@ mod tests {
         let mut map = BTreeMap::new();
         map.insert("workspace".into(), "chrome:ws:false:".into());
         assert!(changed_row_ids(&map, &map).is_empty());
+    }
+
+    #[test]
+    fn in_place_save_of_already_modified_file_changes_signature() {
+        let cwd = tmp_workspace("ws-watch-sig");
+        let rel = Path::new("demo/src");
+        fs::create_dir_all(cwd.join(rel)).unwrap();
+        let file = cwd.join("demo/src/main.ts");
+        fs::write(&file, "a\n").unwrap();
+        let row = modified_file_row("demo", "src/main.ts");
+
+        let first = row_signature(&row, &cwd);
+        assert!(first.starts_with("M:"), "{first}");
+        assert!(!first.ends_with(":gone"), "{first}");
+
+        let again = row_signature(&row, &cwd);
+        assert_eq!(first, again);
+
+        fs::write(&file, "a\nb\n").unwrap();
+        let after_save = row_signature(&row, &cwd);
+        assert_ne!(
+            first, after_save,
+            "same-letter in-place save must change the watch signature"
+        );
+        assert!(after_save.starts_with("M:"), "{after_save}");
+
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn missing_worktree_file_signs_gone() {
+        let row = modified_file_row("demo", "src/gone.ts");
+        let sig = row_signature(&row, Path::new("/nonexistent"));
+        assert_eq!(sig, "M:gone");
     }
 }

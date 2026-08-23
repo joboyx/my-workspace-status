@@ -54,9 +54,9 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 
 `-a` starts with ignored repos shown. `-f` starts a fetch after the first paint. First paint does not wait on a network fetch.
 
-`WS_STATUS_WATCH_MS` polls local git and refreshes the snapshot. Default is `3000`. `0` disables the poll. Fold, focus, and scroll stay put. Only rows whose identity actually changed flash.
+`WS_STATUS_WATCH_MS` polls local git and refreshes the snapshot. Default is `3000`. `0` disables the poll. Fold, focus, and scroll stay put. File rows flash (~800ms) when the git status letter **or** worktree `size:mtimeMs` changes, so an in-place save of an already-modified file flashes. Chrome rows flash when label / fold / repo path moves.
 
-`WS_STATUS_FETCH_MS` runs `git fetch` on visible primary checkouts. Default is `300000` (5 minutes). `0` disables it. The watch poll stays a separate timer. Hidden ignored repos stay out. Linked worktrees are not fetched unless you focus that row and press `f`.
+`WS_STATUS_FETCH_MS` runs `git fetch` on every snapshot checkout except hidden ignored repos, including linked worktrees. Default is `300000` (5 minutes). `0` disables it. The watch poll stays a separate timer. Shown ignored repos (`.` / `-a`) are included. Manual `f` stays focus-scoped: primaries on the workspace / family row, and a linked worktree only when that row is focused.
 
 ## What this TUI does
 
@@ -72,7 +72,7 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 - `h` / `l` on a focused file diff pan long lines. They still fold when the tree is focused
 - Stage / unstage / revert act on every dirty file in the focused scope (file, dir, flat repo, checkout, or workspace), including every scoped file across repos. A file row stays single-file. A dir row writes the dir path and its children. Family containers do not mix linked worktree files. Hidden ignored stay out unless shown. Revert asks `y` / `Y` / `n` on the status line. `y` discards tracked and keeps untracked, except a sole untracked file which still deletes. `Y` also deletes untracked. Stage and unstage do not confirm
 - `e` uses config `editor`, then `$EDITOR`, then `$VISUAL`, then `vim`. It opens a focused workspace dirty file, a focused commit-file row, or a focused commit-file diff. A TTY editor leaves the alternate screen and returns to the same fold, focus, and scroll. GUI editors (`cursor`, `code`) spawn without a remount. Resume drains leftover raw-mode keys
-- Fetch / pull / default do not fan out to linked worktrees unless the focused row is that worktree
+- Fetch / pull / default (`f` / `p` / `d`) do not fan out to linked worktrees unless the focused row is that worktree. The background fetch timer still includes linked worktrees (and shown ignored); it skips hidden ignored.
 - `P` pushes the focused visible repo or checkout only when it is ahead, diverged, or has no upstream. In-sync is a no-op. Workspace never fans out. Hidden ignored stay out. Linked worktrees push only when that row is focused
 - `S` on a dirty file or repo is create-only (`s stash`). `S` on a clean repo that has `stash@{0}` is a no-op. Apply / pop / drop only from a focused graph stash row (`a` / `p` / `D`, plus `S` there). Never drop latest from a file or repo row. Pop and drop ask `y` / `n` first
 - `d` switches visible targets that are off the default branch. Already-default is a no-op and does not pull. Dirty trees still skip
