@@ -1,8 +1,6 @@
 //! Background fetch period. Independent of [`super::watch`].
 
-use crate::snapshot::WorkspaceSnapshot;
-
-use super::ops::{op_targets, Op};
+use crate::snapshot::{WorkspaceRepoSnapshot, WorkspaceSnapshot};
 
 /// Default background-fetch period (5 minutes).
 pub const DEFAULT_FETCH_MS: u64 = 300_000;
@@ -29,23 +27,38 @@ pub fn fetch_interval_ms(raw: Option<&str>) -> u64 {
     (parsed as u64).max(MIN_FETCH_MS)
 }
 
-/// Visible primary checkouts only. Hidden ignored stay out.
-/// Linked worktrees are omitted (the timer does not use tree focus).
-pub fn background_fetch_targets(
-    snapshot: &WorkspaceSnapshot,
-    show_ignored: bool,
-) -> Vec<String> {
-    op_targets(snapshot, None, show_ignored, Op::Fetch)
+/// True when this checkout is on the ignore list (or its primary is).
+/// Matches Ink `isHiddenIgnoredRepo` without a named-filter exception
+/// (`collectBackgroundFetchTargets` does not pass named repos).
+fn checkout_is_hidden_ignored(repo: &WorkspaceRepoSnapshot, ignored: &[String]) -> bool {
+    if ignored.is_empty() {
+        return false;
+    }
+    ignored
+        .iter()
+        .any(|path| repo.repo == *path || repo.primary_repo.as_deref() == Some(path.as_str()))
+}
+
+/// Snapshot paths the background fetch timer may touch.
+///
+/// Every checkout except hidden ignored, including linked worktrees.
+/// When ignored repos are shown, those paths are included too.
+/// Manual key `f` stays on [`super::ops::op_targets`] (focus-scoped).
+pub fn background_fetch_targets(snapshot: &WorkspaceSnapshot, show_ignored: bool) -> Vec<String> {
+    snapshot
+        .repos
+        .iter()
+        .filter(|repo| show_ignored || !checkout_is_hidden_ignored(repo, &snapshot.ignored_repos))
+        .map(|repo| repo.repo.clone())
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{
-        build_workspace_snapshot, CheckoutKind, RepoSnapshot, SyncStatus,
-    };
+    use crate::snapshot::{build_workspace_snapshot, CheckoutKind, RepoSnapshot, SyncStatus};
 
-    fn snap(name: &str, linked: bool) -> RepoSnapshot {
+    fn snap(name: &str, primary: Option<&str>) -> RepoSnapshot {
         RepoSnapshot {
             repo: name.into(),
             branch: "main".into(),
@@ -55,12 +68,12 @@ mod tests {
             has_staged: false,
             has_untracked: false,
             changes: Vec::new(),
-            checkout_kind: if linked {
+            checkout_kind: if primary.is_some() {
                 CheckoutKind::Linked
             } else {
                 CheckoutKind::Primary
             },
-            primary_repo: if linked { Some("app".into()) } else { None },
+            primary_repo: primary.map(str::to_string),
             merged_into_default: None,
             default_branch_override: None,
         }
@@ -82,20 +95,30 @@ mod tests {
     }
 
     #[test]
-    fn background_targets_are_visible_primaries_only() {
+    fn background_targets_include_linked_worktrees_and_shown_ignored() {
         let snapshot = build_workspace_snapshot(
             &[
-                snap("app", false),
-                snap("app/.worktrees/feat", true),
-                snap("notes", false),
+                snap("app", None),
+                snap("app/.worktrees/feat", Some("app")),
+                snap("notes", None),
+                snap("notes/.worktrees/feat", Some("notes")),
             ],
             &["notes".into()],
             false,
             &[],
         );
-        assert_eq!(background_fetch_targets(&snapshot, false), vec!["app"]);
-        let shown = background_fetch_targets(&snapshot, true);
-        assert_eq!(shown, vec!["app", "notes"]);
-        assert!(!shown.iter().any(|r| r.contains("worktrees")));
+        assert_eq!(
+            background_fetch_targets(&snapshot, false),
+            vec!["app", "app/.worktrees/feat"]
+        );
+        assert_eq!(
+            background_fetch_targets(&snapshot, true),
+            vec![
+                "app",
+                "app/.worktrees/feat",
+                "notes",
+                "notes/.worktrees/feat",
+            ]
+        );
     }
 }
