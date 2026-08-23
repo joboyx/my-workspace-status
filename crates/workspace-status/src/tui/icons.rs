@@ -55,8 +55,8 @@ pub fn icon_move(ascii: bool) -> &'static str {
 pub fn icon_diff(ascii: bool) -> &'static str {
     glyph(ascii, "", "%")
 }
-/// Font named in the Ink help footer (`REQUIRED_FONT`).
-pub const REQUIRED_FONT: &str = "MesloLGM Nerd Font Mono";
+/// Font named in the help footer (`REQUIRED_FONT`).
+pub const REQUIRED_FONT: &str = "MesloLGS NF";
 pub fn icon_folder(ascii: bool) -> &'static str {
     glyph(ascii, "", "/")
 }

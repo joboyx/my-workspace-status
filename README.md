@@ -6,7 +6,7 @@ The implementation is TypeScript under `src/` (`src/index.ts` → `dist/index.js
 `crates/workspace-status` is the Rust CLI (`workspace-status` and `ws`).
 On a TTY it opens a ratatui TUI. `--plain` and `--json` print the same snapshot.
 `crates/workspace-status-graph` is the ratatui git-graph widget used by that TUI.
-The TypeScript Ink app is still in this repository for features the Rust TUI does not cover yet. See [docs/tui-rust.md](./docs/tui-rust.md).
+Intra-line word diff and syntax highlighting are not in this TUI yet ([docs/diff-rendering.md](./docs/diff-rendering.md)). The TypeScript app stays in the repo. See [docs/tui-rust.md](./docs/tui-rust.md).
 
 It is intentionally treated as a black-box CLI:
 
@@ -47,7 +47,6 @@ Both commands install workspace-status and ws into Cargo bin.
 On a TTY the Rust binary opens the ratatui TUI. Pass --plain or --json for agents.
 `-i` / `--tui` forces the TUI when stdout is not a TTY. `-v` / `-p` / `-d` / `--plain` / `--json` still stay headless.
 A non-TTY run without those flags prints --plain.
-The TypeScript app stays available for Ink-only features.
 
 ## Use --plain or --json from agents
 
@@ -62,9 +61,9 @@ The Rust CLI opens the TUI on a TTY. A non-TTY run without those flags prints th
 
 ## Nerd Font
 
-The TUI expects a Nerd Font. Use MesloLGM Nerd Font Mono (the Mono build).
-The proportional build breaks column alignment.
-Set WS_STATUS_GLYPHS=ascii to use plain markers.
+The TUI expects a Nerd Font. Use MesloLGS NF (romkatv/powerlevel10k-media).
+MesloLGM Nerd Font Mono letter-spaces in some VTE terminals (xfce4-terminal sizes cells off the widest Nerd glyph).
+Set WS_STATUS_GLYPHS=ascii for plain markers.
 
 ## Reference contract
 
@@ -156,47 +155,35 @@ That isolation is deliberate. Refactors should be able to change implementation 
 
 Ratatui TUI (`workspace-status` / `ws` on a TTY).
 
-To rebuild these frames, seed the demo workspace and follow [docs/demo.md](./docs/demo.md).
+Rebuild these frames with `./scripts/capture-demo-stills.sh` (see [docs/demo.md](./docs/demo.md)).
 
-**Tree + file diff** — focus a dirty file; the right pane loads its unified diff.
+**Tree + file diff** — dirty `auth.ts` and its unified diff.
 
 ![Tree and file diff](docs/images/01-file-diff.png)
 
-**Git graph** — focus a repo or worktree. Dirty `○`, HEAD `⊙`, stash `◇`, linked worktree ``.
+**Git graph** — merger: merge elbows, stash `◇`, two-line meta.
 
 ![Git graph](docs/images/02-git-graph.png)
 
-**Help overlay** — `?` is a short key list.
+**Help** — `?` opens MOVE / GIT / VIEW.
 
 ![Help overlay](docs/images/03-help.png)
 
-**Search** — `/` then Enter. `n` / `N` step matches without hiding rows.
+**Search** — `/auth` Enter. Matches highlight; rows stay visible.
 
 ![Search](docs/images/04-search.png)
 
-**Stash menu** — `S` for create / apply / pop / drop.
+**Boxed confirm** — drop a graph-focused stash (`D`). `y` / `n` in a rounded overlay.
 
-![Stash menu](docs/images/05-stash-menu.png)
+![Boxed confirm](docs/images/05-confirm.png)
 
-**Branch picker** — `b` lists local branches. Type to filter. `C` creates one at HEAD.
+**Reviewed mark** — Space on a dirty file. Eye `` sits before the status badge.
 
-![Branch picker](docs/images/06-branch-picker.png)
-
-**Create branch** — name overlay from the picker.
-
-![Create branch](docs/images/07-create-branch.png)
-
-**Reviewed mark** — Space on a dirty file writes `` / ASCII `*` (same store as the Ink app).
-
-![Reviewed mark](docs/images/08-reviewed.png)
-
-**Ignored repos** — `.` shows or hides config `ignoredRepos`.
-
-![Show ignored](docs/images/09-show-ignored.png)
+![Reviewed mark](docs/images/07-reviewed.png)
 
 ## Interactive TUI
 
-On a TTY (without `-v` / `-p` / `-d` / `--plain` / `--json`), the script opens an Ink TUI that blocks on keyboard input. **Agents must always pass `--plain` or `--json`** — do not rely on non-TTY alone; a hung agent shell is the failure mode. Force the TUI with `-i` / `--tui` for humans only.
+On a TTY (without `-v` / `-p` / `-d` / `--plain` / `--json`), the Rust CLI opens the ratatui TUI and blocks on keyboard input. **Agents must always pass `--plain` or `--json`** — do not rely on non-TTY alone; a hung agent shell is the failure mode. Force the TUI with `-i` / `--tui` for humans only. Intra-line / syntax highlight in file diffs is still Ink-only.
 
 The interactive TUI uses the terminal **alternate screen** (DEC 1049, same idea as Vim/less) while mounted, so frames do not remain in primary scrollback after a normal exit (double Ctrl+C). Leave also shows the cursor and hooks `beforeExit`/`exit` so abrupt process exit still restores the primary buffer. Before `$EDITOR` (`e`) it leaves that buffer and re-enters on remount. `SIGKILL` skips that restore (leave hooks do not run).
 

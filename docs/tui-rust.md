@@ -7,7 +7,7 @@ A non-TTY run without those flags still prints `--plain`. Agents must pass `--pl
 The TypeScript Ink app stays in this repository. Use it when you need a feature that this TUI does not implement yet.
 
 Screenshots of the daily views live in the [root README](../README.md#screenshots).
-To rebuild those frames, seed the workspace in [demo.md](./demo.md).
+To rebuild those frames, run `./scripts/capture-demo-stills.sh` (see [demo.md](./demo.md)).
 
 ## Daily keys
 

@@ -31,7 +31,7 @@ Do **not** invent spur heuristics (`parent.lane + 1`, spine `◇─╯`, mid-rai
 | Any git command or operation semantics | `docs/git-operations.md` |
 | Environment variables, workspace config, keybindings, themes | `docs/configuration.md` |
 | Output format of the plain report | `SAMPLE_OUTPUT.md` and `test/workspace-status.e2e.ts` |
-| Demo workspace seed or screenshot frames | `docs/demo.md` + `scripts/seed-demo-workspace.sh` |
+| Demo workspace seed or screenshot frames | `docs/demo.md` + `scripts/seed-demo-workspace.sh` + `scripts/capture-demo-stills.sh` |
 
 A change is not complete while its documentation is stale.
 
@@ -45,4 +45,5 @@ A change is not complete while its documentation is stale.
 
 ## Demo / screenshots
 
-When capturing TUI stills or a recording, seed with `./scripts/seed-demo-workspace.sh` and follow [docs/demo.md](./docs/demo.md). Do not invent a new fixture. Use font `MesloLGS NF` (romkatv/powerlevel10k-media). Do not use MesloLGM Nerd Font Mono — it letter-spaces in xfce4-terminal.
+Refresh README/demo stills with `./scripts/capture-demo-stills.sh`.
+Do not invent a fixture. Do not invent a new capture pipeline. Do not drive the TUI by hand.
