@@ -69,12 +69,12 @@ pub fn format_row(row: &GraphRow, glyphs: &GlyphSet) -> String {
 }
 
 /// Label after the gutter. Commit and stash drop the node glyph because
-/// the gutter already paints it. Commit subjects stay on this line; refs,
-/// hash, date, and author live on the spacer beneath.
+/// the gutter already paints it. Subjects stay on this line; refs /
+/// `stash@{n}`, hash, date, and author live on the spacer beneath.
 pub fn format_label(row: &GraphRow, glyphs: &GlyphSet) -> String {
     match row {
         GraphRow::Uncommitted | GraphRow::Worktree(_) => format_row(row, glyphs),
-        GraphRow::Stash(stash) => format!("{}  {}", stash.stash_ref, stash.subject),
+        GraphRow::Stash(stash) => stash.subject.clone(),
         GraphRow::Commit { commit, .. } => format_commit_subject(commit),
     }
 }
@@ -182,6 +182,15 @@ pub fn meta_column_widths<'a>(
     commits: impl IntoIterator<Item = &'a Commit>,
     now_unix: i64,
 ) -> (usize, usize) {
+    meta_column_widths_with_stashes(commits, std::iter::empty(), now_unix)
+}
+
+/// Date / author rails across commits and stashes so spacer columns line up.
+pub fn meta_column_widths_with_stashes<'a>(
+    commits: impl IntoIterator<Item = &'a Commit>,
+    stashes: impl IntoIterator<Item = &'a Stash>,
+    now_unix: i64,
+) -> (usize, usize) {
     let mut date_width = 4usize;
     let mut author_width = 1usize;
     for commit in commits {
@@ -194,6 +203,11 @@ pub fn meta_column_widths<'a>(
             .min(AUTHOR_COL_MAX);
         author_width = author_width.max(name_len);
     }
+    for stash in stashes {
+        date_width = date_width.max(format_relative_date(stash.author_date_unix, now_unix).len());
+        let name_len = stash.author_name.chars().count().max(1).min(AUTHOR_COL_MAX);
+        author_width = author_width.max(name_len);
+    }
     (date_width, author_width.min(AUTHOR_COL_MAX))
 }
 
@@ -201,21 +215,14 @@ pub fn meta_column_widths<'a>(
 ///
 /// Drop order when narrow: hash → date → author (keep refs).
 pub fn format_commit_spacer(opts: CommitSpacerOpts<'_>) -> String {
-    let available = opts.available;
-    if available == 0 {
-        return String::new();
-    }
-
-    let hash = short_id(&opts.commit.id).to_string();
-    let date_raw = format_relative_date(opts.commit.author_date_unix, opts.now_unix);
-    let date = pad_right(&trunc(&date_raw, opts.date_width), opts.date_width);
-    let author_raw = &opts.commit.author_name;
-    let author = pad_right(&trunc(author_raw, opts.author_width), opts.author_width);
-
-    let cols = pick_meta_columns(available, &hash, &date, &author, MIN_LEFT_KEEP);
-    let meta = meta_columns_text(&hash, &date, &author, cols);
-    let ref_budget = available.saturating_sub(meta.chars().count());
-
+    let (hash, date, author) = padded_meta(
+        &opts.commit.id,
+        &opts.commit.author_name,
+        opts.commit.author_date_unix,
+        opts.date_width,
+        opts.author_width,
+        opts.now_unix,
+    );
     let mut left = format_commit_ref_chips(
         &opts.commit.refs,
         opts.is_head,
@@ -228,12 +235,66 @@ pub fn format_commit_spacer(opts: CommitSpacerOpts<'_>) -> String {
         }
         left.push_str(&worktree_mark(worktree, opts.glyphs));
     }
-    if !left.is_empty() && ref_budget > 0 {
-        left = trunc(&left, ref_budget);
-    } else if ref_budget == 0 {
-        left.clear();
-    }
+    assemble_spacer(&left, &hash, &date, &author, opts.available)
+}
 
+/// Inputs for [`format_stash_spacer`].
+pub struct StashSpacerOpts<'a> {
+    /// Stash whose spacer is painted.
+    pub stash: &'a Stash,
+    /// Columns after the gutter gap. `stash@{n}` stays left; meta is right-anchored.
+    pub available: usize,
+    /// Padded relative-date column width (rails across rows).
+    pub date_width: usize,
+    /// Padded author column width (rails across rows).
+    pub author_width: usize,
+    /// Clock for relative dates (unix seconds).
+    pub now_unix: i64,
+}
+
+/// Spacer under a stash: `[stash@{n}][pad][hash][ ][date][ ][author]`.
+///
+/// Drop order when narrow: hash → date → author (keep `stash@{n}`).
+pub fn format_stash_spacer(opts: StashSpacerOpts<'_>) -> String {
+    let (hash, date, author) = padded_meta(
+        &opts.stash.id,
+        &opts.stash.author_name,
+        opts.stash.author_date_unix,
+        opts.date_width,
+        opts.author_width,
+        opts.now_unix,
+    );
+    assemble_spacer(&opts.stash.stash_ref, &hash, &date, &author, opts.available)
+}
+
+fn padded_meta(
+    id: &str,
+    author_name: &str,
+    author_date_unix: i64,
+    date_width: usize,
+    author_width: usize,
+    now_unix: i64,
+) -> (String, String, String) {
+    let hash = short_id(id).to_string();
+    let date_raw = format_relative_date(author_date_unix, now_unix);
+    let date = pad_right(&trunc(&date_raw, date_width), date_width);
+    let author = pad_right(&trunc(author_name, author_width), author_width);
+    (hash, date, author)
+}
+
+/// Left flex + right-anchored meta. Drop order hash → date → author.
+fn assemble_spacer(left: &str, hash: &str, date: &str, author: &str, available: usize) -> String {
+    if available == 0 {
+        return String::new();
+    }
+    let cols = pick_meta_columns(available, hash, date, author, MIN_LEFT_KEEP);
+    let meta = meta_columns_text(hash, date, author, cols);
+    let ref_budget = available.saturating_sub(meta.chars().count());
+    let left = if ref_budget == 0 {
+        String::new()
+    } else {
+        trunc(left, ref_budget)
+    };
     if meta.is_empty() {
         return pad_right(&left, available);
     }
@@ -450,7 +511,7 @@ fn format_merged_chip(chip: &MergedRefChip, is_checkout: bool, glyphs: &GlyphSet
 mod tests {
     use super::*;
     use crate::glyphs::{ASCII, UNICODE};
-    use crate::model::{Commit, GraphRow, Worktree};
+    use crate::model::{Commit, GraphRow, Stash, Worktree};
 
     #[test]
     fn short_id_keeps_ids_shorter_than_seven() {
@@ -664,6 +725,66 @@ mod tests {
         assert!(
             !line.contains("abcdefg"),
             "hash should drop before refs: {line}"
+        );
+    }
+
+    fn sample_stash() -> Stash {
+        Stash {
+            id: "s1abcdefhhhh".into(),
+            stash_ref: "stash@{0}".into(),
+            subject: "WIP on main".into(),
+            author_name: "Ada Lovelace".into(),
+            author_date_unix: 1_700_000_000 - 86400,
+            parent_id: Some("aaa1111".into()),
+        }
+    }
+
+    #[test]
+    fn format_label_stash_is_subject_only() {
+        let row = GraphRow::Stash(sample_stash());
+        assert_eq!(format_label(&row, &UNICODE), "WIP on main");
+        assert_eq!(format_row(&row, &UNICODE), "◇ stash@{0}  WIP on main");
+    }
+
+    #[test]
+    fn format_stash_spacer_puts_ref_hash_date_author() {
+        let stash = sample_stash();
+        let line = format_stash_spacer(StashSpacerOpts {
+            stash: &stash,
+            available: 80,
+            date_width: 4,
+            author_width: 12,
+            now_unix: 1_700_000_000,
+        });
+        assert!(line.contains("stash@{0}"), "{line}");
+        assert!(line.contains("s1abcde"), "{line}");
+        assert!(line.contains("1d"), "{line}");
+        assert!(line.contains("Ada Lovelace"), "{line}");
+        let ref_at = line.find("stash@{0}").expect("ref");
+        let hash_at = line.find("s1abcde").expect("hash");
+        assert!(ref_at < hash_at, "stash@{{n}} left of meta: {line}");
+    }
+
+    #[test]
+    fn format_stash_spacer_drops_hash_before_ref() {
+        let stash = Stash {
+            id: "abcdefghhhh".into(),
+            stash_ref: "stash@{0}".into(),
+            author_name: "Ada".into(),
+            author_date_unix: 1_700_000_000 - 120,
+            ..Stash::default()
+        };
+        let line = format_stash_spacer(StashSpacerOpts {
+            stash: &stash,
+            available: 20,
+            date_width: 3,
+            author_width: 3,
+            now_unix: 1_700_000_000,
+        });
+        assert!(line.contains("stash@{0}"), "keep stash@{{n}}: {line}");
+        assert!(
+            !line.contains("abcdefg"),
+            "hash should drop before stash@{{n}}: {line}"
         );
     }
 

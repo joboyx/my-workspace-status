@@ -3492,6 +3492,7 @@ mod tests {
                 stash_ref: "stash@{0}".into(),
                 subject: "latest".into(),
                 parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                ..Stash::default()
             }],
         );
         let idx = app
@@ -3763,6 +3764,7 @@ mod tests {
                 stash_ref: "stash@{0}".into(),
                 subject: "latest".into(),
                 parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                ..Stash::default()
             }],
         );
         let idx = app
@@ -3853,6 +3855,7 @@ mod tests {
                 stash_ref: latest.clone(),
                 subject: "latest".into(),
                 parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                ..Stash::default()
             }],
         );
         let idx = app
@@ -3891,6 +3894,7 @@ mod tests {
                 stash_ref: latest.clone(),
                 subject: "again".into(),
                 parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                ..Stash::default()
             }],
         );
         let idx = app
@@ -4265,11 +4269,13 @@ mod tests {
                     stash_ref: "stash@{0}".into(),
                     subject: "latest".into(),
                     parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                ..Stash::default()
                 },
                 Stash {
                     stash_ref: "stash@{1}".into(),
                     subject: "older".into(),
                     parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                ..Stash::default()
                 },
             ],
         );
@@ -4321,6 +4327,7 @@ mod tests {
                 stash_ref: "stash@{1}".into(),
                 subject: "older".into(),
                 parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                ..Stash::default()
             }],
         );
         let idx = app

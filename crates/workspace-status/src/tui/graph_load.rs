@@ -149,24 +149,42 @@ fn load_refs(repo_dir: &Path) -> Vec<(String, GraphRef)> {
 }
 
 fn load_stashes(repo_dir: &Path) -> Vec<Stash> {
-    let raw = exec_git(&["stash", "list", "--format=%gd%x00%s%x00%P"], repo_dir);
+    let raw = exec_git(
+        &[
+            "stash",
+            "list",
+            "--format=%gd%x00%H%x00%P%x00%s%x00%at%x00%an",
+        ],
+        repo_dir,
+    );
     raw.lines()
         .filter(|l| !l.is_empty())
-        .filter_map(|line| {
-            let mut parts = line.split('\0');
-            let stash_ref = parts.next()?.to_string();
-            let subject = parts.next().unwrap_or("").to_string();
-            let parent = parts
-                .next()
-                .and_then(|p| p.split_whitespace().next())
-                .map(str::to_string);
-            Some(Stash {
-                stash_ref,
-                subject,
-                parent_id: parent.filter(|s| !s.is_empty()),
-            })
-        })
+        .filter_map(parse_stash_line)
         .collect()
+}
+
+fn parse_stash_line(line: &str) -> Option<Stash> {
+    let mut parts = line.split('\0');
+    let stash_ref = parts.next()?.to_string();
+    let id = parts.next()?.to_string();
+    if stash_ref.is_empty() || id.is_empty() {
+        return None;
+    }
+    let parent = parts
+        .next()
+        .and_then(|p| p.split_whitespace().next())
+        .map(str::to_string);
+    let subject = parts.next().unwrap_or("").to_string();
+    let author_date_unix = parts.next().unwrap_or("0").parse::<i64>().unwrap_or(0);
+    let author_name = parts.next().unwrap_or("").to_string();
+    Some(Stash {
+        id,
+        stash_ref,
+        subject,
+        author_name,
+        author_date_unix,
+        parent_id: parent.filter(|s| !s.is_empty()),
+    })
 }
 
 fn load_worktrees(
@@ -287,5 +305,23 @@ mod tests {
         assert_eq!(commit.subject, "fix login");
         assert_eq!(commit.author_name, "Ada Lovelace");
         assert_eq!(commit.author_date_unix, 1_700_000_000);
+    }
+
+    #[test]
+    fn parse_stash_line_loads_id_date_and_author() {
+        let line =
+            "stash@{1}\0s1abcdef\0parentsha othersha\0WIP on main\x001700000000\0Ada Lovelace";
+        let stash = parse_stash_line(line).expect("stash");
+        assert_eq!(stash.stash_ref, "stash@{1}");
+        assert_eq!(stash.id, "s1abcdef");
+        assert_eq!(stash.parent_id.as_deref(), Some("parentsha"));
+        assert_eq!(stash.subject, "WIP on main");
+        assert_eq!(stash.author_date_unix, 1_700_000_000);
+        assert_eq!(stash.author_name, "Ada Lovelace");
+    }
+
+    #[test]
+    fn parse_stash_line_skips_missing_id() {
+        assert!(parse_stash_line("stash@{0}\0\0parent\0wip\x001\0Ada").is_none());
     }
 }

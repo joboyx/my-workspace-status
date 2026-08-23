@@ -133,6 +133,7 @@ mod tests {
                 stash_ref: "stash@{2}".into(),
                 subject: "wip".into(),
                 parent_id: None,
+                ..Stash::default()
             })),
             Some(CommitFileSource::Stash {
                 stash_ref: "stash@{2}".into()
@@ -148,6 +149,7 @@ mod tests {
                 stash_ref: "stash@{1}".into(),
                 subject: "wip".into(),
                 parent_id: None,
+                ..Stash::default()
             }))
             .as_deref(),
             Some("stash@{1}")

@@ -149,7 +149,8 @@ The Ink TUI still paints the interactive graph.
 
 Callers feed a `GraphModel` (commits, HEAD, sync, stash, worktrees).
 `GraphWidget` implements ratatui `Widget`. Hidden ignored worktrees stay
-out of `visible_rows` unless `show_ignored` is true.
+out of `visible_rows` unless `show_ignored` is true. Commit and stash
+spacers reuse the same hash / date / author drop order.
 
 See [graph.md](./graph.md).
 

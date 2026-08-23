@@ -16,7 +16,7 @@ multi-lane gutter from the same model.
 | --- | --- |
 | `GraphModel` | Commits, stashes, worktrees, HEAD id, sync, `show_ignored`, uncommitted |
 | `Commit` | Id, subject, parents, refs, author name, author date |
-| `Stash` | `stash@{n}`, subject, parent id (`stash^1`) |
+| `Stash` | Id, `stash@{n}`, subject, author name, author date, parent id (`stash^1`) |
 | `Worktree` | Path, HEAD id, branch, `ignored`, `is_current` |
 | `SyncState` | Branch, status, ahead, behind |
 | `GraphRow` | One visible row: uncommitted, stash, commit, or worktree |
@@ -59,6 +59,12 @@ right. Narrow panes drop hash, then date, then author, and keep refs.
 Relative dates match Ink (`just now` / `Nm` / `Nh` / `Nd` / `Nw` / `Ny`).
 The spacer is not a second selectable row; cursor, search, EasyMotion,
 and click treat it as the parent commit.
+
+The stash node line is subject-only. The spacer under it is
+`[stash@{n}][pad][hash][ ][date][ ][author]` with the same relative-date
+buckets and the same hash → date → author drop order (keep `stash@{n}`).
+The spacer is not a second selectable row; cursor, search, EasyMotion,
+and click treat it as the parent stash.
 
 Lane assignment, parent planning, densify-left, and the
 connection-to-glyph map match the Ink graph
