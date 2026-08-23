@@ -1,7 +1,7 @@
 //! Bottom chrome: Ink-style status pills, hint chips, and breadcrumb.
 //!
 //! Port of `src/tui/StatusBar.tsx`, `Breadcrumb.tsx`, and `bottomChrome.ts`
-//! row budget (Rust overlays stay floating, so confirms do not grow this).
+//! row budget (Rust confirm overlays are boxed, not status-line y/n).
 
 use std::time::Duration;
 
@@ -15,7 +15,9 @@ use crate::snapshot::{CheckoutKind, SyncStatus};
 use super::branches::{can_open_branch_picker, checkoutable_branch_names};
 use super::commit_files::CommitFileRowKind;
 use super::drill::{CommitFileSource, DrillView};
+use super::help::HELP_GROUPS;
 use super::icons::truncate_visible;
+use super::keys::DOUBLE_TAP_MS;
 use super::ops::{collect_write_files, op_targets, push_targets, Op};
 use super::split::DiffMode;
 use super::stash::{stash_ops_for_context, StashOpsContext};
@@ -300,16 +302,52 @@ const GRAPH_HINT_KINDS: &[HintRowKind] = &[
     HintRowKind::GraphUncommitted,
 ];
 
-/// Rows reserved below the panes for breadcrumb + status.
+/// Rows reserved below the panes for breadcrumb + status / overlay.
 ///
-/// Help overlay is painted on top of the frame, matching the current Rust
-/// help, so only the status line is reserved then (breadcrumb hides).
-pub fn bottom_chrome_rows(help_open: bool) -> u16 {
-    if help_open {
-        1
-    } else {
-        2
+/// Help hides the breadcrumb (Ink `bottomChromeRows` + App). Confirms,
+/// stash, create-branch, and pickers replace the status line with a
+/// boxed overlay and shrink the panes by the Ink row budget.
+#[allow(dead_code)]
+pub fn bottom_chrome_rows(state: &AppState) -> u16 {
+    breadcrumb_rows(state).saturating_add(overlay_status_rows(state))
+}
+
+/// Breadcrumb row. Hidden while `?` help is open.
+pub fn breadcrumb_rows(state: &AppState) -> u16 {
+    u16::from(!state.help_open)
+}
+
+/// Status line or replacing overlay rows (Ink `bottomChromeRows`).
+pub fn overlay_status_rows(state: &AppState) -> u16 {
+    if state.help_open {
+        let max = HELP_GROUPS
+            .iter()
+            .map(|group| group.entries.len())
+            .max()
+            .unwrap_or(0) as u16;
+        return max.saturating_add(4);
     }
+    if let Some(pending) = state.confirm.as_ref() {
+        return match pending {
+            super::state::PendingConfirm::RemoveWorktree { .. } => 6,
+            super::state::PendingConfirm::StashDrop { .. } => 5,
+            super::state::PendingConfirm::Revert { .. }
+            | super::state::PendingConfirm::CheckoutOutOfSync { .. } => 7,
+        };
+    }
+    if let Some(ops) = state.stash_menu.as_ref() {
+        let extra = u16::from(!state.status.is_empty());
+        return 4u16.saturating_add(ops.len() as u16).saturating_add(extra);
+    }
+    if state.create_branch.is_some() {
+        return 5;
+    }
+    if let Some(picker) = state.branch_picker.as_ref() {
+        let n = picker.visible().len().max(1).min(12) as u16;
+        let extra = u16::from(!state.status.is_empty());
+        return (4u16.saturating_add(n).saturating_add(extra)).min(17);
+    }
+    1
 }
 
 /// Plain-text join of chip key + gap + label (tests / width math).
@@ -761,8 +799,7 @@ fn allocate_chrome_row(total_width: usize, op_status_len: usize) -> (usize, usiz
 }
 
 fn status_uses_status_text(state: &AppState) -> bool {
-    state.confirm.is_some()
-        || state.search_mode
+    state.search_mode
         || state.easy_motion.is_some()
         || state.stash_menu.is_some()
         || state.branch_picker.is_some()
@@ -851,8 +888,7 @@ pub fn status_line(state: &AppState, width: u16) -> Line<'static> {
     let palette = state.theme.palette();
     let pills = state.theme.pills();
     let surface = hex_color(state.theme.theme().surface);
-    if state.confirm.is_some()
-        || state.stash_menu.is_some()
+    if state.stash_menu.is_some()
         || state.branch_picker.is_some()
         || state.create_branch.is_some()
     {
@@ -977,7 +1013,7 @@ fn idle_status_line(
 fn z_pending(state: &AppState) -> bool {
     state
         .z_pending_at
-        .is_some_and(|at| at.elapsed() <= Duration::from_millis(400))
+        .is_some_and(|at| at.elapsed() <= Duration::from_millis(DOUBLE_TAP_MS))
 }
 
 fn pill_span(label: &str, pill: Pill) -> Span<'static> {
@@ -1130,7 +1166,44 @@ mod tests {
 
     #[test]
     fn bottom_chrome_hides_breadcrumb_during_help() {
-        assert_eq!(bottom_chrome_rows(false), 2);
-        assert_eq!(bottom_chrome_rows(true), 1);
+        let idle = state();
+        assert_eq!(breadcrumb_rows(&idle), 1);
+        assert_eq!(overlay_status_rows(&idle), 1);
+        assert_eq!(bottom_chrome_rows(&idle), 2);
+        let mut help = state();
+        help.help_open = true;
+        assert_eq!(breadcrumb_rows(&help), 0);
+        assert!(overlay_status_rows(&help) > 1);
+        assert_eq!(bottom_chrome_rows(&help), overlay_status_rows(&help));
+    }
+
+    #[test]
+    fn confirm_overlay_uses_ink_row_budget() {
+        let mut app = state();
+        app.confirm = Some(super::super::state::PendingConfirm::Revert {
+            targets: Vec::new(),
+            label: "README.md".into(),
+        });
+        assert_eq!(overlay_status_rows(&app), 7);
+        assert_eq!(breadcrumb_rows(&app), 1);
+        app.confirm = Some(super::super::state::PendingConfirm::StashDrop {
+            repo: "app".into(),
+            stash_ref: "stash@{0}".into(),
+        });
+        assert_eq!(overlay_status_rows(&app), 5);
+        app.confirm = Some(super::super::state::PendingConfirm::RemoveWorktree {
+            primary: "app".into(),
+            path: ".worktrees/topic".into(),
+            force: false,
+            branch: "topic".into(),
+            merged_into_default: Some(true),
+        });
+        assert_eq!(overlay_status_rows(&app), 6);
+        app.confirm = Some(super::super::state::PendingConfirm::CheckoutOutOfSync {
+            repo: "app".into(),
+            branch: "main".into(),
+            remote_ref: "origin/main".into(),
+        });
+        assert_eq!(overlay_status_rows(&app), 7);
     }
 }

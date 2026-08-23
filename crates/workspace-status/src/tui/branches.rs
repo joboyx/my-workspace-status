@@ -163,6 +163,8 @@ pub struct BranchPickerState {
     pub branches: Vec<LocalBranch>,
     pub filter: String,
     pub cursor: usize,
+    /// Graph commit picker paints Ink `Checkout at {short}`. Tree picker is `None`.
+    pub commit_id: Option<String>,
 }
 
 impl BranchPickerState {
@@ -172,11 +174,12 @@ impl BranchPickerState {
             branches,
             filter: String::new(),
             cursor: 0,
+            commit_id: None,
         }
     }
 
     /// Graph `b` picker: only the names on the focused commit.
-    pub fn from_names(repo: String, names: Vec<String>) -> Self {
+    pub fn from_names(repo: String, names: Vec<String>, commit_id: Option<String>) -> Self {
         let branches = names
             .into_iter()
             .map(|name| LocalBranch {
@@ -185,7 +188,9 @@ impl BranchPickerState {
                 authordate: 0,
             })
             .collect();
-        Self::new(repo, branches)
+        let mut state = Self::new(repo, branches);
+        state.commit_id = commit_id;
+        state
     }
 
     pub fn visible(&self) -> Vec<&LocalBranch> {

@@ -31,6 +31,8 @@ pub struct GraphWidget<'a> {
     lane_colors: &'a [Color],
     search_matches: &'a [usize],
     search_bg: Option<Color>,
+    cursor_fg: Color,
+    cursor_bg: Option<Color>,
 }
 
 impl<'a> GraphWidget<'a> {
@@ -47,6 +49,8 @@ impl<'a> GraphWidget<'a> {
             lane_colors: &[],
             search_matches: &[],
             search_bg: None,
+            cursor_fg: Color::Cyan,
+            cursor_bg: None,
         }
     }
 
@@ -102,6 +106,13 @@ impl<'a> GraphWidget<'a> {
         self.search_bg = Some(bg);
         self
     }
+
+    /// Ink cursor bar (`▌`) plus `cursorBg`. Spacers keep the background only.
+    pub fn cursor_style(mut self, fg: Color, bg: Color) -> Self {
+        self.cursor_fg = fg;
+        self.cursor_bg = Some(bg);
+        self
+    }
 }
 
 impl Widget for GraphWidget<'_> {
@@ -147,7 +158,7 @@ impl Widget for GraphWidget<'_> {
             glyphs,
             PaintOpts {
                 gutter_width: cap,
-                line_width: Some(area.width as usize),
+                line_width: Some(area.width.saturating_sub(1) as usize),
                 now_unix: self.now_unix,
             },
         );
@@ -169,6 +180,8 @@ impl Widget for GraphWidget<'_> {
                 selected,
                 search_match,
                 self.search_bg,
+                self.cursor_fg,
+                self.cursor_bg,
                 lane_colors,
                 fallback,
             );
@@ -229,22 +242,39 @@ fn put_painted_line(
     selected: bool,
     search_match: bool,
     search_bg: Option<Color>,
+    cursor_fg: Color,
+    cursor_bg: Option<Color>,
     lane_colors: &[Color],
     fallback: Color,
 ) {
     let mut spans: Vec<Span> = Vec::new();
+    let bar = if selected && line.selectable {
+        "▌"
+    } else {
+        " "
+    };
+    let row_bg = if selected {
+        cursor_bg
+    } else if search_match {
+        search_bg
+    } else {
+        None
+    };
+    let mut bar_style = Style::default()
+        .fg(cursor_fg)
+        .add_modifier(Modifier::BOLD);
+    if let Some(bg) = row_bg {
+        bar_style = bar_style.bg(bg);
+    }
+    spans.push(Span::styled(bar, bar_style));
     if !line.gutter.is_empty() {
         spans.extend(cells_to_spans(&line.gutter, lane_colors, fallback));
         spans.push(Span::raw(" "));
     }
     spans.push(Span::raw(line.label.clone()));
     let mut style = Style::default();
-    if selected {
-        style = style.add_modifier(Modifier::REVERSED);
-    } else if search_match {
-        if let Some(bg) = search_bg {
-            style = style.bg(bg);
-        }
+    if let Some(bg) = row_bg {
+        style = style.bg(bg);
     }
     Line::from(spans)
         .style(style)
@@ -257,13 +287,10 @@ fn put_text_line(
     y: u16,
     width: u16,
     text: &str,
-    selected: bool,
+    _selected: bool,
     fg: Color,
 ) {
-    let mut style = Style::default().fg(fg);
-    if selected {
-        style = style.add_modifier(Modifier::REVERSED);
-    }
+    let style = Style::default().fg(fg);
     Line::from(Span::styled(text.to_string(), style)).render(Rect::new(x, y, width, 1), buf);
 }
 
@@ -996,5 +1023,37 @@ mod tests {
             line.push_str(buffer[(x, 0)].symbol());
         }
         assert!(line.contains("merge"), "{line}");
+    }
+
+    #[test]
+    fn selected_row_paints_cursor_bar() {
+        let model = sample_model();
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .selected(Some(0))
+                    .cursor_style(Color::Cyan, Color::DarkGray)
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut saw_bar = false;
+        let mut saw_reversed = false;
+        for y in 0..16u16 {
+            for x in 0..80u16 {
+                let cell = &buffer[(x, y)];
+                if cell.symbol() == "▌" {
+                    saw_bar = true;
+                }
+                if cell.modifier.contains(Modifier::REVERSED) {
+                    saw_reversed = true;
+                }
+            }
+        }
+        assert!(saw_bar, "selected graph row should paint ▌");
+        assert!(!saw_reversed, "graph cursor should not use reverse video");
     }
 }
