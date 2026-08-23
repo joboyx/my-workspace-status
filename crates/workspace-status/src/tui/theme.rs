@@ -28,7 +28,6 @@ pub const THEME_IDS: [ThemeId; 5] = [
 /// Default when `WS_STATUS_THEME` is unset or unknown.
 pub const DEFAULT_THEME_ID: ThemeId = ThemeId::TokyoNight;
 
-
 /// Ratatui colours for the active theme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
@@ -40,6 +39,9 @@ pub struct Palette {
     pub added: Color,
     pub modified: Color,
     pub deleted: Color,
+    pub renamed: Color,
+    pub branch_default: Color,
+    pub branch_feature: Color,
     pub cursor: Color,
     pub cursor_bg: Color,
     pub diff_hunk: Color,
@@ -57,10 +59,24 @@ pub struct ThemePalette {
     pub added: &'static str,
     pub modified: &'static str,
     pub deleted: &'static str,
+    pub renamed: &'static str,
+    pub branch_default: &'static str,
+    pub branch_feature: &'static str,
     pub cursor: &'static str,
     pub cursor_bg: &'static str,
     pub diff_hunk: &'static str,
     pub flash: &'static str,
+}
+
+/// Status-bar pill hex pairs (Ink `Theme.pill`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThemePill {
+    pub mode_bg: &'static str,
+    pub mode_fg: &'static str,
+    pub diff_bg: &'static str,
+    pub diff_fg: &'static str,
+    pub filter_bg: &'static str,
+    pub filter_fg: &'static str,
 }
 
 /// One built-in theme.
@@ -70,6 +86,22 @@ pub struct Theme {
     pub label: &'static str,
     pub surface: &'static str,
     pub palette: ThemePalette,
+    pub pill: ThemePill,
+}
+
+/// One status-bar pill (background + foreground).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pill {
+    pub bg: Color,
+    pub fg: Color,
+}
+
+/// Mode / diff / filter pills for the active theme.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pills {
+    pub mode: Pill,
+    pub diff: Pill,
+    pub filter: Pill,
 }
 
 impl ThemeId {
@@ -90,6 +122,24 @@ impl ThemeId {
         self.theme().label
     }
 
+    /// Ink status-bar pill colours.
+    pub fn pills(self) -> Pills {
+        let pill = self.theme().pill;
+        Pills {
+            mode: Pill {
+                bg: hex_color(pill.mode_bg),
+                fg: hex_color(pill.mode_fg),
+            },
+            diff: Pill {
+                bg: hex_color(pill.diff_bg),
+                fg: hex_color(pill.diff_fg),
+            },
+            filter: Pill {
+                bg: hex_color(pill.filter_bg),
+                fg: hex_color(pill.filter_fg),
+            },
+        }
+    }
 
     /// Ratatui colours for paint.
     pub fn palette(self) -> Palette {
@@ -103,6 +153,9 @@ impl ThemeId {
             added: hex_color(p.added),
             modified: hex_color(p.modified),
             deleted: hex_color(p.deleted),
+            renamed: hex_color(p.renamed),
+            branch_default: hex_color(p.branch_default),
+            branch_feature: hex_color(p.branch_feature),
             cursor: hex_color(p.cursor),
             cursor_bg: hex_color(p.cursor_bg),
             diff_hunk: hex_color(p.diff_hunk),
@@ -135,10 +188,21 @@ const TOKYO_NIGHT: Theme = Theme {
         added: "#9ece6a",
         modified: "#e0af68",
         deleted: "#f7768e",
+        renamed: "#7dcfff",
+        branch_default: "#7aa2f7",
+        branch_feature: "#bb9af7",
         cursor: "#7aa2f7",
         cursor_bg: "#283457",
         diff_hunk: "#7dcfff",
         flash: "#3d5236",
+    },
+    pill: ThemePill {
+        mode_bg: "#3d59a1",
+        mode_fg: "#c0caf5",
+        diff_bg: "#33467c",
+        diff_fg: "#c0caf5",
+        filter_bg: "#bb9af7",
+        filter_fg: "#1a1b26",
     },
 };
 
@@ -155,10 +219,21 @@ const MONOKAI: Theme = Theme {
         added: "#a6e22e",
         modified: "#e6db74",
         deleted: "#f92672",
+        renamed: "#66d9ef",
+        branch_default: "#66d9ef",
+        branch_feature: "#ae81ff",
         cursor: "#f8f8f2",
         cursor_bg: "#3e3d32",
         diff_hunk: "#66d9ef",
         flash: "#3e4a28",
+    },
+    pill: ThemePill {
+        mode_bg: "#49483e",
+        mode_fg: "#f8f8f2",
+        diff_bg: "#3e3d32",
+        diff_fg: "#f8f8f2",
+        filter_bg: "#ae81ff",
+        filter_fg: "#272822",
     },
 };
 
@@ -175,10 +250,21 @@ const DRACULA: Theme = Theme {
         added: "#50fa7b",
         modified: "#f1fa8c",
         deleted: "#ff5555",
+        renamed: "#8be9fd",
+        branch_default: "#bd93f9",
+        branch_feature: "#bd93f9",
         cursor: "#bd93f9",
         cursor_bg: "#44475a",
         diff_hunk: "#8be9fd",
         flash: "#2d4a3e",
+    },
+    pill: ThemePill {
+        mode_bg: "#44475a",
+        mode_fg: "#f8f8f2",
+        diff_bg: "#6272a4",
+        diff_fg: "#f8f8f2",
+        filter_bg: "#bd93f9",
+        filter_fg: "#282a36",
     },
 };
 
@@ -195,10 +281,21 @@ const GRUVBOX_DARK: Theme = Theme {
         added: "#b8bb26",
         modified: "#fabd2f",
         deleted: "#fb4934",
+        renamed: "#83a598",
+        branch_default: "#458588",
+        branch_feature: "#d3869b",
         cursor: "#fe8019",
         cursor_bg: "#3c3836",
         diff_hunk: "#83a598",
         flash: "#32361a",
+    },
+    pill: ThemePill {
+        mode_bg: "#504945",
+        mode_fg: "#ebdbb2",
+        diff_bg: "#3c3836",
+        diff_fg: "#ebdbb2",
+        filter_bg: "#d3869b",
+        filter_fg: "#282828",
     },
 };
 
@@ -215,10 +312,21 @@ const CATPPUCCIN_MOCHA: Theme = Theme {
         added: "#a6e3a1",
         modified: "#f9e2af",
         deleted: "#f38ba8",
+        renamed: "#89dceb",
+        branch_default: "#89b4fa",
+        branch_feature: "#cba6f7",
         cursor: "#89b4fa",
         cursor_bg: "#313244",
         diff_hunk: "#89dceb",
         flash: "#1e2b1e",
+    },
+    pill: ThemePill {
+        mode_bg: "#45475a",
+        mode_fg: "#cdd6f4",
+        diff_bg: "#313244",
+        diff_fg: "#cdd6f4",
+        filter_bg: "#cba6f7",
+        filter_fg: "#1e1e2e",
     },
 };
 

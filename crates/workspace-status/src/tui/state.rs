@@ -2,10 +2,11 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use workspace_status_graph::{
-    graph_chrome_budget, paint_model, GraphChromeBudget, GraphModel, GraphRow, ASCII, UNICODE,
+    format_relative_date, graph_chrome_budget, paint_model, GraphChromeBudget, GraphModel,
+    GraphRow, ASCII, UNICODE,
 };
 
 use crate::snapshot::{FileChange, WorkspaceSnapshot};
@@ -51,8 +52,8 @@ use super::stash::{
 };
 use super::theme::{cycle_theme_id, theme_from_env, ThemeId};
 use super::tree::{
-    build_tree, collect_foldable_subtree_ids, default_folds, flatten, visible_for_tree, NodeKind,
-    TreeNode, VisibleRow,
+    build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
+    workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
 };
 #[cfg(not(test))]
 use super::viewed::viewed_store_path;
@@ -190,6 +191,8 @@ pub struct AppState {
     pub graph_cursor: usize,
     /// True while the next `git log` window is fetching (Ink `loading older…`).
     pub graph_loading_older: bool,
+    /// True while listing commit files (Ink `commitFilesLoading`).
+    pub commit_files_loading: bool,
     pub drill: DrillView,
     pub diff_content: DiffContent,
     pub diff_scroll: u16,
@@ -229,6 +232,13 @@ pub struct AppState {
     last_click: Option<(u16, u16, Instant)>,
 }
 
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 impl AppState {
     pub fn new(cwd: PathBuf, snapshot: WorkspaceSnapshot, ascii: bool) -> Self {
         Self::with_viewed_path(cwd, snapshot, ascii, default_viewed_path())
@@ -244,9 +254,9 @@ impl AppState {
         let tree_mode = true;
         let commit_tree_mode = true;
         let visible = visible_snapshot(&snapshot, show_ignored);
-        let tree = build_tree(&visible, tree_mode);
+        let tree = build_tree(&visible, tree_mode, &workspace_label_from_cwd(&cwd));
         let folds = default_folds(&tree);
-        let rows = flatten(&tree, &folds);
+        let rows = flatten_with(&tree, &folds, ascii);
         let cursor = initial_cursor(&rows);
         let signatures = tree_signatures(&tree, &cwd);
         let viewed_store = load_viewed_store(&viewed_path);
@@ -266,12 +276,13 @@ impl AppState {
             help_search_armed: false,
             help_search_hit: None,
             focus: FocusPane::Left,
-            status: "q quit  ? help  . ignored  f fetch  p pull  d default".into(),
+            status: String::new(),
             graph: None,
             graph_identity: None,
             graph_scroll: 0,
             graph_cursor: 0,
             graph_loading_older: false,
+            commit_files_loading: false,
             drill: DrillView::Graph,
             diff_content: DiffContent::default(),
             diff_scroll: 0,
@@ -424,7 +435,12 @@ impl AppState {
             DrillView::Files { files, .. } | DrillView::Diff { files, .. } => files.as_slice(),
             DrillView::Graph => return Vec::new(),
         };
-        flatten_commit_files(files, self.commit_tree_mode, &self.commit_file_folds)
+        flatten_commit_files(
+            files,
+            self.commit_tree_mode,
+            &self.commit_file_folds,
+            self.ascii,
+        )
     }
 
     fn commit_files_cursor(&self) -> usize {
@@ -441,6 +457,13 @@ impl AppState {
         }
         let rows = self.commit_file_rows();
         rows.get(self.commit_files_cursor()).cloned()
+    }
+
+    /// Kind of the highlighted commit-file row, when the files list is open.
+    pub(crate) fn focused_commit_file_kind(
+        &self,
+    ) -> Option<super::commit_files::CommitFileRowKind> {
+        self.focused_commit_file_row().map(|row| row.kind)
     }
 
     fn focused_commit_edit_path(&self) -> Option<(String, String)> {
@@ -508,6 +531,14 @@ impl AppState {
                 if !subject.is_empty() {
                     bits.push(subject.to_string());
                 }
+                if let Some(commit) = commit {
+                    if !commit.author_name.is_empty() {
+                        bits.push(commit.author_name.clone());
+                    }
+                    if commit.author_date_unix != 0 {
+                        bits.push(format_relative_date(commit.author_date_unix, unix_now()));
+                    }
+                }
                 Some(bits.join(" · "))
             }
         };
@@ -535,11 +566,19 @@ impl AppState {
         }
     }
 
+    fn visible_tree(&self) -> TreeNode {
+        let visible = visible_snapshot(&self.snapshot, self.show_ignored);
+        build_tree(
+            &visible,
+            self.tree_mode,
+            &workspace_label_from_cwd(&self.cwd),
+        )
+    }
+
     pub fn rebuild_rows(&mut self) {
         let focus_id = self.focused_row().map(|r| r.id.clone());
-        let visible = visible_snapshot(&self.snapshot, self.show_ignored);
-        self.tree = build_tree(&visible, self.tree_mode);
-        self.rows = flatten(&self.tree, &self.folds);
+        self.tree = self.visible_tree();
+        self.rows = flatten_with(&self.tree, &self.folds, self.ascii);
         if self.rows.is_empty() {
             self.cursor = 0;
             return;
@@ -559,10 +598,9 @@ impl AppState {
         }
         let previous_id = self.focused_row().map(|row| row.id.clone());
         self.tree_mode = !self.tree_mode;
-        let visible = visible_snapshot(&self.snapshot, self.show_ignored);
-        self.tree = build_tree(&visible, self.tree_mode);
+        self.tree = self.visible_tree();
         self.folds = default_folds(&self.tree);
-        self.rows = flatten(&self.tree, &self.folds);
+        self.rows = flatten_with(&self.tree, &self.folds, self.ascii);
         self.restore_focus_after_tree_rebuild(previous_id);
         self.status = if self.tree_mode {
             "Directory tree".into()
@@ -1473,12 +1511,12 @@ impl AppState {
 
     fn is_tree_chevron(&self, col: u16, depth: usize) -> bool {
         let prefix = if self.easy_motion.is_some() { 2 } else { 0 };
-        col == self.layout.tree_x + prefix + (depth as u16) * 2
+        col == self.layout.tree_x + prefix + 1 + (depth as u16) * 2
     }
 
     fn is_files_chevron(&self, col: u16, depth: usize) -> bool {
         let prefix = if self.easy_motion.is_some() { 2 } else { 0 };
-        col == self.layout.diff_content_x + prefix + (depth as u16) * 2
+        col == self.layout.diff_content_x + prefix + 1 + (depth as u16) * 2
     }
 
     fn click_graph(&mut self, row: u16, is_double: bool, right: bool) -> Effect {
@@ -1618,10 +1656,27 @@ impl AppState {
         self.graph_identity = None;
         self.graph_cursor = 0;
         self.graph_loading_older = false;
+        self.commit_files_loading = false;
         self.drill = DrillView::Graph;
         self.diff_content = DiffContent::default();
         self.diff_repo = None;
         self.diff_path = None;
+    }
+
+    /// Open the commit-files drill before git returns.
+    ///
+    /// Paint uses `loading files…` while `commit_files_loading` is true and
+    /// the list is empty.
+    pub fn begin_commit_files(&mut self, repo: String, source: CommitFileSource) {
+        self.commit_file_folds.clear();
+        self.commit_files_loading = true;
+        self.drill = DrillView::Files {
+            repo,
+            source,
+            files: Vec::new(),
+            cursor: 0,
+        };
+        self.focus = FocusPane::Right;
     }
 
     pub fn open_commit_files(
@@ -1631,6 +1686,7 @@ impl AppState {
         files: Vec<CommitFile>,
     ) {
         self.commit_file_folds.clear();
+        self.commit_files_loading = false;
         self.status = format!("files {}", files.len());
         let cursor = DrillView::files_cursor(&files, 0);
         self.drill = DrillView::Files {
@@ -1730,15 +1786,12 @@ impl AppState {
 
     fn set_search_status(&mut self, hit: bool) {
         if self.search_query.trim().is_empty() {
-            self.status = "/".into();
+            self.status.clear();
         } else if hit {
-            self.status = if self.search_mode {
-                format!("/{}", self.search_query)
-            } else {
-                format!("/{}  n next  N prev", self.search_query)
-            };
+            // Armed query is a `/query` chip on the idle bar, not `n next N prev`.
+            self.status.clear();
         } else {
-            self.status = format!("/{}  no match", self.search_query);
+            self.status = "no match".into();
         }
     }
 
@@ -1795,10 +1848,14 @@ impl AppState {
             self.set_search_status(false);
             return;
         };
-        let current_path =
-            flatten_commit_files(files, self.commit_tree_mode, &self.commit_file_folds)
-                .get(*cursor)
-                .map(|row| row.path.clone());
+        let current_path = flatten_commit_files(
+            files,
+            self.commit_tree_mode,
+            &self.commit_file_folds,
+            self.ascii,
+        )
+        .get(*cursor)
+        .map(|row| row.path.clone());
         let current_file_idx = current_path
             .as_deref()
             .and_then(|path| files.iter().position(|file| file.path == path))
@@ -5255,7 +5312,9 @@ mod tests {
             .iter()
             .find(|row| row.id == "file:app:src/lib.rs")
             .expect("lib.rs");
-        assert!(lib.label.contains("src/lib.rs"));
+        assert!(lib.label.contains("lib.rs"));
+        assert!(lib.label.contains("src"));
+        assert!(!lib.label.contains("src/lib.rs"));
         assert_eq!(
             app.focused_row().map(|row| row.id.as_str()),
             Some("file:app:src/lib.rs")
@@ -5325,7 +5384,13 @@ mod tests {
         assert!(app.rows.iter().any(|row| row.id == "dir:app:src"));
         let rows = app.commit_file_rows();
         assert!(rows.iter().all(|row| !row.is_dir()));
-        assert!(rows.iter().any(|row| row.label.contains("src/lib.rs")));
+        assert!(rows.iter().any(|row| {
+            row.id == "file:src/lib.rs"
+                && row.label.contains("lib.rs")
+                && row.label.contains("src")
+                && !row.label.contains("src/lib.rs")
+                && row.trailing.contains('A')
+        }));
         app.dispatch(Action::ToggleTreeMode);
         assert!(app.commit_tree_mode);
         assert!(app.commit_file_rows().iter().any(|row| row.id == "dir:src"));
@@ -5652,6 +5717,11 @@ mod tests {
         let mut app = state();
         focus_repo(&mut app, "app");
         install_graph(&mut app, Vec::new());
+        if let Some(model) = app.graph.as_mut() {
+            model.commits[0].author_name = "Ada".into();
+            model.commits[0].author_date_unix = unix_now() - 3600;
+            model.commits[0].refs = vec![GraphRef::local("main")];
+        }
         app.open_commit_files(
             "app".into(),
             CommitFileSource::Commit {
@@ -5669,7 +5739,13 @@ mod tests {
         assert_eq!(title, "app");
         let subtitle = subtitle.expect("subtitle");
         assert!(subtitle.contains("aaa1111"), "{subtitle}");
+        assert!(subtitle.contains("main"), "{subtitle}");
         assert!(subtitle.contains("head"), "{subtitle}");
+        assert!(subtitle.contains("Ada"), "{subtitle}");
+        assert!(
+            subtitle.contains("1h") || subtitle.contains("59m") || subtitle.contains("just now"),
+            "{subtitle}"
+        );
         assert!(app
             .commit_file_rows()
             .iter()
@@ -5830,7 +5906,7 @@ mod tests {
             .position(|r| r.id == "dir:app:src")
             .expect("dir");
         let depth = app.rows[idx].depth;
-        let col = app.layout.tree_x + (depth as u16) * 2;
+        let col = app.layout.tree_x + 1 + (depth as u16) * 2;
         let row = app.layout.tree_y + idx as u16;
         assert!(app.rows.iter().any(|r| r.id == "file:app:src/lib.rs"));
         app.dispatch(Action::Click { col, row });

@@ -294,8 +294,6 @@ mod tests {
             kind: NodeKind::File,
             label: "M README.md".into(),
             repo: Some(repo.into()),
-            primary_repo: None,
-            ignored: false,
             file: Some(FileChange {
                 path: "README.md".into(),
                 staged_status: None,
@@ -303,8 +301,7 @@ mod tests {
                 untracked: false,
                 old_path: None,
             }),
-            foldable: false,
-            folded: false,
+            ..VisibleRow::default()
         }
     }
 
@@ -314,27 +311,19 @@ mod tests {
             depth: 1,
             kind: NodeKind::Group,
             label: "No updates (1)".into(),
-            repo: None,
-            primary_repo: None,
-            ignored: false,
-            file: None,
             foldable: true,
             folded: true,
+            ..VisibleRow::default()
         }
     }
 
     fn workspace_row() -> VisibleRow {
         VisibleRow {
             id: "workspace".into(),
-            depth: 0,
             kind: NodeKind::Workspace,
             label: "workspace".into(),
-            repo: None,
-            primary_repo: None,
-            ignored: false,
-            file: None,
             foldable: true,
-            folded: false,
+            ..VisibleRow::default()
         }
     }
 
@@ -346,10 +335,7 @@ mod tests {
             label: repo.into(),
             repo: Some(repo.into()),
             primary_repo: Some("app".into()),
-            ignored: false,
-            file: None,
-            foldable: false,
-            folded: false,
+            ..VisibleRow::default()
         }
     }
 
@@ -445,11 +431,7 @@ mod tests {
             kind: NodeKind::Repo,
             label: repo.into(),
             repo: Some(repo.into()),
-            primary_repo: None,
-            ignored: false,
-            file: None,
-            foldable: false,
-            folded: false,
+            ..VisibleRow::default()
         }
     }
 
@@ -589,11 +571,8 @@ mod tests {
             kind: NodeKind::Dir,
             label: dir.into(),
             repo: Some(repo.into()),
-            primary_repo: None,
-            ignored: false,
-            file: None,
             foldable: true,
-            folded: false,
+            ..VisibleRow::default()
         }
     }
 

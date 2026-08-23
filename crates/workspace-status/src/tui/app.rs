@@ -32,8 +32,8 @@ use crate::snapshot::{
 
 use super::action::{Action, Effect};
 use super::branches::{
-    checkout_name_for_ref, is_origin_remote_ref, plan_graph_checkout, DIRTY_WORKTREE_STATUS,
-    GraphCheckoutPlan,
+    checkout_name_for_ref, is_origin_remote_ref, plan_graph_checkout, GraphCheckoutPlan,
+    DIRTY_WORKTREE_STATUS,
 };
 use super::diff::{load_file_diff, DiffContent};
 use super::drill::CommitFileSource;
@@ -443,6 +443,8 @@ fn apply_effect_inner(
             Err(err) => state.status = format!("remove worktree failed: {err}"),
         },
         Effect::LoadCommitFiles { repo, source } => {
+            state.begin_commit_files(repo.clone(), source.clone());
+            let _ = terminal.draw(|frame| draw(frame, state));
             load_commit_files(state, opts, repo, source);
         }
         Effect::LoadCommitDiff { repo, source, path } => {

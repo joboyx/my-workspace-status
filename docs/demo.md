@@ -27,7 +27,7 @@ Both go away when DEST is wiped.
 - Terminal: at least 140x40. Side-by-side diff needs 100 or more columns. Stay in the default inline diff for stills.
 - Watch and background fetch stay off so frames do not flicker.
 - Re-run the seed script after any write (`s` / `u` / `x`, stash apply/pop/drop, checkout, reviewed mark).
-- Reviewed marks live in `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (fallback `~/.local/state/my-workspace-status/viewed-files.json`). Delete that file if a `◉` survives a reseed.
+- Reviewed marks live in `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (fallback `~/.local/state/my-workspace-status/viewed-files.json`). Delete that file if a `` / `*` survives a reseed.
 
 Each shot starts from a fresh launch unless noted. The first cursor is `app` → `src/auth.ts` (unstaged `M`) with the file diff on the right.
 
@@ -91,7 +91,7 @@ Focus `src/auth.ts`.
 
 Keys: Space.
 
-Show: viewed glyph `◉` / `*` on that dirty file. Not the clean `✓`.
+Show: viewed glyph `` / `*` (Ink `ICON_VIEWED`) on that dirty file, trailing before the status badge. Not the clean `` / `.`.
 
 ## 08 — show ignored
 
