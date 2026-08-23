@@ -89,14 +89,14 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 - Tree / right and in-diff split ratios stay in the current session only. They reset on the next launch (Ink does not persist them either)
 - `--plain` / `--json` / `-v` / `-p` / `-d` stay headless
 
-Reviewed marks use `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (same identity and fingerprint as Ink). A mark drops when the file fingerprint changes. Space toggles dirty file rows only. The viewed glyph is Ink `ICON_VIEWED` (`` / ASCII `*`), cyan/blue, trailing before the status badge — not the clean check. Clean `ICON_CLEAN` (`` / `.`) paints only on the No updates group and on repo / checkout rows inside it.
+Reviewed marks use `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (same identity and fingerprint as Ink). A mark drops when the file fingerprint changes. Space toggles dirty file rows only. The viewed glyph is Ink `ICON_VIEWED` from `icons.ts`: nerd nf-fa-eye `U+F06E` (``) / ASCII `*` — not `◉` and not a substitute eye. Cyan/blue, trailing before the status badge — not the clean check. Clean `ICON_CLEAN` (`` / `.`) paints only on the No updates group and on repo / checkout rows inside it.
 
 ## Tree chrome (Ink parity)
 
 Daily tree paint matches Ink `src/tui/icons.ts` + `model/tree.ts` + `TreePane.tsx`:
 
 - File rows: type glyph on the left, name, 2-column status badge on the **right** (`A` / `S` / `MS` / `M` / `D` / `R` / `U` / `C`). Untracked is `A`, staged-only is `S`, staged+unstaged is `MS`. Commit-file lists reuse the same chrome (name-status letters stay A/M/D/R/C, not workspace `S`).
-- Folder / repo / branch / linked-worktree / sync / merge / viewed glyphs from the same registry. `WS_STATUS_GLYPHS=ascii` uses the same fallbacks (`#` `@` `L` `&` `/` `^` `v` `Y` `?` `=` `M` `o` `*`). Reviewed is `` / `*` (not `◉`). Ignored is `` / `~` (not `[ignored]`).
+- Folder / repo / branch / linked-worktree / sync / merge / viewed glyphs from the same registry. `WS_STATUS_GLYPHS=ascii` uses the same fallbacks (`#` `@` `L` `&` `/` `^` `v` `Y` `?` `=` `M` `o` `*`). Reviewed is Ink `ICON_VIEWED`: nerd nf-fa-eye `U+F06E` (``) / ASCII `*` — not `◉` and not a substitute eye. Ignored is `` / `~` (not `[ignored]`).
 - Workspace header is file-oriented: `{cwd basename}` trailing `{N} changed · {ahead/behind/diverged/attention|all current}`.
 - Linked worktrees under a family are checkout rows labeled by **branch** (Ink), not `wt <path>`. Detached linked checkouts fall back to the short worktree path. Linked-only snapshots (no primary in the window) stay a flat `Repo` row — no phantom primary container.
 - Repo / checkout trailing sync marks match Ink (`↑N` / `↓N` / diverged / no-upstream). Merged-into-default / open-vs-default sit next to the branch. Up-to-date `` only inside No updates. The No updates count is a trailing number, not `(N)` in the label.
