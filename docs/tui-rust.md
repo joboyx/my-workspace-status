@@ -60,7 +60,7 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 
 ## What this TUI does
 
-- Tree of repos, linked worktrees, and dirty files from the same snapshot builder as `--plain` / `--json`
+- Tree of repos, linked worktrees, and dirty files from the same snapshot builder as `--plain` / `--json`. Chrome matches Ink: status letters on the right, Nerd file/folder/sync glyphs, file-oriented workspace header, branch-labeled linked checkouts
 - Files sit in a directory trie by default. `t` toggles tree / flat on the workspace. Status is `Directory tree` / `Flat paths`
 - Dir rows fold with `z` / `h` / `l`. `zz` within ~400ms folds or unfolds the focused subtree. A dir `s` / `u` / `x` writes files under that dir
 - Tree / flat stays in this session. Rust has no session store. Commit-file lists have their own `t` toggle and the same dir-trie collapse
@@ -78,7 +78,7 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 - `P` pushes the focused visible repo or checkout only when it is ahead, diverged, or has no upstream. In-sync is a no-op. Workspace never fans out. Hidden ignored stay out. Linked worktrees push only when that row is focused
 - `S` on a dirty tree file or repo is create-only (`s stash`). `S` on a clean tree row that has `stash@{0}` is a no-op. `S` is left-pane only: a right-focused graph is a silent no-op. On a left-focused graph (commit drill) or when the menu is already open, a graph commit or uncommitted row offers apply / pop of the latest stash (`a` / `p`); drop stays off unless a graph stash row is focused. Graph stash rows offer apply / pop / drop of that `stash@{n}` (`a` / `p` / `D`, plus `S` on a left-focused graph stash). Never drop latest from a non-stash row. Menu `p` runs immediately. Drop asks `y` / `n`
 - `d` switches visible targets that are off the default branch. Already-default is a no-op and does not pull. Dirty trees still skip
-- `Enter` on a graph commit (or stash / uncommitted row) opens depth-1: left pane is the graph list, right pane is commit detail (short hash, refs, subject, plus the file tree). `Enter` on a file opens the commit diff. `Esc` pops diff to files (graph still left), then leaves the drill so the graph is the right pane again, then focuses the tree. Esc never quits. Hidden ignored repos stay out of the drill unless shown
+- `Enter` on a graph commit (or stash / uncommitted row) opens depth-1: left pane is the graph list, right pane is commit detail (short hash, refs, subject, author, relative date, plus the file tree). `Enter` on a file opens the commit diff. `Esc` pops diff to files (graph still left), then leaves the drill so the graph is the right pane again, then focuses the tree. Esc never quits. Hidden ignored repos stay out of the drill unless shown
 - Graph stash rows are first-class: `a` apply, `p` pop, and `D` drop the focused `stash@{n}`. Drop asks `y` / `n`
 - `b` on a tree checkout or flat repo opens the local branch picker. Type to filter. Enter checks out. `C` creates a branch at HEAD and checks it out. Selecting the current branch closes with `Already on …` and skips git. Dirty worktrees (`git diff` / `git diff --cached`, not untracked) refuse with `Dirty worktree — commit or stash first`. Local picker names never confirm against `origin/*`
 - `b` on a focused graph commit checks out that commit's local and `origin/*` refs. One name checks out. Several names open a picker of those names only. Tags and other remotes stay out. A dirty tree refuses (`Dirty worktree — commit or stash first`). Selecting `origin/<name>` confirms only when a local branch of that name exists with a null or mismatched SHA; Yes checks out the local then `git merge --ff-only` of that already-fetched remote-tracking ref (no fetch, no reset, no pull). Scope is the checkout that owns the graph. Hidden ignored stay out
@@ -90,7 +90,21 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 - Tree / right and in-diff split ratios stay in the current session only. They reset on the next launch (Ink does not persist them either)
 - `--plain` / `--json` / `-v` / `-p` / `-d` stay headless
 
-Reviewed marks use `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (same identity and fingerprint as Ink). A mark drops when the file fingerprint changes. Space toggles dirty workspace-tree file rows at depth 0 only. The viewed glyph is `◉` / `*`, not the clean `✓`. Clean `✓` paints only on the No updates group.
+Reviewed marks use `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (same identity and fingerprint as Ink). A mark drops when the file fingerprint changes. Space toggles dirty workspace-tree file rows at depth 0 only. The viewed glyph is Ink `ICON_VIEWED` from `icons.ts`: nerd nf-fa-eye `U+F06E` (``) / ASCII `*` — not `◉` and not a substitute eye. Cyan/blue, trailing before the status badge — not the clean check. Clean `ICON_CLEAN` (`` / `.`) paints only on the No updates group and on repo / checkout rows inside it.
+
+## Tree chrome (Ink parity)
+
+Daily tree paint matches Ink `src/tui/icons.ts` + `model/tree.ts` + `TreePane.tsx`:
+
+- File rows: type glyph on the left, name, 2-column status badge on the **right** (`A` / `S` / `MS` / `M` / `D` / `R` / `U` / `C`). Untracked is `A`, staged-only is `S`, staged+unstaged is `MS`. Commit-file lists reuse the same chrome (name-status letters stay A/M/D/R/C, not workspace `S`).
+- Folder / repo / branch / linked-worktree / sync / merge / viewed glyphs from the same registry. `WS_STATUS_GLYPHS=ascii` uses the same fallbacks (`#` `@` `L` `&` `/` `^` `v` `Y` `?` `=` `M` `o` `*`). Reviewed is Ink `ICON_VIEWED`: nerd nf-fa-eye `U+F06E` (``) / ASCII `*` — not `◉` and not a substitute eye. Ignored is `` / `~` (not `[ignored]`).
+- Workspace header is file-oriented: `{cwd basename}` trailing `{N} changed · {ahead/behind/diverged/attention|all current}`.
+- Linked worktrees under a family are checkout rows labeled by **branch** (Ink), not `wt <path>`. Detached linked checkouts fall back to the short worktree path. Linked-only snapshots (no primary in the window) stay a flat `Repo` row — no phantom primary container.
+- Repo / checkout trailing sync marks match Ink (`↑N` / `↓N` / diverged / no-upstream). Merged-into-default / open-vs-default sit next to the branch. Up-to-date `` only inside No updates. The No updates count is a trailing number, not `(N)` in the label.
+
+Rust extras stay: `q`, Tab, Home/End, family-row `b`, picker `C`. Confirm `y`/`n` stays on the status line (overlays vs status-line confirm is out of scope). Bottom chrome matches Ink: mode pills, contextual hint chips (Rust extras `q` / `Tab` append and truncate with `…`), breadcrumb `workspace › [repo]`, armed search as a `/{query}` chip. Graph window/autoload, diff section headers, and stash meta are separate.
+
+Glyphs live in `crates/workspace-status/src/tui/icons.rs`. Labels are built in `tree.rs` (`node_segments`); `render.rs` right-aligns trailing and paints the cursor bar. An empty workspace tree paints muted `No matching rows` (Ink TreePane). Commit-file lists do the same when loaded and empty; while git is still listing they paint `loading files…` (Ink CommitDetailPane).
 
 ## Optional Ink-only
 
@@ -114,7 +128,7 @@ See [tui-model.md](./tui-model.md) for the Ink keymap.
 
 Left pane: workspace tree at depth 0. Clean default-branch repos sit under a folded `No updates` group. In a commit-files or commit-diff drill the left pane is the graph list so the graph stays visible.
 
-Right pane: graph for a repo or worktree at depth 0, a numbered file diff when a dirty file is focused, or commit detail (meta header plus file tree) / that file's commit diff.
+Right pane: graph for a repo or worktree at depth 0, a numbered file diff when a dirty file is focused, or commit detail (meta header plus file tree) / that file's commit diff. Commit files still loading with 0 rows paint muted `loading files…`; a loaded empty list paints muted `No matching rows`.
 
 A file diff paints a one-line path header (`{repo}/{path}  inline|split`, plus ` · full` when unlimited `-U` is on, ` · pan N` when panned) then STAGED / UNSTAGED / NEW section labels and a line-number gutter. After a commit drill the left pane is the graph, so that header is how the file path stays visible. Intra-line and syntax highlight stay Ink-only. Overlay confirm vs status-line `y`/`n` is unchanged.
 
@@ -122,8 +136,8 @@ Graph commits and stashes paint two lines, matching Ink layout A: subject on the
 
 Graph history matches Ink `gitLogGraphWindow`: `log --exclude=refs/stash --all --topo-order --date-order --skip --max-count` with a 300-commit window. Reaching the last loaded row fetches the next page and paints `loading older…`. Missing `stash^1` parents are loaded with `log --no-walk --ignore-missing` and sit after the log prefix so autoload skip stays on the window, not `commits.len()`. The working-tree row is always present on a loaded graph (`Working tree clean` / `Uncommitted changes`; dirty vs clean is the label only). The pane keeps a 2-line selection footer (footer before header when space is tight): uncommitted → `worktree · not a commit`; spacer → `connector · not selectable`; stash → `stash@{n} ·` hash `·` date; commit → ref chips or `(no refs)` `·` hash `·` author `·` date; empty → `no selection`. Each gutter cell uses its `color_lane` from `DEFAULT_LANE_COLORS`. Linked worktree nodes use Ink `ICON_LINKED_WORKTREE` (`` / `L`), not the 2-column `🔗` emoji.
 
-Rust extras that stay: `q`, Tab, Home/End, family-row `b`, picker `C`. The TypeScript Ink app is not removed. This TUI does not add hint chips, a breadcrumb, or a 3-hour timestamp rule.
+Rust extras that stay: `q`, Tab, Home/End, family-row `b`, picker `C`. The TypeScript Ink app is not removed. This TUI does not add a 3-hour timestamp rule.
 
 The tree / right split defaults to 40% tree. The in-diff RULE defaults to 50/50. Drag either splitter (3-column grab band). Neither pane or column can collapse to zero. Both ratios are session-only.
 
-Bottom line: short status. `?` opens a small overlay of the keys above. `/` uses that line as the search prompt.
+Bottom chrome is two rows except during `?` help (breadcrumb hides). The breadcrumb mirrors the drill (`workspace › repo › hash`) and marks the right-focused segment with `[brackets]`. Trailing op-status / toasts sit on that row. The status line is Ink-style mode pills (`tree`/`flat`, `inline`/`split`), an armed-search `/{query}` chip, `? help`, and contextual hint chips truncated with `…`. Rust extras `q` and `Tab` append after Ink hints. `/` typing replaces the bar with a SEARCH prompt; EasyMotion uses an EASY chip. Confirm `y`/`n` still replaces that line (no confirm overlay). `?` opens a small overlay of the keys above.

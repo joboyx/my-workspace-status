@@ -9,28 +9,49 @@ use workspace_status_graph::{graph_chrome_budget, paint_model, GraphWidget, ASCI
 
 use std::time::Instant;
 
+use super::chrome::{bottom_chrome_rows, breadcrumb_line, status_line};
 use super::diff::{
     cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, gutter_width,
     section_header, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
 };
 use super::drill::DrillView;
 use super::easy_motion::{easy_motion_labels, visible_window};
+use super::icons::{
+    truncate_visible, CURSOR_BAR, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED,
+    FOLD_EXPANDED_ASCII,
+};
 use super::search::slice_visible;
 use super::split::{
     diff_split_rule_x, effective_diff_mode, is_side_by_side_split, pane_widths,
     side_by_side_column_widths, MIN_PANE_COLS,
 };
 use super::state::{AppState, FocusPane};
-use super::theme::Palette;
-use super::tree::NodeKind;
+use super::theme::{hex_color, Palette};
+use super::tree::{row_segments, NodeKind, NodeSegments, SegRole, TextSeg, VisibleRow};
 use super::watch::flash_active;
+use crate::helpers::visible_width;
+
+/// Empty tree / empty commit-file list (Ink TreePane).
+const NO_MATCHING_ROWS: &str = "No matching rows";
+/// Commit-file list while git is still listing (Ink CommitDetailPane).
+const LOADING_FILES: &str = "loading files…";
+
+fn muted_copy(text: &'static str, palette: Palette) -> Line<'static> {
+    Line::from(Span::styled(text, Style::default().fg(palette.muted)))
+}
 
 /// Draw one frame. Updates `state.layout` for mouse hits.
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     let area = frame.area();
+    let chrome = bottom_chrome_rows(state.help_open);
+    let crumb_h = chrome.saturating_sub(1);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(3),
+            Constraint::Length(crumb_h),
+            Constraint::Length(1),
+        ])
         .split(area);
     let widths = pane_widths(area.width, state.tree_fraction);
     let panes = Layout::default()
@@ -99,12 +120,15 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     frame.render_widget(right_block, panes[1]);
     draw_right(frame, right_inner, state);
 
+    if crumb_h > 0 {
+        frame.render_widget(
+            Paragraph::new(breadcrumb_line(state, chunks[1].width)),
+            chunks[1],
+        );
+    }
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            state.status.clone(),
-            Style::default().fg(state.theme.palette().muted),
-        ))),
-        chunks[1],
+        Paragraph::new(status_line(state, chunks[2].width)),
+        chunks[2],
     );
 
     state.layout.tree_x = tree_inner.x;
@@ -168,73 +192,233 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if area.height == 0 || area.width == 0 {
         return;
     }
+    let palette = state.theme.palette();
+    if state.rows.is_empty() {
+        frame.render_widget(Paragraph::new(muted_copy(NO_MATCHING_ROWS, palette)), area);
+        return;
+    }
     let height = area.height as usize;
+    let width = area.width as usize;
     let cursor = state.cursor;
     let (start, _) = visible_window(state.rows.len(), cursor, height);
     state.layout.list_offset = start;
     let motion = tree_easy_motion_labels(state, start, height);
-    let palette = state.theme.palette();
     let mut lines = Vec::new();
     for (i, row) in state.rows.iter().enumerate().skip(start).take(height) {
-        let label = motion
+        let motion_label = motion
             .as_ref()
             .and_then(|labels| labels.get(i - start))
-            .map(|s| format!("{s:<2}"))
-            .unwrap_or_default();
-        let chevron = if row.foldable {
-            if row.folded {
-                if state.ascii {
-                    ">"
-                } else {
-                    "▸"
-                }
-            } else if state.ascii {
-                "v"
-            } else {
-                "▾"
-            }
-        } else {
-            " "
-        };
-        let mark = if row.kind == NodeKind::File && state.reviewed.contains(&row.id) {
-            if state.ascii {
-                "* "
-            } else {
-                "◉ "
-            }
-        } else if row.id == "group:no-updates" {
-            if state.ascii {
-                ". "
-            } else {
-                "✓ "
-            }
-        } else {
-            ""
-        };
-        let indent = "  ".repeat(row.depth);
-        let text = format!("{label}{indent}{chevron} {mark}{}", row.label);
+            .cloned();
+        let viewed = row.kind == NodeKind::File && state.reviewed.contains(&row.id);
         let flashing = state
             .flashes
             .get(&row.id)
             .is_some_and(|at| flash_active(Instant::now().saturating_duration_since(*at)));
-        let style = if i == cursor {
-            Style::default().fg(palette.cursor).bg(palette.cursor_bg)
-        } else if flashing {
-            Style::default()
-                .fg(palette.modified)
-                .add_modifier(Modifier::BOLD)
-        } else if row.ignored || row.kind == NodeKind::Group {
-            Style::default().fg(palette.muted)
-        } else if row.kind == NodeKind::File {
-            Style::default().fg(palette.file)
-        } else if !label.is_empty() {
-            Style::default().fg(palette.heading)
-        } else {
-            Style::default().fg(palette.repo)
-        };
-        lines.push(Line::from(Span::styled(text, style)));
+        lines.push(paint_tree_row(
+            row,
+            width,
+            i == cursor,
+            flashing,
+            state.ascii,
+            viewed,
+            motion_label.as_deref(),
+            palette,
+        ));
     }
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn paint_tree_row(
+    row: &VisibleRow,
+    width: usize,
+    selected: bool,
+    flashing: bool,
+    ascii: bool,
+    viewed: bool,
+    motion_label: Option<&str>,
+    palette: Palette,
+) -> Line<'static> {
+    let segs = row_segments(row, ascii, viewed);
+    paint_segmented_row(
+        row.depth,
+        row.foldable,
+        row.folded,
+        &segs,
+        width,
+        selected,
+        flashing,
+        ascii,
+        motion_label,
+        palette,
+    )
+}
+
+fn paint_segmented_row(
+    depth: usize,
+    foldable: bool,
+    folded: bool,
+    segs: &NodeSegments,
+    width: usize,
+    selected: bool,
+    flashing: bool,
+    ascii: bool,
+    motion_label: Option<&str>,
+    palette: Palette,
+) -> Line<'static> {
+    let bg = if selected {
+        Some(palette.cursor_bg)
+    } else if flashing {
+        Some(palette.flash)
+    } else {
+        None
+    };
+    let trailing_text: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
+    let trailing_width = visible_width(&trailing_text);
+    let pad = usize::from(trailing_width > 0);
+
+    let mut spans: Vec<Span> = Vec::new();
+    let edge = if selected { CURSOR_BAR } else { " " };
+    spans.push(styled_span(
+        edge,
+        Style::default()
+            .fg(palette.cursor)
+            .add_modifier(Modifier::BOLD),
+        bg,
+    ));
+
+    let prefix_width = if let Some(label) = motion_label {
+        let padded = format!("{label:<2}");
+        spans.push(styled_span(
+            &padded,
+            Style::default()
+                .fg(palette.cursor)
+                .add_modifier(Modifier::BOLD),
+            bg,
+        ));
+        1 + visible_width(&padded)
+    } else {
+        let indent = "  ".repeat(depth);
+        spans.push(styled_span(&indent, Style::default(), bg));
+        let chevron = fold_chevron(foldable, folded, ascii);
+        spans.push(styled_span(
+            &format!("{chevron} "),
+            Style::default().fg(palette.muted),
+            bg,
+        ));
+        1 + visible_width(&indent) + 2
+    };
+
+    let label_budget = width
+        .saturating_sub(prefix_width)
+        .saturating_sub(trailing_width)
+        .saturating_sub(pad);
+    let label = truncate_segs(&segs.segments, label_budget.max(1));
+    let label_width: usize = label.iter().map(|s| visible_width(&s.text)).sum();
+    for seg in &label {
+        spans.push(styled_span(&seg.text, seg_style(seg, palette), bg));
+    }
+    let gap = pad + label_budget.saturating_sub(label_width);
+    if gap > 0 {
+        spans.push(styled_span(&" ".repeat(gap), Style::default(), bg));
+    }
+    for seg in &segs.trailing {
+        spans.push(styled_span(&seg.text, seg_style(seg, palette), bg));
+    }
+    let used: usize = spans
+        .iter()
+        .map(|s| visible_width(s.content.as_ref()))
+        .sum();
+    if used < width {
+        spans.push(styled_span(&" ".repeat(width - used), Style::default(), bg));
+    }
+    Line::from(spans)
+}
+
+fn fold_chevron(foldable: bool, folded: bool, ascii: bool) -> &'static str {
+    if !foldable {
+        return " ";
+    }
+    if folded {
+        if ascii {
+            FOLD_COLLAPSED_ASCII
+        } else {
+            FOLD_COLLAPSED
+        }
+    } else if ascii {
+        FOLD_EXPANDED_ASCII
+    } else {
+        FOLD_EXPANDED
+    }
+}
+
+fn styled_span(text: &str, mut style: Style, bg: Option<ratatui::style::Color>) -> Span<'static> {
+    if let Some(bg) = bg {
+        style = style.bg(bg);
+    }
+    Span::styled(text.to_string(), style)
+}
+
+fn seg_style(seg: &TextSeg, palette: Palette) -> Style {
+    let fg = if let Some(hex) = seg.hex {
+        hex_color(hex)
+    } else {
+        match seg.role {
+            SegRole::Heading => palette.heading,
+            SegRole::Repo => palette.repo,
+            SegRole::Dir => palette.dir,
+            SegRole::File => palette.file,
+            SegRole::Muted => palette.muted,
+            SegRole::Added => palette.added,
+            SegRole::Modified => palette.modified,
+            SegRole::Deleted => palette.deleted,
+            SegRole::Renamed => palette.renamed,
+            SegRole::BranchDefault => palette.branch_default,
+            SegRole::BranchFeature => palette.branch_feature,
+        }
+    };
+    let mut style = Style::default().fg(fg);
+    if seg.bold {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if seg.dim {
+        style = style.add_modifier(Modifier::DIM);
+    }
+    style
+}
+
+fn truncate_segs(segs: &[TextSeg], width: usize) -> Vec<TextSeg> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let total: usize = segs.iter().map(|s| visible_width(&s.text)).sum();
+    if total <= width {
+        return segs.to_vec();
+    }
+    let budget = width.saturating_sub(1);
+    let mut out = Vec::new();
+    let mut used = 0;
+    for seg in segs {
+        let sw = visible_width(&seg.text);
+        if used + sw <= budget {
+            out.push(seg.clone());
+            used += sw;
+            continue;
+        }
+        let mut cut = seg.clone();
+        cut.text = truncate_visible(&seg.text, budget.saturating_sub(used));
+        if !cut.text.is_empty() {
+            out.push(cut);
+        }
+        break;
+    }
+    out.push(TextSeg {
+        text: "…".into(),
+        role: SegRole::Muted,
+        hex: None,
+        bold: false,
+        dim: true,
+    });
+    out
 }
 
 fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -333,10 +517,19 @@ fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, curso
     };
     let rows = state.commit_file_rows();
     if rows.is_empty() {
-        frame.render_widget(Paragraph::new("no files in this commit"), list_area);
+        let copy = if state.commit_files_loading {
+            LOADING_FILES
+        } else {
+            NO_MATCHING_ROWS
+        };
+        frame.render_widget(
+            Paragraph::new(muted_copy(copy, state.theme.palette())),
+            list_area,
+        );
         return;
     }
     let height = list_h as usize;
+    let width = list_area.width as usize;
     let (start, _) = visible_window(rows.len(), cursor, height);
     let motion = file_easy_motion_labels(state, start, height);
     let lines: Vec<Line> = rows
@@ -345,39 +538,26 @@ fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, curso
         .skip(start)
         .take(height)
         .map(|(i, row)| {
-            let label = motion
+            let motion_label = motion
                 .as_ref()
                 .and_then(|labels| labels.get(i - start))
-                .map(|s| format!("{s:<2}"))
-                .unwrap_or_default();
-            let chevron = if row.foldable {
-                if row.folded {
-                    if state.ascii {
-                        ">"
-                    } else {
-                        "▸"
-                    }
-                } else if state.ascii {
-                    "v"
-                } else {
-                    "▾"
-                }
-            } else {
-                " "
+                .cloned();
+            let segs = NodeSegments {
+                segments: row.segments.clone(),
+                trailing: row.trailing_segs.clone(),
             };
-            let indent = "  ".repeat(row.depth);
-            let text = format!("{label}{indent}{chevron} {}", row.label);
-            let mut style = if row.is_dir() {
-                Style::default().fg(palette.repo)
-            } else {
-                Style::default().fg(palette.file)
-            };
-            if i == cursor {
-                style = style.fg(palette.cursor).bg(palette.cursor_bg);
-            } else if !label.is_empty() {
-                style = style.fg(palette.heading);
-            }
-            Line::from(Span::styled(text, style))
+            paint_segmented_row(
+                row.depth,
+                row.foldable,
+                row.folded,
+                &segs,
+                width,
+                i == cursor,
+                false,
+                state.ascii,
+                motion_label.as_deref(),
+                palette,
+            )
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), list_area);
@@ -915,9 +1095,77 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("app"), "{text}");
         assert!(text.contains("README.md"), "{text}");
+        assert!(text.contains("changed ·"), "{text}");
+        let file_line = text
+            .lines()
+            .find(|line| line.contains("README.md"))
+            .unwrap_or("");
+        let name_at = file_line
+            .find("README.md")
+            .expect("README.md on a tree row");
+        let after_name = &file_line[name_at + "README.md".len()..];
+        assert!(
+            after_name.contains('M'),
+            "status badge should sit to the right of the name: {file_line:?}"
+        );
+        assert!(
+            !file_line.contains("? README") && !file_line.contains("M README"),
+            "badge must not prefix the file name: {file_line:?}"
+        );
         assert!(
             text.contains("seed") || text.contains("dirty") || text.contains("aaa1111"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn commit_file_rows_reuse_trailing_status_badge() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.open_commit_files(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![
+                super::super::drill::CommitFile {
+                    status: "A".into(),
+                    path: "src/lib.rs".into(),
+                    old_path: None,
+                },
+                super::super::drill::CommitFile {
+                    status: "M".into(),
+                    path: "README.md".into(),
+                    old_path: None,
+                },
+            ],
+        );
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        let added = text
+            .lines()
+            .find(|line| line.contains("lib.rs"))
+            .unwrap_or("");
+        let name_at = added.find("lib.rs").expect("lib.rs on a commit-file row");
+        let after_name = &added[name_at + "lib.rs".len()..];
+        assert!(
+            after_name.contains('A'),
+            "commit-file A badge should sit to the right of the name: {added:?}"
+        );
+        assert!(
+            !added.contains("A  lib") && !added.contains("A lib"),
+            "badge must not prefix the file name: {added:?}"
+        );
+        let readme = text
+            .lines()
+            .find(|line| line.contains("README.md"))
+            .unwrap_or("");
+        let readme_at = readme.find("README.md").expect("README.md");
+        assert!(
+            readme[readme_at + "README.md".len()..].contains('M'),
+            "commit-file M badge should sit to the right: {readme:?}"
         );
     }
 
@@ -990,5 +1238,42 @@ mod tests {
             text.contains("UNSTAGED") || text.contains("STAGED"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn empty_tree_paints_no_matching_rows() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.rows.clear();
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains(NO_MATCHING_ROWS), "{text}");
+        assert!(!text.contains("no files in this commit"), "{text}");
+    }
+
+    #[test]
+    fn empty_commit_files_paint_loading_then_no_matching_rows() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let source = super::super::drill::CommitFileSource::Commit {
+            commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        };
+        state.begin_commit_files("app".into(), source.clone());
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let loading = buffer_text(&terminal);
+        assert!(loading.contains(LOADING_FILES), "{loading}");
+        assert!(!loading.contains(NO_MATCHING_ROWS), "{loading}");
+        assert!(!loading.contains("no files in this commit"), "{loading}");
+
+        state.open_commit_files("app".into(), source, Vec::new());
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let empty = buffer_text(&terminal);
+        assert!(empty.contains(NO_MATCHING_ROWS), "{empty}");
+        assert!(!empty.contains(LOADING_FILES), "{empty}");
+        assert!(!empty.contains("no files in this commit"), "{empty}");
     }
 }
