@@ -91,16 +91,16 @@ The two overrides differ in the TUI. `-a` replaces the ignored list before `runT
 
 ## Nerd Font requirement
 
-The TUI needs a patched **Nerd Font**. File-type devicons and the git/folder glyphs all live in the Unicode private-use area; without one they render as tofu boxes. Recommended: **MesloLGM Nerd Font Mono**.
+The TUI needs a patched **Nerd Font**. File-type devicons and the git/folder glyphs all live in the Unicode private-use area; without one they render as tofu boxes. Recommended: **MesloLGS NF** (romkatv/powerlevel10k-media). Do not use MesloLGM Nerd Font Mono in xfce4-terminal — VTE sizes cells off the widest Nerd glyph and letter-spaces ASCII.
 
-Use the **Mono** variant. The proportional build renders icons roughly two columns wide, which breaks the layout arithmetic — `visibleWidth` counts private-use codepoints as width 1 and every pane width is computed from that assumption. For the same reason, `src/tui/icons.ts` must never gain emoji or CJK codepoints; those are double-width. Plain-report badges (`badgeForChange` in `src/changes.ts`) stay emoji, because the report is not laid out in columns.
+`visibleWidth` counts private-use codepoints as width 1 and every pane width is computed from that assumption. For the same reason, icon tables must never gain emoji or CJK codepoints; those are double-width. Plain-report badges (`badgeForChange` in `src/changes.ts`) stay emoji, because the report is not laid out in columns.
 
-`WS_STATUS_GLYPHS=ascii` is the escape hatch when no Nerd Font is available.
+`WS_STATUS_GLYPHS=ascii` is the escape hatch when no Nerd Font is available. Do not set it when MesloLGS NF is installed.
 
 VS Code and Cursor resolve the terminal font on the client, independently of the system terminal. Set it in **User Settings**, not the WSL Machine settings:
 
 ```json
-"terminal.integrated.fontFamily": "'MesloLGM Nerd Font Mono', monospace"
+"terminal.integrated.fontFamily": "'MesloLGS NF', monospace"
 ```
 
 A missing Nerd Font only affects glyphs. It does not change which keys the terminal sends.
@@ -130,7 +130,7 @@ On many macOS setups there is no dedicated PageUp key. `Fn+Up` and `Fn+Down` oft
 
 Split falls back to inline below 100 columns (`NARROW_SXS` in `diffSplit.ts`); the status line then reads `inline (too narrow)`. Drag the in-diff RULE to resize columns for the rest of the session (resets on next launch).
 
-Graph ref chips: default-branch names use `palette.branchDefault` (distinct from `muted`). Checkout / detached marks use per-theme high-contrast `palette.headMark` (Nerd Font crosshairs / `[HEAD]`). Synced chips put Nerd Font exchange before the branch name. Marks are PUA icons so MesloLGM keeps 1-cell metrics.
+Graph ref chips: default-branch names use `palette.branchDefault` (distinct from `muted`). Checkout / detached marks use per-theme high-contrast `palette.headMark` (Nerd Font crosshairs / `[HEAD]`). Synced chips put Nerd Font exchange before the branch name. Marks are PUA icons so MesloLGS NF keeps 1-cell metrics.
 
 ## Keymap
 

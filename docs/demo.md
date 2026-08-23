@@ -2,6 +2,12 @@
 
 Seed one workspace, then capture the stills below.
 
+Refresh README/demo PNGs from the repo root:
+
+    ./scripts/capture-demo-stills.sh
+
+That script seeds, installs MesloLGS NF if needed, and types the hardcoded keys below. Do not invent a fixture or a second capture pipeline.
+
 ## Seed
 
 From the repository root:
@@ -22,7 +28,7 @@ Both go away when DEST is wiped.
     WS_STATUS_WATCH_MS=0 WS_STATUS_FETCH_MS=0 workspace-status
 
 - Theme: default Tokyo Night. Do not press `T`.
-- Font: `MesloLGS NF` (romkatv/powerlevel10k-media). Do not set `WS_STATUS_GLYPHS=ascii` when that font is present. Set it only if the font is missing. Do not use MesloLGM Nerd Font Mono — it letter-spaces in xfce4-terminal (VTE sizes cells off the widest Nerd glyph).
+- Font: `MesloLGS NF` 13 (romkatv/powerlevel10k-media). Do not set `WS_STATUS_GLYPHS=ascii` when that font is present. Set it only if the font is missing. Do not use MesloLGM Nerd Font Mono — it letter-spaces in xfce4-terminal (VTE sizes cells off the widest Nerd glyph).
 - Some hosts export `NO_COLOR=1`, which paints the first frame gray. Unset `NO_COLOR` and `FORCE_COLOR` before launch.
 - Terminal: at least 140x40. Side-by-side diff needs 100 or more columns. Stay in the default inline diff for stills.
 - Watch and background fetch stay off so frames do not flicker.
@@ -45,7 +51,7 @@ Each shot starts from a fresh launch unless noted. The first cursor is `app` →
 
 Focus stays on `src/auth.ts`. The right pane is the unified diff (refresh window `5m` → `2m`, plus `withRefreshedExpiry`).
 
-Keys: none (or `g` then `j` onto `auth.ts` if the cursor moved).
+Keys: none. Fresh launch leaves the cursor on `auth.ts`.
 
 Show: dirty `app` files (`M` / `A` / staged `session.ts`), linked `feat-login`, `services/api`, folded No updates, and the auth diff.
 
@@ -53,7 +59,7 @@ Show: dirty `app` files (`M` / `A` / staged `session.ts`), linked `feat-login`, 
 
 Focus `merger` so the right pane is the graph: merge elbows, stash `◇`, HEAD `⊙`.
 
-Keys: `/` `merger` Enter. If the cursor landed on a file, `k` to the repo row.
+Keys: `/` `merger` Enter. Do not press `k` after.
 
 Show: `merge billing into main` join, `stash@{0}` diamond + short spur, `feature/reconciliation` HEAD.
 
@@ -63,27 +69,27 @@ Keys: `?`
 
 Show: the short key overlay, not a wall of text. Tree + pane still visible behind it.
 
-## 04 — search then next
+## 04 — search
 
-Keys: `/` `auth` Enter, then `n`.
+Keys: `/` `auth` Enter.
 
-Show: search prompt / armed query, match highlight on `auth.ts` (and the next hit after `n`). Do not hide rows.
+Show: armed `/auth`, match highlight on `auth.ts`. Rows stay visible.
 
-## 05 — stash menu
+## 05 — boxed confirm
 
-Focus `merger` (has `stash@{0}`) or `app` (also has one).
+Focus `merger`, move the graph cursor onto `stash@{0}`, then drop.
 
-Keys: `/` `merger` Enter, then `S`.
+Keys: `/` `merger` Enter, Tab, `j` onto the stash diamond, `D`. Do not press `y`.
 
-Show: stash overlay (`s` create, `a` apply, `p` pop, `d` drop). Do not confirm apply/pop/drop.
+Show: rounded boxed overlay `Drop stash@{0}?` with `y` drop / `n` cancel.
 
-## 06 — branch picker
+## 06 — stash menu
 
-Focus `app`.
+Tree `S` on dirty `app` is create-only (`s` stash). Full apply / pop / drop needs a graph-focused stash, then `S` (or `a` / `p` / `D`).
 
-Keys: `g`, `k` onto the `app` repo row if needed, then `b`.
+Keys (create-only still): `S` on dirty `app` (fresh launch is already on `auth.ts` under `app`).
 
-Show: local branches (`main`, `feature/auth-refresh`). Type-to-filter is optional. Do not press `C` (create-branch is a skip).
+Show: `Stash app` overlay, `s` create, Esc cancel. Do not confirm.
 
 ## 07 — reviewed mark
 
@@ -103,7 +109,7 @@ Show: ignored dirty `notes` (`inbox.md`) entering the tree. Press `.` again only
 
 Focus `merger`, move the graph cursor onto a commit (the merge or `Start reconciliation job`), then drill.
 
-Keys: `/` `merger` Enter, `j`/`k` to the commit, Enter.
+Keys: `/` `merger` Enter, Tab, `j` to a commit, Enter.
 
 Show: commit file list in the right pane. Do not Enter again into a file diff unless you want a second crop. The named still is the file list.
 
@@ -111,14 +117,14 @@ Show: commit file list in the right pane. Do not Enter again into a file diff un
 
 Focus the tree (Esc until the left pane is active).
 
-Keys: `;`
+Keys: `;` (or Ctrl-Space). Do not type a label.
 
 Show: `a`–`z` labels on the current viewport. Do not type a label (that jumps and dismisses). Esc cancels after the shot.
 
 ## Skip as stills
 
 - Fetch / pull / push in-flight (`f`, `p`, `P`)
-- `y`/`n` confirms (revert, pop/drop, worktree remove, out-of-sync checkout)
-- Create-branch prompt (`b` then `C`)
+- Completing a confirm with `y` (shot 05 shows the overlay; do not press `y`)
+- Create-branch prompt (`b` then `C`) — not a README still
 - Theme cycle (`T`) — stay on Tokyo Night
 - Watch poll (already disabled)
