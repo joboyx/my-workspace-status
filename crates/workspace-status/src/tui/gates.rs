@@ -1,0 +1,301 @@
+//! Focus / depth / kind gates for tree writes (Ink `gates.ts` + `activeContext.ts`).
+//!
+//! `dispatch` refuses workspace-tree writes when ViewStack depth ≥ 1 or when
+//! the right pane is focused, unless the Ink allow-list matches.
+
+use super::action::Action;
+
+/// Which list (or diff) the focused pane is driving.
+///
+/// Mirrors Ink `listFocusTarget`: tree, graph list, commit-file list, or a
+/// focused file diff (`None`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListFocusTarget {
+    Tree,
+    Graph,
+    CommitFiles,
+    None,
+}
+
+/// True when `action` is a tree write Ink already refuses at depth ≥ 1
+/// (`TREE_WRITE_BLOCKED_IDS`: s/u/x/f/p/P/d/b/W). `S` is not in that set.
+pub fn is_tree_write_blocked(action: &Action, depth: u8) -> bool {
+    depth >= 1 && is_tree_write_action(action)
+}
+
+fn is_tree_write_action(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Stage
+            | Action::Unstage
+            | Action::Revert
+            | Action::Fetch
+            | Action::Pull
+            | Action::Push
+            | Action::DefaultBranch
+            | Action::Branch
+            | Action::RemoveWorktree
+    )
+}
+
+/// Actions that drive a list or row-scoped registry write (Ink
+/// `LEFT_LIST_ACTION_TYPES`). Nav chrome, quit/help/refresh, theme/mouse,
+/// view-mode toggles, diff scroll, and overlay input are excluded.
+pub fn is_left_list_action(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Move(_)
+            | Action::MoveToStart
+            | Action::MoveToEnd
+            | Action::FoldToggle
+            | Action::FoldClose
+            | Action::FoldOpen
+            | Action::Stage
+            | Action::Unstage
+            | Action::Revert
+            | Action::Edit
+            | Action::ToggleReviewed
+            | Action::ToggleFullContext
+            | Action::Branch
+            | Action::RemoveWorktree
+            | Action::GraphCheckout
+            | Action::GraphCreateBranch
+            | Action::GraphStashApply
+            | Action::GraphStashDrop
+            | Action::GraphStashPop
+            | Action::StashMenu
+            | Action::Fetch
+            | Action::Pull
+            | Action::Push
+            | Action::DefaultBranch
+    )
+}
+
+fn is_graph_write_action(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::GraphCheckout
+            | Action::GraphCreateBranch
+            | Action::GraphStashApply
+            | Action::GraphStashDrop
+            | Action::GraphStashPop
+    )
+}
+
+fn is_move_action(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Move(_) | Action::MoveToStart | Action::MoveToEnd
+    )
+}
+
+fn is_fold_action(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::FoldToggle | Action::FoldClose | Action::FoldOpen
+    )
+}
+
+fn is_commit_nav_action(action: &Action) -> bool {
+    is_move_action(action)
+        || is_fold_action(action)
+        || matches!(action, Action::Edit | Action::ToggleFullContext)
+}
+
+fn is_diff_file_write(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Edit | Action::ToggleFullContext | Action::ToggleReviewed
+    )
+}
+
+/// True when a left-list action may still run with the right pane focused.
+///
+/// Allow-list: graph move/write (b/c/a/p/D), graph `S`, tree `b` on a focused
+/// graph (Rust extra: stash/uncommitted `b` still opens the HEAD picker),
+/// commit-file nav, diff move, and diff `e` / Ctrl+O / space.
+pub fn right_pane_left_list_allowed(target: ListFocusTarget, action: &Action) -> bool {
+    let graph_move = target == ListFocusTarget::Graph && is_move_action(action);
+    let graph_write = target == ListFocusTarget::Graph && is_graph_write_action(action);
+    let tree_branch_on_graph = target == ListFocusTarget::Graph && matches!(action, Action::Branch);
+    let graph_stash_menu = target == ListFocusTarget::Graph && matches!(action, Action::StashMenu);
+    let commit_nav = target == ListFocusTarget::CommitFiles && is_commit_nav_action(action);
+    let diff_move = target == ListFocusTarget::None && is_move_action(action);
+    let diff_file_write = target == ListFocusTarget::None && is_diff_file_write(action);
+    graph_move
+        || graph_write
+        || tree_branch_on_graph
+        || graph_stash_menu
+        || commit_nav
+        || diff_move
+        || diff_file_write
+}
+
+/// True when `dispatch` should swallow `action` as a silent no-op.
+pub fn dispatch_is_noop(
+    action: &Action,
+    depth: u8,
+    focus_right: bool,
+    target: ListFocusTarget,
+) -> bool {
+    if is_tree_write_blocked(action, depth) {
+        return true;
+    }
+    focus_right && is_left_list_action(action) && !right_pane_left_list_allowed(target, action)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tree_writes_blocked_at_depth_one_and_two() {
+        for action in [
+            Action::Stage,
+            Action::Unstage,
+            Action::Revert,
+            Action::Fetch,
+            Action::Pull,
+            Action::Push,
+            Action::DefaultBranch,
+            Action::Branch,
+            Action::RemoveWorktree,
+        ] {
+            assert!(!is_tree_write_blocked(&action, 0), "{action:?}");
+            assert!(is_tree_write_blocked(&action, 1), "{action:?}");
+            assert!(is_tree_write_blocked(&action, 2), "{action:?}");
+        }
+        assert!(!is_tree_write_blocked(&Action::StashMenu, 1));
+        assert!(!is_tree_write_blocked(&Action::ToggleReviewed, 1));
+        assert!(!is_tree_write_blocked(&Action::Edit, 1));
+    }
+
+    #[test]
+    fn right_pane_allow_list_matches_ink() {
+        assert!(right_pane_left_list_allowed(
+            ListFocusTarget::Graph,
+            &Action::GraphCheckout
+        ));
+        assert!(right_pane_left_list_allowed(
+            ListFocusTarget::Graph,
+            &Action::GraphCreateBranch
+        ));
+        assert!(right_pane_left_list_allowed(
+            ListFocusTarget::Graph,
+            &Action::GraphStashApply
+        ));
+        assert!(right_pane_left_list_allowed(
+            ListFocusTarget::Graph,
+            &Action::GraphStashPop
+        ));
+        assert!(right_pane_left_list_allowed(
+            ListFocusTarget::Graph,
+            &Action::GraphStashDrop
+        ));
+        assert!(right_pane_left_list_allowed(
+            ListFocusTarget::Graph,
+            &Action::Branch
+        ));
+        assert!(right_pane_left_list_allowed(
+            ListFocusTarget::Graph,
+            &Action::StashMenu
+        ));
+        assert!(right_pane_left_list_allowed(
+            ListFocusTarget::CommitFiles,
+            &Action::Move(1)
+        ));
+        assert!(right_pane_left_list_allowed(
+            ListFocusTarget::CommitFiles,
+            &Action::Edit
+        ));
+        assert!(right_pane_left_list_allowed(
+            ListFocusTarget::CommitFiles,
+            &Action::ToggleFullContext
+        ));
+        assert!(right_pane_left_list_allowed(
+            ListFocusTarget::None,
+            &Action::Edit
+        ));
+        assert!(right_pane_left_list_allowed(
+            ListFocusTarget::None,
+            &Action::ToggleFullContext
+        ));
+        assert!(right_pane_left_list_allowed(
+            ListFocusTarget::None,
+            &Action::ToggleReviewed
+        ));
+        assert!(!right_pane_left_list_allowed(
+            ListFocusTarget::Graph,
+            &Action::Stage
+        ));
+        assert!(!right_pane_left_list_allowed(
+            ListFocusTarget::None,
+            &Action::StashMenu
+        ));
+        assert!(!right_pane_left_list_allowed(
+            ListFocusTarget::CommitFiles,
+            &Action::Fetch
+        ));
+    }
+
+    #[test]
+    fn dispatch_noops_tree_writes_when_right_focused_at_depth_one() {
+        for action in [
+            Action::Stage,
+            Action::Fetch,
+            Action::Pull,
+            Action::Push,
+            Action::DefaultBranch,
+            Action::Branch,
+            Action::RemoveWorktree,
+            Action::StashMenu,
+        ] {
+            assert!(
+                dispatch_is_noop(&action, 1, true, ListFocusTarget::CommitFiles),
+                "{action:?}"
+            );
+        }
+        assert!(!dispatch_is_noop(
+            &Action::Edit,
+            1,
+            true,
+            ListFocusTarget::CommitFiles
+        ));
+        assert!(!dispatch_is_noop(
+            &Action::GraphCheckout,
+            0,
+            true,
+            ListFocusTarget::Graph
+        ));
+        assert!(!dispatch_is_noop(
+            &Action::Branch,
+            0,
+            true,
+            ListFocusTarget::Graph
+        ));
+        assert!(!dispatch_is_noop(
+            &Action::StashMenu,
+            0,
+            true,
+            ListFocusTarget::Graph
+        ));
+        assert!(!dispatch_is_noop(
+            &Action::ToggleFullContext,
+            0,
+            true,
+            ListFocusTarget::None
+        ));
+        assert!(!dispatch_is_noop(
+            &Action::ToggleReviewed,
+            0,
+            true,
+            ListFocusTarget::None
+        ));
+        assert!(dispatch_is_noop(
+            &Action::ToggleReviewed,
+            0,
+            true,
+            ListFocusTarget::Graph
+        ));
+    }
+}

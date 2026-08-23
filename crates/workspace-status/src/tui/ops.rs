@@ -16,8 +16,7 @@ pub struct ScopedFile {
 
 fn is_family_container(snapshot: &WorkspaceSnapshot, repo: &str) -> bool {
     snapshot.repos.iter().any(|member| {
-        member.checkout_kind == CheckoutKind::Linked
-            && member.primary_repo.as_deref() == Some(repo)
+        member.checkout_kind == CheckoutKind::Linked && member.primary_repo.as_deref() == Some(repo)
     })
 }
 
@@ -129,17 +128,27 @@ pub enum Op {
     DefaultBranch,
 }
 
+/// True when `p` / `d` must stay a silent no-op on this row kind.
+///
+/// Ink registry: pull / default-branch are workspace / repo / checkout only.
+/// Fetch stays scoped on file and dir rows.
+pub fn op_is_kind_noop(kind: NodeKind, op: Op) -> bool {
+    matches!(op, Op::Pull | Op::DefaultBranch) && matches!(kind, NodeKind::File | NodeKind::Dir)
+}
+
 /// Checkout paths that `op` may touch for the focused row.
 ///
 /// Workspace rows resolve to visible primaries. Group rows yield no
 /// targets (Ink `collectBulkGitTargets`). Hidden ignored repos are omitted
 /// unless `show_ignored` is true. Linked worktrees are omitted unless the
-/// focused row is that worktree (or a file inside it).
+/// focused row is that worktree (or a file inside it). Pull and
+/// default-branch skip file and dir rows (Ink kinds); fetch still includes
+/// them.
 pub fn op_targets(
     snapshot: &WorkspaceSnapshot,
     focused: Option<&VisibleRow>,
     show_ignored: bool,
-    _op: Op,
+    op: Op,
 ) -> Vec<String> {
     let visible: Vec<&WorkspaceRepoSnapshot> = snapshot
         .repos
@@ -150,6 +159,10 @@ pub fn op_targets(
     let Some(row) = focused else {
         return primaries_only(&visible);
     };
+
+    if op_is_kind_noop(row.kind, op) {
+        return Vec::new();
+    }
 
     match row.kind {
         NodeKind::Workspace => primaries_only(&visible),
@@ -238,20 +251,17 @@ pub fn push_targets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{
-        build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus,
-    };
+    use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus};
     use crate::tui::tree::VisibleRow;
 
-    fn snap(
-        name: &str,
-        _ignored: bool,
-        linked: bool,
-        behind: bool,
-    ) -> RepoSnapshot {
+    fn snap(name: &str, _ignored: bool, linked: bool, behind: bool) -> RepoSnapshot {
         RepoSnapshot {
             repo: name.into(),
-            branch: if behind { "feature/x".into() } else { "main".into() },
+            branch: if behind {
+                "feature/x".into()
+            } else {
+                "main".into()
+            },
             sync_status: if behind {
                 SyncStatus::Behind
             } else {
@@ -475,11 +485,7 @@ mod tests {
             vec!["app"]
         );
         assert_eq!(
-            push_targets(
-                &snapshot,
-                Some(&checkout_row(".worktrees/app/feat")),
-                false
-            ),
+            push_targets(&snapshot, Some(&checkout_row(".worktrees/app/feat")), false),
             vec![".worktrees/app/feat"]
         );
         assert!(!push_targets(&snapshot, Some(&repo_row("app")), false)
@@ -504,12 +510,8 @@ mod tests {
         diverged.repo = "lib".into();
         diverged.sync_status = SyncStatus::Diverged;
         diverged.sync_note = "diverged".into();
-        let snapshot = build_workspace_snapshot(
-            &[ahead, diverged, up_to_date("notes")],
-            &[],
-            false,
-            &[],
-        );
+        let snapshot =
+            build_workspace_snapshot(&[ahead, diverged, up_to_date("notes")], &[], false, &[]);
         assert_eq!(
             push_targets(&snapshot, Some(&repo_row("app")), false),
             vec!["app"]
@@ -560,7 +562,10 @@ mod tests {
         assert!(collect_write_files(&snapshot, Some(&repo_row("app")), false).is_empty());
         let files = collect_write_files(&snapshot, Some(&repo_row("lib")), false);
         assert_eq!(
-            files.iter().map(|f| f.change.path.as_str()).collect::<Vec<_>>(),
+            files
+                .iter()
+                .map(|f| f.change.path.as_str())
+                .collect::<Vec<_>>(),
             vec!["a.rs"]
         );
         assert!(files.iter().all(|f| f.repo == "lib"));
@@ -595,7 +600,12 @@ mod tests {
     #[test]
     fn collect_write_files_dir_is_prefix_only() {
         let snapshot = build_workspace_snapshot(
-            &[dirty("app", false, false, &["README.md", "src/lib.rs", "src/main.rs"])],
+            &[dirty(
+                "app",
+                false,
+                false,
+                &["README.md", "src/lib.rs", "src/main.rs"],
+            )],
             &[],
             false,
             &[],
@@ -605,6 +615,29 @@ mod tests {
         paths.sort();
         assert_eq!(paths, vec!["src/lib.rs", "src/main.rs"]);
         assert!(files.iter().all(|f| f.repo == "app"));
+    }
+
+    #[test]
+    fn pull_and_default_skip_file_and_dir_fetch_stays() {
+        let snapshot = built();
+        let file = file_row("app");
+        let dir = dir_row("app", "src");
+        assert!(op_targets(&snapshot, Some(&file), false, Op::Pull).is_empty());
+        assert!(op_targets(&snapshot, Some(&file), false, Op::DefaultBranch).is_empty());
+        assert!(op_targets(&snapshot, Some(&dir), false, Op::Pull).is_empty());
+        assert!(op_targets(&snapshot, Some(&dir), false, Op::DefaultBranch).is_empty());
+        assert_eq!(
+            op_targets(&snapshot, Some(&file), false, Op::Fetch),
+            vec!["app"]
+        );
+        assert_eq!(
+            op_targets(&snapshot, Some(&dir), false, Op::Fetch),
+            vec!["app"]
+        );
+        assert!(op_is_kind_noop(NodeKind::File, Op::Pull));
+        assert!(op_is_kind_noop(NodeKind::Dir, Op::DefaultBranch));
+        assert!(!op_is_kind_noop(NodeKind::File, Op::Fetch));
+        assert!(!op_is_kind_noop(NodeKind::Repo, Op::Pull));
     }
 
     #[test]

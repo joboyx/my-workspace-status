@@ -26,11 +26,12 @@ use super::drill::{
 };
 use super::easy_motion::{resolve_easy_motion_jump, visible_window, EasyMotionResolve};
 use super::fetch::background_fetch_targets;
+use super::gates::{dispatch_is_noop, ListFocusTarget};
 use super::help::{help_match_indices, step_help_match};
 use super::keys::InputMode;
 use super::ops::{
-    collect_write_files, op_targets, push_targets, refresh_target, should_delete_untracked,
-    Op, ScopedFile,
+    collect_write_files, op_is_kind_noop, op_targets, push_targets, refresh_target,
+    should_delete_untracked, Op, ScopedFile,
 };
 use super::search::{
     apply_pan, focus_commit_file_search, focus_diff_search, focus_graph_search, focus_tree_search,
@@ -358,6 +359,44 @@ impl AppState {
         self.drill.is_files() || self.drill.is_diff()
     }
 
+    /// ViewStack depth: 0 workspace, 1 commit files, 2 commit diff.
+    fn nav_depth(&self) -> u8 {
+        match self.drill {
+            DrillView::Graph => 0,
+            DrillView::Files { .. } => 1,
+            DrillView::Diff { .. } => 2,
+        }
+    }
+
+    /// Ink `listFocusTarget` for the focused pane.
+    fn list_focus_target(&self) -> ListFocusTarget {
+        match &self.drill {
+            DrillView::Graph => {
+                if self.focus == FocusPane::Left {
+                    ListFocusTarget::Tree
+                } else if self.right_is_diff() {
+                    ListFocusTarget::None
+                } else {
+                    ListFocusTarget::Graph
+                }
+            }
+            DrillView::Files { .. } => {
+                if self.focus == FocusPane::Left {
+                    ListFocusTarget::Graph
+                } else {
+                    ListFocusTarget::CommitFiles
+                }
+            }
+            DrillView::Diff { .. } => {
+                if self.focus == FocusPane::Left {
+                    ListFocusTarget::Graph
+                } else {
+                    ListFocusTarget::None
+                }
+            }
+        }
+    }
+
     pub fn graph_pane_focused(&self) -> bool {
         if self.in_commit_drill() {
             self.focus == FocusPane::Left
@@ -593,6 +632,14 @@ impl AppState {
     pub fn dispatch(&mut self, action: Action) -> Effect {
         if !matches!(action, Action::FoldToggle) {
             self.z_pending_at = None;
+        }
+        if dispatch_is_noop(
+            &action,
+            self.nav_depth(),
+            self.focus == FocusPane::Right,
+            self.list_focus_target(),
+        ) {
+            return Effect::None;
         }
         match action {
             Action::Quit => Effect::Quit,
@@ -1088,6 +1135,12 @@ impl AppState {
     }
 
     fn op_effect(&mut self, op: Op) -> Effect {
+        if self
+            .focused_row()
+            .is_some_and(|row| op_is_kind_noop(row.kind, op))
+        {
+            return Effect::None;
+        }
         let targets = op_targets(&self.snapshot, self.focused_row(), self.show_ignored, op);
         if targets.is_empty() {
             self.status = "no visible repos for that op".into();
@@ -1824,7 +1877,7 @@ impl AppState {
     }
 
     fn toggle_full_context(&mut self) -> Effect {
-        if self.focus != FocusPane::Right || !self.right_is_diff() {
+        if !self.right_is_diff() {
             return Effect::None;
         }
         let Some(id) = self.displayed_diff_id() else {
@@ -2020,6 +2073,9 @@ impl AppState {
     }
 
     fn toggle_reviewed(&mut self) -> Effect {
+        if self.nav_depth() >= 1 {
+            return Effect::None;
+        }
         let Some(row) = self.focused_row().cloned() else {
             return Effect::None;
         };
@@ -2054,27 +2110,32 @@ impl AppState {
         self.reviewed = viewed_row_ids(&self.snapshot, &self.viewed_store, &self.cwd);
     }
 
+    fn refuse_remove_worktree(&mut self) -> Effect {
+        self.status = "Focus a linked worktree to remove".into();
+        Effect::None
+    }
+
     fn begin_remove_worktree(&mut self) -> Effect {
         let Some(row) = self.focused_row() else {
-            return Effect::None;
+            return self.refuse_remove_worktree();
         };
         if row_is_hidden_ignored(row, self.show_ignored) {
             return Effect::None;
         }
         if !matches!(row.kind, NodeKind::Checkout | NodeKind::Repo) {
-            return Effect::None;
+            return self.refuse_remove_worktree();
         }
         let Some(repo_path) = row.repo.as_deref() else {
-            return Effect::None;
+            return self.refuse_remove_worktree();
         };
         let Some(snap) = self.snapshot.repos.iter().find(|r| r.repo == repo_path) else {
-            return Effect::None;
+            return self.refuse_remove_worktree();
         };
         if snap.checkout_kind != CheckoutKind::Linked {
-            return Effect::None;
+            return self.refuse_remove_worktree();
         }
         let Some(primary) = snap.primary_repo.clone() else {
-            return Effect::None;
+            return self.refuse_remove_worktree();
         };
         let force = snap.has_unstaged || snap.has_staged || snap.has_untracked;
         let path = snap.repo.clone();
@@ -2942,6 +3003,187 @@ mod tests {
         app.cursor = 0;
         app.dispatch(Action::ToggleReviewed);
         assert!(app.reviewed.contains(&id));
+    }
+
+    fn sample_commit_files() -> Vec<CommitFile> {
+        vec![CommitFile {
+            status: "M".into(),
+            path: "README.md".into(),
+            old_path: None,
+        }]
+    }
+
+    #[test]
+    fn tree_writes_noop_when_depth_at_least_one_and_right_focused() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        let cursor = app.cursor;
+        let id = app.rows[cursor].id.clone();
+        app.open_commit_files(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            sample_commit_files(),
+        );
+        assert_eq!(app.focus, FocusPane::Right);
+        assert!(app.in_commit_drill());
+        let status = app.status.clone();
+        for action in [
+            Action::Stage,
+            Action::Unstage,
+            Action::Revert,
+            Action::Fetch,
+            Action::Pull,
+            Action::Push,
+            Action::DefaultBranch,
+            Action::Branch,
+            Action::RemoveWorktree,
+            Action::StashMenu,
+        ] {
+            assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
+            assert_eq!(
+                app.cursor, cursor,
+                "{action:?} must not move the tree cursor"
+            );
+            assert!(app.confirm.is_none(), "{action:?}");
+            assert_eq!(app.status, status, "{action:?} must stay silent");
+        }
+        match app.dispatch(Action::Edit) {
+            Effect::EditFile { path, .. } => assert_eq!(path, "README.md"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
+        assert!(!app.reviewed.contains(&id));
+    }
+
+    #[test]
+    fn pull_and_default_on_file_or_dir_are_silent_fetch_stays() {
+        let mut snap = tree_repo();
+        snap.branch = "feature/x".into();
+        snap.sync_status = SyncStatus::Behind;
+        let snapshot = build_workspace_snapshot(&[snap], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        focus_id(&mut app, "file:app:README.md");
+        let status = app.status.clone();
+        assert_eq!(app.dispatch(Action::Pull), Effect::None);
+        assert_eq!(app.status, status);
+        assert_eq!(app.dispatch(Action::DefaultBranch), Effect::None);
+        assert_eq!(app.status, status);
+        match app.dispatch(Action::Fetch) {
+            Effect::Fetch { repos } => assert_eq!(repos, vec!["app"]),
+            other => panic!("{other:?}"),
+        }
+        focus_id(&mut app, "dir:app:src");
+        let status = app.status.clone();
+        assert_eq!(app.dispatch(Action::Pull), Effect::None);
+        assert_eq!(app.status, status);
+        assert_eq!(app.dispatch(Action::DefaultBranch), Effect::None);
+        assert_eq!(app.status, status);
+        match app.dispatch(Action::Fetch) {
+            Effect::Fetch { repos } => assert_eq!(repos, vec!["app"]),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn space_toggles_reviewed_only_at_depth_zero_workspace_file() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        let id = app.focused_row().unwrap().id.clone();
+        app.focus = FocusPane::Right;
+        assert!(app.right_is_diff());
+        assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
+        assert!(app.reviewed.contains(&id));
+        app.open_commit_files(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            sample_commit_files(),
+        );
+        app.dispatch(Action::ToggleReviewed);
+        assert!(app.reviewed.contains(&id), "depth 1 must not unmark");
+        app.open_commit_diff(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            sample_commit_files(),
+            0,
+            "README.md".into(),
+            DiffContent::from_lines(vec!["+line".into()]),
+        );
+        app.dispatch(Action::ToggleReviewed);
+        assert!(app.reviewed.contains(&id), "depth 2 must not unmark");
+    }
+
+    #[test]
+    fn ctrl_o_fires_from_left_when_right_is_already_a_diff() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            DiffContent::from_lines(vec!["@@ -1,1 +1,2 @@".into(), "+line".into()]),
+        );
+        app.focus = FocusPane::Left;
+        assert!(app.right_is_diff());
+        match app.dispatch(Action::ToggleFullContext) {
+            Effect::LoadRightPane => {}
+            other => panic!("{other:?}"),
+        }
+        assert!(app.full_context_active());
+
+        let mut commit = state();
+        focus_repo(&mut commit, "app");
+        commit.open_commit_diff(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            sample_commit_files(),
+            0,
+            "README.md".into(),
+            DiffContent::from_lines(vec!["@@ -1,1 +1,2 @@".into(), "+line".into()]),
+        );
+        commit.focus = FocusPane::Left;
+        match commit.dispatch(Action::ToggleFullContext) {
+            Effect::LoadCommitDiff { path, .. } => assert_eq!(path, "README.md"),
+            other => panic!("{other:?}"),
+        }
+        assert!(commit.full_context_active());
+    }
+
+    #[test]
+    fn remove_worktree_refuses_with_status_when_not_linked() {
+        let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        app.cursor = 0;
+        assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
+        assert_eq!(app.status, "Focus a linked worktree to remove");
+        assert!(app.confirm.is_none());
+        focus_repo(&mut app, "app");
+        assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
+        assert_eq!(app.status, "Focus a linked worktree to remove");
+        let file_idx = app
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::File)
+            .expect("file");
+        app.cursor = file_idx;
+        assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
+        assert_eq!(app.status, "Focus a linked worktree to remove");
+        assert!(app.confirm.is_none());
+        focus_checkout(&mut app, "app/.worktrees/feat");
+        assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
+        assert!(matches!(
+            app.confirm,
+            Some(PendingConfirm::RemoveWorktree { .. })
+        ));
+        assert!(app.status.contains("remove worktree"));
+        assert!(app.status.contains("y/n"));
+        app.dispatch(Action::ConfirmNo);
+        assert!(app.confirm.is_none());
     }
 
     #[test]
@@ -4216,9 +4458,11 @@ mod tests {
         let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
         app.cursor = 0;
         assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
+        assert_eq!(app.status, "Focus a linked worktree to remove");
         assert!(app.confirm.is_none());
         focus_repo(&mut app, "app");
         assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
+        assert_eq!(app.status, "Focus a linked worktree to remove");
         let file_idx = app
             .rows
             .iter()
@@ -4226,6 +4470,7 @@ mod tests {
             .expect("file");
         app.cursor = file_idx;
         assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
+        assert_eq!(app.status, "Focus a linked worktree to remove");
         focus_checkout(&mut app, "app/.worktrees/feat");
         assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
         assert!(matches!(
@@ -4637,6 +4882,19 @@ mod tests {
         app.open_stash_menu("app".into(), Some("stash@{0}".into()));
         assert_eq!(app.dispatch(Action::StashMenuChar('d')), Effect::None);
         assert!(app.confirm.is_none());
+    }
+
+    #[test]
+    fn graph_stash_menu_dispatch_from_right_focused_graph_is_not_noop() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        install_graph(&mut app, vec![graph_stash("stash@{0}", "latest")]);
+        focus_graph_row(&mut app, |r| matches!(r, GraphRow::Commit { .. }));
+        assert_eq!(app.focus, FocusPane::Right);
+        match app.dispatch(Action::StashMenu) {
+            Effect::PrepareStashMenu { repo } => assert_eq!(repo, "app"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -5270,7 +5528,11 @@ mod tests {
             app.workspace_diff_context("app", "README.md"),
             Some(FULL_DIFF_CONTEXT_LINES)
         );
-        assert_eq!(app.dispatch(Action::ToggleFullContext), Effect::None);
+        match app.dispatch(Action::ToggleFullContext) {
+            Effect::LoadRightPane => {}
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(app.diff_context_lines(), None);
 
         let mut commit = state();
         focus_repo(&mut commit, "app");
