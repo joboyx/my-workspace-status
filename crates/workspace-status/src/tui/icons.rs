@@ -47,6 +47,16 @@ pub fn icon_linked_worktree(ascii: bool) -> &'static str {
 pub fn icon_branch(ascii: bool) -> &'static str {
     glyph(ascii, "", "&")
 }
+/// Help MOVE column. Nerd: nf-dev-terminal_badge; ASCII: `+`.
+pub fn icon_move(ascii: bool) -> &'static str {
+    glyph(ascii, "", "+")
+}
+/// Help VIEW column. Nerd: nf-oct-diff; ASCII: `%`.
+pub fn icon_diff(ascii: bool) -> &'static str {
+    glyph(ascii, "", "%")
+}
+/// Font named in the Ink help footer (`REQUIRED_FONT`).
+pub const REQUIRED_FONT: &str = "MesloLGM Nerd Font Mono";
 pub fn icon_folder(ascii: bool) -> &'static str {
     glyph(ascii, "", "/")
 }

@@ -48,6 +48,7 @@ pub fn is_left_list_action(action: &Action) -> bool {
             | Action::MoveToStart
             | Action::MoveToEnd
             | Action::FoldToggle
+            | Action::FoldToggleSubtree
             | Action::FoldClose
             | Action::FoldOpen
             | Action::Stage
@@ -92,7 +93,7 @@ fn is_move_action(action: &Action) -> bool {
 fn is_fold_action(action: &Action) -> bool {
     matches!(
         action,
-        Action::FoldToggle | Action::FoldClose | Action::FoldOpen
+        Action::FoldToggle | Action::FoldToggleSubtree | Action::FoldClose | Action::FoldOpen
     )
 }
 

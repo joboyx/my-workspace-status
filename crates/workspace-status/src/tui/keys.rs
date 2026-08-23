@@ -6,15 +6,22 @@ use crossterm::event::{
 
 use super::action::Action;
 
+/// Ink `DOUBLE_TAP_MS` — window for `zz` / `gg` after the first key.
+pub const DOUBLE_TAP_MS: u64 = 400;
+
 /// How the keymap reads the next key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputMode {
     Normal { search_active: bool },
+    /// First `z` already toggled; second `z` in the window is subtree.
+    ZPending { search_active: bool },
+    /// First `g` armed; second `g` in the window is `gg` (move to start).
+    GPending { search_active: bool },
     SearchPrompt,
     Confirm,
     Help,
-    /// `?` overlay with `/` help search active.
-    HelpSearch { armed: bool },
+    /// `?` overlay with `/` help query open (chars append; highlight only).
+    HelpSearch,
     StashMenu,
     BranchPicker,
     CreateBranch,
@@ -60,11 +67,11 @@ pub fn event_to_action_ex(
                 InputMode::SearchPrompt
                     | InputMode::Confirm
                     | InputMode::Help
-                    | InputMode::HelpSearch { .. }
+                    | InputMode::HelpSearch
                     | InputMode::StashMenu
                     | InputMode::BranchPicker
                     | InputMode::CreateBranch
-                    | InputMode::EasyMotion
+                    | InputMode::EasyMotion,
             ) {
                 Action::None
             } else {
@@ -92,16 +99,40 @@ fn key_to_action(
             KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('?') => Action::ToggleHelp,
             _ => Action::None,
         },
-        InputMode::HelpSearch { armed } => match key.code {
+        InputMode::HelpSearch => match key.code {
             KeyCode::Esc => Action::SearchCancel,
-            KeyCode::Enter => Action::SearchSubmit,
             KeyCode::Backspace => Action::SearchBackspace,
-            KeyCode::Char('n') if armed => Action::SearchNext,
-            KeyCode::Char('N') if armed => Action::SearchPrev,
+            KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::SearchBackspace
+            }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Action::SearchChar(c)
             }
             _ => Action::None,
+        },
+        InputMode::ZPending { search_active } => match key.code {
+            KeyCode::Char('z') => Action::FoldToggleSubtree,
+            KeyCode::Esc => Action::None,
+            _ => normal_key(
+                key,
+                search_active,
+                right_is_diff,
+                focus_right,
+                graph_stash_focused,
+                graph_commit_focused,
+            ),
+        },
+        InputMode::GPending { search_active } => match key.code {
+            KeyCode::Char('g') => Action::MoveToStart,
+            KeyCode::Esc => Action::None,
+            _ => normal_key(
+                key,
+                search_active,
+                right_is_diff,
+                focus_right,
+                graph_stash_focused,
+                graph_commit_focused,
+            ),
         },
         InputMode::Confirm => match key.code {
             KeyCode::Char('Y') => Action::ConfirmYesClean,
@@ -113,6 +144,9 @@ fn key_to_action(
             KeyCode::Esc => Action::SearchCancel,
             KeyCode::Enter => Action::SearchSubmit,
             KeyCode::Backspace => Action::SearchBackspace,
+            KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::SearchBackspace
+            }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Action::SearchChar(c)
             }
@@ -245,7 +279,7 @@ fn normal_key(
             }
         }
         KeyCode::Char('G') => Action::MoveToEnd,
-        KeyCode::Char('g') => Action::MoveToStart,
+        KeyCode::Char('g') => Action::ArmGChord,
         KeyCode::Home => Action::MoveToStart,
         KeyCode::End => Action::MoveToEnd,
         KeyCode::PageUp => {
@@ -639,27 +673,38 @@ mod tests {
             event_to_action(&key(KeyCode::Char('/')), InputMode::Help, true, true),
             Action::SearchStart
         );
-        let searching = InputMode::HelpSearch { armed: false };
+        let searching = InputMode::HelpSearch;
         assert_eq!(
             event_to_action(&key(KeyCode::Char('f')), searching, false, false),
             Action::SearchChar('f')
         );
         assert_eq!(
+            event_to_action(&key(KeyCode::Char('n')), searching, false, false),
+            Action::SearchChar('n')
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('N')), searching, false, false),
+            Action::SearchChar('N')
+        );
+        assert_eq!(
             event_to_action(&key(KeyCode::Enter), searching, false, false),
-            Action::SearchSubmit
+            Action::None
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Esc), searching, false, false),
             Action::SearchCancel
         );
-        let armed = InputMode::HelpSearch { armed: true };
         assert_eq!(
-            event_to_action(&key(KeyCode::Char('n')), armed, false, false),
-            Action::SearchNext
+            event_to_action(&key(KeyCode::Char('q')), searching, false, false),
+            Action::SearchChar('q')
         );
         assert_eq!(
-            event_to_action(&key(KeyCode::Char('N')), armed, false, false),
-            Action::SearchPrev
+            event_to_action(&key(KeyCode::Char('?')), searching, false, false),
+            Action::SearchChar('?')
+        );
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('h')), searching, false, false),
+            Action::SearchBackspace
         );
     }
 
@@ -692,6 +737,52 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::PageDown), normal(), false, false),
             Action::PageMove(1)
+        );
+    }
+
+    #[test]
+    fn zz_chord_is_toggle_then_subtree() {
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('z')), normal(), false, false),
+            Action::FoldToggle
+        );
+        let pending = InputMode::ZPending {
+            search_active: false,
+        };
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('z')), pending, false, false),
+            Action::FoldToggleSubtree
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('j')), pending, false, false),
+            Action::Move(1)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Esc), pending, false, false),
+            Action::None
+        );
+    }
+
+    #[test]
+    fn gg_chord_arms_then_moves_to_start() {
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('g')), normal(), false, false),
+            Action::ArmGChord
+        );
+        let pending = InputMode::GPending {
+            search_active: false,
+        };
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('g')), pending, false, false),
+            Action::MoveToStart
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Home), normal(), false, false),
+            Action::MoveToStart
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('G')), normal(), false, false),
+            Action::MoveToEnd
         );
     }
 }

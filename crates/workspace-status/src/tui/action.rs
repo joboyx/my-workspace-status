@@ -12,6 +12,18 @@ pub enum Action {
     MoveToEnd,
     PageMove(i32),
     FoldToggle,
+    /**
+     * Second `z` within [`super::keys::DOUBLE_TAP_MS`].
+     *
+     * Ink `fold.toggleSubtree`. First `z` already applied [`Self::FoldToggle`].
+     */
+    FoldToggleSubtree,
+    /**
+     * First `g` of a `gg` chord.
+     *
+     * Dispatch arms a pending timer and does not move the cursor.
+     */
+    ArmGChord,
     FoldClose,
     FoldOpen,
     ToggleShowIgnored,

@@ -36,7 +36,9 @@ gutter cell from `GraphCell.color_lane`; an empty slice uses
 `DEFAULT_LANE_COLORS` (Ink `laneColors.ts`).
 `GraphWidget::search_matches` paints the filter/search background on
 selectable visible-row indexes (Ink `searchMatchIds`). Spacers stay
-unhighlighted. The selected cursor still wins.
+unhighlighted. The selected cursor still wins: Ink `▌` plus `cursorBg`
+(`GraphWidget::cursor_style`). Spacers keep the background only. The
+widget does not use reverse video for the cursor.
 
 ## Visible rows
 

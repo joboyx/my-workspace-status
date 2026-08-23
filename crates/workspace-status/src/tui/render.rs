@@ -3,23 +3,28 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Widget, Wrap};
 use ratatui::Frame;
 use workspace_status_graph::{graph_chrome_budget, paint_model, GraphWidget, ASCII, UNICODE};
 
 use std::collections::HashSet;
 use std::time::Instant;
 
-use super::chrome::{bottom_chrome_rows, breadcrumb_line, status_line};
+use super::chrome::{breadcrumb_line, breadcrumb_rows, overlay_status_rows, status_line};
 use super::diff::{
     cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, gutter_width,
     section_header, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
 };
 use super::drill::DrillView;
 use super::easy_motion::{easy_motion_labels, visible_window};
+use super::help::{
+    help_entry_matches, HELP_COLUMN_COUNT, HELP_GROUPS, HELP_IDLE_FOOTER_SNIPPET,
+    HELP_SEARCH_ESC_HINT,
+};
 use super::icons::{
+    icon_branch, icon_diff, icon_merged_into_default, icon_move, icon_open_vs_default,
     truncate_visible, CURSOR_BAR, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED,
-    FOLD_EXPANDED_ASCII,
+    FOLD_EXPANDED_ASCII, REQUIRED_FONT,
 };
 use super::search::{
     collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids,
@@ -29,7 +34,7 @@ use super::split::{
     diff_split_rule_x, effective_diff_mode, is_side_by_side_split, pane_widths,
     side_by_side_column_widths, MIN_PANE_COLS,
 };
-use super::state::{AppState, FocusPane};
+use super::state::{AppState, FocusPane, PendingConfirm};
 use super::theme::{hex_color, Palette};
 use super::tree::{row_segments, NodeKind, NodeSegments, SegRole, TextSeg, VisibleRow};
 use super::watch::flash_active;
@@ -66,14 +71,14 @@ fn row_match_bg(
 /// Draw one frame. Updates `state.layout` for mouse hits.
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     let area = frame.area();
-    let chrome = bottom_chrome_rows(state.help_open);
-    let crumb_h = chrome.saturating_sub(1);
+    let overlay_h = overlay_status_rows(state);
+    let crumb_h = breadcrumb_rows(state);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
             Constraint::Length(crumb_h),
-            Constraint::Length(1),
+            Constraint::Length(overlay_h),
         ])
         .split(area);
     let widths = pane_widths(area.width, state.tree_fraction);
@@ -149,10 +154,22 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
             chunks[1],
         );
     }
-    frame.render_widget(
-        Paragraph::new(status_line(state, chunks[2].width)),
-        chunks[2],
-    );
+    if state.help_open {
+        draw_help(frame, chunks[2], state);
+    } else if state.confirm.is_some() {
+        draw_confirm(frame, chunks[2], state);
+    } else if state.stash_menu.is_some() {
+        draw_stash_menu(frame, chunks[2], state);
+    } else if state.create_branch.is_some() {
+        draw_create_branch(frame, chunks[2], state);
+    } else if state.branch_picker.is_some() {
+        draw_branch_picker(frame, chunks[2], state);
+    } else {
+        frame.render_widget(
+            Paragraph::new(status_line(state, chunks[2].width)),
+            chunks[2],
+        );
+    }
 
     state.layout.tree_x = tree_inner.x;
     state.layout.tree_y = tree_inner.y;
@@ -191,15 +208,6 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         let list_h = right_inner.height.saturating_sub(header_h) as usize;
         let (start, _) = visible_window(state.commit_file_rows().len(), *cursor, list_h);
         state.layout.files_list_offset = start;
-    }
-    if state.help_open {
-        draw_help(frame, area, state);
-    } else if state.stash_menu.is_some() {
-        draw_stash_menu(frame, area, state);
-    } else if state.create_branch.is_some() {
-        draw_create_branch(frame, area, state);
-    } else if state.branch_picker.is_some() {
-        draw_branch_picker(frame, area, state);
     }
 }
 
@@ -498,6 +506,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         .scroll(state.graph_scroll)
         .loading_older(state.graph_loading_older)
         .search_matches(&matches, state.theme.pills().filter.bg)
+        .cursor_style(state.theme.palette().cursor, state.theme.palette().cursor_bg)
         .render(area, frame.buffer_mut());
     overlay_graph_easy_motion(frame, area, state);
 }
@@ -830,33 +839,101 @@ fn cell_accent(kind: DiffCellKind, palette: Palette) -> Option<Style> {
     }
 }
 
-fn help_span_style(hit: bool, current: bool, palette: Palette) -> Style {
-    if current {
-        Style::default().fg(palette.cursor).bg(palette.cursor_bg)
-    } else if hit {
-        Style::default().fg(palette.heading)
-    } else {
-        Style::default()
+fn help_group_chrome(title: &str, ascii: bool, palette: Palette) -> (&'static str, Color) {
+    match title {
+        "MOVE" => (icon_move(ascii), palette.cursor),
+        "GIT" => (icon_branch(ascii), palette.added),
+        _ => (icon_diff(ascii), palette.modified),
     }
 }
 
-fn help_entry_text(entry: &super::help::HelpEntry) -> String {
-    format!("{}  {}", entry.keys, entry.desc)
-}
-
-fn help_cell_text(text: &str, width: usize) -> String {
-    let mut cell = truncate_visible(text, width);
-    let used = visible_width(&cell);
+fn clamp_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for span in spans {
+        let w = visible_width(&span.content);
+        if used >= width {
+            break;
+        }
+        if used + w <= width {
+            used += w;
+            out.push(span);
+            continue;
+        }
+        let take = width - used;
+        let cut = truncate_visible(&span.content, take);
+        out.push(Span::styled(cut, span.style));
+        used = width;
+        break;
+    }
     if used < width {
-        cell.push_str(&" ".repeat(width - used));
+        out.push(Span::raw(" ".repeat(width - used)));
     }
-    cell
+    out
+}
+
+fn with_bg(spans: Vec<Span<'static>>, bg: Option<Color>) -> Vec<Span<'static>> {
+    let Some(bg) = bg else {
+        return spans;
+    };
+    spans
+        .into_iter()
+        .map(|span| span.patch_style(Style::default().bg(bg)))
+        .collect()
+}
+
+fn help_entry_spans(
+    entry: &super::help::HelpEntry,
+    color: Color,
+    surface: Color,
+    muted: Color,
+    width: usize,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (i, chip) in entry.keys.split(' ').filter(|part| !part.is_empty()).enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(key_chip(chip, color, surface));
+    }
+    spans.push(Span::styled(
+        format!(" {}", entry.desc),
+        Style::default().fg(muted),
+    ));
+    clamp_spans(spans, width)
+}
+
+fn key_chip(key: &str, bg: Color, fg: Color) -> Span<'static> {
+    Span::styled(
+        format!(" {key} "),
+        Style::default()
+            .fg(fg)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn overlay_surface(state: &AppState) -> Color {
+    hex_color(state.theme.theme().surface)
+}
+
+fn overlay_block(accent: Color) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(accent))
+        .padding(Padding::horizontal(1))
 }
 
 fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    use super::help::{help_entry_matches, help_flat_index, HELP_COLUMN_COUNT, HELP_GROUPS};
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let query = state.help_search_query.as_deref().unwrap_or("");
+    let searching = state.help_search_query.is_some();
     let palette = state.theme.palette();
+    let pills = state.theme.pills();
+    let surface = overlay_surface(state);
     let max_rows = HELP_GROUPS
         .iter()
         .map(|group| group.entries.len())
@@ -864,54 +941,265 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         .unwrap_or(0);
     let mut lines: Vec<Line> = Vec::new();
 
-    let width = area.width.saturating_sub(2).max(40);
-    let inner = width.saturating_sub(2);
-    let col_w = (inner as usize / HELP_COLUMN_COUNT).max(1);
+    let inner = area.width.saturating_sub(4).max(1) as usize;
+    let col_w = (inner / HELP_COLUMN_COUNT).max(1);
 
     let mut title_spans = Vec::new();
     for group in HELP_GROUPS {
-        title_spans.push(Span::styled(
-            help_cell_text(group.title, col_w),
-            Style::default()
-                .fg(palette.heading)
-                .add_modifier(Modifier::BOLD),
+        let (icon, color) = help_group_chrome(group.title, state.ascii, palette);
+        title_spans.extend(clamp_spans(
+            vec![Span::styled(
+                format!("{icon}  {}", group.title),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )],
+            col_w,
         ));
     }
     lines.push(Line::from(title_spans));
 
     for row in 0..max_rows {
         let mut spans = Vec::new();
-        for (group_i, group) in HELP_GROUPS.iter().enumerate() {
+        for group in HELP_GROUPS {
+            let (_, color) = help_group_chrome(group.title, state.ascii, palette);
             let Some(entry) = group.entries.get(row) else {
-                spans.push(Span::raw(" ".repeat(col_w)));
+                spans.extend(clamp_spans(vec![Span::raw("")], col_w));
                 continue;
             };
-            let flat = help_flat_index(group_i, row);
-            let hit = help_entry_matches(entry.keys, entry.desc, query);
-            let current = flat.is_some_and(|i| state.help_search_hit == Some(i));
-            spans.push(Span::styled(
-                help_cell_text(&help_entry_text(entry), col_w),
-                help_span_style(hit, current, palette),
+            let hit = searching && help_entry_matches(entry.keys, entry.desc, query);
+            let bg = hit.then_some(pills.filter.bg);
+            spans.extend(with_bg(
+                help_entry_spans(entry, color, surface, palette.muted, col_w),
+                bg,
             ));
         }
         lines.push(Line::from(spans));
     }
 
-    let height = ((lines.len() as u16) + 2).min(area.height.saturating_sub(1));
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + area.height.saturating_sub(height);
-    let rect = Rect::new(x, y, width, height);
-    frame.render_widget(Clear, rect);
-    let title = if let Some(q) = &state.help_search_query {
-        format!(" keys  /{q} ")
+    if searching {
+        let q = state.help_search_query.as_deref().unwrap_or("");
+        lines.push(Line::from(vec![
+            key_chip("HELP", pills.filter.bg, pills.filter.fg),
+            Span::styled(format!(" /{q}"), Style::default().fg(palette.repo)),
+            Span::styled("▏", Style::default().fg(palette.cursor)),
+            Span::styled(
+                format!("   {HELP_SEARCH_ESC_HINT}"),
+                Style::default().fg(palette.muted),
+            ),
+        ]));
     } else {
-        " keys ".into()
-    };
+        lines.push(Line::from(Span::styled(
+            format!("Needs a Nerd Font · {REQUIRED_FONT} · {HELP_IDLE_FOOTER_SNIPPET} · Esc closes"),
+            Style::default().fg(palette.muted),
+        )));
+    }
+
+    frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(title))
+            .block(overlay_block(palette.cursor))
             .wrap(Wrap { trim: false }),
-        rect,
+        area,
+    );
+}
+
+fn files_word(n: usize) -> &'static str {
+    if n == 1 {
+        "file"
+    } else {
+        "files"
+    }
+}
+
+fn confirm_action_row(
+    yes: &str,
+    yes_label: &str,
+    extra: Option<(&str, Color, &str)>,
+    accent: Color,
+    muted: Color,
+    surface: Color,
+) -> Line<'static> {
+    let mut spans = vec![
+        key_chip(yes, accent, surface),
+        Span::styled(format!(" {yes_label}   "), Style::default().fg(muted)),
+    ];
+    if let Some((key, bg, label)) = extra {
+        spans.push(key_chip(key, bg, surface));
+        spans.push(Span::styled(
+            format!(" {label}   "),
+            Style::default().fg(muted),
+        ));
+    }
+    spans.push(key_chip("n", muted, surface));
+    spans.push(Span::styled(" cancel", Style::default().fg(muted)));
+    Line::from(spans)
+}
+
+fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let Some(pending) = state.confirm.as_ref() else {
+        return;
+    };
+    let palette = state.theme.palette();
+    let surface = overlay_surface(state);
+    let (accent, lines) = match pending {
+        PendingConfirm::Revert { targets, label } => {
+            let tracked = targets.iter().filter(|t| !t.untracked).count();
+            let untracked = targets.iter().filter(|t| t.untracked).count();
+            let single_untracked = tracked == 0 && untracked == 1;
+            let accent = if single_untracked {
+                palette.deleted
+            } else {
+                palette.modified
+            };
+            let fate = if single_untracked { "deleted" } else { "kept" };
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        "Revert ",
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(label.clone(), Style::default().fg(palette.file)),
+                    Span::styled("?", Style::default().fg(accent)),
+                ]),
+                Line::from(Span::styled(
+                    format!("  {tracked} tracked {} → discarded", files_word(tracked)),
+                    Style::default().fg(palette.muted),
+                )),
+                Line::from(Span::styled(
+                    format!(
+                        "  {untracked} untracked {} → {fate}",
+                        files_word(untracked)
+                    ),
+                    Style::default().fg(if single_untracked {
+                        accent
+                    } else {
+                        palette.muted
+                    }),
+                )),
+                confirm_action_row(
+                    "y",
+                    "revert",
+                    Some(("Y", palette.deleted, "revert + delete untracked")),
+                    accent,
+                    palette.muted,
+                    surface,
+                ),
+            ];
+            (accent, lines)
+        }
+        PendingConfirm::StashDrop { stash_ref, .. } => {
+            let accent = palette.deleted;
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        "Drop ",
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(stash_ref.clone(), Style::default().fg(palette.file)),
+                    Span::styled("?", Style::default().fg(accent)),
+                ]),
+                confirm_action_row(
+                    "y",
+                    "drop",
+                    None,
+                    accent,
+                    palette.muted,
+                    surface,
+                ),
+            ];
+            (accent, lines)
+        }
+        PendingConfirm::RemoveWorktree {
+            path,
+            force,
+            branch,
+            merged_into_default,
+            ..
+        } => {
+            let accent = palette.deleted;
+            let merge_text = match merged_into_default {
+                Some(true) => format!(
+                    "merged into default {}",
+                    icon_merged_into_default(state.ascii)
+                ),
+                Some(false) => format!(
+                    "NOT merged into default {}",
+                    icon_open_vs_default(state.ascii)
+                ),
+                None => "merge status unknown".into(),
+            };
+            let dirty_line = if *force {
+                Line::from(Span::styled(
+                    "  dirty worktree — will use --force",
+                    Style::default().fg(accent),
+                ))
+            } else {
+                Line::from(Span::styled(
+                    "  clean worktree",
+                    Style::default().fg(palette.muted),
+                ))
+            };
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        "Remove worktree ",
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(path.clone(), Style::default().fg(palette.file)),
+                    Span::styled("?", Style::default().fg(accent)),
+                ]),
+                Line::from(Span::styled(
+                    format!("  branch {branch} — {merge_text}"),
+                    Style::default().fg(palette.muted),
+                )),
+                dirty_line,
+                confirm_action_row(
+                    "y",
+                    "remove",
+                    None,
+                    accent,
+                    palette.muted,
+                    surface,
+                ),
+            ];
+            (accent, lines)
+        }
+        PendingConfirm::CheckoutOutOfSync {
+            branch,
+            remote_ref,
+            ..
+        } => {
+            let accent = palette.modified;
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(branch.clone(), Style::default().fg(palette.file)),
+                    Span::styled(" is not in sync with ", Style::default().fg(palette.muted)),
+                    Span::styled(remote_ref.clone(), Style::default().fg(palette.file)),
+                ]),
+                Line::from(Span::styled(
+                    "Checkout local then pull?",
+                    Style::default().fg(accent),
+                )),
+                confirm_action_row(
+                    "y",
+                    "checkout then pull",
+                    None,
+                    accent,
+                    palette.muted,
+                    surface,
+                ),
+            ];
+            (accent, lines)
+        }
+    };
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(overlay_block(accent))
+            .wrap(Wrap { trim: false }),
+        area,
     );
 }
 
@@ -978,7 +1266,7 @@ fn overlay_graph_easy_motion(frame: &mut Frame<'_>, area: Rect, state: &AppState
                     let label = &labels[idx - start];
                     if !label.is_empty() {
                         frame.buffer_mut().set_stringn(
-                            area.x,
+                            area.x.saturating_add(1),
                             y,
                             &format!("{label:<2}"),
                             2,
@@ -1008,45 +1296,69 @@ fn filter_labels(labels: Vec<String>, typed: &str) -> Vec<String> {
         .collect()
 }
 
-fn overlay_rect(area: Rect, width: u16, height: u16) -> Rect {
-    let width = width.min(area.width.saturating_sub(2)).max(10);
-    let height = height.min(area.height.saturating_sub(2)).max(4);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    Rect::new(x, y, width, height)
+fn overlay_status_color(status: &str, palette: Palette) -> Color {
+    let lower = status.to_ascii_lowercase();
+    if lower.contains("failed") || lower.contains("error") || lower.contains("invalid") || lower.contains("dirty")
+    {
+        palette.deleted
+    } else {
+        palette.muted
+    }
 }
 
 fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let Some(ops) = state.stash_menu.as_ref() else {
         return;
     };
-    let height = (ops.len() as u16).saturating_add(4).min(12);
-    let rect = overlay_rect(area, 48, height);
-    frame.render_widget(Clear, rect);
-    let mut lines = vec![Line::from(Span::styled(
-        " Stash ",
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    ))];
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let palette = state.theme.palette();
+    let surface = overlay_surface(state);
+    let accent = palette.modified;
+    let subtitle = state.stash_repo.as_deref().unwrap_or("");
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "Stash ",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(subtitle.to_string(), Style::default().fg(palette.muted)),
+    ])];
     for op in ops {
-        let detail = op.stash_ref.as_deref().unwrap_or("");
-        let text = if detail.is_empty() {
-            format!(" {}  {}", op.key, op.label)
-        } else {
-            format!(" {}  {}  {}", op.key, op.label, detail)
+        let detail = match op.id {
+            super::stash::StashOpId::Apply
+            | super::stash::StashOpId::Pop
+            | super::stash::StashOpId::Drop => op.stash_ref.as_deref().unwrap_or(""),
+            super::stash::StashOpId::Create => "",
         };
-        lines.push(Line::from(text));
+        let mut spans = vec![
+            key_chip(&op.key.to_string(), accent, surface),
+            Span::styled(format!(" {}", op.label), Style::default().fg(palette.file)),
+        ];
+        if !detail.is_empty() {
+            spans.push(Span::styled(
+                format!(" {detail}"),
+                Style::default().fg(palette.muted),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    if !state.status.is_empty() {
+        lines.push(Line::from(Span::styled(
+            state.status.clone(),
+            Style::default().fg(overlay_status_color(&state.status, palette)),
+        )));
     }
     lines.push(Line::from(Span::styled(
-        " Esc cancel",
-        Style::default().fg(Color::DarkGray),
+        "Esc cancel",
+        Style::default().fg(palette.muted),
     )));
+    frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" stash "))
+            .block(overlay_block(accent))
             .wrap(Wrap { trim: false }),
-        rect,
+        area,
     );
 }
 
@@ -1054,37 +1366,136 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let Some(picker) = state.branch_picker.as_ref() else {
         return;
     };
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let palette = state.theme.palette();
+    let accent = palette.branch_feature;
     let visible = picker.visible();
-    let height = (visible.len() as u16).saturating_add(5).min(16);
-    let rect = overlay_rect(area, 52, height);
-    frame.render_widget(Clear, rect);
-    let mut lines = vec![Line::from(format!(
-        " Branch {}  filter: {}",
-        picker.repo,
-        if picker.filter.is_empty() {
-            "…".into()
-        } else {
-            picker.filter.clone()
-        }
-    ))];
-    if visible.is_empty() {
-        lines.push(Line::from("  No matching branches"));
+    let max_rows = 12usize;
+    let start = if visible.len() <= max_rows {
+        0
     } else {
-        for (i, branch) in visible.iter().enumerate() {
+        picker
+            .cursor
+            .saturating_sub(max_rows / 2)
+            .min(visible.len() - max_rows)
+    };
+    let window = if visible.is_empty() {
+        Vec::new()
+    } else {
+        visible
+            .iter()
+            .skip(start)
+            .take(max_rows)
+            .copied()
+            .collect::<Vec<_>>()
+    };
+    let filter = if picker.filter.is_empty() {
+        "…"
+    } else {
+        picker.filter.as_str()
+    };
+    let graph = picker.commit_id.is_some();
+    let show_filter = !graph || visible.len() > 8 || !picker.filter.is_empty();
+    let mut title = Vec::new();
+    if graph {
+        let short = picker
+            .commit_id
+            .as_deref()
+            .map(|id| id.get(..7).unwrap_or(id).to_string())
+            .unwrap_or_default();
+        title.push(Span::styled(
+            "Checkout ",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ));
+        title.push(Span::styled("at ", Style::default().fg(palette.muted)));
+        title.push(Span::styled(short, Style::default().fg(palette.repo)));
+    } else {
+        title.push(Span::styled(
+            "Branch ",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ));
+        title.push(Span::styled(
+            picker.repo.clone(),
+            Style::default().fg(palette.repo),
+        ));
+    }
+    if show_filter {
+        title.push(Span::styled(
+            "  filter: ",
+            Style::default().fg(palette.muted),
+        ));
+        title.push(Span::styled(
+            filter.to_string(),
+            Style::default().fg(palette.cursor),
+        ));
+    }
+    let mut lines = vec![Line::from(title)];
+    if window.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No matching branches",
+            Style::default().fg(palette.muted),
+        )));
+    } else {
+        for (i, branch) in window.iter().enumerate() {
+            let index = start + i;
+            let selected = index == picker.cursor;
             let mark = if branch.current { "* " } else { "  " };
-            let cursor = if i == picker.cursor { "❯ " } else { "  " };
-            lines.push(Line::from(format!("{cursor}{mark}{}", branch.name)));
+            let cursor = if selected { "❯ " } else { "  " };
+            let row_bg = if selected {
+                palette.cursor_bg
+            } else {
+                Color::Reset
+            };
+            let name_fg = if branch.current {
+                palette.added
+            } else if selected {
+                palette.file
+            } else {
+                palette.muted
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    cursor.to_string(),
+                    Style::default()
+                        .fg(if selected {
+                            palette.cursor
+                        } else {
+                            palette.muted
+                        })
+                        .bg(row_bg),
+                ),
+                Span::styled(
+                    format!("{mark}{}", branch.name),
+                    Style::default().fg(name_fg).bg(row_bg),
+                ),
+            ]));
         }
     }
+    if !state.status.is_empty() {
+        lines.push(Line::from(Span::styled(
+            state.status.clone(),
+            Style::default().fg(overlay_status_color(&state.status, palette)),
+        )));
+    }
+    let footer = if graph && !show_filter {
+        "j/k move · Enter checkout · C create · Esc cancel"
+    } else if graph {
+        "j/k move · type to filter · Enter checkout · C create · Esc cancel"
+    } else {
+        "j/k move · type to filter · Enter checkout · C create · Esc close"
+    };
     lines.push(Line::from(Span::styled(
-        " j/k move · type to filter · Enter checkout · C create · Esc close",
-        Style::default().fg(Color::DarkGray),
+        footer,
+        Style::default().fg(palette.muted),
     )));
+    frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" branch "))
+            .block(overlay_block(accent))
             .wrap(Wrap { trim: false }),
-        rect,
+        area,
     );
 }
 
@@ -1092,26 +1503,52 @@ fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let Some(create) = state.create_branch.as_ref() else {
         return;
     };
-    let rect = overlay_rect(area, 48, 6);
-    frame.render_widget(Clear, rect);
-    let at = create
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let palette = state.theme.palette();
+    let accent = palette.branch_feature;
+    let short = create
         .commit_id
         .as_deref()
-        .map(|id| format!(" at {}", id.get(..7).unwrap_or(id)))
+        .map(|id| id.get(..7).unwrap_or(id).to_string())
         .unwrap_or_default();
-    let body = format!(
-        " Create branch{at}\n  name: {}\n Enter confirm · Esc cancel",
-        if create.name.is_empty() {
-            "…"
-        } else {
-            create.name.as_str()
-        }
-    );
+    let name = if create.name.is_empty() {
+        "…"
+    } else {
+        create.name.as_str()
+    };
+    let mut title = vec![Span::styled(
+        "Create branch ",
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+    )];
+    if !short.is_empty() {
+        title.push(Span::styled("at ", Style::default().fg(palette.muted)));
+        title.push(Span::styled(short, Style::default().fg(palette.repo)));
+    }
+    let mut lines = vec![
+        Line::from(title),
+        Line::from(vec![
+            Span::styled("  name: ", Style::default().fg(palette.muted)),
+            Span::styled(name.to_string(), Style::default().fg(palette.cursor)),
+        ]),
+    ];
+    if !state.status.is_empty() {
+        lines.push(Line::from(Span::styled(
+            state.status.clone(),
+            Style::default().fg(overlay_status_color(&state.status, palette)),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "Enter confirm · Esc cancel",
+        Style::default().fg(palette.muted),
+    )));
+    frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(body)
-            .block(Block::default().borders(Borders::ALL).title(" create "))
+        Paragraph::new(lines)
+            .block(overlay_block(accent))
             .wrap(Wrap { trim: false }),
-        rect,
+        area,
     );
 }
 
@@ -1268,17 +1705,18 @@ mod tests {
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         state.help_open = true;
-        let backend = TestBackend::new(80, 24);
+        let backend = TestBackend::new(120, 28);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("q  quit"), "{text}");
-        assert!(text.contains(".  show ignored"), "{text}");
-        assert!(text.contains("S  stash menu"), "{text}");
-        assert!(text.contains("P  push"), "{text}");
-        assert!(text.contains("W  remove worktree"), "{text}");
+        assert!(text.contains("quit"), "{text}");
+        assert!(text.contains("show / hide ignored"), "{text}");
+        assert!(text.contains("stash menu"), "{text}");
+        assert!(text.contains("push ahead"), "{text}");
+        assert!(text.contains("remove linked worktree"), "{text}");
         assert!(text.contains("EasyMotion"), "{text}");
         assert!(text.contains("cycle theme"), "{text}");
+        assert!(text.contains("/ search help"), "{text}");
         assert!(text.contains("MOVE"), "{text}");
         assert!(text.contains("GIT"), "{text}");
         assert!(text.contains("VIEW"), "{text}");
@@ -1289,6 +1727,95 @@ mod tests {
             header.is_some(),
             "help overlay should paint MOVE / GIT / VIEW on one row:\n{text}"
         );
+    }
+
+    #[test]
+    fn help_search_highlights_without_hiding_rows() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.help_open = true;
+        state.help_search_query = Some("quit".into());
+        let backend = TestBackend::new(120, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("MOVE"), "{text}");
+        assert!(text.contains("stage scope"), "{text}");
+        assert!(text.contains("quit"), "{text}");
+        assert!(text.contains("Esc clears search"), "{text}");
+        assert!(!text.contains("n/N wrap"), "{text}");
+    }
+
+    #[test]
+    fn confirm_overlays_match_ink_copy_not_status_line() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.confirm = Some(PendingConfirm::Revert {
+            label: "README.md".into(),
+            targets: vec![
+                crate::tui::state::RevertTarget {
+                    repo: "app".into(),
+                    path: "README.md".into(),
+                    untracked: false,
+                    old_path: None,
+                },
+                crate::tui::state::RevertTarget {
+                    repo: "app".into(),
+                    path: "tmp.log".into(),
+                    untracked: true,
+                    old_path: None,
+                },
+            ],
+        });
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Revert"), "{text}");
+        assert!(text.contains("README.md"), "{text}");
+        assert!(text.contains("tracked"), "{text}");
+        assert!(text.contains("untracked"), "{text}");
+        assert!(text.contains("discarded"), "{text}");
+        assert!(text.contains("kept"), "{text}");
+        assert!(text.contains("revert + delete untracked"), "{text}");
+        assert!(!text.contains("? y/n"), "{text}");
+        assert!(!text.contains("revert README.md? y/n"), "{text}");
+
+        state.confirm = Some(PendingConfirm::StashDrop {
+            repo: "app".into(),
+            stash_ref: "stash@{0}".into(),
+        });
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Drop"), "{text}");
+        assert!(text.contains("stash@{0}"), "{text}");
+        assert!(text.contains("drop"), "{text}");
+        assert!(text.contains("cancel"), "{text}");
+
+        state.confirm = Some(PendingConfirm::RemoveWorktree {
+            primary: "app".into(),
+            path: ".worktrees/topic".into(),
+            force: true,
+            branch: "topic".into(),
+            merged_into_default: Some(false),
+        });
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Remove worktree"), "{text}");
+        assert!(text.contains(".worktrees/topic"), "{text}");
+        assert!(text.contains("NOT merged"), "{text}");
+        assert!(text.contains("--force"), "{text}");
+
+        state.confirm = Some(PendingConfirm::CheckoutOutOfSync {
+            repo: "app".into(),
+            branch: "main".into(),
+            remote_ref: "origin/main".into(),
+        });
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("is not in sync with"), "{text}");
+        assert!(text.contains("Checkout local then pull?"), "{text}");
+        assert!(text.contains("checkout then pull"), "{text}");
     }
 
     #[test]
