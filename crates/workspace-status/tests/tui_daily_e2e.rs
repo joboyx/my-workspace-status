@@ -16,7 +16,10 @@ fn git_env() -> Vec<(&'static str, &'static str)> {
         ("GIT_AUTHOR_NAME", "workspace-status e2e"),
         ("GIT_AUTHOR_EMAIL", "workspace-status-e2e@example.invalid"),
         ("GIT_COMMITTER_NAME", "workspace-status e2e"),
-        ("GIT_COMMITTER_EMAIL", "workspace-status-e2e@example.invalid"),
+        (
+            "GIT_COMMITTER_EMAIL",
+            "workspace-status-e2e@example.invalid",
+        ),
         ("GIT_CONFIG_GLOBAL", "/dev/null"),
         ("GIT_CONFIG_NOSYSTEM", "1"),
     ]
@@ -49,7 +52,14 @@ fn seed_repo(workspace: &Path, name: &str, branch: &str, dirty: bool) {
         git(&repo, &["checkout", "-q", "-b", branch]);
     }
     git(&repo, &["config", "user.name", "workspace-status e2e"]);
-    git(&repo, &["config", "user.email", "workspace-status-e2e@example.invalid"]);
+    git(
+        &repo,
+        &[
+            "config",
+            "user.email",
+            "workspace-status-e2e@example.invalid",
+        ],
+    );
     fs::write(repo.join("README.md"), format!("# {name}\n")).unwrap();
     git(&repo, &["add", "README.md"]);
     git(&repo, &["commit", "-q", "-m", &format!("seed {name}")]);
@@ -71,7 +81,14 @@ fn seed_merge_graph(workspace: &Path, name: &str) {
         git(&repo, &["checkout", "-q", "-b", "main"]);
     }
     git(&repo, &["config", "user.name", "workspace-status e2e"]);
-    git(&repo, &["config", "user.email", "workspace-status-e2e@example.invalid"]);
+    git(
+        &repo,
+        &[
+            "config",
+            "user.email",
+            "workspace-status-e2e@example.invalid",
+        ],
+    );
     fs::write(repo.join("README.md"), "# root\n").unwrap();
     git(&repo, &["add", "README.md"]);
     git(&repo, &["commit", "-q", "-m", "root"]);
@@ -83,10 +100,7 @@ fn seed_merge_graph(workspace: &Path, name: &str) {
     fs::write(repo.join("right.txt"), "right\n").unwrap();
     git(&repo, &["add", "right.txt"]);
     git(&repo, &["commit", "-q", "-m", "right"]);
-    git(
-        &repo,
-        &["merge", "--no-ff", "-m", "merge", "left"],
-    );
+    git(&repo, &["merge", "--no-ff", "-m", "merge", "left"]);
     git(&repo, &["checkout", "-q", "-b", "feature/graph"]);
     fs::write(repo.join("wip.txt"), "stash me\n").unwrap();
     git(&repo, &["add", "wip.txt"]);
@@ -172,8 +186,17 @@ fn dirty_file_paints_diff_pane() {
     );
     let frame = tui.frame();
     assert_contains(&frame, " diff");
+    assert_contains(&frame, "README.md");
     assert!(
-        frame.contains("dirty") || frame.contains("README.md") || frame.contains("unstaged"),
+        frame.contains("inline") || frame.contains("split"),
+        "diff header should name the layout:\n{frame}"
+    );
+    assert!(
+        frame.contains("UNSTAGED") || frame.contains("STAGED") || frame.contains("NEW"),
+        "diff pane should label staged/unstaged/new:\n{frame}"
+    );
+    assert!(
+        frame.contains("dirty") || frame.contains("│"),
         "diff pane should show the dirty file:\n{frame}"
     );
     let _ = fs::remove_dir_all(root);
@@ -204,10 +227,7 @@ fn multi_lane_graph_paints_merge_and_stash_spur() {
         "graph should show the commit author:\n{frame}"
     );
     assert!(
-        frame.contains('╮')
-            || frame.contains('╭')
-            || frame.contains('╯')
-            || frame.contains('╰'),
+        frame.contains('╮') || frame.contains('╭') || frame.contains('╯') || frame.contains('╰'),
         "merge / stash join elbows:\n{frame}"
     );
     assert!(
@@ -306,7 +326,8 @@ fn drill_enter_and_esc_walk_commit_files_diff() {
         "Enter on a graph commit should open the file list:\n{files}"
     );
     assert!(
-        files.contains("graph") && (files.contains("merge") || files.contains("left") || files.contains("right")),
+        files.contains("graph")
+            && (files.contains("merge") || files.contains("left") || files.contains("right")),
         "depth-1 keeps the graph on the left:\n{files}"
     );
     assert!(
@@ -321,6 +342,17 @@ fn drill_enter_and_esc_walk_commit_files_diff() {
     assert!(
         tui.right_is_diff(),
         "Enter on a commit file should open the diff:\n{diff}"
+    );
+    assert!(
+        diff.contains("left.txt")
+            || diff.contains("right.txt")
+            || diff.contains("wip.txt")
+            || diff.contains("README.md"),
+        "commit diff header should keep the file path after the graph takes the left pane:\n{diff}"
+    );
+    assert!(
+        diff.contains("inline") || diff.contains("split"),
+        "commit diff header should name the layout:\n{diff}"
     );
     tui.esc();
     if tui.right_is_diff() {

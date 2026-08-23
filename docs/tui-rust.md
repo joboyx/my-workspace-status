@@ -65,6 +65,7 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 - Dir rows fold with `z` / `h` / `l`. `zz` within ~400ms folds or unfolds the focused subtree. A dir `s` / `u` / `x` writes files under that dir
 - Tree / flat stays in this session. Rust has no session store. Commit-file lists have their own `t` toggle and the same dir-trie collapse
 - Right pane at depth 0: file diff when a dirty file is focused. Graph pane via `workspace-status-graph` when a repo or worktree is focused
+- File diffs paint `{repo}/{path}  inline|split` (plus ` · full` / ` · pan N`) then STAGED / UNSTAGED / NEW labels and a line-number gutter. After a commit drill the graph stays left, so the header is the path. Intra-line / syntax highlight stays Ink-only
 - Hidden ignored repos stay out of the tree, search, stage / unstage / revert, and fetch / pull / push / default unless you show them
 - `/` searches the focused pane. Tree matches include folded rows and unfold ancestors. Graph search matches commit subjects and ref names. Commit-file search matches paths. Diff search matches painted line text. When `?` help is open, `/` searches the help overlay instead
 - `Ctrl+O` on a focused file diff reloads it with unlimited unified context and keeps the current hunk in view
@@ -112,7 +113,9 @@ See [tui-model.md](./tui-model.md) for the Ink keymap.
 
 Left pane: workspace tree at depth 0. Clean default-branch repos sit under a folded `No updates` group. In a commit-files or commit-diff drill the left pane is the graph list so the graph stays visible.
 
-Right pane: graph for a repo or worktree at depth 0, a unified or side-by-side diff for a dirty file, or commit detail (meta header plus file tree) / that file's commit diff.
+Right pane: graph for a repo or worktree at depth 0, a numbered file diff when a dirty file is focused, or commit detail (meta header plus file tree) / that file's commit diff.
+
+A file diff paints a one-line path header (`{repo}/{path}  inline|split`, plus ` · full` when unlimited `-U` is on, ` · pan N` when panned) then STAGED / UNSTAGED / NEW section labels and a line-number gutter. After a commit drill the left pane is the graph, so that header is how the file path stays visible. Intra-line and syntax highlight stay Ink-only. Overlay confirm vs status-line `y`/`n` is unchanged.
 
 Graph commits paint two lines, matching Ink layout A: subject on the node row; refs / branch chips, short hash, relative date (`just now` / `Nm` / `Nh` / `Nd` / `Nw` / `Ny`), and author on the spacer beneath. Local and `origin/*` names stay visible (matching local+remote tips merge into one chip). The spacer is not a second cursor, search, or EasyMotion target — `j` / `k` / Enter / Esc still treat the commit as one item. When the pane is narrow, meta drops hash, then date, then author, keeping refs.
 

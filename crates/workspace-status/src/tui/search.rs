@@ -90,7 +90,11 @@ fn find_path(node: &TreeNode, target: &str, path: &mut Vec<String>) -> bool {
 }
 
 /// Unfold every ancestor of `focus_id` so the row can paint.
-pub fn unfold_ancestors(tree: &TreeNode, folds: &HashSet<String>, focus_id: &str) -> HashSet<String> {
+pub fn unfold_ancestors(
+    tree: &TreeNode,
+    folds: &HashSet<String>,
+    focus_id: &str,
+) -> HashSet<String> {
     let mut next = folds.clone();
     for id in path_to(tree, focus_id) {
         next.remove(&id);
@@ -118,7 +122,6 @@ pub fn focus_tree_search(
     };
     (unfold_ancestors(tree, folds, &focus_id), Some(focus_id))
 }
-
 
 /// Search text for one graph row: subject plus decoration / ref names.
 pub fn graph_row_search_text(row: &GraphRow) -> String {
@@ -153,7 +156,12 @@ pub fn collect_graph_match_indices(rows: &[GraphRow], query: &str) -> Vec<usize>
 }
 
 /// Next/prev graph match index with wrap. `dir` 0 = first hit.
-pub fn focus_graph_search(rows: &[GraphRow], query: &str, current: usize, dir: i32) -> Option<usize> {
+pub fn focus_graph_search(
+    rows: &[GraphRow],
+    query: &str,
+    current: usize,
+    dir: i32,
+) -> Option<usize> {
     let hits = collect_graph_match_indices(rows, query);
     if hits.is_empty() {
         return None;
@@ -194,7 +202,12 @@ pub fn match_diff_line_indices(lines: &[String], query: &str) -> Vec<usize> {
 }
 
 /// Next/prev matching diff line. `dir` 0 = first hit.
-pub fn focus_diff_search(lines: &[String], query: &str, current: Option<usize>, dir: i32) -> Option<usize> {
+pub fn focus_diff_search(
+    lines: &[String],
+    query: &str,
+    current: Option<usize>,
+    dir: i32,
+) -> Option<usize> {
     let hits = match_diff_line_indices(lines, query);
     if hits.is_empty() {
         return None;
@@ -248,6 +261,7 @@ pub fn slice_visible(text: &str, offset: usize, width: usize) -> String {
 }
 
 /// First hunk header at or before `scroll`, else the line at `scroll`.
+#[allow(dead_code)]
 pub fn hunk_anchor(lines: &[String], scroll: usize) -> Option<String> {
     if lines.is_empty() {
         return None;
@@ -267,6 +281,7 @@ pub fn hunk_anchor(lines: &[String], scroll: usize) -> Option<String> {
 }
 
 /// Scroll so `anchor` stays in the upper third of `view_h`.
+#[allow(dead_code)]
 pub fn scroll_to_keep_anchor(lines: &[String], anchor: &str, view_h: u16) -> u16 {
     let Some(idx) = lines.iter().position(|l| l == anchor) else {
         return 0;
@@ -279,9 +294,7 @@ pub fn scroll_to_keep_anchor(lines: &[String], anchor: &str, view_h: u16) -> u16
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{
-        build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus,
-    };
+    use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus};
     use crate::tui::tree::{build_tree, default_folds, visible_for_tree, NodeKind};
 
     fn repo(name: &str, dirty_path: Option<&str>) -> RepoSnapshot {
@@ -373,13 +386,15 @@ mod tests {
             collect_match_ids(&shown, "secret"),
             vec!["file:notes:secret.md".to_string()]
         );
-        assert!(shown
-            .children
-            .iter()
-            .any(|c| c.kind == NodeKind::Repo && c.label.contains("notes"))
-            || flatten(&shown, &HashSet::new())
+        assert!(
+            shown
+                .children
                 .iter()
-                .any(|r| r.label.contains("notes")));
+                .any(|c| c.kind == NodeKind::Repo && c.label.contains("notes"))
+                || flatten(&shown, &HashSet::new())
+                    .iter()
+                    .any(|r| r.label.contains("notes"))
+        );
     }
 
     #[test]
@@ -432,7 +447,11 @@ mod tests {
             },
         ];
         assert_eq!(focus_commit_file_search(&files, "lib", 0, 0), Some(1));
-        let lines = vec!["@@ hunk @@".into(), "+needle line".into(), " context".into()];
+        let lines = vec![
+            "@@ hunk @@".into(),
+            "+needle line".into(),
+            " context".into(),
+        ];
         assert_eq!(focus_diff_search(&lines, "needle", None, 0), Some(1));
         assert_eq!(apply_pan(0, -1, 4), 0);
         assert_eq!(apply_pan(0, 1, 4), 1);

@@ -4,6 +4,8 @@ use workspace_status_graph::GraphRow;
 
 use crate::git::NameStatus;
 
+use super::diff::DiffContent;
+
 /// Git object that a commit-file list / diff is scoped to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommitFileSource {
@@ -45,14 +47,14 @@ pub enum DrillView {
         files: Vec<CommitFile>,
         cursor: usize,
     },
-    /// Depth 2: unified diff for one of those files.
+    /// Depth 2: numbered file diff (graph stays in the left pane).
     Diff {
         repo: String,
         source: CommitFileSource,
         files: Vec<CommitFile>,
         file_cursor: usize,
         path: String,
-        lines: Vec<String>,
+        content: DiffContent,
     },
 }
 
