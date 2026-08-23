@@ -36,7 +36,7 @@ const NO_MATCHING_ROWS: &str = "No matching rows";
 /// Commit-file list while git is still listing (Ink CommitDetailPane).
 const LOADING_FILES: &str = "loading files…";
 
-fn muted_copy(text: &str, palette: Palette) -> Line<'static> {
+fn muted_copy(text: &'static str, palette: Palette) -> Line<'static> {
     Line::from(Span::styled(text, Style::default().fg(palette.muted)))
 }
 
