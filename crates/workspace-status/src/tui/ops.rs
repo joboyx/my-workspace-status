@@ -297,12 +297,9 @@ mod tests {
             depth: 1,
             kind: NodeKind::Group,
             label: "No updates (1)".into(),
-            repo: None,
-            primary_repo: None,
-            ignored: false,
-            file: None,
             foldable: true,
             folded: true,
+            ..VisibleRow::default()
         }
     }
 
