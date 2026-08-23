@@ -1,7 +1,7 @@
 //! Help overlay entries and `/` search (highlight only).
 //!
 //! Three columns match Ink `HELP_GROUPS` (MOVE / GIT / VIEW). Rust extras
-//! (`q`, Tab, picker `C`, stash `a/p/D`, mouse) stay in those groups.
+//! (`q`, Tab, picker `C`, stash `a p D`, Home/End) stay in those groups.
 
 /// One help row: key chips plus a short description.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,36 +26,40 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
         title: "MOVE",
         entries: &[
             HelpEntry {
-                keys: "j/k",
-                desc: "move",
+                keys: "j k",
+                desc: "down / up",
             },
             HelpEntry {
-                keys: "arrows",
-                desc: "same",
+                keys: "h l",
+                desc: "fold · pan when right+diff",
             },
             HelpEntry {
                 keys: "z",
-                desc: "fold this row",
+                desc: "toggle fold (instant; no-op on graph/diff)",
             },
             HelpEntry {
                 keys: "zz",
-                desc: "fold subtree",
+                desc: "toggle subtree (no-op on graph/diff)",
             },
             HelpEntry {
-                keys: "h/l",
-                desc: "fold tree / pan diff",
+                keys: "gg G",
+                desc: "top / bottom of focused pane",
+            },
+            HelpEntry {
+                keys: "Home End",
+                desc: "top / bottom",
             },
             HelpEntry {
                 keys: "/",
-                desc: "pane or help search",
+                desc: "search focused pane (Enter arms)",
             },
             HelpEntry {
-                keys: "n/N",
-                desc: "next / prev",
+                keys: "n N",
+                desc: "next / prev match (after Enter)",
             },
             HelpEntry {
-                keys: ";",
-                desc: "EasyMotion",
+                keys: "Ctrl-Space ;",
+                desc: "EasyMotion on focused list",
             },
         ],
     },
@@ -64,7 +68,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
         entries: &[
             HelpEntry {
                 keys: "s",
-                desc: "stage",
+                desc: "stage scope",
             },
             HelpEntry {
                 keys: "S",
@@ -72,23 +76,23 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: "u",
-                desc: "unstage",
+                desc: "unstage scope",
             },
             HelpEntry {
                 keys: "x",
-                desc: "revert (y/n)",
+                desc: "revert (y/Y)",
             },
             HelpEntry {
                 keys: "e",
-                desc: "edit",
+                desc: "open in editor",
             },
             HelpEntry {
                 keys: "space",
-                desc: "mark reviewed",
+                desc: "mark dirty file reviewed (eye)",
             },
             HelpEntry {
                 keys: "f",
-                desc: "fetch",
+                desc: "fetch remotes",
             },
             HelpEntry {
                 keys: "p",
@@ -96,7 +100,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: "P",
-                desc: "push",
+                desc: "push ahead/diverged/new",
             },
             HelpEntry {
                 keys: "d",
@@ -104,7 +108,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: "b",
-                desc: "branch picker",
+                desc: "depth 0 picker · graph local/origin/*",
             },
             HelpEntry {
                 keys: "C",
@@ -112,15 +116,15 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: "W",
-                desc: "remove worktree",
+                desc: "remove linked worktree",
             },
             HelpEntry {
                 keys: "r",
-                desc: "refresh",
+                desc: "refresh now",
             },
             HelpEntry {
-                keys: "a/p/D",
-                desc: "focused stash",
+                keys: "a p D",
+                desc: "focused stash apply/pop/drop",
             },
         ],
     },
@@ -133,55 +137,43 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: "t",
-                desc: "tree / flat",
+                desc: "flat / tree",
             },
             HelpEntry {
                 keys: ".",
-                desc: "show ignored",
+                desc: "show / hide ignored repos",
             },
             HelpEntry {
                 keys: "T",
                 desc: "cycle theme",
             },
             HelpEntry {
-                keys: "Ctrl+O",
-                desc: "full-file context",
+                keys: "Ctrl-o",
+                desc: "full-file · keep hunk in view",
             },
             HelpEntry {
-                keys: "PgUp/PgDn",
-                desc: "page",
+                keys: "PgUp PgDn",
+                desc: "page focused pane",
             },
             HelpEntry {
-                keys: "Ctrl+u/d",
-                desc: "list ±5",
+                keys: "Ctrl-u Ctrl-d",
+                desc: "page focused ±5",
             },
             HelpEntry {
                 keys: "m",
-                desc: "toggle mouse",
-            },
-            HelpEntry {
-                keys: "click",
-                desc: "select row",
-            },
-            HelpEntry {
-                keys: "dbl-click",
-                desc: "enter / drill",
-            },
-            HelpEntry {
-                keys: "drag",
-                desc: "resize split",
+                desc: "mouse · drag pane or split divider",
             },
             HelpEntry {
                 keys: "Esc",
-                desc: "back",
+                desc: "back / unfocus · never quit",
             },
             HelpEntry {
-                keys: "Enter",
-                desc: "drill",
+                keys: "Enter dblclick",
+                desc: "focus right / drill",
             },
             HelpEntry {
                 keys: "?",
-                desc: "close this help",
+                desc: "this help",
             },
             HelpEntry {
                 keys: "Tab",
@@ -191,13 +183,21 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 keys: "q",
                 desc: "quit",
             },
+            HelpEntry {
+                keys: "Ctrl-C Ctrl-C",
+                desc: "quit (press twice)",
+            },
         ],
     },
 ];
 
+/// Idle help footer must mention overlay-local `/` search.
+pub const HELP_IDLE_FOOTER_SNIPPET: &str = "/ search help";
+/// Active help-search footer Esc hint (Ink `HELP_SEARCH_ESC_HINT`).
+pub const HELP_SEARCH_ESC_HINT: &str = "Esc clears search";
+
 /// Flattened help rows in column order (MOVE, then GIT, then VIEW).
-///
-/// `n` / `N` and `/` search use this order.
+#[allow(dead_code)]
 pub fn help_entries() -> impl Iterator<Item = &'static HelpEntry> {
     HELP_GROUPS.iter().flat_map(|group| group.entries.iter())
 }
@@ -218,6 +218,7 @@ pub fn help_entry_matches(keys: &str, desc: &str, query: &str) -> bool {
 }
 
 /// Indices of flattened help entries that match `query`, in order.
+#[allow(dead_code)]
 pub fn help_match_indices(query: &str) -> Vec<usize> {
     help_entries()
         .enumerate()
@@ -226,37 +227,6 @@ pub fn help_match_indices(query: &str) -> Vec<usize> {
         .collect()
 }
 
-/// Next/prev match index with wrap. Empty `hits` → `None`.
-pub fn step_help_match(hits: &[usize], current: Option<usize>, dir: i32) -> Option<usize> {
-    if hits.is_empty() {
-        return None;
-    }
-    let pos = current.and_then(|cur| hits.iter().position(|&h| h == cur));
-    let Some(pos) = pos else {
-        return if dir < 0 {
-            hits.last().copied()
-        } else {
-            hits.first().copied()
-        };
-    };
-    let len = hits.len() as i32;
-    let next = (pos as i32 + dir).rem_euclid(len) as usize;
-    hits.get(next).copied()
-}
-
-/// Flat index for `groups[group_i].entries[row]`.
-pub fn help_flat_index(group_i: usize, row: usize) -> Option<usize> {
-    let group = HELP_GROUPS.get(group_i)?;
-    if row >= group.entries.len() {
-        return None;
-    }
-    let before: usize = HELP_GROUPS
-        .iter()
-        .take(group_i)
-        .map(|g| g.entries.len())
-        .sum();
-    Some(before + row)
-}
 
 #[cfg(test)]
 mod tests {
@@ -264,25 +234,15 @@ mod tests {
 
     #[test]
     fn matches_case_insensitive_keys_or_desc() {
-        assert!(help_entry_matches("Ctrl+O", "full-file context", "ctrl"));
-        assert!(help_entry_matches("Ctrl+O", "full-file context", "FILE"));
-        assert!(!help_entry_matches("Ctrl+O", "full-file context", "zzz"));
+        assert!(help_entry_matches("Ctrl-o", "full-file · keep hunk in view", "ctrl"));
+        assert!(help_entry_matches("Ctrl-o", "full-file · keep hunk in view", "FILE"));
+        assert!(!help_entry_matches("Ctrl-o", "full-file · keep hunk in view", "zzz"));
     }
 
     #[test]
     fn empty_query_is_not_a_match() {
-        assert!(!help_entry_matches("j/k", "move", ""));
-        assert!(!help_entry_matches("j/k", "move", "   "));
-    }
-
-    #[test]
-    fn step_wraps_help_hits() {
-        let hits = vec![2, 5, 9];
-        assert_eq!(step_help_match(&hits, None, 1), Some(2));
-        assert_eq!(step_help_match(&hits, Some(2), 1), Some(5));
-        assert_eq!(step_help_match(&hits, Some(9), 1), Some(2));
-        assert_eq!(step_help_match(&hits, Some(2), -1), Some(9));
-        assert_eq!(step_help_match(&[], None, 1), None);
+        assert!(!help_entry_matches("j k", "down / up", ""));
+        assert!(!help_entry_matches("j k", "down / up", "   "));
     }
 
     #[test]
@@ -295,16 +255,17 @@ mod tests {
         assert!(keys.contains(&"q"));
         assert!(keys.contains(&"Tab"));
         assert!(keys.contains(&"C"));
-        assert!(keys.contains(&"a/p/D"));
+        assert!(keys.contains(&"a p D"));
+        assert!(keys.contains(&"Home End"));
         let move_keys: Vec<&str> = HELP_GROUPS[0].entries.iter().map(|e| e.keys).collect();
         let view_keys: Vec<&str> = HELP_GROUPS[2].entries.iter().map(|e| e.keys).collect();
-        assert!(!move_keys.contains(&"PgUp/PgDn"));
-        assert!(!move_keys.contains(&"Ctrl+u/d"));
-        assert!(view_keys.contains(&"PgUp/PgDn"));
-        assert!(view_keys.contains(&"Ctrl+u/d"));
+        assert!(!move_keys.contains(&"PgUp PgDn"));
+        assert!(!move_keys.contains(&"Ctrl-u Ctrl-d"));
+        assert!(view_keys.contains(&"PgUp PgDn"));
+        assert!(view_keys.contains(&"Ctrl-u Ctrl-d"));
         assert!(view_keys.contains(&"."));
         assert!(view_keys.contains(&"T"));
-        assert!(view_keys.contains(&"Ctrl+O"));
+        assert!(view_keys.contains(&"Ctrl-o"));
         assert!(view_keys.contains(&"m"));
         assert!(view_keys.contains(&"Esc"));
         assert!(help_match_indices("quit")

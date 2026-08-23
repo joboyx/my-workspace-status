@@ -30,8 +30,7 @@ use super::drill::{
 use super::easy_motion::{resolve_easy_motion_jump, visible_window, EasyMotionResolve};
 use super::fetch::background_fetch_targets;
 use super::gates::{dispatch_is_noop, ListFocusTarget};
-use super::help::{help_match_indices, step_help_match};
-use super::keys::InputMode;
+use super::keys::{InputMode, DOUBLE_TAP_MS};
 use super::ops::{
     collect_write_files, op_is_kind_noop, op_targets, push_targets, refresh_target,
     should_delete_untracked, Op, ScopedFile,
@@ -137,6 +136,8 @@ enum EasyMotionList {
 pub enum PendingConfirm {
     Revert {
         targets: Vec<RevertTarget>,
+        /// Focused-row path shown in the overlay (Ink `Confirm.label`).
+        label: String,
     },
     StashDrop {
         repo: String,
@@ -151,6 +152,8 @@ pub enum PendingConfirm {
         primary: String,
         path: String,
         force: bool,
+        branch: String,
+        merged_into_default: Option<bool>,
     },
 }
 
@@ -181,8 +184,6 @@ pub struct AppState {
     pub cursor: usize,
     pub help_open: bool,
     pub help_search_query: Option<String>,
-    pub help_search_armed: bool,
-    pub help_search_hit: Option<usize>,
     pub focus: FocusPane,
     pub status: String,
     pub graph: Option<GraphModel>,
@@ -229,6 +230,7 @@ pub struct AppState {
     pub theme: ThemeId,
     pub mouse_enabled: bool,
     pub(crate) z_pending_at: Option<Instant>,
+    pub(crate) g_pending_at: Option<Instant>,
     last_click: Option<(u16, u16, Instant)>,
 }
 
@@ -273,8 +275,6 @@ impl AppState {
             cursor,
             help_open: false,
             help_search_query: None,
-            help_search_armed: false,
-            help_search_hit: None,
             focus: FocusPane::Left,
             status: String::new(),
             graph: None,
@@ -316,6 +316,7 @@ impl AppState {
             theme: theme_from_env(),
             mouse_enabled: true,
             z_pending_at: None,
+            g_pending_at: None,
             last_click: None,
         };
         state.reconcile_viewed_store();
@@ -333,9 +334,7 @@ impl AppState {
             InputMode::BranchPicker
         } else if self.help_open {
             if self.help_search_query.is_some() {
-                InputMode::HelpSearch {
-                    armed: self.help_search_armed,
-                }
+                InputMode::HelpSearch
             } else {
                 InputMode::Help
             }
@@ -343,11 +342,23 @@ impl AppState {
             InputMode::SearchPrompt
         } else if self.easy_motion.is_some() {
             InputMode::EasyMotion
+        } else if self.chord_pending(self.z_pending_at) {
+            InputMode::ZPending {
+                search_active: self.search_active,
+            }
+        } else if self.chord_pending(self.g_pending_at) {
+            InputMode::GPending {
+                search_active: self.search_active,
+            }
         } else {
             InputMode::Normal {
                 search_active: self.search_active,
             }
         }
+    }
+
+    fn chord_pending(&self, at: Option<Instant>) -> bool {
+        at.is_some_and(|t| t.elapsed() <= Duration::from_millis(DOUBLE_TAP_MS))
     }
 
     pub fn focused_row(&self) -> Option<&VisibleRow> {
@@ -685,15 +696,26 @@ impl AppState {
         if !matches!(action, Action::FoldToggle) {
             self.z_pending_at = None;
         }
-        if dispatch_is_noop(
+        if !matches!(action, Action::ArmGChord) {
+            self.g_pending_at = None;
+        }
+        let noop = dispatch_is_noop(
             &action,
             self.nav_depth(),
             self.focus == FocusPane::Right,
             self.list_focus_target(),
-        ) {
+        );
+        if noop && !matches!(action, Action::FoldToggle) {
             return Effect::None;
         }
         match action {
+            Action::FoldToggle => {
+                if !noop {
+                    self.fold_op(FoldOp::Toggle);
+                }
+                self.z_pending_at = Some(Instant::now());
+                Effect::None
+            }
             Action::Quit => Effect::Quit,
             Action::ToggleHelp => {
                 self.drag = SplitDrag::None;
@@ -708,7 +730,14 @@ impl AppState {
                 let height = self.layout.tree_height.max(1) as i32;
                 self.move_focused(pages * height)
             }
-            Action::FoldToggle => self.fold_toggle_or_zz(),
+            Action::FoldToggleSubtree => {
+                self.fold_subtree();
+                Effect::None
+            }
+            Action::ArmGChord => {
+                self.g_pending_at = Some(Instant::now());
+                Effect::None
+            }
             Action::FoldClose => {
                 self.fold_op(FoldOp::Close);
                 Effect::None
@@ -809,9 +838,6 @@ impl AppState {
                 self.drag = SplitDrag::None;
                 if self.help_open {
                     self.help_search_query = Some(String::new());
-                    self.help_search_armed = false;
-                    self.help_search_hit = None;
-                    self.status = "/".into();
                     Effect::None
                 } else {
                     self.search_mode = true;
@@ -828,7 +854,6 @@ impl AppState {
                     if let Some(q) = &mut self.help_search_query {
                         q.push(c);
                     }
-                    self.refresh_help_search(0);
                     Effect::None
                 } else if self.search_mode {
                     self.search_query.push(c);
@@ -843,7 +868,6 @@ impl AppState {
                     if let Some(q) = &mut self.help_search_query {
                         q.pop();
                     }
-                    self.refresh_help_search(0);
                     Effect::None
                 } else if self.search_mode {
                     self.search_query.pop();
@@ -855,19 +879,6 @@ impl AppState {
             }
             Action::SearchSubmit => {
                 if self.help_open && self.help_search_query.is_some() {
-                    let empty = self
-                        .help_search_query
-                        .as_deref()
-                        .map(|q| q.trim().is_empty())
-                        .unwrap_or(true);
-                    if empty {
-                        self.help_search_armed = false;
-                        self.help_search_hit = None;
-                        self.status = "/".into();
-                    } else {
-                        self.help_search_armed = true;
-                        self.refresh_help_search(0);
-                    }
                     Effect::None
                 } else {
                     self.search_mode = false;
@@ -899,10 +910,7 @@ impl AppState {
                 }
             }
             Action::SearchNext => {
-                if self.help_open && self.help_search_armed {
-                    self.refresh_help_search(1);
-                    Effect::None
-                } else if self.search_active && !self.search_query.trim().is_empty() {
+                if self.search_active && !self.search_query.trim().is_empty() {
                     self.apply_search(1);
                     self.search_load_effect()
                 } else {
@@ -910,10 +918,7 @@ impl AppState {
                 }
             }
             Action::SearchPrev => {
-                if self.help_open && self.help_search_armed {
-                    self.refresh_help_search(-1);
-                    Effect::None
-                } else if self.search_active && !self.search_query.trim().is_empty() {
+                if self.search_active && !self.search_query.trim().is_empty() {
                     self.apply_search(-1);
                     self.search_load_effect()
                 } else {
@@ -1263,45 +1268,6 @@ impl AppState {
 
     fn clear_help_search(&mut self) {
         self.help_search_query = None;
-        self.help_search_armed = false;
-        self.help_search_hit = None;
-    }
-
-    fn refresh_help_search(&mut self, dir: i32) {
-        let query = self.help_search_query.as_deref().unwrap_or("");
-        let hits = help_match_indices(query);
-        self.help_search_hit = if dir == 0 {
-            hits.first().copied()
-        } else {
-            step_help_match(&hits, self.help_search_hit, dir)
-        };
-        if let Some(q) = &self.help_search_query {
-            if q.trim().is_empty() {
-                self.status = "/".into();
-            } else if let Some(hit) = self.help_search_hit {
-                self.status = format!(
-                    "/{q}  {}/{}",
-                    hits.iter().position(|&h| h == hit).unwrap_or(0) + 1,
-                    hits.len()
-                );
-            } else {
-                self.status = format!("/{q}  no match");
-            }
-        }
-    }
-
-    fn fold_toggle_or_zz(&mut self) -> Effect {
-        if let Some(at) = self.z_pending_at {
-            if at.elapsed() <= Duration::from_millis(400) {
-                self.z_pending_at = None;
-                self.fold_op(FoldOp::Toggle);
-                self.fold_subtree();
-                return Effect::None;
-            }
-        }
-        self.fold_op(FoldOp::Toggle);
-        self.z_pending_at = Some(Instant::now());
-        Effect::None
     }
 
     fn fold_subtree(&mut self) {
@@ -2073,26 +2039,28 @@ impl AppState {
                 old_path: file.change.old_path.clone(),
             })
             .collect();
-        let tracked = targets.iter().filter(|t| !t.untracked).count();
-        let untracked = targets.iter().filter(|t| t.untracked).count();
-        self.confirm = Some(PendingConfirm::Revert {
-            targets: targets.clone(),
-        });
-        self.status = if targets.len() == 1 {
-            if targets[0].untracked {
-                format!("delete {}? y/n", targets[0].path)
-            } else {
-                format!("revert {}? y/n", targets[0].path)
-            }
-        } else {
-            format!("revert {tracked} tracked, {untracked} untracked? y/Y/n")
-        };
+        let label = self
+            .focused_row()
+            .map(|row| {
+                if row.chrome.path.is_empty() {
+                    row.label.clone()
+                } else {
+                    row.chrome.path.clone()
+                }
+            })
+            .unwrap_or_else(|| {
+                targets
+                    .first()
+                    .map(|t| t.path.clone())
+                    .unwrap_or_default()
+            });
+        self.confirm = Some(PendingConfirm::Revert { targets, label });
         Effect::None
     }
 
     fn confirm_yes(&mut self, clean: bool) -> Effect {
         match self.confirm.take() {
-            Some(PendingConfirm::Revert { targets }) => {
+            Some(PendingConfirm::Revert { targets, .. }) => {
                 if targets.is_empty() {
                     return Effect::None;
                 }
@@ -2141,6 +2109,7 @@ impl AppState {
                 primary,
                 path,
                 force,
+                ..
             }) => {
                 self.status = format!("remove worktree {path}");
                 Effect::RemoveWorktree {
@@ -2220,12 +2189,15 @@ impl AppState {
         };
         let force = snap.has_unstaged || snap.has_staged || snap.has_untracked;
         let path = snap.repo.clone();
+        let branch = snap.branch.clone();
+        let merged_into_default = snap.merged_into_default;
         self.confirm = Some(PendingConfirm::RemoveWorktree {
             primary,
-            path: path.clone(),
+            path,
             force,
+            branch,
+            merged_into_default,
         });
-        self.status = format!("remove worktree {path}? y/n");
         Effect::None
     }
 
@@ -2355,7 +2327,6 @@ impl AppState {
                     repo,
                     stash_ref: stash_ref.clone(),
                 });
-                self.status = format!("drop {stash_ref}? y/n");
                 Effect::None
             }
         }
@@ -2397,7 +2368,7 @@ impl AppState {
             .and_then(|r| r.default_branch_override.clone());
         let sorted = super::branches::sort_branches_for_picker(branches, default.as_deref());
         self.branch_picker = Some(BranchPickerState::new(repo, sorted));
-        self.status = "j/k move  type filter  Enter checkout  C create".into();
+        self.status.clear();
     }
 
     fn submit_branch_picker(&mut self) -> Effect {
@@ -2451,9 +2422,6 @@ impl AppState {
                 branch: branch.clone(),
                 remote_ref: remote_ref.clone(),
             });
-            self.status = format!(
-                "{branch} is not in sync with {remote_ref}. checkout then fast-forward? y/n"
-            );
             Effect::None
         } else {
             self.checkout_or_confirm(repo, branch)
@@ -2472,7 +2440,7 @@ impl AppState {
             name: seed,
             commit_id: None,
         });
-        self.status = "create branch  Enter confirm  Esc cancel".into();
+        self.status.clear();
         Effect::None
     }
 
@@ -2527,8 +2495,12 @@ impl AppState {
         if names.len() == 1 {
             return self.checkout_or_confirm(repo, names[0].clone());
         }
-        self.branch_picker = Some(BranchPickerState::from_names(repo, names));
-        self.status = "j/k move  type filter  Enter checkout  C create".into();
+        self.branch_picker = Some(BranchPickerState::from_names(
+            repo,
+            names,
+            Some(commit.id.clone()),
+        ));
+        self.status.clear();
         Effect::None
     }
 
@@ -2547,14 +2519,13 @@ impl AppState {
             return Effect::None;
         };
         let commit_id = commit.id.clone();
-        let short = commit_id.get(..7).unwrap_or(&commit_id).to_string();
         self.help_open = false;
         self.create_branch = Some(CreateBranchState {
             repo,
             name: String::new(),
             commit_id: Some(commit_id),
         });
-        self.status = format!("create branch at {short}  Enter confirm  Esc cancel");
+        self.status.clear();
         Effect::None
     }
 
@@ -2801,7 +2772,6 @@ impl AppState {
                     repo,
                     stash_ref: stash_ref.clone(),
                 });
-                self.status = format!("drop {stash_ref}? y/n");
                 Effect::None
             }
             StashOpId::Create => Effect::None,
@@ -3261,8 +3231,7 @@ mod tests {
             app.confirm,
             Some(PendingConfirm::RemoveWorktree { .. })
         ));
-        assert!(app.status.contains("remove worktree"));
-        assert!(app.status.contains("y/n"));
+        assert!(app.confirm.is_some());
         app.dispatch(Action::ConfirmNo);
         assert!(app.confirm.is_none());
     }
@@ -5021,7 +4990,6 @@ mod tests {
         app.open_stash_menu("app".into(), Some("stash@{0}".into()));
         assert_eq!(app.dispatch(Action::StashMenuChar('d')), Effect::None);
         assert!(app.confirm.is_some());
-        assert!(app.status.contains("drop stash@{0}? y/n"));
         match app.dispatch(Action::ConfirmYes) {
             Effect::StashDrop { stash_ref, .. } => assert_eq!(stash_ref, "stash@{0}"),
             other => panic!("{other:?}"),
@@ -5682,21 +5650,22 @@ mod tests {
         assert!(app.help_search_query.is_some());
         assert!(!app.search_mode);
         assert!(!app.search_active);
-        assert_eq!(app.input_mode(), InputMode::HelpSearch { armed: false });
+        assert_eq!(app.input_mode(), InputMode::HelpSearch);
         app.dispatch(Action::SearchChar('q'));
         app.dispatch(Action::SearchChar('u'));
         app.dispatch(Action::SearchChar('i'));
         assert_eq!(app.help_search_query.as_deref(), Some("qui"));
         assert!(!app.search_mode);
+        app.dispatch(Action::SearchChar('n'));
+        assert_eq!(app.help_search_query.as_deref(), Some("quin"));
         app.dispatch(Action::SearchSubmit);
-        assert!(app.help_search_armed);
-        assert!(app.help_search_hit.is_some());
+        assert_eq!(app.help_search_query.as_deref(), Some("quin"));
         app.dispatch(Action::SearchNext);
         app.dispatch(Action::SearchPrev);
+        assert_eq!(app.help_search_query.as_deref(), Some("quin"));
         app.dispatch(Action::SearchCancel);
         assert!(app.help_open);
         assert!(app.help_search_query.is_none());
-        assert!(!app.help_search_armed);
     }
 
     #[test]
@@ -5829,13 +5798,25 @@ mod tests {
     }
 
     #[test]
-    fn zz_within_400ms_folds_subtree() {
+    fn zz_second_z_is_toggle_subtree() {
         let mut app = tree_app();
         focus_id(&mut app, "repo:app");
         app.dispatch(Action::FoldToggle);
         assert!(app.folds.contains("repo:app"));
         assert!(!app.folds.contains("dir:app:src"));
-        app.dispatch(Action::FoldToggle);
+        app.dispatch(Action::FoldToggleSubtree);
+        assert!(
+            !app.folds.contains("repo:app"),
+            "toggleSubtree on a folded parent opens the subtree"
+        );
+        assert!(!app.folds.contains("dir:app:src"));
+    }
+
+    #[test]
+    fn fold_toggle_subtree_closes_an_open_subtree() {
+        let mut app = tree_app();
+        focus_id(&mut app, "repo:app");
+        app.dispatch(Action::FoldToggleSubtree);
         assert!(app.folds.contains("repo:app"));
         assert!(app.folds.contains("dir:app:src"));
         assert!(app.rows.iter().all(|r| r.id != "file:app:src/lib.rs"));
@@ -5852,6 +5833,19 @@ mod tests {
         app.dispatch(Action::FoldToggle);
         assert!(!app.folds.contains("dir:app:src"));
         assert!(!app.folds.contains("repo:app"));
+    }
+
+    #[test]
+    fn gg_chord_arms_without_moving_then_moves_to_start() {
+        let mut app = tree_app();
+        app.cursor = 3.min(app.rows.len().saturating_sub(1));
+        let before = app.cursor;
+        app.dispatch(Action::ArmGChord);
+        assert_eq!(app.cursor, before);
+        assert!(app.g_pending_at.is_some());
+        app.dispatch(Action::MoveToStart);
+        assert_eq!(app.cursor, 0);
+        assert!(app.g_pending_at.is_none());
     }
 
     #[test]
