@@ -93,7 +93,10 @@ pub enum Effect {
     Fetch { repos: Vec<String> },
     Pull { repos: Vec<String> },
     DefaultBranch { repos: Vec<String> },
+    /// Reload every checkout (`r` on the workspace row or No-updates group).
     ReloadSnapshot,
+    /// Reload one checkout (`r` on a repo, checkout, file, or dir row).
+    ReloadRepo { repo: String },
     LoadRightPane,
     Stage {
         repo: String,

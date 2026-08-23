@@ -29,7 +29,8 @@ use super::fetch::background_fetch_targets;
 use super::help::{help_match_indices, step_help_match};
 use super::keys::InputMode;
 use super::ops::{
-    collect_write_files, op_targets, push_targets, should_delete_untracked, Op, ScopedFile,
+    collect_write_files, op_targets, push_targets, refresh_target, should_delete_untracked,
+    Op, ScopedFile,
 };
 use super::search::{
     apply_pan, focus_commit_file_search, focus_diff_search, focus_graph_search, focus_tree_search,
@@ -632,7 +633,7 @@ impl AppState {
             Action::Fetch => self.op_effect(Op::Fetch),
             Action::Pull => self.op_effect(Op::Pull),
             Action::DefaultBranch => self.op_effect(Op::DefaultBranch),
-            Action::Refresh => Effect::ReloadSnapshot,
+            Action::Refresh => self.refresh_effect(),
             Action::ToggleReviewed => self.toggle_reviewed(),
             Action::FocusLeft => {
                 self.focus = FocusPane::Left;
@@ -1135,6 +1136,13 @@ impl AppState {
                     Effect::DefaultBranch { repos }
                 }
             }
+        }
+    }
+
+    fn refresh_effect(&self) -> Effect {
+        match refresh_target(self.focused_row()) {
+            None => Effect::ReloadSnapshot,
+            Some(repo) => Effect::ReloadRepo { repo },
         }
     }
 
@@ -1873,10 +1881,8 @@ impl AppState {
             })
             .collect();
         if selected.is_empty() {
-            self.status = match write {
-                FileWrite::Stage => "nothing to stage".into(),
-                FileWrite::Unstage => "nothing to unstage".into(),
-            };
+            let kind = self.focused_row().map(|row| row.kind);
+            self.status = empty_write_status(kind, write);
             return Effect::None;
         }
         let groups = group_write_paths(&selected);
@@ -1914,8 +1920,13 @@ impl AppState {
             });
             self.status = if staged_only {
                 "nothing to discard (staged only)".into()
-            } else {
+            } else if matches!(
+                self.focused_row().map(|row| row.kind),
+                Some(NodeKind::File | NodeKind::Dir | NodeKind::Repo | NodeKind::Checkout)
+            ) {
                 "nothing to discard".into()
+            } else {
+                "focus a file, dir, checkout, or repo to revert".into()
             };
             return Effect::None;
         }
@@ -2654,6 +2665,19 @@ enum FileWrite {
     Unstage,
 }
 
+fn empty_write_status(kind: Option<NodeKind>, write: FileWrite) -> String {
+    let verb = match write {
+        FileWrite::Stage => "stage",
+        FileWrite::Unstage => "unstage",
+    };
+    match kind {
+        Some(NodeKind::File | NodeKind::Dir | NodeKind::Repo | NodeKind::Checkout) => {
+            format!("nothing to {verb}")
+        }
+        _ => format!("focus a file, dir, checkout, or repo to {verb}"),
+    }
+}
+
 fn is_stageable(change: &FileChange) -> bool {
     change.unstaged_status.is_some() || change.untracked
 }
@@ -2987,7 +3011,7 @@ mod tests {
     }
 
     #[test]
-    fn bulk_stage_on_repo_and_workspace_rows() {
+    fn bulk_stage_on_repo_and_file_rows() {
         let snapshot = build_workspace_snapshot(
             &[two_file_repo(), repo("notes", true)],
             &["notes".into()],
@@ -2996,14 +3020,7 @@ mod tests {
         );
         let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         app.cursor = 0;
-        match app.dispatch(Action::Stage) {
-            Effect::Stage { repo, mut paths } => {
-                assert_eq!(repo, "app");
-                paths.sort();
-                assert_eq!(paths, vec!["README.md", "new.txt"]);
-            }
-            other => panic!("{other:?}"),
-        }
+        assert_eq!(app.dispatch(Action::Stage), Effect::None);
         focus_repo(&mut app, "app");
         match app.dispatch(Action::Stage) {
             Effect::Stage { repo, mut paths } => {
@@ -3020,6 +3037,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bulk_stage_on_checkout_not_family_container() {
+        let mut linked = two_file_repo();
+        linked.repo = ".worktrees/app/feat".into();
+        linked.checkout_kind = CheckoutKind::Linked;
+        linked.primary_repo = Some("app".into());
+        linked.has_untracked = false;
+        linked.changes = vec![FileChange {
+            path: "wt.md".into(),
+            staged_status: None,
+            unstaged_status: Some("M".into()),
+            untracked: false,
+            old_path: None,
+        }];
+        let snapshot = build_workspace_snapshot(&[two_file_repo(), linked], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        focus_repo(&mut app, "app");
+        assert_eq!(app.dispatch(Action::Stage), Effect::None);
+        let idx = app
+            .rows
+            .iter()
+            .position(|row| row.kind == NodeKind::Checkout && row.repo.as_deref() == Some("app"))
+            .expect("primary checkout");
+        app.cursor = idx;
+        match app.dispatch(Action::Stage) {
+            Effect::Stage { repo, mut paths } => {
+                assert_eq!(repo, "app");
+                paths.sort();
+                assert_eq!(paths, vec!["README.md", "new.txt"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        let wt = app
+            .rows
+            .iter()
+            .position(|row| {
+                row.kind == NodeKind::Checkout
+                    && row.repo.as_deref() == Some(".worktrees/app/feat")
+            })
+            .expect("linked checkout");
+        app.cursor = wt;
+        match app.dispatch(Action::Stage) {
+            Effect::Stage { repo, paths } => {
+                assert_eq!(repo, ".worktrees/app/feat");
+                assert_eq!(paths, vec!["wt.md"]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     fn mixed_dirty(name: &str) -> RepoSnapshot {
         let mut snap = two_file_repo();
         snap.repo = name.into();
@@ -3027,7 +3094,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_stage_and_revert_cover_two_dirty_primaries() {
+    fn workspace_stage_unstage_revert_are_noop() {
         let snapshot =
             build_workspace_snapshot(&[mixed_dirty("app"), mixed_dirty("api")], &[], false, &[]);
         let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
@@ -3036,73 +3103,87 @@ mod tests {
             app.focused_row().map(|row| row.kind),
             Some(NodeKind::Workspace)
         );
-        match app.dispatch(Action::Stage) {
-            Effect::Batch(children) => {
-                assert_eq!(
-                    children,
-                    vec![
-                        Effect::Stage {
-                            repo: "api".into(),
-                            paths: vec!["README.md".into(), "new.txt".into()],
-                        },
-                        Effect::Stage {
-                            repo: "app".into(),
-                            paths: vec!["README.md".into(), "new.txt".into()],
-                        },
-                    ]
-                );
-            }
-            other => panic!("{other:?}"),
-        }
-        assert_eq!(app.status, "stage 4 files");
-
-        app.cursor = 0;
+        assert_eq!(app.dispatch(Action::Stage), Effect::None);
+        assert_eq!(app.dispatch(Action::Unstage), Effect::None);
         assert_eq!(app.dispatch(Action::Revert), Effect::None);
-        match app.dispatch(Action::ConfirmYes) {
-            Effect::Batch(children) => {
-                assert_eq!(
-                    children,
-                    vec![
-                        Effect::Revert {
-                            repo: "api".into(),
-                            tracked: vec!["README.md".into()],
-                            untracked: vec![],
-                        },
-                        Effect::Revert {
-                            repo: "app".into(),
-                            tracked: vec!["README.md".into()],
-                            untracked: vec![],
-                        },
-                    ]
-                );
-            }
-            other => panic!("{other:?}"),
-        }
-        assert_eq!(app.status, "revert 2 tracked, 0 untracked");
+        assert!(app.confirm.is_none());
+    }
 
-        app.cursor = 0;
-        assert_eq!(app.dispatch(Action::Revert), Effect::None);
-        match app.dispatch(Action::ConfirmYesClean) {
-            Effect::Batch(children) => {
-                assert_eq!(
-                    children,
-                    vec![
-                        Effect::Revert {
-                            repo: "api".into(),
-                            tracked: vec!["README.md".into()],
-                            untracked: vec!["new.txt".into()],
-                        },
-                        Effect::Revert {
-                            repo: "app".into(),
-                            tracked: vec!["README.md".into()],
-                            untracked: vec!["new.txt".into()],
-                        },
-                    ]
-                );
-            }
+    #[test]
+    fn no_updates_group_fetch_pull_default_are_noop() {
+        let mut app = state();
+        let idx = app
+            .rows
+            .iter()
+            .position(|row| row.id == "group:no-updates")
+            .expect("no-updates group");
+        app.cursor = idx;
+        assert_eq!(app.dispatch(Action::Fetch), Effect::None);
+        assert_eq!(app.dispatch(Action::Pull), Effect::None);
+        assert_eq!(app.dispatch(Action::DefaultBranch), Effect::None);
+    }
+
+    #[test]
+    fn refresh_on_checkout_names_that_repo() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        match app.dispatch(Action::Refresh) {
+            Effect::ReloadRepo { repo } => assert_eq!(repo, "app"),
             other => panic!("{other:?}"),
         }
-        assert_eq!(app.status, "revert 2 tracked, 2 untracked");
+        app.cursor = 0;
+        assert_eq!(
+            app.focused_row().map(|row| row.kind),
+            Some(NodeKind::Workspace)
+        );
+        assert_eq!(app.dispatch(Action::Refresh), Effect::ReloadSnapshot);
+        let idx = app
+            .rows
+            .iter()
+            .position(|row| row.id == "group:no-updates")
+            .expect("no-updates group");
+        app.cursor = idx;
+        assert_eq!(app.dispatch(Action::Refresh), Effect::ReloadSnapshot);
+    }
+
+    #[test]
+    fn refresh_on_linked_checkout_names_that_path() {
+        let snapshot = build_workspace_snapshot(
+            &[
+                repo("app", true),
+                RepoSnapshot {
+                    repo: ".worktrees/app/feat".into(),
+                    branch: "feature/x".into(),
+                    sync_status: SyncStatus::NoUpstream,
+                    sync_note: String::new(),
+                    has_unstaged: false,
+                    has_staged: false,
+                    has_untracked: false,
+                    changes: Vec::new(),
+                    checkout_kind: CheckoutKind::Linked,
+                    primary_repo: Some("app".into()),
+                    merged_into_default: None,
+                    default_branch_override: None,
+                },
+            ],
+            &[],
+            false,
+            &[],
+        );
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let idx = app
+            .rows
+            .iter()
+            .position(|row| {
+                row.kind == NodeKind::Checkout
+                    && row.repo.as_deref() == Some(".worktrees/app/feat")
+            })
+            .expect("linked checkout");
+        app.cursor = idx;
+        match app.dispatch(Action::Refresh) {
+            Effect::ReloadRepo { repo } => assert_eq!(repo, ".worktrees/app/feat"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -3206,7 +3287,7 @@ mod tests {
         assert!(app.status.contains("no match"));
         app.dispatch(Action::SearchCancel);
         assert!(app.rows.iter().all(|r| !r.label.contains("notes")));
-        app.cursor = 0;
+        focus_repo(&mut app, "app");
         match app.dispatch(Action::Stage) {
             Effect::Stage { repo, paths } => {
                 assert_eq!(repo, "app");
