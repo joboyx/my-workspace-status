@@ -9,8 +9,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use workspace_status_graph::{
-    Commit, GraphModel, GraphRef, GraphRow, Stash, SyncState, SyncStatus, Worktree,
-    DEFAULT_GRAPH_WINDOW,
+    Commit, GraphModel, GraphRef, Stash, SyncState, SyncStatus, Worktree, DEFAULT_GRAPH_WINDOW,
 };
 
 use crate::git::exec_git;
@@ -496,7 +495,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn parse_stash_line_loads_id_date_and_author() {
         let line =
             "stash@{1}\0s1abcdef\0parentsha othersha\0WIP on main\x001700000000\0Ada Lovelace";
@@ -611,6 +609,8 @@ mod live_git {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    use workspace_status_graph::GraphRow;
 
     use crate::snapshot::{build_workspace_snapshot, CheckoutKind, RepoSnapshot, SyncStatus};
 
