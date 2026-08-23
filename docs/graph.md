@@ -34,6 +34,9 @@ uses the full lane model. `GraphWidget::loading_older` paints
 `loading older…` under the list. `GraphWidget::lane_colors` colours each
 gutter cell from `GraphCell.color_lane`; an empty slice uses
 `DEFAULT_LANE_COLORS` (Ink `laneColors.ts`).
+`GraphWidget::search_matches` paints the filter/search background on
+selectable visible-row indexes (Ink `searchMatchIds`). Spacers stay
+unhighlighted. The selected cursor still wins.
 
 ## Visible rows
 
