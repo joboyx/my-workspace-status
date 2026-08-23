@@ -9,52 +9,55 @@ use workspace_status_graph::{paint_model, GraphModel, GraphRow, ASCII, UNICODE};
 use crate::snapshot::{FileChange, WorkspaceSnapshot};
 
 use super::action::{Action, Effect};
+use super::branches::{
+    can_open_branch_picker, checkout_name_for_ref, checkoutable_branch_names, is_valid_branch_name,
+    BranchPickerState, CreateBranchState,
+};
 use super::commit_files::{
     ancestor_dir_ids, collect_foldable_subtree_ids as collect_commit_subtree_ids,
     flatten_commit_files, CommitFileRow,
+};
+use super::diff::{
+    anchor_row_index, build_diff_rows, cell_code_width, clamp_diff_scroll, gutter_width,
+    row_search_text, scroll_to_keep_row, DiffContent, DiffRow,
 };
 use super::drill::{
     source_from_graph_row, stash_ref_from_graph_row, CommitFile, CommitFileSource, DrillView,
 };
 use super::easy_motion::{resolve_easy_motion_jump, visible_window, EasyMotionResolve};
-use super::theme::{cycle_theme_id, theme_from_env, ThemeId};
-use super::branches::{
-    can_open_branch_picker, checkout_name_for_ref, checkoutable_branch_names, is_valid_branch_name,
-    BranchPickerState, CreateBranchState,
-};
-use super::keys::InputMode;
 use super::fetch::background_fetch_targets;
+use super::help::{help_match_indices, step_help_match};
+use super::keys::InputMode;
 use super::ops::{
-    collect_write_files, op_targets, push_targets, should_delete_untracked, ScopedFile, Op,
+    collect_write_files, op_targets, push_targets, should_delete_untracked, Op, ScopedFile,
 };
 use super::search::{
-    apply_pan, focus_commit_file_search, focus_diff_search,
-    focus_graph_search, focus_tree_search, hunk_anchor, max_col_offset, scroll_to_keep_anchor,
-    SearchPane,
+    apply_pan, focus_commit_file_search, focus_diff_search, focus_graph_search, focus_tree_search,
+    max_col_offset, SearchPane,
 };
-use crate::git::FULL_DIFF_CONTEXT_LINES;
 use super::split::{
-    clamp_tree_fraction, diff_split_fraction_from_col, hit_split, is_side_by_side_split,
-    pair_unified_lines, tree_fraction_from_col, DiffMode, SplitDrag, SplitHit, SplitLayout,
-    DIFF_SPLIT_FRACTION, TREE_WIDTH_FRACTION,
+    clamp_tree_fraction, diff_split_fraction_from_col, effective_diff_mode, hit_split,
+    tree_fraction_from_col, DiffMode, SplitDrag, SplitHit, SplitLayout, DIFF_SPLIT_FRACTION,
+    TREE_WIDTH_FRACTION,
 };
 use super::stash::{
     checkout_path, resolve_stash_menu_key, row_is_hidden_ignored, stash_dirty_for_row,
     stash_ops_for_context, StashMenuKeyResult, StashOp, StashOpId, StashOpsContext,
 };
-use super::help::{help_match_indices, step_help_match};
+use super::theme::{cycle_theme_id, theme_from_env, ThemeId};
 use super::tree::{
     build_tree, collect_foldable_subtree_ids, default_folds, flatten, visible_for_tree, NodeKind,
     TreeNode, VisibleRow,
 };
+#[cfg(not(test))]
+use super::viewed::viewed_store_path;
 use super::viewed::{
     collect_current_fingerprints, fingerprint_file_change, is_viewed, load_viewed_store,
     reconcile_viewed, save_viewed_store, toggle_viewed, viewed_identity, viewed_row_ids,
     ViewedStore,
 };
-#[cfg(not(test))]
-use super::viewed::viewed_store_path;
 use super::watch::{changed_row_ids, tree_signatures};
+use crate::git::FULL_DIFF_CONTEXT_LINES;
 use crate::snapshot::CheckoutKind;
 
 /// Which pane has keyboard focus.
@@ -77,6 +80,8 @@ pub struct LayoutHit {
     pub pane_height: u16,
     pub outer_tree_width: u16,
     pub diff_pane_width: u16,
+    /// Inner right-pane height (excludes the tree/graph border).
+    pub diff_pane_height: u16,
     pub diff_content_x: u16,
     pub diff_split_rule_x: Option<u16>,
     pub right_y: u16,
@@ -97,6 +102,7 @@ impl Default for LayoutHit {
             pane_height: 22,
             outer_tree_width: 48,
             diff_pane_width: 70,
+            diff_pane_height: 20,
             diff_content_x: 50,
             diff_split_rule_x: None,
             right_y: 1,
@@ -182,7 +188,7 @@ pub struct AppState {
     pub graph_scroll: u16,
     pub graph_cursor: usize,
     pub drill: DrillView,
-    pub diff_lines: Vec<String>,
+    pub diff_content: DiffContent,
     pub diff_scroll: u16,
     pub diff_repo: Option<String>,
     pub diff_path: Option<String>,
@@ -201,7 +207,7 @@ pub struct AppState {
     pub diff_col_offset: u16,
     /// File identities currently shown with unlimited `-U` context.
     pub full_context: HashSet<String>,
-    pending_hunk_anchor: Option<String>,
+    pending_hunk_anchor: Option<usize>,
     pub confirm: Option<PendingConfirm>,
     pub stash_menu: Option<Vec<StashOp>>,
     pub stash_repo: Option<String>,
@@ -263,7 +269,7 @@ impl AppState {
             graph_scroll: 0,
             graph_cursor: 0,
             drill: DrillView::Graph,
-            diff_lines: Vec::new(),
+            diff_content: DiffContent::default(),
             diff_scroll: 0,
             diff_repo: None,
             diff_path: None,
@@ -358,9 +364,7 @@ impl AppState {
         if self.in_commit_drill() {
             self.focus == FocusPane::Left
         } else {
-            self.focus == FocusPane::Right
-                && self.drill.is_graph()
-                && !self.tree_file_focused()
+            self.focus == FocusPane::Right && self.drill.is_graph() && !self.tree_file_focused()
         }
     }
 
@@ -431,9 +435,10 @@ impl AppState {
                 } else {
                     commit_id.as_str()
                 };
-                let commit = self.graph.as_ref().and_then(|model| {
-                    model.commits.iter().find(|commit| commit.id == *commit_id)
-                });
+                let commit = self
+                    .graph
+                    .as_ref()
+                    .and_then(|model| model.commits.iter().find(|commit| commit.id == *commit_id));
                 let refs = commit
                     .map(|commit| {
                         commit
@@ -579,7 +584,8 @@ impl AppState {
         self.diff_scroll = diff_scroll;
         let changed = changed_row_ids(&before, &self.signatures);
         let now = Instant::now();
-        self.flashes.retain(|_, at| now.duration_since(*at).as_millis() < 800);
+        self.flashes
+            .retain(|_, at| now.duration_since(*at).as_millis() < 800);
         for id in &changed {
             self.flashes.insert(id.clone(), now);
         }
@@ -1085,12 +1091,7 @@ impl AppState {
     }
 
     fn op_effect(&mut self, op: Op) -> Effect {
-        let targets = op_targets(
-            &self.snapshot,
-            self.focused_row(),
-            self.show_ignored,
-            op,
-        );
+        let targets = op_targets(&self.snapshot, self.focused_row(), self.show_ignored, op);
         if targets.is_empty() {
             self.status = "no visible repos for that op".into();
             return Effect::None;
@@ -1105,8 +1106,7 @@ impl AppState {
                     .into_iter()
                     .filter(|repo| {
                         self.snapshot.repos.iter().any(|r| {
-                            r.repo == *repo
-                                && r.sync_status == crate::snapshot::SyncStatus::Behind
+                            r.repo == *repo && r.sync_status == crate::snapshot::SyncStatus::Behind
                         })
                     })
                     .collect();
@@ -1169,7 +1169,11 @@ impl AppState {
             if q.trim().is_empty() {
                 self.status = "/".into();
             } else if let Some(hit) = self.help_search_hit {
-                self.status = format!("/{q}  {}/{}", hits.iter().position(|&h| h == hit).unwrap_or(0) + 1, hits.len());
+                self.status = format!(
+                    "/{q}  {}/{}",
+                    hits.iter().position(|&h| h == hit).unwrap_or(0) + 1,
+                    hits.len()
+                );
             } else {
                 self.status = format!("/{q}  no match");
             }
@@ -1291,14 +1295,8 @@ impl AppState {
     }
 
     fn scroll_right(&mut self, delta: i32) {
-        if let DrillView::Diff { lines, .. } = &self.drill {
-            let max = self.diff_scroll_max(lines) as i32;
-            let next = self.diff_scroll as i32 + delta;
-            self.diff_scroll = next.clamp(0, max) as u16;
-            return;
-        }
-        if self.right_is_diff() {
-            let max = self.diff_scroll_max(&self.diff_lines) as i32;
+        if self.right_is_diff() || self.drill.is_diff() {
+            let max = self.diff_scroll_max() as i32;
             let next = self.diff_scroll as i32 + delta;
             self.diff_scroll = next.clamp(0, max) as u16;
         } else {
@@ -1307,13 +1305,16 @@ impl AppState {
         }
     }
 
-    fn diff_scroll_max(&self, lines: &[String]) -> usize {
-        let count = if is_side_by_side_split(self.diff_mode, self.layout.diff_pane_width) {
-            pair_unified_lines(lines).len()
-        } else {
-            lines.len()
-        };
-        count.saturating_sub(1)
+    fn diff_body_height(&self) -> usize {
+        self.layout.diff_pane_height.saturating_sub(1).max(1) as usize
+    }
+
+    fn diff_scroll_max(&self) -> usize {
+        clamp_diff_scroll(
+            usize::MAX,
+            self.current_diff_rows().len(),
+            self.diff_body_height(),
+        )
     }
 
     fn split_layout(&self) -> SplitLayout {
@@ -1498,20 +1499,25 @@ impl AppState {
         }
         self.graph_identity = Some(identity);
         self.graph = Some(model);
-        let n = self.graph.as_ref().map(|g| g.visible_rows().len()).unwrap_or(0);
+        let n = self
+            .graph
+            .as_ref()
+            .map(|g| g.visible_rows().len())
+            .unwrap_or(0);
         if n == 0 {
             self.graph_cursor = 0;
         } else {
             self.graph_cursor = self.graph_cursor.min(n - 1);
         }
         if self.drill.is_graph() {
-            self.diff_lines.clear();
+            self.diff_content = DiffContent::default();
             self.diff_repo = None;
             self.diff_path = None;
         }
     }
 
-    pub fn set_diff(&mut self, repo: String, path: String, lines: Vec<String>) {
+    /// Store workspace-file diff content for the right pane.
+    pub fn set_diff(&mut self, repo: String, path: String, content: DiffContent) {
         let same = self.diff_repo.as_deref() == Some(repo.as_str())
             && self.diff_path.as_deref() == Some(path.as_str());
         if !same {
@@ -1520,7 +1526,7 @@ impl AppState {
         }
         self.diff_repo = Some(repo);
         self.diff_path = Some(path);
-        self.diff_lines = lines;
+        self.diff_content = content;
         self.apply_pending_hunk_anchor();
         if self.drill.is_graph() {
             self.graph = None;
@@ -1532,12 +1538,17 @@ impl AppState {
         self.graph_identity = None;
         self.graph_cursor = 0;
         self.drill = DrillView::Graph;
-        self.diff_lines.clear();
+        self.diff_content = DiffContent::default();
         self.diff_repo = None;
         self.diff_path = None;
     }
 
-    pub fn open_commit_files(&mut self, repo: String, source: CommitFileSource, files: Vec<CommitFile>) {
+    pub fn open_commit_files(
+        &mut self,
+        repo: String,
+        source: CommitFileSource,
+        files: Vec<CommitFile>,
+    ) {
         self.commit_file_folds.clear();
         self.status = format!("files {}", files.len());
         let cursor = DrillView::files_cursor(&files, 0);
@@ -1557,7 +1568,7 @@ impl AppState {
         files: Vec<CommitFile>,
         file_cursor: usize,
         path: String,
-        lines: Vec<String>,
+        content: DiffContent,
     ) {
         self.diff_scroll = 0;
         self.diff_col_offset = 0;
@@ -1568,7 +1579,7 @@ impl AppState {
             files,
             file_cursor,
             path,
-            lines,
+            content,
         };
         self.apply_pending_hunk_anchor();
     }
@@ -1611,11 +1622,29 @@ impl AppState {
         SearchPane::Graph
     }
 
-    fn current_diff_lines(&self) -> &[String] {
+    fn current_diff_content(&self) -> &DiffContent {
         match &self.drill {
-            DrillView::Diff { lines, .. } => lines,
-            _ => &self.diff_lines,
+            DrillView::Diff { content, .. } => content,
+            _ => &self.diff_content,
         }
+    }
+
+    /// Path shown in the diff pane header (`repo/path`, Ink `focusHint`).
+    pub fn diff_header_path(&self) -> String {
+        match &self.drill {
+            DrillView::Diff { repo, path, .. } => format!("{repo}/{path}"),
+            _ => match (self.diff_repo.as_deref(), self.diff_path.as_deref()) {
+                (Some(repo), Some(path)) => format!("{repo}/{path}"),
+                (_, Some(path)) => path.to_string(),
+                _ => String::new(),
+            },
+        }
+    }
+
+    /// Numbered rows for the current layout (inline vs split).
+    pub fn current_diff_rows(&self) -> Vec<DiffRow> {
+        let mode = effective_diff_mode(self.diff_mode, self.layout.diff_pane_width);
+        build_diff_rows(self.current_diff_content(), mode)
     }
 
     fn set_search_status(&mut self, hit: bool) {
@@ -1668,7 +1697,8 @@ impl AppState {
             return;
         };
         let rows = model.visible_rows();
-        let Some(idx) = focus_graph_search(&rows, &self.search_query, self.graph_cursor, dir) else {
+        let Some(idx) = focus_graph_search(&rows, &self.search_query, self.graph_cursor, dir)
+        else {
             self.set_search_status(false);
             return;
         };
@@ -1684,14 +1714,16 @@ impl AppState {
             self.set_search_status(false);
             return;
         };
-        let current_path = flatten_commit_files(files, self.commit_tree_mode, &self.commit_file_folds)
-            .get(*cursor)
-            .map(|row| row.path.clone());
+        let current_path =
+            flatten_commit_files(files, self.commit_tree_mode, &self.commit_file_folds)
+                .get(*cursor)
+                .map(|row| row.path.clone());
         let current_file_idx = current_path
             .as_deref()
             .and_then(|path| files.iter().position(|file| file.path == path))
             .unwrap_or(*cursor);
-        let Some(file_idx) = focus_commit_file_search(files, &self.search_query, current_file_idx, dir)
+        let Some(file_idx) =
+            focus_commit_file_search(files, &self.search_query, current_file_idx, dir)
         else {
             self.set_search_status(false);
             return;
@@ -1705,15 +1737,15 @@ impl AppState {
     }
 
     fn apply_diff_search(&mut self, dir: i32) {
-        let lines = self.current_diff_lines().to_vec();
-        let Some(idx) = focus_diff_search(&lines, &self.search_query, self.search_hit, dir) else {
+        let rows = self.current_diff_rows();
+        let texts: Vec<String> = rows.iter().map(row_search_text).collect();
+        let Some(idx) = focus_diff_search(&texts, &self.search_query, self.search_hit, dir) else {
             self.search_hit = None;
             self.set_search_status(false);
             return;
         };
         self.search_hit = Some(idx);
-        let view_h = self.layout.pane_height.max(1);
-        self.diff_scroll = scroll_to_keep_anchor(&lines, &lines[idx], view_h);
+        self.diff_scroll = scroll_to_keep_row(idx, self.diff_body_height(), rows.len());
         self.set_search_status(true);
     }
 
@@ -1721,9 +1753,19 @@ impl AppState {
         if self.focus != FocusPane::Right || !self.right_is_diff() {
             return;
         }
-        let lines = self.current_diff_lines();
-        let lens: Vec<usize> = lines.iter().map(|l| l.chars().count()).collect();
-        let viewport = self.layout.diff_pane_width.max(1) as usize;
+        let rows = self.current_diff_rows();
+        let gutter = gutter_width(&rows);
+        let mut lens = Vec::new();
+        for row in &rows {
+            if let DiffRow::Line { left, right } = row {
+                lens.push(left.text.chars().count());
+                if let Some(right) = right {
+                    lens.push(right.text.chars().count());
+                }
+            }
+        }
+        let pane_w = self.layout.diff_pane_width.max(1) as usize;
+        let viewport = cell_code_width(pane_w, gutter);
         let max = max_col_offset(&lens, viewport);
         self.diff_col_offset = apply_pan(self.diff_col_offset, delta, max);
     }
@@ -1773,7 +1815,6 @@ impl AppState {
         self.diff_context_for(&id)
     }
 
-    #[allow(dead_code)]
     pub fn full_context_active(&self) -> bool {
         self.diff_context_lines().is_some()
     }
@@ -1785,8 +1826,12 @@ impl AppState {
         let Some(id) = self.displayed_diff_id() else {
             return Effect::None;
         };
-        let lines = self.current_diff_lines();
-        self.pending_hunk_anchor = hunk_anchor(lines, self.diff_scroll as usize);
+        let rows = self.current_diff_rows();
+        self.pending_hunk_anchor = Some(anchor_row_index(
+            &rows,
+            self.diff_scroll as usize,
+            self.diff_body_height(),
+        ));
         if !self.full_context.remove(&id) {
             self.full_context.insert(id);
         }
@@ -1807,9 +1852,8 @@ impl AppState {
         let Some(anchor) = self.pending_hunk_anchor.take() else {
             return;
         };
-        let lines = self.current_diff_lines().to_vec();
-        let view_h = self.layout.pane_height.max(1);
-        self.diff_scroll = scroll_to_keep_anchor(&lines, &anchor, view_h);
+        let rows = self.current_diff_rows();
+        self.diff_scroll = scroll_to_keep_row(anchor, self.diff_body_height(), rows.len());
     }
 
     fn focused_file_if_shown(&self) -> Option<(String, FileChange)> {
@@ -1915,7 +1959,8 @@ impl AppState {
                 let delete_untracked = should_delete_untracked(&flags, clean);
                 let groups = group_revert_targets(&targets, delete_untracked);
                 let tracked_n: usize = groups.iter().map(|(_, tracked, _)| tracked.len()).sum();
-                let untracked_n: usize = groups.iter().map(|(_, _, untracked)| untracked.len()).sum();
+                let untracked_n: usize =
+                    groups.iter().map(|(_, _, untracked)| untracked.len()).sum();
                 self.status = if tracked_n + untracked_n == 1 {
                     if untracked_n == 1 {
                         format!("delete {}", groups[0].2[0])
@@ -2257,7 +2302,8 @@ impl AppState {
                 branch: branch.clone(),
                 remote_ref: remote_ref.clone(),
             });
-            self.status = format!("{branch} is not in sync with {remote_ref}. checkout then pull? y/n");
+            self.status =
+                format!("{branch} is not in sync with {remote_ref}. checkout then pull? y/n");
             Effect::None
         } else {
             self.checkout_or_confirm(repo, branch)
@@ -2770,13 +2816,15 @@ fn visible_snapshot(snapshot: &WorkspaceSnapshot, show_ignored: bool) -> Workspa
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::easy_motion::visible_window;
     use super::super::keys::InputMode;
     use super::super::theme::{resolve_theme_id, ThemeId};
+    use super::*;
+    use crate::snapshot::{
+        build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
+    };
     use crate::tui::split::{pane_widths, side_by_side_column_widths, DIFF_SPLIT_FRACTION};
     use crate::tui::watch::watch_interval_ms;
-    use crate::snapshot::{build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus};
     use workspace_status_graph::{Commit, GraphRef, Stash};
 
     fn repo(name: &str, dirty: bool) -> RepoSnapshot {
@@ -2990,12 +3038,8 @@ mod tests {
 
     #[test]
     fn workspace_stage_and_revert_cover_two_dirty_primaries() {
-        let snapshot = build_workspace_snapshot(
-            &[mixed_dirty("app"), mixed_dirty("api")],
-            &[],
-            false,
-            &[],
-        );
+        let snapshot =
+            build_workspace_snapshot(&[mixed_dirty("app"), mixed_dirty("api")], &[], false, &[]);
         let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         app.cursor = 0;
         assert_eq!(
@@ -3078,7 +3122,9 @@ mod tests {
         focus_repo(&mut app, "app");
         assert_eq!(app.dispatch(Action::Revert), Effect::None);
         match app.dispatch(Action::ConfirmYes) {
-            Effect::Revert { tracked, untracked, .. } => {
+            Effect::Revert {
+                tracked, untracked, ..
+            } => {
                 assert_eq!(tracked, vec!["README.md"]);
                 assert!(untracked.is_empty());
             }
@@ -3087,7 +3133,9 @@ mod tests {
         focus_repo(&mut app, "app");
         app.dispatch(Action::Revert);
         match app.dispatch(Action::ConfirmYesClean) {
-            Effect::Revert { tracked, untracked, .. } => {
+            Effect::Revert {
+                tracked, untracked, ..
+            } => {
                 assert_eq!(tracked, vec!["README.md"]);
                 assert_eq!(untracked, vec!["new.txt"]);
             }
@@ -3148,7 +3196,10 @@ mod tests {
         assert!(app.search_active);
         assert!(!app.search_mode);
         assert!(app.rows.iter().any(|r| r.id == "file:app:README.md"));
-        assert_eq!(app.focused_row().map(|r| r.id.as_str()), Some("file:app:README.md"));
+        assert_eq!(
+            app.focused_row().map(|r| r.id.as_str()),
+            Some("file:app:README.md")
+        );
         let first = app.focused_row().map(|r| r.id.clone());
         app.dispatch(Action::SearchNext);
         app.dispatch(Action::SearchPrev);
@@ -3177,10 +3228,7 @@ mod tests {
         assert!(app.rows.iter().any(|r| r.label.contains("notes")));
         focus_file(&mut app, "README.md");
         // notes file is also README? notes has README.md in helper
-        let notes = app
-            .rows
-            .iter()
-            .position(|r| r.id == "file:notes:README.md");
+        let notes = app.rows.iter().position(|r| r.id == "file:notes:README.md");
         assert!(notes.is_some());
         app.cursor = notes.unwrap();
         match app.dispatch(Action::Stage) {
@@ -3308,7 +3356,10 @@ mod tests {
             ("GIT_AUTHOR_NAME", "workspace-status test"),
             ("GIT_AUTHOR_EMAIL", "workspace-status-test@example.invalid"),
             ("GIT_COMMITTER_NAME", "workspace-status test"),
-            ("GIT_COMMITTER_EMAIL", "workspace-status-test@example.invalid"),
+            (
+                "GIT_COMMITTER_EMAIL",
+                "workspace-status-test@example.invalid",
+            ),
         ];
         let git = |args: &[&str]| {
             let mut cmd = Command::new("git");
@@ -3353,7 +3404,9 @@ mod tests {
         );
         app.dispatch(Action::Revert);
         match app.dispatch(Action::ConfirmYes) {
-            Effect::Revert { tracked, untracked, .. } => {
+            Effect::Revert {
+                tracked, untracked, ..
+            } => {
                 assert!(untracked.is_empty());
                 revert_tracked_file(&repo_dir, &tracked[0]).unwrap();
             }
@@ -3421,7 +3474,9 @@ mod tests {
         match app.dispatch(Action::Push) {
             Effect::Push { repos } => {
                 assert_eq!(repos, vec!["app"]);
-                assert!(!repos.iter().any(|r| r.contains("worktrees") || r == "notes"));
+                assert!(!repos
+                    .iter()
+                    .any(|r| r.contains("worktrees") || r == "notes"));
             }
             other => panic!("{other:?}"),
         }
@@ -3465,10 +3520,13 @@ mod tests {
         assert!(app.status.contains("cancelled"));
 
         app.open_stash_menu("app".into(), Some("stash@{0}".into()));
-        assert_eq!(app.dispatch(Action::StashMenuChar('s')), Effect::StashCreate {
-            repo: "app".into(),
-            paths: vec!["README.md".into()],
-        });
+        assert_eq!(
+            app.dispatch(Action::StashMenuChar('s')),
+            Effect::StashCreate {
+                repo: "app".into(),
+                paths: vec!["README.md".into()],
+            }
+        );
         app.open_stash_menu("app".into(), Some("stash@{0}".into()));
         assert_eq!(app.dispatch(Action::StashMenuChar('a')), Effect::None);
         assert!(app.confirm.is_none());
@@ -3553,11 +3611,17 @@ mod tests {
         assert!(app.branch_picker.is_some());
         app.dispatch(Action::BranchChar('f'));
         assert_eq!(
-            app.branch_picker.as_ref().unwrap().selected().map(|b| b.name.as_str()),
+            app.branch_picker
+                .as_ref()
+                .unwrap()
+                .selected()
+                .map(|b| b.name.as_str()),
             Some("feature/x")
         );
         match app.dispatch(Action::BranchSubmit) {
-            Effect::CheckoutBranch { branch, pull_after, .. } => {
+            Effect::CheckoutBranch {
+                branch, pull_after, ..
+            } => {
                 assert_eq!(branch, "feature/x");
                 assert!(!pull_after);
             }
@@ -3601,9 +3665,7 @@ mod tests {
         );
         match app.dispatch(Action::ConfirmYes) {
             Effect::CheckoutBranch {
-                branch,
-                pull_after,
-                ..
+                branch, pull_after, ..
             } => {
                 assert_eq!(branch, "feature/x");
                 assert!(pull_after);
@@ -3617,7 +3679,12 @@ mod tests {
         if !dirty {
             app_repo.branch = "feature/x".into();
         }
-        let snapshot = build_workspace_snapshot(&[app_repo, repo("notes", true)], &["notes".into()], false, &[]);
+        let snapshot = build_workspace_snapshot(
+            &[app_repo, repo("notes", true)],
+            &["notes".into()],
+            false,
+            &[],
+        );
         AppState::new(PathBuf::from("/tmp"), snapshot, true)
     }
 
@@ -3811,7 +3878,10 @@ mod tests {
             ("GIT_AUTHOR_NAME", "workspace-status test"),
             ("GIT_AUTHOR_EMAIL", "workspace-status-test@example.invalid"),
             ("GIT_COMMITTER_NAME", "workspace-status test"),
-            ("GIT_COMMITTER_EMAIL", "workspace-status-test@example.invalid"),
+            (
+                "GIT_COMMITTER_EMAIL",
+                "workspace-status-test@example.invalid",
+            ),
         ];
         let git = |args: &[&str]| {
             let mut cmd = Command::new("git");
@@ -3877,7 +3947,10 @@ mod tests {
         );
         app.dispatch(Action::GraphStashDrop);
         app.dispatch(Action::ConfirmNo);
-        assert_eq!(latest_stash_ref(&repo_dir).as_deref(), Some(latest.as_str()));
+        assert_eq!(
+            latest_stash_ref(&repo_dir).as_deref(),
+            Some(latest.as_str())
+        );
         app.dispatch(Action::GraphStashDrop);
         match app.dispatch(Action::ConfirmYes) {
             Effect::StashDrop { stash_ref, .. } => stash_drop(&repo_dir, &stash_ref).unwrap(),
@@ -3906,10 +3979,13 @@ mod tests {
             .position(|r| matches!(r, GraphRow::Stash(s) if s.stash_ref == latest))
             .expect("stash2 row");
         app.graph_cursor = idx;
-        assert_eq!(app.dispatch(Action::GraphStashPop), Effect::StashPop {
-            repo: "app".into(),
-            stash_ref: latest.clone(),
-        });
+        assert_eq!(
+            app.dispatch(Action::GraphStashPop),
+            Effect::StashPop {
+                repo: "app".into(),
+                stash_ref: latest.clone(),
+            }
+        );
         stash_pop(&repo_dir, &latest).unwrap();
         assert!(latest_stash_ref(&repo_dir).is_none());
 
@@ -4052,7 +4128,10 @@ mod tests {
             &[],
         );
         let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
-        assert!(app.rows.iter().all(|r| r.repo.as_deref() != Some("notes/.worktrees/feat")));
+        assert!(app
+            .rows
+            .iter()
+            .all(|r| r.repo.as_deref() != Some("notes/.worktrees/feat")));
         assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
         app.dispatch(Action::ToggleShowIgnored);
         if let Some(idx) = app
@@ -4072,7 +4151,9 @@ mod tests {
         match app.dispatch(Action::FetchTick) {
             Effect::Fetch { repos } => {
                 assert_eq!(repos, vec!["app"]);
-                assert!(!repos.iter().any(|r| r.contains("worktrees") || r == "notes"));
+                assert!(!repos
+                    .iter()
+                    .any(|r| r.contains("worktrees") || r == "notes"));
             }
             other => panic!("{other:?}"),
         }
@@ -4137,7 +4218,10 @@ mod tests {
 
     fn install_graph(app: &mut AppState, stashes: Vec<Stash>) {
         let model = GraphModel {
-            commits: vec![graph_commit("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "head")],
+            commits: vec![graph_commit(
+                "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "head",
+            )],
             stashes,
             worktrees: Vec::new(),
             head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
@@ -4145,7 +4229,11 @@ mod tests {
             show_ignored: app.show_ignored,
             uncommitted: false,
         };
-        app.set_graph(model, "app".into(), "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into());
+        app.set_graph(
+            model,
+            "app".into(),
+            "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        );
         app.focus = FocusPane::Right;
         app.drill = DrillView::Graph;
     }
@@ -4212,7 +4300,7 @@ mod tests {
             }],
             0,
             "src/lib.rs".into(),
-            vec!["+fn x() {}".into()],
+            DiffContent::from_lines(vec!["+fn x() {}".into()]),
         );
         assert!(app.drill.is_diff());
         assert_eq!(app.dispatch(Action::NavEsc), Effect::None);
@@ -4343,12 +4431,13 @@ mod tests {
         let ops = app.stash_menu.clone().expect("graph menu");
         assert!(ops.iter().any(|op| op.id == StashOpId::Drop));
         assert!(
-            ops.iter().any(|op| op.stash_ref.as_deref() == Some("stash@{1}")),
+            ops.iter()
+                .any(|op| op.stash_ref.as_deref() == Some("stash@{1}")),
             "{ops:?}"
         );
-        assert!(ops.iter().all(|op| {
-            op.stash_ref.is_none() || op.stash_ref.as_deref() == Some("stash@{1}")
-        }));
+        assert!(ops
+            .iter()
+            .all(|op| { op.stash_ref.is_none() || op.stash_ref.as_deref() == Some("stash@{1}") }));
     }
 
     fn wide_split_layout() -> super::LayoutHit {
@@ -4369,7 +4458,10 @@ mod tests {
         let mut app = state();
         app.layout = wide_split_layout();
         let start = pane_widths(160, app.tree_fraction).tree_width;
-        assert_eq!(app.dispatch(Action::Click { col: 47, row: 5 }), Effect::None);
+        assert_eq!(
+            app.dispatch(Action::Click { col: 47, row: 5 }),
+            Effect::None
+        );
         assert_eq!(app.drag, SplitDrag::Pane);
         assert_eq!(app.dispatch(Action::Drag { col: 70, row: 8 }), Effect::None);
         let after = pane_widths(160, app.tree_fraction).tree_width;
@@ -4387,9 +4479,18 @@ mod tests {
         app.layout = wide_split_layout();
         let rule = app.layout.diff_split_rule_x.expect("rule");
         let start = side_by_side_column_widths(110, app.diff_split_fraction).left_width;
-        assert_eq!(app.dispatch(Action::Click { col: rule, row: 6 }), Effect::None);
+        assert_eq!(
+            app.dispatch(Action::Click { col: rule, row: 6 }),
+            Effect::None
+        );
         assert_eq!(app.drag, SplitDrag::Diff);
-        assert_eq!(app.dispatch(Action::Drag { col: rule + 20, row: 6 }), Effect::None);
+        assert_eq!(
+            app.dispatch(Action::Drag {
+                col: rule + 20,
+                row: 6
+            }),
+            Effect::None
+        );
         let after = side_by_side_column_widths(110, app.diff_split_fraction).left_width;
         assert!(after > start, "start={start} after={after}");
         assert_eq!(app.drag, SplitDrag::Diff);
@@ -4424,7 +4525,10 @@ mod tests {
         let mut app = state();
         app.layout = wide_split_layout();
         assert!(!app.rows.is_empty());
-        let effect = app.dispatch(Action::Click { col: 10, row: app.layout.tree_y });
+        let effect = app.dispatch(Action::Click {
+            col: 10,
+            row: app.layout.tree_y,
+        });
         assert_eq!(app.drag, SplitDrag::None);
         assert_eq!(effect, Effect::LoadRightPane);
         assert_eq!(app.cursor, app.layout.list_offset);
@@ -4451,29 +4555,38 @@ mod tests {
         assert_eq!(app.input_mode(), InputMode::EasyMotion);
         let first = app.rows[0].id.clone();
         let second = app.rows[1].id.clone();
-        assert_eq!(app.dispatch(Action::EasyMotionChar('b')), Effect::LoadRightPane);
-        assert_eq!(app.focused_row().map(|r| r.id.as_str()), Some(second.as_str()));
+        assert_eq!(
+            app.dispatch(Action::EasyMotionChar('b')),
+            Effect::LoadRightPane
+        );
+        assert_eq!(
+            app.focused_row().map(|r| r.id.as_str()),
+            Some(second.as_str())
+        );
         assert!(app.easy_motion.is_none());
 
         app.cursor = 0;
         app.layout.tree_height = 2;
         app.dispatch(Action::EasyMotionStart);
         app.dispatch(Action::EasyMotionChar('a'));
-        assert_eq!(app.focused_row().map(|r| r.id.as_str()), Some(first.as_str()));
+        assert_eq!(
+            app.focused_row().map(|r| r.id.as_str()),
+            Some(first.as_str())
+        );
 
         app.cursor = app.rows.len() - 1;
         app.layout.tree_height = 2;
-        let (start, count) = visible_window(
-            app.rows.len(),
-            app.cursor,
-            app.layout.tree_height as usize,
-        );
+        let (start, count) =
+            visible_window(app.rows.len(), app.cursor, app.layout.tree_height as usize);
         assert_eq!(count, 2);
         assert_eq!(start, app.rows.len() - 2);
         let target = app.rows[start].id.clone();
         app.dispatch(Action::EasyMotionStart);
         app.dispatch(Action::EasyMotionChar('a'));
-        assert_eq!(app.focused_row().map(|r| r.id.as_str()), Some(target.as_str()));
+        assert_eq!(
+            app.focused_row().map(|r| r.id.as_str()),
+            Some(target.as_str())
+        );
         assert_ne!(app.cursor, 0);
     }
 
@@ -4497,7 +4610,12 @@ mod tests {
         app.dispatch(Action::EasyMotionStart);
         assert_eq!(app.dispatch(Action::EasyMotionCancel), Effect::None);
         assert!(app.easy_motion.is_none());
-        assert_eq!(app.input_mode(), InputMode::Normal { search_active: false });
+        assert_eq!(
+            app.input_mode(),
+            InputMode::Normal {
+                search_active: false
+            }
+        );
         assert_eq!(app.cursor, before, "Esc stays on the same row");
     }
 
@@ -4607,12 +4725,18 @@ mod tests {
             .find(|row| row.id == "file:app:src/lib.rs")
             .expect("lib.rs");
         assert!(lib.label.contains("src/lib.rs"));
-        assert_eq!(app.focused_row().map(|row| row.id.as_str()), Some("file:app:src/lib.rs"));
+        assert_eq!(
+            app.focused_row().map(|row| row.id.as_str()),
+            Some("file:app:src/lib.rs")
+        );
         app.dispatch(Action::ToggleTreeMode);
         assert!(app.tree_mode);
         assert_eq!(app.status, "Directory tree");
         assert!(app.rows.iter().any(|row| row.id == "dir:app:src"));
-        assert_eq!(app.focused_row().map(|row| row.id.as_str()), Some("file:app:src/lib.rs"));
+        assert_eq!(
+            app.focused_row().map(|row| row.id.as_str()),
+            Some("file:app:src/lib.rs")
+        );
     }
 
     #[test]
@@ -4778,13 +4902,13 @@ mod tests {
         app.set_diff(
             "app".into(),
             "README.md".into(),
-            vec![
+            DiffContent::from_lines(vec![
                 "diff --git a/README.md b/README.md".into(),
                 "@@ -1,3 +1,4 @@".into(),
                 " context".into(),
                 "+needle-unique".into(),
                 " more".into(),
-            ],
+            ]),
         );
         type_search(&mut app, "needle-unique");
         assert_eq!(app.search_target, SearchPane::Diff);
@@ -4814,7 +4938,7 @@ mod tests {
         app.set_diff(
             "app".into(),
             "README.md".into(),
-            vec!["@@ -1,1 +1,2 @@".into(), "+line".into()],
+            DiffContent::from_lines(vec!["@@ -1,1 +1,2 @@".into(), "+line".into()]),
         );
         assert_eq!(app.diff_context_lines(), None);
         assert!(!app.full_context_active());
@@ -4852,7 +4976,7 @@ mod tests {
         app.set_diff(
             "app".into(),
             "README.md".into(),
-            vec!["+".to_string() + &"x".repeat(40)],
+            DiffContent::from_unified(format!("@@ -0,0 +1,1 @@\n+{}", "x".repeat(40))),
         );
         assert_eq!(app.diff_col_offset, 0);
         app.dispatch(Action::PanDiff(1));
@@ -4881,9 +5005,12 @@ mod tests {
         app.set_diff(
             "app".into(),
             "README.md".into(),
-            vec!["@@ -1,1 +1,2 @@".into(), "+line".into()],
+            DiffContent::from_lines(vec!["@@ -1,1 +1,2 @@".into(), "+line".into()]),
         );
-        assert_eq!(app.dispatch(Action::ToggleFullContext), Effect::LoadRightPane);
+        assert_eq!(
+            app.dispatch(Action::ToggleFullContext),
+            Effect::LoadRightPane
+        );
         app.focus = FocusPane::Left;
         assert_eq!(app.diff_context_lines(), Some(FULL_DIFF_CONTEXT_LINES));
         assert_eq!(
@@ -4907,7 +5034,7 @@ mod tests {
             }],
             0,
             "README.md".into(),
-            vec!["@@ -1,1 +1,2 @@".into(), "+line".into()],
+            DiffContent::from_lines(vec!["@@ -1,1 +1,2 @@".into(), "+line".into()]),
         );
         match commit.dispatch(Action::ToggleFullContext) {
             Effect::LoadCommitDiff { path, .. } => assert_eq!(path, "README.md"),
@@ -4954,10 +5081,7 @@ mod tests {
         assert!(app.help_search_query.is_some());
         assert!(!app.search_mode);
         assert!(!app.search_active);
-        assert_eq!(
-            app.input_mode(),
-            InputMode::HelpSearch { armed: false }
-        );
+        assert_eq!(app.input_mode(), InputMode::HelpSearch { armed: false });
         app.dispatch(Action::SearchChar('q'));
         app.dispatch(Action::SearchChar('u'));
         app.dispatch(Action::SearchChar('i'));
@@ -5010,7 +5134,10 @@ mod tests {
         let subtitle = subtitle.expect("subtitle");
         assert!(subtitle.contains("aaa1111"), "{subtitle}");
         assert!(subtitle.contains("head"), "{subtitle}");
-        assert!(app.commit_file_rows().iter().any(|row| row.path == "src/lib.rs"));
+        assert!(app
+            .commit_file_rows()
+            .iter()
+            .any(|row| row.path == "src/lib.rs"));
     }
 
     #[test]
@@ -5056,7 +5183,7 @@ mod tests {
             }],
             idx,
             "src/lib.rs".into(),
-            vec!["+fn x() {}".into()],
+            DiffContent::from_lines(vec!["+fn x() {}".into()]),
         );
         match app.dispatch(Action::Edit) {
             Effect::EditFile { repo, path } => {
@@ -5172,7 +5299,10 @@ mod tests {
         assert!(app.rows.iter().any(|r| r.id == "file:app:src/lib.rs"));
         app.dispatch(Action::Click { col, row });
         assert!(app.folds.contains("dir:app:src"));
-        assert_eq!(app.cursor, app.rows.iter().position(|r| r.id == "dir:app:src").unwrap());
+        assert_eq!(
+            app.cursor,
+            app.rows.iter().position(|r| r.id == "dir:app:src").unwrap()
+        );
         assert!(app.rows.iter().all(|r| r.id != "file:app:src/lib.rs"));
     }
 
@@ -5197,5 +5327,4 @@ mod tests {
         assert!(app.mouse_enabled);
         assert!(app.status.contains("on"));
     }
-
 }

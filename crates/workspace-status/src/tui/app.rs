@@ -19,8 +19,8 @@ use crate::config::WorkspaceStatusConfig;
 use crate::discovery::collect_snapshots;
 use crate::git::{
     checkout_branch, create_branch_at, create_branch_checkout, diff_commit_file_ctx,
-    diff_stash_file_ctx, exec_git_checked, git_diff_args,
-    latest_stash_ref, list_commit_name_status, list_local_branches, list_stash_name_status,
+    diff_stash_file_ctx, exec_git_checked, git_diff_args, latest_stash_ref,
+    list_commit_name_status, list_local_branches, list_stash_name_status,
     list_worktree_name_status, origin_out_of_sync, pull_quiet, push_quiet, remove_untracked_file,
     remove_worktree, revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop,
     stash_push, unstage_file,
@@ -28,14 +28,14 @@ use crate::git::{
 use crate::snapshot::{build_workspace_snapshot, WorkspaceSnapshot};
 
 use super::action::{Action, Effect};
-use super::diff::load_file_diff;
+use super::diff::{load_file_diff, DiffContent};
 use super::drill::CommitFileSource;
 use super::editor::{editor_command, is_detached_editor, resolve_editor};
+use super::fetch::fetch_interval_ms;
 use super::graph_load::load_graph_model;
 use super::keys::event_to_action_ex;
 use super::render::draw;
 use super::state::AppState;
-use super::fetch::fetch_interval_ms;
 use super::watch::watch_interval_ms;
 
 /// Options for the interactive TUI.
@@ -84,15 +84,11 @@ fn run_loop(
     opts: &TuiOpts,
 ) -> Result<(), u8> {
     apply_effect(state, Effect::LoadRightPane, opts, terminal);
-    terminal
-        .draw(|frame| draw(frame, state))
-        .map_err(|_| 1u8)?;
+    terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
     if opts.start_fetch {
         let effect = state.dispatch(Action::Fetch);
         apply_effect(state, effect, opts, terminal);
-        terminal
-            .draw(|frame| draw(frame, state))
-            .map_err(|_| 1u8)?;
+        terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
     }
 
     let watch_ms = watch_interval_ms(std::env::var("WS_STATUS_WATCH_MS").ok().as_deref());
@@ -148,9 +144,7 @@ fn run_loop(
                 last_fetch = Instant::now();
             }
         }
-        terminal
-            .draw(|frame| draw(frame, state))
-            .map_err(|_| 1u8)?;
+        terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
     }
 }
 
@@ -224,7 +218,10 @@ fn apply_effect(
                 }
             }
             reload_snapshot(state, opts);
-            state.status = format!("unstaged {}", paths.last().map(String::as_str).unwrap_or(""));
+            state.status = format!(
+                "unstaged {}",
+                paths.last().map(String::as_str).unwrap_or("")
+            );
             load_right(state);
         }
         Effect::Revert {
@@ -284,8 +281,7 @@ fn apply_effect(
                 &args,
                 &opts.cwd.join(&repo),
                 state.mouse_enabled,
-            )
-            {
+            ) {
                 state.status = format!("edit failed: {err}");
             } else {
                 state.status = format!("edited {path}");
@@ -328,22 +324,20 @@ fn apply_effect(
             let latest = latest_stash_ref(&opts.cwd.join(&repo));
             state.open_stash_menu(repo, latest);
         }
-        Effect::StashCreate { repo, paths } => {
-            match stash_push(&opts.cwd.join(&repo), &paths) {
-                Ok(()) => {
-                    reload_snapshot(state, opts);
-                    state.status = if paths.len() == 1 {
-                        "Stashed 1 file".into()
-                    } else if paths.is_empty() {
-                        "Stashed".into()
-                    } else {
-                        format!("Stashed {} files", paths.len())
-                    };
-                    load_right(state);
-                }
-                Err(err) => state.status = format!("stash failed: {err}"),
+        Effect::StashCreate { repo, paths } => match stash_push(&opts.cwd.join(&repo), &paths) {
+            Ok(()) => {
+                reload_snapshot(state, opts);
+                state.status = if paths.len() == 1 {
+                    "Stashed 1 file".into()
+                } else if paths.is_empty() {
+                    "Stashed".into()
+                } else {
+                    format!("Stashed {} files", paths.len())
+                };
+                load_right(state);
             }
-        }
+            Err(err) => state.status = format!("stash failed: {err}"),
+        },
         Effect::StashApply { repo, stash_ref } => {
             match stash_apply(&opts.cwd.join(&repo), &stash_ref) {
                 Ok(()) => {
@@ -415,31 +409,27 @@ fn apply_effect(
             repo,
             name,
             commit_id,
-        } => {
-            match create_branch_at(&opts.cwd.join(&repo), &name, &commit_id) {
-                Ok(()) => {
-                    reload_snapshot(state, opts);
-                    let short = commit_id.get(..7).unwrap_or(&commit_id);
-                    state.status = format!("created {name} at {short}");
-                    load_right(state);
-                }
-                Err(err) => state.status = format!("create branch failed: {err}"),
+        } => match create_branch_at(&opts.cwd.join(&repo), &name, &commit_id) {
+            Ok(()) => {
+                reload_snapshot(state, opts);
+                let short = commit_id.get(..7).unwrap_or(&commit_id);
+                state.status = format!("created {name} at {short}");
+                load_right(state);
             }
-        }
+            Err(err) => state.status = format!("create branch failed: {err}"),
+        },
         Effect::RemoveWorktree {
             primary,
             path,
             force,
-        } => {
-            match remove_worktree(&opts.cwd.join(&primary), &opts.cwd.join(&path), force) {
-                Ok(()) => {
-                    reload_snapshot(state, opts);
-                    state.status = format!("removed worktree {path}");
-                    load_right(state);
-                }
-                Err(err) => state.status = format!("remove worktree failed: {err}"),
+        } => match remove_worktree(&opts.cwd.join(&primary), &opts.cwd.join(&path), force) {
+            Ok(()) => {
+                reload_snapshot(state, opts);
+                state.status = format!("removed worktree {path}");
+                load_right(state);
             }
-        }
+            Err(err) => state.status = format!("remove worktree failed: {err}"),
+        },
         Effect::LoadCommitFiles { repo, source } => {
             load_commit_files(state, opts, repo, source);
         }
@@ -474,12 +464,7 @@ pub(crate) fn apply_headless_effect(state: &mut AppState, effect: Effect, opts: 
     }
 }
 
-fn load_commit_files(
-    state: &mut AppState,
-    opts: &TuiOpts,
-    repo: String,
-    source: CommitFileSource,
-) {
+fn load_commit_files(state: &mut AppState, opts: &TuiOpts, repo: String, source: CommitFileSource) {
     let dir = opts.cwd.join(&repo);
     let files = match &source {
         CommitFileSource::Commit { commit_id } => list_commit_name_status(&dir, commit_id),
@@ -498,45 +483,39 @@ fn load_commit_diff(
 ) {
     let dir = opts.cwd.join(&repo);
     let context = state.commit_diff_context(&repo, &path);
-    let lines = match &source {
+    let content = match &source {
         CommitFileSource::Commit { commit_id } => {
-            diff_commit_file_ctx(&dir, commit_id, &path, context)
+            DiffContent::from_lines(diff_commit_file_ctx(&dir, commit_id, &path, context))
         }
         CommitFileSource::Stash { stash_ref } => {
-            diff_stash_file_ctx(&dir, stash_ref, &path, context)
+            DiffContent::from_lines(diff_stash_file_ctx(&dir, stash_ref, &path, context))
         }
         CommitFileSource::Worktree => {
             if let Some((_, change)) = state.focused_file() {
                 if change.path == path {
                     load_file_diff(&state.cwd, &repo, &change, context)
                 } else {
-                    let args = git_diff_args(&["diff", "HEAD"], &path, context);
-                    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                    crate::git::exec_git(&refs, &dir)
-                        .lines()
-                        .map(str::to_string)
-                        .collect()
+                    head_file_diff(&dir, &path, context)
                 }
             } else {
-                let args = git_diff_args(&["diff", "HEAD"], &path, context);
-                let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                crate::git::exec_git(&refs, &dir)
-                    .lines()
-                    .map(str::to_string)
-                    .collect()
+                head_file_diff(&dir, &path, context)
             }
         }
     };
     let (files, file_cursor) = match &state.drill {
         super::drill::DrillView::Files { files, cursor, .. } => (files.clone(), *cursor),
         super::drill::DrillView::Diff {
-            files,
-            file_cursor,
-            ..
+            files, file_cursor, ..
         } => (files.clone(), *file_cursor),
         super::drill::DrillView::Graph => (Vec::new(), 0),
     };
-    state.open_commit_diff(repo, source, files, file_cursor, path, lines);
+    state.open_commit_diff(repo, source, files, file_cursor, path, content);
+}
+
+fn head_file_diff(dir: &Path, path: &str, context: Option<u32>) -> DiffContent {
+    let args = git_diff_args(&["diff", "HEAD"], path, context);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    DiffContent::from_unified(crate::git::exec_git(&refs, dir))
 }
 
 fn drain_pending_events() {
@@ -593,10 +572,7 @@ fn run_blocking_editor(
     let restore = resume_tui(terminal, mouse_enabled);
     match (spawn, restore) {
         (Ok(status), Ok(())) if status.success() => Ok(()),
-        (Ok(status), Ok(())) => Err(format!(
-            "editor exited {}",
-            status.code().unwrap_or(-1)
-        )),
+        (Ok(status), Ok(())) => Err(format!("editor exited {}", status.code().unwrap_or(-1))),
         (Err(err), Ok(())) => Err(err.to_string()),
         (Ok(_), Err(err)) | (Err(_), Err(err)) => Err(err),
     }
@@ -618,22 +594,18 @@ fn load_right(state: &mut AppState) {
         return;
     }
     if let Some((repo, change)) = state.focused_file() {
-        let lines = load_file_diff(
+        let content = load_file_diff(
             &state.cwd,
             &repo,
             &change,
             state.workspace_diff_context(&repo, &change.path),
         );
-        state.set_diff(repo, change.path, lines);
+        state.set_diff(repo, change.path, content);
         return;
     }
     if let Some(repo) = state.focused_graph_repo() {
-        let (model, identity) = load_graph_model(
-            &state.cwd,
-            &state.snapshot,
-            &repo,
-            state.show_ignored,
-        );
+        let (model, identity) =
+            load_graph_model(&state.cwd, &state.snapshot, &repo, state.show_ignored);
         state.set_graph(model, identity.repo, identity.head);
         return;
     }
@@ -660,5 +632,10 @@ pub fn collect_full_snapshot(
         Some(filter_repos.iter().cloned().collect())
     };
     let snapshots = collect_snapshots(cwd, do_fetch, &discover, only.as_ref());
-    build_workspace_snapshot(&snapshots, &config.ignored_repos, show_ignored, filter_repos)
+    build_workspace_snapshot(
+        &snapshots,
+        &config.ignored_repos,
+        show_ignored,
+        filter_repos,
+    )
 }

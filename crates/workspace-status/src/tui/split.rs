@@ -145,6 +145,15 @@ pub fn is_side_by_side_split(mode: DiffMode, pane_width: u16) -> bool {
     mode == DiffMode::SideBySide && pane_width >= NARROW_SXS
 }
 
+/// Preferred mode after the narrow-pane fallback (Ink `effectiveDiffMode`).
+pub fn effective_diff_mode(mode: DiffMode, pane_width: u16) -> DiffMode {
+    if is_side_by_side_split(mode, pane_width) {
+        DiffMode::SideBySide
+    } else {
+        DiffMode::Inline
+    }
+}
+
 /// 1-based terminal column of the first right-pane content cell.
 pub fn diff_content_origin_x(tree_width: u16) -> u16 {
     tree_width.saturating_add(DIFF_CONTENT_PAD)
@@ -230,6 +239,7 @@ pub fn hit_split(layout: SplitLayout, col: u16, row: u16) -> SplitHit {
     SplitHit::Other
 }
 
+#[allow(dead_code)]
 fn unified_kind(line: &str) -> &'static str {
     if line.starts_with("+++")
         || line.starts_with("---")
@@ -255,6 +265,7 @@ fn unified_kind(line: &str) -> &'static str {
 }
 
 /// Zip unified-diff lines into side-by-side pairs (Ink `sideBySide.ts` shape).
+#[allow(dead_code)]
 pub fn pair_unified_lines(lines: &[String]) -> Vec<SplitRow> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -302,6 +313,7 @@ pub fn pair_unified_lines(lines: &[String]) -> Vec<SplitRow> {
 }
 
 /// Visible columns of `text`, padded or truncated to `width`.
+#[allow(dead_code)]
 pub fn pad_trunc(text: &str, width: u16) -> String {
     let width = width as usize;
     let chars: Vec<char> = text.chars().collect();
@@ -390,6 +402,14 @@ mod tests {
         assert!(is_side_by_side_split(DiffMode::SideBySide, NARROW_SXS));
         assert!(!is_side_by_side_split(DiffMode::SideBySide, NARROW_SXS - 1));
         assert!(!is_side_by_side_split(DiffMode::Inline, 200));
+        assert_eq!(
+            effective_diff_mode(DiffMode::SideBySide, NARROW_SXS - 1),
+            DiffMode::Inline
+        );
+        assert_eq!(
+            effective_diff_mode(DiffMode::SideBySide, NARROW_SXS),
+            DiffMode::SideBySide
+        );
     }
 
     fn wide_layout(rule: Option<u16>) -> SplitLayout {
@@ -414,7 +434,10 @@ mod tests {
         assert_eq!(hit_split(layout, 46, 5), SplitHit::Pane);
         assert_eq!(hit_split(layout, 48, 5), SplitHit::Pane);
         assert_eq!(hit_split(layout, rule_0, 5), SplitHit::DiffSplit);
-        assert_eq!(hit_split(layout, rule_0.saturating_sub(1), 5), SplitHit::DiffSplit);
+        assert_eq!(
+            hit_split(layout, rule_0.saturating_sub(1), 5),
+            SplitHit::DiffSplit
+        );
         assert_eq!(hit_split(layout, rule_0 + 1, 5), SplitHit::DiffSplit);
         assert_eq!(hit_split(layout, 10, 5), SplitHit::Other);
         assert_eq!(hit_split(layout, 100, 5), SplitHit::Other);
