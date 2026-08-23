@@ -9,7 +9,8 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use workspace_status_graph::{
-    Commit, GraphModel, GraphRef, Stash, SyncState, SyncStatus, Worktree, DEFAULT_GRAPH_WINDOW,
+    Commit, GraphModel, GraphRef, GraphRow, Stash, SyncState, SyncStatus, Worktree,
+    DEFAULT_GRAPH_WINDOW,
 };
 
 use crate::git::exec_git;
@@ -736,6 +737,40 @@ mod live_git {
         assert_eq!(model.limit, 50);
         assert_eq!(model.window, model.commits.len());
         assert_eq!(model.uncommitted, Some(false));
+        let rows = model.visible_rows();
+        assert!(
+            matches!(
+                rows.first(),
+                Some(GraphRow::Uncommitted { has_changes: false })
+            ),
+            "clean loaded graph starts on the working-tree row, got {rows:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clean_loaded_graph_starts_with_working_tree_row() {
+        let (root, repo) = temp_workspace();
+        init_repo(&repo);
+        commit_file(&repo, "a.txt", "1\n", "c1");
+        let snapshot = snapshot_app();
+        let (model, _) = load_graph_model_window(
+            root.join("workspace").as_path(),
+            &snapshot,
+            "app",
+            false,
+            0,
+            50,
+        );
+        assert_eq!(model.uncommitted, Some(false));
+        let rows = model.visible_rows();
+        assert!(
+            matches!(
+                rows.first(),
+                Some(GraphRow::Uncommitted { has_changes: false })
+            ),
+            "Ink always paints the working-tree row; dirty vs clean is label only, got {rows:?}"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

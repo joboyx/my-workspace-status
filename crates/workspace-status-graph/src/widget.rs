@@ -775,6 +775,56 @@ mod tests {
     }
 
     #[test]
+    fn paints_clean_working_tree_row() {
+        let mut model = sample_model();
+        model.uncommitted = Some(false);
+        let joined = render_lines(&model, 120, 16, false).join("\n");
+        assert!(
+            joined.contains("○ working tree clean"),
+            "always-on clean row: {joined}"
+        );
+        assert!(
+            !joined.contains("○ uncommitted changes"),
+            "dirty label must not appear when clean: {joined}"
+        );
+    }
+
+    #[test]
+    fn paints_stash_selection_footer() {
+        let model = sample_model();
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .selected(Some(1))
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut last = String::new();
+        let mut prev = String::new();
+        for y in 0..16u16 {
+            let mut line = String::new();
+            for x in 0..80u16 {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            let trimmed = line.trim_end().to_string();
+            if !trimmed.is_empty() {
+                prev = last;
+                last = trimmed;
+            }
+        }
+        assert!(prev.contains("WIP on main"), "stash footer subject: {prev}");
+        assert!(
+            last.contains("stash@{0}") && last.contains("ccc3333") && last.contains("1d"),
+            "stash footer meta ref · hash · date: {last}"
+        );
+        assert!(!last.contains("Ada"), "stash footer has no author: {last}");
+    }
+
+    #[test]
     fn paints_loading_older_status() {
         let model = sample_model();
         let backend = TestBackend::new(80, 16);

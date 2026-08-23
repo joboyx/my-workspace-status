@@ -746,6 +746,15 @@ mod tests {
     }
 
     #[test]
+    fn format_uncommitted_label_is_dirty_or_clean() {
+        let dirty = GraphRow::Uncommitted { has_changes: true };
+        let clean = GraphRow::Uncommitted { has_changes: false };
+        assert_eq!(format_row(&dirty, &UNICODE), "○ uncommitted changes");
+        assert_eq!(format_row(&clean, &UNICODE), "○ working tree clean");
+        assert_eq!(format_label(&clean, &ASCII), "o working tree clean");
+    }
+
+    #[test]
     fn format_label_stash_is_subject_only() {
         let row = GraphRow::Stash(sample_stash());
         assert_eq!(format_label(&row, &UNICODE), "WIP on main");

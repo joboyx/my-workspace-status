@@ -68,7 +68,12 @@ pub fn selection_detail_lines(
             [trunc(line, width), trunc("worktree · not a commit", width)]
         }
         GraphRow::Stash(stash) => {
-            let meta = stash.stash_ref.clone();
+            // Ink `graphSelectionDetailLines`: `[ref, hash.slice(0,7), date].join(' · ')`.
+            let meta = join_meta([
+                stash.stash_ref.clone(),
+                short_id(&stash.id).to_string(),
+                format_relative_date(stash.author_date_unix, now_unix),
+            ]);
             [trunc(&stash.subject, width), trunc(&meta, width)]
         }
         GraphRow::Worktree(wt) => {
@@ -106,6 +111,14 @@ pub fn selection_detail_lines(
     }
 }
 
+fn join_meta(parts: impl IntoIterator<Item = String>) -> String {
+    parts
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 fn trunc(text: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -125,7 +138,7 @@ fn trunc(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::glyphs::UNICODE;
-    use crate::model::Commit;
+    use crate::model::{Commit, Stash};
 
     #[test]
     fn budget_prefers_footer_over_header() {
@@ -161,8 +174,36 @@ mod tests {
         assert_eq!(a, "Uncommitted changes");
         assert_eq!(b, "worktree · not a commit");
         let clean = GraphRow::Uncommitted { has_changes: false };
-        let [c, _] = selection_detail_lines(&model, Some(&clean), &UNICODE, 40, 0);
+        let [c, d] = selection_detail_lines(&model, Some(&clean), &UNICODE, 40, 0);
         assert_eq!(c, "Working tree clean");
+        assert_eq!(d, "worktree · not a commit");
+    }
+
+    #[test]
+    fn footer_stash_ref_hash_date_without_author() {
+        let stash = Stash {
+            id: "abcdefghhhh".into(),
+            stash_ref: "stash@{0}".into(),
+            subject: "WIP on main".into(),
+            author_name: "Ada".into(),
+            author_date_unix: 1_700_000_000 - 120,
+            parent_id: None,
+        };
+        let model = GraphModel {
+            stashes: vec![stash.clone()],
+            uncommitted: Some(false),
+            ..GraphModel::default()
+        };
+        let [subject, meta] = selection_detail_lines(
+            &model,
+            Some(&GraphRow::Stash(stash)),
+            &UNICODE,
+            80,
+            1_700_000_000,
+        );
+        assert_eq!(subject, "WIP on main");
+        assert_eq!(meta, "stash@{0} · abcdefg · 2m");
+        assert!(!meta.contains("Ada"), "{meta}");
     }
 
     #[test]

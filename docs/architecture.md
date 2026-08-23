@@ -151,9 +151,11 @@ loads a `GraphModel` in `graph_load.rs` (`log --exclude=refs/stash --all
 --topo-order --date-order`, window 300, autoload, extra `stash^1`) and
 paints `GraphWidget`. Hidden ignored worktrees stay out of `visible_rows`
 unless `show_ignored` is true. Gutter cells use `GraphCell.color_lane`
-and `DEFAULT_LANE_COLORS`. Chrome is a 2-line selection footer plus
-optional sync header (`graph_chrome_budget`). Commit and stash spacers
-reuse the same hash / date / author drop order.
+and `DEFAULT_LANE_COLORS`. Chrome is a 2-line selection footer
+(`selection_detail_lines`) plus optional sync header
+(`graph_chrome_budget`). A loaded graph always emits the working-tree
+row. Commit and stash spacers reuse the same hash / date / author drop
+order.
 
 See [graph.md](./graph.md).
 
