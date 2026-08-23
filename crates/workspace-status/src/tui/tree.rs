@@ -641,7 +641,7 @@ fn walk(
 ) {
     let foldable = !node.children.is_empty();
     let folded = foldable && folds.contains(&node.id);
-    let segs = node_segments(node, tree_mode, in_no_updates, ascii, false);
+    let segs = node_segments(node, tree_mode, in_no_updates, ascii);
     let (label, right_raw) = segments_search_label(&segs);
     out.push(VisibleRow {
         id: node.id.clone(),
@@ -740,7 +740,7 @@ pub fn file_change_from_name_status(
 
 /// File-row segments shared by the workspace tree and commit-file lists.
 pub fn file_change_segments(change: &FileChange, tree_mode: bool, ascii: bool) -> NodeSegments {
-    file_segments(change, tree_mode, ascii, false)
+    file_segments(change, tree_mode, ascii)
 }
 
 /// Folder-row segments (workspace dirs and commit-file dirs).
@@ -767,7 +767,7 @@ pub fn segments_search_label(segs: &NodeSegments) -> (String, String) {
     (label, right_raw)
 }
 
-fn file_segments(change: &FileChange, tree_mode: bool, ascii: bool, viewed: bool) -> NodeSegments {
+fn file_segments(change: &FileChange, tree_mode: bool, ascii: bool) -> NodeSegments {
     let status = status_letter_from_change(change);
     let color = SegRole::from(status.color_role());
     let icon = file_icon(ascii, &change.path);
@@ -815,24 +815,13 @@ fn file_segments(change: &FileChange, tree_mode: bool, ascii: bool, viewed: bool
         });
     }
 
-    let mut trailing = Vec::new();
-    if viewed {
-        trailing.push(TextSeg {
-            text: icon_viewed(ascii).to_string(),
-            role: SegRole::Renamed,
-            hex: None,
-            bold: false,
-            dim: false,
-        });
-        trailing.push(text_seg(" ", SegRole::Muted));
-    }
-    trailing.push(TextSeg {
+    let trailing = vec![TextSeg {
         text: tui_file_badge(change).to_string(),
         role: color,
         hex: None,
         bold: true,
         dim: false,
-    });
+    }];
     NodeSegments { segments, trailing }
 }
 
@@ -1037,7 +1026,6 @@ pub fn node_segments(
     tree_mode: bool,
     in_no_updates: bool,
     ascii: bool,
-    viewed: bool,
 ) -> NodeSegments {
     match node.kind {
         NodeKind::Workspace => workspace_segments(node, ascii),
@@ -1052,7 +1040,7 @@ pub fn node_segments(
         },
         NodeKind::Dir => dir_name_segments(&node.label, ascii),
         NodeKind::File => match node.file.as_ref() {
-            Some(change) => file_segments(change, tree_mode, ascii, viewed),
+            Some(change) => file_segments(change, tree_mode, ascii),
             None => NodeSegments {
                 segments: vec![text_seg(&node.label, SegRole::File)],
                 trailing: Vec::new(),
@@ -1061,7 +1049,8 @@ pub fn node_segments(
     }
 }
 
-/// Segments for a flattened row. Viewed eye is prepended on dirty file rows.
+/// Segments for a flattened row. Viewed eye is prepended on dirty file rows
+/// (Ink `applyViewedMarks`) using `icon_viewed` — nf-fa-eye `U+F06E` / `*`.
 pub fn row_segments(row: &VisibleRow, ascii: bool, viewed: bool) -> NodeSegments {
     let mut trailing = row.trailing_segs.clone();
     if viewed && row.kind == NodeKind::File {
@@ -1476,9 +1465,22 @@ mod tests {
             .expect("file");
         let segs = row_segments(file, true, true);
         let trail: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
-        assert!(trail.contains(icon_viewed(true)), "{trail}");
-        assert!(!trail.contains('◉'));
         assert_eq!(icon_viewed(true), "*");
-        assert_eq!(icon_viewed(false), "");
+        assert_eq!(icon_viewed(false), "\u{f06e}");
+        assert!(trail.contains(icon_viewed(true)), "{trail}");
+        assert!(!trail.contains('\u{25c9}'), "{trail}");
+        let nerd = row_segments(file, false, true);
+        let nerd_trail: String = nerd.trailing.iter().map(|s| s.text.as_str()).collect();
+        assert!(nerd_trail.contains('\u{f06e}'), "{nerd_trail}");
+        assert!(!nerd_trail.contains('\u{25c9}'), "{nerd_trail}");
+        assert!(!nerd_trail.contains('\u{f07a}'), "{nerd_trail}");
+        assert_eq!(
+            nerd.trailing
+                .iter()
+                .filter(|s| s.text == icon_viewed(false))
+                .count(),
+            1,
+            "{nerd_trail}"
+        );
     }
 }

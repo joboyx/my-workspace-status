@@ -83,9 +83,17 @@ pub fn icon_merged_into_default(ascii: bool) -> &'static str {
 pub fn icon_open_vs_default(ascii: bool) -> &'static str {
     glyph(ascii, "", "o")
 }
-/// Reviewed mark on a dirty file row. Nerd: nf-fa-eye; ASCII: `*`.
+/// Ink `ICON_VIEWED` nerd glyph: nf-fa-eye (`U+F06E`).
+///
+/// Same pairing as `src/tui/icons.ts`. Do not substitute `◉` or another PUA eye.
+pub const ICON_VIEWED_NERD: &str = "\u{f06e}";
+/// Ink `ICON_VIEWED` ASCII fallback.
+pub const ICON_VIEWED_ASCII: &str = "*";
+
+/// Reviewed mark on a dirty file row. Nerd: nf-fa-eye (`U+F06E`); ASCII: `*`.
+/// Distinct from `ICON_CLEAN` / `ICON_SYNCED`.
 pub fn icon_viewed(ascii: bool) -> &'static str {
-    glyph(ascii, "", "*")
+    glyph(ascii, ICON_VIEWED_NERD, ICON_VIEWED_ASCII)
 }
 
 const DEFAULT_FILE_GLYPH: &str = "";
@@ -530,6 +538,19 @@ mod tests {
         assert_eq!(icon_viewed(true), "*");
         assert_ne!(icon_viewed(false), icon_clean(false));
         assert_ne!(icon_viewed(false), icon_synced(false));
+    }
+
+    #[test]
+    fn viewed_is_ink_nf_fa_eye_not_a_substitute() {
+        assert_eq!(icon_viewed(false), "\u{f06e}");
+        assert_eq!(icon_viewed(true), "*");
+        assert_eq!(icon_viewed(false), ICON_VIEWED_NERD);
+        assert_eq!(icon_viewed(true), ICON_VIEWED_ASCII);
+        let nerd = icon_viewed(false).chars().next().expect("glyph");
+        assert_eq!(u32::from(nerd), 0xf06e);
+        assert_ne!(nerd, '\u{25c9}'); // ◉
+        assert_ne!(nerd, '\u{f07a}'); // other PUA eye/search lookalike
+        assert_eq!(visible_width(icon_viewed(false)), 1);
     }
 
     #[test]
