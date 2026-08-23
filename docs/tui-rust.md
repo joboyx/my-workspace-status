@@ -25,13 +25,13 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 | `n` / `N` | Next / previous match on the pane bound at `/` (previous is `N`, not `p`). Same keys step help matches when help search is armed |
 | `Ctrl+u` / `Ctrl+d` | Move the focused list ±5 rows (tree, graph, or commit-files). On a focused file diff, scroll ±5. PageUp / PageDown stay one viewport |
 | `Ctrl+O` | Toggle unlimited `-U` context on the focused file diff. A second press restores the previous context. No-op on tree, graph, or a commit-file list |
-| `s` | Stage dirty files in the focused scope (file, repo, dir, checkout, or workspace). Workspace writes every scoped file across repos |
-| `u` | Unstage dirty files in the focused scope |
-| `x` | Revert dirty files in the focused scope. `y` discards tracked (keeps untracked except a sole untracked file). `Y` also deletes untracked |
+| `s` | Stage dirty files in the focused scope (file, dir, checkout, or flat repo). Workspace and family-container rows are a no-op |
+| `u` | Unstage dirty files in the focused scope. Workspace and family-container rows are a no-op |
+| `x` | Revert dirty files in the focused scope. Workspace and family-container rows are a no-op. `y` discards tracked (keeps untracked except a sole untracked file). `Y` also deletes untracked |
 | `e` | Edit the focused workspace file, commit-file row, or commit-file diff (`$EDITOR` or config `editor`) |
-| `f` | Fetch visible targets |
-| `p` | Pull visible targets that are behind |
-| `d` | Switch visible targets that are off the default branch. Already-default is a no-op (does not pull) |
+| `f` | Fetch visible targets. Workspace fans out to primaries. No-updates group is a no-op |
+| `p` | Pull visible targets that are behind. No-updates group is a no-op |
+| `d` | Switch visible targets that are off the default branch. Already-default is a no-op (does not pull). No-updates group is a no-op |
 | `P` | Push the focused visible repo or checkout when it is ahead, diverged, or has no upstream. In-sync is a no-op |
 | `S` | Stash menu. Tree dirty file or repo is create-only (`s`). Graph commit or uncommitted offers apply / pop of the latest stash; drop needs a focused stash row (`a` / `p` / `D`, or `S` there) |
 | `Enter` | Focus the right pane, or drill: graph commit → commit detail (graph stays left) → commit diff |
@@ -39,7 +39,7 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 | `a` / `p` / `D` | Apply / pop / drop the focused graph stash row. Drop asks `y` / `n` |
 | `b` | Tree: local branch picker (list, filter, checkout, `C` create at HEAD). Graph commit: checkout refs on that commit (one name checks out, several open a name picker). Dirty tree refuses with commit-or-stash |
 | `c` | Graph commit: create a branch at that commit (`git branch -- name commitId`). No checkout. No-op when a graph commit is not focused |
-| `r` | Reload the workspace snapshot |
+| `r` | Reload the focused checkout. Workspace row or No-updates group reloads the whole workspace |
 | `space` | Mark a dirty file as reviewed. Writes the same viewed-files store as the Ink app |
 | `w` / `W` | Remove the focused linked worktree after `y` / `n` |
 | `Tab` | Focus the other pane |
@@ -70,9 +70,9 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 - `/` searches the focused pane. Tree matches include folded rows and unfold ancestors. Graph search matches commit subjects and ref names. Commit-file search matches paths. Diff search matches painted line text. When `?` help is open, `/` searches the help overlay instead
 - `Ctrl+O` on a focused file diff reloads it with unlimited unified context and keeps the current hunk in view
 - `h` / `l` on a focused file diff pan long lines. They still fold when the tree is focused
-- Stage / unstage / revert act on every dirty file in the focused scope (file, dir, flat repo, checkout, or workspace), including every scoped file across repos. A file row stays single-file. A dir row writes the dir path and its children. Family containers do not mix linked worktree files. Hidden ignored stay out unless shown. Revert asks `y` / `Y` / `n` on the status line. `y` discards tracked and keeps untracked, except a sole untracked file which still deletes. `Y` also deletes untracked. Stage and unstage do not confirm
+- Stage / unstage / revert act on dirty files in the focused scope (file, dir, flat repo, or checkout). A file row stays single-file. A dir row writes the dir path and its children. Workspace, No-updates group, and family containers are a no-op. Hidden ignored stay out unless shown. Revert asks `y` / `Y` / `n` on the status line. `y` discards tracked and keeps untracked, except a sole untracked file which still deletes. `Y` also deletes untracked. Stage and unstage do not confirm
 - `e` uses config `editor`, then `$EDITOR`, then `$VISUAL`, then `vim`. It opens a focused workspace dirty file, a focused commit-file row, or a focused commit-file diff. A TTY editor leaves the alternate screen and returns to the same fold, focus, and scroll. GUI editors (`cursor`, `code`) spawn without a remount. Resume drains leftover raw-mode keys
-- Fetch / pull / default (`f` / `p` / `d`) do not fan out to linked worktrees unless the focused row is that worktree. The background fetch timer still includes linked worktrees (and shown ignored); it skips hidden ignored.
+- Fetch / pull / default (`f` / `p` / `d`) do not fan out to linked worktrees unless the focused row is that worktree. The No-updates group is a no-op for `f` / `p` / `d`. Workspace `f` / `p` / `d` still targets visible primaries. The background fetch timer still includes linked worktrees (and shown ignored); it skips hidden ignored.
 - `P` pushes the focused visible repo or checkout only when it is ahead, diverged, or has no upstream. In-sync is a no-op. Workspace never fans out. Hidden ignored stay out. Linked worktrees push only when that row is focused
 - `S` on a dirty tree file or repo is create-only (`s stash`). `S` on a clean tree row that has `stash@{0}` is a no-op. On a focused graph commit or uncommitted row, `S` offers apply / pop of the latest stash (`a` / `p`); drop stays off unless a graph stash row is focused. Graph stash rows offer apply / pop / drop of that `stash@{n}` (`a` / `p` / `D`, plus `S` there). Never drop latest from a non-stash row. Menu `p` runs immediately. Drop asks `y` / `n`
 - `d` switches visible targets that are off the default branch. Already-default is a no-op and does not pull. Dirty trees still skip
@@ -82,7 +82,7 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 - `b` on a focused graph commit checks out that commit's local and `origin/*` refs. One name checks out. Several names open a picker of those names only. Tags and other remotes stay out. A dirty tree refuses (`Dirty worktree — commit or stash first`). Scope is the checkout that owns the graph. Hidden ignored stay out
 - `c` on a focused graph commit opens a name prompt and runs `git branch -- <name> <commitId>`. It does not check the new branch out. `c` is a no-op on a tree, file, or workspace row. Picker `C` still creates and checks out at HEAD
 - `w` / `W` removes the focused linked worktree. Workspace, repo family, file, and hidden ignored rows are a no-op. Confirm with `y` / `n`. The command is `git worktree remove [--force]` from the primary. Bind-mount aliases remap the same way as in the TypeScript app. Ink uses the same keys
-- Action / Effect loop: crossterm events become `Action`, dispatch updates state and returns an `Effect`
+- Action / Effect loop: crossterm events become `Action`, dispatch updates state and returns an `Effect`. `r` is `ReloadRepo` for a focused checkout (or file / dir / flat repo) and `ReloadSnapshot` on the workspace row or No-updates group
 - EasyMotion (`;` / Ctrl+Space) labels the currently visible rows on the focused list (tree, graph, or commit files). Prefix matching is partial / hit / miss. Hit jumps. Esc or a miss cancels and keeps the cursor. A focused diff does not start the overlay
 - `T` cycles Tokyo Night → Monokai → Dracula → Gruvbox Dark → Catppuccin Mocha → Tokyo Night. Launch seed is `WS_STATUS_THEME`. The cycle stays in the current session; neither this TUI nor Ink writes a theme file
 - Mouse is optional. Keys work without it. `m` toggles capture. Double-click is Enter. Click a fold chevron to toggle fold. Drag the tree / right splitter, or the in-diff RULE in split mode, to resize. `i` toggles inline / split without a mouse

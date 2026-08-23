@@ -16,7 +16,7 @@ use ratatui::Terminal;
 
 use crate::actions::{pull_behind_repos, switch_repo_to_default_branch};
 use crate::config::WorkspaceStatusConfig;
-use crate::discovery::collect_snapshots;
+use crate::discovery::{collect_snapshots, process_repo, RepoCheckoutMeta};
 use crate::git::{
     checkout_branch, create_branch_at, create_branch_checkout, diff_commit_file_ctx,
     diff_stash_file_ctx, exec_git_checked, git_diff_args, latest_stash_ref,
@@ -25,7 +25,9 @@ use crate::git::{
     remove_worktree, revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop,
     stash_push, unstage_file,
 };
-use crate::snapshot::{build_workspace_snapshot, WorkspaceSnapshot};
+use crate::snapshot::{
+    build_workspace_snapshot, repo_snapshots_from_workspace, CheckoutKind, WorkspaceSnapshot,
+};
 
 use super::action::{Action, Effect};
 use super::diff::{load_file_diff, DiffContent};
@@ -193,7 +195,12 @@ fn apply_effect(
         }
         Effect::ReloadSnapshot => {
             reload_snapshot(state, opts);
-            state.status = "refreshed".into();
+            state.status = "refreshed workspace".into();
+            load_right(state);
+        }
+        Effect::ReloadRepo { repo } => {
+            reload_repo(state, opts, &repo);
+            state.status = format!("refreshed {repo}");
             load_right(state);
         }
         Effect::LoadRightPane => load_right(state),
@@ -451,7 +458,12 @@ pub(crate) fn apply_headless_effect(state: &mut AppState, effect: Effect, opts: 
         Effect::LoadRightPane => load_right(state),
         Effect::ReloadSnapshot => {
             reload_snapshot(state, opts);
-            state.status = "refreshed".into();
+            state.status = "refreshed workspace".into();
+            load_right(state);
+        }
+        Effect::ReloadRepo { repo } => {
+            reload_repo(state, opts, &repo);
+            state.status = format!("refreshed {repo}");
             load_right(state);
         }
         Effect::LoadCommitFiles { repo, source } => {
@@ -585,6 +597,39 @@ fn reload_snapshot(state: &mut AppState, opts: &TuiOpts) {
         &state.snapshot.filter_repos,
         state.show_ignored,
         false,
+    );
+    state.apply_snapshot(snapshot);
+}
+
+/// Refresh one checkout in place. Missing paths drop out of the snapshot
+/// (same as Ink `refreshRepoOnly`).
+fn reload_repo(state: &mut AppState, opts: &TuiOpts, repo: &str) {
+    let existing = state.snapshot.repos.iter().find(|row| row.repo == repo);
+    let meta = RepoCheckoutMeta {
+        checkout_kind: existing
+            .map(|row| row.checkout_kind)
+            .unwrap_or(CheckoutKind::Primary),
+        primary_repo: existing.and_then(|row| row.primary_repo.clone()),
+    };
+    let override_name = existing.and_then(|row| row.default_branch_override.clone());
+    let mut snaps = repo_snapshots_from_workspace(&state.snapshot);
+    match process_repo(repo, &opts.cwd, false, override_name.as_deref(), &meta) {
+        Some(snap) => {
+            if let Some(slot) = snaps.iter_mut().find(|row| row.repo == repo) {
+                *slot = snap;
+            } else {
+                snaps.push(snap);
+            }
+        }
+        None => {
+            snaps.retain(|row| row.repo != repo);
+        }
+    }
+    let snapshot = build_workspace_snapshot(
+        &snaps,
+        &state.snapshot.ignored_repos,
+        state.show_ignored,
+        &state.snapshot.filter_repos,
     );
     state.apply_snapshot(snapshot);
 }

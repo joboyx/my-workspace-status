@@ -42,10 +42,11 @@ fn files_for_repo(snapshot: &WorkspaceSnapshot, repo: &str) -> Vec<ScopedFile> {
 /// Dirty files a stage / unstage / revert should touch for the focused row.
 ///
 /// File rows stay single-file. Dir rows walk dirty files under that dir
-/// (the dir path itself and its children). Repo and checkout rows walk every
-/// dirty file in that checkout. Family containers yield no files. Workspace
-/// rows walk visible primary checkouts. Hidden ignored stay out unless shown.
-/// Linked worktrees are included only when that checkout is focused.
+/// (the dir path itself and its children). Checkout and flat repo rows walk
+/// every dirty file in that checkout. Family containers, workspace, and
+/// group rows yield no files (Ink `collectFiles`). Hidden ignored stay out
+/// unless shown. Linked worktrees are included only when that checkout is
+/// focused.
 pub fn collect_write_files(
     snapshot: &WorkspaceSnapshot,
     focused: Option<&VisibleRow>,
@@ -94,19 +95,7 @@ pub fn collect_write_files(
             }
             files_for_repo(snapshot, repo)
         }
-        NodeKind::Workspace => snapshot
-            .repos
-            .iter()
-            .filter(|member| member.checkout_kind == CheckoutKind::Primary)
-            .filter(|member| show_ignored || !member.ignored)
-            .flat_map(|member| {
-                member.changes.iter().map(|change| ScopedFile {
-                    repo: member.repo.clone(),
-                    change: change.clone(),
-                })
-            })
-            .collect(),
-        NodeKind::Group => Vec::new(),
+        NodeKind::Workspace | NodeKind::Group => Vec::new(),
     }
 }
 
@@ -142,9 +131,10 @@ pub enum Op {
 
 /// Checkout paths that `op` may touch for the focused row.
 ///
-/// Hidden ignored repos are omitted unless `show_ignored` is true.
-/// Linked worktrees are omitted unless the focused row is that worktree
-/// (or a file inside it).
+/// Workspace rows resolve to visible primaries. Group rows yield no
+/// targets (Ink `collectBulkGitTargets`). Hidden ignored repos are omitted
+/// unless `show_ignored` is true. Linked worktrees are omitted unless the
+/// focused row is that worktree (or a file inside it).
 pub fn op_targets(
     snapshot: &WorkspaceSnapshot,
     focused: Option<&VisibleRow>,
@@ -162,7 +152,8 @@ pub fn op_targets(
     };
 
     match row.kind {
-        NodeKind::Workspace | NodeKind::Group => primaries_only(&visible),
+        NodeKind::Workspace => primaries_only(&visible),
+        NodeKind::Group => Vec::new(),
         NodeKind::Repo => {
             // Family container or flat primary: that primary only.
             let Some(repo) = row.repo.as_deref() else {
@@ -192,6 +183,19 @@ fn include_if_visible(repo: &str, visible: &[&WorkspaceRepoSnapshot]) -> Vec<Str
         vec![repo.to_string()]
     } else {
         Vec::new()
+    }
+}
+
+/// Checkout path `r` should reload, or `None` for a whole-workspace reload.
+///
+/// Workspace and No-updates group (and no focus) reload everything. A
+/// checkout, flat repo, file, or dir reloads that checkout only. Family
+/// containers use the primary path (same as Ink `repoPathOf`).
+pub fn refresh_target(focused: Option<&VisibleRow>) -> Option<String> {
+    let row = focused?;
+    match row.kind {
+        NodeKind::Workspace | NodeKind::Group => None,
+        NodeKind::Repo | NodeKind::Checkout | NodeKind::File | NodeKind::Dir => row.repo.clone(),
     }
 }
 
@@ -294,6 +298,21 @@ mod tests {
         }
     }
 
+    fn group_row() -> VisibleRow {
+        VisibleRow {
+            id: "group:no-updates".into(),
+            depth: 1,
+            kind: NodeKind::Group,
+            label: "No updates (1)".into(),
+            repo: None,
+            primary_repo: None,
+            ignored: false,
+            file: None,
+            foldable: true,
+            folded: true,
+        }
+    }
+
     fn workspace_row() -> VisibleRow {
         VisibleRow {
             id: "workspace".into(),
@@ -349,6 +368,34 @@ mod tests {
         let snapshot = built();
         let targets = op_targets(&snapshot, Some(&workspace_row()), true, Op::Fetch);
         assert_eq!(targets, vec!["app", "notes"]);
+    }
+
+    #[test]
+    fn group_fetch_pull_default_are_empty() {
+        let snapshot = built();
+        for op in [Op::Fetch, Op::Pull, Op::DefaultBranch] {
+            assert!(
+                op_targets(&snapshot, Some(&group_row()), false, op).is_empty(),
+                "{op:?}"
+            );
+            assert!(
+                op_targets(&snapshot, Some(&group_row()), true, op).is_empty(),
+                "{op:?} shown ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_target_is_checkout_or_whole_workspace() {
+        assert_eq!(refresh_target(Some(&workspace_row())), None);
+        assert_eq!(refresh_target(Some(&group_row())), None);
+        assert_eq!(refresh_target(None), None);
+        assert_eq!(
+            refresh_target(Some(&checkout_row(".worktrees/app/feat"))),
+            Some(".worktrees/app/feat".into())
+        );
+        assert_eq!(refresh_target(Some(&file_row("app"))), Some("app".into()));
+        assert_eq!(refresh_target(Some(&repo_row("lib"))), Some("lib".into()));
     }
 
     #[test]
@@ -497,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_write_files_repo_and_workspace_skip_hidden_and_worktrees() {
+    fn collect_write_files_workspace_and_family_are_empty() {
         let snapshot = build_workspace_snapshot(
             &[
                 dirty("app", false, false, &["README.md", "src/lib.rs"]),
@@ -517,22 +564,7 @@ mod tests {
             vec!["a.rs"]
         );
         assert!(files.iter().all(|f| f.repo == "lib"));
-        let workspace = collect_write_files(&snapshot, Some(&workspace_row()), false);
-        assert_eq!(
-            workspace
-                .iter()
-                .map(|f| (f.repo.as_str(), f.change.path.as_str()))
-                .collect::<Vec<_>>(),
-            vec![
-                ("app", "README.md"),
-                ("app", "src/lib.rs"),
-                ("lib", "a.rs"),
-            ]
-        );
-        assert!(workspace.iter().all(|f| f.repo != "notes"));
-        assert!(workspace
-            .iter()
-            .all(|f| f.repo != ".worktrees/app/feat"));
+        assert!(collect_write_files(&snapshot, Some(&workspace_row()), false).is_empty());
         let file = collect_write_files(&snapshot, Some(&file_row("app")), false);
         assert_eq!(file.len(), 1);
         assert_eq!(file[0].change.path, "README.md");
