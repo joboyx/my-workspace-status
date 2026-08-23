@@ -56,13 +56,17 @@ stay out of ops unless shown.
 space remains (footer wins when tight; no header when `sync` is unset).
 `loading older…` takes one extra row while the next log page loads.
 
-Footer copy matches Ink `graphSelectionDetailLines`:
+Footer copy matches Ink `graphSelectionDetailLines` (do not invent
+other strings):
 
+- no row: `no selection`
 - uncommitted: `Working tree clean` / `Uncommitted changes`, then
   `worktree · not a commit`
+- spacer: `…`, then `connector · not selectable`
 - stash: subject, then `stash@{n} ·` short hash `·` relative date (no
   author)
-- commit: subject, then ref chips `·` hash `·` author `·` date
+- commit: subject, then ref chips `·` hash `·` author `·` date, or
+  `(no refs)` when there are no chips
 
 Then one gutter plus label per visible row. Commit and stash rows also
 paint a spacer line under the node (densify rails, or the stash spur).

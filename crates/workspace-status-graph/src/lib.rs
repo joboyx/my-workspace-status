@@ -22,7 +22,11 @@ mod topology;
 mod widget;
 
 pub use action::{Action, Effect};
-pub use chrome::{graph_chrome_budget, selection_detail_lines, GraphChromeBudget, LOADING_OLDER};
+pub use chrome::{
+    graph_chrome_budget, selection_detail_lines, GraphChromeBudget, GraphFooterSelection,
+    FOOTER_CONNECTOR_NOT_SELECTABLE, FOOTER_NO_REFS, FOOTER_NO_SELECTION, FOOTER_SPACER_SUBJECT,
+    FOOTER_WORKTREE_NOT_A_COMMIT, LOADING_OLDER,
+};
 pub use format::{
     format_commit_ref_chips, format_commit_spacer, format_commit_subject, format_label,
     format_relative_date, format_row, format_stash_spacer, format_sync, meta_column_widths,

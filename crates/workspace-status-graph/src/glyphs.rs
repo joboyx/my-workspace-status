@@ -99,3 +99,16 @@ pub const ASCII: GlyphSet = GlyphSet {
     tee_up: "+",
     cross: "+",
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worktree_glyph_matches_ink_linked_worktree_not_emoji() {
+        assert_eq!(UNICODE.worktree, "");
+        assert_eq!(ASCII.worktree, "L");
+        assert_ne!(UNICODE.worktree, "🔗");
+        assert_ne!(ASCII.worktree, "wt");
+    }
+}

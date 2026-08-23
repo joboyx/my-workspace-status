@@ -832,5 +832,7 @@ mod tests {
             is_current: false,
         });
         assert_eq!(format_row(&row, &UNICODE), " notes  [ignored]");
+        assert_eq!(format_row(&row, &ASCII), "L notes  [ignored]");
+        assert!(!format_row(&row, &UNICODE).contains("🔗"));
     }
 }

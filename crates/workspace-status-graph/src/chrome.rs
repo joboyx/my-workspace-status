@@ -9,6 +9,41 @@ use crate::model::{GraphModel, GraphRow};
 /// Status / pane copy while the next log page loads.
 pub const LOADING_OLDER: &str = "loading older…";
 
+/// Ink `graphSelectionDetailLines` when no row is focused.
+pub const FOOTER_NO_SELECTION: &str = "no selection";
+
+/// Ink uncommitted footer meta.
+pub const FOOTER_WORKTREE_NOT_A_COMMIT: &str = "worktree · not a commit";
+
+/// Ink spacer footer meta (`kind: 'spacer'`).
+pub const FOOTER_CONNECTOR_NOT_SELECTABLE: &str = "connector · not selectable";
+
+/// Ink commit footer when the commit has no ref chips.
+pub const FOOTER_NO_REFS: &str = "(no refs)";
+
+/// Ink spacer footer subject.
+pub const FOOTER_SPACER_SUBJECT: &str = "…";
+
+/// What GraphPane's 2-line selection footer describes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphFooterSelection<'a> {
+    /// No focused list row.
+    None,
+    /// A [`GraphRow`] from [`GraphModel::visible_rows`].
+    Row(&'a GraphRow),
+    /// Spacer under a commit or stash (not in `visible_rows`).
+    Spacer,
+}
+
+impl<'a> From<Option<&'a GraphRow>> for GraphFooterSelection<'a> {
+    fn from(row: Option<&'a GraphRow>) -> Self {
+        match row {
+            Some(row) => Self::Row(row),
+            None => Self::None,
+        }
+    }
+}
+
 /// How many header / footer / list rows GraphPane should reserve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphChromeBudget {
@@ -49,25 +84,30 @@ pub fn graph_chrome_budget(
 /// Two selection-detail lines (subject + meta). Truncated to `width`.
 pub fn selection_detail_lines(
     model: &GraphModel,
-    row: Option<&GraphRow>,
+    selection: GraphFooterSelection<'_>,
     glyphs: &GlyphSet,
     width: usize,
     now_unix: i64,
 ) -> [String; 2] {
     let width = width.max(1);
-    let Some(row) = row else {
-        return [trunc("no selection", width), String::new()];
-    };
-    match row {
-        GraphRow::Uncommitted { has_changes } => {
+    match selection {
+        GraphFooterSelection::None => [trunc(FOOTER_NO_SELECTION, width), String::new()],
+        GraphFooterSelection::Spacer => [
+            trunc(FOOTER_SPACER_SUBJECT, width),
+            trunc(FOOTER_CONNECTOR_NOT_SELECTABLE, width),
+        ],
+        GraphFooterSelection::Row(GraphRow::Uncommitted { has_changes }) => {
             let line = if *has_changes {
                 "Uncommitted changes"
             } else {
                 "Working tree clean"
             };
-            [trunc(line, width), trunc("worktree · not a commit", width)]
+            [
+                trunc(line, width),
+                trunc(FOOTER_WORKTREE_NOT_A_COMMIT, width),
+            ]
         }
-        GraphRow::Stash(stash) => {
+        GraphFooterSelection::Row(GraphRow::Stash(stash)) => {
             // Ink `graphSelectionDetailLines`: `[ref, hash.slice(0,7), date].join(' · ')`.
             let meta = join_meta([
                 stash.stash_ref.clone(),
@@ -76,13 +116,13 @@ pub fn selection_detail_lines(
             ]);
             [trunc(&stash.subject, width), trunc(&meta, width)]
         }
-        GraphRow::Worktree(wt) => {
+        GraphFooterSelection::Row(GraphRow::Worktree(wt)) => {
             let meta = wt.branch.clone().unwrap_or_default();
             [trunc(&wt.path, width), trunc(&meta, width)]
         }
-        GraphRow::Commit {
+        GraphFooterSelection::Row(GraphRow::Commit {
             commit, is_head, ..
-        } => {
+        }) => {
             let chips = format_commit_ref_chips(
                 &commit.refs,
                 *is_head,
@@ -92,7 +132,7 @@ pub fn selection_detail_lines(
             let hash = short_id(&commit.id);
             let mut meta_parts: Vec<String> = Vec::new();
             if chips.is_empty() {
-                meta_parts.push("(no refs)".into());
+                meta_parts.push(FOOTER_NO_REFS.into());
             } else {
                 meta_parts.push(chips);
             }
@@ -170,13 +210,48 @@ mod tests {
             ..GraphModel::default()
         };
         let dirty = GraphRow::Uncommitted { has_changes: true };
-        let [a, b] = selection_detail_lines(&model, Some(&dirty), &UNICODE, 40, 0);
+        let [a, b] =
+            selection_detail_lines(&model, GraphFooterSelection::Row(&dirty), &UNICODE, 40, 0);
         assert_eq!(a, "Uncommitted changes");
-        assert_eq!(b, "worktree · not a commit");
+        assert_eq!(b, FOOTER_WORKTREE_NOT_A_COMMIT);
         let clean = GraphRow::Uncommitted { has_changes: false };
-        let [c, d] = selection_detail_lines(&model, Some(&clean), &UNICODE, 40, 0);
+        let [c, d] =
+            selection_detail_lines(&model, GraphFooterSelection::Row(&clean), &UNICODE, 40, 0);
         assert_eq!(c, "Working tree clean");
-        assert_eq!(d, "worktree · not a commit");
+        assert_eq!(d, FOOTER_WORKTREE_NOT_A_COMMIT);
+    }
+
+    #[test]
+    fn footer_no_selection_connector_and_no_refs() {
+        let model = GraphModel::default();
+        let [none, empty] =
+            selection_detail_lines(&model, GraphFooterSelection::None, &UNICODE, 40, 0);
+        assert_eq!(none, FOOTER_NO_SELECTION);
+        assert_eq!(empty, "");
+        let [dots, connector] =
+            selection_detail_lines(&model, GraphFooterSelection::Spacer, &UNICODE, 40, 0);
+        assert_eq!(dots, FOOTER_SPACER_SUBJECT);
+        assert_eq!(connector, FOOTER_CONNECTOR_NOT_SELECTABLE);
+        let commit = Commit {
+            id: "abcdefghhhh".into(),
+            subject: "untagged".into(),
+            ..Commit::default()
+        };
+        let model = GraphModel {
+            commits: vec![commit.clone()],
+            ..GraphModel::default()
+        };
+        let row = GraphRow::Commit {
+            commit,
+            is_head: false,
+            worktrees: Vec::new(),
+        };
+        let [_, meta] =
+            selection_detail_lines(&model, GraphFooterSelection::Row(&row), &UNICODE, 80, 0);
+        assert!(
+            meta.starts_with(FOOTER_NO_REFS),
+            "commit with no chips uses Ink (no refs): {meta}"
+        );
     }
 
     #[test]
@@ -196,7 +271,7 @@ mod tests {
         };
         let [subject, meta] = selection_detail_lines(
             &model,
-            Some(&GraphRow::Stash(stash)),
+            GraphFooterSelection::Row(&GraphRow::Stash(stash)),
             &UNICODE,
             80,
             1_700_000_000,
@@ -227,8 +302,13 @@ mod tests {
             is_head: true,
             worktrees: Vec::new(),
         };
-        let [subject, meta] =
-            selection_detail_lines(&model, Some(&row), &UNICODE, 80, 1_700_000_000);
+        let [subject, meta] = selection_detail_lines(
+            &model,
+            GraphFooterSelection::Row(&row),
+            &UNICODE,
+            80,
+            1_700_000_000,
+        );
         assert_eq!(subject, "add footer");
         assert!(meta.contains("abcdefg"), "{meta}");
         assert!(meta.contains("Ada"), "{meta}");

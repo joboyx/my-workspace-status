@@ -162,7 +162,7 @@ To rebuild these frames, seed the demo workspace and follow [docs/demo.md](./doc
 
 ![Tree and file diff](docs/images/01-file-diff.png)
 
-**Git graph** — focus a repo or worktree. Dirty `○`, HEAD `⊙`, stash `◇`, linked worktree `🔗`.
+**Git graph** — focus a repo or worktree. Dirty `○`, HEAD `⊙`, stash `◇`, linked worktree ``.
 
 ![Git graph](docs/images/02-git-graph.png)
 

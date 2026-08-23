@@ -6,7 +6,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
-use crate::chrome::{graph_chrome_budget, selection_detail_lines, LOADING_OLDER};
+use crate::chrome::{
+    graph_chrome_budget, selection_detail_lines, GraphFooterSelection, LOADING_OLDER,
+};
 use crate::format::format_sync;
 use crate::glyphs::{ASCII, UNICODE};
 use crate::lane_colors::{cells_to_spans, default_lane_colors};
@@ -170,8 +172,13 @@ impl Widget for GraphWidget<'_> {
             footer_y = footer_y.saturating_sub(2);
             let rows = self.model.visible_rows();
             let selected = self.selected.and_then(|i| rows.get(i));
-            let [line1, line2] =
-                selection_detail_lines(self.model, selected, glyphs, area.width as usize, now);
+            let [line1, line2] = selection_detail_lines(
+                self.model,
+                GraphFooterSelection::from(selected),
+                glyphs,
+                area.width as usize,
+                now,
+            );
             put_text_line(buf, area.x, footer_y, area.width, &line1, false, fallback);
             put_text_line(
                 buf,
@@ -379,6 +386,11 @@ mod tests {
             "HEAD branch chip: {joined}"
         );
         assert!(joined.contains(".worktrees/feature/graph"), "{joined}");
+        assert!(
+            joined.contains(""),
+            "linked worktree uses ICON_LINKED_WORKTREE: {joined}"
+        );
+        assert!(!joined.contains("🔗"), "emoji desyncs the gutter: {joined}");
         assert!(joined.contains("bbb2222"), "{joined}");
         assert!(joined.contains("prior commit"), "{joined}");
     }
@@ -679,6 +691,7 @@ mod tests {
         assert!(joined.contains("*"), "{joined}");
         assert!(joined.contains("bbb2222"), "{joined}");
         assert!(joined.contains("L .worktrees/feature/graph"), "{joined}");
+        assert!(!joined.contains("🔗"), "emoji desyncs the gutter: {joined}");
         assert!(!joined.contains("⊙"), "{joined}");
         assert!(!joined.contains("●"), "{joined}");
         let merge_lines = render_lines(&merge_model(), 80, 16, true);
