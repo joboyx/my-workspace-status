@@ -28,7 +28,6 @@ pub const THEME_IDS: [ThemeId; 5] = [
 /// Default when `WS_STATUS_THEME` is unset or unknown.
 pub const DEFAULT_THEME_ID: ThemeId = ThemeId::TokyoNight;
 
-
 /// Ratatui colours for the active theme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
@@ -40,6 +39,9 @@ pub struct Palette {
     pub added: Color,
     pub modified: Color,
     pub deleted: Color,
+    pub renamed: Color,
+    pub branch_default: Color,
+    pub branch_feature: Color,
     pub cursor: Color,
     pub cursor_bg: Color,
     pub diff_hunk: Color,
@@ -57,6 +59,9 @@ pub struct ThemePalette {
     pub added: &'static str,
     pub modified: &'static str,
     pub deleted: &'static str,
+    pub renamed: &'static str,
+    pub branch_default: &'static str,
+    pub branch_feature: &'static str,
     pub cursor: &'static str,
     pub cursor_bg: &'static str,
     pub diff_hunk: &'static str,
@@ -90,7 +95,6 @@ impl ThemeId {
         self.theme().label
     }
 
-
     /// Ratatui colours for paint.
     pub fn palette(self) -> Palette {
         let p = self.theme().palette;
@@ -103,6 +107,9 @@ impl ThemeId {
             added: hex_color(p.added),
             modified: hex_color(p.modified),
             deleted: hex_color(p.deleted),
+            renamed: hex_color(p.renamed),
+            branch_default: hex_color(p.branch_default),
+            branch_feature: hex_color(p.branch_feature),
             cursor: hex_color(p.cursor),
             cursor_bg: hex_color(p.cursor_bg),
             diff_hunk: hex_color(p.diff_hunk),
@@ -135,6 +142,9 @@ const TOKYO_NIGHT: Theme = Theme {
         added: "#9ece6a",
         modified: "#e0af68",
         deleted: "#f7768e",
+        renamed: "#7dcfff",
+        branch_default: "#7aa2f7",
+        branch_feature: "#bb9af7",
         cursor: "#7aa2f7",
         cursor_bg: "#283457",
         diff_hunk: "#7dcfff",
@@ -155,6 +165,9 @@ const MONOKAI: Theme = Theme {
         added: "#a6e22e",
         modified: "#e6db74",
         deleted: "#f92672",
+        renamed: "#66d9ef",
+        branch_default: "#66d9ef",
+        branch_feature: "#ae81ff",
         cursor: "#f8f8f2",
         cursor_bg: "#3e3d32",
         diff_hunk: "#66d9ef",
@@ -175,6 +188,9 @@ const DRACULA: Theme = Theme {
         added: "#50fa7b",
         modified: "#f1fa8c",
         deleted: "#ff5555",
+        renamed: "#8be9fd",
+        branch_default: "#bd93f9",
+        branch_feature: "#bd93f9",
         cursor: "#bd93f9",
         cursor_bg: "#44475a",
         diff_hunk: "#8be9fd",
@@ -195,6 +211,9 @@ const GRUVBOX_DARK: Theme = Theme {
         added: "#b8bb26",
         modified: "#fabd2f",
         deleted: "#fb4934",
+        renamed: "#83a598",
+        branch_default: "#458588",
+        branch_feature: "#d3869b",
         cursor: "#fe8019",
         cursor_bg: "#3c3836",
         diff_hunk: "#83a598",
@@ -215,6 +234,9 @@ const CATPPUCCIN_MOCHA: Theme = Theme {
         added: "#a6e3a1",
         modified: "#f9e2af",
         deleted: "#f38ba8",
+        renamed: "#89dceb",
+        branch_default: "#89b4fa",
+        branch_feature: "#cba6f7",
         cursor: "#89b4fa",
         cursor_bg: "#313244",
         diff_hunk: "#89dceb",

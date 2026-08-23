@@ -133,15 +133,16 @@ Adding a node kind means editing four files that each `switch` on `kind`. TypeSc
 
 ## Rust CLI crate
 
+`crates/workspace-status` is the CLI (`workspace-status` and `ws`).
+It implements discovery, `--plain`, `--json`, `-a`/`--all`, repo filters, ignored-repo visibility from snapshot.md, and the ratatui TUI.
 
-crates/workspace-status is the headless CLI (workspace-status and ws).
-It implements discovery, --plain, --json, -a/--all, repo filters, and ignored-repo visibility from snapshot.md.
+Git calls use a subprocess. The binary prefers `/usr/bin/git` so WSL does not pick a Windows `git.exe`. Set `WORKSPACE_STATUS_GIT` to override.
 
-Git calls use a subprocess. The binary prefers /usr/bin/git so WSL does not pick a Windows git.exe. Set WORKSPACE_STATUS_GIT to override.
+`--fetch`, `--pull`, and `--default-branch` write progress to stderr when `--json` is set. `--json` wins when both `--json` and `--plain` are set. `-v` applies to `--plain` only.
 
---fetch, --pull, and --default-branch write progress to stderr when --json is set. --json wins when both --json and --plain are set. -v applies to --plain only.
+On a TTY (or `-i` / `--tui`) the binary opens the ratatui TUI. Tree chrome (status letters, Nerd glyphs, workspace wording, linked-checkout labels, sync marks) is ported from Ink: `tui/icons.rs` (glyph registry), `tui/tree.rs` (`node_segments`), `tui/render.rs` (right-aligned trailing + cursor bar). See [tui-rust.md](./tui-rust.md).
 
-This crate does not open a TUI. A run without --plain or --json prints the --plain report. The TypeScript Ink app is still the interactive TUI.
+The TypeScript Ink app stays in this repository for features the Rust TUI does not cover yet.
 
 
 ## Rust graph crate

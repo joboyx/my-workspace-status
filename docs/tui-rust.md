@@ -60,7 +60,7 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 
 ## What this TUI does
 
-- Tree of repos, linked worktrees, and dirty files from the same snapshot builder as `--plain` / `--json`
+- Tree of repos, linked worktrees, and dirty files from the same snapshot builder as `--plain` / `--json`. Chrome matches Ink: status letters on the right, Nerd file/folder/sync glyphs, file-oriented workspace header, branch-labeled linked checkouts
 - Files sit in a directory trie by default. `t` toggles tree / flat on the workspace. Status is `Directory tree` / `Flat paths`
 - Dir rows fold with `z` / `h` / `l`. `zz` within ~400ms folds or unfolds the focused subtree. A dir `s` / `u` / `x` writes files under that dir
 - Tree / flat stays in this session. Rust has no session store. Commit-file lists have their own `t` toggle and the same dir-trie collapse
@@ -89,7 +89,21 @@ To rebuild those frames, seed the workspace in [demo.md](./demo.md).
 - Tree / right and in-diff split ratios stay in the current session only. They reset on the next launch (Ink does not persist them either)
 - `--plain` / `--json` / `-v` / `-p` / `-d` stay headless
 
-Reviewed marks use `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (same identity and fingerprint as Ink). A mark drops when the file fingerprint changes. Space toggles dirty file rows only. The viewed glyph is `◉` / `*`, not the clean `✓`. Clean `✓` paints only on the No updates group.
+Reviewed marks use `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (same identity and fingerprint as Ink). A mark drops when the file fingerprint changes. Space toggles dirty file rows only. The viewed glyph is Ink `ICON_VIEWED` (`` / ASCII `*`), cyan/blue, trailing before the status badge — not the clean check. Clean `ICON_CLEAN` (`` / `.`) paints only on the No updates group and on repo / checkout rows inside it.
+
+## Tree chrome (Ink parity)
+
+Daily tree paint matches Ink `src/tui/icons.ts` + `model/tree.ts` + `TreePane.tsx`:
+
+- File rows: type glyph on the left, name, 2-column status badge on the **right** (`A` / `S` / `MS` / `M` / `D` / `R` / `U` / `C`). Untracked is `A`, staged-only is `S`, staged+unstaged is `MS`.
+- Folder / repo / branch / linked-worktree / sync / merge / viewed glyphs from the same registry. `WS_STATUS_GLYPHS=ascii` uses the same fallbacks (`#` `@` `L` `&` `/` `^` `v` `Y` `?` `=` `M` `o` `*`).
+- Workspace header is file-oriented: `{cwd basename}` trailing `{N} changed · {ahead/behind/diverged/attention|all current}`.
+- Linked worktrees under a family are checkout rows labeled by **branch** (Ink), not `wt <path>`. Detached linked checkouts fall back to the short worktree path.
+- Repo / checkout trailing sync marks match Ink (`↑N` / `↓N` / diverged / no-upstream). Merged-into-default / open-vs-default sit next to the branch. Up-to-date `` only inside No updates.
+
+Rust extras stay: `q`, Tab, Home/End, family-row `b`, picker `C`. Confirm `y`/`n` stays on the status line (overlays vs status-line confirm is out of scope). Graph window/autoload, diff section headers, and stash meta are separate.
+
+Glyphs live in `crates/workspace-status/src/tui/icons.rs`. Labels are built in `tree.rs` (`node_segments`); `render.rs` right-aligns trailing and paints the cursor bar.
 
 ## Optional Ink-only
 

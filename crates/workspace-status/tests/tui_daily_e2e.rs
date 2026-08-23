@@ -147,6 +147,13 @@ fn assert_absent(frame: &str, needle: &str) {
     );
 }
 
+/// True when a tree row names this repo (branch glyph present; not the `/` query).
+fn frame_has_repo_row(frame: &str, name: &str) -> bool {
+    frame
+        .lines()
+        .any(|line| line.contains(name) && (line.contains('') || line.contains(" & ")))
+}
+
 #[test]
 fn tree_shows_dirty_and_folded_no_updates() {
     let (root, workspace) = daily_workspace();
@@ -156,7 +163,7 @@ fn tree_shows_dirty_and_folded_no_updates() {
     assert_contains(&frame, "app");
     assert_contains(&frame, "README.md");
     assert_contains(&frame, "No updates");
-    assert_absent(&frame, "lib  main");
+    assert_absent(&frame, "lib");
     assert_absent(&frame, "notes");
 
     tui.key('G');
@@ -171,7 +178,7 @@ fn tree_shows_dirty_and_folded_no_updates() {
     tui.key('h');
     let closed = tui.frame();
     assert_contains(&closed, "No updates");
-    assert_absent(&closed, "lib  main");
+    assert_absent(&closed, "lib");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -242,7 +249,7 @@ fn search_n_and_n_unfolds_parents() {
     let (root, workspace) = daily_workspace();
     let mut tui = open(&workspace);
     let start = tui.frame();
-    assert_absent(&start, "lib  main");
+    assert_absent(&start, "lib");
 
     tui.search("main");
     let first = tui.cursor_id();
@@ -377,9 +384,16 @@ fn hidden_ignored_stay_out_until_shown() {
     let (root, workspace) = daily_workspace();
     let mut hidden = open(&workspace);
     let frame = hidden.frame();
-    assert_absent(&frame, "notes  main");
+    assert!(
+        !frame_has_repo_row(&frame, "notes"),
+        "notes must stay out until shown:\n{frame}"
+    );
     hidden.search("notes");
-    assert_absent(&hidden.frame(), "notes  main");
+    assert!(
+        !frame_has_repo_row(&hidden.frame(), "notes"),
+        "search must not reveal hidden ignored:\n{}",
+        hidden.frame()
+    );
     assert!(
         !hidden.cursor_label().contains("notes"),
         "hidden ignored must not become the cursor"
@@ -387,12 +401,24 @@ fn hidden_ignored_stay_out_until_shown() {
 
     hidden.key('.');
     let shown = hidden.frame();
-    assert_contains(&shown, "notes  main");
+    assert_contains(&shown, "notes");
+    assert!(
+        frame_has_repo_row(&shown, "notes"),
+        "ignored notes should enter the tree:\n{shown}"
+    );
 
     hidden.key('.');
-    assert_absent(&hidden.frame(), "notes  main");
+    assert!(
+        !frame_has_repo_row(&hidden.frame(), "notes"),
+        "notes should hide again:\n{}",
+        hidden.frame()
+    );
 
     let mut all = HeadlessTui::open(&workspace, true);
-    assert_contains(&all.frame(), "notes  main");
+    assert!(
+        frame_has_repo_row(&all.frame(), "notes"),
+        "-a should show notes:\n{}",
+        all.frame()
+    );
     let _ = fs::remove_dir_all(root);
 }

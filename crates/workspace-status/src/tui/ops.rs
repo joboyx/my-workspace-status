@@ -16,8 +16,7 @@ pub struct ScopedFile {
 
 fn is_family_container(snapshot: &WorkspaceSnapshot, repo: &str) -> bool {
     snapshot.repos.iter().any(|member| {
-        member.checkout_kind == CheckoutKind::Linked
-            && member.primary_repo.as_deref() == Some(repo)
+        member.checkout_kind == CheckoutKind::Linked && member.primary_repo.as_deref() == Some(repo)
     })
 }
 
@@ -238,20 +237,17 @@ pub fn push_targets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{
-        build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus,
-    };
+    use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus};
     use crate::tui::tree::VisibleRow;
 
-    fn snap(
-        name: &str,
-        _ignored: bool,
-        linked: bool,
-        behind: bool,
-    ) -> RepoSnapshot {
+    fn snap(name: &str, _ignored: bool, linked: bool, behind: bool) -> RepoSnapshot {
         RepoSnapshot {
             repo: name.into(),
-            branch: if behind { "feature/x".into() } else { "main".into() },
+            branch: if behind {
+                "feature/x".into()
+            } else {
+                "main".into()
+            },
             sync_status: if behind {
                 SyncStatus::Behind
             } else {
@@ -284,8 +280,6 @@ mod tests {
             kind: NodeKind::File,
             label: "M README.md".into(),
             repo: Some(repo.into()),
-            primary_repo: None,
-            ignored: false,
             file: Some(FileChange {
                 path: "README.md".into(),
                 staged_status: None,
@@ -293,8 +287,7 @@ mod tests {
                 untracked: false,
                 old_path: None,
             }),
-            foldable: false,
-            folded: false,
+            ..VisibleRow::default()
         }
     }
 
@@ -316,15 +309,10 @@ mod tests {
     fn workspace_row() -> VisibleRow {
         VisibleRow {
             id: "workspace".into(),
-            depth: 0,
             kind: NodeKind::Workspace,
             label: "workspace".into(),
-            repo: None,
-            primary_repo: None,
-            ignored: false,
-            file: None,
             foldable: true,
-            folded: false,
+            ..VisibleRow::default()
         }
     }
 
@@ -336,10 +324,7 @@ mod tests {
             label: repo.into(),
             repo: Some(repo.into()),
             primary_repo: Some("app".into()),
-            ignored: false,
-            file: None,
-            foldable: false,
-            folded: false,
+            ..VisibleRow::default()
         }
     }
 
@@ -435,11 +420,7 @@ mod tests {
             kind: NodeKind::Repo,
             label: repo.into(),
             repo: Some(repo.into()),
-            primary_repo: None,
-            ignored: false,
-            file: None,
-            foldable: false,
-            folded: false,
+            ..VisibleRow::default()
         }
     }
 
@@ -475,11 +456,7 @@ mod tests {
             vec!["app"]
         );
         assert_eq!(
-            push_targets(
-                &snapshot,
-                Some(&checkout_row(".worktrees/app/feat")),
-                false
-            ),
+            push_targets(&snapshot, Some(&checkout_row(".worktrees/app/feat")), false),
             vec![".worktrees/app/feat"]
         );
         assert!(!push_targets(&snapshot, Some(&repo_row("app")), false)
@@ -504,12 +481,8 @@ mod tests {
         diverged.repo = "lib".into();
         diverged.sync_status = SyncStatus::Diverged;
         diverged.sync_note = "diverged".into();
-        let snapshot = build_workspace_snapshot(
-            &[ahead, diverged, up_to_date("notes")],
-            &[],
-            false,
-            &[],
-        );
+        let snapshot =
+            build_workspace_snapshot(&[ahead, diverged, up_to_date("notes")], &[], false, &[]);
         assert_eq!(
             push_targets(&snapshot, Some(&repo_row("app")), false),
             vec!["app"]
@@ -560,7 +533,10 @@ mod tests {
         assert!(collect_write_files(&snapshot, Some(&repo_row("app")), false).is_empty());
         let files = collect_write_files(&snapshot, Some(&repo_row("lib")), false);
         assert_eq!(
-            files.iter().map(|f| f.change.path.as_str()).collect::<Vec<_>>(),
+            files
+                .iter()
+                .map(|f| f.change.path.as_str())
+                .collect::<Vec<_>>(),
             vec!["a.rs"]
         );
         assert!(files.iter().all(|f| f.repo == "lib"));
@@ -584,18 +560,20 @@ mod tests {
             kind: NodeKind::Dir,
             label: dir.into(),
             repo: Some(repo.into()),
-            primary_repo: None,
-            ignored: false,
-            file: None,
             foldable: true,
-            folded: false,
+            ..VisibleRow::default()
         }
     }
 
     #[test]
     fn collect_write_files_dir_is_prefix_only() {
         let snapshot = build_workspace_snapshot(
-            &[dirty("app", false, false, &["README.md", "src/lib.rs", "src/main.rs"])],
+            &[dirty(
+                "app",
+                false,
+                false,
+                &["README.md", "src/lib.rs", "src/main.rs"],
+            )],
             &[],
             false,
             &[],
