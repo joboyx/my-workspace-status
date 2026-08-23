@@ -21,7 +21,9 @@ pub fn sort_branches_for_picker(
                 return b_default.cmp(&a_default);
             }
         }
-        b.authordate.cmp(&a.authordate).then_with(|| a.name.cmp(&b.name))
+        b.authordate
+            .cmp(&a.authordate)
+            .then_with(|| a.name.cmp(&b.name))
     });
     branches
 }
@@ -85,6 +87,52 @@ pub fn checkout_name_for_ref(selected: &str) -> String {
         local_name_from_origin_ref(selected).to_string()
     } else {
         selected.to_string()
+    }
+}
+
+/// Status copy when checkout refuses a dirty worktree (tracked changes only).
+pub const DIRTY_WORKTREE_STATUS: &str = "Dirty worktree — commit or stash first";
+
+/// Pure checkout vs confirm-then-fast-forward decision (no git I/O).
+///
+/// Origin remotes with an out-of-sync (or unread) local counterpart confirm,
+/// then `merge --ff-only` of the selected `origin/*` ref. Local names never
+/// confirm.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GraphCheckoutPlan {
+    Checkout {
+        branch: String,
+    },
+    ConfirmLocalThenPull {
+        local_branch: String,
+        remote_ref: String,
+    },
+}
+
+/// Plan checkout for a picker or single-name selection.
+///
+/// Confirm only when `selected_name` is `origin/…` **and** a local branch of
+/// that name exists with a null or mismatched SHA.
+pub fn plan_graph_checkout(
+    selected_name: &str,
+    local_exists: bool,
+    local_sha: Option<&str>,
+    remote_sha: Option<&str>,
+) -> GraphCheckoutPlan {
+    if !is_origin_remote_ref(selected_name) {
+        return GraphCheckoutPlan::Checkout {
+            branch: selected_name.to_string(),
+        };
+    }
+    let local_branch = local_name_from_origin_ref(selected_name).to_string();
+    if local_exists && (local_sha.is_none() || remote_sha.is_none() || local_sha != remote_sha) {
+        return GraphCheckoutPlan::ConfirmLocalThenPull {
+            local_branch,
+            remote_ref: selected_name.to_string(),
+        };
+    }
+    GraphCheckoutPlan::Checkout {
+        branch: local_branch,
     }
 }
 
@@ -238,6 +286,65 @@ mod tests {
     }
 
     #[test]
+    fn plan_local_selection_never_confirms() {
+        assert_eq!(
+            plan_graph_checkout("main", true, Some("aaa"), Some("bbb")),
+            GraphCheckoutPlan::Checkout {
+                branch: "main".into()
+            }
+        );
+    }
+
+    #[test]
+    fn plan_origin_with_no_local_checkouts_short_name() {
+        assert_eq!(
+            plan_graph_checkout("origin/feature/x", false, None, Some("abc")),
+            GraphCheckoutPlan::Checkout {
+                branch: "feature/x".into()
+            }
+        );
+    }
+
+    #[test]
+    fn plan_origin_with_local_same_sha_checkouts_short_name() {
+        assert_eq!(
+            plan_graph_checkout("origin/main", true, Some("aaa"), Some("aaa")),
+            GraphCheckoutPlan::Checkout {
+                branch: "main".into()
+            }
+        );
+    }
+
+    #[test]
+    fn plan_origin_with_local_different_sha_confirms() {
+        assert_eq!(
+            plan_graph_checkout("origin/main", true, Some("aaa"), Some("bbb")),
+            GraphCheckoutPlan::ConfirmLocalThenPull {
+                local_branch: "main".into(),
+                remote_ref: "origin/main".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn plan_origin_with_local_but_a_sha_is_null_confirms() {
+        assert_eq!(
+            plan_graph_checkout("origin/main", true, Some("aaa"), None),
+            GraphCheckoutPlan::ConfirmLocalThenPull {
+                local_branch: "main".into(),
+                remote_ref: "origin/main".into(),
+            }
+        );
+        assert_eq!(
+            plan_graph_checkout("origin/main", true, None, Some("bbb")),
+            GraphCheckoutPlan::ConfirmLocalThenPull {
+                local_branch: "main".into(),
+                remote_ref: "origin/main".into(),
+            }
+        );
+    }
+
+    #[test]
     fn checkoutable_names_skip_tags_and_non_origin() {
         use workspace_status_graph::GraphRef;
         let names = checkoutable_branch_names(&[
@@ -251,10 +358,8 @@ mod tests {
 
     #[test]
     fn picker_cursor_clamps_on_filter() {
-        let mut picker = BranchPickerState::new(
-            "app".into(),
-            vec![b("main", true, 1), b("feat", false, 2)],
-        );
+        let mut picker =
+            BranchPickerState::new("app".into(), vec![b("main", true, 1), b("feat", false, 2)]);
         picker.cursor = 1;
         picker.set_filter("main".into());
         assert_eq!(picker.cursor, 0);

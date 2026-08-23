@@ -86,6 +86,27 @@ pub fn checkout_branch(branch: &str, cwd: &Path) -> bool {
     exec_git_status(&["checkout", "-b", branch, &origin, "--quiet"], cwd) == 0
 }
 
+/// Fast-forward HEAD to an already-fetched remote-tracking ref (no fetch, no reset).
+///
+/// Accepts `origin/foo` or `refs/remotes/origin/foo`. Uses `git merge --ff-only`
+/// so an ahead or diverged local tip is left unchanged (no merge commit).
+///
+/// Returns true when HEAD now matches the remote-tracking tip.
+pub fn fast_forward_to_remote_ref(remote_ref: &str, cwd: &Path) -> bool {
+    let git_ref = if remote_ref.starts_with("refs/") {
+        remote_ref.to_string()
+    } else {
+        format!("refs/remotes/{remote_ref}")
+    };
+    let Some(target_sha) = rev_parse_quiet(&git_ref, cwd) else {
+        return false;
+    };
+    if exec_git_status(&["merge", "--ff-only", "--quiet", &git_ref], cwd) != 0 {
+        return false;
+    }
+    rev_parse_quiet("HEAD", cwd).as_deref() == Some(target_sha.as_str())
+}
+
 const AUTO_STASH_MESSAGE: &str = "ws-status: auto-stash before pull";
 
 #[derive(Debug, Clone, Copy)]
@@ -100,11 +121,7 @@ pub fn pull_quiet_detailed(cwd: &Path) -> PullQuietResult {
     let dirty = repo_has_local_changes(cwd);
     let mut stashed = false;
     if dirty {
-        if exec_git_status(
-            &["stash", "push", "-m", AUTO_STASH_MESSAGE, "--quiet"],
-            cwd,
-        ) != 0
-        {
+        if exec_git_status(&["stash", "push", "-m", AUTO_STASH_MESSAGE, "--quiet"], cwd) != 0 {
             return PullQuietResult {
                 ok: false,
                 stashed: false,
@@ -238,7 +255,6 @@ pub fn remove_untracked_file(cwd: &Path, file_path: &str) -> Result<(), String> 
     exec_git_checked(&["clean", "-f", "--", file_path], cwd)
 }
 
-
 /// `git push --quiet`. First publish uses `git push -u <remote> HEAD`.
 pub fn push_quiet(cwd: &Path) -> Result<(), String> {
     let branch = exec_git(&["branch", "--show-current"], cwd);
@@ -361,10 +377,7 @@ pub fn list_local_branches(cwd: &Path) -> Vec<LocalBranch> {
             if name.is_empty() {
                 return None;
             }
-            let authordate = parts
-                .next()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
+            let authordate = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
             let current = parts.next() == Some("*");
             Some(LocalBranch {
                 name,
@@ -387,12 +400,12 @@ pub fn origin_out_of_sync(cwd: &Path, branch: &str) -> Option<String> {
     }
 }
 
-
 /// Drop a linked worktree. Runs `git worktree remove [--force] <path>` from the primary.
 pub fn remove_worktree(primary_abs: &Path, worktree_abs: &Path, force: bool) -> Result<(), String> {
     let porcelain = list_worktrees_porcelain(primary_abs);
     let entries = crate::worktrees::parse_worktree_list_porcelain(&porcelain);
-    let target = crate::worktrees::resolve_worktree_remove_target(&entries, primary_abs, worktree_abs);
+    let target =
+        crate::worktrees::resolve_worktree_remove_target(&entries, primary_abs, worktree_abs);
     let path = target.git_path.to_string_lossy().into_owned();
     if force {
         exec_git_checked(&["worktree", "remove", "--force", &path], &target.git_cwd)
@@ -501,10 +514,7 @@ pub fn list_stash_name_status(cwd: &Path, stash_ref: &str) -> Vec<NameStatus> {
 
 /// Worktree + index changes versus HEAD, plus untracked files.
 pub fn list_worktree_name_status(cwd: &Path) -> Vec<NameStatus> {
-    let mut files = parse_name_status_lines(&exec_git(
-        &["diff", "HEAD", "--name-status"],
-        cwd,
-    ));
+    let mut files = parse_name_status_lines(&exec_git(&["diff", "HEAD", "--name-status"], cwd));
     let untracked = exec_git(&["ls-files", "--others", "--exclude-standard"], cwd);
     for path in untracked.lines().map(str::trim).filter(|l| !l.is_empty()) {
         if files.iter().any(|f| f.path == path) {
@@ -587,7 +597,6 @@ pub fn diff_stash_file_ctx(
     lines_or_empty_diff(&exec_git_owned(&args, cwd))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,7 +630,10 @@ mod tests {
             ("GIT_AUTHOR_NAME", "workspace-status test"),
             ("GIT_AUTHOR_EMAIL", "workspace-status-test@example.invalid"),
             ("GIT_COMMITTER_NAME", "workspace-status test"),
-            ("GIT_COMMITTER_EMAIL", "workspace-status-test@example.invalid"),
+            (
+                "GIT_COMMITTER_EMAIL",
+                "workspace-status-test@example.invalid",
+            ),
         ]
     }
 
@@ -657,6 +669,7 @@ mod tests {
         git(&dir, &["add", "README.md"]);
         git(&dir, &["commit", "-q", "-m", "seed"]);
         fs::write(dir.join("README.md"), "# dirty\n").unwrap();
+        assert!(repo_has_local_changes(&dir));
         assert_ne!(exec_git_status(&["diff", "--quiet"], &dir), 0);
         stage_file(&dir, "README.md").unwrap();
         assert_ne!(exec_git_status(&["diff", "--cached", "--quiet"], &dir), 0);
@@ -665,7 +678,9 @@ mod tests {
         assert_ne!(exec_git_status(&["diff", "--quiet"], &dir), 0);
         revert_tracked_file(&dir, "README.md").unwrap();
         assert_eq!(exec_git_status(&["diff", "--quiet"], &dir), 0);
+        assert!(!repo_has_local_changes(&dir));
         fs::write(dir.join("tmp-untracked.txt"), "x\n").unwrap();
+        assert!(!repo_has_local_changes(&dir));
         remove_untracked_file(&dir, "tmp-untracked.txt").unwrap();
         assert!(!dir.join("tmp-untracked.txt").exists());
         let _ = fs::remove_dir_all(&dir);
@@ -694,17 +709,26 @@ mod tests {
         git(&dir, &["commit", "-q", "-m", "seed"]);
         fs::write(dir.join("README.md"), "# dirty\n").unwrap();
         stash_push(&dir, &[]).unwrap();
-        assert_eq!(fs::read_to_string(dir.join("README.md")).unwrap(), "# seed\n");
+        assert_eq!(
+            fs::read_to_string(dir.join("README.md")).unwrap(),
+            "# seed\n"
+        );
         let latest = latest_stash_ref(&dir).expect("stash");
         stash_apply(&dir, &latest).unwrap();
-        assert_eq!(fs::read_to_string(dir.join("README.md")).unwrap(), "# dirty\n");
+        assert_eq!(
+            fs::read_to_string(dir.join("README.md")).unwrap(),
+            "# dirty\n"
+        );
         stash_drop(&dir, &latest).unwrap();
         assert!(latest_stash_ref(&dir).is_none());
         fs::write(dir.join("README.md"), "# dirty2\n").unwrap();
         stash_push(&dir, &["README.md".into()]).unwrap();
         let latest = latest_stash_ref(&dir).expect("stash2");
         stash_pop(&dir, &latest).unwrap();
-        assert_eq!(fs::read_to_string(dir.join("README.md")).unwrap(), "# dirty2\n");
+        assert_eq!(
+            fs::read_to_string(dir.join("README.md")).unwrap(),
+            "# dirty2\n"
+        );
         assert!(latest_stash_ref(&dir).is_none());
 
         create_branch_checkout(&dir, "feature/x").unwrap();
@@ -736,7 +760,12 @@ mod tests {
         // advance origin
         let other = dir.join("other");
         Command::new(git_binary())
-            .args(["clone", "-q", remote.to_str().unwrap(), other.to_str().unwrap()])
+            .args([
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ])
             .status()
             .unwrap();
         git(&other, &["checkout", "-q", "feature/behind"]);
@@ -749,6 +778,59 @@ mod tests {
             origin_out_of_sync(&dir, "feature/behind").as_deref(),
             Some("origin/feature/behind")
         );
+        let remote_sha = exec_git(&["rev-parse", "origin/feature/behind"], &dir);
+        assert_ne!(exec_git(&["rev-parse", "HEAD"], &dir), remote_sha);
+        assert!(fast_forward_to_remote_ref("origin/feature/behind", &dir));
+        assert_eq!(exec_git(&["rev-parse", "HEAD"], &dir), remote_sha);
+        assert_eq!(
+            exec_git(&["branch", "--show-current"], &dir),
+            "feature/behind"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fast_forward_to_remote_ref_ahead_and_missing_leave_head() {
+        let dir = std::env::temp_dir().join(format!(
+            "ws-git-ff-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let init = Command::new(git_binary())
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&dir)
+            .status();
+        if init.map(|s| s.success()).unwrap_or(false) == false {
+            git(&dir, &["init", "-q"]);
+            git(&dir, &["checkout", "-q", "-b", "main"]);
+        }
+        fs::write(dir.join("README.md"), "# seed\n").unwrap();
+        git(&dir, &["add", "README.md"]);
+        git(&dir, &["commit", "-q", "-m", "seed"]);
+        let head = exec_git(&["rev-parse", "HEAD"], &dir);
+        assert!(!fast_forward_to_remote_ref("origin/foo", &dir));
+        assert_eq!(exec_git(&["rev-parse", "HEAD"], &dir), head);
+        assert_eq!(exec_git(&["branch", "--show-current"], &dir), "main");
+
+        let remote = dir.join("remote.git");
+        Command::new(git_binary())
+            .args(["init", "-q", "--bare", remote.to_str().unwrap()])
+            .status()
+            .unwrap();
+        git(&dir, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(&dir, &["push", "-u", "origin", "main", "--quiet"]);
+        git(&dir, &["checkout", "-q", "-b", "foo"]);
+        git(&dir, &["push", "-u", "origin", "foo", "--quiet"]);
+        fs::write(dir.join("ahead.txt"), "ahead\n").unwrap();
+        git(&dir, &["add", "ahead.txt"]);
+        git(&dir, &["commit", "-q", "-m", "ahead"]);
+        let ahead = exec_git(&["rev-parse", "HEAD"], &dir);
+        assert!(!fast_forward_to_remote_ref("origin/foo", &dir));
+        assert_eq!(exec_git(&["rev-parse", "HEAD"], &dir), ahead);
+        assert_eq!(exec_git(&["branch", "--show-current"], &dir), "foo");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -775,7 +857,10 @@ mod tests {
         git(&dir, &["commit", "-q", "-m", "seed"]);
         let wt = dir.join(".worktrees").join("feat");
         fs::create_dir_all(dir.join(".worktrees")).unwrap();
-        git(&dir, &["worktree", "add", "-b", "feature/x", wt.to_str().unwrap()]);
+        git(
+            &dir,
+            &["worktree", "add", "-b", "feature/x", wt.to_str().unwrap()],
+        );
         assert!(wt.join(".git").exists() || wt.exists());
         remove_worktree(&dir, &wt, false).unwrap();
         assert!(!wt.exists());
@@ -832,15 +917,24 @@ mod tests {
         stash_push(&dir, &[]).unwrap();
         let refs = list_stash_refs(&dir);
         assert!(refs.len() >= 2, "{refs:?}");
-        let older = refs.iter().find(|r| r.ends_with("{1}")).cloned().unwrap_or_else(|| refs[1].clone());
+        let older = refs
+            .iter()
+            .find(|r| r.ends_with("{1}"))
+            .cloned()
+            .unwrap_or_else(|| refs[1].clone());
         let stash_files = list_stash_name_status(&dir, &older);
-        assert!(stash_files.iter().any(|f| f.path == "two.txt"), "{stash_files:?}");
+        assert!(
+            stash_files.iter().any(|f| f.path == "two.txt"),
+            "{stash_files:?}"
+        );
         let stash_diff = diff_stash_file(&dir, &older, "two.txt");
         assert!(!stash_diff.is_empty(), "{stash_diff:?}");
         fs::write(dir.join("untracked.txt"), "u\n").unwrap();
         let worktree = list_worktree_name_status(&dir);
-        assert!(worktree.iter().any(|f| f.path == "untracked.txt"), "{worktree:?}");
+        assert!(
+            worktree.iter().any(|f| f.path == "untracked.txt"),
+            "{worktree:?}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
-
 }

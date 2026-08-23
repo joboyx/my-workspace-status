@@ -10,7 +10,7 @@ use crate::snapshot::{FileChange, WorkspaceSnapshot};
 
 use super::action::{Action, Effect};
 use super::branches::{
-    can_open_branch_picker, checkout_name_for_ref, checkoutable_branch_names, is_valid_branch_name,
+    can_open_branch_picker, checkoutable_branch_names, is_valid_branch_name, DIRTY_WORKTREE_STATUS,
     BranchPickerState, CreateBranchState,
 };
 use super::commit_files::{
@@ -1996,11 +1996,11 @@ impl AppState {
                 branch,
                 remote_ref,
             }) => {
-                self.status = format!("checkout {branch} then pull {remote_ref}");
+                self.status = format!("checkout {branch} then fast-forward {remote_ref}");
                 Effect::CheckoutBranch {
                     repo,
-                    branch,
-                    pull_after: true,
+                    selected_name: branch,
+                    fast_forward_ref: Some(remote_ref),
                 }
             }
             Some(PendingConfirm::RemoveWorktree {
@@ -2265,8 +2265,12 @@ impl AppState {
         let repo = picker.repo.clone();
         let filter = picker.filter.clone();
         if let Some(selected) = picker.selected().cloned() {
-            self.branch_picker = None;
-            return self.checkout_or_confirm(repo, checkout_name_for_ref(&selected.name));
+            if selected.current {
+                self.branch_picker = None;
+                self.status = format!("Already on {}", selected.name);
+                return Effect::None;
+            }
+            return self.checkout_or_confirm(repo, selected.name);
         }
         if is_valid_branch_name(&filter) {
             self.branch_picker = None;
@@ -2280,17 +2284,19 @@ impl AppState {
         Effect::None
     }
 
-    /// Ask before checkout when `origin/<branch>` exists and differs.
-    pub fn checkout_or_confirm(&mut self, repo: String, branch: String) -> Effect {
-        self.status = format!("checkout {branch}");
+    /// Emit a checkout effect. Origin out-of-sync confirm is decided later
+    /// (`plan_graph_checkout`) from the selected name, not from local vs origin
+    /// of every checkout.
+    pub fn checkout_or_confirm(&mut self, repo: String, selected_name: String) -> Effect {
+        self.status = format!("checkout {selected_name}");
         Effect::CheckoutBranch {
             repo,
-            branch,
-            pull_after: false,
+            selected_name,
+            fast_forward_ref: None,
         }
     }
 
-    /// Confirm checkout when local is out of sync with origin/*.
+    /// Confirm checkout when a local exists and is out of sync with the selected `origin/*`.
     pub fn confirm_checkout_if_out_of_sync(
         &mut self,
         repo: String,
@@ -2303,8 +2309,9 @@ impl AppState {
                 branch: branch.clone(),
                 remote_ref: remote_ref.clone(),
             });
-            self.status =
-                format!("{branch} is not in sync with {remote_ref}. checkout then pull? y/n");
+            self.status = format!(
+                "{branch} is not in sync with {remote_ref}. checkout then fast-forward? y/n"
+            );
             Effect::None
         } else {
             self.checkout_or_confirm(repo, branch)
@@ -2371,12 +2378,12 @@ impl AppState {
             return Effect::None;
         }
         if self.graph_repo_is_dirty(&repo) {
-            self.status = "Dirty worktree — commit or stash first".into();
+            self.status = DIRTY_WORKTREE_STATUS.into();
             return Effect::None;
         }
         self.help_open = false;
         if names.len() == 1 {
-            return self.checkout_or_confirm(repo, checkout_name_for_ref(&names[0]));
+            return self.checkout_or_confirm(repo, names[0].clone());
         }
         self.branch_picker = Some(BranchPickerState::from_names(repo, names));
         self.status = "j/k move  type filter  Enter checkout  C create".into();
@@ -3691,10 +3698,12 @@ mod tests {
         );
         match app.dispatch(Action::BranchSubmit) {
             Effect::CheckoutBranch {
-                branch, pull_after, ..
+                selected_name,
+                fast_forward_ref,
+                ..
             } => {
-                assert_eq!(branch, "feature/x");
-                assert!(!pull_after);
+                assert_eq!(selected_name, "feature/x");
+                assert!(fast_forward_ref.is_none());
             }
             other => panic!("{other:?}"),
         }
@@ -3736,13 +3745,70 @@ mod tests {
         );
         match app.dispatch(Action::ConfirmYes) {
             Effect::CheckoutBranch {
-                branch, pull_after, ..
+                selected_name,
+                fast_forward_ref,
+                ..
             } => {
-                assert_eq!(branch, "feature/x");
-                assert!(pull_after);
+                assert_eq!(selected_name, "feature/x");
+                assert_eq!(fast_forward_ref.as_deref(), Some("origin/feature/x"));
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn tree_picker_already_on_closes_with_no_git() {
+        use crate::git::LocalBranch;
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        app.open_branch_picker(
+            "app".into(),
+            vec![LocalBranch {
+                name: "main".into(),
+                current: true,
+                authordate: 1,
+            }],
+        );
+        assert_eq!(app.dispatch(Action::BranchSubmit), Effect::None);
+        assert!(app.branch_picker.is_none());
+        assert_eq!(app.status, "Already on main");
+        assert!(app.confirm.is_none());
+    }
+
+    #[test]
+    fn tree_picker_local_selection_never_confirms() {
+        use crate::git::LocalBranch;
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        app.open_branch_picker(
+            "app".into(),
+            vec![
+                LocalBranch {
+                    name: "main".into(),
+                    current: true,
+                    authordate: 1,
+                },
+                LocalBranch {
+                    name: "feature/x".into(),
+                    current: false,
+                    authordate: 2,
+                },
+            ],
+        );
+        app.dispatch(Action::BranchChar('f'));
+        match app.dispatch(Action::BranchSubmit) {
+            Effect::CheckoutBranch {
+                selected_name,
+                fast_forward_ref,
+                ..
+            } => {
+                assert_eq!(selected_name, "feature/x");
+                assert!(fast_forward_ref.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(app.confirm.is_none());
+        assert!(app.branch_picker.is_some());
     }
 
     fn graph_state(dirty: bool) -> AppState {
@@ -3794,12 +3860,12 @@ mod tests {
         match app.dispatch(Action::GraphCheckout) {
             Effect::CheckoutBranch {
                 repo,
-                branch,
-                pull_after,
+                selected_name,
+                fast_forward_ref,
             } => {
                 assert_eq!(repo, "app");
-                assert_eq!(branch, "main");
-                assert!(!pull_after);
+                assert_eq!(selected_name, "main");
+                assert!(fast_forward_ref.is_none());
             }
             other => panic!("{other:?}"),
         }
@@ -3816,7 +3882,14 @@ mod tests {
         assert_eq!(names, vec!["main", "topic", "origin/main", "origin/z"]);
         app.dispatch(Action::BranchMove(2));
         match app.dispatch(Action::BranchSubmit) {
-            Effect::CheckoutBranch { branch, .. } => assert_eq!(branch, "main"),
+            Effect::CheckoutBranch {
+                selected_name,
+                fast_forward_ref,
+                ..
+            } => {
+                assert_eq!(selected_name, "origin/main");
+                assert!(fast_forward_ref.is_none());
+            }
             other => panic!("{other:?}"),
         }
     }
@@ -4088,9 +4161,11 @@ mod tests {
         app.open_branch_picker("app".into(), list_local_branches(&repo_dir));
         app.dispatch(Action::BranchChar('p'));
         match app.dispatch(Action::BranchSubmit) {
-            Effect::CheckoutBranch { branch, .. } => {
-                assert_eq!(branch, "feature/pick");
-                assert!(checkout_branch(&branch, &repo_dir));
+            Effect::CheckoutBranch {
+                selected_name, ..
+            } => {
+                assert_eq!(selected_name, "feature/pick");
+                assert!(checkout_branch(&selected_name, &repo_dir));
             }
             other => panic!("{other:?}"),
         }
