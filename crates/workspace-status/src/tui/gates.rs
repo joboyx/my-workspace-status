@@ -111,24 +111,17 @@ fn is_diff_file_write(action: &Action) -> bool {
 
 /// True when a left-list action may still run with the right pane focused.
 ///
-/// Allow-list: graph move/write (b/c/a/p/D), graph `S`, tree `b` on a focused
-/// graph (Rust extra: stash/uncommitted `b` still opens the HEAD picker),
-/// commit-file nav, diff move, and diff `e` / Ctrl+O / space.
+/// Allow-list matches Ink `rightPaneLeftListAllowed`: graph move/write
+/// (`b`/`c`/`a`/`p`/`D` as `GraphCheckout` / `GraphCreateBranch` /
+/// stash apply/pop/drop), commit-file nav, diff move, and diff `e` /
+/// Ctrl+O / space. Tree `b` (`Branch`) and `S` (`StashMenu`) stay left-only.
 pub fn right_pane_left_list_allowed(target: ListFocusTarget, action: &Action) -> bool {
     let graph_move = target == ListFocusTarget::Graph && is_move_action(action);
     let graph_write = target == ListFocusTarget::Graph && is_graph_write_action(action);
-    let tree_branch_on_graph = target == ListFocusTarget::Graph && matches!(action, Action::Branch);
-    let graph_stash_menu = target == ListFocusTarget::Graph && matches!(action, Action::StashMenu);
     let commit_nav = target == ListFocusTarget::CommitFiles && is_commit_nav_action(action);
     let diff_move = target == ListFocusTarget::None && is_move_action(action);
     let diff_file_write = target == ListFocusTarget::None && is_diff_file_write(action);
-    graph_move
-        || graph_write
-        || tree_branch_on_graph
-        || graph_stash_menu
-        || commit_nav
-        || diff_move
-        || diff_file_write
+    graph_move || graph_write || commit_nav || diff_move || diff_file_write
 }
 
 /// True when `dispatch` should swallow `action` as a silent no-op.
@@ -192,11 +185,11 @@ mod tests {
             ListFocusTarget::Graph,
             &Action::GraphStashDrop
         ));
-        assert!(right_pane_left_list_allowed(
+        assert!(!right_pane_left_list_allowed(
             ListFocusTarget::Graph,
             &Action::Branch
         ));
-        assert!(right_pane_left_list_allowed(
+        assert!(!right_pane_left_list_allowed(
             ListFocusTarget::Graph,
             &Action::StashMenu
         ));
@@ -267,13 +260,13 @@ mod tests {
             true,
             ListFocusTarget::Graph
         ));
-        assert!(!dispatch_is_noop(
+        assert!(dispatch_is_noop(
             &Action::Branch,
             0,
             true,
             ListFocusTarget::Graph
         ));
-        assert!(!dispatch_is_noop(
+        assert!(dispatch_is_noop(
             &Action::StashMenu,
             0,
             true,

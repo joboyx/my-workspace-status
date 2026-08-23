@@ -10,8 +10,8 @@ use crate::snapshot::{FileChange, WorkspaceSnapshot};
 
 use super::action::{Action, Effect};
 use super::branches::{
-    can_open_branch_picker, checkoutable_branch_names, is_valid_branch_name, DIRTY_WORKTREE_STATUS,
-    BranchPickerState, CreateBranchState,
+    can_open_branch_picker, checkoutable_branch_names, is_valid_branch_name, BranchPickerState,
+    CreateBranchState, DIRTY_WORKTREE_STATUS,
 };
 use super::commit_files::{
     ancestor_dir_ids, collect_foldable_subtree_ids as collect_commit_subtree_ids,
@@ -3322,8 +3322,7 @@ mod tests {
             .rows
             .iter()
             .position(|row| {
-                row.kind == NodeKind::Checkout
-                    && row.repo.as_deref() == Some(".worktrees/app/feat")
+                row.kind == NodeKind::Checkout && row.repo.as_deref() == Some(".worktrees/app/feat")
             })
             .expect("linked checkout");
         app.cursor = wt;
@@ -3424,8 +3423,7 @@ mod tests {
             .rows
             .iter()
             .position(|row| {
-                row.kind == NodeKind::Checkout
-                    && row.repo.as_deref() == Some(".worktrees/app/feat")
+                row.kind == NodeKind::Checkout && row.repo.as_deref() == Some(".worktrees/app/feat")
             })
             .expect("linked checkout");
         app.cursor = idx;
@@ -4230,10 +4228,8 @@ mod tests {
             .expect("stash");
         app.graph_cursor = idx;
         assert!(!app.graph_commit_focused());
-        assert!(matches!(
-            app.dispatch(Action::Branch),
-            Effect::PrepareBranchPicker { repo } if repo == "app"
-        ));
+        assert_eq!(app.focus, FocusPane::Right);
+        assert_eq!(app.dispatch(Action::Branch), Effect::None);
         assert_eq!(app.dispatch(Action::GraphCreateBranch), Effect::None);
         assert!(app.create_branch.is_none());
     }
@@ -4376,6 +4372,7 @@ mod tests {
         assert!(latest_stash_ref(&repo_dir).is_none());
 
         focus_repo(&mut app, "app");
+        app.focus = FocusPane::Left;
         match app.dispatch(Action::Branch) {
             Effect::PrepareBranchPicker { repo } => {
                 app.open_branch_picker(repo, list_local_branches(&repo_dir));
@@ -4403,9 +4400,7 @@ mod tests {
         app.open_branch_picker("app".into(), list_local_branches(&repo_dir));
         app.dispatch(Action::BranchChar('p'));
         match app.dispatch(Action::BranchSubmit) {
-            Effect::CheckoutBranch {
-                selected_name, ..
-            } => {
+            Effect::CheckoutBranch { selected_name, .. } => {
                 assert_eq!(selected_name, "feature/pick");
                 assert!(checkout_branch(&selected_name, &repo_dir));
             }
@@ -4885,16 +4880,15 @@ mod tests {
     }
 
     #[test]
-    fn graph_stash_menu_dispatch_from_right_focused_graph_is_not_noop() {
+    fn graph_stash_menu_dispatch_from_right_focused_graph_is_noop() {
         let mut app = state();
         focus_repo(&mut app, "app");
         install_graph(&mut app, vec![graph_stash("stash@{0}", "latest")]);
         focus_graph_row(&mut app, |r| matches!(r, GraphRow::Commit { .. }));
         assert_eq!(app.focus, FocusPane::Right);
-        match app.dispatch(Action::StashMenu) {
-            Effect::PrepareStashMenu { repo } => assert_eq!(repo, "app"),
-            other => panic!("{other:?}"),
-        }
+        let status = app.status.clone();
+        assert_eq!(app.dispatch(Action::StashMenu), Effect::None);
+        assert_eq!(app.status, status);
     }
 
     #[test]
