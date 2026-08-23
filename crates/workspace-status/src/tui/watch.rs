@@ -5,8 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
-use crate::snapshot::FileChange;
-
+use super::icons::status_letter_from_change;
 use super::tree::{NodeKind, TreeNode, VisibleRow};
 
 /// Default poll period. Matches the Ink TUI.
@@ -36,38 +35,6 @@ pub fn watch_interval_ms(raw: Option<&str>) -> u64 {
     (parsed as u64).max(MIN_WATCH_MS)
 }
 
-/// Ink `statusLetterFromChange`: one letter (or `MS`) for the file row.
-fn status_letter_from_change(change: &FileChange) -> String {
-    if change.unstaged_status.as_deref() == Some("U")
-        || change.staged_status.as_deref() == Some("U")
-    {
-        return "U".into();
-    }
-    if change.staged_status.is_some() && change.unstaged_status.is_some() {
-        return "MS".into();
-    }
-    let status = change
-        .unstaged_status
-        .as_deref()
-        .or(change.staged_status.as_deref());
-    if status == Some("R") {
-        return "R".into();
-    }
-    if status == Some("D") {
-        return "D".into();
-    }
-    if change.untracked || status == Some("A") {
-        return "A".into();
-    }
-    if change.staged_status.is_some() && change.unstaged_status.is_none() {
-        return "S".into();
-    }
-    if status == Some("C") {
-        return "C".into();
-    }
-    "M".into()
-}
-
 /// Ink `changeSignatures` disk token: `size:mtimeMs`, or `gone` when missing.
 fn file_disk_token(cwd: &Path, repo: &str, rel: &str) -> String {
     let abs = cwd.join(repo).join(rel);
@@ -89,7 +56,8 @@ fn file_disk_token(cwd: &Path, repo: &str, rel: &str) -> String {
 ///
 /// File rows match Ink `changeSignatures`: status letter plus `size:mtimeMs`
 /// (or `gone`). An in-place save of an already-modified file therefore flashes.
-/// Chrome rows stay label / fold / repo path.
+/// Chrome rows use path / branch / sync / change count so glyph paint does not
+/// count as a semantic update.
 pub fn row_signature(row: &VisibleRow, cwd: &Path) -> String {
     match row.kind {
         NodeKind::File => {
@@ -97,18 +65,20 @@ pub fn row_signature(row: &VisibleRow, cwd: &Path) -> String {
                 .file
                 .as_ref()
                 .map(status_letter_from_change)
-                .unwrap_or_else(|| "M".into());
+                .unwrap_or(super::icons::FileStatusLetter::M);
             let disk = match (row.repo.as_deref(), row.file.as_ref()) {
                 (Some(repo), Some(file)) => file_disk_token(cwd, repo, &file.path),
                 _ => "gone".into(),
             };
-            format!("{status}:{disk}")
+            format!("{}:{disk}", status.as_str())
         }
         _ => format!(
-            "chrome:{}:{}:{}",
-            row.label,
-            row.folded,
-            row.repo.as_deref().unwrap_or("")
+            "chrome:{}:{}:{}:{}:{}",
+            row.chrome.path,
+            row.chrome.branch,
+            row.chrome.sync_status.map(|s| s.as_str()).unwrap_or(""),
+            row.chrome.change_count,
+            row.folded
         ),
     }
 }
@@ -165,8 +135,6 @@ mod tests {
             kind: NodeKind::File,
             label: format!("M {path}"),
             repo: Some(repo.into()),
-            primary_repo: None,
-            ignored: false,
             file: Some(FileChange {
                 path: path.into(),
                 staged_status: None,
@@ -174,8 +142,7 @@ mod tests {
                 untracked: false,
                 old_path: None,
             }),
-            foldable: false,
-            folded: false,
+            ..VisibleRow::default()
         }
     }
 

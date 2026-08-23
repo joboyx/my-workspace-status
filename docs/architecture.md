@@ -137,11 +137,13 @@ Adding a node kind means editing four files that each `switch` on `kind`. TypeSc
 It implements discovery, `--plain`, `--json`, `-a`/`--all`, repo filters,
 ignored-repo visibility from snapshot.md, and the ratatui TUI on a TTY.
 
-Git calls use a subprocess. The binary prefers `/usr/bin/git` so WSL does not pick a Windows git.exe. Set `WORKSPACE_STATUS_GIT` to override.
+Git calls use a subprocess. The binary prefers `/usr/bin/git` so WSL does not pick a Windows `git.exe`. Set `WORKSPACE_STATUS_GIT` to override.
 
 `--fetch`, `--pull`, and `--default-branch` write progress to stderr when `--json` is set. `--json` wins when both `--json` and `--plain` are set. `-v` applies to `--plain` only.
 
-See [tui-rust.md](./tui-rust.md).
+On a TTY (or `-i` / `--tui`) the binary opens the ratatui TUI. Tree chrome (status letters, Nerd glyphs, workspace wording, linked-checkout labels, sync marks) is ported from Ink: `tui/icons.rs` (glyph registry), `tui/tree.rs` (`node_segments`), `tui/render.rs` (right-aligned trailing + cursor bar). See [tui-rust.md](./tui-rust.md).
+
+The TypeScript Ink app stays in this repository for features the Rust TUI does not cover yet.
 
 ## Rust graph crate
 

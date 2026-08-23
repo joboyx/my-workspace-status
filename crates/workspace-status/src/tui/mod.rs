@@ -5,27 +5,28 @@
 
 mod action;
 mod app;
-mod headless;
 mod branches;
-mod diff;
 mod commit_files;
+mod diff;
 mod drill;
 mod easy_motion;
 pub(crate) mod editor;
+pub(crate) mod fetch;
 mod graph_load;
+mod headless;
 mod help;
 mod gates;
+mod icons;
 mod keys;
 mod ops;
 mod render;
 pub(crate) mod search;
 mod split;
 mod stash;
-mod theme;
 mod state;
+mod theme;
 mod tree;
 pub(crate) mod viewed;
-pub(crate) mod fetch;
 pub(crate) mod watch;
 
 pub use app::{collect_full_snapshot, run_tui, TuiOpts};

@@ -51,8 +51,8 @@ use super::stash::{
 };
 use super::theme::{cycle_theme_id, theme_from_env, ThemeId};
 use super::tree::{
-    build_tree, collect_foldable_subtree_ids, default_folds, flatten, visible_for_tree, NodeKind,
-    TreeNode, VisibleRow,
+    build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
+    workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
 };
 #[cfg(not(test))]
 use super::viewed::viewed_store_path;
@@ -244,9 +244,9 @@ impl AppState {
         let tree_mode = true;
         let commit_tree_mode = true;
         let visible = visible_snapshot(&snapshot, show_ignored);
-        let tree = build_tree(&visible, tree_mode);
+        let tree = build_tree(&visible, tree_mode, &workspace_label_from_cwd(&cwd));
         let folds = default_folds(&tree);
-        let rows = flatten(&tree, &folds);
+        let rows = flatten_with(&tree, &folds, ascii);
         let cursor = initial_cursor(&rows);
         let signatures = tree_signatures(&tree, &cwd);
         let viewed_store = load_viewed_store(&viewed_path);
@@ -535,11 +535,19 @@ impl AppState {
         }
     }
 
+    fn visible_tree(&self) -> TreeNode {
+        let visible = visible_snapshot(&self.snapshot, self.show_ignored);
+        build_tree(
+            &visible,
+            self.tree_mode,
+            &workspace_label_from_cwd(&self.cwd),
+        )
+    }
+
     pub fn rebuild_rows(&mut self) {
         let focus_id = self.focused_row().map(|r| r.id.clone());
-        let visible = visible_snapshot(&self.snapshot, self.show_ignored);
-        self.tree = build_tree(&visible, self.tree_mode);
-        self.rows = flatten(&self.tree, &self.folds);
+        self.tree = self.visible_tree();
+        self.rows = flatten_with(&self.tree, &self.folds, self.ascii);
         if self.rows.is_empty() {
             self.cursor = 0;
             return;
@@ -559,10 +567,9 @@ impl AppState {
         }
         let previous_id = self.focused_row().map(|row| row.id.clone());
         self.tree_mode = !self.tree_mode;
-        let visible = visible_snapshot(&self.snapshot, self.show_ignored);
-        self.tree = build_tree(&visible, self.tree_mode);
+        self.tree = self.visible_tree();
         self.folds = default_folds(&self.tree);
-        self.rows = flatten(&self.tree, &self.folds);
+        self.rows = flatten_with(&self.tree, &self.folds, self.ascii);
         self.restore_focus_after_tree_rebuild(previous_id);
         self.status = if self.tree_mode {
             "Directory tree".into()
@@ -1473,7 +1480,7 @@ impl AppState {
 
     fn is_tree_chevron(&self, col: u16, depth: usize) -> bool {
         let prefix = if self.easy_motion.is_some() { 2 } else { 0 };
-        col == self.layout.tree_x + prefix + (depth as u16) * 2
+        col == self.layout.tree_x + prefix + 1 + (depth as u16) * 2
     }
 
     fn is_files_chevron(&self, col: u16, depth: usize) -> bool {
@@ -5255,7 +5262,9 @@ mod tests {
             .iter()
             .find(|row| row.id == "file:app:src/lib.rs")
             .expect("lib.rs");
-        assert!(lib.label.contains("src/lib.rs"));
+        assert!(lib.label.contains("lib.rs"));
+        assert!(lib.label.contains("src"));
+        assert!(!lib.label.contains("src/lib.rs"));
         assert_eq!(
             app.focused_row().map(|row| row.id.as_str()),
             Some("file:app:src/lib.rs")
@@ -5830,7 +5839,7 @@ mod tests {
             .position(|r| r.id == "dir:app:src")
             .expect("dir");
         let depth = app.rows[idx].depth;
-        let col = app.layout.tree_x + (depth as u16) * 2;
+        let col = app.layout.tree_x + 1 + (depth as u16) * 2;
         let row = app.layout.tree_y + idx as u16;
         assert!(app.rows.iter().any(|r| r.id == "file:app:src/lib.rs"));
         app.dispatch(Action::Click { col, row });

@@ -335,7 +335,7 @@ mod tests {
             show_ignored,
             &[],
         );
-        build_tree(&visible_for_tree(&built), true)
+        build_tree(&visible_for_tree(&built), true, "workspace")
     }
 
     #[test]
@@ -390,7 +390,7 @@ mod tests {
             shown
                 .children
                 .iter()
-                .any(|c| c.kind == NodeKind::Repo && c.label.contains("notes"))
+                .any(|c| c.kind == NodeKind::Repo && c.chrome.path.contains("notes"))
                 || flatten(&shown, &HashSet::new())
                     .iter()
                     .any(|r| r.label.contains("notes"))
