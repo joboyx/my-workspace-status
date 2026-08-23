@@ -2,6 +2,11 @@
 
 `src/tui/diff/` plus `src/tui/DiffPane.tsx`.
 
+The Rust TUI ports the same parse / row / header idea in
+`crates/workspace-status/src/tui/diff.rs` (paint in `render.rs`). Path header,
+line-number gutter, and STAGED / UNSTAGED / NEW labels match Ink. Intra-line
+and syntax highlight stay Ink-only.
+
 ## Pipeline
 
 ```

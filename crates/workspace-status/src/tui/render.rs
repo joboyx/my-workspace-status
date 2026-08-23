@@ -9,13 +9,17 @@ use workspace_status_graph::{paint_model, GraphWidget, ASCII, UNICODE};
 
 use std::time::Instant;
 
+use super::diff::{
+    cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, gutter_width,
+    section_header, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
+};
 use super::drill::DrillView;
 use super::easy_motion::{easy_motion_labels, visible_window};
+use super::search::slice_visible;
 use super::split::{
-    diff_split_rule_x, is_side_by_side_split, pad_trunc, pair_unified_lines, pane_widths,
+    diff_split_rule_x, effective_diff_mode, is_side_by_side_split, pane_widths,
     side_by_side_column_widths, MIN_PANE_COLS,
 };
-use super::search::slice_visible;
 use super::state::{AppState, FocusPane};
 use super::theme::Palette;
 use super::tree::NodeKind;
@@ -39,7 +43,11 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
 
     let left_is_graph = state.in_commit_drill();
     let left_title = if left_is_graph {
-        if state.focus == FocusPane::Left { " graph " } else { " graph" }
+        if state.focus == FocusPane::Left {
+            " graph "
+        } else {
+            " graph"
+        }
     } else if state.focus == FocusPane::Left {
         " tree "
     } else {
@@ -48,7 +56,10 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     let tree_block = Block::default()
         .borders(Borders::ALL)
         .title(left_title)
-        .border_style(pane_border(state.focus == FocusPane::Left, state.theme.palette()));
+        .border_style(pane_border(
+            state.focus == FocusPane::Left,
+            state.theme.palette(),
+        ));
     let tree_inner = tree_block.inner(panes[0]);
     frame.render_widget(tree_block, panes[0]);
     if left_is_graph {
@@ -59,9 +70,17 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
 
     let focused = state.focus == FocusPane::Right;
     let right_title = if state.drill.is_files() {
-        if focused { " files " } else { " files" }
+        if focused {
+            " files "
+        } else {
+            " files"
+        }
     } else if state.drill.is_diff() || state.right_is_diff() {
-        if focused { " diff " } else { " diff" }
+        if focused {
+            " diff "
+        } else {
+            " diff"
+        }
     } else if focused {
         " graph "
     } else {
@@ -70,8 +89,13 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     let right_block = Block::default()
         .borders(Borders::ALL)
         .title(right_title)
-        .border_style(pane_border(state.focus == FocusPane::Right, state.theme.palette()));
+        .border_style(pane_border(
+            state.focus == FocusPane::Right,
+            state.theme.palette(),
+        ));
     let right_inner = right_block.inner(panes[1]);
+    state.layout.diff_pane_width = right_inner.width;
+    state.layout.diff_pane_height = right_inner.height;
     frame.render_widget(right_block, panes[1]);
     draw_right(frame, right_inner, state);
 
@@ -92,15 +116,15 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.pane_height = chunks[0].height;
     state.layout.outer_tree_width = panes[0].width;
     state.layout.diff_pane_width = right_inner.width;
+    state.layout.diff_pane_height = right_inner.height;
     state.layout.diff_content_x = right_inner.x;
-    state.layout.diff_split_rule_x = if state.right_is_diff()
-        && is_side_by_side_split(state.diff_mode, right_inner.width)
-    {
-        let split = side_by_side_column_widths(right_inner.width, state.diff_split_fraction);
-        Some(diff_split_rule_x(panes[0].width, split.left_width).saturating_sub(1))
-    } else {
-        None
-    };
+    state.layout.diff_split_rule_x =
+        if state.right_is_diff() && is_side_by_side_split(state.diff_mode, right_inner.width) {
+            let split = side_by_side_column_widths(right_inner.width, state.diff_split_fraction);
+            Some(diff_split_rule_x(panes[0].width, split.left_width).saturating_sub(1))
+        } else {
+            None
+        };
 
     state.layout.right_y = right_inner.y;
     if let super::drill::DrillView::Files { cursor, .. } = &state.drill {
@@ -159,7 +183,11 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             .unwrap_or_default();
         let chevron = if row.foldable {
             if row.folded {
-                if state.ascii { ">" } else { "▸" }
+                if state.ascii {
+                    ">"
+                } else {
+                    "▸"
+                }
             } else if state.ascii {
                 "v"
             } else {
@@ -169,9 +197,17 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             " "
         };
         let mark = if row.kind == NodeKind::File && state.reviewed.contains(&row.id) {
-            if state.ascii { "* " } else { "◉ " }
+            if state.ascii {
+                "* "
+            } else {
+                "◉ "
+            }
         } else if row.id == "group:no-updates" {
-            if state.ascii { ". " } else { "✓ " }
+            if state.ascii {
+                ". "
+            } else {
+                "✓ "
+            }
         } else {
             ""
         };
@@ -184,7 +220,9 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         let style = if i == cursor {
             Style::default().fg(palette.cursor).bg(palette.cursor_bg)
         } else if flashing {
-            Style::default().fg(palette.modified).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(palette.modified)
+                .add_modifier(Modifier::BOLD)
         } else if row.ignored || row.kind == NodeKind::Group {
             Style::default().fg(palette.muted)
         } else if row.kind == NodeKind::File {
@@ -208,22 +246,14 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             draw_commit_detail(frame, area, state, *cursor);
             return;
         }
-        DrillView::Diff { lines, path, .. } => {
-            if lines.is_empty() {
-                frame.render_widget(Paragraph::new(format!("no diff for {path}")), area);
-                return;
-            }
-            draw_diff_lines(frame, area, state, lines);
+        DrillView::Diff { .. } => {
+            draw_diff_pane(frame, area, state);
             return;
         }
         DrillView::Graph => {}
     }
     if state.right_is_diff() {
-        if state.diff_lines.is_empty() {
-            frame.render_widget(Paragraph::new("select a dirty file"), area);
-            return;
-        }
-        draw_diff_lines(frame, area, state, &state.diff_lines);
+        draw_diff_pane(frame, area, state);
         return;
     }
     draw_graph(frame, area, state);
@@ -321,7 +351,11 @@ fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, curso
                 .unwrap_or_default();
             let chevron = if row.foldable {
                 if row.folded {
-                    if state.ascii { ">" } else { "▸" }
+                    if state.ascii {
+                        ">"
+                    } else {
+                        "▸"
+                    }
                 } else if state.ascii {
                     "v"
                 } else {
@@ -348,59 +382,198 @@ fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, curso
     frame.render_widget(Paragraph::new(lines), list_area);
 }
 
-fn draw_diff_lines(frame: &mut Frame<'_>, area: Rect, state: &AppState, lines: &[String]) {
-    let skip = state.diff_scroll as usize;
-    if is_side_by_side_split(state.diff_mode, area.width) {
-        let split = side_by_side_column_widths(area.width, state.diff_split_fraction);
-        let rows = pair_unified_lines(lines);
-        let off = state.diff_col_offset as usize;
-        let painted: Vec<Line> = rows
-            .iter()
-            .skip(skip)
-            .take(area.height as usize)
-            .map(|row| {
-                let left = pad_trunc(&slice_visible(&row.left, off, split.left_width as usize), split.left_width);
-                let right = pad_trunc(&slice_visible(&row.right, off, split.right_width as usize), split.right_width);
-                Line::from(vec![
-                    Span::styled(left, diff_style(&row.left, state.theme.palette())),
-                    Span::styled("│", Style::default().fg(Color::DarkGray)),
-                    Span::styled(right, diff_style(&row.right, state.theme.palette())),
-                ])
-            })
-            .collect();
-        frame.render_widget(Paragraph::new(painted), area);
+fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    if area.width == 0 || area.height == 0 {
         return;
     }
+    let palette = state.theme.palette();
+    let path = state.diff_header_path();
+    let effective = effective_diff_mode(state.diff_mode, area.width);
+    let rows = state.current_diff_rows();
+    let body_h = area.height.saturating_sub(1).max(1) as usize;
+    let max_start = rows.len().saturating_sub(body_h);
+    let skip = (state.diff_scroll as usize).min(max_start);
+    let mode_label = diff_pane_mode_label(state.diff_mode, effective);
+    let header = diff_pane_header(
+        &path,
+        mode_label,
+        state.full_context_active(),
+        state.diff_col_offset,
+        skip,
+        body_h,
+        rows.len(),
+    );
+    let title = if path.is_empty() {
+        "Diff"
+    } else {
+        path.as_str()
+    };
+    let extra = header.strip_prefix(title).unwrap_or("").to_string();
+    let header_line = Line::from(vec![
+        Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(palette.heading)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(extra, Style::default().fg(palette.muted)),
+    ]);
+    let header_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1,
+    };
+    frame.render_widget(Paragraph::new(header_line), header_area);
+    if area.height <= 1 {
+        return;
+    }
+    let body = Rect {
+        x: area.x,
+        y: area.y.saturating_add(1),
+        width: area.width,
+        height: area.height.saturating_sub(1),
+    };
+    if rows.is_empty() {
+        let msg = if path.is_empty() {
+            "select a dirty file"
+        } else {
+            "(no diff)"
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(msg, Style::default().fg(palette.muted))),
+            body,
+        );
+        return;
+    }
+    let gutter = gutter_width(&rows);
+    let split = is_side_by_side_split(state.diff_mode, area.width);
     let off = state.diff_col_offset as usize;
-    let width = area.width as usize;
-    let painted: Vec<Line> = lines
+    let painted: Vec<Line> = rows
         .iter()
         .enumerate()
         .skip(skip)
-        .take(area.height as usize)
-        .map(|(i, line)| {
-            let visible = slice_visible(line, off, width);
-            let mut style = diff_style(line, state.theme.palette());
-            if state.search_hit == Some(i) {
-                style = style.bg(state.theme.palette().flash);
-            }
-            Line::from(Span::styled(visible, style))
+        .take(body.height as usize)
+        .map(|(i, row)| {
+            paint_diff_row(
+                row,
+                area.width,
+                gutter,
+                split,
+                off,
+                state,
+                state.search_hit == Some(i),
+            )
         })
         .collect();
-    frame.render_widget(Paragraph::new(painted), area);
+    frame.render_widget(Paragraph::new(painted), body);
 }
 
-fn diff_style(line: &str, palette: Palette) -> Style {
-    if line.starts_with('+') && !line.starts_with("+++") {
-        Style::default().fg(palette.added)
-    } else if line.starts_with('-') && !line.starts_with("---") {
-        Style::default().fg(palette.deleted)
-    } else if line.starts_with("@@") {
-        Style::default().fg(palette.diff_hunk)
-    } else if line == "staged" || line == "unstaged" || line.starts_with("untracked") {
-        Style::default().fg(palette.heading)
-    } else {
-        Style::default().fg(palette.repo)
+fn paint_diff_row(
+    row: &DiffRow,
+    width: u16,
+    gutter: usize,
+    split: bool,
+    col_offset: usize,
+    state: &AppState,
+    search_hit: bool,
+) -> Line<'static> {
+    let palette = state.theme.palette();
+    let mut line = match row {
+        DiffRow::Section(section) => {
+            let color = section_style(*section, palette);
+            Line::from(Span::styled(
+                format!(" {} ", section_header(*section)),
+                color.add_modifier(Modifier::BOLD),
+            ))
+        }
+        DiffRow::Hunk { text } => Line::from(Span::styled(
+            slice_visible(text, 0, width as usize),
+            Style::default().fg(palette.diff_hunk),
+        )),
+        DiffRow::Line { left, right } if split && right.is_some() => {
+            let cols = side_by_side_column_widths(width, state.diff_split_fraction);
+            let mut spans = paint_cell_spans(left, cols.left_width, gutter, col_offset, palette);
+            spans.push(Span::styled(
+                DIFF_RULE.to_string(),
+                Style::default().fg(Color::DarkGray),
+            ));
+            spans.extend(paint_cell_spans(
+                right.as_ref().unwrap(),
+                cols.right_width,
+                gutter,
+                col_offset,
+                palette,
+            ));
+            Line::from(spans)
+        }
+        DiffRow::Line { left, .. } => {
+            Line::from(paint_cell_spans(left, width, gutter, col_offset, palette))
+        }
+    };
+    if search_hit {
+        line.spans = line
+            .spans
+            .into_iter()
+            .map(|span| {
+                let style = span.style.bg(palette.flash);
+                Span::styled(span.content.to_string(), style)
+            })
+            .collect();
+    }
+    line
+}
+
+fn section_style(section: DiffSection, palette: Palette) -> Style {
+    match section {
+        DiffSection::Staged => Style::default().fg(palette.added),
+        DiffSection::Unstaged => Style::default().fg(palette.modified),
+        DiffSection::New => Style::default().fg(palette.heading),
+    }
+}
+
+fn paint_cell_spans(
+    cell: &DiffCell,
+    width: u16,
+    gutter: usize,
+    col_offset: usize,
+    palette: Palette,
+) -> Vec<Span<'static>> {
+    let width = width as usize;
+    let code_w = cell_code_width(width, gutter);
+    let line_no = cell
+        .line_no
+        .map(|n| format!("{n:>gutter$}"))
+        .unwrap_or_else(|| " ".repeat(gutter));
+    let plain = slice_visible(&cell.text, col_offset, code_w);
+    let sign = cell_sign(cell.kind);
+    let accent = cell_accent(cell.kind, palette);
+    let code_style = accent.unwrap_or(Style::default().fg(palette.repo));
+    let muted = Style::default()
+        .fg(palette.muted)
+        .add_modifier(Modifier::DIM);
+    let used = gutter + 4 + plain.chars().count();
+    let pad = width.saturating_sub(used);
+    vec![
+        Span::styled(line_no, muted),
+        Span::styled(format!(" {DIFF_RULE} "), muted),
+        Span::styled(
+            sign.to_string(),
+            accent
+                .unwrap_or(Style::default())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(plain, code_style),
+        Span::raw(" ".repeat(pad)),
+    ]
+}
+
+fn cell_accent(kind: DiffCellKind, palette: Palette) -> Option<Style> {
+    match kind {
+        DiffCellKind::Add => Some(Style::default().fg(palette.added)),
+        DiffCellKind::Del => Some(Style::default().fg(palette.deleted)),
+        DiffCellKind::Meta => Some(Style::default().fg(palette.muted)),
+        DiffCellKind::Ctx | DiffCellKind::Empty => None,
     }
 }
 
@@ -576,13 +749,12 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     frame.render_widget(Clear, rect);
     let mut lines = vec![Line::from(Span::styled(
         " Stash ",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
     ))];
     for op in ops {
-        let detail = op
-            .stash_ref
-            .as_deref()
-            .unwrap_or("");
+        let detail = op.stash_ref.as_deref().unwrap_or("");
         let text = if detail.is_empty() {
             format!(" {}  {}", op.key, op.label)
         } else {
@@ -719,12 +891,8 @@ mod tests {
 
     #[test]
     fn paints_tree_and_graph() {
-        let snapshot = build_workspace_snapshot(
-            &[repo("app", true), repo("lib", false)],
-            &[],
-            false,
-            &[],
-        );
+        let snapshot =
+            build_workspace_snapshot(&[repo("app", true), repo("lib", false)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         state.graph = Some(GraphModel {
             commits: vec![Commit {
@@ -741,13 +909,14 @@ mod tests {
         });
         let backend = TestBackend::new(80, 16);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| draw(frame, &mut state))
-            .unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("app"), "{text}");
         assert!(text.contains("README.md"), "{text}");
-        assert!(text.contains("seed") || text.contains("dirty") || text.contains("aaa1111"), "{text}");
+        assert!(
+            text.contains("seed") || text.contains("dirty") || text.contains("aaa1111"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -757,9 +926,7 @@ mod tests {
         state.help_open = true;
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| draw(frame, &mut state))
-            .unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("q  quit"), "{text}");
         assert!(text.contains(".  show ignored"), "{text}");
@@ -778,9 +945,7 @@ mod tests {
         assert!(state.easy_motion.is_some());
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| draw(frame, &mut state))
-            .unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("a "), "{text}");
         assert!(text.contains("b "), "{text}");
@@ -800,21 +965,28 @@ mod tests {
         state.set_diff(
             "app".into(),
             "README.md".into(),
-            vec![
+            super::super::diff::DiffContent::from_lines(vec![
                 "@@ -1,1 +1,1 @@".into(),
                 "-old line".into(),
                 "+new line".into(),
-            ],
+            ]),
         );
         let backend = TestBackend::new(220, 20);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| draw(frame, &mut state))
-            .unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         assert!(state.layout.diff_split_rule_x.is_some(), "rule missing");
         assert!(state.layout.outer_tree_width >= 20);
         let text = buffer_text(&terminal);
         assert!(text.contains("│") || text.contains("|"), "{text}");
-        assert!(text.contains("old") || text.contains("new") || text.contains("README"), "{text}");
+        assert!(
+            text.contains("old") || text.contains("new") || text.contains("README"),
+            "{text}"
+        );
+        assert!(text.contains("README.md"), "{text}");
+        assert!(text.contains("split") || text.contains("inline"), "{text}");
+        assert!(
+            text.contains("UNSTAGED") || text.contains("STAGED"),
+            "{text}"
+        );
     }
 }
