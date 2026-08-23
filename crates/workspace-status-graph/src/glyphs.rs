@@ -24,6 +24,10 @@ pub struct GlyphSet {
     pub ahead: &'static str,
     /// Behind upstream.
     pub behind: &'static str,
+    /// Checkout mark on the named HEAD branch chip (`` / `+`).
+    pub checkout_mark: &'static str,
+    /// Synced local+remote mark inside a merged chip (`` / `=`).
+    pub sync_mark: &'static str,
     /// Vertical through-rail.
     pub vertical: &'static str,
     /// Horizontal parent edge.
@@ -57,6 +61,8 @@ pub const UNICODE: GlyphSet = GlyphSet {
     worktree: "🔗",
     ahead: "↑",
     behind: "↓",
+    checkout_mark: "",
+    sync_mark: "",
     vertical: "│",
     horizontal: "─",
     corner_down_right: "╮",
@@ -79,6 +85,8 @@ pub const ASCII: GlyphSet = GlyphSet {
     worktree: "wt",
     ahead: "^",
     behind: "v",
+    checkout_mark: "+",
+    sync_mark: "=",
     vertical: "|",
     horizontal: "-",
     corner_down_right: "\\",

@@ -9,7 +9,7 @@ use ratatui::widgets::Widget;
 use crate::format::format_sync;
 use crate::glyphs::{ASCII, UNICODE};
 use crate::model::GraphModel;
-use crate::paint::paint_model;
+use crate::paint::{paint_model_with, PaintOpts};
 
 /// Renderable git-graph widget.
 ///
@@ -22,6 +22,7 @@ pub struct GraphWidget<'a> {
     gutter_width: Option<u16>,
     selected: Option<usize>,
     scroll: u16,
+    now_unix: Option<i64>,
 }
 
 impl<'a> GraphWidget<'a> {
@@ -33,6 +34,7 @@ impl<'a> GraphWidget<'a> {
             gutter_width: None,
             selected: None,
             scroll: 0,
+            now_unix: None,
         }
     }
 
@@ -60,6 +62,12 @@ impl<'a> GraphWidget<'a> {
         self.scroll = scroll;
         self
     }
+
+    /// Freeze the relative-date clock (unix seconds). Tests pass a fixed instant.
+    pub fn now_unix(mut self, unix: i64) -> Self {
+        self.now_unix = Some(unix);
+        self
+    }
 }
 
 impl Widget for GraphWidget<'_> {
@@ -74,13 +82,29 @@ impl Widget for GraphWidget<'_> {
 
         if let Some(sync) = &self.model.sync {
             if y < bottom {
-                put_line(buf, area.x, y, area.width, &format_sync(sync, glyphs), false);
+                put_line(
+                    buf,
+                    area.x,
+                    y,
+                    area.width,
+                    &format_sync(sync, glyphs),
+                    false,
+                );
                 y = y.saturating_add(1);
             }
         }
 
         let skip = self.scroll as usize;
-        for line in paint_model(self.model, glyphs, cap).into_iter().skip(skip) {
+        let painted = paint_model_with(
+            self.model,
+            glyphs,
+            PaintOpts {
+                gutter_width: cap,
+                line_width: Some(area.width as usize),
+                now_unix: self.now_unix,
+            },
+        );
+        for line in painted.into_iter().skip(skip) {
             if y >= bottom {
                 break;
             }
@@ -106,9 +130,12 @@ mod tests {
     use crate::action::Action;
     use crate::action::Effect;
     use crate::model::{Commit, Stash, SyncState, SyncStatus, Worktree};
+    use crate::paint::paint_model;
     use crate::topology::cells_text;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    const NOW: i64 = 1_700_000_000;
 
     fn commit(id: &str, subject: &str, parents: &[&str]) -> Commit {
         Commit {
@@ -116,6 +143,8 @@ mod tests {
             subject: subject.into(),
             parents: parents.iter().map(|p| (*p).to_string()).collect(),
             refs: Vec::new(),
+            author_name: "Ada".into(),
+            author_date_unix: NOW - 3600,
         }
     }
 
@@ -139,6 +168,8 @@ mod tests {
                     subject: "add graph crate".into(),
                     parents: vec![parent.into()],
                     refs: vec!["main".into()],
+                    author_name: "Ada Lovelace".into(),
+                    author_date_unix: NOW - 120,
                 },
                 commit(parent, "prior commit", &[]),
             ],
@@ -196,6 +227,7 @@ mod tests {
             .draw(|frame| {
                 GraphWidget::new(model)
                     .ascii(ascii)
+                    .now_unix(NOW)
                     .render(frame.area(), frame.buffer_mut());
             })
             .expect("draw");
@@ -225,7 +257,10 @@ mod tests {
         assert!(joined.contains("stash@{0}"), "stash ref: {joined}");
         assert!(joined.contains("WIP on main"), "stash subject: {joined}");
         assert!(joined.contains("aaa1111"), "{joined}");
-        assert!(joined.contains("[HEAD]"), "{joined}");
+        assert!(
+            joined.contains("[main]") || joined.contains("[main]"),
+            "HEAD branch chip: {joined}"
+        );
         assert!(joined.contains(".worktrees/feature/graph"), "{joined}");
         assert!(joined.contains("bbb2222"), "{joined}");
         assert!(joined.contains("prior commit"), "{joined}");
@@ -240,9 +275,59 @@ mod tests {
             .expect("stash row");
         let head = lines
             .iter()
-            .position(|l| l.contains("[HEAD]"))
+            .position(|l| l.contains("add graph crate"))
             .expect("head row");
         assert!(stash < head, "stash {stash} should sit above HEAD {head}");
+    }
+
+    #[test]
+    fn commit_paints_subject_then_refs_hash_date_author() {
+        let model = sample_model();
+        let lines = render_lines(&model, 120, 16, false);
+        let subject = lines
+            .iter()
+            .position(|l| l.contains("add graph crate"))
+            .expect("subject row");
+        assert!(
+            !lines[subject].contains("aaa1111"),
+            "hash must not sit on the subject: {}",
+            lines[subject]
+        );
+        assert!(
+            !lines[subject].contains("[main]") && !lines[subject].contains("[main]"),
+            "refs must not sit on the subject: {}",
+            lines[subject]
+        );
+        let meta = &lines[subject + 1];
+        assert!(meta.contains("aaa1111"), "short hash on spacer: {meta}");
+        assert!(
+            meta.contains("[main]") || meta.contains("[main]"),
+            "branch chip on spacer: {meta}"
+        );
+        let painted = paint_model_with(
+            &model,
+            &UNICODE,
+            PaintOpts {
+                now_unix: Some(NOW),
+                line_width: Some(200),
+                ..PaintOpts::default()
+            },
+        );
+        let subject_line = painted
+            .iter()
+            .find(|l| l.label.contains("add graph crate"))
+            .expect("subject painted");
+        assert!(subject_line.selectable);
+        let spacer = painted
+            .iter()
+            .skip_while(|l| !l.label.contains("add graph crate"))
+            .nth(1)
+            .expect("commit spacer");
+        assert!(!spacer.selectable);
+        assert_eq!(spacer.row_index, subject_line.row_index);
+        assert!(spacer.label.contains("aaa1111"), "{}", spacer.label);
+        assert!(spacer.label.contains("2m"), "{}", spacer.label);
+        assert!(spacer.label.contains("Ada Lovelace"), "{}", spacer.label);
     }
 
     #[test]
@@ -296,8 +381,14 @@ mod tests {
     fn paints_merge_open_and_join() {
         let lines = render_lines(&merge_model(), 80, 16, false);
         let joined = lines.join("\n");
-        assert!(joined.contains('╮') || joined.contains('╭'), "open: {joined}");
-        assert!(joined.contains('╯') || joined.contains('╰'), "join: {joined}");
+        assert!(
+            joined.contains('╮') || joined.contains('╭'),
+            "open: {joined}"
+        );
+        assert!(
+            joined.contains('╯') || joined.contains('╰'),
+            "join: {joined}"
+        );
         assert!(joined.contains("merge"), "{joined}");
         assert!(joined.contains("left"), "{joined}");
         assert!(joined.contains("right"), "{joined}");
@@ -368,7 +459,10 @@ mod tests {
         let lines = render_lines(&model, 120, 16, false);
         let joined = lines.join("\n");
         assert!(joined.contains("notes"), "expected notes path: {joined}");
-        assert!(joined.contains("[ignored]"), "expected ignored mark: {joined}");
+        assert!(
+            joined.contains("[ignored]"),
+            "expected ignored mark: {joined}"
+        );
     }
 
     #[test]

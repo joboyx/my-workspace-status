@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use workspace_status_graph::{GraphModel, GraphRow};
+use workspace_status_graph::{paint_model, GraphModel, GraphRow, ASCII, UNICODE};
 
 use crate::snapshot::{FileChange, WorkspaceSnapshot};
 
@@ -1417,13 +1417,22 @@ impl AppState {
         if row < y {
             return Effect::None;
         }
-        let idx = self.graph_scroll as usize + (row - y) as usize;
-        let n = self
-            .graph
-            .as_ref()
-            .map(|g| g.visible_rows().len())
-            .unwrap_or(0);
-        if idx < n {
+        let Some(model) = self.graph.as_ref() else {
+            return Effect::None;
+        };
+        let mut offset = (row - y) as usize;
+        if model.sync.is_some() {
+            if offset == 0 {
+                return Effect::None;
+            }
+            offset -= 1;
+        }
+        let glyphs = if self.ascii { &ASCII } else { &UNICODE };
+        let painted = paint_model(model, glyphs, None);
+        let Some(line) = painted.get(self.graph_scroll as usize + offset) else {
+            return Effect::None;
+        };
+        if let Some(idx) = line.row_index {
             self.graph_cursor = idx;
             if is_double {
                 return self.nav_enter();
@@ -3623,6 +3632,8 @@ mod tests {
                 subject: "head".into(),
                 parents: Vec::new(),
                 refs,
+                author_name: String::new(),
+                author_date_unix: 0,
             }],
             stashes: Vec::new(),
             worktrees: Vec::new(),
@@ -4115,6 +4126,8 @@ mod tests {
             subject: subject.into(),
             parents: Vec::new(),
             refs: Vec::new(),
+            author_name: String::new(),
+            author_date_unix: 0,
         }
     }
 

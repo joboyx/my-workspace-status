@@ -85,7 +85,7 @@ impl From<String> for GraphRef {
 }
 
 /// One commit in the loaded window.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Commit {
     /// Full commit id.
     pub id: String,
@@ -95,6 +95,10 @@ pub struct Commit {
     pub parents: Vec<String>,
     /// Branch or tag labels that point at this commit.
     pub refs: Vec<GraphRef>,
+    /// `git log` `%an` author name. Empty when unknown.
+    pub author_name: String,
+    /// `git log` `%at` author date (unix seconds). `0` when unknown.
+    pub author_date_unix: i64,
 }
 
 /// One `git stash` entry.

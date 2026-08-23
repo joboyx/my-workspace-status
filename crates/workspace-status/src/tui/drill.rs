@@ -112,6 +112,8 @@ mod tests {
                 subject: "s".into(),
                 parents: Vec::new(),
                 refs: Vec::new(),
+                author_name: String::new(),
+                author_date_unix: 0,
             },
             is_head: true,
             worktrees: Vec::new(),
