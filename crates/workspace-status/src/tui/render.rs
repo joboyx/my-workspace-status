@@ -26,7 +26,7 @@ use super::split::{
 };
 use super::state::{AppState, FocusPane};
 use super::theme::{hex_color, Palette};
-use super::tree::{row_segments, NodeKind, SegRole, TextSeg, VisibleRow};
+use super::tree::{row_segments, NodeKind, NodeSegments, SegRole, TextSeg, VisibleRow};
 use super::watch::flash_active;
 use crate::helpers::visible_width;
 
@@ -215,6 +215,33 @@ fn paint_tree_row(
     motion_label: Option<&str>,
     palette: Palette,
 ) -> Line<'static> {
+    let segs = row_segments(row, ascii, viewed);
+    paint_segmented_row(
+        row.depth,
+        row.foldable,
+        row.folded,
+        &segs,
+        width,
+        selected,
+        flashing,
+        ascii,
+        motion_label,
+        palette,
+    )
+}
+
+fn paint_segmented_row(
+    depth: usize,
+    foldable: bool,
+    folded: bool,
+    segs: &NodeSegments,
+    width: usize,
+    selected: bool,
+    flashing: bool,
+    ascii: bool,
+    motion_label: Option<&str>,
+    palette: Palette,
+) -> Line<'static> {
     let bg = if selected {
         Some(palette.cursor_bg)
     } else if flashing {
@@ -222,7 +249,6 @@ fn paint_tree_row(
     } else {
         None
     };
-    let segs = row_segments(row, ascii, viewed);
     let trailing_text: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
     let trailing_width = visible_width(&trailing_text);
     let pad = usize::from(trailing_width > 0);
@@ -248,9 +274,9 @@ fn paint_tree_row(
         ));
         1 + visible_width(&padded)
     } else {
-        let indent = "  ".repeat(row.depth);
+        let indent = "  ".repeat(depth);
         spans.push(styled_span(&indent, Style::default(), bg));
-        let chevron = fold_chevron(row, ascii);
+        let chevron = fold_chevron(foldable, folded, ascii);
         spans.push(styled_span(
             &format!("{chevron} "),
             Style::default().fg(palette.muted),
@@ -285,11 +311,11 @@ fn paint_tree_row(
     Line::from(spans)
 }
 
-fn fold_chevron(row: &VisibleRow, ascii: bool) -> &'static str {
-    if !row.foldable {
+fn fold_chevron(foldable: bool, folded: bool, ascii: bool) -> &'static str {
+    if !foldable {
         return " ";
     }
-    if row.folded {
+    if folded {
         if ascii {
             FOLD_COLLAPSED_ASCII
         } else {
@@ -471,6 +497,7 @@ fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, curso
         return;
     }
     let height = list_h as usize;
+    let width = list_area.width as usize;
     let (start, _) = visible_window(rows.len(), cursor, height);
     let motion = file_easy_motion_labels(state, start, height);
     let lines: Vec<Line> = rows
@@ -479,39 +506,26 @@ fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, curso
         .skip(start)
         .take(height)
         .map(|(i, row)| {
-            let label = motion
+            let motion_label = motion
                 .as_ref()
                 .and_then(|labels| labels.get(i - start))
-                .map(|s| format!("{s:<2}"))
-                .unwrap_or_default();
-            let chevron = if row.foldable {
-                if row.folded {
-                    if state.ascii {
-                        ">"
-                    } else {
-                        "▸"
-                    }
-                } else if state.ascii {
-                    "v"
-                } else {
-                    "▾"
-                }
-            } else {
-                " "
+                .cloned();
+            let segs = NodeSegments {
+                segments: row.segments.clone(),
+                trailing: row.trailing_segs.clone(),
             };
-            let indent = "  ".repeat(row.depth);
-            let text = format!("{label}{indent}{chevron} {}", row.label);
-            let mut style = if row.is_dir() {
-                Style::default().fg(palette.repo)
-            } else {
-                Style::default().fg(palette.file)
-            };
-            if i == cursor {
-                style = style.fg(palette.cursor).bg(palette.cursor_bg);
-            } else if !label.is_empty() {
-                style = style.fg(palette.heading);
-            }
-            Line::from(Span::styled(text, style))
+            paint_segmented_row(
+                row.depth,
+                row.foldable,
+                row.folded,
+                &segs,
+                width,
+                i == cursor,
+                false,
+                state.ascii,
+                motion_label.as_deref(),
+                palette,
+            )
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), list_area);
@@ -1068,6 +1082,57 @@ mod tests {
         assert!(
             text.contains("seed") || text.contains("dirty") || text.contains("aaa1111"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn commit_file_rows_reuse_trailing_status_badge() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.open_commit_files(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![
+                super::super::drill::CommitFile {
+                    status: "A".into(),
+                    path: "src/lib.rs".into(),
+                    old_path: None,
+                },
+                super::super::drill::CommitFile {
+                    status: "M".into(),
+                    path: "README.md".into(),
+                    old_path: None,
+                },
+            ],
+        );
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        let added = text
+            .lines()
+            .find(|line| line.contains("lib.rs"))
+            .unwrap_or("");
+        let name_at = added.find("lib.rs").expect("lib.rs on a commit-file row");
+        let after_name = &added[name_at + "lib.rs".len()..];
+        assert!(
+            after_name.contains('A'),
+            "commit-file A badge should sit to the right of the name: {added:?}"
+        );
+        assert!(
+            !added.contains("A  lib") && !added.contains("A lib"),
+            "badge must not prefix the file name: {added:?}"
+        );
+        let readme = text
+            .lines()
+            .find(|line| line.contains("README.md"))
+            .unwrap_or("");
+        let readme_at = readme.find("README.md").expect("README.md");
+        assert!(
+            readme[readme_at + "README.md".len()..].contains('M'),
+            "commit-file M badge should sit to the right: {readme:?}"
         );
     }
 

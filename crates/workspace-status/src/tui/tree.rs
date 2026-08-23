@@ -642,14 +642,7 @@ fn walk(
     let foldable = !node.children.is_empty();
     let folded = foldable && folds.contains(&node.id);
     let segs = node_segments(node, tree_mode, in_no_updates, ascii, false);
-    let left = segments_text(&segs.segments);
-    let right_raw = segments_text(&segs.trailing);
-    let right_for_label = right_raw.trim().to_string();
-    let label = if right_for_label.is_empty() {
-        left.trim_end().to_string()
-    } else {
-        format!("{}  {right_for_label}", left.trim_end())
-    };
+    let (label, right_raw) = segments_search_label(&segs);
     out.push(VisibleRow {
         id: node.id.clone(),
         depth,
@@ -682,10 +675,6 @@ fn walk(
             out,
         );
     }
-}
-
-fn segments_text(segs: &[TextSeg]) -> String {
-    segs.iter().map(|s| s.text.as_str()).collect()
 }
 
 fn icon_seg(text: &str, role: SegRole) -> TextSeg {
@@ -730,13 +719,55 @@ fn sync_trailing(chrome: &NodeChrome, in_no_updates: bool, ascii: bool) -> Vec<T
     )]
 }
 
-fn file_segments(node: &TreeNode, tree_mode: bool, ascii: bool, viewed: bool) -> NodeSegments {
-    let Some(change) = node.file.as_ref() else {
-        return NodeSegments {
-            segments: vec![text_seg(&node.label, SegRole::File)],
-            trailing: Vec::new(),
-        };
+/// Single-sided name-status → FileChange (Ink `changeFromNameStatus`).
+///
+/// `unstaged_status` carries the letter so commit/stash rows keep A/M/D/R/C
+/// instead of workspace staged-only `S`.
+pub fn file_change_from_name_status(
+    status: &str,
+    path: impl Into<String>,
+    old_path: Option<String>,
+) -> FileChange {
+    let letter = status.chars().next().unwrap_or('M').to_string();
+    FileChange {
+        path: path.into(),
+        staged_status: None,
+        unstaged_status: Some(letter),
+        untracked: false,
+        old_path,
+    }
+}
+
+/// File-row segments shared by the workspace tree and commit-file lists.
+pub fn file_change_segments(change: &FileChange, tree_mode: bool, ascii: bool) -> NodeSegments {
+    file_segments(change, tree_mode, ascii, false)
+}
+
+/// Folder-row segments (workspace dirs and commit-file dirs).
+pub fn dir_name_segments(name: &str, ascii: bool) -> NodeSegments {
+    NodeSegments {
+        segments: vec![
+            icon_seg(icon_folder(ascii), SegRole::Dir),
+            text_seg(name, SegRole::Dir),
+        ],
+        trailing: Vec::new(),
+    }
+}
+
+/// Search label (left + trailing) and the untrimmed trailing run.
+pub fn segments_search_label(segs: &NodeSegments) -> (String, String) {
+    let left: String = segs.segments.iter().map(|s| s.text.as_str()).collect();
+    let right_raw: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
+    let right_for_label = right_raw.trim().to_string();
+    let label = if right_for_label.is_empty() {
+        left.trim_end().to_string()
+    } else {
+        format!("{}  {right_for_label}", left.trim_end())
     };
+    (label, right_raw)
+}
+
+fn file_segments(change: &FileChange, tree_mode: bool, ascii: bool, viewed: bool) -> NodeSegments {
     let status = status_letter_from_change(change);
     let color = SegRole::from(status.color_role());
     let icon = file_icon(ascii, &change.path);
@@ -1019,14 +1050,14 @@ pub fn node_segments(
             ],
             trailing: vec![text_seg(node.children.len().to_string(), SegRole::Muted)],
         },
-        NodeKind::Dir => NodeSegments {
-            segments: vec![
-                icon_seg(icon_folder(ascii), SegRole::Dir),
-                text_seg(&node.label, SegRole::Dir),
-            ],
-            trailing: Vec::new(),
+        NodeKind::Dir => dir_name_segments(&node.label, ascii),
+        NodeKind::File => match node.file.as_ref() {
+            Some(change) => file_segments(change, tree_mode, ascii, viewed),
+            None => NodeSegments {
+                segments: vec![text_seg(&node.label, SegRole::File)],
+                trailing: Vec::new(),
+            },
         },
-        NodeKind::File => file_segments(node, tree_mode, ascii, viewed),
     }
 }
 
@@ -1378,5 +1409,76 @@ mod tests {
         let ops = rows.iter().find(|r| r.id == "repo:ops").expect("ops");
         assert!(ops.trailing.contains('Y'), "{}", ops.trailing);
         assert!(!ops.label.contains("wt "));
+    }
+
+    #[test]
+    fn linked_only_does_not_invent_family_container() {
+        let linked = repo("app/.worktrees/feat", true, true);
+        let built = build_workspace_snapshot(&[linked], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        assert!(rows.iter().any(|r| r.id == "repo:app/.worktrees/feat"));
+        assert!(rows.iter().all(|r| r.id != "repo:app"));
+        assert!(rows.iter().all(|r| r.kind != NodeKind::Checkout));
+        let row = rows
+            .iter()
+            .find(|r| r.id == "repo:app/.worktrees/feat")
+            .expect("linked-only repo");
+        assert!(!row.chrome.is_family);
+        assert!(row.label.contains("main"));
+        assert!(!row.label.contains("wt "));
+    }
+
+    #[test]
+    fn ignored_uses_icon_not_bracket_text() {
+        let built = build_workspace_snapshot(
+            &[repo("app", true, false), repo("notes", true, false)],
+            &["notes".into()],
+            true,
+            &[],
+        );
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let notes = rows.iter().find(|r| r.id == "repo:notes").expect("notes");
+        assert!(notes.label.contains(icon_ignored(true)), "{}", notes.label);
+        assert!(!notes.label.contains("[ignored]"));
+    }
+
+    #[test]
+    fn no_updates_count_is_trailing_not_parens() {
+        let built = build_workspace_snapshot(
+            &[repo("app", true, false), repo("lib", false, false)],
+            &[],
+            false,
+            &[],
+        );
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let folds = default_folds(&tree);
+        let rows = flatten_with(&tree, &folds, true);
+        let group = rows
+            .iter()
+            .find(|r| r.id == "group:no-updates")
+            .expect("group");
+        assert_eq!(group.trailing.trim(), "1");
+        assert!(group.label.contains("No updates"));
+        assert!(!group.label.contains("(1)"));
+        assert!(!group.trailing.contains('('));
+    }
+
+    #[test]
+    fn viewed_glyph_is_ink_eye_not_circle() {
+        let built = build_workspace_snapshot(&[dirty_repo("app", &["README.md"])], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let file = rows
+            .iter()
+            .find(|r| r.id == "file:app:README.md")
+            .expect("file");
+        let segs = row_segments(file, true, true);
+        let trail: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
+        assert!(trail.contains(icon_viewed(true)), "{trail}");
+        assert!(!trail.contains('◉'));
+        assert_eq!(icon_viewed(true), "*");
+        assert_eq!(icon_viewed(false), "");
     }
 }

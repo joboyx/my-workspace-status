@@ -186,7 +186,7 @@ To rebuild these frames, seed the demo workspace and follow [docs/demo.md](./doc
 
 ![Create branch](docs/images/07-create-branch.png)
 
-**Reviewed mark** — Space on a dirty file writes `◉` (same store as the Ink app).
+**Reviewed mark** — Space on a dirty file writes `` / ASCII `*` (same store as the Ink app).
 
 ![Reviewed mark](docs/images/08-reviewed.png)
 
