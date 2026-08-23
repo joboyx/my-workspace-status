@@ -54,14 +54,6 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "next / prev",
             },
             HelpEntry {
-                keys: "Ctrl+u/d",
-                desc: "list ±5",
-            },
-            HelpEntry {
-                keys: "PgUp/PgDn",
-                desc: "page",
-            },
-            HelpEntry {
                 keys: ";",
                 desc: "EasyMotion",
             },
@@ -154,6 +146,14 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             HelpEntry {
                 keys: "Ctrl+O",
                 desc: "full-file context",
+            },
+            HelpEntry {
+                keys: "PgUp/PgDn",
+                desc: "page",
+            },
+            HelpEntry {
+                keys: "Ctrl+u/d",
+                desc: "list ±5",
             },
             HelpEntry {
                 keys: "m",
@@ -296,6 +296,17 @@ mod tests {
         assert!(keys.contains(&"Tab"));
         assert!(keys.contains(&"C"));
         assert!(keys.contains(&"a/p/D"));
+        let move_keys: Vec<&str> = HELP_GROUPS[0].entries.iter().map(|e| e.keys).collect();
+        let view_keys: Vec<&str> = HELP_GROUPS[2].entries.iter().map(|e| e.keys).collect();
+        assert!(!move_keys.contains(&"PgUp/PgDn"));
+        assert!(!move_keys.contains(&"Ctrl+u/d"));
+        assert!(view_keys.contains(&"PgUp/PgDn"));
+        assert!(view_keys.contains(&"Ctrl+u/d"));
+        assert!(view_keys.contains(&"."));
+        assert!(view_keys.contains(&"T"));
+        assert!(view_keys.contains(&"Ctrl+O"));
+        assert!(view_keys.contains(&"m"));
+        assert!(view_keys.contains(&"Esc"));
         assert!(help_match_indices("quit")
             .iter()
             .any(|&i| { help_entries().nth(i).is_some_and(|e| e.keys == "q") }));
