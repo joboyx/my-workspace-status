@@ -30,6 +30,9 @@ pub struct StashOpsContext {
     pub dirty_paths: Option<Vec<String>>,
     /// Graph stash row only. File/repo rows leave this empty.
     pub focused_stash_ref: Option<String>,
+    /// Latest `stash@{n}` for graph commit / uncommitted apply and pop.
+    /// Drop never uses this — that still requires [`Self::focused_stash_ref`].
+    pub latest_stash_ref: Option<String>,
 }
 
 /// Overlay key outcome while the stash menu is open.
@@ -42,8 +45,9 @@ pub enum StashMenuKeyResult {
 
 /// Overlay ops valid for `ctx`, in create → apply → pop → drop order.
 ///
-/// A dirty file or repo is create-only. Apply / pop / drop require a focused
-/// graph stash row. A clean repo is a no-op even when `stash@{0}` exists.
+/// Apply / pop target the focused graph stash, else the latest stash.
+/// Drop requires a focused graph stash row (never "drop latest").
+/// A tree row that omits `latest_stash_ref` stays create-only when dirty.
 pub fn stash_ops_for_context(ctx: &StashOpsContext) -> Vec<StashOp> {
     let mut ops = Vec::new();
     if ctx.dirty {
@@ -56,7 +60,11 @@ pub fn stash_ops_for_context(ctx: &StashOpsContext) -> Vec<StashOp> {
             paths,
         });
     }
-    if let Some(stash_ref) = ctx.focused_stash_ref.as_deref() {
+    let apply_ref = ctx
+        .focused_stash_ref
+        .as_deref()
+        .or(ctx.latest_stash_ref.as_deref());
+    if let Some(stash_ref) = apply_ref {
         ops.push(StashOp {
             id: StashOpId::Apply,
             key: 'a',
@@ -71,6 +79,8 @@ pub fn stash_ops_for_context(ctx: &StashOpsContext) -> Vec<StashOp> {
             stash_ref: Some(stash_ref.to_string()),
             paths: None,
         });
+    }
+    if let Some(stash_ref) = ctx.focused_stash_ref.as_deref() {
         ops.push(StashOp {
             id: StashOpId::Drop,
             key: 'd',
@@ -80,6 +90,20 @@ pub fn stash_ops_for_context(ctx: &StashOpsContext) -> Vec<StashOp> {
         });
     }
     ops
+}
+
+/// Status-line chips for the open overlay (`stash  s create  a apply …`).
+pub fn stash_menu_status(ops: &[StashOp]) -> String {
+    let mut parts = vec!["stash"];
+    for op in ops {
+        parts.push(match op.id {
+            StashOpId::Create => "s create",
+            StashOpId::Apply => "a apply",
+            StashOpId::Pop => "p pop",
+            StashOpId::Drop => "d drop",
+        });
+    }
+    parts.join("  ")
 }
 
 /// Map overlay input to cancel / run / ignore. Enter runs the first listed op.
@@ -178,73 +202,98 @@ fn is_stashable(change: &FileChange) -> bool {
 mod tests {
     use super::*;
 
+    fn ctx(dirty: bool, focused: Option<&str>, latest: Option<&str>) -> StashOpsContext {
+        StashOpsContext {
+            dirty,
+            dirty_paths: None,
+            focused_stash_ref: focused.map(str::to_string),
+            latest_stash_ref: latest.map(str::to_string),
+        }
+    }
+
+    fn op_ids(ops: &[StashOp]) -> Vec<StashOpId> {
+        ops.iter().map(|op| op.id).collect()
+    }
+
     #[test]
     fn dirty_file_yields_create_with_paths() {
         let ops = stash_ops_for_context(&StashOpsContext {
             dirty: true,
             dirty_paths: Some(vec!["src/a.rs".into()]),
             focused_stash_ref: None,
+            latest_stash_ref: None,
         });
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].id, StashOpId::Create);
         assert_eq!(ops[0].key, 's');
-        assert_eq!(ops[0].paths.as_deref(), Some(["src/a.rs".to_string()].as_slice()));
+        assert_eq!(
+            ops[0].paths.as_deref(),
+            Some(["src/a.rs".to_string()].as_slice())
+        );
     }
 
     #[test]
     fn dirty_file_or_repo_is_create_only() {
-        let ops = stash_ops_for_context(&StashOpsContext {
-            dirty: true,
-            dirty_paths: None,
-            focused_stash_ref: None,
-        });
-        assert_eq!(
-            ops.iter().map(|op| op.id).collect::<Vec<_>>(),
-            vec![StashOpId::Create]
-        );
+        let ops = stash_ops_for_context(&ctx(true, None, None));
+        assert_eq!(op_ids(&ops), vec![StashOpId::Create]);
     }
 
     #[test]
     fn clean_with_no_stash_is_empty() {
-        let ops = stash_ops_for_context(&StashOpsContext {
-            dirty: false,
-            dirty_paths: None,
-            focused_stash_ref: None,
-        });
+        let ops = stash_ops_for_context(&ctx(false, None, None));
         assert!(ops.is_empty());
     }
 
     #[test]
-    fn clean_repo_with_latest_stash_is_empty() {
-        let ops = stash_ops_for_context(&StashOpsContext {
-            dirty: false,
-            dirty_paths: None,
-            focused_stash_ref: None,
-        });
-        assert!(ops.is_empty());
+    fn latest_stash_offers_apply_pop_not_drop() {
+        let ops = stash_ops_for_context(&ctx(false, None, Some("stash@{0}")));
+        assert_eq!(op_ids(&ops), vec![StashOpId::Apply, StashOpId::Pop]);
+        assert!(ops
+            .iter()
+            .all(|op| op.stash_ref.as_deref() == Some("stash@{0}")));
+        assert!(!ops.iter().any(|op| op.id == StashOpId::Drop));
+    }
+
+    #[test]
+    fn dirty_plus_latest_is_create_apply_pop() {
+        let ops = stash_ops_for_context(&ctx(true, None, Some("stash@{2}")));
+        assert_eq!(
+            op_ids(&ops),
+            vec![StashOpId::Create, StashOpId::Apply, StashOpId::Pop]
+        );
+        assert!(ops
+            .iter()
+            .filter(|op| op.id != StashOpId::Create)
+            .all(|op| op.stash_ref.as_deref() == Some("stash@{2}")));
     }
 
     #[test]
     fn focused_graph_stash_yields_apply_pop_drop() {
-        let ops = stash_ops_for_context(&StashOpsContext {
-            dirty: false,
-            dirty_paths: None,
-            focused_stash_ref: Some("stash@{1}".into()),
-        });
+        let ops = stash_ops_for_context(&ctx(false, Some("stash@{1}"), Some("stash@{0}")));
         assert_eq!(
-            ops.iter().map(|op| op.id).collect::<Vec<_>>(),
+            op_ids(&ops),
             vec![StashOpId::Apply, StashOpId::Pop, StashOpId::Drop]
         );
-        assert!(ops.iter().all(|op| op.stash_ref.as_deref() == Some("stash@{1}")));
+        assert!(ops
+            .iter()
+            .all(|op| op.stash_ref.as_deref() == Some("stash@{1}")));
+    }
+
+    #[test]
+    fn drop_requires_focused_stash_even_when_latest_exists() {
+        let from_latest = stash_ops_for_context(&ctx(false, None, Some("stash@{0}")));
+        assert!(!from_latest.iter().any(|op| op.id == StashOpId::Drop));
+        let focused = stash_ops_for_context(&ctx(false, Some("stash@{1}"), Some("stash@{0}")));
+        let drop = focused
+            .iter()
+            .find(|op| op.id == StashOpId::Drop)
+            .expect("drop");
+        assert_eq!(drop.stash_ref.as_deref(), Some("stash@{1}"));
     }
 
     #[test]
     fn menu_keys_run_cancel_ignore() {
-        let ops = stash_ops_for_context(&StashOpsContext {
-            dirty: true,
-            dirty_paths: None,
-            focused_stash_ref: Some("stash@{0}".into()),
-        });
+        let ops = stash_ops_for_context(&ctx(true, Some("stash@{0}"), None));
         assert!(matches!(
             resolve_stash_menu_key(None, false, true, &ops),
             StashMenuKeyResult::Cancel
@@ -261,5 +310,17 @@ mod tests {
             resolve_stash_menu_key(Some('x'), false, false, &ops),
             StashMenuKeyResult::Ignore
         ));
+    }
+
+    #[test]
+    fn menu_status_lists_present_ops() {
+        assert_eq!(stash_menu_status(&[]), "stash");
+        let ops = stash_ops_for_context(&ctx(true, None, Some("stash@{0}")));
+        assert_eq!(stash_menu_status(&ops), "stash  s create  a apply  p pop");
+        let drop_ops = stash_ops_for_context(&ctx(false, Some("stash@{1}"), None));
+        assert_eq!(
+            stash_menu_status(&drop_ops),
+            "stash  a apply  p pop  d drop"
+        );
     }
 }
