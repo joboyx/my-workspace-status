@@ -2,14 +2,18 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
+use crate::chrome::{
+    graph_chrome_budget, selection_detail_lines, GraphFooterSelection, LOADING_OLDER,
+};
 use crate::format::format_sync;
 use crate::glyphs::{ASCII, UNICODE};
+use crate::lane_colors::{cells_to_spans, default_lane_colors};
 use crate::model::GraphModel;
-use crate::paint::{paint_model_with, PaintOpts};
+use crate::paint::{paint_model_with, PaintOpts, PaintedLine};
 
 /// Renderable git-graph widget.
 ///
@@ -23,6 +27,8 @@ pub struct GraphWidget<'a> {
     selected: Option<usize>,
     scroll: u16,
     now_unix: Option<i64>,
+    loading_older: bool,
+    lane_colors: &'a [Color],
 }
 
 impl<'a> GraphWidget<'a> {
@@ -35,6 +41,8 @@ impl<'a> GraphWidget<'a> {
             selected: None,
             scroll: 0,
             now_unix: None,
+            loading_older: false,
+            lane_colors: &[],
         }
     }
 
@@ -68,6 +76,18 @@ impl<'a> GraphWidget<'a> {
         self.now_unix = Some(unix);
         self
     }
+
+    /// Paint `loading older…` under the list while the next window loads.
+    pub fn loading_older(mut self, loading: bool) -> Self {
+        self.loading_older = loading;
+        self
+    }
+
+    /// Per-cell gutter colours. Empty uses [`crate::DEFAULT_LANE_COLORS`].
+    pub fn lane_colors(mut self, colors: &'a [Color]) -> Self {
+        self.lane_colors = colors;
+        self
+    }
 }
 
 impl Widget for GraphWidget<'_> {
@@ -77,18 +97,31 @@ impl Widget for GraphWidget<'_> {
         }
         let glyphs = if self.ascii { &ASCII } else { &UNICODE };
         let cap = self.gutter_width.map(|w| w as usize);
+        let default_colors = default_lane_colors();
+        let lane_colors: &[Color] = if self.lane_colors.is_empty() {
+            &default_colors
+        } else {
+            self.lane_colors
+        };
+        let fallback = Color::Reset;
+        let now = self.now_unix.unwrap_or_else(now_unix_secs);
+        let chrome =
+            graph_chrome_budget(area.height, self.loading_older, self.model.sync.is_some());
         let mut y = area.y;
-        let bottom = area.y.saturating_add(area.height);
+        let list_bottom = area
+            .y
+            .saturating_add(u16::from(chrome.header) + chrome.list_height);
 
-        if let Some(sync) = &self.model.sync {
-            if y < bottom {
-                put_line(
+        if chrome.header {
+            if let Some(sync) = &self.model.sync {
+                put_text_line(
                     buf,
                     area.x,
                     y,
                     area.width,
                     &format_sync(sync, glyphs),
                     false,
+                    fallback,
                 );
                 y = y.saturating_add(1);
             }
@@ -105,22 +138,106 @@ impl Widget for GraphWidget<'_> {
             },
         );
         for line in painted.into_iter().skip(skip) {
-            if y >= bottom {
+            if y >= list_bottom {
                 break;
             }
             let selected = self.selected.is_some() && line.row_index == self.selected;
-            put_line(buf, area.x, y, area.width, &line.text(), selected);
+            put_painted_line(
+                buf,
+                area.x,
+                y,
+                area.width,
+                &line,
+                selected,
+                lane_colors,
+                fallback,
+            );
             y = y.saturating_add(1);
+        }
+
+        let mut footer_y = area.y.saturating_add(area.height);
+        if chrome.older {
+            footer_y = footer_y.saturating_sub(1);
+            put_text_line(
+                buf,
+                area.x,
+                footer_y,
+                area.width,
+                LOADING_OLDER,
+                false,
+                fallback,
+            );
+        }
+        if chrome.footer {
+            footer_y = footer_y.saturating_sub(2);
+            let rows = self.model.visible_rows();
+            let selected = self.selected.and_then(|i| rows.get(i));
+            let [line1, line2] = selection_detail_lines(
+                self.model,
+                GraphFooterSelection::from(selected),
+                glyphs,
+                area.width as usize,
+                now,
+            );
+            put_text_line(buf, area.x, footer_y, area.width, &line1, false, fallback);
+            put_text_line(
+                buf,
+                area.x,
+                footer_y.saturating_add(1),
+                area.width,
+                &line2,
+                false,
+                fallback,
+            );
         }
     }
 }
 
-fn put_line(buf: &mut Buffer, x: u16, y: u16, width: u16, text: &str, selected: bool) {
-    let style = if selected {
-        Style::default().add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default()
-    };
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn put_painted_line(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    line: &PaintedLine,
+    selected: bool,
+    lane_colors: &[Color],
+    fallback: Color,
+) {
+    let mut spans: Vec<Span> = Vec::new();
+    if !line.gutter.is_empty() {
+        spans.extend(cells_to_spans(&line.gutter, lane_colors, fallback));
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::raw(line.label.clone()));
+    let mut style = Style::default();
+    if selected {
+        style = style.add_modifier(Modifier::REVERSED);
+    }
+    Line::from(spans)
+        .style(style)
+        .render(Rect::new(x, y, width, 1), buf);
+}
+
+fn put_text_line(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    text: &str,
+    selected: bool,
+    fg: Color,
+) {
+    let mut style = Style::default().fg(fg);
+    if selected {
+        style = style.add_modifier(Modifier::REVERSED);
+    }
     Line::from(Span::styled(text.to_string(), style)).render(Rect::new(x, y, width, 1), buf);
 }
 
@@ -192,8 +309,9 @@ mod tests {
                 ahead: 1,
                 behind: 0,
             }),
-            show_ignored: false,
-            uncommitted: true,
+            uncommitted: Some(true),
+            window: 2,
+            ..GraphModel::default()
         }
     }
 
@@ -255,7 +373,10 @@ mod tests {
         let lines = render_lines(&sample_model(), 120, 16, false);
         let joined = lines.join("\n");
         assert!(joined.contains("main ↑1"), "sync header: {joined}");
-        assert!(joined.contains("○ dirty"), "uncommitted: {joined}");
+        assert!(
+            joined.contains("○ uncommitted changes"),
+            "uncommitted: {joined}"
+        );
         assert!(joined.contains("◇"), "stash diamond: {joined}");
         assert!(joined.contains("stash@{0}"), "stash ref: {joined}");
         assert!(joined.contains("WIP on main"), "stash subject: {joined}");
@@ -265,6 +386,11 @@ mod tests {
             "HEAD branch chip: {joined}"
         );
         assert!(joined.contains(".worktrees/feature/graph"), "{joined}");
+        assert!(
+            joined.contains(""),
+            "linked worktree uses ICON_LINKED_WORKTREE: {joined}"
+        );
+        assert!(!joined.contains("🔗"), "emoji desyncs the gutter: {joined}");
         assert!(joined.contains("bbb2222"), "{joined}");
         assert!(joined.contains("prior commit"), "{joined}");
     }
@@ -557,14 +683,15 @@ mod tests {
         let lines = render_lines(&sample_model(), 120, 16, true);
         let joined = lines.join("\n");
         assert!(joined.contains("main ^1"), "{joined}");
-        assert!(joined.contains("o dirty"), "{joined}");
+        assert!(joined.contains("o uncommitted changes"), "{joined}");
         assert!(joined.contains('s'), "{joined}");
         assert!(joined.contains("stash@{0}"), "{joined}");
         assert!(joined.contains("@"), "{joined}");
         assert!(joined.contains("aaa1111"), "{joined}");
         assert!(joined.contains("*"), "{joined}");
         assert!(joined.contains("bbb2222"), "{joined}");
-        assert!(joined.contains("wt .worktrees/feature/graph"), "{joined}");
+        assert!(joined.contains("L .worktrees/feature/graph"), "{joined}");
+        assert!(!joined.contains("🔗"), "emoji desyncs the gutter: {joined}");
         assert!(!joined.contains("⊙"), "{joined}");
         assert!(!joined.contains("●"), "{joined}");
         let merge_lines = render_lines(&merge_model(), 80, 16, true);
@@ -578,8 +705,163 @@ mod tests {
 
     #[test]
     fn empty_model_renders_no_rows() {
-        let lines = render_lines(&GraphModel::default(), 20, 4, false);
+        let lines = render_lines(&GraphModel::default(), 20, 2, false);
         assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    #[test]
+    fn gutter_cells_use_distinct_lane_colors() {
+        let model = merge_model();
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let colors = crate::default_lane_colors();
+        let mut seen = std::collections::HashSet::new();
+        for y in 0..16u16 {
+            for x in 0..20u16 {
+                let cell = &buffer[(x, y)];
+                if cell.symbol() == " " || cell.symbol().is_empty() {
+                    continue;
+                }
+                if let Color::Rgb(r, g, b) = cell.fg {
+                    if colors.iter().any(
+                        |c| matches!(c, Color::Rgb(cr, cg, cb) if *cr == r && *cg == g && *cb == b),
+                    ) {
+                        seen.insert((r, g, b));
+                    }
+                }
+            }
+        }
+        assert!(
+            seen.len() >= 2,
+            "expected at least two lane colours on the merge gutter, got {seen:?}"
+        );
+    }
+
+    #[test]
+    fn paints_two_line_selection_footer() {
+        let model = sample_model();
+        let lines = render_lines(&model, 80, 16, false);
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("no selection")
+                || joined.contains("Uncommitted changes")
+                || joined.contains("add graph crate"),
+            "selection footer: {joined}"
+        );
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .selected(Some(0))
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut last = String::new();
+        let mut prev = String::new();
+        for y in 0..16u16 {
+            let mut line = String::new();
+            for x in 0..80u16 {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            let trimmed = line.trim_end().to_string();
+            if !trimmed.is_empty() {
+                prev = last;
+                last = trimmed;
+            }
+        }
+        assert!(
+            prev.contains("Uncommitted changes"),
+            "footer subject: {prev}"
+        );
+        assert!(last.contains("worktree"), "footer meta: {last}");
+    }
+
+    #[test]
+    fn paints_clean_working_tree_row() {
+        let mut model = sample_model();
+        model.uncommitted = Some(false);
+        let joined = render_lines(&model, 120, 16, false).join("\n");
+        assert!(
+            joined.contains("○ working tree clean"),
+            "always-on clean row: {joined}"
+        );
+        assert!(
+            !joined.contains("○ uncommitted changes"),
+            "dirty label must not appear when clean: {joined}"
+        );
+    }
+
+    #[test]
+    fn paints_stash_selection_footer() {
+        let model = sample_model();
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .selected(Some(1))
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut last = String::new();
+        let mut prev = String::new();
+        for y in 0..16u16 {
+            let mut line = String::new();
+            for x in 0..80u16 {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            let trimmed = line.trim_end().to_string();
+            if !trimmed.is_empty() {
+                prev = last;
+                last = trimmed;
+            }
+        }
+        assert!(prev.contains("WIP on main"), "stash footer subject: {prev}");
+        assert!(
+            last.contains("stash@{0}") && last.contains("ccc3333") && last.contains("1d"),
+            "stash footer meta ref · hash · date: {last}"
+        );
+        assert!(!last.contains("Ada"), "stash footer has no author: {last}");
+    }
+
+    #[test]
+    fn paints_loading_older_status() {
+        let model = sample_model();
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .loading_older(true)
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut joined = String::new();
+        for y in 0..16u16 {
+            for x in 0..80u16 {
+                joined.push_str(buffer[(x, y)].symbol());
+            }
+            joined.push('\n');
+        }
+        assert!(
+            joined.contains("loading older…"),
+            "loading older status: {joined}"
+        );
     }
 
     #[test]

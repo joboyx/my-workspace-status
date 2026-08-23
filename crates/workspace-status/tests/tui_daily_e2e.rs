@@ -319,6 +319,8 @@ fn drill_enter_and_esc_walk_commit_files_diff() {
     tui.search("merger");
     assert!(tui.right_is_graph(), "merger row should load the graph");
     tui.enter();
+    tui.key('j');
+    tui.key('j');
     tui.enter();
     let files = tui.frame();
     assert!(

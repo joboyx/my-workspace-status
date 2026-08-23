@@ -133,26 +133,29 @@ Adding a node kind means editing four files that each `switch` on `kind`. TypeSc
 
 ## Rust CLI crate
 
+`crates/workspace-status` is the Rust CLI (`workspace-status` and `ws`).
+It implements discovery, `--plain`, `--json`, `-a`/`--all`, repo filters,
+ignored-repo visibility from snapshot.md, and the ratatui TUI on a TTY.
 
-crates/workspace-status is the headless CLI (workspace-status and ws).
-It implements discovery, --plain, --json, -a/--all, repo filters, and ignored-repo visibility from snapshot.md.
+Git calls use a subprocess. The binary prefers `/usr/bin/git` so WSL does not pick a Windows git.exe. Set `WORKSPACE_STATUS_GIT` to override.
 
-Git calls use a subprocess. The binary prefers /usr/bin/git so WSL does not pick a Windows git.exe. Set WORKSPACE_STATUS_GIT to override.
+`--fetch`, `--pull`, and `--default-branch` write progress to stderr when `--json` is set. `--json` wins when both `--json` and `--plain` are set. `-v` applies to `--plain` only.
 
---fetch, --pull, and --default-branch write progress to stderr when --json is set. --json wins when both --json and --plain are set. -v applies to --plain only.
-
-This crate does not open a TUI. A run without --plain or --json prints the --plain report. The TypeScript Ink app is still the interactive TUI.
-
+See [tui-rust.md](./tui-rust.md).
 
 ## Rust graph crate
 
 `crates/workspace-status-graph` is a ratatui widget for one git graph window.
-The Ink TUI still paints the interactive graph.
-
-Callers feed a `GraphModel` (commits, HEAD, sync, stash, worktrees).
-`GraphWidget` implements ratatui `Widget`. Hidden ignored worktrees stay
-out of `visible_rows` unless `show_ignored` is true. Commit and stash
-spacers reuse the same hash / date / author drop order.
+The TypeScript Ink app still has its own graph paint. The ratatui TUI
+loads a `GraphModel` in `graph_load.rs` (`log --exclude=refs/stash --all
+--topo-order --date-order`, window 300, autoload, extra `stash^1`) and
+paints `GraphWidget`. Hidden ignored worktrees stay out of `visible_rows`
+unless `show_ignored` is true. Gutter cells use `GraphCell.color_lane`
+and `DEFAULT_LANE_COLORS`. Chrome is a 2-line selection footer
+(`selection_detail_lines`) plus optional sync header
+(`graph_chrome_budget`). A loaded graph always emits the working-tree
+row. Commit and stash spacers reuse the same hash / date / author drop
+order.
 
 See [graph.md](./graph.md).
 

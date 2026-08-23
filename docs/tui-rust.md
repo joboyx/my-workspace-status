@@ -119,6 +119,10 @@ A file diff paints a one-line path header (`{repo}/{path}  inline|split`, plus `
 
 Graph commits and stashes paint two lines, matching Ink layout A: subject on the node row; refs / `stash@{n}`, short hash, relative date (`just now` / `Nm` / `Nh` / `Nd` / `Nw` / `Ny`), and author on the spacer beneath. Local and `origin/*` names stay visible on commit spacers (matching local+remote tips merge into one chip). The spacer is not a second cursor, search, or EasyMotion target — `j` / `k` / Enter / Esc still treat the commit or stash as one item. When the pane is narrow, meta drops hash, then date, then author, keeping refs / `stash@{n}`.
 
+Graph history matches Ink `gitLogGraphWindow`: `log --exclude=refs/stash --all --topo-order --date-order --skip --max-count` with a 300-commit window. Reaching the last loaded row fetches the next page and paints `loading older…`. Missing `stash^1` parents are loaded with `log --no-walk --ignore-missing` and sit after the log prefix so autoload skip stays on the window, not `commits.len()`. The working-tree row is always present on a loaded graph (`Working tree clean` / `Uncommitted changes`; dirty vs clean is the label only). The pane keeps a 2-line selection footer (footer before header when space is tight): uncommitted → `worktree · not a commit`; spacer → `connector · not selectable`; stash → `stash@{n} ·` hash `·` date; commit → ref chips or `(no refs)` `·` hash `·` author `·` date; empty → `no selection`. Each gutter cell uses its `color_lane` from `DEFAULT_LANE_COLORS`. Linked worktree nodes use Ink `ICON_LINKED_WORKTREE` (`` / `L`), not the 2-column `🔗` emoji.
+
+Rust extras that stay: `q`, Tab, Home/End, family-row `b`, picker `C`. The TypeScript Ink app is not removed. This TUI does not add hint chips, a breadcrumb, or a 3-hour timestamp rule.
+
 The tree / right split defaults to 40% tree. The in-diff RULE defaults to 50/50. Drag either splitter (3-column grab band). Neither pane or column can collapse to zero. Both ratios are session-only.
 
 Bottom line: short status. `?` opens a small overlay of the keys above. `/` uses that line as the search prompt.

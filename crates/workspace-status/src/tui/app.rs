@@ -13,6 +13,7 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use workspace_status_graph::LOADING_OLDER;
 
 use crate::actions::{pull_behind_repos, switch_repo_to_default_branch};
 use crate::config::WorkspaceStatusConfig;
@@ -38,7 +39,10 @@ use super::diff::{load_file_diff, DiffContent};
 use super::drill::CommitFileSource;
 use super::editor::{editor_command, is_detached_editor, resolve_editor};
 use super::fetch::fetch_interval_ms;
-use super::graph_load::load_graph_model;
+use super::graph_load::{
+    autoload_limit, autoload_skip, load_graph_model, load_graph_model_window, merge_autoload,
+    refresh_graph_limit, should_autoload, ShouldAutoload,
+};
 use super::keys::event_to_action_ex;
 use super::render::draw;
 use super::state::AppState;
@@ -160,11 +164,21 @@ fn apply_effect(
     opts: &TuiOpts,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) {
+    apply_effect_inner(state, effect, opts, terminal);
+    maybe_autoload_graph(state, opts, Some(terminal));
+}
+
+fn apply_effect_inner(
+    state: &mut AppState,
+    effect: Effect,
+    opts: &TuiOpts,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) {
     match effect {
         Effect::None | Effect::Quit => {}
         Effect::Batch(effects) => {
             for child in effects {
-                apply_effect(state, child, opts, terminal);
+                apply_effect_inner(state, child, opts, terminal);
             }
         }
         Effect::Fetch { repos } => {
@@ -506,11 +520,16 @@ pub(crate) fn run_checkout_branch(
 
 /// Apply pane-load effects without a TTY. Used by the headless e2e harness.
 pub(crate) fn apply_headless_effect(state: &mut AppState, effect: Effect, opts: &TuiOpts) {
+    apply_headless_inner(state, effect, opts);
+    maybe_autoload_graph(state, opts, None);
+}
+
+fn apply_headless_inner(state: &mut AppState, effect: Effect, opts: &TuiOpts) {
     match effect {
         Effect::None | Effect::Quit => {}
         Effect::Batch(effects) => {
             for child in effects {
-                apply_headless_effect(state, child, opts);
+                apply_headless_inner(state, child, opts);
             }
         }
         Effect::LoadRightPane => load_right(state),
@@ -707,12 +726,79 @@ fn load_right(state: &mut AppState) {
         return;
     }
     if let Some(repo) = state.focused_graph_repo() {
-        let (model, identity) =
-            load_graph_model(&state.cwd, &state.snapshot, &repo, state.show_ignored);
+        let same_repo = state
+            .graph_identity
+            .as_ref()
+            .is_some_and(|(r, _)| r == &repo);
+        let (model, identity) = if same_repo {
+            load_graph_model_window(
+                &state.cwd,
+                &state.snapshot,
+                &repo,
+                state.show_ignored,
+                0,
+                refresh_graph_limit(state.graph.as_ref()),
+            )
+        } else {
+            load_graph_model(&state.cwd, &state.snapshot, &repo, state.show_ignored)
+        };
         state.set_graph(model, identity.repo, identity.head);
         return;
     }
     state.clear_right();
+}
+
+/// Fetch the next `git log` page when the cursor sits on the last loaded row.
+fn maybe_autoload_graph(
+    state: &mut AppState,
+    opts: &TuiOpts,
+    terminal: Option<&mut Terminal<CrosstermBackend<io::Stdout>>>,
+) {
+    let (repo, skip, limit) = {
+        if state.graph_loading_older {
+            return;
+        }
+        if state.right_is_diff() && !state.in_commit_drill() {
+            return;
+        }
+        let Some(model) = state.graph.as_ref() else {
+            return;
+        };
+        if !should_autoload(ShouldAutoload {
+            cursor_index: state.graph_cursor,
+            loaded_count: model.visible_rows().len(),
+            has_more: model.has_more,
+            loading: false,
+        }) {
+            return;
+        }
+        let Some((repo, _)) = state.graph_identity.as_ref() else {
+            return;
+        };
+        (repo.clone(), autoload_skip(model), autoload_limit(model))
+    };
+    let show_ignored = state.show_ignored;
+    state.graph_loading_older = true;
+    let prev_status = state.status.clone();
+    state.status = LOADING_OLDER.to_string();
+    if let Some(terminal) = terminal {
+        let _ = terminal.draw(|frame| draw(frame, state));
+    }
+    let (page, identity) =
+        load_graph_model_window(&opts.cwd, &state.snapshot, &repo, show_ignored, skip, limit);
+    let Some(current) = state.graph.clone() else {
+        state.graph_loading_older = false;
+        if state.status == LOADING_OLDER {
+            state.status = prev_status;
+        }
+        return;
+    };
+    let merged = merge_autoload(&current, page);
+    state.set_graph(merged, identity.repo, identity.head);
+    state.graph_loading_older = false;
+    if state.status == LOADING_OLDER {
+        state.status = prev_status;
+    }
 }
 
 /// Discover every repo (ignored included) so `.` can show them without a walk.

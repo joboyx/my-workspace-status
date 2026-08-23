@@ -2,10 +2,14 @@
 
 use crate::action::{Action, Effect};
 
+/// Default `git log --max-count` for one graph window. Matches Ink
+/// `DEFAULT_GRAPH_WINDOW`.
+pub const DEFAULT_GRAPH_WINDOW: usize = 300;
+
 /// Assembled graph payload for one checkout window.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GraphModel {
-    /// Newest-first commit window.
+    /// Newest-first commit window, then optional extra `stash^1` commits.
     pub commits: Vec<Commit>,
     /// Stash entries. Visible rows park each stash above its parent.
     pub stashes: Vec<Stash>,
@@ -17,8 +21,19 @@ pub struct GraphModel {
     pub sync: Option<SyncState>,
     /// When true, rows marked ignored stay in [`GraphModel::visible_rows`].
     pub show_ignored: bool,
-    /// When true, paint a dirty / uncommitted row above the commit list.
-    pub uncommitted: bool,
+    /// Working-tree row. `None` omits it (empty fixtures). A loaded graph
+    /// always sets `Some(has_changes)` so the row stays on even when clean.
+    pub uncommitted: Option<bool>,
+    /// Offset of this log window's start in `git log --all`. Stays `0` after
+    /// an autoload merge (Ink `skip`).
+    pub skip: usize,
+    /// Page size used for this window (`--max-count`). Default 300.
+    pub limit: usize,
+    /// True when the log page filled `limit` (Ink `hasMore`).
+    pub has_more: bool,
+    /// Length of the `git log` prefix in [`GraphModel::commits`] (excludes
+    /// extra stash parents). Autoload skip uses this, not `commits.len()`.
+    pub window: usize,
 }
 
 /// Kind of annotated ref on a commit. Same set as Ink `GraphRefKind`.
@@ -165,8 +180,11 @@ pub enum SyncStatus {
 /// One visible graph row after ignore filtering and stash placement.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphRow {
-    /// Dirty / uncommitted working tree above the commit list.
-    Uncommitted,
+    /// Working-tree row above the commit list. Always present on a loaded graph.
+    Uncommitted {
+        /// True when the worktree or index is dirty.
+        has_changes: bool,
+    },
     /// Stash side-leaf.
     Stash(Stash),
     /// Commit node, optional HEAD mark, and attached visible worktrees.
@@ -183,6 +201,18 @@ pub enum GraphRow {
 }
 
 impl GraphModel {
+    /// Log-window prefix length. `window` when set; otherwise `commits.len()`.
+    ///
+    /// Autoload skip is `skip + window_count()`, so extra `stash^1` commits
+    /// appended after the prefix do not drop history.
+    pub fn window_count(&self) -> usize {
+        if self.window == 0 {
+            self.commits.len()
+        } else {
+            self.window
+        }
+    }
+
     /// Apply an [`Action`]. Dispatch is pure and returns an [`Effect`].
     pub fn dispatch(&mut self, action: Action) -> Effect {
         match action {
@@ -204,8 +234,8 @@ impl GraphModel {
         let commit_ids: Vec<&str> = self.commits.iter().map(|c| c.id.as_str()).collect();
         let mut rows = Vec::new();
 
-        if self.uncommitted {
-            rows.push(GraphRow::Uncommitted);
+        if let Some(has_changes) = self.uncommitted {
+            rows.push(GraphRow::Uncommitted { has_changes });
         }
 
         for stash in &self.stashes {

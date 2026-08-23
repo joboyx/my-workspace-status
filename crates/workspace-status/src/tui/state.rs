@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use workspace_status_graph::{paint_model, GraphModel, GraphRow, ASCII, UNICODE};
+use workspace_status_graph::{
+    graph_chrome_budget, paint_model, GraphChromeBudget, GraphModel, GraphRow, ASCII, UNICODE,
+};
 
 use crate::snapshot::{FileChange, WorkspaceSnapshot};
 
@@ -185,6 +187,8 @@ pub struct AppState {
     pub graph_identity: Option<(String, String)>,
     pub graph_scroll: u16,
     pub graph_cursor: usize,
+    /// True while the next `git log` window is fetching (Ink `loading older…`).
+    pub graph_loading_older: bool,
     pub drill: DrillView,
     pub diff_content: DiffContent,
     pub diff_scroll: u16,
@@ -266,6 +270,7 @@ impl AppState {
             graph_identity: None,
             graph_scroll: 0,
             graph_cursor: 0,
+            graph_loading_older: false,
             drill: DrillView::Graph,
             diff_content: DiffContent::default(),
             diff_scroll: 0,
@@ -364,6 +369,15 @@ impl AppState {
         } else {
             self.focus == FocusPane::Right && self.drill.is_graph() && !self.tree_file_focused()
         }
+    }
+
+    /// Header / footer / list split for the graph pane (Ink `graphChromeBudget`).
+    pub fn graph_chrome(&self) -> GraphChromeBudget {
+        graph_chrome_budget(
+            self.layout.tree_height.max(1),
+            self.graph_loading_older,
+            self.graph.as_ref().is_some_and(|g| g.sync.is_some()),
+        )
     }
 
     pub fn commit_file_rows(&self) -> Vec<CommitFileRow> {
@@ -1039,7 +1053,8 @@ impl AppState {
                     .as_ref()
                     .map(|g| g.visible_rows().len())
                     .unwrap_or(0);
-                visible_window(n, self.graph_cursor, height)
+                let list_h = self.graph_chrome().list_height.max(1) as usize;
+                visible_window(n, self.graph_cursor, list_h)
             }
             EasyMotionList::CommitFiles => {
                 let rows = self.commit_file_rows();
@@ -1425,12 +1440,20 @@ impl AppState {
         let Some(model) = self.graph.as_ref() else {
             return Effect::None;
         };
+        let chrome = graph_chrome_budget(
+            self.layout.tree_height.max(1),
+            self.graph_loading_older,
+            model.sync.is_some(),
+        );
         let mut offset = (row - y) as usize;
-        if model.sync.is_some() {
+        if chrome.header {
             if offset == 0 {
                 return Effect::None;
             }
             offset -= 1;
+        }
+        if offset >= chrome.list_height as usize {
+            return Effect::None;
         }
         let glyphs = if self.ascii { &ASCII } else { &UNICODE };
         let painted = paint_model(model, glyphs, None);
@@ -1541,6 +1564,7 @@ impl AppState {
         self.graph = None;
         self.graph_identity = None;
         self.graph_cursor = 0;
+        self.graph_loading_older = false;
         self.drill = DrillView::Graph;
         self.diff_content = DiffContent::default();
         self.diff_repo = None;
@@ -3845,7 +3869,8 @@ mod tests {
             head_id: Some(id.into()),
             sync: None,
             show_ignored: app.show_ignored,
-            uncommitted: false,
+            uncommitted: None,
+            ..GraphModel::default()
         };
         app.set_graph(model, "app".into(), id.into());
         app.focus = FocusPane::Right;
@@ -4371,7 +4396,8 @@ mod tests {
             head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             sync: None,
             show_ignored: app.show_ignored,
-            uncommitted: false,
+            uncommitted: None,
+            ..GraphModel::default()
         };
         app.set_graph(
             model,
@@ -4645,9 +4671,9 @@ mod tests {
         focus_repo(&mut app, "app");
         install_graph(&mut app, vec![graph_stash("stash@{0}", "latest")]);
         if let Some(graph) = app.graph.as_mut() {
-            graph.uncommitted = true;
+            graph.uncommitted = Some(true);
         }
-        focus_graph_row(&mut app, |r| matches!(r, GraphRow::Uncommitted));
+        focus_graph_row(&mut app, |r| matches!(r, GraphRow::Uncommitted { .. }));
         app.open_stash_menu("app".into(), Some("stash@{0}".into()));
         let ops = app.stash_menu.clone().expect("uncommitted menu");
         assert_eq!(
@@ -5085,7 +5111,8 @@ mod tests {
             head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             sync: None,
             show_ignored: app.show_ignored,
-            uncommitted: false,
+            uncommitted: None,
+            ..GraphModel::default()
         };
         app.set_graph(
             model,
