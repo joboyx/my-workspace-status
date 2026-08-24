@@ -62,7 +62,7 @@ See [git-operations.md](./git-operations.md).
 
 ## Live refresh and background fetch
 
-`tui/watch.rs` polls file signatures (status + mtime) and tree chrome signatures (repo / checkout / dir / workspace / group) so those rows flash on semantic updates, including remove ghosts for ~800ms. Graph list rows use a separate signature map. Fetch / pull / push / default-branch completion also flashes `repo:<path>` rows.
+`tui/watch.rs` polls file signatures (status + mtime) and tree chrome signatures (repo / checkout / dir / workspace / group) so those rows flash on semantic updates, including remove ghosts for ~800ms. Graph list rows and commit-file rows use separate signature maps keyed by repo (and source). A disjoint identity set seeds and does not flash, so switching repos does not light up the whole graph. Fetch / pull / push / default-branch completion also flashes `repo:<path>` / `checkout:<path>` rows. The flash is a four-step background fade; status letter colours stay.
 
 `tui/fetch.rs` schedules bounded `git fetch --quiet` batches (`WS_STATUS_FETCH_MS`, default 5 minutes; `0` disables) and powers the manual `f` action. File `row_signature` is status letter + `size:mtimeMs` (or `gone`), and `background_fetch_targets` is every snapshot except hidden ignored (linked worktrees included). Manual `f` stays on focus-scoped `op_targets`.
 

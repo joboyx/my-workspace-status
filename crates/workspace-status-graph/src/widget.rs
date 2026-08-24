@@ -54,6 +54,7 @@ pub struct GraphWidget<'a> {
     lane_colors: &'a [Color],
     search_matches: &'a [usize],
     search_bg: Option<Color>,
+    flash_rows: &'a [(usize, Color)],
     cursor_fg: Color,
     cursor_bg: Option<Color>,
     label_palette: Option<GraphLabelPalette>,
@@ -74,6 +75,7 @@ impl<'a> GraphWidget<'a> {
             lane_colors: &[],
             search_matches: &[],
             search_bg: None,
+            flash_rows: &[],
             cursor_fg: Color::Cyan,
             cursor_bg: None,
             label_palette: None,
@@ -131,6 +133,15 @@ impl<'a> GraphWidget<'a> {
     pub fn search_matches(mut self, indices: &'a [usize], bg: Color) -> Self {
         self.search_matches = indices;
         self.search_bg = Some(bg);
+        self
+    }
+
+    /// Paint flash background on graph rows (node + spacers).
+    ///
+    /// `rows` are [`GraphModel::visible_rows`] indexes with the fade colour.
+    /// Cursor and search still win. Unlike search, spacers follow the node.
+    pub fn flash_rows(mut self, rows: &'a [(usize, Color)]) -> Self {
+        self.flash_rows = rows;
         self
     }
 
@@ -219,6 +230,12 @@ impl Widget for GraphWidget<'_> {
                 && line
                     .row_index
                     .is_some_and(|i| self.search_matches.contains(&i));
+            let flash_bg = line.row_index.and_then(|i| {
+                self.flash_rows
+                    .iter()
+                    .find(|(idx, _)| *idx == i)
+                    .map(|(_, color)| *color)
+            });
             put_painted_line(
                 buf,
                 area.x,
@@ -228,6 +245,7 @@ impl Widget for GraphWidget<'_> {
                 selected,
                 search_match,
                 self.search_bg,
+                flash_bg,
                 self.cursor_fg,
                 self.cursor_bg,
                 lane_colors,
@@ -310,6 +328,7 @@ fn put_painted_line(
     selected: bool,
     search_match: bool,
     search_bg: Option<Color>,
+    flash_bg: Option<Color>,
     cursor_fg: Color,
     cursor_bg: Option<Color>,
     lane_colors: &[Color],
@@ -328,7 +347,7 @@ fn put_painted_line(
     } else if search_match {
         search_bg
     } else {
-        None
+        flash_bg
     };
     let mut bar_style = Style::default().fg(cursor_fg).add_modifier(Modifier::BOLD);
     if let Some(bg) = row_bg {
@@ -1147,6 +1166,95 @@ mod tests {
             assert!(
                 !spacer_has_match,
                 "stash spacer is not a searchMatchIds target"
+            );
+        }
+    }
+
+    #[test]
+    fn flash_paints_node_and_spacer_cursor_wins() {
+        let model = sample_model();
+        let rows = model.visible_rows();
+        let stash_idx = rows
+            .iter()
+            .position(|row| matches!(row, GraphRow::Stash(_)))
+            .expect("stash row");
+        let flash = Color::Rgb(61, 82, 54);
+        let cursor_bg = Color::Rgb(40, 52, 87);
+        let flashes = [(stash_idx, flash)];
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .selected(Some(stash_idx))
+                    .flash_rows(&flashes)
+                    .cursor_style(Color::Cyan, cursor_bg)
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut stash_line_y = None;
+        let mut stash_spacer_y = None;
+        for y in 0..16u16 {
+            let mut line = String::new();
+            for x in 0..80u16 {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            if line.contains("WIP on main") {
+                stash_line_y = Some(y);
+                stash_spacer_y = Some(y.saturating_add(1));
+                break;
+            }
+        }
+        let y = stash_line_y.expect("stash subject line");
+        assert!(
+            (0..80u16).any(|x| buffer[(x, y)].bg == cursor_bg),
+            "cursor background wins over flash on the node"
+        );
+        assert!(
+            (0..80u16).all(|x| buffer[(x, y)].bg != flash),
+            "flash must not paint over the cursor"
+        );
+        if let Some(spacer_y) = stash_spacer_y {
+            assert!(
+                (0..80u16).any(|x| buffer[(x, spacer_y)].bg == cursor_bg),
+                "cursor background follows the stash spacer"
+            );
+        }
+
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .selected(Some(0))
+                    .flash_rows(&flashes)
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut stash_line_y = None;
+        let mut stash_spacer_y = None;
+        for y in 0..16u16 {
+            let mut line = String::new();
+            for x in 0..80u16 {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            if line.contains("WIP on main") {
+                stash_line_y = Some(y);
+                stash_spacer_y = Some(y.saturating_add(1));
+                break;
+            }
+        }
+        let y = stash_line_y.expect("stash subject line");
+        assert!(
+            (0..80u16).any(|x| buffer[(x, y)].bg == flash),
+            "flash paints the stash node"
+        );
+        if let Some(spacer_y) = stash_spacer_y {
+            assert!(
+                (0..80u16).any(|x| buffer[(x, spacer_y)].bg == flash),
+                "flash follows the stash spacer"
             );
         }
     }

@@ -36,7 +36,9 @@ gutter cell from `GraphCell.color_lane`; an empty slice uses
 `DEFAULT_LANE_COLORS`.
 `GraphWidget::search_matches` paints the filter/search background on
 selectable visible-row indexes. Spacers stay
-unhighlighted. The selected cursor still wins: `▌` plus `cursorBg`
+unhighlighted. `GraphWidget::flash_rows` paints the fade background on
+the same visible-row indexes, including spacers (a flashing commit
+keeps its spacer). The selected cursor still wins: `▌` plus `cursorBg`
 (`GraphWidget::cursor_style`). Spacers keep the background only. The
 widget does not use reverse video for the cursor.
 `GraphWidget::col_offset` skips label columns (gutter stays put) so long

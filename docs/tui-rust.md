@@ -54,7 +54,7 @@ To rebuild those frames, run `./scripts/capture-demo-stills.sh` (see [demo.md](.
 
 `-a` starts with ignored repos shown. `-f` starts a fetch after the first paint. First paint does not wait on a network fetch.
 
-`WS_STATUS_WATCH_MS` polls local git and refreshes the snapshot. Default is `3000`. `0` disables the poll. Fold, focus, and scroll stay put. File rows flash (~800ms) when the git status letter **or** worktree `size:mtimeMs` changes, so an in-place save of an already-modified file flashes. Chrome rows flash when label / fold / repo path moves.
+`WS_STATUS_WATCH_MS` polls local git and refreshes the snapshot. Default is `3000`. `0` disables the poll. Fold, focus, and scroll stay put. File, graph, and commit-file rows flash (~800ms background fade) when that row's identity is added, updated, or removed. File signatures use the git status letter **or** worktree `size:mtimeMs`, so an in-place save of an already-modified file flashes. Chrome rows flash when label / fold / repo path moves. A disjoint identity set (first paint, repo switch) seeds signatures and does not flash. Graph autoload of older commits skips add-flashes. Status colours stay; the flash is background only. While a flash is decaying, the event loop ticks every `FLASH_TICK_MS` (120ms).
 
 `WS_STATUS_FETCH_MS` runs `git fetch` on every snapshot checkout except hidden ignored repos, including linked worktrees. Default is `300000` (5 minutes). `0` disables it. The watch poll stays a separate timer. Shown ignored repos (`.` / `-a`) are included. Manual `f` stays focus-scoped: primaries on the workspace / family row, and a linked worktree only when that row is focused.
 

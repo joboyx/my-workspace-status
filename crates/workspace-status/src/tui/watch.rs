@@ -1,10 +1,14 @@
 //! Live snapshot poll. `WS_STATUS_WATCH_MS=0` disables.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
+use workspace_status_graph::{GraphModel, GraphRow};
+
+use super::commit_files::CommitFileRow;
+use super::drill::CommitFileSource;
 use super::icons::status_letter_from_change;
 use super::tree::{NodeKind, TreeNode, VisibleRow};
 
@@ -14,6 +18,8 @@ pub const DEFAULT_WATCH_MS: u64 = 3000;
 pub const MIN_WATCH_MS: u64 = 500;
 /// How long a changed row stays highlighted.
 pub const FLASH_MS: u64 = 800;
+/// Repaint cadence while a flash is decaying (`FLASH_MS / 8`, floor 120).
+pub const FLASH_TICK_MS: u64 = 120;
 
 /// Poll period from `WS_STATUS_WATCH_MS`. `0` disables. Missing / invalid → default.
 pub fn watch_interval_ms(raw: Option<&str>) -> u64 {
@@ -101,9 +107,33 @@ pub fn changed_row_ids(
     before: &BTreeMap<String, String>,
     after: &BTreeMap<String, String>,
 ) -> Vec<String> {
+    flashable_row_ids(before, after, true)
+}
+
+/// True when `after` shares no keys with `before` (or `before` is empty).
+///
+/// A repo switch, first paint, or wholly different commit set is a new list,
+/// not a set of added/removed rows — do not flash.
+pub fn is_new_row_set(before: &BTreeMap<String, String>, after: &BTreeMap<String, String>) -> bool {
+    before.is_empty() || after.keys().all(|id| !before.contains_key(id))
+}
+
+/// Ids that should flash for this signature diff.
+///
+/// `include_adds` is false for graph autoload (older commits appended) so a
+/// longer window does not flash every newly loaded row.
+pub fn flashable_row_ids(
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+    include_adds: bool,
+) -> Vec<String> {
     let mut out = Vec::new();
     for (id, sig) in after {
-        if before.get(id) != Some(sig) {
+        if let Some(prev) = before.get(id) {
+            if prev != sig {
+                out.push(id.clone());
+            }
+        } else if include_adds {
             out.push(id.clone());
         }
     }
@@ -117,9 +147,273 @@ pub fn changed_row_ids(
     out
 }
 
+/// Linear 1 → 0 over [`FLASH_MS`].
+pub fn flash_strength(elapsed: Duration) -> f32 {
+    let ms = elapsed.as_millis() as f32;
+    let window = FLASH_MS as f32;
+    if ms <= 0.0 {
+        1.0
+    } else if ms >= window {
+        0.0
+    } else {
+        1.0 - ms / window
+    }
+}
+
 /// True when `elapsed` is still inside the flash window.
 pub fn flash_active(elapsed: Duration) -> bool {
-    elapsed.as_millis() < u128::from(FLASH_MS)
+    flash_strength(elapsed) > 0.0
+}
+
+/// Drop flash stamps that have finished decaying.
+pub fn prune_flashes(flashes: &mut HashMap<String, Instant>, now: Instant) {
+    flashes.retain(|_, at| flash_active(now.saturating_duration_since(*at)));
+}
+
+/// A removed row kept in place for [`FLASH_MS`] so the flash is visible.
+#[derive(Clone, Debug)]
+pub struct GhostRow<T> {
+    /// Stable row id (same as the live list).
+    pub id: String,
+    /// Last painted row.
+    pub row: T,
+    /// When the removal was stamped.
+    pub flashed_at: Instant,
+    /// Index in the last live list.
+    pub index: usize,
+}
+
+/// Drop ghosts whose flash has expired.
+pub fn prune_ghosts<T>(ghosts: &mut Vec<GhostRow<T>>, now: Instant) {
+    ghosts.retain(|g| flash_active(now.saturating_duration_since(g.flashed_at)));
+}
+
+/// Capture live rows that disappeared from `after`.
+///
+/// `id_of` is the painted-row identity used to merge ghosts. `sig_id_of` is
+/// the signature-map key (tree ids are the same; commit-file ids include
+/// repo and source).
+pub fn capture_removal_ghosts<T: Clone>(
+    old_rows: &[T],
+    id_of: impl Fn(&T) -> &str,
+    sig_id_of: impl Fn(&T) -> String,
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+    now: Instant,
+) -> Vec<GhostRow<T>> {
+    let mut out = Vec::new();
+    for (index, row) in old_rows.iter().enumerate() {
+        let sig_id = sig_id_of(row);
+        if before.contains_key(&sig_id) && !after.contains_key(&sig_id) {
+            out.push(GhostRow {
+                id: id_of(row).to_string(),
+                row: row.clone(),
+                flashed_at: now,
+                index,
+            });
+        }
+    }
+    out
+}
+
+/// Re-insert active ghosts at their last live index. Live ids win.
+pub fn merge_ghost_rows<T: Clone>(
+    live: &[T],
+    ghosts: &[GhostRow<T>],
+    id_of: impl Fn(&T) -> &str,
+) -> Vec<T> {
+    let live_ids: std::collections::HashSet<&str> = live.iter().map(&id_of).collect();
+    let mut out = live.to_vec();
+    let mut extras: Vec<&GhostRow<T>> = ghosts
+        .iter()
+        .filter(|g| !live_ids.contains(g.id.as_str()))
+        .collect();
+    extras.sort_by_key(|g| g.index);
+    for ghost in extras {
+        let at = ghost.index.min(out.len());
+        out.insert(at, ghost.row.clone());
+    }
+    out
+}
+
+/// Graph window identity used to distinguish autoload from a repo switch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphFlashMeta {
+    /// Checkout path the model was loaded for.
+    pub repo: String,
+    /// `git log --skip` of this window.
+    pub skip: usize,
+    /// `git log --max-count` of this window.
+    pub limit: usize,
+    /// Log-prefix commit ids (newest first), excluding extra stash parents.
+    pub commit_ids: Vec<String>,
+}
+
+/// How to apply a newly loaded graph against the previous signature map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphFlashDecision {
+    /// Focused checkout disagrees with the painted model — ignore this load.
+    Stale,
+    /// First paint, repo switch, or a disjoint identity set: seed, do not flash.
+    Seed,
+    /// Same list: flash overlapping adds/updates/removes. Autoload skips pure adds.
+    Apply {
+        /// When false, newly appeared ids (older autoload pages) do not flash.
+        include_adds: bool,
+    },
+}
+
+/// Stable id for one graph row (`{repo}#{kind}:{id}`).
+pub fn graph_row_id(row: &GraphRow) -> String {
+    match row {
+        GraphRow::Uncommitted { .. } => "uncommitted".into(),
+        GraphRow::Stash(stash) => format!("stash:{}", stash.stash_ref),
+        GraphRow::Commit { commit, .. } => format!("commit:{}", commit.id),
+        GraphRow::Worktree(wt) => format!("worktree:{}", wt.path),
+    }
+}
+
+/// Same sha / `stash@{n}` / uncommitted row in another repo is a different row.
+pub fn graph_row_identity(repo: &str, row: &GraphRow) -> String {
+    format!("{repo}#{}", graph_row_id(row))
+}
+
+/// Model signature for one graph row. Never painted segments.
+pub fn graph_row_signature(row: &GraphRow) -> String {
+    match row {
+        GraphRow::Uncommitted { has_changes } => format!("uncommitted:{has_changes}"),
+        GraphRow::Stash(stash) => format!(
+            "stash:{}|{}",
+            stash.subject,
+            stash.parent_id.as_deref().unwrap_or("")
+        ),
+        GraphRow::Commit {
+            commit,
+            is_head,
+            worktrees,
+        } => {
+            let mut refs: Vec<&str> = commit.refs.iter().map(|r| r.name.as_str()).collect();
+            refs.sort_unstable();
+            let mut wt_paths: Vec<&str> = worktrees.iter().map(|w| w.path.as_str()).collect();
+            wt_paths.sort_unstable();
+            format!(
+                "commit:{}|{}|{}|{}",
+                commit.subject,
+                refs.join(","),
+                is_head,
+                wt_paths.join(",")
+            )
+        }
+        GraphRow::Worktree(wt) => format!(
+            "worktree:{}|{}|{}",
+            wt.branch.as_deref().unwrap_or(""),
+            wt.head_id.as_deref().unwrap_or(""),
+            wt.ignored
+        ),
+    }
+}
+
+/// Signatures for every visible graph row, keyed by [`graph_row_identity`].
+pub fn graph_row_signatures(model: &GraphModel, repo: &str) -> BTreeMap<String, String> {
+    model
+        .visible_rows()
+        .iter()
+        .map(|row| (graph_row_identity(repo, row), graph_row_signature(row)))
+        .collect()
+}
+
+/// Log-window meta for autoload / repo-switch detection.
+pub fn graph_flash_meta(model: &GraphModel, repo: &str) -> GraphFlashMeta {
+    let n = model.window_count().min(model.commits.len());
+    GraphFlashMeta {
+        repo: repo.to_string(),
+        skip: model.skip,
+        limit: model.limit,
+        commit_ids: model.commits[..n].iter().map(|c| c.id.clone()).collect(),
+    }
+}
+
+fn is_autoload_prefix(prev: &GraphFlashMeta, next: &GraphFlashMeta) -> bool {
+    prev.skip == next.skip
+        && next.commit_ids.len() > prev.commit_ids.len()
+        && next.commit_ids.starts_with(&prev.commit_ids)
+}
+
+/// Decide whether a newly loaded graph should flash, seed, or be ignored.
+pub fn graph_flash_decision(
+    focused_repo: Option<&str>,
+    painted_repo: &str,
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+    prev_meta: Option<&GraphFlashMeta>,
+    next_meta: &GraphFlashMeta,
+) -> GraphFlashDecision {
+    if let Some(focused) = focused_repo {
+        if focused != painted_repo {
+            return GraphFlashDecision::Stale;
+        }
+    }
+    if before.is_empty() || is_new_row_set(before, after) {
+        return GraphFlashDecision::Seed;
+    }
+    if let Some(prev) = prev_meta {
+        if prev.repo != next_meta.repo {
+            return GraphFlashDecision::Seed;
+        }
+        if is_autoload_prefix(prev, next_meta) {
+            return GraphFlashDecision::Apply {
+                include_adds: false,
+            };
+        }
+    }
+    GraphFlashDecision::Apply { include_adds: true }
+}
+
+fn commit_file_source_key(source: &CommitFileSource) -> String {
+    match source {
+        CommitFileSource::Commit { commit_id } => format!("commit:{commit_id}"),
+        CommitFileSource::Stash { stash_ref } => format!("stash:{stash_ref}"),
+        CommitFileSource::Worktree => "worktree".into(),
+    }
+}
+
+/// Same path in another commit / repo is a different row.
+pub fn commit_file_identity(repo: &str, source: &CommitFileSource, row_id: &str) -> String {
+    format!("{repo}#{}#{row_id}", commit_file_source_key(source))
+}
+
+/// Path + status (+ old path). Dirs use `dir|{path}`.
+pub fn commit_file_signature(row: &CommitFileRow) -> String {
+    match row.file.as_ref() {
+        Some(file) => format!(
+            "{}|{}|{}",
+            file.path,
+            file.status,
+            file.old_path.as_deref().unwrap_or("")
+        ),
+        None => format!("dir|{}", row.path),
+    }
+}
+
+/// Signatures for a flattened commit-file list.
+pub fn commit_file_signatures(
+    repo: &str,
+    source: &CommitFileSource,
+    rows: &[CommitFileRow],
+) -> BTreeMap<String, String> {
+    rows.iter()
+        .map(|row| {
+            (
+                commit_file_identity(repo, source, &row.id),
+                commit_file_signature(row),
+            )
+        })
+        .collect()
+}
+
+/// Tree node ids for a checkout path (`repo:` and/or `checkout:`).
+pub fn checkout_flash_ids(path: &str) -> Vec<String> {
+    vec![format!("repo:{path}"), format!("checkout:{path}")]
 }
 
 #[cfg(test)]
@@ -127,6 +421,7 @@ mod tests {
     use super::*;
     use crate::snapshot::FileChange;
     use std::path::PathBuf;
+    use workspace_status_graph::{Commit, GraphRef, Stash, Worktree};
 
     fn modified_file_row(repo: &str, path: &str) -> VisibleRow {
         VisibleRow {
@@ -157,6 +452,24 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn mini_model(ids: &[&str]) -> GraphModel {
+        GraphModel {
+            uncommitted: Some(false),
+            commits: ids
+                .iter()
+                .map(|id| Commit {
+                    id: (*id).into(),
+                    subject: format!("s-{id}"),
+                    ..Commit::default()
+                })
+                .collect(),
+            window: ids.len(),
+            skip: 0,
+            limit: 300,
+            ..GraphModel::default()
+        }
     }
 
     #[test]
@@ -225,5 +538,163 @@ mod tests {
         let row = modified_file_row("demo", "src/gone.ts");
         let sig = row_signature(&row, Path::new("/nonexistent"));
         assert_eq!(sig, "M:gone");
+    }
+
+    #[test]
+    fn disjoint_row_set_is_new() {
+        let mut before = BTreeMap::new();
+        before.insert("demo#commit:aaa".into(), "s".into());
+        let mut after = BTreeMap::new();
+        after.insert("notes#commit:aaa".into(), "s".into());
+        assert!(is_new_row_set(&before, &after));
+        let both = flashable_row_ids(&before, &after, true);
+        assert!(both.contains(&"demo#commit:aaa".to_string()));
+        assert!(both.contains(&"notes#commit:aaa".to_string()));
+        // Callers must check is_new_row_set before flashing those ids.
+    }
+
+    #[test]
+    fn overlapping_set_is_not_new() {
+        let mut before = BTreeMap::new();
+        before.insert("demo#commit:aaa".into(), "s".into());
+        before.insert("demo#commit:bbb".into(), "s".into());
+        let mut after = before.clone();
+        after.insert("demo#commit:ccc".into(), "s".into());
+        assert!(!is_new_row_set(&before, &after));
+    }
+
+    #[test]
+    fn autoload_skips_new_ids_but_keeps_updates_and_removes() {
+        let mut before = BTreeMap::new();
+        before.insert("demo#commit:aaa".into(), "s-aaa".into());
+        before.insert("demo#commit:bbb".into(), "s-bbb".into());
+        let mut after = before.clone();
+        after.insert("demo#commit:ccc".into(), "s-ccc".into());
+        after.insert("demo#commit:aaa".into(), "s-aaa-updated".into());
+        after.remove("demo#commit:bbb");
+        let flashed = flashable_row_ids(&before, &after, false);
+        assert!(flashed.contains(&"demo#commit:aaa".to_string()));
+        assert!(flashed.contains(&"demo#commit:bbb".to_string()));
+        assert!(!flashed.contains(&"demo#commit:ccc".to_string()));
+    }
+
+    #[test]
+    fn same_sha_different_repo_is_different_identity() {
+        let row = GraphRow::Commit {
+            commit: Commit {
+                id: "aaa".into(),
+                subject: "s".into(),
+                refs: vec![GraphRef::local("main")],
+                ..Commit::default()
+            },
+            is_head: true,
+            worktrees: Vec::new(),
+        };
+        assert_ne!(
+            graph_row_identity("demo", &row),
+            graph_row_identity("notes", &row)
+        );
+    }
+
+    #[test]
+    fn graph_flash_decision_seeds_on_repo_switch() {
+        let a = mini_model(&["aaa"]);
+        let b = mini_model(&["aaa"]);
+        let before = graph_row_signatures(&a, "demo");
+        let after = graph_row_signatures(&b, "notes");
+        let prev = graph_flash_meta(&a, "demo");
+        let next = graph_flash_meta(&b, "notes");
+        assert_eq!(
+            graph_flash_decision(Some("notes"), "notes", &before, &after, Some(&prev), &next),
+            GraphFlashDecision::Seed
+        );
+    }
+
+    #[test]
+    fn graph_flash_decision_skips_adds_on_autoload_prefix() {
+        let prev_model = mini_model(&["aaa", "bbb"]);
+        let next_model = mini_model(&["aaa", "bbb", "ccc"]);
+        let before = graph_row_signatures(&prev_model, "demo");
+        let after = graph_row_signatures(&next_model, "demo");
+        let prev = graph_flash_meta(&prev_model, "demo");
+        let next = graph_flash_meta(&next_model, "demo");
+        assert_eq!(
+            graph_flash_decision(Some("demo"), "demo", &before, &after, Some(&prev), &next),
+            GraphFlashDecision::Apply {
+                include_adds: false
+            }
+        );
+    }
+
+    #[test]
+    fn graph_flash_decision_stale_when_focus_disagrees() {
+        let model = mini_model(&["aaa"]);
+        let sigs = graph_row_signatures(&model, "demo");
+        let meta = graph_flash_meta(&model, "demo");
+        assert_eq!(
+            graph_flash_decision(Some("notes"), "demo", &sigs, &sigs, Some(&meta), &meta),
+            GraphFlashDecision::Stale
+        );
+    }
+
+    #[test]
+    fn flash_strength_ramps_to_zero() {
+        assert_eq!(flash_strength(Duration::from_millis(0)), 1.0);
+        assert!(flash_strength(Duration::from_millis(400)) > 0.4);
+        assert!(flash_strength(Duration::from_millis(400)) < 0.6);
+        assert_eq!(flash_strength(Duration::from_millis(FLASH_MS)), 0.0);
+        assert!(!flash_active(Duration::from_millis(FLASH_MS)));
+        assert!(flash_active(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn merge_ghosts_reinserts_at_index() {
+        let live = vec!["a".to_string(), "c".to_string()];
+        let ghosts = vec![GhostRow {
+            id: "b".into(),
+            row: "b".to_string(),
+            flashed_at: Instant::now(),
+            index: 1,
+        }];
+        let merged = merge_ghost_rows(&live, &ghosts, |s| s.as_str());
+        assert_eq!(merged, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn graph_signature_ignores_ref_paint_order() {
+        let mut left = GraphRow::Commit {
+            commit: Commit {
+                id: "aaa".into(),
+                subject: "s".into(),
+                refs: vec![GraphRef::local("main"), GraphRef::local("topic")],
+                ..Commit::default()
+            },
+            is_head: false,
+            worktrees: Vec::new(),
+        };
+        let mut right = left.clone();
+        if let GraphRow::Commit { commit, .. } = &mut right {
+            commit.refs.reverse();
+        }
+        assert_eq!(graph_row_signature(&left), graph_row_signature(&right));
+        if let GraphRow::Commit { commit, .. } = &mut left {
+            commit.subject = "other".into();
+        }
+        assert_ne!(graph_row_signature(&left), graph_row_signature(&right));
+        let stash = GraphRow::Stash(Stash {
+            stash_ref: "stash@{0}".into(),
+            subject: "WIP".into(),
+            parent_id: Some("aaa".into()),
+            ..Stash::default()
+        });
+        let wt = GraphRow::Worktree(Worktree {
+            path: "wt".into(),
+            head_id: Some("aaa".into()),
+            branch: Some("feature".into()),
+            ignored: false,
+            is_current: false,
+        });
+        assert!(graph_row_signature(&stash).starts_with("stash:"));
+        assert!(graph_row_signature(&wt).starts_with("worktree:"));
     }
 }
