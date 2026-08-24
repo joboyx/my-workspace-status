@@ -18,11 +18,13 @@ It is intentionally treated as a black-box CLI:
 
 ### GitHub Releases (Rust CLI)
 
-This repository is **private**. Anyone with repo/release access (`gh` or a token with `contents: read`) can install `workspace-status`, `ws`, and `workspace-status-update` from the latest GitHub Release:
+This repository is **private**. Anyone with repo/release access (`gh` or a token with `contents: read`) can install `workspace-status`, `ws`, and `workspace-status-update` from the latest GitHub Release into `~/.local/bin` (XDG; already on PATH for Ubuntu login shells; no rustup). The installer cannot mutate the parent shell PATH, so export it and `hash -r` in the same shell:
 
 ```bash
 gh release download -R joboyx/my-workspace-status --pattern workspace-status-installer.sh
 WORKSPACE_STATUS_GITHUB_TOKEN=$(gh auth token) sh workspace-status-installer.sh
+export PATH="$HOME/.local/bin:$PATH"
+hash -r
 ```
 
 `WORKSPACE_STATUS_GITHUB_TOKEN` is the cargo-dist ≥0.29 installer bearer token. The installer uses it to fetch the private linux/macOS archives. Unauthenticated `releases/latest/download` 404s; do not pipe that curl.
@@ -37,7 +39,7 @@ Uninstall:
 ./scripts/uninstall.sh
 ```
 
-That removes `~/.cargo/bin/{ws,workspace-status,workspace-status-update}` and the cargo-dist receipt under `${XDG_CONFIG_HOME:-$HOME/.config}/workspace-status/`.
+That removes `~/.local/bin/{ws,workspace-status,workspace-status-update}` (and a leftover `~/.cargo/bin` copy) and the cargo-dist receipt under `${XDG_CONFIG_HOME:-$HOME/.config}/workspace-status/`.
 
 ### cargo install (fallback)
 

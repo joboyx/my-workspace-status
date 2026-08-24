@@ -166,7 +166,7 @@ See [graph.md](./graph.md).
 The Rust CLI is published with [cargo-dist](https://axodotdev.github.io/cargo-dist/) 0.32 (`dist-workspace.toml`).
 `.github/workflows/release.yml` is generated (`dist generate`) and builds GitHub Release archives plus `workspace-status-installer.sh` on a version tag (linux and macOS, aarch64 and x86_64). There is no Windows dist target.
 `.github/workflows/tag-release.yml` writes an annotated `vX.Y.Z` on each push to `main` and dispatches Release (`GITHUB_TOKEN` tag pushes do not start other workflows). `allow-dirty = ["ci"]` keeps the extra `workflow_dispatch` on the generated Release workflow.
-Installers place `workspace-status`, `ws`, and `workspace-status-update` in `$CARGO_HOME/bin`.
+Installers place `workspace-status`, `ws`, and `workspace-status-update` in `~/.local/bin`.
 `workspace-status-graph` is a path library, not a separate dist app. There is no crates.io or Homebrew publish job.
 
 ## Decisions
