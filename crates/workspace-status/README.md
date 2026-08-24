@@ -21,3 +21,4 @@ cargo install --git https://github.com/joboyx/my-workspace-status --locked --pac
 ```
 
 GitHub Releases and `cargo install` both install `workspace-status` and `ws`.
+A GitHub Release install also includes `workspace-status-update`. Update with `ws --update`.

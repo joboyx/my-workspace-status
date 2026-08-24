@@ -136,8 +136,9 @@ Adding a node kind means editing four files that each `switch` on `kind`. TypeSc
 ## Rust CLI crate
 
 `crates/workspace-status` is the Rust CLI (`workspace-status` and `ws`).
-It implements discovery, `--plain`, `--json`, `-a`/`--all`, repo filters,
+It implements discovery, `--plain`, `--json`, `-a`/`--all`, `--update`, repo filters,
 ignored-repo visibility from snapshot.md, and the ratatui TUI on a TTY.
+CLI flags live in `src/cli.rs`.
 
 Git calls use a subprocess. The binary prefers `/usr/bin/git` so WSL does not pick a Windows `git.exe`. Set `WORKSPACE_STATUS_GIT` to override.
 
@@ -176,6 +177,7 @@ The Rust CLI is published with [cargo-dist](https://axodotdev.github.io/cargo-di
 `.github/workflows/release.yml` is generated (`dist generate`) and builds GitHub Release archives plus `workspace-status-installer.sh` / `.ps1` on a version tag (linux, macOS, and Windows `x86_64-pc-windows-msvc`; linux/mac aarch64 and x86_64).
 `.github/workflows/tag-release.yml` writes an annotated `vX.Y.Z` on each push to `main` and dispatches Release (`GITHUB_TOKEN` tag pushes do not start other workflows). `allow-dirty = ["ci"]` keeps the extra `workflow_dispatch` on the generated Release workflow.
 Installers place `workspace-status`, `ws`, and `workspace-status-update` in `~/.local/bin`.
+`--update` (`ws --update` / `workspace-status --update`) execs `workspace-status-update` from the same directory as the current executable, then PATH. The sidecar's exit status is the process exit status. That run does not open the TUI or apply repo filters. `install-updater = true` keeps the sidecar in the installer.
 `workspace-status-graph` is a path library, not a separate dist app. There is no crates.io or Homebrew publish job.
 
 ## Decisions
