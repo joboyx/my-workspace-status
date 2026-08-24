@@ -17,7 +17,7 @@ multi-lane gutter from the same model.
 | `GraphModel` | Commits, stashes, worktrees, HEAD id, sync, `show_ignored`, `uncommitted`, `skip` / `limit` / `has_more` / `window` |
 | `Commit` | Id, subject, parents, refs, author name, author date |
 | `Stash` | Id, `stash@{n}`, subject, author name, author date, parent id (`stash^1`) |
-| `Worktree` | Path, HEAD id, branch, `ignored`, `is_current` |
+| `Worktree` | Path, HEAD id, branch, `ignored`, `is_current`. Linked extras only (`git worktree list` / `.git` gitfile). The main checkout (`.git` directory) is not marked. |
 | `SyncState` | Branch, status, ahead, behind |
 | `GraphRow` | One visible row: uncommitted, stash, commit, or worktree |
 | `GraphCell` | One gutter column: glyph, colour lane, role |

@@ -885,6 +885,7 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
     } else {
         SegRole::BranchDefault
     };
+    // Linked extras only. The primary checkout is a normal repo glyph.
     let linked = node.chrome.checkout_kind == Some(CheckoutKind::Linked);
     let repo_icon = if linked {
         icon_linked_worktree(ascii)
@@ -962,6 +963,7 @@ fn checkout_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeS
     } else {
         SegRole::BranchDefault
     };
+    // Nested primary uses the branch glyph, never the linked-worktree mark.
     let linked = node.chrome.checkout_kind == Some(CheckoutKind::Linked);
     let row_icon = if linked {
         icon_linked_worktree(ascii)
@@ -1373,6 +1375,40 @@ mod tests {
             .expect("primary checkout");
         assert!(primary_row.label.contains("main"));
         assert!(primary_row.label.contains('&') || primary_row.label.contains("main"));
+        assert_ne!(
+            primary_row.segments.first().map(|s| s.text.trim()),
+            Some(icon_linked_worktree(true)),
+            "primary checkout must not use the linked-worktree glyph"
+        );
+        assert_eq!(
+            checkout.segments.first().map(|s| s.text.trim()),
+            Some(icon_linked_worktree(true)),
+            "linked extra keeps the worktree glyph"
+        );
+        assert_eq!(
+            family.segments.first().map(|s| s.text.trim()),
+            Some(icon_repo(true)),
+        );
+        assert_eq!(
+            primary_row.segments.first().map(|s| s.text.trim()),
+            Some(icon_branch(true)),
+        );
+    }
+
+    #[test]
+    fn flat_primary_repo_uses_repo_glyph_not_worktree() {
+        let built = build_workspace_snapshot(&[repo("app", true, false)], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let app = rows.iter().find(|r| r.id == "repo:app").expect("repo:app");
+        assert_eq!(
+            app.segments.first().map(|s| s.text.trim()),
+            Some(icon_repo(true))
+        );
+        assert_ne!(
+            app.segments.first().map(|s| s.text.trim()),
+            Some(icon_linked_worktree(true))
+        );
     }
 
     #[test]

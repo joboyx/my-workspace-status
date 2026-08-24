@@ -37,6 +37,11 @@ Colour ownership:
 Merges are identified by topology (extra elbows / tees), not a distinct node
 glyph.
 
+Worktree marks (`` / `L`) are **linked extras** from `git worktree list`
+(checkout whose `.git` is a file). The main checkout (`.git` directory — the
+repo folder in the workspace) is not marked. A focused linked extra still
+gets the mark.
+
 ## Connection → glyph
 
 | Connections | Unicode | ASCII |

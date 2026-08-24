@@ -20,6 +20,7 @@ import {
   ICON_BRANCH,
   ICON_CLEAN,
   ICON_LINKED_WORKTREE,
+  ICON_REPO,
   ICON_MERGED_INTO_DEFAULT,
   ICON_OPEN_VS_DEFAULT,
   ICON_SYNCED,
@@ -376,6 +377,20 @@ describe('buildTree + fold + flatten', () => {
     assert.ok(!detachedRow.label.includes('HEAD (detached)'));
   });
 
+  it('flat primary repo uses ICON_REPO, not the linked-worktree glyph', () => {
+    const tree = buildTree({
+      snapshots: [base({ repo: 'app', branch: 'main' })],
+      ignoredRepos: new Set(),
+      treeMode: false,
+      workspaceLabel: 'ws',
+    });
+    const rows = flatten(tree, createFoldState(tree));
+    const app = rows.find((r) => r.node.kind === 'repo' && r.node.path === 'app');
+    assert.ok(app);
+    assert.match(app.label, new RegExp(`^${ICON_REPO}`));
+    assert.doesNotMatch(app.label, new RegExp(`^${ICON_LINKED_WORKTREE}`));
+  });
+
   it('linked checkout rows use linked icon, branch label, and merge mark', () => {
     const primary = base({
       repo: 'acme-api',
@@ -435,6 +450,7 @@ describe('buildTree + fold + flatten', () => {
     assert.doesNotMatch(openRow.label, /\*feature\//);
     assert.doesNotMatch(mergedRow.label, /\*feature\//);
     assert.match(primaryRow.label, new RegExp(`^${ICON_BRANCH}`));
+    assert.doesNotMatch(primaryRow.label, new RegExp(`^${ICON_LINKED_WORKTREE}`));
     assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(openRow.label));
     assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(mergedRow.label));
   });

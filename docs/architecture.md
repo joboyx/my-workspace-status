@@ -154,7 +154,9 @@ The TypeScript Ink app still has its own graph paint. The ratatui TUI
 loads a `GraphModel` in `graph_load.rs` (`log --exclude=refs/stash --all
 --topo-order --date-order`, window 300, autoload, extra `stash^1`) and
 paints `GraphWidget`. Hidden ignored worktrees stay out of `visible_rows`
-unless `show_ignored` is true. Gutter cells use `GraphCell.color_lane`
+unless `show_ignored` is true. Worktree marks are linked extras from
+`git worktree list` (`.git` gitfile); the main checkout is not marked.
+Gutter cells use `GraphCell.color_lane`
 and `DEFAULT_LANE_COLORS`. Chrome is a 2-line selection footer
 (`selection_detail_lines`) plus optional sync header
 (`graph_chrome_budget`). A loaded graph always emits the working-tree

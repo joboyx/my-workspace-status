@@ -6,14 +6,18 @@
 //! after the log prefix so autoload skip stays on `window`, not `commits.len()`.
 
 use std::collections::HashSet;
+use std::fs;
 use std::path::Path;
 
 use workspace_status_graph::{
     Commit, GraphModel, GraphRef, Stash, SyncState, SyncStatus, Worktree, DEFAULT_GRAPH_WINDOW,
 };
 
-use crate::git::exec_git;
+use crate::git::{exec_git, list_worktrees_porcelain};
 use crate::snapshot::{CheckoutKind, WorkspaceRepoSnapshot, WorkspaceSnapshot};
+use crate::worktrees::{
+    is_linked_worktree_checkout, map_linked_worktree_rel_path, parse_worktree_list_porcelain,
+};
 
 /// Identity used to keep graph scroll when the same row is still focused.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,7 +69,7 @@ pub fn load_graph_model_window(
     let window = window_commits.len();
     let mut commits = window_commits;
     commits.extend(extra);
-    let worktrees = load_worktrees(snapshot, row, &head, show_ignored);
+    let worktrees = load_worktrees(cwd, &repo_dir, snapshot, row, &head, show_ignored);
     let has_changes = row.has_unstaged || row.has_staged || row.has_untracked;
     let model = GraphModel {
         commits,
@@ -380,6 +384,49 @@ fn parse_stash_line(line: &str) -> Option<Stash> {
 }
 
 fn load_worktrees(
+    cwd: &Path,
+    repo_dir: &Path,
+    snapshot: &WorkspaceSnapshot,
+    focused: &WorkspaceRepoSnapshot,
+    head: &str,
+    show_ignored: bool,
+) -> Vec<Worktree> {
+    let porcelain = list_worktrees_porcelain(repo_dir);
+    let entries = parse_worktree_list_porcelain(&porcelain);
+    if entries.is_empty() {
+        return load_worktrees_from_snapshot(snapshot, focused, head, show_ignored);
+    }
+    let cwd_abs = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let primary_rel = focused.primary_repo.as_deref().unwrap_or(&focused.repo);
+    let primary_abs =
+        fs::canonicalize(cwd.join(primary_rel)).unwrap_or_else(|_| cwd.join(primary_rel));
+    entries
+        .into_iter()
+        .filter(|entry| !entry.bare && is_linked_worktree_checkout(&entry.path))
+        .filter_map(|entry| {
+            let path = worktree_display_path(&entry.path, &cwd_abs, &primary_abs);
+            let ignored = snapshot
+                .repos
+                .iter()
+                .find(|repo| repo.repo == path)
+                .map(|repo| repo.ignored)
+                .unwrap_or(false);
+            if !show_ignored && ignored {
+                return None;
+            }
+            Some(Worktree {
+                path,
+                head_id: entry.head.filter(|h| !h.is_empty()),
+                branch: entry.branch.filter(|b| !b.is_empty()),
+                ignored,
+                is_current: same_checkout(&entry.path, repo_dir),
+            })
+        })
+        .collect()
+}
+
+/// Snapshot fallback when `git worktree list` is empty. Primary checkouts stay out.
+fn load_worktrees_from_snapshot(
     snapshot: &WorkspaceSnapshot,
     focused: &WorkspaceRepoSnapshot,
     head: &str,
@@ -406,6 +453,22 @@ fn load_worktrees(
             is_current: repo.repo == focused.repo,
         })
         .collect()
+}
+
+fn worktree_display_path(entry_abs: &Path, cwd_abs: &Path, primary_abs: &Path) -> String {
+    if let Some((_, rel)) = map_linked_worktree_rel_path(entry_abs, cwd_abs, primary_abs) {
+        return rel;
+    }
+    let abs = fs::canonicalize(entry_abs).unwrap_or_else(|_| entry_abs.to_path_buf());
+    abs.strip_prefix(cwd_abs)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| abs.to_string_lossy().replace('\\', "/"))
+}
+
+fn same_checkout(a: &Path, b: &Path) -> bool {
+    let ca = fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf());
+    let cb = fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf());
+    ca == cb
 }
 
 fn sync_from_snapshot(repo: &WorkspaceRepoSnapshot) -> SyncState {
@@ -872,6 +935,62 @@ mod live_git {
             "stash^1 outside the log window must be loaded so the tip can park"
         );
         assert!(model.commits.len() > 3);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn graph_omits_worktree_mark_on_primary_keeps_linked_extra() {
+        let (root, repo) = temp_workspace();
+        init_repo(&repo);
+        commit_file(&repo, "a.txt", "1\n", "c1");
+        fs::create_dir_all(repo.join(".worktrees")).unwrap();
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature/x",
+                ".worktrees/feat",
+            ],
+        );
+        let snapshot = snapshot_app();
+        let cwd = root.join("workspace");
+        let (model, _) = load_graph_model_window(&cwd, &snapshot, "app", false, 0, 50);
+        assert!(
+            model.worktrees.iter().all(|wt| wt.path != "app"),
+            "primary checkout must not be a worktree mark, got {:?}",
+            model.worktrees
+        );
+        let extra = model
+            .worktrees
+            .iter()
+            .find(|wt| wt.path.contains(".worktrees/feat"))
+            .expect("linked extra from git worktree list");
+        assert!(extra.head_id.is_some(), "extras keep porcelain HEAD");
+        assert!(!extra.is_current, "primary graph: extra is not current");
+
+        let mut linked_snap = snapshot_app();
+        let mut extra_row = linked_snap.repos[0].clone();
+        extra_row.repo = "app/.worktrees/feat".into();
+        extra_row.branch = "feature/x".into();
+        extra_row.checkout_kind = CheckoutKind::Linked;
+        extra_row.primary_repo = Some("app".into());
+        linked_snap.repos.push(extra_row);
+        let (linked_model, _) =
+            load_graph_model_window(&cwd, &linked_snap, "app/.worktrees/feat", false, 0, 50);
+        assert!(
+            linked_model.worktrees.iter().all(|wt| wt.path != "app"),
+            "main checkout stays unmarked when the extra is focused, got {:?}",
+            linked_model.worktrees
+        );
+        let focused = linked_model
+            .worktrees
+            .iter()
+            .find(|wt| wt.path.contains(".worktrees/feat"))
+            .expect("focused extra still marked");
+        assert!(focused.is_current);
         let _ = fs::remove_dir_all(&root);
     }
 }
