@@ -374,16 +374,6 @@ fn padded_meta(
 /// Left flex + right-anchored meta. Drop order hash → date → author.
 ///
 /// Whole chips stay intact; hidden refs collapse to `+N` (never mid-chip `…`).
-fn assemble_spacer_groups(
-    groups: &[Vec<LabelPart>],
-    hash: &str,
-    date: &str,
-    author: &str,
-    available: usize,
-) -> String {
-    parts_text(&assemble_spacer_parts(groups, hash, date, author, available))
-}
-
 fn assemble_spacer_parts(
     groups: &[Vec<LabelPart>],
     hash: &str,
@@ -1134,8 +1124,8 @@ mod tests {
             id: "abcdefg".into(),
             subject: "topic".into(),
             refs: vec![
-                "feature/one".into(),
-                "feature/two".into(),
+                "main".into(),
+                "feature/long-name".into(),
                 GraphRef::tag("v1"),
             ],
             author_name: "Ada".into(),
@@ -1155,8 +1145,20 @@ mod tests {
             default_branch_override: None,
         });
         assert!(
-            line.contains('+'),
-            "hidden chips should show +N: {line}"
+            line.contains("[main]"),
+            "kept first chip: {line}"
+        );
+        assert!(
+            line.contains("+2"),
+            "exact overflow count: {line}"
+        );
+        assert!(
+            !line.contains("feature/long-name"),
+            "overflow chip must not remain: {line}"
+        );
+        assert!(
+            !line.contains("[v1]"),
+            "overflow tag must not remain: {line}"
         );
         assert!(
             !line.contains('…'),

@@ -927,8 +927,12 @@ mod tests {
             "footer subject: {prev}"
         );
         assert!(
-            last.contains("main") || last.contains("worktree"),
-            "footer meta lists HEAD refs or worktree fallback: {last}"
+            last.contains("main"),
+            "uncommitted footer lists HEAD refs: {last}"
+        );
+        assert!(
+            !last.contains("not a commit"),
+            "HEAD has refs so fallback is unused: {last}"
         );
     }
 

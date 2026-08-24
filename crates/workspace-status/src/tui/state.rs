@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use workspace_status_graph::{
     format_relative_date, graph_chrome_budget, paint_model, GraphChromeBudget, GraphModel,
-    GraphRow, ASCII, UNICODE,
+    GraphRow, PaintedLine, ASCII, UNICODE,
 };
 
 use crate::snapshot::{FileChange, WorkspaceSnapshot};
@@ -727,8 +727,12 @@ impl AppState {
             Action::MoveToStart => self.move_focused_edge(false),
             Action::MoveToEnd => self.move_focused_edge(true),
             Action::PageMove(pages) => {
-                let height = self.page_step();
-                self.move_focused(pages * height)
+                if self.graph_pane_focused() {
+                    self.page_graph(pages)
+                } else {
+                    let height = self.page_step();
+                    self.move_focused(pages * height)
+                }
             }
             Action::FoldToggleSubtree => {
                 self.fold_subtree();
@@ -2569,6 +2573,33 @@ impl AppState {
         self.sync_graph_scroll();
     }
 
+    /// Page in painted-list space (Ink `applySelectableGraphPageMove`), then
+    /// snap onto a selectable row. EasyMotion / click stay on `visible_rows`.
+    fn page_graph(&mut self, pages: i32) -> Effect {
+        let Some(model) = self.graph.as_ref() else {
+            return Effect::None;
+        };
+        let glyphs = if self.ascii { &ASCII } else { &UNICODE };
+        let painted = paint_model(model, glyphs, None);
+        if painted.is_empty() {
+            return Effect::None;
+        }
+        let list_h = self.graph_chrome().list_height.max(1) as usize;
+        let page = list_h.saturating_sub(1).max(1) as i32;
+        let current = painted
+            .iter()
+            .position(|line| line.row_index == Some(self.graph_cursor) && line.selectable)
+            .unwrap_or(0);
+        let last = painted.len() as i32 - 1;
+        let target = (current as i32 + pages * page).clamp(0, last) as usize;
+        let snapped = nearest_selectable_painted_index(&painted, target);
+        if let Some(idx) = painted[snapped].row_index {
+            self.graph_cursor = idx;
+        }
+        self.sync_graph_scroll();
+        Effect::None
+    }
+
     fn sync_graph_scroll(&mut self) {
         let Some(model) = self.graph.as_ref() else {
             return;
@@ -2587,12 +2618,11 @@ impl AppState {
     }
 
     fn page_step(&self) -> i32 {
-        let height = if self.graph_pane_focused() {
-            self.graph_chrome().list_height
-        } else {
-            self.layout.tree_height
-        };
-        height.max(1).saturating_sub(1).max(1) as i32
+        self.layout
+            .tree_height
+            .max(1)
+            .saturating_sub(1)
+            .max(1) as i32
     }
 
     fn move_file_cursor(&mut self, delta: i32) {
@@ -2655,6 +2685,7 @@ impl AppState {
                         .map(|g| g.visible_rows().len())
                         .unwrap_or(0);
                     self.graph_cursor = if end { n.saturating_sub(1) } else { 0 };
+                    self.sync_graph_scroll();
                     Effect::None
                 }
                 _ => Effect::None,
@@ -2666,6 +2697,7 @@ impl AppState {
                 .map(|g| g.visible_rows().len())
                 .unwrap_or(0);
             self.graph_cursor = if end { n.saturating_sub(1) } else { 0 };
+            self.sync_graph_scroll();
             Effect::None
         } else if end {
             if !self.rows.is_empty() {
@@ -2887,6 +2919,29 @@ fn group_revert_targets(
     }
     groups.retain(|(_, tracked, untracked)| !tracked.is_empty() || !untracked.is_empty());
     groups
+}
+
+/// Snap a painted-list index onto a selectable line (prefer forward, then back).
+/// Matches Ink `nearestSelectableGraphIndex`.
+fn nearest_selectable_painted_index(painted: &[PaintedLine], from: usize) -> usize {
+    if painted.is_empty() {
+        return 0;
+    }
+    let from = from.min(painted.len() - 1);
+    if painted[from].selectable {
+        return from;
+    }
+    for i in from + 1..painted.len() {
+        if painted[i].selectable {
+            return i;
+        }
+    }
+    for i in (0..from).rev() {
+        if painted[i].selectable {
+            return i;
+        }
+    }
+    0
 }
 
 fn single_or_batch(effects: Vec<Effect>) -> Effect {
@@ -5882,6 +5937,97 @@ mod tests {
         app.cursor = 4;
         app.dispatch(Action::Move(-5));
         assert_eq!(app.cursor, 0);
+    }
+
+    fn install_linear_graph(app: &mut AppState, n: usize) {
+        let commits: Vec<Commit> = (0..n)
+            .map(|i| {
+                let id = format!("c{i:02}{}", "a".repeat(36));
+                let parents = if i + 1 < n {
+                    vec![format!("c{:02}{}", i + 1, "a".repeat(36))]
+                } else {
+                    Vec::new()
+                };
+                Commit {
+                    id,
+                    subject: format!("commit {i}"),
+                    parents,
+                    refs: Vec::new(),
+                    author_name: String::new(),
+                    author_date_unix: 0,
+                }
+            })
+            .collect();
+        let head = commits[0].id.clone();
+        let model = GraphModel {
+            commits,
+            stashes: Vec::new(),
+            worktrees: Vec::new(),
+            head_id: Some(head.clone()),
+            sync: None,
+            show_ignored: app.show_ignored,
+            uncommitted: None,
+            ..GraphModel::default()
+        };
+        app.set_graph(model, "app".into(), head);
+        app.focus = FocusPane::Right;
+        app.drill = DrillView::Graph;
+    }
+
+    fn painted_focus_index(app: &AppState) -> usize {
+        let model = app.graph.as_ref().expect("graph");
+        let glyphs = if app.ascii { &ASCII } else { &UNICODE };
+        let painted = paint_model(model, glyphs, None);
+        painted
+            .iter()
+            .position(|line| line.row_index == Some(app.graph_cursor) && line.selectable)
+            .expect("focused painted row")
+    }
+
+    #[test]
+    fn graph_pgdn_pages_painted_lines_and_keeps_focus_in_viewport() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_linear_graph(&mut app, 20);
+        // height 12, no sync header → list_height 10, page = 9 painted lines
+        app.layout.tree_height = 12;
+        let list_h = app.graph_chrome().list_height.max(1) as usize;
+        assert_eq!(list_h, 10, "list_height from chrome budget");
+        let page = list_h.saturating_sub(1).max(1);
+        app.graph_cursor = 0;
+        app.sync_graph_scroll();
+        let before = painted_focus_index(&app);
+        let selectable = app.graph.as_ref().unwrap().visible_rows().len();
+        app.dispatch(Action::PageMove(1));
+        let after = painted_focus_index(&app);
+        let scroll = app.graph_scroll as usize;
+        assert!(
+            after >= scroll && after < scroll + list_h,
+            "focused painted row {after} must stay in [{scroll}, {})",
+            scroll + list_h
+        );
+        assert!(
+            after >= page.saturating_sub(1) && after <= page + 1,
+            "PageDown should move about one painted viewport ({page}), got painted {before} → {after}"
+        );
+        assert!(
+            app.graph_cursor < page.min(selectable),
+            "must not apply painted page ({page}) to selectable indices; cursor={}",
+            app.graph_cursor
+        );
+
+        app.dispatch(Action::MoveToEnd);
+        let end = painted_focus_index(&app);
+        let end_scroll = app.graph_scroll as usize;
+        assert!(
+            end >= end_scroll && end < end_scroll + list_h,
+            "End should sync scroll: painted {end} in [{end_scroll}, {})",
+            end_scroll + list_h
+        );
+        assert!(end_scroll > 0, "tall list End should scroll");
+        app.dispatch(Action::MoveToStart);
+        assert_eq!(app.graph_cursor, 0);
+        assert_eq!(app.graph_scroll, 0);
     }
 
     #[test]

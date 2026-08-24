@@ -66,7 +66,8 @@ other strings):
 
 - no row: `no selection`
 - uncommitted: `Working tree clean` / `Uncommitted changes`, then
-  `worktree · not a commit`
+  HEAD commit ref chips (same chips as the HEAD commit row), or
+  `worktree · not a commit` when HEAD has none
 - spacer: `…`, then `connector · not selectable`
 - stash: subject, then `stash@{n} ·` short hash `·` relative date (no
   author)
