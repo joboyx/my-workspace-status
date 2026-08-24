@@ -4006,6 +4006,24 @@ mod tests {
     }
 
     #[test]
+    fn resize_does_not_dismiss_revert_confirm() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        assert_eq!(app.dispatch(Action::Revert), Effect::None);
+        assert!(app.confirm.is_some());
+        assert_eq!(
+            app.dispatch(Action::Resize {
+                cols: 100,
+                rows: 24
+            }),
+            Effect::None
+        );
+        assert!(app.confirm.is_some());
+        assert_eq!(app.dispatch(Action::ConfirmNo), Effect::None);
+        assert!(app.confirm.is_none());
+    }
+
+    #[test]
     fn watch_zero_is_disable_and_refresh_keeps_focus() {
         assert_eq!(watch_interval_ms(Some("0")), 0);
         assert!(watch_interval_ms(Some("2000")) >= 500);

@@ -54,6 +54,8 @@ Porcelain v1 is pinned deliberately: v2 would change rename and XY handling and 
 
 All of them live in `crates/workspace-status/src/git.rs` and run as a subprocess. The binary prefers `/usr/bin/git` so WSL does not pick a Windows `git.exe`. Set `WORKSPACE_STATUS_GIT` to override.
 
+Every wrapper starts git with stdin `/dev/null` and `GIT_TERMINAL_PROMPT=0`. A credential or SSH prompt therefore fails fast instead of blocking the ratatui event loop (the parent would be stuck in `output()` while the child waited on the same TTY). Merge also sets `GIT_EDITOR=true` and `GIT_MERGE_AUTOEDIT=no`.
+
 `exec_git` swallows failures and returns `""`; `exec_git_status` returns the exit code. `exec_git_checked` is the wrapper that surfaces failure to the caller.
 
 See [git-operations.md](./git-operations.md).
@@ -68,7 +70,7 @@ See [git-operations.md](./git-operations.md).
 
 Pane widths come from `tui/split.rs` `pane_widths(term_cols, fraction)` — never from tree label lengths. Long tree paths, graph subjects, and diff lines clip to that frozen width; `left_col_offset` / `right_col_offset` / `diff_col_offset` pan inside the clip. Default fraction is `TREE_WIDTH_FRACTION` (0.4). The session keeps a `tree_fraction` (resets on next launch; not persisted) and freezes `{ tree_width, tree_inner_width, diff_width }`, recomputing when terminal columns change or when the user drags the divider. Clamp helpers keep both panes ≥ 20 cols (accounting for padding) when the terminal is wide enough. The in-diff side-by-side RULE uses the same session-only drag model. Hit-testing consumes `diff_split_rule_x` only while split mode is actually painted (`≥ NARROW_SXS`). The `?` help overlay shrinks the panes instead of overlapping them.
 
-The ratatui TUI applies crossterm `Resize` to `Terminal::resize` (the event size, not a later ioctl) and recomputes pane widths, graph gutter cap, help overlay rows, and list viewports from the new area.
+The ratatui TUI applies crossterm `Resize` to `Terminal::resize` (the event size, not a later ioctl) and recomputes pane widths, graph gutter cap, help overlay rows, and list viewports from the new area. The event loop drains queued input with `poll(0)` + `read`, skips watch/fetch ticks while an overlay is open, and autoloads graph history only after list movement. Long git work (fetch / pull / push / default-branch / watch / full reload) runs on a worker; the loop still paints and accepts resize and quit.
 
 ## Graph widget
 
@@ -90,6 +92,7 @@ Graph checkout confirm (and several other graph UX choices) is inspired by [Git 
 | New CLI flag          | `cli.rs` + `tui::HeadlessFlags` / `should_open_tui` if it affects TUI vs headless                                                                                          |
 | Snapshot contract     | `snapshot.rs` (`build_workspace_snapshot`) + `docs/snapshot.md` + `tests/snapshot_contract.rs`                                                                            |
 | New key binding       | `tui/keys.rs` (`Action`) + `tui/state.rs` dispatch + `tui/help.rs` (`HELP_GROUPS`) + `tui/gates.rs` if the key is row-scoped                                               |
+| Event-loop freeze / overlay ticks / graph autoload gates | `tui/event_pump.rs` + `tui/app.rs` (`run_loop`, `run_work_pumped`)                                                                                                          |
 
 ## CLI crate
 

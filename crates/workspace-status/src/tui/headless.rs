@@ -10,7 +10,7 @@ use ratatui::Terminal;
 use crate::config::{load_workspace_status_config, WorkspaceStatusConfig};
 use crate::snapshot::WorkspaceSnapshot;
 
-use super::action::Effect;
+use super::action::{Action, Effect};
 use super::app::{apply_headless_effect, collect_full_snapshot, TuiOpts};
 use super::keys::event_to_action_with;
 use super::render::draw;
@@ -53,7 +53,12 @@ impl HeadlessTui {
             start_fetch: false,
         };
         let mut state = AppState::with_viewed_path(cwd, snapshot, false, viewed_path);
-        apply_headless_effect(&mut state, super::action::Effect::LoadRightPane, &opts);
+        apply_headless_effect(
+            &mut state,
+            super::action::Effect::LoadRightPane,
+            &opts,
+            &Action::None,
+        );
         let mut session = Self {
             state,
             opts,
@@ -89,8 +94,9 @@ impl HeadlessTui {
             self.state.graph_commit_focused(),
             self.state.hl_folds(),
         );
+        let action_for_load = action.clone();
         let effect = self.state.dispatch(action);
-        apply_headless_effect(&mut self.state, effect, &self.opts);
+        apply_headless_effect(&mut self.state, effect, &self.opts, &action_for_load);
         let _ = self.frame();
         self.state.sync_graph_scroll();
     }
@@ -245,12 +251,13 @@ impl HeadlessTui {
             self.state.graph_commit_focused(),
             self.state.hl_folds(),
         );
+        let action_for_load = action.clone();
         let effect = self.state.dispatch(action);
         if matches!(effect, Effect::Quit) {
             self.quit = true;
             return;
         }
-        apply_headless_effect(&mut self.state, effect, &self.opts);
+        apply_headless_effect(&mut self.state, effect, &self.opts, &action_for_load);
     }
 
     fn paint(&mut self) -> Vec<String> {
