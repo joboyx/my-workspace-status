@@ -81,6 +81,22 @@ pub fn checkoutable_branch_names(refs: &[GraphRef]) -> Vec<String> {
     locals
 }
 
+/// Rev and overlay label for merging a focused graph commit into HEAD.
+///
+/// Local and `origin/*` names are used as-is (same set as checkout). Tags and
+/// unlabeled commits use the commit id (short hash as the label).
+pub fn merge_rev_for_commit(commit_id: &str, refs: &[GraphRef]) -> (String, String) {
+    if let Some(name) = checkoutable_branch_names(refs).into_iter().next() {
+        return (name.clone(), name);
+    }
+    let short = if commit_id.len() >= 7 {
+        commit_id[..7].to_string()
+    } else {
+        commit_id.to_string()
+    };
+    (commit_id.to_string(), short)
+}
+
 /// Branch to check out for a picker or single-name selection.
 pub fn checkout_name_for_ref(selected: &str) -> String {
     if is_origin_remote_ref(selected) {
@@ -359,6 +375,32 @@ mod tests {
             GraphRef::remote("origin/topic"),
         ]);
         assert_eq!(names, vec!["topic", "origin/topic"]);
+    }
+
+    #[test]
+    fn merge_rev_prefers_local_then_origin_else_commit() {
+        use workspace_status_graph::GraphRef;
+        let id = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        assert_eq!(
+            merge_rev_for_commit(
+                id,
+                &[
+                    GraphRef::tag("v1.0"),
+                    GraphRef::remote("origin/z"),
+                    GraphRef::local("topic"),
+                ]
+            ),
+            ("topic".into(), "topic".into())
+        );
+        assert_eq!(
+            merge_rev_for_commit(id, &[GraphRef::remote("origin/z"), GraphRef::tag("v1.0")]),
+            ("origin/z".into(), "origin/z".into())
+        );
+        assert_eq!(
+            merge_rev_for_commit(id, &[GraphRef::tag("v1.0")]),
+            (id.into(), "aaa1111".into())
+        );
+        assert_eq!(merge_rev_for_commit(id, &[]), (id.into(), "aaa1111".into()));
     }
 
     #[test]

@@ -85,6 +85,7 @@ pub enum Action {
     GraphStashDrop,
     GraphCheckout,
     GraphCreateBranch,
+    GraphMerge,
     EasyMotionStart,
     EasyMotionChar(char),
     EasyMotionCancel,
@@ -165,6 +166,13 @@ pub enum Effect {
         repo: String,
         name: String,
         commit_id: String,
+    },
+    MergeIntoHead {
+        repo: String,
+        /// Branch name, `origin/…`, or commit SHA (tags resolve to the commit).
+        rev: String,
+        /// Overlay / status label for `rev`.
+        label: String,
     },
     RemoveWorktree {
         primary: String,

@@ -107,6 +107,80 @@ pub fn fast_forward_to_remote_ref(remote_ref: &str, cwd: &Path) -> bool {
     rev_parse_quiet("HEAD", cwd).as_deref() == Some(target_sha.as_str())
 }
 
+/// Outcome of merging a rev into the current HEAD.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MergeIntoHeadResult {
+    /// HEAD already contained `rev`.
+    AlreadyUpToDate,
+    /// HEAD fast-forwarded to `rev`.
+    FastForward,
+    /// Created a merge commit (`--no-ff` after a failed fast-forward).
+    MergeCommit,
+    /// Conflicts left in the worktree. The merge is not aborted or continued.
+    Conflict,
+    /// Merge did not start or failed without leaving a merge in progress.
+    Failed(String),
+}
+
+fn run_merge(args: &[&str], cwd: &Path) -> std::io::Result<std::process::Output> {
+    Command::new(git_binary())
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_EDITOR", "true")
+        .env("GIT_MERGE_AUTOEDIT", "no")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+}
+
+fn merge_failed_message(out: &std::process::Output) -> String {
+    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if err.is_empty() {
+        format!("git merge exited {}", out.status.code().unwrap_or(-1))
+    } else {
+        err
+    }
+}
+
+/// Merge `rev` into HEAD. Fast-forward when that is possible, otherwise a
+/// merge commit. Does not rebase, does not abort on conflict, and does not
+/// open an editor (`--no-edit`).
+///
+/// Tries `git merge --ff-only`, then `git merge --no-ff --no-edit`. Conflicts
+/// stay uncommitted (`MERGE_HEAD` remains). Callers refuse a dirty worktree
+/// before invoking this.
+pub fn merge_into_head(rev: &str, cwd: &Path) -> MergeIntoHeadResult {
+    let before = rev_parse_quiet("HEAD", cwd);
+    match run_merge(&["merge", "--ff-only", "--quiet", "--", rev], cwd) {
+        Ok(out) if out.status.success() => {
+            let after = rev_parse_quiet("HEAD", cwd);
+            if before == after {
+                return MergeIntoHeadResult::AlreadyUpToDate;
+            }
+            return MergeIntoHeadResult::FastForward;
+        }
+        Ok(_) => {}
+        Err(err) => return MergeIntoHeadResult::Failed(err.to_string()),
+    }
+    if rev_parse_quiet("MERGE_HEAD", cwd).is_some() {
+        return MergeIntoHeadResult::Conflict;
+    }
+    match run_merge(
+        &["merge", "--no-ff", "--no-edit", "--quiet", "--", rev],
+        cwd,
+    ) {
+        Ok(out) if out.status.success() => MergeIntoHeadResult::MergeCommit,
+        Ok(out) => {
+            if rev_parse_quiet("MERGE_HEAD", cwd).is_some() {
+                MergeIntoHeadResult::Conflict
+            } else {
+                MergeIntoHeadResult::Failed(merge_failed_message(&out))
+            }
+        }
+        Err(err) => MergeIntoHeadResult::Failed(err.to_string()),
+    }
+}
+
 const AUTO_STASH_MESSAGE: &str = "ws-status: auto-stash before pull";
 
 #[derive(Debug, Clone, Copy)]
@@ -647,6 +721,30 @@ mod tests {
         assert!(status.success(), "git {args:?}");
     }
 
+    fn init_repo(dir: &Path) {
+        fs::create_dir_all(dir).unwrap();
+        let init = Command::new(git_binary())
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(dir)
+            .status();
+        if init.map(|s| s.success()).unwrap_or(false) == false {
+            git(dir, &["init", "-q"]);
+            git(dir, &["checkout", "-q", "-b", "main"]);
+        }
+        git(dir, &["config", "user.name", "workspace-status test"]);
+        git(
+            dir,
+            &[
+                "config",
+                "user.email",
+                "workspace-status-test@example.invalid",
+            ],
+        );
+        fs::write(dir.join("README.md"), "# seed\n").unwrap();
+        git(dir, &["add", "README.md"]);
+        git(dir, &["commit", "-q", "-m", "seed"]);
+    }
+
     #[test]
     fn stage_unstage_revert_on_fixture() {
         let dir = std::env::temp_dir().join(format!(
@@ -831,6 +929,99 @@ mod tests {
         assert!(!fast_forward_to_remote_ref("origin/foo", &dir));
         assert_eq!(exec_git(&["rev-parse", "HEAD"], &dir), ahead);
         assert_eq!(exec_git(&["branch", "--show-current"], &dir), "foo");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_into_head_ff_merge_commit_conflict_and_worktree() {
+        let dir = std::env::temp_dir().join(format!(
+            "ws-git-merge-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        init_repo(&dir);
+        let seed = exec_git(&["rev-parse", "HEAD"], &dir);
+        assert_eq!(
+            merge_into_head(&seed, &dir),
+            MergeIntoHeadResult::AlreadyUpToDate
+        );
+        assert_eq!(exec_git(&["rev-parse", "HEAD"], &dir), seed);
+
+        git(&dir, &["checkout", "-q", "-b", "topic"]);
+        fs::write(dir.join("topic.txt"), "topic\n").unwrap();
+        git(&dir, &["add", "topic.txt"]);
+        git(&dir, &["commit", "-q", "-m", "topic"]);
+        let topic = exec_git(&["rev-parse", "HEAD"], &dir);
+        git(&dir, &["tag", "v1.0"]);
+        git(&dir, &["checkout", "-q", "main"]);
+        assert_eq!(
+            merge_into_head(&topic, &dir),
+            MergeIntoHeadResult::FastForward
+        );
+        assert_eq!(exec_git(&["rev-parse", "HEAD"], &dir), topic);
+        assert_eq!(exec_git(&["branch", "--show-current"], &dir), "main");
+
+        git(&dir, &["reset", "--hard", "--quiet", &seed]);
+        fs::write(dir.join("main.txt"), "main\n").unwrap();
+        git(&dir, &["add", "main.txt"]);
+        git(&dir, &["commit", "-q", "-m", "main"]);
+        let main_tip = exec_git(&["rev-parse", "HEAD"], &dir);
+        assert_eq!(
+            merge_into_head(&topic, &dir),
+            MergeIntoHeadResult::MergeCommit
+        );
+        assert_ne!(exec_git(&["rev-parse", "HEAD"], &dir), main_tip);
+        assert_eq!(exec_git(&["rev-parse", "HEAD^1"], &dir), main_tip);
+        assert_eq!(exec_git(&["rev-parse", "HEAD^2"], &dir), topic);
+        assert!(rev_parse_quiet("MERGE_HEAD", &dir).is_none());
+
+        git(&dir, &["reset", "--hard", "--quiet", &seed]);
+        fs::write(dir.join("README.md"), "# main-side\n").unwrap();
+        git(&dir, &["add", "README.md"]);
+        git(&dir, &["commit", "-q", "-m", "main-side"]);
+        git(&dir, &["checkout", "-q", "-B", "conflict-topic", &seed]);
+        fs::write(dir.join("README.md"), "# topic-side\n").unwrap();
+        git(&dir, &["add", "README.md"]);
+        git(&dir, &["commit", "-q", "-m", "topic-side"]);
+        let conflict_topic = exec_git(&["rev-parse", "HEAD"], &dir);
+        git(&dir, &["checkout", "-q", "main"]);
+        let main_before = exec_git(&["rev-parse", "HEAD"], &dir);
+        assert_eq!(
+            merge_into_head(&conflict_topic, &dir),
+            MergeIntoHeadResult::Conflict
+        );
+        assert!(rev_parse_quiet("MERGE_HEAD", &dir).is_some());
+        assert_eq!(exec_git(&["rev-parse", "HEAD"], &dir), main_before);
+        git(&dir, &["merge", "--abort"]);
+
+        git(&dir, &["reset", "--hard", "--quiet", &seed]);
+        let wt = dir.join(".worktrees").join("feat");
+        fs::create_dir_all(dir.join(".worktrees")).unwrap();
+        git(
+            &dir,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "wt-main",
+                wt.to_str().unwrap(),
+                &seed,
+            ],
+        );
+        let primary_head = exec_git(&["rev-parse", "HEAD"], &dir);
+        assert_eq!(
+            merge_into_head(&topic, &wt),
+            MergeIntoHeadResult::FastForward
+        );
+        assert_eq!(exec_git(&["rev-parse", "HEAD"], &wt), topic);
+        assert_eq!(exec_git(&["rev-parse", "HEAD"], &dir), primary_head);
+
+        match merge_into_head("this-ref-does-not-exist", &dir) {
+            MergeIntoHeadResult::Failed(_) => {}
+            other => panic!("{other:?}"),
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 

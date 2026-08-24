@@ -13,8 +13,8 @@ use crate::snapshot::{FileChange, WorkspaceSnapshot};
 
 use super::action::{Action, Effect};
 use super::branches::{
-    can_open_branch_picker, checkoutable_branch_names, is_valid_branch_name, BranchPickerState,
-    CreateBranchState, DIRTY_WORKTREE_STATUS,
+    can_open_branch_picker, checkoutable_branch_names, is_valid_branch_name, merge_rev_for_commit,
+    BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
 };
 use super::commit_files::{
     ancestor_dir_ids, collect_foldable_subtree_ids as collect_commit_subtree_ids,
@@ -154,6 +154,12 @@ pub enum PendingConfirm {
         force: bool,
         branch: String,
         merged_into_default: Option<bool>,
+    },
+    MergeIntoHead {
+        repo: String,
+        rev: String,
+        label: String,
+        into: String,
     },
 }
 
@@ -944,6 +950,7 @@ impl AppState {
                         PendingConfirm::StashDrop { .. } => "drop cancelled".into(),
                         PendingConfirm::CheckoutOutOfSync { .. } => "checkout cancelled".into(),
                         PendingConfirm::RemoveWorktree { .. } => "remove worktree cancelled".into(),
+                        PendingConfirm::MergeIntoHead { .. } => "merge cancelled".into(),
                     };
                 }
                 Effect::None
@@ -1057,6 +1064,10 @@ impl AppState {
             Action::GraphCreateBranch => {
                 self.drag = SplitDrag::None;
                 self.begin_graph_create_branch()
+            }
+            Action::GraphMerge => {
+                self.drag = SplitDrag::None;
+                self.begin_graph_merge()
             }
             Action::EasyMotionStart => self.start_easy_motion(),
             Action::EasyMotionChar(c) => self.easy_motion_char(c),
@@ -2117,6 +2128,12 @@ impl AppState {
                     force,
                 }
             }
+            Some(PendingConfirm::MergeIntoHead {
+                repo, rev, label, ..
+            }) => {
+                self.status = format!("merge {label}");
+                Effect::MergeIntoHead { repo, rev, label }
+            }
             None => Effect::None,
         }
     }
@@ -2526,6 +2543,46 @@ impl AppState {
         });
         self.status.clear();
         Effect::None
+    }
+
+    fn begin_graph_merge(&mut self) -> Effect {
+        if !self.graph_commit_focused() {
+            return Effect::None;
+        }
+        if self.hidden_ignored_focus() {
+            self.status = "focus a visible repo to merge".into();
+            return Effect::None;
+        }
+        let Some(repo) = self.focused_graph_repo() else {
+            return Effect::None;
+        };
+        let Some(GraphRow::Commit { commit, .. }) = self.focused_graph_row() else {
+            return Effect::None;
+        };
+        if self.graph_repo_is_dirty(&repo) {
+            self.status = DIRTY_WORKTREE_STATUS.into();
+            return Effect::None;
+        }
+        let (rev, label) = merge_rev_for_commit(&commit.id, &commit.refs);
+        let into = self.graph_head_label(&repo);
+        self.help_open = false;
+        self.confirm = Some(PendingConfirm::MergeIntoHead {
+            repo,
+            rev,
+            label,
+            into,
+        });
+        Effect::None
+    }
+
+    fn graph_head_label(&self, repo: &str) -> String {
+        self.snapshot
+            .repos
+            .iter()
+            .find(|row| row.repo == repo)
+            .map(|row| row.branch.clone())
+            .filter(|branch| !branch.is_empty())
+            .unwrap_or_else(|| "HEAD".into())
     }
 
     fn graph_repo_is_dirty(&self, repo: &str) -> bool {
@@ -4327,6 +4384,116 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn graph_commit_m_opens_confirm_yes_merges_no_cancels() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_graph_commit(&mut app, &["topic"]);
+        assert_eq!(app.dispatch(Action::GraphMerge), Effect::None);
+        match &app.confirm {
+            Some(PendingConfirm::MergeIntoHead {
+                repo,
+                rev,
+                label,
+                into,
+            }) => {
+                assert_eq!(repo, "app");
+                assert_eq!(rev, "topic");
+                assert_eq!(label, "topic");
+                assert_eq!(into, "feature/x");
+            }
+            other => panic!("{other:?}"),
+        }
+        match app.dispatch(Action::ConfirmYes) {
+            Effect::MergeIntoHead { repo, rev, label } => {
+                assert_eq!(repo, "app");
+                assert_eq!(rev, "topic");
+                assert_eq!(label, "topic");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(app.confirm.is_none());
+
+        install_graph_commit(&mut app, &["topic"]);
+        assert_eq!(app.dispatch(Action::GraphMerge), Effect::None);
+        assert_eq!(app.dispatch(Action::ConfirmNo), Effect::None);
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "merge cancelled");
+    }
+
+    #[test]
+    fn graph_commit_m_dirty_refuses() {
+        let mut app = graph_state(true);
+        focus_repo(&mut app, "app");
+        install_graph_commit(&mut app, &["main"]);
+        assert_eq!(app.dispatch(Action::GraphMerge), Effect::None);
+        assert!(app.confirm.is_none());
+        assert!(app.status.contains("commit or stash"));
+    }
+
+    #[test]
+    fn graph_commit_m_tag_merges_commit_id() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_graph_commit_refs(&mut app, vec![GraphRef::tag("v1.0")]);
+        assert_eq!(app.dispatch(Action::GraphMerge), Effect::None);
+        match &app.confirm {
+            Some(PendingConfirm::MergeIntoHead { rev, label, .. }) => {
+                assert_eq!(rev, "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+                assert_eq!(label, "aaa1111");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn graph_merge_worktree_only_when_that_row_is_focused() {
+        let mut app = AppState::new(PathBuf::from("/tmp"), linked_snapshot(), true);
+        focus_repo(&mut app, "app");
+        install_graph_commit(&mut app, &["topic"]);
+        assert_eq!(app.dispatch(Action::GraphMerge), Effect::None);
+        assert!(app.confirm.is_none());
+        assert!(app.status.contains("commit or stash"));
+
+        focus_checkout(&mut app, "app/.worktrees/feat");
+        install_graph_commit(&mut app, &["topic"]);
+        assert_eq!(app.dispatch(Action::GraphMerge), Effect::None);
+        match &app.confirm {
+            Some(PendingConfirm::MergeIntoHead { repo, into, .. }) => {
+                assert_eq!(repo, "app/.worktrees/feat");
+                assert_eq!(into, "feature/x");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn graph_stash_m_is_noop_for_merge() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_graph(
+            &mut app,
+            vec![Stash {
+                stash_ref: "stash@{0}".into(),
+                subject: "latest".into(),
+                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                ..Stash::default()
+            }],
+        );
+        let idx = app
+            .graph
+            .as_ref()
+            .unwrap()
+            .visible_rows()
+            .iter()
+            .position(|r| matches!(r, GraphRow::Stash(_)))
+            .expect("stash");
+        app.graph_cursor = idx;
+        assert!(!app.graph_commit_focused());
+        assert_eq!(app.dispatch(Action::GraphMerge), Effect::None);
+        assert!(app.confirm.is_none());
     }
 
     #[test]

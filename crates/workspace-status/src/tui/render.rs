@@ -1223,6 +1223,34 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ];
             (accent, lines)
         }
+        PendingConfirm::MergeIntoHead { label, into, .. } => {
+            let accent = palette.modified;
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        "Merge ",
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(label.clone(), Style::default().fg(palette.file)),
+                    Span::styled(" into ", Style::default().fg(palette.muted)),
+                    Span::styled(into.clone(), Style::default().fg(palette.file)),
+                    Span::styled("?", Style::default().fg(accent)),
+                ]),
+                Line::from(Span::styled(
+                    "  fast-forward if possible, otherwise a merge commit",
+                    Style::default().fg(palette.muted),
+                )),
+                confirm_action_row(
+                    "y",
+                    "merge",
+                    None,
+                    accent,
+                    palette.muted,
+                    surface,
+                ),
+            ];
+            (accent, lines)
+        }
     };
     if area.width == 0 || area.height == 0 {
         return;
@@ -1853,6 +1881,22 @@ mod tests {
         assert!(text.contains("is not in sync with"), "{text}");
         assert!(text.contains("Checkout local then pull?"), "{text}");
         assert!(text.contains("checkout then pull"), "{text}");
+
+        state.confirm = Some(PendingConfirm::MergeIntoHead {
+            repo: "app".into(),
+            rev: "topic".into(),
+            label: "topic".into(),
+            into: "main".into(),
+        });
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Merge"), "{text}");
+        assert!(text.contains("topic"), "{text}");
+        assert!(text.contains("into"), "{text}");
+        assert!(text.contains("main"), "{text}");
+        assert!(text.contains("fast-forward"), "{text}");
+        assert!(text.contains("merge commit"), "{text}");
+        assert!(!text.contains("? y/n"), "{text}");
     }
 
     #[test]

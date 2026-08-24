@@ -111,6 +111,10 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "depth 0 picker · graph local/origin/*",
             },
             HelpEntry {
+                keys: "m",
+                desc: "graph merge into HEAD",
+            },
+            HelpEntry {
                 keys: "C",
                 desc: "create (in picker)",
             },
@@ -495,6 +499,8 @@ mod tests {
         assert!(keys.contains(&"C"));
         assert!(keys.contains(&"a p D"));
         assert!(keys.contains(&"Home End"));
+        let git_keys: Vec<&str> = HELP_GROUPS[1].entries.iter().map(|e| e.keys).collect();
+        assert!(git_keys.contains(&"m"));
         let move_keys: Vec<&str> = HELP_GROUPS[0].entries.iter().map(|e| e.keys).collect();
         let view_keys: Vec<&str> = HELP_GROUPS[2].entries.iter().map(|e| e.keys).collect();
         assert!(!move_keys.contains(&"PgUp PgDn"));

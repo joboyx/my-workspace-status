@@ -61,6 +61,7 @@ pub fn is_left_list_action(action: &Action) -> bool {
             | Action::RemoveWorktree
             | Action::GraphCheckout
             | Action::GraphCreateBranch
+            | Action::GraphMerge
             | Action::GraphStashApply
             | Action::GraphStashDrop
             | Action::GraphStashPop
@@ -77,6 +78,7 @@ fn is_graph_write_action(action: &Action) -> bool {
         action,
         Action::GraphCheckout
             | Action::GraphCreateBranch
+            | Action::GraphMerge
             | Action::GraphStashApply
             | Action::GraphStashDrop
             | Action::GraphStashPop
@@ -113,8 +115,8 @@ fn is_diff_file_write(action: &Action) -> bool {
 /// True when a left-list action may still run with the right pane focused.
 ///
 /// Allow-list matches Ink `rightPaneLeftListAllowed`: graph move/write
-/// (`b`/`c`/`a`/`p`/`D` as `GraphCheckout` / `GraphCreateBranch` /
-/// stash apply/pop/drop), commit-file nav, diff move, and diff `e` /
+/// (`b`/`c`/`m`/`a`/`p`/`D` as `GraphCheckout` / `GraphCreateBranch` /
+/// `GraphMerge` / stash apply/pop/drop), commit-file nav, diff move, and diff `e` /
 /// Ctrl+O / space. Tree `b` (`Branch`) and `S` (`StashMenu`) stay left-only.
 pub fn right_pane_left_list_allowed(target: ListFocusTarget, action: &Action) -> bool {
     let graph_move = target == ListFocusTarget::Graph && is_move_action(action);
@@ -173,6 +175,10 @@ mod tests {
         assert!(right_pane_left_list_allowed(
             ListFocusTarget::Graph,
             &Action::GraphCreateBranch
+        ));
+        assert!(right_pane_left_list_allowed(
+            ListFocusTarget::Graph,
+            &Action::GraphMerge
         ));
         assert!(right_pane_left_list_allowed(
             ListFocusTarget::Graph,
@@ -257,6 +263,12 @@ mod tests {
         ));
         assert!(!dispatch_is_noop(
             &Action::GraphCheckout,
+            0,
+            true,
+            ListFocusTarget::Graph
+        ));
+        assert!(!dispatch_is_noop(
+            &Action::GraphMerge,
             0,
             true,
             ListFocusTarget::Graph
