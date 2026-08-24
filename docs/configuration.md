@@ -83,7 +83,7 @@ The two overrides differ in the TUI. `-a` replaces the ignored list before the T
 | `WORKSPACE_STATUS_GIT`    | `/usr/bin/git` if present, else `git`                   | Git binary. Exists to avoid a Windows `git.exe` shadowing the Linux one on WSL2, and as a test seam.                                                                                              |
 | `WS_STATUS_VIEWED_STORE`  | `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` | JSON store for TUI space-reviewed marks (identity = repo path + file path; fingerprint = status + worktree bytes). Tests should set this to a temp file.                                              |
 
-**Graph + commit files:** focusing a repo/dir at depth 0 shows the multi-branch commit graph in the right pane; depth 1 left is the same graph list and depth 1 right is commit meta + file tree; depth 2 is commit files | diff. Graph lane colours follow the active built-in theme (`T` cycles); no new env var. Autoload window size defaults to 300, not user-configurable. Commit file trees default to directory tree via dedicated `commit_tree_mode` (independent of workspace `tree_mode`).
+**Graph + commit files:** focusing a repo/dir at depth 0 shows the multi-branch commit graph in the right pane; depth 1 left is the same graph list and depth 1 right is commit meta + file tree; depth 2 left is the commit file list and depth 2 right is the diff. Graph lane colours follow the active built-in theme (`T` cycles); no new env var. Autoload window size defaults to 300, not user-configurable. Commit file trees default to directory tree via dedicated `commit_tree_mode` (independent of workspace `tree_mode`).
 
 ## Nerd Font requirement
 

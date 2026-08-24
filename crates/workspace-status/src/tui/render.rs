@@ -93,17 +93,28 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         ])
         .split(chunks[0]);
 
-    let left_is_graph = state.in_commit_drill();
-    let left_title = if left_is_graph {
-        if state.focus == FocusPane::Left {
-            " graph "
-        } else {
-            " graph"
+    let left_title = match &state.drill {
+        DrillView::Files { .. } => {
+            if state.focus == FocusPane::Left {
+                " graph "
+            } else {
+                " graph"
+            }
         }
-    } else if state.focus == FocusPane::Left {
-        " tree "
-    } else {
-        " tree"
+        DrillView::Diff { .. } => {
+            if state.focus == FocusPane::Left {
+                " files "
+            } else {
+                " files"
+            }
+        }
+        DrillView::Graph => {
+            if state.focus == FocusPane::Left {
+                " tree "
+            } else {
+                " tree"
+            }
+        }
     };
     let tree_block = Block::default()
         .borders(Borders::ALL)
@@ -114,8 +125,11 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         ));
     let tree_inner = tree_block.inner(panes[0]);
     frame.render_widget(tree_block, panes[0]);
-    if left_is_graph {
+    if state.drill.is_files() {
         draw_graph(frame, tree_inner, state);
+    } else if state.drill.is_diff() {
+        let cursor = state.commit_files_cursor();
+        draw_commit_file_list(frame, tree_inner, state, cursor);
     } else {
         draw_tree(frame, tree_inner, state);
     }
@@ -210,6 +224,13 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         state.layout.files_list_y = right_inner.y.saturating_add(header_h);
         let list_h = right_inner.height.saturating_sub(header_h) as usize;
         let (start, _) = visible_window(state.commit_file_rows().len(), *cursor, list_h);
+        state.layout.files_list_offset = start;
+    } else if state.drill.is_diff() {
+        let cursor = state.commit_files_cursor();
+        let n = state.commit_file_rows().len();
+        state.layout.files_list_y = tree_inner.y;
+        let list_h = tree_inner.height as usize;
+        let (start, _) = visible_window(n, cursor, list_h);
         state.layout.files_list_offset = start;
     }
 }
@@ -583,6 +604,14 @@ fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, curso
         width: area.width,
         height: list_h,
     };
+    draw_commit_file_list(frame, list_area, state, cursor);
+}
+
+fn draw_commit_file_list(frame: &mut Frame<'_>, area: Rect, state: &AppState, cursor: usize) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let palette = state.theme.palette();
     let rows = state.commit_file_rows();
     if rows.is_empty() {
         let copy = if state.commit_files_loading {
@@ -592,12 +621,12 @@ fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, curso
         };
         frame.render_widget(
             Paragraph::new(muted_copy(copy, state.theme.palette())),
-            list_area,
+            area,
         );
         return;
     }
-    let height = list_h as usize;
-    let width = list_area.width as usize;
+    let height = area.height as usize;
+    let width = area.width as usize;
     let (start, _) = visible_window(rows.len(), cursor, height);
     let motion = file_easy_motion_labels(state, start, height);
     let search_bg = state.theme.pills().filter.bg;
@@ -637,15 +666,16 @@ fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, curso
             )
         })
         .collect();
-    frame.render_widget(Paragraph::new(lines), list_area);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn commit_file_search_match_paths(state: &AppState) -> HashSet<String> {
     if state.search_target != SearchPane::CommitFiles {
         return HashSet::new();
     }
-    let DrillView::Files { files, .. } = &state.drill else {
-        return HashSet::new();
+    let files = match &state.drill {
+        DrillView::Files { files, .. } | DrillView::Diff { files, .. } => files,
+        DrillView::Graph => return HashSet::new(),
     };
     collect_commit_file_match_indices(files, &state.search_query)
         .into_iter()
@@ -1279,14 +1309,12 @@ fn tree_easy_motion_labels(state: &AppState, start: usize, height: usize) -> Opt
 
 fn file_easy_motion_labels(state: &AppState, start: usize, height: usize) -> Option<Vec<String>> {
     let motion = state.easy_motion.as_ref()?;
-    if state.focus != FocusPane::Right || !state.drill.is_files() {
+    if !state.commit_files_list_focused() {
         return None;
     }
-    let DrillView::Files { cursor, .. } = &state.drill else {
-        return None;
-    };
+    let cursor = state.commit_files_cursor();
     let rows = state.commit_file_rows();
-    let (_win_start, count) = visible_window(rows.len(), *cursor, height);
+    let (_win_start, count) = visible_window(rows.len(), cursor, height);
     if _win_start != start {
         return None;
     }

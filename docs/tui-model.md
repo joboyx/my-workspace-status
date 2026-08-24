@@ -43,6 +43,8 @@ Default folds: ignored repos with children + the `no-updates` group. Non-ignored
 
 `AppState` in `tui/state.rs` holds restorable view state: cursor row id, folds, filter, diff mode, full-context ids, tree mode, mouse enabled, theme, nav (focus pane + drill depth), and diff column offset. Graph window default is 300. There is no on-disk session store — fold, split ratios, and theme cycle reset on the next launch.
 
+Enter / Esc follow the ViewStack: left Enter focuses right at the same depth; right Enter pushes the next depth and stays on the right (no-op at depth 2); Esc on the right unfocuses to the left; Esc on the left pops one depth and stays on the left (no-op at depth 0). `list_focus_target` maps depth + focus to Tree, Graph, CommitFiles, or None (scrolling a file diff). Graph writes run only when the graph list is focused (depth 0 right or depth 1 left). Depth 2 left is the commit file list.
+
 Full-context membership means unlimited unified context (`FULL_DIFF_CONTEXT_LINES`) for that file id — toggled by `Ctrl+O`, cleared by `Esc` or a second `Ctrl+O`. After a full-file toggle, scroll recenters on the prior hunk/change anchor.
 
 ## Graph list
@@ -59,7 +61,7 @@ See [git-graph-topology.md](./git-graph-topology.md) and [graph.md](./graph.md).
 
 Write scope for bulk git (`f` / `p` / `P` / `d`): primaries on workspace/family rows; a linked worktree only when that row is focused; hidden ignored-list paths omitted even if focused. When ignored repos are shown (`.` / `-a`), they follow the same primary / focused-worktree rule. Background fetch uses `background_fetch_targets` and skips hidden ignored repos.
 
-Graph pane writes (`graphCheckout` / `graphCreateBranch` / `graphMerge` / stash apply / drop / pop) gate on graph-list focus (depth 0 right, depth 1 left, or any later depth where the focused pane is the graph list). Graph `m` is `graphMerge` (always confirms). Leftover branch/tag chips on a commit spacer collapse to a bold `[+N]` overflow chip so the row does not grow.
+Graph pane writes (`graphCheckout` / `graphCreateBranch` / `graphMerge` / stash apply / drop / pop) gate on graph-list focus (depth 0 right or depth 1 left). Graph `m` is `graphMerge` (always confirms). Leftover branch/tag chips on a commit spacer collapse to a bold `[+N]` overflow chip so the row does not grow. Depth 2 left is the commit file list, so those graph writes do not fire there.
 
 ## Editor
 

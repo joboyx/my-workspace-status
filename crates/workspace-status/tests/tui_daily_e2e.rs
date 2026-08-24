@@ -367,30 +367,37 @@ fn drill_enter_and_esc_walk_commit_files_diff() {
         "Enter on a commit file should open the diff:\n{diff}"
     );
     assert!(
+        diff.contains("files"),
+        "depth-2 left pane is the commit file list:\n{diff}"
+    );
+    assert!(
         diff.contains("left.txt")
             || diff.contains("right.txt")
             || diff.contains("wip.txt")
             || diff.contains("README.md"),
-        "commit diff header should keep the file path after the graph takes the left pane:\n{diff}"
+        "commit diff header should keep the file path:\n{diff}"
     );
     assert!(
         diff.contains("inline") || diff.contains("split"),
         "commit diff header should name the layout:\n{diff}"
     );
     tui.esc();
-    if tui.right_is_diff() {
-        tui.esc();
-    }
+    assert!(
+        tui.right_is_diff(),
+        "first Esc unfocuses and stays on the commit diff:\n{}",
+        tui.frame()
+    );
+    tui.esc();
     let back_files = tui.frame();
     assert!(
         tui.right_is_files(),
-        "Esc should pop to the file list:\n{back_files}"
+        "second Esc pops to the file list:\n{back_files}"
     );
     tui.esc();
     let back_graph = tui.frame();
     assert!(
         tui.right_is_graph(),
-        "Esc should pop to the graph:\n{back_graph}"
+        "third Esc pops to the graph:\n{back_graph}"
     );
     let _ = fs::remove_dir_all(root);
 }

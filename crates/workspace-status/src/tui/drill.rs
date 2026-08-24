@@ -47,7 +47,7 @@ pub enum DrillView {
         files: Vec<CommitFile>,
         cursor: usize,
     },
-    /// Depth 2: numbered file diff (graph stays in the left pane).
+    /// Depth 2: numbered file diff. Left pane is the commit file list.
     Diff {
         repo: String,
         source: CommitFileSource,
