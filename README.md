@@ -18,30 +18,14 @@ It is intentionally treated as a black-box CLI:
 
 ### GitHub Releases (Rust CLI)
 
-Install `workspace-status` and `ws` (and `workspace-status-update`) from the latest GitHub Release:
-
-```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/joboyx/my-workspace-status/releases/latest/download/workspace-status-installer.sh | sh
-```
-
-This repository is **private**. Unauthenticated `releases/latest/download` 404s. Export a GitHub token that can read this repo (`contents: read`), then:
-
-```bash
-export WORKSPACE_STATUS_GITHUB_TOKEN=...   # cargo-dist ≥0.29 installer bearer token
-curl --proto '=https' --tlsv1.2 -LsSf \
-  -H "Authorization: Bearer ${WORKSPACE_STATUS_GITHUB_TOKEN}" \
-  https://github.com/joboyx/my-workspace-status/releases/latest/download/workspace-status-installer.sh \
-  | sh
-```
-
-If that curl still 404s (GitHub private-asset redirects), download the installer with `gh`:
+This repository is **private**. Anyone with repo/release access (`gh` or a token with `contents: read`) can install `workspace-status`, `ws`, and `workspace-status-update` from the latest GitHub Release:
 
 ```bash
 gh release download -R joboyx/my-workspace-status --pattern workspace-status-installer.sh
 WORKSPACE_STATUS_GITHUB_TOKEN=$(gh auth token) sh workspace-status-installer.sh
 ```
 
-The public curl works only after this repository is public.
+`WORKSPACE_STATUS_GITHUB_TOKEN` is the cargo-dist ≥0.29 installer bearer token. The installer uses it to fetch the private linux/macOS archives. Unauthenticated `releases/latest/download` 404s; do not pipe that curl.
 
 On a TTY the Rust binary opens the ratatui TUI. Pass `--plain` or `--json` for agents.
 `-i` / `--tui` forces the TUI when stdout is not a TTY. `-v` / `-p` / `-d` / `--plain` / `--json` still stay headless.
@@ -54,8 +38,6 @@ Uninstall:
 ```
 
 That removes `~/.cargo/bin/{ws,workspace-status,workspace-status-update}` and the cargo-dist receipt under `${XDG_CONFIG_HOME:-$HOME/.config}/workspace-status/`.
-
-Windows: `irm https://github.com/joboyx/my-workspace-status/releases/latest/download/workspace-status-installer.ps1 | iex` (same `WORKSPACE_STATUS_GITHUB_TOKEN` for a private repo).
 
 ### cargo install (fallback)
 
