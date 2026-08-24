@@ -1,12 +1,12 @@
-# Sample Output - workspace-status.sh
+# Sample Output - workspace-status
 
-This document shows the main output states and combinations from `workspace-status.sh`.
-`workspace-status.sh` is the source of truth. This document is supplemental and mirrors current script behavior.
-All scenarios in this document are covered by `test/workspace-status.e2e.ts`.
+This document shows the main output states and combinations from `workspace-status`.
+The CLI is the source of truth. This document is supplemental and mirrors current behaviour.
+Snapshot fixture coverage lives in `crates/workspace-status/tests/snapshot_contract.rs`.
 
 ## Workspace Config
 
-`workspace-status.sh` reads `.workspace-status-config.json` from the current workspace root. Repos listed in `ignoredRepos` are skipped from discovery, status checks, fetch, pull, and default-branch switching unless `-a` or `--all` is passed. `maxDepth` (default `3`) is how many path segments below cwd to search for git repos. `defaultBranches` optionally maps a workspace-relative repo path to a sole default branch name; when set, classification, ordering, branch markers, and `--default-branch` / TUI `d` use that branch. Repos without an entry keep the previous behaviour (treat `main`/`master`/`develop` as default for classification; resolve switch target from git).
+`workspace-status` reads `.workspace-status-config.json` from the current workspace root. Repos listed in `ignoredRepos` are skipped from discovery, status checks, fetch, pull, and default-branch switching unless `-a` or `--all` is passed. `maxDepth` (default `3`) is how many path segments below cwd to search for git repos. `defaultBranches` optionally maps a workspace-relative repo path to a sole default branch name; when set, classification, ordering, branch markers, and `--default-branch` / TUI `d` use that branch. Repos without an entry keep the previous behaviour (treat `main`/`master`/`develop` as default for classification; resolve switch target from git).
 
 ```json
 {

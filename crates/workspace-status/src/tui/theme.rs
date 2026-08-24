@@ -1,11 +1,11 @@
-//! Built-in TUI colour themes. Same ids and cycle order as Ink `theme.ts`.
+//! Built-in TUI colour themes.
 //!
 //! Launch seed is `WS_STATUS_THEME`. `T` cycles in the current session only.
-//! Ink does not write a theme file; this TUI matches that.
+//! There is no theme file; the cycle stays in the current session.
 
 use ratatui::style::Color;
 
-/// Built-in dark theme identifiers (Ink cycle order).
+/// Built-in dark theme identifiers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ThemeId {
     #[default]
@@ -70,7 +70,7 @@ pub struct ThemePalette {
     pub flash: &'static str,
 }
 
-/// Status-bar pill hex pairs (Ink `Theme.pill`).
+/// Status-bar pill hex pairs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThemePill {
     pub mode_bg: &'static str,
@@ -124,7 +124,7 @@ impl ThemeId {
         self.theme().label
     }
 
-    /// Ink status-bar pill colours.
+    /// Status-bar pill colours.
     pub fn pills(self) -> Pills {
         let pill = self.theme().pill;
         Pills {

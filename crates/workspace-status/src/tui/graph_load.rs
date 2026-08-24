@@ -1,6 +1,6 @@
 //! Load a [`workspace_status_graph::GraphModel`] from git + the snapshot.
 //!
-//! History matches Ink `gitLogGraphWindow`: `log --exclude=refs/stash --all
+//! History command: `log --exclude=refs/stash --all
 //! --topo-order --date-order --skip --max-count`. Default window is 300.
 //! Missing `stash^1` parents are fetched with `log --no-walk` and appended
 //! after the log prefix so autoload skip stays on `window`, not `commits.len()`.
@@ -774,7 +774,7 @@ mod live_git {
                 rows.first(),
                 Some(GraphRow::Uncommitted { has_changes: false })
             ),
-            "Ink always paints the working-tree row; dirty vs clean is label only, got {rows:?}"
+            "A loaded graph always paints the working-tree row; dirty vs clean is label only, got {rows:?}"
         );
         let _ = fs::remove_dir_all(&root);
     }

@@ -2,8 +2,7 @@
 
 use crate::action::{Action, Effect};
 
-/// Default `git log --max-count` for one graph window. Matches Ink
-/// `DEFAULT_GRAPH_WINDOW`.
+/// Default `git log --max-count` for one graph window.
 pub const DEFAULT_GRAPH_WINDOW: usize = 300;
 
 /// Assembled graph payload for one checkout window.
@@ -25,11 +24,11 @@ pub struct GraphModel {
     /// always sets `Some(has_changes)` so the row stays on even when clean.
     pub uncommitted: Option<bool>,
     /// Offset of this log window's start in `git log --all`. Stays `0` after
-    /// an autoload merge (Ink `skip`).
+    /// an autoload merge.
     pub skip: usize,
     /// Page size used for this window (`--max-count`). Default 300.
     pub limit: usize,
-    /// True when the log page filled `limit` (Ink `hasMore`).
+    /// True when the log page filled `limit`.
     pub has_more: bool,
     /// Length of the `git log` prefix in [`GraphModel::commits`] (excludes
     /// extra stash parents). Autoload skip uses this, not `commits.len()`.
@@ -38,7 +37,7 @@ pub struct GraphModel {
     pub default_branch_override: Option<String>,
 }
 
-/// Kind of annotated ref on a commit. Same set as Ink `GraphRefKind`.
+/// Kind of annotated ref on a commit. Same set as `GraphRefKind`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefKind {
     /// `refs/heads/*`

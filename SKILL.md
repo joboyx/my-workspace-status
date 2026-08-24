@@ -17,25 +17,24 @@ You are helping the user review the status of all git repositories in the curren
 
 **Your Task:**
 
-1. Run the git status script to gather repository information
+1. Run `workspace-status` to gather repository information
 2. Choose flags that match the user request
-3. Show the script output directly unless the user explicitly asks for extra interpretation
+3. Show the CLI output directly unless the user explicitly asks for extra interpretation
 
 **Instructions:**
 
-- Run the sibling script that lives next to this file: `workspace-status.sh` (short alias: `ws`)
-- Resolve the script path relative to this `SKILL.md`; do not assume a hardcoded `~/.claude/...` location
-- **Always pass `--plain` or `--json` for agent runs.** On a TTY without one of those flags, the script opens an interactive Ink TUI that waits for keyboard input and will hang the agent shell until killed. Do not rely on “non-TTY” alone — some harnesses allocate a TTY. Never use `-i` / `--tui` from an agent. `--plain` is the human renderer. `--json` prints the same workspace snapshot. See [docs/snapshot.md](./docs/snapshot.md).
-- The script reads `.workspace-status-config.json` from the current workspace root; repos in `ignoredRepos` are skipped unless `-a` or `--all` is passed
+- Run `workspace-status` (short alias: `ws`) from PATH
+- **Always pass `--plain` or `--json` for agent runs.** On a TTY without one of those flags, the CLI opens an interactive TUI that waits for keyboard input and will hang the agent shell until killed. Do not rely on “non-TTY” alone — some harnesses allocate a TTY. Never use `-i` / `--tui` from an agent. `--plain` is the human renderer. `--json` prints the same workspace snapshot. See [docs/snapshot.md](./docs/snapshot.md).
+- The CLI reads `.workspace-status-config.json` from the current workspace root; repos in `ignoredRepos` are skipped unless `-a` or `--all` is passed
 - Optional `defaultBranches` map (repo path → branch) overrides the default branch for classification, markers, ordering, and `--default-branch` / TUI `d`; without an entry, defaults are derived as today
 - `maxDepth` (default **3**) controls how many path segments below cwd are searched for git repos (so `acme/light-modules/*` is included by default)
 - Optional `editor` for TUI `e` (same shape as `$EDITOR`). Omit the key or set `"editor": "vim"` for vim (the default). `"editor": "cursor"` opens Cursor IDE. Config overrides `$EDITOR` / `$VISUAL`.
 - Pass one or more repo paths (e.g. `dotfiles`, `dotfiles notes`) to limit output to those repos; named repos are included even when listed in `ignoredRepos`
-- The script already formats its own output, so prefer showing it as-is
-- When changing the script or its output contract, keep `SAMPLE_OUTPUT.md` and `test/workspace-status.e2e.ts` in sync
+- The CLI already formats its own output, so prefer showing it as-is
+- When changing the CLI or its output contract, keep `SAMPLE_OUTPUT.md` and `crates/workspace-status/tests/snapshot_contract.rs` in sync
 
-**Script Output Format:**
-The script produces:
+**Output Format:**
+The CLI produces:
 
 1. **Summary section** (default output):
    - 📝 Changes: uncommitted, staged, both
@@ -68,9 +67,10 @@ The script produces:
 - `--default-branch`: Switch non-default branches to their default branch, then pull
 - `--plain`: Force plain text report (required for agent runs unless `--json` — avoids interactive TUI hang)
 - `--json`: Print the workspace snapshot as JSON (also disables the TUI)
+- `--update`: Run the cargo-dist updater (`workspace-status-update`) and exit (never opens the TUI)
 - `-i` / `--tui`: Force interactive TUI (humans only; never from agents)
 
-**Interactive TUI (humans only):** On a TTY (without `-v` / `-p` / `-d` / `--plain` / `--json`), the script opens an Ink viewer and blocks on keyboard input. Agents must always pass `--plain` or `--json` (see Instructions). Force TUI with `-i` / `--tui` only for interactive human use.
+**Interactive TUI (humans only):** On a TTY (without `-v` / `-p` / `-d` / `--plain` / `--json`), the CLI opens a ratatui TUI and blocks on keyboard input. Agents must always pass `--plain` or `--json` (see Instructions). Force TUI with `-i` / `--tui` only for interactive human use.
 
 The TUI requires a **Nerd Font** — recommended `MesloLGM Nerd Font Mono` (the **Mono** variant; the proportional build breaks column alignment). In VS Code / Cursor set `terminal.integrated.fontFamily` in **User Settings**, since the terminal font is resolved on the client rather than in WSL. `WS_STATUS_GLYPHS=ascii` swaps in plain markers.
 
@@ -97,28 +97,29 @@ Live TUI keymap (full overlay detail in [docs/configuration.md](./docs/configura
 | `p`                                   | pull behind primaries (workspace / family) or the focused checkout (including a linked worktree)                                                       |
 | `P`                                   | push ahead\|diverged\|no-upstream (repo/checkout only; family uses the primary; first publish uses `-u`)                                               |
 | `d`                                   | switch primaries (or the focused checkout) to the default branch and pull when clean; dirty checkouts skipped                                          |
-| `e`                                   | open focused file in configured editor (default vim; config overrides `$EDITOR` / `$VISUAL`). vim remounts the session; Cursor stays mounted           |
+| `e`                                   | open focused file in configured editor (default vim; config overrides `$EDITOR` / `$VISUAL`). vim leaves the alternate screen; Cursor stays mounted     |
 | `space`                               | toggle reviewed on a dirty file row (eye mark). Stays until that file's diff or contents change. Non-file rows no-op (do not fold)                     |
 | `b`                                   | depth 0: local branch picker. Graph commit: checkout local or `origin/*` (confirm when local is out of sync, then fast-forward to that `origin/*` ref) |
 | `c`                                   | graph commit: create branch at commit (name overlay; ref only, no checkout)                                                                            |
+| `m`                                   | graph commit: boxed confirm, then merge that ref into HEAD (`--ff-only`, else `--no-ff --no-edit`). Dirty tracked worktree refuses. Tree / stash / uncommitted `m` toggles mouse reporting |
 | `Ctrl-o`                              | toggle full-file diff context (does not open editor)                                                                                                   |
 | `/`                                   | search the focused pane (substring; does not hide rows). Enter arms the query; `Esc` clears                                                            |
 | `n` / `N`                             | next / previous search match (only while a search is active; otherwise `p` is pull)                                                                    |
 | `Ctrl-Space`                          | EasyMotion jump on the **focused** list (tree / graph / commit files). No-op on a focused diff                                                         |
 | `?`                                   | keymap help overlay                                                                                                                                    |
 | `PgUp` / `PgDn` / `Ctrl-u` / `Ctrl-d` | page the **focused** pane (list or diff)                                                                                                               |
-| `m`                                   | toggle mouse reporting (on by default)                                                                                                                 |
+| `m`                                   | toggle mouse reporting (on by default) except on a focused graph commit (merge, above)                                                                 |
 | `Enter`                               | left: focus right; right: drill (stay on right). Double-click a list row runs Enter                                                                    |
-| `Ctrl-C` twice                        | quit (first press prompts; second within ~2s exits — same as LLM harnesses)                                                                            |
+| `q` / `Ctrl-C`                        | quit                                                                                                                                                   |
 | `Esc`                                 | back (right → left, then pop depth). Never quits. Cancels overlays / chords first                                                                      |
 
 When the right pane loads a new view, rows, or dataset (repo, pane kind, graph contents, or commit-file list key), it resets to the top — first selectable graph row, first commit-file row, or diff scroll 0. Same-view graph rebuilds (width/theme, autoload older) keep the cursor. `Ctrl-o` still keeps the hunk in view. The left tree still restores by id.
 
 **Known limits:**
 
-- macOS PageUp: the terminal must deliver the key (`Fn+Up` / mapped PageUp). CSI fallback cannot page if the sequence never arrives.
+- macOS PageUp: the terminal must deliver the key (`Fn+Up` / mapped PageUp). Use `Ctrl-u` / `Ctrl-d` when PageUp does not arrive.
 - `SIGKILL` skips alternate-screen restore (leave hooks do not run).
 - Search Enter-to-arm: `/` opens a query; Enter arms it so `n` / `N` step matches. Esc clears.
 
 **Your Task:**
-Run the script with the smallest set of flags that matches the request, **always including `--plain`**, then display the output directly. Only add your own summary when the user asks for analysis instead of raw output. Skipping `--plain` on a TTY can hang the shell on the interactive TUI.
+Run `workspace-status` with the smallest set of flags that matches the request, **always including `--plain`**, then display the output directly. Only add your own summary when the user asks for analysis instead of raw output. Skipping `--plain` on a TTY can hang the shell on the interactive TUI.

@@ -1,18 +1,18 @@
 //! Session-only pane and in-diff split math.
 //!
-//! Matches the Ink helpers in `layoutWidths.ts` / `diffSplit.ts` / `hitTest.ts`.
+//! Pane split, hit-testing, and side-by-side column math.
 //! Fractions are not written to disk; the next launch resets to the defaults.
 
-/// Default tree/right split (Ink `TREE_WIDTH_FRACTION`).
+/// Default tree/right split.
 pub const TREE_WIDTH_FRACTION: f64 = 0.4;
 
-/// Default in-diff split (Ink `DIFF_SPLIT_FRACTION`).
+/// Default in-diff split.
 pub const DIFF_SPLIT_FRACTION: f64 = 0.5;
 
 /// Minimum outer width for either tree/right pane.
 pub const MIN_PANE_COLS: u16 = 20;
 
-/// Ink right-pane horizontal padding (`paddingX={1}` each side).
+/// Right-pane horizontal padding (one column each side).
 pub const DIFF_PAD_X: u16 = 2;
 
 /// Below this right-pane content width, side-by-side falls back to inline.
@@ -70,7 +70,7 @@ pub struct SplitLayout {
     pub term_cols: u16,
     pub term_rows: u16,
     pub pane_height: u16,
-    /// Outer tree box width, same number Ink stores as `treeWidth`.
+    /// Outer tree box width.
     pub tree_width: u16,
     /// Right-pane content width (inner).
     pub diff_pane_width: u16,
@@ -145,7 +145,7 @@ pub fn is_side_by_side_split(mode: DiffMode, pane_width: u16) -> bool {
     mode == DiffMode::SideBySide && pane_width >= NARROW_SXS
 }
 
-/// Preferred mode after the narrow-pane fallback (Ink `effectiveDiffMode`).
+/// Preferred mode after the narrow-pane fallback.
 pub fn effective_diff_mode(mode: DiffMode, pane_width: u16) -> DiffMode {
     if is_side_by_side_split(mode, pane_width) {
         DiffMode::SideBySide
@@ -264,7 +264,7 @@ fn unified_kind(line: &str) -> &'static str {
     }
 }
 
-/// Zip unified-diff lines into side-by-side pairs (Ink `sideBySide.ts` shape).
+/// Zip unified-diff lines into side-by-side pairs.
 #[allow(dead_code)]
 pub fn pair_unified_lines(lines: &[String]) -> Vec<SplitRow> {
     let mut out = Vec::new();

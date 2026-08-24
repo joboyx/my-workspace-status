@@ -1,13 +1,13 @@
-//! Focus / depth / kind gates for tree writes (Ink `gates.ts` + `activeContext.ts`).
+//! Focus / depth / kind gates for tree writes.
 //!
 //! `dispatch` refuses workspace-tree writes when ViewStack depth ≥ 1 or when
-//! the right pane is focused, unless the Ink allow-list matches.
+//! the right pane is focused, unless the allow-list matches.
 
 use super::action::Action;
 
 /// Which list (or diff) the focused pane is driving.
 ///
-/// Mirrors Ink `listFocusTarget`: tree, graph list, commit-file list, or a
+/// Tree, graph list, commit-file list, or a
 /// focused file diff (`None`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ListFocusTarget {
@@ -17,8 +17,8 @@ pub enum ListFocusTarget {
     None,
 }
 
-/// True when `action` is a tree write Ink already refuses at depth ≥ 1
-/// (`TREE_WRITE_BLOCKED_IDS`: s/u/x/f/p/P/d/b/W). `S` is not in that set.
+/// True when `action` is a tree write already refused at depth ≥ 1
+/// (`s`/`u`/`x`/`f`/`p`/`P`/`d`/`b`/`W`). `S` is not in that set.
 pub fn is_tree_write_blocked(action: &Action, depth: u8) -> bool {
     depth >= 1 && is_tree_write_action(action)
 }
@@ -38,8 +38,8 @@ fn is_tree_write_action(action: &Action) -> bool {
     )
 }
 
-/// Actions that drive a list or row-scoped registry write (Ink
-/// `LEFT_LIST_ACTION_TYPES`). Nav chrome, quit/help/refresh, theme/mouse,
+/// Actions that drive a list or row-scoped registry write.
+/// Nav chrome, quit/help/refresh, theme/mouse,
 /// view-mode toggles, diff scroll, and overlay input are excluded.
 pub fn is_left_list_action(action: &Action) -> bool {
     matches!(
@@ -114,7 +114,7 @@ fn is_diff_file_write(action: &Action) -> bool {
 
 /// True when a left-list action may still run with the right pane focused.
 ///
-/// Allow-list matches Ink `rightPaneLeftListAllowed`: graph move/write
+/// Allow-list: graph move/write
 /// (`b`/`c`/`m`/`a`/`p`/`D` as `GraphCheckout` / `GraphCreateBranch` /
 /// `GraphMerge` / stash apply/pop/drop), commit-file nav, diff move, and diff `e` /
 /// Ctrl+O / space. Tree `b` (`Branch`) and `S` (`StashMenu`) stay left-only.
@@ -167,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn right_pane_allow_list_matches_ink() {
+    fn right_pane_allow_list() {
         assert!(right_pane_left_list_allowed(
             ListFocusTarget::Graph,
             &Action::GraphCheckout

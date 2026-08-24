@@ -1,6 +1,6 @@
 //! Help overlay entries and `/` search (highlight only).
 //!
-//! Three columns match Ink `HELP_GROUPS` (MOVE / GIT / VIEW). Rust extras
+//! Three columns match `HELP_GROUPS` (MOVE / GIT / VIEW). Extra keys
 //! (`q`, Tab, picker `C`, stash `a p D`, Home/End) stay in those groups.
 
 /// One help row: key chips plus a short description.
@@ -10,7 +10,7 @@ pub struct HelpEntry {
     pub desc: &'static str,
 }
 
-/// One help column (Ink MOVE / GIT / VIEW).
+/// One help column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HelpGroup {
     pub title: &'static str,
@@ -20,7 +20,7 @@ pub struct HelpGroup {
 /// Help overlay stays on three groups.
 pub const HELP_COLUMN_COUNT: usize = 3;
 
-/// Short key list shown in the `?` overlay, grouped like Ink.
+/// Short key list shown in the `?` overlay, grouped the same.
 pub const HELP_GROUPS: &[HelpGroup] = &[
     HelpGroup {
         title: "MOVE",
@@ -197,7 +197,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
 
 /// Idle help footer must mention overlay-local `/` search.
 pub const HELP_IDLE_FOOTER_SNIPPET: &str = "/ search help";
-/// Active help-search footer Esc hint (Ink `HELP_SEARCH_ESC_HINT`).
+/// Active help-search footer Esc hint.
 pub const HELP_SEARCH_ESC_HINT: &str = "Esc clears search";
 
 /// Flattened help rows in column order (MOVE, then GIT, then VIEW).
@@ -488,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_are_move_git_view_with_rust_extras() {
+    fn groups_are_move_git_view() {
         assert_eq!(HELP_GROUPS.len(), HELP_COLUMN_COUNT);
         assert_eq!(HELP_GROUPS[0].title, "MOVE");
         assert_eq!(HELP_GROUPS[1].title, "GIT");

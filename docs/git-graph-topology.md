@@ -1,6 +1,6 @@
 # Git graph topology
 
-Gutter painting for the workspace-status TUI (`src/tui/graph/`).
+Gutter painting for the workspace-status TUI (`crates/workspace-status-graph`).
 
 Lane assignment, parent planning, densify-left, fixed gutter width, viewport,
 and navigation are unchanged aside from spacer skipping (below). This doc
@@ -8,7 +8,7 @@ covers **how cells are painted**.
 
 **Read order for stash work:** lock the [stash visual grammar](#stash-rows--visual-grammar)
 (pictures / isomorphism) before changing densify, spur-lane math, or
-`stashLeafRailCells`. Wrong paint almost always comes from skipping that step.
+`stash_leaf_rail_cells`. Wrong paint almost always comes from skipping that step.
 
 ## Connection model
 
@@ -93,10 +93,10 @@ Every **commit** and **stash** is followed by a non-selectable `spacer`
 - **Stash row:** node + subject (full flex). `stash@{n}` is not on this line.
 - **Stash spacer:** live rails + short spur + `stash@{n}` left + right-anchored
   hash / date / author (same drop order as commit spacers: hash → date →
-  author). Relative dates match `formatRelativeDate` / `format_relative_date`.
+  author). Relative dates match `format_relative_date`.
 
 Between consecutive commits the spacer gutter densifies
-(`prev.stemDown` → `next.stemUp`), including when a parked stash leaf sits
+(`prev.stem_down` → `next.stem_up`), including when a parked stash leaf sits
 between those commits (stash is always immediately above `stash^1`). Stash
 rows **never** own densify.
 
@@ -132,7 +132,7 @@ That is the stash leaf. Do not invent a separate “stash chrome” metaphor
 ### Hard rules
 
 1. Stash is **always a leaf** — never the parent of any commit or stash.
-2. Attachment **identity** is always `stash^1` (`parentId` = first `%P` parent /
+2. Attachment **identity** is always `stash^1` (`parent_id` = first `%P` parent /
    HEAD at stash time). List **placement** parks each stash **immediately above**
    that parent (1 node away) — stash author-date does not interleave it into the
    commit chrono stream. Out-of-window `stash^1` is fetched into the model at
@@ -186,20 +186,20 @@ Newest at top. `◇` = stash leaf tip.
 
 ### Paint intent (implementation must match)
 
-Target behaviour for list + `stashLeaf*` wiring (docs are normative; if code
+Target behaviour for list + `stash_leaf_*` wiring (docs are normative; if code
 disagrees, fix the code):
 
-1. **Placement** (`buildGraphListRows`): commits newest-first; each stash tip +
-   spacer inserted **immediately above** its `parentId` commit. Multiple stashes
+1. **Placement** (`GraphModel::visible_rows`): commits newest-first; each stash tip +
+   spacer inserted **immediately above** its `parent_id` commit. Multiple stashes
    on the same parent stack newest-first above that parent, each on its **own**
-   free leaf lane. `loadGraphModel` fetches missing `stash^1` commits into the
-   model (does not change `skip`/`limit`/`hasMore`) so park-on-parent can join.
+   free leaf lane. `load_graph_model` fetches missing `stash^1` commits into the
+   model (does not change `skip`/`limit`/`has_more`) so park-on-parent can join.
    True orphans (parent object missing) still sit after uncommitted, newest-first.
    Extra parents insert into the layout walk by date; the git window order is
    unchanged. Extra `%P` targets not in the layout set are dropped.
 2. **Base layer** on stash row + stash spacer: through-verticals for rails that
-   are genuinely live in that gap (post-densify: prefer `next.stemUp`, else
-   `prev.stemDown` at the window tail).
+   are genuinely live in that gap (post-densify: prefer `next.stem_up`, else
+   `prev.stem_down` at the window tail).
 3. **Leaf overlay** on the stash selectable row: 1-node tip `◇` on a **free**
    leaf lane (allocator — never steal a live DAG lane / parent lane). Live
    through-rails stay; **no** mid-rail `├─◇` tee; **no** `down` on the tip column.
@@ -218,21 +218,20 @@ name; not stash leaf paint).
 
 | Concern | Primary files |
 | --- | --- |
-| List order / park-on-parent / join overlay wiring | `src/tui/graph/list.ts` (`buildGraphListRows`) |
-| Free leaf lane, tip `◇`, spacer spur, live through-rails | `src/tui/graph/rows.ts` (`buildStashRailContext`, `graphStashSegments`, `graphStashSpacerSegments`, join helpers) |
-| Commit DAG layout + densify | `src/tui/graph/layout.ts` (+ densify helpers used from rows) |
-| Stash model (`parentId` = `stash^1`); fetch missing parents | `src/git.ts` (`listStashes`, `gitLogCommitsByIds`) / `src/tui/graph/load.ts` |
-| Gutter clip window (node + stash join cols) | `src/tui/graph/gutterBudget.ts` (`sliceCellsAroundLane`) |
-| Regression tests (S0–S7 + park order + gutter dump) | `test/tui-graph-list.test.ts` (also rows / load / git-graph tests when changing cell paint or window load) |
-| Rust ratatui gutter (same lane model) | `crates/workspace-status-graph` (`layout.rs`, `topology.rs`, `stash.rs`, `paint.rs`, `format.rs`) |
+| List order / park-on-parent / join overlay wiring | `crates/workspace-status-graph/src/model.rs` (`GraphModel::visible_rows`) |
+| Free leaf lane, tip `◇`, spacer spur, live through-rails | `crates/workspace-status-graph/src/stash.rs` (`StashRailContext`, paint helpers) |
+| Commit DAG layout + densify | `crates/workspace-status-graph/src/layout.rs` + `topology.rs` |
+| Stash model (`parent_id` = `stash^1`); fetch missing parents | `crates/workspace-status/src/tui/graph_load.rs` (`load_graph_model`) |
+| Gutter clip window (node + stash join cols) | `crates/workspace-status-graph/src/gutter.rs` (`slice_cells_around_lane`) |
+| Regression tests (S0–S7 + park order + gutter dump) | `crates/workspace-status-graph` unit tests + `crates/workspace-status/src/tui/graph_load.rs` |
 
 Canonical skill tree: `ai/common/skills/my-workspace-status/` only.
 
 ### Verify before shipping stash paint
 
-1. `npm test` in the skill directory.
+1. `cargo test --workspace`.
 2. **Live gutter dump** on a multi-stash repo (e.g. workspace `notes`):
-   `loadGraphModel` → `layoutCommits` → `buildGraphListRows` → print gutter
+   `load_graph_model` → `layout_commits` → `GraphModel::visible_rows` → print gutter
    slices around each `stash@{n}`. Confirm tip row is immediately above
    `stash^1` and the spacer carries a short spur into a close elbow — no gap
    rows between `◇` and join while a side `│` continues.
@@ -246,7 +245,7 @@ Park-on-parent + 3b→◇ leaf paint landed (PR #54 era). Residual issues — do
 
 | Gap | Notes |
 | --- | --- |
-| Orphan pile | **Addressed:** `loadGraphModel` lazy-loads missing `stash^1` via `gitLogCommitsByIds` so those tips park and join. Extra parents insert into the layout walk by date without reshuffling the git window; `%P` targets not in the layout set are dropped so they cannot plant a waiter through the window. Remaining true orphans are parent objects git cannot resolve — still a lone `◇` after uncommitted (no fake spine tee). |
+| Orphan pile | **Addressed:** `load_graph_model` lazy-loads missing `stash^1` so those tips park and join. Extra parents insert into the layout walk by date without reshuffling the git window; `%P` targets not in the layout set are dropped so they cannot plant a waiter through the window. Remaining true orphans are parent objects git cannot resolve — still a lone `◇` after uncommitted (no fake spine tee). |
 | Crowded / multi-lane gutters | **Improved:** sibling tips reserve distinct leaf lanes; clip window prefers covering node + join/leaf columns; join overlay keeps through-rails (`┼`) instead of eating them. Extreme density (more live lanes than the gutter cap) can still clip. |
 | Operator-reported edge cases | Capture failing screenshots + short gutter dump next to S0–S7 before changing paint; extend the config table rather than one-off glyph hacks. |
 | Agent skill copies | Edit **common** only; redeploy/symlink per `ai/AGENTS.md` — do not fork paint logic under `agents/*/skills/`. |
