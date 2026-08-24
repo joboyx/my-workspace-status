@@ -36,6 +36,9 @@ impl From<NameStatus> for CommitFile {
 }
 
 /// Right-pane drill depth: graph → file list → file diff.
+///
+/// Depth 1 puts the graph list on the left. Depth 2 puts the commit-file
+/// list on the left (right is the numbered file diff).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DrillView {
     /// Graph (or the tree-file worktree diff when the tree focuses a file).
@@ -47,7 +50,7 @@ pub enum DrillView {
         files: Vec<CommitFile>,
         cursor: usize,
     },
-    /// Depth 2: numbered file diff (graph stays in the left pane).
+    /// Depth 2: numbered file diff (commit-file list on the left).
     Diff {
         repo: String,
         source: CommitFileSource,

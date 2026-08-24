@@ -39,6 +39,30 @@ Flatten walks depth-first, emitting a `VisibleRow` per node: `id`, `depth`, `nod
 
 Default folds: ignored repos with children + the `no-updates` group. Non-ignored repos with changes start expanded. `z` toggles immediately and arms a 400ms `zz` window for subtree toggle.
 
+## ViewStack / Enter / Esc
+
+`DrillView` in `tui/drill.rs` is the depth stack (`Graph` = 0, `Files` = 1, `Diff` = 2). `FocusPane` is left or right. Together they are the ViewStack.
+
+| Depth | Left | Right |
+| --- | --- | --- |
+| 0, repo/dir focused | Workspace tree | Graph |
+| 0, file focused | Workspace tree | Worktree `DiffPane` |
+| 1 `Files` | Graph list | Commit detail + file tree |
+| 2 `Diff` | Commit-file list | Commit-scoped `DiffPane` |
+
+`list_focus_target` (`tui/state.rs`) is the focused list: depth 0 left → tree; depth 0 right / depth 1 left → graph; depth 1 right / depth 2 left → commit files; depth 2 right (and depth 0 file diffs) → none (diff scroll). `j`/`k`, fold, search, EasyMotion, click, and wheel follow that target.
+
+| Focus / depth | Enter | Esc |
+| --- | --- | --- |
+| Left (any depth) | Focus right (same stack) | Pop one depth; stay on left (no-op at depth 0) |
+| Right, depth 0 | Push commit files when a graph row can drill; stay on right | Unfocus → left |
+| Right, depth 1 | Push commit diff; stay on right | Unfocus → left |
+| Right, depth 2 (leaf) | No-op | Unfocus → left |
+
+Enter that deepens the stack keeps **right** focus. Esc that pops a depth keeps **left** focus. Esc never quits.
+
+At depth 2, `j`/`k` on the left move the commit-file cursor and load that file's diff when the focused row is a file. Directory rows keep the previous diff.
+
 ## App state
 
 `AppState` in `tui/state.rs` holds restorable view state: cursor row id, folds, filter, diff mode, full-context ids, tree mode, mouse enabled, theme, nav (focus pane + drill depth), and diff column offset. Graph window default is 300. There is no on-disk session store — fold, split ratios, and theme cycle reset on the next launch.
@@ -59,7 +83,7 @@ See [git-graph-topology.md](./git-graph-topology.md) and [graph.md](./graph.md).
 
 Write scope for bulk git (`f` / `p` / `P` / `d`): primaries on workspace/family rows; a linked worktree only when that row is focused; hidden ignored-list paths omitted even if focused. When ignored repos are shown (`.` / `-a`), they follow the same primary / focused-worktree rule. Background fetch uses `background_fetch_targets` and skips hidden ignored repos.
 
-Graph pane writes (`graphCheckout` / `graphCreateBranch` / `graphMerge` / stash apply / drop / pop) gate on graph-list focus (depth 0 right, depth 1 left, or any later depth where the focused pane is the graph list). Graph `m` is `graphMerge` (always confirms). Leftover branch/tag chips on a commit spacer collapse to a bold `[+N]` overflow chip so the row does not grow.
+Graph pane writes (`graphCheckout` / `graphCreateBranch` / `graphMerge` / stash apply / drop / pop) gate on graph-list focus (depth 0 right or depth 1 left). Graph `m` is `graphMerge` (always confirms). Leftover branch/tag chips on a commit spacer collapse to a bold `[+N]` overflow chip so the row does not grow.
 
 ## Editor
 

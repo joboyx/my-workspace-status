@@ -402,7 +402,11 @@ impl AppState {
     }
 
     /// Which list (or diff) the focused pane is driving.
-    fn list_focus_target(&self) -> ListFocusTarget {
+    ///
+    /// Depth 0 left is the workspace tree; depth 1 left is the graph; depth 2
+    /// left is the commit-file list. Right at depth 2 (and depth 0 file diffs)
+    /// is `None` so `j`/`k` scroll the diff.
+    pub(crate) fn list_focus_target(&self) -> ListFocusTarget {
         match &self.drill {
             DrillView::Graph => {
                 if self.focus == FocusPane::Left {
@@ -422,7 +426,7 @@ impl AppState {
             }
             DrillView::Diff { .. } => {
                 if self.focus == FocusPane::Left {
-                    ListFocusTarget::Graph
+                    ListFocusTarget::CommitFiles
                 } else {
                     ListFocusTarget::None
                 }
@@ -430,11 +434,54 @@ impl AppState {
         }
     }
 
+    pub(crate) fn commit_files_list_focused(&self) -> bool {
+        self.list_focus_target() == ListFocusTarget::CommitFiles
+    }
+
     pub fn graph_pane_focused(&self) -> bool {
-        if self.in_commit_drill() {
-            self.focus == FocusPane::Left
+        self.list_focus_target() == ListFocusTarget::Graph
+    }
+
+    fn commit_drill_files(&self) -> Option<&[CommitFile]> {
+        match &self.drill {
+            DrillView::Files { files, .. } | DrillView::Diff { files, .. } => Some(files),
+            DrillView::Graph => None,
+        }
+    }
+
+    fn files_list_origin_x(&self) -> u16 {
+        if self.drill.is_diff() {
+            self.layout.tree_x
         } else {
-            self.focus == FocusPane::Right && self.drill.is_graph() && !self.tree_file_focused()
+            self.layout.diff_content_x
+        }
+    }
+
+    fn set_commit_file_cursor(&mut self, idx: usize) {
+        match &mut self.drill {
+            DrillView::Files { cursor, .. } => *cursor = idx,
+            DrillView::Diff { file_cursor, .. } => *file_cursor = idx,
+            DrillView::Graph => {}
+        }
+    }
+
+    fn maybe_load_focused_commit_diff(&self) -> Effect {
+        let DrillView::Diff {
+            repo, source, path, ..
+        } = &self.drill
+        else {
+            return Effect::None;
+        };
+        let Some(row) = self.focused_commit_file_row() else {
+            return Effect::None;
+        };
+        if !row.is_file() || row.path == *path {
+            return Effect::None;
+        }
+        Effect::LoadCommitDiff {
+            repo: repo.clone(),
+            source: source.clone(),
+            path: row.path.clone(),
         }
     }
 
@@ -460,7 +507,7 @@ impl AppState {
         )
     }
 
-    fn commit_files_cursor(&self) -> usize {
+    pub(crate) fn commit_files_cursor(&self) -> usize {
         match &self.drill {
             DrillView::Files { cursor, .. } => *cursor,
             DrillView::Diff { file_cursor, .. } => *file_cursor,
@@ -469,7 +516,7 @@ impl AppState {
     }
 
     fn focused_commit_file_row(&self) -> Option<CommitFileRow> {
-        if !self.drill.is_files() {
+        if self.drill.is_graph() {
             return None;
         }
         let rows = self.commit_file_rows();
@@ -484,16 +531,20 @@ impl AppState {
     }
 
     fn focused_commit_edit_path(&self) -> Option<(String, String)> {
-        match &self.drill {
-            DrillView::Files { repo, .. } => {
-                let row = self.focused_commit_file_row()?;
-                if !row.is_file() {
-                    return None;
-                }
-                Some((repo.clone(), row.path))
+        let repo = match &self.drill {
+            DrillView::Files { repo, .. } | DrillView::Diff { repo, .. } => repo.clone(),
+            DrillView::Graph => return None,
+        };
+        if self.commit_files_list_focused() {
+            let row = self.focused_commit_file_row()?;
+            if !row.is_file() {
+                return None;
             }
-            DrillView::Diff { repo, path, .. } => Some((repo.clone(), path.clone())),
-            DrillView::Graph => None,
+            return Some((repo, row.path));
+        }
+        match &self.drill {
+            DrillView::Diff { path, .. } => Some((repo, path.clone())),
+            _ => None,
         }
     }
 
@@ -565,9 +616,7 @@ impl AppState {
     fn restore_commit_file_cursor(&mut self, path: Option<&str>) {
         let rows = self.commit_file_rows();
         if rows.is_empty() {
-            if let DrillView::Files { cursor, .. } = &mut self.drill {
-                *cursor = 0;
-            }
+            self.set_commit_file_cursor(0);
             return;
         }
         let idx = path
@@ -578,9 +627,7 @@ impl AppState {
             })
             .unwrap_or(0)
             .min(rows.len() - 1);
-        if let DrillView::Files { cursor, .. } = &mut self.drill {
-            *cursor = idx;
-        }
+        self.set_commit_file_cursor(idx);
     }
 
     fn visible_tree(&self) -> TreeNode {
@@ -631,7 +678,7 @@ impl AppState {
         let path = self.focused_commit_file_row().map(|row| row.path);
         self.commit_tree_mode = !self.commit_tree_mode;
         self.commit_file_folds.clear();
-        if self.drill.is_files() {
+        if !self.drill.is_graph() {
             self.restore_commit_file_cursor(path.as_deref());
         }
         self.status = if self.commit_tree_mode {
@@ -829,12 +876,15 @@ impl AppState {
                 if col >= self.layout.right_x {
                     self.focus = FocusPane::Right;
                     if self.drill.is_files() {
-                        self.move_file_cursor(delta);
+                        self.move_file_cursor(delta)
                     } else {
                         self.scroll_right(delta);
+                        Effect::None
                     }
-                    Effect::None
-                } else if self.in_commit_drill() {
+                } else if self.drill.is_diff() {
+                    self.focus = FocusPane::Left;
+                    self.move_file_cursor(delta)
+                } else if self.drill.is_files() {
                     self.focus = FocusPane::Left;
                     self.move_graph_cursor(delta);
                     Effect::None
@@ -867,8 +917,7 @@ impl AppState {
                     Effect::None
                 } else if self.search_mode {
                     self.search_query.push(c);
-                    self.apply_search(0);
-                    self.search_load_effect()
+                    self.apply_search(0)
                 } else {
                     Effect::None
                 }
@@ -881,8 +930,7 @@ impl AppState {
                     Effect::None
                 } else if self.search_mode {
                     self.search_query.pop();
-                    self.apply_search(0);
-                    self.search_load_effect()
+                    self.apply_search(0)
                 } else {
                     Effect::None
                 }
@@ -900,8 +948,7 @@ impl AppState {
                         Effect::None
                     } else {
                         self.search_active = true;
-                        self.apply_search(0);
-                        self.search_load_effect()
+                        self.apply_search(0)
                     }
                 }
             }
@@ -921,16 +968,14 @@ impl AppState {
             }
             Action::SearchNext => {
                 if self.search_active && !self.search_query.trim().is_empty() {
-                    self.apply_search(1);
-                    self.search_load_effect()
+                    self.apply_search(1)
                 } else {
                     Effect::None
                 }
             }
             Action::SearchPrev => {
                 if self.search_active && !self.search_query.trim().is_empty() {
-                    self.apply_search(-1);
-                    self.search_load_effect()
+                    self.apply_search(-1)
                 } else {
                     Effect::None
                 }
@@ -1131,23 +1176,11 @@ impl AppState {
     }
 
     fn easy_motion_list(&self) -> Option<EasyMotionList> {
-        if self.in_commit_drill() && self.focus == FocusPane::Left {
-            return Some(EasyMotionList::Graph);
-        }
-        if self.focus == FocusPane::Right {
-            match &self.drill {
-                DrillView::Files { .. } => Some(EasyMotionList::CommitFiles),
-                DrillView::Diff { .. } => None,
-                DrillView::Graph => {
-                    if self.right_is_diff() {
-                        None
-                    } else {
-                        Some(EasyMotionList::Graph)
-                    }
-                }
-            }
-        } else {
-            Some(EasyMotionList::Tree)
+        match self.list_focus_target() {
+            ListFocusTarget::Tree => Some(EasyMotionList::Tree),
+            ListFocusTarget::Graph => Some(EasyMotionList::Graph),
+            ListFocusTarget::CommitFiles => Some(EasyMotionList::CommitFiles),
+            ListFocusTarget::None => None,
         }
     }
 
@@ -1201,10 +1234,8 @@ impl AppState {
                 if n == 0 {
                     return Effect::None;
                 }
-                if let DrillView::Files { cursor, .. } = &mut self.drill {
-                    *cursor = index.min(n - 1);
-                }
-                Effect::None
+                self.set_commit_file_cursor(index.min(n - 1));
+                self.maybe_load_focused_commit_diff()
             }
         }
     }
@@ -1288,15 +1319,14 @@ impl AppState {
     }
 
     fn fold_subtree(&mut self) {
-        if self.drill.is_files() && self.focus == FocusPane::Right {
+        if self.commit_files_list_focused() {
             let Some(row) = self.focused_commit_file_row() else {
                 return;
             };
             let id = row.id.clone();
             let path = row.path.clone();
-            let files = match &self.drill {
-                DrillView::Files { files, .. } => files.clone(),
-                _ => return,
+            let Some(files) = self.commit_drill_files().map(|files| files.to_vec()) else {
+                return;
             };
             let ids = collect_commit_subtree_ids(&files, self.commit_tree_mode, &id);
             if ids.is_empty() {
@@ -1313,7 +1343,7 @@ impl AppState {
             self.restore_commit_file_cursor(Some(&path));
             return;
         }
-        if self.focus != FocusPane::Left || self.in_commit_drill() {
+        if self.list_focus_target() != ListFocusTarget::Tree {
             return;
         }
         let Some(row) = self.focused_row().cloned() else {
@@ -1335,11 +1365,11 @@ impl AppState {
     }
 
     fn fold_op(&mut self, op: FoldOp) {
-        if self.drill.is_files() && self.focus == FocusPane::Right {
+        if self.commit_files_list_focused() {
             self.fold_commit_file(op);
             return;
         }
-        if self.focus != FocusPane::Left || self.in_commit_drill() {
+        if self.list_focus_target() != ListFocusTarget::Tree {
             return;
         }
         let Some(row) = self.focused_row().cloned() else {
@@ -1470,7 +1500,10 @@ impl AppState {
             return Effect::None;
         }
         self.focus = FocusPane::Left;
-        if self.in_commit_drill() {
+        if self.drill.is_diff() {
+            return self.click_commit_files(col, row, is_double);
+        }
+        if self.drill.is_files() {
             return self.click_graph(row, is_double, false);
         }
         if row < self.layout.tree_y {
@@ -1499,7 +1532,7 @@ impl AppState {
 
     fn is_files_chevron(&self, col: u16, depth: usize) -> bool {
         let prefix = if self.easy_motion.is_some() { 2 } else { 0 };
-        col == self.layout.diff_content_x + prefix + 1 + (depth as u16) * 2
+        col == self.files_list_origin_x() + prefix + 1 + (depth as u16) * 2
     }
 
     fn click_graph(&mut self, row: u16, is_double: bool, right: bool) -> Effect {
@@ -1552,9 +1585,7 @@ impl AppState {
         if idx >= n {
             return Effect::None;
         }
-        if let DrillView::Files { cursor, .. } = &mut self.drill {
-            *cursor = idx;
-        }
+        self.set_commit_file_cursor(idx);
         let Some(file_row) = self.commit_file_rows().get(idx).cloned() else {
             return Effect::None;
         };
@@ -1562,10 +1593,14 @@ impl AppState {
             self.fold_commit_file(FoldOp::Toggle);
             return Effect::None;
         }
+        let load = self.maybe_load_focused_commit_diff();
         if is_double {
-            return self.nav_enter();
+            return match self.nav_enter() {
+                Effect::None => load,
+                other => other,
+            };
         }
-        Effect::None
+        load
     }
 
     fn drag_split(&mut self, col: u16, _row: u16) -> Effect {
@@ -1727,19 +1762,12 @@ impl AppState {
     }
 
     fn current_search_pane(&self) -> SearchPane {
-        if self.in_commit_drill() && self.focus == FocusPane::Left {
-            return SearchPane::Graph;
+        match self.list_focus_target() {
+            ListFocusTarget::Tree => SearchPane::Tree,
+            ListFocusTarget::Graph => SearchPane::Graph,
+            ListFocusTarget::CommitFiles => SearchPane::CommitFiles,
+            ListFocusTarget::None => SearchPane::Diff,
         }
-        if self.focus == FocusPane::Left {
-            return SearchPane::Tree;
-        }
-        if self.drill.is_files() {
-            return SearchPane::CommitFiles;
-        }
-        if self.right_is_diff() {
-            return SearchPane::Diff;
-        }
-        SearchPane::Graph
     }
 
     fn current_diff_content(&self) -> &DiffContent {
@@ -1778,12 +1806,24 @@ impl AppState {
         }
     }
 
-    fn apply_search(&mut self, dir: i32) {
+    fn apply_search(&mut self, dir: i32) -> Effect {
         match self.search_target {
-            SearchPane::Tree => self.apply_tree_search(dir),
-            SearchPane::Graph => self.apply_graph_search(dir),
-            SearchPane::CommitFiles => self.apply_commit_file_search(dir),
-            SearchPane::Diff => self.apply_diff_search(dir),
+            SearchPane::Tree => {
+                self.apply_tree_search(dir);
+                self.search_load_effect()
+            }
+            SearchPane::Graph => {
+                self.apply_graph_search(dir);
+                Effect::None
+            }
+            SearchPane::CommitFiles => {
+                self.apply_commit_file_search(dir);
+                self.maybe_load_focused_commit_diff()
+            }
+            SearchPane::Diff => {
+                self.apply_diff_search(dir);
+                Effect::None
+            }
         }
     }
 
@@ -1825,24 +1865,26 @@ impl AppState {
     }
 
     fn apply_commit_file_search(&mut self, dir: i32) {
-        let DrillView::Files { files, cursor, .. } = &self.drill else {
+        let Some(files) = self.commit_drill_files() else {
             self.set_search_status(false);
             return;
         };
+        let files = files.to_vec();
+        let cursor = self.commit_files_cursor();
         let current_path = flatten_commit_files(
-            files,
+            &files,
             self.commit_tree_mode,
             &self.commit_file_folds,
             self.ascii,
         )
-        .get(*cursor)
+        .get(cursor)
         .map(|row| row.path.clone());
         let current_file_idx = current_path
             .as_deref()
             .and_then(|path| files.iter().position(|file| file.path == path))
-            .unwrap_or(*cursor);
+            .unwrap_or(cursor);
         let Some(file_idx) =
-            focus_commit_file_search(files, &self.search_query, current_file_idx, dir)
+            focus_commit_file_search(&files, &self.search_query, current_file_idx, dir)
         else {
             self.set_search_status(false);
             return;
@@ -2245,6 +2287,9 @@ impl AppState {
     }
 
     fn begin_stash_menu(&mut self) -> Effect {
+        if self.nav_depth() >= 2 {
+            return Effect::None;
+        }
         let Some(repo) = self.focused_checkout_if_shown() else {
             self.status = "focus a visible repo to stash".into();
             return Effect::None;
@@ -2682,90 +2727,65 @@ impl AppState {
         self.layout.tree_height.max(1).saturating_sub(1).max(1) as i32
     }
 
-    fn move_file_cursor(&mut self, delta: i32) {
+    fn move_file_cursor(&mut self, delta: i32) -> Effect {
         let n = self.commit_file_rows().len();
-        if let DrillView::Files { cursor, .. } = &mut self.drill {
-            if n == 0 {
-                *cursor = 0;
-                return;
-            }
-            let next = *cursor as i32 + delta;
-            *cursor = next.clamp(0, n as i32 - 1) as usize;
+        if n == 0 {
+            self.set_commit_file_cursor(0);
+            return Effect::None;
         }
+        let next = (self.commit_files_cursor() as i32 + delta).clamp(0, n as i32 - 1) as usize;
+        self.set_commit_file_cursor(next);
+        self.maybe_load_focused_commit_diff()
     }
 
     fn move_focused(&mut self, delta: i32) -> Effect {
-        if self.focus == FocusPane::Right {
-            match &self.drill {
-                DrillView::Files { .. } => {
-                    self.move_file_cursor(delta);
-                    Effect::None
-                }
-                DrillView::Diff { .. } => {
-                    self.scroll_right(delta);
-                    Effect::None
-                }
-                DrillView::Graph => {
-                    if self.tree_file_focused() {
-                        self.scroll_right(delta);
-                    } else {
-                        self.move_graph_cursor(delta);
-                    }
-                    Effect::None
-                }
+        match self.list_focus_target() {
+            ListFocusTarget::CommitFiles => self.move_file_cursor(delta),
+            ListFocusTarget::Graph => {
+                self.move_graph_cursor(delta);
+                Effect::None
             }
-        } else if self.in_commit_drill() {
-            self.move_graph_cursor(delta);
-            Effect::None
-        } else {
-            self.move_cursor(delta);
-            self.drill = DrillView::Graph;
-            Effect::LoadRightPane
+            ListFocusTarget::None => {
+                self.scroll_right(delta);
+                Effect::None
+            }
+            ListFocusTarget::Tree => {
+                self.move_cursor(delta);
+                self.drill = DrillView::Graph;
+                Effect::LoadRightPane
+            }
         }
     }
 
     fn move_focused_edge(&mut self, end: bool) -> Effect {
-        if self.focus == FocusPane::Right {
-            let tree_file = self.tree_file_focused();
-            match &self.drill {
-                DrillView::Files { .. } => {
-                    let n = self.commit_file_rows().len();
-                    if let DrillView::Files { cursor, .. } = &mut self.drill {
-                        *cursor = if end { n.saturating_sub(1) } else { 0 };
+        match self.list_focus_target() {
+            ListFocusTarget::CommitFiles => {
+                let n = self.commit_file_rows().len();
+                self.set_commit_file_cursor(if end { n.saturating_sub(1) } else { 0 });
+                self.maybe_load_focused_commit_diff()
+            }
+            ListFocusTarget::Graph => {
+                let n = self
+                    .graph
+                    .as_ref()
+                    .map(|g| g.visible_rows().len())
+                    .unwrap_or(0);
+                self.graph_cursor = if end { n.saturating_sub(1) } else { 0 };
+                self.sync_graph_scroll();
+                Effect::None
+            }
+            ListFocusTarget::None => Effect::None,
+            ListFocusTarget::Tree => {
+                if end {
+                    if !self.rows.is_empty() {
+                        self.cursor = self.rows.len() - 1;
                     }
-                    Effect::None
+                } else {
+                    self.cursor = 0;
                 }
-                DrillView::Graph if !tree_file => {
-                    let n = self
-                        .graph
-                        .as_ref()
-                        .map(|g| g.visible_rows().len())
-                        .unwrap_or(0);
-                    self.graph_cursor = if end { n.saturating_sub(1) } else { 0 };
-                    self.sync_graph_scroll();
-                    Effect::None
-                }
-                _ => Effect::None,
+                self.drill = DrillView::Graph;
+                Effect::LoadRightPane
             }
-        } else if self.in_commit_drill() {
-            let n = self
-                .graph
-                .as_ref()
-                .map(|g| g.visible_rows().len())
-                .unwrap_or(0);
-            self.graph_cursor = if end { n.saturating_sub(1) } else { 0 };
-            self.sync_graph_scroll();
-            Effect::None
-        } else if end {
-            if !self.rows.is_empty() {
-                self.cursor = self.rows.len() - 1;
-            }
-            self.drill = DrillView::Graph;
-            Effect::LoadRightPane
-        } else {
-            self.cursor = 0;
-            self.drill = DrillView::Graph;
-            Effect::LoadRightPane
         }
     }
 
@@ -2820,6 +2840,10 @@ impl AppState {
     }
 
     fn nav_esc(&mut self) -> Effect {
+        if self.focus == FocusPane::Right {
+            self.focus = FocusPane::Left;
+            return Effect::None;
+        }
         match &self.drill {
             DrillView::Diff {
                 repo,
@@ -2846,12 +2870,7 @@ impl AppState {
                 self.status = "graph".into();
                 Effect::LoadRightPane
             }
-            DrillView::Graph => {
-                if self.focus == FocusPane::Right {
-                    self.focus = FocusPane::Left;
-                }
-                Effect::None
-            }
+            DrillView::Graph => Effect::None,
         }
     }
 
@@ -3082,6 +3101,7 @@ fn visible_snapshot(snapshot: &WorkspaceSnapshot, show_ignored: bool) -> Workspa
 #[cfg(test)]
 mod tests {
     use super::super::easy_motion::visible_window;
+    use super::super::gates::ListFocusTarget;
     use super::super::keys::InputMode;
     use super::super::theme::{resolve_theme_id, ThemeId};
     use super::*;
@@ -5008,13 +5028,179 @@ mod tests {
             DiffContent::from_lines(vec!["+fn x() {}".into()]),
         );
         assert!(app.drill.is_diff());
+        assert_eq!(app.focus, FocusPane::Right);
+        assert_eq!(app.list_focus_target(), ListFocusTarget::None);
+        assert_eq!(app.dispatch(Action::NavEsc), Effect::None);
+        assert!(app.drill.is_diff(), "right Esc unfocuses without popping");
+        assert_eq!(app.focus, FocusPane::Left);
+        assert!(app.commit_files_list_focused());
         assert_eq!(app.dispatch(Action::NavEsc), Effect::None);
         assert!(app.drill.is_files());
+        assert_eq!(app.focus, FocusPane::Left);
+        assert_eq!(app.list_focus_target(), ListFocusTarget::Graph);
         assert!(app.graph.is_some());
         assert_eq!(app.dispatch(Action::NavEsc), Effect::LoadRightPane);
         assert!(app.drill.is_graph());
+        assert_eq!(app.focus, FocusPane::Left);
+    }
+
+    #[test]
+    fn esc_on_right_at_files_unfocuses_without_popping() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        install_graph(&mut app, Vec::new());
+        app.open_commit_files(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+            }],
+        );
+        assert_eq!(app.focus, FocusPane::Right);
+        assert!(app.drill.is_files());
+        assert_eq!(app.dispatch(Action::NavEsc), Effect::None);
+        assert!(app.drill.is_files());
+        assert_eq!(app.focus, FocusPane::Left);
+        assert_eq!(app.list_focus_target(), ListFocusTarget::Graph);
+    }
+
+    #[test]
+    fn j_k_on_depth_2_left_moves_commit_files_not_graph() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        install_graph(&mut app, Vec::new());
+        let files = vec![
+            CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+            },
+            CommitFile {
+                status: "A".into(),
+                path: "src/lib.rs".into(),
+                old_path: None,
+            },
+        ];
+        app.open_commit_files(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            files.clone(),
+        );
+        app.open_commit_diff(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            files,
+            0,
+            "README.md".into(),
+            DiffContent::from_lines(vec!["+fn x() {}".into()]),
+        );
         assert_eq!(app.dispatch(Action::NavEsc), Effect::None);
         assert_eq!(app.focus, FocusPane::Left);
+        assert!(app.drill.is_diff());
+        let graph_before = app.graph_cursor;
+        let rows = app.commit_file_rows();
+        let lib = rows
+            .iter()
+            .position(|row| row.path == "src/lib.rs")
+            .expect("src/lib.rs row");
+        assert!(lib > 0, "src/lib.rs should not be the first row: {rows:?}");
+        if let DrillView::Diff { file_cursor, .. } = &mut app.drill {
+            *file_cursor = lib - 1;
+        }
+        match app.dispatch(Action::Move(1)) {
+            Effect::LoadCommitDiff { path, .. } => assert_eq!(path, "src/lib.rs"),
+            other => panic!("expected LoadCommitDiff, got {other:?}"),
+        }
+        assert_eq!(app.graph_cursor, graph_before);
+        assert_eq!(app.commit_files_cursor(), lib);
+        assert_eq!(app.focus, FocusPane::Left);
+    }
+
+    #[test]
+    fn j_k_on_depth_1_left_still_moves_graph() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        install_graph(&mut app, Vec::new());
+        if let Some(model) = app.graph.as_mut() {
+            model.commits.push(graph_commit(
+                "bbb2222cccccccccccccccccccccccccccccccccc",
+                "other",
+            ));
+        }
+        app.open_commit_files(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+            }],
+        );
+        app.focus = FocusPane::Left;
+        let files_before = app.commit_files_cursor();
+        let graph_before = app.graph_cursor;
+        assert_eq!(app.dispatch(Action::Move(1)), Effect::None);
+        assert_eq!(app.commit_files_cursor(), files_before);
+        assert_ne!(app.graph_cursor, graph_before);
+    }
+
+    #[test]
+    fn fold_on_depth_2_left_folds_commit_files() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        install_graph(&mut app, Vec::new());
+        let files = vec![
+            CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+            },
+            CommitFile {
+                status: "A".into(),
+                path: "src/lib.rs".into(),
+                old_path: None,
+            },
+        ];
+        app.open_commit_diff(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            files,
+            0,
+            "README.md".into(),
+            DiffContent::from_lines(vec!["+fn x() {}".into()]),
+        );
+        app.focus = FocusPane::Left;
+        let dir = app
+            .commit_file_rows()
+            .iter()
+            .position(|row| row.id == "dir:src")
+            .expect("dir:src");
+        if let DrillView::Diff { file_cursor, .. } = &mut app.drill {
+            *file_cursor = dir;
+        }
+        assert!(app
+            .commit_file_rows()
+            .iter()
+            .any(|row| row.path == "src/lib.rs"));
+        app.dispatch(Action::FoldToggle);
+        assert!(
+            !app.commit_file_rows()
+                .iter()
+                .any(|row| row.path == "src/lib.rs"),
+            "folding dir:src should hide src/lib.rs"
+        );
     }
 
     #[test]

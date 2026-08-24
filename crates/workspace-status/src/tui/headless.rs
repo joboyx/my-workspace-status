@@ -181,6 +181,21 @@ impl HeadlessTui {
         self.state.drill.is_graph() && !self.state.right_is_diff()
     }
 
+    /// Whether keyboard focus is on the right pane.
+    pub fn focus_is_right(&self) -> bool {
+        matches!(self.state.focus, FocusPane::Right)
+    }
+
+    /// Depth 2 left pane is the commit-file list.
+    pub fn left_is_files(&self) -> bool {
+        self.state.drill.is_diff()
+    }
+
+    /// Depth 1 left pane is the graph list.
+    pub fn left_is_graph(&self) -> bool {
+        self.state.drill.is_files()
+    }
+
     fn send(&mut self, code: KeyCode) {
         let event = Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
         let action = event_to_action_ex(

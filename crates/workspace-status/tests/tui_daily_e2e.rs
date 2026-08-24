@@ -367,30 +367,44 @@ fn drill_enter_and_esc_walk_commit_files_diff() {
         "Enter on a commit file should open the diff:\n{diff}"
     );
     assert!(
+        tui.left_is_files() && (diff.contains("files") || diff.contains(" files")),
+        "depth 2 puts the commit-file list on the left:\n{diff}"
+    );
+    assert!(
+        tui.focus_is_right(),
+        "Enter that drills keeps right focus:\n{diff}"
+    );
+    assert!(
         diff.contains("left.txt")
             || diff.contains("right.txt")
             || diff.contains("wip.txt")
             || diff.contains("README.md"),
-        "commit diff header should keep the file path after the graph takes the left pane:\n{diff}"
+        "commit diff header should keep the file path:\n{diff}"
     );
     assert!(
         diff.contains("inline") || diff.contains("split"),
         "commit diff header should name the layout:\n{diff}"
     );
     tui.esc();
-    if tui.right_is_diff() {
+    if tui.focus_is_right() {
         tui.esc();
     }
+    let unfocus = tui.frame();
+    assert!(
+        tui.right_is_diff() && !tui.focus_is_right(),
+        "Esc on the right pane unfocuses without popping:\n{unfocus}"
+    );
+    tui.esc();
     let back_files = tui.frame();
     assert!(
-        tui.right_is_files(),
-        "Esc should pop to the file list:\n{back_files}"
+        tui.right_is_files() && tui.left_is_graph(),
+        "Esc on the left pane pops to commit files (graph left):\n{back_files}"
     );
     tui.esc();
     let back_graph = tui.frame();
     assert!(
         tui.right_is_graph(),
-        "Esc should pop to the graph:\n{back_graph}"
+        "Esc on the left pane pops to the graph:\n{back_graph}"
     );
     let _ = fs::remove_dir_all(root);
 }
