@@ -484,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_are_move_git_view_with_rust_extras() {
+    fn groups_are_move_git_view() {
         assert_eq!(HELP_GROUPS.len(), HELP_COLUMN_COUNT);
         assert_eq!(HELP_GROUPS[0].title, "MOVE");
         assert_eq!(HELP_GROUPS[1].title, "GIT");

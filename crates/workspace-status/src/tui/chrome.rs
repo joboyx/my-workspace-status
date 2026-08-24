@@ -1119,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_file_hints_include_stage_and_rust_extras_in_the_list() {
+    fn idle_file_hints_include_stage_and_extras_in_the_list() {
         let mut app = state();
         let idx = app
             .rows
