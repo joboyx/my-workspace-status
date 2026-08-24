@@ -519,6 +519,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             remote: pal.dir,
             tag: pal.modified,
             head_mark: pal.head_mark,
+            overflow: pal.heading,
         })
         .render(area, frame.buffer_mut());
     overlay_graph_easy_motion(frame, area, state);

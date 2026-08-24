@@ -207,6 +207,7 @@ function graphListRowOpts(
     refRemoteColor: active.palette.dir,
     refTagColor: active.palette.modified,
     headMarkColor: active.palette.headMark,
+    overflowColor: active.palette.heading,
     defaultBranchOverride,
     headBranch: headBranch ?? null,
   };

@@ -160,12 +160,13 @@ and `DEFAULT_LANE_COLORS`. Chrome is a 2-line selection footer
 (`graph_chrome_budget`). A loaded graph always emits the working-tree
 row. Commit and stash spacers reuse the same hash / date / author drop
 order. Dates are relative through 3 hours, then UTC `YYYY-MM-DD HH:MM`.
-The gutter is capped like Ink (`gutter.rs`: at most 30% of the pane,
+The gutter is capped (`gutter.rs`: at most 30% of the pane,
 keep ≥24 columns for refs+subject) and windowed around the focused
-commit. Overflow branch/tag chips collapse to `+N`; the footer lists
-every ref (HEAD commit refs on the working-tree row). `GraphWidget`
-colours subject vs meta vs HEAD / default / feature / remote / tag chips
-and paints a 1-column position scrollbar.
+commit. Overflow branch/tag chips collapse to a bold `[+N]` chip on the
+row itself; the footer lists every ref (HEAD commit refs on the
+working-tree row). `GraphWidget` colours subject vs meta vs HEAD /
+default / feature / remote / tag chips, paints the overflow chip in the
+heading accent (not muted meta), and paints a 1-column position scrollbar.
 
 See [graph.md](./graph.md).
 

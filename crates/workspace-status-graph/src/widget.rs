@@ -16,23 +16,25 @@ use crate::lane_colors::{cells_to_spans, default_lane_colors};
 use crate::model::GraphModel;
 use crate::paint::{paint_model_with, PaintOpts, PaintedLine};
 
-/// Ink subject / meta / ref-chip colours for graph labels.
+/// Subject, meta, and ref-chip colours for graph labels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphLabelPalette {
-    /// Commit subject (Ink `repo`).
+    /// Commit subject.
     pub subject: Color,
-    /// Hash, date, author (Ink `muted`).
+    /// Hash, date, author, worktree marks, padding.
     pub meta: Color,
     /// Feature / local branch chips.
     pub branch_local: Color,
     /// Default-branch chips.
     pub branch_default: Color,
-    /// Remote-tracking chips (Ink `dir`).
+    /// Remote-tracking chips.
     pub remote: Color,
-    /// Tag chips (Ink `modified`).
+    /// Tag chips.
     pub tag: Color,
-    /// Checkout / `[HEAD]` mark (Ink `headMark`).
+    /// Checkout / `[HEAD]` mark.
     pub head_mark: Color,
+    /// Hidden leftover branch/tag chip (`[+N]`). Distinct from muted meta.
+    pub overflow: Color,
 }
 
 /// Renderable git-graph widget.
@@ -136,7 +138,7 @@ impl<'a> GraphWidget<'a> {
         self
     }
 
-    /// Colour commit subjects, meta, and ref chips (Ink GraphPane palette).
+    /// Colour commit subjects, meta, ref chips, and the hidden-ref overflow chip.
     pub fn label_palette(mut self, palette: GraphLabelPalette) -> Self {
         self.label_palette = Some(palette);
         self
@@ -316,9 +318,7 @@ fn put_painted_line(
     } else {
         None
     };
-    let mut bar_style = Style::default()
-        .fg(cursor_fg)
-        .add_modifier(Modifier::BOLD);
+    let mut bar_style = Style::default().fg(cursor_fg).add_modifier(Modifier::BOLD);
     if let Some(bg) = row_bg {
         bar_style = bar_style.bg(bg);
     }
@@ -337,7 +337,11 @@ fn put_painted_line(
         .render(Rect::new(x, y, width, 1), buf);
 }
 
-fn label_spans(line: &PaintedLine, palette: Option<GraphLabelPalette>, fallback: Color) -> Vec<Span<'static>> {
+fn label_spans(
+    line: &PaintedLine,
+    palette: Option<GraphLabelPalette>,
+    fallback: Color,
+) -> Vec<Span<'static>> {
     let kind_color = |kind: LabelKind, pal: GraphLabelPalette| -> Color {
         match kind {
             LabelKind::Subject => pal.subject,
@@ -347,7 +351,7 @@ fn label_spans(line: &PaintedLine, palette: Option<GraphLabelPalette>, fallback:
             LabelKind::ChipDefault => pal.branch_default,
             LabelKind::ChipRemote => pal.remote,
             LabelKind::ChipTag => pal.tag,
-            LabelKind::Overflow => pal.meta,
+            LabelKind::Overflow => pal.overflow,
         }
     };
     if line.parts.is_empty() {
@@ -364,7 +368,11 @@ fn label_spans(line: &PaintedLine, palette: Option<GraphLabelPalette>, fallback:
             .parts
             .iter()
             .map(|p| {
-                Span::styled(p.text.clone(), Style::default().fg(kind_color(p.kind, pal)))
+                let mut style = Style::default().fg(kind_color(p.kind, pal));
+                if p.kind == LabelKind::Overflow {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                Span::styled(p.text.clone(), style)
             })
             .collect(),
     }
@@ -388,8 +396,11 @@ mod tests {
     use super::*;
     use crate::action::Action;
     use crate::action::Effect;
-    use crate::model::{Commit, GraphRow, Stash, SyncState, SyncStatus, Worktree};
-    use crate::paint::paint_model;
+    use crate::chrome::{selection_detail_lines, GraphFooterSelection};
+    use crate::format::overflow_chip_text;
+    use crate::hex_color;
+    use crate::model::{Commit, GraphRef, GraphRow, Stash, SyncState, SyncStatus, Worktree};
+    use crate::paint::{paint_model, paint_model_with, PaintOpts};
     use crate::topology::cells_text;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -645,7 +656,11 @@ mod tests {
         assert_eq!(spacer.row_index, subject_line.row_index);
         assert!(spacer.label.contains("stash@{0}"), "{}", spacer.label);
         assert!(spacer.label.contains("ccc3333"), "{}", spacer.label);
-        assert!(spacer.label.contains("2023-11-13 22:13"), "{}", spacer.label);
+        assert!(
+            spacer.label.contains("2023-11-13 22:13"),
+            "{}",
+            spacer.label
+        );
         assert!(spacer.label.contains("Ada Lovelace"), "{}", spacer.label);
         assert!(
             !subject_line.label.contains("stash@{0}"),
@@ -980,7 +995,9 @@ mod tests {
         }
         assert!(prev.contains("WIP on main"), "stash footer subject: {prev}");
         assert!(
-            last.contains("stash@{0}") && last.contains("ccc3333") && last.contains("2023-11-13 22:13"),
+            last.contains("stash@{0}")
+                && last.contains("ccc3333")
+                && last.contains("2023-11-13 22:13"),
             "stash footer meta ref · hash · date: {last}"
         );
         assert!(!last.contains("Ada"), "stash footer has no author: {last}");
@@ -1151,5 +1168,164 @@ mod tests {
         }
         assert!(saw_bar, "selected graph row should paint ▌");
         assert!(!saw_reversed, "graph cursor should not use reverse video");
+    }
+
+    fn many_ref_commit() -> Commit {
+        let mut refs = vec![
+            GraphRef::local("main"),
+            GraphRef::local("feature/long-topic"),
+        ];
+        for i in 0..6 {
+            refs.push(GraphRef::tag(format!("v1.{i}.0")));
+        }
+        Commit {
+            id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            subject: "tag soup".into(),
+            refs,
+            author_name: "Ada Lovelace".into(),
+            author_date_unix: NOW - 120,
+            ..Commit::default()
+        }
+    }
+
+    fn test_label_palette() -> GraphLabelPalette {
+        GraphLabelPalette {
+            subject: hex_color("#c0caf5"),
+            meta: hex_color("#565f89"),
+            branch_local: hex_color("#7aa2f7"),
+            branch_default: hex_color("#9ece6a"),
+            remote: hex_color("#7dcfff"),
+            tag: hex_color("#e0af68"),
+            head_mark: hex_color("#ff9e64"),
+            overflow: hex_color("#7dcfff"),
+        }
+    }
+
+    #[test]
+    fn narrow_row_shows_overflow_chip_for_hidden_branches_and_tags() {
+        let commit = many_ref_commit();
+        let model = GraphModel {
+            commits: vec![commit.clone()],
+            head_id: Some(commit.id.clone()),
+            uncommitted: Some(false),
+            window: 1,
+            ..GraphModel::default()
+        };
+        let width = 42u16;
+        let painted = paint_model_with(
+            &model,
+            &crate::ASCII,
+            PaintOpts {
+                now_unix: Some(NOW),
+                line_width: Some(width as usize),
+                ..PaintOpts::default()
+            },
+        );
+        let spacer = painted
+            .iter()
+            .find(|l| !l.selectable && l.label.contains("[main]"))
+            .or_else(|| painted.iter().find(|l| !l.selectable))
+            .expect("commit spacer");
+        assert!(
+            spacer.label.chars().count() <= width as usize,
+            "row must not grow past pane: {}",
+            spacer.label
+        );
+        let overflow = spacer
+            .parts
+            .iter()
+            .find(|p| p.kind == crate::LabelKind::Overflow)
+            .expect("overflow part");
+        assert!(
+            overflow.text.starts_with("[+") && overflow.text.ends_with(']'),
+            "overflow chip: {}",
+            overflow.text
+        );
+        assert!(
+            !spacer.label.contains("[v1.5.0]") || !spacer.label.contains("[feature/long-topic]"),
+            "some branch/tag chips must hide: {}",
+            spacer.label
+        );
+
+        let row = GraphRow::Commit {
+            commit: commit.clone(),
+            is_head: true,
+            worktrees: Vec::new(),
+        };
+        let [_, footer] = selection_detail_lines(
+            &model,
+            GraphFooterSelection::Row(&row),
+            &crate::ASCII,
+            200,
+            NOW,
+        );
+        assert!(footer.contains("[main]"), "{footer}");
+        assert!(footer.contains("[feature/long-topic]"), "{footer}");
+        for i in 0..6 {
+            assert!(
+                footer.contains(&format!("[v1.{i}.0]")),
+                "footer keeps tag v1.{i}.0: {footer}"
+            );
+        }
+        assert!(
+            !footer.contains(&overflow_chip_text(1)),
+            "footer lists refs instead of collapsing them: {footer}"
+        );
+    }
+
+    #[test]
+    fn overflow_chip_uses_overflow_colour_not_muted_meta() {
+        let commit = many_ref_commit();
+        let model = GraphModel {
+            commits: vec![commit],
+            uncommitted: Some(false),
+            window: 1,
+            ..GraphModel::default()
+        };
+        let pal = test_label_palette();
+        let backend = TestBackend::new(48, 10);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .ascii(true)
+                    .now_unix(NOW)
+                    .label_palette(pal)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut saw_overflow = false;
+        let mut overflow_uses_meta = false;
+        for y in 0..10u16 {
+            let mut x = 0u16;
+            while x < 48 {
+                let cell = &buffer[(x, y)];
+                if cell.symbol() != "[" {
+                    x += 1;
+                    continue;
+                }
+                let next = buffer[(x.saturating_add(1), y)].symbol();
+                if next != "+" {
+                    x += 1;
+                    continue;
+                }
+                saw_overflow = true;
+                assert_eq!(cell.fg, pal.overflow, "overflow chip colour");
+                assert!(
+                    cell.modifier.contains(Modifier::BOLD),
+                    "overflow chip must be bold"
+                );
+                if cell.fg == pal.meta {
+                    overflow_uses_meta = true;
+                }
+                x += 1;
+            }
+        }
+        assert!(saw_overflow, "expected [+N] on the narrow graph row");
+        assert!(
+            !overflow_uses_meta,
+            "overflow must not use muted meta colour"
+        );
     }
 }
