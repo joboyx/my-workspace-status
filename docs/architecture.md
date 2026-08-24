@@ -106,7 +106,7 @@ CLI flags live in `cli.rs`.
 
 `--fetch`, `--pull`, and `--default-branch` write progress to stderr when `--json` is set. `--json` wins when both `--json` and `--plain` are set. `-v` applies to `--plain` only.
 
-On a TTY (or `-i` / `--tui`) the binary opens the ratatui TUI. Tree chrome (status letters, Nerd glyphs, workspace wording, linked-checkout labels, sync marks) lives in `tui/icons.rs` (glyph registry), `tui/tree.rs` (`node_segments`), and `tui/render.rs` (right-aligned trailing + cursor bar). Bottom chrome (mode pills, hint chips, breadcrumb) lives in `tui/chrome.rs`. In-flight fetch / pull / push / default-branch paint `Verb n/N…` on the breadcrumb trailing slot (`tui/ops.rs` `format_running_op`) and redraw after each repo. Commit-file lists reuse the same file chrome. See [tui-rust.md](./tui-rust.md).
+On a TTY (or `-i` / `--tui`) the binary opens the ratatui TUI. Tree chrome (status letters, Nerd glyphs, workspace wording, linked-checkout labels, sync marks) lives in `tui/icons.rs` (glyph registry), `tui/tree.rs` (`node_segments`), and `tui/render.rs` (right-aligned trailing + cursor bar). Bottom chrome (mode pills, hint chips, breadcrumb) lives in `tui/chrome.rs`. In-flight fetch / pull / push / default-branch paint `Verb n/N…` on the breadcrumb trailing slot (`tui/ops.rs` `format_running_op`) and redraw after each repo. Completion uses `format_completed_op` (`Fetched N repos`, with ` (N failed)` if any) so the slot never lists repo names. Commit-file lists reuse the same file chrome. See [tui-rust.md](./tui-rust.md).
 
 ## Graph crate
 

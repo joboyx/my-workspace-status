@@ -155,6 +155,27 @@ pub fn format_running_op(kind: RunningOp, done: usize, total: usize) -> String {
     }
 }
 
+/// Completion line for a finished workspace op: `Pulled 3 repos`.
+///
+/// `ok + failed` is how many repos the op ran against. `failed > 0`
+/// appends ` (N failed)`. Repo names are never listed — a long
+/// workspace must not swamp the breadcrumb trailing slot.
+pub fn format_completed_op(kind: RunningOp, ok: usize, failed: usize) -> String {
+    let verb = match kind {
+        RunningOp::Fetch => "Fetched",
+        RunningOp::Pull => "Pulled",
+        RunningOp::Push => "Pushed",
+        RunningOp::DefaultBranch => "Switched",
+    };
+    let total = ok.saturating_add(failed);
+    let noun = if total == 1 { "repo" } else { "repos" };
+    if failed > 0 {
+        format!("{verb} {total} {noun} ({failed} failed)")
+    } else {
+        format!("{verb} {total} {noun}")
+    }
+}
+
 /// True when `p` / `d` must stay a silent no-op on this row kind.
 ///
 /// Pull / default-branch are workspace / repo / checkout only.
@@ -670,5 +691,26 @@ mod tests {
             "Switching 0/5…"
         );
         assert_eq!(format_running_op(RunningOp::Pull, 0, 0), "Pulling…");
+    }
+
+    #[test]
+    fn completed_op_summary_counts_repos_and_failures() {
+        assert_eq!(format_completed_op(RunningOp::Pull, 3, 0), "Pulled 3 repos");
+        assert_eq!(
+            format_completed_op(RunningOp::Fetch, 3, 1),
+            "Fetched 4 repos (1 failed)"
+        );
+        assert_eq!(format_completed_op(RunningOp::Push, 1, 0), "Pushed 1 repo");
+        assert_eq!(
+            format_completed_op(RunningOp::Push, 0, 2),
+            "Pushed 2 repos (2 failed)"
+        );
+        assert_eq!(
+            format_completed_op(RunningOp::DefaultBranch, 2, 1),
+            "Switched 3 repos (1 failed)"
+        );
+        let listed = format_completed_op(RunningOp::Fetch, 2, 0);
+        assert!(!listed.contains("notes"), "{listed}");
+        assert!(!listed.contains("dotfiles"), "{listed}");
     }
 }
