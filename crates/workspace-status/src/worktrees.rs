@@ -1,7 +1,6 @@
 //! Worktree porcelain parse, under-cwd mapping, merge classification.
 
 use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use crate::helpers::DETACHED_HEAD_BRANCH;
@@ -15,10 +14,22 @@ pub struct GitWorktreeListEntry {
     pub detached: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Filesystem identity used to match a TUI path to a git-registered worktree.
+///
+/// Unix uses `(dev, ino)` so bind-mount aliases match. Other platforms have no
+/// inodes; identity is canonical path plus size and mtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathIdentity {
+    #[cfg(unix)]
     pub dev: u64,
+    #[cfg(unix)]
     pub ino: u64,
+    #[cfg(not(unix))]
+    path: PathBuf,
+    #[cfg(not(unix))]
+    len: u64,
+    #[cfg(not(unix))]
+    mtime: Option<std::time::SystemTime>,
 }
 
 fn realpath(abs: &Path) -> PathBuf {
@@ -26,13 +37,26 @@ fn realpath(abs: &Path) -> PathBuf {
 }
 
 fn identity(abs: &Path) -> Option<PathIdentity> {
-    fs::metadata(abs).ok().map(|st| PathIdentity {
-        dev: st.dev(),
-        ino: st.ino(),
-    })
+    let st = fs::metadata(abs).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(PathIdentity {
+            dev: st.dev(),
+            ino: st.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Some(PathIdentity {
+            path: abs.to_path_buf(),
+            len: st.len(),
+            mtime: st.modified().ok(),
+        })
+    }
 }
 
-fn same_identity(a: Option<PathIdentity>, b: Option<PathIdentity>) -> bool {
+fn same_identity(a: Option<&PathIdentity>, b: Option<&PathIdentity>) -> bool {
     matches!((a, b), (Some(x), Some(y)) if x == y)
 }
 
@@ -70,7 +94,7 @@ fn remap_via_primary_identity(
     let mut suffix: Vec<String> = Vec::new();
     let mut cur = abs.to_path_buf();
     loop {
-        if same_identity(identity(&cur), Some(primary_id)) || cur == primary {
+        if same_identity(identity(&cur).as_ref(), Some(&primary_id)) || cur == primary {
             suffix.reverse();
             let extra = suffix.join("/");
             let rel_path = join_workspace_rel(&[primary_rel.as_str(), extra.as_str()]);
@@ -105,7 +129,7 @@ pub fn map_linked_worktree_rel_path(
     let abs = realpath(entry_abs);
     let primary_id = identity(&primary);
 
-    if same_identity(identity(&abs), primary_id) || abs == primary {
+    if same_identity(identity(&abs).as_ref(), primary_id.as_ref()) || abs == primary {
         return None;
     }
     if !under_dir(&primary, &cwd) {
@@ -233,7 +257,7 @@ fn listed_worktree_path(entries: &[GitWorktreeListEntry], worktree_abs: &Path) -
             continue;
         }
         let listed = resolve_abs(&entry.path);
-        if same_identity(identity(&listed), wt_id) {
+        if same_identity(identity(&listed).as_ref(), wt_id.as_ref()) {
             return listed;
         }
     }
@@ -244,7 +268,7 @@ fn registered_primary_abs(abs: &Path, primary_abs: &Path) -> Option<PathBuf> {
     let primary_id = identity(&resolve_abs(primary_abs))?;
     let mut cur = resolve_abs(abs);
     loop {
-        if same_identity(identity(&cur), Some(primary_id)) {
+        if same_identity(identity(&cur).as_ref(), Some(&primary_id)) {
             return Some(cur);
         }
         match cur.parent() {
@@ -254,7 +278,8 @@ fn registered_primary_abs(abs: &Path, primary_abs: &Path) -> Option<PathBuf> {
     }
 }
 
-/// `gitPath` is the porcelain worktree line (inode match when prefixes differ).
+/// `gitPath` is the porcelain worktree line (inode match on Unix when prefixes
+/// differ; path + size + mtime elsewhere).
 /// `gitCwd` is the registered primary prefix so gitdir back-pointers match.
 pub fn resolve_worktree_remove_target(
     entries: &[GitWorktreeListEntry],
@@ -355,5 +380,22 @@ detached
         );
         assert_eq!(target.git_path, PathBuf::from("/tmp/app/.worktrees/feat"));
         assert_eq!(target.git_cwd, PathBuf::from("/tmp/app"));
+    }
+
+    #[test]
+    fn identity_same_path_matches_and_parent_differs() {
+        let dir = std::env::temp_dir();
+        let a = identity(&dir);
+        let b = identity(&dir);
+        assert!(a.is_some());
+        assert!(same_identity(a.as_ref(), b.as_ref()));
+        if let Some(parent) = dir.parent() {
+            if parent != dir {
+                let parent_id = identity(parent);
+                if parent_id.is_some() {
+                    assert!(!same_identity(a.as_ref(), parent_id.as_ref()));
+                }
+            }
+        }
     }
 }

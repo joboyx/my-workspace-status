@@ -41,6 +41,14 @@ Uninstall:
 
 That removes `~/.local/bin/{ws,workspace-status,workspace-status-update}` (and a leftover `~/.cargo/bin` copy) and the cargo-dist receipt under `${XDG_CONFIG_HOME:-$HOME/.config}/workspace-status/`.
 
+Windows (same private-repo token):
+
+```powershell
+gh release download -R joboyx/my-workspace-status --pattern workspace-status-installer.ps1
+$env:WORKSPACE_STATUS_GITHUB_TOKEN = gh auth token
+.\workspace-status-installer.ps1
+```
+
 ### cargo install (fallback)
 
 Requires rustc 1.85 or later. This repository is a Cargo workspace. Name the package when you install from git:
