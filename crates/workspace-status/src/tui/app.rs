@@ -15,16 +15,16 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use workspace_status_graph::LOADING_OLDER;
 
-use crate::actions::{pull_behind_repos, switch_repo_to_default_branch};
+use crate::actions::switch_repo_to_default_branch;
 use crate::config::WorkspaceStatusConfig;
 use crate::discovery::{collect_snapshots, process_repo, RepoCheckoutMeta};
 use crate::git::{
     checkout_branch, create_branch_at, create_branch_checkout, diff_commit_file_ctx,
     diff_stash_file_ctx, exec_git_checked, fast_forward_to_remote_ref, git_diff_args,
     latest_stash_ref, list_commit_name_status, list_local_branches, list_stash_name_status,
-    list_worktree_name_status, push_quiet, remove_untracked_file, remove_worktree,
-    repo_has_local_changes, rev_parse_quiet, revert_tracked_file, stage_file, stash_apply,
-    stash_drop, stash_pop, stash_push, unstage_file,
+    list_worktree_name_status, pull_quiet_detailed, push_quiet, remove_untracked_file,
+    remove_worktree, repo_has_local_changes, rev_parse_quiet, revert_tracked_file, stage_file,
+    stash_apply, stash_drop, stash_pop, stash_push, unstage_file,
 };
 use crate::snapshot::{
     build_workspace_snapshot, repo_snapshots_from_workspace, CheckoutKind, WorkspaceSnapshot,
@@ -44,6 +44,7 @@ use super::graph_load::{
     refresh_graph_limit, should_autoload, ShouldAutoload,
 };
 use super::keys::event_to_action_ex;
+use super::ops::{format_running_op, RunningOp};
 use super::render::draw;
 use super::state::AppState;
 use super::watch::watch_interval_ms;
@@ -158,6 +159,34 @@ fn run_loop(
     }
 }
 
+fn paint_running_op(
+    state: &mut AppState,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    kind: RunningOp,
+    done: usize,
+    total: usize,
+) {
+    state.status = format_running_op(kind, done, total);
+    let _ = terminal.draw(|frame| draw(frame, state));
+}
+
+fn run_repos_with_progress<F>(
+    state: &mut AppState,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    kind: RunningOp,
+    repos: &[String],
+    mut each: F,
+) where
+    F: FnMut(&str),
+{
+    let total = repos.len();
+    paint_running_op(state, terminal, kind, 0, total);
+    for (i, repo) in repos.iter().enumerate() {
+        each(repo);
+        paint_running_op(state, terminal, kind, i + 1, total);
+    }
+}
+
 fn apply_effect(
     state: &mut AppState,
     effect: Effect,
@@ -182,30 +211,40 @@ fn apply_effect_inner(
             }
         }
         Effect::Fetch { repos } => {
-            for repo in &repos {
+            run_repos_with_progress(state, terminal, RunningOp::Fetch, &repos, |repo| {
                 let _ = exec_git_checked(&["fetch", "--quiet"], &opts.cwd.join(repo));
-            }
+            });
             reload_snapshot(state, opts);
             state.status = format!("fetched {}", repos.join(" "));
             load_right(state);
         }
         Effect::Pull { repos } => {
-            let _ = pull_behind_repos(&opts.cwd, &repos);
+            run_repos_with_progress(state, terminal, RunningOp::Pull, &repos, |repo| {
+                let _ = pull_quiet_detailed(&opts.cwd.join(repo));
+            });
             reload_snapshot(state, opts);
             state.status = format!("pulled {}", repos.join(" "));
             load_right(state);
         }
         Effect::DefaultBranch { repos } => {
-            for repo in &repos {
-                let Some(snap) = state.snapshot.repos.iter().find(|r| r.repo == *repo) else {
-                    continue;
-                };
-                let _ = switch_repo_to_default_branch(
-                    repo,
-                    &snap.branch,
-                    &opts.cwd,
-                    snap.default_branch_override.as_deref(),
-                );
+            let total = repos.len();
+            paint_running_op(state, terminal, RunningOp::DefaultBranch, 0, total);
+            for (i, repo) in repos.iter().enumerate() {
+                let task = state
+                    .snapshot
+                    .repos
+                    .iter()
+                    .find(|r| r.repo == *repo)
+                    .map(|snap| (snap.branch.clone(), snap.default_branch_override.clone()));
+                if let Some((branch, override_name)) = task {
+                    let _ = switch_repo_to_default_branch(
+                        repo,
+                        &branch,
+                        &opts.cwd,
+                        override_name.as_deref(),
+                    );
+                }
+                paint_running_op(state, terminal, RunningOp::DefaultBranch, i + 1, total);
             }
             reload_snapshot(state, opts);
             state.status = format!("default-branch {}", repos.join(" "));
@@ -327,11 +366,14 @@ fn apply_effect_inner(
         Effect::Push { repos } => {
             let mut ok = 0;
             let mut failed = 0;
-            for repo in &repos {
+            let total = repos.len();
+            paint_running_op(state, terminal, RunningOp::Push, 0, total);
+            for (i, repo) in repos.iter().enumerate() {
                 match push_quiet(&opts.cwd.join(repo)) {
                     Ok(()) => ok += 1,
                     Err(_) => failed += 1,
                 }
+                paint_running_op(state, terminal, RunningOp::Push, i + 1, total);
             }
             reload_snapshot(state, opts);
             state.status = if failed > 0 && ok == 0 {

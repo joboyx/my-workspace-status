@@ -428,6 +428,19 @@ fn chrome_pills_breadcrumb_and_armed_search_chip() {
 }
 
 #[test]
+fn fetch_paints_running_op_progress_on_breadcrumb() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    tui.key('f');
+    let frame = tui.frame();
+    assert!(
+        frame.contains("Fetching 0/1…") || frame.contains("Fetching 0/"),
+        "manual f should paint repo progress on the breadcrumb:\n{frame}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn hidden_ignored_stay_out_until_shown() {
     let (root, workspace) = daily_workspace();
     let mut hidden = open(&workspace);
