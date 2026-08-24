@@ -127,10 +127,20 @@ export function graphSelectionDetailLines(
   if (row.kind === 'uncommitted') {
     const hasChanges = model?.uncommitted?.hasChanges ?? true;
     const line = hasChanges ? 'Uncommitted changes' : 'Working tree clean';
+    const head = model?.headId
+      ? model.commits.find((c) => c.id === model.headId)
+      : undefined;
+    const chipSegs = head
+      ? graphRefChipSegments(head.refs, opts, true)
+      : [];
+    const line2 =
+      chipSegs.length > 0
+        ? truncateSegments(chipSegs, width)
+        : [{ text: truncLine('worktree · not a commit', width), color: muted }];
     return {
       footer: [
         [{ text: truncLine(line, width), color: subjectColor }],
-        [{ text: truncLine('worktree · not a commit', width), color: muted }],
+        line2,
       ],
     };
   }

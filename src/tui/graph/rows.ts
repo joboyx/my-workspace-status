@@ -77,17 +77,27 @@ export type GraphRowOptions = {
   ascii?: boolean;
 };
 
+/** Relative ages only up to 3 hours (iOS notification style). */
+export const RELATIVE_DATE_LIMIT_SECS = 3 * 3600;
+
+/** UTC `YYYY-MM-DD HH:MM` for timestamps older than {@link RELATIVE_DATE_LIMIT_SECS}. */
+export function formatUtcTimestamp(unix: number): string {
+  const d = new Date(Math.max(0, unix) * 1000);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+}
+
 /**
- * Compact relative date for graph rows.
+ * Compact relative date for graph rows. Older than 3h → UTC timestamp.
  */
 export function formatRelativeDate(unix: number, nowUnix: number): string {
   const delta = Math.max(0, nowUnix - unix);
-  if (delta < 60) return 'just now';
-  if (delta < 3600) return `${Math.floor(delta / 60)}m`;
-  if (delta < 86400) return `${Math.floor(delta / 3600)}h`;
-  if (delta < 86400 * 14) return `${Math.floor(delta / 86400)}d`;
-  if (delta < 86400 * 70) return `${Math.floor(delta / (86400 * 7))}w`;
-  return `${Math.floor(delta / (86400 * 365))}y`;
+  if (delta <= RELATIVE_DATE_LIMIT_SECS) {
+    if (delta < 60) return 'just now';
+    if (delta < 3600) return `${Math.floor(delta / 60)}m`;
+    return `${Math.floor(delta / 3600)}h`;
+  }
+  return formatUtcTimestamp(unix);
 }
 
 function trunc(text: string, max: number): string {
@@ -320,20 +330,79 @@ function chipIsCheckout(
  * the Nerd Font crosshairs mark when HEAD is on that branch.
  * Shared by commit spacers and the GraphPane selection footer.
  */
+/**
+ * Whole chips as groups so a narrow spacer can hide leftover chips as `+N`
+ * instead of mid-chip ellipsis.
+ */
+export function graphRefChipGroups(
+  refs: readonly GraphRef[],
+  opts: GraphRowOptions,
+  isHead: boolean,
+): Segment[][] {
+  const headMark = opts.headMarkColor ?? '#e0af68';
+  const groups: Segment[][] = [];
+  if (showDetachedHeadChip(opts, isHead)) {
+    groups.push([{ text: '[HEAD]', color: headMark, bold: true }]);
+  }
+  for (const chip of mergeCommitRefChips(refs, opts)) {
+    groups.push(mergedRefChipSegments(chip, opts, chipIsCheckout(chip, opts, isHead)));
+  }
+  return groups;
+}
+
+function segsWidth(segs: readonly Segment[]): number {
+  return segs.reduce((n, s) => n + s.text.length, 0);
+}
+
+/**
+ * Keep whole chip groups that fit; leftover count becomes `+N`.
+ */
+export function fitChipGroups(
+  groups: readonly Segment[][],
+  budget: number,
+  overflowColor: string,
+): Segment[] {
+  if (groups.length === 0 || budget <= 0) return [];
+  const gapColor = overflowColor;
+  const n = groups.length;
+  for (let k = n; k >= 0; k--) {
+    const hidden = n - k;
+    let width = 0;
+    for (let i = 0; i < k; i++) {
+      if (i > 0) width += 1;
+      width += segsWidth(groups[i]!);
+    }
+    const ov =
+      hidden > 0 ? `+${hidden}`.length + (k > 0 ? 1 : 0) : 0;
+    if (width + ov <= budget) {
+      const out: Segment[] = [];
+      for (let i = 0; i < k; i++) {
+        if (i > 0) out.push({ text: ' ', color: gapColor });
+        out.push(...groups[i]!);
+      }
+      if (hidden > 0) {
+        if (k > 0) out.push({ text: ' ', color: gapColor });
+        out.push({ text: `+${hidden}`, color: overflowColor });
+      }
+      return out;
+    }
+  }
+  const token = `+${n}`;
+  if (token.length <= budget) return [{ text: token, color: overflowColor }];
+  return [{ text: token.slice(0, Math.max(1, budget)), color: overflowColor }];
+}
+
 export function graphRefChipSegments(
   refs: readonly GraphRef[],
   opts: GraphRowOptions,
   isHead: boolean,
 ): Segment[] {
   const gapColor = opts.subjectColor ?? '#c0caf5';
-  const headMark = opts.headMarkColor ?? '#e0af68';
+  const groups = graphRefChipGroups(refs, opts, isHead);
   const segs: Segment[] = [];
-  if (showDetachedHeadChip(opts, isHead)) {
-    segs.push({ text: '[HEAD]', color: headMark, bold: true });
-  }
-  for (const chip of mergeCommitRefChips(refs, opts)) {
+  for (const g of groups) {
     if (segs.length > 0) segs.push({ text: ' ', color: gapColor });
-    segs.push(...mergedRefChipSegments(chip, opts, chipIsCheckout(chip, opts, isHead)));
+    segs.push(...g);
   }
   return segs;
 }
@@ -805,11 +874,9 @@ export function graphSpacerSegments(
   const meta = metaColumnsText(hash, date, author, cols);
   const refBudget = Math.max(0, available - meta.length);
 
-  const refSegs = commitRefChipSegments(prev, opts, isHead);
-  if (refSegs.length > 0 && refBudget > 0) {
-    // Pane width must not recolour chips — truncate with colour boundaries intact
-    // (depth-0 right vs depth-1 left often differ only by available columns).
-    segs.push(...truncateSegments(refSegs, refBudget));
+  const refGroups = graphRefChipGroups(prev.commit.refs, opts, isHead);
+  if (refGroups.length > 0 && refBudget > 0) {
+    segs.push(...fitChipGroups(refGroups, refBudget, muted));
   }
   if (meta.length > 0) {
     const leftLen = segmentsText(segs).length;

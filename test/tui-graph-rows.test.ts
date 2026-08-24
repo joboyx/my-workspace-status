@@ -45,7 +45,8 @@ describe('formatRelativeDate', () => {
     assert.equal(formatRelativeDate(100, 100), 'just now');
     assert.equal(formatRelativeDate(0, 120), '2m');
     assert.equal(formatRelativeDate(0, 3600 * 3), '3h');
-    assert.equal(formatRelativeDate(0, 86400 * 2), '2d');
+    assert.equal(formatRelativeDate(0, 3600 * 3 + 1), '1970-01-01 00:00');
+    assert.equal(formatRelativeDate(0, 86400 * 2), '1970-01-01 00:00');
   });
 });
 
@@ -363,10 +364,14 @@ describe('graphCommitSegments', () => {
     // Depth-1 left panes are much narrower than depth-0 right; truncation
     // must keep chip colours (not flatten the whole ref run to muted).
     const narrow = graphSpacerSegments({ ...colorOpts, width: 36 }, row, null);
+    const text = segmentsText(narrow);
     const chipColors = new Set(
       narrow.filter((s) => s.color === '#local' || s.color === '#tag').map((s) => s.color),
     );
-    assert.ok(chipColors.size > 0, 'narrow spacer must retain at least one chip colour');
+    assert.ok(
+      chipColors.size > 0 || /\+\d/.test(text),
+      `narrow spacer keeps a chip colour or +N overflow: ${text}`,
+    );
     assert.ok(
       !narrow.some(
         (s) =>
@@ -375,6 +380,7 @@ describe('graphCommitSegments', () => {
       ),
       'must not flatten truncated refs into a single muted blob',
     );
+    assert.doesNotMatch(text, /…/, 'must not mid-chip ellipsis');
   });
 
   it('ref chip colours match across wide and narrow panes when chips fully fit', () => {
