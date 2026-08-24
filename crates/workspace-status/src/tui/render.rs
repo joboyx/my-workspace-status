@@ -43,16 +43,16 @@ use super::tree::{row_segments, NodeKind, NodeSegments, SegRole, TextSeg, Visibl
 use super::watch::flash_active;
 use crate::helpers::visible_width;
 
-/// Empty tree / empty commit-file list (Ink TreePane).
+/// Empty tree / empty commit-file list.
 const NO_MATCHING_ROWS: &str = "No matching rows";
-/// Commit-file list while git is still listing (Ink CommitDetailPane).
+/// Commit-file list while git is still listing.
 const LOADING_FILES: &str = "loading files…";
 
 fn muted_copy(text: &'static str, palette: Palette) -> Line<'static> {
     Line::from(Span::styled(text, Style::default().fg(palette.muted)))
 }
 
-/// Cursor → search match → flash. Same stack as Ink `treeRowEmphasis`.
+/// Cursor → search match → flash. Same stack as `treeRowEmphasis`.
 fn row_match_bg(
     selected: bool,
     search_match: bool,
@@ -1784,7 +1784,7 @@ mod tests {
     }
 
     #[test]
-    fn confirm_overlays_match_ink_copy_not_status_line() {
+    fn confirm_overlays_use_boxed_copy_not_status_line() {
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         state.confirm = Some(PendingConfirm::Revert {

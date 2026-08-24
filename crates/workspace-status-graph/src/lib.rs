@@ -1,8 +1,7 @@
 //! Ratatui widget for the workspace-status git graph.
 //!
 //! The crate owns the graph *model* and a renderable [`GraphWidget`].
-//! It does not run a terminal app. The TypeScript Ink TUI still ships
-//! in this repository for features the Rust TUI has not ported yet.
+//! It does not run a terminal app.
 //!
 //! Interactive and headless callers share [`GraphModel::visible_rows`] and
 //! the format helpers. Display differs: the widget paints a multi-lane
@@ -31,10 +30,10 @@ pub use chrome::{
 pub use format::{
     assemble_commit_spacer, assemble_stash_spacer, format_commit_ref_chips,
     format_commit_ref_chips_with, format_commit_spacer, format_commit_subject, format_label,
-    format_relative_date, format_row, format_stash_spacer,
-    format_sync, format_utc_timestamp, meta_column_widths, meta_column_widths_with_stashes,
-    meta_columns_text, pick_meta_columns, short_id, CommitSpacerOpts, LabelKind, LabelPart,
-    MetaCols, StashSpacerOpts, RELATIVE_DATE_LIMIT_SECS,
+    format_relative_date, format_row, format_stash_spacer, format_sync, format_utc_timestamp,
+    meta_column_widths, meta_column_widths_with_stashes, meta_columns_text, pick_meta_columns,
+    short_id, CommitSpacerOpts, LabelKind, LabelPart, MetaCols, StashSpacerOpts,
+    RELATIVE_DATE_LIMIT_SECS,
 };
 pub use glyphs::{GlyphSet, ASCII, CELL_W, UNICODE};
 pub use gutter::{graph_gutter_cap, resolve_graph_width, GUTTER_MAX_FRACTION, MIN_SUBJECT_FLOOR};

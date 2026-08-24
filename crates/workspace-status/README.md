@@ -8,6 +8,8 @@ On a TTY, `workspace-status` and `ws` open a ratatui TUI.
 
 Screenshots of the tree, graph, diff, and overlays: [root README](../../README.md#screenshots).
 
+See [docs/tui-rust.md](../../docs/tui-rust.md).
+
 Install from the public GitHub Release installer (see the [root README](../../README.md#install)), or from this crate:
 
 ```bash

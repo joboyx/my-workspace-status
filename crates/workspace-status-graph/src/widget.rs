@@ -16,22 +16,22 @@ use crate::lane_colors::{cells_to_spans, default_lane_colors};
 use crate::model::GraphModel;
 use crate::paint::{paint_model_with, PaintOpts, PaintedLine};
 
-/// Ink subject / meta / ref-chip colours for graph labels.
+/// Subject / meta / ref-chip colours for graph labels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphLabelPalette {
-    /// Commit subject (Ink `repo`).
+    /// Commit subject.
     pub subject: Color,
-    /// Hash, date, author (Ink `muted`).
+    /// Hash, date, author.
     pub meta: Color,
     /// Feature / local branch chips.
     pub branch_local: Color,
     /// Default-branch chips.
     pub branch_default: Color,
-    /// Remote-tracking chips (Ink `dir`).
+    /// Remote-tracking chips.
     pub remote: Color,
-    /// Tag chips (Ink `modified`).
+    /// Tag chips.
     pub tag: Color,
-    /// Checkout / `[HEAD]` mark (Ink `headMark`).
+    /// Checkout / `[HEAD]` mark.
     pub head_mark: Color,
 }
 
@@ -119,7 +119,7 @@ impl<'a> GraphWidget<'a> {
         self
     }
 
-    /// Paint Ink `searchMatchIds` background on selectable graph rows.
+    /// Paint `searchMatchIds` background on selectable graph rows.
     ///
     /// `indices` are [`GraphModel::visible_rows`] indexes. Spacers stay
     /// unhighlighted. [`Self::selected`] still wins over a match.
@@ -129,14 +129,14 @@ impl<'a> GraphWidget<'a> {
         self
     }
 
-    /// Ink cursor bar (`▌`) plus `cursorBg`. Spacers keep the background only.
+    /// Cursor bar (`▌`) plus `cursorBg`. Spacers keep the background only.
     pub fn cursor_style(mut self, fg: Color, bg: Color) -> Self {
         self.cursor_fg = fg;
         self.cursor_bg = Some(bg);
         self
     }
 
-    /// Colour commit subjects, meta, and ref chips (Ink GraphPane palette).
+    /// Colour commit subjects, meta, and ref chips.
     pub fn label_palette(mut self, palette: GraphLabelPalette) -> Self {
         self.label_palette = Some(palette);
         self
@@ -316,9 +316,7 @@ fn put_painted_line(
     } else {
         None
     };
-    let mut bar_style = Style::default()
-        .fg(cursor_fg)
-        .add_modifier(Modifier::BOLD);
+    let mut bar_style = Style::default().fg(cursor_fg).add_modifier(Modifier::BOLD);
     if let Some(bg) = row_bg {
         bar_style = bar_style.bg(bg);
     }
@@ -337,7 +335,11 @@ fn put_painted_line(
         .render(Rect::new(x, y, width, 1), buf);
 }
 
-fn label_spans(line: &PaintedLine, palette: Option<GraphLabelPalette>, fallback: Color) -> Vec<Span<'static>> {
+fn label_spans(
+    line: &PaintedLine,
+    palette: Option<GraphLabelPalette>,
+    fallback: Color,
+) -> Vec<Span<'static>> {
     let kind_color = |kind: LabelKind, pal: GraphLabelPalette| -> Color {
         match kind {
             LabelKind::Subject => pal.subject,
@@ -363,9 +365,7 @@ fn label_spans(line: &PaintedLine, palette: Option<GraphLabelPalette>, fallback:
         Some(pal) => line
             .parts
             .iter()
-            .map(|p| {
-                Span::styled(p.text.clone(), Style::default().fg(kind_color(p.kind, pal)))
-            })
+            .map(|p| Span::styled(p.text.clone(), Style::default().fg(kind_color(p.kind, pal))))
             .collect(),
     }
 }
@@ -645,7 +645,11 @@ mod tests {
         assert_eq!(spacer.row_index, subject_line.row_index);
         assert!(spacer.label.contains("stash@{0}"), "{}", spacer.label);
         assert!(spacer.label.contains("ccc3333"), "{}", spacer.label);
-        assert!(spacer.label.contains("2023-11-13 22:13"), "{}", spacer.label);
+        assert!(
+            spacer.label.contains("2023-11-13 22:13"),
+            "{}",
+            spacer.label
+        );
         assert!(spacer.label.contains("Ada Lovelace"), "{}", spacer.label);
         assert!(
             !subject_line.label.contains("stash@{0}"),
@@ -980,7 +984,9 @@ mod tests {
         }
         assert!(prev.contains("WIP on main"), "stash footer subject: {prev}");
         assert!(
-            last.contains("stash@{0}") && last.contains("ccc3333") && last.contains("2023-11-13 22:13"),
+            last.contains("stash@{0}")
+                && last.contains("ccc3333")
+                && last.contains("2023-11-13 22:13"),
             "stash footer meta ref · hash · date: {last}"
         );
         assert!(!last.contains("Ada"), "stash footer has no author: {last}");

@@ -1,4 +1,4 @@
-//! EasyMotion labels and prefix resolve (Ink `easyMotion.ts`).
+//! EasyMotion labels and prefix resolve.
 //!
 //! Labels cover the painted viewport only: `a`–`z`, then `aa`, `ab`, …
 
@@ -58,7 +58,7 @@ pub fn resolve_easy_motion_jump(
     }
 }
 
-/// First visible index, centred on `cursor` (Ink `treeViewportStart`).
+/// First visible index, centred on `cursor`.
 pub fn list_viewport_start(row_count: usize, cursor: usize, height: usize) -> usize {
     let view_height = height.max(1);
     let max_start = row_count.saturating_sub(view_height);
@@ -126,7 +126,10 @@ mod tests {
             resolve_easy_motion_jump(28, 10, "aa"),
             EasyMotionResolve::Hit { index: 36 }
         );
-        assert_eq!(resolve_easy_motion_jump(28, 0, "zz"), EasyMotionResolve::Miss);
+        assert_eq!(
+            resolve_easy_motion_jump(28, 0, "zz"),
+            EasyMotionResolve::Miss
+        );
     }
 
     #[test]

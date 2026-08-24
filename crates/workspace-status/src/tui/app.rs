@@ -751,7 +751,7 @@ fn reload_snapshot(state: &mut AppState, opts: &TuiOpts) {
 }
 
 /// Refresh one checkout in place. Missing paths drop out of the snapshot
-/// (same as Ink `refreshRepoOnly`).
+/// (same as `refreshRepoOnly`).
 fn reload_repo(state: &mut AppState, opts: &TuiOpts, repo: &str) {
     let existing = state.snapshot.repos.iter().find(|row| row.repo == repo);
     let meta = RepoCheckoutMeta {

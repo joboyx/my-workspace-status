@@ -1,4 +1,4 @@
-//! Pane-relative graph gutter budget. Matches Ink `gutterBudget.ts`.
+//! Pane-relative graph gutter budget.
 //!
 //! Topology layout stays full-width; paint clips the gutter so subject/refs
 //! keep leftover horizontal space on wide panes.

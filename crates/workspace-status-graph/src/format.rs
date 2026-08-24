@@ -6,7 +6,7 @@ use crate::model::{Commit, GraphRef, GraphRow, RefKind, Stash, SyncState, SyncSt
 /// Prefer keeping at least this many left columns before dropping right meta.
 const MIN_LEFT_KEEP: usize = 12;
 
-/// Cap for the author column (Ink `authorWidth`).
+/// Cap for the author column.
 const AUTHOR_COL_MAX: usize = 16;
 
 /// Format the sync header line (`branch` plus ahead/behind marks).
@@ -61,7 +61,7 @@ pub enum LabelKind {
     Overflow,
 }
 
-/// Compact age or absolute timestamp. Matches Ink `formatRelativeDate`.
+/// Compact age or absolute timestamp.
 pub fn format_relative_date(unix: i64, now_unix: i64) -> String {
     let delta = (now_unix - unix).max(0);
     if delta <= RELATIVE_DATE_LIMIT_SECS {
@@ -239,7 +239,7 @@ pub fn pick_meta_columns(
     }
 }
 
-/// Date / author column widths shared across a commit window (Ink rails).
+/// Date / author column widths shared across a commit window.
 pub fn meta_column_widths<'a>(
     commits: impl IntoIterator<Item = &'a Commit>,
     now_unix: i64,

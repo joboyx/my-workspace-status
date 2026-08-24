@@ -28,7 +28,7 @@ pub fn fetch_interval_ms(raw: Option<&str>) -> u64 {
 }
 
 /// True when this checkout is on the ignore list (or its primary is).
-/// Matches Ink `isHiddenIgnoredRepo` without a named-filter exception
+/// Matches `isHiddenIgnoredRepo` without a named-filter exception
 /// (`collectBackgroundFetchTargets` does not pass named repos).
 fn checkout_is_hidden_ignored(repo: &WorkspaceRepoSnapshot, ignored: &[String]) -> bool {
     if ignored.is_empty() {

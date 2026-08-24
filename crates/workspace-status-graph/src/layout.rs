@@ -1,7 +1,7 @@
 //! Assign lanes and paint a lazygit-style coloured cell matrix.
 //!
-//! Lane assignment matches the Ink walk (`src/tui/graph/layout.ts`). Paint
-//! builds an internal directional connection model then resolves glyphs.
+//! Lane assignment, then paint builds an internal directional connection
+//! model and resolves glyphs.
 //!
 //! Duplicate first-parent waiters are intentional: sibling tips that share
 //! a parent keep distinct lanes until the parent row joins them. After each
@@ -54,11 +54,7 @@ struct ParentPlan {
 /// Plan next active vector + secondary opens + links to already-live parents.
 ///
 /// Always keep a first-parent waiter on `commit_lane` (duplicate ids OK).
-fn plan_parents(
-    active: &[Option<String>],
-    commit_lane: usize,
-    parents: &[String],
-) -> ParentPlan {
+fn plan_parents(active: &[Option<String>], commit_lane: usize, parents: &[String]) -> ParentPlan {
     let mut next = active.to_vec();
     while next.len() <= commit_lane {
         next.push(None);
@@ -78,7 +74,9 @@ fn plan_parents(
     next[commit_lane] = Some(parents[0].clone());
 
     for parent in parents.iter().skip(1) {
-        let existing = next.iter().position(|id| id.as_deref() == Some(parent.as_str()));
+        let existing = next
+            .iter()
+            .position(|id| id.as_deref() == Some(parent.as_str()));
         if let Some(existing) = existing {
             if existing != commit_lane {
                 linked.push(existing);
@@ -247,9 +245,8 @@ fn paint_cells(
         add_open_corner(&mut topo, commit_lane, to, to);
     }
 
-    let (stem_up, stem_down) = collect_stem_refs(
-        &topo, commit, commit_lane, active, next, join_from, opened,
-    );
+    let (stem_up, stem_down) =
+        collect_stem_refs(&topo, commit, commit_lane, active, next, join_from, opened);
     add_node(&mut topo, commit_lane);
 
     let mut cells = topo_to_cells(&topo, g);

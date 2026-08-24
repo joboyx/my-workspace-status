@@ -1,7 +1,7 @@
-//! File-diff load, unified-diff parse, and Ink-style numbered rows.
+//! File-diff load, unified-diff parse, and numbered rows.
 //!
-//! Port of `src/tui/diff/parse.ts` + `src/tui/diff/rows.ts` + the DiffPane
-//! path header. Intra-line / syntax highlight stays out of scope.
+//! Path header, line-number gutter, and STAGED / UNSTAGED / NEW labels.
+//! Intra-line / syntax highlight stays out of scope.
 
 use std::path::Path;
 
@@ -10,10 +10,10 @@ use crate::snapshot::FileChange;
 
 use super::split::DiffMode;
 
-/// Stub huge / binary untracked files above ~1 MB (Ink `HUGE_FILE_BYTES`).
+/// Stub huge / binary untracked files above ~1 MB.
 const HUGE_FILE_BYTES: u64 = 1_000_000;
 
-/// Gutter rule between line numbers and the sign (Ink `RULE`).
+/// Gutter rule between line numbers and the sign.
 pub const DIFF_RULE: char = '│';
 
 /// Staged / unstaged / untracked section label.
@@ -72,7 +72,7 @@ struct Hunk {
     lines: Vec<ParsedLine>,
 }
 
-/// Staged + unstaged unified text for one file (Ink `DiffPaneContent`).
+/// Staged + unstaged unified text for one file.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DiffContent {
     pub staged: String,
@@ -104,7 +104,7 @@ impl DiffContent {
 }
 
 /// Load a unified diff for one dirty file. Untracked files synthesise an all-add hunk.
-/// `context` of `Some(n)` adds `-Un` (Ink full-file uses a large `n`).
+/// `context` of `Some(n)` adds `-Un`.
 pub fn load_file_diff(
     cwd: &Path,
     repo: &str,
@@ -144,7 +144,7 @@ fn untracked_content(repo_dir: &Path, path: &str) -> DiffContent {
     }
 }
 
-/// Read an untracked worktree file as a unified diff body (Ink `newFile.ts`).
+/// Read an untracked worktree file as a unified diff body.
 fn read_untracked_as_diff(abs: &Path, rel_path: &str) -> String {
     let Ok(meta) = std::fs::metadata(abs) else {
         return String::new();
@@ -463,7 +463,7 @@ pub fn gutter_width(rows: &[DiffRow]) -> usize {
     max.to_string().len().max(2)
 }
 
-/// Section header text (Ink `tuiSectionHeader`).
+/// Section header text.
 pub fn section_header(section: DiffSection) -> &'static str {
     match section {
         DiffSection::Staged => "STAGED",
@@ -540,7 +540,7 @@ pub fn row_search_text(row: &DiffRow) -> String {
     }
 }
 
-/// Clamp vertical diff scroll so PageDown cannot grow past EOF (Ink `clampDiffScroll`).
+/// Clamp vertical diff scroll so PageDown cannot grow past EOF.
 pub fn clamp_diff_scroll(scroll: usize, row_count: usize, view_h: usize) -> usize {
     let max_start = row_count.saturating_sub(view_h.max(1));
     scroll.min(max_start)

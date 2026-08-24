@@ -59,7 +59,7 @@ pub fn local_name_from_origin_ref(name: &str) -> &str {
 /// Local and `origin/*` names `b` may checkout at a graph commit.
 ///
 /// Locals first, then remotes. Each group is unique and sorted.
-/// Tags and non-origin remotes stay out (same set as Ink `checkoutableBranchNames`).
+/// Tags and non-origin remotes stay out (same set as `checkoutableBranchNames`).
 pub fn checkoutable_branch_names(refs: &[GraphRef]) -> Vec<String> {
     let mut locals: Vec<String> = refs
         .iter()
@@ -163,7 +163,7 @@ pub struct BranchPickerState {
     pub branches: Vec<LocalBranch>,
     pub filter: String,
     pub cursor: usize,
-    /// Graph commit picker paints Ink `Checkout at {short}`. Tree picker is `None`.
+    /// Graph commit picker paints `Checkout at {short}`. Tree picker is `None`.
     pub commit_id: Option<String>,
 }
 

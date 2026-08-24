@@ -1,216 +1,82 @@
 # Git operations
 
-Every git subprocess the tool runs. `<git>` is `GIT_BINARY` (`WORKSPACE_STATUS_GIT`, else `/usr/bin/git` when it exists, else `git`).
+Every git subprocess the tool runs. `<git>` is `git_binary()` (`WORKSPACE_STATUS_GIT`, else `/usr/bin/git` when it exists, else `git`).
 
-## `src/git.ts`
+## `crates/workspace-status/src/git.rs`
 
-| Function                                                 | Command                                                                                                                            | Returns                               | Purpose                                                                                                                            |
-| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `execGit(args, cwd)`                                     | `<git> <args>`                                                                                                                     | trimmed stdout, `''` on any failure   | Generic read. Swallows errors by design — callers treat empty as "unknown".                                                        |
-| `execGitStatus(args, cwd)`                               | `<git> <args>`                                                                                                                     | exit code, `-1` on throw              | Generic write / predicate.                                                                                                         |
-| `repoHasLocalChanges(cwd)`                               | `diff --quiet`, then `diff --cached --quiet`                                                                                       | boolean                               | True when either exits non-zero. Untracked files are **not** counted.                                                              |
-| `revParseQuiet(ref, cwd)`                                | `rev-parse --verify --quiet <ref>`                                                                                                 | SHA string, or `null` when missing    | Graph checkout SHA compare (`refs/heads/<local>` vs `refs/remotes/origin/<local>`)                                                 |
-| `checkoutBranch(branch, cwd)`                            | `checkout <branch> --quiet`, falling back to `checkout -b <branch> origin/<branch> --quiet`                                        | boolean                               | Second form creates a local tracking branch when the branch only exists on the remote.                                             |
-| `fastForwardToRemoteRef(remoteRef, cwd)`                 | `merge --ff-only --quiet` of `origin/foo` or `refs/remotes/origin/foo` (no fetch)                                                  | boolean                               | Graph confirm Yes: advance HEAD to the **selected** remote-tracking tip. Ahead/diverged/missing → false; HEAD unchanged. No reset. |
-| `listLocalBranches(repoDir)`                             | `for-each-ref --format='%(refname:short)\t%(authordate:unix)\t%(HEAD)' refs/heads/`                                                | `LocalBranch[]`                       | Local branches only (no remotes). `%(HEAD)` is `*` for the current branch.                                                         |
-| `pullQuietDetailed(cwd)`                                 | when dirty: `stash push -m …` → `pull --quiet` → `stash pop`; else `pull --quiet`                                                  | `PullQuietResult`                     | Auto-stash tracked local changes around pull; pop always runs after pull                                                           |
-| `pullQuiet(cwd)`                                         | delegates to `pullQuietDetailed`                                                                                                   | boolean (`result.ok`)                 |                                                                                                                                    |
-| `pushQuiet(cwd)`                                         | `push --quiet`, or `push -u <remote> HEAD --quiet` when no/wrong upstream                                                          | boolean                               | TUI `P`. No force, no auto-stash; first publish / feature-on-develop tracking uses `-u`; diverged remotes may fail                 |
-| `needsUpstreamPublish(cwd)`                              | compare `branch --show-current` to `@{upstream}` short name                                                                        | boolean                               | True when detached is false and upstream is missing or names a different branch                                                    |
-| `FULL_DIFF_CONTEXT_LINES`                                | —                                                                                                                                  | `999_999`                             | Large enough `-U` value to keep a typical source file in one hunk.                                                                 |
-| `diffFile(repoDir, path, contextLines?)`                 | `diff [-U<n>] -- <path>`                                                                                                           | diff text                             | Unstaged changes for one file. Omit `contextLines` for git’s default context; pass a finite `≥ 0` to insert `-U`.                  |
-| `diffCachedFile(repoDir, path, contextLines?)`           | `diff --cached [-U<n>] -- <path>`                                                                                                  | diff text                             | Staged changes for one file. Same optional `-U` as `diffFile`.                                                                     |
-| `stageFile(repoDir, path)`                               | `add -- <path>`                                                                                                                    | `{ok, error?}`                        |                                                                                                                                    |
-| `unstageFile(repoDir, path)`                             | `restore --staged -- <path>`                                                                                                       | `{ok, error?}`                        |                                                                                                                                    |
-| `revertTrackedFile(repoDir, path)`                       | `restore -- <path>`                                                                                                                | `{ok, error?}`                        | Discards worktree changes. **Destructive.**                                                                                        |
-| `removeUntrackedFile(repoDir, path)`                     | `clean -f -- <path>`                                                                                                               | `{ok, error?}`                        | Deletes the file. **Destructive.**                                                                                                 |
-| `execGitOutputAsync(args, cwd)`                          | delegates to `execGit`                                                                                                             | stdout                                | Historical alias; no behavioural difference.                                                                                       |
-| `execGitAsync(args, cwd)`                                | `<git> <args>`                                                                                                                     | `void`, **throws** on non-zero        | The only wrapper that propagates failure. Used for fetch/pull.                                                                     |
-| `listWorktreesPorcelain(repoDir)`                        | `worktree list --porcelain`                                                                                                        | stdout (or `''`)                      | Enumerate checkouts for linked-worktree discovery                                                                                  |
-| `isAncestor(repoDir, maybeAncestor, tip)`                | `merge-base --is-ancestor <maybeAncestor> <tip>`                                                                                   | `true` / `false` / `null`             | Exit 0 → true, 1 → false, else null (merge-into-default probe)                                                                     |
-| `resolveDefaultBranchTipRef(repoDir, defaultBranch)`     | `rev-parse --verify --quiet` on `origin/<branch>` then `<branch>`                                                                  | first existing ref, or `null`         | Tip used for merge-base ancestry                                                                                                   |
-| `resolveDefaultBranchName(repoDir, override?)`           | override, else `symbolic-ref --short refs/remotes/origin/HEAD` (strip `origin/`), else `main`                                      | branch name string                    | Default branch name for merge classification only                                                                                  |
-| `gitLogGraphWindow(repoDir, {skip,limit})`               | `log --exclude=refs/stash --all --topo-order --date-order --skip=<skip> --max-count=<limit> --format=%H%x00%P%x00%s%x00%an%x00%at` | `{ commits, truncated }`              | Graph history window (stash commits excluded; use `listStashes`)                                                                   |
-| `listRefs(repoDir)`                                      | `for-each-ref --format=%(objectname)%09%(refname)%09%(refname:short) refs/heads/ refs/remotes/ refs/tags/`                         | `GraphRef[]`                          | Locals / remotes / tags (skip `*/HEAD`)                                                                                            |
-| `listStashes(repoDir)`                                   | `stash list --format=%gd%x00%H%x00%P%x00%s%x00%at%x00%an`                                                                          | `GraphStash[]`                        | Stash rows; first `%P` parent → `parentId` (`stash^1` / HEAD at stash time)                                                        |
-| `computeRefsFingerprint(repoDir)`                        | `rev-parse HEAD` + sorted `for-each-ref` + sorted stash list + dirty bit from `status --porcelain=v1`                              | string                                | Cache invalidation key                                                                                                             |
-| `repoHasPorcelainChanges(cwd)`                           | `status --porcelain=v1`                                                                                                            | boolean                               | Uncommitted row / dirty bit                                                                                                        |
-| `createBranchAt(repoDir, name, commitId)`                | `branch -- <name> <commitId>`                                                                                                      | `{ok, error?}`                        | Create a local ref **without** checking it out (graph `c`)                                                                         |
-| `stashPush(repoDir, opts?)`                              | `stash push` + `-u` unless `includeUntracked` is false + `-m` when message non-empty + `--` + paths when given                     | `{ok, error?}`                        | Stash worktree changes (untracked by default; not ignored files). Clean tree → `{ok:false}` even when git exits 0                  |
-| `stashApply(repoDir, stashRef)`                          | `stash apply <stashRef>`                                                                                                           | `{ok, error?}`                        | Apply stash; keeps the entry (graph `a`)                                                                                           |
-| `stashPop(repoDir, stashRef?)`                           | `stash pop` + optional `<stashRef>`                                                                                                | `{ok, error?}`                        | Apply then drop a stash entry                                                                                                      |
-| `stashDrop(repoDir, stashRef)`                           | `stash drop <stashRef>`                                                                                                            | `{ok, error?}`                        | Drop a stash entry after confirm (graph `D`)                                                                                       |
-| `removeWorktree(primaryAbs, worktreePath, {force})`      | `worktree remove [--force] <path>` from primary (or git-registered bind-mount prefix)                                              | `{ok, error?}`                        | Remove a linked worktree after TUI confirm (`W`). Remaps bind-mount aliases via `resolveWorktreeRemoveTarget`.                     |
-| `listCommitNameStatus(repoDir, commitId)`                | `diff-tree --no-commit-id --name-status -r -z <commit>^ <commit>`; empty → same with `--root <commit>`                             | `FileChange[]` via `parseNameStatusZ` | First-parent file list (merges); `--root` for root commits                                                                         |
-| `listWorktreeNameStatus(repoDir)`                        | `diff HEAD --name-status -z` + `status --porcelain=v1 -z` (merge `??`)                                                             | `FileChange[]`                        | Worktree + index + untracked                                                                                                       |
-| `listStashNameStatus(repoDir, stashRef)`                 | `stash show --name-status -z <stashRef>`                                                                                           | `FileChange[]`                        | Files in a stash entry                                                                                                             |
-| `diffCommitFile(repoDir, commitId, path, contextLines?)` | `diff [-U<n>] <commit>^ <commit> -- <path>`; empty → `show [-U<n>] --first-parent <commit> -- <path>`                              | unified diff text                     | First-parent per-file diff; root / empty → `show --first-parent`                                                                   |
-| `diffStashFile(repoDir, stashRef, path, contextLines?)`  | `diff [-U<n>] <stashRef>^1 <stashRef> -- <path>`                                                                                   | unified diff text                     | Per-file stash diff (same first-parent range as `stash show`; pathspecs after `stash show -p` are rejected by git)                 |
+| Function | Command | Returns | Purpose |
+| --- | --- | --- | --- |
+| `exec_git(args, cwd)` | `<git> <args>` | trimmed stdout, `""` on any failure | Generic read. Swallows errors by design — callers treat empty as "unknown". |
+| `exec_git_status(args, cwd)` | `<git> <args>` | exit code, `-1` on throw | Generic write / predicate. |
+| `exec_git_checked(args, cwd)` | `<git> <args>` | `Result<(), String>` | Surfaces failure to the caller. |
+| `repo_has_local_changes(cwd)` | `diff --quiet`, then `diff --cached --quiet` | boolean | True when either exits non-zero. Untracked files are **not** counted. |
+| `rev_parse_quiet(ref, cwd)` | `rev-parse --verify --quiet <ref>` | SHA string, or `None` when missing | Graph checkout SHA compare (`refs/heads/<local>` vs `refs/remotes/origin/<local>`) |
+| `checkout_branch(branch, cwd)` | `checkout <branch> --quiet`, falling back to `checkout -b <branch> origin/<branch> --quiet` | boolean | Second form creates a local tracking branch when the branch only exists on the remote. |
+| `fast_forward_to_remote_ref(remote_ref, cwd)` | `merge --ff-only --quiet` of `origin/foo` or `refs/remotes/origin/foo` (no fetch) | boolean | Graph confirm Yes: advance HEAD to the **selected** remote-tracking tip. Ahead/diverged/missing → false; HEAD unchanged. No reset. |
+| `list_local_branches(cwd)` | `for-each-ref` on `refs/heads/` | `LocalBranch[]` | Local branches only (no remotes). |
+| `pull_quiet_detailed(cwd)` | when dirty: `stash push -m …` → `pull --quiet` → `stash pop`; else `pull --quiet` | `PullQuietResult` | Auto-stash tracked local changes around pull; pop always runs after pull |
+| `pull_quiet(cwd)` | delegates to `pull_quiet_detailed` | boolean (`result.ok`) | |
+| `push_quiet(cwd)` | `push --quiet`, or `push -u <remote> HEAD --quiet` when no/wrong upstream | `Result` | TUI `P`. No force, no auto-stash; first publish uses `-u`; diverged remotes may fail |
+| `FULL_DIFF_CONTEXT_LINES` | — | `999_999` | Large enough `-U` value to keep a typical source file in one hunk. |
+| `git_diff_args(base, path, context)` | inserts `-U<n>` and `-- <path>` | argv | Shared builder for worktree / cached / commit / stash diffs. |
+| `stage_file` / `unstage_file` | `add -- <path>` / `restore --staged -- <path>` | `Result` | TUI `s` / `u` |
+| `revert_tracked_file` / `remove_untracked_file` | `restore -- <path>` / `clean -f -- <path>` | `Result` | TUI `x`. **Destructive.** |
+| `list_worktrees_porcelain(cwd)` | `worktree list --porcelain` | stdout (or `""`) | Enumerate checkouts for linked-worktree discovery |
+| `is_ancestor(cwd, maybe_ancestor, tip)` | `merge-base --is-ancestor` | `Some(true/false)` / `None` | Merge-into-default probe |
+| `resolve_default_branch_tip_ref` / `resolve_default_branch_name` / `get_default_branch` | `rev-parse` / `symbolic-ref` / `show-ref` | branch / tip | Default branch name and tip for classification and `-d` |
+| `create_branch_at(cwd, name, commit_id)` | `branch -- <name> <commitId>` | `Result` | Create a local ref **without** checking it out (graph `c`) |
+| `create_branch_checkout(cwd, name)` | `checkout -b <name> --quiet` | `Result` | Picker `C` |
+| `stash_push` / `stash_apply` / `stash_pop` / `stash_drop` | `stash push -u` / `apply` / `pop` / `drop` | `Result` | Stash menu and graph stash rows. Unchanged stash list after push is failure |
+| `list_stash_refs` / `latest_stash_ref` | `stash list --format=%gd` | refs | Latest stash for graph `S` apply / pop on a non-stash row |
+| `remove_worktree(primary, path, force)` | `worktree remove [--force] <path>` from primary | `Result` | Remove a linked worktree after TUI confirm (`W`) |
+| `list_commit_name_status` | `diff-tree --name-status -r <commit>^ <commit>`; empty → `--root` | `NameStatus[]` | First-parent file list (merges); `--root` for root commits |
+| `list_worktree_name_status` | `diff HEAD --name-status` + untracked | `NameStatus[]` | Worktree + index + untracked |
+| `list_stash_name_status` | `stash show --name-status <ref>` | `NameStatus[]` | Files in a stash entry |
+| `diff_commit_file` / `_ctx` | `diff <commit>^ <commit> -- <path>`; empty → `show --first-parent` | unified diff lines | First-parent per-file diff |
+| `diff_stash_file` / `_ctx` | `diff <stash>^1 <stash> -- <path>` | unified diff lines | Per-file stash diff |
+| `origin_out_of_sync` | compare `rev-parse` of local vs `origin/<branch>` | `Option<origin/…>` | Helper for graph checkout confirm |
 
-Every wrapper that takes a path puts `--` before it, so a file named `-f` or `HEAD` cannot be read as an option or a revision. The path-free wrappers (`checkoutBranch`, `fastForwardToRemoteRef`, `pullQuiet`, `pushQuiet`, the fetch call) have nothing to separate.
+Every wrapper that takes a path puts `--` before it, so a file named `-f` or `HEAD` cannot be read as an option or a revision.
 
-Name-status parsers live in `src/nameStatus.ts` (`parseNameStatusLines` / `parseNameStatusZ`) so `git.ts` stays free of `tui/` imports for this path.
+## `crates/workspace-status/src/discovery.rs`
 
-`git$` sets `nothrow: true` and `quiet: true` on the zx call, which is why `execGitAsync` has to inspect `result.ok` itself.
+| Call | Command |
+| --- | --- |
+| `expand_repos_with_linked_worktrees` | `worktree list --porcelain` per main checkout |
+| `process_repo` (when `do_fetch`) | `fetch --quiet` — failure is caught and ignored; stale refs are better than no output |
+| `process_repo` | `status --porcelain=v1 --branch --ahead-behind --untracked-files=all` |
+| `process_repo` (merge probe) | `resolve_default_branch_name` + `resolve_default_branch_tip_ref` + `merge-base --is-ancestor HEAD <tip>` |
 
-Invalidate on fetch / watch / checkout / create branch / stash / `r` is **caller-side** (P3) via `cache.invalidateRepo` or fingerprint mismatch — fingerprint itself already changes for those git state mutations.
-
-## `src/discovery.ts`
-
-| Call                             | Command                                                                                           |
-| -------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `expandReposWithLinkedWorktrees` | `worktree list --porcelain` per main checkout (via `listWorktreesPorcelain`)                      |
-| `processRepo` (when `doFetch`)   | `fetch --quiet` — failure is caught and ignored; stale refs are better than no output             |
-| `processRepo`                    | `status --porcelain=v1 --branch --ahead-behind --untracked-files=all`                             |
-| `processRepo` (merge probe)      | `resolveDefaultBranchName` + `resolveDefaultBranchTipRef` + `merge-base --is-ancestor HEAD <tip>` |
-
-After `findReposWithConfig` (primaries; still skips dot-dirs), discovery lists linked worktrees under the workspace cwd, applies the same ignore / named-filter rules (filter on a primary includes its linked children; filter on a linked path includes only that path), dedupes by path (linked metadata wins), and runs `processRepo` with `checkoutKind` / `primaryRepo`.
+After `find_repos_with_config` (primaries; still skips dot-dirs), discovery lists linked worktrees under the workspace cwd, applies the same ignore / named-filter rules (filter on a primary includes its linked children; filter on a linked path includes only that path), dedupes by path (linked metadata wins), and runs `process_repo` with `checkout_kind` / `primary_repo`.
 
 One status call per repo produces branch, upstream, ahead/behind counts, and all three file buckets. `--untracked-files=all` lists files inside untracked directories rather than collapsing to `dir/`, which the tree view needs.
 
-Unborn repos (`## No commits yet on <branch>`) become a normal snapshot with `syncNote: no commits yet`. When status stdout is empty or the branch header cannot be parsed, `processRepo` returns a failure snapshot (`syncNote: status failed`, `mergedIntoDefault: null`) instead of dropping the repo — so the plain report cannot claim all-clean by omission.
+Unborn repos (`## No commits yet on <branch>`) become a normal snapshot with `sync_note: no commits yet`. When status stdout is empty or the branch header cannot be parsed, `process_repo` returns a failure snapshot (`sync_note: status failed`, `merged_into_default: None`) instead of dropping the repo — so the plain report cannot claim all-clean by omission.
 
-## `src/tui/fetch.ts`
+## `crates/workspace-status/src/actions.rs`
 
-| Function                        | Commands                                                                    | Purpose                                                                                                              |
-| ------------------------------- | --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `fetchRepos(cwd, repos, opts?)` | `fetch --quiet` per repo via `execGitAsync`, `mapWithConcurrency` (bound 4) | TUI background timer and manual `f`. Failures are counted, not thrown. Optional `onProgress` updates the status bar. |
+CLI `-p` / `-d` (progress strings go to the caller; `--json` sends them to stderr).
 
-`useFetch.ts` owns the interval (`WS_STATUS_FETCH_MS`) and shares the same runner for `f`. After each batch the TUI re-reads affected repo snapshots so ahead/behind marks update.
+| Function | Purpose |
+| --- | --- |
+| `pull_behind_repos` | `pull_quiet_detailed` per behind repo. Logs success / stash-pop conflict / failure. |
+| `switch_repo_to_default_branch` | Fetch, checkout default, pull when the remote tip differs. Skips dirty repos. |
 
-## `src/tui/gitActions.ts`
+## TUI writes (`tui/ops.rs`, `tui/fetch.rs`, `tui/app.rs`)
 
-Quiet TUI counterparts of CLI pull / default-branch (no stdout). Status bar messages come from `formatPullStatus` / `formatPushStatus` / `formatSwitchStatus`.
+| Function | Purpose |
+| --- | --- |
+| `collect_write_files` | File nodes under the focused row: `[file]` / dir subtree / checkout files / flat-repo files; empty for family containers, workspace, and group. |
+| `op_targets` | Checkout paths for `f` / `p` / `d`. Workspace and family rows yield primary checkouts only. Group is empty. A linked worktree is included only when that row is focused. Hidden ignored repos are omitted. |
+| `push_targets` | Same primary / focused-worktree rule for `P`. Never on workspace. |
+| `background_fetch_targets` | Snapshot paths for the TUI background fetch timer. Hidden ignored checkouts are omitted. When ignored repos are shown, every snapshot path is included, including linked worktrees. Manual `f` stays on `op_targets`. |
+| `refresh_target` | Workspace / No-updates → whole snapshot; otherwise the focused checkout path. |
 
-| Function                                                          | Commands                                                                                                                             | Purpose                                                                                                                                                                                                                                                                            |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tuiPullRepos(cwd, repos, opts?)`                                 | `pullQuietDetailed` per repo, `Promise.all`                                                                                          | Manual `p`. Workspace / family scope passes primary checkouts that are `behind`; a focused linked worktree pulls that path only. Dirty trees are auto-stashed around pull. Optional `onProgress` updates the trailing op-status (`Pulling done/total…`).                           |
-| `tuiPushRepos(cwd, repos, opts?)`                                 | `pushQuiet` per repo, `Promise.all`                                                                                                  | Manual `P` on repo/checkout. Family uses the primary only when it is `ahead`/`diverged`/`no-upstream`. A focused linked worktree pushes that path. No force / auto-stash; failed pushes are counted. Optional `onProgress` updates the trailing op-status (`Pushing done/total…`). |
-| `tuiSwitchRepoToDefault(cwd, repoPath, currentBranch, override?)` | same as CLI `switchRepoToDefaultBranch` (`getDefaultBranch`, `repoHasLocalChanges`, `fetch`, `checkoutBranch`, optional `pullQuiet`) | Manual `d` for one repo. Skips dirty when leaving the current branch; when already on default, pulls (auto-stash if dirty).                                                                                                                                                        |
-| `tuiSwitchReposToDefault(cwd, tasks, opts?)`                      | above, `mapWithConcurrency` bound 8                                                                                                  | Workspace / family `d` over primary checkouts off default. A focused linked worktree is included. Optional `onProgress` updates the trailing op-status (`Switching done/total…`).                                                                                                  |
+After `p` / `P` / `d` / `f`, the TUI refreshes the affected repos and stamps those `repo:<path>` ids into the flash map.
 
-After `p` / `P` / `d`, `useActions` refreshes the affected repos through the shared `refreshRepos` helper (same path as post-fetch refresh) and stamps those `repo:<path>` ids into the flash map (B9).
+## Graph load (`tui/graph_load.rs`)
 
-## `src/tui/branches.ts`
-
-Pure helpers for the `b` picker (no git I/O).
-
-| Function                                         | Purpose                                                            |
-| ------------------------------------------------ | ------------------------------------------------------------------ |
-| `sortBranchesForPicker(branches, defaultBranch)` | Pins `defaultBranch` first when present, then newest `authordate`. |
-| `filterBranches(branches, query)`                | Case-insensitive substring on `name`.                              |
-
-## `src/tui/scope.ts`
-
-| Function                                                                 | Purpose                                                                                                                                                                                                                                                                                                                                                           |
-| ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `collectFiles(focused)`                                                  | Resolve file nodes under the focused row: `[file]` / dir subtree / checkout files / flat-repo files; `[]` for family containers, workspace, and group. The ratatui TUI uses the same rule in `collect_write_files`.                                                                                                                                              |
-| `collectBulkGitTargets(focused, snapshots, ignoredRepos?, showIgnored?)` | Checkout paths for `f` / `p` / `P` / `d`. Workspace and family rows yield primary checkouts only. Group (`No-updates`) is `[]`. A linked worktree is included only when that row (or a file/dir under it, or a flat linked repo) is focused. Hidden ignored repos are omitted even if focused. When ignored repos are shown (`.` / `-a`), they follow the same primary / focused-worktree rule. The ratatui TUI uses `op_targets` for `f` / `p` / `d` and `push_targets` for `P`. |
-| `collectBackgroundFetchTargets(snapshots, ignoredRepos?, showIgnored?)`  | Snapshot paths for the TUI background fetch timer. Hidden ignored checkouts are omitted (linked worktrees follow the primary via `isHiddenIgnoredRepo`). When ignored repos are shown, every snapshot path is included, including linked worktrees. Rust `background_fetch_targets` matches this; manual `f` stays on `collectBulkGitTargets` / `op_targets`. |
-
-## `src/actions.ts`
-
-| Function                                                             | Commands                                                                                                                                                                                                                     | Purpose                                                                                                                                                                                              |
-| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `getDefaultBranch(repoDir, override?)`                               | If `override` set, return it; else `symbolic-ref --quiet --short refs/remotes/origin/HEAD`; else `show-ref --verify refs/remotes/origin/<b>`; else `show-ref --verify refs/heads/<b>` for `b` in `develop`, `main`, `master` | Config override wins when present. Otherwise three-tier git resolution (`origin/HEAD`, then remote/local probes). Also used by the quiet TUI helper.                                                 |
-| `switchRepoToDefaultBranch(repoPath, currentBranch, cwd, override?)` | `fetch --quiet origin <default>`, `checkoutBranch`, `rev-parse HEAD`, `rev-parse origin/<default>`, `pull --quiet`                                                                                                           | CLI `-d`. Skips dirty repos. Compares local and remote commits before pulling so an up-to-date repo prints "Already up to date" without a network round trip. Logs to stdout — do not call from Ink. |
-| `switchReposToDefaultBranch(cwd, tasks)`                             | above, `mapWithConcurrency` bound 8                                                                                                                                                                                          | Returns the count actually switched.                                                                                                                                                                 |
-| `pullBehindRepos(cwd, repos)`                                        | `pull --quiet` per repo via `execGitAsync`, `Promise.allSettled`                                                                                                                                                             | CLI `-p`. Unbounded — network-bound. Reports per repo without aborting the batch. Logs to stdout — do not call from Ink.                                                                             |
-
-## Non-obvious semantics
-
-**Renames need both paths.** `opPaths(file)` in `useActions.ts` returns `[renameFrom, path]` when the file has an `oldPath` that differs. Staging only the new path leaves the deletion of the old path unstaged, and git then reports the pair as `D` + `A` rather than `R`. `runOnPaths` applies the operation to each path in order and stops at the first failure — a partial application is possible if the second call fails.
-
-**Bulk stage / unstage.** `s` / `u` use `collectFiles` from `scope.ts`: a file row is itself; a dir or checkout (or flat repo) walks file/dir descendants — never mixes sibling checkouts under a family container. Workspace, group, and family-container rows yield an empty list. Stage keeps files with `unstaged` or `untracked`; unstage keeps `staged`. Writes group by `repoPath` and refresh each touched path once. Status is `Staged path` / `Unstaged path` for one file, or `Staged N files` / `Unstaged N files` when N > 1. Empty after filtering: `Nothing to stage` / `Nothing to unstage` on file/dir/checkout/repo; wrong focus: `Focus a file, dir, checkout, or repo to stage|unstage`. The ratatui TUI matches this scope (`collect_write_files`); workspace-row `s` / `u` / `x` is a no-op.
-
-**Focused refresh (`r`).** Ink `refreshFocused` reloads the whole workspace on the workspace row or No-updates group, and otherwise `refreshRepoOnly` for `repoPathOf(focus)`. The ratatui TUI matches that with `refresh_target` → `ReloadSnapshot` vs `ReloadRepo { repo }`.
-
-**Bulk revert with counted confirm.** `x` uses the same `collectFiles` scope, keeping `unstaged` or `untracked` (staged-only skipped). Opens `PendingConfirm` with `kind: 'revert'`, serialisable `targets`, plus `trackedCount` / `untrackedCount`. Confirm UI shows counts; `y`/`Enter` runs `git restore` on tracked targets and **keeps** untracked; `Y` also deletes each untracked via `removeUntrackedFile` (per-file `clean -f`, not `clean -fd`). Exception: a single untracked target still deletes on both `y` and `Y` (today’s meaning — the only revert for untracked is delete). Empty after filter: `Nothing to discard` (or `Nothing to discard (staged only)` on a staged-only file); wrong focus: `Focus a file, dir, checkout, or repo to revert`.
-
-**Remove linked worktree (`W`).** Linked `checkout` rows only (`canRemoveWorktree`). Confirm shows branch, `merged into default` / `NOT merged into default`, and `--force` when dirty (staged/unstaged/untracked). Runs `removeWorktree` then refreshes the linked path (dropped) and primary. When the TUI path is a bind-mount alias (same inode, different prefix than `git worktree list`), remove uses the porcelain path and that primary prefix so gitdir back-pointers match. The Rust CLI matches that with `MetadataExt` on Unix; on Windows, worktree identity is canonical path plus size and mtime (no inode / bind-mount remap).
-
-**Reverting an untracked file deletes it.** There is no git object to restore to, so untracked “revert” means remove from disk — irrecoverable. Bulk `y` leaves untracked alone; opt in with `Y`, or press `y` when the only target is one untracked file.
-
-**Staged-only files refuse revert.** When a file is staged with no unstaged component, the worktree already matches the index for that path, so `git restore` would be a no-op. `useActions.ts` returns `Nothing to discard (staged only)` rather than running a command that appears to succeed and changes nothing. Discarding a staged change is a two-step operation (`u` then `x`) by design — it is not something to do behind one keypress.
-
-**`repoHasLocalChanges` ignores untracked files.** `-d` will therefore switch a branch in a repo that has untracked files. That is usually right (untracked files survive a checkout) but it is not what "has local changes" implies.
-
-**`stashPush` treats a no-op as failure.** Apple Git 2.50 prints `No local changes to save` but exits 0. The wrapper compares `stash list` before and after and returns `{ ok: false, error }` when the list is unchanged.
-
-**Local branch picker (`b`).** Opens on a checkout or flat repo row (hidden on family containers), lists `refs/heads/` only (no remotes). Esc closes without quitting. Typing filters; `j`/`k` move; Enter checks out. Dirty worktrees (`repoHasLocalChanges`) refuse checkout with `Dirty worktree — commit or stash first` — browsing while dirty is allowed. Close the picker and press `S` to stash, then retry checkout. Selecting the current branch closes with `Already on …` and skips the dirty check. After a successful checkout the picker closes and that path alone is refreshed.
-
-**Graph actions (graph list focused — depth 0 right or depth 1 left).** After mutate helpers succeed, callers call `invalidateGraph(repo)` (bump `graphCacheEpoch`) and usually `refreshRepoOnly` so the graph and workspace tree stay consistent.
-
-| Key | When visible                                       | Behaviour                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| --- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `b` | Commit row with ≥1 local branch or `origin/*` ref  | Dirty check first. One name → `planGraphCheckout` then `checkoutBranch` (creates tracking from origin when local is missing). Several names → `GraphBranchPicker` (locals then `origin/*`). Selecting `origin/<name>` when a local exists and tips differ (or a SHA cannot be read) opens `GraphCheckoutConfirm`: Yes checks out the local then `fastForwardToRemoteRef` of that selected `origin/<name>` (no fetch; `merge --ff-only`). Ahead/diverged stays on the local tip with a StatusBar error. No / Esc cancels (does not reset local to the remote tip). Never `git checkout origin/foo` as a raw ref (no detached HEAD). Tags and non-`origin` remotes are not targets. Dirty refuse — press `S` to stash. |
-| `c` | Any commit row                                     | `CreateBranchOverlay` name prompt → `createBranchAt` (ref only, HEAD unchanged). Esc cancels.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `S` | Uncommitted, stash, or commit with stash/dirty ops | Opens stash overlay (`stashPush -u` / apply / pop / drop as listed). Whole-tree (file/dir pathspecs are depth 0 only).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `a` | Stash row                                          | `stashApply` then invalidate + refresh.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `p` | Stash row                                          | `stashPop` then invalidate + refresh.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `D` | Stash row                                          | `StashDropConfirm` (`y` / `n` / Esc) → `stashDrop` then invalidate + refresh.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-
-Depth 0 tree `b` remains the full `BranchPicker` (different ActionId). Depth 0 graph `b` is `graphCheckout`. Dirty refuse message matches the repo picker tone.
-
-## Destructive operations
-
-| Operation                           | Confirmation                                                        | Recoverable                                                                                                                               |
-| ----------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `s` stage / `u` unstage             | none                                                                | yes — trivially reversible                                                                                                                |
-| `x` revert, tracked (`y`)           | `y`/`Y`/`n` prompt                                                  | only via git's object store if the change was ever committed or stashed                                                                   |
-| `x` revert + delete untracked (`Y`) | same prompt                                                         | **no** for deleted untracked                                                                                                              |
-| `x` single untracked (`y` or `Y`)   | same prompt                                                         | **no** — the file is deleted                                                                                                              |
-| `-p` / `--pull`                     | none                                                                | yes — but can fail on conflicts                                                                                                           |
-| `-d` / `--default-branch`           | none                                                                | yes — dirty repos are skipped, so no work is lost                                                                                         |
-| `b` checkout (local / origin)       | none when in sync; `y`/`n` when local exists and origin tips differ | yes — dirty worktrees refuse before checkout; confirm Yes is checkout then `fastForwardToRemoteRef` of the selected `origin/*` (no reset) |
-
-Revert, stash drop, and origin-out-of-sync graph checkout use modal `KeyState` `y`/`n` overlays, so no other key can act while one is up.
-
-## Write serialisation
-
-`busyRef` in `useAppState.ts` is a single boolean shared by refresh, every write (including TUI `p` / `d`), background/manual fetch, and the watch poll. Concurrent git writes against the same index would race on `.git/index.lock`; the gate makes the second one report `Busy…` instead. A poll tick that lands while a write or fetch is in flight is dropped, not queued. Graph `b` checkout (local, and confirm Yes) holds the lock for the git write only, then `runBusyThenRefresh` releases it before the snapshot refresh so that follow-up is not a Busy no-op.
-
-
-## `crates/workspace-status/src/git.rs` (Rust TUI writes)
-
-Same path-safe `--` form as the TypeScript helpers. Used by ratatui `s` / `u` / `x`.
-
-| Function | Command | Purpose |
-| --- | --- | --- |
-| `stage_file` | `add -- <path>` | Stage one focused dirty file |
-| `unstage_file` | `restore --staged -- <path>` | Unstage one focused dirty file |
-| `revert_tracked_file` | `restore -- <path>` | Discard worktree changes. Confirm first |
-| `remove_untracked_file` | `clean -f -- <path>` | Delete one untracked file after confirm |
-
-Workspace, repo, dir, and checkout rows write every scoped file across repos. Family containers stay a no-op. Hidden ignored files stay out of these writes unless `.` / `-a` shows them.
-
-## Rust TUI (`crates/workspace-status`)
-
-`crates/workspace-status/src/git.rs` mirrors the Ink helpers the ratatui TUI needs. Same git binary rule. Same no-force push. Stash create uses `stash push -u` and treats an unchanged stash list as failure.
-
-| Function | Command | Purpose |
-| --- | --- | --- |
-| `push_quiet` | `push --quiet`, or `push -u <remote> HEAD --quiet` | TUI `P` on the focused visible checkout |
-| `stash_push` | `stash push -u [-- <paths>]` | Stash menu `s` |
-| `stash_apply` / `stash_pop` / `stash_drop` | `stash apply` / `pop` / `drop <ref>` | Stash menu `a` / `p` / `d` (drop confirms first; pop runs immediately) |
-| `list_stash_refs` / `latest_stash_ref` | `stash list --format=%gd` | Latest stash for graph `S` apply / pop on a commit or uncommitted row; graph stash rows use the focused `stash@{n}` |
-| `load_stashes` (`graph_load`) | `stash list --format=%gd%x00%H%x00%P%x00%s%x00%at%x00%an` | Graph stash rows: ref, id, first parent (`stash^1`), subject, date, author |
-| `list_commit_name_status` | `diff-tree --name-status -r <commit>^ <commit>`; empty → `--root` | File list for a graph commit |
-| `list_stash_name_status` | `stash show --name-status <ref>` | File list for a graph stash row |
-| `list_worktree_name_status` | `diff HEAD --name-status` + `ls-files --others --exclude-standard` | File list for the uncommitted graph row |
-| `diff_commit_file` | `diff <commit>^ <commit> -- <path>`; empty → `show --first-parent` | Commit-file drill diff |
-| `diff_stash_file` | `diff <stash>^1 <stash> -- <path>` | Stash-file drill diff |
-| `list_local_branches` | `for-each-ref` on `refs/heads/` | Branch picker `b` |
-| `create_branch_checkout` | `checkout -b <name> --quiet` | Picker `C` or Enter on a new name |
-| `create_branch_at` | `branch -- <name> <commitId>` | Graph `c` — create a ref at the focused commit. No checkout |
-| `checkout_branch` | `checkout <branch> --quiet`, else `checkout -b <branch> origin/<branch> --quiet` | Tree/graph checkout |
-| `repo_has_local_changes` | `diff --quiet`, then `diff --cached --quiet` | True when either exits non-zero. Untracked files are not counted. Tree-picker and graph `b` dirty refuse |
-| `fast_forward_to_remote_ref` | `merge --ff-only --quiet` of `origin/foo` or `refs/remotes/origin/foo` (no fetch) | Graph confirm Yes: advance HEAD to the selected remote-tracking tip. Ahead/diverged/missing → false; HEAD unchanged. No reset, no pull |
-| `origin_out_of_sync` | compare `rev-parse` of local vs `origin/<branch>` | Helper: `Some(origin/<branch>)` when both refs exist and differ. Checkout confirm uses `plan_graph_checkout` on the selected name instead |
-
-### Graph load (`crates/workspace-status/src/tui/graph_load.rs`)
-
-Matches Ink `gitLogGraphWindow` / `loadGraphModel` / `autoloadNext`. Default window is 300 (`DEFAULT_GRAPH_WINDOW`). `--exclude=refs/stash` precedes `--all`.
+Default window is 300 (`DEFAULT_GRAPH_WINDOW`). `--exclude=refs/stash` precedes `--all`.
 
 | Function | Command | Purpose |
 | --- | --- | --- |
@@ -221,3 +87,52 @@ Matches Ink `gitLogGraphWindow` / `loadGraphModel` / `autoloadNext`. Default win
 Hidden ignored checkouts stay out of `P` / `S` / `b` unless shown. Linked worktrees are included on `f` / `p` / `P` / `d` only when that row is focused. The background fetch timer (`background_fetch_targets` in `tui/fetch.rs`) includes every snapshot except hidden ignored — linked worktrees and shown ignored repos included. See [tui-rust.md](./tui-rust.md).
 
 Manual `f` / `p` / `P` / `d` and the background fetch tick paint a trailing breadcrumb counter (`Fetching n/N…`, `Pulling n/N…`, `Pushing n/N…`, `Switching n/N…`) and redraw after each repo settles. The hint row stays pills + keys. Graph autoload still uses `loading older…`.
+
+## Non-obvious semantics
+
+**Renames need both paths.** Staging only the new path leaves the deletion of the old path unstaged, and git then reports the pair as `D` + `A` rather than `R`. Writes apply to each path in order and stop at the first failure.
+
+**Bulk stage / unstage.** `s` / `u` use `collect_write_files`: a file row is itself; a dir or checkout (or flat repo) walks file/dir descendants — never mixes sibling checkouts under a family container. Workspace, group, and family-container rows yield an empty list. Stage keeps files with unstaged or untracked; unstage keeps staged. Empty after filtering: `Nothing to stage` / `Nothing to unstage`. Wrong focus: `Focus a file, dir, checkout, or repo to stage|unstage`.
+
+**Focused refresh (`r`).** Reloads the whole workspace on the workspace row or No-updates group, and otherwise one checkout (`refresh_target` → `ReloadSnapshot` vs `ReloadRepo { repo }`).
+
+**Bulk revert with counted confirm.** `x` uses the same `collect_write_files` scope, keeping unstaged or untracked (staged-only skipped). Confirm shows counts; `y`/`Enter` runs `git restore` on tracked targets and **keeps** untracked; `Y` also deletes each untracked via `remove_untracked_file` (per-file `clean -f`, not `clean -fd`). Exception: a single untracked target still deletes on both `y` and `Y`. Empty after filter: `Nothing to discard` (or `Nothing to discard (staged only)` on a staged-only file).
+
+**Remove linked worktree (`W`).** Linked `Checkout` rows only. Confirm shows branch, `merged into default` / `NOT merged into default`, and `--force` when dirty. On Unix, bind-mount aliases remap via inode so gitdir back-pointers match. On Windows, worktree identity is canonical path plus size and mtime (no inode / bind-mount remap).
+
+**Reverting an untracked file deletes it.** There is no git object to restore to, so untracked “revert” means remove from disk — irrecoverable. Bulk `y` leaves untracked alone; opt in with `Y`, or press `y` when the only target is one untracked file.
+
+**Staged-only files refuse revert.** When a file is staged with no unstaged component, the worktree already matches the index for that path, so `git restore` would be a no-op. Discarding a staged change is a two-step operation (`u` then `x`) by design.
+
+**`repo_has_local_changes` ignores untracked files.** `-d` will therefore switch a branch in a repo that has untracked files. That is usually right (untracked files survive a checkout) but it is not what "has local changes" implies.
+
+**`stash_push` treats a no-op as failure.** Apple Git 2.50 prints `No local changes to save` but exits 0. The wrapper compares `stash list` before and after and returns `Err` when the list is unchanged.
+
+**Local branch picker (`b`).** Opens on a checkout or flat repo row (hidden on family containers), lists `refs/heads/` only (no remotes). Esc closes without quitting. Typing filters; `j`/`k` move; Enter checks out. Dirty worktrees refuse checkout with `Dirty worktree — commit or stash first`. Selecting the current branch closes with `Already on …` and skips the dirty check.
+
+**Graph actions** (graph list focused — depth 0 right or depth 1 left):
+
+| Key | When visible | Behaviour |
+| --- | --- | --- |
+| `b` | Commit row with ≥1 local branch or `origin/*` ref | Dirty check first. One name → checkout (creates tracking from origin when local is missing). Several names → picker (locals then `origin/*`). Selecting `origin/<name>` when a local exists and tips differ opens confirm: Yes checks out the local then `fast_forward_to_remote_ref` of that selected `origin/<name>` (no fetch; `merge --ff-only`). Tags and non-`origin` remotes are not targets. |
+| `c` | Any commit row | Name prompt → `create_branch_at` (ref only, HEAD unchanged). |
+| `S` | Uncommitted, stash, or commit with stash/dirty ops | Stash overlay (`stash_push -u` / apply / pop / drop as listed). |
+| `a` / `p` / `D` | Stash row | Apply / pop / drop (drop confirms with `y`/`n`/Esc). |
+
+## Destructive operations
+
+| Operation | Confirmation | Recoverable |
+| --- | --- | --- |
+| `s` stage / `u` unstage | none | yes — trivially reversible |
+| `x` revert, tracked (`y`) | `y`/`Y`/`n` prompt | only via git's object store if the change was ever committed or stashed |
+| `x` revert + delete untracked (`Y`) | same prompt | **no** for deleted untracked |
+| `x` single untracked (`y` or `Y`) | same prompt | **no** — the file is deleted |
+| `-p` / `--pull` | none | yes — but can fail on conflicts |
+| `-d` / `--default-branch` | none | yes — dirty repos are skipped, so no work is lost |
+| `b` checkout (local / origin) | none when in sync; `y`/`n` when local exists and origin tips differ | yes — dirty worktrees refuse before checkout; confirm Yes is checkout then `fast_forward_to_remote_ref` of the selected `origin/*` (no reset) |
+
+Revert, stash drop, and origin-out-of-sync graph checkout use modal overlays, so no other key can act while one is up.
+
+## Write serialisation
+
+A single busy flag is shared by refresh, every write (including TUI `p` / `d`), background/manual fetch, and the watch poll. Concurrent git writes against the same index would race on `.git/index.lock`; the gate makes the second one report `Busy…` instead. A poll tick that lands while a write or fetch is in flight is dropped, not queued.

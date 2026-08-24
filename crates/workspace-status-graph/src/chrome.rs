@@ -1,27 +1,29 @@
 //! GraphPane chrome: header / list / 2-line selection footer / loading older.
 //!
-//! Matches Ink `graphChromeBudget` and `graphSelectionDetailLines`.
+//! Header / footer budget (`graph_chrome_budget`) and selection footer copy.
 
-use crate::format::{format_commit_ref_chips, format_commit_ref_chips_with, format_relative_date, short_id};
+use crate::format::{
+    format_commit_ref_chips, format_commit_ref_chips_with, format_relative_date, short_id,
+};
 use crate::glyphs::GlyphSet;
 use crate::model::{GraphModel, GraphRow};
 
 /// Status / pane copy while the next log page loads.
 pub const LOADING_OLDER: &str = "loading older…";
 
-/// Ink `graphSelectionDetailLines` when no row is focused.
+/// Selection footer lines when no row is focused.
 pub const FOOTER_NO_SELECTION: &str = "no selection";
 
-/// Ink uncommitted footer meta.
+/// Uncommitted footer meta.
 pub const FOOTER_WORKTREE_NOT_A_COMMIT: &str = "worktree · not a commit";
 
-/// Ink spacer footer meta (`kind: 'spacer'`).
+/// Spacer footer meta.
 pub const FOOTER_CONNECTOR_NOT_SELECTABLE: &str = "connector · not selectable";
 
-/// Ink commit footer when the commit has no ref chips.
+/// Commit footer when the commit has no ref chips.
 pub const FOOTER_NO_REFS: &str = "(no refs)";
 
-/// Ink spacer footer subject.
+/// Spacer footer subject.
 pub const FOOTER_SPACER_SUBJECT: &str = "…";
 
 /// What GraphPane's 2-line selection footer describes.
@@ -57,7 +59,7 @@ pub struct GraphChromeBudget {
     pub older: bool,
 }
 
-/// Footer first, then header, matching Ink `graphChromeBudget`.
+/// Footer first, then header, matching `graphChromeBudget`.
 pub fn graph_chrome_budget(
     height: u16,
     loading_older: bool,
@@ -107,7 +109,7 @@ pub fn selection_detail_lines(
             [trunc(line, width), trunc(&meta, width)]
         }
         GraphFooterSelection::Row(GraphRow::Stash(stash)) => {
-            // Ink `graphSelectionDetailLines`: `[ref, hash.slice(0,7), date].join(' · ')`.
+            // `graphSelectionDetailLines`: `[ref, hash.slice(0,7), date].join(' · ')`.
             let meta = join_meta([
                 stash.stash_ref.clone(),
                 short_id(&stash.id).to_string(),
@@ -292,7 +294,7 @@ mod tests {
             selection_detail_lines(&model, GraphFooterSelection::Row(&row), &UNICODE, 80, 0);
         assert!(
             meta.starts_with(FOOTER_NO_REFS),
-            "commit with no chips uses Ink (no refs): {meta}"
+            "commit with no chips uses (no refs): {meta}"
         );
     }
 

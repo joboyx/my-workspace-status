@@ -15,7 +15,7 @@ pub enum Action {
     /**
      * Second `z` within [`super::keys::DOUBLE_TAP_MS`].
      *
-     * Ink `fold.toggleSubtree`. First `z` already applied [`Self::FoldToggle`].
+     * First `z` already applied [`Self::FoldToggle`].
      */
     FoldToggleSubtree,
     /**
@@ -40,11 +40,21 @@ pub enum Action {
     PanDiff(i32),
     /// Toggle unlimited `-U` context on the focused file diff.
     ToggleFullContext,
-    Click { col: u16, row: u16 },
-    Drag { col: u16, row: u16 },
+    Click {
+        col: u16,
+        row: u16,
+    },
+    Drag {
+        col: u16,
+        row: u16,
+    },
     Release,
     ToggleDiffMode,
-    ScrollWheel { col: u16, row: u16, delta: i32 },
+    ScrollWheel {
+        col: u16,
+        row: u16,
+        delta: i32,
+    },
     SearchStart,
     SearchChar(char),
     SearchBackspace,
@@ -105,13 +115,21 @@ pub enum Effect {
     /// spans more than one repo. A single-repo write stays a plain Stage,
     /// Unstage, or Revert.
     Batch(Vec<Effect>),
-    Fetch { repos: Vec<String> },
-    Pull { repos: Vec<String> },
-    DefaultBranch { repos: Vec<String> },
+    Fetch {
+        repos: Vec<String>,
+    },
+    Pull {
+        repos: Vec<String>,
+    },
+    DefaultBranch {
+        repos: Vec<String>,
+    },
     /// Reload every checkout (`r` on the workspace row or No-updates group).
     ReloadSnapshot,
     /// Reload one checkout (`r` on a repo, checkout, file, or dir row).
-    ReloadRepo { repo: String },
+    ReloadRepo {
+        repo: String,
+    },
     LoadRightPane,
     Stage {
         repo: String,
@@ -131,8 +149,12 @@ pub enum Effect {
         path: String,
     },
     WatchRefresh,
-    Push { repos: Vec<String> },
-    PrepareStashMenu { repo: String },
+    Push {
+        repos: Vec<String>,
+    },
+    PrepareStashMenu {
+        repo: String,
+    },
     StashCreate {
         repo: String,
         paths: Vec<String>,
@@ -149,7 +171,9 @@ pub enum Effect {
         repo: String,
         stash_ref: String,
     },
-    PrepareBranchPicker { repo: String },
+    PrepareBranchPicker {
+        repo: String,
+    },
     CheckoutBranch {
         repo: String,
         /// Picker or graph selection. May be `origin/<name>`. Confirm Yes uses the local name.

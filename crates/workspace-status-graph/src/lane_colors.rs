@@ -1,14 +1,13 @@
-//! Default lane colours and `cellsToSegments` paint helpers.
+//! Default lane colours and span paint helpers.
 //!
-//! Matches Ink `src/tui/graph/laneColors.ts` `DEFAULT_LANE_COLORS` plus
-//! `cellsToSegments` in `rows.ts`. Each gutter cell uses `color_lane`.
+//! Tokyo-night lane cycle. Each gutter cell uses `color_lane`.
 
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 
 use crate::topology::GraphCell;
 
-/// Tokyo-night inspired lane cycle (Ink `DEFAULT_LANE_COLORS`).
+/// Tokyo-night inspired lane cycle.
 pub const DEFAULT_LANE_COLORS: [&str; 8] = [
     "#7aa2f7", // blue
     "#bb9af7", // purple
@@ -51,7 +50,7 @@ pub fn lane_fg(color_lane: Option<usize>, lane_colors: &[Color], fallback: Color
     }
 }
 
-/// Collapse adjacent same-colour gutter cells into spans (Ink `cellsToSegments`).
+/// Collapse adjacent same-colour gutter cells into spans.
 pub fn cells_to_spans<'a>(
     cells: &'a [GraphCell],
     lane_colors: &[Color],

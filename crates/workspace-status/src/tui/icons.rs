@@ -1,4 +1,4 @@
-//! Nerd Font glyph registry for the ratatui tree. Port of Ink `src/tui/icons.ts`.
+//! Nerd Font glyph registry for the ratatui tree.
 //!
 //! A patched Nerd Font is a hard requirement. `WS_STATUS_GLYPHS=ascii` falls
 //! back to plain markers. Every glyph occupies one terminal column: Nerd icons
@@ -18,13 +18,13 @@ pub fn glyph(ascii: bool, nerd: &'static str, fallback: &'static str) -> &'stati
 
 /* ── Structure ──────────────────────────────────────────────────────────── */
 
-/// Fold chevron — expanded. Width 1 in both modes (Ink does not ASCII-gate this).
+/// Fold chevron — expanded. Width 1 in both modes (not ASCII-gated).
 pub const FOLD_EXPANDED: &str = "▾";
 /// Fold chevron — collapsed.
 pub const FOLD_COLLAPSED: &str = "▸";
-/// ASCII fold expanded (Rust extra when `WS_STATUS_GLYPHS=ascii`).
+/// ASCII fold expanded when `WS_STATUS_GLYPHS=ascii`.
 pub const FOLD_EXPANDED_ASCII: &str = "v";
-/// ASCII fold collapsed (Rust extra when `WS_STATUS_GLYPHS=ascii`).
+/// ASCII fold collapsed when `WS_STATUS_GLYPHS=ascii`.
 pub const FOLD_COLLAPSED_ASCII: &str = ">";
 
 /// Cursor accent bar painted in the left-most tree column.
@@ -93,11 +93,11 @@ pub fn icon_merged_into_default(ascii: bool) -> &'static str {
 pub fn icon_open_vs_default(ascii: bool) -> &'static str {
     glyph(ascii, "", "o")
 }
-/// Ink `ICON_VIEWED` nerd glyph: nf-fa-eye (`U+F06E`).
+/// `ICON_VIEWED` nerd glyph: nf-fa-eye (`U+F06E`).
 ///
-/// Same pairing as `src/tui/icons.ts`. Do not substitute `◉` or another PUA eye.
+/// Do not substitute `◉` or another PUA eye.
 pub const ICON_VIEWED_NERD: &str = "\u{f06e}";
-/// Ink `ICON_VIEWED` ASCII fallback.
+/// `ICON_VIEWED` ASCII fallback.
 pub const ICON_VIEWED_ASCII: &str = "*";
 
 /// Reviewed mark on a dirty file row. Nerd: nf-fa-eye (`U+F06E`); ASCII: `*`.
@@ -264,7 +264,7 @@ fn extension_icon(ext: &str) -> Option<FileIcon> {
 
 /* ── File status ────────────────────────────────────────────────────────── */
 
-/// Letter code aligned with Ink `FileStatusLetter`.
+/// Letter code aligned with `FileStatusLetter`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileStatusLetter {
     A,
@@ -278,7 +278,7 @@ pub enum FileStatusLetter {
 }
 
 impl FileStatusLetter {
-    /// Ink letter token (`A` / `S` / `MS` / `M` / `D` / `R` / `U` / `C`).
+    /// Letter token (`A` / `S` / `MS` / `M` / `D` / `R` / `U` / `C`).
     ///
     /// Watch signatures and tests use this, not the 2-column badge.
     pub fn as_str(self) -> &'static str {
@@ -308,7 +308,7 @@ impl FileStatusLetter {
         }
     }
 
-    /// Ink `statusColor` token name.
+    /// `statusColor` token name.
     pub fn color_role(self) -> StatusColorRole {
         match self {
             Self::A | Self::S => StatusColorRole::Added,
@@ -331,7 +331,7 @@ pub enum StatusColorRole {
     File,
 }
 
-/// Map a FileChange to the same letter vocabulary as Ink `statusLetterFromChange`.
+/// Map a FileChange to the same letter vocabulary as `statusLetterFromChange`.
 pub fn status_letter_from_change(change: &FileChange) -> FileStatusLetter {
     // Conflict before MS — staged+unstaged both set must not swallow U.
     let unstaged = change.unstaged_status.as_deref();
@@ -460,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn badges_are_two_columns_and_match_ink() {
+    fn badges_are_two_columns() {
         let letters = [
             FileStatusLetter::A,
             FileStatusLetter::M,
@@ -551,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn viewed_is_ink_nf_fa_eye_not_a_substitute() {
+    fn viewed_is_nf_fa_eye_not_a_substitute() {
         assert_eq!(icon_viewed(false), "\u{f06e}");
         assert_eq!(icon_viewed(true), "*");
         assert_eq!(icon_viewed(false), ICON_VIEWED_NERD);
