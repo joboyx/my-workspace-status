@@ -33,6 +33,7 @@ stdout_is_tty || flags.force_tui
 | `--json`         | workspace snapshot JSON on stdout (progress from `-f`/`-p`/`-d` goes to stderr)                         |
 | `-v`, `-p`, `-d` | plain report — these flags print progress logs mid-run, which cannot coexist with ratatui owning the screen |
 | `--update`       | exec `workspace-status-update` and exit — never opens the TUI or applies repo filters                      |
+| TUI startup (TTY) | before `run_tui`: at most every 6 hours, fetch the latest published GitHub Release. Newer → `new version available, update? [y/n]`. `y` runs the sidecar. `n` / fail / current → open the TUI. `--plain` / `--json` / `--update` skip this |
 
 On a TTY the mount loop uses the alternate screen (DEC 1049) so frames stay off the primary scrollback. Leave/re-enter brackets a blocking TTY `$EDITOR` (vim). GUI editors such as Cursor spawn detached and stay on the mounted TUI.
 
@@ -41,6 +42,7 @@ On a TTY the mount loop uses the alternate screen (DEC 1049) so frames stay off 
 | Stage          | Module                                                                              | Produces                                                                                                                                                                 |
 | -------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Config         | `config.rs`                                                                         | `WorkspaceStatusConfig` (`ignoredRepos`, `maxDepth`, `defaultBranches`, `editor`)                                                                                        |
+| Startup update | `update_check.rs` (TUI launch only)                                                 | Last-check timestamp under `$XDG_STATE_HOME/my-workspace-status/update-check.json`. `curl` GET of GitHub Releases `latest` (`tag_name` vs `CARGO_PKG_VERSION`). Prompt, never silent install. Missing/failed `curl` stays quiet.     |
 | Discovery      | `discovery.rs` — `find_repos_with_config` + linked via `git worktree list --porcelain` | primary paths up to `maxDepth`, then linked worktrees under cwd (dot dirs still skipped by walk)                                                                       |
 | Snapshot       | `discovery.rs` — `process_repo`                                                     | `WorkspaceRepoSnapshot` per path (`checkoutKind`, `primaryRepo?`, `mergedIntoDefault`) from status + merge-base probe                                                     |
 | Workspace      | `snapshot.rs` — `build_workspace_snapshot`                                          | Workspace snapshot (`docs/snapshot.md`): repos, ignore, branch/sync/checkout, file changes. `--json` prints it. Hidden ignored repos stay out of `repos` unless shown    |
@@ -90,6 +92,7 @@ Graph checkout confirm (and several other graph UX choices) is inspired by [Git 
 | New pane / overlay    | `tui/` module + `chrome.rs` row budget + `render.rs` layout                                                                                                               |
 | Nav shell / drill     | `tui/drill.rs` + `tui/state.rs` + `chrome.rs` breadcrumb                                                                                                                  |
 | New CLI flag          | `cli.rs` + `tui::HeadlessFlags` / `should_open_tui` if it affects TUI vs headless                                                                                          |
+| TUI startup update check | `update_check.rs` + `cli.rs` (before `run_tui`). Sidecar exec stays in `update.rs`                                                                                      |
 | Snapshot contract     | `snapshot.rs` (`build_workspace_snapshot`) + `docs/snapshot.md` + `tests/snapshot_contract.rs`                                                                            |
 | New key binding       | `tui/keys.rs` (`Action`) + `tui/state.rs` dispatch + `tui/help.rs` (`HELP_GROUPS`) + `tui/gates.rs` if the key is row-scoped                                               |
 | Event-loop freeze / overlay ticks / graph autoload gates | `tui/event_pump.rs` + `tui/app.rs` (`run_loop`, `run_work_pumped`)                                                                                                          |
@@ -97,7 +100,7 @@ Graph checkout confirm (and several other graph UX choices) is inspired by [Git 
 ## CLI crate
 
 `crates/workspace-status` is the CLI (`workspace-status` and `ws`).
-It implements discovery, `--plain`, `--json`, `-a`/`--all`, `--update`, repo filters,
+It implements discovery, `--plain`, `--json`, `-a`/`--all`, `--update`, the TUI-startup GitHub Release prompt, repo filters,
 ignored-repo visibility from snapshot.md, and the ratatui TUI on a TTY.
 CLI flags live in `cli.rs`.
 
@@ -122,6 +125,7 @@ The CLI is published with [cargo-dist](https://axodotdev.github.io/cargo-dist/) 
 `.github/workflows/tag-release.yml` writes an annotated `vX.Y.Z` on each push to `main` and dispatches Release (`GITHUB_TOKEN` tag pushes do not start other workflows). `allow-dirty = ["ci"]` keeps the extra `workflow_dispatch` on the generated Release workflow.
 Installers place `workspace-status`, `ws`, and `workspace-status-update` in `~/.local/bin`.
 `--update` (`ws --update` / `workspace-status --update`) execs `workspace-status-update` from the same directory as the current executable, then PATH. The sidecar's exit status is the process exit status. That run does not open the TUI or apply repo filters. `install-updater = true` keeps the sidecar in the installer.
+A TTY TUI launch (`ws` / `workspace-status` without `--plain` / `--json` / `--update`) may ask to run that same sidecar **before** the alternate screen mounts: at most every 6 hours it `curl`s the latest published GitHub Release. Newer → `new version available, update? [y/n]`. `y` execs the sidecar. `n` opens the TUI. Offline / current / parse failure / missing `curl` stay quiet. The last-check time is stored in `$XDG_STATE_HOME/my-workspace-status/update-check.json` (`WS_STATUS_UPDATE_CHECK_STORE` overrides). HeadlessTui tests do not run this check.
 `workspace-status-graph` is a path library, not a separate dist app. There is no crates.io or Homebrew publish job.
 
 ## Decisions

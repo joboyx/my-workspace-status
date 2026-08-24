@@ -32,6 +32,9 @@ pub struct HeadlessTui {
 impl HeadlessTui {
     /// Open a session from a workspace directory. Hidden ignored stay out unless
     /// `show_ignored` is true (`-a`).
+    ///
+    /// Does not run the CLI GitHub Release check. That prompt exists only on a
+    /// real `ws` / `workspace-status` TUI launch.
     pub fn open(cwd: impl Into<PathBuf>, show_ignored: bool) -> Self {
         let cwd = cwd.into();
         let config = load_workspace_status_config(&cwd)

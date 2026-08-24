@@ -65,7 +65,7 @@ At depth 2, `j`/`k` on the left move the commit-file cursor and load that file's
 
 ## App state
 
-`AppState` in `tui/state.rs` holds restorable view state: cursor row id, folds, filter, diff mode, full-context ids, tree mode, mouse enabled, theme, nav (focus pane + drill depth), `diff_col_offset`, `left_col_offset`, and `right_col_offset`. Graph window default is 300. There is no on-disk session store — fold, split ratios, pan offsets, and theme cycle reset on the next launch.
+`AppState` in `tui/state.rs` holds restorable view state: cursor row id, folds, filter, diff mode, full-context ids, tree mode, mouse enabled, theme, nav (focus pane + drill depth), `diff_col_offset`, `left_col_offset`, and `right_col_offset`. Graph window default is 300. There is no on-disk session store — fold, split ratios, pan offsets, and theme cycle reset on the next launch. The GitHub Release startup prompt (`update_check.rs`) runs in the CLI **before** `AppState` exists; it is not session state.
 
 Full-context membership means unlimited unified context (`FULL_DIFF_CONTEXT_LINES`) for that file id — toggled by `Ctrl+O`, cleared by `Esc` or a second `Ctrl+O`. After a full-file toggle, scroll recenters on the prior hunk/change anchor.
 

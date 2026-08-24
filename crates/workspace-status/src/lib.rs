@@ -9,6 +9,8 @@ pub mod helpers;
 pub mod render;
 pub mod snapshot;
 pub mod tui;
+pub mod update;
+pub mod update_check;
 pub mod worktrees;
 
 pub use cli::cli_main;

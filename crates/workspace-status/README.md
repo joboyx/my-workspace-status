@@ -5,6 +5,7 @@ Git status for every repo and worktree under the current directory, in one TUI.
 On a TTY, `workspace-status` and `ws` open a ratatui TUI.
 `--plain` prints human text. `--json` prints the same snapshot as JSON.
 `-v`, `-p`, and `-d` stay headless. A non-TTY run without those flags prints `--plain`.
+A TTY launch may ask to install a newer GitHub Release before the TUI; `--plain` / `--json` / `--update` skip that.
 
 Screenshots of the tree, graph, diff, and overlays: [root README](../../README.md#screenshots).
 
