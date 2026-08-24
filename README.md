@@ -16,11 +16,60 @@ It is intentionally treated as a black-box CLI:
 
 ## Install
 
-Requires Node 20 or later, npm, and git. The Rust crates need rustc 1.85 or later.
+### GitHub Releases (Rust CLI)
+
+Install `workspace-status` and `ws` (and `workspace-status-update`) from the latest GitHub Release:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/joboyx/my-workspace-status/releases/latest/download/workspace-status-installer.sh | sh
+```
+
+This repository is **private**. Unauthenticated `releases/latest/download` 404s. Export a GitHub token that can read this repo (`contents: read`), then:
+
+```bash
+export WORKSPACE_STATUS_GITHUB_TOKEN=...   # cargo-dist ≥0.29 installer bearer token
+curl --proto '=https' --tlsv1.2 -LsSf \
+  -H "Authorization: Bearer ${WORKSPACE_STATUS_GITHUB_TOKEN}" \
+  https://github.com/joboyx/my-workspace-status/releases/latest/download/workspace-status-installer.sh \
+  | sh
+```
+
+If that curl still 404s (GitHub private-asset redirects), download the installer with `gh`:
+
+```bash
+gh release download -R joboyx/my-workspace-status --pattern workspace-status-installer.sh
+WORKSPACE_STATUS_GITHUB_TOKEN=$(gh auth token) sh workspace-status-installer.sh
+```
+
+The public curl works only after this repository is public.
+
+On a TTY the Rust binary opens the ratatui TUI. Pass `--plain` or `--json` for agents.
+`-i` / `--tui` forces the TUI when stdout is not a TTY. `-v` / `-p` / `-d` / `--plain` / `--json` still stay headless.
+A non-TTY run without those flags prints `--plain`.
+
+Uninstall:
+
+```bash
+./scripts/uninstall.sh
+```
+
+That removes `~/.cargo/bin/{ws,workspace-status,workspace-status-update}` and the cargo-dist receipt under `${XDG_CONFIG_HOME:-$HOME/.config}/workspace-status/`.
+
+Windows: `irm https://github.com/joboyx/my-workspace-status/releases/latest/download/workspace-status-installer.ps1 | iex` (same `WORKSPACE_STATUS_GITHUB_TOKEN` for a private repo).
+
+### cargo install (fallback)
+
+Requires rustc 1.85 or later. This repository is a Cargo workspace. Name the package when you install from git:
+
+    cargo install --git https://github.com/joboyx/my-workspace-status --locked --package workspace-status
+
+From a local clone:
+
+    cargo install --path crates/workspace-status --locked
 
 ### TypeScript app (TUI + current ws wrapper)
 
-Clone this repository, then install and link commands:
+Requires Node 20 or later, npm, and git. Clone this repository, then install and link commands:
 
 ```bash
 git clone https://github.com/joboyx/my-workspace-status.git
@@ -32,21 +81,6 @@ npm link
 `npm link` installs two commands: `workspace-status` and `ws`. They launch the TypeScript app.
 
 The launcher also installs dependencies and builds dist when they are missing or stale.
-
-### Rust CLI (TUI + --plain / --json)
-
-This repository is a Cargo workspace. Name the package when you install from git:
-
-    cargo install --git https://github.com/joboyx/my-workspace-status --locked --package workspace-status
-
-From a local clone:
-
-    cargo install --path crates/workspace-status --locked
-
-Both commands install workspace-status and ws into Cargo bin.
-On a TTY the Rust binary opens the ratatui TUI. Pass --plain or --json for agents.
-`-i` / `--tui` forces the TUI when stdout is not a TTY. `-v` / `-p` / `-d` / `--plain` / `--json` still stay headless.
-A non-TTY run without those flags prints --plain.
 
 ## Use --plain or --json from agents
 

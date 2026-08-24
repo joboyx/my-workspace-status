@@ -10,7 +10,7 @@ Screenshots of the tree, graph, diff, and overlays: [root README](../../README.m
 
 The TypeScript Ink app is still in this repository for features the Rust TUI does not cover. See [docs/tui-rust.md](../../docs/tui-rust.md).
 
-Install from this crate:
+Install from GitHub Releases (see the [root README](../../README.md#install)), or from this crate:
 
 ```bash
 cargo install --path crates/workspace-status --locked
@@ -22,4 +22,4 @@ From git (this repository is a Cargo workspace, so name the package):
 cargo install --git https://github.com/joboyx/my-workspace-status --locked --package workspace-status
 ```
 
-Both commands install `workspace-status` and `ws`.
+GitHub Releases and `cargo install` both install `workspace-status` and `ws`.
