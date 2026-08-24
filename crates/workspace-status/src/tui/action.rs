@@ -6,6 +6,13 @@ use super::drill::CommitFileSource;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     Quit,
+    /**
+     * Double Ctrl-C quit chord.
+     *
+     * First press prompts; second within [`super::ctrl_c_exit::CTRL_C_EXIT_MS`]
+     * quits. `q` stays [`Self::Quit`].
+     */
+    CtrlC,
     ToggleHelp,
     Move(i32),
     MoveToStart,

@@ -515,6 +515,7 @@ mod tests {
         assert!(help_match_indices("quit")
             .iter()
             .any(|&i| { help_entries().nth(i).is_some_and(|e| e.keys == "q") }));
+        assert!(view_keys.contains(&"Ctrl-C Ctrl-C"));
     }
 
     #[test]

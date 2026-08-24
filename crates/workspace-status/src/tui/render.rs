@@ -13,7 +13,10 @@ use workspace_status_graph::{
 use std::collections::HashSet;
 use std::time::Instant;
 
-use super::chrome::{breadcrumb_line, breadcrumb_rows, overlay_status_rows_for, status_line};
+use super::chrome::{
+    breadcrumb_line, breadcrumb_rows, ctrl_c_prompt_line, ctrl_c_prompt_rows,
+    overlay_status_rows_for, status_line,
+};
 use super::diff::{
     cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, gutter_width,
     section_header, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
@@ -76,11 +79,13 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     let area = frame.area();
     let overlay_h = overlay_status_rows_for(state, area.width);
     let crumb_h = breadcrumb_rows(state);
+    let prompt_h = ctrl_c_prompt_rows(state);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
             Constraint::Length(crumb_h),
+            Constraint::Length(prompt_h),
             Constraint::Length(overlay_h),
         ])
         .split(area);
@@ -166,21 +171,25 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
             chunks[1],
         );
     }
-    if state.help_open {
-        draw_help(frame, chunks[2], state);
-    } else if state.confirm.is_some() {
-        draw_confirm(frame, chunks[2], state);
-    } else if state.stash_menu.is_some() {
-        draw_stash_menu(frame, chunks[2], state);
-    } else if state.create_branch.is_some() {
-        draw_create_branch(frame, chunks[2], state);
-    } else if state.branch_picker.is_some() {
-        draw_branch_picker(frame, chunks[2], state);
-    } else {
+    if prompt_h > 0 {
         frame.render_widget(
-            Paragraph::new(status_line(state, chunks[2].width)),
+            Paragraph::new(ctrl_c_prompt_line(state, chunks[2].width)),
             chunks[2],
         );
+    }
+    let overlay = chunks[3];
+    if state.help_open {
+        draw_help(frame, overlay, state);
+    } else if state.confirm.is_some() {
+        draw_confirm(frame, overlay, state);
+    } else if state.stash_menu.is_some() {
+        draw_stash_menu(frame, overlay, state);
+    } else if state.create_branch.is_some() {
+        draw_create_branch(frame, overlay, state);
+    } else if state.branch_picker.is_some() {
+        draw_branch_picker(frame, overlay, state);
+    } else {
+        frame.render_widget(Paragraph::new(status_line(state, overlay.width)), overlay);
     }
 
     state.layout.tree_x = tree_inner.x;

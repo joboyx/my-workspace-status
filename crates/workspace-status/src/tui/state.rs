@@ -20,6 +20,7 @@ use super::commit_files::{
     ancestor_dir_ids, collect_foldable_subtree_ids as collect_commit_subtree_ids,
     flatten_commit_files, CommitFileRow,
 };
+use super::ctrl_c_exit::{handle_ctrl_c, is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT};
 use super::diff::{
     anchor_row_index, build_diff_rows, cell_code_width, clamp_diff_scroll, gutter_width,
     row_search_text, scroll_to_keep_row, DiffContent, DiffRow,
@@ -237,6 +238,7 @@ pub struct AppState {
     pub mouse_enabled: bool,
     pub(crate) z_pending_at: Option<Instant>,
     pub(crate) g_pending_at: Option<Instant>,
+    pub(crate) ctrl_c_armed_until: Option<Instant>,
     last_click: Option<(u16, u16, Instant)>,
 }
 
@@ -323,6 +325,7 @@ impl AppState {
             mouse_enabled: true,
             z_pending_at: None,
             g_pending_at: None,
+            ctrl_c_armed_until: None,
             last_click: None,
         };
         state.reconcile_viewed_store();
@@ -745,6 +748,41 @@ impl AppState {
         changed
     }
 
+    fn ctrl_c(&mut self, now: Instant) -> Effect {
+        let result = handle_ctrl_c(self.ctrl_c_armed_until, now);
+        self.ctrl_c_armed_until = result.armed_until;
+        if result.quit {
+            return Effect::Quit;
+        }
+        if result.prompt {
+            self.status = CTRL_C_EXIT_PROMPT.into();
+        }
+        Effect::None
+    }
+
+    /// Disarm an expired Ctrl-C window. Clears the prompt only when it is still showing.
+    pub fn expire_ctrl_c_prompt(&mut self, now: Instant) -> bool {
+        let Some(until) = self.ctrl_c_armed_until else {
+            return false;
+        };
+        if now < until {
+            return false;
+        }
+        self.ctrl_c_armed_until = None;
+        if is_ctrl_c_exit_prompt(&self.status) {
+            self.status.clear();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Milliseconds left on the Ctrl-C arm, if one is active.
+    pub fn ctrl_c_remaining_ms(&self, now: Instant) -> Option<u64> {
+        let until = self.ctrl_c_armed_until?;
+        Some(until.saturating_duration_since(now).as_millis() as u64)
+    }
+
     pub fn dispatch(&mut self, action: Action) -> Effect {
         if !matches!(action, Action::FoldToggle) {
             self.z_pending_at = None;
@@ -770,6 +808,7 @@ impl AppState {
                 Effect::None
             }
             Action::Quit => Effect::Quit,
+            Action::CtrlC => self.ctrl_c(Instant::now()),
             Action::ToggleHelp => {
                 self.drag = SplitDrag::None;
                 self.help_open = !self.help_open;
@@ -3711,6 +3750,43 @@ mod tests {
         let mut app = state();
         assert_eq!(app.dispatch(Action::ToggleHelp), Effect::None);
         assert!(app.help_open);
+        assert_eq!(app.dispatch(Action::Quit), Effect::Quit);
+    }
+
+    #[test]
+    fn ctrl_c_prompts_then_quits_within_the_window() {
+        let mut app = state();
+        assert_eq!(app.dispatch(Action::CtrlC), Effect::None);
+        assert_eq!(app.status, CTRL_C_EXIT_PROMPT);
+        assert!(app.ctrl_c_armed_until.is_some());
+        assert_eq!(app.dispatch(Action::CtrlC), Effect::Quit);
+    }
+
+    #[test]
+    fn ctrl_c_expired_arm_is_a_fresh_prompt_not_quit() {
+        let mut app = state();
+        assert_eq!(app.dispatch(Action::CtrlC), Effect::None);
+        let until = app.ctrl_c_armed_until.expect("armed");
+        assert!(!app.expire_ctrl_c_prompt(until - Duration::from_millis(1)));
+        assert_eq!(app.status, CTRL_C_EXIT_PROMPT);
+        assert!(app.expire_ctrl_c_prompt(until));
+        assert!(app.status.is_empty());
+        assert!(app.ctrl_c_armed_until.is_none());
+        assert_eq!(app.dispatch(Action::CtrlC), Effect::None);
+        assert_eq!(app.status, CTRL_C_EXIT_PROMPT);
+    }
+
+    #[test]
+    fn other_keys_do_not_disarm_ctrl_c() {
+        let mut app = state();
+        assert_eq!(app.dispatch(Action::CtrlC), Effect::None);
+        let _ = app.dispatch(Action::Move(1));
+        assert_eq!(app.dispatch(Action::CtrlC), Effect::Quit);
+    }
+
+    #[test]
+    fn q_still_quits_immediately() {
+        let mut app = state();
         assert_eq!(app.dispatch(Action::Quit), Effect::Quit);
     }
 

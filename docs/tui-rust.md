@@ -11,7 +11,8 @@ To rebuild those frames, run `./scripts/capture-demo-stills.sh` (see [demo.md](.
 
 | Key | Action |
 | --- | --- |
-| `q` / `Ctrl-C` | Quit |
+| `Ctrl-C` twice | Quit. First press paints `Press Ctrl+C again to exit`; second within ~2s exits. Overlay pickers show that copy inline |
+| `q` | Quit immediately (Rust extra) |
 | `?` | Help overlay (short list, not a wall of text) |
 | `j` / `k` or arrows | Move the tree. On a focused graph, move the graph cursor. On a file list, move the file. On a focused file diff, scroll the diff |
 | `z` | Toggle fold on this row |

@@ -8,6 +8,7 @@ mod app;
 mod branches;
 mod chrome;
 mod commit_files;
+mod ctrl_c_exit;
 mod diff;
 mod drill;
 mod easy_motion;
