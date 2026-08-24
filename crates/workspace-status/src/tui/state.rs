@@ -2638,10 +2638,6 @@ impl AppState {
             .is_some_and(|row| row.has_unstaged || row.has_staged)
     }
 
-    fn tree_file_focused(&self) -> bool {
-        matches!(self.focused_row().map(|r| r.kind), Some(NodeKind::File))
-    }
-
     fn hidden_ignored_focus(&self) -> bool {
         self.focused_row()
             .is_some_and(|row| row_is_hidden_ignored(row, self.show_ignored))
