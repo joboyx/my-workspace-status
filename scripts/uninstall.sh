@@ -3,7 +3,8 @@
 set -euo pipefail
 
 app=workspace-status
-bin_dir="${CARGO_HOME:-$HOME/.cargo}/bin"
+local_bin="${HOME}/.local/bin"
+cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
 config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
 receipt_dir="${config_home}/${app}"
 receipt="${receipt_dir}/${app}-receipt.json"
@@ -14,7 +15,9 @@ remove_bins() {
   rm -f -- "$dir/ws" "$dir/workspace-status" "$dir/workspace-status-update"
 }
 
-remove_bins "$bin_dir"
+remove_bins "$local_bin"
+# Leftover from 0.1.x CARGO_HOME installs (not on PATH without rustup).
+remove_bins "$cargo_bin"
 
 if [[ -f "$receipt" ]]; then
   prefix=$(sed -n 's/.*"install_prefix":[[:space:]]*"\([^"]*\)".*/\1/p' "$receipt" | head -n 1)
