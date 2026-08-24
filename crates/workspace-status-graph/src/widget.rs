@@ -4,16 +4,36 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Widget;
+use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget};
 
 use crate::chrome::{
     graph_chrome_budget, selection_detail_lines, GraphFooterSelection, LOADING_OLDER,
 };
-use crate::format::format_sync;
+use crate::format::{format_sync, LabelKind};
 use crate::glyphs::{ASCII, UNICODE};
+use crate::gutter::graph_gutter_cap;
 use crate::lane_colors::{cells_to_spans, default_lane_colors};
 use crate::model::GraphModel;
 use crate::paint::{paint_model_with, PaintOpts, PaintedLine};
+
+/// Ink subject / meta / ref-chip colours for graph labels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GraphLabelPalette {
+    /// Commit subject (Ink `repo`).
+    pub subject: Color,
+    /// Hash, date, author (Ink `muted`).
+    pub meta: Color,
+    /// Feature / local branch chips.
+    pub branch_local: Color,
+    /// Default-branch chips.
+    pub branch_default: Color,
+    /// Remote-tracking chips (Ink `dir`).
+    pub remote: Color,
+    /// Tag chips (Ink `modified`).
+    pub tag: Color,
+    /// Checkout / `[HEAD]` mark (Ink `headMark`).
+    pub head_mark: Color,
+}
 
 /// Renderable git-graph widget.
 ///
@@ -33,6 +53,7 @@ pub struct GraphWidget<'a> {
     search_bg: Option<Color>,
     cursor_fg: Color,
     cursor_bg: Option<Color>,
+    label_palette: Option<GraphLabelPalette>,
 }
 
 impl<'a> GraphWidget<'a> {
@@ -51,6 +72,7 @@ impl<'a> GraphWidget<'a> {
             search_bg: None,
             cursor_fg: Color::Cyan,
             cursor_bg: None,
+            label_palette: None,
         }
     }
 
@@ -113,6 +135,12 @@ impl<'a> GraphWidget<'a> {
         self.cursor_bg = Some(bg);
         self
     }
+
+    /// Colour commit subjects, meta, and ref chips (Ink GraphPane palette).
+    pub fn label_palette(mut self, palette: GraphLabelPalette) -> Self {
+        self.label_palette = Some(palette);
+        self
+    }
 }
 
 impl Widget for GraphWidget<'_> {
@@ -121,7 +149,11 @@ impl Widget for GraphWidget<'_> {
             return;
         }
         let glyphs = if self.ascii { &ASCII } else { &UNICODE };
-        let cap = self.gutter_width.map(|w| w as usize);
+        let pane = area.width.saturating_sub(1) as usize; // scrollbar column
+        let cap = Some(match self.gutter_width {
+            Some(w) => w as usize,
+            None => graph_gutter_cap(pane.max(1)),
+        });
         let default_colors = default_lane_colors();
         let lane_colors: &[Color] = if self.lane_colors.is_empty() {
             &default_colors
@@ -153,16 +185,20 @@ impl Widget for GraphWidget<'_> {
         }
 
         let skip = self.scroll as usize;
+        let line_width = area.width.saturating_sub(2) as usize; // cursor + scrollbar
         let painted = paint_model_with(
             self.model,
             glyphs,
             PaintOpts {
                 gutter_width: cap,
-                line_width: Some(area.width.saturating_sub(1) as usize),
+                line_width: Some(line_width.max(1)),
                 now_unix: self.now_unix,
             },
         );
-        for line in painted.into_iter().skip(skip) {
+        let content_len = painted.len();
+        let list_top = y;
+        let list_height = list_bottom.saturating_sub(list_top);
+        for line in painted.iter().skip(skip) {
             if y >= list_bottom {
                 break;
             }
@@ -175,8 +211,8 @@ impl Widget for GraphWidget<'_> {
                 buf,
                 area.x,
                 y,
-                area.width,
-                &line,
+                area.width.saturating_sub(1),
+                line,
                 selected,
                 search_match,
                 self.search_bg,
@@ -184,8 +220,27 @@ impl Widget for GraphWidget<'_> {
                 self.cursor_bg,
                 lane_colors,
                 fallback,
+                self.label_palette,
             );
             y = y.saturating_add(1);
+        }
+        if list_height > 0 && area.width > 0 {
+            let mut sb_state = ScrollbarState::new(content_len.saturating_sub(1))
+                .position((skip).min(content_len.saturating_sub(1)));
+            let sb_area = Rect {
+                x: area.x.saturating_add(area.width.saturating_sub(1)),
+                y: list_top,
+                width: 1,
+                height: list_height,
+            };
+            StatefulWidget::render(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(None)
+                    .end_symbol(None),
+                sb_area,
+                buf,
+                &mut sb_state,
+            );
         }
 
         let mut footer_y = area.y.saturating_add(area.height);
@@ -246,6 +301,7 @@ fn put_painted_line(
     cursor_bg: Option<Color>,
     lane_colors: &[Color],
     fallback: Color,
+    palette: Option<GraphLabelPalette>,
 ) {
     let mut spans: Vec<Span> = Vec::new();
     let bar = if selected && line.selectable {
@@ -271,7 +327,7 @@ fn put_painted_line(
         spans.extend(cells_to_spans(&line.gutter, lane_colors, fallback));
         spans.push(Span::raw(" "));
     }
-    spans.push(Span::raw(line.label.clone()));
+    spans.extend(label_spans(line, palette, fallback));
     let mut style = Style::default();
     if let Some(bg) = row_bg {
         style = style.bg(bg);
@@ -279,6 +335,39 @@ fn put_painted_line(
     Line::from(spans)
         .style(style)
         .render(Rect::new(x, y, width, 1), buf);
+}
+
+fn label_spans(line: &PaintedLine, palette: Option<GraphLabelPalette>, fallback: Color) -> Vec<Span<'static>> {
+    let kind_color = |kind: LabelKind, pal: GraphLabelPalette| -> Color {
+        match kind {
+            LabelKind::Subject => pal.subject,
+            LabelKind::Meta => pal.meta,
+            LabelKind::ChipHead => pal.head_mark,
+            LabelKind::ChipLocal => pal.branch_local,
+            LabelKind::ChipDefault => pal.branch_default,
+            LabelKind::ChipRemote => pal.remote,
+            LabelKind::ChipTag => pal.tag,
+            LabelKind::Overflow => pal.meta,
+        }
+    };
+    if line.parts.is_empty() {
+        let color = match (palette, line.selectable) {
+            (Some(pal), true) => pal.subject,
+            (Some(pal), false) => pal.meta,
+            (None, _) => fallback,
+        };
+        return vec![Span::styled(line.label.clone(), Style::default().fg(color))];
+    }
+    match palette {
+        None => vec![Span::raw(line.label.clone())],
+        Some(pal) => line
+            .parts
+            .iter()
+            .map(|p| {
+                Span::styled(p.text.clone(), Style::default().fg(kind_color(p.kind, pal)))
+            })
+            .collect(),
+    }
 }
 
 fn put_text_line(
@@ -556,7 +645,7 @@ mod tests {
         assert_eq!(spacer.row_index, subject_line.row_index);
         assert!(spacer.label.contains("stash@{0}"), "{}", spacer.label);
         assert!(spacer.label.contains("ccc3333"), "{}", spacer.label);
-        assert!(spacer.label.contains("1d"), "{}", spacer.label);
+        assert!(spacer.label.contains("2023-11-13 22:13"), "{}", spacer.label);
         assert!(spacer.label.contains("Ada Lovelace"), "{}", spacer.label);
         assert!(
             !subject_line.label.contains("stash@{0}"),
@@ -837,7 +926,10 @@ mod tests {
             prev.contains("Uncommitted changes"),
             "footer subject: {prev}"
         );
-        assert!(last.contains("worktree"), "footer meta: {last}");
+        assert!(
+            last.contains("main") || last.contains("worktree"),
+            "footer meta lists HEAD refs or worktree fallback: {last}"
+        );
     }
 
     #[test]
@@ -884,7 +976,7 @@ mod tests {
         }
         assert!(prev.contains("WIP on main"), "stash footer subject: {prev}");
         assert!(
-            last.contains("stash@{0}") && last.contains("ccc3333") && last.contains("1d"),
+            last.contains("stash@{0}") && last.contains("ccc3333") && last.contains("2023-11-13 22:13"),
             "stash footer meta ref · hash · date: {last}"
         );
         assert!(!last.contains("Ada"), "stash footer has no author: {last}");

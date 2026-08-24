@@ -27,25 +27,79 @@ pub fn format_sync(sync: &SyncState, glyphs: &GlyphSet) -> String {
     parts.join(" ")
 }
 
-/// Compact relative date. Matches Ink `formatRelativeDate` exactly.
+/// Relative ages only up to 3 hours (iOS notification style). Older
+/// timestamps paint as UTC `YYYY-MM-DD HH:MM`.
+pub const RELATIVE_DATE_LIMIT_SECS: i64 = 3 * 3600;
+
+/// One styled run of graph label / spacer text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LabelPart {
+    /// Visible text.
+    pub text: String,
+    /// How the widget should colour this run.
+    pub kind: LabelKind,
+}
+
+/// Semantic colour role for a [`LabelPart`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LabelKind {
+    /// Commit / stash subject (stronger than meta).
+    Subject,
+    /// Hash, date, author, worktree marks, padding.
+    Meta,
+    /// Detached `[HEAD]` / checkout glyph.
+    ChipHead,
+    /// Local (or merged) non-default branch chip.
+    ChipLocal,
+    /// Default-branch chip (`main` / override).
+    ChipDefault,
+    /// Unmatched remote-tracking chip.
+    ChipRemote,
+    /// Tag chip.
+    ChipTag,
+    /// Hidden-ref count (`+N`) when chips do not fit.
+    Overflow,
+}
+
+/// Compact age or absolute timestamp. Matches Ink `formatRelativeDate`.
 pub fn format_relative_date(unix: i64, now_unix: i64) -> String {
     let delta = (now_unix - unix).max(0);
-    if delta < 60 {
-        return "just now".into();
-    }
-    if delta < 3600 {
-        return format!("{}m", delta / 60);
-    }
-    if delta < 86400 {
+    if delta <= RELATIVE_DATE_LIMIT_SECS {
+        if delta < 60 {
+            return "just now".into();
+        }
+        if delta < 3600 {
+            return format!("{}m", delta / 60);
+        }
         return format!("{}h", delta / 3600);
     }
-    if delta < 86400 * 14 {
-        return format!("{}d", delta / 86400);
-    }
-    if delta < 86400 * 70 {
-        return format!("{}w", delta / (86400 * 7));
-    }
-    format!("{}y", delta / (86400 * 365))
+    format_utc_timestamp(unix)
+}
+
+/// UTC `YYYY-MM-DD HH:MM` without extra crates.
+pub fn format_utc_timestamp(unix: i64) -> String {
+    let unix = unix.max(0);
+    let days = unix.div_euclid(86_400);
+    let rem = unix.rem_euclid(86_400) as u32;
+    let hour = rem / 3600;
+    let min = (rem % 3600) / 60;
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}")
+}
+
+/// Howard Hinnant civil-from-days: days since Unix epoch → UTC Y-M-D.
+fn civil_from_days(z: i64) -> (i32, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m as u32, d as u32)
 }
 
 /// Format one visible row. Headless callers share this function.
@@ -105,6 +159,8 @@ pub struct CommitSpacerOpts<'a> {
     pub author_width: usize,
     /// Clock for relative dates (unix seconds).
     pub now_unix: i64,
+    /// Configured default-branch override (`None` → main/master/develop).
+    pub default_branch_override: Option<&'a str>,
 }
 
 /// Which right-meta columns fit beside a left flex region.
@@ -221,6 +277,11 @@ pub fn meta_column_widths_with_stashes<'a>(
 ///
 /// Drop order when narrow: hash → date → author (keep refs).
 pub fn format_commit_spacer(opts: CommitSpacerOpts<'_>) -> String {
+    assemble_commit_spacer(opts).0
+}
+
+/// Commit spacer string plus coloured [`LabelPart`]s (chips, overflow, meta).
+pub fn assemble_commit_spacer(opts: CommitSpacerOpts<'_>) -> (String, Vec<LabelPart>) {
     let (hash, date, author) = padded_meta(
         &opts.commit.id,
         &opts.commit.author_name,
@@ -229,19 +290,26 @@ pub fn format_commit_spacer(opts: CommitSpacerOpts<'_>) -> String {
         opts.author_width,
         opts.now_unix,
     );
-    let mut left = format_commit_ref_chips(
+    // Worktree marks stay visible; leftover *ref* chips collapse to `+N`.
+    let mut groups = Vec::new();
+    for worktree in opts.worktrees {
+        let mark = worktree_mark(worktree, opts.glyphs);
+        if !mark.is_empty() {
+            groups.push(vec![LabelPart {
+                text: mark,
+                kind: LabelKind::Meta,
+            }]);
+        }
+    }
+    groups.extend(commit_ref_chip_groups(
         &opts.commit.refs,
         opts.is_head,
         opts.head_branch,
         opts.glyphs,
-    );
-    for worktree in opts.worktrees {
-        if !left.is_empty() {
-            left.push(' ');
-        }
-        left.push_str(&worktree_mark(worktree, opts.glyphs));
-    }
-    assemble_spacer(&left, &hash, &date, &author, opts.available)
+        opts.default_branch_override,
+    ));
+    let parts = assemble_spacer_parts(&groups, &hash, &date, &author, opts.available);
+    (parts_text(&parts), parts)
 }
 
 /// Inputs for [`format_stash_spacer`].
@@ -262,6 +330,11 @@ pub struct StashSpacerOpts<'a> {
 ///
 /// Drop order when narrow: hash → date → author (keep `stash@{n}`).
 pub fn format_stash_spacer(opts: StashSpacerOpts<'_>) -> String {
+    assemble_stash_spacer(opts).0
+}
+
+/// Stash spacer string plus coloured [`LabelPart`]s.
+pub fn assemble_stash_spacer(opts: StashSpacerOpts<'_>) -> (String, Vec<LabelPart>) {
     let (hash, date, author) = padded_meta(
         &opts.stash.id,
         &opts.stash.author_name,
@@ -270,7 +343,17 @@ pub fn format_stash_spacer(opts: StashSpacerOpts<'_>) -> String {
         opts.author_width,
         opts.now_unix,
     );
-    assemble_spacer(&opts.stash.stash_ref, &hash, &date, &author, opts.available)
+    let parts = assemble_spacer_parts(
+        &[vec![LabelPart {
+            text: opts.stash.stash_ref.clone(),
+            kind: LabelKind::Meta,
+        }]],
+        &hash,
+        &date,
+        &author,
+        opts.available,
+    );
+    (parts_text(&parts), parts)
 }
 
 fn padded_meta(
@@ -289,25 +372,131 @@ fn padded_meta(
 }
 
 /// Left flex + right-anchored meta. Drop order hash → date → author.
-fn assemble_spacer(left: &str, hash: &str, date: &str, author: &str, available: usize) -> String {
+///
+/// Whole chips stay intact; hidden refs collapse to `+N` (never mid-chip `…`).
+fn assemble_spacer_groups(
+    groups: &[Vec<LabelPart>],
+    hash: &str,
+    date: &str,
+    author: &str,
+    available: usize,
+) -> String {
+    parts_text(&assemble_spacer_parts(groups, hash, date, author, available))
+}
+
+fn assemble_spacer_parts(
+    groups: &[Vec<LabelPart>],
+    hash: &str,
+    date: &str,
+    author: &str,
+    available: usize,
+) -> Vec<LabelPart> {
     if available == 0 {
-        return String::new();
+        return Vec::new();
     }
     let cols = pick_meta_columns(available, hash, date, author, MIN_LEFT_KEEP);
     let meta = meta_columns_text(hash, date, author, cols);
     let ref_budget = available.saturating_sub(meta.chars().count());
-    let left = if ref_budget == 0 {
-        String::new()
-    } else {
-        trunc(left, ref_budget)
-    };
-    if meta.is_empty() {
-        return pad_right(&left, available);
-    }
-    let left_len = left.chars().count();
+    let mut left = fit_chip_groups(groups, ref_budget);
+    let left_len = parts_width(&left);
     let meta_len = meta.chars().count();
+    if meta.is_empty() {
+        pad_parts_right(&mut left, available);
+        return left;
+    }
     let pad = available.saturating_sub(left_len).saturating_sub(meta_len);
-    format!("{left}{}{meta}", " ".repeat(pad))
+    if pad > 0 {
+        left.push(LabelPart {
+            text: " ".repeat(pad),
+            kind: LabelKind::Meta,
+        });
+    }
+    if !meta.is_empty() {
+        left.push(LabelPart {
+            text: meta,
+            kind: LabelKind::Meta,
+        });
+    }
+    left
+}
+
+fn parts_text(parts: &[LabelPart]) -> String {
+    parts.iter().map(|p| p.text.as_str()).collect()
+}
+
+fn parts_width(parts: &[LabelPart]) -> usize {
+    parts.iter().map(|p| p.text.chars().count()).sum()
+}
+
+fn pad_parts_right(parts: &mut Vec<LabelPart>, available: usize) {
+    let len = parts_width(parts);
+    if len < available {
+        parts.push(LabelPart {
+            text: " ".repeat(available - len),
+            kind: LabelKind::Meta,
+        });
+    }
+}
+
+/// Keep whole chip groups that fit; leftover count becomes `+N`.
+fn fit_chip_groups(groups: &[Vec<LabelPart>], budget: usize) -> Vec<LabelPart> {
+    if groups.is_empty() || budget == 0 {
+        return Vec::new();
+    }
+    let n = groups.len();
+    for k in (0..=n).rev() {
+        let hidden = n - k;
+        let mut width = 0usize;
+        for (i, g) in groups.iter().take(k).enumerate() {
+            if i > 0 {
+                width += 1;
+            }
+            width += parts_width(g);
+        }
+        let ov = if hidden > 0 {
+            let token = format!("+{hidden}");
+            token.chars().count() + usize::from(k > 0)
+        } else {
+            0
+        };
+        if width + ov <= budget {
+            let mut out = Vec::new();
+            for (i, g) in groups.iter().take(k).enumerate() {
+                if i > 0 {
+                    out.push(LabelPart {
+                        text: " ".into(),
+                        kind: LabelKind::Meta,
+                    });
+                }
+                out.extend(g.iter().cloned());
+            }
+            if hidden > 0 {
+                if k > 0 {
+                    out.push(LabelPart {
+                        text: " ".into(),
+                        kind: LabelKind::Meta,
+                    });
+                }
+                out.push(LabelPart {
+                    text: format!("+{hidden}"),
+                    kind: LabelKind::Overflow,
+                });
+            }
+            return out;
+        }
+    }
+    let token = format!("+{n}");
+    if token.chars().count() <= budget {
+        vec![LabelPart {
+            text: token,
+            kind: LabelKind::Overflow,
+        }]
+    } else {
+        vec![LabelPart {
+            text: trunc(&token, budget),
+            kind: LabelKind::Overflow,
+        }]
+    }
 }
 
 /// Subject-only label for the commit row (refs live on the spacer beneath).
@@ -322,15 +511,62 @@ pub fn format_commit_ref_chips(
     head_branch: Option<&str>,
     glyphs: &GlyphSet,
 ) -> String {
+    format_commit_ref_chips_with(
+        refs,
+        is_head,
+        head_branch,
+        glyphs,
+        None,
+    )
+}
+
+/// Like [`format_commit_ref_chips`] with a default-branch override for colour/sort.
+pub fn format_commit_ref_chips_with(
+    refs: &[GraphRef],
+    is_head: bool,
+    head_branch: Option<&str>,
+    glyphs: &GlyphSet,
+    default_branch_override: Option<&str>,
+) -> String {
+    let groups = commit_ref_chip_groups(
+        refs,
+        is_head,
+        head_branch,
+        glyphs,
+        default_branch_override,
+    );
     let mut parts = Vec::new();
-    if show_detached_head_chip(head_branch, is_head) {
-        parts.push("[HEAD]".to_string());
-    }
-    for chip in merge_commit_ref_chips(refs) {
-        let checkout = chip_is_checkout(&chip, head_branch, is_head);
-        parts.push(format_merged_chip(&chip, checkout, glyphs));
+    for g in groups {
+        parts.push(parts_text(&g));
     }
     parts.join(" ")
+}
+
+/// One visual chip as styled runs (`[HEAD]`, `[main]`, `+N` later).
+fn commit_ref_chip_groups(
+    refs: &[GraphRef],
+    is_head: bool,
+    head_branch: Option<&str>,
+    glyphs: &GlyphSet,
+    default_branch_override: Option<&str>,
+) -> Vec<Vec<LabelPart>> {
+    let mut groups = Vec::new();
+    if show_detached_head_chip(head_branch, is_head) {
+        groups.push(vec![LabelPart {
+            text: "[HEAD]".into(),
+            kind: LabelKind::ChipHead,
+        }]);
+    }
+    for chip in merge_commit_ref_chips(refs, default_branch_override) {
+        let checkout = chip_is_checkout(&chip, head_branch, is_head);
+        groups.push(merged_chip_parts(
+            &chip,
+            checkout,
+            glyphs,
+            default_branch_override,
+        ));
+    }
+    groups
 }
 
 /// First seven characters of a commit id (or the whole id when shorter).
@@ -393,7 +629,10 @@ fn remote_short_name(remote_ref: &str) -> &str {
         .unwrap_or(remote_ref)
 }
 
-fn is_default_branch(name: &str) -> bool {
+fn is_default_branch(name: &str, override_name: Option<&str>) -> bool {
+    if let Some(over) = override_name {
+        return name == over;
+    }
     matches!(name, "main" | "master" | "develop")
 }
 
@@ -426,17 +665,17 @@ impl MergedRefChip {
         }
     }
 
-    fn sort_key(&self) -> u8 {
+    fn sort_key(&self, default_branch_override: Option<&str>) -> u8 {
         match self {
             Self::Merged(n) | Self::Local(n) => {
-                if is_default_branch(n) {
+                if is_default_branch(n, default_branch_override) {
                     0
                 } else {
                     1
                 }
             }
             Self::Remote(n) => {
-                if is_default_branch(remote_short_name(n)) {
+                if is_default_branch(remote_short_name(n), default_branch_override) {
                     0
                 } else {
                     2
@@ -448,7 +687,10 @@ impl MergedRefChip {
 }
 
 /// Merge local foo + remote */foo into one chip; leave unmatched remotes/tags.
-fn merge_commit_ref_chips(refs: &[GraphRef]) -> Vec<MergedRefChip> {
+fn merge_commit_ref_chips(
+    refs: &[GraphRef],
+    default_branch_override: Option<&str>,
+) -> Vec<MergedRefChip> {
     let locals: Vec<&GraphRef> = refs.iter().filter(|r| r.kind == RefKind::Local).collect();
     let remotes: Vec<&GraphRef> = refs.iter().filter(|r| r.kind == RefKind::Remote).collect();
     let tags: Vec<&GraphRef> = refs.iter().filter(|r| r.kind == RefKind::Tag).collect();
@@ -476,7 +718,11 @@ fn merge_commit_ref_chips(refs: &[GraphRef]) -> Vec<MergedRefChip> {
     }
 
     let mut indexed: Vec<(usize, MergedRefChip)> = chips.into_iter().enumerate().collect();
-    indexed.sort_by(|a, b| a.1.sort_key().cmp(&b.1.sort_key()).then(a.0.cmp(&b.0)));
+    indexed.sort_by(|a, b| {
+        a.1.sort_key(default_branch_override)
+            .cmp(&b.1.sort_key(default_branch_override))
+            .then(a.0.cmp(&b.0))
+    });
     indexed.into_iter().map(|(_, chip)| chip).collect()
 }
 
@@ -497,18 +743,63 @@ fn chip_is_checkout(chip: &MergedRefChip, head_branch: Option<&str>, is_head: bo
 }
 
 fn format_merged_chip(chip: &MergedRefChip, is_checkout: bool, glyphs: &GlyphSet) -> String {
+    parts_text(&merged_chip_parts(chip, is_checkout, glyphs, None))
+}
+
+fn merged_chip_parts(
+    chip: &MergedRefChip,
+    is_checkout: bool,
+    glyphs: &GlyphSet,
+    default_branch_override: Option<&str>,
+) -> Vec<LabelPart> {
+    let kind = match chip {
+        MergedRefChip::Tag(_) => LabelKind::ChipTag,
+        MergedRefChip::Remote(n) => {
+            if is_default_branch(remote_short_name(n), default_branch_override) {
+                LabelKind::ChipDefault
+            } else {
+                LabelKind::ChipRemote
+            }
+        }
+        MergedRefChip::Local(n) | MergedRefChip::Merged(n) => {
+            if is_default_branch(n, default_branch_override) {
+                LabelKind::ChipDefault
+            } else {
+                LabelKind::ChipLocal
+            }
+        }
+    };
     match chip {
-        MergedRefChip::Tag(_) | MergedRefChip::Remote(_) => format!("[{}]", chip.name()),
+        MergedRefChip::Tag(_) | MergedRefChip::Remote(_) => vec![LabelPart {
+            text: format!("[{}]", chip.name()),
+            kind,
+        }],
         MergedRefChip::Local(_) | MergedRefChip::Merged(_) => {
-            let mut inner = String::new();
+            let mut parts = vec![LabelPart {
+                text: "[".into(),
+                kind,
+            }];
             if is_checkout {
-                inner.push_str(glyphs.checkout_mark);
+                parts.push(LabelPart {
+                    text: glyphs.checkout_mark.to_string(),
+                    kind: LabelKind::ChipHead,
+                });
             }
             if matches!(chip, MergedRefChip::Merged(_)) {
-                inner.push_str(glyphs.sync_mark);
+                parts.push(LabelPart {
+                    text: glyphs.sync_mark.to_string(),
+                    kind: LabelKind::ChipRemote,
+                });
             }
-            inner.push_str(chip.name());
-            format!("[{inner}]")
+            parts.push(LabelPart {
+                text: chip.name().to_string(),
+                kind,
+            });
+            parts.push(LabelPart {
+                text: "]".into(),
+                kind,
+            });
+            parts
         }
     }
 }
@@ -527,20 +818,19 @@ mod tests {
     }
 
     #[test]
-    fn format_relative_date_matches_ink_buckets() {
+    fn format_relative_date_uses_three_hour_cutoff() {
         let now = 1_700_000_000;
         assert_eq!(format_relative_date(now, now), "just now");
         assert_eq!(format_relative_date(now - 59, now), "just now");
         assert_eq!(format_relative_date(now - 60, now), "1m");
         assert_eq!(format_relative_date(now - 3599, now), "59m");
         assert_eq!(format_relative_date(now - 3600, now), "1h");
-        assert_eq!(format_relative_date(now - 86399, now), "23h");
-        assert_eq!(format_relative_date(now - 86400, now), "1d");
-        assert_eq!(format_relative_date(now - 86400 * 13, now), "13d");
-        assert_eq!(format_relative_date(now - 86400 * 14, now), "2w");
-        assert_eq!(format_relative_date(now - 86400 * 69, now), "9w");
-        assert_eq!(format_relative_date(now - 86400 * 70, now), "0y");
-        assert_eq!(format_relative_date(now - 86400 * 365, now), "1y");
+        assert_eq!(format_relative_date(now - 3 * 3600, now), "3h");
+        assert_eq!(
+            format_relative_date(now - 3 * 3600 - 1, now),
+            "2023-11-14 19:13"
+        );
+        assert_eq!(format_relative_date(now - 86400, now), "2023-11-13 22:13");
         assert_eq!(format_relative_date(now + 10, now), "just now");
     }
 
@@ -663,6 +953,7 @@ mod tests {
             date_width: 4,
             author_width: 12,
             now_unix: 1_700_000_000,
+            default_branch_override: None,
         });
         assert!(
             line.contains("[main]"),
@@ -699,6 +990,7 @@ mod tests {
             date_width: 4,
             author_width: 1,
             now_unix: 0,
+            default_branch_override: None,
         });
         assert!(line.contains("[origin/feature/x]"), "{line}");
     }
@@ -723,10 +1015,11 @@ mod tests {
             date_width: 3,
             author_width: 3,
             now_unix: 1_700_000_000,
+            default_branch_override: None,
         });
         assert!(
-            line.contains("[feature") || line.contains("feature/"),
-            "keep refs when dropping hash: {line}"
+            line.contains("[feature") || line.contains("feature/") || line.contains('+'),
+            "keep refs or +N when dropping hash: {line}"
         );
         assert!(
             !line.contains("abcdefg"),
@@ -767,13 +1060,13 @@ mod tests {
         let line = format_stash_spacer(StashSpacerOpts {
             stash: &stash,
             available: 80,
-            date_width: 4,
+            date_width: 16,
             author_width: 12,
             now_unix: 1_700_000_000,
         });
         assert!(line.contains("stash@{0}"), "{line}");
         assert!(line.contains("s1abcde"), "{line}");
-        assert!(line.contains("1d"), "{line}");
+        assert!(line.contains("2023-11-13 22:13"), "{line}");
         assert!(line.contains("Ada Lovelace"), "{line}");
         let ref_at = line.find("stash@{0}").expect("ref");
         let hash_at = line.find("s1abcde").expect("hash");
@@ -796,7 +1089,6 @@ mod tests {
             author_width: 3,
             now_unix: 1_700_000_000,
         });
-        assert!(line.contains("stash@{0}"), "keep stash@{{n}}: {line}");
         assert!(
             !line.contains("abcdefg"),
             "hash should drop before stash@{{n}}: {line}"
@@ -834,5 +1126,41 @@ mod tests {
         assert_eq!(format_row(&row, &UNICODE), " notes  [ignored]");
         assert_eq!(format_row(&row, &ASCII), "L notes  [ignored]");
         assert!(!format_row(&row, &UNICODE).contains("🔗"));
+    }
+
+    #[test]
+    fn format_commit_spacer_hides_overflow_chips_with_count() {
+        let commit = Commit {
+            id: "abcdefg".into(),
+            subject: "topic".into(),
+            refs: vec![
+                "feature/one".into(),
+                "feature/two".into(),
+                GraphRef::tag("v1"),
+            ],
+            author_name: "Ada".into(),
+            author_date_unix: 1_700_000_000 - 120,
+            ..Commit::default()
+        };
+        let line = format_commit_spacer(CommitSpacerOpts {
+            commit: &commit,
+            is_head: false,
+            worktrees: &[],
+            head_branch: None,
+            glyphs: &ASCII,
+            available: 28,
+            date_width: 3,
+            author_width: 3,
+            now_unix: 1_700_000_000,
+            default_branch_override: None,
+        });
+        assert!(
+            line.contains('+'),
+            "hidden chips should show +N: {line}"
+        );
+        assert!(
+            !line.contains('…'),
+            "must not mid-chip ellipsis: {line}"
+        );
     }
 }

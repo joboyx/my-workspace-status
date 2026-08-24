@@ -6,8 +6,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::format::{
-    format_commit_spacer, format_label, format_stash_spacer, meta_column_widths_with_stashes,
-    CommitSpacerOpts, StashSpacerOpts,
+    assemble_commit_spacer, assemble_stash_spacer, format_label, meta_column_widths_with_stashes,
+    CommitSpacerOpts, LabelKind, LabelPart, StashSpacerOpts,
 };
 use crate::glyphs::GlyphSet;
 use crate::layout::{layout_commits, LaidOutCommit};
@@ -45,6 +45,8 @@ pub struct PaintedLine {
     pub row_index: Option<usize>,
     /// True on the selectable node line. Spacers are display-only.
     pub selectable: bool,
+    /// Styled runs for the label (subject vs meta vs chips). Empty → treat `label` as one run.
+    pub parts: Vec<crate::format::LabelPart>,
 }
 
 impl PaintedLine {
@@ -88,6 +90,17 @@ fn now_unix_seconds() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+fn subject_parts(label: &str) -> Vec<LabelPart> {
+    if label.is_empty() {
+        Vec::new()
+    } else {
+        vec![LabelPart {
+            text: label.to_string(),
+            kind: LabelKind::Subject,
+        }]
+    }
 }
 
 fn spacer_available(gutter: &[GraphCell], line_width: usize) -> usize {
@@ -139,7 +152,7 @@ pub fn paint_model_with(
         .max()
         .unwrap_or(0);
     let width = match gutter_width {
-        Some(cap) if cap > 0 => cap.min(topo_width.max(4)),
+        Some(cap) if cap > 0 => cap.min(topo_width),
         _ => topo_width.max(if laid_by_id.is_empty() { 0 } else { 2 }),
     };
     let max_lane = if width > 0 {
@@ -205,9 +218,11 @@ pub fn paint_model_with(
     for (i, row) in rows.iter().enumerate() {
         match row {
             GraphRow::Uncommitted { .. } | GraphRow::Worktree(_) => {
+                let label = format_label(row, glyphs);
                 out.push(PaintedLine {
                     gutter: blank_gutter(paint_width),
-                    label: format_label(row, glyphs),
+                    parts: subject_parts(&label),
+                    label,
                     row_index: Some(i),
                     selectable: true,
                 });
@@ -219,16 +234,18 @@ pub fn paint_model_with(
                 } else {
                     blank_gutter(paint_width)
                 };
+                let label = format_label(row, glyphs);
                 out.push(PaintedLine {
                     gutter,
-                    label: format_label(row, glyphs),
+                    parts: subject_parts(&label),
+                    label,
                     row_index: Some(i),
                     selectable: true,
                 });
                 if let Some(ctx) = ctx {
                     let gutter = stash_leaf_rail_cells(paint_width, ctx, glyphs, false, true);
                     let available = spacer_available(&gutter, line_width);
-                    let label = format_stash_spacer(StashSpacerOpts {
+                    let (label, parts) = assemble_stash_spacer(StashSpacerOpts {
                         stash,
                         available,
                         date_width,
@@ -240,6 +257,7 @@ pub fn paint_model_with(
                         label,
                         row_index: Some(i),
                         selectable: false,
+                        parts,
                     });
                 }
             }
@@ -249,9 +267,11 @@ pub fn paint_model_with(
                 worktrees,
             } => {
                 let Some(laid) = laid_by_id.get(&commit.id) else {
+                    let label = format_label(row, glyphs);
                     out.push(PaintedLine {
                         gutter: blank_gutter(paint_width),
-                        label: format_label(row, glyphs),
+                        parts: subject_parts(&label),
+                        label,
                         row_index: Some(i),
                         selectable: true,
                     });
@@ -278,9 +298,11 @@ pub fn paint_model_with(
                 } else {
                     pad_to_width(&mut cells, paint_width);
                 }
+                let label = format_label(row, glyphs);
                 out.push(PaintedLine {
                     gutter: cells,
-                    label: format_label(row, glyphs),
+                    parts: subject_parts(&label),
+                    label,
                     row_index: Some(i),
                     selectable: true,
                 });
@@ -291,7 +313,7 @@ pub fn paint_model_with(
                     stem_down_rail_cells(paint_width, laid, glyphs)
                 };
                 let available = spacer_available(&spacer, line_width);
-                let label = format_commit_spacer(CommitSpacerOpts {
+                let (label, parts) = assemble_commit_spacer(CommitSpacerOpts {
                     commit,
                     is_head: *is_head,
                     worktrees,
@@ -301,12 +323,14 @@ pub fn paint_model_with(
                     date_width,
                     author_width,
                     now_unix,
+                    default_branch_override: model.default_branch_override.as_deref(),
                 });
                 out.push(PaintedLine {
                     gutter: spacer,
                     label,
                     row_index: Some(i),
                     selectable: false,
+                    parts,
                 });
             }
         }
