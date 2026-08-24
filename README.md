@@ -1,15 +1,56 @@
 # workspace-status
 
-Git status for every repository under the current directory.
+Git status for every repo and worktree under the current directory, in one TUI.
 
-On a TTY, `workspace-status` and `ws` open a ratatui TUI. `--plain` and `--json` print the same snapshot.
-Intra-line word diff and syntax highlighting are not in this TUI yet ([docs/diff-rendering.md](./docs/diff-rendering.md)).
+Cursor and VS Code's source control pane is fine for one repo. It falls apart once you have a folder full of them. Worktrees make that worse: same project, three checkouts, three half-finished agent branches, and the SCM view is just a pile of files with no sense of which tree you are in.
 
-The CLI is treated as a black box:
+This is the glance I wanted instead. Left pane is the workspace tree (repos, worktrees, dirty files). Right pane is the graph, the diff, or the commit. Fetch, pull, checkout, stash, search, mark files reviewed, jump around — without opening each folder in the IDE.
 
-- the output format is the user-facing contract
-- behaviour is exercised against real temporary git repositories
-- task-branch behaviour is validated with real remotes, not mocked helpers
+`ws` on a TTY opens that. `--plain` and `--json` print the same snapshot if an agent is calling it.
+
+## Screenshots
+
+**File diff** — dirty `auth.ts` and its unified diff.
+
+![Tree and file diff](docs/images/01-file-diff.png)
+
+**Git graph** — commits, joins, and the stash diamond `◇`.
+
+![Git graph](docs/images/02-git-graph.png)
+
+**Commit files** — Enter a commit; the files that landed in it.
+
+![Commit files](docs/images/09-commit-files.png)
+
+**Search** — `/auth` Enter. Matches highlight; rows stay visible.
+
+![Search](docs/images/04-search.png)
+
+**Reviewed** — Space on a dirty file. Eye `` sits before the status badge.
+
+![Reviewed mark](docs/images/07-reviewed.png)
+
+**Stash** — `S` on a dirty repo. Create from the tree.
+
+![Stash menu](docs/images/06-stash-menu.png)
+
+**Ignored** — `.` brings `notes` into the tree (`ignoredRepos`).
+
+![Show ignored](docs/images/08-show-ignored.png)
+
+**Confirm** — drop a stash (`D`). `y` / `n` in a boxed overlay.
+
+![Boxed confirm](docs/images/05-confirm.png)
+
+**EasyMotion** — `;` (or Ctrl-Space) labels the current list. Type a letter to jump.
+
+![EasyMotion](docs/images/10-easymotion.png)
+
+**Help** — `?` opens MOVE / GIT / VIEW.
+
+![Help overlay](docs/images/03-help.png)
+
+Rebuild these frames with `./scripts/capture-demo-stills.sh` (see [docs/demo.md](./docs/demo.md)).
 
 ## Install
 
@@ -21,10 +62,6 @@ Installs `workspace-status`, `ws`, and `workspace-status-update` into `~/.local/
 curl -LsSf https://github.com/joboyx/my-workspace-status/releases/latest/download/workspace-status-installer.sh | sh
 export PATH="$HOME/.local/bin:$PATH" && hash -r
 ```
-
-On a TTY the binary opens the ratatui TUI. Pass `--plain` or `--json` for agents.
-`-i` / `--tui` forces the TUI when stdout is not a TTY. `-v` / `-p` / `-d` / `--plain` / `--json` still stay headless.
-A non-TTY run without those flags prints `--plain`.
 
 Windows:
 
@@ -50,29 +87,17 @@ From a local clone:
 
     cargo install --path crates/workspace-status --locked
 
-## Use --plain or --json from agents
+## Agents
 
-On a TTY, `workspace-status` without `--plain` or `--json` opens the interactive TUI and waits for keyboard input.
-That hang is the TUI, not a crash.
-Agents must pass `--plain` or `--json` on every run. Do not rely on a non-TTY stdin.
+On a TTY, `ws` without `--plain` or `--json` opens the TUI and waits for keys. That hang is the TUI, not a crash. Agents must pass `--plain` or `--json` on every run. Do not rely on a non-TTY stdin.
 
-A non-TTY run without those flags prints the `--plain` report.
-
-`--plain` is the human text of the workspace snapshot.
-`--json` prints the same snapshot as JSON. See [docs/snapshot.md](./docs/snapshot.md).
+`--plain` is the human text of the workspace snapshot. `--json` is the same snapshot as JSON. See [docs/snapshot.md](./docs/snapshot.md).
 
 ## Nerd Font
 
 The TUI expects a Nerd Font. Use MesloLGS NF (romkatv/powerlevel10k-media).
 MesloLGM Nerd Font Mono letter-spaces in some VTE terminals (xfce4-terminal sizes cells off the widest Nerd glyph).
 Set WS_STATUS_GLYPHS=ascii for plain markers.
-
-## Reference contract
-
-- Desired output shapes live in [SAMPLE_OUTPUT.md](./SAMPLE_OUTPUT.md).
-- The workspace snapshot contract (`--json` and `--plain`) lives in [docs/snapshot.md](./docs/snapshot.md).
-- The executable end-to-end suite lives in [test/workspace-status.e2e.ts](./test/workspace-status.e2e.ts).
-- The snapshot fixture e2e lives in [test/snapshot-contract.e2e.ts](./test/snapshot-contract.e2e.ts).
 
 ## Workspace config
 
@@ -96,7 +121,7 @@ Set WS_STATUS_GLYPHS=ascii for plain markers.
 
 Pass `-a` or `--all` to include repos listed in `ignoredRepos` for that run (`maxDepth` is unchanged). In the TUI, `.` shows or hides those repos at runtime (starts shown with `-a`, hidden without it). Hidden ignored repos stay out of workspace operations unless you show them.
 
-Pass one or more repo paths to limit output (e.g. `workspace-status.sh app vendor-docs`). Named repos are included even when listed in `ignoredRepos`. Named filters may also target linked paths under `.worktrees/` (same discovery as a full collect).
+Pass one or more repo paths to limit output (e.g. `ws app vendor-docs`). Named repos are included even when listed in `ignoredRepos`. Named filters may also target linked paths under `.worktrees/` (same discovery as a full collect).
 
 ## Plain report markers
 
@@ -104,11 +129,40 @@ Pass one or more repo paths to limit output (e.g. `workspace-status.sh app vendo
 - **🔗** — linked git worktree checkout (repo path prefix + `🔗 Linked worktrees` summary)
 - **✅** / **🌱** after a non-default branch — tip merged into default / still open
 
+## Interactive TUI
+
+On a TTY (without `-v` / `-p` / `-d` / `--plain` / `--json`), `ws` opens the TUI and waits for keys.
+`-i` / `--tui` forces the TUI when stdout is not a TTY. Those headless flags still win over `--tui`.
+A non-TTY run without those flags prints `--plain`.
+
+The TUI uses the terminal **alternate screen** (DEC 1049, same idea as Vim/less) while running, so frames do not remain in primary scrollback after a normal exit. Before `$EDITOR` (`e`) it leaves that buffer and re-enters on return. `SIGKILL` skips that restore.
+
+Requirements, keymap, and layout details: [docs/configuration.md](./docs/configuration.md).
+
+Known limits: intra-line word diff is not in this TUI yet; macOS PageUp needs the terminal to deliver the key (`Fn+Up` / mapped PageUp); search `/` is armed with Enter before `n` / `N` step matches.
+
+Several graph features — including checkout confirm when a local branch is out of sync with `origin/*` — are inspired by [Git Graph](https://github.com/mhutchie/vscode-git-graph) (mhutchie, VS Code).
+
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md). Local checks are `npm test` and `cargo test`.
+
 ## Development
 
-Clone this repository. Local checks are `npm test` and `cargo test`. See [CONTRIBUTING.md](./CONTRIBUTING.md).
+The CLI is treated as a black box:
 
-## Running the E2E suite
+- the output format is the user-facing contract
+- behaviour is exercised against real temporary git repositories
+- task-branch behaviour is validated with real remotes, not mocked helpers
+
+### Reference contract
+
+- Desired output shapes live in [SAMPLE_OUTPUT.md](./SAMPLE_OUTPUT.md).
+- The workspace snapshot contract (`--json` and `--plain`) lives in [docs/snapshot.md](./docs/snapshot.md).
+- The executable end-to-end suite lives in [test/workspace-status.e2e.ts](./test/workspace-status.e2e.ts).
+- The snapshot fixture e2e lives in [test/snapshot-contract.e2e.ts](./test/snapshot-contract.e2e.ts).
+
+### Running the E2E suite
 
 ```bash
 npm test
@@ -120,7 +174,7 @@ Optional environment variables:
 - `WORKSPACE_STATUS_SCRIPT=/abs/path/to/workspace-status.sh` tests a different script path.
 - `KEEP_E2E_WORKDIR=1` keeps each temp scenario on disk for debugging.
 
-## Coverage
+### Coverage
 
 The E2E suite covers the full sample-scenario surface plus the main operational flags of `workspace-status.sh`:
 
@@ -142,7 +196,7 @@ The E2E suite covers the full sample-scenario surface plus the main operational 
 | Workspace config      | `ignoredRepos` skips configured repos; `maxDepth` (default 3) caps discovery depth; `defaultBranches` overrides per-repo default; `editor` sets TUI `e` command; `--all` includes ignored repos |
 | Repo filter           | Positional repo paths limit output to named repos; named repos bypass `ignoredRepos`; unknown repos exit with an error                                                                          |
 
-## Scenario isolation
+### Scenario isolation
 
 Each test scenario:
 
@@ -152,48 +206,6 @@ Each test scenario:
 - destroys the scenario after the assertion run unless `KEEP_E2E_WORKDIR=1`
 
 That isolation is deliberate. Refactors should be able to change implementation details while preserving the observable contract.
-
-## Screenshots
-
-Ratatui TUI (`workspace-status` / `ws` on a TTY).
-
-Rebuild these frames with `./scripts/capture-demo-stills.sh` (see [docs/demo.md](./docs/demo.md)).
-
-**Tree + file diff** — dirty `auth.ts` and its unified diff.
-
-![Tree and file diff](docs/images/01-file-diff.png)
-
-**Git graph** — merger: merge elbows, stash `◇`, two-line meta.
-
-![Git graph](docs/images/02-git-graph.png)
-
-**Help** — `?` opens MOVE / GIT / VIEW.
-
-![Help overlay](docs/images/03-help.png)
-
-**Search** — `/auth` Enter. Matches highlight; rows stay visible.
-
-![Search](docs/images/04-search.png)
-
-**Boxed confirm** — drop a graph-focused stash (`D`). `y` / `n` in a rounded overlay.
-
-![Boxed confirm](docs/images/05-confirm.png)
-
-**Reviewed mark** — Space on a dirty file. Eye `` sits before the status badge.
-
-![Reviewed mark](docs/images/07-reviewed.png)
-
-## Interactive TUI
-
-On a TTY (without `-v` / `-p` / `-d` / `--plain` / `--json`), the Rust CLI opens the ratatui TUI and blocks on keyboard input. **Agents must always pass `--plain` or `--json`** — do not rely on non-TTY alone; a hung agent shell is the failure mode. Force the TUI with `-i` / `--tui` for humans only. Intra-line / syntax highlight in file diffs is still Ink-only.
-
-The interactive TUI uses the terminal **alternate screen** (DEC 1049, same idea as Vim/less) while mounted, so frames do not remain in primary scrollback after a normal exit (double Ctrl+C). Leave also shows the cursor and hooks `beforeExit`/`exit` so abrupt process exit still restores the primary buffer. Before `$EDITOR` (`e`) it leaves that buffer and re-enters on remount. `SIGKILL` skips that restore (leave hooks do not run).
-
-Requirements, keymap, and layout details: [docs/configuration.md](./docs/configuration.md).
-
-Known limits: macOS PageUp needs the terminal to deliver the key (`Fn+Up` / mapped PageUp); search `/` is armed with Enter before `n` / `p` step matches.
-
-Several graph features — including checkout confirm when a local branch is out of sync with `origin/*` — are inspired by [Git Graph](https://github.com/mhutchie/vscode-git-graph) (mhutchie, VS Code).
 
 ## Documentation
 
