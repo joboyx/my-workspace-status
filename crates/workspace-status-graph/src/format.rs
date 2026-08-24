@@ -57,8 +57,17 @@ pub enum LabelKind {
     ChipRemote,
     /// Tag chip.
     ChipTag,
-    /// Hidden-ref count (`+N`) when chips do not fit.
+    /// Hidden leftover branch/tag count (`[+N]`) when chips do not fit.
     Overflow,
+}
+
+/// Chip text for leftover hidden branch/tag refs (`[+N]`).
+///
+/// Always a whole chip (brackets). Callers reserve this width so the
+/// spacer never mid-clips a hidden-ref count the way a raw `+N` blends
+/// into hash/date meta.
+pub fn overflow_chip_text(hidden: usize) -> String {
+    format!("[+{hidden}]")
 }
 
 /// Compact age or absolute timestamp. Matches Ink `formatRelativeDate`.
@@ -290,25 +299,25 @@ pub fn assemble_commit_spacer(opts: CommitSpacerOpts<'_>) -> (String, Vec<LabelP
         opts.author_width,
         opts.now_unix,
     );
-    // Worktree marks stay visible; leftover *ref* chips collapse to `+N`.
-    let mut groups = Vec::new();
+    // Worktree marks stay visible; leftover *ref* chips collapse to `[+N]`.
+    let mut prefix = Vec::new();
     for worktree in opts.worktrees {
         let mark = worktree_mark(worktree, opts.glyphs);
         if !mark.is_empty() {
-            groups.push(vec![LabelPart {
+            prefix.push(vec![LabelPart {
                 text: mark,
                 kind: LabelKind::Meta,
             }]);
         }
     }
-    groups.extend(commit_ref_chip_groups(
+    let refs = commit_ref_chip_groups(
         &opts.commit.refs,
         opts.is_head,
         opts.head_branch,
         opts.glyphs,
         opts.default_branch_override,
-    ));
-    let parts = assemble_spacer_parts(&groups, &hash, &date, &author, opts.available);
+    );
+    let parts = assemble_spacer_parts(&prefix, &refs, &hash, &date, &author, opts.available);
     (parts_text(&parts), parts)
 }
 
@@ -348,6 +357,7 @@ pub fn assemble_stash_spacer(opts: StashSpacerOpts<'_>) -> (String, Vec<LabelPar
             text: opts.stash.stash_ref.clone(),
             kind: LabelKind::Meta,
         }]],
+        &[],
         &hash,
         &date,
         &author,
@@ -373,9 +383,11 @@ fn padded_meta(
 
 /// Left flex + right-anchored meta. Drop order hash → date → author.
 ///
-/// Whole chips stay intact; hidden refs collapse to `+N` (never mid-chip `…`).
+/// `prefix` (worktree marks) stays intact. Leftover *ref* chips in
+/// `overflowable` collapse to `[+N]` (never mid-chip `…`).
 fn assemble_spacer_parts(
-    groups: &[Vec<LabelPart>],
+    prefix: &[Vec<LabelPart>],
+    overflowable: &[Vec<LabelPart>],
     hash: &str,
     date: &str,
     author: &str,
@@ -387,12 +399,25 @@ fn assemble_spacer_parts(
     let cols = pick_meta_columns(available, hash, date, author, MIN_LEFT_KEEP);
     let meta = meta_columns_text(hash, date, author, cols);
     let ref_budget = available.saturating_sub(meta.chars().count());
-    let mut left = fit_chip_groups(groups, ref_budget);
+    let mut left = join_chip_groups(prefix);
+    let prefix_w = parts_width(&left);
+    let gap = usize::from(!left.is_empty() && !overflowable.is_empty());
+    let chip_budget = ref_budget.saturating_sub(prefix_w.saturating_add(gap));
+    let chips = fit_chip_groups(overflowable, chip_budget);
+    if !chips.is_empty() {
+        if !left.is_empty() {
+            left.push(LabelPart {
+                text: " ".into(),
+                kind: LabelKind::Meta,
+            });
+        }
+        left.extend(chips);
+    }
     let left_len = parts_width(&left);
     let meta_len = meta.chars().count();
     if meta.is_empty() {
         pad_parts_right(&mut left, available);
-        return left;
+        return clamp_parts_to_width(left, available);
     }
     let pad = available.saturating_sub(left_len).saturating_sub(meta_len);
     if pad > 0 {
@@ -407,7 +432,45 @@ fn assemble_spacer_parts(
             kind: LabelKind::Meta,
         });
     }
-    left
+    clamp_parts_to_width(left, available)
+}
+
+fn join_chip_groups(groups: &[Vec<LabelPart>]) -> Vec<LabelPart> {
+    let mut out = Vec::new();
+    for (i, g) in groups.iter().enumerate() {
+        if i > 0 {
+            out.push(LabelPart {
+                text: " ".into(),
+                kind: LabelKind::Meta,
+            });
+        }
+        out.extend(g.iter().cloned());
+    }
+    out
+}
+
+/// Cap the spacer at `available` columns. Trailing meta/padding drop first so
+/// a leftover `[+N]` chip stays on the row instead of growing past the pane.
+fn clamp_parts_to_width(mut parts: Vec<LabelPart>, available: usize) -> Vec<LabelPart> {
+    if available == 0 {
+        return Vec::new();
+    }
+    while parts_width(&parts) > available {
+        let extra = parts_width(&parts) - available;
+        let Some(last) = parts.last_mut() else {
+            break;
+        };
+        let last_w = last.text.chars().count();
+        if last_w > extra {
+            last.text = last.text.chars().take(last_w - extra).collect();
+            if last.text.is_empty() {
+                parts.pop();
+            }
+        } else {
+            parts.pop();
+        }
+    }
+    parts
 }
 
 fn parts_text(parts: &[LabelPart]) -> String {
@@ -428,7 +491,7 @@ fn pad_parts_right(parts: &mut Vec<LabelPart>, available: usize) {
     }
 }
 
-/// Keep whole chip groups that fit; leftover count becomes `+N`.
+/// Keep whole chip groups that fit; leftover branch/tag count becomes `[+N]`.
 fn fit_chip_groups(groups: &[Vec<LabelPart>], budget: usize) -> Vec<LabelPart> {
     if groups.is_empty() || budget == 0 {
         return Vec::new();
@@ -444,8 +507,7 @@ fn fit_chip_groups(groups: &[Vec<LabelPart>], budget: usize) -> Vec<LabelPart> {
             width += parts_width(g);
         }
         let ov = if hidden > 0 {
-            let token = format!("+{hidden}");
-            token.chars().count() + usize::from(k > 0)
+            overflow_chip_text(hidden).chars().count() + usize::from(k > 0)
         } else {
             0
         };
@@ -468,25 +530,35 @@ fn fit_chip_groups(groups: &[Vec<LabelPart>], budget: usize) -> Vec<LabelPart> {
                     });
                 }
                 out.push(LabelPart {
-                    text: format!("+{hidden}"),
+                    text: overflow_chip_text(hidden),
                     kind: LabelKind::Overflow,
                 });
             }
             return out;
         }
     }
-    let token = format!("+{n}");
-    if token.chars().count() <= budget {
-        vec![LabelPart {
+    match overflow_token(n, budget) {
+        Some(token) => vec![LabelPart {
             text: token,
             kind: LabelKind::Overflow,
-        }]
-    } else {
-        vec![LabelPart {
-            text: trunc(&token, budget),
-            kind: LabelKind::Overflow,
-        }]
+        }],
+        None => Vec::new(),
     }
+}
+
+fn overflow_token(hidden: usize, budget: usize) -> Option<String> {
+    if hidden == 0 || budget == 0 {
+        return None;
+    }
+    let chip = overflow_chip_text(hidden);
+    if chip.chars().count() <= budget {
+        return Some(chip);
+    }
+    let bare = format!("+{hidden}");
+    if bare.chars().count() <= budget {
+        return Some(bare);
+    }
+    None
 }
 
 /// Subject-only label for the commit row (refs live on the spacer beneath).
@@ -501,13 +573,7 @@ pub fn format_commit_ref_chips(
     head_branch: Option<&str>,
     glyphs: &GlyphSet,
 ) -> String {
-    format_commit_ref_chips_with(
-        refs,
-        is_head,
-        head_branch,
-        glyphs,
-        None,
-    )
+    format_commit_ref_chips_with(refs, is_head, head_branch, glyphs, None)
 }
 
 /// Like [`format_commit_ref_chips`] with a default-branch override for colour/sort.
@@ -518,13 +584,8 @@ pub fn format_commit_ref_chips_with(
     glyphs: &GlyphSet,
     default_branch_override: Option<&str>,
 ) -> String {
-    let groups = commit_ref_chip_groups(
-        refs,
-        is_head,
-        head_branch,
-        glyphs,
-        default_branch_override,
-    );
+    let groups =
+        commit_ref_chip_groups(refs, is_head, head_branch, glyphs, default_branch_override);
     let mut parts = Vec::new();
     for g in groups {
         parts.push(parts_text(&g));
@@ -532,7 +593,7 @@ pub fn format_commit_ref_chips_with(
     parts.join(" ")
 }
 
-/// One visual chip as styled runs (`[HEAD]`, `[main]`, `+N` later).
+/// One visual chip as styled runs (`[HEAD]`, `[main]`, `[+N]` later).
 fn commit_ref_chip_groups(
     refs: &[GraphRef],
     is_head: bool,
@@ -1009,7 +1070,7 @@ mod tests {
         });
         assert!(
             line.contains("[feature") || line.contains("feature/") || line.contains('+'),
-            "keep refs or +N when dropping hash: {line}"
+            "keep refs or [+N] when dropping hash: {line}"
         );
         assert!(
             !line.contains("abcdefg"),
@@ -1144,14 +1205,8 @@ mod tests {
             now_unix: 1_700_000_000,
             default_branch_override: None,
         });
-        assert!(
-            line.contains("[main]"),
-            "kept first chip: {line}"
-        );
-        assert!(
-            line.contains("+2"),
-            "exact overflow count: {line}"
-        );
+        assert!(line.contains("[main]"), "kept first chip: {line}");
+        assert!(line.contains("[+2]"), "exact overflow chip: {line}");
         assert!(
             !line.contains("feature/long-name"),
             "overflow chip must not remain: {line}"
@@ -1160,9 +1215,199 @@ mod tests {
             !line.contains("[v1]"),
             "overflow tag must not remain: {line}"
         );
+        assert!(!line.contains('…'), "must not mid-chip ellipsis: {line}");
+        let overflow = assemble_commit_spacer(CommitSpacerOpts {
+            commit: &commit,
+            is_head: false,
+            worktrees: &[],
+            head_branch: None,
+            glyphs: &ASCII,
+            available: 28,
+            date_width: 3,
+            author_width: 3,
+            now_unix: 1_700_000_000,
+            default_branch_override: None,
+        })
+        .1;
         assert!(
-            !line.contains('…'),
-            "must not mid-chip ellipsis: {line}"
+            overflow
+                .iter()
+                .any(|p| p.kind == LabelKind::Overflow && p.text == "[+2]"),
+            "overflow run must be LabelKind::Overflow: {overflow:?}"
         );
+    }
+
+    #[test]
+    fn overflow_chip_counts_hidden_tags() {
+        let commit = Commit {
+            id: "abcdefg".into(),
+            subject: "topic".into(),
+            refs: vec![
+                GraphRef::tag("v1.0.0"),
+                GraphRef::tag("v1.1.0"),
+                GraphRef::tag("release-candidate"),
+            ],
+            author_name: "Ada".into(),
+            author_date_unix: 1_700_000_000 - 120,
+            ..Commit::default()
+        };
+        let line = format_commit_spacer(CommitSpacerOpts {
+            commit: &commit,
+            is_head: false,
+            worktrees: &[],
+            head_branch: None,
+            glyphs: &ASCII,
+            available: 24,
+            date_width: 3,
+            author_width: 3,
+            now_unix: 1_700_000_000,
+            default_branch_override: None,
+        });
+        assert!(line.contains("[+"), "tag overflow must show [+N]: {line}");
+        let hidden = 3usize.saturating_sub(
+            usize::from(line.contains("[v1.0.0]"))
+                + usize::from(line.contains("[v1.1.0]"))
+                + usize::from(line.contains("[release-candidate]")),
+        );
+        assert!(hidden > 0, "at least one tag must hide: {line}");
+        assert!(
+            line.contains(&overflow_chip_text(hidden)),
+            "overflow count includes tags: {line}"
+        );
+        assert!(!line.contains('…'), "must not mid-chip ellipsis: {line}");
+    }
+
+    #[test]
+    fn overflow_chip_counts_branches_and_tags_together() {
+        let commit = Commit {
+            id: "abcdefg".into(),
+            subject: "topic".into(),
+            refs: vec![
+                GraphRef::local("main"),
+                GraphRef::local("feature/x"),
+                GraphRef::tag("v2"),
+                GraphRef::tag("nightly"),
+            ],
+            author_name: "Ada".into(),
+            author_date_unix: 1_700_000_000 - 60,
+            ..Commit::default()
+        };
+        let (line, parts) = assemble_commit_spacer(CommitSpacerOpts {
+            commit: &commit,
+            is_head: false,
+            worktrees: &[],
+            head_branch: None,
+            glyphs: &ASCII,
+            available: 22,
+            date_width: 3,
+            author_width: 3,
+            now_unix: 1_700_000_000,
+            default_branch_override: None,
+        });
+        let overflow = parts
+            .iter()
+            .find(|p| p.kind == LabelKind::Overflow)
+            .expect("overflow chip");
+        assert!(
+            overflow.text.starts_with("[+") && overflow.text.ends_with(']'),
+            "overflow must be a chip: {line}"
+        );
+        assert!(
+            !line.contains("[feature/x]") || !line.contains("[v2]") || !line.contains("[nightly]"),
+            "some branch/tag chips must hide: {line}"
+        );
+        assert!(line.contains("[main]"), "kept default branch: {line}");
+    }
+
+    #[test]
+    fn worktree_marks_stay_visible_when_refs_overflow() {
+        let commit = Commit {
+            id: "abcdefg".into(),
+            subject: "topic".into(),
+            refs: vec![
+                GraphRef::local("main"),
+                GraphRef::local("feature/x"),
+                GraphRef::tag("v2"),
+            ],
+            author_name: "Ada".into(),
+            author_date_unix: 1_700_000_000 - 60,
+            ..Commit::default()
+        };
+        let worktrees = [Worktree {
+            path: "notes".into(),
+            head_id: Some(commit.id.clone()),
+            branch: None,
+            ignored: false,
+            is_current: false,
+        }];
+        let (line, parts) = assemble_commit_spacer(CommitSpacerOpts {
+            commit: &commit,
+            is_head: false,
+            worktrees: &worktrees,
+            head_branch: None,
+            glyphs: &ASCII,
+            available: 28,
+            date_width: 3,
+            author_width: 3,
+            now_unix: 1_700_000_000,
+            default_branch_override: None,
+        });
+        assert!(
+            line.contains("notes"),
+            "worktree mark stays visible: {line}"
+        );
+        assert!(
+            parts.iter().any(|p| p.kind == LabelKind::Overflow),
+            "hidden branch/tag refs still show [+N]: {line}"
+        );
+        assert!(
+            !line.contains("[feature/x]") || !line.contains("[v2]"),
+            "some refs hide: {line}"
+        );
+    }
+
+    #[test]
+    fn commit_spacer_never_exceeds_available_with_many_refs() {
+        let refs: Vec<GraphRef> = (0..20)
+            .map(|i| {
+                if i % 2 == 0 {
+                    GraphRef::local(format!("feature/branch-{i:02}"))
+                } else {
+                    GraphRef::tag(format!("v{i}.0.0-long"))
+                }
+            })
+            .collect();
+        let commit = Commit {
+            id: "abcdefghhhh".into(),
+            subject: "topic".into(),
+            refs,
+            author_name: "Ada Lovelace".into(),
+            author_date_unix: 1_700_000_000 - 120,
+            ..Commit::default()
+        };
+        for available in [8, 16, 24, 40, 64] {
+            let (line, parts) = assemble_commit_spacer(CommitSpacerOpts {
+                commit: &commit,
+                is_head: false,
+                worktrees: &[],
+                head_branch: None,
+                glyphs: &ASCII,
+                available,
+                date_width: 10,
+                author_width: 12,
+                now_unix: 1_700_000_000,
+                default_branch_override: None,
+            });
+            assert!(
+                line.chars().count() <= available,
+                "spacer grew past pane: available={available} len={} line={line:?}",
+                line.chars().count()
+            );
+            assert!(
+                parts.iter().any(|p| p.kind == LabelKind::Overflow),
+                "many refs must overflow: available={available} line={line}"
+            );
+            assert!(!line.contains('…'), "must not mid-chip ellipsis: {line}");
+        }
     }
 }

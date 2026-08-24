@@ -73,6 +73,11 @@ export type GraphRowOptions = {
   refTagColor?: string;
   /** Accent for checkout mark / detached `[HEAD]`. */
   headMarkColor?: string;
+  /**
+   * Hidden leftover branch/tag chip (`[+N]`). Distinct from muted meta so
+   * overflow is obvious on the row.
+   */
+  overflowColor?: string;
   /** Force ASCII glyph set (tests); default follows `WS_STATUS_GLYPHS`. */
   ascii?: boolean;
 };
@@ -331,7 +336,7 @@ function chipIsCheckout(
  * Shared by commit spacers and the GraphPane selection footer.
  */
 /**
- * Whole chips as groups so a narrow spacer can hide leftover chips as `+N`
+ * Whole chips as groups so a narrow spacer can hide leftover chips as `[+N]`
  * instead of mid-chip ellipsis.
  */
 export function graphRefChipGroups(
@@ -355,15 +360,30 @@ function segsWidth(segs: readonly Segment[]): number {
 }
 
 /**
- * Keep whole chip groups that fit; leftover count becomes `+N`.
+ * Chip text for leftover hidden branch/tag refs (`[+N]`).
+ */
+export function overflowChipText(hidden: number): string {
+  return `[+${hidden}]`;
+}
+
+function overflowToken(hidden: number, budget: number): string | null {
+  const chip = overflowChipText(hidden);
+  if (chip.length <= budget) return chip;
+  const bare = `+${hidden}`;
+  if (bare.length <= budget) return bare;
+  return null;
+}
+
+/**
+ * Keep whole chip groups that fit; leftover branch/tag count becomes `[+N]`.
  */
 export function fitChipGroups(
   groups: readonly Segment[][],
   budget: number,
   overflowColor: string,
+  gapColor: string = overflowColor,
 ): Segment[] {
   if (groups.length === 0 || budget <= 0) return [];
-  const gapColor = overflowColor;
   const n = groups.length;
   for (let k = n; k >= 0; k--) {
     const hidden = n - k;
@@ -373,7 +393,7 @@ export function fitChipGroups(
       width += segsWidth(groups[i]!);
     }
     const ov =
-      hidden > 0 ? `+${hidden}`.length + (k > 0 ? 1 : 0) : 0;
+      hidden > 0 ? overflowChipText(hidden).length + (k > 0 ? 1 : 0) : 0;
     if (width + ov <= budget) {
       const out: Segment[] = [];
       for (let i = 0; i < k; i++) {
@@ -382,14 +402,14 @@ export function fitChipGroups(
       }
       if (hidden > 0) {
         if (k > 0) out.push({ text: ' ', color: gapColor });
-        out.push({ text: `+${hidden}`, color: overflowColor });
+        out.push({ text: overflowChipText(hidden), color: overflowColor });
       }
       return out;
     }
   }
-  const token = `+${n}`;
-  if (token.length <= budget) return [{ text: token, color: overflowColor }];
-  return [{ text: token.slice(0, Math.max(1, budget)), color: overflowColor }];
+  const token = overflowToken(n, budget);
+  if (!token) return [];
+  return [{ text: token, color: overflowColor }];
 }
 
 export function graphRefChipSegments(
@@ -876,7 +896,9 @@ export function graphSpacerSegments(
 
   const refGroups = graphRefChipGroups(prev.commit.refs, opts, isHead);
   if (refGroups.length > 0 && refBudget > 0) {
-    segs.push(...fitChipGroups(refGroups, refBudget, muted));
+    const overflow =
+      opts.overflowColor ?? opts.headMarkColor ?? opts.subjectColor ?? muted;
+    segs.push(...fitChipGroups(refGroups, refBudget, overflow, muted));
   }
   if (meta.length > 0) {
     const leftLen = segmentsText(segs).length;

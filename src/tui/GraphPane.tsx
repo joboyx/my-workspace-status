@@ -142,6 +142,7 @@ export function GraphPane(props: GraphPaneProps): React.ReactElement {
         refRemoteColor: PALETTE.dir,
         refTagColor: PALETTE.modified,
         headMarkColor: PALETTE.headMark,
+        overflowColor: PALETTE.heading,
         headBranch: sync?.branch,
         defaultBranchOverride: sync?.defaultBranchOverride,
       })

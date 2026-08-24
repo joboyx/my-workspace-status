@@ -5,8 +5,8 @@ Ratatui widget for the workspace-status git graph.
 The widget paints a multi-lane gutter plus HEAD, sync, stash, and
 worktree markers from a `GraphModel`. Commit rows are two lines:
 subject on the node, then refs / short hash / relative date / author
-on the spacer. Hidden ignored worktree rows stay omitted unless
-`show_ignored` is true.
+on the spacer. Leftover branch/tag chips collapse to `[+N]`. Hidden
+ignored worktree rows stay omitted unless `show_ignored` is true.
 
 See [docs/graph.md](../../docs/graph.md) for the widget contract.
 

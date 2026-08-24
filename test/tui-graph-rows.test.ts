@@ -16,6 +16,7 @@ import {
   graphStashSegments,
   graphStashSpacerSegments,
   graphUncommittedSegments,
+  overflowChipText,
   refChipColor,
   stashRailAnchorLane,
   stashRailCells,
@@ -369,8 +370,8 @@ describe('graphCommitSegments', () => {
       narrow.filter((s) => s.color === '#local' || s.color === '#tag').map((s) => s.color),
     );
     assert.ok(
-      chipColors.size > 0 || /\+\d/.test(text),
-      `narrow spacer keeps a chip colour or +N overflow: ${text}`,
+      chipColors.size > 0 || /\[\+\d+\]/.test(text),
+      `narrow spacer keeps a chip colour or [+N] overflow: ${text}`,
     );
     assert.ok(
       !narrow.some(
@@ -380,6 +381,54 @@ describe('graphCommitSegments', () => {
       ),
       'must not flatten truncated refs into a single muted blob',
     );
+    assert.doesNotMatch(text, /…/, 'must not mid-chip ellipsis');
+  });
+
+  it('shows a [+N] chip when tags and branches overflow the spacer', () => {
+    const multi: GraphCommit = {
+      ...commit,
+      refs: [
+        { kind: 'local', name: 'main', commitId: commit.id },
+        { kind: 'local', name: 'feature/long-topic', commitId: commit.id },
+        { kind: 'tag', name: 'v1.0.0', commitId: commit.id },
+        { kind: 'tag', name: 'v1.1.0', commitId: commit.id },
+        { kind: 'tag', name: 'nightly', commitId: commit.id },
+      ],
+    };
+    const [row] = layoutCommits([multi]);
+    const opts = {
+      nowUnix: 1 as const,
+      graphWidth: 2,
+      mutedColor: '#muted',
+      overflowColor: '#overflow',
+      refLocalColor: '#local',
+      refDefaultColor: '#default',
+      refTagColor: '#tag',
+      subjectColor: '#subject',
+    };
+    const narrow = graphSpacerSegments({ ...opts, width: 28 }, row, null);
+    const text = segmentsText(narrow);
+    assert.ok(
+      text.length <= 28,
+      `spacer must not grow past pane: ${text.length} ${text}`,
+    );
+    const overflow = narrow.find((s) => /^\[\+\d+\]$/.test(s.text));
+    assert.ok(overflow, `overflow chip must be visible: ${text}`);
+    assert.equal(overflow!.color, '#overflow');
+    assert.ok(
+      !narrow.some((s) => s.color === '#muted' && /^\[\+\d+\]$/.test(s.text)),
+      'overflow must not use muted meta colour',
+    );
+    assert.ok(
+      !text.includes('[nightly]') || !text.includes('[v1.1.0]'),
+      `some tags must hide: ${text}`,
+    );
+    const hidden =
+      5 -
+      [text.includes('[main]'), text.includes('[feature/long-topic]'), text.includes('[v1.0.0]'), text.includes('[v1.1.0]'), text.includes('[nightly]')].filter(
+        Boolean,
+      ).length;
+    assert.equal(overflow!.text, overflowChipText(hidden));
     assert.doesNotMatch(text, /…/, 'must not mid-chip ellipsis');
   });
 
