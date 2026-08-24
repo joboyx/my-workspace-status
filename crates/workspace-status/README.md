@@ -10,7 +10,7 @@ Screenshots of the tree, graph, diff, and overlays: [root README](../../README.m
 
 The TypeScript Ink app is still in this repository for features the Rust TUI does not cover. See [docs/tui-rust.md](../../docs/tui-rust.md).
 
-Install from GitHub Releases (see the [root README](../../README.md#install)), or from this crate:
+Install from the public GitHub Release installer (see the [root README](../../README.md#install)), or from this crate:
 
 ```bash
 cargo install --path crates/workspace-status --locked

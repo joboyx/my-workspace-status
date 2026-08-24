@@ -1,37 +1,36 @@
 # workspace-status
 
-`workspace-status.sh` is the workspace-level git status contract for this tool.
-The implementation is TypeScript under `src/` (`src/index.ts` → `dist/index.js`); git subprocesses use [`zx`](https://google.github.io/zx/) `$` (run via Node, not the zx CLI). The `.sh` launcher runs `npm ci` and `npm run build` when needed.
+Git status for every repository under the current directory.
 
-`crates/workspace-status` is the Rust CLI (`workspace-status` and `ws`).
-On a TTY it opens a ratatui TUI. `--plain` and `--json` print the same snapshot.
-`crates/workspace-status-graph` is the ratatui git-graph widget used by that TUI.
-Intra-line word diff and syntax highlighting are not in this TUI yet ([docs/diff-rendering.md](./docs/diff-rendering.md)). The TypeScript app stays in the repo. See [docs/tui-rust.md](./docs/tui-rust.md).
+On a TTY, `workspace-status` and `ws` open a ratatui TUI. `--plain` and `--json` print the same snapshot.
+Intra-line word diff and syntax highlighting are not in this TUI yet ([docs/diff-rendering.md](./docs/diff-rendering.md)).
 
-It is intentionally treated as a black-box CLI:
+The CLI is treated as a black box:
 
 - the output format is the user-facing contract
-- the script is exercised against real temporary git repositories
-- task-branch behavior is validated with real remotes, not mocked helpers
+- behaviour is exercised against real temporary git repositories
+- task-branch behaviour is validated with real remotes, not mocked helpers
 
 ## Install
 
-### GitHub Releases (Rust CLI)
+### GitHub Release
 
-This repository is **private**. Anyone with repo/release access (`gh` or a token with `contents: read`) can install `workspace-status`, `ws`, and `workspace-status-update` from the latest GitHub Release into `~/.local/bin` (XDG; already on PATH for Ubuntu login shells; no rustup). The installer cannot mutate the parent shell PATH, so export it and `hash -r` in the same shell:
+Installs `workspace-status`, `ws`, and `workspace-status-update` into `~/.local/bin` (already on PATH for Ubuntu login shells). The installer cannot mutate the parent shell PATH, so export it and `hash -r` in the same session:
 
 ```bash
-gh release download -R joboyx/my-workspace-status --pattern workspace-status-installer.sh
-WORKSPACE_STATUS_GITHUB_TOKEN=$(gh auth token) sh workspace-status-installer.sh
-export PATH="$HOME/.local/bin:$PATH"
-hash -r
+curl -LsSf https://github.com/joboyx/my-workspace-status/releases/latest/download/workspace-status-installer.sh | sh
+export PATH="$HOME/.local/bin:$PATH" && hash -r
 ```
 
-`WORKSPACE_STATUS_GITHUB_TOKEN` is the cargo-dist ≥0.29 installer bearer token. The installer uses it to fetch the private linux/macOS archives. Unauthenticated `releases/latest/download` 404s; do not pipe that curl.
-
-On a TTY the Rust binary opens the ratatui TUI. Pass `--plain` or `--json` for agents.
+On a TTY the binary opens the ratatui TUI. Pass `--plain` or `--json` for agents.
 `-i` / `--tui` forces the TUI when stdout is not a TTY. `-v` / `-p` / `-d` / `--plain` / `--json` still stay headless.
 A non-TTY run without those flags prints `--plain`.
+
+Windows:
+
+```powershell
+irm https://github.com/joboyx/my-workspace-status/releases/latest/download/workspace-status-installer.ps1 | iex
+```
 
 Uninstall:
 
@@ -41,15 +40,7 @@ Uninstall:
 
 That removes `~/.local/bin/{ws,workspace-status,workspace-status-update}` (and a leftover `~/.cargo/bin` copy) and the cargo-dist receipt under `${XDG_CONFIG_HOME:-$HOME/.config}/workspace-status/`.
 
-Windows (same private-repo token):
-
-```powershell
-gh release download -R joboyx/my-workspace-status --pattern workspace-status-installer.ps1
-$env:WORKSPACE_STATUS_GITHUB_TOKEN = gh auth token
-.\workspace-status-installer.ps1
-```
-
-### cargo install (fallback)
+### From source
 
 Requires rustc 1.85 or later. This repository is a Cargo workspace. Name the package when you install from git:
 
@@ -59,28 +50,13 @@ From a local clone:
 
     cargo install --path crates/workspace-status --locked
 
-### TypeScript app (TUI + current ws wrapper)
-
-Requires Node 20 or later, npm, and git. Clone this repository, then install and link commands:
-
-```bash
-git clone https://github.com/joboyx/my-workspace-status.git
-cd my-workspace-status
-npm ci
-npm link
-```
-
-`npm link` installs two commands: `workspace-status` and `ws`. They launch the TypeScript app.
-
-The launcher also installs dependencies and builds dist when they are missing or stale.
-
 ## Use --plain or --json from agents
 
-On a TTY, the TypeScript app without --plain or --json opens the interactive TUI and waits for keyboard input.
+On a TTY, `workspace-status` without `--plain` or `--json` opens the interactive TUI and waits for keyboard input.
 That hang is the TUI, not a crash.
-Agents must pass --plain or --json on every run. Do not rely on a non-TTY stdin.
+Agents must pass `--plain` or `--json` on every run. Do not rely on a non-TTY stdin.
 
-The Rust CLI opens the TUI on a TTY. A non-TTY run without those flags prints the --plain report.
+A non-TTY run without those flags prints the `--plain` report.
 
 `--plain` is the human text of the workspace snapshot.
 `--json` prints the same snapshot as JSON. See [docs/snapshot.md](./docs/snapshot.md).
@@ -100,7 +76,7 @@ Set WS_STATUS_GLYPHS=ascii for plain markers.
 
 ## Workspace config
 
-`workspace-status.sh` reads `.workspace-status-config.json` from the current workspace root.
+`workspace-status` reads `.workspace-status-config.json` from the current workspace root.
 
 ```json
 {
@@ -128,9 +104,9 @@ Pass one or more repo paths to limit output (e.g. `workspace-status.sh app vendo
 - **🔗** — linked git worktree checkout (repo path prefix + `🔗 Linked worktrees` summary)
 - **✅** / **🌱** after a non-default branch — tip merged into default / still open
 
-## Setup
+## Development
 
-`workspace-status.sh` runs `npm ci` when `node_modules` is missing/stale vs `package-lock.json` (via npm’s `node_modules/.package-lock.json` marker), and `npm run build` when `dist/index.js` is missing or older than `src/**/*.{ts,tsx}` or `tsconfig.json`. For local development, `npm ci` in this directory is still fine.
+Clone this repository. Local checks are `npm test` and `cargo test`. See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Running the E2E suite
 

@@ -7,9 +7,7 @@
 3. Clone this repository.
 4. Run `npm ci` in the repository root.
 
-The launcher also installs and builds when node_modules or dist is missing or stale.
-
-After npm link, the TypeScript commands are workspace-status and ws.
+The TypeScript launcher (`./workspace-status.sh`) installs and builds when node_modules or dist is missing or stale. End-user install of `workspace-status` / `ws` is the GitHub Release installer in the README, not npm.
 
 ## Checks
 
