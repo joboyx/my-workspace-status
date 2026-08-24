@@ -101,7 +101,9 @@ fn remap_via_primary_identity(
             let abs_path = if rel_path.is_empty() {
                 cwd.to_path_buf()
             } else {
-                cwd.join(PathBuf::from(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR)))
+                cwd.join(PathBuf::from(
+                    rel_path.replace('/', std::path::MAIN_SEPARATOR_STR),
+                ))
             };
             return Some((abs_path, rel_path));
         }
@@ -116,6 +118,20 @@ fn remap_via_primary_identity(
         }
     }
     None
+}
+
+/// Main checkout: `.git` is a directory. Linked extras use a gitfile.
+pub fn is_main_worktree_checkout(dir: &Path) -> bool {
+    fs::metadata(dir.join(".git"))
+        .map(|st| st.is_dir())
+        .unwrap_or(false)
+}
+
+/// Linked extra: `.git` is a file (`gitdir: …`), not the main checkout.
+pub fn is_linked_worktree_checkout(dir: &Path) -> bool {
+    fs::metadata(dir.join(".git"))
+        .map(|st| st.is_file())
+        .unwrap_or(false)
 }
 
 /// Map a linked worktree absolute path to a workspace-relative path under cwd.
@@ -153,7 +169,8 @@ pub fn parse_worktree_list_porcelain(text: &str) -> Vec<GitWorktreeListEntry> {
     let mut entries = Vec::new();
     let mut current: Option<GitWorktreeListEntry> = None;
 
-    let flush = |current: &mut Option<GitWorktreeListEntry>, entries: &mut Vec<GitWorktreeListEntry>| {
+    let flush = |current: &mut Option<GitWorktreeListEntry>,
+                 entries: &mut Vec<GitWorktreeListEntry>| {
         if let Some(entry) = current.take() {
             entries.push(entry);
         }
@@ -184,11 +201,7 @@ pub fn parse_worktree_list_porcelain(text: &str) -> Vec<GitWorktreeListEntry> {
             continue;
         }
         if let Some(rest) = line.strip_prefix("branch ") {
-            cur.branch = Some(
-                rest.strip_prefix("refs/heads/")
-                    .unwrap_or(rest)
-                    .to_string(),
-            );
+            cur.branch = Some(rest.strip_prefix("refs/heads/").unwrap_or(rest).to_string());
             continue;
         }
         if line == "bare" {
@@ -219,7 +232,6 @@ pub fn linked_worktrees_under_cwd(
     }
     out
 }
-
 
 /// Paths git accepts for `worktree remove` when the TUI path is a bind-mount alias.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,8 +299,8 @@ pub fn resolve_worktree_remove_target(
     worktree_abs: &Path,
 ) -> WorktreeRemoveTarget {
     let git_path = listed_worktree_path(entries, worktree_abs);
-    let git_cwd = registered_primary_abs(&git_path, primary_abs)
-        .unwrap_or_else(|| resolve_abs(primary_abs));
+    let git_cwd =
+        registered_primary_abs(&git_path, primary_abs).unwrap_or_else(|| resolve_abs(primary_abs));
     WorktreeRemoveTarget { git_cwd, git_path }
 }
 
@@ -309,6 +321,7 @@ pub fn classify_merged_into_default(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::Path;
 
     #[test]
@@ -397,5 +410,28 @@ detached
                 }
             }
         }
+    }
+
+    #[test]
+    fn gitfile_vs_gitdir_classifies_linked_vs_main() {
+        let root = std::env::temp_dir().join(format!(
+            "ws-wt-kind-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let main = root.join("main");
+        let linked = root.join("linked");
+        fs::create_dir_all(&main).unwrap();
+        fs::create_dir_all(&linked).unwrap();
+        fs::create_dir_all(main.join(".git")).unwrap();
+        fs::write(linked.join(".git"), "gitdir: ../main/.git/worktrees/x\n").unwrap();
+        assert!(is_main_worktree_checkout(&main));
+        assert!(!is_linked_worktree_checkout(&main));
+        assert!(is_linked_worktree_checkout(&linked));
+        assert!(!is_main_worktree_checkout(&linked));
+        let _ = fs::remove_dir_all(&root);
     }
 }

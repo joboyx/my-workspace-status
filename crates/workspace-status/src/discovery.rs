@@ -12,7 +12,8 @@ use crate::git::{
 use crate::helpers::{is_default_branch, DETACHED_HEAD_BRANCH};
 use crate::snapshot::{CheckoutKind, FileChange, RepoSnapshot, SyncStatus};
 use crate::worktrees::{
-    classify_merged_into_default, linked_worktrees_under_cwd, parse_worktree_list_porcelain,
+    classify_merged_into_default, is_main_worktree_checkout, linked_worktrees_under_cwd,
+    parse_worktree_list_porcelain,
 };
 
 #[derive(Debug, Clone)]
@@ -22,7 +23,10 @@ pub struct RepoCheckoutMeta {
 }
 
 fn path_depth(repo_path: &str) -> usize {
-    repo_path.split(['/', '\\']).filter(|s| !s.is_empty()).count()
+    repo_path
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty())
+        .count()
 }
 
 fn can_reach_only_repo(repo_path: &str, only_repos: &BTreeSet<String>) -> bool {
@@ -45,9 +49,7 @@ fn has_git_dir(dir: &Path) -> bool {
 }
 
 fn is_main_checkout(repo_dir: &Path) -> bool {
-    fs::metadata(repo_dir.join(".git"))
-        .map(|st| st.is_dir())
-        .unwrap_or(false)
+    is_main_worktree_checkout(repo_dir)
 }
 
 fn find_main_checkout_rel(cwd: &Path, rel_path: &str) -> Option<String> {
@@ -55,10 +57,7 @@ fn find_main_checkout_rel(cwd: &Path, rel_path: &str) -> Option<String> {
     let mut abs = cwd.join(rel_path);
     loop {
         if abs == cwd_abs || abs.starts_with(&cwd_abs) {
-            if fs::metadata(abs.join(".git"))
-                .map(|st| st.is_dir())
-                .unwrap_or(false)
-            {
+            if is_main_worktree_checkout(&abs) {
                 let rel = abs
                     .strip_prefix(&cwd_abs)
                     .ok()?
@@ -82,7 +81,9 @@ fn is_effective_directory(parent: &Path, name: &str) -> bool {
     let full = parent.join(name);
     match fs::symlink_metadata(&full) {
         Ok(meta) if meta.is_dir() => true,
-        Ok(meta) if meta.file_type().is_symlink() => fs::metadata(&full).map(|m| m.is_dir()).unwrap_or(false),
+        Ok(meta) if meta.file_type().is_symlink() => {
+            fs::metadata(&full).map(|m| m.is_dir()).unwrap_or(false)
+        }
         _ => false,
     }
 }
@@ -466,9 +467,8 @@ fn override_for_path(
     primary_repo: Option<&str>,
     default_branches: &std::collections::BTreeMap<String, String>,
 ) -> Option<String> {
-    default_branch_override_for(repo_path, default_branches).or_else(|| {
-        primary_repo.and_then(|p| default_branch_override_for(p, default_branches))
-    })
+    default_branch_override_for(repo_path, default_branches)
+        .or_else(|| primary_repo.and_then(|p| default_branch_override_for(p, default_branches)))
 }
 
 fn compute_merged_into_default(
@@ -558,13 +558,7 @@ pub fn collect_snapshots(
                 meta.primary_repo.as_deref(),
                 &config.default_branches,
             );
-            process_repo(
-                &repo_path,
-                cwd,
-                do_fetch,
-                override_name.as_deref(),
-                &meta,
-            )
+            process_repo(&repo_path, cwd, do_fetch, override_name.as_deref(), &meta)
         })
         .collect()
 }
