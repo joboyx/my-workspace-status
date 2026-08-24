@@ -51,6 +51,10 @@ pub fn event_to_action_ex(
     graph_commit_focused: bool,
 ) -> Action {
     match event {
+        Event::Resize(cols, rows) => Action::Resize {
+            cols: *cols,
+            rows: *rows,
+        },
         Event::Key(key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
             key_to_action(
                 *key,
@@ -384,6 +388,22 @@ mod tests {
         InputMode::Normal {
             search_active: false,
         }
+    }
+
+    #[test]
+    fn resize_is_not_ignored() {
+        assert_eq!(
+            event_to_action(&Event::Resize(120, 40), normal(), false, false),
+            Action::Resize { cols: 120, rows: 40 }
+        );
+        assert_eq!(
+            event_to_action(&Event::Resize(80, 24), InputMode::Help, false, false),
+            Action::Resize { cols: 80, rows: 24 }
+        );
+        assert_eq!(
+            event_to_action(&Event::Resize(60, 18), InputMode::Confirm, true, true),
+            Action::Resize { cols: 60, rows: 18 }
+        );
     }
 
     #[test]

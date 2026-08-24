@@ -5,12 +5,15 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Widget, Wrap};
 use ratatui::Frame;
-use workspace_status_graph::{graph_chrome_budget, graph_gutter_cap, paint_model, GraphLabelPalette, GraphWidget, ASCII, UNICODE};
+use workspace_status_graph::{
+    graph_chrome_budget, graph_gutter_cap, paint_model, GraphLabelPalette, GraphWidget, ASCII,
+    UNICODE,
+};
 
 use std::collections::HashSet;
 use std::time::Instant;
 
-use super::chrome::{breadcrumb_line, breadcrumb_rows, overlay_status_rows, status_line};
+use super::chrome::{breadcrumb_line, breadcrumb_rows, overlay_status_rows_for, status_line};
 use super::diff::{
     cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, gutter_width,
     section_header, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
@@ -18,13 +21,13 @@ use super::diff::{
 use super::drill::DrillView;
 use super::easy_motion::{easy_motion_labels, visible_window};
 use super::help::{
-    help_entry_matches, HELP_COLUMN_COUNT, HELP_GROUPS, HELP_IDLE_FOOTER_SNIPPET,
-    HELP_SEARCH_ESC_HINT,
+    help_chip_gap_spaces, help_column_width, help_entry_matches, help_entry_visual_lines,
+    help_idle_footer, help_inner_width, wrap_help_footer, HELP_GROUPS, HELP_SEARCH_ESC_HINT,
 };
 use super::icons::{
     icon_branch, icon_diff, icon_merged_into_default, icon_move, icon_open_vs_default,
     truncate_visible, CURSOR_BAR, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED,
-    FOLD_EXPANDED_ASCII, REQUIRED_FONT,
+    FOLD_EXPANDED_ASCII,
 };
 use super::search::{
     collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids,
@@ -71,7 +74,7 @@ fn row_match_bg(
 /// Draw one frame. Updates `state.layout` for mouse hits.
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     let area = frame.area();
-    let overlay_h = overlay_status_rows(state);
+    let overlay_h = overlay_status_rows_for(state, area.width);
     let crumb_h = breadcrumb_rows(state);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -892,34 +895,51 @@ fn with_bg(spans: Vec<Span<'static>>, bg: Option<Color>) -> Vec<Span<'static>> {
         .collect()
 }
 
-fn help_entry_spans(
-    entry: &super::help::HelpEntry,
+fn help_chip_spans(keys: &str, color: Color, surface: Color) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for chip in keys.split(' ').filter(|part| !part.is_empty()) {
+        spans.push(key_chip(chip, color, surface));
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::raw(" ".repeat(help_chip_gap_spaces(keys))));
+    spans
+}
+
+fn help_visual_cell_spans(
+    entry: Option<&super::help::HelpEntry>,
+    line: Option<&super::help::HelpVisualLine>,
     color: Color,
     surface: Color,
     muted: Color,
     width: usize,
 ) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    for (i, chip) in entry.keys.split(' ').filter(|part| !part.is_empty()).enumerate() {
-        if i > 0 {
-            spans.push(Span::raw(" "));
+    let Some(vis) = line else {
+        return clamp_spans(vec![Span::raw("")], width);
+    };
+    if vis.chips {
+        let Some(entry) = entry else {
+            return clamp_spans(vec![Span::raw("")], width);
+        };
+        let mut spans = help_chip_spans(entry.keys, color, surface);
+        if !vis.text.is_empty() {
+            spans.push(Span::styled(vis.text.clone(), Style::default().fg(muted)));
         }
-        spans.push(key_chip(chip, color, surface));
+        return clamp_spans(spans, width);
     }
-    spans.push(Span::styled(
-        format!(" {}", entry.desc),
-        Style::default().fg(muted),
-    ));
+    let mut spans = Vec::new();
+    if vis.indent > 0 {
+        spans.push(Span::raw(" ".repeat(vis.indent)));
+    }
+    if !vis.text.is_empty() {
+        spans.push(Span::styled(vis.text.clone(), Style::default().fg(muted)));
+    }
     clamp_spans(spans, width)
 }
 
 fn key_chip(key: &str, bg: Color, fg: Color) -> Span<'static> {
     Span::styled(
         format!(" {key} "),
-        Style::default()
-            .fg(fg)
-            .bg(bg)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
     )
 }
 
@@ -951,8 +971,9 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         .unwrap_or(0);
     let mut lines: Vec<Line> = Vec::new();
 
-    let inner = area.width.saturating_sub(4).max(1) as usize;
-    let col_w = (inner / HELP_COLUMN_COUNT).max(1);
+    let term_width = area.width as usize;
+    let inner = help_inner_width(term_width).max(1);
+    let col_w = help_column_width(term_width);
 
     let mut title_spans = Vec::new();
     for group in HELP_GROUPS {
@@ -968,21 +989,40 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     lines.push(Line::from(title_spans));
 
     for row in 0..max_rows {
-        let mut spans = Vec::new();
-        for group in HELP_GROUPS {
-            let (_, color) = help_group_chrome(group.title, state.ascii, palette);
-            let Some(entry) = group.entries.get(row) else {
-                spans.extend(clamp_spans(vec![Span::raw("")], col_w));
-                continue;
-            };
-            let hit = searching && help_entry_matches(entry.keys, entry.desc, query);
-            let bg = hit.then_some(pills.filter.bg);
-            spans.extend(with_bg(
-                help_entry_spans(entry, color, surface, palette.muted, col_w),
-                bg,
-            ));
+        let cells: Vec<Vec<super::help::HelpVisualLine>> = HELP_GROUPS
+            .iter()
+            .map(|group| match group.entries.get(row) {
+                Some(entry) => help_entry_visual_lines(entry.desc, col_w, entry.keys),
+                None => vec![super::help::HelpVisualLine {
+                    chips: false,
+                    indent: 0,
+                    text: String::new(),
+                }],
+            })
+            .collect();
+        let height = cells.iter().map(|cell| cell.len()).max().unwrap_or(1);
+        for vis_row in 0..height {
+            let mut spans = Vec::new();
+            for (group_idx, group) in HELP_GROUPS.iter().enumerate() {
+                let (_, color) = help_group_chrome(group.title, state.ascii, palette);
+                let entry = group.entries.get(row);
+                let hit = searching
+                    && entry.is_some_and(|item| help_entry_matches(item.keys, item.desc, query));
+                let bg = hit.then_some(pills.filter.bg);
+                spans.extend(with_bg(
+                    help_visual_cell_spans(
+                        entry,
+                        cells[group_idx].get(vis_row),
+                        color,
+                        surface,
+                        palette.muted,
+                        col_w,
+                    ),
+                    bg,
+                ));
+            }
+            lines.push(Line::from(spans));
         }
-        lines.push(Line::from(spans));
     }
 
     if searching {
@@ -997,10 +1037,12 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ),
         ]));
     } else {
-        lines.push(Line::from(Span::styled(
-            format!("Needs a Nerd Font · {REQUIRED_FONT} · {HELP_IDLE_FOOTER_SNIPPET} · Esc closes"),
-            Style::default().fg(palette.muted),
-        )));
+        for part in wrap_help_footer(&help_idle_footer(), inner) {
+            lines.push(Line::from(Span::styled(
+                part,
+                Style::default().fg(palette.muted),
+            )));
+        }
     }
 
     frame.render_widget(Clear, area);
@@ -1075,10 +1117,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     Style::default().fg(palette.muted),
                 )),
                 Line::from(Span::styled(
-                    format!(
-                        "  {untracked} untracked {} → {fate}",
-                        files_word(untracked)
-                    ),
+                    format!("  {untracked} untracked {} → {fate}", files_word(untracked)),
                     Style::default().fg(if single_untracked {
                         accent
                     } else {
@@ -1107,14 +1146,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     Span::styled(stash_ref.clone(), Style::default().fg(palette.file)),
                     Span::styled("?", Style::default().fg(accent)),
                 ]),
-                confirm_action_row(
-                    "y",
-                    "drop",
-                    None,
-                    accent,
-                    palette.muted,
-                    surface,
-                ),
+                confirm_action_row("y", "drop", None, accent, palette.muted, surface),
             ];
             (accent, lines)
         }
@@ -1162,21 +1194,12 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     Style::default().fg(palette.muted),
                 )),
                 dirty_line,
-                confirm_action_row(
-                    "y",
-                    "remove",
-                    None,
-                    accent,
-                    palette.muted,
-                    surface,
-                ),
+                confirm_action_row("y", "remove", None, accent, palette.muted, surface),
             ];
             (accent, lines)
         }
         PendingConfirm::CheckoutOutOfSync {
-            branch,
-            remote_ref,
-            ..
+            branch, remote_ref, ..
         } => {
             let accent = palette.modified;
             let lines = vec![
@@ -1309,7 +1332,10 @@ fn filter_labels(labels: Vec<String>, typed: &str) -> Vec<String> {
 
 fn overlay_status_color(status: &str, palette: Palette) -> Color {
     let lower = status.to_ascii_lowercase();
-    if lower.contains("failed") || lower.contains("error") || lower.contains("invalid") || lower.contains("dirty")
+    if lower.contains("failed")
+        || lower.contains("error")
+        || lower.contains("invalid")
+        || lower.contains("dirty")
     {
         palette.deleted
     } else {
@@ -1716,7 +1742,7 @@ mod tests {
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         state.help_open = true;
-        let backend = TestBackend::new(120, 28);
+        let backend = TestBackend::new(200, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = buffer_text(&terminal);
@@ -1746,7 +1772,7 @@ mod tests {
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         state.help_open = true;
         state.help_search_query = Some("quit".into());
-        let backend = TestBackend::new(120, 28);
+        let backend = TestBackend::new(200, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = buffer_text(&terminal);
@@ -2022,6 +2048,42 @@ mod tests {
             text.contains("UNSTAGED") || text.contains("STAGED"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn draw_relayouts_panes_gutter_help_and_lists() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.help_open = true;
+        let mut wide = Terminal::new(TestBackend::new(200, 40)).unwrap();
+        wide.draw(|frame| draw(frame, &mut state)).unwrap();
+        let wide_tree = state.layout.outer_tree_width;
+        let wide_diff = state.layout.diff_pane_width;
+        let wide_list = state.layout.tree_height;
+        let wide_gutter = graph_gutter_cap(wide_diff.saturating_sub(1) as usize);
+
+        let mut narrow = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        narrow.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert!(
+            state.layout.outer_tree_width < wide_tree,
+            "tree pane should shrink: {} vs {wide_tree}",
+            state.layout.outer_tree_width
+        );
+        let narrow_gutter =
+            graph_gutter_cap(state.layout.diff_pane_width.saturating_sub(1) as usize);
+        assert!(
+            narrow_gutter < wide_gutter,
+            "graph gutter cap should follow pane width: {narrow_gutter} vs {wide_gutter}"
+        );
+        assert!(
+            state.layout.tree_height < wide_list,
+            "list viewport should shrink: {} vs {wide_list}",
+            state.layout.tree_height
+        );
+        let text = buffer_text(&narrow);
+        assert!(text.contains("MOVE"), "{text}");
+        assert!(text.contains("GIT"), "{text}");
+        assert!(text.contains("VIEW"), "{text}");
     }
 
     #[test]

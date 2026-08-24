@@ -483,3 +483,50 @@ fn hidden_ignored_stay_out_until_shown() {
     );
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn terminal_resize_relayouts_panes_gutter_help_and_lists() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    tui.resize(200, 40);
+    tui.search("merger");
+    let _ = tui.frame();
+    let wide_tree = tui.pane_tree_width();
+    let wide_diff = tui.pane_diff_width();
+    let wide_list = tui.pane_tree_height();
+
+    tui.resize(80, 40);
+    assert!(
+        tui.pane_tree_width() < wide_tree,
+        "tree pane should shrink: {} vs {wide_tree}",
+        tui.pane_tree_width()
+    );
+    assert!(
+        tui.pane_diff_width() < wide_diff,
+        "right pane (graph gutter budget) should shrink: {} vs {wide_diff}",
+        tui.pane_diff_width()
+    );
+
+    tui.resize(200, 16);
+    assert!(
+        tui.pane_tree_height() < wide_list,
+        "list viewport should shrink: {} vs {wide_list}",
+        tui.pane_tree_height()
+    );
+
+    tui.resize(200, 48);
+    tui.key('?');
+    let help_wide = tui.frame();
+    assert_contains(&help_wide, "MOVE");
+    assert_contains(&help_wide, "q");
+    assert_contains(&help_wide, "Tab");
+    let help_wide_list = tui.pane_tree_height();
+    tui.resize(80, 48);
+    assert!(
+        tui.pane_tree_height() < help_wide_list,
+        "wrapped help should steal pane rows: {} vs {help_wide_list}",
+        tui.pane_tree_height()
+    );
+    assert_contains(&tui.frame(), "MOVE");
+    let _ = fs::remove_dir_all(root);
+}

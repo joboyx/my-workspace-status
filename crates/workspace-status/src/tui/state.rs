@@ -1062,6 +1062,10 @@ impl AppState {
             Action::EasyMotionChar(c) => self.easy_motion_char(c),
             Action::EasyMotionCancel => self.cancel_easy_motion(),
             Action::CycleTheme => self.cycle_theme(),
+            Action::Resize { cols, rows: _ } => {
+                self.apply_terminal_size(cols);
+                Effect::None
+            }
             Action::None => Effect::None,
         }
     }
@@ -2595,7 +2599,12 @@ impl AppState {
         Effect::None
     }
 
-    fn sync_graph_scroll(&mut self) {
+    fn apply_terminal_size(&mut self, cols: u16) {
+        self.layout.term_cols = cols.max(1);
+        self.tree_fraction = clamp_tree_fraction(self.layout.term_cols, self.tree_fraction);
+    }
+
+    pub(crate) fn sync_graph_scroll(&mut self) {
         let Some(model) = self.graph.as_ref() else {
             return;
         };

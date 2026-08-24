@@ -84,6 +84,8 @@ The Rust TUI matches those two contracts in `crates/workspace-status/src/tui/wat
 
 Pane widths come from `layoutWidths.paneWidths(termCols, fraction?)` — never from tree label lengths. Default fraction is `TREE_WIDTH_FRACTION` (0.4). `App` keeps a session-only `treeFraction` (resets on next launch; not persisted) and freezes `{ treeWidth, treeInnerWidth, diffWidth }` in state, recomputing when terminal columns change (`SIGWINCH` / stdout resize) **or** when the user drags the divider — so the left/right divider does not jitter on `j`/`k`. Hit-testing consumes the same frozen `treeWidth`. Clamp helpers (`clampTreeFraction` / `treeFractionFromWidth`) keep both panes ≥ 20 cols (accounting for padding) when the terminal is wide enough. The in-diff side-by-side RULE uses the same session-only drag model via `diffSplit.ts` (`diffSplitFraction`, not persisted). Hit-testing consumes `diffSplitRuleX` (RULE ± 1) only while split mode is actually painted (`≥ NARROW_SXS`). The `?` help overlay height comes from `helpStatusLines(termCols)` (wrap math in `helpLayout.ts`) so wrapped descriptions shrink the panes instead of overlapping them.
 
+The ratatui TUI applies crossterm `Resize` to `Terminal::resize` (the event size, not a later ioctl) and recomputes pane widths, graph gutter cap, help overlay rows, and list viewports from the new area.
+
 `TreePane` paints a viewport window (`visibleTreeWindow` / `treeViewportStart`) with `React.memo` row views keyed by `row.id`. Cursor-only moves in `useAppState` call `setCursor` (and reset diff scroll) — they do not rebuild `tree`, `folds`, or snapshot identity; `rows` stays memoized on `[tree, folds]`.
 
 ## Repo graph engine (JBY-037 P2b) + UI (P3)

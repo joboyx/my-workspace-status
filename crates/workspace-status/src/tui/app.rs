@@ -6,13 +6,15 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, size as terminal_size, EnterAlternateScreen,
+    LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
+use ratatui::layout::Rect;
+use ratatui::{Terminal, TerminalOptions, Viewport};
 use workspace_status_graph::LOADING_OLDER;
 
 use crate::actions::switch_repo_to_default_branch;
@@ -70,7 +72,12 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
         return Err(1);
     }
     let backend = CrosstermBackend::new(out);
-    let mut terminal = match Terminal::new(backend) {
+    let mut terminal = match Terminal::with_options(
+        backend,
+        TerminalOptions {
+            viewport: Viewport::Fixed(terminal_size_rect()),
+        },
+    ) {
         Ok(t) => t,
         Err(_) => {
             restore_terminal();
@@ -87,6 +94,21 @@ fn restore_terminal() {
     let _ = disable_raw_mode();
     let mut end = stdout();
     let _ = execute!(end, DisableMouseCapture, LeaveAlternateScreen);
+}
+
+fn terminal_size_rect() -> Rect {
+    let (cols, rows) = terminal_size().unwrap_or((80, 24));
+    Rect::new(0, 0, cols.max(1), rows.max(1))
+}
+
+fn apply_terminal_resize(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    cols: u16,
+    rows: u16,
+) -> Result<(), u8> {
+    terminal
+        .resize(Rect::new(0, 0, cols.max(1), rows.max(1)))
+        .map_err(|_| 1u8)
 }
 
 fn run_loop(
@@ -122,10 +144,6 @@ fn run_loop(
             let Ok(event) = event::read() else {
                 continue;
             };
-            if matches!(event, Event::Resize(_, _)) {
-                terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
-                continue;
-            }
             let action = event_to_action_ex(
                 &event,
                 state.input_mode(),
@@ -134,6 +152,10 @@ fn run_loop(
                 state.graph_stash_focused(),
                 state.graph_commit_focused(),
             );
+            let resized = matches!(action, Action::Resize { .. });
+            if let Action::Resize { cols, rows } = &action {
+                apply_terminal_resize(terminal, *cols, *rows)?;
+            }
             let mouse_before = state.mouse_enabled;
             let effect = state.dispatch(action);
             if state.mouse_enabled != mouse_before {
@@ -143,6 +165,11 @@ fn run_loop(
                 return Ok(());
             }
             apply_effect(state, effect, opts, terminal);
+            terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
+            if resized {
+                state.sync_graph_scroll();
+            }
+            continue;
         } else {
             if watch_ms > 0 && last_watch.elapsed().as_millis() as u64 >= watch_ms {
                 let effect = state.dispatch(Action::WatchTick);
@@ -678,6 +705,7 @@ fn resume_tui(
         execute!(out, EnterAlternateScreen).map_err(|e| e.to_string())?;
     }
     let _ = terminal.hide_cursor();
+    let _ = terminal.resize(terminal_size_rect());
     let _ = terminal.clear();
     drain_pending_events();
     Ok(())
