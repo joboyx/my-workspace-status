@@ -727,7 +727,7 @@ impl AppState {
             Action::MoveToStart => self.move_focused_edge(false),
             Action::MoveToEnd => self.move_focused_edge(true),
             Action::PageMove(pages) => {
-                let height = self.layout.tree_height.max(1) as i32;
+                let height = self.page_step();
                 self.move_focused(pages * height)
             }
             Action::FoldToggleSubtree => {
@@ -1174,9 +1174,7 @@ impl AppState {
                     return Effect::None;
                 }
                 self.graph_cursor = index.min(n - 1);
-                if (self.graph_cursor as u16) < self.graph_scroll {
-                    self.graph_scroll = self.graph_cursor as u16;
-                }
+                self.sync_graph_scroll();
                 Effect::None
             }
             EasyMotionList::CommitFiles => {
@@ -1803,9 +1801,7 @@ impl AppState {
             return;
         };
         self.graph_cursor = idx;
-        if (self.graph_cursor as u16) < self.graph_scroll {
-            self.graph_scroll = self.graph_cursor as u16;
-        }
+        self.sync_graph_scroll();
         self.set_search_status(true);
     }
 
@@ -2570,9 +2566,33 @@ impl AppState {
         }
         let next = self.graph_cursor as i32 + delta;
         self.graph_cursor = next.clamp(0, n as i32 - 1) as usize;
-        if (self.graph_cursor as u16) < self.graph_scroll {
-            self.graph_scroll = self.graph_cursor as u16;
-        }
+        self.sync_graph_scroll();
+    }
+
+    fn sync_graph_scroll(&mut self) {
+        let Some(model) = self.graph.as_ref() else {
+            return;
+        };
+        let glyphs = if self.ascii { &ASCII } else { &UNICODE };
+        let painted = paint_model(model, glyphs, None);
+        let Some(idx) = painted
+            .iter()
+            .position(|line| line.row_index == Some(self.graph_cursor) && line.selectable)
+        else {
+            return;
+        };
+        let list_h = self.graph_chrome().list_height.max(1) as usize;
+        let (start, _) = visible_window(painted.len(), idx, list_h);
+        self.graph_scroll = start as u16;
+    }
+
+    fn page_step(&self) -> i32 {
+        let height = if self.graph_pane_focused() {
+            self.graph_chrome().list_height
+        } else {
+            self.layout.tree_height
+        };
+        height.max(1).saturating_sub(1).max(1) as i32
     }
 
     fn move_file_cursor(&mut self, delta: i32) {
@@ -5858,7 +5878,7 @@ mod tests {
         assert_eq!(app.cursor, 5.min(app.rows.len() - 1));
         app.cursor = 0;
         app.dispatch(Action::PageMove(1));
-        assert_eq!(app.cursor, 2);
+        assert_eq!(app.cursor, 1);
         app.cursor = 4;
         app.dispatch(Action::Move(-5));
         assert_eq!(app.cursor, 0);

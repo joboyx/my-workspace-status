@@ -34,6 +34,8 @@ pub struct GraphModel {
     /// Length of the `git log` prefix in [`GraphModel::commits`] (excludes
     /// extra stash parents). Autoload skip uses this, not `commits.len()`.
     pub window: usize,
+    /// Configured default branch (`None` → main/master/develop).
+    pub default_branch_override: Option<String>,
 }
 
 /// Kind of annotated ref on a commit. Same set as Ink `GraphRefKind`.

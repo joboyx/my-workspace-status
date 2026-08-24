@@ -2,7 +2,7 @@
 //!
 //! Matches Ink `graphChromeBudget` and `graphSelectionDetailLines`.
 
-use crate::format::{format_commit_ref_chips, format_relative_date, short_id};
+use crate::format::{format_commit_ref_chips, format_commit_ref_chips_with, format_relative_date, short_id};
 use crate::glyphs::GlyphSet;
 use crate::model::{GraphModel, GraphRow};
 
@@ -102,10 +102,9 @@ pub fn selection_detail_lines(
             } else {
                 "Working tree clean"
             };
-            [
-                trunc(line, width),
-                trunc(FOOTER_WORKTREE_NOT_A_COMMIT, width),
-            ]
+            let meta = head_commit_ref_line(model, glyphs)
+                .unwrap_or_else(|| FOOTER_WORKTREE_NOT_A_COMMIT.to_string());
+            [trunc(line, width), trunc(&meta, width)]
         }
         GraphFooterSelection::Row(GraphRow::Stash(stash)) => {
             // Ink `graphSelectionDetailLines`: `[ref, hash.slice(0,7), date].join(' · ')`.
@@ -123,11 +122,12 @@ pub fn selection_detail_lines(
         GraphFooterSelection::Row(GraphRow::Commit {
             commit, is_head, ..
         }) => {
-            let chips = format_commit_ref_chips(
+            let chips = format_commit_ref_chips_with(
                 &commit.refs,
                 *is_head,
                 model.sync.as_ref().map(|s| s.branch.as_str()),
                 glyphs,
+                model.default_branch_override.as_deref(),
             );
             let hash = short_id(&commit.id);
             let mut meta_parts: Vec<String> = Vec::new();
@@ -148,6 +148,23 @@ pub fn selection_detail_lines(
                 trunc(&meta_parts.join(" · "), width),
             ]
         }
+    }
+}
+
+fn head_commit_ref_line(model: &GraphModel, glyphs: &GlyphSet) -> Option<String> {
+    let id = model.head_id.as_deref()?;
+    let commit = model.commits.iter().find(|c| c.id == id)?;
+    let chips = format_commit_ref_chips_with(
+        &commit.refs,
+        true,
+        model.sync.as_ref().map(|s| s.branch.as_str()),
+        glyphs,
+        model.default_branch_override.as_deref(),
+    );
+    if chips.is_empty() {
+        None
+    } else {
+        Some(chips)
     }
 }
 
@@ -178,7 +195,7 @@ fn trunc(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::glyphs::UNICODE;
-    use crate::model::{Commit, Stash};
+    use crate::model::{Commit, GraphRef, Stash};
 
     #[test]
     fn budget_prefers_footer_over_header() {
@@ -219,6 +236,31 @@ mod tests {
             selection_detail_lines(&model, GraphFooterSelection::Row(&clean), &UNICODE, 40, 0);
         assert_eq!(c, "Working tree clean");
         assert_eq!(d, FOOTER_WORKTREE_NOT_A_COMMIT);
+    }
+
+    #[test]
+    fn footer_uncommitted_lists_head_commit_refs() {
+        let commit = Commit {
+            id: "abcdefghhhh".into(),
+            subject: "tip".into(),
+            parents: Vec::new(),
+            refs: vec![GraphRef::local("main"), GraphRef::tag("v1")],
+            author_name: "Ada".into(),
+            author_date_unix: 1_700_000_000,
+        };
+        let model = GraphModel {
+            commits: vec![commit.clone()],
+            head_id: Some(commit.id.clone()),
+            uncommitted: Some(false),
+            ..GraphModel::default()
+        };
+        let row = GraphRow::Uncommitted { has_changes: false };
+        let [subject, meta] =
+            selection_detail_lines(&model, GraphFooterSelection::Row(&row), &UNICODE, 80, 0);
+        assert_eq!(subject, "Working tree clean");
+        assert!(meta.contains("main"), "{meta}");
+        assert!(meta.contains("v1"), "{meta}");
+        assert_ne!(meta, FOOTER_WORKTREE_NOT_A_COMMIT);
     }
 
     #[test]

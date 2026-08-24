@@ -5,7 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Widget, Wrap};
 use ratatui::Frame;
-use workspace_status_graph::{graph_chrome_budget, paint_model, GraphWidget, ASCII, UNICODE};
+use workspace_status_graph::{graph_chrome_budget, graph_gutter_cap, paint_model, GraphLabelPalette, GraphWidget, ASCII, UNICODE};
 
 use std::collections::HashSet;
 use std::time::Instant;
@@ -500,13 +500,23 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         return;
     };
     let matches = graph_search_matches(state);
+    let pal = state.theme.palette();
     GraphWidget::new(model)
         .ascii(state.ascii)
         .selected(Some(state.graph_cursor))
         .scroll(state.graph_scroll)
         .loading_older(state.graph_loading_older)
         .search_matches(&matches, state.theme.pills().filter.bg)
-        .cursor_style(state.theme.palette().cursor, state.theme.palette().cursor_bg)
+        .cursor_style(pal.cursor, pal.cursor_bg)
+        .label_palette(GraphLabelPalette {
+            subject: pal.repo,
+            meta: pal.muted,
+            branch_local: pal.branch_feature,
+            branch_default: pal.branch_default,
+            remote: pal.dir,
+            tag: pal.modified,
+            head_mark: pal.head_mark,
+        })
         .render(area, frame.buffer_mut());
     overlay_graph_easy_motion(frame, area, state);
 }
@@ -1253,7 +1263,8 @@ fn overlay_graph_easy_motion(frame: &mut Frame<'_>, area: Rect, state: &AppState
         y = y.saturating_add(1);
     }
     let list_bottom = y.saturating_add(chrome.list_height);
-    for line in paint_model(model, glyphs, None)
+    let gutter_cap = graph_gutter_cap(area.width.saturating_sub(1) as usize);
+    for line in paint_model(model, glyphs, Some(gutter_cap))
         .into_iter()
         .skip(state.graph_scroll as usize)
     {

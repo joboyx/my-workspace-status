@@ -84,7 +84,7 @@ The commit node line is subject-only. The spacer under it is
 left (local + matching `origin/*` merge into one chip; unmatched remotes
 stay as `[origin/…]`), muted short hash / relative date / author on the
 right. Narrow panes drop hash, then date, then author, and keep refs.
-Relative dates match Ink (`just now` / `Nm` / `Nh` / `Nd` / `Nw` / `Ny`).
+Relative dates match Ink: `just now` / `Nm` / `Nh` through 3 hours, then UTC `YYYY-MM-DD HH:MM`. Narrow spacers hide leftover chips as `+N` rather than mid-chip ellipsis; the selection footer lists every ref.
 The spacer is not a second selectable row; cursor, search, EasyMotion,
 and click treat it as the parent commit.
 
