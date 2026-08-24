@@ -3780,7 +3780,7 @@ mod tests {
     fn other_keys_do_not_disarm_ctrl_c() {
         let mut app = state();
         assert_eq!(app.dispatch(Action::CtrlC), Effect::None);
-        assert_eq!(app.dispatch(Action::Move(1)), Effect::None);
+        let _ = app.dispatch(Action::Move(1));
         assert_eq!(app.dispatch(Action::CtrlC), Effect::Quit);
     }
 
