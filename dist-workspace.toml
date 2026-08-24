@@ -1,0 +1,25 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Only the CLI crate is an app; workspace-status-graph is a path library bundled into it.
+packages = ["workspace-status"]
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Whether to install an updater program
+install-updater = true
+# GitHub Releases only: do not add Homebrew taps or crates.io publish jobs.
+#
+# After `dist generate`, keep `workflow_dispatch:` on
+# `.github/workflows/release.yml`. `.github/workflows/tag-release.yml` starts
+# Release with `gh workflow run` because a GITHUB_TOKEN tag push does not
+# trigger other workflows.

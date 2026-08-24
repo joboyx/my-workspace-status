@@ -161,6 +161,14 @@ order.
 
 See [graph.md](./graph.md).
 
+## Distribution
+
+The Rust CLI is published with [cargo-dist](https://axodotdev.github.io/cargo-dist/) 0.32 (`dist-workspace.toml`).
+`.github/workflows/release.yml` is generated (`dist generate`) and builds GitHub Release archives plus `workspace-status-installer.sh` / `.ps1` on a version tag.
+`.github/workflows/tag-release.yml` writes an annotated `vX.Y.Z` on each push to `main` and dispatches Release (`GITHUB_TOKEN` tag pushes do not start other workflows).
+Installers place `workspace-status`, `ws`, and `workspace-status-update` in `$CARGO_HOME/bin`.
+`workspace-status-graph` is a path library, not a separate dist app. There is no crates.io or Homebrew publish job.
+
 ## Decisions
 
 **Ink over hand-rolled ANSI.** The TUI is stateful — fold sets, cursor identity tracking, an async diff cache, a poll loop, decaying flash timers. React's re-render-from-state model handles that; a hand-rolled ANSI renderer would mean owning diffing and cursor placement by hand for no gain. The cost is real: Ink does not re-render on `SIGWINCH`, so `App.tsx` tracks terminal size itself.
