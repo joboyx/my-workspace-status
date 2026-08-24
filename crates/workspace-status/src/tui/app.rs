@@ -53,7 +53,7 @@ use super::graph_load::{
     refresh_graph_limit, should_autoload, ShouldAutoload,
 };
 use super::keys::event_to_action_with;
-use super::ops::{format_running_op, RunningOp};
+use super::ops::{format_completed_op, format_running_op, RunningOp};
 use super::render::draw;
 use super::state::AppState;
 use super::watch::{watch_interval_ms, FLASH_TICK_MS};
@@ -348,14 +348,17 @@ fn apply_effect_inner(
         Effect::Fetch { repos } => {
             let cwd = opts.cwd.clone();
             let total = repos.len();
+            let mut ok = 0;
+            let mut failed = 0;
             paint_running_op(state, terminal, RunningOp::Fetch, 0, total);
             for (i, repo) in repos.iter().enumerate() {
                 let dir = cwd.join(repo);
                 match run_work_pumped(terminal, state, move || {
-                    let _ = exec_git_checked(&["fetch", "--quiet"], &dir);
+                    exec_git_checked(&["fetch", "--quiet"], &dir)
                 }) {
                     WorkPump::Quit => return true,
-                    WorkPump::Done(()) => {}
+                    WorkPump::Done(Ok(())) => ok += 1,
+                    WorkPump::Done(Err(_)) => failed += 1,
                 }
                 paint_running_op(state, terminal, RunningOp::Fetch, i + 1, total);
             }
@@ -363,20 +366,26 @@ fn apply_effect_inner(
                 return true;
             }
             state.stamp_checkout_flashes(&repos);
-            state.status = format!("fetched {}", repos.join(" "));
+            state.status = format_completed_op(RunningOp::Fetch, ok, failed);
             load_right(state);
         }
         Effect::Pull { repos } => {
             let cwd = opts.cwd.clone();
             let total = repos.len();
+            let mut ok = 0;
+            let mut failed = 0;
             paint_running_op(state, terminal, RunningOp::Pull, 0, total);
             for (i, repo) in repos.iter().enumerate() {
                 let dir = cwd.join(repo);
-                match run_work_pumped(terminal, state, move || {
-                    let _ = pull_quiet_detailed(&dir);
-                }) {
+                match run_work_pumped(terminal, state, move || pull_quiet_detailed(&dir)) {
                     WorkPump::Quit => return true,
-                    WorkPump::Done(()) => {}
+                    WorkPump::Done(result) => {
+                        if result.ok {
+                            ok += 1;
+                        } else {
+                            failed += 1;
+                        }
+                    }
                 }
                 paint_running_op(state, terminal, RunningOp::Pull, i + 1, total);
             }
@@ -384,11 +393,13 @@ fn apply_effect_inner(
                 return true;
             }
             state.stamp_checkout_flashes(&repos);
-            state.status = format!("pulled {}", repos.join(" "));
+            state.status = format_completed_op(RunningOp::Pull, ok, failed);
             load_right(state);
         }
         Effect::DefaultBranch { repos } => {
             let total = repos.len();
+            let mut ok = 0;
+            let mut failed = 0;
             paint_running_op(state, terminal, RunningOp::DefaultBranch, 0, total);
             for (i, repo) in repos.iter().enumerate() {
                 let task = state
@@ -409,8 +420,16 @@ fn apply_effect_inner(
                         )
                     }) {
                         WorkPump::Quit => return true,
-                        WorkPump::Done(_) => {}
+                        WorkPump::Done((success, _)) => {
+                            if success {
+                                ok += 1;
+                            } else {
+                                failed += 1;
+                            }
+                        }
                     }
+                } else {
+                    failed += 1;
                 }
                 paint_running_op(state, terminal, RunningOp::DefaultBranch, i + 1, total);
             }
@@ -418,7 +437,7 @@ fn apply_effect_inner(
                 return true;
             }
             state.stamp_checkout_flashes(&repos);
-            state.status = format!("default-branch {}", repos.join(" "));
+            state.status = format_completed_op(RunningOp::DefaultBranch, ok, failed);
             load_right(state);
         }
         Effect::ReloadSnapshot => {
@@ -558,15 +577,7 @@ fn apply_effect_inner(
                 return true;
             }
             state.stamp_checkout_flashes(&repos);
-            state.status = if failed > 0 && ok == 0 {
-                format!("push: {failed} failed")
-            } else if failed > 0 {
-                format!("Pushed {ok} · {failed} failed")
-            } else if ok == 1 {
-                "Pushed".into()
-            } else {
-                format!("Pushed {ok}")
-            };
+            state.status = format_completed_op(RunningOp::Push, ok, failed);
             load_right(state);
         }
         Effect::PrepareStashMenu { repo } => {
