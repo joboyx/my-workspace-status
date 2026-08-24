@@ -24,9 +24,10 @@ use crate::git::{
     checkout_branch, create_branch_at, create_branch_checkout, diff_commit_file_ctx,
     diff_stash_file_ctx, exec_git_checked, fast_forward_to_remote_ref, git_diff_args,
     latest_stash_ref, list_commit_name_status, list_local_branches, list_stash_name_status,
-    list_worktree_name_status, pull_quiet_detailed, push_quiet, remove_untracked_file,
-    remove_worktree, repo_has_local_changes, rev_parse_quiet, revert_tracked_file, stage_file,
-    stash_apply, stash_drop, stash_pop, stash_push, unstage_file,
+    list_worktree_name_status, merge_into_head, pull_quiet_detailed, push_quiet,
+    remove_untracked_file, remove_worktree, repo_has_local_changes, rev_parse_quiet,
+    revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop, stash_push, unstage_file,
+    MergeIntoHeadResult,
 };
 use crate::snapshot::{
     build_workspace_snapshot, repo_snapshots_from_workspace, CheckoutKind, WorkspaceSnapshot,
@@ -499,6 +500,12 @@ fn apply_effect_inner(
             }
             Err(err) => state.status = format!("create branch failed: {err}"),
         },
+        Effect::MergeIntoHead { repo, rev, label } => {
+            if run_merge_into_head(state, &opts.cwd, repo, rev, label) {
+                reload_snapshot(state, opts);
+                load_right(state);
+            }
+        }
         Effect::RemoveWorktree {
             primary,
             path,
@@ -585,6 +592,44 @@ pub(crate) fn run_checkout_branch(
                 state.status = format!("Checkout failed: {branch}");
                 false
             }
+        }
+    }
+}
+
+/// Merge `rev` into HEAD of `repo`. Fast-forward when possible, otherwise a
+/// merge commit. Conflicts stay in the worktree (no abort, no continue).
+pub(crate) fn run_merge_into_head(
+    state: &mut AppState,
+    cwd: &Path,
+    repo: String,
+    rev: String,
+    label: String,
+) -> bool {
+    let dir = cwd.join(&repo);
+    if repo_has_local_changes(&dir) {
+        state.status = DIRTY_WORKTREE_STATUS.into();
+        return false;
+    }
+    match merge_into_head(&rev, &dir) {
+        MergeIntoHeadResult::AlreadyUpToDate => {
+            state.status = "Already up to date".into();
+            false
+        }
+        MergeIntoHeadResult::FastForward => {
+            state.status = format!("Fast-forwarded to {label}");
+            true
+        }
+        MergeIntoHeadResult::MergeCommit => {
+            state.status = format!("Merged {label}");
+            true
+        }
+        MergeIntoHeadResult::Conflict => {
+            state.status = "Merge conflict — resolve in the worktree".into();
+            true
+        }
+        MergeIntoHeadResult::Failed(err) => {
+            state.status = format!("merge failed: {err}");
+            false
         }
     }
 }
@@ -1112,6 +1157,85 @@ mod tests {
         }
         assert_eq!(exec_git(&["branch", "--show-current"], &repo_dir), "foo");
         assert_eq!(exec_git(&["rev-parse", "HEAD"], &repo_dir), remote_sha);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn graph_merge_dirty_refuses_then_ff_and_conflict_stay_uncommitted() {
+        let root = std::env::temp_dir().join(format!(
+            "ws-tui-merge-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let repo_dir = workspace.join("app");
+        init_repo(&repo_dir);
+        git(&repo_dir, &["config", "user.name", "workspace-status test"]);
+        git(
+            &repo_dir,
+            &[
+                "config",
+                "user.email",
+                "workspace-status-test@example.invalid",
+            ],
+        );
+        git(&repo_dir, &["checkout", "-q", "-b", "topic"]);
+        fs::write(repo_dir.join("topic.txt"), "topic\n").unwrap();
+        git(&repo_dir, &["add", "topic.txt"]);
+        git(&repo_dir, &["commit", "-q", "-m", "topic"]);
+        let topic = exec_git(&["rev-parse", "HEAD"], &repo_dir);
+        git(&repo_dir, &["checkout", "-q", "main"]);
+        fs::write(repo_dir.join("README.md"), "# dirty\n").unwrap();
+        fs::write(repo_dir.join("untracked.txt"), "u\n").unwrap();
+
+        let config = WorkspaceStatusConfig::with_defaults();
+        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let mut app = AppState::new(workspace.clone(), snapshot, true);
+        assert!(!run_merge_into_head(
+            &mut app,
+            &workspace,
+            "app".into(),
+            topic.clone(),
+            "topic".into(),
+        ));
+        assert_eq!(app.status, DIRTY_WORKTREE_STATUS);
+        assert_eq!(exec_git(&["branch", "--show-current"], &repo_dir), "main");
+        assert_ne!(exec_git(&["rev-parse", "HEAD"], &repo_dir), topic);
+
+        git(&repo_dir, &["checkout", "-q", "--", "README.md"]);
+        assert!(!repo_has_local_changes(&repo_dir));
+        assert!(run_merge_into_head(
+            &mut app,
+            &workspace,
+            "app".into(),
+            topic.clone(),
+            "topic".into(),
+        ));
+        assert_eq!(app.status, "Fast-forwarded to topic");
+        assert_eq!(exec_git(&["rev-parse", "HEAD"], &repo_dir), topic);
+        assert!(repo_dir.join("untracked.txt").exists());
+
+        git(&repo_dir, &["reset", "--hard", "--quiet", "HEAD~1"]);
+        fs::write(repo_dir.join("README.md"), "# main-side\n").unwrap();
+        git(&repo_dir, &["add", "README.md"]);
+        git(&repo_dir, &["commit", "-q", "-m", "main-side"]);
+        git(&repo_dir, &["checkout", "-q", "-B", "other", "HEAD~1"]);
+        fs::write(repo_dir.join("README.md"), "# other-side\n").unwrap();
+        git(&repo_dir, &["add", "README.md"]);
+        git(&repo_dir, &["commit", "-q", "-m", "other-side"]);
+        let other = exec_git(&["rev-parse", "HEAD"], &repo_dir);
+        git(&repo_dir, &["checkout", "-q", "main"]);
+        assert!(run_merge_into_head(
+            &mut app,
+            &workspace,
+            "app".into(),
+            other,
+            "other".into(),
+        ));
+        assert_eq!(app.status, "Merge conflict — resolve in the worktree");
+        assert!(rev_parse_quiet("MERGE_HEAD", &repo_dir).is_some());
         let _ = fs::remove_dir_all(&root);
     }
 }

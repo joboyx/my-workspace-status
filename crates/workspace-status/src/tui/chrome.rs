@@ -74,6 +74,7 @@ enum HintActionId {
     FullFile,
     GraphCheckout,
     GraphCreateBranch,
+    GraphMerge,
     StashMenu,
     StashApply,
     StashPop,
@@ -239,6 +240,15 @@ const HINT_ACTIONS: &[HintAction] = &[
         focus_left_only: false,
     },
     HintAction {
+        id: HintActionId::GraphMerge,
+        key: "m",
+        label: "merge",
+        kinds: &[HintRowKind::GraphCommit],
+        destructive: false,
+        depths: Some(&[0, 1]),
+        focus_left_only: false,
+    },
+    HintAction {
         id: HintActionId::StashMenu,
         key: "S",
         label: "stash",
@@ -332,7 +342,8 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
             super::state::PendingConfirm::RemoveWorktree { .. } => 6,
             super::state::PendingConfirm::StashDrop { .. } => 5,
             super::state::PendingConfirm::Revert { .. }
-            | super::state::PendingConfirm::CheckoutOutOfSync { .. } => 7,
+            | super::state::PendingConfirm::CheckoutOutOfSync { .. }
+            | super::state::PendingConfirm::MergeIntoHead { .. } => 7,
         };
     }
     if let Some(ops) = state.stash_menu.as_ref() {
@@ -485,7 +496,7 @@ pub fn action_hint_segments(state: &AppState) -> Vec<HintSegment> {
 fn graph_action_visible(state: &AppState, action: &HintAction) -> bool {
     match action.id {
         HintActionId::GraphCheckout => focused_commit_checkoutable(state),
-        HintActionId::GraphCreateBranch => {
+        HintActionId::GraphCreateBranch | HintActionId::GraphMerge => {
             matches!(state.focused_graph_row(), Some(GraphRow::Commit { .. }))
         }
         HintActionId::StashApply | HintActionId::StashPop | HintActionId::StashDrop => {
@@ -1202,6 +1213,13 @@ mod tests {
             repo: "app".into(),
             branch: "main".into(),
             remote_ref: "origin/main".into(),
+        });
+        assert_eq!(overlay_status_rows(&app), 7);
+        app.confirm = Some(super::super::state::PendingConfirm::MergeIntoHead {
+            repo: "app".into(),
+            rev: "topic".into(),
+            label: "topic".into(),
+            into: "main".into(),
         });
         assert_eq!(overlay_status_rows(&app), 7);
     }

@@ -227,6 +227,7 @@ fn normal_key(
         match key.code {
             KeyCode::Char('b') => return Action::GraphCheckout,
             KeyCode::Char('c') => return Action::GraphCreateBranch,
+            KeyCode::Char('m') => return Action::GraphMerge,
             _ => {}
         }
     }
@@ -532,6 +533,14 @@ mod tests {
         assert_eq!(
             event_to_action_ex(&key(KeyCode::Char('c')), normal(), false, true, false, true),
             Action::GraphCreateBranch
+        );
+        assert_eq!(
+            event_to_action_ex(&key(KeyCode::Char('m')), normal(), false, true, false, true),
+            Action::GraphMerge
+        );
+        assert_eq!(
+            event_to_action_ex(&key(KeyCode::Char('m')), normal(), false, true, true, false),
+            Action::ToggleMouse
         );
         assert_eq!(
             event_to_action_ex(&key(KeyCode::Char('b')), normal(), false, true, true, false),
