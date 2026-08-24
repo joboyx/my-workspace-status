@@ -2,6 +2,8 @@
 
 Read [README.md](./README.md) first for usage, then `docs/` for internals.
 
+Tag `ink-tui` is the historical TypeScript Ink TUI snapshot.
+
 ## Graph / stash (read this before paint changes)
 
 Stash gutter tips are **not** a special chrome problem. Normative rule:
