@@ -7,9 +7,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget};
 
 use crate::chrome::{
-    graph_chrome_budget, selection_detail_lines, GraphFooterSelection, LOADING_OLDER,
+    graph_chrome_budget, selection_detail_parts, GraphFooterSelection, LOADING_OLDER,
 };
-use crate::format::{format_sync, LabelKind};
+use crate::format::{format_sync, slice_label_parts, LabelKind, LabelPart};
 use crate::glyphs::{ASCII, UNICODE};
 use crate::gutter::graph_gutter_cap;
 use crate::lane_colors::{cells_to_spans, default_lane_colors};
@@ -152,7 +152,8 @@ impl<'a> GraphWidget<'a> {
         self
     }
 
-    /// Colour commit subjects, meta, ref chips, and the hidden-ref overflow chip.
+    /// Colour commit subjects, meta, ref chips, the hidden-ref overflow chip,
+    /// and the matching chip runs on the 2-line selection footer.
     pub fn label_palette(mut self, palette: GraphLabelPalette) -> Self {
         self.label_palette = Some(palette);
         self
@@ -291,21 +292,29 @@ impl Widget for GraphWidget<'_> {
             footer_y = footer_y.saturating_sub(2);
             let rows = self.model.visible_rows();
             let selected = self.selected.and_then(|i| rows.get(i));
-            let [line1, line2] = selection_detail_lines(
+            let [line1, line2] = selection_detail_parts(
                 self.model,
                 GraphFooterSelection::from(selected),
                 glyphs,
                 area.width as usize,
                 now,
             );
-            put_text_line(buf, area.x, footer_y, area.width, &line1, false, fallback);
-            put_text_line(
+            put_parts_line(
+                buf,
+                area.x,
+                footer_y,
+                area.width,
+                &line1,
+                self.label_palette,
+                fallback,
+            );
+            put_parts_line(
                 buf,
                 area.x,
                 footer_y.saturating_add(1),
                 area.width,
                 &line2,
-                false,
+                self.label_palette,
                 fallback,
             );
         }
@@ -383,41 +392,8 @@ fn slice_line_label(line: &PaintedLine, offset: usize, width: usize) -> PaintedL
         out.label = out.label.chars().skip(offset).take(width).collect();
         return out;
     }
-    out.parts = slice_parts(&out.parts, offset, width);
+    out.parts = slice_label_parts(&out.parts, offset, width);
     out.label = out.parts.iter().map(|p| p.text.as_str()).collect();
-    out
-}
-
-fn slice_parts(
-    parts: &[crate::format::LabelPart],
-    offset: usize,
-    width: usize,
-) -> Vec<crate::format::LabelPart> {
-    if width == 0 {
-        return Vec::new();
-    }
-    let mut skip = offset;
-    let mut remain = width;
-    let mut out = Vec::new();
-    for part in parts {
-        let n = part.text.chars().count();
-        if skip >= n {
-            skip -= n;
-            continue;
-        }
-        let sliced: String = part.text.chars().skip(skip).take(remain).collect();
-        skip = 0;
-        let used = sliced.chars().count();
-        if !sliced.is_empty() {
-            let mut p = part.clone();
-            p.text = sliced;
-            out.push(p);
-        }
-        remain = remain.saturating_sub(used);
-        if remain == 0 {
-            break;
-        }
-    }
     out
 }
 
@@ -426,18 +402,6 @@ fn label_spans(
     palette: Option<GraphLabelPalette>,
     fallback: Color,
 ) -> Vec<Span<'static>> {
-    let kind_color = |kind: LabelKind, pal: GraphLabelPalette| -> Color {
-        match kind {
-            LabelKind::Subject => pal.subject,
-            LabelKind::Meta => pal.meta,
-            LabelKind::ChipHead => pal.head_mark,
-            LabelKind::ChipLocal => pal.branch_local,
-            LabelKind::ChipDefault => pal.branch_default,
-            LabelKind::ChipRemote => pal.remote,
-            LabelKind::ChipTag => pal.tag,
-            LabelKind::Overflow => pal.overflow,
-        }
-    };
     if line.parts.is_empty() {
         let color = match (palette, line.selectable) {
             (Some(pal), true) => pal.subject,
@@ -446,13 +410,39 @@ fn label_spans(
         };
         return vec![Span::styled(line.label.clone(), Style::default().fg(color))];
     }
+    spans_from_parts(&line.parts, palette, fallback)
+}
+
+fn label_kind_color(kind: LabelKind, pal: GraphLabelPalette) -> Color {
+    match kind {
+        LabelKind::Subject => pal.subject,
+        LabelKind::Meta => pal.meta,
+        LabelKind::ChipHead => pal.head_mark,
+        LabelKind::ChipLocal => pal.branch_local,
+        LabelKind::ChipDefault => pal.branch_default,
+        LabelKind::ChipRemote => pal.remote,
+        LabelKind::ChipTag => pal.tag,
+        LabelKind::Overflow => pal.overflow,
+    }
+}
+
+fn spans_from_parts(
+    parts: &[LabelPart],
+    palette: Option<GraphLabelPalette>,
+    fallback: Color,
+) -> Vec<Span<'static>> {
+    if parts.is_empty() {
+        return Vec::new();
+    }
     match palette {
-        None => vec![Span::raw(line.label.clone())],
-        Some(pal) => line
-            .parts
+        None => {
+            let text: String = parts.iter().map(|p| p.text.as_str()).collect();
+            vec![Span::styled(text, Style::default().fg(fallback))]
+        }
+        Some(pal) => parts
             .iter()
             .map(|p| {
-                let mut style = Style::default().fg(kind_color(p.kind, pal));
+                let mut style = Style::default().fg(label_kind_color(p.kind, pal));
                 if p.kind == LabelKind::Overflow {
                     style = style.add_modifier(Modifier::BOLD);
                 }
@@ -460,6 +450,18 @@ fn label_spans(
             })
             .collect(),
     }
+}
+
+fn put_parts_line(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    parts: &[LabelPart],
+    palette: Option<GraphLabelPalette>,
+    fallback: Color,
+) {
+    Line::from(spans_from_parts(parts, palette, fallback)).render(Rect::new(x, y, width, 1), buf);
 }
 
 fn put_text_line(
@@ -1499,6 +1501,159 @@ mod tests {
         assert!(
             !overflow_uses_meta,
             "overflow must not use muted meta colour"
+        );
+    }
+
+    fn row_text_and_fg(buffer: &Buffer, y: u16, width: u16) -> (String, Vec<Color>) {
+        let mut text = String::new();
+        let mut colors = Vec::new();
+        for x in 0..width {
+            let cell = &buffer[(x, y)];
+            let sym = cell.symbol();
+            if sym.is_empty() {
+                continue;
+            }
+            for _ in 0..sym.chars().count() {
+                colors.push(cell.fg);
+            }
+            text.push_str(sym);
+        }
+        (text, colors)
+    }
+
+    fn fg_at(text: &str, colors: &[Color], needle: &str, offset: usize) -> Color {
+        let i = text
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing {needle:?} in {text:?}"));
+        colors[i + offset]
+    }
+
+    #[test]
+    fn footer_ref_chips_reuse_row_chip_palette() {
+        let commit = Commit {
+            id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            subject: "palette footer".into(),
+            refs: vec![
+                GraphRef::local("main"),
+                GraphRef::local("topic"),
+                GraphRef::remote("origin/other"),
+                GraphRef::tag("v1"),
+            ],
+            author_name: "Ada".into(),
+            author_date_unix: NOW - 120,
+            ..Commit::default()
+        };
+        let model = GraphModel {
+            commits: vec![commit],
+            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            sync: Some(SyncState {
+                branch: "main".into(),
+                status: SyncStatus::UpToDate,
+                ahead: 0,
+                behind: 0,
+            }),
+            uncommitted: Some(false),
+            window: 1,
+            ..GraphModel::default()
+        };
+        let pal = test_label_palette();
+        let width = 100u16;
+        let height = 16u16;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .ascii(true)
+                    .selected(Some(1))
+                    .now_unix(NOW)
+                    .label_palette(pal)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+
+        let mut spacer: Option<(String, Vec<Color>)> = None;
+        for y in 0..height.saturating_sub(2) {
+            let row = row_text_and_fg(buffer, y, width);
+            if row.0.contains("[+main]") && row.0.contains("[v1]") {
+                spacer = Some(row);
+                break;
+            }
+        }
+        let (spacer_text, spacer_fg) = spacer.expect("commit spacer with chips");
+        let (footer_text, footer_fg) = row_text_and_fg(buffer, height - 1, width);
+        assert!(
+            footer_text.contains("[+main]") && footer_text.contains("[topic]"),
+            "footer lists branch chips: {footer_text}"
+        );
+        assert!(
+            footer_text.contains("[v1]") && footer_text.contains("[origin/other]"),
+            "footer lists tag and remote chips: {footer_text}"
+        );
+
+        let head = fg_at(&footer_text, &footer_fg, "[+main]", 1);
+        let default = fg_at(&footer_text, &footer_fg, "[+main]", 2);
+        let local = fg_at(&footer_text, &footer_fg, "[topic]", 1);
+        let remote = fg_at(&footer_text, &footer_fg, "[origin/other]", 1);
+        let tag = fg_at(&footer_text, &footer_fg, "[v1]", 1);
+        assert_eq!(head, pal.head_mark, "HEAD checkout mark");
+        assert_eq!(default, pal.branch_default, "default branch chip");
+        assert_eq!(local, pal.branch_local, "feature branch chip");
+        assert_eq!(remote, pal.remote, "remote chip");
+        assert_eq!(tag, pal.tag, "tag chip");
+        assert_ne!(head, default);
+        assert_ne!(default, local);
+        assert_ne!(local, tag);
+        assert_ne!(tag, remote);
+        assert_ne!(default, pal.meta);
+        assert_eq!(
+            head,
+            fg_at(&spacer_text, &spacer_fg, "[+main]", 1),
+            "footer HEAD mark must match the row chip"
+        );
+        assert_eq!(
+            default,
+            fg_at(&spacer_text, &spacer_fg, "[+main]", 2),
+            "footer default branch must match the row chip"
+        );
+        assert_eq!(
+            local,
+            fg_at(&spacer_text, &spacer_fg, "[topic]", 1),
+            "footer feature branch must match the row chip"
+        );
+        assert_eq!(
+            tag,
+            fg_at(&spacer_text, &spacer_fg, "[v1]", 1),
+            "footer tag must match the row chip"
+        );
+        assert_eq!(
+            remote,
+            fg_at(&spacer_text, &spacer_fg, "[origin/other]", 1),
+            "footer remote must match the row chip"
+        );
+
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .ascii(true)
+                    .selected(Some(0))
+                    .now_unix(NOW)
+                    .label_palette(pal)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let (wt_footer, wt_fg) = row_text_and_fg(buffer, height - 1, width);
+        assert_eq!(
+            fg_at(&wt_footer, &wt_fg, "[+main]", 1),
+            pal.head_mark,
+            "working-tree footer HEAD mark: {wt_footer}"
+        );
+        assert_eq!(
+            fg_at(&wt_footer, &wt_fg, "[v1]", 1),
+            pal.tag,
+            "working-tree footer tag: {wt_footer}"
         );
     }
 
