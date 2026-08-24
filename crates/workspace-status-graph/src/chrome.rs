@@ -59,7 +59,7 @@ pub struct GraphChromeBudget {
     pub older: bool,
 }
 
-/// Footer first, then header, matching `graphChromeBudget`.
+/// Footer first, then header.
 pub fn graph_chrome_budget(
     height: u16,
     loading_older: bool,
@@ -109,7 +109,6 @@ pub fn selection_detail_lines(
             [trunc(line, width), trunc(&meta, width)]
         }
         GraphFooterSelection::Row(GraphRow::Stash(stash)) => {
-            // `graphSelectionDetailLines`: `[ref, hash.slice(0,7), date].join(' · ')`.
             let meta = join_meta([
                 stash.stash_ref.clone(),
                 short_id(&stash.id).to_string(),
