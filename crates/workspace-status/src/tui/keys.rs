@@ -95,7 +95,7 @@ fn key_to_action(
     graph_commit_focused: bool,
 ) -> Action {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        return Action::Quit;
+        return Action::CtrlC;
     }
     match mode {
         InputMode::Help => match key.code {
@@ -410,6 +410,10 @@ mod tests {
     #[test]
     fn daily_keys() {
         assert_eq!(event_to_action(&key(KeyCode::Char('q')), normal(), false, false), Action::Quit);
+        assert_eq!(event_to_action(&ctrl(KeyCode::Char('c')), normal(), false, false), Action::CtrlC);
+        assert_eq!(event_to_action(&ctrl(KeyCode::Char('c')), InputMode::Help, false, false), Action::CtrlC);
+        assert_eq!(event_to_action(&ctrl(KeyCode::Char('c')), InputMode::Confirm, false, false), Action::CtrlC);
+        assert_eq!(event_to_action(&ctrl(KeyCode::Char('c')), InputMode::SearchPrompt, false, false), Action::CtrlC);
         assert_eq!(event_to_action(&key(KeyCode::Char('?')), normal(), false, false), Action::ToggleHelp);
         assert_eq!(event_to_action(&key(KeyCode::Char('.')), normal(), false, false), Action::ToggleShowIgnored);
         assert_eq!(event_to_action(&key(KeyCode::Char('f')), normal(), false, false), Action::Fetch);

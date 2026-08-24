@@ -1,7 +1,7 @@
 //! Headless ratatui session for cargo tests. Uses TestBackend. No TTY.
 
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
@@ -10,6 +10,7 @@ use ratatui::Terminal;
 use crate::config::{load_workspace_status_config, WorkspaceStatusConfig};
 use crate::snapshot::WorkspaceSnapshot;
 
+use super::action::Effect;
 use super::app::{apply_headless_effect, collect_full_snapshot, TuiOpts};
 use super::keys::event_to_action_ex;
 use super::render::draw;
@@ -25,6 +26,7 @@ pub struct HeadlessTui {
     opts: TuiOpts,
     width: u16,
     height: u16,
+    quit: bool,
 }
 
 impl HeadlessTui {
@@ -57,6 +59,7 @@ impl HeadlessTui {
             opts,
             width: WIDTH,
             height: HEIGHT,
+            quit: false,
         };
         let _ = session.frame();
         session
@@ -114,6 +117,23 @@ impl HeadlessTui {
     /// Send Esc.
     pub fn esc(&mut self) {
         self.send(KeyCode::Esc);
+    }
+
+    /// Send Ctrl-C through the real keymap (double-press quit chord).
+    pub fn ctrl_c(&mut self) {
+        self.send_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    }
+
+    /// True after `q` or a completed double Ctrl-C.
+    pub fn did_quit(&self) -> bool {
+        self.quit
+    }
+
+    /// Expire an armed Ctrl-C window as if the confirm interval elapsed.
+    pub fn expire_ctrl_c(&mut self) {
+        let now = self.state.ctrl_c_armed_until.unwrap_or_else(Instant::now);
+        self.state.expire_ctrl_c_prompt(now);
+        let _ = self.frame();
     }
 
     /// Type `/query` and Enter (tree search).
@@ -197,7 +217,14 @@ impl HeadlessTui {
     }
 
     fn send(&mut self, code: KeyCode) {
-        let event = Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        self.send_key(code, KeyModifiers::NONE);
+    }
+
+    fn send_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        if self.quit {
+            return;
+        }
+        let event = Event::Key(KeyEvent::new(code, modifiers));
         let action = event_to_action_ex(
             &event,
             self.state.input_mode(),
@@ -207,6 +234,10 @@ impl HeadlessTui {
             self.state.graph_commit_focused(),
         );
         let effect = self.state.dispatch(action);
+        if matches!(effect, Effect::Quit) {
+            self.quit = true;
+            return;
+        }
         apply_headless_effect(&mut self.state, effect, &self.opts);
     }
 

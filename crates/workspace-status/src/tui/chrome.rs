@@ -13,6 +13,7 @@ use crate::snapshot::{CheckoutKind, SyncStatus};
 
 use super::branches::{can_open_branch_picker, checkoutable_branch_names};
 use super::commit_files::CommitFileRowKind;
+use super::ctrl_c_exit::{is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT};
 use super::drill::{CommitFileSource, DrillView};
 use super::help::help_status_lines;
 use super::icons::truncate_visible;
@@ -318,12 +319,38 @@ const GRAPH_HINT_KINDS: &[HintRowKind] = &[
 /// boxed overlay and shrink the panes by the overlay row budget.
 #[allow(dead_code)]
 pub fn bottom_chrome_rows(state: &AppState) -> u16 {
-    breadcrumb_rows(state).saturating_add(overlay_status_rows(state))
+    breadcrumb_rows(state)
+        .saturating_add(ctrl_c_prompt_rows(state))
+        .saturating_add(overlay_status_rows(state))
 }
 
 /// Breadcrumb row. Hidden while `?` help is open.
 pub fn breadcrumb_rows(state: &AppState) -> u16 {
     u16::from(!state.help_open)
+}
+
+/// Pinned Ctrl-C prompt row. Overlay pickers render the copy inline instead.
+pub fn ctrl_c_prompt_rows(state: &AppState) -> u16 {
+    u16::from(ctrl_c_prompt_pinned(state))
+}
+
+/// True when the quit prompt sits on its own chrome row (not a breadcrumb toast).
+pub fn ctrl_c_prompt_pinned(state: &AppState) -> bool {
+    is_ctrl_c_exit_prompt(&state.status)
+        && state.stash_menu.is_none()
+        && state.branch_picker.is_none()
+        && state.create_branch.is_none()
+}
+
+/// Bold quit-prompt line painted between the breadcrumb and the status / overlay.
+pub fn ctrl_c_prompt_line(state: &AppState, width: u16) -> Line<'static> {
+    let palette = state.theme.palette();
+    Line::from(Span::styled(
+        truncate_visible(CTRL_C_EXIT_PROMPT, width as usize),
+        Style::default()
+            .fg(palette.modified)
+            .add_modifier(Modifier::BOLD),
+    ))
 }
 
 /// Status line or replacing overlay rows.
@@ -817,7 +844,7 @@ fn status_uses_status_text(state: &AppState) -> bool {
 }
 
 fn breadcrumb_op_status(state: &AppState) -> String {
-    if status_uses_status_text(state) {
+    if status_uses_status_text(state) || is_ctrl_c_exit_prompt(&state.status) {
         return String::new();
     }
     state.status.trim().to_string()
@@ -1181,6 +1208,35 @@ mod tests {
         assert_eq!(breadcrumb_rows(&help), 0);
         assert!(overlay_status_rows(&help) > 1);
         assert_eq!(bottom_chrome_rows(&help), overlay_status_rows(&help));
+    }
+
+    #[test]
+    fn ctrl_c_prompt_is_pinned_not_a_breadcrumb_toast() {
+        let mut app = state();
+        app.status = CTRL_C_EXIT_PROMPT.into();
+        let crumb = line_plain(&breadcrumb_line(&app, 80));
+        assert!(
+            !crumb.contains("Ctrl+C"),
+            "quit prompt must not sit in the breadcrumb toast: {crumb:?}"
+        );
+        assert_eq!(ctrl_c_prompt_rows(&app), 1);
+        assert_eq!(bottom_chrome_rows(&app), 3);
+        let prompt = line_plain(&ctrl_c_prompt_line(&app, 80));
+        assert!(
+            prompt.contains("Ctrl+C again"),
+            "pinned row should show the quit prompt: {prompt:?}"
+        );
+        let status = line_plain(&status_line(&app, 80));
+        assert!(
+            !status.contains("Ctrl+C again"),
+            "status line keeps pills/hints: {status:?}"
+        );
+        app.stash_menu = Some(Vec::new());
+        assert_eq!(
+            ctrl_c_prompt_rows(&app),
+            0,
+            "overlay pickers render the copy inline"
+        );
     }
 
     #[test]

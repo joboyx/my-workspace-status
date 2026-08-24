@@ -140,7 +140,16 @@ fn run_loop(
         } else {
             fetch_ms.saturating_sub(last_fetch.elapsed().as_millis() as u64)
         };
-        let timeout = Duration::from_millis(remain_watch.min(remain_fetch).min(200).max(10));
+        let remain_ctrl_c = state
+            .ctrl_c_remaining_ms(Instant::now())
+            .unwrap_or(u64::MAX);
+        let timeout = Duration::from_millis(
+            remain_watch
+                .min(remain_fetch)
+                .min(remain_ctrl_c)
+                .min(200)
+                .max(10),
+        );
         if event::poll(timeout).unwrap_or(false) {
             let Ok(event) = event::read() else {
                 continue;
@@ -172,6 +181,7 @@ fn run_loop(
             }
             continue;
         } else {
+            let _ = state.expire_ctrl_c_prompt(Instant::now());
             if watch_ms > 0 && last_watch.elapsed().as_millis() as u64 >= watch_ms {
                 let effect = state.dispatch(Action::WatchTick);
                 apply_effect(state, effect, opts, terminal);

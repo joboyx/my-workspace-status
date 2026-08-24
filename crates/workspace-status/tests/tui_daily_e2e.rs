@@ -544,3 +544,43 @@ fn terminal_resize_relayouts_panes_gutter_help_and_lists() {
     assert_contains(&tui.frame(), "MOVE");
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn first_ctrl_c_prompts_second_quits() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    tui.ctrl_c();
+    let prompted = tui.frame();
+    assert_contains(&prompted, "Press Ctrl+C again to exit");
+    assert!(!tui.did_quit(), "a single Ctrl-C must not quit");
+    tui.ctrl_c();
+    assert!(
+        tui.did_quit(),
+        "second Ctrl-C within the window should quit"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn expired_ctrl_c_arm_does_not_quit() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    tui.ctrl_c();
+    assert_contains(&tui.frame(), "Press Ctrl+C again to exit");
+    tui.expire_ctrl_c();
+    assert_absent(&tui.frame(), "Press Ctrl+C again to exit");
+    assert!(!tui.did_quit());
+    tui.ctrl_c();
+    assert!(!tui.did_quit(), "a late Ctrl-C re-arms instead of quitting");
+    assert_contains(&tui.frame(), "Press Ctrl+C again to exit");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn q_still_quits_immediately() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    tui.key('q');
+    assert!(tui.did_quit(), "q remains an immediate quit");
+    let _ = fs::remove_dir_all(root);
+}
