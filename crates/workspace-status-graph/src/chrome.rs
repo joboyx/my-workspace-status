@@ -1,9 +1,11 @@
 //! GraphPane chrome: header / list / 2-line selection footer / loading older.
 //!
 //! Header / footer budget (`graph_chrome_budget`) and selection footer copy.
+//! Footer ref chips are the same [`LabelPart`] runs as the commit spacer.
 
 use crate::format::{
-    format_commit_ref_chips, format_commit_ref_chips_with, format_relative_date, short_id,
+    commit_ref_chip_parts, format_relative_date, is_default_branch, parts_text, short_id,
+    trunc_label_parts, LabelKind, LabelPart,
 };
 use crate::glyphs::GlyphSet;
 use crate::model::{GraphModel, GraphRow};
@@ -91,12 +93,26 @@ pub fn selection_detail_lines(
     width: usize,
     now_unix: i64,
 ) -> [String; 2] {
+    let [subject, meta] = selection_detail_parts(model, selection, glyphs, width, now_unix);
+    [parts_text(&subject), parts_text(&meta)]
+}
+
+/// Styled selection-footer runs. Chip kinds match the commit spacer so
+/// [`crate::GraphWidget::label_palette`] can reuse row colours (HEAD /
+/// default / local / remote / tag). Hash, date, and author stay [`LabelKind::Meta`].
+pub fn selection_detail_parts(
+    model: &GraphModel,
+    selection: GraphFooterSelection<'_>,
+    glyphs: &GlyphSet,
+    width: usize,
+    now_unix: i64,
+) -> [Vec<LabelPart>; 2] {
     let width = width.max(1);
     match selection {
-        GraphFooterSelection::None => [trunc(FOOTER_NO_SELECTION, width), String::new()],
+        GraphFooterSelection::None => [subject_parts(FOOTER_NO_SELECTION, width), Vec::new()],
         GraphFooterSelection::Spacer => [
-            trunc(FOOTER_SPACER_SUBJECT, width),
-            trunc(FOOTER_CONNECTOR_NOT_SELECTABLE, width),
+            subject_parts(FOOTER_SPACER_SUBJECT, width),
+            meta_parts(FOOTER_CONNECTOR_NOT_SELECTABLE, width),
         ],
         GraphFooterSelection::Row(GraphRow::Uncommitted { has_changes }) => {
             let line = if *has_changes {
@@ -104,58 +120,86 @@ pub fn selection_detail_lines(
             } else {
                 "Working tree clean"
             };
-            let meta = head_commit_ref_line(model, glyphs)
-                .unwrap_or_else(|| FOOTER_WORKTREE_NOT_A_COMMIT.to_string());
-            [trunc(line, width), trunc(&meta, width)]
+            let meta = head_commit_ref_parts(model, glyphs).unwrap_or_else(|| {
+                vec![LabelPart {
+                    text: FOOTER_WORKTREE_NOT_A_COMMIT.to_string(),
+                    kind: LabelKind::Meta,
+                }]
+            });
+            [subject_parts(line, width), trunc_label_parts(&meta, width)]
         }
         GraphFooterSelection::Row(GraphRow::Stash(stash)) => {
-            let meta = join_meta([
-                stash.stash_ref.clone(),
-                short_id(&stash.id).to_string(),
-                format_relative_date(stash.author_date_unix, now_unix),
+            let meta = join_meta_groups([
+                vec![meta_part(stash.stash_ref.clone())],
+                vec![meta_part(short_id(&stash.id).to_string())],
+                vec![meta_part(format_relative_date(
+                    stash.author_date_unix,
+                    now_unix,
+                ))],
             ]);
-            [trunc(&stash.subject, width), trunc(&meta, width)]
+            [
+                subject_parts(&stash.subject, width),
+                trunc_label_parts(&meta, width),
+            ]
         }
         GraphFooterSelection::Row(GraphRow::Worktree(wt)) => {
-            let meta = wt.branch.clone().unwrap_or_default();
-            [trunc(&wt.path, width), trunc(&meta, width)]
+            let meta = match wt.branch.as_deref() {
+                Some(branch) if !branch.is_empty() => vec![LabelPart {
+                    text: branch.to_string(),
+                    kind: if is_default_branch(branch, model.default_branch_override.as_deref()) {
+                        LabelKind::ChipDefault
+                    } else {
+                        LabelKind::ChipLocal
+                    },
+                }],
+                _ => Vec::new(),
+            };
+            [
+                subject_parts(&wt.path, width),
+                trunc_label_parts(&meta, width),
+            ]
         }
         GraphFooterSelection::Row(GraphRow::Commit {
             commit, is_head, ..
         }) => {
-            let chips = format_commit_ref_chips_with(
+            let chips = commit_ref_chip_parts(
                 &commit.refs,
                 *is_head,
                 model.sync.as_ref().map(|s| s.branch.as_str()),
                 glyphs,
                 model.default_branch_override.as_deref(),
             );
-            let hash = short_id(&commit.id);
-            let mut meta_parts: Vec<String> = Vec::new();
+            let mut groups: Vec<Vec<LabelPart>> = Vec::new();
             if chips.is_empty() {
-                meta_parts.push(FOOTER_NO_REFS.into());
+                groups.push(vec![LabelPart {
+                    text: FOOTER_NO_REFS.into(),
+                    kind: LabelKind::Meta,
+                }]);
             } else {
-                meta_parts.push(chips);
+                groups.push(chips);
             }
-            meta_parts.push(hash.to_string());
+            groups.push(vec![meta_part(short_id(&commit.id).to_string())]);
             if !commit.author_name.is_empty() {
-                meta_parts.push(commit.author_name.clone());
+                groups.push(vec![meta_part(commit.author_name.clone())]);
             }
             if commit.author_date_unix > 0 {
-                meta_parts.push(format_relative_date(commit.author_date_unix, now_unix));
+                groups.push(vec![meta_part(format_relative_date(
+                    commit.author_date_unix,
+                    now_unix,
+                ))]);
             }
             [
-                trunc(&commit.subject, width),
-                trunc(&meta_parts.join(" · "), width),
+                subject_parts(&commit.subject, width),
+                trunc_label_parts(&join_meta_groups(groups), width),
             ]
         }
     }
 }
 
-fn head_commit_ref_line(model: &GraphModel, glyphs: &GlyphSet) -> Option<String> {
+fn head_commit_ref_parts(model: &GraphModel, glyphs: &GlyphSet) -> Option<Vec<LabelPart>> {
     let id = model.head_id.as_deref()?;
     let commit = model.commits.iter().find(|c| c.id == id)?;
-    let chips = format_commit_ref_chips_with(
+    let chips = commit_ref_chip_parts(
         &commit.refs,
         true,
         model.sync.as_ref().map(|s| s.branch.as_str()),
@@ -169,34 +213,51 @@ fn head_commit_ref_line(model: &GraphModel, glyphs: &GlyphSet) -> Option<String>
     }
 }
 
-fn join_meta(parts: impl IntoIterator<Item = String>) -> String {
-    parts
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" · ")
+fn subject_parts(text: &str, width: usize) -> Vec<LabelPart> {
+    trunc_label_parts(
+        &[LabelPart {
+            text: text.to_string(),
+            kind: LabelKind::Subject,
+        }],
+        width,
+    )
 }
 
-fn trunc(text: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
+fn meta_parts(text: &str, width: usize) -> Vec<LabelPart> {
+    trunc_label_parts(&[meta_part(text.to_string())], width)
+}
+
+fn meta_part(text: String) -> LabelPart {
+    LabelPart {
+        text,
+        kind: LabelKind::Meta,
     }
-    let count = text.chars().count();
-    if count <= max {
-        return text.to_string();
+}
+
+fn join_meta_groups(groups: impl IntoIterator<Item = Vec<LabelPart>>) -> Vec<LabelPart> {
+    let mut out = Vec::new();
+    let mut first = true;
+    for group in groups {
+        if group.is_empty() || parts_text(&group).is_empty() {
+            continue;
+        }
+        if !first {
+            out.push(LabelPart {
+                text: " · ".into(),
+                kind: LabelKind::Meta,
+            });
+        }
+        first = false;
+        out.extend(group);
     }
-    if max == 1 {
-        return "…".into();
-    }
-    let keep: String = text.chars().take(max - 1).collect();
-    format!("{keep}…")
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::glyphs::UNICODE;
-    use crate::model::{Commit, GraphRef, Stash};
+    use crate::model::{Commit, GraphRef, Stash, SyncState, SyncStatus};
 
     #[test]
     fn budget_prefers_footer_over_header() {
@@ -356,5 +417,108 @@ mod tests {
         assert!(meta.contains("abcdefg"), "{meta}");
         assert!(meta.contains("Ada"), "{meta}");
         assert!(meta.contains("2m") || meta.contains("just now"), "{meta}");
+    }
+
+    #[test]
+    fn footer_commit_parts_reuse_row_chip_kinds() {
+        let commit = Commit {
+            id: "abcdefghhhh".into(),
+            subject: "palette".into(),
+            refs: vec![
+                GraphRef::local("main"),
+                GraphRef::local("topic"),
+                GraphRef::remote("origin/other"),
+                GraphRef::tag("v1"),
+            ],
+            author_name: "Ada".into(),
+            author_date_unix: 1_700_000_000 - 120,
+            ..Commit::default()
+        };
+        let model = GraphModel {
+            commits: vec![commit.clone()],
+            head_id: Some(commit.id.clone()),
+            sync: Some(SyncState {
+                branch: "main".into(),
+                status: SyncStatus::UpToDate,
+                ahead: 0,
+                behind: 0,
+            }),
+            uncommitted: Some(false),
+            ..GraphModel::default()
+        };
+        let row = GraphRow::Commit {
+            commit,
+            is_head: true,
+            worktrees: Vec::new(),
+        };
+        let [subject, meta] = selection_detail_parts(
+            &model,
+            GraphFooterSelection::Row(&row),
+            &UNICODE,
+            80,
+            1_700_000_000,
+        );
+        assert!(
+            subject.iter().all(|p| p.kind == LabelKind::Subject),
+            "{subject:?}"
+        );
+        let kinds_for = |needle: &str| -> Vec<LabelKind> {
+            meta.iter()
+                .filter(|p| p.text.contains(needle))
+                .map(|p| p.kind)
+                .collect()
+        };
+        assert!(
+            kinds_for("main").contains(&LabelKind::ChipDefault),
+            "default branch: {meta:?}"
+        );
+        assert!(
+            kinds_for("topic").contains(&LabelKind::ChipLocal),
+            "feature branch: {meta:?}"
+        );
+        assert!(
+            kinds_for("origin/other").contains(&LabelKind::ChipRemote),
+            "remote: {meta:?}"
+        );
+        assert!(
+            kinds_for("v1").contains(&LabelKind::ChipTag),
+            "tag: {meta:?}"
+        );
+        assert!(
+            meta.iter().any(|p| p.kind == LabelKind::ChipHead),
+            "HEAD checkout mark: {meta:?}"
+        );
+        assert!(
+            kinds_for("Ada").iter().all(|k| *k == LabelKind::Meta),
+            "author stays meta: {meta:?}"
+        );
+        let hash_kinds = kinds_for("abcdefg");
+        assert!(
+            !hash_kinds.is_empty() && hash_kinds.iter().all(|k| *k == LabelKind::Meta),
+            "hash stays meta: {meta:?}"
+        );
+
+        let uncommitted = GraphRow::Uncommitted { has_changes: false };
+        let [_, head_meta] = selection_detail_parts(
+            &model,
+            GraphFooterSelection::Row(&uncommitted),
+            &UNICODE,
+            80,
+            1_700_000_000,
+        );
+        assert!(
+            head_meta
+                .iter()
+                .any(|p| p.kind == LabelKind::ChipDefault && p.text.contains("main")),
+            "uncommitted footer reuses HEAD chips: {head_meta:?}"
+        );
+        assert!(
+            head_meta.iter().any(|p| p.kind == LabelKind::ChipTag),
+            "uncommitted footer keeps tags: {head_meta:?}"
+        );
+        assert!(
+            head_meta.iter().any(|p| p.kind == LabelKind::ChipHead),
+            "uncommitted footer keeps HEAD mark: {head_meta:?}"
+        );
     }
 }

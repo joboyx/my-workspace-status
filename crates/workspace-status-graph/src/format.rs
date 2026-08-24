@@ -473,12 +473,69 @@ fn clamp_parts_to_width(mut parts: Vec<LabelPart>, available: usize) -> Vec<Labe
     parts
 }
 
-fn parts_text(parts: &[LabelPart]) -> String {
+pub(crate) fn parts_text(parts: &[LabelPart]) -> String {
     parts.iter().map(|p| p.text.as_str()).collect()
 }
 
 fn parts_width(parts: &[LabelPart]) -> usize {
     parts.iter().map(|p| p.text.chars().count()).sum()
+}
+
+/// Skip `offset` columns then keep at most `width` columns of `parts`.
+pub(crate) fn slice_label_parts(
+    parts: &[LabelPart],
+    offset: usize,
+    width: usize,
+) -> Vec<LabelPart> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut skip = offset;
+    let mut remain = width;
+    let mut out = Vec::new();
+    for part in parts {
+        let n = part.text.chars().count();
+        if skip >= n {
+            skip -= n;
+            continue;
+        }
+        let sliced: String = part.text.chars().skip(skip).take(remain).collect();
+        skip = 0;
+        let used = sliced.chars().count();
+        if !sliced.is_empty() {
+            let mut p = part.clone();
+            p.text = sliced;
+            out.push(p);
+        }
+        remain = remain.saturating_sub(used);
+        if remain == 0 {
+            break;
+        }
+    }
+    out
+}
+
+/// Truncate styled runs: keep the start, append `…` when over `max`.
+pub(crate) fn trunc_label_parts(parts: &[LabelPart], max: usize) -> Vec<LabelPart> {
+    if max == 0 {
+        return Vec::new();
+    }
+    let count = parts_width(parts);
+    if count <= max {
+        return parts.to_vec();
+    }
+    if max == 1 {
+        return vec![LabelPart {
+            text: "…".into(),
+            kind: LabelKind::Meta,
+        }];
+    }
+    let mut out = slice_label_parts(parts, 0, max - 1);
+    out.push(LabelPart {
+        text: "…".into(),
+        kind: LabelKind::Meta,
+    });
+    out
 }
 
 fn pad_parts_right(parts: &mut Vec<LabelPart>, available: usize) {
@@ -584,13 +641,30 @@ pub fn format_commit_ref_chips_with(
     glyphs: &GlyphSet,
     default_branch_override: Option<&str>,
 ) -> String {
-    let groups =
-        commit_ref_chip_groups(refs, is_head, head_branch, glyphs, default_branch_override);
-    let mut parts = Vec::new();
-    for g in groups {
-        parts.push(parts_text(&g));
-    }
-    parts.join(" ")
+    parts_text(&commit_ref_chip_parts(
+        refs,
+        is_head,
+        head_branch,
+        glyphs,
+        default_branch_override,
+    ))
+}
+
+/// Styled chip runs for a commit (same groups as the spacer; no overflow).
+pub(crate) fn commit_ref_chip_parts(
+    refs: &[GraphRef],
+    is_head: bool,
+    head_branch: Option<&str>,
+    glyphs: &GlyphSet,
+    default_branch_override: Option<&str>,
+) -> Vec<LabelPart> {
+    join_chip_groups(&commit_ref_chip_groups(
+        refs,
+        is_head,
+        head_branch,
+        glyphs,
+        default_branch_override,
+    ))
 }
 
 /// One visual chip as styled runs (`[HEAD]`, `[main]`, `[+N]` later).
@@ -680,7 +754,7 @@ fn remote_short_name(remote_ref: &str) -> &str {
         .unwrap_or(remote_ref)
 }
 
-fn is_default_branch(name: &str, override_name: Option<&str>) -> bool {
+pub(crate) fn is_default_branch(name: &str, override_name: Option<&str>) -> bool {
     if let Some(over) = override_name {
         return name == over;
     }

@@ -65,7 +65,7 @@ stay out of ops unless shown.
 space remains (footer wins when tight; no header when `sync` is unset).
 `loading older…` takes one extra row while the next log page loads.
 
-Footer copy (`selection_detail_lines`; do not invent
+Footer copy (`selection_detail_lines` / `selection_detail_parts`; do not invent
 other strings):
 
 - no row: `no selection`
@@ -77,6 +77,11 @@ other strings):
   author)
 - commit: subject, then ref chips `·` hash `·` author `·` date, or
   `(no refs)` when there are no chips
+
+Footer paint reuses the commit-spacer chip runs (`LabelKind`: HEAD /
+default / local / remote / tag). `GraphWidget::label_palette` colours
+those the same as the row chips. Hash, date, and author stay `meta`.
+Do not flatten the footer to one colour.
 
 Then one gutter plus label per visible row. Commit and stash rows also
 paint a spacer line under the node (densify rails, or the stash spur).

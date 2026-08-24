@@ -74,7 +74,7 @@ The ratatui TUI applies crossterm `Resize` to `Terminal::resize` (the event size
 
 ## Graph widget
 
-`crates/workspace-status-graph` is a ratatui widget for one git graph window. The TUI loads a `GraphModel` in `graph_load.rs` (`log --exclude=refs/stash --all --topo-order --date-order`, window 300, autoload, extra `stash^1`) and paints `GraphWidget`. Hidden ignored worktrees stay out of `visible_rows` unless `show_ignored` is true. Worktree marks are linked extras from `git worktree list` (`.git` gitfile); the main checkout is not marked. Gutter cells use `GraphCell.color_lane` and `DEFAULT_LANE_COLORS`. Chrome is a 2-line selection footer (`selection_detail_lines`) plus optional sync header (`graph_chrome_budget`). A loaded graph always emits the working-tree row. Commit and stash spacers reuse the same hash / date / author drop order. Dates are relative through 3 hours, then UTC `YYYY-MM-DD HH:MM`. The gutter is capped (`gutter.rs`: at most 30% of the pane, keep ≥24 columns for refs+subject) and windowed around the focused commit. Overflow branch/tag chips collapse to a bold `[+N]` chip on the row itself (heading accent, not muted meta); the footer lists every ref (HEAD commit refs on the working-tree row).
+`crates/workspace-status-graph` is a ratatui widget for one git graph window. The TUI loads a `GraphModel` in `graph_load.rs` (`log --exclude=refs/stash --all --topo-order --date-order`, window 300, autoload, extra `stash^1`) and paints `GraphWidget`. Hidden ignored worktrees stay out of `visible_rows` unless `show_ignored` is true. Worktree marks are linked extras from `git worktree list` (`.git` gitfile); the main checkout is not marked. Gutter cells use `GraphCell.color_lane` and `DEFAULT_LANE_COLORS`. Chrome is a 2-line selection footer (`selection_detail_lines` / `selection_detail_parts`) plus optional sync header (`graph_chrome_budget`). Footer ref chips reuse the same `LabelKind` runs as the commit spacer so `GraphWidget::label_palette` paints HEAD / default / feature / remote / tag with the row-chip colours (not a single footer wash). A loaded graph always emits the working-tree row. Commit and stash spacers reuse the same hash / date / author drop order. Dates are relative through 3 hours, then UTC `YYYY-MM-DD HH:MM`. The gutter is capped (`gutter.rs`: at most 30% of the pane, keep ≥24 columns for refs+subject) and windowed around the focused commit. Overflow branch/tag chips collapse to a bold `[+N]` chip on the row itself (heading accent, not muted meta); the footer lists every ref (HEAD commit refs on the working-tree row).
 
 See [graph.md](./graph.md) and [git-graph-topology.md](./git-graph-topology.md).
 
@@ -110,6 +110,7 @@ On a TTY (or `-i` / `--tui`) the binary opens the ratatui TUI. Tree chrome (stat
 `crates/workspace-status-graph` is a ratatui widget for one git graph window.
 The crate itself does not run a terminal app. The TUI paints `GraphWidget`.
 `GraphWidget` colours subject vs meta vs HEAD / default / feature / remote / tag chips
+(including the 2-line selection footer, which reuses the row-chip `LabelKind` runs)
 and paints a 1-column position scrollbar.
 
 See [graph.md](./graph.md).
