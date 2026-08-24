@@ -17,9 +17,7 @@ packages = ["workspace-status"]
 install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = true
+# Keep tag-triggered Release CI plus workflow_dispatch (see tag-release.yml).
+# GITHUB_TOKEN tag pushes do not start other workflows.
+allow-dirty = ["ci"]
 # GitHub Releases only: do not add Homebrew taps or crates.io publish jobs.
-#
-# After `dist generate`, keep `workflow_dispatch:` on
-# `.github/workflows/release.yml`. `.github/workflows/tag-release.yml` starts
-# Release with `gh workflow run` because a GITHUB_TOKEN tag push does not
-# trigger other workflows.
