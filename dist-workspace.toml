@@ -13,8 +13,8 @@ installers = ["shell"]
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
 # Only the CLI crate is an app; workspace-status-graph is a path library bundled into it.
 packages = ["workspace-status"]
-# Path that installers should place binaries in
-install-path = "CARGO_HOME"
+# Path that installers should place binaries in (XDG user bin; no rustup PATH)
+install-path = "~/.local/bin"
 # Whether to install an updater program
 install-updater = true
 # Keep tag-triggered Release CI plus workflow_dispatch (see tag-release.yml).
