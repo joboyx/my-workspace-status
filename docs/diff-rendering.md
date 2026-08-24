@@ -67,7 +67,7 @@ Toggling full-file does **not** open an editor (`e` does). After the new rows lo
 
 ## Commit / stash / worktree diffs at depth 2
 
-At drill depth 2 the right pane still uses the same `DiffRow` paint, but the loader scopes content by commit-file source:
+At drill depth 2 the right pane still uses the same `DiffRow` paint, and the left pane is the commit-file list (`j`/`k` there move files and load the focused file's diff). The loader scopes content by commit-file source:
 
 | Source | Staged slot | Unstaged slot |
 | --- | --- | --- |

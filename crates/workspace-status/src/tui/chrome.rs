@@ -667,7 +667,7 @@ pub fn hint_row_kind(state: &AppState) -> HintRowKind {
             None => HintRowKind::Workspace,
         };
     }
-    if state.drill.is_files() && state.focus == FocusPane::Right {
+    if state.commit_files_list_focused() {
         return match state.focused_commit_file_kind() {
             Some(CommitFileRowKind::Dir) => HintRowKind::Dir,
             Some(CommitFileRowKind::File) | None => HintRowKind::File,
@@ -1144,10 +1144,7 @@ mod tests {
             .collect();
         assert!(keys.contains(&"s".into()), "{keys:?}");
         assert!(keys.contains(&"x".into()), "{keys:?}");
-        let extras: Vec<String> = extra_hint_segments()
-            .into_iter()
-            .map(|s| s.key)
-            .collect();
+        let extras: Vec<String> = extra_hint_segments().into_iter().map(|s| s.key).collect();
         assert_eq!(extras, vec!["Tab".to_string(), "q".to_string()]);
     }
 
