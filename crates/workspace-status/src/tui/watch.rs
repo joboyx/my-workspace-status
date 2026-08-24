@@ -8,7 +8,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use super::icons::status_letter_from_change;
 use super::tree::{NodeKind, TreeNode, VisibleRow};
 
-/// Default poll period. Matches the Ink TUI.
+/// Default poll period.
 pub const DEFAULT_WATCH_MS: u64 = 3000;
 /// Faster than this spends more time in git than in the UI.
 pub const MIN_WATCH_MS: u64 = 500;
@@ -35,7 +35,7 @@ pub fn watch_interval_ms(raw: Option<&str>) -> u64 {
     (parsed as u64).max(MIN_WATCH_MS)
 }
 
-/// Ink `changeSignatures` disk token: `size:mtimeMs`, or `gone` when missing.
+/// `changeSignatures` disk token: `size:mtimeMs`, or `gone` when missing.
 fn file_disk_token(cwd: &Path, repo: &str, rel: &str) -> String {
     let abs = cwd.join(repo).join(rel);
     match fs::metadata(&abs) {
@@ -54,7 +54,7 @@ fn file_disk_token(cwd: &Path, repo: &str, rel: &str) -> String {
 
 /// Semantic signature for one painted row.
 ///
-/// File rows match Ink `changeSignatures`: status letter plus `size:mtimeMs`
+/// File rows match `changeSignatures`: status letter plus `size:mtimeMs`
 /// (or `gone`). An in-place save of an already-modified file therefore flashes.
 /// Chrome rows use path / branch / sync / change count so glyph paint does not
 /// count as a semantic update.

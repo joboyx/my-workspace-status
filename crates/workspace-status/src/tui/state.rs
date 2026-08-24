@@ -136,7 +136,7 @@ enum EasyMotionList {
 pub enum PendingConfirm {
     Revert {
         targets: Vec<RevertTarget>,
-        /// Focused-row path shown in the overlay (Ink `Confirm.label`).
+        /// Focused-row path shown in the overlay.
         label: String,
     },
     StashDrop {
@@ -196,9 +196,9 @@ pub struct AppState {
     pub graph_identity: Option<(String, String)>,
     pub graph_scroll: u16,
     pub graph_cursor: usize,
-    /// True while the next `git log` window is fetching (Ink `loading older…`).
+    /// True while the next `git log` window is fetching (`loading older…`).
     pub graph_loading_older: bool,
-    /// True while listing commit files (Ink `commitFilesLoading`).
+    /// True while listing commit files.
     pub commit_files_loading: bool,
     pub drill: DrillView,
     pub diff_content: DiffContent,
@@ -401,7 +401,7 @@ impl AppState {
         }
     }
 
-    /// Ink `listFocusTarget` for the focused pane.
+    /// Which list (or diff) the focused pane is driving.
     fn list_focus_target(&self) -> ListFocusTarget {
         match &self.drill {
             DrillView::Graph => {
@@ -438,7 +438,7 @@ impl AppState {
         }
     }
 
-    /// Header / footer / list split for the graph pane (Ink `graphChromeBudget`).
+    /// Header / footer / list split for the graph pane.
     pub fn graph_chrome(&self) -> GraphChromeBudget {
         graph_chrome_budget(
             self.layout.tree_height.max(1),
@@ -1749,7 +1749,7 @@ impl AppState {
         }
     }
 
-    /// Path shown in the diff pane header (`repo/path`, Ink `focusHint`).
+    /// Path shown in the diff pane header (`repo/path`).
     pub fn diff_header_path(&self) -> String {
         match &self.drill {
             DrillView::Diff { repo, path, .. } => format!("{repo}/{path}"),
@@ -2629,7 +2629,7 @@ impl AppState {
         self.sync_graph_scroll();
     }
 
-    /// Page in painted-list space (Ink `applySelectableGraphPageMove`), then
+    /// Page in painted-list space, then
     /// snap onto a selectable row. EasyMotion / click stay on `visible_rows`.
     fn page_graph(&mut self, pages: i32) -> Effect {
         let Some(model) = self.graph.as_ref() else {
@@ -2979,7 +2979,7 @@ fn group_revert_targets(
 }
 
 /// Snap a painted-list index onto a selectable line (prefer forward, then back).
-/// Matches Ink `nearestSelectableGraphIndex`.
+/// Nearest selectable graph index at or after `start`.
 fn nearest_selectable_painted_index(painted: &[PaintedLine], from: usize) -> usize {
     if painted.is_empty() {
         return 0;
@@ -3041,7 +3041,7 @@ fn default_viewed_path() -> PathBuf {
     viewed_store_path()
 }
 
-/// Ancestor ids to try when a tree-mode row disappears in flat mode (Ink `focusAncestorIds`).
+/// Ancestor ids to try when a tree-mode row disappears in flat mode.
 fn focus_ancestor_ids(id: &str) -> Vec<String> {
     let Some((kind, rest)) = id.split_once(':') else {
         return Vec::new();

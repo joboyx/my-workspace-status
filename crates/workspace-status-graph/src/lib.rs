@@ -1,8 +1,7 @@
 //! Ratatui widget for the workspace-status git graph.
 //!
 //! The crate owns the graph *model* and a renderable [`GraphWidget`].
-//! It does not run a terminal app. The TypeScript Ink TUI still ships
-//! in this repository for features the Rust TUI has not ported yet.
+//! It does not run a terminal app.
 //!
 //! Interactive and headless callers share [`GraphModel::visible_rows`] and
 //! the format helpers. Display differs: the widget paints a multi-lane

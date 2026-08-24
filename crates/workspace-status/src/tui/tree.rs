@@ -1,7 +1,6 @@
 //! Workspace tree from the same snapshot used by --plain / --json.
 //!
-//! Row chrome (icons, status letters, sync marks, workspace wording) matches
-//! Ink `src/tui/model/tree.ts` + `src/tui/icons.ts`.
+//! Row chrome (icons, status letters, sync marks, workspace wording).
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -16,7 +15,7 @@ use super::icons::{
     tui_sync_mark, StatusColorRole,
 };
 
-/// Structural node kind. Matches the Ink tree vocabulary used daily.
+/// Structural node kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeKind {
     Workspace,
@@ -27,7 +26,7 @@ pub enum NodeKind {
     File,
 }
 
-/// Paint / search chrome copied from the snapshot (Ink `RepoNode` / `CheckoutNode`).
+/// Paint / search chrome copied from the snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct NodeChrome {
     /// Repo path, dir path, or file path.
@@ -99,7 +98,7 @@ impl From<StatusColorRole> for SegRole {
     }
 }
 
-/// Left run + right-aligned trailing run (Ink `NodeSegments`).
+/// Left run + right-aligned trailing run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NodeSegments {
     pub segments: Vec<TextSeg>,
@@ -153,8 +152,8 @@ impl Default for VisibleRow {
 }
 
 /// Build the workspace tree from a snapshot (ignored repos may still be present).
-/// `tree_mode` true is a directory trie (Ink default). False is a flat path list.
-/// `workspace_label` is the Ink root name (cwd basename).
+/// `tree_mode` true is a directory trie. False is a flat path list.
+/// `workspace_label` is the root name (cwd basename).
 pub fn build_tree(
     snapshot: &WorkspaceSnapshot,
     tree_mode: bool,
@@ -214,7 +213,7 @@ pub fn build_tree(
     }
 }
 
-/// Cwd basename used as the workspace row label (Ink `path.basename(cwd)`).
+/// Cwd basename used as the workspace row label`).
 pub fn workspace_label_from_cwd(cwd: &std::path::Path) -> String {
     let name = cwd
         .file_name()
@@ -531,7 +530,7 @@ fn materialize_dir(
     children
 }
 
-/// File / dir forest under a checkout. Matches Ink `materializeChangeForest`.
+/// File / dir forest under a checkout. Matches `materializeChangeForest`.
 fn materialize_change_forest(repo: &WorkspaceRepoSnapshot, tree_mode: bool) -> Vec<TreeNode> {
     if !tree_mode {
         return repo
@@ -719,7 +718,7 @@ fn sync_trailing(chrome: &NodeChrome, in_no_updates: bool, ascii: bool) -> Vec<T
     )]
 }
 
-/// Single-sided name-status → FileChange (Ink `changeFromNameStatus`).
+/// Single-sided name-status → FileChange.
 ///
 /// `unstaged_status` carries the letter so commit/stash rows keep A/M/D/R/C
 /// instead of workspace staged-only `S`.
@@ -1050,7 +1049,7 @@ pub fn node_segments(
 }
 
 /// Segments for a flattened row. Viewed eye is prepended on dirty file rows
-/// (Ink `applyViewedMarks`) using `icon_viewed` — nf-fa-eye `U+F06E` / `*`.
+/// using `icon_viewed` — nf-fa-eye `U+F06E` / `*`.
 pub fn row_segments(row: &VisibleRow, ascii: bool, viewed: bool) -> NodeSegments {
     let mut trailing = row.trailing_segs.clone();
     if viewed && row.kind == NodeKind::File {
@@ -1287,7 +1286,7 @@ mod tests {
     }
 
     #[test]
-    fn status_letters_match_ink_and_badge_is_trailing() {
+    fn status_letters_and_badge_are_trailing() {
         let mut snap = dirty_repo("app", &[]);
         snap.has_untracked = true;
         snap.has_staged = true;
@@ -1455,7 +1454,7 @@ mod tests {
     }
 
     #[test]
-    fn viewed_glyph_is_ink_eye_not_circle() {
+    fn viewed_glyph_is_eye_not_circle() {
         let built = build_workspace_snapshot(&[dirty_repo("app", &["README.md"])], &[], false, &[]);
         let tree = build_tree(&visible_for_tree(&built), true, "ws");
         let rows = flatten_with(&tree, &HashSet::new(), true);

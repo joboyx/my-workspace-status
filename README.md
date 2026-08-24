@@ -147,7 +147,7 @@ Several graph features — including checkout confirm when a local branch is out
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md). Local checks are `npm test` and `cargo test`.
+See [CONTRIBUTING.md](./CONTRIBUTING.md). Local checks are `cargo test --workspace`.
 
 ## Development
 
@@ -161,28 +161,22 @@ The CLI is treated as a black box:
 
 - Desired output shapes live in [SAMPLE_OUTPUT.md](./SAMPLE_OUTPUT.md).
 - The workspace snapshot contract (`--json` and `--plain`) lives in [docs/snapshot.md](./docs/snapshot.md).
-- The executable end-to-end suite lives in [test/workspace-status.e2e.ts](./test/workspace-status.e2e.ts).
-- The snapshot fixture e2e lives in [test/snapshot-contract.e2e.ts](./test/snapshot-contract.e2e.ts).
+- The snapshot fixture e2e lives in [crates/workspace-status/tests/snapshot_contract.rs](./crates/workspace-status/tests/snapshot_contract.rs).
+- Daily-path TUI coverage lives in [crates/workspace-status/tests/tui_daily_e2e.rs](./crates/workspace-status/tests/tui_daily_e2e.rs).
 
-### Running the E2E suite
+### Running the test suite
 
 ```bash
-npm test
-cargo test
+cargo test --workspace
 ```
-
-Optional environment variables:
-
-- `WORKSPACE_STATUS_SCRIPT=/abs/path/to/workspace-status.sh` tests a different script path.
-- `KEEP_E2E_WORKDIR=1` keeps each temp scenario on disk for debugging.
 
 ### Coverage
 
-The E2E suite covers the full sample-scenario surface plus the main operational flags of `workspace-status.sh`:
+`cargo test --workspace` covers the snapshot contract, CLI flags, discovery, and the daily TUI path (TestBackend, no TTY):
 
 | Area                  | Covered behavior                                                                                                                                                                                |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| CLI contract          | `--help` documents `--all`, `--fetch`, `--verbose`, `--pull`, `--default-branch`, `--plain`, and `--json`                                                                                       |
+| CLI contract          | `--help` documents `--all`, `--fetch`, `--verbose`, `--pull`, `--default-branch`, `--plain`, `--json`, and `--update` |
 | Snapshot contract     | `--json` and `--plain` share one workspace snapshot; fixture e2e builds a temp workspace and asserts both without a TTY                                                                         |
 | Clean summary         | all-clean default-branch workspaces and mixed clean default/non-default workspaces                                                                                                              |
 | Verbose table         | category ordering, default/non-default grouping, `no-upstream` display, detached HEAD display, and mixed-state table output                                                                     |
@@ -205,7 +199,7 @@ Each test scenario:
 - creates a fresh temp workspace
 - creates fresh bare remotes and collaborator clones when needed
 - reinitializes git state from scratch
-- destroys the scenario after the assertion run unless `KEEP_E2E_WORKDIR=1`
+- destroys the scenario after the assertion run
 
 That isolation is deliberate. Refactors should be able to change implementation details while preserving the observable contract.
 
@@ -221,6 +215,7 @@ That isolation is deliberate. Refactors should be able to change implementation 
 | [docs/diff-rendering.md](./docs/diff-rendering.md) | Diff pipeline and syntax highlighting |
 | [docs/git-operations.md](./docs/git-operations.md) | Git commands, operation semantics, safety rules |
 | [docs/demo.md](./docs/demo.md) | Demo workspace and screenshot frames |
+| [docs/tui-rust.md](./docs/tui-rust.md) | Ratatui TUI keys, layout, and chrome |
 | [docs/configuration.md](./docs/configuration.md) | Environment variables, workspace config, keymap |
 
 ## License

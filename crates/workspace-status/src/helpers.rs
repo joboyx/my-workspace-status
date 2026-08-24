@@ -1,4 +1,4 @@
-//! Branch/sync classification and string helpers. Matches `src/helpers.ts`.
+//! Branch/sync classification and string helpers.
 
 use crate::snapshot::{CheckoutKind, RepoSnapshot, SyncStatus};
 
@@ -168,7 +168,7 @@ pub fn compare_repo_paths_for_display(a: &RepoSnapshot, b: &RepoSnapshot) -> std
         .then_with(|| a.repo.cmp(&b.repo))
 }
 
-/// Terminal display width. Matches the TypeScript `visibleWidth` ranges.
+/// Terminal display width.
 pub fn visible_width(value: &str) -> usize {
     let mut width = 0;
     for ch in value.chars() {

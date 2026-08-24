@@ -1,4 +1,4 @@
-//! Persist viewed marks. Same path, identity, and fingerprint as the Ink TUI.
+//! Persist viewed marks (path, identity, and fingerprint).
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -290,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_matches_ink_golden() {
+    fn fingerprint_matches_golden() {
         let fp = viewed_fingerprint(ViewedFingerprintInput {
             staged_status: None,
             unstaged_status: Some("M"),
@@ -366,10 +366,7 @@ mod tests {
         store = toggle_viewed(&store, &identity, &marked);
         let dropped = reconcile_viewed(&store, &HashMap::from([(identity.clone(), changed)]));
         assert!(dropped.is_empty());
-        let kept = reconcile_viewed(
-            &store,
-            &HashMap::from([(identity.clone(), marked.clone())]),
-        );
+        let kept = reconcile_viewed(&store, &HashMap::from([(identity.clone(), marked.clone())]));
         assert_eq!(kept, store);
         let gone = reconcile_viewed(&store, &HashMap::new());
         assert!(gone.is_empty());
@@ -407,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn load_save_round_trip_ink_json() {
+    fn load_save_round_trip_json() {
         let dir = std::env::temp_dir().join(format!(
             "ws-viewed-{}",
             SystemTime::now()
@@ -425,10 +422,13 @@ mod tests {
             old_path: None,
             content: b"x\n",
         });
-        let ink = "{\n  \"version\": 1,\n  \"entries\": {\n    \"demo\\u0000src/a.ts\": {\n      \"fingerprint\": \"67da1a55766001c9402f9ca0bcf83d79c6793d1633d3dbff4bafe342c363531e\"\n    }\n  }\n}\n";
-        fs::write(&file, ink).unwrap();
+        let json = "{\n  \"version\": 1,\n  \"entries\": {\n    \"demo\\u0000src/a.ts\": {\n      \"fingerprint\": \"67da1a55766001c9402f9ca0bcf83d79c6793d1633d3dbff4bafe342c363531e\"\n    }\n  }\n}\n";
+        fs::write(&file, json).unwrap();
         let loaded = load_viewed_store(&file);
-        assert_eq!(loaded.get(&identity).map(String::as_str), Some(fingerprint.as_str()));
+        assert_eq!(
+            loaded.get(&identity).map(String::as_str),
+            Some(fingerprint.as_str())
+        );
         save_viewed_store(&loaded, &file);
         let again = load_viewed_store(&file);
         assert_eq!(again, loaded);

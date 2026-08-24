@@ -43,7 +43,7 @@ fn files_for_repo(snapshot: &WorkspaceSnapshot, repo: &str) -> Vec<ScopedFile> {
 /// File rows stay single-file. Dir rows walk dirty files under that dir
 /// (the dir path itself and its children). Checkout and flat repo rows walk
 /// every dirty file in that checkout. Family containers, workspace, and
-/// group rows yield no files (Ink `collectFiles`). Hidden ignored stay out
+/// group rows yield no files. Hidden ignored stay out
 /// unless shown. Linked worktrees are included only when that checkout is
 /// focused.
 pub fn collect_write_files(
@@ -157,7 +157,7 @@ pub fn format_running_op(kind: RunningOp, done: usize, total: usize) -> String {
 
 /// True when `p` / `d` must stay a silent no-op on this row kind.
 ///
-/// Ink registry: pull / default-branch are workspace / repo / checkout only.
+/// Pull / default-branch are workspace / repo / checkout only.
 /// Fetch stays scoped on file and dir rows.
 pub fn op_is_kind_noop(kind: NodeKind, op: Op) -> bool {
     matches!(op, Op::Pull | Op::DefaultBranch) && matches!(kind, NodeKind::File | NodeKind::Dir)
@@ -166,10 +166,10 @@ pub fn op_is_kind_noop(kind: NodeKind, op: Op) -> bool {
 /// Checkout paths that `op` may touch for the focused row.
 ///
 /// Workspace rows resolve to visible primaries. Group rows yield no
-/// targets (Ink `collectBulkGitTargets`). Hidden ignored repos are omitted
+/// targets. Hidden ignored repos are omitted
 /// unless `show_ignored` is true. Linked worktrees are omitted unless the
 /// focused row is that worktree (or a file inside it). Pull and
-/// default-branch skip file and dir rows (Ink kinds); fetch still includes
+/// default-branch skip file and dir rows; fetch still includes
 /// them.
 pub fn op_targets(
     snapshot: &WorkspaceSnapshot,
@@ -230,7 +230,7 @@ fn include_if_visible(repo: &str, visible: &[&WorkspaceRepoSnapshot]) -> Vec<Str
 ///
 /// Workspace and No-updates group (and no focus) reload everything. A
 /// checkout, flat repo, file, or dir reloads that checkout only. Family
-/// containers use the primary path (same as Ink `repoPathOf`).
+/// containers use the primary path.
 pub fn refresh_target(focused: Option<&VisibleRow>) -> Option<String> {
     let row = focused?;
     match row.kind {

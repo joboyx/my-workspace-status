@@ -611,7 +611,7 @@ fn lines_or_empty_diff(text: &str) -> Vec<String> {
     }
 }
 
-/// Context large enough to show a typical source file in one hunk (Ink).
+/// Context large enough to show a typical source file in one hunk.
 pub const FULL_DIFF_CONTEXT_LINES: u32 = 999_999;
 
 /// Build `git diff` argv, inserting `-U{n}` when `context` is set.

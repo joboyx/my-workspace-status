@@ -97,7 +97,7 @@ Focus `src/auth.ts`.
 
 Keys: Space.
 
-Show: viewed glyph `` / `*` (Ink `ICON_VIEWED`) on that dirty file, trailing before the status badge. Not the clean `` / `.`.
+Show: viewed glyph `` / `*` (`ICON_VIEWED`) on that dirty file, trailing before the status badge. Not the clean `` / `.`.
 
 ## 08 — show ignored
 

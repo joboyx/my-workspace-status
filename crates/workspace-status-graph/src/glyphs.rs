@@ -1,6 +1,6 @@
 //! Graph node, rail, and sync glyphs.
 //!
-//! Unicode matches the Ink graph (`docs/git-graph-topology.md`).
+//! Unicode matches `docs/git-graph-topology.md`.
 //! ASCII matches `WS_STATUS_GLYPHS=ascii`. Topology is the same; only
 //! the glyph map changes.
 
@@ -18,7 +18,7 @@ pub struct GlyphSet {
     pub uncommitted: &'static str,
     /// Stash side-leaf tip.
     pub stash: &'static str,
-    /// Linked worktree marker. Ink `ICON_LINKED_WORKTREE` (`` / `L`).
+    /// Linked worktree marker. `ICON_LINKED_WORKTREE` (`` / `L`).
     pub worktree: &'static str,
     /// Ahead of upstream.
     pub ahead: &'static str,
@@ -105,7 +105,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn worktree_glyph_matches_ink_linked_worktree_not_emoji() {
+    fn worktree_glyph_is_linked_not_emoji() {
         assert_eq!(UNICODE.worktree, "");
         assert_eq!(ASCII.worktree, "L");
         assert_ne!(UNICODE.worktree, "🔗");

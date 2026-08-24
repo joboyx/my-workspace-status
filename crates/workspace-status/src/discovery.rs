@@ -1,4 +1,4 @@
-//! Discover git repos and collect snapshots. Matches `src/discovery.ts`.
+//! Discover git repos and collect snapshots.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;

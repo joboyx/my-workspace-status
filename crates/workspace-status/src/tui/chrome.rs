@@ -1,7 +1,6 @@
-//! Bottom chrome: Ink-style status pills, hint chips, and breadcrumb.
+//! Bottom chrome: status pills, hint chips, and breadcrumb.
 //!
-//! Port of `src/tui/StatusBar.tsx`, `Breadcrumb.tsx`, and `bottomChrome.ts`
-//! row budget (Rust confirm overlays are boxed, not status-line y/n).
+//! Confirm overlays are boxed, not status-line y/n.
 
 use std::time::Duration;
 
@@ -25,7 +24,7 @@ use super::state::{AppState, FocusPane};
 use super::theme::{hex_color, Palette, Pill, Pills};
 use super::tree::NodeKind;
 
-/// Columns between a hint chip and its label (Ink `HINT_CHIP_GAP`).
+/// Columns between a hint chip and its label.
 pub const HINT_CHIP_GAP: usize = 2;
 /// Gap rendered between two hints.
 const HINT_SEPARATOR: &str = "  ";
@@ -44,7 +43,7 @@ pub struct HintSegment {
     pub destructive: bool,
 }
 
-/// Row kind that selects the hint list (Ink `RowKind`).
+/// Row kind that selects the hint list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HintRowKind {
     Workspace,
@@ -314,9 +313,9 @@ const GRAPH_HINT_KINDS: &[HintRowKind] = &[
 
 /// Rows reserved below the panes for breadcrumb + status / overlay.
 ///
-/// Help hides the breadcrumb (Ink `bottomChromeRows` + App). Confirms,
+/// Help hides the breadcrumb. Confirms,
 /// stash, create-branch, and pickers replace the status line with a
-/// boxed overlay and shrink the panes by the Ink row budget.
+/// boxed overlay and shrink the panes by the overlay row budget.
 #[allow(dead_code)]
 pub fn bottom_chrome_rows(state: &AppState) -> u16 {
     breadcrumb_rows(state).saturating_add(overlay_status_rows(state))
@@ -327,7 +326,7 @@ pub fn breadcrumb_rows(state: &AppState) -> u16 {
     u16::from(!state.help_open)
 }
 
-/// Status line or replacing overlay rows (Ink `bottomChromeRows`).
+/// Status line or replacing overlay rows.
 pub fn overlay_status_rows(state: &AppState) -> u16 {
     overlay_status_rows_for(state, state.layout.term_cols.max(1))
 }
@@ -438,8 +437,8 @@ pub fn nav_chrome_hint_segments(depth: u8, focus: FocusPane) -> Vec<HintSegment>
     out
 }
 
-/// Rust-only chips. Appended after Ink hints so they truncate first.
-pub fn rust_extra_hint_segments() -> Vec<HintSegment> {
+/// Extra chips. Appended after core hints so they truncate first.
+pub fn extra_hint_segments() -> Vec<HintSegment> {
     vec![hint("Tab", "other pane", false), hint("q", "quit", false)]
 }
 
@@ -658,7 +657,7 @@ pub fn nav_depth(state: &AppState) -> u8 {
     }
 }
 
-/// Active row kind for the hint bar (Ink `activeRowKind`).
+/// Active row kind for the hint bar.
 pub fn hint_row_kind(state: &AppState) -> HintRowKind {
     if state.graph_pane_focused() {
         return match state.focused_graph_row() {
@@ -971,7 +970,7 @@ fn idle_status_line(
     }
     let mut hints = nav_chrome_hint_segments(nav_depth(state), state.focus);
     hints.extend(action_hint_segments(state));
-    hints.extend(rust_extra_hint_segments());
+    hints.extend(extra_hint_segments());
     let fitted = fit_hint_segments(&hints, (width as usize).saturating_sub(used));
 
     let mut spans = vec![
@@ -1085,27 +1084,27 @@ mod tests {
     }
 
     #[test]
-    fn fit_appends_ellipsis_instead_of_dropping_ink_hints_for_extras() {
-        let ink = vec![
+    fn fit_appends_ellipsis_instead_of_dropping_core_hints_for_extras() {
+        let core = vec![
             hint_of("⏎", "focus right"),
             hint_of("s", "stage"),
             hint_of("x", "revert"),
         ];
-        let mut all = ink.clone();
-        all.extend(rust_extra_hint_segments());
-        let fitted = fit_hint_segments(&all, hints_width(&ink) + 4);
+        let mut all = core.clone();
+        all.extend(extra_hint_segments());
+        let fitted = fit_hint_segments(&all, hints_width(&core) + 4);
         let keys: Vec<&str> = fitted.iter().map(|s| s.key.as_str()).collect();
         assert!(keys.contains(&"⏎"), "{keys:?}");
         assert!(keys.contains(&"s"), "{keys:?}");
         assert!(keys.contains(&HINT_ELLIPSIS), "{keys:?}");
         assert!(
             !keys.contains(&"q"),
-            "extras must truncate before Ink hints"
+            "extras must truncate before core hints"
         );
     }
 
     #[test]
-    fn nav_chrome_matches_ink() {
+    fn nav_chrome_pills_and_hints() {
         assert_eq!(
             nav_chrome_hint_segments(0, FocusPane::Left),
             vec![hint_of("⏎", "focus right")]
@@ -1131,7 +1130,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_file_hints_include_stage_and_rust_extras_in_the_list() {
+    fn idle_file_hints_include_stage_and_extras_in_the_list() {
         let mut app = state();
         let idx = app
             .rows
@@ -1145,7 +1144,7 @@ mod tests {
             .collect();
         assert!(keys.contains(&"s".into()), "{keys:?}");
         assert!(keys.contains(&"x".into()), "{keys:?}");
-        let extras: Vec<String> = rust_extra_hint_segments()
+        let extras: Vec<String> = extra_hint_segments()
             .into_iter()
             .map(|s| s.key)
             .collect();
@@ -1188,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn confirm_overlay_uses_ink_row_budget() {
+    fn confirm_overlay_uses_row_budget() {
         let mut app = state();
         app.confirm = Some(super::super::state::PendingConfirm::Revert {
             targets: Vec::new(),

@@ -1,4 +1,4 @@
-//! Daily-path ratatui e2e. TestBackend only — no TTY, no Ink harness.
+//! Daily-path ratatui e2e. TestBackend only — no TTY.
 //!
 //! Covers the tree, file diff, multi-lane graph, search, EasyMotion, theme
 //! cycle, commit drill, and hidden ignored repos. Fixtures follow the same
@@ -408,7 +408,7 @@ fn chrome_pills_breadcrumb_and_armed_search_chip() {
     assert_contains(&idle, "? help");
     assert!(
         idle.contains("q") || idle.contains("Tab") || idle.contains("…"),
-        "Rust extras q/Tab should appear or truncate with …:\n{idle}"
+        "extras q/Tab should appear or truncate with …:\n{idle}"
     );
 
     tui.search("merger");

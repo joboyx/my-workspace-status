@@ -121,7 +121,7 @@ impl<'a> GraphWidget<'a> {
         self
     }
 
-    /// Paint Ink `searchMatchIds` background on selectable graph rows.
+    /// Paint search-match background on selectable graph rows.
     ///
     /// `indices` are [`GraphModel::visible_rows`] indexes. Spacers stay
     /// unhighlighted. [`Self::selected`] still wins over a match.
@@ -131,7 +131,7 @@ impl<'a> GraphWidget<'a> {
         self
     }
 
-    /// Ink cursor bar (`▌`) plus `cursorBg`. Spacers keep the background only.
+    /// Cursor bar (`▌`) plus `cursorBg`. Spacers keep the background only.
     pub fn cursor_style(mut self, fg: Color, bg: Color) -> Self {
         self.cursor_fg = fg;
         self.cursor_bg = Some(bg);

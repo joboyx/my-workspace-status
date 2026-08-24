@@ -15,7 +15,7 @@ pub enum Action {
     /**
      * Second `z` within [`super::keys::DOUBLE_TAP_MS`].
      *
-     * Ink `fold.toggleSubtree`. First `z` already applied [`Self::FoldToggle`].
+     * Subtree fold. First `z` already applied [`Self::FoldToggle`].
      */
     FoldToggleSubtree,
     /**

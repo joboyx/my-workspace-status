@@ -6,7 +6,7 @@ use crossterm::event::{
 
 use super::action::Action;
 
-/// Ink `DOUBLE_TAP_MS` — window for `zz` / `gg` after the first key.
+/// Window for `zz` / `gg` after the first key.
 pub const DOUBLE_TAP_MS: u64 = 400;
 
 /// How the keymap reads the next key.

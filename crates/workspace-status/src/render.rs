@@ -1,4 +1,4 @@
-//! `--plain` renderer. Matches `src/render.ts` section layout.
+//! `--plain` renderer.
 
 use std::collections::{BTreeMap, HashMap};
 
