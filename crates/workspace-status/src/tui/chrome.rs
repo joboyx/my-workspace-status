@@ -15,7 +15,7 @@ use crate::snapshot::{CheckoutKind, SyncStatus};
 use super::branches::{can_open_branch_picker, checkoutable_branch_names};
 use super::commit_files::CommitFileRowKind;
 use super::drill::{CommitFileSource, DrillView};
-use super::help::HELP_GROUPS;
+use super::help::help_status_lines;
 use super::icons::truncate_visible;
 use super::keys::DOUBLE_TAP_MS;
 use super::ops::{collect_write_files, op_targets, push_targets, Op};
@@ -319,13 +319,13 @@ pub fn breadcrumb_rows(state: &AppState) -> u16 {
 
 /// Status line or replacing overlay rows (Ink `bottomChromeRows`).
 pub fn overlay_status_rows(state: &AppState) -> u16 {
+    overlay_status_rows_for(state, state.layout.term_cols.max(1))
+}
+
+/// Overlay row budget at `term_cols` so wrap math can follow a resize.
+pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
     if state.help_open {
-        let max = HELP_GROUPS
-            .iter()
-            .map(|group| group.entries.len())
-            .max()
-            .unwrap_or(0) as u16;
-        return max.saturating_add(4);
+        return help_status_lines(term_cols);
     }
     if let Some(pending) = state.confirm.as_ref() {
         return match pending {

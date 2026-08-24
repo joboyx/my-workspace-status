@@ -90,6 +90,9 @@ pub enum Action {
     EasyMotionCancel,
     CycleTheme,
     ToggleMouse,
+    /// Terminal size changed. Crossterm `Resize` carries the new cols/rows;
+    /// ioctl can still report the previous size when the event arrives.
+    Resize { cols: u16, rows: u16 },
     None,
 }
 

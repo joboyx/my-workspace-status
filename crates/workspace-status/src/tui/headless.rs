@@ -72,6 +72,40 @@ impl HeadlessTui {
         self.send(KeyCode::Tab);
     }
 
+    /// Apply a crossterm `Resize` and relayout panes to `cols` × `rows`.
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        self.width = cols.max(1);
+        self.height = rows.max(1);
+        let event = Event::Resize(self.width, self.height);
+        let action = event_to_action_ex(
+            &event,
+            self.state.input_mode(),
+            self.state.right_is_diff(),
+            matches!(self.state.focus, FocusPane::Right),
+            self.state.graph_stash_focused(),
+            self.state.graph_commit_focused(),
+        );
+        let effect = self.state.dispatch(action);
+        apply_headless_effect(&mut self.state, effect, &self.opts);
+        let _ = self.frame();
+        self.state.sync_graph_scroll();
+    }
+
+    /// Outer tree pane width from the last paint.
+    pub fn pane_tree_width(&self) -> u16 {
+        self.state.layout.outer_tree_width
+    }
+
+    /// Right-pane inner width from the last paint.
+    pub fn pane_diff_width(&self) -> u16 {
+        self.state.layout.diff_pane_width
+    }
+
+    /// Left-pane inner list height from the last paint.
+    pub fn pane_tree_height(&self) -> u16 {
+        self.state.layout.tree_height
+    }
+
     /// Send Enter.
     pub fn enter(&mut self) {
         self.send(KeyCode::Enter);
