@@ -1,11 +1,11 @@
 //! Headless workspace-status CLI (`workspace-status` / `ws`).
 
 use std::collections::BTreeSet;
+use std::env;
 use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode};
 
-use clap::Parser;
 use crate::actions::{pull_behind_repos, switch_repo_to_default_branch};
 use crate::config::load_workspace_status_config;
 use crate::discovery::{collect_snapshots, validate_filter_repos};
@@ -15,6 +15,7 @@ use crate::snapshot::{
     build_summary_state, build_verbose_rows, build_workspace_snapshot, non_default_branch_repos,
     repo_snapshots_from_workspace, serialize_workspace_snapshot, visible_workspace_snapshot,
 };
+use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -27,7 +28,9 @@ Those headless flags still win over --tui. Agents must pass --plain or --json.\n
 A non-TTY run without those flags prints --plain.\n\n\
 --json pretty-prints the snapshot on stdout. Progress from --fetch, --pull,\n\
 or --default-branch goes to stderr. --json wins when both --json and --plain\n\
-are set. -v applies to --plain only."
+are set. -v applies to --plain only.\n\n\
+--update runs the cargo-dist updater (workspace-status-update) and exits.\n\
+That run does not open the TUI or apply repo filters."
 )]
 struct Cli {
     /// Include ignored repos (`showIgnored`).
@@ -62,6 +65,10 @@ struct Cli {
     #[arg(short = 'i', long = "tui")]
     tui: bool,
 
+    /// Run the installed updater and exit. Does not open the TUI.
+    #[arg(long = "update")]
+    update: bool,
+
     /// Optional workspace-relative repo filters. Named repos bypass ignoredRepos.
     #[arg(value_name = "REPO")]
     filter_repos: Vec<String>,
@@ -77,7 +84,10 @@ fn say(json: bool, line: &str) {
 
 pub fn cli_main() -> ExitCode {
     let cli = Cli::parse();
-    let cwd = match std::env::current_dir() {
+    if cli.update {
+        return run_self_update();
+    }
+    let cwd = match env::current_dir() {
         Ok(p) => p,
         Err(err) => {
             eprintln!("{err}");
@@ -133,13 +143,8 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
         force_tui: cli.tui,
     };
     if crate::tui::should_open_tui(io::stdout().is_terminal(), flags) {
-        let snapshot = crate::tui::collect_full_snapshot(
-            &cwd,
-            &loaded,
-            &filter_repos,
-            cli.all,
-            false,
-        );
+        let snapshot =
+            crate::tui::collect_full_snapshot(&cwd, &loaded, &filter_repos, cli.all, false);
         return crate::tui::run_tui(crate::tui::TuiOpts {
             cwd,
             snapshot,
@@ -150,7 +155,10 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
 
     let force_json = cli.json;
     if cli.fetch {
-        say(force_json, "🔄 Fetching from remotes (this may take a moment)...");
+        say(
+            force_json,
+            "🔄 Fetching from remotes (this may take a moment)...",
+        );
         say(force_json, "");
     }
 
@@ -204,12 +212,8 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
         }
     }
 
-    let workspace = build_workspace_snapshot(
-        &snapshots,
-        &loaded.ignored_repos,
-        cli.all,
-        &filter_repos,
-    );
+    let workspace =
+        build_workspace_snapshot(&snapshots, &loaded.ignored_repos, cli.all, &filter_repos);
     let published = visible_workspace_snapshot(&workspace);
 
     if force_json {
@@ -224,4 +228,99 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
         println!("{line}");
     }
     Ok(())
+}
+
+fn updater_file_name() -> &'static str {
+    if cfg!(windows) {
+        "workspace-status-update.exe"
+    } else {
+        "workspace-status-update"
+    }
+}
+
+fn sibling_updater(current_exe: &Path) -> Option<PathBuf> {
+    let path = current_exe.parent()?.join(updater_file_name());
+    path.is_file().then_some(path)
+}
+
+fn updater_command(current_exe: &Path) -> Command {
+    if let Some(path) = sibling_updater(current_exe) {
+        Command::new(path)
+    } else {
+        Command::new("workspace-status-update")
+    }
+}
+
+fn run_self_update() -> ExitCode {
+    let exe = match env::current_exe() {
+        Ok(p) => p,
+        Err(err) => {
+            eprintln!("failed to resolve current executable: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut cmd = updater_command(&exe);
+    exec_updater(&mut cmd)
+}
+
+#[cfg(unix)]
+fn exec_updater(cmd: &mut Command) -> ExitCode {
+    use std::os::unix::process::CommandExt;
+    let err = cmd.exec();
+    eprintln!("failed to run workspace-status-update: {err}");
+    ExitCode::from(1)
+}
+
+#[cfg(not(unix))]
+fn exec_updater(cmd: &mut Command) -> ExitCode {
+    match cmd.status() {
+        Ok(status) => status
+            .code()
+            .and_then(|code| u8::try_from(code).ok())
+            .map(ExitCode::from)
+            .unwrap_or(ExitCode::from(1)),
+        Err(err) => {
+            eprintln!("failed to run workspace-status-update: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir() -> PathBuf {
+        let path = env::temp_dir().join(format!(
+            "ws-cli-update-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn sibling_updater_finds_file_next_to_exe() {
+        let dir = temp_dir();
+        let exe = dir.join("ws");
+        fs::write(&exe, b"").unwrap();
+        let sidecar = dir.join(updater_file_name());
+        fs::write(&sidecar, b"").unwrap();
+        assert_eq!(sibling_updater(&exe).as_deref(), Some(sidecar.as_path()));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sibling_updater_none_without_sidecar() {
+        let dir = temp_dir();
+        let exe = dir.join("ws");
+        fs::write(&exe, b"").unwrap();
+        assert_eq!(sibling_updater(&exe), None);
+        let _ = fs::remove_dir_all(dir);
+    }
 }

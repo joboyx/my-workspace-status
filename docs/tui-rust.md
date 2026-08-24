@@ -124,6 +124,7 @@ See [tui-model.md](./tui-model.md) for the Ink keymap.
 | `-i` / `--tui` | Ratatui TUI even when stdout is not a TTY |
 | `--plain` or `--json` | Snapshot text / JSON (wins over `--tui`) |
 | `-v`, `-p`, `-d` | Headless `--plain` path (with that flag; wins over `--tui`) |
+| `--update` | Exec `workspace-status-update`; never opens the TUI |
 | Non-TTY without `--tui` | Headless `--plain` unless `--json` |
 
 ## Layout
