@@ -47,6 +47,8 @@ pub struct Palette {
     pub cursor_bg: Color,
     pub diff_hunk: Color,
     pub flash: Color,
+    /// Four-step fade. Index 0 is [`Self::flash`].
+    pub flash_ramp: [Color; 4],
 }
 
 /// Semantic colours used by the ratatui paint.
@@ -68,6 +70,8 @@ pub struct ThemePalette {
     pub cursor_bg: &'static str,
     pub diff_hunk: &'static str,
     pub flash: &'static str,
+    /// Four-step fade hex. Index 0 matches [`Self::flash`].
+    pub flash_ramp: [&'static str; 4],
 }
 
 /// Status-bar pill hex pairs.
@@ -163,6 +167,12 @@ impl ThemeId {
             cursor_bg: hex_color(p.cursor_bg),
             diff_hunk: hex_color(p.diff_hunk),
             flash: hex_color(p.flash),
+            flash_ramp: [
+                hex_color(p.flash_ramp[0]),
+                hex_color(p.flash_ramp[1]),
+                hex_color(p.flash_ramp[2]),
+                hex_color(p.flash_ramp[3]),
+            ],
         }
     }
 
@@ -199,6 +209,7 @@ const TOKYO_NIGHT: Theme = Theme {
         cursor_bg: "#283457",
         diff_hunk: "#7dcfff",
         flash: "#3d5236",
+        flash_ramp: ["#3d5236", "#354830", "#2d3d2a", "#273324"],
     },
     pill: ThemePill {
         mode_bg: "#3d59a1",
@@ -231,6 +242,7 @@ const MONOKAI: Theme = Theme {
         cursor_bg: "#3e3d32",
         diff_hunk: "#66d9ef",
         flash: "#3e4a28",
+        flash_ramp: ["#3e4a28", "#353f24", "#2c3420", "#242b1c"],
     },
     pill: ThemePill {
         mode_bg: "#49483e",
@@ -263,6 +275,7 @@ const DRACULA: Theme = Theme {
         cursor_bg: "#44475a",
         diff_hunk: "#8be9fd",
         flash: "#2d4a3e",
+        flash_ramp: ["#2d4a3e", "#274038", "#213632", "#1c2d2b"],
     },
     pill: ThemePill {
         mode_bg: "#44475a",
@@ -295,6 +308,7 @@ const GRUVBOX_DARK: Theme = Theme {
         cursor_bg: "#3c3836",
         diff_hunk: "#83a598",
         flash: "#32361a",
+        flash_ramp: ["#32361a", "#2c3018", "#262a16", "#202314"],
     },
     pill: ThemePill {
         mode_bg: "#504945",
@@ -327,6 +341,7 @@ const CATPPUCCIN_MOCHA: Theme = Theme {
         cursor_bg: "#313244",
         diff_hunk: "#89dceb",
         flash: "#1e2b1e",
+        flash_ramp: ["#1e2b1e", "#1a261a", "#162116", "#121c12"],
     },
     pill: ThemePill {
         mode_bg: "#45475a",
@@ -377,6 +392,25 @@ pub fn hex_color(hex: &str) -> Color {
         return Color::White;
     };
     Color::Rgb(r, g, b)
+}
+
+impl Palette {
+    /// Background for a decaying flash. `None` when the flash has expired.
+    pub fn flash_bg(self, strength: f32) -> Option<Color> {
+        if strength <= 0.0 {
+            return None;
+        }
+        let idx = if strength > 0.75 {
+            0
+        } else if strength > 0.50 {
+            1
+        } else if strength > 0.25 {
+            2
+        } else {
+            3
+        };
+        Some(self.flash_ramp[idx])
+    }
 }
 
 #[cfg(test)]
@@ -430,5 +464,16 @@ mod tests {
     fn hex_parses_tokyo_heading() {
         assert_eq!(hex_color("#7dcfff"), Color::Rgb(0x7d, 0xcf, 0xff));
         assert_eq!(hex_color("bad"), Color::White);
+    }
+
+    #[test]
+    fn flash_ramp_starts_at_flash_and_fades() {
+        for id in THEME_IDS {
+            let pal = id.palette();
+            assert_eq!(pal.flash_ramp[0], pal.flash);
+            assert_eq!(pal.flash_bg(1.0), Some(pal.flash));
+            assert_eq!(pal.flash_bg(0.0), None);
+            assert_ne!(pal.flash_bg(0.3), pal.flash_bg(1.0));
+        }
     }
 }

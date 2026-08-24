@@ -56,7 +56,7 @@ use super::keys::event_to_action_with;
 use super::ops::{format_running_op, RunningOp};
 use super::render::draw;
 use super::state::AppState;
-use super::watch::watch_interval_ms;
+use super::watch::{watch_interval_ms, FLASH_TICK_MS};
 
 /// Options for the interactive TUI.
 pub struct TuiOpts {
@@ -165,11 +165,16 @@ fn run_loop(
         let remain_ctrl_c = state
             .ctrl_c_remaining_ms(Instant::now())
             .unwrap_or(u64::MAX);
+        let idle_ms = if state.has_active_flashes() {
+            FLASH_TICK_MS
+        } else {
+            200
+        };
         let timeout = Duration::from_millis(
             remain_watch
                 .min(remain_fetch)
                 .min(remain_ctrl_c)
-                .min(200)
+                .min(idle_ms)
                 .max(10),
         );
         if event::poll(timeout).unwrap_or(false) {
@@ -357,6 +362,7 @@ fn apply_effect_inner(
             if reload_snapshot_pumped(state, opts, terminal) {
                 return true;
             }
+            state.stamp_checkout_flashes(&repos);
             state.status = format!("fetched {}", repos.join(" "));
             load_right(state);
         }
@@ -377,6 +383,7 @@ fn apply_effect_inner(
             if reload_snapshot_pumped(state, opts, terminal) {
                 return true;
             }
+            state.stamp_checkout_flashes(&repos);
             state.status = format!("pulled {}", repos.join(" "));
             load_right(state);
         }
@@ -410,6 +417,7 @@ fn apply_effect_inner(
             if reload_snapshot_pumped(state, opts, terminal) {
                 return true;
             }
+            state.stamp_checkout_flashes(&repos);
             state.status = format!("default-branch {}", repos.join(" "));
             load_right(state);
         }
@@ -549,6 +557,7 @@ fn apply_effect_inner(
             if reload_snapshot_pumped(state, opts, terminal) {
                 return true;
             }
+            state.stamp_checkout_flashes(&repos);
             state.status = if failed > 0 && ok == 0 {
                 format!("push: {failed} failed")
             } else if failed > 0 {
@@ -947,7 +956,7 @@ fn reload_snapshot(state: &mut AppState, opts: &TuiOpts) {
         state.show_ignored,
         false,
     );
-    state.apply_snapshot(snapshot);
+    state.apply_watch_snapshot(snapshot);
 }
 
 /// Refresh one checkout in place. Missing paths drop out of the snapshot
@@ -980,22 +989,22 @@ fn reload_repo(state: &mut AppState, opts: &TuiOpts, repo: &str) {
         state.show_ignored,
         &state.snapshot.filter_repos,
     );
-    state.apply_snapshot(snapshot);
+    state.apply_watch_snapshot(snapshot);
 }
 
 fn load_right(state: &mut AppState) {
-    if !state.drill.is_graph() {
-        return;
-    }
-    if let Some((repo, change)) = state.focused_file() {
-        let content = load_file_diff(
-            &state.cwd,
-            &repo,
-            &change,
-            state.workspace_diff_context(&repo, &change.path),
-        );
-        state.set_diff(repo, change.path, content);
-        return;
+    let in_graph = state.drill.is_graph();
+    if in_graph {
+        if let Some((repo, change)) = state.focused_file() {
+            let content = load_file_diff(
+                &state.cwd,
+                &repo,
+                &change,
+                state.workspace_diff_context(&repo, &change.path),
+            );
+            state.set_diff(repo, change.path, content);
+            return;
+        }
     }
     if let Some(repo) = state.focused_graph_repo() {
         let same_repo = state
@@ -1015,9 +1024,29 @@ fn load_right(state: &mut AppState) {
             load_graph_model(&state.cwd, &state.snapshot, &repo, state.show_ignored)
         };
         state.set_graph(model, identity.repo, identity.head);
+        if !in_graph {
+            refresh_worktree_commit_files(state);
+        }
         return;
     }
-    state.clear_right();
+    if in_graph {
+        state.clear_right();
+    } else {
+        refresh_worktree_commit_files(state);
+    }
+}
+
+fn refresh_worktree_commit_files(state: &mut AppState) {
+    let (repo, source) = match &state.drill {
+        super::drill::DrillView::Files { repo, source, .. }
+        | super::drill::DrillView::Diff { repo, source, .. } => (repo.clone(), source.clone()),
+        super::drill::DrillView::Graph => return,
+    };
+    if !matches!(source, CommitFileSource::Worktree) {
+        return;
+    }
+    let files = list_worktree_name_status(&state.cwd.join(&repo));
+    state.open_commit_files(repo, source, files.into_iter().map(Into::into).collect());
 }
 
 /// Fetch the next `git log` page when the cursor sits on the last loaded row.

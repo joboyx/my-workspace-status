@@ -11,7 +11,6 @@ use workspace_status_graph::{
 };
 
 use std::collections::HashSet;
-use std::time::Instant;
 
 use super::chrome::{
     breadcrumb_line, breadcrumb_rows, ctrl_c_prompt_line, ctrl_c_prompt_rows,
@@ -43,7 +42,6 @@ use super::split::{
 use super::state::{AppState, FocusPane, PendingConfirm};
 use super::theme::{hex_color, Palette};
 use super::tree::{row_segments, NodeKind, NodeSegments, SegRole, TextSeg, VisibleRow};
-use super::watch::flash_active;
 use crate::helpers::visible_width;
 
 /// Empty tree / empty commit-file list.
@@ -59,7 +57,7 @@ fn muted_copy(text: &'static str, palette: Palette) -> Line<'static> {
 fn row_match_bg(
     selected: bool,
     search_match: bool,
-    flashing: bool,
+    flash: Option<Color>,
     palette: Palette,
     search_bg: Color,
 ) -> Option<Color> {
@@ -67,15 +65,14 @@ fn row_match_bg(
         Some(palette.cursor_bg)
     } else if search_match {
         Some(search_bg)
-    } else if flashing {
-        Some(palette.flash)
     } else {
-        None
+        flash
     }
 }
 
 /// Draw one frame. Updates `state.layout` for mouse hits.
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
+    state.prune_expired_flashes();
     let area = frame.area();
     let overlay_h = overlay_status_rows_for(state, area.width);
     let crumb_h = breadcrumb_rows(state);
@@ -222,7 +219,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         let cursor = *file_cursor;
         state.layout.files_list_y = tree_inner.y;
         let list_h = tree_inner.height as usize;
-        let (start, _) = visible_window(state.commit_file_rows().len(), cursor, list_h);
+        let (start, _) = visible_window(state.painted_commit_file_rows().len(), cursor, list_h);
         state.layout.files_list_offset = start;
     } else if let super::drill::DrillView::Files { cursor, .. } = &state.drill {
         let (title, subtitle) = state.commit_detail_meta();
@@ -239,7 +236,8 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         header_h = header_h.min(right_inner.height);
         state.layout.files_list_y = right_inner.y.saturating_add(header_h);
         let list_h = right_inner.height.saturating_sub(header_h) as usize;
-        let (start, _) = visible_window(state.commit_file_rows().len(), *cursor, list_h);
+        let painted_n = state.painted_commit_file_rows().len();
+        let (start, _) = visible_window(painted_n, *cursor, list_h);
         state.layout.files_list_offset = start;
     }
 }
@@ -257,14 +255,18 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         return;
     }
     let palette = state.theme.palette();
-    if state.rows.is_empty() {
+    let painted = state.painted_tree_rows();
+    if painted.is_empty() {
         frame.render_widget(Paragraph::new(muted_copy(NO_MATCHING_ROWS, palette)), area);
         return;
     }
     let height = area.height as usize;
     let width = area.width as usize;
-    let cursor = state.cursor;
-    let (start, _) = visible_window(state.rows.len(), cursor, height);
+    let focus_id = state.rows.get(state.cursor).map(|row| row.id.as_str());
+    let painted_cursor = focus_id
+        .and_then(|id| painted.iter().position(|row| row.id == id))
+        .unwrap_or(0);
+    let (start, _) = visible_window(painted.len(), painted_cursor, height);
     state.layout.list_offset = start;
     let motion = tree_easy_motion_labels(state, start, height);
     let search_bg = state.theme.pills().filter.bg;
@@ -276,21 +278,17 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         HashSet::new()
     };
     let mut lines = Vec::new();
-    for (i, row) in state.rows.iter().enumerate().skip(start).take(height) {
+    for (i, row) in painted.iter().enumerate().skip(start).take(height) {
         let motion_label = motion
             .as_ref()
             .and_then(|labels| labels.get(i - start))
             .cloned();
         let viewed = row.kind == NodeKind::File && state.reviewed.contains(&row.id);
-        let flashing = state
-            .flashes
-            .get(&row.id)
-            .is_some_and(|at| flash_active(Instant::now().saturating_duration_since(*at)));
         lines.push(paint_tree_row(
             row,
             width,
-            i == cursor,
-            flashing,
+            Some(row.id.as_str()) == focus_id,
+            state.flash_color(&row.id),
             match_ids.contains(&row.id),
             search_bg,
             state.ascii,
@@ -307,7 +305,7 @@ fn paint_tree_row(
     row: &VisibleRow,
     width: usize,
     selected: bool,
-    flashing: bool,
+    flash: Option<Color>,
     search_match: bool,
     search_bg: Color,
     ascii: bool,
@@ -324,7 +322,7 @@ fn paint_tree_row(
         &segs,
         width,
         selected,
-        flashing,
+        flash,
         search_match,
         search_bg,
         ascii,
@@ -341,7 +339,7 @@ fn paint_segmented_row(
     segs: &NodeSegments,
     width: usize,
     selected: bool,
-    flashing: bool,
+    flash: Option<Color>,
     search_match: bool,
     search_bg: Color,
     ascii: bool,
@@ -349,7 +347,7 @@ fn paint_segmented_row(
     palette: Palette,
     col_offset: usize,
 ) -> Line<'static> {
-    let bg = row_match_bg(selected, search_match, flashing, palette, search_bg);
+    let bg = row_match_bg(selected, search_match, flash, palette, search_bg);
     let trailing_text: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
     let trailing_width = visible_width(&trailing_text);
     let pad = usize::from(trailing_width > 0);
@@ -493,7 +491,7 @@ fn slice_segs(segs: &[TextSeg], offset: usize, width: usize) -> Vec<TextSeg> {
     out
 }
 
-fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -532,6 +530,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &AppState, col_offset: u
     };
     let matches = graph_search_matches(state);
     let pal = state.theme.palette();
+    let flash_rows = state.graph_flash_rows();
     GraphWidget::new(model)
         .ascii(state.ascii)
         .selected(Some(state.graph_cursor))
@@ -539,6 +538,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &AppState, col_offset: u
         .col_offset(col_offset)
         .loading_older(state.graph_loading_older)
         .search_matches(&matches, state.theme.pills().filter.bg)
+        .flash_rows(&flash_rows)
         .cursor_style(pal.cursor, pal.cursor_bg)
         .label_palette(GraphLabelPalette {
             subject: pal.repo,
@@ -564,7 +564,7 @@ fn graph_search_matches(state: &AppState) -> Vec<usize> {
     collect_graph_match_indices(&model.visible_rows(), &state.search_query)
 }
 
-fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, cursor: usize) {
+fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, cursor: usize) {
     let (title, subtitle) = state.commit_detail_meta();
     let mut header: Vec<String> = Vec::new();
     if !title.is_empty() {
@@ -624,7 +624,7 @@ fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, curso
 fn draw_commit_file_list(
     frame: &mut Frame<'_>,
     area: Rect,
-    state: &AppState,
+    state: &mut AppState,
     cursor: usize,
     col_offset: usize,
 ) {
@@ -632,7 +632,7 @@ fn draw_commit_file_list(
         return;
     }
     let palette = state.theme.palette();
-    let rows = state.commit_file_rows();
+    let rows = state.painted_commit_file_rows();
     if rows.is_empty() {
         let copy = if state.commit_files_loading {
             LOADING_FILES
@@ -644,7 +644,16 @@ fn draw_commit_file_list(
     }
     let height = area.height as usize;
     let width = area.width as usize;
-    let (start, _) = visible_window(rows.len(), cursor, height);
+    let focus_id = state
+        .commit_file_rows()
+        .get(cursor)
+        .map(|row| row.id.clone());
+    let painted_cursor = focus_id
+        .as_deref()
+        .and_then(|id| rows.iter().position(|row| row.id == id))
+        .unwrap_or(0);
+    let (start, _) = visible_window(rows.len(), painted_cursor, height);
+    state.layout.files_list_offset = start;
     let motion = file_easy_motion_labels(state, start, height);
     let search_bg = state.theme.pills().filter.bg;
     let searching_files =
@@ -673,8 +682,8 @@ fn draw_commit_file_list(
                 row.folded,
                 &segs,
                 width,
-                i == cursor,
-                false,
+                Some(row.id.as_str()) == focus_id.as_deref(),
+                state.commit_file_flash_color(&row.id),
                 search_match,
                 search_bg,
                 state.ascii,
@@ -1944,18 +1953,64 @@ mod tests {
         let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
         let search_bg = crate::tui::theme::ThemeId::TokyoNight.pills().filter.bg;
         assert_eq!(
-            row_match_bg(true, true, true, palette, search_bg),
+            row_match_bg(true, true, Some(palette.flash), palette, search_bg),
             Some(palette.cursor_bg)
         );
         assert_eq!(
-            row_match_bg(false, true, true, palette, search_bg),
+            row_match_bg(false, true, Some(palette.flash), palette, search_bg),
             Some(search_bg)
         );
         assert_eq!(
-            row_match_bg(false, false, true, palette, search_bg),
+            row_match_bg(false, false, Some(palette.flash), palette, search_bg),
             Some(palette.flash)
         );
-        assert_eq!(row_match_bg(false, false, false, palette, search_bg), None);
+        assert_eq!(row_match_bg(false, false, None, palette, search_bg), None);
+    }
+
+    #[test]
+    fn flash_background_keeps_status_foreground() {
+        let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
+        let segs = NodeSegments {
+            segments: vec![TextSeg {
+                text: "M".into(),
+                role: SegRole::Modified,
+                hex: None,
+                bold: false,
+                dim: false,
+            }],
+            trailing: Vec::new(),
+        };
+        let line = paint_segmented_row(
+            0,
+            false,
+            false,
+            &segs,
+            20,
+            false,
+            Some(palette.flash),
+            false,
+            search_bg_unused(),
+            true,
+            None,
+            palette,
+            0,
+        );
+        assert!(
+            line.spans
+                .iter()
+                .any(|span| span.style.fg == Some(palette.modified)),
+            "status colour must survive flash background"
+        );
+        assert!(
+            line.spans
+                .iter()
+                .any(|span| span.style.bg == Some(palette.flash)),
+            "flash should paint background"
+        );
+    }
+
+    fn search_bg_unused() -> Color {
+        crate::tui::theme::ThemeId::TokyoNight.pills().filter.bg
     }
 
     #[test]

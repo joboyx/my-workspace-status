@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use ratatui::style::Color;
 use workspace_status_graph::{
     format_label, format_relative_date, graph_chrome_budget, graph_gutter_cap, paint_model,
     GraphChromeBudget, GraphModel, GraphRow, PaintedLine, ASCII, UNICODE,
@@ -62,7 +63,12 @@ use super::viewed::{
     reconcile_viewed, save_viewed_store, toggle_viewed, viewed_identity, viewed_row_ids,
     ViewedStore,
 };
-use super::watch::{changed_row_ids, tree_signatures};
+use super::watch::{
+    capture_removal_ghosts, changed_row_ids, checkout_flash_ids, commit_file_identity,
+    commit_file_signatures, flash_strength, flashable_row_ids, graph_flash_decision,
+    graph_flash_meta, graph_row_identity, graph_row_signatures, is_new_row_set, merge_ghost_rows,
+    prune_flashes, prune_ghosts, tree_signatures, GhostRow, GraphFlashDecision, GraphFlashMeta,
+};
 use crate::git::FULL_DIFF_CONTEXT_LINES;
 use crate::helpers::visible_width;
 use crate::snapshot::CheckoutKind;
@@ -234,6 +240,11 @@ pub struct AppState {
     pub create_branch: Option<CreateBranchState>,
     pub flashes: HashMap<String, Instant>,
     pub signatures: BTreeMap<String, String>,
+    pub graph_signatures: BTreeMap<String, String>,
+    graph_flash_meta: Option<GraphFlashMeta>,
+    commit_file_signatures: BTreeMap<String, String>,
+    tree_ghosts: Vec<GhostRow<VisibleRow>>,
+    commit_file_ghosts: Vec<GhostRow<CommitFileRow>>,
     pub tree_fraction: f64,
     pub diff_split_fraction: f64,
     pub diff_mode: DiffMode,
@@ -323,6 +334,11 @@ impl AppState {
             create_branch: None,
             flashes: HashMap::new(),
             signatures,
+            graph_signatures: BTreeMap::new(),
+            graph_flash_meta: None,
+            commit_file_signatures: BTreeMap::new(),
+            tree_ghosts: Vec::new(),
+            commit_file_ghosts: Vec::new(),
             tree_fraction: TREE_WIDTH_FRACTION,
             diff_split_fraction: DIFF_SPLIT_FRACTION,
             diff_mode: DiffMode::SideBySide,
@@ -681,6 +697,8 @@ impl AppState {
         self.folds = default_folds(&self.tree);
         self.rows = flatten_with(&self.tree, &self.folds, self.ascii);
         self.restore_focus_after_tree_rebuild(previous_id);
+        self.signatures = tree_signatures(&self.tree, &self.cwd);
+        self.tree_ghosts.clear();
         self.status = if self.tree_mode {
             "Directory tree".into()
         } else {
@@ -701,6 +719,7 @@ impl AppState {
         } else {
             "Flat paths".into()
         };
+        self.reseed_commit_file_signatures();
         Effect::None
     }
 
@@ -740,6 +759,7 @@ impl AppState {
         let graph_scroll = self.graph_scroll;
         let diff_scroll = self.diff_scroll;
         let before = self.signatures.clone();
+        let old_rows = self.rows.clone();
         self.apply_snapshot(snapshot);
         self.folds = folds;
         self.rebuild_rows();
@@ -750,10 +770,21 @@ impl AppState {
         }
         self.graph_scroll = graph_scroll;
         self.diff_scroll = diff_scroll;
-        let changed = changed_row_ids(&before, &self.signatures);
         let now = Instant::now();
-        self.flashes
-            .retain(|_, at| now.duration_since(*at).as_millis() < 800);
+        self.prune_flash_state(now);
+        if is_new_row_set(&before, &self.signatures) {
+            self.tree_ghosts.clear();
+            return Vec::new();
+        }
+        self.tree_ghosts.extend(capture_removal_ghosts(
+            &old_rows,
+            |row| row.id.as_str(),
+            |row| row.id.clone(),
+            &before,
+            &self.signatures,
+            now,
+        ));
+        let changed = changed_row_ids(&before, &self.signatures);
         for id in &changed {
             self.flashes.insert(id.clone(), now);
         }
@@ -793,6 +824,116 @@ impl AppState {
     pub fn ctrl_c_remaining_ms(&self, now: Instant) -> Option<u64> {
         let until = self.ctrl_c_armed_until?;
         Some(until.saturating_duration_since(now).as_millis() as u64)
+    }
+
+    fn prune_flash_state(&mut self, now: Instant) {
+        prune_flashes(&mut self.flashes, now);
+        prune_ghosts(&mut self.tree_ghosts, now);
+        prune_ghosts(&mut self.commit_file_ghosts, now);
+    }
+
+    /// Drop expired flashes and ghosts before paint / the next tick.
+    pub fn prune_expired_flashes(&mut self) {
+        self.prune_flash_state(Instant::now());
+    }
+
+    /// True when a flash or ghost is still decaying.
+    pub fn has_active_flashes(&self) -> bool {
+        !self.flashes.is_empty()
+            || !self.tree_ghosts.is_empty()
+            || !self.commit_file_ghosts.is_empty()
+    }
+
+    /// Fade colour for a row id, if it is still flashing.
+    pub fn flash_color(&self, id: &str) -> Option<Color> {
+        let at = self.flashes.get(id)?;
+        let strength = flash_strength(Instant::now().saturating_duration_since(*at));
+        self.theme.palette().flash_bg(strength)
+    }
+
+    fn stamp_flashes(&mut self, ids: impl IntoIterator<Item = String>, now: Instant) {
+        for id in ids {
+            self.flashes.insert(id, now);
+        }
+    }
+
+    /// Flash checkout chrome after fetch / pull / push / default-branch.
+    pub fn stamp_checkout_flashes(&mut self, repos: &[String]) {
+        let now = Instant::now();
+        self.prune_flash_state(now);
+        for repo in repos {
+            self.stamp_flashes(checkout_flash_ids(repo), now);
+        }
+    }
+
+    /// Tree rows including removal ghosts for the flash window.
+    pub fn painted_tree_rows(&self) -> Vec<VisibleRow> {
+        merge_ghost_rows(&self.rows, &self.tree_ghosts, |row| row.id.as_str())
+    }
+
+    /// Commit-file rows including removal ghosts for the flash window.
+    pub fn painted_commit_file_rows(&self) -> Vec<CommitFileRow> {
+        merge_ghost_rows(&self.commit_file_rows(), &self.commit_file_ghosts, |row| {
+            row.id.as_str()
+        })
+    }
+
+    /// Visible-row indexes plus fade colours for the graph widget.
+    pub fn graph_flash_rows(&self) -> Vec<(usize, Color)> {
+        let Some(model) = self.graph.as_ref() else {
+            return Vec::new();
+        };
+        let Some((repo, _)) = self.graph_identity.as_ref() else {
+            return Vec::new();
+        };
+        model
+            .visible_rows()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, row)| {
+                let id = graph_row_identity(repo, row);
+                self.flash_color(&id).map(|color| (i, color))
+            })
+            .collect()
+    }
+
+    /// Flash colour for a commit-file row in the current drill.
+    pub fn commit_file_flash_color(&self, row_id: &str) -> Option<Color> {
+        let (repo, source) = match &self.drill {
+            DrillView::Files { repo, source, .. } | DrillView::Diff { repo, source, .. } => {
+                (repo, source)
+            }
+            DrillView::Graph => return None,
+        };
+        self.flash_color(&commit_file_identity(repo, source, row_id))
+    }
+
+    fn unfolded_commit_file_rows(&self, files: &[CommitFile]) -> Vec<CommitFileRow> {
+        flatten_commit_files(files, self.commit_tree_mode, &HashSet::new(), self.ascii)
+    }
+
+    fn reseed_commit_file_signatures(&mut self) {
+        self.commit_file_ghosts.clear();
+        let (repo, source, files) = match &self.drill {
+            DrillView::Files {
+                repo,
+                source,
+                files,
+                ..
+            }
+            | DrillView::Diff {
+                repo,
+                source,
+                files,
+                ..
+            } => (repo.clone(), source.clone(), files.clone()),
+            DrillView::Graph => {
+                self.commit_file_signatures.clear();
+                return;
+            }
+        };
+        let unfolded = self.unfolded_commit_file_rows(&files);
+        self.commit_file_signatures = commit_file_signatures(&repo, &source, &unfolded);
     }
 
     pub fn dispatch(&mut self, action: Action) -> Effect {
@@ -1561,11 +1702,14 @@ impl AppState {
             return Effect::None;
         }
         let idx = self.layout.list_offset + (row - self.layout.tree_y) as usize;
-        if idx >= self.rows.len() {
+        let painted = self.painted_tree_rows();
+        let Some(tree_row) = painted.get(idx).cloned() else {
             return Effect::None;
-        }
-        let tree_row = self.rows[idx].clone();
-        self.cursor = idx;
+        };
+        let Some(live) = self.rows.iter().position(|r| r.id == tree_row.id) else {
+            return Effect::None;
+        };
+        self.cursor = live;
         if tree_row.foldable && self.is_tree_chevron(col, tree_row.depth) {
             self.fold_op(FoldOp::Toggle);
             return Effect::LoadRightPane;
@@ -1632,14 +1776,15 @@ impl AppState {
             return Effect::None;
         }
         let idx = self.layout.files_list_offset + (row - self.layout.files_list_y) as usize;
-        let n = self.commit_file_rows().len();
-        if idx >= n {
-            return Effect::None;
-        }
-        self.set_commit_file_cursor(idx);
-        let Some(file_row) = self.commit_file_rows().get(idx).cloned() else {
+        let painted = self.painted_commit_file_rows();
+        let Some(file_row) = painted.get(idx).cloned() else {
             return Effect::None;
         };
+        let live_rows = self.commit_file_rows();
+        let Some(live) = live_rows.iter().position(|r| r.id == file_row.id) else {
+            return Effect::None;
+        };
+        self.set_commit_file_cursor(live);
         if file_row.foldable && self.is_files_chevron(col, file_row.depth) {
             self.fold_commit_file(FoldOp::Toggle);
             return Effect::None;
@@ -1676,6 +1821,32 @@ impl AppState {
     }
 
     pub fn set_graph(&mut self, model: GraphModel, repo: String, head: String) {
+        let after = graph_row_signatures(&model, &repo);
+        let next_meta = graph_flash_meta(&model, &repo);
+        let focused = self.focused_graph_repo();
+        let decision = graph_flash_decision(
+            focused.as_deref(),
+            &repo,
+            &self.graph_signatures,
+            &after,
+            self.graph_flash_meta.as_ref(),
+            &next_meta,
+        );
+        let now = Instant::now();
+        self.prune_flash_state(now);
+        match decision {
+            GraphFlashDecision::Stale => {}
+            GraphFlashDecision::Seed => {
+                self.graph_signatures = after;
+                self.graph_flash_meta = Some(next_meta);
+            }
+            GraphFlashDecision::Apply { include_adds } => {
+                let ids = flashable_row_ids(&self.graph_signatures, &after, include_adds);
+                self.stamp_flashes(ids, now);
+                self.graph_signatures = after;
+                self.graph_flash_meta = Some(next_meta);
+            }
+        }
         let identity = (repo, head);
         if self.graph_identity.as_ref() != Some(&identity) {
             self.graph_scroll = 0;
@@ -1732,6 +1903,10 @@ impl AppState {
         self.diff_content = DiffContent::default();
         self.diff_repo = None;
         self.diff_path = None;
+        self.graph_signatures.clear();
+        self.graph_flash_meta = None;
+        self.commit_file_signatures.clear();
+        self.commit_file_ghosts.clear();
     }
 
     /// Open the commit-files drill before git returns.
@@ -1757,17 +1932,64 @@ impl AppState {
         source: CommitFileSource,
         files: Vec<CommitFile>,
     ) {
-        self.commit_file_folds.clear();
+        let same_source = match &self.drill {
+            DrillView::Files {
+                repo: r, source: s, ..
+            }
+            | DrillView::Diff {
+                repo: r, source: s, ..
+            } => r == &repo && s == &source,
+            DrillView::Graph => false,
+        };
+        let keep_path = if same_source {
+            self.focused_commit_file_row().map(|row| row.path.clone())
+        } else {
+            None
+        };
+        let before = self.commit_file_signatures.clone();
+        let old_rows = if same_source {
+            self.commit_file_rows()
+        } else {
+            Vec::new()
+        };
+        if !same_source {
+            self.commit_file_folds.clear();
+        }
         self.commit_files_loading = false;
         self.status = format!("files {}", files.len());
         let cursor = DrillView::files_cursor(&files, 0);
         self.drill = DrillView::Files {
-            repo,
-            source,
+            repo: repo.clone(),
+            source: source.clone(),
             files,
             cursor,
         };
         self.focus = FocusPane::Right;
+        if let Some(path) = keep_path.as_deref() {
+            self.restore_commit_file_cursor(Some(path));
+        }
+        let unfolded = match &self.drill {
+            DrillView::Files { files, .. } => self.unfolded_commit_file_rows(files),
+            _ => Vec::new(),
+        };
+        let after = commit_file_signatures(&repo, &source, &unfolded);
+        let now = Instant::now();
+        self.prune_flash_state(now);
+        if !same_source || is_new_row_set(&before, &after) {
+            self.commit_file_signatures = after;
+            self.commit_file_ghosts.clear();
+        } else {
+            self.commit_file_ghosts.extend(capture_removal_ghosts(
+                &old_rows,
+                |row| row.id.as_str(),
+                |row| commit_file_identity(&repo, &source, &row.id),
+                &before,
+                &after,
+                now,
+            ));
+            self.stamp_flashes(flashable_row_ids(&before, &after, true), now);
+            self.commit_file_signatures = after;
+        }
     }
 
     pub fn open_commit_diff(
@@ -3241,7 +3463,7 @@ mod tests {
     };
     use crate::tui::split::{pane_widths, side_by_side_column_widths, DIFF_SPLIT_FRACTION};
     use crate::tui::watch::watch_interval_ms;
-    use workspace_status_graph::{Commit, GraphRef, Stash};
+    use workspace_status_graph::{Commit, GraphModel, GraphRef, Stash};
 
     fn repo(name: &str, dirty: bool) -> RepoSnapshot {
         RepoSnapshot {
@@ -4041,6 +4263,90 @@ mod tests {
         assert_eq!(app.graph_scroll, 3);
         assert_eq!(app.diff_scroll, 4);
         assert_eq!(app.dispatch(Action::WatchTick), Effect::WatchRefresh);
+    }
+
+    fn mini_graph(ids: &[&str]) -> GraphModel {
+        GraphModel {
+            uncommitted: Some(false),
+            commits: ids
+                .iter()
+                .map(|id| Commit {
+                    id: (*id).into(),
+                    subject: format!("s-{id}"),
+                    ..Commit::default()
+                })
+                .collect(),
+            window: ids.len(),
+            skip: 0,
+            limit: 300,
+            ..GraphModel::default()
+        }
+    }
+
+    #[test]
+    fn watch_add_update_remove_flashes_same_ids_only() {
+        let mut app = state();
+        app.flashes.clear();
+        let file_id = app
+            .rows
+            .iter()
+            .find(|row| row.label.contains("README.md"))
+            .map(|row| row.id.clone())
+            .expect("readme row");
+        let mut snapshot = app.snapshot.clone();
+        snapshot.repos[0].changes.push(FileChange {
+            path: "new.rs".into(),
+            staged_status: None,
+            unstaged_status: Some("A".into()),
+            untracked: true,
+            old_path: None,
+        });
+        let added = app.apply_watch_snapshot(snapshot.clone());
+        assert!(
+            added.iter().any(|id| id.contains("new.rs")),
+            "added file should flash: {added:?}"
+        );
+        assert!(
+            !added.contains(&file_id),
+            "unchanged readme should not flash: {added:?}"
+        );
+
+        snapshot.repos[0].changes.retain(|c| c.path != "README.md");
+        let removed = app.apply_watch_snapshot(snapshot);
+        assert!(
+            removed.iter().any(|id| id.contains("README.md")),
+            "removed readme should flash: {removed:?}"
+        );
+        assert!(
+            app.tree_ghosts.iter().any(|g| g.id.contains("README.md")),
+            "removed readme should stay as a ghost"
+        );
+    }
+
+    #[test]
+    fn graph_repo_switch_seeds_without_flashing() {
+        let mut app = state();
+        app.flashes.clear();
+        app.set_graph(mini_graph(&["aaa"]), "app".into(), "aaa".into());
+        assert!(
+            app.flashes.is_empty(),
+            "first graph paint seeds: {:?}",
+            app.flashes.keys().collect::<Vec<_>>()
+        );
+        app.set_graph(mini_graph(&["aaa"]), "lib".into(), "aaa".into());
+        assert!(
+            app.flashes.is_empty(),
+            "repo switch must not flash: {:?}",
+            app.flashes.keys().collect::<Vec<_>>()
+        );
+        let mut updated = mini_graph(&["aaa"]);
+        updated.commits[0].subject = "changed".into();
+        app.set_graph(updated, "lib".into(), "aaa".into());
+        assert!(
+            app.flashes.keys().any(|id| id.contains("commit:aaa")),
+            "same-repo subject change should flash: {:?}",
+            app.flashes.keys().collect::<Vec<_>>()
+        );
     }
 
     #[test]
