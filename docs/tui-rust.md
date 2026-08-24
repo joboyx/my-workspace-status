@@ -52,7 +52,7 @@ To rebuild those frames, run `./scripts/capture-demo-stills.sh` (see [demo.md](.
 | `;` or Ctrl+Space | EasyMotion on the focused list (tree, graph, or commit files). Labels `a`–`z` then `aa`… on the current viewport only. Type a label to jump. Esc cancels. Diff-focused start is a no-op |
 | `T` | Cycle the built-in colour theme. Wraps. Seed from `WS_STATUS_THEME`; the cycle stays in this session (there is no theme file) |
 
-`-a` starts with ignored repos shown. `-f` starts a fetch after the first paint. First paint does not wait on a network fetch.
+`-a` starts with ignored repos shown. `-f` starts a fetch after the first paint. First TUI paint does not wait on a git network fetch. A GitHub Release check may run **before** the TUI mounts (at most every 6 hours; `--plain` / `--json` / `--update` skip it).
 
 `WS_STATUS_WATCH_MS` polls local git and refreshes the snapshot. Default is `3000`. `0` disables the poll. Fold, focus, and scroll stay put. File, graph, and commit-file rows flash (~800ms background fade) when that row's identity is added, updated, or removed. File signatures use the git status letter **or** worktree `size:mtimeMs`, so an in-place save of an already-modified file flashes. Chrome rows flash when label / fold / repo path moves. A disjoint identity set (first paint, repo switch) seeds signatures and does not flash. Graph autoload of older commits skips add-flashes. Status colours stay; the flash is background only. While a flash is decaying, the event loop ticks every `FLASH_TICK_MS` (120ms).
 
@@ -121,7 +121,8 @@ See [tui-model.md](./tui-model.md) for the tree model and action registry.
 | `-i` / `--tui` | Ratatui TUI even when stdout is not a TTY |
 | `--plain` or `--json` | Snapshot text / JSON (wins over `--tui`) |
 | `-v`, `-p`, `-d` | Headless `--plain` path (with that flag; wins over `--tui`) |
-| `--update` | Exec `workspace-status-update`; never opens the TUI |
+| `--update` | Exec `workspace-status-update`; never opens the TUI; never runs the startup check |
+| TUI startup (TTY stdin+stdout) | If the last check is older than 6 hours, `curl` the latest published GitHub Release. Newer → `new version available, update? [y/n]` before the TUI. `y` runs `--update`. `n` opens the TUI. Fail / current / no `curl` stay quiet |
 | Non-TTY without `--tui` | Headless `--plain` unless `--json` |
 
 ## Layout

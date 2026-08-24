@@ -150,3 +150,100 @@ fn update_missing_sidecar_is_nonzero() {
     );
     let _ = fs::remove_dir_all(empty);
 }
+
+#[test]
+fn help_documents_startup_release_check() {
+    let out = Command::new(bin())
+        .arg("--help")
+        .output()
+        .expect("workspace-status --help");
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("6 hours"),
+        "help should mention the 6h TUI startup check: {text}"
+    );
+    assert!(
+        text.contains("newer published release") || text.contains("GitHub Release"),
+        "help should mention the GitHub Release check: {text}"
+    );
+}
+
+#[test]
+fn plain_does_not_run_startup_update_check() {
+    let dir = temp_dir();
+    let store = dir.join("update-check.json");
+    let state = dir.join("xdg-state");
+    let out = Command::new(bin())
+        .arg("--plain")
+        .current_dir(&dir)
+        .env("WS_STATUS_UPDATE_CHECK_STORE", &store)
+        .env("XDG_STATE_HOME", &state)
+        .env("HOME", &dir)
+        .env("TERM", "dumb")
+        .output()
+        .expect("workspace-status --plain");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !store.exists(),
+        "--plain must not write the update-check store"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn json_does_not_run_startup_update_check() {
+    let dir = temp_dir();
+    let store = dir.join("update-check.json");
+    let state = dir.join("xdg-state");
+    let out = Command::new(bin())
+        .arg("--json")
+        .current_dir(&dir)
+        .env("WS_STATUS_UPDATE_CHECK_STORE", &store)
+        .env("XDG_STATE_HOME", &state)
+        .env("HOME", &dir)
+        .env("TERM", "dumb")
+        .output()
+        .expect("workspace-status --json");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !store.exists(),
+        "--json must not write the update-check store"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn update_flag_does_not_run_startup_check() {
+    let dir = temp_dir();
+    let store = dir.join("update-check.json");
+    let state = dir.join("xdg-state");
+    write_script(
+        &dir.join("workspace-status-update"),
+        "#!/bin/sh\necho updated\nexit 0\n",
+    );
+    let out = Command::new(bin())
+        .arg("--update")
+        .env("PATH", &dir)
+        .env("WS_STATUS_UPDATE_CHECK_STORE", &store)
+        .env("XDG_STATE_HOME", &state)
+        .env("HOME", &dir)
+        .output()
+        .expect("workspace-status --update");
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "updated\n");
+    assert!(
+        !store.exists(),
+        "--update must not write the update-check store"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
