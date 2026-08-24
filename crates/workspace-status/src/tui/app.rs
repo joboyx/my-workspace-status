@@ -4,6 +4,8 @@ use std::collections::BTreeSet;
 use std::io::{self, stdout};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
@@ -41,6 +43,10 @@ use super::branches::{
 use super::diff::{load_file_diff, DiffContent};
 use super::drill::CommitFileSource;
 use super::editor::{editor_command, is_detached_editor, resolve_editor};
+use super::event_pump::{
+    action_triggers_graph_autoload, classify_busy_action, overlay_blocks_background_ticks,
+    BusyAction,
+};
 use super::fetch::fetch_interval_ms;
 use super::graph_load::{
     autoload_limit, autoload_skip, load_graph_model, load_graph_model_window, merge_autoload,
@@ -102,6 +108,18 @@ fn terminal_size_rect() -> Rect {
     Rect::new(0, 0, cols.max(1), rows.max(1))
 }
 
+fn map_event(state: &AppState, event: &crossterm::event::Event) -> Action {
+    event_to_action_with(
+        event,
+        state.input_mode(),
+        state.right_is_diff(),
+        matches!(state.focus, super::state::FocusPane::Right),
+        state.graph_stash_focused(),
+        state.graph_commit_focused(),
+        state.hl_folds(),
+    )
+}
+
 fn apply_terminal_resize(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     cols: u16,
@@ -117,11 +135,15 @@ fn run_loop(
     state: &mut AppState,
     opts: &TuiOpts,
 ) -> Result<(), u8> {
-    apply_effect(state, Effect::LoadRightPane, opts, terminal);
+    if apply_effect(state, Effect::LoadRightPane, opts, terminal, &Action::None) {
+        return Ok(());
+    }
     terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
     if opts.start_fetch {
         let effect = state.dispatch(Action::Fetch);
-        apply_effect(state, effect, opts, terminal);
+        if apply_effect(state, effect, opts, terminal, &Action::Fetch) {
+            return Ok(());
+        }
         terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
     }
 
@@ -151,46 +173,51 @@ fn run_loop(
                 .max(10),
         );
         if event::poll(timeout).unwrap_or(false) {
-            let Ok(event) = event::read() else {
-                continue;
-            };
-            let action = event_to_action_with(
-                &event,
-                state.input_mode(),
-                state.right_is_diff(),
-                matches!(state.focus, super::state::FocusPane::Right),
-                state.graph_stash_focused(),
-                state.graph_commit_focused(),
-                state.hl_folds(),
-            );
-            let resized = matches!(action, Action::Resize { .. });
-            if let Action::Resize { cols, rows } = &action {
-                apply_terminal_resize(terminal, *cols, *rows)?;
-            }
-            let mouse_before = state.mouse_enabled;
-            let effect = state.dispatch(action);
-            if state.mouse_enabled != mouse_before {
-                sync_mouse_capture(state.mouse_enabled);
-            }
-            if matches!(effect, Effect::Quit) {
-                return Ok(());
-            }
-            apply_effect(state, effect, opts, terminal);
-            terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
-            if resized {
-                state.sync_graph_scroll();
+            loop {
+                let Ok(event) = event::read() else {
+                    break;
+                };
+                let action = map_event(state, &event);
+                let resized = matches!(action, Action::Resize { .. });
+                if let Action::Resize { cols, rows } = &action {
+                    apply_terminal_resize(terminal, *cols, *rows)?;
+                }
+                let mouse_before = state.mouse_enabled;
+                let action_for_load = action.clone();
+                let effect = state.dispatch(action);
+                if state.mouse_enabled != mouse_before {
+                    sync_mouse_capture(state.mouse_enabled);
+                }
+                if matches!(effect, Effect::Quit) {
+                    return Ok(());
+                }
+                if apply_effect(state, effect, opts, terminal, &action_for_load) {
+                    return Ok(());
+                }
+                terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
+                if resized {
+                    state.sync_graph_scroll();
+                }
+                if !event::poll(Duration::from_millis(0)).unwrap_or(false) {
+                    break;
+                }
             }
             continue;
-        } else {
-            let _ = state.expire_ctrl_c_prompt(Instant::now());
+        }
+        let _ = state.expire_ctrl_c_prompt(Instant::now());
+        if !overlay_blocks_background_ticks(state.input_mode()) {
             if watch_ms > 0 && last_watch.elapsed().as_millis() as u64 >= watch_ms {
                 let effect = state.dispatch(Action::WatchTick);
-                apply_effect(state, effect, opts, terminal);
+                if apply_effect(state, effect, opts, terminal, &Action::WatchTick) {
+                    return Ok(());
+                }
                 last_watch = Instant::now();
             }
             if fetch_ms > 0 && last_fetch.elapsed().as_millis() as u64 >= fetch_ms {
                 let effect = state.dispatch(Action::FetchTick);
-                apply_effect(state, effect, opts, terminal);
+                if apply_effect(state, effect, opts, terminal, &Action::FetchTick) {
+                    return Ok(());
+                }
                 last_fetch = Instant::now();
             }
         }
@@ -209,20 +236,78 @@ fn paint_running_op(
     let _ = terminal.draw(|frame| draw(frame, state));
 }
 
-fn run_repos_with_progress<F>(
-    state: &mut AppState,
+enum WorkPump<T> {
+    Done(T),
+    Quit,
+}
+
+fn run_work_pumped<T: Send + 'static>(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    kind: RunningOp,
-    repos: &[String],
-    mut each: F,
-) where
-    F: FnMut(&str),
-{
-    let total = repos.len();
-    paint_running_op(state, terminal, kind, 0, total);
-    for (i, repo) in repos.iter().enumerate() {
-        each(repo);
-        paint_running_op(state, terminal, kind, i + 1, total);
+    state: &mut AppState,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> WorkPump<T> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    let handle = thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    let mut quit = false;
+    loop {
+        match rx.try_recv() {
+            Ok(value) => {
+                let _ = handle.join();
+                return if quit {
+                    WorkPump::Quit
+                } else {
+                    WorkPump::Done(value)
+                };
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let _ = handle.join();
+                return WorkPump::Quit;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+            loop {
+                let Ok(event) = event::read() else {
+                    break;
+                };
+                let action = map_event(state, &event);
+                match classify_busy_action(&action) {
+                    BusyAction::Quit => quit = true,
+                    BusyAction::Resize { cols, rows } => {
+                        let _ = apply_terminal_resize(terminal, cols, rows);
+                        let _ = state.dispatch(Action::Resize { cols, rows });
+                        let _ = terminal.draw(|frame| draw(frame, state));
+                    }
+                    BusyAction::Ignore => {}
+                }
+                if !event::poll(Duration::from_millis(0)).unwrap_or(false) {
+                    break;
+                }
+            }
+        }
+        let _ = terminal.draw(|frame| draw(frame, state));
+    }
+}
+
+fn reload_snapshot_pumped(
+    state: &mut AppState,
+    opts: &TuiOpts,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> bool {
+    let cwd = opts.cwd.clone();
+    let config = opts.config.clone();
+    let filter = state.snapshot.filter_repos.clone();
+    let show_ignored = state.show_ignored;
+    match run_work_pumped(terminal, state, move || {
+        collect_full_snapshot(&cwd, &config, &filter, show_ignored, false)
+    }) {
+        WorkPump::Quit => true,
+        WorkPump::Done(snapshot) => {
+            state.apply_snapshot(snapshot);
+            false
+        }
     }
 }
 
@@ -231,9 +316,13 @@ fn apply_effect(
     effect: Effect,
     opts: &TuiOpts,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-) {
-    apply_effect_inner(state, effect, opts, terminal);
-    maybe_autoload_graph(state, opts, Some(terminal));
+    action: &Action,
+) -> bool {
+    let quit = apply_effect_inner(state, effect, opts, terminal);
+    if action_triggers_graph_autoload(action) {
+        maybe_autoload_graph(state, opts, Some(terminal));
+    }
+    quit
 }
 
 fn apply_effect_inner(
@@ -241,27 +330,53 @@ fn apply_effect_inner(
     effect: Effect,
     opts: &TuiOpts,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-) {
+) -> bool {
     match effect {
         Effect::None | Effect::Quit => {}
         Effect::Batch(effects) => {
             for child in effects {
-                apply_effect_inner(state, child, opts, terminal);
+                if apply_effect_inner(state, child, opts, terminal) {
+                    return true;
+                }
             }
         }
         Effect::Fetch { repos } => {
-            run_repos_with_progress(state, terminal, RunningOp::Fetch, &repos, |repo| {
-                let _ = exec_git_checked(&["fetch", "--quiet"], &opts.cwd.join(repo));
-            });
-            reload_snapshot(state, opts);
+            let cwd = opts.cwd.clone();
+            let total = repos.len();
+            paint_running_op(state, terminal, RunningOp::Fetch, 0, total);
+            for (i, repo) in repos.iter().enumerate() {
+                let dir = cwd.join(repo);
+                match run_work_pumped(terminal, state, move || {
+                    let _ = exec_git_checked(&["fetch", "--quiet"], &dir);
+                }) {
+                    WorkPump::Quit => return true,
+                    WorkPump::Done(()) => {}
+                }
+                paint_running_op(state, terminal, RunningOp::Fetch, i + 1, total);
+            }
+            if reload_snapshot_pumped(state, opts, terminal) {
+                return true;
+            }
             state.status = format!("fetched {}", repos.join(" "));
             load_right(state);
         }
         Effect::Pull { repos } => {
-            run_repos_with_progress(state, terminal, RunningOp::Pull, &repos, |repo| {
-                let _ = pull_quiet_detailed(&opts.cwd.join(repo));
-            });
-            reload_snapshot(state, opts);
+            let cwd = opts.cwd.clone();
+            let total = repos.len();
+            paint_running_op(state, terminal, RunningOp::Pull, 0, total);
+            for (i, repo) in repos.iter().enumerate() {
+                let dir = cwd.join(repo);
+                match run_work_pumped(terminal, state, move || {
+                    let _ = pull_quiet_detailed(&dir);
+                }) {
+                    WorkPump::Quit => return true,
+                    WorkPump::Done(()) => {}
+                }
+                paint_running_op(state, terminal, RunningOp::Pull, i + 1, total);
+            }
+            if reload_snapshot_pumped(state, opts, terminal) {
+                return true;
+            }
             state.status = format!("pulled {}", repos.join(" "));
             load_right(state);
         }
@@ -276,21 +391,32 @@ fn apply_effect_inner(
                     .find(|r| r.repo == *repo)
                     .map(|snap| (snap.branch.clone(), snap.default_branch_override.clone()));
                 if let Some((branch, override_name)) = task {
-                    let _ = switch_repo_to_default_branch(
-                        repo,
-                        &branch,
-                        &opts.cwd,
-                        override_name.as_deref(),
-                    );
+                    let cwd = opts.cwd.clone();
+                    let repo = repo.clone();
+                    match run_work_pumped(terminal, state, move || {
+                        switch_repo_to_default_branch(
+                            &repo,
+                            &branch,
+                            &cwd,
+                            override_name.as_deref(),
+                        )
+                    }) {
+                        WorkPump::Quit => return true,
+                        WorkPump::Done(_) => {}
+                    }
                 }
                 paint_running_op(state, terminal, RunningOp::DefaultBranch, i + 1, total);
             }
-            reload_snapshot(state, opts);
+            if reload_snapshot_pumped(state, opts, terminal) {
+                return true;
+            }
             state.status = format!("default-branch {}", repos.join(" "));
             load_right(state);
         }
         Effect::ReloadSnapshot => {
-            reload_snapshot(state, opts);
+            if reload_snapshot_pumped(state, opts, terminal) {
+                return true;
+            }
             state.status = "refreshed workspace".into();
             load_right(state);
         }
@@ -305,7 +431,7 @@ fn apply_effect_inner(
             for path in &paths {
                 if let Err(err) = stage_file(&dir, path) {
                     state.status = format!("stage failed: {err}");
-                    return;
+                    return false;
                 }
             }
             reload_snapshot(state, opts);
@@ -317,7 +443,7 @@ fn apply_effect_inner(
             for path in &paths {
                 if let Err(err) = unstage_file(&dir, path) {
                     state.status = format!("unstage failed: {err}");
-                    return;
+                    return false;
                 }
             }
             reload_snapshot(state, opts);
@@ -336,13 +462,13 @@ fn apply_effect_inner(
             for path in &tracked {
                 if let Err(err) = revert_tracked_file(&dir, path) {
                     state.status = format!("revert failed: {err}");
-                    return;
+                    return false;
                 }
             }
             for path in &untracked {
                 if let Err(err) = remove_untracked_file(&dir, path) {
                     state.status = format!("revert failed: {err}");
-                    return;
+                    return false;
                 }
             }
             reload_snapshot(state, opts);
@@ -392,15 +518,19 @@ fn apply_effect_inner(
             }
         }
         Effect::WatchRefresh => {
-            let snapshot = collect_full_snapshot(
-                &opts.cwd,
-                &opts.config,
-                &state.snapshot.filter_repos,
-                state.show_ignored,
-                false,
-            );
-            let _changed = state.apply_watch_snapshot(snapshot);
-            load_right(state);
+            let cwd = opts.cwd.clone();
+            let config = opts.config.clone();
+            let filter = state.snapshot.filter_repos.clone();
+            let show_ignored = state.show_ignored;
+            match run_work_pumped(terminal, state, move || {
+                collect_full_snapshot(&cwd, &config, &filter, show_ignored, false)
+            }) {
+                WorkPump::Quit => return true,
+                WorkPump::Done(snapshot) => {
+                    let _changed = state.apply_watch_snapshot(snapshot);
+                    load_right(state);
+                }
+            }
         }
         Effect::Push { repos } => {
             let mut ok = 0;
@@ -408,13 +538,17 @@ fn apply_effect_inner(
             let total = repos.len();
             paint_running_op(state, terminal, RunningOp::Push, 0, total);
             for (i, repo) in repos.iter().enumerate() {
-                match push_quiet(&opts.cwd.join(repo)) {
-                    Ok(()) => ok += 1,
-                    Err(_) => failed += 1,
+                let dir = opts.cwd.join(repo);
+                match run_work_pumped(terminal, state, move || push_quiet(&dir)) {
+                    WorkPump::Quit => return true,
+                    WorkPump::Done(Ok(())) => ok += 1,
+                    WorkPump::Done(Err(_)) => failed += 1,
                 }
                 paint_running_op(state, terminal, RunningOp::Push, i + 1, total);
             }
-            reload_snapshot(state, opts);
+            if reload_snapshot_pumped(state, opts, terminal) {
+                return true;
+            }
             state.status = if failed > 0 && ok == 0 {
                 format!("push: {failed} failed")
             } else if failed > 0 {
@@ -538,6 +672,7 @@ fn apply_effect_inner(
             load_commit_diff(state, opts, repo, source, path);
         }
     }
+    false
 }
 
 /// Run graph/tree checkout. Returns true when HEAD changed and the snapshot should reload.
@@ -646,9 +781,16 @@ pub(crate) fn run_merge_into_head(
 }
 
 /// Apply pane-load effects without a TTY. Used by the headless e2e harness.
-pub(crate) fn apply_headless_effect(state: &mut AppState, effect: Effect, opts: &TuiOpts) {
+pub(crate) fn apply_headless_effect(
+    state: &mut AppState,
+    effect: Effect,
+    opts: &TuiOpts,
+    action: &Action,
+) {
     apply_headless_inner(state, effect, opts);
-    maybe_autoload_graph(state, opts, None);
+    if action_triggers_graph_autoload(action) {
+        maybe_autoload_graph(state, opts, None);
+    }
 }
 
 fn apply_headless_inner(state: &mut AppState, effect: Effect, opts: &TuiOpts) {
@@ -736,7 +878,9 @@ fn head_file_diff(dir: &Path, path: &str, context: Option<u32>) -> DiffContent {
 
 fn drain_pending_events() {
     while event::poll(Duration::from_millis(0)).unwrap_or(false) {
-        let _ = event::read();
+        if event::read().is_err() {
+            break;
+        }
     }
 }
 

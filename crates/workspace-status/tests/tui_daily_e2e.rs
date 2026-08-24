@@ -719,3 +719,24 @@ fn diff_h_l_pans_long_lines() {
     assert!(tui.right_is_diff());
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn confirm_overlay_keeps_y_n_after_resize() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    tui.search("README");
+    tui.key('x');
+    assert_contains(&tui.frame(), "Revert");
+    let before = tui.cursor_id();
+    tui.resize(100, 24);
+    assert_contains(&tui.frame(), "Revert");
+    tui.key('j');
+    assert_eq!(
+        tui.cursor_id(),
+        before,
+        "confirm overlay should swallow movement keys"
+    );
+    tui.key('n');
+    assert_absent(&tui.frame(), "Revert ");
+    let _ = fs::remove_dir_all(root);
+}

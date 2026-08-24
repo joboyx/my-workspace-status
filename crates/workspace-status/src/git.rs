@@ -23,13 +23,24 @@ pub fn git_binary() -> &'static Path {
     })
 }
 
-fn run(args: &[&str], cwd: &Path) -> std::io::Result<std::process::Output> {
-    Command::new(git_binary())
-        .args(args)
+/// Build a git subprocess that cannot steal the TUI's TTY.
+///
+/// Stdin is `/dev/null` so a credential prompt cannot deadlock against the
+/// event loop. `GIT_TERMINAL_PROMPT=0` fails fast instead of waiting on a
+/// hidden prompt.
+fn git_command(bin: &Path, args: &[&str], cwd: &Path) -> Command {
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
         .current_dir(cwd)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .env("GIT_TERMINAL_PROMPT", "0");
+    cmd
+}
+
+fn run(args: &[&str], cwd: &Path) -> std::io::Result<std::process::Output> {
+    git_command(git_binary(), args, cwd).output()
 }
 
 /// Run git and return trimmed stdout. Empty string on failure.
@@ -123,14 +134,10 @@ pub enum MergeIntoHeadResult {
 }
 
 fn run_merge(args: &[&str], cwd: &Path) -> std::io::Result<std::process::Output> {
-    Command::new(git_binary())
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_EDITOR", "true")
-        .env("GIT_MERGE_AUTOEDIT", "no")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
+    let mut cmd = git_command(git_binary(), args, cwd);
+    cmd.env("GIT_EDITOR", "true")
+        .env("GIT_MERGE_AUTOEDIT", "no");
+    cmd.output()
 }
 
 fn merge_failed_message(out: &std::process::Output) -> String {
@@ -681,6 +688,47 @@ mod tests {
     #[test]
     fn git_binary_is_nonempty() {
         assert!(!git_binary().as_os_str().is_empty());
+    }
+
+    #[test]
+    fn git_command_nulls_stdin_and_disables_prompts() {
+        let dir = std::env::temp_dir().join(format!(
+            "ws-git-stdin-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("probe");
+        fs::write(
+            &script,
+            "#!/bin/sh\nif [ -t 0 ]; then echo TTY; exit 7; fi\nprintf 'prompt=%s\\n' \"${GIT_TERMINAL_PROMPT-}\"\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = git_command(&script, &["status"], &dir)
+            .output()
+            .expect("probe runs");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "probe failed: {stdout} {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            stdout.contains("prompt=0"),
+            "expected GIT_TERMINAL_PROMPT=0, got {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("TTY"),
+            "stdin must not be a TTY: {stdout:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

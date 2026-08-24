@@ -2,6 +2,8 @@
 
 Every git subprocess the tool runs. `<git>` is `git_binary()` (`WORKSPACE_STATUS_GIT`, else `/usr/bin/git` when it exists, else `git`).
 
+All wrappers in this file attach stdin to `/dev/null` and set `GIT_TERMINAL_PROMPT=0`. That keeps git from inheriting the TUI's raw-mode TTY (a credential prompt would otherwise deadlock: the parent waits on `output()`, the child waits on stdin). `merge_into_head` also sets `GIT_EDITOR=true` and `GIT_MERGE_AUTOEDIT=no`.
+
 ## `crates/workspace-status/src/git.rs`
 
 | Function | Command | Returns | Purpose |
@@ -87,7 +89,7 @@ Default window is 300 (`DEFAULT_GRAPH_WINDOW`). `--exclude=refs/stash` precedes 
 
 Hidden ignored checkouts stay out of `P` / `S` / `b` unless shown. Linked worktrees are included on `f` / `p` / `P` / `d` only when that row is focused. The background fetch timer (`background_fetch_targets` in `tui/fetch.rs`) includes every snapshot except hidden ignored — linked worktrees and shown ignored repos included. See [tui-rust.md](./tui-rust.md).
 
-Manual `f` / `p` / `P` / `d` and the background fetch tick paint a trailing breadcrumb counter (`Fetching n/N…`, `Pulling n/N…`, `Pushing n/N…`, `Switching n/N…`) and redraw after each repo settles. The hint row stays pills + keys. Graph autoload still uses `loading older…`.
+Manual `f` / `p` / `P` / `d` and the background fetch tick paint a trailing breadcrumb counter (`Fetching n/N…`, `Pulling n/N…`, `Pushing n/N…`, `Switching n/N…`) and redraw after each repo settles. The hint row stays pills + keys. Graph autoload still uses `loading older…`. Those git children (and watch / full-snapshot reload) run on a worker thread so resize and quit still reach the event loop; overlay modes do not start the watch or fetch timers.
 
 ## Non-obvious semantics
 
