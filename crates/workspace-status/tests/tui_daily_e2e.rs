@@ -584,3 +584,138 @@ fn q_still_quits_immediately() {
     assert!(tui.did_quit(), "q remains an immediate quit");
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn tree_shift_arrows_pan_long_paths_and_h_still_folds() {
+    let (root, workspace) = daily_workspace();
+    let long_dir = workspace.join("app/deep/nested/unique-dir-name");
+    fs::create_dir_all(&long_dir).unwrap();
+    fs::write(long_dir.join("unique-pan-tail.rs"), "fn pan() {}\n").unwrap();
+
+    let mut tui = open(&workspace);
+    tui.key('t');
+    tui.resize(64, 24);
+    tui.search("unique-pan-tail");
+    let clipped = tui.frame();
+    assert_absent(&clipped, "unique-pan-tail.rs");
+
+    for _ in 0..40 {
+        tui.shift_right();
+    }
+    let panned = tui.frame();
+    assert_contains(&panned, "unique-pan-tail");
+
+    tui.key('j');
+    tui.key('k');
+    assert!(
+        tui.cursor_label().contains("unique-pan-tail")
+            || tui.cursor_label().contains("deep/nested"),
+        "vertical j/k should still move after a pan, cursor={}",
+        tui.cursor_label()
+    );
+
+    tui.key('G');
+    tui.key('l');
+    let opened = tui.frame();
+    assert_contains(&opened, "lib");
+    tui.key('h');
+    let closed = tui.frame();
+    assert_contains(&closed, "No updates");
+    assert_absent(&closed, "lib");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn graph_h_l_pans_long_subject_and_j_still_moves() {
+    let (root, workspace) = daily_workspace();
+    seed_long_subject_repo(&workspace, "longsubj");
+    let mut tui = open(&workspace);
+    tui.resize(80, 28);
+    tui.search("longsubj");
+    tui.tab();
+    assert!(tui.right_is_graph(), "right pane should be the graph");
+    tui.search("UNIQUE_GRAP");
+    tui.esc();
+    tui.resize(80, 28);
+    let clipped = tui.frame();
+    // Footer / list clip to the pane, so the unique tail stays off-screen
+    // until pan. Use a prefix of the marker: after max pan the remaining
+    // label viewport is often shorter than UNIQUE_GRAPH_TAIL itself.
+    assert_absent(&clipped, "UNIQUE_GRAP");
+
+    for _ in 0..120 {
+        tui.key('l');
+    }
+    let panned = tui.frame();
+    assert_contains(&panned, "UNIQUE_GRAP");
+
+    tui.key('j');
+    tui.key('k');
+    assert!(
+        tui.right_is_graph(),
+        "vertical j/k should keep the graph focused"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+fn seed_long_subject_repo(workspace: &Path, name: &str) {
+    let repo = workspace.join(name);
+    fs::create_dir_all(&repo).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(&repo)
+        .status();
+    if init.map(|s| s.success()).unwrap_or(false) == false {
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["checkout", "-q", "-b", "main"]);
+    }
+    git(&repo, &["config", "user.name", "workspace-status e2e"]);
+    git(
+        &repo,
+        &[
+            "config",
+            "user.email",
+            "workspace-status-e2e@example.invalid",
+        ],
+    );
+    fs::write(repo.join("README.md"), "# long\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "root"]);
+    git(&repo, &["checkout", "-q", "-b", "feature/long-subject"]);
+    fs::write(repo.join("wip.txt"), "x\n").unwrap();
+    git(&repo, &["add", "wip.txt"]);
+    let subject = format!("{}UNIQUE_GRAPH_TAIL", "n".repeat(80));
+    git(&repo, &["commit", "-q", "-m", &subject]);
+}
+
+#[test]
+fn diff_h_l_pans_long_lines() {
+    let (root, workspace) = daily_workspace();
+    fs::write(
+        workspace.join("app/README.md"),
+        format!("# {}\n", "d".repeat(80)),
+    )
+    .unwrap();
+    let mut tui = open(&workspace);
+    tui.resize(80, 24);
+    tui.tab();
+    assert!(tui.right_is_diff(), "right pane should be the file diff");
+    let clipped = tui.frame();
+    let tail = "d".repeat(20);
+    let before_has_tail = clipped.contains(&tail);
+    for _ in 0..60 {
+        tui.key('l');
+    }
+    let panned = tui.frame();
+    assert!(
+        panned.contains(&tail) || panned.contains("pan"),
+        "diff pan should reveal a long line or show a pan offset:\n{panned}"
+    );
+    if !before_has_tail {
+        assert_contains(&panned, &tail);
+    }
+    tui.key('j');
+    tui.key('k');
+    assert!(tui.right_is_diff());
+    let _ = fs::remove_dir_all(root);
+}

@@ -42,6 +42,9 @@ pub fn event_to_action(
 }
 
 /// Map one terminal event to an [`Action`], including graph-stash and graph-commit keys.
+///
+/// `hl_folds` is true when `h` / `l` / arrows should fold the workspace
+/// tree. Graph, commit-file, and diff focus pass false so those keys pan.
 pub fn event_to_action_ex(
     event: &Event,
     mode: InputMode,
@@ -49,6 +52,27 @@ pub fn event_to_action_ex(
     focus_right: bool,
     graph_stash_focused: bool,
     graph_commit_focused: bool,
+) -> Action {
+    event_to_action_with(
+        event,
+        mode,
+        right_is_diff,
+        focus_right,
+        graph_stash_focused,
+        graph_commit_focused,
+        true,
+    )
+}
+
+/// [`event_to_action_ex`] with an explicit fold-vs-pan flag for `h` / `l`.
+pub fn event_to_action_with(
+    event: &Event,
+    mode: InputMode,
+    right_is_diff: bool,
+    focus_right: bool,
+    graph_stash_focused: bool,
+    graph_commit_focused: bool,
+    hl_folds: bool,
 ) -> Action {
     match event {
         Event::Resize(cols, rows) => Action::Resize {
@@ -63,6 +87,7 @@ pub fn event_to_action_ex(
                 focus_right,
                 graph_stash_focused,
                 graph_commit_focused,
+                hl_folds,
             )
         }
         Event::Mouse(mouse) => {
@@ -93,6 +118,7 @@ fn key_to_action(
     focus_right: bool,
     graph_stash_focused: bool,
     graph_commit_focused: bool,
+    hl_folds: bool,
 ) -> Action {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Action::CtrlC;
@@ -124,6 +150,7 @@ fn key_to_action(
                 focus_right,
                 graph_stash_focused,
                 graph_commit_focused,
+                hl_folds,
             ),
         },
         InputMode::GPending { search_active } => match key.code {
@@ -136,6 +163,7 @@ fn key_to_action(
                 focus_right,
                 graph_stash_focused,
                 graph_commit_focused,
+                hl_folds,
             ),
         },
         InputMode::Confirm => match key.code {
@@ -202,6 +230,7 @@ fn key_to_action(
                 focus_right,
                 graph_stash_focused,
                 graph_commit_focused,
+                hl_folds,
             )
         }
     }
@@ -214,6 +243,7 @@ fn normal_key(
     focus_right: bool,
     graph_stash_focused: bool,
     graph_commit_focused: bool,
+    hl_folds: bool,
 ) -> Action {
     if graph_stash_focused {
         match key.code {
@@ -315,27 +345,32 @@ fn normal_key(
                 Action::Move(-1)
             }
         }
-        KeyCode::Char('h') | KeyCode::Left => {
-            if focus_right && right_is_diff {
-                Action::PanDiff(-1)
-            } else if focus_right {
-                Action::None
-            } else {
-                Action::FoldClose
-            }
-        }
-        KeyCode::Char('l') | KeyCode::Right => {
-            if focus_right && right_is_diff {
-                Action::PanDiff(1)
-            } else if focus_right {
-                Action::None
-            } else {
-                Action::FoldOpen
-            }
-        }
+        KeyCode::Char('h') | KeyCode::Left => hl_or_pan(key, -1, focus_right, hl_folds),
+        KeyCode::Char('l') | KeyCode::Right => hl_or_pan(key, 1, focus_right, hl_folds),
         KeyCode::Enter => Action::NavEnter,
         KeyCode::Esc => Action::NavEsc,
         _ => Action::None,
+    }
+}
+
+/// `h` / `l` / arrows: fold the workspace tree, otherwise pan.
+///
+/// Shift+Left / Shift+Right always pan so long tree paths can move without
+/// stealing fold. Unshifted keys still fold when `hl_folds` is set and the
+/// left tree is focused.
+fn hl_or_pan(key: KeyEvent, delta: i32, focus_right: bool, hl_folds: bool) -> Action {
+    let pan = if delta < 0 {
+        Action::PanDiff(-1)
+    } else {
+        Action::PanDiff(1)
+    };
+    if key.modifiers.contains(KeyModifiers::SHIFT) || !hl_folds || focus_right {
+        return pan;
+    }
+    if delta < 0 {
+        Action::FoldClose
+    } else {
+        Action::FoldOpen
     }
 }
 
@@ -373,6 +408,8 @@ fn mouse_to_action(mouse: MouseEvent) -> Action {
             row: mouse.row,
             delta: -1,
         },
+        MouseEventKind::ScrollLeft => Action::PanDiff(-1),
+        MouseEventKind::ScrollRight => Action::PanDiff(1),
         _ => Action::None,
     }
 }
@@ -616,6 +653,10 @@ mod tests {
         Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL))
     }
 
+    fn shift(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::SHIFT))
+    }
+
     #[test]
     fn easy_motion_and_theme_keys() {
         assert_eq!(
@@ -688,11 +729,59 @@ mod tests {
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('h')), normal(), false, true),
-            Action::None
+            Action::PanDiff(-1)
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('l')), normal(), false, true),
-            Action::None
+            Action::PanDiff(1)
+        );
+        assert_eq!(
+            event_to_action_with(
+                &shift(KeyCode::Left),
+                normal(),
+                false,
+                false,
+                false,
+                false,
+                true
+            ),
+            Action::PanDiff(-1)
+        );
+        assert_eq!(
+            event_to_action_with(
+                &shift(KeyCode::Right),
+                normal(),
+                false,
+                false,
+                false,
+                false,
+                true
+            ),
+            Action::PanDiff(1)
+        );
+        assert_eq!(
+            event_to_action_with(
+                &key(KeyCode::Char('h')),
+                normal(),
+                false,
+                false,
+                false,
+                false,
+                false
+            ),
+            Action::PanDiff(-1)
+        );
+        assert_eq!(
+            event_to_action_with(
+                &key(KeyCode::Char('l')),
+                normal(),
+                false,
+                true,
+                false,
+                false,
+                false
+            ),
+            Action::PanDiff(1)
         );
     }
 

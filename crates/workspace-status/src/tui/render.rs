@@ -33,7 +33,7 @@ use super::icons::{
     FOLD_EXPANDED_ASCII,
 };
 use super::search::{
-    collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids,
+    collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids, slice_cols,
     slice_visible, SearchPane,
 };
 use super::split::{
@@ -127,9 +127,15 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     let tree_inner = tree_block.inner(panes[0]);
     frame.render_widget(tree_block, panes[0]);
     if left_is_files {
-        draw_commit_file_list(frame, tree_inner, state, state.commit_files_cursor());
+        draw_commit_file_list(
+            frame,
+            tree_inner,
+            state,
+            state.commit_files_cursor(),
+            state.left_col_offset as usize,
+        );
     } else if left_is_graph {
-        draw_graph(frame, tree_inner, state);
+        draw_graph(frame, tree_inner, state, state.left_col_offset);
     } else {
         draw_tree(frame, tree_inner, state);
     }
@@ -291,6 +297,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             viewed,
             motion_label.as_deref(),
             palette,
+            state.left_col_offset as usize,
         ));
     }
     frame.render_widget(Paragraph::new(lines), area);
@@ -307,6 +314,7 @@ fn paint_tree_row(
     viewed: bool,
     motion_label: Option<&str>,
     palette: Palette,
+    col_offset: usize,
 ) -> Line<'static> {
     let segs = row_segments(row, ascii, viewed);
     paint_segmented_row(
@@ -322,6 +330,7 @@ fn paint_tree_row(
         ascii,
         motion_label,
         palette,
+        col_offset,
     )
 }
 
@@ -338,6 +347,7 @@ fn paint_segmented_row(
     ascii: bool,
     motion_label: Option<&str>,
     palette: Palette,
+    col_offset: usize,
 ) -> Line<'static> {
     let bg = row_match_bg(selected, search_match, flashing, palette, search_bg);
     let trailing_text: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
@@ -380,7 +390,7 @@ fn paint_segmented_row(
         .saturating_sub(prefix_width)
         .saturating_sub(trailing_width)
         .saturating_sub(pad);
-    let label = truncate_segs(&segs.segments, label_budget.max(1));
+    let label = slice_segs(&segs.segments, col_offset, label_budget.max(1));
     let label_width: usize = label.iter().map(|s| visible_width(&s.text)).sum();
     for seg in &label {
         spans.push(styled_span(&seg.text, seg_style(seg, palette), bg));
@@ -454,38 +464,32 @@ fn seg_style(seg: &TextSeg, palette: Palette) -> Style {
     style
 }
 
-fn truncate_segs(segs: &[TextSeg], width: usize) -> Vec<TextSeg> {
+fn slice_segs(segs: &[TextSeg], offset: usize, width: usize) -> Vec<TextSeg> {
     if width == 0 {
         return Vec::new();
     }
-    let total: usize = segs.iter().map(|s| visible_width(&s.text)).sum();
-    if total <= width {
-        return segs.to_vec();
-    }
-    let budget = width.saturating_sub(1);
+    let mut skip = offset;
+    let mut remain = width;
     let mut out = Vec::new();
-    let mut used = 0;
     for seg in segs {
         let sw = visible_width(&seg.text);
-        if used + sw <= budget {
-            out.push(seg.clone());
-            used += sw;
+        if skip >= sw {
+            skip -= sw;
             continue;
         }
-        let mut cut = seg.clone();
-        cut.text = truncate_visible(&seg.text, budget.saturating_sub(used));
-        if !cut.text.is_empty() {
+        let sliced = slice_cols(&seg.text, skip, remain);
+        skip = 0;
+        let used = visible_width(&sliced);
+        if !sliced.is_empty() {
+            let mut cut = seg.clone();
+            cut.text = sliced;
             out.push(cut);
         }
-        break;
+        remain = remain.saturating_sub(used);
+        if remain == 0 {
+            break;
+        }
     }
-    out.push(TextSeg {
-        text: "…".into(),
-        role: SegRole::Muted,
-        hex: None,
-        bold: false,
-        dim: true,
-    });
     out
 }
 
@@ -508,7 +512,7 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         draw_diff_pane(frame, area, state);
         return;
     }
-    draw_graph(frame, area, state);
+    draw_graph(frame, area, state, state.right_col_offset);
     if state.graph.is_some() {
         return;
     }
@@ -518,7 +522,7 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     );
 }
 
-fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &AppState, col_offset: u16) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -532,6 +536,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         .ascii(state.ascii)
         .selected(Some(state.graph_cursor))
         .scroll(state.graph_scroll)
+        .col_offset(col_offset)
         .loading_older(state.graph_loading_older)
         .search_matches(&matches, state.theme.pills().filter.bg)
         .cursor_style(pal.cursor, pal.cursor_bg)
@@ -607,10 +612,22 @@ fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState, curso
         width: area.width,
         height: list_h,
     };
-    draw_commit_file_list(frame, list_area, state, cursor);
+    draw_commit_file_list(
+        frame,
+        list_area,
+        state,
+        cursor,
+        state.right_col_offset as usize,
+    );
 }
 
-fn draw_commit_file_list(frame: &mut Frame<'_>, area: Rect, state: &AppState, cursor: usize) {
+fn draw_commit_file_list(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    cursor: usize,
+    col_offset: usize,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -663,6 +680,7 @@ fn draw_commit_file_list(frame: &mut Frame<'_>, area: Rect, state: &AppState, cu
                 state.ascii,
                 motion_label.as_deref(),
                 palette,
+                col_offset,
             )
         })
         .collect();

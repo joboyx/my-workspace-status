@@ -46,7 +46,7 @@ use super::graph_load::{
     autoload_limit, autoload_skip, load_graph_model, load_graph_model_window, merge_autoload,
     refresh_graph_limit, should_autoload, ShouldAutoload,
 };
-use super::keys::event_to_action_ex;
+use super::keys::event_to_action_with;
 use super::ops::{format_running_op, RunningOp};
 use super::render::draw;
 use super::state::AppState;
@@ -154,13 +154,14 @@ fn run_loop(
             let Ok(event) = event::read() else {
                 continue;
             };
-            let action = event_to_action_ex(
+            let action = event_to_action_with(
                 &event,
                 state.input_mode(),
                 state.right_is_diff(),
                 matches!(state.focus, super::state::FocusPane::Right),
                 state.graph_stash_focused(),
                 state.graph_commit_focused(),
+                state.hl_folds(),
             );
             let resized = matches!(action, Action::Resize { .. });
             if let Action::Resize { cols, rows } = &action {

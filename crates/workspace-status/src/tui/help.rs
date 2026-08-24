@@ -31,7 +31,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: "h l",
-                desc: "fold · pan when right+diff",
+                desc: "fold · pan lists/diff · Shift+←→ tree",
             },
             HelpEntry {
                 keys: "z",

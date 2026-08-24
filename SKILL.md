@@ -81,7 +81,7 @@ Live TUI keymap (full overlay detail in [docs/configuration.md](./docs/configura
 | Keys                                  | Action                                                                                                                                                 |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `j` / `k` · `↓` / `↑`                 | next / prev visible row (scrolls a focused diff)                                                                                                       |
-| `l` / `→` · `h` / `←`                 | expand / collapse focused row (pan when right+diff)                                                                                                    |
+| `l` / `→` · `h` / `←`                 | tree: expand / collapse. graph / commit-files / diff: pan. Shift+Left / Shift+Right pan the focused pane |
 | `z`                                   | toggle fold immediately; `zz` toggles subtree. No-op when the graph or a diff is focused                                                               |
 | `gg` / `G`                            | first / last visible row on the focused list; on a focused **diff**, scroll to start / end                                                             |
 | `t`                                   | flat ↔ directory tree (view-mode; works when right-focused)                                                                                            |
