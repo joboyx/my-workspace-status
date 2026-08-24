@@ -83,6 +83,7 @@ pub fn load_graph_model_window(
         limit,
         has_more: truncated,
         window,
+        default_branch_override: row.default_branch_override.clone(),
     };
     (
         model,
@@ -159,6 +160,10 @@ pub fn merge_autoload(current: &GraphModel, page: GraphModel) -> GraphModel {
         limit: autoload_limit(current),
         has_more: page.has_more,
         window,
+        default_branch_override: page
+            .default_branch_override
+            .clone()
+            .or_else(|| current.default_branch_override.clone()),
     }
 }
 
