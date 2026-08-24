@@ -331,6 +331,7 @@ fn drill_enter_and_esc_walk_commit_files_diff() {
     let mut tui = open(&workspace);
     tui.search("merger");
     assert!(tui.right_is_graph(), "merger row should load the graph");
+    tui.esc(); // clear armed search so later Esc is the ViewStack ladder
     tui.enter();
     tui.key('j');
     tui.key('j');
