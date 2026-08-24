@@ -12,6 +12,7 @@ use workspace_status_graph::GraphRow;
 
 use super::drill::CommitFile;
 use super::tree::{flatten, TreeNode};
+use crate::helpers::visible_width;
 
 /// Pane `/` binds at search start. `n`/`N` stay on this pane.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -260,6 +261,52 @@ pub fn slice_visible(text: &str, offset: usize, width: usize) -> String {
     text.chars().skip(offset).take(width).collect()
 }
 
+/// Skip `offset` display columns, then take up to `width` columns.
+pub fn slice_cols(text: &str, offset: usize, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut skipped = 0usize;
+    let mut taken = 0usize;
+    let mut out = String::new();
+    for ch in text.chars() {
+        let mut buf = [0u8; 4];
+        let s = ch.encode_utf8(&mut buf);
+        let cw = visible_width(s);
+        if skipped < offset {
+            skipped = skipped.saturating_add(cw);
+            continue;
+        }
+        if taken.saturating_add(cw) > width {
+            break;
+        }
+        out.push(ch);
+        taken = taken.saturating_add(cw);
+    }
+    out
+}
+
+/// Cursor bar + indent + chevron+space. Shared with tree / commit-file paint.
+pub fn list_prefix_cols(depth: usize) -> usize {
+    1 + depth.saturating_mul(2) + 2
+}
+
+/// How far one segmented list row can pan.
+pub fn list_row_pan_max(
+    label_cols: usize,
+    depth: usize,
+    trailing_cols: usize,
+    pane_cols: usize,
+) -> usize {
+    let pad = usize::from(trailing_cols > 0);
+    let budget = pane_cols
+        .saturating_sub(list_prefix_cols(depth))
+        .saturating_sub(trailing_cols)
+        .saturating_sub(pad)
+        .max(1);
+    label_cols.saturating_sub(budget)
+}
+
 /// First hunk header at or before `scroll`, else the line at `scroll`.
 #[allow(dead_code)]
 pub fn hunk_anchor(lines: &[String], scroll: usize) -> Option<String> {
@@ -479,6 +526,9 @@ mod tests {
         assert_eq!(apply_pan(0, -1, 4), 0);
         assert_eq!(apply_pan(0, 1, 4), 1);
         assert_eq!(apply_pan(4, 1, 4), 4);
+        assert_eq!(slice_cols("abcdefghij", 3, 4), "defg");
+        assert_eq!(slice_cols("abcdefghij", 0, 4), "abcd");
+        assert_eq!(list_row_pan_max(20, 0, 0, 10), 13);
         assert_eq!(hunk_anchor(&lines, 1).as_deref(), Some("@@ hunk @@"));
         assert_eq!(scroll_to_keep_anchor(&lines, "@@ hunk @@", 9), 0);
     }

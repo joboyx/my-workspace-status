@@ -15,6 +15,7 @@ use crate::gutter::graph_gutter_cap;
 use crate::lane_colors::{cells_to_spans, default_lane_colors};
 use crate::model::GraphModel;
 use crate::paint::{paint_model_with, PaintOpts, PaintedLine};
+use crate::topology::cells_text;
 
 /// Subject, meta, and ref-chip colours for graph labels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +57,7 @@ pub struct GraphWidget<'a> {
     cursor_fg: Color,
     cursor_bg: Option<Color>,
     label_palette: Option<GraphLabelPalette>,
+    col_offset: u16,
 }
 
 impl<'a> GraphWidget<'a> {
@@ -75,6 +77,7 @@ impl<'a> GraphWidget<'a> {
             cursor_fg: Color::Cyan,
             cursor_bg: None,
             label_palette: None,
+            col_offset: 0,
         }
     }
 
@@ -141,6 +144,13 @@ impl<'a> GraphWidget<'a> {
     /// Colour commit subjects, meta, ref chips, and the hidden-ref overflow chip.
     pub fn label_palette(mut self, palette: GraphLabelPalette) -> Self {
         self.label_palette = Some(palette);
+        self
+    }
+
+    /// Skip this many columns of the label (gutter stays put). Clips to the
+    /// pane; rows do not grow.
+    pub fn col_offset(mut self, offset: u16) -> Self {
+        self.col_offset = offset;
         self
     }
 }
@@ -223,6 +233,7 @@ impl Widget for GraphWidget<'_> {
                 lane_colors,
                 fallback,
                 self.label_palette,
+                self.col_offset,
             );
             y = y.saturating_add(1);
         }
@@ -304,6 +315,7 @@ fn put_painted_line(
     lane_colors: &[Color],
     fallback: Color,
     palette: Option<GraphLabelPalette>,
+    col_offset: u16,
 ) {
     let mut spans: Vec<Span> = Vec::new();
     let bar = if selected && line.selectable {
@@ -323,11 +335,20 @@ fn put_painted_line(
         bar_style = bar_style.bg(bg);
     }
     spans.push(Span::styled(bar, bar_style));
+    let gutter_cols = if line.gutter.is_empty() {
+        0
+    } else {
+        cells_text(&line.gutter).chars().count() + 1
+    };
     if !line.gutter.is_empty() {
         spans.extend(cells_to_spans(&line.gutter, lane_colors, fallback));
         spans.push(Span::raw(" "));
     }
-    spans.extend(label_spans(line, palette, fallback));
+    let label_w = (width as usize)
+        .saturating_sub(1)
+        .saturating_sub(gutter_cols);
+    let sliced = slice_line_label(line, col_offset as usize, label_w);
+    spans.extend(label_spans(&sliced, palette, fallback));
     let mut style = Style::default();
     if let Some(bg) = row_bg {
         style = style.bg(bg);
@@ -335,6 +356,50 @@ fn put_painted_line(
     Line::from(spans)
         .style(style)
         .render(Rect::new(x, y, width, 1), buf);
+}
+
+fn slice_line_label(line: &PaintedLine, offset: usize, width: usize) -> PaintedLine {
+    let mut out = line.clone();
+    if out.parts.is_empty() {
+        out.label = out.label.chars().skip(offset).take(width).collect();
+        return out;
+    }
+    out.parts = slice_parts(&out.parts, offset, width);
+    out.label = out.parts.iter().map(|p| p.text.as_str()).collect();
+    out
+}
+
+fn slice_parts(
+    parts: &[crate::format::LabelPart],
+    offset: usize,
+    width: usize,
+) -> Vec<crate::format::LabelPart> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut skip = offset;
+    let mut remain = width;
+    let mut out = Vec::new();
+    for part in parts {
+        let n = part.text.chars().count();
+        if skip >= n {
+            skip -= n;
+            continue;
+        }
+        let sliced: String = part.text.chars().skip(skip).take(remain).collect();
+        skip = 0;
+        let used = sliced.chars().count();
+        if !sliced.is_empty() {
+            let mut p = part.clone();
+            p.text = sliced;
+            out.push(p);
+        }
+        remain = remain.saturating_sub(used);
+        if remain == 0 {
+            break;
+        }
+    }
+    out
 }
 
 fn label_spans(
@@ -1326,6 +1391,86 @@ mod tests {
         assert!(
             !overflow_uses_meta,
             "overflow must not use muted meta colour"
+        );
+    }
+
+    #[test]
+    fn col_offset_reveals_clipped_subject() {
+        let marker = "UNIQUE_GRAPH_TAIL_xyz";
+        let subject = format!("{}{marker}", "n".repeat(60));
+        let model = GraphModel {
+            commits: vec![commit(
+                "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                &subject,
+                &[],
+            )],
+            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            uncommitted: Some(false),
+            window: 1,
+            ..GraphModel::default()
+        };
+        let width = 36u16;
+        let height = 8u16;
+        let clipped = {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).expect("test backend");
+            terminal
+                .draw(|frame| {
+                    GraphWidget::new(&model)
+                        .ascii(true)
+                        .now_unix(NOW)
+                        .render(frame.area(), frame.buffer_mut());
+                })
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            (0..height)
+                .map(|y| {
+                    let mut line = String::new();
+                    for x in 0..width {
+                        line.push_str(buffer[(x, y)].symbol());
+                    }
+                    line
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(
+            !clipped.contains(marker),
+            "narrow pane must clip the subject tail: {clipped}"
+        );
+        let panned = {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).expect("test backend");
+            terminal
+                .draw(|frame| {
+                    GraphWidget::new(&model)
+                        .ascii(true)
+                        .now_unix(NOW)
+                        .col_offset(50)
+                        .render(frame.area(), frame.buffer_mut());
+                })
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            (0..height)
+                .map(|y| {
+                    let mut line = String::new();
+                    for x in 0..width {
+                        line.push_str(buffer[(x, y)].symbol());
+                    }
+                    line
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(
+            panned.contains(marker),
+            "panning must reveal the clipped tail: {panned}"
+        );
+        assert!(
+            panned
+                .lines()
+                .all(|l| l.chars().count() <= width as usize + 4),
+            "panning must not grow the row past the pane"
         );
     }
 }

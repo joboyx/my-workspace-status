@@ -43,7 +43,10 @@ pub enum Action {
     FocusLeft,
     FocusRight,
     ScrollDiff(i32),
-    /// Horizontal pan on a focused file diff. Positive looks right.
+    /// Horizontal pan on the focused pane (tree, graph, commit-files, or diff).
+    ///
+    /// Positive looks right. Rows stay clipped to the pane; this only
+    /// shifts the viewport.
     PanDiff(i32),
     /// Toggle unlimited `-U` context on the focused file diff.
     ToggleFullContext,

@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use workspace_status_graph::{
-    format_relative_date, graph_chrome_budget, paint_model, GraphChromeBudget, GraphModel,
-    GraphRow, PaintedLine, ASCII, UNICODE,
+    format_label, format_relative_date, graph_chrome_budget, graph_gutter_cap, paint_model,
+    GraphChromeBudget, GraphModel, GraphRow, PaintedLine, ASCII, UNICODE,
 };
 
 use crate::snapshot::{FileChange, WorkspaceSnapshot};
@@ -38,7 +38,7 @@ use super::ops::{
 };
 use super::search::{
     apply_pan, focus_commit_file_search, focus_diff_search, focus_graph_search, focus_tree_search,
-    max_col_offset, SearchPane,
+    list_row_pan_max, max_col_offset, SearchPane,
 };
 use super::split::{
     clamp_tree_fraction, diff_split_fraction_from_col, effective_diff_mode, hit_split,
@@ -52,8 +52,8 @@ use super::stash::{
 };
 use super::theme::{cycle_theme_id, theme_from_env, ThemeId};
 use super::tree::{
-    build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
-    workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
+    build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, row_segments,
+    visible_for_tree, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
 };
 #[cfg(not(test))]
 use super::viewed::viewed_store_path;
@@ -64,6 +64,7 @@ use super::viewed::{
 };
 use super::watch::{changed_row_ids, tree_signatures};
 use crate::git::FULL_DIFF_CONTEXT_LINES;
+use crate::helpers::visible_width;
 use crate::snapshot::CheckoutKind;
 
 /// Which pane has keyboard focus.
@@ -219,6 +220,10 @@ pub struct AppState {
     /// Current matching diff line, when the bound pane is a diff.
     pub search_hit: Option<usize>,
     pub diff_col_offset: u16,
+    /// Horizontal pan of the left list (workspace tree or drill graph/files).
+    pub left_col_offset: u16,
+    /// Horizontal pan of the right list (graph or commit-files).
+    pub right_col_offset: u16,
     /// File identities currently shown with unlimited `-U` context.
     pub full_context: HashSet<String>,
     pending_hunk_anchor: Option<usize>,
@@ -307,6 +312,8 @@ impl AppState {
             search_target: SearchPane::Tree,
             search_hit: None,
             diff_col_offset: 0,
+            left_col_offset: 0,
+            right_col_offset: 0,
             full_context: HashSet::new(),
             pending_hunk_anchor: None,
             confirm: None,
@@ -402,6 +409,11 @@ impl AppState {
             DrillView::Files { .. } => 1,
             DrillView::Diff { .. } => 2,
         }
+    }
+
+    /// True when unshifted `h` / `l` fold the workspace tree.
+    pub(crate) fn hl_folds(&self) -> bool {
+        self.list_focus_target() == ListFocusTarget::Tree
     }
 
     /// Which list (or diff) the focused pane is driving.
@@ -872,7 +884,7 @@ impl AppState {
                 Effect::None
             }
             Action::PanDiff(delta) => {
-                self.pan_diff(delta);
+                self.pan_focused(delta);
                 Effect::None
             }
             Action::ToggleFullContext => self.toggle_full_context(),
@@ -1668,6 +1680,8 @@ impl AppState {
         if self.graph_identity.as_ref() != Some(&identity) {
             self.graph_scroll = 0;
             self.graph_cursor = 0;
+            self.left_col_offset = 0;
+            self.right_col_offset = 0;
             if !matches!(self.drill, DrillView::Files { .. } | DrillView::Diff { .. }) {
                 self.drill = DrillView::Graph;
             }
@@ -1727,6 +1741,7 @@ impl AppState {
     pub fn begin_commit_files(&mut self, repo: String, source: CommitFileSource) {
         self.commit_file_folds.clear();
         self.commit_files_loading = true;
+        self.right_col_offset = 0;
         self.drill = DrillView::Files {
             repo,
             source,
@@ -1766,6 +1781,7 @@ impl AppState {
     ) {
         self.diff_scroll = 0;
         self.diff_col_offset = 0;
+        self.left_col_offset = 0;
         self.status = format!("diff {path}");
         self.drill = DrillView::Diff {
             repo,
@@ -1947,6 +1963,86 @@ impl AppState {
         self.search_hit = Some(idx);
         self.diff_scroll = scroll_to_keep_row(idx, self.diff_body_height(), rows.len());
         self.set_search_status(true);
+    }
+
+    fn pan_focused(&mut self, delta: i32) {
+        match self.list_focus_target() {
+            ListFocusTarget::None => self.pan_diff(delta),
+            ListFocusTarget::Tree => {
+                let max = self.tree_max_col();
+                self.left_col_offset = apply_pan(self.left_col_offset, delta, max);
+            }
+            ListFocusTarget::Graph => {
+                if self.focus == FocusPane::Left {
+                    let max = self.graph_max_col(self.layout.tree_width);
+                    self.left_col_offset = apply_pan(self.left_col_offset, delta, max);
+                } else {
+                    let max = self.graph_max_col(self.layout.diff_pane_width);
+                    self.right_col_offset = apply_pan(self.right_col_offset, delta, max);
+                }
+            }
+            ListFocusTarget::CommitFiles => {
+                if self.focus == FocusPane::Left {
+                    let max = self.commit_file_max_col(self.layout.tree_width);
+                    self.left_col_offset = apply_pan(self.left_col_offset, delta, max);
+                } else {
+                    let max = self.commit_file_max_col(self.layout.diff_pane_width);
+                    self.right_col_offset = apply_pan(self.right_col_offset, delta, max);
+                }
+            }
+        }
+    }
+
+    fn tree_max_col(&self) -> usize {
+        let width = self.layout.tree_width.max(1) as usize;
+        self.rows
+            .iter()
+            .map(|row| {
+                let viewed = row.kind == NodeKind::File && self.reviewed.contains(&row.id);
+                let segs = row_segments(row, self.ascii, viewed);
+                let label: usize = segs.segments.iter().map(|s| visible_width(&s.text)).sum();
+                let trailing: usize = segs.trailing.iter().map(|s| visible_width(&s.text)).sum();
+                list_row_pan_max(label, row.depth, trailing, width)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn commit_file_max_col(&self, pane_width: u16) -> usize {
+        let width = pane_width.max(1) as usize;
+        self.commit_file_rows()
+            .iter()
+            .map(|row| {
+                let label: usize = row.segments.iter().map(|s| visible_width(&s.text)).sum();
+                let trailing: usize = row
+                    .trailing_segs
+                    .iter()
+                    .map(|s| visible_width(&s.text))
+                    .sum();
+                list_row_pan_max(label, row.depth, trailing, width)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn graph_max_col(&self, pane_width: u16) -> usize {
+        let Some(model) = self.graph.as_ref() else {
+            return 0;
+        };
+        let glyphs = if self.ascii { &ASCII } else { &UNICODE };
+        let pane = pane_width.max(1) as usize;
+        let inner = pane.saturating_sub(1); // scrollbar
+        let cap = graph_gutter_cap(inner.max(1));
+        let label_viewport = inner
+            .saturating_sub(1)
+            .saturating_sub(cap)
+            .saturating_sub(1);
+        let lens: Vec<usize> = model
+            .visible_rows()
+            .iter()
+            .map(|row| format_label(row, glyphs).chars().count())
+            .collect();
+        max_col_offset(&lens, label_viewport.max(1))
     }
 
     fn pan_diff(&mut self, delta: i32) {
@@ -6087,6 +6183,69 @@ mod tests {
         assert!(tree.folds.contains("repo:app"));
         tree.dispatch(Action::FoldOpen);
         assert!(!tree.folds.contains("repo:app"));
+    }
+
+    #[test]
+    fn list_pan_shifts_tree_and_graph_without_stealing_fold() {
+        let mut snap = repo("app", true);
+        snap.changes = vec![FileChange {
+            path: format!("deep/nested/{}/tail.rs", "x".repeat(40)),
+            staged_status: None,
+            unstaged_status: Some("M".into()),
+            untracked: false,
+            old_path: None,
+        }];
+        let snapshot = build_workspace_snapshot(&[snap], &[], false, &[]);
+        let mut tree = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        focus_file(&mut tree, "tail.rs");
+        tree.focus = FocusPane::Left;
+        tree.layout.tree_width = 16;
+        assert_eq!(tree.left_col_offset, 0);
+        tree.dispatch(Action::PanDiff(4));
+        assert!(
+            tree.left_col_offset > 0,
+            "Shift/pan should reveal a long tree path"
+        );
+        let panned = tree.left_col_offset;
+        tree.dispatch(Action::PanDiff(-20));
+        assert_eq!(tree.left_col_offset, 0);
+        focus_repo(&mut tree, "app");
+        tree.dispatch(Action::FoldClose);
+        assert!(tree.folds.contains("repo:app"));
+        tree.dispatch(Action::FoldOpen);
+        assert!(!tree.folds.contains("repo:app"));
+        assert_eq!(tree.left_col_offset, 0);
+        tree.dispatch(Action::PanDiff(1));
+        assert!(panned > 0);
+
+        let mut graph = state();
+        focus_repo(&mut graph, "app");
+        let model = GraphModel {
+            commits: vec![Commit {
+                id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                subject: format!("subject-{}", "y".repeat(80)),
+                parents: Vec::new(),
+                refs: Vec::new(),
+                author_name: "Ada".into(),
+                author_date_unix: 1_700_000_000,
+            }],
+            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            uncommitted: None,
+            ..GraphModel::default()
+        };
+        graph.set_graph(
+            model,
+            "app".into(),
+            "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        );
+        graph.focus = FocusPane::Right;
+        graph.drill = DrillView::Graph;
+        graph.layout.diff_pane_width = 20;
+        graph.dispatch(Action::PanDiff(5));
+        assert!(
+            graph.right_col_offset > 0,
+            "h/l on a focused graph should pan a long subject"
+        );
     }
 
     #[test]

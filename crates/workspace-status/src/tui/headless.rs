@@ -12,7 +12,7 @@ use crate::snapshot::WorkspaceSnapshot;
 
 use super::action::Effect;
 use super::app::{apply_headless_effect, collect_full_snapshot, TuiOpts};
-use super::keys::event_to_action_ex;
+use super::keys::event_to_action_with;
 use super::render::draw;
 use super::state::{AppState, FocusPane};
 
@@ -80,13 +80,14 @@ impl HeadlessTui {
         self.width = cols.max(1);
         self.height = rows.max(1);
         let event = Event::Resize(self.width, self.height);
-        let action = event_to_action_ex(
+        let action = event_to_action_with(
             &event,
             self.state.input_mode(),
             self.state.right_is_diff(),
             matches!(self.state.focus, FocusPane::Right),
             self.state.graph_stash_focused(),
             self.state.graph_commit_focused(),
+            self.state.hl_folds(),
         );
         let effect = self.state.dispatch(action);
         apply_headless_effect(&mut self.state, effect, &self.opts);
@@ -216,6 +217,16 @@ impl HeadlessTui {
         self.state.drill.is_files()
     }
 
+    /// Send Shift+Left (pan the focused pane, including the tree).
+    pub fn shift_left(&mut self) {
+        self.send_key(KeyCode::Left, KeyModifiers::SHIFT);
+    }
+
+    /// Send Shift+Right (pan the focused pane, including the tree).
+    pub fn shift_right(&mut self) {
+        self.send_key(KeyCode::Right, KeyModifiers::SHIFT);
+    }
+
     fn send(&mut self, code: KeyCode) {
         self.send_key(code, KeyModifiers::NONE);
     }
@@ -225,13 +236,14 @@ impl HeadlessTui {
             return;
         }
         let event = Event::Key(KeyEvent::new(code, modifiers));
-        let action = event_to_action_ex(
+        let action = event_to_action_with(
             &event,
             self.state.input_mode(),
             self.state.right_is_diff(),
             matches!(self.state.focus, FocusPane::Right),
             self.state.graph_stash_focused(),
             self.state.graph_commit_focused(),
+            self.state.hl_folds(),
         );
         let effect = self.state.dispatch(action);
         if matches!(effect, Effect::Quit) {
