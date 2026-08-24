@@ -128,6 +128,33 @@ pub enum Op {
     DefaultBranch,
 }
 
+/// In-flight multi-repo git op painted on the breadcrumb trailing slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunningOp {
+    Fetch,
+    Pull,
+    Push,
+    DefaultBranch,
+}
+
+/// Progress line for a running workspace op: `Pulling 2/18…`.
+///
+/// `total == 0` drops the counter (`Pulling…`). The status line keeps
+/// mode pills and hints; this string is the breadcrumb trailing slot.
+pub fn format_running_op(kind: RunningOp, done: usize, total: usize) -> String {
+    let verb = match kind {
+        RunningOp::Fetch => "Fetching",
+        RunningOp::Pull => "Pulling",
+        RunningOp::Push => "Pushing",
+        RunningOp::DefaultBranch => "Switching",
+    };
+    if total == 0 {
+        format!("{verb}…")
+    } else {
+        format!("{verb} {done}/{total}…")
+    }
+}
+
 /// True when `p` / `d` must stay a silent no-op on this row kind.
 ///
 /// Ink registry: pull / default-branch are workspace / repo / checkout only.
@@ -631,5 +658,17 @@ mod tests {
             &[],
         );
         assert!(collect_write_files(&snapshot, Some(&repo_row("app")), false).is_empty());
+    }
+
+    #[test]
+    fn running_op_progress_uses_verb_done_over_total() {
+        assert_eq!(format_running_op(RunningOp::Fetch, 0, 18), "Fetching 0/18…");
+        assert_eq!(format_running_op(RunningOp::Pull, 2, 18), "Pulling 2/18…");
+        assert_eq!(format_running_op(RunningOp::Push, 1, 3), "Pushing 1/3…");
+        assert_eq!(
+            format_running_op(RunningOp::DefaultBranch, 0, 5),
+            "Switching 0/5…"
+        );
+        assert_eq!(format_running_op(RunningOp::Pull, 0, 0), "Pulling…");
     }
 }

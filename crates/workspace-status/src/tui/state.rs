@@ -32,8 +32,8 @@ use super::fetch::background_fetch_targets;
 use super::gates::{dispatch_is_noop, ListFocusTarget};
 use super::keys::{InputMode, DOUBLE_TAP_MS};
 use super::ops::{
-    collect_write_files, op_is_kind_noop, op_targets, push_targets, refresh_target,
-    should_delete_untracked, Op, ScopedFile,
+    collect_write_files, format_running_op, op_is_kind_noop, op_targets, push_targets,
+    refresh_target, should_delete_untracked, Op, RunningOp, ScopedFile,
 };
 use super::search::{
     apply_pan, focus_commit_file_search, focus_diff_search, focus_graph_search, focus_tree_search,
@@ -1208,7 +1208,7 @@ impl AppState {
         }
         match op {
             Op::Fetch => {
-                self.status = format!("fetch {}", targets.join(" "));
+                self.status = format_running_op(RunningOp::Fetch, 0, targets.len());
                 Effect::Fetch { repos: targets }
             }
             Op::Pull => {
@@ -1224,7 +1224,7 @@ impl AppState {
                     self.status = "nothing behind to pull".into();
                     Effect::None
                 } else {
-                    self.status = format!("pull {}", behind.join(" "));
+                    self.status = format_running_op(RunningOp::Pull, 0, behind.len());
                     Effect::Pull { repos: behind }
                 }
             }
@@ -1245,7 +1245,7 @@ impl AppState {
                     self.status = "no non-default branches to switch".into();
                     Effect::None
                 } else {
-                    self.status = format!("default-branch {}", repos.join(" "));
+                    self.status = format_running_op(RunningOp::DefaultBranch, 0, repos.len());
                     Effect::DefaultBranch { repos }
                 }
             }
@@ -2048,12 +2048,7 @@ impl AppState {
                     row.chrome.path.clone()
                 }
             })
-            .unwrap_or_else(|| {
-                targets
-                    .first()
-                    .map(|t| t.path.clone())
-                    .unwrap_or_default()
-            });
+            .unwrap_or_else(|| targets.first().map(|t| t.path.clone()).unwrap_or_default());
         self.confirm = Some(PendingConfirm::Revert { targets, label });
         Effect::None
     }
@@ -2206,7 +2201,7 @@ impl AppState {
         if targets.is_empty() {
             return Effect::None;
         }
-        self.status = format!("fetch {}", targets.join(" "));
+        self.status = format_running_op(RunningOp::Fetch, 0, targets.len());
         Effect::Fetch { repos: targets }
     }
 
@@ -2224,7 +2219,7 @@ impl AppState {
             self.status = "nothing to push".into();
             return Effect::None;
         }
-        self.status = format!("push {}", targets.join(" "));
+        self.status = format_running_op(RunningOp::Push, 0, targets.len());
         Effect::Push { repos: targets }
     }
 
@@ -2618,11 +2613,7 @@ impl AppState {
     }
 
     fn page_step(&self) -> i32 {
-        self.layout
-            .tree_height
-            .max(1)
-            .saturating_sub(1)
-            .max(1) as i32
+        self.layout.tree_height.max(1).saturating_sub(1).max(1) as i32
     }
 
     fn move_file_cursor(&mut self, delta: i32) {
@@ -3097,6 +3088,30 @@ mod tests {
             }
             other => panic!("expected fetch, got {other:?}"),
         }
+        assert_eq!(app.status, "Fetching 0/2…");
+    }
+
+    #[test]
+    fn workspace_pull_and_default_arm_running_op_progress() {
+        let mut app_snap = repo("app", false);
+        app_snap.sync_status = SyncStatus::Behind;
+        app_snap.branch = "feature/x".into();
+        let mut lib_snap = repo("lib", false);
+        lib_snap.sync_status = SyncStatus::Behind;
+        lib_snap.branch = "feature/y".into();
+        let snapshot = build_workspace_snapshot(&[app_snap, lib_snap], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        app.cursor = 0;
+        match app.dispatch(Action::Pull) {
+            Effect::Pull { repos } => assert_eq!(repos, vec!["app", "lib"]),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(app.status, "Pulling 0/2…");
+        match app.dispatch(Action::DefaultBranch) {
+            Effect::DefaultBranch { repos } => assert_eq!(repos, vec!["app", "lib"]),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(app.status, "Switching 0/2…");
     }
 
     #[test]
@@ -3350,6 +3365,7 @@ mod tests {
             Effect::DefaultBranch { repos } => assert_eq!(repos, vec!["app"]),
             other => panic!("{other:?}"),
         }
+        assert_eq!(app.status, "Switching 0/1…");
     }
 
     fn two_file_repo() -> RepoSnapshot {
@@ -3605,6 +3621,7 @@ mod tests {
             Effect::Push { repos } => assert_eq!(repos, vec!["lib"]),
             other => panic!("{other:?}"),
         }
+        assert_eq!(app.status, "Pushing 0/1…");
     }
 
     #[test]
@@ -4667,6 +4684,7 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        assert_eq!(app.status, "Fetching 0/2…");
         assert_eq!(app.dispatch(Action::WatchTick), Effect::WatchRefresh);
         assert_eq!(watch_interval_ms(Some("0")), 0);
         assert_ne!(

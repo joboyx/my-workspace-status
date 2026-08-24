@@ -219,3 +219,5 @@ Matches Ink `gitLogGraphWindow` / `loadGraphModel` / `autoloadNext`. Default win
 | `should_autoload` / `merge_autoload` | next page at `skip + window_count` | Cursor on last loaded row; skip stays at the original window start; `window` grows |
 
 Hidden ignored checkouts stay out of `P` / `S` / `b` unless shown. Linked worktrees are included on `f` / `p` / `P` / `d` only when that row is focused. The background fetch timer (`background_fetch_targets` in `tui/fetch.rs`) includes every snapshot except hidden ignored — linked worktrees and shown ignored repos included. See [tui-rust.md](./tui-rust.md).
+
+Manual `f` / `p` / `P` / `d` and the background fetch tick paint a trailing breadcrumb counter (`Fetching n/N…`, `Pulling n/N…`, `Pushing n/N…`, `Switching n/N…`) and redraw after each repo settles. The hint row stays pills + keys. Graph autoload still uses `loading older…`.

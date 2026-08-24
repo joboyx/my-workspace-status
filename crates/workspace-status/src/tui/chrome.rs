@@ -818,7 +818,8 @@ fn is_op_status_error(text: &str) -> bool {
     lower.contains("failed") || lower.contains("error")
 }
 
-/// Breadcrumb row: path on the left, optional toast/op-status on the right.
+/// Breadcrumb row: path on the left, optional toast / running-op status
+/// (`Pulling 1/2…`) on the right.
 pub fn breadcrumb_line(state: &AppState, width: u16) -> Line<'static> {
     let palette = state.theme.palette();
     let width = width as usize;
@@ -888,9 +889,7 @@ pub fn status_line(state: &AppState, width: u16) -> Line<'static> {
     let palette = state.theme.palette();
     let pills = state.theme.pills();
     let surface = hex_color(state.theme.theme().surface);
-    if state.stash_menu.is_some()
-        || state.branch_picker.is_some()
-        || state.create_branch.is_some()
+    if state.stash_menu.is_some() || state.branch_picker.is_some() || state.create_branch.is_some()
     {
         return Line::from(Span::styled(
             truncate_visible(&state.status, width as usize),
@@ -1205,5 +1204,43 @@ mod tests {
             remote_ref: "origin/main".into(),
         });
         assert_eq!(overlay_status_rows(&app), 7);
+    }
+
+    fn line_plain(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn running_op_progress_sits_on_breadcrumb_not_status_hints() {
+        use super::super::ops::{format_running_op, RunningOp};
+        let mut app = state();
+        app.status = format_running_op(RunningOp::Pull, 1, 2);
+        let crumb = line_plain(&breadcrumb_line(&app, 80));
+        assert!(
+            crumb.contains("Pulling 1/2…"),
+            "breadcrumb trailing slot should show progress: {crumb:?}"
+        );
+        assert!(
+            crumb.find("workspace").unwrap() < crumb.find("Pulling").unwrap(),
+            "progress is trailing: {crumb:?}"
+        );
+        let status = line_plain(&status_line(&app, 80));
+        assert!(
+            !status.contains("Pulling"),
+            "status line keeps pills/hints: {status:?}"
+        );
+        assert!(status.contains("? help"), "{status:?}");
+    }
+
+    #[test]
+    fn breadcrumb_truncates_path_before_running_op() {
+        use super::super::ops::{format_running_op, RunningOp};
+        let mut app = state();
+        app.status = format_running_op(RunningOp::Fetch, 2, 18);
+        let crumb = line_plain(&breadcrumb_line(&app, 20));
+        assert!(
+            crumb.contains("Fetching") || crumb.contains("2/18"),
+            "narrow row still keeps op status: {crumb:?}"
+        );
     }
 }
