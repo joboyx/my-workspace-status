@@ -113,14 +113,6 @@ Keys: `/` `merger` Enter, Tab, `j` to a commit, Enter.
 
 Show: commit file list in the right pane. Do not Enter again into a file diff unless you want a second crop. The named still is the file list.
 
-## 10 — EasyMotion
-
-Focus the tree (Esc until the left pane is active).
-
-Keys: `;` (or Ctrl-Space). Do not type a label.
-
-Show: `a`–`z` labels on the current viewport. Do not type a label (that jumps and dismisses). Esc cancels after the shot.
-
 ## Skip as stills
 
 - Fetch / pull / push in-flight (`f`, `p`, `P`)

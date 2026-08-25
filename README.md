@@ -4,7 +4,7 @@ Git status for every repo and worktree under the current directory, in one TUI.
 
 Cursor and VS Code's source control pane is fine for one repo. It falls apart once you have a folder full of them. Worktrees make that worse: same project, three checkouts, three half-finished agent branches, and the SCM view is just a pile of files with no sense of which tree you are in.
 
-This is the glance I wanted instead. Left pane is the workspace tree (repos, worktrees, dirty files). Right pane is the graph, the diff, or the commit. Fetch, pull, checkout, stash, search, mark files reviewed, jump around — without opening each folder in the IDE.
+This is the glance I wanted instead. Left pane is the workspace tree (repos, worktrees, dirty files). Right pane is the graph, the diff, or the commit. Fetch, pull, checkout, stash, search, mark files reviewed — without opening each folder in the IDE.
 
 `ws` on a TTY opens that. `--plain` and `--json` print the same snapshot if an agent is calling it.
 
@@ -41,10 +41,6 @@ This is the glance I wanted instead. Left pane is the workspace tree (repos, wor
 **Confirm** — drop a stash (`D`). `y` / `n` in a boxed overlay.
 
 ![Boxed confirm](docs/images/05-confirm.png)
-
-**EasyMotion** — `;` (or Ctrl-Space) labels the current list. Type a letter to jump.
-
-![EasyMotion](docs/images/10-easymotion.png)
 
 **Help** — `?` opens MOVE / GIT / VIEW.
 

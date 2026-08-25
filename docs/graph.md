@@ -96,13 +96,13 @@ left (local + matching `origin/*` merge into one chip; unmatched remotes
 stay as `[origin/…]`), muted short hash / relative date / author on the
 right. Narrow panes drop hash, then date, then author, and keep refs.
 Relative dates: `just now` / `Nm` / `Nh` through 3 hours, then UTC `YYYY-MM-DD HH:MM`. Narrow spacers keep painting a leftover **branch or tag** chip when part of its name still fits: truncate that name with `…` and keep the brackets (`[feat…]`). `[+N]` is only the count of chips that are **fully hidden** after the visible (full or truncated) chips — a merely truncated chip does not count toward `N`, and `[+N]` is omitted when nothing else is hidden (not muted `+N`). Overflow colour/bold still apply when `N > 0`. The spacer is capped to the pane width so the row does not grow with extra refs. Long subjects clip to the pane; `h` / `l` (and Shift+Left / Shift+Right) pan the label while the gutter stays put. The selection footer still lists every full ref.
-The spacer is not a second selectable row; cursor, search, EasyMotion,
+The spacer is not a second selectable row; cursor, search, `j`/`k`,
 and click treat it as the parent commit.
 
 The stash node line is subject-only. The spacer under it is
 `[stash@{n}][pad][hash][ ][date][ ][author]` with the same relative-date
 buckets and the same hash → date → author drop order (keep `stash@{n}`).
-The spacer is not a second selectable row; cursor, search, EasyMotion,
+The spacer is not a second selectable row; cursor, search, `j`/`k`,
 and click treat it as the parent stash.
 
 Lane assignment, parent planning, densify-left, and the

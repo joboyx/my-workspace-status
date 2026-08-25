@@ -50,7 +50,7 @@ Default folds: ignored repos with children + the `no-updates` group. Non-ignored
 | 1 `Files` | Graph list | Commit detail + file tree |
 | 2 `Diff` | Commit-file list | Commit-scoped `DiffPane` |
 
-`list_focus_target` (`tui/state.rs`) is the focused list: depth 0 left → tree; depth 0 right / depth 1 left → graph; depth 1 right / depth 2 left → commit files; depth 2 right (and depth 0 file diffs) → none (diff scroll). `j`/`k`, fold, search, EasyMotion, click, and wheel follow that target.
+`list_focus_target` (`tui/state.rs`) is the focused list: depth 0 left → tree; depth 0 right / depth 1 left → graph; depth 1 right / depth 2 left → commit files; depth 2 right (and depth 0 file diffs) → none (diff scroll). `j`/`k`, fold, search, click, and wheel follow that target.
 
 | Focus / depth | Enter | Esc |
 | --- | --- | --- |
@@ -61,7 +61,7 @@ Default folds: ignored repos with children + the `no-updates` group. Non-ignored
 
 Enter that deepens the stack keeps **right** focus. Esc that pops a depth keeps **left** focus. Esc never quits.
 
-Left-pane `j`/`k`, click, wheel, search next/prev, and EasyMotion load the matching right pane through `Effect::LoadRightPane` (the same `load_right` / `run_work_pumped` path as depth 0). Depth 1 graph rows load that commit / stash / worktree's files. Depth 2 file rows load that file's commit diff. Directory rows keep the previous diff. Esc/back and the depth stack stay unchanged.
+Left-pane `j`/`k`, click, wheel, and search next/prev load the matching right pane through `Effect::LoadRightPane` (the same `load_right` / `run_work_pumped` path as depth 0). Depth 1 graph rows load that commit / stash / worktree's files. Depth 2 file rows load that file's commit diff. Directory rows keep the previous diff. Esc/back and the depth stack stay unchanged.
 
 ## App state
 
@@ -71,7 +71,7 @@ Full-context membership means unlimited unified context (`FULL_DIFF_CONTEXT_LINE
 
 ## Graph list
 
-Graph rows come from `workspace-status-graph` `GraphModel::visible_rows`. Stashes park immediately above `stash^1`. Graph pane chrome: 2-line selection footer when height ≥ 3 (`graph_chrome_budget` / `selection_detail_lines` / `selection_detail_parts`; footer preferred, header drops first). Uncommitted: `Working tree clean` / `Uncommitted changes` + HEAD commit ref chips, or `worktree · not a commit` when HEAD has none. Spacer: `…` + `connector · not selectable`. Stash: subject + `stash@{n} ·` hash `·` date. Commit: subject + ref chips `·` hash `·` author `·` date, or `(no refs)`. Empty: `no selection`. Footer chips use the same `LabelKind` palette as the row (HEAD / default / feature / remote / tag), not a flat wash. Graph PageUp/PageDown move in painted list space (`visible − 1` painted lines, snap to selectable); `j`/`k`, EasyMotion, and click stay on selectable `visible_rows`. The 1-column scrollbar thumb is mouse-draggable through the same `hit_split` / `SplitDrag` stack as the pane and in-diff splitters (`SplitDrag::GraphScrollbar`); a track click jumps toward that position without moving the graph cursor.
+Graph rows come from `workspace-status-graph` `GraphModel::visible_rows`. Stashes park immediately above `stash^1`. Graph pane chrome: 2-line selection footer when height ≥ 3 (`graph_chrome_budget` / `selection_detail_lines` / `selection_detail_parts`; footer preferred, header drops first). Uncommitted: `Working tree clean` / `Uncommitted changes` + HEAD commit ref chips, or `worktree · not a commit` when HEAD has none. Spacer: `…` + `connector · not selectable`. Stash: subject + `stash@{n} ·` hash `·` date. Commit: subject + ref chips `·` hash `·` author `·` date, or `(no refs)`. Empty: `no selection`. Footer chips use the same `LabelKind` palette as the row (HEAD / default / feature / remote / tag), not a flat wash. Graph PageUp/PageDown move in painted list space (`visible − 1` painted lines, snap to selectable); `j`/`k` and click stay on selectable `visible_rows`. The 1-column scrollbar thumb is mouse-draggable through the same `hit_split` / `SplitDrag` stack as the pane and in-diff splitters (`SplitDrag::GraphScrollbar`); a track click jumps toward that position without moving the graph cursor.
 
 See [git-graph-topology.md](./git-graph-topology.md) and [graph.md](./graph.md).
 

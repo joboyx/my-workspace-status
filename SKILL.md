@@ -105,7 +105,6 @@ Live TUI keymap (full overlay detail in [docs/configuration.md](./docs/configura
 | `Ctrl-o`                              | toggle full-file diff context (does not open editor)                                                                                                   |
 | `/`                                   | search the focused pane (substring; does not hide rows). Enter arms the query; `Esc` clears                                                            |
 | `n` / `N`                             | next / previous search match (only while a search is active; otherwise `p` is pull)                                                                    |
-| `Ctrl-Space`                          | EasyMotion jump on the **focused** list (tree / graph / commit files). No-op on a focused diff                                                         |
 | `?`                                   | keymap help overlay                                                                                                                                    |
 | `PgUp` / `PgDn` / `Ctrl-u` / `Ctrl-d` | page the **focused** pane (list or diff)                                                                                                               |
 | `m`                                   | toggle mouse reporting (on by default) except on a focused graph commit (merge, above). Drag pane / in-diff split / graph scrollbar thumb |

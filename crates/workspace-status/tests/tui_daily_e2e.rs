@@ -1,6 +1,6 @@
 //! Daily-path ratatui e2e. TestBackend only — no TTY.
 //!
-//! Covers the tree, file diff, multi-lane graph, search, EasyMotion, theme
+//! Covers the tree, file diff, multi-lane graph, search, theme
 //! cycle, commit drill, and hidden ignored repos. Fixtures follow the same
 //! git seed style as `snapshot_contract.rs`.
 
@@ -456,32 +456,6 @@ fn search_n_and_n_unfolds_parents() {
 }
 
 #[test]
-fn easy_motion_hit_jumps_visible_row() {
-    let (root, workspace) = daily_workspace();
-    let mut tui = open(&workspace);
-    let before = tui.cursor_id();
-    tui.key(';');
-    let armed = tui.frame();
-    assert!(
-        armed.contains("EASY") || armed.contains("EasyMotion"),
-        "EasyMotion should arm a status chip:\n{armed}"
-    );
-    assert!(
-        armed.contains("a ") || armed.contains("a"),
-        "viewport labels should paint:\n{armed}"
-    );
-    tui.key('a');
-    let after = tui.frame();
-    assert_absent(&after, "EasyMotion");
-    assert_ne!(
-        tui.cursor_id(),
-        before,
-        "hit on `a` should leave the dirty-file cursor"
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
 fn theme_cycle_changes_paint() {
     let (root, workspace) = daily_workspace();
     let mut tui = open(&workspace);
@@ -770,6 +744,8 @@ fn help_overlay_shows_app_version() {
     assert_contains(&help, "GIT");
     assert_contains(&help, "VIEW");
     assert_contains(&help, "/ search help");
+    assert_contains(&help, "down / up");
+    assert_contains(&help, "search focused pane");
     assert_help_version(&help);
 
     tui.key('/');

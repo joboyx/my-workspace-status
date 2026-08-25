@@ -29,7 +29,6 @@ use super::diff::{
 use super::drill::{
     source_from_graph_row, stash_ref_from_graph_row, CommitFile, CommitFileSource, DrillView,
 };
-use super::easy_motion::{resolve_easy_motion_jump, visible_window, EasyMotionResolve};
 use super::fetch::background_fetch_targets;
 use super::gates::{dispatch_is_noop, ListFocusTarget};
 use super::keys::{InputMode, DOUBLE_TAP_MS};
@@ -54,7 +53,7 @@ use super::stash::{
 use super::theme::{cycle_theme_id, theme_from_env, ThemeId};
 use super::tree::{
     build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, row_segments,
-    visible_for_tree, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
+    visible_for_tree, visible_window, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
 };
 #[cfg(not(test))]
 use super::viewed::viewed_store_path;
@@ -135,20 +134,6 @@ impl Default for LayoutHit {
             graph_content_len: 0,
         }
     }
-}
-
-/// Armed EasyMotion overlay (typed prefix so far).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EasyMotion {
-    pub typed: String,
-}
-
-/// Which focused list EasyMotion labels.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EasyMotionList {
-    Tree,
-    Graph,
-    CommitFiles,
 }
 
 /// Confirm overlay before a destructive file write.
@@ -261,7 +246,6 @@ pub struct AppState {
     pub diff_split_fraction: f64,
     pub diff_mode: DiffMode,
     pub drag: SplitDrag,
-    pub easy_motion: Option<EasyMotion>,
     pub theme: ThemeId,
     pub mouse_enabled: bool,
     pub(crate) z_pending_at: Option<Instant>,
@@ -355,7 +339,6 @@ impl AppState {
             diff_split_fraction: DIFF_SPLIT_FRACTION,
             diff_mode: DiffMode::SideBySide,
             drag: SplitDrag::None,
-            easy_motion: None,
             theme: theme_from_env(),
             mouse_enabled: true,
             z_pending_at: None,
@@ -384,8 +367,6 @@ impl AppState {
             }
         } else if self.search_mode {
             InputMode::SearchPrompt
-        } else if self.easy_motion.is_some() {
-            InputMode::EasyMotion
         } else if self.chord_pending(self.z_pending_at) {
             InputMode::ZPending {
                 search_active: self.search_active,
@@ -1338,9 +1319,6 @@ impl AppState {
                 self.drag = SplitDrag::None;
                 self.begin_graph_merge()
             }
-            Action::EasyMotionStart => self.start_easy_motion(),
-            Action::EasyMotionChar(c) => self.easy_motion_char(c),
-            Action::EasyMotionCancel => self.cancel_easy_motion(),
             Action::CycleTheme => self.cycle_theme(),
             Action::Resize { cols, rows: _ } => {
                 self.apply_terminal_size(cols);
@@ -1350,118 +1328,10 @@ impl AppState {
         }
     }
 
-    fn start_easy_motion(&mut self) -> Effect {
-        if self.easy_motion_list().is_none() {
-            return Effect::None;
-        }
-        self.drag = SplitDrag::None;
-        self.easy_motion = Some(EasyMotion {
-            typed: String::new(),
-        });
-        self.status = "EasyMotion".into();
-        Effect::None
-    }
-
-    fn easy_motion_char(&mut self, c: char) -> Effect {
-        let Some(current) = self.easy_motion.clone() else {
-            return Effect::None;
-        };
-        let Some((start, count, list)) = self.easy_motion_window() else {
-            return self.cancel_easy_motion();
-        };
-        let typed = format!("{}{c}", current.typed);
-        match resolve_easy_motion_jump(count, start, &typed) {
-            EasyMotionResolve::Miss => self.cancel_easy_motion(),
-            EasyMotionResolve::Partial => {
-                if let Some(motion) = self.easy_motion.as_mut() {
-                    motion.typed = typed.clone();
-                }
-                self.status = format!("EasyMotion {typed}");
-                Effect::None
-            }
-            EasyMotionResolve::Hit { index } => {
-                self.easy_motion = None;
-                self.status.clear();
-                self.jump_easy_motion(list, index)
-            }
-        }
-    }
-
-    fn cancel_easy_motion(&mut self) -> Effect {
-        self.easy_motion = None;
-        self.status.clear();
-        Effect::None
-    }
-
     fn cycle_theme(&mut self) -> Effect {
         self.theme = cycle_theme_id(self.theme);
         self.status = format!("theme: {}", self.theme.label());
         Effect::None
-    }
-
-    fn easy_motion_list(&self) -> Option<EasyMotionList> {
-        match self.list_focus_target() {
-            ListFocusTarget::Tree => Some(EasyMotionList::Tree),
-            ListFocusTarget::Graph => Some(EasyMotionList::Graph),
-            ListFocusTarget::CommitFiles => Some(EasyMotionList::CommitFiles),
-            ListFocusTarget::None => None,
-        }
-    }
-
-    fn easy_motion_window(&self) -> Option<(usize, usize, EasyMotionList)> {
-        let list = self.easy_motion_list()?;
-        let height = self.layout.tree_height.max(1) as usize;
-        let (start, count) = match list {
-            EasyMotionList::Tree => visible_window(self.rows.len(), self.cursor, height),
-            EasyMotionList::Graph => {
-                let n = self
-                    .graph
-                    .as_ref()
-                    .map(|g| g.visible_rows().len())
-                    .unwrap_or(0);
-                let list_h = self.graph_chrome().list_height.max(1) as usize;
-                visible_window(n, self.graph_cursor, list_h)
-            }
-            EasyMotionList::CommitFiles => {
-                let rows = self.commit_file_rows();
-                visible_window(rows.len(), self.commit_files_cursor(), height)
-            }
-        };
-        Some((start, count, list))
-    }
-
-    fn jump_easy_motion(&mut self, list: EasyMotionList, index: usize) -> Effect {
-        match list {
-            EasyMotionList::Tree => {
-                if self.rows.is_empty() {
-                    return Effect::None;
-                }
-                self.cursor = index.min(self.rows.len() - 1);
-                self.drill = DrillView::Graph;
-                Effect::LoadRightPane
-            }
-            EasyMotionList::Graph => {
-                let n = self
-                    .graph
-                    .as_ref()
-                    .map(|g| g.visible_rows().len())
-                    .unwrap_or(0);
-                if n == 0 {
-                    return Effect::None;
-                }
-                self.graph_cursor = index.min(n - 1);
-                self.sync_graph_scroll();
-                self.follow_graph_files()
-            }
-            EasyMotionList::CommitFiles => {
-                let n = self.commit_file_rows().len();
-                if n == 0 {
-                    return Effect::None;
-                }
-                self.set_commit_file_cursor(index.min(n - 1));
-                self.maybe_load_focused_commit_diff()
-            }
-        }
     }
 
     fn op_effect(&mut self, op: Op) -> Effect {
@@ -1778,13 +1648,11 @@ impl AppState {
     }
 
     fn is_tree_chevron(&self, col: u16, depth: usize) -> bool {
-        let prefix = if self.easy_motion.is_some() { 2 } else { 0 };
-        col == self.layout.tree_x + prefix + 1 + (depth as u16) * 2
+        col == self.layout.tree_x + 1 + (depth as u16) * 2
     }
 
     fn is_files_chevron(&self, col: u16, depth: usize) -> bool {
-        let prefix = if self.easy_motion.is_some() { 2 } else { 0 };
-        col == self.files_list_origin_x() + prefix + 1 + (depth as u16) * 2
+        col == self.files_list_origin_x() + 1 + (depth as u16) * 2
     }
 
     fn click_graph(&mut self, row: u16, is_double: bool, right: bool) -> Effect {
@@ -3106,7 +2974,7 @@ impl AppState {
     }
 
     /// Page in painted-list space, then
-    /// snap onto a selectable row. EasyMotion / click stay on `visible_rows`.
+    /// snap onto a selectable row. Click stays on `visible_rows`.
     fn page_graph(&mut self, pages: i32) -> Effect {
         let Some(model) = self.graph.as_ref() else {
             return Effect::None;
@@ -3531,7 +3399,6 @@ fn visible_snapshot(snapshot: &WorkspaceSnapshot, show_ignored: bool) -> Workspa
 
 #[cfg(test)]
 mod tests {
-    use super::super::easy_motion::visible_window;
     use super::super::gates::ListFocusTarget;
     use super::super::keys::InputMode;
     use super::super::theme::{resolve_theme_id, ThemeId};
@@ -6247,91 +6114,6 @@ mod tests {
         assert_eq!(app.drag, SplitDrag::None);
         assert_eq!(effect, Effect::None);
         assert_eq!(app.focus, FocusPane::Right);
-    }
-
-    #[test]
-    fn easy_motion_labels_visible_rows_only_and_jumps() {
-        let mut app = state();
-        app.layout.tree_height = 2;
-        app.cursor = 0;
-        assert!(app.rows.len() > 2, "need more rows than the viewport");
-        assert_eq!(app.dispatch(Action::EasyMotionStart), Effect::None);
-        assert!(app.easy_motion.is_some());
-        assert_eq!(app.input_mode(), InputMode::EasyMotion);
-        let first = app.rows[0].id.clone();
-        let second = app.rows[1].id.clone();
-        assert_eq!(
-            app.dispatch(Action::EasyMotionChar('b')),
-            Effect::LoadRightPane
-        );
-        assert_eq!(
-            app.focused_row().map(|r| r.id.as_str()),
-            Some(second.as_str())
-        );
-        assert!(app.easy_motion.is_none());
-
-        app.cursor = 0;
-        app.layout.tree_height = 2;
-        app.dispatch(Action::EasyMotionStart);
-        app.dispatch(Action::EasyMotionChar('a'));
-        assert_eq!(
-            app.focused_row().map(|r| r.id.as_str()),
-            Some(first.as_str())
-        );
-
-        app.cursor = app.rows.len() - 1;
-        app.layout.tree_height = 2;
-        let (start, count) =
-            visible_window(app.rows.len(), app.cursor, app.layout.tree_height as usize);
-        assert_eq!(count, 2);
-        assert_eq!(start, app.rows.len() - 2);
-        let target = app.rows[start].id.clone();
-        app.dispatch(Action::EasyMotionStart);
-        app.dispatch(Action::EasyMotionChar('a'));
-        assert_eq!(
-            app.focused_row().map(|r| r.id.as_str()),
-            Some(target.as_str())
-        );
-        assert_ne!(app.cursor, 0);
-    }
-
-    #[test]
-    fn easy_motion_partial_hit_miss_and_esc() {
-        use super::super::easy_motion::{resolve_easy_motion_label, EasyMotionResolve};
-        assert_eq!(
-            resolve_easy_motion_label(&["aa".into(), "ab".into()], "a"),
-            EasyMotionResolve::Partial
-        );
-
-        let mut app = state();
-        app.layout.tree_height = 30;
-        app.cursor = 0;
-        let before = app.cursor;
-        app.dispatch(Action::EasyMotionStart);
-        assert_eq!(app.dispatch(Action::EasyMotionChar('z')), Effect::None);
-        assert!(app.easy_motion.is_none(), "miss cancels");
-        assert_eq!(app.cursor, before, "miss stays on the same row");
-
-        app.dispatch(Action::EasyMotionStart);
-        assert_eq!(app.dispatch(Action::EasyMotionCancel), Effect::None);
-        assert!(app.easy_motion.is_none());
-        assert_eq!(
-            app.input_mode(),
-            InputMode::Normal {
-                search_active: false
-            }
-        );
-        assert_eq!(app.cursor, before, "Esc stays on the same row");
-    }
-
-    #[test]
-    fn easy_motion_start_is_noop_on_focused_diff() {
-        let mut app = state();
-        focus_file(&mut app, "README.md");
-        app.focus = FocusPane::Right;
-        assert!(app.right_is_diff());
-        assert_eq!(app.dispatch(Action::EasyMotionStart), Effect::None);
-        assert!(app.easy_motion.is_none());
     }
 
     #[test]
