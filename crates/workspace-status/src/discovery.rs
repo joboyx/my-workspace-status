@@ -7,7 +7,7 @@ use std::path::Path;
 use crate::config::{default_branch_override_for, WorkspaceStatusConfig};
 use crate::git::{
     exec_git, exec_git_checked, is_ancestor, list_worktrees_porcelain, resolve_default_branch_name,
-    resolve_default_branch_tip_ref,
+    resolve_default_branch_tip_ref, rev_parse_quiet,
 };
 use crate::helpers::{is_default_branch, DETACHED_HEAD_BRANCH};
 use crate::snapshot::{CheckoutKind, FileChange, RepoSnapshot, SyncStatus};
@@ -201,6 +201,7 @@ fn failed_repo_snapshot(
         branch: "(unknown)".to_string(),
         sync_status: SyncStatus::NoUpstream,
         sync_note: "status failed".to_string(),
+        head: String::new(),
         has_unstaged: false,
         has_staged: false,
         has_untracked: false,
@@ -526,11 +527,13 @@ pub fn process_repo(
     let has_staged = !parsed.staged.is_empty();
     let has_untracked = !parsed.untracked.is_empty();
     let merged = compute_merged_into_default(&repo_dir, &branch_state.branch, override_name);
+    let head = rev_parse_quiet("HEAD", &repo_dir).unwrap_or_default();
     Some(RepoSnapshot {
         repo: repo_path.to_string(),
         branch: branch_state.branch,
         sync_status: branch_state.sync_status,
         sync_note: branch_state.sync_note,
+        head,
         has_unstaged,
         has_staged,
         has_untracked,

@@ -1012,3 +1012,157 @@ fn graph_scrollbar_thumb_drag_and_track_jump() {
     tui.mouse_up();
     let _ = fs::remove_dir_all(root);
 }
+
+fn git_stdout(cwd: &Path, args: &[&str]) -> String {
+    let mut cmd = Command::new("git");
+    cmd.args(args).current_dir(cwd);
+    for (k, v) in git_env() {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn seed_watch_pair(workspace: &Path) {
+    seed_repo(workspace, "alpha", "main", false);
+    seed_repo(workspace, "beta", "main", false);
+    git(
+        &workspace.join("alpha"),
+        &["checkout", "-q", "-b", "feature/watch"],
+    );
+    git(
+        &workspace.join("beta"),
+        &["checkout", "-q", "-b", "feature/other"],
+    );
+}
+
+#[test]
+fn watch_tick_reloads_silent_head_move_and_flashes_other_repo_dirty() {
+    let root = std::env::temp_dir().join(format!(
+        "ws-tui-watch-live-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    seed_watch_pair(&workspace);
+    let mut tui = open(&workspace);
+    tui.search("alpha");
+    assert!(
+        tui.right_is_graph(),
+        "alpha row should load the graph:\n{}",
+        tui.frame()
+    );
+    let before_head = tui.graph_head().expect("graph head");
+    let before_frame = tui.frame();
+    assert_absent(&before_frame, "watch-head-move");
+
+    let alpha = workspace.join("alpha");
+    fs::write(alpha.join("tick.txt"), "head-move\n").unwrap();
+    git(&alpha, &["add", "tick.txt"]);
+    git(&alpha, &["commit", "-q", "-m", "watch-head-move"]);
+    let new_head = git_stdout(&alpha, &["rev-parse", "HEAD"]);
+    assert_ne!(before_head, new_head);
+
+    tui.watch_tick();
+    let after_tree = tui.frame();
+    assert_contains(&after_tree, "watch-head-move");
+    assert_eq!(tui.graph_head().as_deref(), Some(new_head.as_str()));
+    assert_eq!(
+        tui.snapshot_head("alpha").as_deref(),
+        Some(new_head.as_str())
+    );
+
+    tui.tab();
+    assert!(
+        tui.focus_is_right(),
+        "graph focus must also pick up the next watch tick:\n{}",
+        tui.frame()
+    );
+    fs::write(alpha.join("tick.txt"), "head-move-2\n").unwrap();
+    git(&alpha, &["add", "tick.txt"]);
+    git(&alpha, &["commit", "-q", "-m", "watch-head-move-2"]);
+    tui.watch_tick();
+    let after_graph = tui.frame();
+    assert_contains(&after_graph, "watch-head-move-2");
+
+    let beta = workspace.join("beta");
+    fs::write(beta.join("dirty.txt"), "flash me\n").unwrap();
+    tui.watch_tick();
+    let dirty_frame = tui.frame();
+    assert_contains(&dirty_frame, "dirty.txt");
+    assert!(
+        tui.is_flashing("file:beta:dirty.txt"),
+        "dirty file on the other repo must flash without r:\n{dirty_frame}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn watch_tick_updates_ahead_count_without_reload_key() {
+    let root = std::env::temp_dir().join(format!(
+        "ws-tui-watch-ahead-e2e-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let workspace = root.join("workspace");
+    let remote = root.join("remote.git");
+    fs::create_dir_all(&workspace).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q", "--bare", remote.to_str().unwrap()])
+        .status();
+    assert!(init.map(|s| s.success()).unwrap_or(false), "bare origin");
+    seed_repo(&workspace, "tracker", "main", false);
+    seed_repo(&workspace, "sidecar", "main", false);
+    git(
+        &workspace.join("sidecar"),
+        &["checkout", "-q", "-b", "feature/sidecar"],
+    );
+    let tracker = workspace.join("tracker");
+    git(
+        &tracker,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&tracker, &["push", "-u", "origin", "main", "--quiet"]);
+    for i in 1..=2 {
+        fs::write(tracker.join("count.txt"), format!("{i}\n")).unwrap();
+        git(&tracker, &["add", "count.txt"]);
+        git(&tracker, &["commit", "-q", "-m", &format!("ahead {i}")]);
+    }
+    let mut tui = open(&workspace);
+    tui.search("tracker");
+    assert_eq!(
+        tui.snapshot_sync_note("tracker").as_deref(),
+        Some("ahead by 2 commits")
+    );
+    let before = tui.frame();
+    assert!(
+        before.contains("ahead 2") || before.contains(&format!("{}2", UNICODE.ahead)),
+        "graph/tree should show ahead 2:\n{before}"
+    );
+
+    fs::write(tracker.join("count.txt"), "3\n").unwrap();
+    git(&tracker, &["add", "count.txt"]);
+    git(&tracker, &["commit", "-q", "-m", "ahead 3"]);
+    tui.watch_tick();
+    assert_eq!(
+        tui.snapshot_sync_note("tracker").as_deref(),
+        Some("ahead by 3 commits")
+    );
+    let after = tui.frame();
+    assert_contains(&after, "ahead 3");
+    assert!(
+        after.contains("ahead 3") || after.contains(&format!("{}3", UNICODE.ahead)),
+        "watch must paint ahead 3 without r:\n{after}"
+    );
+    let _ = fs::remove_dir_all(root);
+}

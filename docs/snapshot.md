@@ -49,7 +49,7 @@ Paths are workspace-relative. The snapshot does not include the workspace root, 
 
 Omitted optional keys: `primaryRepo`, `defaultBranchOverride`, and empty change flags on each file.
 
-These fields cover branch, sync, checkout kind, merge-into-default, and file changes. They are not a full commit graph.
+These fields cover branch, sync, checkout kind, merge-into-default, and file changes. They are not a full commit graph. `HEAD` is collected for TUI live-watch identity and is omitted from `--json`.
 
 ## File change object
 

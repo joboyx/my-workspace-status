@@ -57,7 +57,10 @@ use super::keys::event_to_action_with;
 use super::ops::{format_completed_op, format_running_op, RunningOp};
 use super::render::draw;
 use super::state::AppState;
-use super::watch::{watch_interval_ms, FLASH_TICK_MS};
+use super::watch::{
+    checkout_watch_identities, watch_interval_ms, watch_needs_pane_reload, watch_remain_ms,
+    watch_tick_due, FLASH_TICK_MS,
+};
 
 /// Options for the interactive TUI.
 pub struct TuiOpts {
@@ -153,11 +156,7 @@ fn run_loop(
     let mut last_watch = Instant::now();
     let mut last_fetch = Instant::now();
     loop {
-        let remain_watch = if watch_ms == 0 {
-            u64::MAX
-        } else {
-            watch_ms.saturating_sub(last_watch.elapsed().as_millis() as u64)
-        };
+        let remain_watch = watch_remain_ms(last_watch, Instant::now(), watch_ms);
         let remain_fetch = if fetch_ms == 0 {
             u64::MAX
         } else {
@@ -212,12 +211,12 @@ fn run_loop(
         }
         let _ = state.expire_ctrl_c_prompt(Instant::now());
         if !overlay_blocks_background_ticks(state.input_mode()) {
-            if watch_ms > 0 && last_watch.elapsed().as_millis() as u64 >= watch_ms {
+            if watch_tick_due(last_watch, Instant::now(), watch_ms) {
+                last_watch = Instant::now();
                 let effect = state.dispatch(Action::WatchTick);
                 if apply_effect(state, effect, opts, terminal, &Action::WatchTick) {
                     return Ok(());
                 }
-                last_watch = Instant::now();
             }
             if fetch_ms > 0 && last_fetch.elapsed().as_millis() as u64 >= fetch_ms {
                 let effect = state.dispatch(Action::FetchTick);
@@ -425,21 +424,23 @@ impl RightPaneRequest {
             None
         };
         let follow_diff = match &state.drill {
-            DrillView::Diff { repo, source, .. } => state.focused_commit_file_row().and_then(|row| {
-                if !row.is_file() {
-                    return None;
-                }
-                let (files, file_cursor) = commit_diff_list(state);
-                Some(FollowDiffRequest {
-                    repo: repo.clone(),
-                    source: source.clone(),
-                    path: row.path.clone(),
-                    context: state.commit_diff_context(repo, &row.path),
-                    files,
-                    file_cursor,
-                    focused_file: focused_file.clone(),
+            DrillView::Diff { repo, source, .. } => {
+                state.focused_commit_file_row().and_then(|row| {
+                    if !row.is_file() {
+                        return None;
+                    }
+                    let (files, file_cursor) = commit_diff_list(state);
+                    Some(FollowDiffRequest {
+                        repo: repo.clone(),
+                        source: source.clone(),
+                        path: row.path.clone(),
+                        context: state.commit_diff_context(repo, &row.path),
+                        files,
+                        file_cursor,
+                        focused_file: focused_file.clone(),
+                    })
                 })
-            }),
+            }
             _ => None,
         };
         Self {
@@ -898,9 +899,9 @@ fn apply_effect_inner(
             }) {
                 WorkPump::Quit => return true,
                 WorkPump::Done(snapshot) => {
-                    let before = state.signatures.clone();
-                    let _changed = state.apply_watch_snapshot(snapshot);
-                    if before != state.signatures && load_right_pumped(state, opts, terminal) {
+                    if apply_watch_snapshot_for_tick(state, snapshot)
+                        && load_right_pumped(state, opts, terminal)
+                    {
                         return true;
                     }
                 }
@@ -1350,6 +1351,18 @@ fn apply_headless_inner(state: &mut AppState, effect: Effect, opts: &TuiOpts) {
         Effect::LoadCommitDiff { repo, source, path } => {
             load_commit_diff(state, opts, repo, source, path);
         }
+        Effect::WatchRefresh => {
+            let snapshot = collect_full_snapshot(
+                &opts.cwd,
+                &opts.config,
+                &state.snapshot.filter_repos,
+                state.show_ignored,
+                false,
+            );
+            if apply_watch_snapshot_for_tick(state, snapshot) {
+                load_right_headless(state);
+            }
+        }
         _ => {}
     }
 }
@@ -1592,6 +1605,20 @@ fn compute_reload_repo(
         &snapshot.ignored_repos,
         show_ignored,
         &snapshot.filter_repos,
+    )
+}
+
+/// Apply a watch poll. Returns true when the right pane must reload
+/// (`HEAD` / sync note / dirty set / file signatures moved).
+fn apply_watch_snapshot_for_tick(state: &mut AppState, snapshot: WorkspaceSnapshot) -> bool {
+    let before_sigs = state.signatures.clone();
+    let before_checkouts = checkout_watch_identities(&state.snapshot);
+    state.apply_watch_snapshot(snapshot);
+    watch_needs_pane_reload(
+        &before_sigs,
+        &state.signatures,
+        &before_checkouts,
+        &checkout_watch_identities(&state.snapshot),
     )
 }
 
@@ -2104,7 +2131,11 @@ mod tests {
         assert!(files_before.is_empty());
         app.graph_cursor = 1;
         load_right_headless(&mut app);
-        assert_eq!(app.focus, FocusPane::Left, "follow must not steal left focus");
+        assert_eq!(
+            app.focus,
+            FocusPane::Left,
+            "follow must not steal left focus"
+        );
         assert!(app.drill.is_files());
         let files_after = match &app.drill {
             DrillView::Files { files, .. } => files.clone(),
@@ -2286,10 +2317,161 @@ mod tests {
         let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
         let mut app = AppState::new(workspace.clone(), snapshot.clone(), true);
         let before = app.signatures.clone();
-        let _ = app.apply_watch_snapshot(snapshot);
+        assert!(
+            !apply_watch_snapshot_for_tick(&mut app, snapshot),
+            "identical watch snapshot must skip load_right"
+        );
         assert_eq!(
             before, app.signatures,
             "identical watch snapshot must keep signatures so load_right can be skipped"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn watch_tick_reloads_when_head_moves_without_tree_chrome_flip() {
+        let root = std::env::temp_dir().join(format!(
+            "ws-tui-watch-head-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let alpha = workspace.join("alpha");
+        let beta = workspace.join("beta");
+        init_repo(&alpha);
+        init_repo(&beta);
+        git(&alpha, &["checkout", "-q", "-b", "feature/watch"]);
+        git(&beta, &["checkout", "-q", "-b", "feature/other"]);
+        let config = WorkspaceStatusConfig::with_defaults();
+        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let mut app = AppState::new(workspace.clone(), snapshot, true);
+        load_right_headless(&mut app);
+        let before_head = app
+            .snapshot
+            .repos
+            .iter()
+            .find(|row| row.repo == "alpha")
+            .map(|row| row.head.clone())
+            .expect("alpha");
+        let before_sigs = app.signatures.clone();
+
+        fs::write(alpha.join("tick.txt"), "head-move\n").unwrap();
+        git(&alpha, &["add", "tick.txt"]);
+        git(&alpha, &["commit", "-q", "-m", "watch-head-move"]);
+        let new_head = exec_git(&["rev-parse", "HEAD"], &alpha);
+        assert_ne!(before_head, new_head);
+
+        let next = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let alpha_row = next
+            .repos
+            .iter()
+            .find(|row| row.repo == "alpha")
+            .expect("alpha row");
+        assert_eq!(alpha_row.branch, "feature/watch");
+        assert_eq!(
+            alpha_row.sync_status,
+            crate::snapshot::SyncStatus::NoUpstream
+        );
+        assert!(alpha_row.changes.is_empty());
+        assert_eq!(alpha_row.head, new_head);
+
+        assert!(
+            apply_watch_snapshot_for_tick(&mut app, next),
+            "HEAD-only commit must not skip the pane reload"
+        );
+        assert_ne!(before_sigs, app.signatures);
+        assert_eq!(
+            app.snapshot
+                .repos
+                .iter()
+                .find(|row| row.repo == "alpha")
+                .map(|row| row.head.as_str()),
+            Some(new_head.as_str())
+        );
+
+        fs::write(beta.join("dirty.txt"), "flash me\n").unwrap();
+        let dirty = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let changed = app.apply_watch_snapshot(dirty);
+        assert!(
+            changed.iter().any(|id| id.contains("dirty.txt")),
+            "dirty file on the other repo must flash: {changed:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn watch_tick_reloads_when_ahead_count_moves() {
+        let root = std::env::temp_dir().join(format!(
+            "ws-tui-watch-ahead-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let remote = root.join("remote.git");
+        let tracker = workspace.join("tracker");
+        let sidecar = workspace.join("sidecar");
+        fs::create_dir_all(&workspace).unwrap();
+        Command::new(git_binary())
+            .args(["init", "-q", "--bare", remote.to_str().unwrap()])
+            .status()
+            .unwrap();
+        init_repo(&tracker);
+        git(
+            &tracker,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&tracker, &["push", "-u", "origin", "main", "--quiet"]);
+        init_repo(&sidecar);
+        git(&sidecar, &["checkout", "-q", "-b", "feature/sidecar"]);
+        for i in 1..=2 {
+            fs::write(tracker.join("count.txt"), format!("{i}\n")).unwrap();
+            git(&tracker, &["add", "count.txt"]);
+            git(&tracker, &["commit", "-q", "-m", &format!("ahead {i}")]);
+        }
+        let config = WorkspaceStatusConfig::with_defaults();
+        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let tracker_row = snapshot
+            .repos
+            .iter()
+            .find(|row| row.repo == "tracker")
+            .expect("tracker");
+        assert_eq!(tracker_row.sync_status, crate::snapshot::SyncStatus::Ahead);
+        assert!(
+            tracker_row.sync_note.contains("ahead by 2"),
+            "{}",
+            tracker_row.sync_note
+        );
+        let mut app = AppState::new(workspace.clone(), snapshot, true);
+        fs::write(tracker.join("count.txt"), "3\n").unwrap();
+        git(&tracker, &["add", "count.txt"]);
+        git(&tracker, &["commit", "-q", "-m", "ahead 3"]);
+        let next = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let after = next
+            .repos
+            .iter()
+            .find(|row| row.repo == "tracker")
+            .expect("tracker after");
+        assert_eq!(after.sync_status, crate::snapshot::SyncStatus::Ahead);
+        assert!(
+            after.sync_note.contains("ahead by 3"),
+            "{}",
+            after.sync_note
+        );
+        assert!(
+            apply_watch_snapshot_for_tick(&mut app, next),
+            "ahead 2→3 must not skip the pane reload"
+        );
+        assert_eq!(
+            app.snapshot
+                .repos
+                .iter()
+                .find(|row| row.repo == "tracker")
+                .map(|row| row.sync_note.as_str()),
+            Some("ahead by 3 commits")
         );
         let _ = fs::remove_dir_all(&root);
     }

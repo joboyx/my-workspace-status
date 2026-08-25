@@ -66,6 +66,8 @@ pub struct RepoSnapshot {
     pub branch: String,
     pub sync_status: SyncStatus,
     pub sync_note: String,
+    /// `HEAD` sha. Live-watch identity only; not part of `--json`.
+    pub head: String,
     pub has_unstaged: bool,
     pub has_staged: bool,
     pub has_untracked: bool,
@@ -84,6 +86,9 @@ pub struct WorkspaceRepoSnapshot {
     pub branch: String,
     pub sync_status: SyncStatus,
     pub sync_note: String,
+    /// `HEAD` sha. Live-watch identity only; omitted from `--json`.
+    #[serde(skip)]
+    pub head: String,
     pub checkout_kind: CheckoutKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_repo: Option<String>,
@@ -169,6 +174,7 @@ fn to_workspace_repo(snapshot: &RepoSnapshot, ignored: &BTreeSet<String>) -> Wor
         branch: snapshot.branch.clone(),
         sync_status: snapshot.sync_status,
         sync_note: snapshot.sync_note.clone(),
+        head: snapshot.head.clone(),
         checkout_kind: snapshot.checkout_kind,
         primary_repo: snapshot.primary_repo.clone(),
         merged_into_default: snapshot.merged_into_default,
@@ -229,6 +235,7 @@ pub fn repo_snapshots_from_workspace(snapshot: &WorkspaceSnapshot) -> Vec<RepoSn
             branch: repo.branch.clone(),
             sync_status: repo.sync_status,
             sync_note: repo.sync_note.clone(),
+            head: repo.head.clone(),
             has_unstaged: repo.has_unstaged,
             has_staged: repo.has_staged,
             has_untracked: repo.has_untracked,
@@ -322,7 +329,15 @@ fn to_verbose_row(s: &RepoSnapshot) -> VerboseRow {
     }
 }
 
-pub fn build_verbose_rows(snapshots: &[RepoSnapshot]) -> (Vec<VerboseRow>, Vec<VerboseRow>, Vec<VerboseRow>, usize, usize) {
+pub fn build_verbose_rows(
+    snapshots: &[RepoSnapshot],
+) -> (
+    Vec<VerboseRow>,
+    Vec<VerboseRow>,
+    Vec<VerboseRow>,
+    usize,
+    usize,
+) {
     let mut clean_default = Vec::new();
     let mut clean_non_default = Vec::new();
     let mut change_snaps = Vec::new();
@@ -346,16 +361,27 @@ pub fn build_verbose_rows(snapshots: &[RepoSnapshot]) -> (Vec<VerboseRow>, Vec<V
     change_snaps.sort_by(|a, b| compare_repo_paths_for_display(a, b));
 
     let clean_default: Vec<VerboseRow> = clean_default.into_iter().map(to_verbose_row).collect();
-    let clean_non_default: Vec<VerboseRow> = clean_non_default.into_iter().map(to_verbose_row).collect();
+    let clean_non_default: Vec<VerboseRow> =
+        clean_non_default.into_iter().map(to_verbose_row).collect();
     let change_repos: Vec<VerboseRow> = change_snaps.into_iter().map(to_verbose_row).collect();
 
     let mut repo_width = 20;
     let mut branch_width = 25;
-    for r in clean_default.iter().chain(&clean_non_default).chain(&change_repos) {
+    for r in clean_default
+        .iter()
+        .chain(&clean_non_default)
+        .chain(&change_repos)
+    {
         repo_width = repo_width.max(crate::helpers::visible_width(&r.repo));
         branch_width = branch_width.max(crate::helpers::visible_width(&r.branch));
     }
-    (clean_default, clean_non_default, change_repos, repo_width, branch_width)
+    (
+        clean_default,
+        clean_non_default,
+        change_repos,
+        repo_width,
+        branch_width,
+    )
 }
 
 pub fn build_summary_state(snapshots: &[RepoSnapshot]) -> SummaryState {
@@ -421,7 +447,6 @@ pub fn non_default_branch_repos(summary: &SummaryState) -> Vec<String> {
     sorted_unique(all)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,6 +457,7 @@ mod tests {
             branch: "main".to_string(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            head: String::new(),
             has_unstaged: ignored_change,
             has_staged: false,
             has_untracked: false,
@@ -463,7 +489,11 @@ mod tests {
         );
         let visible = visible_workspace_snapshot(&built);
         assert_eq!(
-            visible.repos.iter().map(|r| r.repo.as_str()).collect::<Vec<_>>(),
+            visible
+                .repos
+                .iter()
+                .map(|r| r.repo.as_str())
+                .collect::<Vec<_>>(),
             vec!["app"]
         );
         assert_eq!(visible.ignored_repos, vec!["notes"]);

@@ -36,6 +36,8 @@ pub struct NodeChrome {
     pub merged_into_default: Option<bool>,
     pub sync_status: Option<SyncStatus>,
     pub sync_note: String,
+    /// `HEAD` sha. Watch identity only; not painted.
+    pub head: String,
     pub change_count: usize,
     pub sync_summary: String,
     pub default_branch_override: Option<String>,
@@ -333,6 +335,12 @@ fn family_container(
         .find(|m| m.sync_status == worst)
         .map(|m| m.sync_note.clone())
         .unwrap_or_default();
+    let primary_head = members
+        .iter()
+        .find(|m| m.checkout_kind == CheckoutKind::Primary)
+        .or_else(|| members.first())
+        .map(|m| m.head.clone())
+        .unwrap_or_default();
     TreeNode {
         id: format!("repo:{primary}"),
         kind: NodeKind::Repo,
@@ -346,6 +354,7 @@ fn family_container(
             path: primary.to_string(),
             sync_status: Some(worst),
             sync_note: note_for_worst,
+            head: primary_head,
             change_count,
             is_family: true,
             checkout_kind: Some(CheckoutKind::Primary),
@@ -396,6 +405,7 @@ fn repo_or_checkout(repo: &WorkspaceRepoSnapshot, kind: NodeKind, tree_mode: boo
             merged_into_default: repo.merged_into_default,
             sync_status: Some(repo.sync_status),
             sync_note: repo.sync_note.clone(),
+            head: repo.head.clone(),
             change_count: repo.changes.len(),
             default_branch_override: repo.default_branch_override.clone(),
             ..NodeChrome::default()
@@ -1108,6 +1118,7 @@ mod tests {
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            head: String::new(),
             has_unstaged: ignored_dirty,
             has_staged: false,
             has_untracked: false,
