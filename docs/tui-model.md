@@ -83,7 +83,7 @@ See [git-graph-topology.md](./git-graph-topology.md) and [graph.md](./graph.md).
 
 Write scope for bulk git (`f` / `p` / `P` / `d`): primaries on workspace/family rows; a linked worktree only when that row is focused; hidden ignored-list paths omitted even if focused. When ignored repos are shown (`.` / `-a`), they follow the same primary / focused-worktree rule. Background fetch uses `background_fetch_targets` and skips hidden ignored repos. After those ops finish, `status` is a count (`Fetched N repos`, with ` (N failed)` if any) — never a list of names.
 
-Graph pane writes (`graphCheckout` / `graphCreateBranch` / `graphMerge` / stash apply / drop / pop) gate on graph-list focus (depth 0 right or depth 1 left). Graph `m` is `graphMerge` (always confirms). Leftover branch/tag chips on a commit spacer collapse to a bold `[+N]` overflow chip so the row does not grow.
+Graph pane writes (`graphCheckout` / `graphCreateBranch` / `graphMerge` / stash apply / drop / pop) gate on graph-list focus (depth 0 right or depth 1 left). Graph `m` is `graphMerge` (always confirms). Leftover branch/tag chips on a commit spacer: truncate the next name with `…` (keep brackets) when part of it fits; bold `[+N]` counts only chips fully hidden after that (omit `[+N]` when the last painted chip is merely truncated) so the row does not grow.
 
 ## Editor
 

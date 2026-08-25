@@ -34,7 +34,8 @@ pub struct GraphLabelPalette {
     pub tag: Color,
     /// Checkout / `[HEAD]` mark.
     pub head_mark: Color,
-    /// Hidden leftover branch/tag chip (`[+N]`). Distinct from muted meta.
+    /// Fully hidden leftover branch/tag chip (`[+N]`). Distinct from muted
+    /// meta. Omitted when the last painted chip is only truncated.
     pub overflow: Color,
 }
 
@@ -1545,6 +1546,74 @@ mod tests {
         assert!(
             !footer.contains(&overflow_chip_text(1)),
             "footer lists refs instead of collapsing them: {footer}"
+        );
+        assert!(
+            footer.contains("[feature/long-topic]"),
+            "pan/footer keep the full name: {footer}"
+        );
+    }
+
+    #[test]
+    fn narrow_row_truncates_last_visible_chip_without_overflow_count() {
+        let commit = Commit {
+            id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            subject: "topic".into(),
+            refs: vec![
+                GraphRef::local("main"),
+                GraphRef::local("feature/long-name"),
+            ],
+            author_name: "Ada".into(),
+            author_date_unix: NOW - 120,
+            ..Commit::default()
+        };
+        let model = GraphModel {
+            commits: vec![commit.clone()],
+            uncommitted: Some(false),
+            window: 1,
+            ..GraphModel::default()
+        };
+        let width = 28u16;
+        let painted = paint_model_with(
+            &model,
+            &crate::ASCII,
+            PaintOpts {
+                now_unix: Some(NOW),
+                line_width: Some(width as usize),
+                ..PaintOpts::default()
+            },
+        );
+        let spacer = painted
+            .iter()
+            .find(|l| !l.selectable && l.label.contains("[main]"))
+            .expect("commit spacer");
+        assert!(
+            spacer.label.contains('…') && spacer.label.contains("…]"),
+            "next chip name truncates in brackets: {}",
+            spacer.label
+        );
+        assert!(
+            spacer
+                .parts
+                .iter()
+                .all(|p| p.kind != crate::LabelKind::Overflow),
+            "truncated last chip is not [+N]: {}",
+            spacer.label
+        );
+        let row = GraphRow::Commit {
+            commit,
+            is_head: false,
+            worktrees: Vec::new(),
+        };
+        let [_, footer] = selection_detail_lines(
+            &model,
+            GraphFooterSelection::Row(&row),
+            &crate::ASCII,
+            200,
+            NOW,
+        );
+        assert!(
+            footer.contains("[feature/long-name]"),
+            "footer lists the full name: {footer}"
         );
     }
 
