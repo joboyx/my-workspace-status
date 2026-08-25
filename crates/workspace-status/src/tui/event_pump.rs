@@ -3,6 +3,12 @@
 //! Long git work must not sit on the draw thread. Overlay modes must not
 //! start background fetch/watch ticks. Graph autoload must not run on
 //! resize, mouse noise, or swallowed overlay keys.
+//!
+//! Fetch / pull / watch *children* already run on a worker (`run_work_pumped`).
+//! Applying that result still used to call `load_right` (`git log` / `git diff`)
+//! on the draw thread. Crossterm queued keys and clicks until that join, then
+//! the loop drained them in a burst. Follow-up pane git must stay on the same
+//! busy pump. Unchanged watch snapshots skip the pane reload.
 
 use super::action::Action;
 use super::keys::InputMode;
@@ -120,5 +126,19 @@ mod tests {
             BusyAction::Ignore
         );
         assert_eq!(classify_busy_action(&Action::Fetch), BusyAction::Ignore);
+        assert_eq!(classify_busy_action(&Action::Pull), BusyAction::Ignore);
+        assert_eq!(classify_busy_action(&Action::Push), BusyAction::Ignore);
+        assert_eq!(
+            classify_busy_action(&Action::Click { col: 4, row: 8 }),
+            BusyAction::Ignore
+        );
+        assert_eq!(
+            classify_busy_action(&Action::ScrollWheel {
+                col: 4,
+                row: 8,
+                delta: -1
+            }),
+            BusyAction::Ignore
+        );
     }
 }

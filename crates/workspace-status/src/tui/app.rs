@@ -29,10 +29,11 @@ use crate::git::{
     list_worktree_name_status, merge_into_head, pull_quiet_detailed, push_quiet,
     remove_untracked_file, remove_worktree, repo_has_local_changes, rev_parse_quiet,
     revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop, stash_push, unstage_file,
-    MergeIntoHeadResult,
+    MergeIntoHeadResult, NameStatus,
 };
 use crate::snapshot::{
-    build_workspace_snapshot, repo_snapshots_from_workspace, CheckoutKind, WorkspaceSnapshot,
+    build_workspace_snapshot, repo_snapshots_from_workspace, CheckoutKind, FileChange,
+    WorkspaceSnapshot,
 };
 
 use super::action::{Action, Effect};
@@ -50,7 +51,7 @@ use super::event_pump::{
 use super::fetch::fetch_interval_ms;
 use super::graph_load::{
     autoload_limit, autoload_skip, load_graph_model, load_graph_model_window, merge_autoload,
-    refresh_graph_limit, should_autoload, ShouldAutoload,
+    refresh_graph_limit, should_autoload, GraphIdentity, ShouldAutoload,
 };
 use super::keys::event_to_action_with;
 use super::ops::{format_completed_op, format_running_op, RunningOp};
@@ -246,6 +247,11 @@ enum WorkPump<T> {
     Quit,
 }
 
+/// Run `work` on a helper thread while this thread still polls crossterm.
+///
+/// Used for fetch / pull / watch snapshot collect **and** follow-up pane git
+/// ([`load_right_pumped`], graph autoload). Keys other than quit / resize are
+/// drained so they cannot sit in the TTY buffer and flush after the join.
 fn run_work_pumped<T: Send + 'static>(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
@@ -316,6 +322,186 @@ fn reload_snapshot_pumped(
     }
 }
 
+/// Inputs for right-pane git (`git log` / `git diff` / worktree name-status).
+///
+/// Must stay `Send` so [`load_right_pumped`] can run [`Self::compute`] on a
+/// worker. #60 moved fetch/pull/watch *children* off the draw thread; applying
+/// that result still called this git on the event loop, so crossterm queued
+/// keys and flushed them in a burst.
+#[derive(Clone, Debug)]
+struct RightPaneRequest {
+    cwd: std::path::PathBuf,
+    snapshot: WorkspaceSnapshot,
+    show_ignored: bool,
+    in_graph: bool,
+    focused_file: Option<(String, FileChange)>,
+    file_diff_context: Option<u32>,
+    focused_graph_repo: Option<String>,
+    same_repo: bool,
+    graph_limit: usize,
+}
+
+/// Git result for [`RightPaneRequest::compute`]. Applied on the draw thread
+/// with no further subprocesses.
+#[derive(Debug)]
+enum RightPaneLoad {
+    Diff {
+        repo: String,
+        path: String,
+        content: DiffContent,
+    },
+    Graph {
+        model: workspace_status_graph::GraphModel,
+        identity: GraphIdentity,
+        worktree_files: Option<(String, CommitFileSource, Vec<NameStatus>)>,
+    },
+    Clear,
+    WorktreeFiles {
+        repo: String,
+        source: CommitFileSource,
+        files: Vec<NameStatus>,
+    },
+    None,
+}
+
+impl RightPaneRequest {
+    fn from_state(state: &AppState) -> Self {
+        let focused_file = state.focused_file();
+        let focused_graph_repo = state.focused_graph_repo();
+        let same_repo = focused_graph_repo.as_ref().is_some_and(|repo| {
+            state
+                .graph_identity
+                .as_ref()
+                .is_some_and(|(r, _)| r == repo)
+        });
+        Self {
+            cwd: state.cwd.clone(),
+            snapshot: state.snapshot.clone(),
+            show_ignored: state.show_ignored,
+            in_graph: state.drill.is_graph(),
+            file_diff_context: focused_file
+                .as_ref()
+                .and_then(|(repo, change)| state.workspace_diff_context(repo, &change.path)),
+            focused_file,
+            focused_graph_repo,
+            same_repo,
+            graph_limit: refresh_graph_limit(state.graph.as_ref()),
+        }
+    }
+
+    fn worktree_refresh(drill: &super::drill::DrillView) -> Option<(String, CommitFileSource)> {
+        match drill {
+            super::drill::DrillView::Files { repo, source, .. }
+            | super::drill::DrillView::Diff { repo, source, .. }
+                if matches!(source, CommitFileSource::Worktree) =>
+            {
+                Some((repo.clone(), source.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    fn compute(&self, worktree: Option<(String, CommitFileSource)>) -> RightPaneLoad {
+        if self.in_graph {
+            if let Some((repo, change)) = &self.focused_file {
+                let content = load_file_diff(&self.cwd, repo, change, self.file_diff_context);
+                return RightPaneLoad::Diff {
+                    repo: repo.clone(),
+                    path: change.path.clone(),
+                    content,
+                };
+            }
+        }
+        if let Some(repo) = &self.focused_graph_repo {
+            let (model, identity) = if self.same_repo {
+                load_graph_model_window(
+                    &self.cwd,
+                    &self.snapshot,
+                    repo,
+                    self.show_ignored,
+                    0,
+                    self.graph_limit,
+                )
+            } else {
+                load_graph_model(&self.cwd, &self.snapshot, repo, self.show_ignored)
+            };
+            let worktree_files = if !self.in_graph {
+                worktree.map(|(wt_repo, source)| {
+                    let files = list_worktree_name_status(&self.cwd.join(&wt_repo));
+                    (wt_repo, source, files)
+                })
+            } else {
+                None
+            };
+            return RightPaneLoad::Graph {
+                model,
+                identity,
+                worktree_files,
+            };
+        }
+        if self.in_graph {
+            RightPaneLoad::Clear
+        } else if let Some((repo, source)) = worktree {
+            let files = list_worktree_name_status(&self.cwd.join(&repo));
+            RightPaneLoad::WorktreeFiles {
+                repo,
+                source,
+                files,
+            }
+        } else {
+            RightPaneLoad::None
+        }
+    }
+}
+
+fn apply_right_pane_load(state: &mut AppState, payload: RightPaneLoad) {
+    match payload {
+        RightPaneLoad::Diff {
+            repo,
+            path,
+            content,
+        } => state.set_diff(repo, path, content),
+        RightPaneLoad::Graph {
+            model,
+            identity,
+            worktree_files,
+        } => {
+            state.set_graph(model, identity.repo, identity.head);
+            if let Some((repo, source, files)) = worktree_files {
+                state.open_commit_files(repo, source, files.into_iter().map(Into::into).collect());
+            }
+        }
+        RightPaneLoad::Clear => state.clear_right(),
+        RightPaneLoad::WorktreeFiles {
+            repo,
+            source,
+            files,
+        } => {
+            state.open_commit_files(repo, source, files.into_iter().map(Into::into).collect());
+        }
+        RightPaneLoad::None => {}
+    }
+}
+
+/// Run right-pane git on a worker. Resize and quit still reach the loop;
+/// other keys are drained so they cannot queue and flush after the join.
+///
+/// Returns true when the user asked to quit during that work.
+fn load_right_pumped(
+    state: &mut AppState,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> bool {
+    let request = RightPaneRequest::from_state(state);
+    let worktree = RightPaneRequest::worktree_refresh(&state.drill);
+    match run_work_pumped(terminal, state, move || request.compute(worktree)) {
+        WorkPump::Quit => true,
+        WorkPump::Done(payload) => {
+            apply_right_pane_load(state, payload);
+            false
+        }
+    }
+}
+
 fn apply_effect(
     state: &mut AppState,
     effect: Effect,
@@ -323,11 +509,13 @@ fn apply_effect(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     action: &Action,
 ) -> bool {
-    let quit = apply_effect_inner(state, effect, opts, terminal);
-    if action_triggers_graph_autoload(action) {
-        maybe_autoload_graph(state, opts, Some(terminal));
+    if apply_effect_inner(state, effect, opts, terminal) {
+        return true;
     }
-    quit
+    if action_triggers_graph_autoload(action) {
+        return maybe_autoload_graph(state, opts, Some(terminal));
+    }
+    false
 }
 
 fn apply_effect_inner(
@@ -367,7 +555,9 @@ fn apply_effect_inner(
             }
             state.stamp_checkout_flashes(&repos);
             state.status = format_completed_op(RunningOp::Fetch, ok, failed);
-            load_right(state);
+            if load_right_pumped(state, terminal) {
+                return true;
+            }
         }
         Effect::Pull { repos } => {
             let cwd = opts.cwd.clone();
@@ -394,7 +584,9 @@ fn apply_effect_inner(
             }
             state.stamp_checkout_flashes(&repos);
             state.status = format_completed_op(RunningOp::Pull, ok, failed);
-            load_right(state);
+            if load_right_pumped(state, terminal) {
+                return true;
+            }
         }
         Effect::DefaultBranch { repos } => {
             let total = repos.len();
@@ -438,21 +630,31 @@ fn apply_effect_inner(
             }
             state.stamp_checkout_flashes(&repos);
             state.status = format_completed_op(RunningOp::DefaultBranch, ok, failed);
-            load_right(state);
+            if load_right_pumped(state, terminal) {
+                return true;
+            }
         }
         Effect::ReloadSnapshot => {
             if reload_snapshot_pumped(state, opts, terminal) {
                 return true;
             }
             state.status = "refreshed workspace".into();
-            load_right(state);
+            if load_right_pumped(state, terminal) {
+                return true;
+            }
         }
         Effect::ReloadRepo { repo } => {
             reload_repo(state, opts, &repo);
             state.status = format!("refreshed {repo}");
-            load_right(state);
+            if load_right_pumped(state, terminal) {
+                return true;
+            }
         }
-        Effect::LoadRightPane => load_right(state),
+        Effect::LoadRightPane => {
+            if load_right_pumped(state, terminal) {
+                return true;
+            }
+        }
         Effect::Stage { repo, paths } => {
             let dir = opts.cwd.join(&repo);
             for path in &paths {
@@ -463,7 +665,9 @@ fn apply_effect_inner(
             }
             reload_snapshot(state, opts);
             state.status = format!("staged {}", paths.last().map(String::as_str).unwrap_or(""));
-            load_right(state);
+            if load_right_pumped(state, terminal) {
+                return true;
+            }
         }
         Effect::Unstage { repo, paths } => {
             let dir = opts.cwd.join(&repo);
@@ -478,7 +682,9 @@ fn apply_effect_inner(
                 "unstaged {}",
                 paths.last().map(String::as_str).unwrap_or("")
             );
-            load_right(state);
+            if load_right_pumped(state, terminal) {
+                return true;
+            }
         }
         Effect::Revert {
             repo,
@@ -512,7 +718,9 @@ fn apply_effect_inner(
                     untracked.len()
                 );
             }
-            load_right(state);
+            if load_right_pumped(state, terminal) {
+                return true;
+            }
         }
         Effect::EditFile { repo, path } => {
             let editor = resolve_editor(
@@ -554,8 +762,11 @@ fn apply_effect_inner(
             }) {
                 WorkPump::Quit => return true,
                 WorkPump::Done(snapshot) => {
+                    let before = state.signatures.clone();
                     let _changed = state.apply_watch_snapshot(snapshot);
-                    load_right(state);
+                    if before != state.signatures && load_right_pumped(state, terminal) {
+                        return true;
+                    }
                 }
             }
         }
@@ -578,7 +789,9 @@ fn apply_effect_inner(
             }
             state.stamp_checkout_flashes(&repos);
             state.status = format_completed_op(RunningOp::Push, ok, failed);
-            load_right(state);
+            if load_right_pumped(state, terminal) {
+                return true;
+            }
         }
         Effect::PrepareStashMenu { repo } => {
             let latest = latest_stash_ref(&opts.cwd.join(&repo));
@@ -594,7 +807,9 @@ fn apply_effect_inner(
                 } else {
                     format!("Stashed {} files", paths.len())
                 };
-                load_right(state);
+                if load_right_pumped(state, terminal) {
+                    return true;
+                }
             }
             Err(err) => state.status = format!("stash failed: {err}"),
         },
@@ -603,7 +818,9 @@ fn apply_effect_inner(
                 Ok(()) => {
                     reload_snapshot(state, opts);
                     state.status = format!("applied {stash_ref}");
-                    load_right(state);
+                    if load_right_pumped(state, terminal) {
+                        return true;
+                    }
                 }
                 Err(err) => state.status = format!("apply failed: {err}"),
             }
@@ -613,7 +830,9 @@ fn apply_effect_inner(
                 Ok(()) => {
                     reload_snapshot(state, opts);
                     state.status = format!("popped {stash_ref}");
-                    load_right(state);
+                    if load_right_pumped(state, terminal) {
+                        return true;
+                    }
                 }
                 Err(err) => state.status = format!("pop failed: {err}"),
             }
@@ -623,7 +842,9 @@ fn apply_effect_inner(
                 Ok(()) => {
                     reload_snapshot(state, opts);
                     state.status = format!("dropped {stash_ref}");
-                    load_right(state);
+                    if load_right_pumped(state, terminal) {
+                        return true;
+                    }
                 }
                 Err(err) => state.status = format!("drop failed: {err}"),
             }
@@ -639,7 +860,9 @@ fn apply_effect_inner(
         } => {
             if run_checkout_branch(state, &opts.cwd, repo, selected_name, fast_forward_ref) {
                 reload_snapshot(state, opts);
-                load_right(state);
+                if load_right_pumped(state, terminal) {
+                    return true;
+                }
             }
         }
         Effect::CreateBranch { repo, name } => {
@@ -647,7 +870,9 @@ fn apply_effect_inner(
                 Ok(()) => {
                     reload_snapshot(state, opts);
                     state.status = format!("created {name}");
-                    load_right(state);
+                    if load_right_pumped(state, terminal) {
+                        return true;
+                    }
                 }
                 Err(err) => state.status = format!("create branch failed: {err}"),
             }
@@ -661,14 +886,18 @@ fn apply_effect_inner(
                 reload_snapshot(state, opts);
                 let short = commit_id.get(..7).unwrap_or(&commit_id);
                 state.status = format!("created {name} at {short}");
-                load_right(state);
+                if load_right_pumped(state, terminal) {
+                    return true;
+                }
             }
             Err(err) => state.status = format!("create branch failed: {err}"),
         },
         Effect::MergeIntoHead { repo, rev, label } => {
             if run_merge_into_head(state, &opts.cwd, repo, rev, label) {
                 reload_snapshot(state, opts);
-                load_right(state);
+                if load_right_pumped(state, terminal) {
+                    return true;
+                }
             }
         }
         Effect::RemoveWorktree {
@@ -679,7 +908,9 @@ fn apply_effect_inner(
             Ok(()) => {
                 reload_snapshot(state, opts);
                 state.status = format!("removed worktree {path}");
-                load_right(state);
+                if load_right_pumped(state, terminal) {
+                    return true;
+                }
             }
             Err(err) => state.status = format!("remove worktree failed: {err}"),
         },
@@ -809,7 +1040,7 @@ pub(crate) fn apply_headless_effect(
 ) {
     apply_headless_inner(state, effect, opts);
     if action_triggers_graph_autoload(action) {
-        maybe_autoload_graph(state, opts, None);
+        let _ = maybe_autoload_graph(state, opts, None);
     }
 }
 
@@ -1004,77 +1235,28 @@ fn reload_repo(state: &mut AppState, opts: &TuiOpts, repo: &str) {
 }
 
 fn load_right(state: &mut AppState) {
-    let in_graph = state.drill.is_graph();
-    if in_graph {
-        if let Some((repo, change)) = state.focused_file() {
-            let content = load_file_diff(
-                &state.cwd,
-                &repo,
-                &change,
-                state.workspace_diff_context(&repo, &change.path),
-            );
-            state.set_diff(repo, change.path, content);
-            return;
-        }
-    }
-    if let Some(repo) = state.focused_graph_repo() {
-        let same_repo = state
-            .graph_identity
-            .as_ref()
-            .is_some_and(|(r, _)| r == &repo);
-        let (model, identity) = if same_repo {
-            load_graph_model_window(
-                &state.cwd,
-                &state.snapshot,
-                &repo,
-                state.show_ignored,
-                0,
-                refresh_graph_limit(state.graph.as_ref()),
-            )
-        } else {
-            load_graph_model(&state.cwd, &state.snapshot, &repo, state.show_ignored)
-        };
-        state.set_graph(model, identity.repo, identity.head);
-        if !in_graph {
-            refresh_worktree_commit_files(state);
-        }
-        return;
-    }
-    if in_graph {
-        state.clear_right();
-    } else {
-        refresh_worktree_commit_files(state);
-    }
-}
-
-fn refresh_worktree_commit_files(state: &mut AppState) {
-    let (repo, source) = match &state.drill {
-        super::drill::DrillView::Files { repo, source, .. }
-        | super::drill::DrillView::Diff { repo, source, .. } => (repo.clone(), source.clone()),
-        super::drill::DrillView::Graph => return,
-    };
-    if !matches!(source, CommitFileSource::Worktree) {
-        return;
-    }
-    let files = list_worktree_name_status(&state.cwd.join(&repo));
-    state.open_commit_files(repo, source, files.into_iter().map(Into::into).collect());
+    let worktree = RightPaneRequest::worktree_refresh(&state.drill);
+    let payload = RightPaneRequest::from_state(state).compute(worktree);
+    apply_right_pane_load(state, payload);
 }
 
 /// Fetch the next `git log` page when the cursor sits on the last loaded row.
+///
+/// Returns true when the user asked to quit during pumped git.
 fn maybe_autoload_graph(
     state: &mut AppState,
     opts: &TuiOpts,
     terminal: Option<&mut Terminal<CrosstermBackend<io::Stdout>>>,
-) {
+) -> bool {
     let (repo, skip, limit) = {
         if state.graph_loading_older {
-            return;
+            return false;
         }
         if state.right_is_diff() && !state.in_commit_drill() {
-            return;
+            return false;
         }
         let Some(model) = state.graph.as_ref() else {
-            return;
+            return false;
         };
         if !should_autoload(ShouldAutoload {
             cursor_index: state.graph_cursor,
@@ -1082,10 +1264,10 @@ fn maybe_autoload_graph(
             has_more: model.has_more,
             loading: false,
         }) {
-            return;
+            return false;
         }
         let Some((repo, _)) = state.graph_identity.as_ref() else {
-            return;
+            return false;
         };
         (repo.clone(), autoload_skip(model), autoload_limit(model))
     };
@@ -1093,17 +1275,32 @@ fn maybe_autoload_graph(
     state.graph_loading_older = true;
     let prev_status = state.status.clone();
     state.status = LOADING_OLDER.to_string();
-    if let Some(terminal) = terminal {
+    let page_and_identity = if let Some(terminal) = terminal {
         let _ = terminal.draw(|frame| draw(frame, state));
-    }
-    let (page, identity) =
-        load_graph_model_window(&opts.cwd, &state.snapshot, &repo, show_ignored, skip, limit);
+        let cwd = opts.cwd.clone();
+        let snapshot = state.snapshot.clone();
+        match run_work_pumped(terminal, state, move || {
+            load_graph_model_window(&cwd, &snapshot, &repo, show_ignored, skip, limit)
+        }) {
+            WorkPump::Quit => {
+                state.graph_loading_older = false;
+                if state.status == LOADING_OLDER {
+                    state.status = prev_status;
+                }
+                return true;
+            }
+            WorkPump::Done(loaded) => loaded,
+        }
+    } else {
+        load_graph_model_window(&opts.cwd, &state.snapshot, &repo, show_ignored, skip, limit)
+    };
+    let (page, identity) = page_and_identity;
     let Some(current) = state.graph.clone() else {
         state.graph_loading_older = false;
         if state.status == LOADING_OLDER {
             state.status = prev_status;
         }
-        return;
+        return false;
     };
     let merged = merge_autoload(&current, page);
     state.set_graph(merged, identity.repo, identity.head);
@@ -1111,6 +1308,7 @@ fn maybe_autoload_graph(
     if state.status == LOADING_OLDER {
         state.status = prev_status;
     }
+    false
 }
 
 /// Discover every repo (ignored included) so `.` can show them without a walk.
@@ -1150,7 +1348,9 @@ mod tests {
     use crate::tui::branches::DIRTY_WORKTREE_STATUS;
     use std::fs;
     use std::process::Command;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn git_env() -> Vec<(&'static str, &'static str)> {
         vec![
@@ -1431,6 +1631,125 @@ mod tests {
         ));
         assert_eq!(app.status, "Merge conflict — resolve in the worktree");
         assert!(rev_parse_quiet("MERGE_HEAD", &repo_dir).is_some());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn right_pane_load_types_are_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<RightPaneRequest>();
+        assert_send::<RightPaneLoad>();
+    }
+
+    #[test]
+    fn compute_right_pane_load_fills_graph_for_a_repo_row() {
+        let root = std::env::temp_dir().join(format!(
+            "ws-tui-pane-load-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let repo_dir = workspace.join("app");
+        init_repo(&repo_dir);
+        fs::write(repo_dir.join("README.md"), "# dirty\n").unwrap();
+        let config = WorkspaceStatusConfig::with_defaults();
+        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let mut app = AppState::new(workspace.clone(), snapshot, true);
+        let idx = app
+            .rows
+            .iter()
+            .position(|r| {
+                r.kind == super::super::tree::NodeKind::Repo && r.repo.as_deref() == Some("app")
+            })
+            .expect("visible app repo row");
+        app.cursor = idx;
+        load_right(&mut app);
+        assert!(
+            app.graph.is_some(),
+            "repo row must load a graph from pane git"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn event_thread_keeps_polling_while_right_pane_git_runs() {
+        let root = std::env::temp_dir().join(format!(
+            "ws-tui-pane-pump-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let repo_dir = workspace.join("app");
+        init_repo(&repo_dir);
+        fs::write(repo_dir.join("README.md"), "# dirty\n").unwrap();
+        let config = WorkspaceStatusConfig::with_defaults();
+        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let mut app = AppState::new(workspace.clone(), snapshot, true);
+        let idx = app
+            .rows
+            .iter()
+            .position(|r| {
+                r.kind == super::super::tree::NodeKind::Repo && r.repo.as_deref() == Some("app")
+            })
+            .expect("visible app repo row");
+        app.cursor = idx;
+        let request = RightPaneRequest::from_state(&app);
+        let worktree = RightPaneRequest::worktree_refresh(&app.drill);
+        let (tx, rx) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(80));
+            let payload = request.compute(worktree);
+            let _ = tx.send(payload);
+        });
+        let mut pumps = 0u32;
+        let payload = loop {
+            match rx.try_recv() {
+                Ok(value) => break value,
+                Err(mpsc::TryRecvError::Empty) => {
+                    pumps += 1;
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    panic!("right-pane worker disconnected")
+                }
+            }
+        };
+        assert!(
+            pumps >= 5,
+            "draw thread must poll while pane git runs (got {pumps} pumps); \
+             inline load_right after fetch would stall until git log returns, \
+             then crossterm would flush queued keys in a burst"
+        );
+        apply_right_pane_load(&mut app, payload);
+        assert!(app.graph.is_some());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unchanged_watch_signatures_let_the_loop_skip_pane_git() {
+        let root = std::env::temp_dir().join(format!(
+            "ws-tui-watch-skip-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let repo_dir = workspace.join("app");
+        init_repo(&repo_dir);
+        let config = WorkspaceStatusConfig::with_defaults();
+        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let mut app = AppState::new(workspace.clone(), snapshot.clone(), true);
+        let before = app.signatures.clone();
+        let _ = app.apply_watch_snapshot(snapshot);
+        assert_eq!(
+            before, app.signatures,
+            "identical watch snapshot must keep signatures so load_right can be skipped"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 }
