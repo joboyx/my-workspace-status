@@ -7,6 +7,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use workspace_status_graph::{GraphModel, GraphRow};
 
+use crate::snapshot::{WorkspaceRepoSnapshot, WorkspaceSnapshot};
+
 use super::commit_files::CommitFileRow;
 use super::drill::CommitFileSource;
 use super::icons::status_letter_from_change;
@@ -41,6 +43,74 @@ pub fn watch_interval_ms(raw: Option<&str>) -> u64 {
     (parsed as u64).max(MIN_WATCH_MS)
 }
 
+/// Remaining milliseconds until the next poll, from when this interval started.
+///
+/// A slow full-workspace collect must not push the next tick out by the
+/// collect duration. `interval_ms == 0` disables (`u64::MAX`).
+pub fn watch_remain_ms(interval_started: Instant, now: Instant, interval_ms: u64) -> u64 {
+    if interval_ms == 0 {
+        return u64::MAX;
+    }
+    interval_ms.saturating_sub(now.saturating_duration_since(interval_started).as_millis() as u64)
+}
+
+/// True when a live-watch poll is due. `interval_ms == 0` never fires.
+pub fn watch_tick_due(interval_started: Instant, now: Instant, interval_ms: u64) -> bool {
+    interval_ms > 0 && watch_remain_ms(interval_started, now, interval_ms) == 0
+}
+
+/// Watch identity for one checkout row.
+///
+/// Includes `HEAD` and `sync_note` so a new local commit on a clean branch
+/// (or ahead 2→3 with the same [`crate::snapshot::SyncStatus`]) is a real
+/// move. Dirty paths participate so an edit still flashes without `r`.
+pub fn checkout_watch_identity(repo: &WorkspaceRepoSnapshot) -> String {
+    let dirty: Vec<String> = repo
+        .changes
+        .iter()
+        .map(|change| {
+            format!(
+                "{}:{}:{}:{}",
+                change.path,
+                change.staged_status.as_deref().unwrap_or(""),
+                change.unstaged_status.as_deref().unwrap_or(""),
+                change.untracked
+            )
+        })
+        .collect();
+    format!(
+        "{}|{}|{}|{}|{}",
+        repo.branch,
+        repo.sync_status.as_str(),
+        repo.sync_note,
+        repo.head,
+        dirty.join(";"),
+    )
+}
+
+/// Checkout watch keys for a snapshot, keyed by repo path.
+pub fn checkout_watch_identities(snapshot: &WorkspaceSnapshot) -> BTreeMap<String, String> {
+    snapshot
+        .repos
+        .iter()
+        .map(|repo| (repo.repo.clone(), checkout_watch_identity(repo)))
+        .collect()
+}
+
+/// True when the right pane should reload after a watch apply.
+///
+/// Tree signatures cover file mtime / status. Checkout identities cover
+/// `HEAD` / `sync_note` / dirty set so a chrome-silent commit still reloads
+/// graph and status.
+pub fn watch_needs_pane_reload(
+    before_sigs: &BTreeMap<String, String>,
+    after_sigs: &BTreeMap<String, String>,
+    before_checkouts: &BTreeMap<String, String>,
+    after_checkouts: &BTreeMap<String, String>,
+) -> bool {
+    before_sigs != after_sigs || before_checkouts != after_checkouts
+}
+
 /// `changeSignatures` disk token: `size:mtimeMs`, or `gone` when missing.
 fn file_disk_token(cwd: &Path, repo: &str, rel: &str) -> String {
     let abs = cwd.join(repo).join(rel);
@@ -62,8 +132,9 @@ fn file_disk_token(cwd: &Path, repo: &str, rel: &str) -> String {
 ///
 /// File rows match `changeSignatures`: status letter plus `size:mtimeMs`
 /// (or `gone`). An in-place save of an already-modified file therefore flashes.
-/// Chrome rows use path / branch / sync / change count so glyph paint does not
-/// count as a semantic update.
+/// Chrome rows use path / branch / sync enum / sync note / HEAD / change
+/// count / fold so a new commit or ahead 2→3 is a semantic update, while
+/// glyph paint still is not.
 pub fn row_signature(row: &VisibleRow, cwd: &Path) -> String {
     match row.kind {
         NodeKind::File => {
@@ -79,10 +150,12 @@ pub fn row_signature(row: &VisibleRow, cwd: &Path) -> String {
             format!("{}:{disk}", status.as_str())
         }
         _ => format!(
-            "chrome:{}:{}:{}:{}:{}",
+            "chrome:{}:{}:{}:{}:{}:{}:{}",
             row.chrome.path,
             row.chrome.branch,
             row.chrome.sync_status.map(|s| s.as_str()).unwrap_or(""),
+            row.chrome.sync_note,
+            row.chrome.head,
             row.chrome.change_count,
             row.folded
         ),
@@ -418,8 +491,9 @@ pub fn checkout_flash_ids(path: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tree::NodeChrome;
     use super::*;
-    use crate::snapshot::FileChange;
+    use crate::snapshot::{CheckoutKind, FileChange, SyncStatus, WorkspaceRepoSnapshot};
     use std::path::PathBuf;
     use workspace_status_graph::{Commit, GraphRef, Stash, Worktree};
 
@@ -485,6 +559,220 @@ mod tests {
         assert_eq!(watch_interval_ms(Some("abc")), DEFAULT_WATCH_MS);
         assert_eq!(watch_interval_ms(Some("100")), MIN_WATCH_MS);
         assert_eq!(watch_interval_ms(Some("5000")), 5000);
+    }
+
+    fn chrome_row(
+        path: &str,
+        branch: &str,
+        status: SyncStatus,
+        note: &str,
+        head: &str,
+    ) -> VisibleRow {
+        VisibleRow {
+            id: format!("repo:{path}"),
+            kind: NodeKind::Repo,
+            chrome: NodeChrome {
+                path: path.into(),
+                branch: branch.into(),
+                sync_status: Some(status),
+                sync_note: note.into(),
+                head: head.into(),
+                change_count: 0,
+                ..NodeChrome::default()
+            },
+            ..VisibleRow::default()
+        }
+    }
+
+    fn checkout_row(
+        path: &str,
+        branch: &str,
+        status: SyncStatus,
+        note: &str,
+        head: &str,
+        dirty: &[(&str, &str)],
+    ) -> WorkspaceRepoSnapshot {
+        WorkspaceRepoSnapshot {
+            repo: path.into(),
+            ignored: false,
+            branch: branch.into(),
+            sync_status: status,
+            sync_note: note.into(),
+            head: head.into(),
+            checkout_kind: CheckoutKind::Primary,
+            primary_repo: None,
+            merged_into_default: None,
+            default_branch_override: None,
+            has_unstaged: !dirty.is_empty(),
+            has_staged: false,
+            has_untracked: false,
+            changes: dirty
+                .iter()
+                .map(|(file, letter)| FileChange {
+                    path: (*file).into(),
+                    staged_status: None,
+                    unstaged_status: Some((*letter).into()),
+                    untracked: false,
+                    old_path: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn next_tick_is_from_interval_start_not_collect_end() {
+        let started = Instant::now();
+        let after_collect = started + Duration::from_millis(2000);
+        assert_eq!(watch_remain_ms(started, after_collect, 3000), 1000);
+        assert!(!watch_tick_due(started, after_collect, 3000));
+        assert!(watch_tick_due(
+            started,
+            started + Duration::from_millis(3000),
+            3000
+        ));
+        assert_eq!(
+            watch_remain_ms(started, started + Duration::from_millis(2000), 0),
+            u64::MAX
+        );
+        // Stamping after collect would leave a full interval — that is the bug.
+        let stamped_after_collect = after_collect;
+        assert_eq!(
+            watch_remain_ms(stamped_after_collect, after_collect, 3000),
+            3000
+        );
+    }
+
+    #[test]
+    fn chrome_signature_moves_on_head_or_sync_note() {
+        let cwd = Path::new("/nonexistent");
+        let base = chrome_row("alpha", "feature/watch", SyncStatus::NoUpstream, "", "aaa");
+        let same_chrome = chrome_row("alpha", "feature/watch", SyncStatus::NoUpstream, "", "aaa");
+        assert_eq!(row_signature(&base, cwd), row_signature(&same_chrome, cwd));
+
+        let new_head = chrome_row("alpha", "feature/watch", SyncStatus::NoUpstream, "", "bbb");
+        assert_ne!(
+            row_signature(&base, cwd),
+            row_signature(&new_head, cwd),
+            "HEAD-only commit must change chrome watch identity"
+        );
+
+        let ahead_two = chrome_row(
+            "alpha",
+            "feature/watch",
+            SyncStatus::Ahead,
+            "ahead by 2 commits",
+            "aaa",
+        );
+        let ahead_three = chrome_row(
+            "alpha",
+            "feature/watch",
+            SyncStatus::Ahead,
+            "ahead by 3 commits",
+            "ccc",
+        );
+        assert_ne!(
+            row_signature(&ahead_two, cwd),
+            row_signature(&ahead_three, cwd),
+            "ahead 2→3 with the same SyncStatus must change chrome watch identity"
+        );
+    }
+
+    #[test]
+    fn checkout_identity_and_pane_reload_see_silent_head_and_dirty() {
+        let before_row = checkout_row(
+            "alpha",
+            "feature/watch",
+            SyncStatus::NoUpstream,
+            "",
+            "aaa",
+            &[],
+        );
+        let after_head = checkout_row(
+            "alpha",
+            "feature/watch",
+            SyncStatus::NoUpstream,
+            "",
+            "bbb",
+            &[],
+        );
+        assert_ne!(
+            checkout_watch_identity(&before_row),
+            checkout_watch_identity(&after_head)
+        );
+
+        let ahead_two = checkout_row(
+            "alpha",
+            "feature/watch",
+            SyncStatus::Ahead,
+            "ahead by 2 commits",
+            "aaa",
+            &[],
+        );
+        let ahead_three = checkout_row(
+            "alpha",
+            "feature/watch",
+            SyncStatus::Ahead,
+            "ahead by 3 commits",
+            "aaa",
+            &[],
+        );
+        assert_ne!(
+            checkout_watch_identity(&ahead_two),
+            checkout_watch_identity(&ahead_three)
+        );
+
+        let mut before_sigs = BTreeMap::new();
+        before_sigs.insert(
+            "repo:alpha".into(),
+            row_signature(
+                &chrome_row("alpha", "feature/watch", SyncStatus::NoUpstream, "", "aaa"),
+                Path::new("/nonexistent"),
+            ),
+        );
+        let mut after_sigs = before_sigs.clone();
+        after_sigs.insert(
+            "repo:alpha".into(),
+            row_signature(
+                &chrome_row("alpha", "feature/watch", SyncStatus::NoUpstream, "", "bbb"),
+                Path::new("/nonexistent"),
+            ),
+        );
+        let mut before_checkouts = BTreeMap::new();
+        before_checkouts.insert("alpha".into(), checkout_watch_identity(&before_row));
+        let mut after_checkouts = BTreeMap::new();
+        after_checkouts.insert("alpha".into(), checkout_watch_identity(&after_head));
+        assert!(watch_needs_pane_reload(
+            &before_sigs,
+            &after_sigs,
+            &before_checkouts,
+            &after_checkouts
+        ));
+        assert!(!watch_needs_pane_reload(
+            &before_sigs,
+            &before_sigs,
+            &before_checkouts,
+            &before_checkouts
+        ));
+
+        let dirty = checkout_row(
+            "beta",
+            "feature/other",
+            SyncStatus::NoUpstream,
+            "",
+            "ddd",
+            &[("README.md", "M")],
+        );
+        assert_ne!(
+            checkout_watch_identity(&checkout_row(
+                "beta",
+                "feature/other",
+                SyncStatus::NoUpstream,
+                "",
+                "ddd",
+                &[]
+            )),
+            checkout_watch_identity(&dirty)
+        );
     }
 
     #[test]

@@ -320,6 +320,7 @@ mod tests {
             } else {
                 String::new()
             },
+            head: String::new(),
             has_unstaged: false,
             has_staged: false,
             has_untracked: false,

@@ -350,6 +350,7 @@ mod tests {
             branch: "main".into(),
             sync_status: SyncStatus::NoUpstream,
             sync_note: String::new(),
+            head: String::new(),
             has_unstaged: dirty_path.is_some(),
             has_staged: false,
             has_untracked: false,

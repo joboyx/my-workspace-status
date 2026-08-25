@@ -131,6 +131,52 @@ impl HeadlessTui {
         self.send(KeyCode::Esc);
     }
 
+    /// Fire one live-watch poll (same as the TTY timer).
+    pub fn watch_tick(&mut self) {
+        if self.quit {
+            return;
+        }
+        let effect = self.state.dispatch(Action::WatchTick);
+        if matches!(effect, Effect::Quit) {
+            self.quit = true;
+            return;
+        }
+        apply_headless_effect(&mut self.state, effect, &self.opts, &Action::WatchTick);
+    }
+
+    /// HEAD sha the graph was last loaded for, if any.
+    pub fn graph_head(&self) -> Option<String> {
+        self.state
+            .graph_identity
+            .as_ref()
+            .map(|(_, head)| head.clone())
+    }
+
+    /// True when `id` is still inside the flash window.
+    pub fn is_flashing(&self, id: &str) -> bool {
+        self.state.flashes.contains_key(id)
+    }
+
+    /// Checkout `HEAD` from the current snapshot, if that repo is loaded.
+    pub fn snapshot_head(&self, repo: &str) -> Option<String> {
+        self.state
+            .snapshot
+            .repos
+            .iter()
+            .find(|row| row.repo == repo)
+            .map(|row| row.head.clone())
+    }
+
+    /// Sync note from the current snapshot, if that repo is loaded.
+    pub fn snapshot_sync_note(&self, repo: &str) -> Option<String> {
+        self.state
+            .snapshot
+            .repos
+            .iter()
+            .find(|row| row.repo == repo)
+            .map(|row| row.sync_note.clone())
+    }
+
     /// Send Ctrl-C through the real keymap (double-press quit chord).
     pub fn ctrl_c(&mut self) {
         self.send_key(KeyCode::Char('c'), KeyModifiers::CONTROL);

@@ -8,7 +8,9 @@
 //! Applying that result still used to call `load_right` (`git log` / `git diff`)
 //! on the draw thread. Crossterm queued keys and clicks until that join, then
 //! the loop drained them in a burst. Follow-up pane git must stay on the same
-//! busy pump. Unchanged watch snapshots skip the pane reload.
+//! busy pump. Unchanged watch snapshots (tree signatures and checkout `HEAD` /
+//! sync note / dirty set) skip the pane reload. The next tick is due from the
+//! start of the interval.
 //!
 //! While a worker runs, nav / pane switch / cancel / quit still dispatch
 //! (`BusyAction::Handle`). Only actions that would start another git write
