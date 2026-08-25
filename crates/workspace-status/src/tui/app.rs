@@ -250,12 +250,15 @@ enum WorkPump<T> {
 /// Run `work` on a helper thread while this thread still polls crossterm.
 ///
 /// Used for fetch / pull / watch snapshot collect, follow-up pane git
-/// ([`load_right_pumped`]), graph autoload, commit files/diff, and TTY
-/// snapshot reloads. Keys other than quit / resize are drained so they
-/// cannot sit in the TTY buffer and flush after the join.
+/// ([`load_right_pumped`]), graph autoload, commit files/diff, TTY snapshot
+/// reloads, and local git writes. Nav / pane switch / cancel dispatch while
+/// the worker runs ([`BusyAction::Handle`]). Actions that would start another
+/// git write are drained ([`BusyAction::Ignore`]) so they cannot nest a second
+/// mutating child or flush after the join.
 fn run_work_pumped<T: Send + 'static>(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
+    opts: &TuiOpts,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> WorkPump<T> {
     let (tx, rx) = mpsc::sync_channel(1);
@@ -292,6 +295,21 @@ fn run_work_pumped<T: Send + 'static>(
                         let _ = state.dispatch(Action::Resize { cols, rows });
                         let _ = terminal.draw(|frame| draw(frame, state));
                     }
+                    BusyAction::Handle => {
+                        let mouse_before = state.mouse_enabled;
+                        let action_for_load = action.clone();
+                        let effect = state.dispatch(action);
+                        if state.mouse_enabled != mouse_before {
+                            sync_mouse_capture(state.mouse_enabled);
+                        }
+                        if matches!(effect, Effect::Quit) {
+                            quit = true;
+                        } else if apply_effect(state, effect, opts, terminal, &action_for_load) {
+                            quit = true;
+                        } else {
+                            let _ = terminal.draw(|frame| draw(frame, state));
+                        }
+                    }
                     BusyAction::Ignore => {}
                 }
                 if !event::poll(Duration::from_millis(0)).unwrap_or(false) {
@@ -312,7 +330,7 @@ fn reload_snapshot_pumped(
     let config = opts.config.clone();
     let filter = state.snapshot.filter_repos.clone();
     let show_ignored = state.show_ignored;
-    match run_work_pumped(terminal, state, move || {
+    match run_work_pumped(terminal, state, opts, move || {
         collect_full_snapshot(&cwd, &config, &filter, show_ignored, false)
     }) {
         WorkPump::Quit => true,
@@ -484,23 +502,59 @@ fn apply_right_pane_load(state: &mut AppState, payload: RightPaneLoad) {
     }
 }
 
-/// Run right-pane git on a worker. Resize and quit still reach the loop;
-/// other keys are drained so they cannot queue and flush after the join.
-///
-/// Returns true when the user asked to quit during that work.
+/// Run right-pane git on a worker. Nav and pane switch stay live; nested
+/// writes are drained. Returns true when the user asked to quit.
 fn load_right_pumped(
     state: &mut AppState,
+    opts: &TuiOpts,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> bool {
     let request = RightPaneRequest::from_state(state);
     let worktree = RightPaneRequest::worktree_refresh(&state.drill);
-    match run_work_pumped(terminal, state, move || request.compute(worktree)) {
+    match run_work_pumped(terminal, state, opts, move || request.compute(worktree)) {
         WorkPump::Quit => true,
         WorkPump::Done(payload) => {
             apply_right_pane_load(state, payload);
             false
         }
     }
+}
+
+/// Reload snapshot + pane after a local write. Always runs so an error
+/// return cannot skip the pump and flush queued keys.
+fn refresh_after_write_pumped(
+    state: &mut AppState,
+    opts: &TuiOpts,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> bool {
+    if reload_snapshot_pumped(state, opts, terminal) {
+        return true;
+    }
+    load_right_pumped(state, opts, terminal)
+}
+
+/// Pump a local git write, then always refresh. Error paths still refresh.
+fn run_write_then_refresh_pumped<T: Send + 'static>(
+    state: &mut AppState,
+    opts: &TuiOpts,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+    status_ok: impl FnOnce(&T) -> String,
+    status_err: impl FnOnce(&str) -> String,
+) -> bool {
+    let outcome = match run_work_pumped(terminal, state, opts, work) {
+        WorkPump::Quit => return true,
+        WorkPump::Done(result) => result,
+    };
+    let status = match &outcome {
+        Ok(value) => status_ok(value),
+        Err(err) => status_err(err),
+    };
+    if refresh_after_write_pumped(state, opts, terminal) {
+        return true;
+    }
+    state.status = status;
+    false
 }
 
 fn apply_effect(
@@ -542,7 +596,7 @@ fn apply_effect_inner(
             paint_running_op(state, terminal, RunningOp::Fetch, 0, total);
             for (i, repo) in repos.iter().enumerate() {
                 let dir = cwd.join(repo);
-                match run_work_pumped(terminal, state, move || {
+                match run_work_pumped(terminal, state, opts, move || {
                     exec_git_checked(&["fetch", "--quiet"], &dir)
                 }) {
                     WorkPump::Quit => return true,
@@ -556,7 +610,7 @@ fn apply_effect_inner(
             }
             state.stamp_checkout_flashes(&repos);
             state.status = format_completed_op(RunningOp::Fetch, ok, failed);
-            if load_right_pumped(state, terminal) {
+            if load_right_pumped(state, opts, terminal) {
                 return true;
             }
         }
@@ -568,7 +622,7 @@ fn apply_effect_inner(
             paint_running_op(state, terminal, RunningOp::Pull, 0, total);
             for (i, repo) in repos.iter().enumerate() {
                 let dir = cwd.join(repo);
-                match run_work_pumped(terminal, state, move || pull_quiet_detailed(&dir)) {
+                match run_work_pumped(terminal, state, opts, move || pull_quiet_detailed(&dir)) {
                     WorkPump::Quit => return true,
                     WorkPump::Done(result) => {
                         if result.ok {
@@ -585,7 +639,7 @@ fn apply_effect_inner(
             }
             state.stamp_checkout_flashes(&repos);
             state.status = format_completed_op(RunningOp::Pull, ok, failed);
-            if load_right_pumped(state, terminal) {
+            if load_right_pumped(state, opts, terminal) {
                 return true;
             }
         }
@@ -604,7 +658,7 @@ fn apply_effect_inner(
                 if let Some((branch, override_name)) = task {
                     let cwd = opts.cwd.clone();
                     let repo = repo.clone();
-                    match run_work_pumped(terminal, state, move || {
+                    match run_work_pumped(terminal, state, opts, move || {
                         switch_repo_to_default_branch(
                             &repo,
                             &branch,
@@ -631,7 +685,7 @@ fn apply_effect_inner(
             }
             state.stamp_checkout_flashes(&repos);
             state.status = format_completed_op(RunningOp::DefaultBranch, ok, failed);
-            if load_right_pumped(state, terminal) {
+            if load_right_pumped(state, opts, terminal) {
                 return true;
             }
         }
@@ -640,7 +694,7 @@ fn apply_effect_inner(
                 return true;
             }
             state.status = "refreshed workspace".into();
-            if load_right_pumped(state, terminal) {
+            if load_right_pumped(state, opts, terminal) {
                 return true;
             }
         }
@@ -649,47 +703,52 @@ fn apply_effect_inner(
                 return true;
             }
             state.status = format!("refreshed {repo}");
-            if load_right_pumped(state, terminal) {
+            if load_right_pumped(state, opts, terminal) {
                 return true;
             }
         }
         Effect::LoadRightPane => {
-            if load_right_pumped(state, terminal) {
+            if load_right_pumped(state, opts, terminal) {
                 return true;
             }
         }
         Effect::Stage { repo, paths } => {
             let dir = opts.cwd.join(&repo);
-            for path in &paths {
-                if let Err(err) = stage_file(&dir, path) {
-                    state.status = format!("stage failed: {err}");
-                    return false;
-                }
-            }
-            if reload_snapshot_pumped(state, opts, terminal) {
-                return true;
-            }
-            state.status = format!("staged {}", paths.last().map(String::as_str).unwrap_or(""));
-            if load_right_pumped(state, terminal) {
+            let paths_work = paths.clone();
+            let last = paths.last().cloned().unwrap_or_default();
+            if run_write_then_refresh_pumped(
+                state,
+                opts,
+                terminal,
+                move || {
+                    for path in &paths_work {
+                        stage_file(&dir, path)?;
+                    }
+                    Ok(())
+                },
+                move |_| format!("staged {last}"),
+                |err| format!("stage failed: {err}"),
+            ) {
                 return true;
             }
         }
         Effect::Unstage { repo, paths } => {
             let dir = opts.cwd.join(&repo);
-            for path in &paths {
-                if let Err(err) = unstage_file(&dir, path) {
-                    state.status = format!("unstage failed: {err}");
-                    return false;
-                }
-            }
-            if reload_snapshot_pumped(state, opts, terminal) {
-                return true;
-            }
-            state.status = format!(
-                "unstaged {}",
-                paths.last().map(String::as_str).unwrap_or("")
-            );
-            if load_right_pumped(state, terminal) {
+            let paths_work = paths.clone();
+            let last = paths.last().cloned().unwrap_or_default();
+            if run_write_then_refresh_pumped(
+                state,
+                opts,
+                terminal,
+                move || {
+                    for path in &paths_work {
+                        unstage_file(&dir, path)?;
+                    }
+                    Ok(())
+                },
+                move |_| format!("unstaged {last}"),
+                |err| format!("unstage failed: {err}"),
+            ) {
                 return true;
             }
         }
@@ -699,35 +758,37 @@ fn apply_effect_inner(
             untracked,
         } => {
             let dir = opts.cwd.join(&repo);
-            for path in &tracked {
-                if let Err(err) = revert_tracked_file(&dir, path) {
-                    state.status = format!("revert failed: {err}");
-                    return false;
-                }
-            }
-            for path in &untracked {
-                if let Err(err) = remove_untracked_file(&dir, path) {
-                    state.status = format!("revert failed: {err}");
-                    return false;
-                }
-            }
-            if reload_snapshot_pumped(state, opts, terminal) {
-                return true;
-            }
-            if tracked.len() + untracked.len() == 1 {
+            let tracked_work = tracked.clone();
+            let untracked_work = untracked.clone();
+            let ok_status = if tracked.len() + untracked.len() == 1 {
                 if untracked.len() == 1 {
-                    state.status = format!("deleted {}", untracked[0]);
+                    format!("deleted {}", untracked[0])
                 } else {
-                    state.status = format!("reverted {}", tracked[0]);
+                    format!("reverted {}", tracked[0])
                 }
             } else {
-                state.status = format!(
+                format!(
                     "reverted {} tracked, {} untracked",
                     tracked.len(),
                     untracked.len()
-                );
-            }
-            if load_right_pumped(state, terminal) {
+                )
+            };
+            if run_write_then_refresh_pumped(
+                state,
+                opts,
+                terminal,
+                move || {
+                    for path in &tracked_work {
+                        revert_tracked_file(&dir, path)?;
+                    }
+                    for path in &untracked_work {
+                        remove_untracked_file(&dir, path)?;
+                    }
+                    Ok(())
+                },
+                move |_| ok_status,
+                |err| format!("revert failed: {err}"),
+            ) {
                 return true;
             }
         }
@@ -762,7 +823,7 @@ fn apply_effect_inner(
                 if reload_repo_pumped(state, opts, terminal, &repo) {
                     return true;
                 }
-                if load_right_pumped(state, terminal) {
+                if load_right_pumped(state, opts, terminal) {
                     return true;
                 }
             }
@@ -772,14 +833,14 @@ fn apply_effect_inner(
             let config = opts.config.clone();
             let filter = state.snapshot.filter_repos.clone();
             let show_ignored = state.show_ignored;
-            match run_work_pumped(terminal, state, move || {
+            match run_work_pumped(terminal, state, opts, move || {
                 collect_full_snapshot(&cwd, &config, &filter, show_ignored, false)
             }) {
                 WorkPump::Quit => return true,
                 WorkPump::Done(snapshot) => {
                     let before = state.signatures.clone();
                     let _changed = state.apply_watch_snapshot(snapshot);
-                    if before != state.signatures && load_right_pumped(state, terminal) {
+                    if before != state.signatures && load_right_pumped(state, opts, terminal) {
                         return true;
                     }
                 }
@@ -792,7 +853,7 @@ fn apply_effect_inner(
             paint_running_op(state, terminal, RunningOp::Push, 0, total);
             for (i, repo) in repos.iter().enumerate() {
                 let dir = opts.cwd.join(repo);
-                match run_work_pumped(terminal, state, move || push_quiet(&dir)) {
+                match run_work_pumped(terminal, state, opts, move || push_quiet(&dir)) {
                     WorkPump::Quit => return true,
                     WorkPump::Done(Ok(())) => ok += 1,
                     WorkPump::Done(Err(_)) => failed += 1,
@@ -804,80 +865,86 @@ fn apply_effect_inner(
             }
             state.stamp_checkout_flashes(&repos);
             state.status = format_completed_op(RunningOp::Push, ok, failed);
-            if load_right_pumped(state, terminal) {
+            if load_right_pumped(state, opts, terminal) {
                 return true;
             }
         }
         Effect::PrepareStashMenu { repo } => {
             let dir = opts.cwd.join(&repo);
-            match run_work_pumped(terminal, state, move || latest_stash_ref(&dir)) {
+            match run_work_pumped(terminal, state, opts, move || latest_stash_ref(&dir)) {
                 WorkPump::Quit => return true,
                 WorkPump::Done(latest) => state.open_stash_menu(repo, latest),
             }
         }
-        Effect::StashCreate { repo, paths } => match stash_push(&opts.cwd.join(&repo), &paths) {
-            Ok(()) => {
-                if reload_snapshot_pumped(state, opts, terminal) {
-                    return true;
-                }
-                state.status = if paths.len() == 1 {
-                    "Stashed 1 file".into()
-                } else if paths.is_empty() {
-                    "Stashed".into()
-                } else {
-                    format!("Stashed {} files", paths.len())
-                };
-                if load_right_pumped(state, terminal) {
-                    return true;
-                }
+        Effect::StashCreate { repo, paths } => {
+            let dir = opts.cwd.join(&repo);
+            let paths_work = paths.clone();
+            let ok_status = if paths.len() == 1 {
+                "Stashed 1 file".to_string()
+            } else if paths.is_empty() {
+                "Stashed".to_string()
+            } else {
+                format!("Stashed {} files", paths.len())
+            };
+            if run_write_then_refresh_pumped(
+                state,
+                opts,
+                terminal,
+                move || stash_push(&dir, &paths_work),
+                move |_| ok_status,
+                |err| format!("stash failed: {err}"),
+            ) {
+                return true;
             }
-            Err(err) => state.status = format!("stash failed: {err}"),
-        },
+        }
         Effect::StashApply { repo, stash_ref } => {
-            match stash_apply(&opts.cwd.join(&repo), &stash_ref) {
-                Ok(()) => {
-                    if reload_snapshot_pumped(state, opts, terminal) {
-                        return true;
-                    }
-                    state.status = format!("applied {stash_ref}");
-                    if load_right_pumped(state, terminal) {
-                        return true;
-                    }
-                }
-                Err(err) => state.status = format!("apply failed: {err}"),
+            let dir = opts.cwd.join(&repo);
+            let stash = stash_ref.clone();
+            let stash_status = stash_ref.clone();
+            if run_write_then_refresh_pumped(
+                state,
+                opts,
+                terminal,
+                move || stash_apply(&dir, &stash),
+                move |_| format!("applied {stash_status}"),
+                |err| format!("apply failed: {err}"),
+            ) {
+                return true;
             }
         }
         Effect::StashPop { repo, stash_ref } => {
-            match stash_pop(&opts.cwd.join(&repo), &stash_ref) {
-                Ok(()) => {
-                    if reload_snapshot_pumped(state, opts, terminal) {
-                        return true;
-                    }
-                    state.status = format!("popped {stash_ref}");
-                    if load_right_pumped(state, terminal) {
-                        return true;
-                    }
-                }
-                Err(err) => state.status = format!("pop failed: {err}"),
+            let dir = opts.cwd.join(&repo);
+            let stash = stash_ref.clone();
+            let stash_status = stash_ref.clone();
+            if run_write_then_refresh_pumped(
+                state,
+                opts,
+                terminal,
+                move || stash_pop(&dir, &stash),
+                move |_| format!("popped {stash_status}"),
+                |err| format!("pop failed: {err}"),
+            ) {
+                return true;
             }
         }
         Effect::StashDrop { repo, stash_ref } => {
-            match stash_drop(&opts.cwd.join(&repo), &stash_ref) {
-                Ok(()) => {
-                    if reload_snapshot_pumped(state, opts, terminal) {
-                        return true;
-                    }
-                    state.status = format!("dropped {stash_ref}");
-                    if load_right_pumped(state, terminal) {
-                        return true;
-                    }
-                }
-                Err(err) => state.status = format!("drop failed: {err}"),
+            let dir = opts.cwd.join(&repo);
+            let stash = stash_ref.clone();
+            let stash_status = stash_ref.clone();
+            if run_write_then_refresh_pumped(
+                state,
+                opts,
+                terminal,
+                move || stash_drop(&dir, &stash),
+                move |_| format!("dropped {stash_status}"),
+                |err| format!("drop failed: {err}"),
+            ) {
+                return true;
             }
         }
         Effect::PrepareBranchPicker { repo } => {
             let dir = opts.cwd.join(&repo);
-            match run_work_pumped(terminal, state, move || list_local_branches(&dir)) {
+            match run_work_pumped(terminal, state, opts, move || list_local_branches(&dir)) {
                 WorkPump::Quit => return true,
                 WorkPump::Done(branches) => state.open_branch_picker(repo, branches),
             }
@@ -887,53 +954,75 @@ fn apply_effect_inner(
             selected_name,
             fast_forward_ref,
         } => {
-            if run_checkout_branch(state, &opts.cwd, repo, selected_name, fast_forward_ref) {
-                if reload_snapshot_pumped(state, opts, terminal) {
-                    return true;
-                }
-                if load_right_pumped(state, terminal) {
-                    return true;
+            let dir = opts.cwd.join(&repo);
+            let name = selected_name.clone();
+            let ff = fast_forward_ref.clone();
+            match run_work_pumped(terminal, state, opts, move || {
+                compute_checkout(&dir, &name, ff.as_deref())
+            }) {
+                WorkPump::Quit => return true,
+                WorkPump::Done(result) => {
+                    let changed = apply_checkout_compute(state, repo, result);
+                    if changed && reload_snapshot_pumped(state, opts, terminal) {
+                        return true;
+                    }
+                    if load_right_pumped(state, opts, terminal) {
+                        return true;
+                    }
                 }
             }
         }
         Effect::CreateBranch { repo, name } => {
-            match create_branch_checkout(&opts.cwd.join(&repo), &name) {
-                Ok(()) => {
-                    if reload_snapshot_pumped(state, opts, terminal) {
-                        return true;
-                    }
-                    state.status = format!("created {name}");
-                    if load_right_pumped(state, terminal) {
-                        return true;
-                    }
-                }
-                Err(err) => state.status = format!("create branch failed: {err}"),
+            let dir = opts.cwd.join(&repo);
+            let name_work = name.clone();
+            let name_status = name.clone();
+            if run_write_then_refresh_pumped(
+                state,
+                opts,
+                terminal,
+                move || create_branch_checkout(&dir, &name_work),
+                move |_| format!("created {name_status}"),
+                |err| format!("create branch failed: {err}"),
+            ) {
+                return true;
             }
         }
         Effect::CreateBranchAt {
             repo,
             name,
             commit_id,
-        } => match create_branch_at(&opts.cwd.join(&repo), &name, &commit_id) {
-            Ok(()) => {
-                if reload_snapshot_pumped(state, opts, terminal) {
-                    return true;
-                }
-                let short = commit_id.get(..7).unwrap_or(&commit_id);
-                state.status = format!("created {name} at {short}");
-                if load_right_pumped(state, terminal) {
-                    return true;
-                }
+        } => {
+            let dir = opts.cwd.join(&repo);
+            let name_work = name.clone();
+            let commit_work = commit_id.clone();
+            let name_status = name.clone();
+            let short = commit_id.get(..7).unwrap_or(&commit_id).to_string();
+            if run_write_then_refresh_pumped(
+                state,
+                opts,
+                terminal,
+                move || create_branch_at(&dir, &name_work, &commit_work),
+                move |_| format!("created {name_status} at {short}"),
+                |err| format!("create branch failed: {err}"),
+            ) {
+                return true;
             }
-            Err(err) => state.status = format!("create branch failed: {err}"),
-        },
+        }
         Effect::MergeIntoHead { repo, rev, label } => {
-            if run_merge_into_head(state, &opts.cwd, repo, rev, label) {
-                if reload_snapshot_pumped(state, opts, terminal) {
-                    return true;
-                }
-                if load_right_pumped(state, terminal) {
-                    return true;
+            let dir = opts.cwd.join(&repo);
+            let rev_work = rev.clone();
+            match run_work_pumped(terminal, state, opts, move || {
+                compute_merge(&dir, &rev_work)
+            }) {
+                WorkPump::Quit => return true,
+                WorkPump::Done(result) => {
+                    let changed = apply_merge_compute(state, &label, result);
+                    if changed && reload_snapshot_pumped(state, opts, terminal) {
+                        return true;
+                    }
+                    if load_right_pumped(state, opts, terminal) {
+                        return true;
+                    }
                 }
             }
         }
@@ -941,18 +1030,21 @@ fn apply_effect_inner(
             primary,
             path,
             force,
-        } => match remove_worktree(&opts.cwd.join(&primary), &opts.cwd.join(&path), force) {
-            Ok(()) => {
-                if reload_snapshot_pumped(state, opts, terminal) {
-                    return true;
-                }
-                state.status = format!("removed worktree {path}");
-                if load_right_pumped(state, terminal) {
-                    return true;
-                }
+        } => {
+            let primary_dir = opts.cwd.join(&primary);
+            let path_dir = opts.cwd.join(&path);
+            let path_status = path.clone();
+            if run_write_then_refresh_pumped(
+                state,
+                opts,
+                terminal,
+                move || remove_worktree(&primary_dir, &path_dir, force),
+                move |_| format!("removed worktree {path_status}"),
+                |err| format!("remove worktree failed: {err}"),
+            ) {
+                return true;
             }
-            Err(err) => state.status = format!("remove worktree failed: {err}"),
-        },
+        }
         Effect::LoadCommitFiles { repo, source } => {
             if load_commit_files_pumped(state, opts, terminal, repo, source) {
                 return true;
@@ -965,6 +1057,168 @@ fn apply_effect_inner(
         }
     }
     false
+}
+
+/// Git-only checkout work. TTY runs this on a worker; tests call it via
+/// [`run_checkout_branch`].
+enum CheckoutCompute {
+    Dirty,
+    Failed {
+        status: String,
+        clear_picker: bool,
+    },
+    Confirm {
+        local_branch: String,
+        remote_ref: String,
+    },
+    Done {
+        status: String,
+    },
+}
+
+/// Git-only merge work. TTY runs this on a worker; tests call it via
+/// [`run_merge_into_head`].
+enum MergeCompute {
+    Dirty,
+    AlreadyUpToDate,
+    FastForward,
+    MergeCommit,
+    Conflict,
+    Failed(String),
+}
+
+fn compute_checkout(
+    dir: &Path,
+    selected_name: &str,
+    fast_forward_ref: Option<&str>,
+) -> CheckoutCompute {
+    if fast_forward_ref.is_none() && repo_has_local_changes(dir) {
+        return CheckoutCompute::Dirty;
+    }
+    if let Some(remote_ref) = fast_forward_ref {
+        if !checkout_branch(selected_name, dir) {
+            return CheckoutCompute::Failed {
+                status: format!("Checkout failed: {selected_name}"),
+                clear_picker: true,
+            };
+        }
+        let ff = fast_forward_to_remote_ref(remote_ref, dir);
+        return CheckoutCompute::Done {
+            status: if ff {
+                format!("Checked out {selected_name} and fast-forwarded to {remote_ref}")
+            } else {
+                format!("Checked out {selected_name}; could not fast-forward to {remote_ref}")
+            },
+        };
+    }
+
+    let local_name = checkout_name_for_ref(selected_name);
+    let local_sha = rev_parse_quiet(&format!("refs/heads/{local_name}"), dir);
+    let remote_sha = if is_origin_remote_ref(selected_name) {
+        rev_parse_quiet(&format!("refs/remotes/{selected_name}"), dir)
+    } else {
+        rev_parse_quiet(&format!("refs/remotes/origin/{local_name}"), dir)
+    };
+    match plan_graph_checkout(
+        selected_name,
+        local_sha.is_some(),
+        local_sha.as_deref(),
+        remote_sha.as_deref(),
+    ) {
+        GraphCheckoutPlan::ConfirmLocalThenPull {
+            local_branch,
+            remote_ref,
+        } => CheckoutCompute::Confirm {
+            local_branch,
+            remote_ref,
+        },
+        GraphCheckoutPlan::Checkout { branch } => {
+            if checkout_branch(&branch, dir) {
+                CheckoutCompute::Done {
+                    status: format!("Checked out {branch}"),
+                }
+            } else {
+                CheckoutCompute::Failed {
+                    status: format!("Checkout failed: {branch}"),
+                    clear_picker: false,
+                }
+            }
+        }
+    }
+}
+
+fn apply_checkout_compute(state: &mut AppState, repo: String, result: CheckoutCompute) -> bool {
+    match result {
+        CheckoutCompute::Dirty => {
+            state.status = DIRTY_WORKTREE_STATUS.into();
+            false
+        }
+        CheckoutCompute::Failed {
+            status,
+            clear_picker,
+        } => {
+            if clear_picker {
+                state.branch_picker = None;
+            }
+            state.status = status;
+            false
+        }
+        CheckoutCompute::Confirm {
+            local_branch,
+            remote_ref,
+        } => {
+            state.branch_picker = None;
+            let _ = state.confirm_checkout_if_out_of_sync(repo, local_branch, Some(remote_ref));
+            false
+        }
+        CheckoutCompute::Done { status } => {
+            state.branch_picker = None;
+            state.status = status;
+            true
+        }
+    }
+}
+
+fn compute_merge(dir: &Path, rev: &str) -> MergeCompute {
+    if repo_has_local_changes(dir) {
+        return MergeCompute::Dirty;
+    }
+    match merge_into_head(rev, dir) {
+        MergeIntoHeadResult::AlreadyUpToDate => MergeCompute::AlreadyUpToDate,
+        MergeIntoHeadResult::FastForward => MergeCompute::FastForward,
+        MergeIntoHeadResult::MergeCommit => MergeCompute::MergeCommit,
+        MergeIntoHeadResult::Conflict => MergeCompute::Conflict,
+        MergeIntoHeadResult::Failed(err) => MergeCompute::Failed(err),
+    }
+}
+
+fn apply_merge_compute(state: &mut AppState, label: &str, result: MergeCompute) -> bool {
+    match result {
+        MergeCompute::Dirty => {
+            state.status = DIRTY_WORKTREE_STATUS.into();
+            false
+        }
+        MergeCompute::AlreadyUpToDate => {
+            state.status = "Already up to date".into();
+            false
+        }
+        MergeCompute::FastForward => {
+            state.status = format!("Fast-forwarded to {label}");
+            true
+        }
+        MergeCompute::MergeCommit => {
+            state.status = format!("Merged {label}");
+            true
+        }
+        MergeCompute::Conflict => {
+            state.status = "Merge conflict — resolve in the worktree".into();
+            true
+        }
+        MergeCompute::Failed(err) => {
+            state.status = format!("merge failed: {err}");
+            false
+        }
+    }
 }
 
 /// Run graph/tree checkout. Returns true when HEAD changed and the snapshot should reload.
@@ -980,58 +1234,8 @@ pub(crate) fn run_checkout_branch(
     fast_forward_ref: Option<String>,
 ) -> bool {
     let dir = cwd.join(&repo);
-    if fast_forward_ref.is_none() && repo_has_local_changes(&dir) {
-        state.status = DIRTY_WORKTREE_STATUS.into();
-        return false;
-    }
-    if let Some(remote_ref) = fast_forward_ref {
-        if !checkout_branch(&selected_name, &dir) {
-            state.branch_picker = None;
-            state.status = format!("Checkout failed: {selected_name}");
-            return false;
-        }
-        let ff = fast_forward_to_remote_ref(&remote_ref, &dir);
-        state.branch_picker = None;
-        state.status = if ff {
-            format!("Checked out {selected_name} and fast-forwarded to {remote_ref}")
-        } else {
-            format!("Checked out {selected_name}; could not fast-forward to {remote_ref}")
-        };
-        return true;
-    }
-
-    let local_name = checkout_name_for_ref(&selected_name);
-    let local_sha = rev_parse_quiet(&format!("refs/heads/{local_name}"), &dir);
-    let remote_sha = if is_origin_remote_ref(&selected_name) {
-        rev_parse_quiet(&format!("refs/remotes/{selected_name}"), &dir)
-    } else {
-        rev_parse_quiet(&format!("refs/remotes/origin/{local_name}"), &dir)
-    };
-    match plan_graph_checkout(
-        &selected_name,
-        local_sha.is_some(),
-        local_sha.as_deref(),
-        remote_sha.as_deref(),
-    ) {
-        GraphCheckoutPlan::ConfirmLocalThenPull {
-            local_branch,
-            remote_ref,
-        } => {
-            state.branch_picker = None;
-            let _ = state.confirm_checkout_if_out_of_sync(repo, local_branch, Some(remote_ref));
-            false
-        }
-        GraphCheckoutPlan::Checkout { branch } => {
-            if checkout_branch(&branch, &dir) {
-                state.branch_picker = None;
-                state.status = format!("Checked out {branch}");
-                true
-            } else {
-                state.status = format!("Checkout failed: {branch}");
-                false
-            }
-        }
-    }
+    let result = compute_checkout(&dir, &selected_name, fast_forward_ref.as_deref());
+    apply_checkout_compute(state, repo, result)
 }
 
 /// Merge `rev` into HEAD of `repo`. Fast-forward when possible, otherwise a
@@ -1044,32 +1248,8 @@ pub(crate) fn run_merge_into_head(
     label: String,
 ) -> bool {
     let dir = cwd.join(&repo);
-    if repo_has_local_changes(&dir) {
-        state.status = DIRTY_WORKTREE_STATUS.into();
-        return false;
-    }
-    match merge_into_head(&rev, &dir) {
-        MergeIntoHeadResult::AlreadyUpToDate => {
-            state.status = "Already up to date".into();
-            false
-        }
-        MergeIntoHeadResult::FastForward => {
-            state.status = format!("Fast-forwarded to {label}");
-            true
-        }
-        MergeIntoHeadResult::MergeCommit => {
-            state.status = format!("Merged {label}");
-            true
-        }
-        MergeIntoHeadResult::Conflict => {
-            state.status = "Merge conflict — resolve in the worktree".into();
-            true
-        }
-        MergeIntoHeadResult::Failed(err) => {
-            state.status = format!("merge failed: {err}");
-            false
-        }
-    }
+    let result = compute_merge(&dir, &rev);
+    apply_merge_compute(state, &label, result)
 }
 
 /// Apply pane-load effects without a TTY. Used by the headless e2e harness.
@@ -1140,7 +1320,7 @@ fn load_commit_files_pumped(
     let _ = terminal.draw(|frame| draw(frame, state));
     let dir = opts.cwd.join(&repo);
     let source_work = source.clone();
-    match run_work_pumped(terminal, state, move || {
+    match run_work_pumped(terminal, state, opts, move || {
         compute_commit_files(&dir, &source_work)
     }) {
         WorkPump::Quit => true,
@@ -1221,7 +1401,7 @@ fn load_commit_diff_pumped(
     let repo_work = repo.clone();
     let source_work = source.clone();
     let path_work = path.clone();
-    match run_work_pumped(terminal, state, move || {
+    match run_work_pumped(terminal, state, opts, move || {
         compute_commit_diff(
             &cwd,
             &repo_work,
@@ -1373,7 +1553,7 @@ fn reload_repo_pumped(
     let snapshot = state.snapshot.clone();
     let repo = repo.to_string();
     let show_ignored = state.show_ignored;
-    match run_work_pumped(terminal, state, move || {
+    match run_work_pumped(terminal, state, opts, move || {
         compute_reload_repo(&cwd, &snapshot, &repo, show_ignored)
     }) {
         WorkPump::Quit => true,
@@ -1430,7 +1610,7 @@ fn maybe_autoload_graph(
         let _ = terminal.draw(|frame| draw(frame, state));
         let cwd = opts.cwd.clone();
         let snapshot = state.snapshot.clone();
-        match run_work_pumped(terminal, state, move || {
+        match run_work_pumped(terminal, state, opts, move || {
             load_graph_model_window(&cwd, &snapshot, &repo, show_ignored, skip, limit)
         }) {
             WorkPump::Quit => {
@@ -1494,7 +1674,7 @@ pub fn collect_full_snapshot(
 mod tests {
     use super::*;
     use crate::config::WorkspaceStatusConfig;
-    use crate::git::{exec_git, git_binary, list_local_branches};
+    use crate::git::{exec_git, git_binary, list_local_branches, stage_file};
     use crate::tui::action::Action;
     use crate::tui::branches::DIRTY_WORKTREE_STATUS;
     use std::fs;
@@ -1877,6 +2057,104 @@ mod tests {
         );
         apply_right_pane_load(&mut app, payload);
         assert!(app.graph.is_some());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn checkout_and_merge_compute_are_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<CheckoutCompute>();
+        assert_send::<MergeCompute>();
+    }
+
+    #[test]
+    fn event_thread_keeps_polling_while_git_write_runs() {
+        let root = std::env::temp_dir().join(format!(
+            "ws-tui-write-pump-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let repo_dir = workspace.join("app");
+        init_repo(&repo_dir);
+        fs::write(repo_dir.join("README.md"), "# dirty\n").unwrap();
+        let dir = repo_dir.clone();
+        let (tx, rx) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(80));
+            let result = stage_file(&dir, "README.md");
+            let _ = tx.send(result);
+        });
+        let mut pumps = 0u32;
+        let result = loop {
+            match rx.try_recv() {
+                Ok(value) => break value,
+                Err(mpsc::TryRecvError::Empty) => {
+                    pumps += 1;
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    panic!("git-write worker disconnected")
+                }
+            }
+        };
+        assert!(
+            pumps >= 5,
+            "draw thread must poll while git add runs (got {pumps} pumps); \
+             unpumped stage_file in apply_effect_inner freezes the TUI until the child exits"
+        );
+        result.expect("stage README.md");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn busy_wait_applies_nav_before_write_finishes() {
+        let root = std::env::temp_dir().join(format!(
+            "ws-tui-busy-nav-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let repo_dir = workspace.join("app");
+        init_repo(&repo_dir);
+        fs::write(repo_dir.join("README.md"), "# dirty\n").unwrap();
+        let config = WorkspaceStatusConfig::with_defaults();
+        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let mut app = AppState::new(workspace.clone(), snapshot, true);
+        assert!(
+            app.rows.len() >= 2,
+            "fixture must have more than one tree row"
+        );
+        app.cursor = 0;
+        let start = app.cursor;
+        let (tx, rx) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(80));
+            let _ = tx.send(());
+        });
+        let mut moved_during = false;
+        loop {
+            match rx.try_recv() {
+                Ok(()) => break,
+                Err(mpsc::TryRecvError::Empty) => {
+                    let _ = app.dispatch(Action::Move(1));
+                    if app.cursor != start {
+                        moved_during = true;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(mpsc::TryRecvError::Disconnected) => panic!("nav worker disconnected"),
+            }
+        }
+        assert!(
+            moved_during,
+            "nav must apply during the worker, not after join (BusyAction::Handle)"
+        );
+        assert_ne!(app.cursor, start);
         let _ = fs::remove_dir_all(&root);
     }
 
