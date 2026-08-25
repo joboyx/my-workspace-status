@@ -1136,9 +1136,9 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         }
     }
 
-    if searching {
+    let footer = if searching {
         let q = state.help_search_query.as_deref().unwrap_or("");
-        lines.extend(help_footer_with_version(
+        help_footer_with_version(
             vec![
                 key_chip("HELP", pills.filter.bg, pills.filter.fg),
                 Span::styled(format!(" /{q}"), Style::default().fg(palette.repo)),
@@ -1150,22 +1150,42 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ],
             inner,
             palette.muted,
-        ));
+        )
     } else {
-        for part in help_idle_footer_lines(inner) {
-            lines.push(Line::from(Span::styled(
-                part,
-                Style::default().fg(palette.muted),
-            )));
-        }
-    }
+        help_idle_footer_lines(inner)
+            .into_iter()
+            .map(|part| Line::from(Span::styled(part, Style::default().fg(palette.muted))))
+            .collect()
+    };
 
     frame.render_widget(Clear, area);
+    let block = overlay_block(palette.cursor);
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+    if inner_area.width == 0 || inner_area.height == 0 {
+        return;
+    }
+    let footer_h = (footer.len() as u16).min(inner_area.height).max(1);
+    let body_h = inner_area.height.saturating_sub(footer_h);
+    if body_h > 0 {
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            Rect {
+                x: inner_area.x,
+                y: inner_area.y,
+                width: inner_area.width,
+                height: body_h,
+            },
+        );
+    }
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(overlay_block(palette.cursor))
-            .wrap(Wrap { trim: false }),
-        area,
+        Paragraph::new(footer).wrap(Wrap { trim: false }),
+        Rect {
+            x: inner_area.x,
+            y: inner_area.y.saturating_add(body_h),
+            width: inner_area.width,
+            height: footer_h,
+        },
     );
 }
 
