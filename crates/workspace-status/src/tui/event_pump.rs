@@ -4,17 +4,20 @@
 //! start background fetch/watch ticks. Graph autoload must not run on
 //! resize, mouse noise, or swallowed overlay keys.
 //!
-//! Fetch / pull / watch *children* already run on a worker (`run_work_pumped`).
-//! Applying that result still used to call `load_right` (`git log` / `git diff`)
-//! on the draw thread. Crossterm queued keys and clicks until that join, then
-//! the loop drained them in a burst. Follow-up pane git must stay on the same
-//! busy pump. Unchanged watch snapshots (tree signatures and checkout `HEAD` /
+//! Fetch / pull / push of independent checkouts run on a capped worker pool
+//! (`run_capped_pumped`, Ink `FETCH_CONCURRENCY` = 4). Watch collect and
+//! other git still use one worker (`run_work_pumped`). Applying a result
+//! still used to call `load_right` (`git log` / `git diff`) on the draw
+//! thread. Crossterm queued keys and clicks until that join, then the loop
+//! drained them in a burst. Follow-up pane git must stay on the same busy
+//! pump. Unchanged watch snapshots (tree signatures and checkout `HEAD` /
 //! sync note / dirty set) skip the pane reload. The next tick is due from the
 //! start of the interval.
 //!
-//! While a worker runs, nav / pane switch / cancel / quit still dispatch
-//! (`BusyAction::Handle`). Only actions that would start another git write
-//! are drained (`Ignore`) so they cannot nest a second mutating child.
+//! While a worker (or capped batch) runs, nav / pane switch / cancel / quit
+//! still dispatch (`BusyAction::Handle`). Only actions that would start
+//! another git write are drained (`Ignore`) so they cannot nest a second
+//! mutating child.
 
 use super::action::Action;
 use super::keys::InputMode;
@@ -283,6 +286,20 @@ mod tests {
         assert!(
             src.contains("run_write_then_refresh_pumped("),
             "TTY local writes must share the pumped write+refresh helper"
+        );
+        assert!(
+            src.contains("run_capped_pumped("),
+            "TTY fetch/pull/push must use run_capped_pumped so independent repos overlap"
+        );
+        assert!(
+            src.contains("run_bulk_remote_pumped("),
+            "TTY Fetch/Pull/Push must share run_bulk_remote_pumped"
+        );
+        assert_eq!(
+            src.matches("for (i, repo) in repos.iter().enumerate()")
+                .count(),
+            1,
+            "only DefaultBranch stays a serial per-repo loop; Fetch/Pull/Push must not"
         );
     }
 }

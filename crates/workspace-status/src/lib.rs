@@ -12,6 +12,7 @@ pub mod config;
 pub mod discovery;
 pub mod git;
 pub mod helpers;
+pub(crate) mod parallel;
 pub mod render;
 pub mod snapshot;
 pub mod tui;

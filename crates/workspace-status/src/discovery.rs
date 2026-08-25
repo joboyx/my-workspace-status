@@ -10,6 +10,7 @@ use crate::git::{
     resolve_default_branch_tip_ref, rev_parse_quiet,
 };
 use crate::helpers::{is_default_branch, DETACHED_HEAD_BRANCH};
+use crate::parallel::{env_fetch_concurrency, map_with_concurrency};
 use crate::snapshot::{CheckoutKind, FileChange, RepoSnapshot, SyncStatus};
 use crate::worktrees::{
     classify_merged_into_default, is_main_worktree_checkout, linked_worktrees_under_cwd,
@@ -545,6 +546,10 @@ pub fn process_repo(
     })
 }
 
+/// Walk primaries and linked worktrees, then [`process_repo`] each checkout.
+///
+/// Independent checkouts run with a cap of 4 (`FETCH_CONCURRENCY`;
+/// `WS_STATUS_FETCH_CONCURRENCY`). Output order matches discovery order.
 pub fn collect_snapshots(
     cwd: &Path,
     do_fetch: bool,
@@ -553,17 +558,20 @@ pub fn collect_snapshots(
 ) -> Vec<RepoSnapshot> {
     let walk_primaries = find_repos_with_config(cwd, config, only_repos);
     let entries = expand_repos_with_linked_worktrees(cwd, &walk_primaries, config, only_repos);
-    entries
-        .into_iter()
-        .filter_map(|(repo_path, meta)| {
-            let override_name = override_for_path(
-                &repo_path,
-                meta.primary_repo.as_deref(),
-                &config.default_branches,
-            );
-            process_repo(&repo_path, cwd, do_fetch, override_name.as_deref(), &meta)
-        })
-        .collect()
+    let cwd = cwd.to_path_buf();
+    let default_branches = config.default_branches.clone();
+    map_with_concurrency(
+        entries,
+        env_fetch_concurrency(),
+        move |(repo_path, meta)| {
+            let override_name =
+                override_for_path(&repo_path, meta.primary_repo.as_deref(), &default_branches);
+            process_repo(&repo_path, &cwd, do_fetch, override_name.as_deref(), &meta)
+        },
+    )
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// Exit-style validation: `Err` lists the unknown repo name.
