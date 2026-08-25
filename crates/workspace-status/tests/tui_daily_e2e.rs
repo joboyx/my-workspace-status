@@ -207,6 +207,61 @@ fn demo_merged_head_chip_matches_footer_on_painted_row() {
     let _ = fs::remove_dir_all(&dest);
 }
 
+#[test]
+fn demo_narrow_graph_truncates_chip_name_footer_keeps_full_ref() {
+    let dest = seed_demo_dest();
+    seed_demo_workspace(&dest);
+    let mut tui = open(&dest);
+    tui.search("merger");
+    tui.tab();
+    tui.resize(64, 28);
+    let frame = tui.frame();
+    let full = "feature/reconciliation";
+    let footer = frame
+        .lines()
+        .find(|l| l.contains(full) && !l.contains("Demo User"))
+        .unwrap_or("");
+    assert!(
+        footer.contains(full),
+        "footer still lists the full ref:\n{frame}"
+    );
+    assert!(
+        !footer.contains("[+"),
+        "footer must not collapse refs to [+N]:\n{footer}\n{frame}"
+    );
+
+    let spacer = frame
+        .lines()
+        .find(|l| l.contains("Demo User") && l.contains('['))
+        .unwrap_or("");
+    assert!(
+        !spacer.is_empty(),
+        "expected a commit spacer with chips:\n{frame}"
+    );
+    let has_full_name = spacer.contains(full);
+    let truncated = spacer.contains('…') && spacer.contains("…]");
+    assert!(
+        has_full_name || truncated,
+        "spacer should keep a full or truncated chip, not drop the name:\n{spacer}\n{frame}"
+    );
+    if truncated && !has_full_name {
+        assert!(
+            !spacer.contains("[+"),
+            "truncated last chip must not count toward [+N]:\n{spacer}"
+        );
+    }
+
+    for _ in 0..24 {
+        tui.key('l');
+    }
+    let panned = tui.frame();
+    assert!(
+        panned.contains(full),
+        "h/l pan still leaves the full ref in the footer:\n{panned}"
+    );
+    let _ = fs::remove_dir_all(&dest);
+}
+
 fn daily_workspace() -> (PathBuf, PathBuf) {
     let root = std::env::temp_dir().join(format!(
         "ws-tui-daily-{}",

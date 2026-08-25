@@ -57,15 +57,20 @@ pub enum LabelKind {
     ChipRemote,
     /// Tag chip.
     ChipTag,
-    /// Hidden leftover branch/tag count (`[+N]`) when chips do not fit.
+    /// Fully hidden leftover branch/tag count (`[+N]`). Truncated chips
+    /// are visible and do not count toward `N`.
     Overflow,
 }
 
-/// Chip text for leftover hidden branch/tag refs (`[+N]`).
+/// Ellipsis inside a truncated chip name. Brackets stay (`[feat…]`).
+const CHIP_NAME_ELLIPSIS: &str = "…";
+
+/// Chip text for fully hidden leftover branch/tag refs (`[+N]`).
 ///
 /// Always a whole chip (brackets). Callers reserve this width so the
-/// spacer never mid-clips a hidden-ref count the way a raw `+N` blends
-/// into hash/date meta.
+/// overflow count is never mid-clipped the way a raw `+N` blends into
+/// hash/date meta. A chip whose name is merely truncated with `…` is
+/// not hidden and must not be included in `N`.
 pub fn overflow_chip_text(hidden: usize) -> String {
     format!("[+{hidden}]")
 }
@@ -294,7 +299,8 @@ pub fn format_commit_spacer(opts: CommitSpacerOpts<'_>) -> String {
 /// Linked extras whose branch is already a ref chip (or the current checkout)
 /// are not repeated as a path prefix — the spacer uses the same chip string as
 /// the selection footer. Other worktree marks stay visible. Leftover *ref*
-/// chips collapse to `[+N]`.
+/// chips: paint a truncated name (`[feat…]`) when part of it fits; `[+N]`
+/// counts only chips that are fully hidden after that.
 pub fn assemble_commit_spacer(opts: CommitSpacerOpts<'_>) -> (String, Vec<LabelPart>) {
     let (hash, date, author) = padded_meta(
         &opts.commit.id,
@@ -391,7 +397,8 @@ fn padded_meta(
 /// Left flex + right-anchored meta. Drop order hash → date → author.
 ///
 /// `prefix` (worktree marks that are not already a ref chip) stays intact.
-/// Leftover *ref* chips in `overflowable` collapse to `[+N]` (never mid-chip `…`).
+/// Leftover *ref* chips in `overflowable`: truncate the next name with `…`
+/// when part of it fits; `[+N]` only for chips fully hidden after that.
 fn assemble_spacer_parts(
     prefix: &[Vec<LabelPart>],
     overflowable: &[Vec<LabelPart>],
@@ -555,48 +562,54 @@ fn pad_parts_right(parts: &mut Vec<LabelPart>, available: usize) {
     }
 }
 
-/// Keep whole chip groups that fit; leftover branch/tag count becomes `[+N]`.
+/// Fit as many full chips as possible. If leftover room can hold part of the
+/// next name, paint that chip truncated with `…` (brackets stay). `[+N]`
+/// counts only chips fully hidden after the visible (full or truncated)
+/// chips — omit it when the last painted chip is merely truncated.
 fn fit_chip_groups(groups: &[Vec<LabelPart>], budget: usize) -> Vec<LabelPart> {
     if groups.is_empty() || budget == 0 {
         return Vec::new();
     }
     let n = groups.len();
     for k in (0..=n).rev() {
-        let hidden = n - k;
-        let mut width = 0usize;
-        for (i, g) in groups.iter().take(k).enumerate() {
-            if i > 0 {
-                width += 1;
+        let full = join_chip_groups(&groups[..k]);
+        let full_w = parts_width(&full);
+        if k == n {
+            if full_w <= budget {
+                return full;
             }
-            width += parts_width(g);
+            continue;
         }
-        let ov = if hidden > 0 {
-            overflow_chip_text(hidden).chars().count() + usize::from(k > 0)
-        } else {
-            0
-        };
-        if width + ov <= budget {
-            let mut out = Vec::new();
-            for (i, g) in groups.iter().take(k).enumerate() {
-                if i > 0 {
-                    out.push(LabelPart {
-                        text: " ".into(),
-                        kind: LabelKind::Meta,
-                    });
-                }
-                out.extend(g.iter().cloned());
+
+        let gap = usize::from(k > 0);
+        let hidden_after_trunc = n - k - 1;
+        let ov_after = overflow_reserve(hidden_after_trunc, true);
+        let trunc_budget = budget
+            .saturating_sub(full_w)
+            .saturating_sub(gap)
+            .saturating_sub(ov_after);
+        if let Some(truncated) = truncate_chip_group(&groups[k], trunc_budget) {
+            let mut out = full;
+            if k > 0 {
+                out.push(space_part());
             }
+            out.extend(truncated);
+            if hidden_after_trunc > 0 {
+                out.push(space_part());
+                out.push(overflow_part(hidden_after_trunc));
+            }
+            return out;
+        }
+
+        let hidden = n - k;
+        let ov = overflow_reserve(hidden, k > 0);
+        if full_w + ov <= budget {
+            let mut out = full;
             if hidden > 0 {
                 if k > 0 {
-                    out.push(LabelPart {
-                        text: " ".into(),
-                        kind: LabelKind::Meta,
-                    });
+                    out.push(space_part());
                 }
-                out.push(LabelPart {
-                    text: overflow_chip_text(hidden),
-                    kind: LabelKind::Overflow,
-                });
+                out.push(overflow_part(hidden));
             }
             return out;
         }
@@ -608,6 +621,134 @@ fn fit_chip_groups(groups: &[Vec<LabelPart>], budget: usize) -> Vec<LabelPart> {
         }],
         None => Vec::new(),
     }
+}
+
+fn space_part() -> LabelPart {
+    LabelPart {
+        text: " ".into(),
+        kind: LabelKind::Meta,
+    }
+}
+
+fn overflow_part(hidden: usize) -> LabelPart {
+    LabelPart {
+        text: overflow_chip_text(hidden),
+        kind: LabelKind::Overflow,
+    }
+}
+
+fn overflow_reserve(hidden: usize, preceded: bool) -> usize {
+    if hidden == 0 {
+        return 0;
+    }
+    overflow_chip_text(hidden).chars().count() + usize::from(preceded)
+}
+
+/// Paint `group` into `budget` columns: keep `[` `]`, truncate the name with
+/// `…` when some of it still fits. Returns `None` when not even one name
+/// character plus ellipsis and brackets fit (drop the whole chip).
+fn truncate_chip_group(group: &[LabelPart], budget: usize) -> Option<Vec<LabelPart>> {
+    if group.is_empty() || budget == 0 {
+        return None;
+    }
+    let full_w = parts_width(group);
+    if full_w <= budget {
+        return Some(group.to_vec());
+    }
+    let ellipsis_w = CHIP_NAME_ELLIPSIS.chars().count();
+    let min_w = 2 + 1 + ellipsis_w;
+    if budget < min_w {
+        return None;
+    }
+
+    if group.len() >= 3 && group[0].text == "[" && group[group.len() - 1].text == "]" {
+        let interior = &group[1..group.len() - 1];
+        let (name, marks) = interior.split_last()?;
+        if name.text.is_empty() {
+            return None;
+        }
+        if let Some(out) = truncate_named_chip(
+            &group[0],
+            marks,
+            name,
+            &group[group.len() - 1],
+            budget,
+            true,
+        ) {
+            return Some(out);
+        }
+        return truncate_named_chip(
+            &group[0],
+            marks,
+            name,
+            &group[group.len() - 1],
+            budget,
+            false,
+        );
+    }
+
+    if group.len() != 1 {
+        return None;
+    }
+    let part = &group[0];
+    if !part.text.starts_with('[') || !part.text.ends_with(']') {
+        return None;
+    }
+    let mut body: Vec<char> = part.text.chars().skip(1).collect();
+    if body.pop() != Some(']') || body.is_empty() {
+        return None;
+    }
+    let name: String = body.into_iter().collect();
+    let name_budget = budget.saturating_sub(2);
+    if name_budget < 1 + ellipsis_w {
+        return None;
+    }
+    let keep = name_budget - ellipsis_w;
+    let prefix: String = name.chars().take(keep).collect();
+    if prefix.is_empty() || prefix.chars().count() >= name.chars().count() {
+        return None;
+    }
+    Some(vec![LabelPart {
+        text: format!("[{prefix}{CHIP_NAME_ELLIPSIS}]"),
+        kind: part.kind,
+    }])
+}
+
+fn truncate_named_chip(
+    open: &LabelPart,
+    marks: &[LabelPart],
+    name: &LabelPart,
+    close: &LabelPart,
+    budget: usize,
+    keep_marks: bool,
+) -> Option<Vec<LabelPart>> {
+    let ellipsis_w = CHIP_NAME_ELLIPSIS.chars().count();
+    let marks_w = if keep_marks { parts_width(marks) } else { 0 };
+    let name_budget = budget.saturating_sub(2).saturating_sub(marks_w);
+    if name_budget < 1 + ellipsis_w {
+        return None;
+    }
+    let keep = name_budget - ellipsis_w;
+    let prefix: String = name.text.chars().take(keep).collect();
+    if prefix.is_empty() {
+        return None;
+    }
+    if prefix.chars().count() >= name.text.chars().count() {
+        return None;
+    }
+    let mut out = vec![open.clone()];
+    if keep_marks {
+        out.extend(marks.iter().cloned());
+    }
+    out.push(LabelPart {
+        text: format!("{prefix}{CHIP_NAME_ELLIPSIS}"),
+        kind: name.kind,
+    });
+    out.push(close.clone());
+    if parts_width(&out) > budget {
+        return None;
+    }
+    Some(out)
 }
 
 fn overflow_token(hidden: usize, budget: usize) -> Option<String> {
@@ -1410,7 +1551,10 @@ mod tests {
             !line.contains("[v1]"),
             "overflow tag must not remain: {line}"
         );
-        assert!(!line.contains('…'), "must not mid-chip ellipsis: {line}");
+        assert!(
+            !line.contains('…'),
+            "no leftover room to truncate the next name: {line}"
+        );
         let overflow = assemble_commit_spacer(CommitSpacerOpts {
             commit: &commit,
             is_head: false,
@@ -1459,17 +1603,36 @@ mod tests {
             default_branch_override: None,
         });
         assert!(line.contains("[+"), "tag overflow must show [+N]: {line}");
-        let hidden = 3usize.saturating_sub(
-            usize::from(line.contains("[v1.0.0]"))
-                + usize::from(line.contains("[v1.1.0]"))
-                + usize::from(line.contains("[release-candidate]")),
-        );
-        assert!(hidden > 0, "at least one tag must hide: {line}");
+        let fully_visible = usize::from(line.contains("[v1.0.0]"))
+            + usize::from(line.contains("[v1.1.0]"))
+            + usize::from(line.contains("[release-candidate]"));
         assert!(
-            line.contains(&overflow_chip_text(hidden)),
-            "overflow count includes tags: {line}"
+            fully_visible < 3,
+            "at least one tag must not fit in full: {line}"
         );
-        assert!(!line.contains('…'), "must not mid-chip ellipsis: {line}");
+        let overflow = assemble_commit_spacer(CommitSpacerOpts {
+            commit: &commit,
+            is_head: false,
+            worktrees: &[],
+            head_branch: None,
+            glyphs: &ASCII,
+            available: 24,
+            date_width: 3,
+            author_width: 3,
+            now_unix: 1_700_000_000,
+            default_branch_override: None,
+        })
+        .1
+        .into_iter()
+        .find(|p| p.kind == LabelKind::Overflow)
+        .expect("overflow chip");
+        let truncated = usize::from(line.contains('…'));
+        let hidden = 3 - fully_visible - truncated;
+        assert!(
+            hidden > 0 && overflow.text == overflow_chip_text(hidden),
+            "overflow counts fully hidden tags only (truncated does not): {line} overflow={}",
+            overflow.text
+        );
     }
 
     #[test]
@@ -1602,7 +1765,117 @@ mod tests {
                 parts.iter().any(|p| p.kind == LabelKind::Overflow),
                 "many refs must overflow: available={available} line={line}"
             );
-            assert!(!line.contains('…'), "must not mid-chip ellipsis: {line}");
+            if let Some(at) = line.find('…') {
+                let before = line[..at].rfind('[');
+                let after = line[at..].find(']');
+                assert!(
+                    before.is_some() && after.is_some(),
+                    "name ellipsis must stay inside chip brackets: {line}"
+                );
+            }
         }
+    }
+
+    fn topic_commit(refs: Vec<GraphRef>) -> Commit {
+        Commit {
+            id: "abcdefg".into(),
+            subject: "topic".into(),
+            refs,
+            author_name: "Ada".into(),
+            author_date_unix: 1_700_000_000 - 120,
+            ..Commit::default()
+        }
+    }
+
+    fn ascii_spacer(commit: &Commit, available: usize) -> (String, Vec<LabelPart>) {
+        assemble_commit_spacer(CommitSpacerOpts {
+            commit,
+            is_head: false,
+            worktrees: &[],
+            head_branch: None,
+            glyphs: &ASCII,
+            available,
+            date_width: 3,
+            author_width: 3,
+            now_unix: 1_700_000_000,
+            default_branch_override: None,
+        })
+    }
+
+    #[test]
+    fn format_commit_spacer_truncates_next_chip_name_keeps_brackets() {
+        let commit = topic_commit(vec![
+            GraphRef::local("main"),
+            GraphRef::local("feature/long-name"),
+        ]);
+        let (line, parts) = ascii_spacer(&commit, 20);
+        assert!(line.contains("[main]"), "kept first chip: {line}");
+        assert!(
+            line.contains('…'),
+            "next chip name must truncate when part of it fits: {line}"
+        );
+        assert!(
+            line.contains("…]"),
+            "truncated chip keeps closing bracket: {line}"
+        );
+        assert!(
+            !line.contains("[feature/long-name]"),
+            "full second name must not remain: {line}"
+        );
+        assert!(
+            parts.iter().all(|p| p.kind != LabelKind::Overflow),
+            "truncated last chip is not hidden: {line} {parts:?}"
+        );
+        assert!(
+            format_commit_ref_chips(&commit.refs, false, None, &ASCII)
+                .contains("[feature/long-name]"),
+            "footer/full chips still list the complete name"
+        );
+    }
+
+    #[test]
+    fn truncated_chip_does_not_count_toward_overflow_n() {
+        let commit = topic_commit(vec![
+            GraphRef::local("main"),
+            GraphRef::local("feature/long-name"),
+            GraphRef::tag("v1"),
+        ]);
+        let (line, parts) = ascii_spacer(&commit, 32);
+        let overflow = parts
+            .iter()
+            .find(|p| p.kind == LabelKind::Overflow)
+            .unwrap_or_else(|| panic!("expected [+N] after a truncated chip: {line}"));
+        assert_eq!(
+            overflow.text, "[+1]",
+            "truncated name is not hidden: {line}"
+        );
+        assert!(
+            line.contains('…'),
+            "second chip should be truncated: {line}"
+        );
+        assert!(
+            !line.contains("[feature/long-name]"),
+            "full second name must not remain: {line}"
+        );
+        assert!(!line.contains("[v1]"), "third chip is fully hidden: {line}");
+        assert!(line.contains("[main]"), "first chip stays: {line}");
+    }
+
+    #[test]
+    fn omit_overflow_chip_when_only_the_last_chip_is_truncated() {
+        let commit = topic_commit(vec![GraphRef::local("feature/long-name")]);
+        let (line, parts) = ascii_spacer(&commit, 18);
+        assert!(
+            line.contains('…') && line.contains("…]"),
+            "lone chip truncates in place: {line}"
+        );
+        assert!(
+            !line.contains("[feature/long-name]"),
+            "full name must not remain when truncated: {line}"
+        );
+        assert!(
+            parts.iter().all(|p| p.kind != LabelKind::Overflow),
+            "nothing else is hidden: {line} {parts:?}"
+        );
     }
 }
