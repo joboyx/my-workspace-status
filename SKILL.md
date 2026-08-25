@@ -108,7 +108,7 @@ Live TUI keymap (full overlay detail in [docs/configuration.md](./docs/configura
 | `Ctrl-Space`                          | EasyMotion jump on the **focused** list (tree / graph / commit files). No-op on a focused diff                                                         |
 | `?`                                   | keymap help overlay                                                                                                                                    |
 | `PgUp` / `PgDn` / `Ctrl-u` / `Ctrl-d` | page the **focused** pane (list or diff)                                                                                                               |
-| `m`                                   | toggle mouse reporting (on by default) except on a focused graph commit (merge, above)                                                                 |
+| `m`                                   | toggle mouse reporting (on by default) except on a focused graph commit (merge, above). Drag pane / in-diff split / graph scrollbar thumb |
 | `Enter`                               | left: focus right; right: drill (stay on right). Double-click a list row runs Enter                                                                    |
 | `Ctrl-C` twice                        | quit (first press prompts; second within ~2s exits)                                                                                                    |
 | `q`                                   | quit immediately (Rust extra)                                                                                                                          |

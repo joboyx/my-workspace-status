@@ -97,6 +97,10 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
 
     let left_is_files = state.drill.is_diff();
     let left_is_graph = state.drill.is_files();
+    state.layout.graph_scrollbar_x = None;
+    state.layout.graph_scrollbar_y = 0;
+    state.layout.graph_scrollbar_height = 0;
+    state.layout.graph_content_len = 0;
     let left_title = if left_is_files {
         if state.focus == FocusPane::Left {
             " files "
@@ -520,7 +524,7 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     );
 }
 
-fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &AppState, col_offset: u16) {
+fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offset: u16) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -552,6 +556,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &AppState, col_offset: u
         })
         .render(area, frame.buffer_mut());
     overlay_graph_easy_motion(frame, area, state);
+    record_graph_scrollbar(state, area);
 }
 
 fn graph_search_matches(state: &AppState) -> Vec<usize> {
@@ -562,6 +567,22 @@ fn graph_search_matches(state: &AppState) -> Vec<usize> {
         return Vec::new();
     };
     collect_graph_match_indices(&model.visible_rows(), &state.search_query)
+}
+
+fn record_graph_scrollbar(state: &mut AppState, area: Rect) {
+    let Some(model) = state.graph.as_ref() else {
+        return;
+    };
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let chrome = graph_chrome_budget(area.height, state.graph_loading_older, model.sync.is_some());
+    let glyphs = if state.ascii { &ASCII } else { &UNICODE };
+    let content_len = paint_model(model, glyphs, None).len();
+    state.layout.graph_scrollbar_x = Some(area.x.saturating_add(area.width.saturating_sub(1)));
+    state.layout.graph_scrollbar_y = area.y.saturating_add(u16::from(chrome.header));
+    state.layout.graph_scrollbar_height = chrome.list_height;
+    state.layout.graph_content_len = content_len;
 }
 
 fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, cursor: usize) {

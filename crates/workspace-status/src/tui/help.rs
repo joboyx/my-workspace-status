@@ -165,7 +165,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: "m",
-                desc: "mouse · drag pane or split divider",
+                desc: "mouse · drag pane, split, or graph scrollbar",
             },
             HelpEntry {
                 keys: "Esc",

@@ -23,11 +23,13 @@ multi-lane gutter from the same model.
 | `GraphCell` | One gutter column: glyph, colour lane, role |
 | `LaidOutCommit` | Lane assignment plus stem metadata for one commit |
 | `GraphWidget` | Ratatui `Widget` over a `GraphModel` |
+| `graph_scrollbar_thumb` | Thumb offset/length matching the painted 1-column bar (TUI hit-test) |
 | `Action` | `ToggleShowIgnored` and `SetShowIgnored` |
 | `Effect` | `None` today. Dispatch stays pure. |
 
 `GraphModel::dispatch` applies an `Action` and returns an `Effect`.
-This crate does not bind keys or run an event loop.
+The widget does not bind keys or run an event loop. The TUI hit-tests the
+1-column scrollbar through `tui/split.rs` (`hit_split` / `SplitDrag::GraphScrollbar`).
 
 `GraphWidget::gutter_width` caps painted gutter columns. Topology still
 uses the full lane model. `GraphWidget::loading_older` paints

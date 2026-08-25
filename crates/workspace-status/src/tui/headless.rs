@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
@@ -236,6 +238,53 @@ impl HeadlessTui {
         self.send_key(KeyCode::Right, KeyModifiers::SHIFT);
     }
 
+    /// Left-button down through the real keymap (`Action::Click`).
+    pub fn mouse_down(&mut self, col: u16, row: u16) {
+        self.send_mouse(MouseEventKind::Down(MouseButton::Left), col, row);
+    }
+
+    /// Left-button drag through the real keymap (`Action::Drag`).
+    pub fn mouse_drag(&mut self, col: u16, row: u16) {
+        self.send_mouse(MouseEventKind::Drag(MouseButton::Left), col, row);
+    }
+
+    /// Left-button up through the real keymap (`Action::Release`).
+    pub fn mouse_up(&mut self) {
+        self.send_mouse(MouseEventKind::Up(MouseButton::Left), 0, 0);
+    }
+
+    /// Current graph list skip (`graph_scroll`).
+    pub fn graph_scroll(&self) -> u16 {
+        self.state.graph_scroll
+    }
+
+    /// 0-based graph scrollbar column from the last paint, if a graph list is up.
+    pub fn graph_scrollbar_col(&self) -> Option<u16> {
+        self.state.layout.graph_scrollbar_x
+    }
+
+    /// Graph scrollbar track (0-based first row, height) from the last paint.
+    pub fn graph_scrollbar_track(&self) -> Option<(u16, u16)> {
+        let height = self.state.layout.graph_scrollbar_height;
+        if self.state.layout.graph_scrollbar_x.is_none() || height == 0 {
+            return None;
+        }
+        Some((self.state.layout.graph_scrollbar_y, height))
+    }
+
+    fn send_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) {
+        if self.quit {
+            return;
+        }
+        let event = Event::Mouse(MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        self.dispatch_event(event);
+    }
+
     fn send(&mut self, code: KeyCode) {
         self.send_key(code, KeyModifiers::NONE);
     }
@@ -244,7 +293,10 @@ impl HeadlessTui {
         if self.quit {
             return;
         }
-        let event = Event::Key(KeyEvent::new(code, modifiers));
+        self.dispatch_event(Event::Key(KeyEvent::new(code, modifiers)));
+    }
+
+    fn dispatch_event(&mut self, event: Event) {
         let action = event_to_action_with(
             &event,
             self.state.input_mode(),
