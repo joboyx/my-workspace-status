@@ -84,7 +84,6 @@ pub fn action_triggers_graph_autoload(action: &Action) -> bool {
             | Action::MoveToEnd
             | Action::SearchNext
             | Action::SearchPrev
-            | Action::EasyMotionChar(_)
             | Action::FocusRight
             | Action::NavEnter
             | Action::ScrollWheel { .. }
@@ -125,7 +124,6 @@ mod tests {
         assert!(overlay_blocks_background_ticks(InputMode::StashMenu));
         assert!(overlay_blocks_background_ticks(InputMode::BranchPicker));
         assert!(overlay_blocks_background_ticks(InputMode::CreateBranch));
-        assert!(overlay_blocks_background_ticks(InputMode::EasyMotion));
         assert!(!overlay_blocks_background_ticks(InputMode::Normal {
             search_active: false
         }));

@@ -6,8 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Widget, Wrap};
 use ratatui::Frame;
 use workspace_status_graph::{
-    graph_chrome_budget, graph_gutter_cap, paint_model, GraphLabelPalette, GraphWidget, ASCII,
-    UNICODE,
+    graph_chrome_budget, paint_model, GraphLabelPalette, GraphWidget, ASCII, UNICODE,
 };
 
 use std::collections::HashSet;
@@ -21,7 +20,6 @@ use super::diff::{
     section_header, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
 };
 use super::drill::DrillView;
-use super::easy_motion::{easy_motion_labels, visible_window};
 use super::help::{
     help_chip_gap_spaces, help_column_width, help_entry_matches, help_entry_visual_lines,
     help_idle_footer_lines, help_inner_width, help_version_label, HELP_GROUPS,
@@ -42,7 +40,9 @@ use super::split::{
 };
 use super::state::{AppState, FocusPane, PendingConfirm};
 use super::theme::{hex_color, Palette};
-use super::tree::{row_segments, NodeKind, NodeSegments, SegRole, TextSeg, VisibleRow};
+use super::tree::{
+    row_segments, visible_window, NodeKind, NodeSegments, SegRole, TextSeg, VisibleRow,
+};
 use crate::helpers::visible_width;
 
 /// Empty tree / empty commit-file list.
@@ -273,7 +273,6 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         .unwrap_or(0);
     let (start, _) = visible_window(painted.len(), painted_cursor, height);
     state.layout.list_offset = start;
-    let motion = tree_easy_motion_labels(state, start, height);
     let search_bg = state.theme.pills().filter.bg;
     let match_ids: HashSet<String> = if state.search_target == SearchPane::Tree {
         collect_match_ids(&state.tree, &state.search_query)
@@ -283,11 +282,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         HashSet::new()
     };
     let mut lines = Vec::new();
-    for (i, row) in painted.iter().enumerate().skip(start).take(height) {
-        let motion_label = motion
-            .as_ref()
-            .and_then(|labels| labels.get(i - start))
-            .cloned();
+    for row in painted.iter().skip(start).take(height) {
         let viewed = row.kind == NodeKind::File && state.reviewed.contains(&row.id);
         lines.push(paint_tree_row(
             row,
@@ -298,7 +293,6 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             search_bg,
             state.ascii,
             viewed,
-            motion_label.as_deref(),
             palette,
             state.left_col_offset as usize,
         ));
@@ -315,7 +309,6 @@ fn paint_tree_row(
     search_bg: Color,
     ascii: bool,
     viewed: bool,
-    motion_label: Option<&str>,
     palette: Palette,
     col_offset: usize,
 ) -> Line<'static> {
@@ -331,7 +324,6 @@ fn paint_tree_row(
         search_match,
         search_bg,
         ascii,
-        motion_label,
         palette,
         col_offset,
     )
@@ -348,7 +340,6 @@ fn paint_segmented_row(
     search_match: bool,
     search_bg: Color,
     ascii: bool,
-    motion_label: Option<&str>,
     palette: Palette,
     col_offset: usize,
 ) -> Line<'static> {
@@ -367,27 +358,15 @@ fn paint_segmented_row(
         bg,
     ));
 
-    let prefix_width = if let Some(label) = motion_label {
-        let padded = format!("{label:<2}");
-        spans.push(styled_span(
-            &padded,
-            Style::default()
-                .fg(palette.cursor)
-                .add_modifier(Modifier::BOLD),
-            bg,
-        ));
-        1 + visible_width(&padded)
-    } else {
-        let indent = "  ".repeat(depth);
-        spans.push(styled_span(&indent, Style::default(), bg));
-        let chevron = fold_chevron(foldable, folded, ascii);
-        spans.push(styled_span(
-            &format!("{chevron} "),
-            Style::default().fg(palette.muted),
-            bg,
-        ));
-        1 + visible_width(&indent) + 2
-    };
+    let indent = "  ".repeat(depth);
+    spans.push(styled_span(&indent, Style::default(), bg));
+    let chevron = fold_chevron(foldable, folded, ascii);
+    spans.push(styled_span(
+        &format!("{chevron} "),
+        Style::default().fg(palette.muted),
+        bg,
+    ));
+    let prefix_width = 1 + visible_width(&indent) + 2;
 
     let label_budget = width
         .saturating_sub(prefix_width)
@@ -556,7 +535,6 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
             overflow: pal.heading,
         })
         .render(area, frame.buffer_mut());
-    overlay_graph_easy_motion(frame, area, state);
     record_graph_scrollbar(state, area);
 }
 
@@ -676,21 +654,15 @@ fn draw_commit_file_list(
         .unwrap_or(0);
     let (start, _) = visible_window(rows.len(), painted_cursor, height);
     state.layout.files_list_offset = start;
-    let motion = file_easy_motion_labels(state, start, height);
     let search_bg = state.theme.pills().filter.bg;
     let searching_files =
         state.search_target == SearchPane::CommitFiles && !state.search_query.trim().is_empty();
     let match_paths = commit_file_search_match_paths(state);
     let lines: Vec<Line> = rows
         .iter()
-        .enumerate()
         .skip(start)
         .take(height)
-        .map(|(i, row)| {
-            let motion_label = motion
-                .as_ref()
-                .and_then(|labels| labels.get(i - start))
-                .cloned();
+        .map(|row| {
             let segs = NodeSegments {
                 segments: row.segments.clone(),
                 trailing: row.trailing_segs.clone(),
@@ -709,7 +681,6 @@ fn draw_commit_file_list(
                 search_match,
                 search_bg,
                 state.ascii,
-                motion_label.as_deref(),
                 palette,
                 col_offset,
             )
@@ -1392,98 +1363,6 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     );
 }
 
-fn tree_easy_motion_labels(state: &AppState, start: usize, height: usize) -> Option<Vec<String>> {
-    let motion = state.easy_motion.as_ref()?;
-    if state.focus != FocusPane::Left {
-        return None;
-    }
-    let (_win_start, count) = visible_window(state.rows.len(), state.cursor, height);
-    if _win_start != start {
-        return None;
-    }
-    Some(filter_labels(easy_motion_labels(count), &motion.typed))
-}
-
-fn file_easy_motion_labels(state: &AppState, start: usize, height: usize) -> Option<Vec<String>> {
-    let motion = state.easy_motion.as_ref()?;
-    if !state.commit_files_list_focused() {
-        return None;
-    }
-    let cursor = state.commit_files_cursor();
-    let rows = state.commit_file_rows();
-    let (_win_start, count) = visible_window(rows.len(), cursor, height);
-    if _win_start != start {
-        return None;
-    }
-    Some(filter_labels(easy_motion_labels(count), &motion.typed))
-}
-
-fn overlay_graph_easy_motion(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let Some(motion) = state.easy_motion.as_ref() else {
-        return;
-    };
-    if !state.graph_pane_focused() {
-        return;
-    }
-    let Some(model) = state.graph.as_ref() else {
-        return;
-    };
-    let n = model.visible_rows().len();
-    let chrome = graph_chrome_budget(area.height, state.graph_loading_older, model.sync.is_some());
-    let list_h = chrome.list_height.max(1) as usize;
-    let (start, count) = visible_window(n, state.graph_cursor, list_h);
-    let labels = filter_labels(easy_motion_labels(count), &motion.typed);
-    let palette = state.theme.palette();
-    let glyphs = if state.ascii { &ASCII } else { &UNICODE };
-    let mut y = area.y;
-    if chrome.header {
-        y = y.saturating_add(1);
-    }
-    let list_bottom = y.saturating_add(chrome.list_height);
-    let gutter_cap = graph_gutter_cap(area.width.saturating_sub(1) as usize);
-    for line in paint_model(model, glyphs, Some(gutter_cap))
-        .into_iter()
-        .skip(state.graph_scroll as usize)
-    {
-        if y >= list_bottom {
-            break;
-        }
-        if line.selectable {
-            if let Some(idx) = line.row_index {
-                if idx >= start && idx < start + labels.len() {
-                    let label = &labels[idx - start];
-                    if !label.is_empty() {
-                        frame.buffer_mut().set_stringn(
-                            area.x.saturating_add(1),
-                            y,
-                            &format!("{label:<2}"),
-                            2,
-                            Style::default().fg(palette.heading),
-                        );
-                    }
-                }
-            }
-        }
-        y = y.saturating_add(1);
-    }
-}
-
-fn filter_labels(labels: Vec<String>, typed: &str) -> Vec<String> {
-    if typed.is_empty() {
-        return labels;
-    }
-    labels
-        .into_iter()
-        .map(|label| {
-            if label == typed || label.starts_with(typed) {
-                label
-            } else {
-                String::new()
-            }
-        })
-        .collect()
-}
-
 fn overlay_status_color(status: &str, palette: Palette) -> Color {
     let lower = status.to_ascii_lowercase();
     if lower.contains("failed")
@@ -1751,7 +1630,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::path::PathBuf;
-    use workspace_status_graph::{Commit, GraphModel};
+    use workspace_status_graph::{graph_gutter_cap, Commit, GraphModel};
 
     fn repo(name: &str, dirty: bool) -> RepoSnapshot {
         RepoSnapshot {
@@ -1926,7 +1805,7 @@ mod tests {
         assert!(text.contains("stash menu"), "{text}");
         assert!(text.contains("push ahead"), "{text}");
         assert!(text.contains("remove linked worktree"), "{text}");
-        assert!(text.contains("EasyMotion"), "{text}");
+        assert!(text.contains("search focused pane"), "{text}");
         assert!(text.contains("cycle theme"), "{text}");
         assert!(text.contains("/ search help"), "{text}");
         assert!(text.contains("MOVE"), "{text}");
@@ -2091,7 +1970,6 @@ mod tests {
             false,
             search_bg_unused(),
             true,
-            None,
             palette,
             0,
         );
@@ -2234,20 +2112,6 @@ mod tests {
             "the other file match should use search bg: a={a_bg:?} b={b_bg:?} search={search_bg:?}"
         );
         assert_ne!(a_bg, b_bg, "cursor and search-match paint must differ");
-    }
-
-    #[test]
-    fn easy_motion_paints_labels_on_visible_tree_rows() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
-        state.dispatch(super::super::action::Action::EasyMotionStart);
-        assert!(state.easy_motion.is_some());
-        let backend = TestBackend::new(80, 12);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-        let text = buffer_text(&terminal);
-        assert!(text.contains("a "), "{text}");
-        assert!(text.contains("b "), "{text}");
     }
 
     #[test]

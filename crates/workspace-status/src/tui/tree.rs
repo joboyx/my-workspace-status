@@ -1079,6 +1079,22 @@ pub fn visible_for_tree(snapshot: &WorkspaceSnapshot) -> WorkspaceSnapshot {
     crate::snapshot::visible_workspace_snapshot(snapshot)
 }
 
+/// First visible index, centred on `cursor`.
+pub(crate) fn list_viewport_start(row_count: usize, cursor: usize, height: usize) -> usize {
+    let view_height = height.max(1);
+    let max_start = row_count.saturating_sub(view_height);
+    let ideal = cursor.saturating_sub(view_height / 2);
+    ideal.min(max_start)
+}
+
+/// Painted window: `(start, visible_count)`.
+pub(crate) fn visible_window(row_count: usize, cursor: usize, height: usize) -> (usize, usize) {
+    let view_height = height.max(1);
+    let start = list_viewport_start(row_count, cursor, view_height);
+    let count = row_count.saturating_sub(start).min(view_height);
+    (start, count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1517,5 +1533,12 @@ mod tests {
             1,
             "{nerd_trail}"
         );
+    }
+
+    #[test]
+    fn viewport_centres_on_cursor() {
+        assert_eq!(visible_window(100, 50, 10), (45, 10));
+        assert_eq!(visible_window(8, 7, 20), (0, 8));
+        assert_eq!(visible_window(40, 39, 2), (38, 2));
     }
 }

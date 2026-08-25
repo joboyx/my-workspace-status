@@ -11,7 +11,6 @@ mod commit_files;
 mod ctrl_c_exit;
 mod diff;
 mod drill;
-mod easy_motion;
 pub(crate) mod editor;
 mod event_pump;
 pub(crate) mod fetch;

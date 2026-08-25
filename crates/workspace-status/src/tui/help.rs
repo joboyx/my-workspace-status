@@ -58,10 +58,6 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 keys: "n N",
                 desc: "next / prev match (after Enter)",
             },
-            HelpEntry {
-                keys: "Ctrl-Space ;",
-                desc: "EasyMotion on focused list",
-            },
         ],
     },
     HelpGroup {
@@ -546,6 +542,9 @@ mod tests {
         assert!(git_keys.contains(&"m"));
         let move_keys: Vec<&str> = HELP_GROUPS[0].entries.iter().map(|e| e.keys).collect();
         let view_keys: Vec<&str> = HELP_GROUPS[2].entries.iter().map(|e| e.keys).collect();
+        assert!(move_keys.contains(&"j k"));
+        assert!(move_keys.contains(&"/"));
+        assert!(move_keys.contains(&"n N"));
         assert!(!move_keys.contains(&"PgUp PgDn"));
         assert!(!move_keys.contains(&"Ctrl-u Ctrl-d"));
         assert!(view_keys.contains(&"PgUp PgDn"));

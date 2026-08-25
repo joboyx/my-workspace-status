@@ -107,7 +107,7 @@ rows **never** own densify.
 
 ### Navigation
 
-Cursor / search / page / EasyMotion land only on selectable rows
+Cursor / search / page / `j`/`k` / click land only on selectable rows
 (`uncommitted` | `stash` | `commit`). Spacers remain in the painted list for
 display and viewport scrolling, but `j`/`k` and match stepping skip them.
 Focusing a commit or stash highlights the full 2-row pair (selectable + its

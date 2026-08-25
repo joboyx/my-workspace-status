@@ -33,7 +33,6 @@ const HINT_SEPARATOR: &str = "  ";
 const HINT_ELLIPSIS: &str = "…";
 /// Status-bar copy while `/` search is in typing mode.
 pub const SEARCH_TYPING_HINT: &str = "Enter arms query · Esc clears · n/N after Enter";
-const EASY_MOTION_HINT: &str = "type label · Esc cancels";
 const BREADCRUMB_SEP: &str = " › ";
 
 /// One rendered action hint: key chip text and description label.
@@ -837,7 +836,6 @@ fn allocate_chrome_row(total_width: usize, op_status_len: usize) -> (usize, usiz
 
 fn status_uses_status_text(state: &AppState) -> bool {
     state.search_mode
-        || state.easy_motion.is_some()
         || state.stash_menu.is_some()
         || state.branch_picker.is_some()
         || state.create_branch.is_some()
@@ -936,9 +934,6 @@ pub fn status_line(state: &AppState, width: u16) -> Line<'static> {
     if state.search_mode {
         return search_typing_line(state, palette, pills.filter);
     }
-    if let Some(motion) = state.easy_motion.as_ref() {
-        return easy_motion_line(motion.typed.as_str(), palette, pills.filter);
-    }
     idle_status_line(state, palette, pills, surface, width)
 }
 
@@ -950,18 +945,6 @@ fn search_typing_line(state: &AppState, palette: Palette, filter: Pill) -> Line<
         Span::styled("▏", Style::default().fg(palette.cursor)),
         Span::styled(
             format!("   {SEARCH_TYPING_HINT}"),
-            Style::default().fg(palette.muted),
-        ),
-    ])
-}
-
-fn easy_motion_line(typed: &str, palette: Palette, filter: Pill) -> Line<'static> {
-    let shown = if typed.is_empty() { "…" } else { typed };
-    Line::from(vec![
-        pill_span("EASY", filter),
-        Span::styled(format!(" {shown}"), Style::default().fg(palette.repo)),
-        Span::styled(
-            format!("   {EASY_MOTION_HINT}"),
             Style::default().fg(palette.muted),
         ),
     ])

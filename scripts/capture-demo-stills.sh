@@ -40,7 +40,6 @@ declare -A STILL_HASHES=()
 # 07 Space on auth.ts (reseed after)
 # 08 .
 # 09 / merger Enter, Tab, j to a commit, Enter
-# 10 ; on tree
 
 die() {
   echo "capture-demo-stills: $*" >&2
@@ -488,11 +487,6 @@ launch_tui
 send slash type:merger Return Tab j j Return
 grab "$STAGE_DIR/09-commit-files.png"
 commit_still "$STAGE_DIR/09-commit-files.png" "$OUT_DIR/09-commit-files.png"
-
-launch_tui
-send semicolon
-grab "$STAGE_DIR/10-easymotion.png"
-commit_still "$STAGE_DIR/10-easymotion.png" "$OUT_DIR/10-easymotion.png"
 
 stop_tui
 echo "capture-demo-stills: wrote stills under $OUT_DIR"

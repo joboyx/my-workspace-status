@@ -96,9 +96,6 @@ pub enum Action {
     GraphCheckout,
     GraphCreateBranch,
     GraphMerge,
-    EasyMotionStart,
-    EasyMotionChar(char),
-    EasyMotionCancel,
     CycleTheme,
     ToggleMouse,
     /// Terminal size changed. Crossterm `Resize` carries the new cols/rows;
