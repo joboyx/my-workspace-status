@@ -1757,6 +1757,107 @@ mod tests {
         );
     }
 
+    fn merged_head_model() -> GraphModel {
+        let id = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        GraphModel {
+            commits: vec![Commit {
+                id: id.into(),
+                subject: "merged head chip".into(),
+                refs: vec![GraphRef::local("main"), GraphRef::remote("origin/main")],
+                author_name: "Ada".into(),
+                author_date_unix: NOW - 120,
+                ..Commit::default()
+            }],
+            head_id: Some(id.into()),
+            sync: Some(SyncState {
+                branch: "main".into(),
+                status: SyncStatus::UpToDate,
+                ahead: 0,
+                behind: 0,
+            }),
+            uncommitted: Some(false),
+            window: 1,
+            ..GraphModel::default()
+        }
+    }
+
+    #[test]
+    fn merged_head_chip_paints_one_chip_matching_footer() {
+        let model = merged_head_model();
+        let pal = test_label_palette();
+        let width = 80u16;
+        let height = 12u16;
+
+        let paint_chip = |ascii: bool, want: &str| {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).expect("test backend");
+            terminal
+                .draw(|frame| {
+                    GraphWidget::new(&model)
+                        .ascii(ascii)
+                        .selected(Some(1))
+                        .now_unix(NOW)
+                        .label_palette(pal)
+                        .render(frame.area(), frame.buffer_mut());
+                })
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            let mut spacer = None;
+            for y in 0..height.saturating_sub(2) {
+                let (text, _) = row_text_and_fg(buffer, y, width);
+                if text.contains("aaa1111") && text.contains(want) {
+                    spacer = Some(text);
+                    break;
+                }
+            }
+            let spacer = spacer.unwrap_or_else(|| {
+                panic!("commit spacer must paint {want}");
+            });
+            let (footer, _) = row_text_and_fg(buffer, height - 1, width);
+            assert!(footer.contains(want), "footer must paint {want}: {footer}");
+            assert!(
+                !spacer.contains("[]") && !spacer.contains("[]") && !spacer.contains("[=]"),
+                "marks must not be separate chips on the row: {spacer}"
+            );
+            let painted = paint_model_with(
+                &model,
+                if ascii { &ASCII } else { &UNICODE },
+                PaintOpts {
+                    now_unix: Some(NOW),
+                    line_width: Some(width as usize),
+                    ..PaintOpts::default()
+                },
+            );
+            let spacer_line = painted
+                .iter()
+                .find(|l| !l.selectable && l.label.contains(want))
+                .expect("painted spacer");
+            assert!(
+                spacer_line.label.contains(want),
+                "painted row label: {}",
+                spacer_line.label
+            );
+            let mark_runs: Vec<&str> = spacer_line
+                .parts
+                .iter()
+                .filter(|p| {
+                    p.kind == crate::LabelKind::ChipHead || p.kind == crate::LabelKind::ChipRemote
+                })
+                .filter(|p| !p.text.contains('[') && !p.text.contains(']'))
+                .map(|p| p.text.as_str())
+                .collect();
+            assert_eq!(
+                mark_runs.len(),
+                1,
+                "checkout+sync must be one painted run: {:?}",
+                spacer_line.parts
+            );
+        };
+
+        paint_chip(false, "[main]");
+        paint_chip(true, "[+=main]");
+    }
+
     #[test]
     fn col_offset_reveals_clipped_subject() {
         let marker = "UNIQUE_GRAPH_TAIL_xyz";
