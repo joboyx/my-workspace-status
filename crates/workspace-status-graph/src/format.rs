@@ -290,6 +290,11 @@ pub fn format_commit_spacer(opts: CommitSpacerOpts<'_>) -> String {
 }
 
 /// Commit spacer string plus coloured [`LabelPart`]s (chips, overflow, meta).
+///
+/// Linked extras whose branch is already a ref chip (or the current checkout)
+/// are not repeated as a path prefix — the spacer uses the same chip string as
+/// the selection footer. Other worktree marks stay visible. Leftover *ref*
+/// chips collapse to `[+N]`.
 pub fn assemble_commit_spacer(opts: CommitSpacerOpts<'_>) -> (String, Vec<LabelPart>) {
     let (hash, date, author) = padded_meta(
         &opts.commit.id,
@@ -299,9 +304,11 @@ pub fn assemble_commit_spacer(opts: CommitSpacerOpts<'_>) -> (String, Vec<LabelP
         opts.author_width,
         opts.now_unix,
     );
-    // Worktree marks stay visible; leftover *ref* chips collapse to `[+N]`.
     let mut prefix = Vec::new();
     for worktree in opts.worktrees {
+        if worktree_covered_by_ref_chip(worktree, opts.commit, opts.is_head, opts.head_branch) {
+            continue;
+        }
         let mark = worktree_mark(worktree, opts.glyphs);
         if !mark.is_empty() {
             prefix.push(vec![LabelPart {
@@ -383,8 +390,8 @@ fn padded_meta(
 
 /// Left flex + right-anchored meta. Drop order hash → date → author.
 ///
-/// `prefix` (worktree marks) stays intact. Leftover *ref* chips in
-/// `overflowable` collapse to `[+N]` (never mid-chip `…`).
+/// `prefix` (worktree marks that are not already a ref chip) stays intact.
+/// Leftover *ref* chips in `overflowable` collapse to `[+N]` (never mid-chip `…`).
 fn assemble_spacer_parts(
     prefix: &[Vec<LabelPart>],
     overflowable: &[Vec<LabelPart>],
@@ -722,6 +729,34 @@ fn worktree_mark(worktree: &Worktree, glyphs: &GlyphSet) -> String {
         mark.push_str("  [ignored]");
     }
     mark
+}
+
+/// True when the footer branch chip already represents this checkout.
+///
+/// The current checkout and any linked extra whose local branch is on the
+/// commit must not paint `path` + branch as a second prefix next to that chip.
+fn worktree_covered_by_ref_chip(
+    worktree: &Worktree,
+    commit: &Commit,
+    is_head: bool,
+    head_branch: Option<&str>,
+) -> bool {
+    if worktree.is_current {
+        return true;
+    }
+    let Some(branch) = worktree.branch.as_deref() else {
+        return false;
+    };
+    if branch.is_empty() || is_detached_head_branch(branch) {
+        return false;
+    }
+    if is_head && head_branch == Some(branch) {
+        return true;
+    }
+    commit
+        .refs
+        .iter()
+        .any(|graph_ref| graph_ref.kind == RefKind::Local && graph_ref.name == branch)
 }
 
 fn trunc(text: &str, max: usize) -> String {
@@ -1268,6 +1303,60 @@ mod tests {
             mark_parts,
             [""],
             "checkout+sync must be one run, not two icons: {parts:?}"
+        );
+    }
+
+    #[test]
+    fn current_worktree_head_spacer_uses_footer_chip_not_path() {
+        let commit = Commit {
+            id: "aaa1111bbbb".into(),
+            subject: "tip".into(),
+            refs: vec![GraphRef::local("main"), GraphRef::remote("origin/main")],
+            author_name: "Ada".into(),
+            author_date_unix: 1_700_000_000 - 120,
+            ..Commit::default()
+        };
+        let worktrees = [
+            Worktree {
+                path: ".worktrees/recon".into(),
+                head_id: Some(commit.id.clone()),
+                branch: Some("main".into()),
+                ignored: false,
+                is_current: true,
+            },
+            Worktree {
+                path: ".worktrees/other".into(),
+                head_id: Some(commit.id.clone()),
+                branch: Some("main".into()),
+                ignored: false,
+                is_current: false,
+            },
+        ];
+        let (line, _) = assemble_commit_spacer(CommitSpacerOpts {
+            commit: &commit,
+            is_head: true,
+            worktrees: &worktrees,
+            head_branch: Some("main"),
+            glyphs: &UNICODE,
+            available: 120,
+            date_width: 4,
+            author_width: 3,
+            now_unix: 1_700_000_000,
+            default_branch_override: None,
+        });
+        let chip = format_commit_ref_chips(&commit.refs, true, Some("main"), &UNICODE);
+        assert_eq!(chip, "[main]");
+        assert!(
+            line.contains(&chip),
+            "spacer must use the footer chip: {line}"
+        );
+        assert!(
+            !line.contains(".worktrees"),
+            "worktree path must not be a second chip: {line}"
+        );
+        assert!(
+            !line.contains(UNICODE.worktree),
+            "worktree glyph must not prefix the footer chip: {line}"
         );
     }
 
