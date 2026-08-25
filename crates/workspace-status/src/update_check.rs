@@ -59,7 +59,7 @@ pub fn offer_startup_update() -> StartupUpdateOffer {
         stdin_is_tty: io::stdin().is_terminal(),
         stdout_is_tty: io::stdout().is_terminal(),
         now: SystemTime::now(),
-        current_version: env!("CARGO_PKG_VERSION"),
+        current_version: crate::APP_VERSION,
         store_path: update_check_store_path(),
         fetch_latest: fetch_latest_release_tag,
         prompt_yes: prompt_yes_no,
