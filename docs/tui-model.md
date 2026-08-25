@@ -61,7 +61,7 @@ Default folds: ignored repos with children + the `no-updates` group. Non-ignored
 
 Enter that deepens the stack keeps **right** focus. Esc that pops a depth keeps **left** focus. Esc never quits.
 
-At depth 2, `j`/`k` on the left move the commit-file cursor and load that file's diff when the focused row is a file. Directory rows keep the previous diff.
+Left-pane `j`/`k`, click, wheel, search next/prev, and EasyMotion load the matching right pane through `Effect::LoadRightPane` (the same `load_right` / `run_work_pumped` path as depth 0). Depth 1 graph rows load that commit / stash / worktree's files. Depth 2 file rows load that file's commit diff. Directory rows keep the previous diff. Esc/back and the depth stack stay unchanged.
 
 ## App state
 

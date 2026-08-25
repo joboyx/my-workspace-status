@@ -565,6 +565,43 @@ fn drill_enter_and_esc_walk_commit_files_diff() {
 }
 
 #[test]
+fn left_pane_move_after_drill_updates_right_pane() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    tui.search("merger");
+    tui.enter();
+    tui.key('j');
+    tui.key('j');
+    tui.enter();
+    let files = tui.frame();
+    assert!(
+        tui.right_is_files(),
+        "Enter on a graph commit should open the file list:\n{files}"
+    );
+    tui.esc();
+    if tui.focus_is_right() {
+        tui.esc();
+    }
+    assert!(
+        tui.left_is_graph() && !tui.focus_is_right(),
+        "Esc on the right pane should leave the graph on the left:\n{}",
+        tui.frame()
+    );
+    let files_before = tui.frame();
+    tui.key('j');
+    let files_after = tui.frame();
+    assert!(
+        tui.right_is_files() && tui.left_is_graph() && !tui.focus_is_right(),
+        "depth-1 j must stay on the left with files on the right:\n{files_after}"
+    );
+    assert_ne!(
+        files_before, files_after,
+        "depth-1 j must reload the right pane for the next graph row:\nBEFORE:\n{files_before}\nAFTER:\n{files_after}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn chrome_pills_breadcrumb_and_armed_search_chip() {
     let (root, workspace) = daily_workspace();
     let mut tui = open(&workspace);

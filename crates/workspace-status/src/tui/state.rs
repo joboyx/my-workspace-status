@@ -508,11 +508,34 @@ impl AppState {
         }
     }
 
+    /// Graph-row source for the right pane at depth ≥ 1.
+    pub(crate) fn follow_commit_source(&self) -> Option<(String, CommitFileSource)> {
+        let repo = self.focused_graph_repo()?;
+        let source = source_from_graph_row(&self.focused_graph_row()?)?;
+        Some((repo, source))
+    }
+
+    /// Load commit files for the focused graph row (depth 1 left).
+    ///
+    /// Depth 0 right is the graph itself — no follow. Same source is a no-op.
+    fn follow_graph_files(&self) -> Effect {
+        let DrillView::Files { repo, source, .. } = &self.drill else {
+            return Effect::None;
+        };
+        match self.follow_commit_source() {
+            Some((next_repo, next_source)) if next_repo == *repo && next_source == *source => {
+                Effect::None
+            }
+            Some(_) => Effect::LoadRightPane,
+            None => Effect::None,
+        }
+    }
+
+    /// Load the focused file's commit diff through `load_right`.
+    ///
+    /// Directory rows and the already-shown path keep the previous diff.
     fn maybe_load_focused_commit_diff(&self) -> Effect {
-        let DrillView::Diff {
-            repo, source, path, ..
-        } = &self.drill
-        else {
+        let DrillView::Diff { path, .. } = &self.drill else {
             return Effect::None;
         };
         let Some(row) = self.focused_commit_file_row() else {
@@ -521,11 +544,7 @@ impl AppState {
         if !row.is_file() || row.path == *path {
             return Effect::None;
         }
-        Effect::LoadCommitDiff {
-            repo: repo.clone(),
-            source: source.clone(),
-            path: row.path.clone(),
-        }
+        Effect::LoadRightPane
     }
 
     /// Header / footer / list split for the graph pane.
@@ -558,7 +577,8 @@ impl AppState {
         }
     }
 
-    fn focused_commit_file_row(&self) -> Option<CommitFileRow> {
+    /// Highlighted commit-file row when the files list is open.
+    pub(crate) fn focused_commit_file_row(&self) -> Option<CommitFileRow> {
         if self.drill.is_graph() {
             return None;
         }
@@ -1091,7 +1111,7 @@ impl AppState {
                 } else if self.drill.is_files() {
                     self.focus = FocusPane::Left;
                     self.move_graph_cursor(delta);
-                    Effect::None
+                    self.follow_graph_files()
                 } else {
                     self.focus = FocusPane::Left;
                     self.move_cursor(delta);
@@ -1431,7 +1451,7 @@ impl AppState {
                 }
                 self.graph_cursor = index.min(n - 1);
                 self.sync_graph_scroll();
-                Effect::None
+                self.follow_graph_files()
             }
             EasyMotionList::CommitFiles => {
                 let n = self.commit_file_rows().len();
@@ -1804,6 +1824,7 @@ impl AppState {
             if is_double {
                 return self.nav_enter();
             }
+            return self.follow_graph_files();
         }
         Effect::None
     }
@@ -1978,6 +1999,8 @@ impl AppState {
         self.focus = FocusPane::Right;
     }
 
+    /// Fill the commit-file list. Enter from the graph focuses the right pane;
+    /// a follow/reload that is already at files/diff keeps the current focus.
     pub fn open_commit_files(
         &mut self,
         repo: String,
@@ -2010,13 +2033,16 @@ impl AppState {
         self.commit_files_loading = false;
         self.status = format!("files {}", files.len());
         let cursor = DrillView::files_cursor(&files, 0);
+        let retain_focus = !self.drill.is_graph();
         self.drill = DrillView::Files {
             repo: repo.clone(),
             source: source.clone(),
             files,
             cursor,
         };
-        self.focus = FocusPane::Right;
+        if !retain_focus {
+            self.focus = FocusPane::Right;
+        }
         if let Some(path) = keep_path.as_deref() {
             self.restore_commit_file_cursor(Some(path));
         }
@@ -2143,7 +2169,7 @@ impl AppState {
             }
             SearchPane::Graph => {
                 self.apply_graph_search(dir);
-                Effect::None
+                self.follow_graph_files()
             }
             SearchPane::CommitFiles => {
                 self.apply_commit_file_search(dir);
@@ -3103,7 +3129,7 @@ impl AppState {
             self.graph_cursor = idx;
         }
         self.sync_graph_scroll();
-        Effect::None
+        self.follow_graph_files()
     }
 
     fn apply_terminal_size(&mut self, cols: u16) {
@@ -3148,7 +3174,7 @@ impl AppState {
             ListFocusTarget::CommitFiles => self.move_file_cursor(delta),
             ListFocusTarget::Graph => {
                 self.move_graph_cursor(delta);
-                Effect::None
+                self.follow_graph_files()
             }
             ListFocusTarget::None => {
                 self.scroll_right(delta);
@@ -3177,7 +3203,7 @@ impl AppState {
                     .unwrap_or(0);
                 self.graph_cursor = if end { n.saturating_sub(1) } else { 0 };
                 self.sync_graph_scroll();
-                Effect::None
+                self.follow_graph_files()
             }
             ListFocusTarget::None => Effect::None,
             ListFocusTarget::Tree => {
@@ -5660,8 +5686,8 @@ mod tests {
             *file_cursor = lib - 1;
         }
         match app.dispatch(Action::Move(1)) {
-            Effect::LoadCommitDiff { path, .. } => assert_eq!(path, "src/lib.rs"),
-            other => panic!("expected LoadCommitDiff, got {other:?}"),
+            Effect::LoadRightPane => {}
+            other => panic!("expected LoadRightPane, got {other:?}"),
         }
         assert_eq!(app.graph_cursor, graph_before);
         assert_eq!(app.commit_files_cursor(), lib);
@@ -5693,9 +5719,10 @@ mod tests {
         app.focus = FocusPane::Left;
         let files_before = app.commit_files_cursor();
         let graph_before = app.graph_cursor;
-        assert_eq!(app.dispatch(Action::Move(1)), Effect::None);
+        assert_eq!(app.dispatch(Action::Move(1)), Effect::LoadRightPane);
         assert_eq!(app.commit_files_cursor(), files_before);
         assert_ne!(app.graph_cursor, graph_before);
+        assert_eq!(app.focus, FocusPane::Left);
     }
 
     #[test]

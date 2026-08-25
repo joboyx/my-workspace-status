@@ -42,7 +42,7 @@ use super::branches::{
     DIRTY_WORKTREE_STATUS,
 };
 use super::diff::{load_file_diff, DiffContent};
-use super::drill::CommitFileSource;
+use super::drill::{CommitFile, CommitFileSource, DrillView};
 use super::editor::{editor_command, is_detached_editor, resolve_editor};
 use super::event_pump::{
     action_triggers_graph_autoload, classify_busy_action, overlay_blocks_background_ticks,
@@ -341,7 +341,9 @@ fn reload_snapshot_pumped(
     }
 }
 
-/// Inputs for right-pane git (`git log` / `git diff` / worktree name-status).
+/// Inputs for right-pane git (`git log` / `git diff` / commit files / commit
+/// diff). Depth 0 loads a graph or worktree file diff. Depth 1 loads files for
+/// the focused graph row. Depth 2 loads that file's commit diff.
 ///
 /// Must stay `Send` so [`load_right_pumped`] can run [`Self::compute`] on a
 /// worker. #60 moved fetch/pull/watch *children* off the draw thread; applying
@@ -358,6 +360,22 @@ struct RightPaneRequest {
     focused_graph_repo: Option<String>,
     same_repo: bool,
     graph_limit: usize,
+    /// Depth 1: commit / stash / worktree files for the focused graph row.
+    follow_files: Option<(String, CommitFileSource)>,
+    /// Depth 2: commit-scoped diff for the focused commit-file row.
+    follow_diff: Option<FollowDiffRequest>,
+}
+
+/// Inputs for a depth-2 commit-file diff loaded through [`RightPaneRequest`].
+#[derive(Clone, Debug)]
+struct FollowDiffRequest {
+    repo: String,
+    source: CommitFileSource,
+    path: String,
+    context: Option<u32>,
+    files: Vec<CommitFile>,
+    file_cursor: usize,
+    focused_file: Option<(String, FileChange)>,
 }
 
 /// Git result for [`RightPaneRequest::compute`]. Applied on the draw thread
@@ -372,13 +390,21 @@ enum RightPaneLoad {
     Graph {
         model: workspace_status_graph::GraphModel,
         identity: GraphIdentity,
-        worktree_files: Option<(String, CommitFileSource, Vec<NameStatus>)>,
+        files: Option<(String, CommitFileSource, Vec<NameStatus>)>,
     },
     Clear,
-    WorktreeFiles {
+    CommitFiles {
         repo: String,
         source: CommitFileSource,
         files: Vec<NameStatus>,
+    },
+    CommitDiff {
+        repo: String,
+        source: CommitFileSource,
+        files: Vec<CommitFile>,
+        file_cursor: usize,
+        path: String,
+        content: DiffContent,
     },
     None,
 }
@@ -393,6 +419,29 @@ impl RightPaneRequest {
                 .as_ref()
                 .is_some_and(|(r, _)| r == repo)
         });
+        let follow_files = if state.drill.is_files() {
+            state.follow_commit_source()
+        } else {
+            None
+        };
+        let follow_diff = match &state.drill {
+            DrillView::Diff { repo, source, .. } => state.focused_commit_file_row().and_then(|row| {
+                if !row.is_file() {
+                    return None;
+                }
+                let (files, file_cursor) = commit_diff_list(state);
+                Some(FollowDiffRequest {
+                    repo: repo.clone(),
+                    source: source.clone(),
+                    path: row.path.clone(),
+                    context: state.commit_diff_context(repo, &row.path),
+                    files,
+                    file_cursor,
+                    focused_file: focused_file.clone(),
+                })
+            }),
+            _ => None,
+        };
         Self {
             cwd: state.cwd.clone(),
             snapshot: state.snapshot.clone(),
@@ -405,22 +454,30 @@ impl RightPaneRequest {
             focused_graph_repo,
             same_repo,
             graph_limit: refresh_graph_limit(state.graph.as_ref()),
+            follow_files,
+            follow_diff,
         }
     }
 
-    fn worktree_refresh(drill: &super::drill::DrillView) -> Option<(String, CommitFileSource)> {
-        match drill {
-            super::drill::DrillView::Files { repo, source, .. }
-            | super::drill::DrillView::Diff { repo, source, .. }
-                if matches!(source, CommitFileSource::Worktree) =>
-            {
-                Some((repo.clone(), source.clone()))
-            }
-            _ => None,
+    fn compute(&self) -> RightPaneLoad {
+        if let Some(follow) = &self.follow_diff {
+            let content = compute_commit_diff(
+                &self.cwd,
+                &follow.repo,
+                &follow.source,
+                &follow.path,
+                follow.context,
+                follow.focused_file.as_ref(),
+            );
+            return RightPaneLoad::CommitDiff {
+                repo: follow.repo.clone(),
+                source: follow.source.clone(),
+                files: follow.files.clone(),
+                file_cursor: follow.file_cursor,
+                path: follow.path.clone(),
+                content,
+            };
         }
-    }
-
-    fn compute(&self, worktree: Option<(String, CommitFileSource)>) -> RightPaneLoad {
         if self.in_graph {
             if let Some((repo, change)) = &self.focused_file {
                 let content = load_file_diff(&self.cwd, repo, change, self.file_diff_context);
@@ -444,27 +501,23 @@ impl RightPaneRequest {
             } else {
                 load_graph_model(&self.cwd, &self.snapshot, repo, self.show_ignored)
             };
-            let worktree_files = if !self.in_graph {
-                worktree.map(|(wt_repo, source)| {
-                    let files = list_worktree_name_status(&self.cwd.join(&wt_repo));
-                    (wt_repo, source, files)
-                })
-            } else {
-                None
-            };
+            let files = self.follow_files.as_ref().map(|(file_repo, source)| {
+                let listed = compute_commit_files(&self.cwd.join(file_repo), source);
+                (file_repo.clone(), source.clone(), listed)
+            });
             return RightPaneLoad::Graph {
                 model,
                 identity,
-                worktree_files,
+                files,
             };
         }
         if self.in_graph {
             RightPaneLoad::Clear
-        } else if let Some((repo, source)) = worktree {
-            let files = list_worktree_name_status(&self.cwd.join(&repo));
-            RightPaneLoad::WorktreeFiles {
-                repo,
-                source,
+        } else if let Some((repo, source)) = &self.follow_files {
+            let files = compute_commit_files(&self.cwd.join(repo), source);
+            RightPaneLoad::CommitFiles {
+                repo: repo.clone(),
+                source: source.clone(),
                 files,
             }
         } else {
@@ -483,21 +536,29 @@ fn apply_right_pane_load(state: &mut AppState, payload: RightPaneLoad) {
         RightPaneLoad::Graph {
             model,
             identity,
-            worktree_files,
+            files,
         } => {
             state.set_graph(model, identity.repo, identity.head);
-            if let Some((repo, source, files)) = worktree_files {
+            if let Some((repo, source, files)) = files {
                 state.open_commit_files(repo, source, files.into_iter().map(Into::into).collect());
             }
         }
         RightPaneLoad::Clear => state.clear_right(),
-        RightPaneLoad::WorktreeFiles {
+        RightPaneLoad::CommitFiles {
             repo,
             source,
             files,
         } => {
             state.open_commit_files(repo, source, files.into_iter().map(Into::into).collect());
         }
+        RightPaneLoad::CommitDiff {
+            repo,
+            source,
+            files,
+            file_cursor,
+            path,
+            content,
+        } => state.open_commit_diff(repo, source, files, file_cursor, path, content),
         RightPaneLoad::None => {}
     }
 }
@@ -510,8 +571,7 @@ fn load_right_pumped(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> bool {
     let request = RightPaneRequest::from_state(state);
-    let worktree = RightPaneRequest::worktree_refresh(&state.drill);
-    match run_work_pumped(terminal, state, opts, move || request.compute(worktree)) {
+    match run_work_pumped(terminal, state, opts, move || request.compute()) {
         WorkPump::Quit => true,
         WorkPump::Done(payload) => {
             apply_right_pane_load(state, payload);
@@ -1566,8 +1626,7 @@ fn reload_repo_pumped(
 
 /// Sync pane git. Headless e2e only — TTY must use [`load_right_pumped`].
 fn load_right_headless(state: &mut AppState) {
-    let worktree = RightPaneRequest::worktree_refresh(&state.drill);
-    let payload = RightPaneRequest::from_state(state).compute(worktree);
+    let payload = RightPaneRequest::from_state(state).compute();
     apply_right_pane_load(state, payload);
 }
 
@@ -2005,6 +2064,60 @@ mod tests {
     }
 
     #[test]
+    fn compute_right_pane_load_follows_graph_row_at_files_depth() {
+        use super::super::drill::{CommitFileSource, DrillView};
+        use super::super::state::FocusPane;
+
+        let root = std::env::temp_dir().join(format!(
+            "ws-tui-pane-follow-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let repo_dir = workspace.join("app");
+        init_repo(&repo_dir);
+        fs::write(repo_dir.join("second.txt"), "two\n").unwrap();
+        git(&repo_dir, &["add", "second.txt"]);
+        git(&repo_dir, &["commit", "-q", "-m", "second"]);
+        git(&repo_dir, &["checkout", "-q", "-b", "feature/follow"]);
+        let config = WorkspaceStatusConfig::with_defaults();
+        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let mut app = AppState::new(workspace.clone(), snapshot, true);
+        let idx = app
+            .rows
+            .iter()
+            .position(|r| {
+                r.kind == super::super::tree::NodeKind::Repo && r.repo.as_deref() == Some("app")
+            })
+            .expect("visible app repo row");
+        app.cursor = idx;
+        load_right_headless(&mut app);
+        assert!(app.graph.is_some());
+        app.open_commit_files("app".into(), CommitFileSource::Worktree, Vec::new());
+        app.focus = FocusPane::Left;
+        let files_before = match &app.drill {
+            DrillView::Files { files, .. } => files.clone(),
+            other => panic!("expected files drill, got {other:?}"),
+        };
+        assert!(files_before.is_empty());
+        app.graph_cursor = 1;
+        load_right_headless(&mut app);
+        assert_eq!(app.focus, FocusPane::Left, "follow must not steal left focus");
+        assert!(app.drill.is_files());
+        let files_after = match &app.drill {
+            DrillView::Files { files, .. } => files.clone(),
+            other => panic!("expected files drill, got {other:?}"),
+        };
+        assert!(
+            files_after.iter().any(|file| file.path == "second.txt"),
+            "HEAD commit should list second.txt, got {files_after:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn event_thread_keeps_polling_while_right_pane_git_runs() {
         let root = std::env::temp_dir().join(format!(
             "ws-tui-pane-pump-{}",
@@ -2029,11 +2142,10 @@ mod tests {
             .expect("visible app repo row");
         app.cursor = idx;
         let request = RightPaneRequest::from_state(&app);
-        let worktree = RightPaneRequest::worktree_refresh(&app.drill);
         let (tx, rx) = mpsc::sync_channel(1);
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(80));
-            let payload = request.compute(worktree);
+            let payload = request.compute();
             let _ = tx.send(payload);
         });
         let mut pumps = 0u32;
