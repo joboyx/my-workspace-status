@@ -2,13 +2,14 @@
 //!
 //! Tree matches include folded rows. Focusing a tree match unfolds its
 //! ancestors so the row is visible. Hidden ignored repos stay out of tree
-//! search unless shown (`.` / `-a`). Graph search matches subject and
-//! decoration text. Commit-file search matches paths. Diff search matches
-//! painted line text.
+//! search unless shown (`.` / `-a`). Graph search matches subject, author,
+//! painted or UTC time, branch and tag names, and sha. Commit-file search
+//! matches paths. Diff search matches painted line text.
 
 use std::collections::HashSet;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use workspace_status_graph::GraphRow;
+use workspace_status_graph::{format_relative_date, format_utc_timestamp, short_id, GraphRow};
 
 use super::drill::CommitFile;
 use super::tree::{flatten, TreeNode};
@@ -124,28 +125,84 @@ pub fn focus_tree_search(
     (unfold_ancestors(tree, folds, &focus_id), Some(focus_id))
 }
 
-/// Search text for one graph row: subject plus decoration / ref names.
+/// Search text for one graph row.
+///
+/// Commits match subject, author, painted relative date, UTC timestamp
+/// (`YYYY-MM-DD HH:MM`), branch and tag names, and full plus short sha.
+/// Stash and worktree rows use the same fields when the model has them.
+/// Uncommitted matches the word `uncommitted`. Dates use the same 3-hour
+/// relative / older-UTC formatter as the painted spacer.
 pub fn graph_row_search_text(row: &GraphRow) -> String {
+    graph_row_search_text_at(row, search_now_unix())
+}
+
+fn search_now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn graph_row_search_text_at(row: &GraphRow, now_unix: i64) -> String {
     match row {
         GraphRow::Uncommitted { .. } => "uncommitted".into(),
-        GraphRow::Stash(stash) => format!("{} {}", stash.subject, stash.stash_ref),
+        GraphRow::Stash(stash) => {
+            let mut parts = Vec::new();
+            push_part(&mut parts, &stash.subject);
+            push_part(&mut parts, &stash.stash_ref);
+            push_part(&mut parts, &stash.author_name);
+            push_sha(&mut parts, &stash.id);
+            push_dates(&mut parts, stash.author_date_unix, now_unix);
+            parts.join(" ")
+        }
         GraphRow::Worktree(wt) => {
-            let branch = wt.branch.as_deref().unwrap_or("");
-            format!("{} {}", wt.path, branch)
+            let mut parts = Vec::new();
+            push_part(&mut parts, &wt.path);
+            if let Some(branch) = &wt.branch {
+                push_part(&mut parts, branch);
+            }
+            if let Some(id) = &wt.head_id {
+                push_sha(&mut parts, id);
+            }
+            parts.join(" ")
         }
         GraphRow::Commit { commit, .. } => {
-            let refs = commit
-                .refs
-                .iter()
-                .map(|r| r.name.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
-            if refs.is_empty() {
-                commit.subject.clone()
-            } else {
-                format!("{} {}", commit.subject, refs)
+            let mut parts = Vec::new();
+            push_part(&mut parts, &commit.subject);
+            for graph_ref in &commit.refs {
+                push_part(&mut parts, &graph_ref.name);
             }
+            push_part(&mut parts, &commit.author_name);
+            push_sha(&mut parts, &commit.id);
+            push_dates(&mut parts, commit.author_date_unix, now_unix);
+            parts.join(" ")
         }
+    }
+}
+
+fn push_part(parts: &mut Vec<String>, value: &str) {
+    if !value.is_empty() {
+        parts.push(value.to_string());
+    }
+}
+
+fn push_sha(parts: &mut Vec<String>, id: &str) {
+    push_part(parts, id);
+    let short = short_id(id);
+    if short != id {
+        push_part(parts, short);
+    }
+}
+
+fn push_dates(parts: &mut Vec<String>, unix: i64, now_unix: i64) {
+    if unix <= 0 {
+        return;
+    }
+    let painted = format_relative_date(unix, now_unix);
+    push_part(parts, &painted);
+    let utc = format_utc_timestamp(unix);
+    if utc != painted {
+        push_part(parts, &utc);
     }
 }
 
@@ -447,28 +504,32 @@ mod tests {
 
     #[test]
     fn graph_subject_and_ref_are_searchable() {
-        use workspace_status_graph::{Commit, GraphRef};
+        use workspace_status_graph::{format_utc_timestamp, Commit, GraphRef};
+        let now = search_now_unix();
+        let recent_unix = now - 90;
+        let recent_utc = format_utc_timestamp(recent_unix);
+        let recent_day = &recent_utc[..10];
         let rows = vec![
             GraphRow::Commit {
                 commit: Commit {
-                    id: "a".into(),
+                    id: "aa11bb22cc33dd44ee55ff6677889900aabbccdd".into(),
                     subject: "fix login timeout".into(),
                     parents: Vec::new(),
-                    refs: vec![GraphRef::local("main")],
-                    author_name: String::new(),
-                    author_date_unix: 0,
+                    refs: vec![GraphRef::local("main"), GraphRef::tag("v9.9.9")],
+                    author_name: "Ada SearchAuthor".into(),
+                    author_date_unix: recent_unix,
                 },
                 is_head: true,
                 worktrees: Vec::new(),
             },
             GraphRow::Commit {
                 commit: Commit {
-                    id: "b".into(),
+                    id: "bb22cc33dd44ee55ff6677889900aabbccddeeff".into(),
                     subject: "docs".into(),
                     parents: Vec::new(),
                     refs: vec![GraphRef::local("topic")],
                     author_name: String::new(),
-                    author_date_unix: 0,
+                    author_date_unix: 1_700_000_000,
                 },
                 is_head: false,
                 worktrees: Vec::new(),
@@ -476,14 +537,24 @@ mod tests {
         ];
         assert_eq!(collect_graph_match_indices(&rows, "login"), vec![0]);
         assert_eq!(collect_graph_match_indices(&rows, "topic"), vec![1]);
+        assert_eq!(collect_graph_match_indices(&rows, "v9.9.9"), vec![0]);
+        assert_eq!(collect_graph_match_indices(&rows, "SearchAuthor"), vec![0]);
+        assert_eq!(collect_graph_match_indices(&rows, "1m"), vec![0]);
+        assert_eq!(collect_graph_match_indices(&rows, recent_day), vec![0]);
+        assert_eq!(collect_graph_match_indices(&rows, "2023-11-14"), vec![1]);
+        assert_eq!(
+            collect_graph_match_indices(&rows, "aa11bb22cc33dd44ee55ff6677889900aabbccdd"),
+            vec![0]
+        );
+        assert_eq!(collect_graph_match_indices(&rows, "aa11bb2"), vec![0]);
         assert_eq!(focus_graph_search(&rows, "o", 0, 1), Some(1));
         assert_eq!(focus_graph_search(&rows, "o", 1, -1), Some(0));
     }
 
     #[test]
-    fn graph_stash_search_skips_spacer_meta() {
-        use workspace_status_graph::Stash;
-        let rows = vec![GraphRow::Stash(Stash {
+    fn graph_stash_and_worktree_search_include_sha_author_time() {
+        use workspace_status_graph::{Stash, Worktree};
+        let stash_rows = vec![GraphRow::Stash(Stash {
             id: "deadbeefcafebabe".into(),
             stash_ref: "stash@{0}".into(),
             subject: "wip notes".into(),
@@ -491,16 +562,31 @@ mod tests {
             author_date_unix: 1_700_000_000,
             parent_id: None,
         })];
-        assert_eq!(collect_graph_match_indices(&rows, "wip"), vec![0]);
-        assert_eq!(collect_graph_match_indices(&rows, "stash@{0}"), vec![0]);
-        assert!(
-            collect_graph_match_indices(&rows, "UniqueAuthorXYZ").is_empty(),
-            "author lives on the spacer, not search"
+        assert_eq!(collect_graph_match_indices(&stash_rows, "wip"), vec![0]);
+        assert_eq!(
+            collect_graph_match_indices(&stash_rows, "stash@{0}"),
+            vec![0]
         );
-        assert!(
-            collect_graph_match_indices(&rows, "deadbee").is_empty(),
-            "hash lives on the spacer, not search"
+        assert_eq!(
+            collect_graph_match_indices(&stash_rows, "UniqueAuthorXYZ"),
+            vec![0]
         );
+        assert_eq!(collect_graph_match_indices(&stash_rows, "deadbee"), vec![0]);
+        assert_eq!(
+            collect_graph_match_indices(&stash_rows, "2023-11-14"),
+            vec![0]
+        );
+
+        let wt_rows = vec![GraphRow::Worktree(Worktree {
+            path: "feature-wt".into(),
+            head_id: Some("ffeeddccbbaa99887766554433221100ffeeddcc".into()),
+            branch: Some("feature/login-page".into()),
+            ignored: false,
+            is_current: false,
+        })];
+        assert_eq!(collect_graph_match_indices(&wt_rows, "feature-wt"), vec![0]);
+        assert_eq!(collect_graph_match_indices(&wt_rows, "login-page"), vec![0]);
+        assert_eq!(collect_graph_match_indices(&wt_rows, "ffeeddc"), vec![0]);
     }
 
     #[test]
