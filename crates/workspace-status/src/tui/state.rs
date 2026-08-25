@@ -6367,6 +6367,44 @@ mod tests {
     }
 
     #[test]
+    fn graph_search_focuses_author_sha_ref_and_time() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        let now = unix_now();
+        let mut hit = graph_commit("aa11bb22cc33dd44ee55ff6677889900aabbccdd", "alpha unique");
+        hit.author_name = "Ada SearchAuthor".into();
+        hit.author_date_unix = now - 90;
+        hit.refs = vec![GraphRef::tag("v9.9.9"), GraphRef::local("topic-search")];
+        let miss = graph_commit("ccc3333dddddddddddddddddddddddddddddd", "beta unique");
+        let model = GraphModel {
+            commits: vec![hit, miss],
+            stashes: Vec::new(),
+            worktrees: Vec::new(),
+            head_id: Some("aa11bb22cc33dd44ee55ff6677889900aabbccdd".into()),
+            sync: None,
+            show_ignored: app.show_ignored,
+            uncommitted: None,
+            ..GraphModel::default()
+        };
+        app.set_graph(
+            model,
+            "app".into(),
+            "aa11bb22cc33dd44ee55ff6677889900aabbccdd".into(),
+        );
+        app.focus = FocusPane::Right;
+        app.drill = DrillView::Graph;
+
+        for query in ["SearchAuthor", "aa11bb2", "v9.9.9", "topic-search", "1m"] {
+            app.graph_cursor = 1;
+            type_search(&mut app, query);
+            assert_eq!(
+                app.graph_cursor, 0,
+                "query {query} should focus the hit row"
+            );
+        }
+    }
+
+    #[test]
     fn commit_files_search_focuses_matching_path() {
         let mut app = state();
         focus_repo(&mut app, "app");
