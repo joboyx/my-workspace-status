@@ -64,7 +64,7 @@ See [git-operations.md](./git-operations.md).
 
 ## Live refresh and background fetch
 
-`tui/watch.rs` polls file signatures (status + mtime) and tree chrome signatures (repo / checkout / dir / workspace / group) so those rows flash on semantic updates, including remove ghosts for ~800ms. Graph list rows and commit-file rows use separate signature maps keyed by repo (and source). A disjoint identity set seeds and does not flash, so switching repos does not light up the whole graph. Fetch / pull / push / default-branch completion also flashes `repo:<path>` / `checkout:<path>` rows. The flash is a four-step background fade; status letter colours stay.
+`tui/watch.rs` polls file signatures (status + mtime) and tree chrome signatures (repo / checkout / dir / workspace / group) so those rows flash on semantic updates, including remove ghosts for ~800ms. Graph list rows and commit-file rows use separate signature maps keyed by repo (and source). A disjoint identity set seeds and does not flash, so switching repos does not light up the whole graph. Fetch / pull / push / default-branch completion also flashes `repo:<path>` / `checkout:<path>` rows. The flash is a four-step background fade; status letter colours stay. Watch snapshot collect and the follow-up graph/diff reload run on a worker; identical signatures skip that pane git.
 
 `tui/fetch.rs` schedules bounded `git fetch --quiet` batches (`WS_STATUS_FETCH_MS`, default 5 minutes; `0` disables) and powers the manual `f` action. File `row_signature` is status letter + `size:mtimeMs` (or `gone`), and `background_fetch_targets` is every snapshot except hidden ignored (linked worktrees included). Manual `f` stays on focus-scoped `op_targets`.
 
@@ -72,7 +72,7 @@ See [git-operations.md](./git-operations.md).
 
 Pane widths come from `tui/split.rs` `pane_widths(term_cols, fraction)` — never from tree label lengths. Long tree paths, graph subjects, and diff lines clip to that frozen width; `left_col_offset` / `right_col_offset` / `diff_col_offset` pan inside the clip. Default fraction is `TREE_WIDTH_FRACTION` (0.4). The session keeps a `tree_fraction` (resets on next launch; not persisted) and freezes `{ tree_width, tree_inner_width, diff_width }`, recomputing when terminal columns change or when the user drags the divider. Clamp helpers keep both panes ≥ 20 cols (accounting for padding) when the terminal is wide enough. The in-diff side-by-side RULE uses the same session-only drag model. Hit-testing consumes `diff_split_rule_x` only while split mode is actually painted (`≥ NARROW_SXS`). The `?` help overlay shrinks the panes instead of overlapping them.
 
-The ratatui TUI applies crossterm `Resize` to `Terminal::resize` (the event size, not a later ioctl) and recomputes pane widths, graph gutter cap, help overlay rows, and list viewports from the new area. The event loop drains queued input with `poll(0)` + `read`, skips watch/fetch ticks while an overlay is open, and autoloads graph history only after list movement. Long git work (fetch / pull / push / default-branch / watch / full reload) runs on a worker; the loop still paints and accepts resize and quit.
+The ratatui TUI applies crossterm `Resize` to `Terminal::resize` (the event size, not a later ioctl) and recomputes pane widths, graph gutter cap, help overlay rows, and list viewports from the new area. The event loop drains queued input with `poll(0)` + `read`, skips watch/fetch ticks while an overlay is open, and autoloads graph history only after list movement. Long git work (fetch / pull / push / default-branch / watch / full reload **and** the follow-up graph `log` / file `diff` in `load_right`) runs on a worker; the loop still paints and accepts resize and quit. An unchanged watch poll skips that pane reload so idle ticks do not re-run `git log`.
 
 ## Graph widget
 
@@ -95,7 +95,7 @@ Graph checkout confirm (and several other graph UX choices) is inspired by [Git 
 | TUI startup update check | `update_check.rs` + `cli.rs` (before `run_tui`). Sidecar exec stays in `update.rs`                                                                                      |
 | Snapshot contract     | `snapshot.rs` (`build_workspace_snapshot`) + `docs/snapshot.md` + `tests/snapshot_contract.rs`                                                                            |
 | New key binding       | `tui/keys.rs` (`Action`) + `tui/state.rs` dispatch + `tui/help.rs` (`HELP_GROUPS`) + `tui/gates.rs` if the key is row-scoped                                               |
-| Event-loop freeze / overlay ticks / graph autoload gates | `tui/event_pump.rs` + `tui/app.rs` (`run_loop`, `run_work_pumped`)                                                                                                          |
+| Event-loop freeze / overlay ticks / graph autoload gates | `tui/event_pump.rs` + `tui/app.rs` (`run_loop`, `run_work_pumped`, `load_right_pumped`)                                                                                    |
 
 ## CLI crate
 
