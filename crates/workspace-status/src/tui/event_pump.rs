@@ -141,4 +141,49 @@ mod tests {
             BusyAction::Ignore
         );
     }
+
+    /// Fails CI if TTY `apply_effect_inner` grows a sync `load_right(` /
+    /// `reload_snapshot(state` / commit-file git call again. Headless e2e keeps
+    /// the sync helpers (`load_right_headless`, `reload_snapshot`).
+    #[test]
+    fn tty_event_loop_must_not_call_sync_pane_git() {
+        let src = include_str!("app.rs");
+        assert!(
+            !src.contains("load_right("),
+            "TTY must use load_right_pumped; Headless e2e uses load_right_headless. \
+             Re-adding load_right( puts git log / git diff on the draw thread."
+        );
+        assert!(
+            src.contains("load_right_pumped("),
+            "TTY pane git must stay on load_right_pumped"
+        );
+        assert!(
+            src.contains("load_right_headless("),
+            "Headless e2e must keep sync load_right_headless"
+        );
+        assert_eq!(
+            src.matches("reload_snapshot(state, opts").count(),
+            1,
+            "only apply_headless_inner may call reload_snapshot(state, opts); \
+             TTY must use reload_snapshot_pumped"
+        );
+        assert_eq!(
+            src.matches("reload_repo(state, opts").count(),
+            1,
+            "only apply_headless_inner may call reload_repo(state, opts); \
+             TTY must use reload_repo_pumped"
+        );
+        assert_eq!(
+            src.matches("load_commit_files(state, opts").count(),
+            1,
+            "only apply_headless_inner may call load_commit_files(state, opts); \
+             TTY must use load_commit_files_pumped"
+        );
+        assert_eq!(
+            src.matches("load_commit_diff(state, opts").count(),
+            1,
+            "only apply_headless_inner may call load_commit_diff(state, opts); \
+             TTY must use load_commit_diff_pumped"
+        );
+    }
 }

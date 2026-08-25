@@ -249,9 +249,10 @@ enum WorkPump<T> {
 
 /// Run `work` on a helper thread while this thread still polls crossterm.
 ///
-/// Used for fetch / pull / watch snapshot collect **and** follow-up pane git
-/// ([`load_right_pumped`], graph autoload). Keys other than quit / resize are
-/// drained so they cannot sit in the TTY buffer and flush after the join.
+/// Used for fetch / pull / watch snapshot collect, follow-up pane git
+/// ([`load_right_pumped`]), graph autoload, commit files/diff, and TTY
+/// snapshot reloads. Keys other than quit / resize are drained so they
+/// cannot sit in the TTY buffer and flush after the join.
 fn run_work_pumped<T: Send + 'static>(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
@@ -644,7 +645,9 @@ fn apply_effect_inner(
             }
         }
         Effect::ReloadRepo { repo } => {
-            reload_repo(state, opts, &repo);
+            if reload_repo_pumped(state, opts, terminal, &repo) {
+                return true;
+            }
             state.status = format!("refreshed {repo}");
             if load_right_pumped(state, terminal) {
                 return true;
@@ -663,7 +666,9 @@ fn apply_effect_inner(
                     return false;
                 }
             }
-            reload_snapshot(state, opts);
+            if reload_snapshot_pumped(state, opts, terminal) {
+                return true;
+            }
             state.status = format!("staged {}", paths.last().map(String::as_str).unwrap_or(""));
             if load_right_pumped(state, terminal) {
                 return true;
@@ -677,7 +682,9 @@ fn apply_effect_inner(
                     return false;
                 }
             }
-            reload_snapshot(state, opts);
+            if reload_snapshot_pumped(state, opts, terminal) {
+                return true;
+            }
             state.status = format!(
                 "unstaged {}",
                 paths.last().map(String::as_str).unwrap_or("")
@@ -704,7 +711,9 @@ fn apply_effect_inner(
                     return false;
                 }
             }
-            reload_snapshot(state, opts);
+            if reload_snapshot_pumped(state, opts, terminal) {
+                return true;
+            }
             if tracked.len() + untracked.len() == 1 {
                 if untracked.len() == 1 {
                     state.status = format!("deleted {}", untracked[0]);
@@ -750,6 +759,12 @@ fn apply_effect_inner(
             } else {
                 state.status = format!("edited {path}");
                 drain_pending_events();
+                if reload_repo_pumped(state, opts, terminal, &repo) {
+                    return true;
+                }
+                if load_right_pumped(state, terminal) {
+                    return true;
+                }
             }
         }
         Effect::WatchRefresh => {
@@ -794,12 +809,17 @@ fn apply_effect_inner(
             }
         }
         Effect::PrepareStashMenu { repo } => {
-            let latest = latest_stash_ref(&opts.cwd.join(&repo));
-            state.open_stash_menu(repo, latest);
+            let dir = opts.cwd.join(&repo);
+            match run_work_pumped(terminal, state, move || latest_stash_ref(&dir)) {
+                WorkPump::Quit => return true,
+                WorkPump::Done(latest) => state.open_stash_menu(repo, latest),
+            }
         }
         Effect::StashCreate { repo, paths } => match stash_push(&opts.cwd.join(&repo), &paths) {
             Ok(()) => {
-                reload_snapshot(state, opts);
+                if reload_snapshot_pumped(state, opts, terminal) {
+                    return true;
+                }
                 state.status = if paths.len() == 1 {
                     "Stashed 1 file".into()
                 } else if paths.is_empty() {
@@ -816,7 +836,9 @@ fn apply_effect_inner(
         Effect::StashApply { repo, stash_ref } => {
             match stash_apply(&opts.cwd.join(&repo), &stash_ref) {
                 Ok(()) => {
-                    reload_snapshot(state, opts);
+                    if reload_snapshot_pumped(state, opts, terminal) {
+                        return true;
+                    }
                     state.status = format!("applied {stash_ref}");
                     if load_right_pumped(state, terminal) {
                         return true;
@@ -828,7 +850,9 @@ fn apply_effect_inner(
         Effect::StashPop { repo, stash_ref } => {
             match stash_pop(&opts.cwd.join(&repo), &stash_ref) {
                 Ok(()) => {
-                    reload_snapshot(state, opts);
+                    if reload_snapshot_pumped(state, opts, terminal) {
+                        return true;
+                    }
                     state.status = format!("popped {stash_ref}");
                     if load_right_pumped(state, terminal) {
                         return true;
@@ -840,7 +864,9 @@ fn apply_effect_inner(
         Effect::StashDrop { repo, stash_ref } => {
             match stash_drop(&opts.cwd.join(&repo), &stash_ref) {
                 Ok(()) => {
-                    reload_snapshot(state, opts);
+                    if reload_snapshot_pumped(state, opts, terminal) {
+                        return true;
+                    }
                     state.status = format!("dropped {stash_ref}");
                     if load_right_pumped(state, terminal) {
                         return true;
@@ -850,8 +876,11 @@ fn apply_effect_inner(
             }
         }
         Effect::PrepareBranchPicker { repo } => {
-            let branches = list_local_branches(&opts.cwd.join(&repo));
-            state.open_branch_picker(repo, branches);
+            let dir = opts.cwd.join(&repo);
+            match run_work_pumped(terminal, state, move || list_local_branches(&dir)) {
+                WorkPump::Quit => return true,
+                WorkPump::Done(branches) => state.open_branch_picker(repo, branches),
+            }
         }
         Effect::CheckoutBranch {
             repo,
@@ -859,7 +888,9 @@ fn apply_effect_inner(
             fast_forward_ref,
         } => {
             if run_checkout_branch(state, &opts.cwd, repo, selected_name, fast_forward_ref) {
-                reload_snapshot(state, opts);
+                if reload_snapshot_pumped(state, opts, terminal) {
+                    return true;
+                }
                 if load_right_pumped(state, terminal) {
                     return true;
                 }
@@ -868,7 +899,9 @@ fn apply_effect_inner(
         Effect::CreateBranch { repo, name } => {
             match create_branch_checkout(&opts.cwd.join(&repo), &name) {
                 Ok(()) => {
-                    reload_snapshot(state, opts);
+                    if reload_snapshot_pumped(state, opts, terminal) {
+                        return true;
+                    }
                     state.status = format!("created {name}");
                     if load_right_pumped(state, terminal) {
                         return true;
@@ -883,7 +916,9 @@ fn apply_effect_inner(
             commit_id,
         } => match create_branch_at(&opts.cwd.join(&repo), &name, &commit_id) {
             Ok(()) => {
-                reload_snapshot(state, opts);
+                if reload_snapshot_pumped(state, opts, terminal) {
+                    return true;
+                }
                 let short = commit_id.get(..7).unwrap_or(&commit_id);
                 state.status = format!("created {name} at {short}");
                 if load_right_pumped(state, terminal) {
@@ -894,7 +929,9 @@ fn apply_effect_inner(
         },
         Effect::MergeIntoHead { repo, rev, label } => {
             if run_merge_into_head(state, &opts.cwd, repo, rev, label) {
-                reload_snapshot(state, opts);
+                if reload_snapshot_pumped(state, opts, terminal) {
+                    return true;
+                }
                 if load_right_pumped(state, terminal) {
                     return true;
                 }
@@ -906,7 +943,9 @@ fn apply_effect_inner(
             force,
         } => match remove_worktree(&opts.cwd.join(&primary), &opts.cwd.join(&path), force) {
             Ok(()) => {
-                reload_snapshot(state, opts);
+                if reload_snapshot_pumped(state, opts, terminal) {
+                    return true;
+                }
                 state.status = format!("removed worktree {path}");
                 if load_right_pumped(state, terminal) {
                     return true;
@@ -915,12 +954,14 @@ fn apply_effect_inner(
             Err(err) => state.status = format!("remove worktree failed: {err}"),
         },
         Effect::LoadCommitFiles { repo, source } => {
-            state.begin_commit_files(repo.clone(), source.clone());
-            let _ = terminal.draw(|frame| draw(frame, state));
-            load_commit_files(state, opts, repo, source);
+            if load_commit_files_pumped(state, opts, terminal, repo, source) {
+                return true;
+            }
         }
         Effect::LoadCommitDiff { repo, source, path } => {
-            load_commit_diff(state, opts, repo, source, path);
+            if load_commit_diff_pumped(state, opts, terminal, repo, source, path) {
+                return true;
+            }
         }
     }
     false
@@ -1052,16 +1093,16 @@ fn apply_headless_inner(state: &mut AppState, effect: Effect, opts: &TuiOpts) {
                 apply_headless_inner(state, child, opts);
             }
         }
-        Effect::LoadRightPane => load_right(state),
+        Effect::LoadRightPane => load_right_headless(state),
         Effect::ReloadSnapshot => {
             reload_snapshot(state, opts);
             state.status = "refreshed workspace".into();
-            load_right(state);
+            load_right_headless(state);
         }
         Effect::ReloadRepo { repo } => {
             reload_repo(state, opts, &repo);
             state.status = format!("refreshed {repo}");
-            load_right(state);
+            load_right_headless(state);
         }
         Effect::LoadCommitFiles { repo, source } => {
             load_commit_files(state, opts, repo, source);
@@ -1073,16 +1114,44 @@ fn apply_headless_inner(state: &mut AppState, effect: Effect, opts: &TuiOpts) {
     }
 }
 
+/// Sync commit-file git. Headless e2e only — TTY must use [`load_commit_files_pumped`].
 fn load_commit_files(state: &mut AppState, opts: &TuiOpts, repo: String, source: CommitFileSource) {
-    let dir = opts.cwd.join(&repo);
-    let files = match &source {
-        CommitFileSource::Commit { commit_id } => list_commit_name_status(&dir, commit_id),
-        CommitFileSource::Stash { stash_ref } => list_stash_name_status(&dir, stash_ref),
-        CommitFileSource::Worktree => list_worktree_name_status(&dir),
-    };
+    let files = compute_commit_files(&opts.cwd.join(&repo), &source);
     state.open_commit_files(repo, source, files.into_iter().map(Into::into).collect());
 }
 
+fn compute_commit_files(dir: &Path, source: &CommitFileSource) -> Vec<NameStatus> {
+    match source {
+        CommitFileSource::Commit { commit_id } => list_commit_name_status(dir, commit_id),
+        CommitFileSource::Stash { stash_ref } => list_stash_name_status(dir, stash_ref),
+        CommitFileSource::Worktree => list_worktree_name_status(dir),
+    }
+}
+
+/// List commit files on a worker. Returns true when the user asked to quit.
+fn load_commit_files_pumped(
+    state: &mut AppState,
+    opts: &TuiOpts,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    repo: String,
+    source: CommitFileSource,
+) -> bool {
+    state.begin_commit_files(repo.clone(), source.clone());
+    let _ = terminal.draw(|frame| draw(frame, state));
+    let dir = opts.cwd.join(&repo);
+    let source_work = source.clone();
+    match run_work_pumped(terminal, state, move || {
+        compute_commit_files(&dir, &source_work)
+    }) {
+        WorkPump::Quit => true,
+        WorkPump::Done(files) => {
+            state.open_commit_files(repo, source, files.into_iter().map(Into::into).collect());
+            false
+        }
+    }
+}
+
+/// Sync commit-diff git. Headless e2e only — TTY must use [`load_commit_diff_pumped`].
 fn load_commit_diff(
     state: &mut AppState,
     opts: &TuiOpts,
@@ -1090,35 +1159,84 @@ fn load_commit_diff(
     source: CommitFileSource,
     path: String,
 ) {
-    let dir = opts.cwd.join(&repo);
     let context = state.commit_diff_context(&repo, &path);
-    let content = match &source {
-        CommitFileSource::Commit { commit_id } => {
-            DiffContent::from_lines(diff_commit_file_ctx(&dir, commit_id, &path, context))
-        }
-        CommitFileSource::Stash { stash_ref } => {
-            DiffContent::from_lines(diff_stash_file_ctx(&dir, stash_ref, &path, context))
-        }
-        CommitFileSource::Worktree => {
-            if let Some((_, change)) = state.focused_file() {
-                if change.path == path {
-                    load_file_diff(&state.cwd, &repo, &change, context)
-                } else {
-                    head_file_diff(&dir, &path, context)
-                }
-            } else {
-                head_file_diff(&dir, &path, context)
-            }
-        }
-    };
-    let (files, file_cursor) = match &state.drill {
+    let focused = state.focused_file();
+    let content = compute_commit_diff(&opts.cwd, &repo, &source, &path, context, focused.as_ref());
+    let (files, file_cursor) = commit_diff_list(state);
+    state.open_commit_diff(repo, source, files, file_cursor, path, content);
+}
+
+fn commit_diff_list(state: &AppState) -> (Vec<super::drill::CommitFile>, usize) {
+    match &state.drill {
         super::drill::DrillView::Files { files, cursor, .. } => (files.clone(), *cursor),
         super::drill::DrillView::Diff {
             files, file_cursor, ..
         } => (files.clone(), *file_cursor),
         super::drill::DrillView::Graph => (Vec::new(), 0),
-    };
-    state.open_commit_diff(repo, source, files, file_cursor, path, content);
+    }
+}
+
+fn compute_commit_diff(
+    cwd: &Path,
+    repo: &str,
+    source: &CommitFileSource,
+    path: &str,
+    context: Option<u32>,
+    focused_file: Option<&(String, FileChange)>,
+) -> DiffContent {
+    let dir = cwd.join(repo);
+    match source {
+        CommitFileSource::Commit { commit_id } => {
+            DiffContent::from_lines(diff_commit_file_ctx(&dir, commit_id, path, context))
+        }
+        CommitFileSource::Stash { stash_ref } => {
+            DiffContent::from_lines(diff_stash_file_ctx(&dir, stash_ref, path, context))
+        }
+        CommitFileSource::Worktree => {
+            if let Some((file_repo, change)) = focused_file {
+                if file_repo == repo && change.path == path {
+                    return load_file_diff(cwd, repo, change, context);
+                }
+            }
+            head_file_diff(&dir, path, context)
+        }
+    }
+}
+
+/// Load a commit / stash / worktree file diff on a worker.
+///
+/// Returns true when the user asked to quit.
+fn load_commit_diff_pumped(
+    state: &mut AppState,
+    opts: &TuiOpts,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    repo: String,
+    source: CommitFileSource,
+    path: String,
+) -> bool {
+    let context = state.commit_diff_context(&repo, &path);
+    let focused_file = state.focused_file();
+    let (files, file_cursor) = commit_diff_list(state);
+    let cwd = opts.cwd.clone();
+    let repo_work = repo.clone();
+    let source_work = source.clone();
+    let path_work = path.clone();
+    match run_work_pumped(terminal, state, move || {
+        compute_commit_diff(
+            &cwd,
+            &repo_work,
+            &source_work,
+            &path_work,
+            context,
+            focused_file.as_ref(),
+        )
+    }) {
+        WorkPump::Quit => true,
+        WorkPump::Done(content) => {
+            state.open_commit_diff(repo, source, files, file_cursor, path, content);
+            false
+        }
+    }
 }
 
 fn head_file_diff(dir: &Path, path: &str, context: Option<u32>) -> DiffContent {
@@ -1190,6 +1308,7 @@ fn run_blocking_editor(
     }
 }
 
+/// Sync snapshot collect. Headless e2e only — TTY must use [`reload_snapshot_pumped`].
 fn reload_snapshot(state: &mut AppState, opts: &TuiOpts) {
     let snapshot = collect_full_snapshot(
         &opts.cwd,
@@ -1201,10 +1320,13 @@ fn reload_snapshot(state: &mut AppState, opts: &TuiOpts) {
     state.apply_watch_snapshot(snapshot);
 }
 
-/// Refresh one checkout in place. Missing paths drop out of the snapshot
-/// (focused checkout only).
-fn reload_repo(state: &mut AppState, opts: &TuiOpts, repo: &str) {
-    let existing = state.snapshot.repos.iter().find(|row| row.repo == repo);
+fn compute_reload_repo(
+    cwd: &Path,
+    snapshot: &WorkspaceSnapshot,
+    repo: &str,
+    show_ignored: bool,
+) -> WorkspaceSnapshot {
+    let existing = snapshot.repos.iter().find(|row| row.repo == repo);
     let meta = RepoCheckoutMeta {
         checkout_kind: existing
             .map(|row| row.checkout_kind)
@@ -1212,8 +1334,8 @@ fn reload_repo(state: &mut AppState, opts: &TuiOpts, repo: &str) {
         primary_repo: existing.and_then(|row| row.primary_repo.clone()),
     };
     let override_name = existing.and_then(|row| row.default_branch_override.clone());
-    let mut snaps = repo_snapshots_from_workspace(&state.snapshot);
-    match process_repo(repo, &opts.cwd, false, override_name.as_deref(), &meta) {
+    let mut snaps = repo_snapshots_from_workspace(snapshot);
+    match process_repo(repo, cwd, false, override_name.as_deref(), &meta) {
         Some(snap) => {
             if let Some(slot) = snaps.iter_mut().find(|row| row.repo == repo) {
                 *slot = snap;
@@ -1225,16 +1347,45 @@ fn reload_repo(state: &mut AppState, opts: &TuiOpts, repo: &str) {
             snaps.retain(|row| row.repo != repo);
         }
     }
-    let snapshot = build_workspace_snapshot(
+    build_workspace_snapshot(
         &snaps,
-        &state.snapshot.ignored_repos,
-        state.show_ignored,
-        &state.snapshot.filter_repos,
-    );
+        &snapshot.ignored_repos,
+        show_ignored,
+        &snapshot.filter_repos,
+    )
+}
+
+/// Refresh one checkout in place. Missing paths drop out of the snapshot
+/// (focused checkout only). Headless e2e only — TTY must use [`reload_repo_pumped`].
+fn reload_repo(state: &mut AppState, opts: &TuiOpts, repo: &str) {
+    let snapshot = compute_reload_repo(&opts.cwd, &state.snapshot, repo, state.show_ignored);
     state.apply_watch_snapshot(snapshot);
 }
 
-fn load_right(state: &mut AppState) {
+/// Refresh one checkout on a worker. Returns true when the user asked to quit.
+fn reload_repo_pumped(
+    state: &mut AppState,
+    opts: &TuiOpts,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    repo: &str,
+) -> bool {
+    let cwd = opts.cwd.clone();
+    let snapshot = state.snapshot.clone();
+    let repo = repo.to_string();
+    let show_ignored = state.show_ignored;
+    match run_work_pumped(terminal, state, move || {
+        compute_reload_repo(&cwd, &snapshot, &repo, show_ignored)
+    }) {
+        WorkPump::Quit => true,
+        WorkPump::Done(snapshot) => {
+            state.apply_watch_snapshot(snapshot);
+            false
+        }
+    }
+}
+
+/// Sync pane git. Headless e2e only — TTY must use [`load_right_pumped`].
+fn load_right_headless(state: &mut AppState) {
     let worktree = RightPaneRequest::worktree_refresh(&state.drill);
     let payload = RightPaneRequest::from_state(state).compute(worktree);
     apply_right_pane_load(state, payload);
@@ -1665,7 +1816,7 @@ mod tests {
             })
             .expect("visible app repo row");
         app.cursor = idx;
-        load_right(&mut app);
+        load_right_headless(&mut app);
         assert!(
             app.graph.is_some(),
             "repo row must load a graph from pane git"
