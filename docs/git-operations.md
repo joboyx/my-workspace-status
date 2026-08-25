@@ -50,11 +50,15 @@ Every wrapper that takes a path puts `--` before it, so a file named `-f` or `HE
 | `process_repo` | `status --porcelain=v1 --branch --ahead-behind --untracked-files=all` |
 | `process_repo` (merge probe) | `resolve_default_branch_name` + `resolve_default_branch_tip_ref` + `merge-base --is-ancestor HEAD <tip>` |
 
-After `find_repos_with_config` (primaries; still skips dot-dirs), discovery lists linked worktrees under the workspace cwd, applies the same ignore / named-filter rules (filter on a primary includes its linked children; filter on a linked path includes only that path), dedupes by path (linked metadata wins), and runs `process_repo` with `checkout_kind` / `primary_repo`.
+After `find_repos_with_config` (primaries; still skips dot-dirs), discovery lists linked worktrees under the workspace cwd, applies the same ignore / named-filter rules (filter on a primary includes its linked children; filter on a linked path includes only that path), dedupes by path (linked metadata wins), and runs `process_repo` with `checkout_kind` / `primary_repo`. Independent checkouts run with a cap of `FETCH_CONCURRENCY` (4; `WS_STATUS_FETCH_CONCURRENCY`) so a live watch tick is not one-repo-at-a-time. There is no inotify.
 
 One status call per repo produces branch, upstream, ahead/behind counts, and all three file buckets. `--untracked-files=all` lists files inside untracked directories rather than collapsing to `dir/`, which the tree view needs.
 
 Unborn repos (`## No commits yet on <branch>`) become a normal snapshot with `sync_note: no commits yet`. When status stdout is empty or the branch header cannot be parsed, `process_repo` returns a failure snapshot (`sync_note: status failed`, `merged_into_default: None`) instead of dropping the repo — so the plain report cannot claim all-clean by omission.
+
+## `crates/workspace-status/src/parallel.rs`
+
+Bounded map (`map_with_concurrency` / `CappedBatch`) used by `collect_snapshots` and TTY fetch / pull / push. Cap is `FETCH_CONCURRENCY` (4; `WS_STATUS_FETCH_CONCURRENCY`). Completions are counted as jobs **finish**. Exclusive checkout writes stay serial in `tui/app.rs`.
 
 ## `crates/workspace-status/src/actions.rs`
 
@@ -75,7 +79,7 @@ CLI `-p` / `-d` (progress strings go to the caller; `--json` sends them to stder
 | `background_fetch_targets` | Snapshot paths for the TUI background fetch timer. Hidden ignored checkouts are omitted. When ignored repos are shown, every snapshot path is included, including linked worktrees. Manual `f` stays on `op_targets`. |
 | `refresh_target` | Workspace / No-updates → whole snapshot; otherwise the focused checkout path. |
 
-After `p` / `P` / `d` / `f`, the TUI refreshes the affected repos and stamps those `repo:<path>` and `checkout:<path>` ids into the flash map. TTY local writes (`s` / `u` / `x` / stash / checkout / create-branch / merge / remove-worktree) run inside `run_work_pumped`; error paths still reload snapshot + pane so leftover keys cannot flush. Headless e2e stays sync.
+After `p` / `P` / `d` / `f`, the TUI refreshes the affected repos and stamps those `repo:<path>` and `checkout:<path>` ids into the flash map. TTY local writes (`s` / `u` / `x` / stash / checkout / create-branch / merge / remove-worktree) run inside `run_work_pumped`; error paths still reload snapshot + pane so leftover keys cannot flush. Headless e2e stays sync. Independent per-repo `f` / `p` / `P` (and `FetchTick`) use `run_capped_pumped` so they overlap.
 
 ## Graph load (`tui/graph_load.rs`)
 
@@ -89,7 +93,7 @@ Default window is 300 (`DEFAULT_GRAPH_WINDOW`). `--exclude=refs/stash` precedes 
 
 Hidden ignored checkouts stay out of `P` / `S` / `b` unless shown. Linked worktrees are included on `f` / `p` / `P` / `d` only when that row is focused. The background fetch timer (`background_fetch_targets` in `tui/fetch.rs`) includes every snapshot except hidden ignored — linked worktrees and shown ignored repos included. See [tui-rust.md](./tui-rust.md).
 
-Manual `f` / `p` / `P` / `d` and the background fetch tick paint a trailing breadcrumb counter (`Fetching n/N…`, `Pulling n/N…`, `Pushing n/N…`, `Switching n/N…`) and redraw after each repo settles. When the op finishes, that slot is a count (`Fetched N repos`, `Pulled N repos`, `Pushed N repos`, `Switched N repos`), with ` (N failed)` if any failed — never a list of names. The hint row stays pills + keys. Graph autoload still uses `loading older…`. Those git children (and watch / full-snapshot reload) run on a worker thread so resize and quit still reach the event loop; overlay modes do not start the watch or fetch timers. The follow-up right-pane reload (`git log` / file `diff` / commit files after fetch / pull / push / watch / left-pane movement at every depth) uses that same pump. An unchanged watch snapshot (tree signatures **and** checkout `HEAD` / sync note / dirty set) skips it. The next watch tick is scheduled from the start of the interval.
+Manual `f` / `p` / `P` / `d` and the background fetch tick paint a trailing breadcrumb counter (`Fetching n/N…`, `Pulling n/N…`, `Pushing n/N…`, `Switching n/N…`) and redraw as each repo completes (not as it starts). Fetch / pull / push of independent checkouts overlap under `FETCH_CONCURRENCY` (4). When the op finishes, that slot is a count (`Fetched N repos`, `Pulled N repos`, `Pushed N repos`, `Switched N repos`), with ` (N failed)` if any failed — never a list of names. The hint row stays pills + keys. Graph autoload still uses `loading older…`. Those git children (and watch / full-snapshot reload) run on a worker thread so resize and quit still reach the event loop; overlay modes do not start the watch or fetch timers. The follow-up right-pane reload (`git log` / file `diff` / commit files after fetch / pull / push / watch / left-pane movement at every depth) uses that same pump. An unchanged watch snapshot (tree signatures **and** checkout `HEAD` / sync note / dirty set) skips it. The next watch tick is scheduled from the start of the interval.
 
 ## Non-obvious semantics
 
@@ -140,4 +144,6 @@ Revert, stash drop, origin-out-of-sync graph checkout, and graph merge use modal
 
 ## Write serialisation
 
-A single busy flag is shared by refresh, every write (including TUI `p` / `d`), background/manual fetch, and the watch poll. Concurrent git writes against the same index would race on `.git/index.lock`; the gate makes the second one report `Busy…` instead. A poll tick that lands while a write or fetch is in flight is dropped, not queued.
+Independent per-repo `git fetch` / `pull` / `push` (manual `f` / `p` / `P` and the background fetch tick) run in parallel with a cap of `FETCH_CONCURRENCY` (4; override `WS_STATUS_FETCH_CONCURRENCY`). Progress is `Fetching n/N…` as each checkout **finishes**, not as it starts. After the batch: `Fetched N repos` / `(N failed)` — never names.
+
+Writes that must stay exclusive on one checkout (stage, unstage, revert, stash, checkout, create-branch, merge into HEAD, default-branch switch) stay serial. While any of those (or a capped batch) is in flight, the event loop stays live (`run_work_pumped` / `run_capped_pumped`); `q` / resize / nav still apply; keys that would start another git write are drained (`BusyAction::Ignore`). Watch/status collect (`collect_snapshots` / `process_repo`) uses the same cap so a live tick is not one-repo-at-a-time. There is no inotify.

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::io::{self, stdout};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -31,6 +31,7 @@ use crate::git::{
     revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop, stash_push, unstage_file,
     MergeIntoHeadResult, NameStatus,
 };
+use crate::parallel::{env_fetch_concurrency, CappedBatch};
 use crate::snapshot::{
     build_workspace_snapshot, repo_snapshots_from_workspace, CheckoutKind, FileChange,
     WorkspaceSnapshot,
@@ -246,14 +247,65 @@ enum WorkPump<T> {
     Quit,
 }
 
+/// Drain crossterm while a worker or capped batch owns git children.
+///
+/// Nav / pane switch / cancel dispatch ([`BusyAction::Handle`]). Actions that
+/// would start another git write are drained ([`BusyAction::Ignore`]). Sets
+/// `quit` when the user asked to leave; the caller still waits for in-flight
+/// git to exit.
+fn pump_busy_events(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &mut AppState,
+    opts: &TuiOpts,
+    quit: &mut bool,
+) {
+    if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+        loop {
+            let Ok(event) = event::read() else {
+                break;
+            };
+            let action = map_event(state, &event);
+            match classify_busy_action(&action) {
+                BusyAction::Quit => *quit = true,
+                BusyAction::Resize { cols, rows } => {
+                    let _ = apply_terminal_resize(terminal, cols, rows);
+                    let _ = state.dispatch(Action::Resize { cols, rows });
+                    let _ = terminal.draw(|frame| draw(frame, state));
+                }
+                BusyAction::Handle => {
+                    let mouse_before = state.mouse_enabled;
+                    let action_for_load = action.clone();
+                    let effect = state.dispatch(action);
+                    if state.mouse_enabled != mouse_before {
+                        sync_mouse_capture(state.mouse_enabled);
+                    }
+                    if matches!(effect, Effect::Quit) {
+                        *quit = true;
+                    } else if apply_effect(state, effect, opts, terminal, &action_for_load) {
+                        *quit = true;
+                    } else {
+                        let _ = terminal.draw(|frame| draw(frame, state));
+                    }
+                }
+                BusyAction::Ignore => {}
+            }
+            if !event::poll(Duration::from_millis(0)).unwrap_or(false) {
+                break;
+            }
+        }
+    }
+    let _ = terminal.draw(|frame| draw(frame, state));
+}
+
 /// Run `work` on a helper thread while this thread still polls crossterm.
 ///
-/// Used for fetch / pull / watch snapshot collect, follow-up pane git
-/// ([`load_right_pumped`]), graph autoload, commit files/diff, TTY snapshot
-/// reloads, and local git writes. Nav / pane switch / cancel dispatch while
-/// the worker runs ([`BusyAction::Handle`]). Actions that would start another
-/// git write are drained ([`BusyAction::Ignore`]) so they cannot nest a second
-/// mutating child or flush after the join.
+/// Used for watch snapshot collect, follow-up pane git ([`load_right_pumped`]),
+/// graph autoload, commit files/diff, TTY snapshot reloads, and local git
+/// writes. Independent per-repo fetch / pull / push use [`run_capped_pumped`].
+/// Nav / pane switch / cancel dispatch while the worker runs
+/// ([`BusyAction::Handle`]). Actions that would start another git write are
+/// drained ([`BusyAction::Ignore`]) so they cannot nest a second mutating
+/// child or flush after the join.
 fn run_work_pumped<T: Send + 'static>(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
@@ -281,42 +333,106 @@ fn run_work_pumped<T: Send + 'static>(
             }
             Err(mpsc::TryRecvError::Empty) => {}
         }
-        if event::poll(Duration::from_millis(50)).unwrap_or(false) {
-            loop {
-                let Ok(event) = event::read() else {
-                    break;
-                };
-                let action = map_event(state, &event);
-                match classify_busy_action(&action) {
-                    BusyAction::Quit => quit = true,
-                    BusyAction::Resize { cols, rows } => {
-                        let _ = apply_terminal_resize(terminal, cols, rows);
-                        let _ = state.dispatch(Action::Resize { cols, rows });
-                        let _ = terminal.draw(|frame| draw(frame, state));
-                    }
-                    BusyAction::Handle => {
-                        let mouse_before = state.mouse_enabled;
-                        let action_for_load = action.clone();
-                        let effect = state.dispatch(action);
-                        if state.mouse_enabled != mouse_before {
-                            sync_mouse_capture(state.mouse_enabled);
-                        }
-                        if matches!(effect, Effect::Quit) {
-                            quit = true;
-                        } else if apply_effect(state, effect, opts, terminal, &action_for_load) {
-                            quit = true;
-                        } else {
-                            let _ = terminal.draw(|frame| draw(frame, state));
-                        }
-                    }
-                    BusyAction::Ignore => {}
-                }
-                if !event::poll(Duration::from_millis(0)).unwrap_or(false) {
-                    break;
+        pump_busy_events(terminal, state, opts, &mut quit);
+    }
+}
+
+/// Run independent per-repo work with [`env_fetch_concurrency`] workers.
+///
+/// Completions arrive as they finish (not as they start). `q` cancels queued
+/// items; in-flight git still runs to completion, same as a single
+/// [`run_work_pumped`] child. Nav / resize stay live via [`pump_busy_events`].
+fn run_capped_pumped<I, T, F>(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &mut AppState,
+    opts: &TuiOpts,
+    items: Vec<I>,
+    work: F,
+    mut on_progress: impl FnMut(
+        &mut AppState,
+        &mut Terminal<CrosstermBackend<io::Stdout>>,
+        usize,
+        usize,
+    ),
+) -> WorkPump<Vec<Option<T>>>
+where
+    I: Send + 'static,
+    T: Send + 'static,
+    F: Fn(I) -> T + Send + Sync + 'static,
+{
+    let total = items.len();
+    if total == 0 {
+        return WorkPump::Done(Vec::new());
+    }
+    let mut batch = CappedBatch::start(items, env_fetch_concurrency(), work);
+    let mut quit = false;
+    loop {
+        while let Some(done) = batch.try_recv() {
+            on_progress(state, terminal, done, total);
+        }
+        if batch.is_finished() {
+            let results = batch.join();
+            return if quit {
+                WorkPump::Quit
+            } else {
+                WorkPump::Done(results)
+            };
+        }
+        if quit {
+            batch.cancel();
+        }
+        pump_busy_events(terminal, state, opts, &mut quit);
+    }
+}
+
+/// Fetch / pull / push many checkouts in parallel. Exclusive writes stay serial.
+///
+/// Progress is `Verb n/N` as completions land. After the batch: `Verbed N
+/// repos` / `(N failed)` — never names. Returns true when the user quit.
+fn run_bulk_remote_pumped<T, F, S>(
+    state: &mut AppState,
+    opts: &TuiOpts,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    repos: Vec<String>,
+    kind: RunningOp,
+    work: F,
+    succeeded: S,
+) -> bool
+where
+    T: Send + 'static,
+    F: Fn(PathBuf) -> T + Send + Sync + 'static,
+    S: Fn(&T) -> bool,
+{
+    let total = repos.len();
+    let cwd = opts.cwd.clone();
+    paint_running_op(state, terminal, kind, 0, total);
+    match run_capped_pumped(
+        terminal,
+        state,
+        opts,
+        repos.clone(),
+        move |repo| work(cwd.join(repo)),
+        |state, terminal, done, total| {
+            paint_running_op(state, terminal, kind, done, total);
+        },
+    ) {
+        WorkPump::Quit => true,
+        WorkPump::Done(results) => {
+            let mut ok = 0usize;
+            let mut failed = 0usize;
+            for slot in results {
+                match slot {
+                    Some(value) if succeeded(&value) => ok += 1,
+                    _ => failed += 1,
                 }
             }
+            if reload_snapshot_pumped(state, opts, terminal) {
+                return true;
+            }
+            state.stamp_checkout_flashes(&repos);
+            state.status = format_completed_op(kind, ok, failed);
+            load_right_pumped(state, opts, terminal)
         }
-        let _ = terminal.draw(|frame| draw(frame, state));
     }
 }
 
@@ -650,57 +766,28 @@ fn apply_effect_inner(
             }
         }
         Effect::Fetch { repos } => {
-            let cwd = opts.cwd.clone();
-            let total = repos.len();
-            let mut ok = 0;
-            let mut failed = 0;
-            paint_running_op(state, terminal, RunningOp::Fetch, 0, total);
-            for (i, repo) in repos.iter().enumerate() {
-                let dir = cwd.join(repo);
-                match run_work_pumped(terminal, state, opts, move || {
-                    exec_git_checked(&["fetch", "--quiet"], &dir)
-                }) {
-                    WorkPump::Quit => return true,
-                    WorkPump::Done(Ok(())) => ok += 1,
-                    WorkPump::Done(Err(_)) => failed += 1,
-                }
-                paint_running_op(state, terminal, RunningOp::Fetch, i + 1, total);
-            }
-            if reload_snapshot_pumped(state, opts, terminal) {
-                return true;
-            }
-            state.stamp_checkout_flashes(&repos);
-            state.status = format_completed_op(RunningOp::Fetch, ok, failed);
-            if load_right_pumped(state, opts, terminal) {
+            if run_bulk_remote_pumped(
+                state,
+                opts,
+                terminal,
+                repos,
+                RunningOp::Fetch,
+                |dir| exec_git_checked(&["fetch", "--quiet"], &dir),
+                Result::is_ok,
+            ) {
                 return true;
             }
         }
         Effect::Pull { repos } => {
-            let cwd = opts.cwd.clone();
-            let total = repos.len();
-            let mut ok = 0;
-            let mut failed = 0;
-            paint_running_op(state, terminal, RunningOp::Pull, 0, total);
-            for (i, repo) in repos.iter().enumerate() {
-                let dir = cwd.join(repo);
-                match run_work_pumped(terminal, state, opts, move || pull_quiet_detailed(&dir)) {
-                    WorkPump::Quit => return true,
-                    WorkPump::Done(result) => {
-                        if result.ok {
-                            ok += 1;
-                        } else {
-                            failed += 1;
-                        }
-                    }
-                }
-                paint_running_op(state, terminal, RunningOp::Pull, i + 1, total);
-            }
-            if reload_snapshot_pumped(state, opts, terminal) {
-                return true;
-            }
-            state.stamp_checkout_flashes(&repos);
-            state.status = format_completed_op(RunningOp::Pull, ok, failed);
-            if load_right_pumped(state, opts, terminal) {
+            if run_bulk_remote_pumped(
+                state,
+                opts,
+                terminal,
+                repos,
+                RunningOp::Pull,
+                |dir| pull_quiet_detailed(&dir),
+                |result| result.ok,
+            ) {
                 return true;
             }
         }
@@ -908,25 +995,15 @@ fn apply_effect_inner(
             }
         }
         Effect::Push { repos } => {
-            let mut ok = 0;
-            let mut failed = 0;
-            let total = repos.len();
-            paint_running_op(state, terminal, RunningOp::Push, 0, total);
-            for (i, repo) in repos.iter().enumerate() {
-                let dir = opts.cwd.join(repo);
-                match run_work_pumped(terminal, state, opts, move || push_quiet(&dir)) {
-                    WorkPump::Quit => return true,
-                    WorkPump::Done(Ok(())) => ok += 1,
-                    WorkPump::Done(Err(_)) => failed += 1,
-                }
-                paint_running_op(state, terminal, RunningOp::Push, i + 1, total);
-            }
-            if reload_snapshot_pumped(state, opts, terminal) {
-                return true;
-            }
-            state.stamp_checkout_flashes(&repos);
-            state.status = format_completed_op(RunningOp::Push, ok, failed);
-            if load_right_pumped(state, opts, terminal) {
+            if run_bulk_remote_pumped(
+                state,
+                opts,
+                terminal,
+                repos,
+                RunningOp::Push,
+                |dir| push_quiet(&dir),
+                Result::is_ok,
+            ) {
                 return true;
             }
         }
