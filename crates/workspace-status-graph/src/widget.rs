@@ -167,6 +167,38 @@ impl<'a> GraphWidget<'a> {
     }
 }
 
+/// Thumb offset from the track top, and thumb length, matching [`GraphWidget`]'s
+/// ratatui `Scrollbar`.
+///
+/// Paint uses `ScrollbarState::new(content_len.saturating_sub(1)).position(scroll)`
+/// with no begin/end symbols and default viewport (`track_height`). `None` when
+/// ratatui would skip the bar (`content_len < 2` or a zero-height track).
+pub fn graph_scrollbar_thumb(
+    content_len: usize,
+    scroll: u16,
+    track_height: u16,
+) -> Option<(u16, u16)> {
+    let content_length = content_len.saturating_sub(1);
+    if content_length == 0 || track_height == 0 {
+        return None;
+    }
+    let track_length = f64::from(track_height);
+    let viewport_length = f64::from(track_height);
+    let max_position = content_length.saturating_sub(1) as f64;
+    let start_position = (f64::from(scroll)).clamp(0.0, max_position);
+    let max_viewport_position = max_position + viewport_length;
+    if max_viewport_position <= 0.0 {
+        return None;
+    }
+    let end_position = start_position + viewport_length;
+    let thumb_start = start_position * track_length / max_viewport_position;
+    let thumb_end = end_position * track_length / max_viewport_position;
+    let thumb_start = thumb_start.round().clamp(0.0, track_length - 1.0) as u16;
+    let thumb_end = thumb_end.round().clamp(0.0, track_length) as u16;
+    let thumb_length = thumb_end.saturating_sub(thumb_start).max(1);
+    Some((thumb_start, thumb_length))
+}
+
 impl Widget for GraphWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.width == 0 || area.height == 0 {
@@ -482,7 +514,7 @@ mod tests {
     use super::*;
     use crate::action::Action;
     use crate::action::Effect;
-    use crate::chrome::{selection_detail_lines, GraphFooterSelection};
+    use crate::chrome::{graph_chrome_budget, selection_detail_lines, GraphFooterSelection};
     use crate::format::overflow_chip_text;
     use crate::hex_color;
     use crate::model::{Commit, GraphRef, GraphRow, Stash, SyncState, SyncStatus, Worktree};
@@ -1258,6 +1290,74 @@ mod tests {
                 (0..80u16).any(|x| buffer[(x, spacer_y)].bg == flash),
                 "flash follows the stash spacer"
             );
+        }
+    }
+
+    #[test]
+    fn graph_scrollbar_thumb_matches_painted_handle() {
+        let mut commits = Vec::new();
+        for i in 0..24 {
+            let id = format!("c{i:02}{}", "a".repeat(36));
+            let parents = if i + 1 < 24 {
+                vec![format!("c{:02}{}", i + 1, "a".repeat(36))]
+            } else {
+                Vec::new()
+            };
+            commits.push(Commit {
+                id,
+                subject: format!("commit {i}"),
+                parents,
+                refs: Vec::new(),
+                author_name: "Ada".into(),
+                author_date_unix: NOW - 3600,
+            });
+        }
+        let head = commits[0].id.clone();
+        let model = GraphModel {
+            commits,
+            head_id: Some(head),
+            uncommitted: Some(false),
+            window: 24,
+            ..GraphModel::default()
+        };
+        let width = 40u16;
+        let height = 16u16;
+        let scroll = 8u16;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .ascii(true)
+                    .scroll(scroll)
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let chrome = graph_chrome_budget(height, false, false);
+        let list_top = u16::from(chrome.header);
+        let painted = paint_model_with(
+            &model,
+            &ASCII,
+            PaintOpts {
+                now_unix: Some(NOW),
+                line_width: Some(width.saturating_sub(2) as usize),
+                ..PaintOpts::default()
+            },
+        );
+        let (thumb_off, thumb_len) =
+            graph_scrollbar_thumb(painted.len(), scroll, chrome.list_height).expect("thumb");
+        let sb_x = width.saturating_sub(1);
+        for i in 0..chrome.list_height {
+            let y = list_top.saturating_add(i);
+            let cell = buffer[(sb_x, y)].symbol();
+            let on_thumb = i >= thumb_off && i < thumb_off.saturating_add(thumb_len);
+            if on_thumb {
+                assert_eq!(cell, "█", "thumb cell at y={y} off={i}");
+            } else {
+                assert_ne!(cell, "█", "track must not paint thumb at y={y} off={i}");
+            }
         }
     }
 

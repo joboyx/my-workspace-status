@@ -42,9 +42,9 @@ use super::search::{
     list_row_pan_max, max_col_offset, SearchPane,
 };
 use super::split::{
-    clamp_tree_fraction, diff_split_fraction_from_col, effective_diff_mode, hit_split,
-    tree_fraction_from_col, DiffMode, SplitDrag, SplitHit, SplitLayout, DIFF_SPLIT_FRACTION,
-    TREE_WIDTH_FRACTION,
+    clamp_tree_fraction, diff_split_fraction_from_col, effective_diff_mode,
+    graph_scroll_from_delta, graph_scroll_from_row, hit_split, tree_fraction_from_col, DiffMode,
+    SplitDrag, SplitHit, SplitLayout, DIFF_SPLIT_FRACTION, TREE_WIDTH_FRACTION,
 };
 use super::stash::{
     checkout_path, resolve_stash_menu_key, row_is_hidden_ignored, stash_dirty_for_row,
@@ -100,6 +100,14 @@ pub struct LayoutHit {
     pub right_y: u16,
     pub files_list_y: u16,
     pub files_list_offset: usize,
+    /// 0-based graph scrollbar column when a graph list is painted.
+    pub graph_scrollbar_x: Option<u16>,
+    /// 0-based first row of the graph scrollbar track.
+    pub graph_scrollbar_y: u16,
+    /// Graph list height (scrollbar track).
+    pub graph_scrollbar_height: u16,
+    /// Painted graph line count.
+    pub graph_content_len: usize,
 }
 
 impl Default for LayoutHit {
@@ -121,6 +129,10 @@ impl Default for LayoutHit {
             right_y: 1,
             files_list_y: 3,
             files_list_offset: 0,
+            graph_scrollbar_x: None,
+            graph_scrollbar_y: 0,
+            graph_scrollbar_height: 0,
+            graph_content_len: 0,
         }
     }
 }
@@ -1641,6 +1653,11 @@ impl AppState {
             diff_pane_width: self.layout.diff_pane_width,
             diff_content_x: self.layout.diff_content_x,
             diff_split_rule_x: self.layout.diff_split_rule_x,
+            graph_scrollbar_x: self.layout.graph_scrollbar_x,
+            graph_scrollbar_y: self.layout.graph_scrollbar_y,
+            graph_scrollbar_height: self.layout.graph_scrollbar_height,
+            graph_content_len: self.layout.graph_content_len,
+            graph_scroll: self.graph_scroll,
         }
     }
 
@@ -1668,6 +1685,26 @@ impl AppState {
             SplitHit::DiffSplit => {
                 self.drag = SplitDrag::Diff;
                 self.apply_diff_fraction_from_col(col);
+                self.last_click = None;
+                return Effect::None;
+            }
+            SplitHit::GraphThumb => {
+                self.focus_graph_pane();
+                self.drag = SplitDrag::GraphScrollbar {
+                    origin_row: row,
+                    origin_scroll: self.graph_scroll,
+                };
+                self.last_click = None;
+                return Effect::None;
+            }
+            SplitHit::GraphTrack => {
+                self.focus_graph_pane();
+                let jumped = graph_scroll_from_row(self.split_layout(), row);
+                self.graph_scroll = jumped;
+                self.drag = SplitDrag::GraphScrollbar {
+                    origin_row: row,
+                    origin_scroll: jumped,
+                };
                 self.last_click = None;
                 return Effect::None;
             }
@@ -1799,13 +1836,28 @@ impl AppState {
         load
     }
 
-    fn drag_split(&mut self, col: u16, _row: u16) -> Effect {
+    fn drag_split(&mut self, col: u16, row: u16) -> Effect {
         match self.drag {
             SplitDrag::Pane => self.apply_tree_fraction_from_col(col),
             SplitDrag::Diff => self.apply_diff_fraction_from_col(col),
+            SplitDrag::GraphScrollbar {
+                origin_row,
+                origin_scroll,
+            } => {
+                self.graph_scroll =
+                    graph_scroll_from_delta(self.split_layout(), origin_row, origin_scroll, row);
+            }
             SplitDrag::None => {}
         }
         Effect::None
+    }
+
+    fn focus_graph_pane(&mut self) {
+        self.focus = if self.drill.is_files() {
+            FocusPane::Left
+        } else {
+            FocusPane::Right
+        };
     }
 
     fn toggle_diff_mode(&mut self) -> Effect {
@@ -6045,6 +6097,129 @@ mod tests {
         assert_eq!(app.diff_mode, DiffMode::Inline);
         app.dispatch(Action::ToggleDiffMode);
         assert_eq!(app.diff_mode, DiffMode::SideBySide);
+    }
+
+    fn arm_graph_scrollbar(app: &mut AppState, content_len: usize) {
+        app.layout.term_cols = 160;
+        app.layout.pane_height = 22;
+        app.layout.outer_tree_width = 48;
+        app.layout.right_x = 48;
+        app.layout.right_y = 1;
+        app.layout.graph_scrollbar_x = Some(158);
+        app.layout.graph_scrollbar_y = 2;
+        app.layout.graph_scrollbar_height = 10;
+        app.layout.graph_content_len = content_len;
+        app.graph_scroll = 0;
+        app.focus = FocusPane::Right;
+    }
+
+    #[test]
+    fn graph_scrollbar_thumb_drag_updates_scroll_and_release_ends_drag() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_linear_graph(&mut app, 20);
+        let glyphs = if app.ascii { &ASCII } else { &UNICODE };
+        let content_len = paint_model(app.graph.as_ref().unwrap(), glyphs, None).len();
+        arm_graph_scrollbar(&mut app, content_len);
+        let thumb =
+            workspace_status_graph::graph_scrollbar_thumb(content_len, 0, 10).expect("thumb");
+        let thumb_row = 2 + thumb.0;
+        let start = app.graph_scroll;
+        let cursor = app.graph_cursor;
+        assert_eq!(
+            app.dispatch(Action::Click {
+                col: 158,
+                row: thumb_row
+            }),
+            Effect::None
+        );
+        assert_eq!(
+            app.drag,
+            SplitDrag::GraphScrollbar {
+                origin_row: thumb_row,
+                origin_scroll: start
+            }
+        );
+        assert_eq!(app.graph_scroll, start, "thumb grab must not jump");
+        assert_eq!(
+            app.dispatch(Action::Drag {
+                col: 158,
+                row: thumb_row + 6
+            }),
+            Effect::None
+        );
+        assert!(
+            app.graph_scroll > start,
+            "thumb drag should scroll, got {}",
+            app.graph_scroll
+        );
+        assert_eq!(
+            app.graph_cursor, cursor,
+            "scrollbar must not move the graph cursor"
+        );
+        assert_eq!(app.dispatch(Action::Release), Effect::None);
+        assert_eq!(app.drag, SplitDrag::None);
+
+        app.dispatch(Action::Move(1));
+        assert_ne!(app.graph_cursor, cursor, "j still moves the graph cursor");
+        let after_j = app.graph_cursor;
+        app.dispatch(Action::PageMove(1));
+        assert_ne!(app.graph_cursor, after_j, "PageDown still pages the graph");
+        app.dispatch(Action::PanDiff(1));
+        app.dispatch(Action::PanDiff(-1));
+    }
+
+    #[test]
+    fn graph_scrollbar_track_click_jumps_and_arms_drag() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_linear_graph(&mut app, 20);
+        let glyphs = if app.ascii { &ASCII } else { &UNICODE };
+        let content_len = paint_model(app.graph.as_ref().unwrap(), glyphs, None).len();
+        arm_graph_scrollbar(&mut app, content_len);
+        let thumb =
+            workspace_status_graph::graph_scrollbar_thumb(content_len, 0, 10).expect("thumb");
+        let track_row = 2 + 9;
+        assert!(
+            track_row >= 2 + thumb.0 + thumb.1,
+            "fixture track row must sit below the thumb"
+        );
+        let cursor = app.graph_cursor;
+        assert_eq!(
+            app.dispatch(Action::Click {
+                col: 158,
+                row: track_row
+            }),
+            Effect::None
+        );
+        assert!(
+            app.graph_scroll > 0,
+            "track click should jump toward the click"
+        );
+        assert_eq!(
+            app.drag,
+            SplitDrag::GraphScrollbar {
+                origin_row: track_row,
+                origin_scroll: app.graph_scroll
+            }
+        );
+        assert_eq!(app.graph_cursor, cursor);
+        assert_eq!(app.dispatch(Action::Release), Effect::None);
+        assert_eq!(app.drag, SplitDrag::None);
+    }
+
+    #[test]
+    fn click_on_graph_body_is_not_a_scrollbar_drag() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_linear_graph(&mut app, 20);
+        let glyphs = if app.ascii { &ASCII } else { &UNICODE };
+        let content_len = paint_model(app.graph.as_ref().unwrap(), glyphs, None).len();
+        arm_graph_scrollbar(&mut app, content_len);
+        let effect = app.dispatch(Action::Click { col: 80, row: 4 });
+        assert_eq!(app.drag, SplitDrag::None);
+        assert_eq!(effect, Effect::None);
+        assert_eq!(app.focus, FocusPane::Right);
     }
 
     #[test]

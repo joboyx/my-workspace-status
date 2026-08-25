@@ -47,4 +47,4 @@ pub use model::{
 };
 pub use paint::{paint_model, paint_model_with, PaintOpts, PaintedLine};
 pub use topology::{cells_text, CellRole, GraphCell};
-pub use widget::{GraphLabelPalette, GraphWidget};
+pub use widget::{graph_scrollbar_thumb, GraphLabelPalette, GraphWidget};

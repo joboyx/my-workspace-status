@@ -107,6 +107,18 @@ fn seed_merge_graph(workspace: &Path, name: &str) {
     git(&repo, &["stash", "push", "-q", "-m", "WIP on graph"]);
 }
 
+/// Long linear history so the graph list overflows and shows a scrollbar thumb.
+fn seed_tall_graph(workspace: &Path, name: &str) {
+    seed_repo(workspace, name, "main", false);
+    let repo = workspace.join(name);
+    for i in 0..30 {
+        fs::write(repo.join("count.txt"), format!("{i}\n")).unwrap();
+        git(&repo, &["add", "count.txt"]);
+        git(&repo, &["commit", "-q", "-m", &format!("count {i}")]);
+    }
+    git(&repo, &["checkout", "-q", "-b", "feature/tall"]);
+}
+
 fn daily_workspace() -> (PathBuf, PathBuf) {
     let root = std::env::temp_dir().join(format!(
         "ws-tui-daily-{}",
@@ -738,5 +750,62 @@ fn confirm_overlay_keeps_y_n_after_resize() {
     );
     tui.key('n');
     assert_absent(&tui.frame(), "Revert ");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn graph_scrollbar_thumb_drag_and_track_jump() {
+    let root = std::env::temp_dir().join(format!(
+        "ws-tui-sb-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    seed_tall_graph(&workspace, "history");
+    let mut tui = open(&workspace);
+    tui.search("history");
+    assert!(
+        tui.right_is_graph(),
+        "focusing the tall repo should paint the graph"
+    );
+    tui.tab();
+    assert!(tui.focus_is_right());
+    let frame = tui.frame();
+    let col = tui
+        .graph_scrollbar_col()
+        .expect("graph list should reserve a scrollbar column");
+    let (track_y, track_h) = tui
+        .graph_scrollbar_track()
+        .expect("graph list should expose a scrollbar track");
+    assert!(track_h > 2, "track height {track_h} in:\n{frame}");
+    let start = tui.graph_scroll();
+    tui.mouse_down(col, track_y);
+    assert_eq!(
+        tui.graph_scroll(),
+        start,
+        "thumb grab at the top of the track must not jump"
+    );
+    tui.mouse_drag(col, track_y + track_h.saturating_sub(1));
+    let dragged = tui.graph_scroll();
+    assert!(
+        dragged > start,
+        "thumb drag should scroll the graph, start={start} dragged={dragged}"
+    );
+    tui.mouse_up();
+    tui.key('j');
+    tui.key('k');
+    tui.key('G');
+    let _ = tui.frame();
+    tui.key('g');
+    tui.key('g');
+    tui.mouse_down(col, track_y + track_h.saturating_sub(1));
+    assert!(
+        tui.graph_scroll() > 0,
+        "track click should jump toward the bottom"
+    );
+    tui.mouse_up();
     let _ = fs::remove_dir_all(root);
 }

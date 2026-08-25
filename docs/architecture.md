@@ -70,7 +70,7 @@ See [git-operations.md](./git-operations.md).
 
 ## Layout stability
 
-Pane widths come from `tui/split.rs` `pane_widths(term_cols, fraction)` — never from tree label lengths. Long tree paths, graph subjects, and diff lines clip to that frozen width; `left_col_offset` / `right_col_offset` / `diff_col_offset` pan inside the clip. Default fraction is `TREE_WIDTH_FRACTION` (0.4). The session keeps a `tree_fraction` (resets on next launch; not persisted) and freezes `{ tree_width, tree_inner_width, diff_width }`, recomputing when terminal columns change or when the user drags the divider. Clamp helpers keep both panes ≥ 20 cols (accounting for padding) when the terminal is wide enough. The in-diff side-by-side RULE uses the same session-only drag model. Hit-testing consumes `diff_split_rule_x` only while split mode is actually painted (`≥ NARROW_SXS`). The `?` help overlay shrinks the panes instead of overlapping them.
+Pane widths come from `tui/split.rs` `pane_widths(term_cols, fraction)` — never from tree label lengths. Long tree paths, graph subjects, and diff lines clip to that frozen width; `left_col_offset` / `right_col_offset` / `diff_col_offset` pan inside the clip. Default fraction is `TREE_WIDTH_FRACTION` (0.4). The session keeps a `tree_fraction` (resets on next launch; not persisted) and freezes `{ tree_width, tree_inner_width, diff_width }`, recomputing when terminal columns change or when the user drags the divider. Clamp helpers keep both panes ≥ 20 cols (accounting for padding) when the terminal is wide enough. The in-diff side-by-side RULE uses the same session-only drag model. Hit-testing (`hit_split`) consumes `diff_split_rule_x` only while split mode is actually painted (`≥ NARROW_SXS`), and the graph scrollbar column (`graph_scrollbar_x` / track) from the last paint. Graph thumb drag and track jump reuse `SplitDrag` with the pane and in-diff splitters (one mouse stack). The `?` help overlay shrinks the panes instead of overlapping them.
 
 The ratatui TUI applies crossterm `Resize` to `Terminal::resize` (the event size, not a later ioctl) and recomputes pane widths, graph gutter cap, help overlay rows, and list viewports from the new area. The event loop drains queued input with `poll(0)` + `read`, skips watch/fetch ticks while an overlay is open, and autoloads graph history only after list movement. Long git work (fetch / pull / push / default-branch / watch / full reload **and** the follow-up graph `log` / file `diff` in `load_right`) runs on a worker; the loop still paints and accepts resize and quit. An unchanged watch poll skips that pane reload so idle ticks do not re-run `git log`.
 
@@ -114,7 +114,10 @@ On a TTY (or `-i` / `--tui`) the binary opens the ratatui TUI. Tree chrome (stat
 The crate itself does not run a terminal app. The TUI paints `GraphWidget`.
 `GraphWidget` colours subject vs meta vs HEAD / default / feature / remote / tag chips
 (including the 2-line selection footer, which reuses the row-chip `LabelKind` runs)
-and paints a 1-column position scrollbar.
+and paints a 1-column position scrollbar. The TUI hit-tests that thumb through
+the same `tui/split.rs` `hit_split` / `SplitDrag` stack as the pane divider
+and in-diff RULE (`SplitDrag::GraphScrollbar`). Track clicks jump toward that
+position. Keyboard `j` / `k`, `h` / `l`, and PageUp/PageDown are unchanged.
 
 See [graph.md](./graph.md).
 
