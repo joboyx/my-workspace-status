@@ -139,6 +139,15 @@ fn seed_demo_workspace_state_and_snapshot() {
     );
     assert!(git(&merger, &["log", "--oneline", "--decorate"]).contains("merge billing into main"));
     assert!(git(&merger, &["stash", "list"]).contains("WIP: reconcile totals"));
+    assert!(
+        dest.join("merger/.worktrees/recon").is_dir(),
+        "seed must include a linked worktree on the current branch"
+    );
+    let merger_worktrees = git(&merger, &["worktree", "list"]);
+    assert!(
+        merger_worktrees.contains(".worktrees/recon"),
+        "linked extra on feature/reconciliation: {merger_worktrees}"
+    );
 
     let config: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(dest.join(".workspace-status-config.json")).unwrap(),
@@ -168,6 +177,7 @@ fn seed_demo_workspace_state_and_snapshot() {
     assert!(names.contains(&"services/api"));
     assert!(names.contains(&"lib"));
     assert!(names.contains(&"merger"));
+    assert!(names.contains(&"merger/.worktrees/recon"));
 
     let lib = snapshot["repos"]
         .as_array()
@@ -230,6 +240,7 @@ fn seed_demo_workspace_state_and_snapshot() {
     assert!(plain_text.contains("feat-login"));
     assert!(plain_text.contains("services/api"));
     assert!(plain_text.contains("merger"));
+    assert!(plain_text.contains(".worktrees/recon"));
     assert!(plain_text.contains("feature/auth-refresh"));
     assert!(plain_text.contains("feature/reconciliation"));
     assert!(!plain_text.split_whitespace().any(|w| w == "notes"));

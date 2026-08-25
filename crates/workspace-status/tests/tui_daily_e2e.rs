@@ -142,10 +142,22 @@ fn seed_demo_workspace(dest: &Path) {
     assert!(status.success(), "seed-demo-workspace.sh failed");
 }
 
+fn first_bracket_chip(line: &str) -> &str {
+    let start = line.find('[').unwrap_or(0);
+    let Some(rel_end) = line[start..].find(']') else {
+        return "";
+    };
+    &line[start..=start + rel_end]
+}
+
 #[test]
 fn demo_merged_head_chip_matches_footer_on_painted_row() {
     let dest = seed_demo_dest();
     seed_demo_workspace(&dest);
+    assert!(
+        dest.join("merger/.worktrees/recon").is_dir(),
+        "seed must include a linked worktree on the current branch"
+    );
     let mut tui = open(&dest);
     tui.search("merger");
     let frame = tui.frame();
@@ -172,6 +184,19 @@ fn demo_merged_head_chip_matches_footer_on_painted_row() {
     assert!(
         footer.contains(&chip),
         "selection footer must show {chip}:\n{footer}\n{frame}"
+    );
+    assert_eq!(
+        first_bracket_chip(spacer),
+        first_bracket_chip(footer),
+        "painted spacer chip must equal footer chip\nspacer={spacer}\nfooter={footer}"
+    );
+    assert!(
+        !spacer.contains(".worktrees"),
+        "worktree path must not be a second chip on the spacer:\n{spacer}\n{frame}"
+    );
+    assert!(
+        !spacer.contains(UNICODE.worktree),
+        "worktree glyph must not prefix the footer chip:\n{spacer}"
     );
     let split_checkout = format!("[{}]", UNICODE.checkout_mark);
     let split_sync = format!("[{}]", UNICODE.sync_mark);

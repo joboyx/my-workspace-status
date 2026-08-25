@@ -456,6 +456,10 @@ write_file "$MERGER/README.md" <<'EOF'
 Billing + invoices history used to screenshot the multi-lane graph.
 EOF
 
+write_file "$MERGER/.gitignore" <<'EOF'
+.worktrees/
+EOF
+
 write_file "$MERGER/src/core.ts" <<'EOF'
 export type Money = { cents: number; currency: "USD" };
 
@@ -513,6 +517,11 @@ add_origin "$MERGER" "merger"
 # Stay on the feature branch (non-default) so the repo stays visible.
 git_in "$MERGER" push -q -u origin feature/reconciliation
 git_in "$MERGER" checkout -q feature/reconciliation
+
+# Linked extra on the current branch (same HEAD as the primary). `--force`
+# is required because git refuses a second checkout of a live branch.
+mkdir -p "$MERGER/.worktrees"
+git_in "$MERGER" worktree add -f -q "$MERGER/.worktrees/recon" feature/reconciliation
 
 echo "seeded $WORKSPACE"
 echo "cd $WORKSPACE && WS_STATUS_WATCH_MS=0 WS_STATUS_FETCH_MS=0 workspace-status"

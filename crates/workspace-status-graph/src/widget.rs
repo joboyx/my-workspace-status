@@ -1775,10 +1775,27 @@ mod tests {
                 ahead: 0,
                 behind: 0,
             }),
+            worktrees: vec![Worktree {
+                path: ".worktrees/recon".into(),
+                head_id: Some(id.into()),
+                branch: Some("main".into()),
+                ignored: false,
+                is_current: true,
+            }],
             uncommitted: Some(false),
             window: 1,
             ..GraphModel::default()
         }
+    }
+
+    fn first_bracket_chip(line: &str) -> &str {
+        let start = line
+            .find('[')
+            .unwrap_or_else(|| panic!("no chip in {line}"));
+        let rel_end = line[start..]
+            .find(']')
+            .unwrap_or_else(|| panic!("unclosed chip in {line}"));
+        &line[start..=start + rel_end]
     }
 
     #[test]
@@ -1815,6 +1832,24 @@ mod tests {
             });
             let (footer, _) = row_text_and_fg(buffer, height - 1, width);
             assert!(footer.contains(want), "footer must paint {want}: {footer}");
+            assert_eq!(
+                first_bracket_chip(&spacer),
+                first_bracket_chip(&footer),
+                "painted spacer chip must equal footer chip\nspacer={spacer}\nfooter={footer}"
+            );
+            assert!(
+                !spacer.contains(".worktrees"),
+                "worktree path must not be a second chip on the row: {spacer}"
+            );
+            let wt_glyph = if ascii {
+                ASCII.worktree
+            } else {
+                UNICODE.worktree
+            };
+            assert!(
+                !spacer.contains(wt_glyph),
+                "worktree glyph must not prefix the footer chip: {spacer}"
+            );
             assert!(
                 !spacer.contains("[]") && !spacer.contains("[]") && !spacer.contains("[=]"),
                 "marks must not be separate chips on the row: {spacer}"

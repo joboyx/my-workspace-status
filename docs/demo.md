@@ -45,7 +45,7 @@ Each shot starts from a fresh launch unless noted. The first cursor is `app` →
 | `services/api` | Dirty `feature/rate-limit`, diverged from origin. |
 | `lib` | Clean `main`. Folds under No updates. |
 | `notes` | Dirty and listed in `ignoredRepos`. Hidden until `.` or `-a`. |
-| `merger` | `feature/reconciliation` with a merge commit and a stash. |
+| `merger` | `feature/reconciliation` with a merge commit, a stash, and a linked worktree at `merger/.worktrees/recon` on the same branch. |
 
 ## 01 — tree + file diff
 
