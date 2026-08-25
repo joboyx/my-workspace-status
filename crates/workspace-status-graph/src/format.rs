@@ -904,16 +904,23 @@ fn merged_chip_parts(
                 text: "[".into(),
                 kind,
             }];
+            // Checkout + sync must be one run so paint cannot emit two icon
+            // spans. Footer already concatenates them as `[checkout][sync][name]`.
+            let mut marks = String::new();
             if is_checkout {
-                parts.push(LabelPart {
-                    text: glyphs.checkout_mark.to_string(),
-                    kind: LabelKind::ChipHead,
-                });
+                marks.push_str(glyphs.checkout_mark);
             }
             if matches!(chip, MergedRefChip::Merged(_)) {
+                marks.push_str(glyphs.sync_mark);
+            }
+            if !marks.is_empty() {
                 parts.push(LabelPart {
-                    text: glyphs.sync_mark.to_string(),
-                    kind: LabelKind::ChipRemote,
+                    text: marks,
+                    kind: if is_checkout {
+                        LabelKind::ChipHead
+                    } else {
+                        LabelKind::ChipRemote
+                    },
                 });
             }
             parts.push(LabelPart {
@@ -1237,6 +1244,31 @@ mod tests {
         let chips = format_commit_ref_chips(&[GraphRef::local("main")], true, Some("main"), &ASCII);
         assert!(!chips.contains("[HEAD]"), "{chips}");
         assert_eq!(chips, "[+main]");
+    }
+
+    #[test]
+    fn merged_named_head_is_one_chip() {
+        let refs = [GraphRef::local("main"), GraphRef::remote("origin/main")];
+        assert_eq!(
+            format_commit_ref_chips(&refs, true, Some("main"), &ASCII),
+            "[+=main]"
+        );
+        assert_eq!(
+            format_commit_ref_chips(&refs, true, Some("main"), &UNICODE),
+            "[main]"
+        );
+        let parts = commit_ref_chip_parts(&refs, true, Some("main"), &UNICODE, None);
+        let mark_parts: Vec<&str> = parts
+            .iter()
+            .filter(|p| p.kind == LabelKind::ChipHead || p.kind == LabelKind::ChipRemote)
+            .filter(|p| p.text != "[" && p.text != "]" && p.text != "main")
+            .map(|p| p.text.as_str())
+            .collect();
+        assert_eq!(
+            mark_parts,
+            [""],
+            "checkout+sync must be one run, not two icons: {parts:?}"
+        );
     }
 
     #[test]

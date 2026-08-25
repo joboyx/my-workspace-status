@@ -10,6 +10,7 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use workspace_status::tui::HeadlessTui;
+use workspace_status_graph::UNICODE;
 
 fn git_env() -> Vec<(&'static str, &'static str)> {
     vec![
@@ -117,6 +118,68 @@ fn seed_tall_graph(workspace: &Path, name: &str) {
         git(&repo, &["commit", "-q", "-m", &format!("count {i}")]);
     }
     git(&repo, &["checkout", "-q", "-b", "feature/tall"]);
+}
+
+fn seed_demo_dest() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "ws-tui-demo-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+fn seed_demo_workspace(dest: &Path) {
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("scripts/seed-demo-workspace.sh");
+    let status = Command::new("bash")
+        .arg(&script)
+        .arg(dest)
+        .status()
+        .expect("seed script runs");
+    assert!(status.success(), "seed-demo-workspace.sh failed");
+}
+
+#[test]
+fn demo_merged_head_chip_matches_footer_on_painted_row() {
+    let dest = seed_demo_dest();
+    seed_demo_workspace(&dest);
+    let mut tui = open(&dest);
+    tui.search("merger");
+    let frame = tui.frame();
+    let chip = format!(
+        "[{}{}feature/reconciliation]",
+        UNICODE.checkout_mark, UNICODE.sync_mark
+    );
+    assert!(
+        frame.contains(&chip),
+        "demo HEAD chip must be one pair of brackets:\n{frame}"
+    );
+    let spacer = frame
+        .lines()
+        .find(|l| l.contains(&chip) && l.contains("Demo User"))
+        .unwrap_or("");
+    let footer = frame
+        .lines()
+        .find(|l| l.contains(&chip) && !l.contains("Demo User"))
+        .unwrap_or("");
+    assert!(
+        spacer.contains(&chip),
+        "commit spacer must match footer chip {chip}:\n{spacer}\n{frame}"
+    );
+    assert!(
+        footer.contains(&chip),
+        "selection footer must show {chip}:\n{footer}\n{frame}"
+    );
+    let split_checkout = format!("[{}]", UNICODE.checkout_mark);
+    let split_sync = format!("[{}]", UNICODE.sync_mark);
+    assert!(
+        !spacer.contains(&split_checkout) && !spacer.contains(&split_sync),
+        "marks must not paint as separate chips:\n{spacer}"
+    );
+    let _ = fs::remove_dir_all(&dest);
 }
 
 fn daily_workspace() -> (PathBuf, PathBuf) {
