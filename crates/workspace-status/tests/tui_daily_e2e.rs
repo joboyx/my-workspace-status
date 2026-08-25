@@ -295,6 +295,24 @@ fn assert_contains(frame: &str, needle: &str) {
     );
 }
 
+fn assert_help_version(frame: &str) {
+    let version = workspace_status::APP_VERSION;
+    assert_contains(frame, version);
+    let line = frame
+        .lines()
+        .rev()
+        .find(|line| line.contains(version))
+        .unwrap_or_else(|| panic!("expected version {version} in:\n{frame}"));
+    let idx = line.rfind(version).expect("version");
+    let after = &line[idx + version.len()..];
+    assert!(
+        after
+            .chars()
+            .all(|c| c.is_whitespace() || matches!(c, '│' | '╯' | '╮' | '┘' | '┐' | '║' | '┤')),
+        "package version should sit in the help overlay lower-right:\n{line}"
+    );
+}
+
 fn assert_absent(frame: &str, needle: &str) {
     assert!(
         !frame.contains(needle),
@@ -726,6 +744,7 @@ fn terminal_resize_relayouts_panes_gutter_help_and_lists() {
     assert_contains(&help_wide, "MOVE");
     assert_contains(&help_wide, "q");
     assert_contains(&help_wide, "Tab");
+    assert_help_version(&help_wide);
     let help_wide_list = tui.pane_tree_height();
     tui.resize(80, 48);
     assert!(
@@ -733,8 +752,36 @@ fn terminal_resize_relayouts_panes_gutter_help_and_lists() {
         "wrapped help should steal pane rows: {} vs {help_wide_list}",
         tui.pane_tree_height()
     );
-    assert_contains(&tui.frame(), "MOVE");
+    let help_narrow = tui.frame();
+    assert_contains(&help_narrow, "MOVE");
+    assert_help_version(&help_narrow);
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn help_overlay_shows_app_version() {
+    let dest = seed_demo_dest();
+    seed_demo_workspace(&dest);
+    let mut tui = open(&dest);
+    tui.resize(160, 40);
+    tui.key('?');
+    let help = tui.frame();
+    assert_contains(&help, "MOVE");
+    assert_contains(&help, "GIT");
+    assert_contains(&help, "VIEW");
+    assert_contains(&help, "/ search help");
+    assert_help_version(&help);
+
+    tui.key('/');
+    tui.key('q');
+    tui.key('u');
+    tui.key('i');
+    tui.key('t');
+    let searching = tui.frame();
+    assert_contains(&searching, "Esc clears search");
+    assert_contains(&searching, "stage scope");
+    assert_help_version(&searching);
+    let _ = fs::remove_dir_all(&dest);
 }
 
 #[test]

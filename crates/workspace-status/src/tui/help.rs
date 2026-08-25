@@ -2,6 +2,7 @@
 //!
 //! Three columns match `HELP_GROUPS` (MOVE / GIT / VIEW). Extra keys
 //! (`q`, Tab, picker `C`, stash `a p D`, Home/End) stay in those groups.
+//! The footer shows [`crate::APP_VERSION`] in the lower-right.
 
 /// One help row: key chips plus a short description.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,6 +201,11 @@ pub const HELP_IDLE_FOOTER_SNIPPET: &str = "/ search help";
 /// Active help-search footer Esc hint.
 pub const HELP_SEARCH_ESC_HINT: &str = "Esc clears search";
 
+/// Lower-right help overlay label. Digits are [`crate::APP_VERSION`].
+pub fn help_version_label() -> String {
+    format!("v{}", crate::APP_VERSION)
+}
+
 /// Flattened help rows in column order (MOVE, then GIT, then VIEW).
 #[allow(dead_code)]
 pub fn help_entries() -> impl Iterator<Item = &'static HelpEntry> {
@@ -371,6 +377,41 @@ pub fn wrap_help_footer(text: &str, inner_width: usize) -> Vec<String> {
     wrap_help_description(text, inner_width.max(1))
 }
 
+/// Right-align [`help_version_label`] on the last of `lines` within `width`.
+///
+/// Adds a row only when the last line cannot share the version without
+/// crowding the footer copy.
+pub fn attach_help_version(lines: &mut Vec<String>, width: usize) {
+    use crate::helpers::visible_width;
+
+    let version = help_version_label();
+    let vw = visible_width(&version);
+    let width = width.max(1);
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    let last = lines.last().expect("footer lines");
+    let lw = visible_width(last);
+    let gap_needed = usize::from(lw > 0);
+    if lw + gap_needed + vw <= width {
+        let gap = width - lw - vw;
+        let last = lines.last_mut().expect("footer lines");
+        last.push_str(&" ".repeat(gap));
+        last.push_str(&version);
+    } else {
+        let gap = width.saturating_sub(vw);
+        lines.push(format!("{}{version}", " ".repeat(gap)));
+    }
+}
+
+/// Idle footer rows, with the package version in the lower-right.
+pub fn help_idle_footer_lines(inner_width: usize) -> Vec<String> {
+    let inner = inner_width.max(1);
+    let mut lines = wrap_help_footer(&help_idle_footer(), inner);
+    attach_help_version(&mut lines, inner);
+    lines
+}
+
 /// Visual lines for one help entry at `column_width`.
 pub fn help_entry_visual_lines(
     description: &str,
@@ -441,12 +482,14 @@ pub fn help_overlay_row_count(body_rows: usize, footer_rows: usize) -> usize {
 }
 
 /// Full overlay height for `groups` at `term_width` with a wrappable footer.
+///
+/// The lower-right package version is part of the footer row budget.
 pub fn help_overlay_height(groups: &[HelpGroup], term_width: usize, footer: &str) -> usize {
+    let inner = help_inner_width(term_width).max(1);
     let body = help_body_line_count(groups, help_column_width(term_width));
-    let footer_lines = wrap_help_footer(footer, help_inner_width(term_width))
-        .len()
-        .max(1);
-    help_overlay_row_count(body, footer_lines)
+    let mut footer_lines = wrap_help_footer(footer, inner);
+    attach_help_version(&mut footer_lines, inner);
+    help_overlay_row_count(body, footer_lines.len().max(1))
 }
 
 /// Overlay rows reserved for `?` help at `term_cols`.
@@ -535,5 +578,46 @@ mod tests {
             "narrow terminals wrap more and take more rows"
         );
         assert!(HELP_KEY_WIDTH >= 18);
+    }
+
+    #[test]
+    fn version_label_is_cargo_pkg_version() {
+        assert_eq!(help_version_label(), format!("v{}", crate::APP_VERSION));
+        assert_eq!(crate::APP_VERSION, env!("CARGO_PKG_VERSION"));
+        assert!(!crate::APP_VERSION.is_empty());
+        for entry in help_entries() {
+            assert!(
+                !entry.keys.contains(crate::APP_VERSION)
+                    && !entry.desc.contains(crate::APP_VERSION),
+                "package version belongs in the footer, not the keymap: {entry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn idle_footer_right_aligns_version() {
+        let inner = 80;
+        let lines = help_idle_footer_lines(inner);
+        let last = lines.last().expect("footer");
+        assert!(
+            last.ends_with(&help_version_label()),
+            "version should sit on the right: {last:?}"
+        );
+        assert!(
+            last.contains(HELP_IDLE_FOOTER_SNIPPET),
+            "footer copy must stay: {last:?}"
+        );
+        assert_eq!(crate::helpers::visible_width(last), inner, "{last:?}");
+    }
+
+    #[test]
+    fn version_wraps_to_own_row_when_last_line_is_full() {
+        let version = help_version_label();
+        let mut lines = vec!["x".repeat(20)];
+        attach_help_version(&mut lines, 20);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[1].ends_with(&version), "{lines:?}");
+        assert_eq!(crate::helpers::visible_width(&lines[1]), 20);
+        assert!(!lines[0].contains(&version), "must not crowd the left copy");
     }
 }

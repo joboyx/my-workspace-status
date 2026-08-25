@@ -24,7 +24,8 @@ use super::drill::DrillView;
 use super::easy_motion::{easy_motion_labels, visible_window};
 use super::help::{
     help_chip_gap_spaces, help_column_width, help_entry_matches, help_entry_visual_lines,
-    help_idle_footer, help_inner_width, wrap_help_footer, HELP_GROUPS, HELP_SEARCH_ESC_HINT,
+    help_idle_footer_lines, help_inner_width, help_version_label, HELP_GROUPS,
+    HELP_SEARCH_ESC_HINT,
 };
 use super::icons::{
     icon_branch, icon_diff, icon_merged_into_default, icon_move, icon_open_vs_default,
@@ -1026,6 +1027,37 @@ fn overlay_surface(state: &AppState) -> Color {
     hex_color(state.theme.theme().surface)
 }
 
+fn help_spans_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|span| visible_width(&span.content)).sum()
+}
+
+/// Append the package version on the right of `left`, or on the next row.
+fn help_footer_with_version(
+    mut left: Vec<Span<'static>>,
+    inner: usize,
+    muted: Color,
+) -> Vec<Line<'static>> {
+    let version = help_version_label();
+    let vw = visible_width(&version);
+    let lw = help_spans_width(&left);
+    let inner = inner.max(1);
+    let gap_needed = usize::from(lw > 0);
+    if lw + gap_needed + vw <= inner {
+        left.push(Span::raw(" ".repeat(inner - lw - vw)));
+        left.push(Span::styled(version, Style::default().fg(muted)));
+        vec![Line::from(left)]
+    } else {
+        let gap = inner.saturating_sub(vw);
+        vec![
+            Line::from(left),
+            Line::from(vec![
+                Span::raw(" ".repeat(gap)),
+                Span::styled(version, Style::default().fg(muted)),
+            ]),
+        ]
+    }
+}
+
 fn overlay_block(accent: Color) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
@@ -1104,32 +1136,56 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         }
     }
 
-    if searching {
+    let footer = if searching {
         let q = state.help_search_query.as_deref().unwrap_or("");
-        lines.push(Line::from(vec![
-            key_chip("HELP", pills.filter.bg, pills.filter.fg),
-            Span::styled(format!(" /{q}"), Style::default().fg(palette.repo)),
-            Span::styled("▏", Style::default().fg(palette.cursor)),
-            Span::styled(
-                format!("   {HELP_SEARCH_ESC_HINT}"),
-                Style::default().fg(palette.muted),
-            ),
-        ]));
+        help_footer_with_version(
+            vec![
+                key_chip("HELP", pills.filter.bg, pills.filter.fg),
+                Span::styled(format!(" /{q}"), Style::default().fg(palette.repo)),
+                Span::styled("▏", Style::default().fg(palette.cursor)),
+                Span::styled(
+                    format!("   {HELP_SEARCH_ESC_HINT}"),
+                    Style::default().fg(palette.muted),
+                ),
+            ],
+            inner,
+            palette.muted,
+        )
     } else {
-        for part in wrap_help_footer(&help_idle_footer(), inner) {
-            lines.push(Line::from(Span::styled(
-                part,
-                Style::default().fg(palette.muted),
-            )));
-        }
-    }
+        help_idle_footer_lines(inner)
+            .into_iter()
+            .map(|part| Line::from(Span::styled(part, Style::default().fg(palette.muted))))
+            .collect()
+    };
 
     frame.render_widget(Clear, area);
+    let block = overlay_block(palette.cursor);
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+    if inner_area.width == 0 || inner_area.height == 0 {
+        return;
+    }
+    let footer_h = (footer.len() as u16).min(inner_area.height).max(1);
+    let body_h = inner_area.height.saturating_sub(footer_h);
+    if body_h > 0 {
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            Rect {
+                x: inner_area.x,
+                y: inner_area.y,
+                width: inner_area.width,
+                height: body_h,
+            },
+        );
+    }
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(overlay_block(palette.cursor))
-            .wrap(Wrap { trim: false }),
-        area,
+        Paragraph::new(footer).wrap(Wrap { trim: false }),
+        Rect {
+            x: inner_area.x,
+            y: inner_area.y.saturating_add(body_h),
+            width: inner_area.width,
+            height: footer_h,
+        },
     );
 }
 
@@ -1737,6 +1793,27 @@ mod tests {
         out
     }
 
+    fn assert_help_version_lower_right(text: &str) {
+        let version = crate::APP_VERSION;
+        assert!(
+            text.contains(version),
+            "help overlay should show Cargo package version {version}:\n{text}"
+        );
+        let line = text
+            .lines()
+            .rev()
+            .find(|line| line.contains(version))
+            .unwrap_or_else(|| panic!("expected version {version} in:\n{text}"));
+        let idx = line.rfind(version).expect("version");
+        let after = &line[idx + version.len()..];
+        assert!(
+            after
+                .chars()
+                .all(|c| c.is_whitespace() || matches!(c, '│' | '╯' | '╮' | '┘' | '┐' | '║' | '┤')),
+            "package version should sit in the help overlay lower-right:\n{line}"
+        );
+    }
+
     #[test]
     fn paints_tree_and_graph() {
         let snapshot =
@@ -1862,6 +1939,7 @@ mod tests {
             header.is_some(),
             "help overlay should paint MOVE / GIT / VIEW on one row:\n{text}"
         );
+        assert_help_version_lower_right(&text);
     }
 
     #[test]
@@ -1879,6 +1957,7 @@ mod tests {
         assert!(text.contains("quit"), "{text}");
         assert!(text.contains("Esc clears search"), "{text}");
         assert!(!text.contains("n/N wrap"), "{text}");
+        assert_help_version_lower_right(&text);
     }
 
     #[test]

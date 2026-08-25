@@ -1,5 +1,11 @@
 //! Workspace-status library: discovery, snapshot, --plain/--json, ratatui TUI.
 
+/// Cargo package version compiled into this crate (`CARGO_PKG_VERSION`).
+///
+/// Same string `ws --update` compares to GitHub release tags. The `?` help
+/// overlay paints this in the lower-right. Do not add a second version literal.
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod actions;
 pub mod cli;
 pub mod config;
