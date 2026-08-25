@@ -9,6 +9,10 @@
 //! on the draw thread. Crossterm queued keys and clicks until that join, then
 //! the loop drained them in a burst. Follow-up pane git must stay on the same
 //! busy pump. Unchanged watch snapshots skip the pane reload.
+//!
+//! While a worker runs, nav / pane switch / cancel / quit still dispatch
+//! (`BusyAction::Handle`). Only actions that would start another git write
+//! are drained (`Ignore`) so they cannot nest a second mutating child.
 
 use super::action::Action;
 use super::keys::InputMode;
@@ -16,8 +20,10 @@ use super::keys::InputMode;
 /// What to do with an event while a git subprocess owns a worker thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BusyAction {
-    /// Keep waiting; the event is drained so the TTY buffer cannot fill.
+    /// Drain the event. Used for actions that would start another git write.
     Ignore,
+    /// Dispatch and apply (nav, pane switch, cancel, overlay typing, …).
+    Handle,
     /// Relayout while the worker continues.
     Resize { cols: u16, rows: u16 },
     /// Finish the current worker, then leave the TUI.
@@ -25,6 +31,10 @@ pub enum BusyAction {
 }
 
 /// Classify one dispatched action during an in-flight git op.
+///
+/// Writes (`f` / `p` / `s` / confirm-yes / …) are [`BusyAction::Ignore`] so
+/// they cannot start a second mutating child. Everything else stays live:
+/// move, click, wheel, Tab, Esc, help, search, overlay cancel.
 pub fn classify_busy_action(action: &Action) -> BusyAction {
     match action {
         Action::Quit => BusyAction::Quit,
@@ -32,7 +42,27 @@ pub fn classify_busy_action(action: &Action) -> BusyAction {
             cols: *cols,
             rows: *rows,
         },
-        _ => BusyAction::Ignore,
+        Action::Fetch
+        | Action::Pull
+        | Action::Push
+        | Action::DefaultBranch
+        | Action::Stage
+        | Action::Unstage
+        | Action::Revert
+        | Action::ConfirmYes
+        | Action::ConfirmYesClean
+        | Action::Edit
+        | Action::WatchTick
+        | Action::FetchTick
+        | Action::StashMenuEnter
+        | Action::GraphStashApply
+        | Action::GraphStashPop
+        | Action::GraphStashDrop
+        | Action::GraphCheckout
+        | Action::GraphMerge
+        | Action::BranchSubmit
+        | Action::CreateBranchSubmit => BusyAction::Ignore,
+        _ => BusyAction::Handle,
     }
 }
 
@@ -108,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn busy_loop_keeps_quit_and_resize_drains_the_rest() {
+    fn busy_loop_keeps_nav_live_and_drops_nested_writes() {
         assert_eq!(classify_busy_action(&Action::Quit), BusyAction::Quit);
         assert_eq!(
             classify_busy_action(&Action::Resize {
@@ -120,17 +150,16 @@ mod tests {
                 rows: 30
             }
         );
-        assert_eq!(classify_busy_action(&Action::Move(1)), BusyAction::Ignore);
+        assert_eq!(classify_busy_action(&Action::Move(1)), BusyAction::Handle);
         assert_eq!(
-            classify_busy_action(&Action::ConfirmYes),
-            BusyAction::Ignore
+            classify_busy_action(&Action::FocusRight),
+            BusyAction::Handle
         );
-        assert_eq!(classify_busy_action(&Action::Fetch), BusyAction::Ignore);
-        assert_eq!(classify_busy_action(&Action::Pull), BusyAction::Ignore);
-        assert_eq!(classify_busy_action(&Action::Push), BusyAction::Ignore);
+        assert_eq!(classify_busy_action(&Action::NavEsc), BusyAction::Handle);
+        assert_eq!(classify_busy_action(&Action::ConfirmNo), BusyAction::Handle);
         assert_eq!(
             classify_busy_action(&Action::Click { col: 4, row: 8 }),
-            BusyAction::Ignore
+            BusyAction::Handle
         );
         assert_eq!(
             classify_busy_action(&Action::ScrollWheel {
@@ -138,13 +167,27 @@ mod tests {
                 row: 8,
                 delta: -1
             }),
+            BusyAction::Handle
+        );
+        assert_eq!(
+            classify_busy_action(&Action::ConfirmYes),
+            BusyAction::Ignore
+        );
+        assert_eq!(classify_busy_action(&Action::Fetch), BusyAction::Ignore);
+        assert_eq!(classify_busy_action(&Action::Pull), BusyAction::Ignore);
+        assert_eq!(classify_busy_action(&Action::Push), BusyAction::Ignore);
+        assert_eq!(classify_busy_action(&Action::Stage), BusyAction::Ignore);
+        assert_eq!(classify_busy_action(&Action::Revert), BusyAction::Ignore);
+        assert_eq!(
+            classify_busy_action(&Action::GraphCheckout),
             BusyAction::Ignore
         );
     }
 
     /// Fails CI if TTY `apply_effect_inner` grows a sync `load_right(` /
-    /// `reload_snapshot(state` / commit-file git call again. Headless e2e keeps
-    /// the sync helpers (`load_right_headless`, `reload_snapshot`).
+    /// `reload_snapshot(state` / commit-file git call / unpumped local write
+    /// (`git add` / stash / checkout / …) again. Headless e2e keeps the sync
+    /// helpers (`load_right_headless`, `reload_snapshot`).
     #[test]
     fn tty_event_loop_must_not_call_sync_pane_git() {
         let src = include_str!("app.rs");
@@ -184,6 +227,62 @@ mod tests {
             1,
             "only apply_headless_inner may call load_commit_diff(state, opts); \
              TTY must use load_commit_diff_pumped"
+        );
+        assert!(
+            !src.contains("if let Err(err) = stage_file"),
+            "TTY Stage must pump git add; unpumped stage_file blocks the draw thread"
+        );
+        assert!(
+            !src.contains("if let Err(err) = unstage_file"),
+            "TTY Unstage must pump git restore --staged"
+        );
+        assert!(
+            !src.contains("if let Err(err) = revert_tracked_file"),
+            "TTY Revert must pump git restore"
+        );
+        assert!(
+            !src.contains("if let Err(err) = remove_untracked_file"),
+            "TTY Revert must pump git clean"
+        );
+        assert!(
+            !src.contains("match stash_push("),
+            "TTY stash create must pump git stash push"
+        );
+        assert!(
+            !src.contains("match stash_apply("),
+            "TTY stash apply must pump git stash apply"
+        );
+        assert!(
+            !src.contains("match stash_pop("),
+            "TTY stash pop must pump git stash pop"
+        );
+        assert!(
+            !src.contains("match stash_drop("),
+            "TTY stash drop must pump git stash drop"
+        );
+        assert!(
+            !src.contains("match create_branch_checkout("),
+            "TTY create-branch checkout must be pumped"
+        );
+        assert!(
+            !src.contains("match create_branch_at("),
+            "TTY create-branch-at must be pumped"
+        );
+        assert!(
+            !src.contains("match remove_worktree("),
+            "TTY remove-worktree must be pumped"
+        );
+        assert!(
+            !src.contains("if run_checkout_branch(state"),
+            "TTY checkout must pump compute_checkout; run_checkout_branch is tests/sync only"
+        );
+        assert!(
+            !src.contains("if run_merge_into_head(state"),
+            "TTY merge must pump compute_merge; run_merge_into_head is tests/sync only"
+        );
+        assert!(
+            src.contains("run_write_then_refresh_pumped("),
+            "TTY local writes must share the pumped write+refresh helper"
         );
     }
 }
