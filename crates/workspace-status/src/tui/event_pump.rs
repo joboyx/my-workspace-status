@@ -72,7 +72,9 @@ pub fn classify_busy_action(action: &Action) -> BusyAction {
         | Action::GraphCheckout
         | Action::GraphMerge
         | Action::BranchSubmit
-        | Action::CreateBranchSubmit => BusyAction::Ignore,
+        | Action::CreateBranchSubmit
+        | Action::GraphFocusSubmit
+        | Action::GraphFocusClear => BusyAction::Ignore,
         _ => BusyAction::Handle,
     }
 }
@@ -149,6 +151,7 @@ mod tests {
         assert!(overlay_blocks_background_ticks(InputMode::SearchPrompt));
         assert!(overlay_blocks_background_ticks(InputMode::StashMenu));
         assert!(overlay_blocks_background_ticks(InputMode::BranchPicker));
+        assert!(overlay_blocks_background_ticks(InputMode::GraphFocusPicker));
         assert!(overlay_blocks_background_ticks(InputMode::CreateBranch));
         assert!(!overlay_blocks_background_ticks(InputMode::Normal {
             search_active: false

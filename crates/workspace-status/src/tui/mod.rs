@@ -15,6 +15,7 @@ pub(crate) mod editor;
 mod event_pump;
 pub(crate) mod fetch;
 mod gates;
+mod graph_focus;
 mod graph_load;
 mod headless;
 mod help;

@@ -2,8 +2,10 @@
 //!
 //! History command: `log --exclude=refs/stash --all
 //! --topo-order --date-order --skip --max-count`. Default window is 300.
-//! Missing `stash^1` parents are fetched with `log --no-walk` and appended
-//! after the log prefix so autoload skip stays on `window`, not `commits.len()`.
+//! Graph `o` replaces `--all` with the selected local branch tips so the
+//! window is only their ancestors. Missing `stash^1` parents are fetched
+//! with `log --no-walk` and appended after the log prefix so autoload skip
+//! stays on `window`, not `commits.len()` (skipped while branch focus is on).
 
 use std::collections::HashSet;
 use std::fs;
@@ -19,6 +21,8 @@ use crate::worktrees::{
     is_linked_worktree_checkout, map_linked_worktree_rel_path, parse_worktree_list_porcelain,
 };
 
+use super::graph_focus::focus_rev_for_branch;
+
 /// Identity used to keep graph scroll when the same row is still focused.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphIdentity {
@@ -32,11 +36,23 @@ pub fn load_graph_model(
     snapshot: &WorkspaceSnapshot,
     repo: &str,
     show_ignored: bool,
+    focus_branches: &[String],
 ) -> (GraphModel, GraphIdentity) {
-    load_graph_model_window(cwd, snapshot, repo, show_ignored, 0, DEFAULT_GRAPH_WINDOW)
+    load_graph_model_window(
+        cwd,
+        snapshot,
+        repo,
+        show_ignored,
+        0,
+        DEFAULT_GRAPH_WINDOW,
+        focus_branches,
+    )
 }
 
 /// Load one `git log` page. `skip` / `limit` map to `--skip` / `--max-count`.
+///
+/// Empty `focus_branches` uses `--all`. Otherwise the page is ancestors of
+/// those local tips (`refs/heads/<name>`).
 pub fn load_graph_model_window(
     cwd: &Path,
     snapshot: &WorkspaceSnapshot,
@@ -44,6 +60,7 @@ pub fn load_graph_model_window(
     show_ignored: bool,
     skip: usize,
     limit: usize,
+    focus_branches: &[String],
 ) -> (GraphModel, GraphIdentity) {
     let repo_dir = cwd.join(repo);
     let Some(row) = snapshot.repos.iter().find(|r| r.repo == repo) else {
@@ -63,13 +80,32 @@ pub fn load_graph_model_window(
 
     let head = exec_git(&["rev-parse", "HEAD"], &repo_dir);
     let refs = load_refs(&repo_dir);
-    let (window_commits, truncated) = load_commits(&repo_dir, skip, limit, &refs);
-    let stashes = load_stashes(&repo_dir);
-    let extra = load_missing_stash_parents(&repo_dir, &window_commits, &stashes, &refs);
+    let (window_commits, truncated) = load_commits(&repo_dir, skip, limit, &refs, focus_branches);
+    let mut stashes = load_stashes(&repo_dir);
+    let extra = if focus_branches.is_empty() {
+        load_missing_stash_parents(&repo_dir, &window_commits, &stashes, &refs)
+    } else {
+        Vec::new()
+    };
     let window = window_commits.len();
     let mut commits = window_commits;
     commits.extend(extra);
-    let worktrees = load_worktrees(cwd, &repo_dir, snapshot, row, &head, show_ignored);
+    let mut worktrees = load_worktrees(cwd, &repo_dir, snapshot, row, &head, show_ignored);
+    if !focus_branches.is_empty() {
+        let ids: HashSet<&str> = commits.iter().map(|c| c.id.as_str()).collect();
+        stashes.retain(|stash| {
+            stash
+                .parent_id
+                .as_deref()
+                .is_some_and(|parent| ids.contains(parent))
+        });
+        worktrees.retain(|worktree| {
+            worktree
+                .head_id
+                .as_deref()
+                .is_some_and(|head_id| ids.contains(head_id))
+        });
+    }
     let has_changes = row.has_unstaged || row.has_staged || row.has_untracked;
     let model = GraphModel {
         commits,
@@ -197,13 +233,18 @@ fn load_commits(
     skip: usize,
     limit: usize,
     refs: &[(String, GraphRef)],
+    focus_branches: &[String],
 ) -> (Vec<Commit>, bool) {
     let skip_arg = format!("--skip={skip}");
     let max_arg = format!("--max-count={limit}");
-    let raw = exec_git(
-        &[
-            "log",
-            // `--exclude` must precede `--all` or stash still gets included.
+    let revs: Vec<String> = focus_branches
+        .iter()
+        .map(|name| focus_rev_for_branch(name))
+        .collect();
+    let mut args: Vec<&str> = vec!["log"];
+    if revs.is_empty() {
+        // `--exclude` must precede `--all` or stash still gets included.
+        args.extend([
             "--exclude=refs/stash",
             "--all",
             "--topo-order",
@@ -211,9 +252,18 @@ fn load_commits(
             &skip_arg,
             &max_arg,
             "--pretty=format:%H%x00%P%x00%s%x00%an%x00%at",
-        ],
-        repo_dir,
-    );
+        ]);
+    } else {
+        args.extend([
+            "--topo-order",
+            "--date-order",
+            &skip_arg,
+            &max_arg,
+            "--pretty=format:%H%x00%P%x00%s%x00%an%x00%at",
+        ]);
+        args.extend(revs.iter().map(String::as_str));
+    }
+    let raw = exec_git(&args, repo_dir);
     let commits: Vec<Commit> = raw
         .lines()
         .filter(|l| !l.is_empty())
@@ -794,6 +844,7 @@ mod live_git {
             false,
             0,
             50,
+            &[],
         );
         let subjects: Vec<&str> = model.commits.iter().map(|c| c.subject.as_str()).collect();
         assert!(
@@ -818,6 +869,42 @@ mod live_git {
     }
 
     #[test]
+    fn focused_log_drops_unrelated_branch_tips() {
+        let (root, repo) = temp_workspace();
+        init_repo(&repo);
+        commit_file(&repo, "a.txt", "1\n", "c1");
+        git(&repo, &["checkout", "-q", "-b", "feature"]);
+        commit_file(&repo, "a.txt", "feat\n", "c-feature");
+        git(&repo, &["checkout", "-q", "main"]);
+        commit_file(&repo, "a.txt", "2\n", "c2-main");
+        let snapshot = snapshot_app();
+        let cwd = root.join("workspace");
+        let (model, _) = load_graph_model_window(
+            cwd.as_path(),
+            &snapshot,
+            "app",
+            false,
+            0,
+            50,
+            &["feature".into()],
+        );
+        let subjects: Vec<&str> = model.commits.iter().map(|c| c.subject.as_str()).collect();
+        assert!(
+            subjects.iter().any(|s| *s == "c-feature"),
+            "focused tip must stay, got {subjects:?}"
+        );
+        assert!(
+            subjects.iter().any(|s| *s == "c1"),
+            "ancestors stay, got {subjects:?}"
+        );
+        assert!(
+            !subjects.iter().any(|s| *s == "c2-main"),
+            "unrelated main leaf must drop, got {subjects:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn clean_loaded_graph_starts_with_working_tree_row() {
         let (root, repo) = temp_workspace();
         init_repo(&repo);
@@ -830,6 +917,7 @@ mod live_git {
             false,
             0,
             50,
+            &[],
         );
         assert_eq!(model.uncommitted, Some(false));
         let rows = model.visible_rows();
@@ -852,11 +940,11 @@ mod live_git {
         }
         let snapshot = snapshot_app();
         let cwd = root.join("workspace");
-        let (page, _) = load_graph_model_window(&cwd, &snapshot, "app", false, 0, 3);
+        let (page, _) = load_graph_model_window(&cwd, &snapshot, "app", false, 0, 3, &[]);
         assert_eq!(page.window, 3);
         assert_eq!(page.commits.len(), 3);
         assert!(page.has_more);
-        let (page2, _) = load_graph_model_window(&cwd, &snapshot, "app", false, 3, 3);
+        let (page2, _) = load_graph_model_window(&cwd, &snapshot, "app", false, 3, 3, &[]);
         assert_eq!(page2.skip, 3);
         assert_ne!(page2.commits[0].id, page.commits[0].id);
         let _ = fs::remove_dir_all(&root);
@@ -877,6 +965,7 @@ mod live_git {
             false,
             0,
             50,
+            &[],
         );
         assert!(model
             .stashes
@@ -915,6 +1004,7 @@ mod live_git {
             false,
             0,
             3,
+            &[],
         );
         assert_eq!(model.limit, 3);
         assert!(model.has_more);
@@ -958,7 +1048,7 @@ mod live_git {
         );
         let snapshot = snapshot_app();
         let cwd = root.join("workspace");
-        let (model, _) = load_graph_model_window(&cwd, &snapshot, "app", false, 0, 50);
+        let (model, _) = load_graph_model_window(&cwd, &snapshot, "app", false, 0, 50, &[]);
         assert!(
             model.worktrees.iter().all(|wt| wt.path != "app"),
             "primary checkout must not be a worktree mark, got {:?}",
@@ -980,7 +1070,7 @@ mod live_git {
         extra_row.primary_repo = Some("app".into());
         linked_snap.repos.push(extra_row);
         let (linked_model, _) =
-            load_graph_model_window(&cwd, &linked_snap, "app/.worktrees/feat", false, 0, 50);
+            load_graph_model_window(&cwd, &linked_snap, "app/.worktrees/feat", false, 0, 50, &[]);
         assert!(
             linked_model.worktrees.iter().all(|wt| wt.path != "app"),
             "main checkout stays unmarked when the extra is focused, got {:?}",

@@ -34,6 +34,8 @@ pub enum InputMode {
     HelpSearch,
     StashMenu,
     BranchPicker,
+    /// Graph `o` overlay: mark local branches, Enter applies ancestor focus.
+    GraphFocusPicker,
     CreateBranch,
 }
 
@@ -108,6 +110,7 @@ pub fn event_to_action_with(
                     | InputMode::HelpSearch
                     | InputMode::StashMenu
                     | InputMode::BranchPicker
+                    | InputMode::GraphFocusPicker
                     | InputMode::CreateBranch,
             ) {
                 Action::None
@@ -188,6 +191,12 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
         InputMode::BranchPicker => match key.code {
             KeyCode::Backspace => true,
             KeyCode::Char('C') => false,
+            KeyCode::Char(_) => typing,
+            _ => false,
+        },
+        InputMode::GraphFocusPicker => match key.code {
+            KeyCode::Backspace => true,
+            KeyCode::Char('O') | KeyCode::Char(' ') => false,
             KeyCode::Char(_) => typing,
             _ => false,
         },
@@ -324,6 +333,19 @@ fn key_to_action(
             }
             _ => Action::None,
         },
+        InputMode::GraphFocusPicker => match key.code {
+            KeyCode::Esc => Action::GraphFocusCancel,
+            KeyCode::Enter => Action::GraphFocusSubmit,
+            KeyCode::Backspace => Action::GraphFocusBackspace,
+            KeyCode::Char('j') | KeyCode::Down => Action::GraphFocusMove(1),
+            KeyCode::Char('k') | KeyCode::Up => Action::GraphFocusMove(-1),
+            KeyCode::Char(' ') => Action::GraphFocusToggle,
+            KeyCode::Char('O') => Action::GraphFocusClear,
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::GraphFocusChar(c)
+            }
+            _ => Action::None,
+        },
         InputMode::CreateBranch => match key.code {
             KeyCode::Esc => Action::CreateBranchCancel,
             KeyCode::Enter => Action::CreateBranchSubmit,
@@ -407,6 +429,8 @@ fn normal_key(
         KeyCode::Char('P') => Action::Push,
         KeyCode::Char('S') => Action::StashMenu,
         KeyCode::Char('b') => Action::Branch,
+        KeyCode::Char('o') => Action::GraphFocusBranches,
+        KeyCode::Char('O') => Action::GraphFocusClear,
         KeyCode::Char('w') | KeyCode::Char('W') => Action::RemoveWorktree,
         KeyCode::Char('i') => Action::ToggleDiffMode,
         KeyCode::Char('m') => Action::ToggleMouse,
@@ -774,6 +798,41 @@ mod tests {
                 false
             ),
             Action::CreateBranchStart
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('o')), normal(), false, true),
+            Action::GraphFocusBranches
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('O')), normal(), false, true),
+            Action::GraphFocusClear
+        );
+        assert_eq!(
+            event_to_action(
+                &key(KeyCode::Char(' ')),
+                InputMode::GraphFocusPicker,
+                false,
+                true
+            ),
+            Action::GraphFocusToggle
+        );
+        assert_eq!(
+            event_to_action(
+                &key(KeyCode::Enter),
+                InputMode::GraphFocusPicker,
+                false,
+                true
+            ),
+            Action::GraphFocusSubmit
+        );
+        assert_eq!(
+            event_to_action(
+                &key(KeyCode::Char('O')),
+                InputMode::GraphFocusPicker,
+                false,
+                true
+            ),
+            Action::GraphFocusClear
         );
     }
 
