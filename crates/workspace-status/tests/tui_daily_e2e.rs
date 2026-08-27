@@ -1892,3 +1892,99 @@ fn default_main_worktree_row_omits_pinetree_linked_keeps_mark() {
     );
     let _ = fs::remove_dir_all(root);
 }
+
+/// Diverging local branches so focusing one drops the others' unique commits.
+fn seed_branch_focus_graph(workspace: &Path, name: &str) {
+    let repo = workspace.join(name);
+    fs::create_dir_all(&repo).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(&repo)
+        .status();
+    if init.map(|s| s.success()).unwrap_or(false) == false {
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["checkout", "-q", "-b", "main"]);
+    }
+    git(&repo, &["config", "user.name", "workspace-status e2e"]);
+    git(
+        &repo,
+        &[
+            "config",
+            "user.email",
+            "workspace-status-e2e@example.invalid",
+        ],
+    );
+    fs::write(repo.join("README.md"), "# focus-root-commit\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "focus-root-commit"]);
+    git(&repo, &["checkout", "-q", "-b", "feature/keep"]);
+    fs::write(repo.join("keep.txt"), "keep\n").unwrap();
+    git(&repo, &["add", "keep.txt"]);
+    git(&repo, &["commit", "-q", "-m", "keep-leaf-commit"]);
+    git(&repo, &["checkout", "-q", "main"]);
+    fs::write(repo.join("main.txt"), "main\n").unwrap();
+    git(&repo, &["add", "main.txt"]);
+    git(&repo, &["commit", "-q", "-m", "main-leaf-commit"]);
+    git(&repo, &["checkout", "-q", "-b", "topic/noise", "HEAD~1"]);
+    fs::write(repo.join("noise.txt"), "noise\n").unwrap();
+    git(&repo, &["add", "noise.txt"]);
+    git(&repo, &["commit", "-q", "-m", "noise-leaf-commit"]);
+    git(&repo, &["checkout", "-q", "feature/keep"]);
+}
+
+#[test]
+fn graph_branch_focus_hides_unrelated_history_and_clears() {
+    let root = std::env::temp_dir().join(format!(
+        "ws-tui-graph-focus-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    seed_branch_focus_graph(&workspace, "focusbox");
+
+    let mut tui = open(&workspace);
+    tui.search("focusbox");
+    tui.tab();
+    assert!(tui.right_is_graph(), "right pane should be the graph");
+    let full = tui.frame();
+    assert_contains(&full, "keep-leaf-commit");
+    assert_contains(&full, "noise-leaf-commit");
+    assert_contains(&full, "main-leaf-commit");
+    assert_contains(&full, "focus-root-commit");
+
+    tui.resize(160, 40);
+    tui.key('?');
+    let help = tui.frame();
+    assert_contains(&help, "MOVE");
+    assert_contains(&help, "graph focus branches");
+    assert_contains(&help, "o O");
+    tui.esc();
+
+    tui.key('o');
+    let overlay = tui.frame();
+    assert_contains(&overlay, "Focus branches");
+    assert_contains(&overlay, "feature/keep");
+    assert_contains(&overlay, "topic/noise");
+    assert_contains(&overlay, "Enter apply");
+
+    for c in "keep".chars() {
+        tui.key(c);
+    }
+    tui.enter();
+    let focused = tui.frame();
+    assert_contains(&focused, "keep-leaf-commit");
+    assert_contains(&focused, "focus-root-commit");
+    assert_absent(&focused, "noise-leaf-commit");
+    assert_absent(&focused, "main-leaf-commit");
+
+    tui.key('O');
+    let restored = tui.frame();
+    assert_contains(&restored, "keep-leaf-commit");
+    assert_contains(&restored, "noise-leaf-commit");
+    assert_contains(&restored, "main-leaf-commit");
+    assert_contains(&restored, "focus-root-commit");
+    let _ = fs::remove_dir_all(root);
+}
