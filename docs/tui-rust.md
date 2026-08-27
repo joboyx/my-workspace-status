@@ -22,7 +22,7 @@ To rebuild those frames, run `./scripts/capture-demo-stills.sh` (see [demo.md](.
 | `.` | Show or hide ignored repos |
 | `/` | Search the focused pane (workspace tree, graph, commit-file list, or file diff). Enter arms the query. Esc clears. When `?` help is open, `/` opens a help query: characters (including `n`/`N`) append; highlight only; rows stay visible. Esc clears the query (help stays). No Enter-arm and no `n`/`N` next/prev while help search is open. `?` / `q` / Esc with no query still close help |
 | `n` / `N` | Next / previous match on the pane bound at `/` (previous is `N`, not `p`). While help search is open these keys append to the query instead |
-| `g` / `G` | `gg` (second `g` within ~400ms) moves to the start of the focused list. Lone `g` expires with no move. `G` is the end. Home / End also jump to start / end |
+| `g` / `G` | `gg` (second `g` within ~400ms) moves to the start of the focused list. Lone `g` expires with no move. `G` is the end. Home / End also jump to start / end. On a focused **file diff**, `gg` / `G` (and Home / End) scroll to the start / end |
 | `Ctrl+u` / `Ctrl+d` | Move the focused list ±5 rows (tree, graph, or commit-files). On a focused file diff, scroll ±5. PageUp / PageDown stay one viewport |
 | `Ctrl+O` | Toggle unlimited `-U` context when the right pane is already a file diff. Fires from a left-focused workspace file or commit-file as well as from the right pane. A second press restores the previous context. No-op on tree, graph, or a commit-file list |
 | `s` | Stage dirty files in the focused scope (file, dir, checkout, or flat repo). Workspace and family-container rows are a no-op |

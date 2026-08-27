@@ -50,7 +50,7 @@ Default folds: ignored repos with children + the `no-updates` group. Non-ignored
 | 1 `Files` | Graph list | Commit detail + file tree |
 | 2 `Diff` | Commit-file list | Commit-scoped `DiffPane` |
 
-`list_focus_target` (`tui/state.rs`) is the focused list: depth 0 left → tree; depth 0 right / depth 1 left → graph; depth 1 right / depth 2 left → commit files; depth 2 right (and depth 0 file diffs) → none (diff scroll). `j`/`k`, fold, search, click, and vertical wheel follow that target. Mouse horizontal wheel (and Shift+wheel) pans the pane under the pointer without moving the focused row; the workspace tree matches the right pane. Trackpad hscroll is SGR `66`/`67`. When a file diff has long lines, that report over the left pane pans the diff; short tree paths still pan the tree when the painted diff fits. Click still selects. Unshifted `h` / `l` still fold the tree.
+`list_focus_target` (`tui/state.rs`) is the focused list: depth 0 left → tree; depth 0 right / depth 1 left → graph; depth 1 right / depth 2 left → commit files; depth 2 right (and depth 0 file diffs) → none (diff scroll). `j`/`k`, `gg` / `G` / Home / End, fold, search, click, and vertical wheel follow that target. On a focused file diff, `gg` / `G` (and Home / End) scroll to the start / end. Mouse horizontal wheel (and Shift+wheel) pans the pane under the pointer without moving the focused row; the workspace tree matches the right pane. Trackpad hscroll is SGR `66`/`67`. When a file diff has long lines, that report over the left pane pans the diff; short tree paths still pan the tree when the painted diff fits. Click still selects. Unshifted `h` / `l` still fold the tree.
 
 | Focus / depth | Enter | Esc |
 | --- | --- | --- |

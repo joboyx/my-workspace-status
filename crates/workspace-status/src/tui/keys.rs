@@ -1232,6 +1232,29 @@ mod tests {
             event_to_action(&key(KeyCode::Char('G')), normal(), false, false),
             Action::MoveToEnd
         );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('G')), normal(), true, true),
+            Action::MoveToEnd
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('g')), normal(), true, true),
+            Action::ArmGChord
+        );
+        let pending = InputMode::GPending {
+            search_active: false,
+        };
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('g')), pending, true, true),
+            Action::MoveToStart
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Home), normal(), true, true),
+            Action::MoveToStart
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::End), normal(), true, true),
+            Action::MoveToEnd
+        );
     }
 
     #[test]

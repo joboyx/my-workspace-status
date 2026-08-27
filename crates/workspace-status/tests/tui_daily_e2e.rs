@@ -424,6 +424,11 @@ fn dirty_file_paints_diff_pane() {
 fn gg_g_jump_focused_pane_including_file_diff() {
     let (root, workspace) = daily_workspace();
     seed_tall_dirty_file(&workspace, "unique-gg-file.rs");
+    let merger = workspace.join("merger");
+    fs::write(merger.join("one.txt"), "one\n").unwrap();
+    fs::write(merger.join("two.txt"), "two\n").unwrap();
+    git(&merger, &["add", "one.txt", "two.txt"]);
+    git(&merger, &["commit", "-q", "-m", "two files"]);
     let mut tui = open(&workspace);
 
     tui.search("unique-gg-file");
@@ -497,7 +502,20 @@ fn gg_g_jump_focused_pane_including_file_diff() {
     );
 
     tui.esc();
-    tui.search("merger");
+    if tui.focus_is_right() {
+        tui.esc();
+    }
+    assert!(
+        !tui.focus_is_right() && tui.cursor_id().contains("unique-gg-file"),
+        "Esc should return to the left tree on the file row:\n{}",
+        tui.frame()
+    );
+    tui.key('j');
+    assert!(
+        tui.cursor_id().contains("merger") && tui.right_is_graph(),
+        "j from the tall file should land on merger with the graph:\n{}",
+        tui.frame()
+    );
     tui.tab();
     assert!(
         tui.right_is_graph() && tui.focus_is_right(),
@@ -519,7 +537,6 @@ fn gg_g_jump_focused_pane_including_file_diff() {
         tui.graph_cursor()
     );
 
-    tui.key('j');
     tui.key('j');
     tui.enter();
     let files = tui.frame();
@@ -567,8 +584,7 @@ fn gg_g_jump_focused_pane_including_file_diff() {
         "gg on a left graph should jump to the first row"
     );
 
-    tui.key('j');
-    tui.key('j');
+    tui.search("two files");
     tui.enter();
     tui.enter();
     tui.esc();

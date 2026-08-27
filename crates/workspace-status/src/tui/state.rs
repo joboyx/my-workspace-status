@@ -3189,7 +3189,15 @@ impl AppState {
                 self.sync_graph_scroll();
                 self.follow_graph_files()
             }
-            ListFocusTarget::None => Effect::None,
+            ListFocusTarget::None => {
+                // Focused file / commit diff: `gg` / Home start, `G` / End end.
+                self.diff_scroll = if end {
+                    self.diff_scroll_max() as u16
+                } else {
+                    0
+                };
+                Effect::None
+            }
             ListFocusTarget::Tree => {
                 if end {
                     if !self.rows.is_empty() {
@@ -7229,6 +7237,63 @@ mod tests {
         app.dispatch(Action::MoveToStart);
         assert_eq!(app.cursor, 0);
         assert!(app.g_pending_at.is_none());
+    }
+
+    #[test]
+    fn gg_g_on_focused_diff_scroll_to_edges() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        let mut lines = vec!["@@ -1,1 +1,40 @@".into()];
+        lines.extend((0..40).map(|i| format!("+line {i}")));
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            DiffContent::from_lines(lines),
+        );
+        app.focus = FocusPane::Right;
+        app.layout.diff_pane_height = 8;
+        assert_eq!(app.list_focus_target(), ListFocusTarget::None);
+        app.dispatch(Action::ScrollDiff(3));
+        let mid = app.diff_scroll;
+        assert!(mid > 0, "ScrollDiff should leave the top");
+        app.dispatch(Action::MoveToEnd);
+        assert!(
+            app.diff_scroll > mid,
+            "MoveToEnd must scroll a focused diff, mid={mid} after={}",
+            app.diff_scroll
+        );
+        assert_eq!(app.focus, FocusPane::Right);
+        app.dispatch(Action::MoveToStart);
+        assert_eq!(app.diff_scroll, 0);
+        assert_eq!(app.focus, FocusPane::Right);
+    }
+
+    #[test]
+    fn gg_g_on_left_tree_with_file_diff_shown_moves_tree() {
+        let mut app = tree_app();
+        focus_file(&mut app, "README.md");
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            DiffContent::from_lines(vec!["+line".into(); 20]),
+        );
+        app.focus = FocusPane::Left;
+        app.diff_scroll = 4;
+        app.cursor = 2.min(app.rows.len().saturating_sub(1));
+        app.dispatch(Action::MoveToStart);
+        assert_eq!(app.cursor, 0);
+        assert_eq!(
+            app.diff_scroll, 4,
+            "left gg must not scroll an unfocused file diff"
+        );
+        assert_eq!(app.focus, FocusPane::Left);
+        app.dispatch(Action::MoveToEnd);
+        assert_eq!(app.cursor, app.rows.len() - 1);
+        assert_eq!(
+            app.diff_scroll, 4,
+            "left G must not scroll an unfocused file diff"
+        );
+        assert_eq!(app.focus, FocusPane::Left);
     }
 
     #[test]
