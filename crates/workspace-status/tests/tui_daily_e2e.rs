@@ -1569,3 +1569,94 @@ fn watch_tick_updates_ahead_count_without_reload_key() {
     );
     let _ = fs::remove_dir_all(root);
 }
+
+/// Open-vs-default mark (`ICON_OPEN_VS_DEFAULT` / nf-fa-tree).
+const OPEN_VS_DEFAULT: &str = "";
+/// Nested primary checkout glyph (`ICON_BRANCH`).
+const PRIMARY_CHECKOUT_GLYPH: &str = "";
+/// Linked extra glyph (`ICON_LINKED_WORKTREE`).
+const LINKED_WORKTREE_GLYPH: &str = "";
+
+fn seed_primary_and_linked_family(workspace: &Path) {
+    seed_repo(workspace, "app", "main", false);
+    let repo = workspace.join("app");
+    fs::write(repo.join(".gitignore"), ".worktrees/\n").unwrap();
+    git(&repo, &["add", ".gitignore"]);
+    git(&repo, &["commit", "-q", "-m", "ignore linked worktree dir"]);
+    git(&repo, &["checkout", "-q", "-b", "feature/primary-open"]);
+    fs::write(repo.join("primary.txt"), "primary off default\n").unwrap();
+    git(&repo, &["add", "primary.txt"]);
+    git(&repo, &["commit", "-q", "-m", "primary off default"]);
+    fs::write(repo.join("README.md"), "# app\ndirty primary\n").unwrap();
+    fs::create_dir_all(repo.join(".worktrees")).unwrap();
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature/linked-open",
+            ".worktrees/feat",
+            "main",
+        ],
+    );
+    let linked = repo.join(".worktrees/feat");
+    fs::write(linked.join("open.txt"), "linked open vs default\n").unwrap();
+    git(&linked, &["add", "open.txt"]);
+    git(&linked, &["commit", "-q", "-m", "linked open"]);
+}
+
+fn tree_pane(line: &str) -> &str {
+    let rest = line.strip_prefix('│').unwrap_or(line);
+    rest.split('│').next().unwrap_or(rest)
+}
+
+#[test]
+fn default_main_worktree_row_omits_pinetree_linked_keeps_mark() {
+    let root = std::env::temp_dir().join(format!(
+        "ws-tui-primary-pinetree-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    seed_primary_and_linked_family(&workspace);
+    let mut tui = open(&workspace);
+    let frame = tui.frame();
+    let primary = frame
+        .lines()
+        .map(tree_pane)
+        .find(|line| {
+            line.contains(PRIMARY_CHECKOUT_GLYPH) && line.contains("feature/primary-open")
+        })
+        .unwrap_or("");
+    let linked = frame
+        .lines()
+        .map(tree_pane)
+        .find(|line| line.contains(LINKED_WORKTREE_GLYPH) && line.contains("feature/linked-open"))
+        .unwrap_or("");
+    assert!(
+        !primary.is_empty(),
+        "expected a painted primary (main) worktree row:\n{frame}"
+    );
+    assert!(
+        !linked.is_empty(),
+        "expected a painted linked worktree row:\n{frame}"
+    );
+    assert!(
+        !primary.contains(LINKED_WORKTREE_GLYPH),
+        "primary checkout must use the git/branch glyph, not the linked mark:\n{primary}\n{frame}"
+    );
+    assert!(
+        !primary.contains(OPEN_VS_DEFAULT),
+        "primary (main) worktree must not paint the open-vs-default tree:\n{primary}\n{frame}"
+    );
+    assert!(
+        linked.contains(OPEN_VS_DEFAULT),
+        "linked worktree keeps the open-vs-default mark:\n{linked}\n{frame}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
