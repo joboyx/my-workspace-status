@@ -834,6 +834,15 @@ fn file_segments(change: &FileChange, tree_mode: bool, ascii: bool) -> NodeSegme
     NodeSegments { segments, trailing }
 }
 
+/// Open-vs-default / merged-into-default sit on linked extras only.
+fn linked_merge_mark(node: &TreeNode, ascii: bool) -> &'static str {
+    if node.chrome.checkout_kind == Some(CheckoutKind::Linked) {
+        tui_merge_mark(ascii, node.chrome.merged_into_default)
+    } else {
+        ""
+    }
+}
+
 fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegments {
     let name_role = if node.ignored {
         SegRole::Muted
@@ -888,7 +897,7 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
         &node.chrome.branch,
         node.chrome.default_branch_override.as_deref(),
     );
-    let merge = tui_merge_mark(ascii, node.chrome.merged_into_default);
+    let merge = linked_merge_mark(node, ascii);
     let branch_role = if off_default {
         SegRole::BranchFeature
     } else {
@@ -966,7 +975,7 @@ fn checkout_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeS
         &node.chrome.branch,
         node.chrome.default_branch_override.as_deref(),
     );
-    let merge = tui_merge_mark(ascii, node.chrome.merged_into_default);
+    let merge = linked_merge_mark(node, ascii);
     let branch_role = if off_default {
         SegRole::BranchFeature
     } else {
@@ -1418,6 +1427,42 @@ mod tests {
         assert_eq!(
             primary_row.segments.first().map(|s| s.text.trim()),
             Some(icon_branch(true)),
+        );
+        assert!(
+            !primary_row.label.contains('o'),
+            "primary checkout omits the open-vs-default mark, got {}",
+            primary_row.label
+        );
+    }
+
+    #[test]
+    fn primary_checkout_omits_open_vs_default_mark() {
+        let mut primary = dirty_repo("app", &["src/a.ts"]);
+        primary.branch = "feature/auth-refresh".into();
+        primary.merged_into_default = Some(false);
+        let mut linked = repo("app/.worktrees/feat", true, true);
+        linked.branch = "feature/side-leaf".into();
+        linked.merged_into_default = Some(false);
+        let built = build_workspace_snapshot(&[primary, linked], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let primary_row = rows
+            .iter()
+            .find(|r| r.id == "checkout:app")
+            .expect("primary checkout");
+        let linked_row = rows
+            .iter()
+            .find(|r| r.id == "checkout:app/.worktrees/feat")
+            .expect("linked checkout");
+        assert!(
+            !primary_row.label.contains('o'),
+            "primary must not paint open-vs-default, got {}",
+            primary_row.label
+        );
+        assert!(
+            linked_row.label.contains('o'),
+            "linked extra keeps open-vs-default, got {}",
+            linked_row.label
         );
     }
 

@@ -1629,9 +1629,7 @@ fn default_main_worktree_row_omits_pinetree_linked_keeps_mark() {
     let primary = frame
         .lines()
         .map(tree_pane)
-        .find(|line| {
-            line.contains(PRIMARY_CHECKOUT_GLYPH) && line.contains("feature/primary-open")
-        })
+        .find(|line| line.contains(PRIMARY_CHECKOUT_GLYPH) && line.contains("feature/primary-open"))
         .unwrap_or("");
     let linked = frame
         .lines()
