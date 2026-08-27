@@ -1,7 +1,7 @@
 //! Crossterm event loop. First paint happens before any network fetch.
 
 use std::collections::BTreeSet;
-use std::io::{self, stdout};
+use std::io::{self, stdout, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -82,7 +82,7 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
     let mut state = AppState::new(opts.cwd.clone(), opts.snapshot.clone(), ascii);
     enable_raw_mode().map_err(|_| 1u8)?;
     let mut out = stdout();
-    if execute!(out, EnterAlternateScreen, EnableMouseCapture).is_err() {
+    if execute!(out, EnterAlternateScreen).is_err() || enable_mouse_capture(&mut out).is_err() {
         let _ = disable_raw_mode();
         return Err(1);
     }
@@ -1676,10 +1676,25 @@ fn drain_pending_events() {
     }
 }
 
+/// Enable mouse capture, then turn off SGR any-event tracking (DECSET 1003).
+///
+/// Crossterm's [`EnableMouseCapture`] also sets 1003. Trackpad horizontal
+/// scroll then arrives as `CSI < 99 ; col ; row M` (wheel-right plus the
+/// motion bit). Crossterm 0.28 drops that report, so the TTY never pans.
+/// Button-event tracking (1002) still reports clicks, wheel, and splitter
+/// drag. With 1003 off, the terminal emits clean wheel-right (`67`) that
+/// the TTY parser already maps to a horizontal pan. Headless e2e still
+/// parses SGR 99 as pan (the same bytes a 1003 terminal sends).
+fn enable_mouse_capture(out: &mut impl Write) -> io::Result<()> {
+    execute!(out, EnableMouseCapture)?;
+    write!(out, "\x1b[?1003l")?;
+    out.flush()
+}
+
 fn sync_mouse_capture(enabled: bool) {
     let mut out = stdout();
     if enabled {
-        let _ = execute!(out, EnableMouseCapture);
+        let _ = enable_mouse_capture(&mut out);
     } else {
         let _ = execute!(out, DisableMouseCapture);
     }
@@ -1692,7 +1707,8 @@ fn resume_tui(
     enable_raw_mode().map_err(|e| e.to_string())?;
     let mut out = stdout();
     if mouse_enabled {
-        execute!(out, EnterAlternateScreen, EnableMouseCapture).map_err(|e| e.to_string())?;
+        execute!(out, EnterAlternateScreen).map_err(|e| e.to_string())?;
+        enable_mouse_capture(&mut out).map_err(|e| e.to_string())?;
     } else {
         execute!(out, EnterAlternateScreen).map_err(|e| e.to_string())?;
     }

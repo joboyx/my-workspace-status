@@ -575,8 +575,8 @@ pub(crate) fn parse_sgr_mouse_report(seq: &[u8]) -> Option<Event> {
 /// Decode the SGR `Cb` field (button + modifier bits) the way xterm encodes it.
 ///
 /// Wheel left/right are buttons 6/7 (`Cb` 66/67). Shift+wheel is the
-/// vertical wheel plus bit 2 (`Cb` 68/69). Bit 5 is motion; crossterm 0.28
-/// drops wheel reports that include it.
+/// vertical wheel plus bit 2 (`Cb` 68/69). Bit 5 is motion; a wheel report
+/// that includes it is still a wheel (trackpad pan under DECSET 1003).
 fn sgr_button_kind(cb: u8) -> Option<(MouseEventKind, KeyModifiers)> {
     let button_number = (cb & 0b0000_0011) | ((cb & 0b1100_0000) >> 4);
     let dragging = cb & 0b0010_0000 == 0b0010_0000;
@@ -591,8 +591,8 @@ fn sgr_button_kind(cb: u8) -> Option<(MouseEventKind, KeyModifiers)> {
         (3, true) | (4, true) | (5, true) => MouseEventKind::Moved,
         (4, false) => MouseEventKind::ScrollUp,
         (5, false) => MouseEventKind::ScrollDown,
-        (6, false) => MouseEventKind::ScrollLeft,
-        (7, false) => MouseEventKind::ScrollRight,
+        (6, false) | (6, true) => MouseEventKind::ScrollLeft,
+        (7, false) | (7, true) => MouseEventKind::ScrollRight,
         _ => return None,
     };
     let mut modifiers = KeyModifiers::empty();
@@ -1093,10 +1093,16 @@ mod tests {
                 horizontal: true,
             }
         );
-        let motion_right = parse_sgr_mouse_report(&sgr_mouse_report(SGR_WHEEL_RIGHT_MOTION, 8, 4));
-        assert!(
-            motion_right.is_none(),
-            "crossterm 0.28 drops SGR 99 (wheel right + motion); the daily e2e must see that"
+        let motion_right =
+            parse_sgr_mouse_report(&sgr_mouse_report(SGR_WHEEL_RIGHT_MOTION, 8, 4)).unwrap();
+        assert_eq!(
+            event_to_action(&motion_right, normal(), false, false),
+            Action::ScrollWheel {
+                col: 8,
+                row: 4,
+                delta: 1,
+                horizontal: true,
+            }
         );
     }
 
