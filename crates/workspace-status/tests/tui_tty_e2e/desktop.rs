@@ -197,11 +197,10 @@ impl DesktopSession {
         thread::sleep(Duration::from_millis(200));
     }
 
-    /// VTE wheel right via XTEST. No `--window` on warp or click.
+    /// XTEST wheel right. No `--window` on warp or click.
     ///
-    /// `--window` uses XSendEvent. VTE ignores that, so a later `click 7`
-    /// would fire at the real pointer instead of the tree cell — and an
-    /// earlier desktop "pass" never panned.
+    /// `--window` uses XSendEvent. Real terminals ignore that, so a later
+    /// `click 7` would fire at the real pointer instead of the tree cell.
     pub fn wheel_right_at_cell(&self, col: u16, row: u16, times: u32) {
         self.pointer_to_cell(col, row);
         for _ in 0..times {
