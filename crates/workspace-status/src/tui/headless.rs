@@ -14,12 +14,13 @@ use crate::snapshot::WorkspaceSnapshot;
 
 use super::action::{Action, Effect};
 use super::app::{apply_headless_effect, collect_full_snapshot, TuiOpts};
-use super::keys::{
-    event_to_action_with, parse_sgr_mouse_report, sgr_mouse_report, SGR_SHIFT_WHEEL_DOWN,
-    SGR_WHEEL_RIGHT, SGR_WHEEL_RIGHT_MOTION,
-};
+use super::keys::event_to_action_with;
 use super::render::draw;
 use super::state::{AppState, FocusPane};
+use super::tty::{
+    decode_sgr_mouse, sgr_mouse_report, SGR_SHIFT_WHEEL_DOWN, SGR_WHEEL_RIGHT,
+    SGR_WHEEL_RIGHT_MOTION,
+};
 
 /// Default TestBackend size. Wide enough for the tree + graph / diff split.
 const WIDTH: u16 = 140;
@@ -324,8 +325,8 @@ impl HeadlessTui {
 
     /// Trackpad hscroll as a TTY SGR wheel-right report (`CSI < 67 ; C ; R M`).
     ///
-    /// `col` / `row` are 0-based cells. The bytes are 1-based, then parsed
-    /// the same way `event::read` delivers them on a real terminal.
+    /// `col` / `row` are 0-based cells. The bytes are 1-based, then decoded
+    /// with [`super::tty::decode_sgr_mouse`] (same contract as `read_event`).
     pub fn mouse_sgr_scroll_right(&mut self, col: u16, row: u16) {
         self.send_sgr_mouse(&sgr_mouse_report(SGR_WHEEL_RIGHT, col, row));
     }
@@ -335,12 +336,13 @@ impl HeadlessTui {
         self.send_sgr_mouse(&sgr_mouse_report(SGR_SHIFT_WHEEL_DOWN, col, row));
     }
 
-    /// Dispatch one parsed SGR mouse report through the real keymap.
+    /// Dispatch one decoded SGR mouse report through the real keymap.
     ///
-    /// Unknown reports are dropped, matching `event::read` skipping a
-    /// crossterm parse error (the TTY never sees those bytes as an `Event`).
+    /// Unknown reports are dropped, matching `read_event` / `event::read`
+    /// skipping a crossterm parse error (the TTY never sees those bytes as
+    /// an `Event`).
     pub fn send_sgr_mouse(&mut self, seq: &[u8]) {
-        let Some(event) = parse_sgr_mouse_report(seq) else {
+        let Some(event) = decode_sgr_mouse(seq) else {
             return;
         };
         self.dispatch_event(event);

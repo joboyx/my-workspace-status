@@ -513,101 +513,6 @@ fn wheel_action(mouse: MouseEvent, delta: i32, horizontal: bool) -> Action {
     }
 }
 
-/// xterm SGR button for wheel right (trackpad hscroll).
-pub(crate) const SGR_WHEEL_RIGHT: u8 = 67;
-/// xterm SGR button for Shift+wheel down (common trackpad hscroll encoding).
-pub(crate) const SGR_SHIFT_WHEEL_DOWN: u8 = 69;
-/// Wheel right with the 1003 motion bit (`67 | 32`). Some terminals set this
-/// during a trackpad pan while any-event mouse tracking is on.
-pub(crate) const SGR_WHEEL_RIGHT_MOTION: u8 = 67 | 32;
-
-/// Encode one xterm SGR mouse report (`CSI < Cb ; Cx ; Cy M`).
-///
-/// `col` / `row` are 0-based cells, matching crossterm. The sequence uses
-/// 1-based coordinates, which is what a TTY sends for trackpad hscroll.
-pub(crate) fn sgr_mouse_report(button: u8, col: u16, row: u16) -> Vec<u8> {
-    format!(
-        "\x1b[<{button};{};{}M",
-        col.saturating_add(1),
-        row.saturating_add(1)
-    )
-    .into_bytes()
-}
-
-/// Parse one xterm SGR mouse report into a crossterm `Event`.
-///
-/// This is the same encoding `event::read` sees on a real TTY after
-/// `EnableMouseCapture` (DECSET 1006). Headless tests must go through it
-/// instead of constructing `MouseEventKind::ScrollRight` in memory.
-pub(crate) fn parse_sgr_mouse_report(seq: &[u8]) -> Option<Event> {
-    if seq.len() < 8 || !seq.starts_with(&[0x1b, b'[', b'<']) {
-        return None;
-    }
-    let last = *seq.last()?;
-    if last != b'M' && last != b'm' {
-        return None;
-    }
-    let body = std::str::from_utf8(&seq[3..seq.len() - 1]).ok()?;
-    let mut parts = body.split(';');
-    let cb: u8 = parts.next()?.parse().ok()?;
-    let cx: u16 = parts.next()?.parse().ok()?;
-    let cy: u16 = parts.next()?.parse().ok()?;
-    if cx == 0 || cy == 0 {
-        return None;
-    }
-    let (kind, modifiers) = sgr_button_kind(cb)?;
-    let kind = if last == b'm' {
-        match kind {
-            MouseEventKind::Down(button) => MouseEventKind::Up(button),
-            other => other,
-        }
-    } else {
-        kind
-    };
-    Some(Event::Mouse(MouseEvent {
-        kind,
-        column: cx.saturating_sub(1),
-        row: cy.saturating_sub(1),
-        modifiers,
-    }))
-}
-
-/// Decode the SGR `Cb` field (button + modifier bits) the way xterm encodes it.
-///
-/// Wheel left/right are buttons 6/7 (`Cb` 66/67). Shift+wheel is the
-/// vertical wheel plus bit 2 (`Cb` 68/69). Bit 5 is motion; a wheel report
-/// that includes it is still a wheel (trackpad pan under DECSET 1003).
-fn sgr_button_kind(cb: u8) -> Option<(MouseEventKind, KeyModifiers)> {
-    let button_number = (cb & 0b0000_0011) | ((cb & 0b1100_0000) >> 4);
-    let dragging = cb & 0b0010_0000 == 0b0010_0000;
-    let kind = match (button_number, dragging) {
-        (0, false) => MouseEventKind::Down(MouseButton::Left),
-        (1, false) => MouseEventKind::Down(MouseButton::Middle),
-        (2, false) => MouseEventKind::Down(MouseButton::Right),
-        (0, true) => MouseEventKind::Drag(MouseButton::Left),
-        (1, true) => MouseEventKind::Drag(MouseButton::Middle),
-        (2, true) => MouseEventKind::Drag(MouseButton::Right),
-        (3, false) => MouseEventKind::Up(MouseButton::Left),
-        (3, true) | (4, true) | (5, true) => MouseEventKind::Moved,
-        (4, false) => MouseEventKind::ScrollUp,
-        (5, false) => MouseEventKind::ScrollDown,
-        (6, false) | (6, true) => MouseEventKind::ScrollLeft,
-        (7, false) | (7, true) => MouseEventKind::ScrollRight,
-        _ => return None,
-    };
-    let mut modifiers = KeyModifiers::empty();
-    if cb & 0b0000_0100 != 0 {
-        modifiers |= KeyModifiers::SHIFT;
-    }
-    if cb & 0b0000_1000 != 0 {
-        modifiers |= KeyModifiers::ALT;
-    }
-    if cb & 0b0001_0000 != 0 {
-        modifiers |= KeyModifiers::CONTROL;
-    }
-    Some((kind, modifiers))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1072,7 +977,11 @@ mod tests {
 
     #[test]
     fn sgr_trackpad_hscroll_bytes_map_to_horizontal_pan() {
-        let right = parse_sgr_mouse_report(&sgr_mouse_report(SGR_WHEEL_RIGHT, 8, 4)).unwrap();
+        use crate::tui::tty::{
+            decode_sgr_mouse, sgr_mouse_report, SGR_SHIFT_WHEEL_DOWN, SGR_WHEEL_RIGHT,
+            SGR_WHEEL_RIGHT_MOTION,
+        };
+        let right = decode_sgr_mouse(&sgr_mouse_report(SGR_WHEEL_RIGHT, 8, 4)).unwrap();
         assert_eq!(
             event_to_action(&right, normal(), false, false),
             Action::ScrollWheel {
@@ -1082,8 +991,7 @@ mod tests {
                 horizontal: true,
             }
         );
-        let shift_wheel =
-            parse_sgr_mouse_report(&sgr_mouse_report(SGR_SHIFT_WHEEL_DOWN, 8, 4)).unwrap();
+        let shift_wheel = decode_sgr_mouse(&sgr_mouse_report(SGR_SHIFT_WHEEL_DOWN, 8, 4)).unwrap();
         assert_eq!(
             event_to_action(&shift_wheel, normal(), false, false),
             Action::ScrollWheel {
@@ -1093,16 +1001,9 @@ mod tests {
                 horizontal: true,
             }
         );
-        let motion_right =
-            parse_sgr_mouse_report(&sgr_mouse_report(SGR_WHEEL_RIGHT_MOTION, 8, 4)).unwrap();
-        assert_eq!(
-            event_to_action(&motion_right, normal(), false, false),
-            Action::ScrollWheel {
-                col: 8,
-                row: 4,
-                delta: 1,
-                horizontal: true,
-            }
+        assert!(
+            decode_sgr_mouse(&sgr_mouse_report(SGR_WHEEL_RIGHT_MOTION, 8, 4)).is_none(),
+            "live event::read drops SGR 99; keymap must not see a kinder decode"
         );
     }
 

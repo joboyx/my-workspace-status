@@ -928,11 +928,11 @@ fn tree_mouse_hscroll_does_not_move_focused_row() {
     let _ = fs::remove_dir_all(root);
 }
 
-/// Operator path: pointer over the left tree, a long path that is actually
-/// clipped, trackpad hscroll as TTY SGR bytes — including the 1003 motion-bit
-/// form (`CSI < 99 ; C ; R M`) that `EnableMouseCapture` makes terminals
-/// send. Constructed `ScrollRight` / Shift+wheel keys are not this path.
-/// Focus stays on a different row; the hovered path pans.
+/// Trackpad hscroll as TTY SGR bytes through the same decoder the live loop
+/// uses (`tty::decode_sgr_mouse`, matching crossterm 0.28 `event::read`).
+/// Motion-bit wheel (`CSI < 99`) is dropped, so it must not pan. Wheel-right
+/// (`CSI < 67`) pans the tree without changing the focused row. Click still
+/// selects; `h` / `l` still fold.
 #[test]
 fn tree_trackpad_sgr_hscroll_pans_without_stealing_focus() {
     let (root, workspace) = daily_workspace();
@@ -972,7 +972,30 @@ fn tree_trackpad_sgr_hscroll_pans_without_stealing_focus() {
     assert_eq!(
         tui.cursor_id(),
         focused,
-        "trackpad hscroll over a long tree path must not steal the focused row"
+        "dropped SGR 99 over a long tree path must not steal the focused row"
+    );
+    assert_eq!(
+        tui.right_is_diff(),
+        was_diff,
+        "dropped SGR 99 must not load a different right pane"
+    );
+    assert_eq!(
+        tui.left_col_offset(),
+        0,
+        "crossterm 0.28 event::read drops SGR 99; the tree must not pan"
+    );
+    let ignored = tui.frame();
+    let ignored_left = left_pane(&ignored, tui.pane_right_x());
+    assert_contains(&ignored_left, "very-long");
+    assert_absent(&ignored_left, "TAIL99");
+
+    for _ in 0..40 {
+        tui.mouse_sgr_scroll_right(col, row);
+    }
+    assert_eq!(
+        tui.cursor_id(),
+        focused,
+        "SGR wheel right over a long tree path must not steal the focused row"
     );
     assert_eq!(
         tui.right_is_diff(),
