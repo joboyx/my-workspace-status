@@ -42,10 +42,6 @@ impl DesktopSession {
         Self::open_with(workspace, COLS, ROWS, Emulator::Xfce)
     }
 
-    pub fn open_size(workspace: &Path, cols: u16, rows: u16) -> Self {
-        Self::open_with(workspace, cols, rows, Emulator::Xfce)
-    }
-
     /// xterm encodes XTEST button 7 as SGR 67. VTE does not.
     pub fn open_xterm_size(workspace: &Path, cols: u16, rows: u16) -> Self {
         Self::open_with(workspace, cols, rows, Emulator::Xterm)
