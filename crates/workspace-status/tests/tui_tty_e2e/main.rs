@@ -163,7 +163,7 @@ fn pty_tree_sgr_hscroll_pans_clipped_path() {
 }
 
 #[cfg(target_os = "linux")]
-mod desktop {
+mod xfce {
     use super::*;
     use crate::desktop::DesktopSession;
     use crate::harness::{assert_tree_clipped_long_path, left_tree, tree_row_containing};
