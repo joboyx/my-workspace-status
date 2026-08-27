@@ -1074,8 +1074,17 @@ impl AppState {
                 };
                 Effect::None
             }
-            Action::ScrollWheel { col, row: _, delta } => {
+            Action::ScrollWheel {
+                col,
+                row: _,
+                delta,
+                horizontal,
+            } => {
                 if !self.mouse_enabled {
+                    return Effect::None;
+                }
+                if horizontal {
+                    self.mouse_pan(col, delta);
                     return Effect::None;
                 }
                 if col >= self.layout.right_x {
@@ -2159,6 +2168,18 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// Mouse hscroll: pan the pane under the pointer without moving the
+    /// focused row. The workspace tree matches the right pane — scroll does
+    /// not steal the cursor. Click still selects.
+    fn mouse_pan(&mut self, col: u16, delta: i32) {
+        if col < self.layout.right_x && self.drill.is_graph() {
+            let max = self.tree_max_col();
+            self.left_col_offset = apply_pan(self.left_col_offset, delta, max);
+            return;
+        }
+        self.pan_focused(delta);
     }
 
     fn tree_max_col(&self) -> usize {
@@ -6601,6 +6622,87 @@ mod tests {
             graph.right_col_offset > 0,
             "h/l on a focused graph should pan a long subject"
         );
+    }
+
+    #[test]
+    fn tree_mouse_hscroll_pans_without_moving_cursor() {
+        let mut snap = repo("app", true);
+        snap.changes = vec![FileChange {
+            path: format!("deep/nested/{}/tail.rs", "x".repeat(40)),
+            staged_status: None,
+            unstaged_status: Some("M".into()),
+            untracked: false,
+            old_path: None,
+        }];
+        let snapshot = build_workspace_snapshot(&[snap], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        focus_file(&mut app, "tail.rs");
+        app.focus = FocusPane::Left;
+        app.layout.tree_width = 16;
+        app.layout.right_x = 40;
+        let cursor = app.cursor;
+        let id = app.rows[cursor].id.clone();
+        assert_eq!(app.left_col_offset, 0);
+
+        assert_eq!(
+            app.dispatch(Action::ScrollWheel {
+                col: 8,
+                row: 4,
+                delta: 4,
+                horizontal: true,
+            }),
+            Effect::None
+        );
+        assert_eq!(app.cursor, cursor, "hscroll must not move the tree cursor");
+        assert_eq!(app.rows[app.cursor].id, id);
+        assert_eq!(app.focus, FocusPane::Left);
+        assert!(
+            app.left_col_offset > 0,
+            "tree mouse hscroll should pan a long path"
+        );
+
+        app.focus = FocusPane::Right;
+        let panned = app.left_col_offset;
+        app.dispatch(Action::ScrollWheel {
+            col: 8,
+            row: 4,
+            delta: 2,
+            horizontal: true,
+        });
+        assert_eq!(app.cursor, cursor);
+        assert_eq!(
+            app.focus,
+            FocusPane::Right,
+            "hscroll must not steal pane focus"
+        );
+        assert!(
+            app.left_col_offset >= panned,
+            "hscroll over the tree pans the tree even when the right pane is focused"
+        );
+
+        app.focus = FocusPane::Left;
+        let after_pan = app.cursor;
+        app.dispatch(Action::ScrollWheel {
+            col: 8,
+            row: 4,
+            delta: -1,
+            horizontal: false,
+        });
+        assert_ne!(
+            app.cursor, after_pan,
+            "vertical wheel over the tree still moves the cursor"
+        );
+
+        let mut fold = AppState::new(
+            PathBuf::from("/tmp"),
+            build_workspace_snapshot(&[repo("app", true)], &[], false, &[]),
+            true,
+        );
+        focus_repo(&mut fold, "app");
+        fold.dispatch(Action::FoldClose);
+        assert!(fold.folds.contains("repo:app"));
+        fold.dispatch(Action::FoldOpen);
+        assert!(!fold.folds.contains("repo:app"));
     }
 
     #[test]

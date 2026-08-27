@@ -91,7 +91,10 @@ pub fn action_triggers_graph_autoload(action: &Action) -> bool {
             | Action::SearchPrev
             | Action::FocusRight
             | Action::NavEnter
-            | Action::ScrollWheel { .. }
+            | Action::ScrollWheel {
+                horizontal: false,
+                ..
+            }
             | Action::Click { .. }
     )
 }
@@ -118,6 +121,18 @@ mod tests {
         assert!(action_triggers_graph_autoload(&Action::Move(1)));
         assert!(action_triggers_graph_autoload(&Action::MoveToEnd));
         assert!(action_triggers_graph_autoload(&Action::PageMove(-1)));
+        assert!(action_triggers_graph_autoload(&Action::ScrollWheel {
+            col: 1,
+            row: 1,
+            delta: 1,
+            horizontal: false,
+        }));
+        assert!(!action_triggers_graph_autoload(&Action::ScrollWheel {
+            col: 1,
+            row: 1,
+            delta: 1,
+            horizontal: true,
+        }));
     }
 
     #[test]
@@ -168,7 +183,8 @@ mod tests {
             classify_busy_action(&Action::ScrollWheel {
                 col: 4,
                 row: 8,
-                delta: -1
+                delta: -1,
+                horizontal: false,
             }),
             BusyAction::Handle
         );

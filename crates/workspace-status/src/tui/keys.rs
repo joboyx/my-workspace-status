@@ -371,19 +371,25 @@ fn mouse_to_action(mouse: MouseEvent) -> Action {
             row: mouse.row,
         },
         MouseEventKind::Up(MouseButton::Left) => Action::Release,
-        MouseEventKind::ScrollDown => Action::ScrollWheel {
-            col: mouse.column,
-            row: mouse.row,
-            delta: 1,
-        },
-        MouseEventKind::ScrollUp => Action::ScrollWheel {
-            col: mouse.column,
-            row: mouse.row,
-            delta: -1,
-        },
-        MouseEventKind::ScrollLeft => Action::PanDiff(-1),
-        MouseEventKind::ScrollRight => Action::PanDiff(1),
+        MouseEventKind::ScrollDown => wheel_action(mouse, 1, false),
+        MouseEventKind::ScrollUp => wheel_action(mouse, -1, false),
+        MouseEventKind::ScrollLeft => wheel_action(mouse, -1, true),
+        MouseEventKind::ScrollRight => wheel_action(mouse, 1, true),
         _ => Action::None,
+    }
+}
+
+/// Vertical wheel, or horizontal pan (wheel left/right / Shift+wheel).
+///
+/// Many terminals encode trackpad hscroll as Shift+wheel rather than
+/// `ScrollLeft` / `ScrollRight`. Both must pan without moving the focused
+/// row on the workspace tree.
+fn wheel_action(mouse: MouseEvent, delta: i32, horizontal: bool) -> Action {
+    Action::ScrollWheel {
+        col: mouse.column,
+        row: mouse.row,
+        delta,
+        horizontal: horizontal || mouse.modifiers.contains(KeyModifiers::SHIFT),
     }
 }
 
@@ -579,11 +585,15 @@ mod tests {
     }
 
     fn mouse(kind: MouseEventKind, col: u16, row: u16) -> Event {
+        mouse_mods(kind, col, row, KeyModifiers::NONE)
+    }
+
+    fn mouse_mods(kind: MouseEventKind, col: u16, row: u16, modifiers: KeyModifiers) -> Event {
         Event::Mouse(MouseEvent {
             kind,
             column: col,
             row,
-            modifiers: KeyModifiers::NONE,
+            modifiers,
         })
     }
 
@@ -619,6 +629,80 @@ mod tests {
                 false
             ),
             Action::None
+        );
+    }
+
+    #[test]
+    fn mouse_hscroll_and_shift_wheel_map_to_horizontal_pan() {
+        assert_eq!(
+            event_to_action(
+                &mouse(MouseEventKind::ScrollLeft, 8, 4),
+                normal(),
+                false,
+                false
+            ),
+            Action::ScrollWheel {
+                col: 8,
+                row: 4,
+                delta: -1,
+                horizontal: true,
+            }
+        );
+        assert_eq!(
+            event_to_action(
+                &mouse(MouseEventKind::ScrollRight, 8, 4),
+                normal(),
+                false,
+                false
+            ),
+            Action::ScrollWheel {
+                col: 8,
+                row: 4,
+                delta: 1,
+                horizontal: true,
+            }
+        );
+        assert_eq!(
+            event_to_action(
+                &mouse_mods(MouseEventKind::ScrollUp, 8, 4, KeyModifiers::SHIFT),
+                normal(),
+                false,
+                false
+            ),
+            Action::ScrollWheel {
+                col: 8,
+                row: 4,
+                delta: -1,
+                horizontal: true,
+            }
+        );
+        assert_eq!(
+            event_to_action(
+                &mouse_mods(MouseEventKind::ScrollDown, 8, 4, KeyModifiers::SHIFT),
+                normal(),
+                false,
+                false
+            ),
+            Action::ScrollWheel {
+                col: 8,
+                row: 4,
+                delta: 1,
+                horizontal: true,
+            }
+        );
+        assert_eq!(
+            event_to_action(
+                &mouse(MouseEventKind::ScrollDown, 8, 4),
+                normal(),
+                false,
+                false
+            ),
+            Action::ScrollWheel {
+                col: 8,
+                row: 4,
+                delta: 1,
+                horizontal: false,
+            }
         );
     }
 

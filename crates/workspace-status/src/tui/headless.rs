@@ -299,6 +299,36 @@ impl HeadlessTui {
         self.send_mouse(MouseEventKind::Up(MouseButton::Left), 0, 0);
     }
 
+    /// Vertical wheel down through the real keymap.
+    pub fn mouse_scroll_down(&mut self, col: u16, row: u16) {
+        self.send_mouse(MouseEventKind::ScrollDown, col, row);
+    }
+
+    /// Horizontal wheel right through the real keymap.
+    pub fn mouse_scroll_right(&mut self, col: u16, row: u16) {
+        self.send_mouse(MouseEventKind::ScrollRight, col, row);
+    }
+
+    /// Shift+wheel down (common terminal encoding of trackpad hscroll).
+    pub fn mouse_shift_scroll_down(&mut self, col: u16, row: u16) {
+        self.send_mouse_mods(MouseEventKind::ScrollDown, col, row, KeyModifiers::SHIFT);
+    }
+
+    /// Inner tree pane origin x from the last paint.
+    pub fn tree_inner_x(&self) -> u16 {
+        self.state.layout.tree_x
+    }
+
+    /// Inner tree pane origin y from the last paint.
+    pub fn tree_inner_y(&self) -> u16 {
+        self.state.layout.tree_y
+    }
+
+    /// Horizontal pan of the left list (`left_col_offset`).
+    pub fn left_col_offset(&self) -> u16 {
+        self.state.left_col_offset
+    }
+
     /// Current graph list skip (`graph_scroll`).
     pub fn graph_scroll(&self) -> u16 {
         self.state.graph_scroll
@@ -319,6 +349,16 @@ impl HeadlessTui {
     }
 
     fn send_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) {
+        self.send_mouse_mods(kind, col, row, KeyModifiers::NONE);
+    }
+
+    fn send_mouse_mods(
+        &mut self,
+        kind: MouseEventKind,
+        col: u16,
+        row: u16,
+        modifiers: KeyModifiers,
+    ) {
         if self.quit {
             return;
         }
@@ -326,7 +366,7 @@ impl HeadlessTui {
             kind,
             column: col,
             row,
-            modifiers: KeyModifiers::NONE,
+            modifiers,
         });
         self.dispatch_event(event);
     }
