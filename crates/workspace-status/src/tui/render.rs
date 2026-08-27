@@ -3,7 +3,10 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Widget, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, StatefulWidget, Widget, Wrap,
+};
 use ratatui::Frame;
 use workspace_status_graph::{
     graph_chrome_budget, graph_col_max, graph_hscroll_visible, graph_vscroll_visible, paint_model,
@@ -736,7 +739,7 @@ fn commit_file_label_matches(label: &str, query: &str) -> bool {
     !q.is_empty() && label.to_lowercase().contains(&q)
 }
 
-fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -744,8 +747,13 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let path = state.diff_header_path();
     let effective = effective_diff_mode(state.diff_mode, area.width);
     let rows = state.current_diff_rows();
-    let body_h = area.height.saturating_sub(1).max(1) as usize;
-    let max_start = rows.len().saturating_sub(body_h);
+    let vscroll = graph_vscroll_visible(state.diff_scroll);
+    let hscroll = graph_hscroll_visible(state.diff_col_offset);
+    let v_cols = u16::from(vscroll);
+    let h_rows = u16::from(hscroll);
+    let list_h = area.height.saturating_sub(1).max(1);
+    let line_h = list_h.saturating_sub(h_rows).max(1) as usize;
+    let max_start = rows.len().saturating_sub(line_h);
     let skip = (state.diff_scroll as usize).min(max_start);
     let mode_label = diff_pane_mode_label(state.diff_mode, effective);
     let header = diff_pane_header(
@@ -754,7 +762,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         state.full_context_active(),
         state.diff_col_offset,
         skip,
-        body_h,
+        line_h,
         rows.len(),
     );
     let title = if path.is_empty() {
@@ -786,7 +794,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         x: area.x,
         y: area.y.saturating_add(1),
         width: area.width,
-        height: area.height.saturating_sub(1),
+        height: list_h,
     };
     if rows.is_empty() {
         let msg = if path.is_empty() {
@@ -801,17 +809,19 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         return;
     }
     let gutter = gutter_width(&rows);
-    let split = is_side_by_side_split(state.diff_mode, area.width);
+    let split = is_side_by_side_split(state.diff_mode, area.width.saturating_sub(v_cols));
     let off = state.diff_col_offset as usize;
+    let line_width = area.width.saturating_sub(v_cols).max(1);
+    let content_len = rows.len();
     let painted: Vec<Line> = rows
         .iter()
         .enumerate()
         .skip(skip)
-        .take(body.height as usize)
+        .take(line_h)
         .map(|(i, row)| {
             paint_diff_row(
                 row,
-                area.width,
+                line_width,
                 gutter,
                 split,
                 off,
@@ -820,7 +830,57 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             )
         })
         .collect();
-    frame.render_widget(Paragraph::new(painted), body);
+    let lines_area = Rect {
+        x: body.x,
+        y: body.y,
+        width: line_width,
+        height: line_h as u16,
+    };
+    frame.render_widget(Paragraph::new(painted), lines_area);
+    let buf = frame.buffer_mut();
+    if vscroll && body.height > 0 && area.width > 0 {
+        state.layout.diff_scrollbar_x = Some(area.x.saturating_add(area.width.saturating_sub(1)));
+        state.layout.diff_scrollbar_y = body.y;
+        state.layout.diff_scrollbar_height = body.height;
+        let mut sb_state = ScrollbarState::new(content_len.saturating_sub(1))
+            .position(skip.min(content_len.saturating_sub(1)));
+        let sb_area = Rect {
+            x: area.x.saturating_add(area.width.saturating_sub(1)),
+            y: body.y,
+            width: 1,
+            height: body.height,
+        };
+        StatefulWidget::render(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None),
+            sb_area,
+            buf,
+            &mut sb_state,
+        );
+    }
+    let col_max = state.diff_pan_max();
+    if hscroll && col_max > 0 && body.height > 0 && area.width > 0 {
+        state.layout.diff_hscrollbar_y = Some(body.y.saturating_add(body.height.saturating_sub(1)));
+        state.layout.diff_hscrollbar_x = area.x;
+        state.layout.diff_hscrollbar_width = area.width.saturating_sub(v_cols).max(1);
+        let mut sb_state =
+            ScrollbarState::new(col_max).position((state.diff_col_offset as usize).min(col_max));
+        let sb_area = Rect {
+            x: area.x,
+            y: body.y.saturating_add(body.height.saturating_sub(1)),
+            width: area.width.saturating_sub(v_cols).max(1),
+            height: 1,
+        };
+        StatefulWidget::render(
+            Scrollbar::new(ScrollbarOrientation::HorizontalBottom)
+                .begin_symbol(None)
+                .end_symbol(None),
+            sb_area,
+            buf,
+            &mut sb_state,
+        );
+    }
 }
 
 fn paint_diff_row(

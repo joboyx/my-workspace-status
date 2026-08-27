@@ -60,8 +60,9 @@ pub enum Action {
     /// graph / diff viewport. Horizontal (wheel left/right, or Shift+wheel)
     /// pans the pane under the pointer without changing the focused row.
     /// Over the workspace tree that matches the right pane: scroll does not
-    /// steal the cursor. Click still selects. Keyboard `h` / `l` are
-    /// unchanged.
+    /// steal the cursor. When a file diff has long lines, trackpad hscroll
+    /// over the left pane pans that diff. Click still selects. Keyboard
+    /// `h` / `l` are unchanged.
     ScrollWheel {
         col: u16,
         row: u16,

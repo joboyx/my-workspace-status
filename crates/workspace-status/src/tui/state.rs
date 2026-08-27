@@ -1563,7 +1563,11 @@ impl AppState {
     }
 
     fn diff_body_height(&self) -> usize {
-        self.layout.diff_pane_height.saturating_sub(1).max(1) as usize
+        let h_bar = u16::from(self.diff_col_offset > 0);
+        self.layout
+            .diff_pane_height
+            .saturating_sub(1 + h_bar)
+            .max(1) as usize
     }
 
     fn diff_scroll_max(&self) -> usize {
@@ -2262,10 +2266,15 @@ impl AppState {
     /// Mouse hscroll: pan the pane under the pointer without moving the
     /// focused row. The workspace tree matches the right pane — scroll does
     /// not steal the cursor. Graph / diff under the pointer pan even when
-    /// the other pane holds keyboard focus. Click still selects.
+    /// the other pane holds keyboard focus. When a file diff has long lines,
+    /// trackpad hscroll over the left pane pans that diff (the line the
+    /// operator is reading) instead of a short tree label. Click still
+    /// selects.
     fn mouse_pan(&mut self, col: u16, delta: i32) {
         if col >= self.layout.right_x {
             self.pan_right_pane(delta);
+        } else if self.diff_can_pan() {
+            self.pan_diff_content(delta);
         } else {
             self.pan_left_pane(delta);
         }
@@ -2310,11 +2319,9 @@ impl AppState {
         graph_col_max(model, self.ascii, pane_width, self.graph_scroll > 0)
     }
 
-    fn pan_diff_content(&mut self, delta: i32) {
-        let rows = self.current_diff_rows();
-        let gutter = gutter_width(&rows);
+    fn diff_line_lens(&self) -> Vec<usize> {
         let mut lens = Vec::new();
-        for row in &rows {
+        for row in self.current_diff_rows() {
             if let DiffRow::Line { left, right } = row {
                 lens.push(left.text.chars().count());
                 if let Some(right) = right {
@@ -2322,9 +2329,24 @@ impl AppState {
                 }
             }
         }
-        let pane_w = self.layout.diff_pane_width.max(1) as usize;
-        let viewport = cell_code_width(pane_w, gutter);
-        let max = max_col_offset(&lens, viewport);
+        lens
+    }
+
+    /// Max `diff_col_offset` for the painted file diff (0 if it fits).
+    pub(crate) fn diff_pan_max(&self) -> usize {
+        let rows = self.current_diff_rows();
+        let gutter = gutter_width(&rows);
+        let v_cols = u16::from(self.diff_scroll > 0);
+        let pane_w = self.layout.diff_pane_width.saturating_sub(v_cols).max(1) as usize;
+        max_col_offset(&self.diff_line_lens(), cell_code_width(pane_w, gutter))
+    }
+
+    fn diff_can_pan(&self) -> bool {
+        (self.right_is_diff() || self.drill.is_diff()) && self.diff_pan_max() > 0
+    }
+
+    fn pan_diff_content(&mut self, delta: i32) {
+        let max = self.diff_pan_max();
         self.diff_col_offset = apply_pan(self.diff_col_offset, delta, max);
     }
 
@@ -6743,6 +6765,40 @@ mod tests {
         assert!(tree.folds.contains("repo:app"));
         tree.dispatch(Action::FoldOpen);
         assert!(!tree.folds.contains("repo:app"));
+    }
+
+    #[test]
+    fn mouse_hscroll_over_left_pane_pans_long_diff() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.focus = FocusPane::Left;
+        app.layout.right_x = 48;
+        app.layout.diff_pane_width = 8;
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            DiffContent::from_unified(format!("@@ -0,0 +1,1 @@\n+{}", "x".repeat(40))),
+        );
+        assert_eq!(app.diff_col_offset, 0);
+        assert_eq!(
+            app.dispatch(Action::ScrollWheel {
+                col: 8,
+                row: 4,
+                delta: 5,
+                horizontal: true,
+            }),
+            Effect::None
+        );
+        assert!(
+            app.diff_col_offset > 0,
+            "hscroll over the left pane must pan a long file diff"
+        );
+        assert_eq!(
+            app.focus,
+            FocusPane::Left,
+            "hscroll must not steal tree focus"
+        );
+        assert_eq!(app.left_col_offset, 0, "short tree labels stay unpanned");
     }
 
     #[test]

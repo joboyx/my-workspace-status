@@ -50,7 +50,7 @@ Default folds: ignored repos with children + the `no-updates` group. Non-ignored
 | 1 `Files` | Graph list | Commit detail + file tree |
 | 2 `Diff` | Commit-file list | Commit-scoped `DiffPane` |
 
-`list_focus_target` (`tui/state.rs`) is the focused list: depth 0 left → tree; depth 0 right / depth 1 left → graph; depth 1 right / depth 2 left → commit files; depth 2 right (and depth 0 file diffs) → none (diff scroll). `j`/`k`, fold, search, click, and vertical wheel follow that target. Mouse horizontal wheel (and Shift+wheel) pans the pane under the pointer without moving the focused row; the workspace tree matches the right pane. Trackpad hscroll is SGR `66`/`67`. Click still selects. Unshifted `h` / `l` still fold the tree.
+`list_focus_target` (`tui/state.rs`) is the focused list: depth 0 left → tree; depth 0 right / depth 1 left → graph; depth 1 right / depth 2 left → commit files; depth 2 right (and depth 0 file diffs) → none (diff scroll). `j`/`k`, fold, search, click, and vertical wheel follow that target. Mouse horizontal wheel (and Shift+wheel) pans the pane under the pointer without moving the focused row; the workspace tree matches the right pane. Trackpad hscroll is SGR `66`/`67`. When a file diff has long lines, that report over the left pane pans the diff; short tree paths still pan the tree when the painted diff fits. Click still selects. Unshifted `h` / `l` still fold the tree.
 
 | Focus / depth | Enter | Esc |
 | --- | --- | --- |
@@ -77,7 +77,7 @@ See [git-graph-topology.md](./git-graph-topology.md) and [graph.md](./graph.md).
 
 ## Actions and gates
 
-`tui/action.rs` is the single source of truth for which actions exist. `tui/tty.rs` enables mouse (click + button-event + SGR, never DECSET 1003) and decodes TTY SGR reports the way the live `event::read` loop does (`66`/`67` → `ScrollWheel { horizontal: true }`; motion-bit `98`/`99` dropped). `tui/keys.rs` maps crossterm events to `Action`. `tui/gates.rs` hides writes that the focused row / depth / pane must not run. `tui/ops.rs` resolves stage / unstage / revert file lists (`collect_write_files`) and bulk git targets (`op_targets` / `push_targets`).
+`tui/action.rs` is the single source of truth for which actions exist. `tui/tty.rs` enables mouse (click + button-event + SGR, never DECSET 1003) and decodes TTY SGR reports the way the live `event::read` loop does (`66`/`67` → `ScrollWheel { horizontal: true }`; motion-bit `98`/`99` dropped). `tui/keys.rs` maps crossterm events to `Action`. `tui/state.rs` `mouse_pan` routes a long file-diff pan when the pointer is over the left pane and the painted diff can pan; otherwise the left list pans. `tui/gates.rs` hides writes that the focused row / depth / pane must not run. `tui/ops.rs` resolves stage / unstage / revert file lists (`collect_write_files`) and bulk git targets (`op_targets` / `push_targets`).
 
 `stage` / `unstage` / `revert` resolve targets through `collect_write_files` (file / dir / checkout / flat repo). Family containers, workspace, and group yield no files. Revert opens a counted confirm; `y` discards tracked only, `Y` also deletes untracked via per-file `remove_untracked_file`. `r` reloads one checkout unless the focused row is workspace or `group:no-updates`.
 
