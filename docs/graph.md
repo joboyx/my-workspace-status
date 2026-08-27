@@ -36,7 +36,7 @@ vertical and horizontal scrollbars through `tui/split.rs` (`hit_split` /
 only when `scroll > 0`; the horizontal bar only when `col_offset > 0`.
 
 `GraphWidget::gutter_width` caps painted gutter columns. Topology still
-uses the full lane model. `GraphWidget::loading_older` paints
+uses the full lane model; every row shares the same left-aligned clip. `GraphWidget::loading_older` paints
 `loading older…` under the list. `GraphWidget::lane_colors` colours each
 gutter cell from `GraphCell.color_lane`; an empty slice uses
 `DEFAULT_LANE_COLORS`.
@@ -92,14 +92,14 @@ Do not flatten the footer to one colour.
 Then one gutter plus label per visible row. Commit and stash rows also
 paint a spacer line under the node (densify rails, or the stash spur).
 
-Each gutter cell is a styled span from `color_lane`. Adjacent cells with the same lane colour merge.
+Each gutter cell occupies one buffer column from `color_lane`. The widget writes the rail into a fixed-x region, then clips the label in the leftover columns, so wrapping or hiding the subject cannot shift the graph.
 
 The commit node line is subject-only. The spacer under it is
 `[refs…][pad][hash][ ][date][ ][author]`: branch / tag chips on the
 left (local + matching `origin/*` merge into one chip; unmatched remotes
 stay as `[origin/…]`), muted short hash / relative date / author on the
 right. Narrow panes drop hash, then date, then author, and keep refs.
-Relative dates: `just now` / `Nm` / `Nh` through 3 hours, then local `YYYY-MM-DD HH:MM` (operator timezone). Search still matches that painted clock and a stable UTC `YYYY-MM-DD HH:MM`. Narrow spacers keep painting a leftover **branch or tag** chip when part of its name still fits: truncate that name with `…` and keep the brackets (`[feat…]`). `[+N]` is only the count of chips that are **fully hidden** after the visible (full or truncated) chips — a merely truncated chip does not count toward `N`, and `[+N]` is omitted when nothing else is hidden (not muted `+N`). Overflow colour/bold still apply when `N > 0`. The spacer is capped to the pane width so the row does not grow with extra refs. Long subjects clip to the pane; `h` / `l` (and Shift+Left / Shift+Right) pan the label while the gutter stays put. The selection footer still lists every full ref.
+Relative dates: `just now` / `Nm` / `Nh` through 3 hours, then local `YYYY-MM-DD HH:MM` (operator timezone). Search still matches that painted clock and a stable UTC `YYYY-MM-DD HH:MM`. Narrow spacers keep painting a leftover **branch or tag** chip when part of its name still fits: truncate that name with `…` and keep the brackets (`[feat…]`). `[+N]` is only the count of chips that are **fully hidden** after the visible (full or truncated) chips — a merely truncated chip does not count toward `N`, and `[+N]` is omitted when nothing else is hidden (not muted `+N`). Overflow colour/bold still apply when `N > 0`. The spacer is capped to the pane width so the row does not grow with extra refs. Long subjects clip to the pane; `h` / `l` (and Shift+Left / Shift+Right) pan the label while the gutter stays put. When the gutter cap is tighter than topology, every row shares the same left-aligned clip (`clip_gutter_shared`) so vertical rails stay in the same columns. The selection footer still lists every full ref.
 The spacer is not a second selectable row; cursor, search, `j`/`k`,
 and click treat it as the parent commit.
 

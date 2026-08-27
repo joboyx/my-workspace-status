@@ -36,7 +36,10 @@ pub use format::{
     MetaCols, StashSpacerOpts, RELATIVE_DATE_LIMIT_SECS,
 };
 pub use glyphs::{GlyphSet, ASCII, CELL_W, UNICODE};
-pub use gutter::{graph_gutter_cap, resolve_graph_width, GUTTER_MAX_FRACTION, MIN_SUBJECT_FLOOR};
+pub use gutter::{
+    clip_gutter_shared, graph_gutter_cap, resolve_graph_width, GUTTER_MAX_FRACTION,
+    MIN_SUBJECT_FLOOR,
+};
 pub use lane_colors::{
     cells_to_spans, default_lane_colors, hex_color, lane_fg, DEFAULT_LANE_COLORS,
 };

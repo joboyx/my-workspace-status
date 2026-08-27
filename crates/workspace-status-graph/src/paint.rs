@@ -10,16 +10,14 @@ use crate::format::{
     CommitSpacerOpts, LabelKind, LabelPart, StashSpacerOpts,
 };
 use crate::glyphs::GlyphSet;
+use crate::gutter::clip_gutter_shared;
 use crate::layout::{layout_commits, LaidOutCommit};
 use crate::model::{GraphModel, GraphRow};
 use crate::stash::{
     apply_stash_join_cells, build_stash_rail_context, stash_leaf_rail_cells, stash_rail_cells,
     stem_down_rail_cells, StashRailContext,
 };
-use crate::topology::{
-    apply_head_node_glyph, blank_gutter, cells_text, pad_to_width, slice_cells_around_lane,
-    GraphCell,
-};
+use crate::topology::{apply_head_node_glyph, blank_gutter, cells_text, GraphCell};
 
 /// Options for [`paint_model_with`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -107,8 +105,7 @@ fn spacer_available(gutter: &[GraphCell], line_width: usize) -> usize {
     if gutter.is_empty() {
         return line_width;
     }
-    let gutter_cols = cells_text(gutter).chars().count();
-    line_width.saturating_sub(gutter_cols.saturating_add(1))
+    line_width.saturating_sub(gutter.len().saturating_add(1))
 }
 
 /// Paint the model into display lines (sync header is applied by the widget).
@@ -289,15 +286,7 @@ pub fn paint_model_with(
                     );
                 }
                 cells = apply_head_node_glyph(&cells, *is_head, glyphs);
-                let join_cols: Vec<usize> = stash_joins
-                    .get(&commit.id)
-                    .map(|lanes| lanes.iter().map(|l| l * crate::glyphs::CELL_W).collect())
-                    .unwrap_or_default();
-                if cells.len() > paint_width {
-                    cells = slice_cells_around_lane(&cells, paint_width, laid.lane, &join_cols);
-                } else {
-                    pad_to_width(&mut cells, paint_width);
-                }
+                cells = clip_gutter_shared(&cells, paint_width);
                 let label = format_label(row, glyphs);
                 out.push(PaintedLine {
                     gutter: cells,
