@@ -137,8 +137,9 @@ impl DesktopSession {
             .args(["windowactivate", "--sync", &self.wid])
             .stderr(Stdio::null())
             .status();
-        // XTEST warp + click (no `--window`). VTE ignores XSendEvent.
-        let (x, y) = self.cell_root_pixels(2, 1);
+        // XTEST warp + click on the status row (not a fold chevron). A click
+        // on the workspace header folds the tree and hides the long path.
+        let (x, y) = self.cell_root_pixels(4, self.rows.saturating_sub(1));
         let _ = Command::new("xdotool")
             .args(["mousemove", "--sync", &x.to_string(), &y.to_string()])
             .status();
