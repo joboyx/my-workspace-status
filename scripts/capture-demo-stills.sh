@@ -100,6 +100,8 @@ write_helpers() {
 unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE
 export WS_STATUS_WATCH_MS=0
 export WS_STATUS_FETCH_MS=0
+# Seed timestamps are Asia/Manila; pin TZ so stills match that clock.
+export TZ=Asia/Manila
 export TERM=xterm-256color
 export COLORTERM=truecolor
 export NO_AT_BRIDGE=1
@@ -427,6 +429,7 @@ cd "$REPO_ROOT"
 unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE
 export NO_AT_BRIDGE=1
 export GTK_A11Y=none
+export TZ=Asia/Manila
 
 apt_install xvfb xfce4-terminal xdotool imagemagick python3-pil x11-apps x11-utils x11-xserver-utils curl fontconfig dbus-x11 openbox
 install_font

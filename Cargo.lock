@@ -854,6 +854,7 @@ dependencies = [
 name = "workspace-status-graph"
 version = "0.1.36"
 dependencies = [
+ "libc",
  "ratatui",
 ]
 

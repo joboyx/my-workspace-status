@@ -516,7 +516,7 @@ mod tests {
     use crate::action::Action;
     use crate::action::Effect;
     use crate::chrome::{graph_chrome_budget, selection_detail_lines, GraphFooterSelection};
-    use crate::format::overflow_chip_text;
+    use crate::format::{format_local_timestamp, overflow_chip_text};
     use crate::hex_color;
     use crate::model::{Commit, GraphRef, GraphRow, Stash, SyncState, SyncStatus, Worktree};
     use crate::paint::{paint_model, paint_model_with, PaintOpts};
@@ -776,7 +776,7 @@ mod tests {
         assert!(spacer.label.contains("stash@{0}"), "{}", spacer.label);
         assert!(spacer.label.contains("ccc3333"), "{}", spacer.label);
         assert!(
-            spacer.label.contains("2023-11-13 22:13"),
+            spacer.label.contains(&format_local_timestamp(NOW - 86400)),
             "{}",
             spacer.label
         );
@@ -1116,7 +1116,7 @@ mod tests {
         assert!(
             last.contains("stash@{0}")
                 && last.contains("ccc3333")
-                && last.contains("2023-11-13 22:13"),
+                && last.contains(&format_local_timestamp(NOW - 86400)),
             "stash footer meta ref · hash · date: {last}"
         );
         assert!(!last.contains("Ada"), "stash footer has no author: {last}");

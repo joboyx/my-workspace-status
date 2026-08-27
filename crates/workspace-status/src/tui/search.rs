@@ -3,7 +3,7 @@
 //! Tree matches include folded rows. Focusing a tree match unfolds its
 //! ancestors so the row is visible. Hidden ignored repos stay out of tree
 //! search unless shown (`.` / `-a`). Graph search matches subject, author,
-//! painted or UTC time, branch and tag names, and sha. Commit-file search
+//! painted (relative or local) or UTC time, branch and tag names, and sha. Commit-file search
 //! matches paths. Diff search matches painted line text.
 
 use std::collections::HashSet;
@@ -127,11 +127,13 @@ pub fn focus_tree_search(
 
 /// Search text for one graph row.
 ///
-/// Commits match subject, author, painted relative date, UTC timestamp
-/// (`YYYY-MM-DD HH:MM`), branch and tag names, and full plus short sha.
+/// Commits match subject, author, painted relative date, painted local
+/// timestamp (`YYYY-MM-DD HH:MM`), UTC timestamp (`YYYY-MM-DD HH:MM`),
+/// branch and tag names, and full plus short sha.
 /// Stash and worktree rows use the same fields when the model has them.
 /// Uncommitted matches the word `uncommitted`. Dates use the same 3-hour
-/// relative / older-UTC formatter as the painted spacer.
+/// relative / older-local formatter as the painted spacer, plus a stable
+/// UTC form so a calendar date still hits when the row shows a relative age.
 pub fn graph_row_search_text(row: &GraphRow) -> String {
     graph_row_search_text_at(row, search_now_unix())
 }
@@ -504,7 +506,9 @@ mod tests {
 
     #[test]
     fn graph_subject_and_ref_are_searchable() {
-        use workspace_status_graph::{format_utc_timestamp, Commit, GraphRef};
+        use workspace_status_graph::{
+            format_relative_date, format_utc_timestamp, Commit, GraphRef,
+        };
         let now = search_now_unix();
         let recent_unix = now - 90;
         let recent_utc = format_utc_timestamp(recent_unix);
@@ -542,6 +546,8 @@ mod tests {
         assert_eq!(collect_graph_match_indices(&rows, "1m"), vec![0]);
         assert_eq!(collect_graph_match_indices(&rows, recent_day), vec![0]);
         assert_eq!(collect_graph_match_indices(&rows, "2023-11-14"), vec![1]);
+        let old_painted = format_relative_date(1_700_000_000, now);
+        assert_eq!(collect_graph_match_indices(&rows, &old_painted), vec![1]);
         assert_eq!(
             collect_graph_match_indices(&rows, "aa11bb22cc33dd44ee55ff6677889900aabbccdd"),
             vec![0]
