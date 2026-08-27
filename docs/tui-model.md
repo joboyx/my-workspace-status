@@ -50,7 +50,7 @@ Default folds: ignored repos with children + the `no-updates` group. Non-ignored
 | 1 `Files` | Graph list | Commit detail + file tree |
 | 2 `Diff` | Commit-file list | Commit-scoped `DiffPane` |
 
-`list_focus_target` (`tui/state.rs`) is the focused list: depth 0 left → tree; depth 0 right / depth 1 left → graph; depth 1 right / depth 2 left → commit files; depth 2 right (and depth 0 file diffs) → none (diff scroll). `j`/`k`, fold, search, click, and wheel follow that target.
+`list_focus_target` (`tui/state.rs`) is the focused list: depth 0 left → tree; depth 0 right / depth 1 left → graph; depth 1 right / depth 2 left → commit files; depth 2 right (and depth 0 file diffs) → none (diff scroll). `j`/`k`, fold, search, click, and vertical wheel follow that target. Mouse horizontal wheel (and Shift+wheel) pans the pane under the pointer without moving the focused row; the workspace tree matches the right pane. Click still selects. Unshifted `h` / `l` still fold the tree.
 
 | Focus / depth | Enter | Esc |
 | --- | --- | --- |
@@ -61,7 +61,7 @@ Default folds: ignored repos with children + the `no-updates` group. Non-ignored
 
 Enter that deepens the stack keeps **right** focus. Esc that pops a depth keeps **left** focus. Esc never quits.
 
-Left-pane `j`/`k`, click, wheel, and search next/prev load the matching right pane through `Effect::LoadRightPane` (the same `load_right` / `run_work_pumped` path as depth 0). Depth 1 graph rows load that commit / stash / worktree's files. Depth 2 file rows load that file's commit diff. Directory rows keep the previous diff. Esc/back and the depth stack stay unchanged.
+Left-pane `j`/`k`, click, vertical wheel, and search next/prev load the matching right pane through `Effect::LoadRightPane` (the same `load_right` / `run_work_pumped` path as depth 0). Mouse horizontal wheel over the workspace tree pans without `LoadRightPane`. Depth 1 graph rows load that commit / stash / worktree's files. Depth 2 file rows load that file's commit diff. Directory rows keep the previous diff. Esc/back and the depth stack stay unchanged.
 
 ## App state
 

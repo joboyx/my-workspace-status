@@ -54,7 +54,19 @@ pub enum Action {
     Drag { col: u16, row: u16 },
     Release,
     ToggleDiffMode,
-    ScrollWheel { col: u16, row: u16, delta: i32 },
+    /// Mouse wheel. Positive `delta` is down / right.
+    ///
+    /// Vertical (`horizontal: false`) moves a list cursor or scrolls the
+    /// graph / diff viewport. Horizontal (wheel left/right, or Shift+wheel)
+    /// pans without changing the focused row. Over the workspace tree that
+    /// matches the right pane: scroll does not steal the cursor. Click still
+    /// selects. Keyboard `h` / `l` are unchanged.
+    ScrollWheel {
+        col: u16,
+        row: u16,
+        delta: i32,
+        horizontal: bool,
+    },
     SearchStart,
     SearchChar(char),
     SearchBackspace,

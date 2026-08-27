@@ -841,6 +841,72 @@ fn tree_shift_arrows_pan_long_paths_and_h_still_folds() {
 }
 
 #[test]
+fn tree_mouse_hscroll_does_not_move_focused_row() {
+    let (root, workspace) = daily_workspace();
+    let long_dir = workspace.join("app/deep/nested/unique-dir-name");
+    fs::create_dir_all(&long_dir).unwrap();
+    fs::write(long_dir.join("unique-hscroll-tail.rs"), "fn pan() {}\n").unwrap();
+
+    let mut tui = open(&workspace);
+    tui.key('t');
+    tui.resize(64, 24);
+    tui.search("unique-hscroll-tail");
+    let clipped = tui.frame();
+    assert_absent(&clipped, "unique-hscroll-tail.rs");
+
+    let focused = tui.cursor_id();
+    let col = tui.tree_inner_x().saturating_add(4);
+    let row = tui.tree_inner_y().saturating_add(1);
+    for _ in 0..40 {
+        tui.mouse_scroll_right(col, row);
+    }
+    assert_eq!(
+        tui.cursor_id(),
+        focused,
+        "wheel left/right over the tree must not move the focused row"
+    );
+    let panned = tui.frame();
+    assert_contains(&panned, "unique-hscroll-tail");
+    assert!(
+        tui.left_col_offset() > 0,
+        "tree mouse hscroll should pan a long path"
+    );
+
+    tui.mouse_shift_scroll_down(col, row);
+    assert_eq!(
+        tui.cursor_id(),
+        focused,
+        "Shift+wheel over the tree must not move the focused row"
+    );
+
+    let before_click = tui.cursor_id();
+    tui.mouse_down(col, tui.tree_inner_y());
+    assert_ne!(
+        tui.cursor_id(),
+        before_click,
+        "click still selects the row under the pointer"
+    );
+
+    let after_click = tui.cursor_id();
+    tui.mouse_scroll_down(col, row);
+    assert_ne!(
+        tui.cursor_id(),
+        after_click,
+        "vertical wheel over the tree still moves the cursor"
+    );
+
+    tui.key('G');
+    tui.key('l');
+    let opened = tui.frame();
+    assert_contains(&opened, "lib");
+    tui.key('h');
+    let closed = tui.frame();
+    assert_contains(&closed, "No updates");
+    assert_absent(&closed, "lib");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn graph_h_l_pans_long_subject_and_j_still_moves() {
     let (root, workspace) = daily_workspace();
     seed_long_subject_repo(&workspace, "longsubj");
