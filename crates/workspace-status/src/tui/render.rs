@@ -107,6 +107,12 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.graph_hscrollbar_x = 0;
     state.layout.graph_hscrollbar_width = 0;
     state.layout.graph_col_max = 0;
+    state.layout.diff_scrollbar_x = None;
+    state.layout.diff_scrollbar_y = 0;
+    state.layout.diff_scrollbar_height = 0;
+    state.layout.diff_hscrollbar_y = None;
+    state.layout.diff_hscrollbar_x = 0;
+    state.layout.diff_hscrollbar_width = 0;
     let left_title = if left_is_files {
         if state.focus == FocusPane::Left {
             " files "

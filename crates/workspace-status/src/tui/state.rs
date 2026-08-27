@@ -116,6 +116,18 @@ pub struct LayoutHit {
     pub graph_hscrollbar_width: u16,
     /// Max horizontal pan for the painted graph.
     pub graph_col_max: u16,
+    /// 0-based diff scrollbar column when a file diff is painted.
+    pub diff_scrollbar_x: Option<u16>,
+    /// 0-based first row of the diff scrollbar track (body, not header).
+    pub diff_scrollbar_y: u16,
+    /// Diff body height (vertical scrollbar track).
+    pub diff_scrollbar_height: u16,
+    /// 0-based diff horizontal scrollbar row when the bar is painted.
+    pub diff_hscrollbar_y: Option<u16>,
+    /// 0-based first column of the diff horizontal scrollbar track.
+    pub diff_hscrollbar_x: u16,
+    /// Diff horizontal scrollbar track width.
+    pub diff_hscrollbar_width: u16,
 }
 
 impl Default for LayoutHit {
@@ -145,6 +157,12 @@ impl Default for LayoutHit {
             graph_hscrollbar_x: 0,
             graph_hscrollbar_width: 0,
             graph_col_max: 0,
+            diff_scrollbar_x: None,
+            diff_scrollbar_y: 0,
+            diff_scrollbar_height: 0,
+            diff_hscrollbar_y: None,
+            diff_hscrollbar_x: 0,
+            diff_hscrollbar_width: 0,
         }
     }
 }

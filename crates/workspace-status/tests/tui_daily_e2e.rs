@@ -1203,6 +1203,134 @@ fn diff_h_l_pans_long_lines() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Long file-diff hscroll: pointer over the left pane, TTY SGR through
+/// `tty::decode_sgr_mouse` (same contract as live `event::read`). Motion-bit
+/// wheel (`CSI < 99`) is dropped, so it must not pan. Wheel-right (`CSI < 67`)
+/// pans the painted long diff. Origin-hidden bars: h-bar after leaving the
+/// left edge, v-bar after leaving the top. Keyboard `h` / `j` / `k` still
+/// pan and scroll. Short tree paths still pan the tree when the diff fits
+/// (see `tree_trackpad_sgr_hscroll_pans_without_stealing_focus`).
+#[test]
+fn left_pane_trackpad_hscroll_pans_long_diff_and_shows_scrollbars() {
+    let (root, workspace) = daily_workspace();
+    let marker = "UNIQUE_DIFF_TAIL";
+    let long = format!("{}{marker}", "n".repeat(80));
+    let mut body = format!("{long}\n");
+    for i in 0..40 {
+        body.push_str(&format!("line {i}\n"));
+    }
+    fs::write(workspace.join("app/unique-diffline.rs"), body).unwrap();
+
+    let mut tui = open(&workspace);
+    tui.resize(80, 24);
+    tui.search("unique-diffline");
+    assert!(
+        tui.right_is_diff(),
+        "file row should load the long-line diff"
+    );
+    assert!(
+        !tui.focus_is_right(),
+        "search leaves keyboard focus on the tree"
+    );
+    let clipped = tui.frame();
+    assert_absent(&clipped, marker);
+    assert_eq!(tui.diff_col_offset(), 0);
+    assert_eq!(tui.left_col_offset(), 0);
+    assert!(
+        tui.diff_hscrollbar_track().is_none(),
+        "horizontal bar stays hidden at the left edge"
+    );
+    assert!(
+        tui.diff_scrollbar_col().is_none(),
+        "vertical bar stays hidden at the top"
+    );
+
+    let col = tui.tree_inner_x().saturating_add(4);
+    let row = tui.tree_inner_y().saturating_add(1);
+    assert!(
+        col < tui.pane_right_x(),
+        "pointer must sit in the left pane, col={col} right_x={}",
+        tui.pane_right_x()
+    );
+
+    for _ in 0..80 {
+        tui.mouse_sgr_motion_scroll_right(col, row);
+    }
+    assert_eq!(
+        tui.diff_col_offset(),
+        0,
+        "crossterm 0.28 event::read drops SGR 99; the long diff must not pan"
+    );
+    assert_eq!(
+        tui.left_col_offset(),
+        0,
+        "dropped SGR 99 must not pan the tree"
+    );
+    let ignored = tui.frame();
+    assert_absent(&ignored, marker);
+    assert!(
+        tui.diff_hscrollbar_track().is_none(),
+        "dropped SGR 99 must not reveal the horizontal bar"
+    );
+
+    for _ in 0..80 {
+        tui.mouse_sgr_scroll_right(col, row);
+    }
+    let panned = tui.frame();
+    assert_contains(&panned, marker);
+    assert!(
+        tui.diff_col_offset() > 0,
+        "SGR wheel right over the left pane must pan the long diff"
+    );
+    assert_eq!(
+        tui.left_col_offset(),
+        0,
+        "short tree paths stay unpanned when the painted diff can pan"
+    );
+    assert!(
+        !tui.focus_is_right(),
+        "trackpad hscroll must not steal tree focus"
+    );
+    assert!(
+        tui.diff_hscrollbar_track().is_some(),
+        "horizontal bar is shown once the viewport leaves the left edge"
+    );
+    assert!(
+        tui.diff_scrollbar_col().is_none(),
+        "vertical bar stays hidden while still at the top"
+    );
+
+    tui.tab();
+    tui.key('h');
+    tui.key('h');
+    assert!(
+        tui.right_is_diff(),
+        "keyboard h/l still pan a focused file diff"
+    );
+    for _ in 0..30 {
+        tui.key('j');
+    }
+    let _ = tui.frame();
+    assert!(
+        tui.diff_scroll() > 0,
+        "j on a focused diff should leave the top"
+    );
+    assert!(
+        tui.diff_scrollbar_col().is_some(),
+        "vertical bar is shown once the diff leaves the top"
+    );
+    for _ in 0..40 {
+        tui.key('k');
+    }
+    let _ = tui.frame();
+    assert_eq!(tui.diff_scroll(), 0, "k returns to the top of the diff");
+    assert!(
+        tui.diff_scrollbar_col().is_none(),
+        "vertical bar hides again at the top"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn confirm_overlay_keeps_y_n_after_resize() {
     let (root, workspace) = daily_workspace();
