@@ -228,7 +228,7 @@ name; not stash leaf paint).
 | Free leaf lane, tip `◇`, spacer spur, live through-rails | `crates/workspace-status-graph/src/stash.rs` (`StashRailContext`, paint helpers) |
 | Commit DAG layout + densify | `crates/workspace-status-graph/src/layout.rs` + `topology.rs` |
 | Stash model (`parent_id` = `stash^1`); fetch missing parents | `crates/workspace-status/src/tui/graph_load.rs` (`load_graph_model`) |
-| Gutter clip window (node + stash join cols) | `crates/workspace-status-graph/src/gutter.rs` (`slice_cells_around_lane`) |
+| Gutter clip window | `crates/workspace-status-graph/src/gutter.rs` (`clip_gutter_shared`) — one left-aligned `[0, cap)` for every row |
 | Regression tests (S0–S7 + park order + gutter dump) | `crates/workspace-status-graph` unit tests + `crates/workspace-status/src/tui/graph_load.rs` |
 
 Canonical skill tree: `ai/common/skills/my-workspace-status/` only.
@@ -252,7 +252,7 @@ Park-on-parent + 3b→◇ leaf paint landed (PR #54 era). Residual issues — do
 | Gap | Notes |
 | --- | --- |
 | Orphan pile | **Addressed:** `load_graph_model` lazy-loads missing `stash^1` so those tips park and join. Extra parents insert into the layout walk by date without reshuffling the git window; `%P` targets not in the layout set are dropped so they cannot plant a waiter through the window. Remaining true orphans are parent objects git cannot resolve — still a lone `◇` after uncommitted (no fake spine tee). |
-| Crowded / multi-lane gutters | **Improved:** sibling tips reserve distinct leaf lanes; clip window prefers covering node + join/leaf columns; join overlay keeps through-rails (`┼`) instead of eating them. Extreme density (more live lanes than the gutter cap) can still clip. |
+| Crowded / multi-lane gutters | **Improved:** sibling tips reserve distinct leaf lanes; paint clips the same left window on every row so rails stay aligned; join overlay keeps through-rails (`┼`) instead of eating them. Extreme density (more live lanes than the gutter cap) can still clip the rightmost lanes. |
 | Operator-reported edge cases | Capture failing screenshots + short gutter dump next to S0–S7 before changing paint; extend the config table rather than one-off glyph hacks. |
 | Agent skill copies | Edit **common** only; redeploy/symlink per `ai/AGENTS.md` — do not fork paint logic under `agents/*/skills/`. |
 

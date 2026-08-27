@@ -58,63 +58,6 @@ pub fn pad_to_width(cells: &mut Vec<GraphCell>, width: usize) {
     }
 }
 
-/// Focus column for clipping — prefer the painted node, else `lane * CELL_W`.
-pub fn gutter_focus_col(cells: &[GraphCell], lane: usize) -> usize {
-    if let Some(i) = cells.iter().position(|c| c.role == CellRole::Node) {
-        return i;
-    }
-    if cells.is_empty() {
-        return 0;
-    }
-    (lane * crate::glyphs::CELL_W).min(cells.len() - 1)
-}
-
-/// Window of `budget` cells anchored so the node stays visible.
-///
-/// `extra_cols` (stash join / leaf columns) are included when they fit
-/// beside the focus. If the span exceeds the budget, the node stays.
-pub fn slice_cells_around_lane(
-    cells: &[GraphCell],
-    budget: usize,
-    lane: usize,
-    extra_cols: &[usize],
-) -> Vec<GraphCell> {
-    if budget == 0 {
-        return Vec::new();
-    }
-    if cells.len() <= budget {
-        return cells.to_vec();
-    }
-    let focus = gutter_focus_col(cells, lane);
-    let mut wanted = vec![focus];
-    for c in extra_cols {
-        if *c < cells.len() {
-            wanted.push(*c);
-        }
-    }
-    let min_w = *wanted.iter().min().unwrap();
-    let max_w = *wanted.iter().max().unwrap();
-    let span = max_w - min_w + 1;
-    let start = if span <= budget {
-        let slack = budget - span;
-        let raw = min_w.saturating_sub(slack / 2);
-        raw.min(cells.len() - budget)
-    } else {
-        let extras: Vec<usize> = wanted.into_iter().filter(|c| *c != focus).collect();
-        let extra_bias = if extras.is_empty() {
-            focus as f64
-        } else {
-            extras.iter().sum::<usize>() as f64 / extras.len() as f64
-        };
-        if extra_bias >= focus as f64 {
-            focus.min(cells.len() - budget)
-        } else {
-            focus.saturating_sub(budget - 1).min(cells.len() - budget)
-        }
-    };
-    cells[start..start + budget].to_vec()
-}
-
 /// Per-cell topology before glyph resolution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TopoCell {
@@ -183,7 +126,8 @@ pub fn connect(
     let adding_vertical = up || down;
     if had_vertical && adding_horizontal && !adding_vertical {
         // keep existing color_lane
-    } else if color_lane.is_some() && (!had_vertical || adding_vertical || cell.color_lane.is_none())
+    } else if color_lane.is_some()
+        && (!had_vertical || adding_vertical || cell.color_lane.is_none())
     {
         cell.color_lane = color_lane;
     }

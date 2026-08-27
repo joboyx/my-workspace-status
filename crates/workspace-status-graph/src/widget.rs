@@ -12,10 +12,9 @@ use crate::chrome::{
 use crate::format::{format_label, format_sync, slice_label_parts, LabelKind, LabelPart};
 use crate::glyphs::{ASCII, UNICODE};
 use crate::gutter::graph_gutter_cap;
-use crate::lane_colors::{cells_to_spans, default_lane_colors};
+use crate::lane_colors::{default_lane_colors, lane_fg};
 use crate::model::GraphModel;
 use crate::paint::{paint_model_with, PaintOpts, PaintedLine};
-use crate::topology::cells_text;
 
 /// Subject, meta, and ref-chip colours for graph labels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,7 +90,7 @@ impl<'a> GraphWidget<'a> {
     }
 
     /// Cap the gutter at `width` columns. Topology still uses the full
-    /// lane model; paint clips to this width.
+    /// lane model; paint clips every row to the same left-aligned window.
     pub fn gutter_width(mut self, width: u16) -> Self {
         self.gutter_width = Some(width);
         self
@@ -439,7 +438,10 @@ fn put_painted_line(
     palette: Option<GraphLabelPalette>,
     col_offset: u16,
 ) {
-    let mut spans: Vec<Span> = Vec::new();
+    if width == 0 {
+        return;
+    }
+    let row = Rect::new(x, y, width, 1);
     let bar = if selected && line.selectable {
         "▌"
     } else {
@@ -453,31 +455,49 @@ fn put_painted_line(
         flash_bg
     };
     let mut bar_style = Style::default().fg(cursor_fg).add_modifier(Modifier::BOLD);
+    let mut row_style = Style::default();
     if let Some(bg) = row_bg {
         bar_style = bar_style.bg(bg);
+        row_style = row_style.bg(bg);
+        buf.set_style(row, row_style);
     }
-    spans.push(Span::styled(bar, bar_style));
-    let gutter_cols = if line.gutter.is_empty() {
-        0
-    } else {
-        cells_text(&line.gutter).chars().count() + 1
-    };
-    if !line.gutter.is_empty() {
-        spans.extend(cells_to_spans(&line.gutter, lane_colors, fallback));
-        spans.push(Span::raw(" "));
+    buf[(x, y)].set_symbol(bar);
+    buf[(x, y)].set_style(bar_style);
+
+    let end = x.saturating_add(width);
+    let mut col = x.saturating_add(1);
+    for cell in &line.gutter {
+        if col >= end {
+            break;
+        }
+        let fg = lane_fg(cell.color_lane, lane_colors, fallback);
+        let mut style = Style::default().fg(fg);
+        if let Some(bg) = row_bg {
+            style = style.bg(bg);
+        }
+        // One GraphCell = one buffer column. Overwrite any wide-glyph
+        // continuation so rails stay put when the label clips.
+        buf[(col, y)].set_symbol(&cell.ch);
+        buf[(col, y)].set_style(style);
+        col = col.saturating_add(1);
     }
-    let label_w = (width as usize)
-        .saturating_sub(1)
-        .saturating_sub(gutter_cols);
-    let sliced = slice_line_label(line, col_offset as usize, label_w);
-    spans.extend(label_spans(&sliced, palette, fallback));
-    let mut style = Style::default();
-    if let Some(bg) = row_bg {
-        style = style.bg(bg);
+    if !line.gutter.is_empty() && col < end {
+        let mut style = Style::default();
+        if let Some(bg) = row_bg {
+            style = style.bg(bg);
+        }
+        buf[(col, y)].set_symbol(" ");
+        buf[(col, y)].set_style(style);
+        col = col.saturating_add(1);
     }
-    Line::from(spans)
-        .style(style)
-        .render(Rect::new(x, y, width, 1), buf);
+    let label_w = end.saturating_sub(col);
+    if label_w == 0 {
+        return;
+    }
+    let sliced = slice_line_label(line, col_offset as usize, label_w as usize);
+    Line::from(label_spans(&sliced, palette, fallback))
+        .style(row_style)
+        .render(Rect::new(col, y, label_w, 1), buf);
 }
 
 fn slice_line_label(line: &PaintedLine, offset: usize, width: usize) -> PaintedLine {
@@ -1573,6 +1593,97 @@ mod tests {
                 .iter()
                 .any(|l| l.contains("vendor/secret") && l.contains("[ignored]")),
             "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn capped_gutter_keeps_rail_columns_when_labels_clip() {
+        let mut model = merge_model();
+        for commit in &mut model.commits {
+            commit.subject = format!("{} {}", commit.subject, "n".repeat(48));
+        }
+        let painted = paint_model_with(
+            &model,
+            &UNICODE,
+            PaintOpts {
+                gutter_width: Some(2),
+                line_width: Some(24),
+                now_unix: Some(NOW),
+            },
+        );
+        let gutters: Vec<&[crate::GraphCell]> = painted
+            .iter()
+            .filter(|l| !l.gutter.is_empty())
+            .map(|l| l.gutter.as_slice())
+            .collect();
+        assert!(gutters.len() >= 4, "merge rows");
+        let width = gutters[0].len();
+        assert_eq!(width, 2);
+        assert!(
+            gutters.iter().all(|g| g.len() == width),
+            "shared clip width"
+        );
+        let left = painted
+            .iter()
+            .find(|l| l.selectable && l.label.contains("left"))
+            .expect("left");
+        let right = painted
+            .iter()
+            .find(|l| l.selectable && l.label.contains("right"))
+            .expect("right");
+        assert_eq!(left.gutter[0].role, crate::CellRole::Node);
+        assert_eq!(
+            right.gutter[0].ch,
+            UNICODE.vertical,
+            "side-lane node must not steal column 0: {}",
+            cells_text(&right.gutter)
+        );
+        assert_ne!(right.gutter[0].role, crate::CellRole::Node);
+
+        let width = 36u16;
+        let height = 12u16;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .gutter_width(2)
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let chrome = graph_chrome_budget(height, false, false);
+        let list_bottom = u16::from(chrome.header) + chrome.list_height;
+        let mut spine_x: Option<u16> = None;
+        for y in u16::from(chrome.header)..list_bottom {
+            for x in 0..width.saturating_sub(1) {
+                let sym = buffer[(x, y)].symbol();
+                if sym == UNICODE.vertical || sym == UNICODE.commit || sym == UNICODE.head_commit {
+                    match spine_x {
+                        None => spine_x = Some(x),
+                        Some(col) => {
+                            assert_eq!(x, col, "rail/node at ({x},{y}) drifted from column {col}")
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        assert!(spine_x.is_some(), "expected a spine column in the list");
+        let joined = (0..height)
+            .map(|y| {
+                let mut line = String::new();
+                for x in 0..width {
+                    line.push_str(buffer[(x, y)].symbol());
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !joined.contains("nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"),
+            "narrow pane must clip long subjects:\n{joined}"
         );
     }
 

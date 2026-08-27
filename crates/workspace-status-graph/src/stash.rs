@@ -8,11 +8,11 @@
 use std::collections::HashSet;
 
 use crate::glyphs::{GlyphSet, CELL_W};
+use crate::gutter::clip_gutter_shared;
 use crate::layout::{GraphStemRef, LaidOutCommit};
 use crate::topology::{
     add_horizontal_bridge, add_join_corner, add_vertical, blank_gutter, connect, empty_topo,
-    ensure_topo_width, ensure_width, slice_cells_around_lane, topo_to_cells, CellRole, GraphCell,
-    TopoCell,
+    ensure_topo_width, ensure_width, topo_to_cells, CellRole, GraphCell, TopoCell,
 };
 
 /// Paint context for a stash as a 1-node side leaf tip.
@@ -56,10 +56,7 @@ pub fn stash_live_rails_at_gap(
 
 /// Lane indices occupied by live stem columns.
 pub fn live_lanes_from_rails(live_rails: &[GraphStemRef]) -> HashSet<usize> {
-    live_rails
-        .iter()
-        .map(|r| r.col / CELL_W)
-        .collect()
+    live_rails.iter().map(|r| r.col / CELL_W).collect()
 }
 
 /// Allocate a free leaf lane for a stash tip.
@@ -111,12 +108,8 @@ pub fn build_stash_rail_context(
     if let Some(parent) = parent {
         live_lanes.insert(parent.lane);
     }
-    let leaf_lane = allocate_stash_leaf_lane(
-        &live_lanes,
-        parent.map(|p| p.lane),
-        reserved,
-        max_lane,
-    );
+    let leaf_lane =
+        allocate_stash_leaf_lane(&live_lanes, parent.map(|p| p.lane), reserved, max_lane);
     let sibling_spur_lanes = if parent.is_some() && tip_above_parent {
         reserved
             .iter()
@@ -145,9 +138,10 @@ pub fn match_stem_refs(
     let mut used = HashSet::new();
     let mut pairs = Vec::new();
     for from in down {
-        let same_col = up.iter().enumerate().find(|(i, to)| {
-            !used.contains(i) && to.id == from.id && to.col == from.col
-        });
+        let same_col = up
+            .iter()
+            .enumerate()
+            .find(|(i, to)| !used.contains(i) && to.id == from.id && to.col == from.col);
         let hit = same_col.or_else(|| {
             up.iter()
                 .enumerate()
@@ -162,7 +156,12 @@ pub fn match_stem_refs(
 }
 
 /// Paint one densify remapped rail on a commit spacer.
-fn paint_stem_transition(topo: &mut Vec<TopoCell>, from_col: usize, to_col: usize, color_lane: usize) {
+fn paint_stem_transition(
+    topo: &mut Vec<TopoCell>,
+    from_col: usize,
+    to_col: usize,
+    color_lane: usize,
+) {
     let from_lane = from_col / CELL_W;
     let to_lane = to_col / CELL_W;
     ensure_topo_width(topo, from_col.max(to_col) + 1);
@@ -214,21 +213,8 @@ fn paint_stem_transition(topo: &mut Vec<TopoCell>, from_col: usize, to_col: usiz
     add_horizontal_bridge(topo, from_lane, to_lane, color_lane);
 }
 
-fn clip_or_pad(
-    cells: Vec<GraphCell>,
-    budget: usize,
-    anchor_lane: usize,
-    extra_cols: &[usize],
-) -> Vec<GraphCell> {
-    if cells.len() > budget {
-        slice_cells_around_lane(&cells, budget, anchor_lane, extra_cols)
-    } else if cells.len() < budget {
-        let mut cells = cells;
-        cells.extend(blank_gutter(budget - cells.len()));
-        cells
-    } else {
-        cells
-    }
+fn clip_or_pad(cells: Vec<GraphCell>, budget: usize) -> Vec<GraphCell> {
+    clip_gutter_shared(&cells, budget)
 }
 
 /// Densify gutter that preserves live rails between two commits.
@@ -257,7 +243,7 @@ pub fn stash_rail_cells(
     }
     let mut cells = topo_to_cells(&topo, glyphs);
     ensure_width(&mut cells, topology_width);
-    clip_or_pad(cells, display_width, prev.lane, &[])
+    clip_or_pad(cells, display_width)
 }
 
 /// Through-rails only from `prev.stem_down` (no densify to a next commit).
@@ -279,7 +265,7 @@ pub fn stem_down_rail_cells(
     }
     let mut cells = topo_to_cells(&topo, glyphs);
     ensure_width(&mut cells, topology_width);
-    clip_or_pad(cells, display_width, prev.lane, &[])
+    clip_or_pad(cells, display_width)
 }
 
 fn merge_join_overlay_cell(base: &GraphCell, over: &GraphCell, g: &GlyphSet) -> GraphCell {
@@ -433,20 +419,7 @@ pub fn stash_leaf_rail_cells(
         };
     }
 
-    let anchor = if node || paint_spur {
-        leaf_lane
-    } else {
-        ctx.parent.as_ref().map(|p| p.lane).unwrap_or(leaf_lane)
-    };
-    let extra_cols: Vec<usize> = ctx
-        .live_rails
-        .iter()
-        .map(|r| r.col)
-        .chain(ctx.sibling_spur_lanes.iter().map(|lane| lane * CELL_W))
-        .chain(ctx.parent.as_ref().map(|p| p.lane * CELL_W))
-        .chain(std::iter::once(leaf_lane * CELL_W))
-        .collect();
-    clip_or_pad(cells, display_width, anchor, &extra_cols)
+    clip_or_pad(cells, display_width)
 }
 
 #[cfg(test)]
