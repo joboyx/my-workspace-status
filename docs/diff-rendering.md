@@ -57,7 +57,7 @@ Split rows (`left + RULE + right`) take column widths from `tui/split.rs`. Defau
 
 ## Horizontal pan
 
-Long diff lines are **not** word-wrapped. `h` / `←` and `l` / `→` pan when the right pane shows a file diff (same keys pan a focused graph or commit-file list). Shift+Left / Shift+Right pan the focused pane, including the tree. Mouse horizontal wheel (and Shift+wheel) pans without moving the focused row. Offset resets to 0 when the focused file changes. Header shows `· pan N` when offset > 0. Rows stay clipped to the pane width.
+Long diff lines are **not** word-wrapped. `h` / `←` and `l` / `→` pan when the right pane shows a file diff (same keys pan a focused graph or commit-file list). Shift+Left / Shift+Right pan the focused pane, including the tree. Mouse horizontal wheel (and Shift+wheel) pans the pane under the pointer without moving the focused row. Offset resets to 0 when the focused file changes. Header shows `· pan N` when offset > 0. Rows stay clipped to the pane width.
 
 ## Full-file view
 

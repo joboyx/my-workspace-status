@@ -6,7 +6,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Widget, Wrap};
 use ratatui::Frame;
 use workspace_status_graph::{
-    graph_chrome_budget, paint_model, GraphLabelPalette, GraphWidget, ASCII, UNICODE,
+    graph_chrome_budget, graph_col_max, graph_hscroll_visible, graph_vscroll_visible, paint_model,
+    GraphLabelPalette, GraphWidget, ASCII, UNICODE,
 };
 
 use std::collections::HashSet;
@@ -102,6 +103,10 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.graph_scrollbar_y = 0;
     state.layout.graph_scrollbar_height = 0;
     state.layout.graph_content_len = 0;
+    state.layout.graph_hscrollbar_y = None;
+    state.layout.graph_hscrollbar_x = 0;
+    state.layout.graph_hscrollbar_width = 0;
+    state.layout.graph_col_max = 0;
     let left_title = if left_is_files {
         if state.focus == FocusPane::Left {
             " files "
@@ -535,7 +540,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
             overflow: pal.heading,
         })
         .render(area, frame.buffer_mut());
-    record_graph_scrollbar(state, area);
+    record_graph_scrollbar(state, area, col_offset);
 }
 
 fn graph_search_matches(state: &AppState) -> Vec<usize> {
@@ -548,7 +553,7 @@ fn graph_search_matches(state: &AppState) -> Vec<usize> {
     collect_graph_match_indices(&model.visible_rows(), &state.search_query)
 }
 
-fn record_graph_scrollbar(state: &mut AppState, area: Rect) {
+fn record_graph_scrollbar(state: &mut AppState, area: Rect, col_offset: u16) {
     let Some(model) = state.graph.as_ref() else {
         return;
     };
@@ -558,10 +563,27 @@ fn record_graph_scrollbar(state: &mut AppState, area: Rect) {
     let chrome = graph_chrome_budget(area.height, state.graph_loading_older, model.sync.is_some());
     let glyphs = if state.ascii { &ASCII } else { &UNICODE };
     let content_len = paint_model(model, glyphs, None).len();
-    state.layout.graph_scrollbar_x = Some(area.x.saturating_add(area.width.saturating_sub(1)));
-    state.layout.graph_scrollbar_y = area.y.saturating_add(u16::from(chrome.header));
-    state.layout.graph_scrollbar_height = chrome.list_height;
     state.layout.graph_content_len = content_len;
+    let vscroll = graph_vscroll_visible(state.graph_scroll);
+    let hscroll = graph_hscroll_visible(col_offset);
+    let list_top = area.y.saturating_add(u16::from(chrome.header));
+    let list_height = chrome.list_height;
+    if vscroll && list_height > 0 {
+        state.layout.graph_scrollbar_x = Some(area.x.saturating_add(area.width.saturating_sub(1)));
+        state.layout.graph_scrollbar_y = list_top;
+        state.layout.graph_scrollbar_height = list_height;
+    }
+    if hscroll && list_height > 0 {
+        let v_cols = u16::from(vscroll);
+        let max = graph_col_max(model, state.ascii, area.width, vscroll);
+        if max > 0 {
+            state.layout.graph_hscrollbar_y =
+                Some(list_top.saturating_add(list_height).saturating_sub(1));
+            state.layout.graph_hscrollbar_x = area.x;
+            state.layout.graph_hscrollbar_width = area.width.saturating_sub(v_cols).max(1);
+            state.layout.graph_col_max = max.min(u16::MAX as usize) as u16;
+        }
+    }
 }
 
 fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, cursor: usize) {

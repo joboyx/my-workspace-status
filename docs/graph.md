@@ -23,13 +23,17 @@ multi-lane gutter from the same model.
 | `GraphCell` | One gutter column: glyph, colour lane, role |
 | `LaidOutCommit` | Lane assignment plus stem metadata for one commit |
 | `GraphWidget` | Ratatui `Widget` over a `GraphModel` |
-| `graph_scrollbar_thumb` | Thumb offset/length matching the painted 1-column bar (TUI hit-test) |
+| `graph_scrollbar_thumb` | Thumb offset/length matching a painted bar (TUI hit-test, vertical or horizontal) |
+| `graph_col_max` | Max `col_offset` for the longest label in the pane |
+| `graph_vscroll_visible` / `graph_hscroll_visible` | Show the vertical bar only after leaving the top; the horizontal bar only after leaving the left edge |
 | `Action` | `ToggleShowIgnored` and `SetShowIgnored` |
 | `Effect` | `None` today. Dispatch stays pure. |
 
 `GraphModel::dispatch` applies an `Action` and returns an `Effect`.
 The widget does not bind keys or run an event loop. The TUI hit-tests the
-1-column scrollbar through `tui/split.rs` (`hit_split` / `SplitDrag::GraphScrollbar`).
+vertical and horizontal scrollbars through `tui/split.rs` (`hit_split` /
+`SplitDrag::GraphScrollbar` / `GraphHScrollbar`). The vertical bar is painted
+only when `scroll > 0`; the horizontal bar only when `col_offset > 0`.
 
 `GraphWidget::gutter_width` caps painted gutter columns. Topology still
 uses the full lane model. `GraphWidget::loading_older` paints

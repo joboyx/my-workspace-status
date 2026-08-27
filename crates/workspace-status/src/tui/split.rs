@@ -44,6 +44,10 @@ pub enum SplitHit {
     GraphThumb,
     /// Graph scrollbar track (not the thumb).
     GraphTrack,
+    /// Painted graph horizontal scrollbar thumb.
+    GraphHThumb,
+    /// Graph horizontal scrollbar track (not the thumb).
+    GraphHTrack,
     Other,
 }
 
@@ -60,6 +64,13 @@ pub enum SplitDrag {
         origin_row: u16,
         /// `graph_scroll` at that origin.
         origin_scroll: u16,
+    },
+    /// Graph horizontal scrollbar. Column delta maps onto `col_offset`.
+    GraphHScrollbar {
+        /// Mouse column at mouse-down (or after a track jump).
+        origin_col: u16,
+        /// Horizontal pan offset at that origin.
+        origin_offset: u16,
     },
 }
 
@@ -102,6 +113,16 @@ pub struct SplitLayout {
     pub graph_content_len: usize,
     /// Current graph list skip (`graph_scroll`).
     pub graph_scroll: u16,
+    /// 0-based graph horizontal scrollbar row when the bar is painted.
+    pub graph_hscrollbar_y: Option<u16>,
+    /// 0-based first column of the graph horizontal scrollbar track.
+    pub graph_hscrollbar_x: u16,
+    /// Graph horizontal scrollbar track width.
+    pub graph_hscrollbar_width: u16,
+    /// Max horizontal pan for the painted graph.
+    pub graph_col_max: u16,
+    /// Current graph horizontal pan (`col_offset`).
+    pub graph_col_offset: u16,
 }
 
 /// One paired side-by-side row from a unified diff.
@@ -267,6 +288,27 @@ pub fn graph_scroll_from_delta(
     (i32::from(origin_scroll) + delta * max / denom).clamp(0, max) as u16
 }
 
+/// Map a 0-based mouse column onto `col_offset` (track-fraction jump).
+pub fn graph_col_from_col(layout: SplitLayout, col: u16) -> u16 {
+    graph_col_from_delta(layout, layout.graph_hscrollbar_x, 0, col)
+}
+
+/// Map a drag (`origin_col` / `origin_offset` plus current `col`) onto pan.
+pub fn graph_col_from_delta(
+    layout: SplitLayout,
+    origin_col: u16,
+    origin_offset: u16,
+    col: u16,
+) -> u16 {
+    let max = i32::from(layout.graph_col_max);
+    if max == 0 {
+        return 0;
+    }
+    let denom = i32::from(layout.graph_hscrollbar_width.saturating_sub(1).max(1));
+    let delta = i32::from(col).saturating_sub(i32::from(origin_col));
+    (i32::from(origin_offset) + delta * max / denom).clamp(0, max) as u16
+}
+
 fn hit_graph_scrollbar(layout: SplitLayout, col: u16, row: u16) -> Option<SplitHit> {
     let x = layout.graph_scrollbar_x?;
     if col != x || layout.graph_scrollbar_height == 0 {
@@ -291,11 +333,35 @@ fn hit_graph_scrollbar(layout: SplitLayout, col: u16, row: u16) -> Option<SplitH
     Some(SplitHit::GraphTrack)
 }
 
+fn hit_graph_hscrollbar(layout: SplitLayout, col: u16, row: u16) -> Option<SplitHit> {
+    let y = layout.graph_hscrollbar_y?;
+    if row != y || layout.graph_hscrollbar_width == 0 {
+        return None;
+    }
+    if col < layout.graph_hscrollbar_x {
+        return None;
+    }
+    let rel = col.saturating_sub(layout.graph_hscrollbar_x);
+    if rel >= layout.graph_hscrollbar_width {
+        return None;
+    }
+    if let Some((thumb_off, thumb_len)) = workspace_status_graph::graph_scrollbar_thumb(
+        (layout.graph_col_max as usize).saturating_add(1),
+        layout.graph_col_offset,
+        layout.graph_hscrollbar_width,
+    ) {
+        if rel >= thumb_off && rel < thumb_off.saturating_add(thumb_len) {
+            return Some(SplitHit::GraphHThumb);
+        }
+    }
+    Some(SplitHit::GraphHTrack)
+}
+
 /// Map a 0-based mouse cell onto a drag handle.
 ///
 /// Graph scrollbar (exact column, list track) wins over the 3-column pane
-/// divider band so a left-pane graph thumb stays draggable. Then pane, then
-/// in-diff RULE.
+/// divider band so a left-pane graph thumb stays draggable. Horizontal graph
+/// track is next, then pane, then in-diff RULE.
 pub fn hit_split(layout: SplitLayout, col: u16, row: u16) -> SplitHit {
     let x = col.saturating_add(1);
     let y = row.saturating_add(1);
@@ -306,6 +372,9 @@ pub fn hit_split(layout: SplitLayout, col: u16, row: u16) -> SplitHit {
         return SplitHit::Other;
     }
     if let Some(hit) = hit_graph_scrollbar(layout, col, row) {
+        return hit;
+    }
+    if let Some(hit) = hit_graph_hscrollbar(layout, col, row) {
         return hit;
     }
     if is_divider_column(x, layout.tree_width, layout.term_cols) {
@@ -507,6 +576,11 @@ mod tests {
             graph_scrollbar_height: 0,
             graph_content_len: 0,
             graph_scroll: 0,
+            graph_hscrollbar_y: None,
+            graph_hscrollbar_x: 0,
+            graph_hscrollbar_width: 0,
+            graph_col_max: 0,
+            graph_col_offset: 0,
         }
     }
 
@@ -524,6 +598,11 @@ mod tests {
             graph_scrollbar_height: 10,
             graph_content_len: 40,
             graph_scroll: 0,
+            graph_hscrollbar_y: None,
+            graph_hscrollbar_x: 0,
+            graph_hscrollbar_width: 0,
+            graph_col_max: 0,
+            graph_col_offset: 0,
         }
     }
 
@@ -569,6 +648,11 @@ mod tests {
             graph_scrollbar_height: 0,
             graph_content_len: 0,
             graph_scroll: 0,
+            graph_hscrollbar_y: None,
+            graph_hscrollbar_x: 0,
+            graph_hscrollbar_width: 0,
+            graph_col_max: 0,
+            graph_col_offset: 0,
         };
         assert_eq!(hit_split(layout, 47, 4), SplitHit::Pane);
     }
@@ -605,6 +689,11 @@ mod tests {
             graph_scrollbar_height: 10,
             graph_content_len: 40,
             graph_scroll: 0,
+            graph_hscrollbar_y: None,
+            graph_hscrollbar_x: 0,
+            graph_hscrollbar_width: 0,
+            graph_col_max: 0,
+            graph_col_offset: 0,
         };
         assert!(
             matches!(
@@ -639,6 +728,82 @@ mod tests {
             graph_scroll_from_delta(layout, 4, 3, 4),
             3,
             "zero delta keeps origin scroll"
+        );
+    }
+
+    fn graph_hsb_layout() -> SplitLayout {
+        let mut layout = graph_sb_layout();
+        layout.graph_scrollbar_x = None;
+        layout.graph_hscrollbar_y = Some(12);
+        layout.graph_hscrollbar_x = 50;
+        layout.graph_hscrollbar_width = 20;
+        layout.graph_col_max = 40;
+        layout.graph_col_offset = 0;
+        layout
+    }
+
+    #[test]
+    fn hit_test_graph_horizontal_scrollbar_thumb_and_track() {
+        let layout = graph_hsb_layout();
+        let thumb = workspace_status_graph::graph_scrollbar_thumb(41, 0, 20).expect("thumb");
+        let thumb_col = layout.graph_hscrollbar_x + thumb.0;
+        assert_eq!(hit_split(layout, thumb_col, 12), SplitHit::GraphHThumb);
+        let track_col = layout
+            .graph_hscrollbar_x
+            .saturating_add(layout.graph_hscrollbar_width.saturating_sub(1));
+        if track_col != thumb_col {
+            assert_eq!(hit_split(layout, track_col, 12), SplitHit::GraphHTrack);
+        }
+        assert_eq!(hit_split(layout, thumb_col, 11), SplitHit::Other);
+        assert_eq!(
+            hit_split(layout, layout.graph_hscrollbar_x.saturating_sub(1), 12),
+            SplitHit::Other
+        );
+    }
+
+    #[test]
+    fn vertical_graph_scrollbar_column_wins_over_horizontal_track() {
+        let mut layout = graph_hsb_layout();
+        layout.graph_scrollbar_x = Some(69);
+        layout.graph_hscrollbar_x = 50;
+        layout.graph_hscrollbar_width = 20;
+        layout.graph_hscrollbar_y = Some(4);
+        layout.graph_scrollbar_y = 2;
+        layout.graph_scrollbar_height = 10;
+        assert!(
+            matches!(
+                hit_split(layout, 69, 4),
+                SplitHit::GraphThumb | SplitHit::GraphTrack
+            ),
+            "vertical column must win the corner cell"
+        );
+    }
+
+    #[test]
+    fn graph_col_from_col_jumps_toward_track_and_drag_delta() {
+        let layout = graph_hsb_layout();
+        let jumped = graph_col_from_col(
+            layout,
+            layout
+                .graph_hscrollbar_x
+                .saturating_add(layout.graph_hscrollbar_width.saturating_sub(1)),
+        );
+        assert!(jumped > 0, "right of track should pan right: {jumped}");
+        assert_eq!(jumped, layout.graph_col_max);
+        let dragged = graph_col_from_delta(
+            layout,
+            layout.graph_hscrollbar_x,
+            0,
+            layout.graph_hscrollbar_x + 10,
+        );
+        assert!(
+            dragged > 0 && dragged < jumped,
+            "mid drag {dragged} jump {jumped}"
+        );
+        assert_eq!(
+            graph_col_from_delta(layout, 4, 3, 4),
+            3,
+            "zero delta keeps origin offset"
         );
     }
 

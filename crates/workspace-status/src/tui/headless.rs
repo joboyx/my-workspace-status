@@ -329,6 +329,26 @@ impl HeadlessTui {
         self.state.left_col_offset
     }
 
+    /// 0-based first column of the right pane from the last paint.
+    pub fn pane_right_x(&self) -> u16 {
+        self.state.layout.right_x
+    }
+
+    /// Right-pane horizontal pan offset.
+    pub fn right_col_offset(&self) -> u16 {
+        self.state.right_col_offset
+    }
+
+    /// Graph horizontal scrollbar track (0-based x, y, width) from the last paint.
+    pub fn graph_hscrollbar_track(&self) -> Option<(u16, u16, u16)> {
+        let y = self.state.layout.graph_hscrollbar_y?;
+        let width = self.state.layout.graph_hscrollbar_width;
+        if width == 0 {
+            return None;
+        }
+        Some((self.state.layout.graph_hscrollbar_x, y, width))
+    }
+
     /// Current graph list skip (`graph_scroll`).
     pub fn graph_scroll(&self) -> u16 {
         self.state.graph_scroll

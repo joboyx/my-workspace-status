@@ -107,7 +107,7 @@ Live TUI keymap (full overlay detail in [docs/configuration.md](./docs/configura
 | `n` / `N`                             | next / previous search match (only while a search is active; otherwise `p` is pull)                                                                    |
 | `?`                                   | keymap help overlay                                                                                                                                    |
 | `PgUp` / `PgDn` / `Ctrl-u` / `Ctrl-d` | page the **focused** pane (list or diff)                                                                                                               |
-| `m`                                   | toggle mouse reporting (on by default) except on a focused graph commit (merge, above). Drag pane / in-diff split / graph scrollbar thumb |
+| `m`                                   | toggle mouse reporting (on by default) except on a focused graph commit (merge, above). Drag pane / in-diff split / graph scrollbar thumbs |
 | `Enter`                               | left: focus right; right: drill (stay on right). Double-click a list row runs Enter                                                                    |
 | `Ctrl-C` twice                        | quit (first press prompts; second within ~2s exits)                                                                                                    |
 | `q`                                   | quit immediately (Rust extra)                                                                                                                          |

@@ -9,7 +9,7 @@ use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, Stateful
 use crate::chrome::{
     graph_chrome_budget, selection_detail_parts, GraphFooterSelection, LOADING_OLDER,
 };
-use crate::format::{format_sync, slice_label_parts, LabelKind, LabelPart};
+use crate::format::{format_label, format_sync, slice_label_parts, LabelKind, LabelPart};
 use crate::glyphs::{ASCII, UNICODE};
 use crate::gutter::graph_gutter_cap;
 use crate::lane_colors::{cells_to_spans, default_lane_colors};
@@ -168,12 +168,13 @@ impl<'a> GraphWidget<'a> {
     }
 }
 
-/// Thumb offset from the track top, and thumb length, matching [`GraphWidget`]'s
-/// ratatui `Scrollbar`.
+/// Thumb offset from the track top (or left), and thumb length, matching
+/// [`GraphWidget`]'s ratatui `Scrollbar`.
 ///
 /// Paint uses `ScrollbarState::new(content_len.saturating_sub(1)).position(scroll)`
 /// with no begin/end symbols and default viewport (`track_height`). `None` when
 /// ratatui would skip the bar (`content_len < 2` or a zero-height track).
+/// Reused for the horizontal track (`track_height` is then the track width).
 pub fn graph_scrollbar_thumb(
     content_len: usize,
     scroll: u16,
@@ -200,13 +201,52 @@ pub fn graph_scrollbar_thumb(
     Some((thumb_start, thumb_length))
 }
 
+/// Vertical graph scrollbar is painted only after the list leaves the top.
+pub fn graph_vscroll_visible(scroll: u16) -> bool {
+    scroll > 0
+}
+
+/// Horizontal graph scrollbar is painted only after the viewport leaves the
+/// left edge.
+pub fn graph_hscroll_visible(col_offset: u16) -> bool {
+    col_offset > 0
+}
+
+/// Max `col_offset` so the longest label can sit in the viewport.
+///
+/// `vscroll` is true when the 1-column vertical bar is reserved.
+pub fn graph_col_max(model: &GraphModel, ascii: bool, pane_width: u16, vscroll: bool) -> usize {
+    let glyphs = if ascii { &ASCII } else { &UNICODE };
+    let pane = pane_width.max(1) as usize;
+    let inner = if vscroll {
+        pane.saturating_sub(1)
+    } else {
+        pane
+    };
+    let cap = graph_gutter_cap(inner.max(1));
+    let label_viewport = inner
+        .saturating_sub(1)
+        .saturating_sub(cap)
+        .saturating_sub(1);
+    let longest = model
+        .visible_rows()
+        .iter()
+        .map(|row| format_label(row, glyphs).chars().count())
+        .max()
+        .unwrap_or(0);
+    longest.saturating_sub(label_viewport.max(1))
+}
+
 impl Widget for GraphWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.width == 0 || area.height == 0 {
             return;
         }
         let glyphs = if self.ascii { &ASCII } else { &UNICODE };
-        let pane = area.width.saturating_sub(1) as usize; // scrollbar column
+        let vscroll = graph_vscroll_visible(self.scroll);
+        let hscroll = graph_hscroll_visible(self.col_offset);
+        let v_cols = u16::from(vscroll);
+        let pane = area.width.saturating_sub(v_cols) as usize;
         let cap = Some(match self.gutter_width {
             Some(w) => w as usize,
             None => graph_gutter_cap(pane.max(1)),
@@ -242,7 +282,7 @@ impl Widget for GraphWidget<'_> {
         }
 
         let skip = self.scroll as usize;
-        let line_width = area.width.saturating_sub(2) as usize; // cursor + scrollbar
+        let line_width = area.width.saturating_sub(1 + v_cols) as usize; // cursor + optional scrollbar
         let painted = paint_model_with(
             self.model,
             glyphs,
@@ -274,7 +314,7 @@ impl Widget for GraphWidget<'_> {
                 buf,
                 area.x,
                 y,
-                area.width.saturating_sub(1),
+                area.width.saturating_sub(v_cols),
                 line,
                 selected,
                 search_match,
@@ -289,7 +329,7 @@ impl Widget for GraphWidget<'_> {
             );
             y = y.saturating_add(1);
         }
-        if list_height > 0 && area.width > 0 {
+        if vscroll && list_height > 0 && area.width > 0 {
             let mut sb_state = ScrollbarState::new(content_len.saturating_sub(1))
                 .position((skip).min(content_len.saturating_sub(1)));
             let sb_area = Rect {
@@ -306,6 +346,27 @@ impl Widget for GraphWidget<'_> {
                 buf,
                 &mut sb_state,
             );
+        }
+        if hscroll && list_height > 0 && area.width > 0 {
+            let max = graph_col_max(self.model, self.ascii, area.width, vscroll);
+            if max > 0 {
+                let mut sb_state =
+                    ScrollbarState::new(max).position((self.col_offset as usize).min(max));
+                let sb_area = Rect {
+                    x: area.x,
+                    y: list_bottom.saturating_sub(1),
+                    width: area.width.saturating_sub(v_cols).max(1),
+                    height: 1,
+                };
+                StatefulWidget::render(
+                    Scrollbar::new(ScrollbarOrientation::HorizontalBottom)
+                        .begin_symbol(None)
+                        .end_symbol(None),
+                    sb_area,
+                    buf,
+                    &mut sb_state,
+                );
+            }
         }
 
         let mut footer_y = area.y.saturating_add(area.height);
@@ -1360,6 +1421,127 @@ mod tests {
                 assert_ne!(cell, "█", "track must not paint thumb at y={y} off={i}");
             }
         }
+    }
+
+    fn tall_linear_model(n: usize) -> GraphModel {
+        let mut commits = Vec::new();
+        for i in 0..n {
+            let id = format!("c{i:02}{}", "a".repeat(36));
+            let parents = if i + 1 < n {
+                vec![format!("c{:02}{}", i + 1, "a".repeat(36))]
+            } else {
+                Vec::new()
+            };
+            commits.push(Commit {
+                id,
+                subject: format!("commit {i}"),
+                parents,
+                refs: Vec::new(),
+                author_name: "Ada".into(),
+                author_date_unix: NOW - 3600,
+            });
+        }
+        let head = commits[0].id.clone();
+        GraphModel {
+            commits,
+            head_id: Some(head),
+            uncommitted: Some(false),
+            window: n,
+            ..GraphModel::default()
+        }
+    }
+
+    fn render_graph(
+        model: &GraphModel,
+        width: u16,
+        height: u16,
+        scroll: u16,
+        col_offset: u16,
+    ) -> Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(model)
+                    .ascii(true)
+                    .scroll(scroll)
+                    .col_offset(col_offset)
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn vertical_scrollbar_hidden_at_top_shown_when_scrolled() {
+        let model = tall_linear_model(24);
+        let width = 40u16;
+        let height = 16u16;
+        let chrome = graph_chrome_budget(height, false, false);
+        let at_top = render_graph(&model, width, height, 0, 0);
+        let sb_x = width.saturating_sub(1);
+        for i in 0..chrome.list_height {
+            let y = u16::from(chrome.header).saturating_add(i);
+            assert_ne!(
+                at_top[(sb_x, y)].symbol(),
+                "█",
+                "no vertical thumb at top y={y}"
+            );
+        }
+        let scrolled = render_graph(&model, width, height, 8, 0);
+        let painted = paint_model_with(
+            &model,
+            &ASCII,
+            PaintOpts {
+                now_unix: Some(NOW),
+                line_width: Some(width.saturating_sub(2) as usize),
+                ..PaintOpts::default()
+            },
+        );
+        let (thumb_off, thumb_len) =
+            graph_scrollbar_thumb(painted.len(), 8, chrome.list_height).expect("thumb");
+        let thumb_y = u16::from(chrome.header).saturating_add(thumb_off);
+        assert_eq!(scrolled[(sb_x, thumb_y)].symbol(), "█");
+        assert!(thumb_len >= 1);
+    }
+
+    #[test]
+    fn horizontal_scrollbar_hidden_at_left_shown_when_panned() {
+        let marker = "UNIQUE_GRAPH_TAIL_xyz";
+        let subject = format!("{}{marker}", "n".repeat(60));
+        let model = GraphModel {
+            commits: vec![commit(
+                "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                &subject,
+                &[],
+            )],
+            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            uncommitted: Some(false),
+            window: 1,
+            ..GraphModel::default()
+        };
+        let width = 36u16;
+        let height = 8u16;
+        let chrome = graph_chrome_budget(height, false, false);
+        let list_bottom = u16::from(chrome.header) + chrome.list_height;
+        let h_y = list_bottom.saturating_sub(1);
+        let at_left = render_graph(&model, width, height, 0, 0);
+        let left_row: String = (0..width)
+            .map(|x| at_left[(x, h_y)].symbol().to_string())
+            .collect();
+        assert!(
+            !left_row.contains('█'),
+            "no horizontal thumb at left edge: {left_row}"
+        );
+        let panned = render_graph(&model, width, height, 0, 50);
+        let panned_row: String = (0..width)
+            .map(|x| panned[(x, h_y)].symbol().to_string())
+            .collect();
+        assert!(
+            panned_row.contains('█'),
+            "panned viewport must paint a horizontal thumb: {panned_row}"
+        );
     }
 
     #[test]

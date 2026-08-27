@@ -6,8 +6,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::style::Color;
 use workspace_status_graph::{
-    format_label, format_relative_date, graph_chrome_budget, graph_gutter_cap, paint_model,
-    GraphChromeBudget, GraphModel, GraphRow, PaintedLine, ASCII, UNICODE,
+    format_relative_date, graph_chrome_budget, graph_col_max, paint_model, GraphChromeBudget,
+    GraphModel, GraphRow, PaintedLine, ASCII, UNICODE,
 };
 
 use crate::snapshot::{FileChange, WorkspaceSnapshot};
@@ -41,9 +41,10 @@ use super::search::{
     list_row_pan_max, max_col_offset, SearchPane,
 };
 use super::split::{
-    clamp_tree_fraction, diff_split_fraction_from_col, effective_diff_mode,
-    graph_scroll_from_delta, graph_scroll_from_row, hit_split, tree_fraction_from_col, DiffMode,
-    SplitDrag, SplitHit, SplitLayout, DIFF_SPLIT_FRACTION, TREE_WIDTH_FRACTION,
+    clamp_tree_fraction, diff_split_fraction_from_col, effective_diff_mode, graph_col_from_col,
+    graph_col_from_delta, graph_scroll_from_delta, graph_scroll_from_row, hit_split,
+    tree_fraction_from_col, DiffMode, SplitDrag, SplitHit, SplitLayout, DIFF_SPLIT_FRACTION,
+    TREE_WIDTH_FRACTION,
 };
 use super::stash::{
     checkout_path, resolve_stash_menu_key, row_is_hidden_ignored, stash_dirty_for_row,
@@ -107,6 +108,14 @@ pub struct LayoutHit {
     pub graph_scrollbar_height: u16,
     /// Painted graph line count.
     pub graph_content_len: usize,
+    /// 0-based graph horizontal scrollbar row when the bar is painted.
+    pub graph_hscrollbar_y: Option<u16>,
+    /// 0-based first column of the graph horizontal scrollbar track.
+    pub graph_hscrollbar_x: u16,
+    /// Graph horizontal scrollbar track width.
+    pub graph_hscrollbar_width: u16,
+    /// Max horizontal pan for the painted graph.
+    pub graph_col_max: u16,
 }
 
 impl Default for LayoutHit {
@@ -132,6 +141,10 @@ impl Default for LayoutHit {
             graph_scrollbar_y: 0,
             graph_scrollbar_height: 0,
             graph_content_len: 0,
+            graph_hscrollbar_y: None,
+            graph_hscrollbar_x: 0,
+            graph_hscrollbar_width: 0,
+            graph_col_max: 0,
         }
     }
 }
@@ -1557,6 +1570,15 @@ impl AppState {
             graph_scrollbar_height: self.layout.graph_scrollbar_height,
             graph_content_len: self.layout.graph_content_len,
             graph_scroll: self.graph_scroll,
+            graph_hscrollbar_y: self.layout.graph_hscrollbar_y,
+            graph_hscrollbar_x: self.layout.graph_hscrollbar_x,
+            graph_hscrollbar_width: self.layout.graph_hscrollbar_width,
+            graph_col_max: self.layout.graph_col_max,
+            graph_col_offset: if self.drill.is_files() {
+                self.left_col_offset
+            } else {
+                self.right_col_offset
+            },
         }
     }
 
@@ -1603,6 +1625,26 @@ impl AppState {
                 self.drag = SplitDrag::GraphScrollbar {
                     origin_row: row,
                     origin_scroll: jumped,
+                };
+                self.last_click = None;
+                return Effect::None;
+            }
+            SplitHit::GraphHThumb => {
+                self.focus_graph_pane();
+                self.drag = SplitDrag::GraphHScrollbar {
+                    origin_col: col,
+                    origin_offset: self.graph_col_offset(),
+                };
+                self.last_click = None;
+                return Effect::None;
+            }
+            SplitHit::GraphHTrack => {
+                self.focus_graph_pane();
+                let jumped = graph_col_from_col(self.split_layout(), col);
+                self.set_graph_col_offset(jumped);
+                self.drag = SplitDrag::GraphHScrollbar {
+                    origin_col: col,
+                    origin_offset: jumped,
                 };
                 self.last_click = None;
                 return Effect::None;
@@ -1744,6 +1786,14 @@ impl AppState {
             } => {
                 self.graph_scroll =
                     graph_scroll_from_delta(self.split_layout(), origin_row, origin_scroll, row);
+            }
+            SplitDrag::GraphHScrollbar {
+                origin_col,
+                origin_offset,
+            } => {
+                let next =
+                    graph_col_from_delta(self.split_layout(), origin_col, origin_offset, col);
+                self.set_graph_col_offset(next);
             }
             SplitDrag::None => {}
         }
@@ -2143,43 +2193,64 @@ impl AppState {
     }
 
     fn pan_focused(&mut self, delta: i32) {
-        match self.list_focus_target() {
-            ListFocusTarget::None => self.pan_diff(delta),
-            ListFocusTarget::Tree => {
-                let max = self.tree_max_col();
-                self.left_col_offset = apply_pan(self.left_col_offset, delta, max);
-            }
-            ListFocusTarget::Graph => {
-                if self.focus == FocusPane::Left {
-                    let max = self.graph_max_col(self.layout.tree_width);
-                    self.left_col_offset = apply_pan(self.left_col_offset, delta, max);
-                } else {
-                    let max = self.graph_max_col(self.layout.diff_pane_width);
-                    self.right_col_offset = apply_pan(self.right_col_offset, delta, max);
-                }
-            }
-            ListFocusTarget::CommitFiles => {
-                if self.focus == FocusPane::Left {
-                    let max = self.commit_file_max_col(self.layout.tree_width);
-                    self.left_col_offset = apply_pan(self.left_col_offset, delta, max);
-                } else {
-                    let max = self.commit_file_max_col(self.layout.diff_pane_width);
-                    self.right_col_offset = apply_pan(self.right_col_offset, delta, max);
-                }
-            }
+        if self.focus == FocusPane::Left {
+            self.pan_left_pane(delta);
+        } else {
+            self.pan_right_pane(delta);
+        }
+    }
+
+    fn pan_left_pane(&mut self, delta: i32) {
+        if self.drill.is_diff() {
+            let max = self.commit_file_max_col(self.layout.tree_width);
+            self.left_col_offset = apply_pan(self.left_col_offset, delta, max);
+        } else if self.drill.is_files() {
+            let max = self.graph_max_col(self.layout.tree_width);
+            self.left_col_offset = apply_pan(self.left_col_offset, delta, max);
+        } else {
+            let max = self.tree_max_col();
+            self.left_col_offset = apply_pan(self.left_col_offset, delta, max);
+        }
+    }
+
+    fn pan_right_pane(&mut self, delta: i32) {
+        if self.right_is_diff() || self.drill.is_diff() {
+            self.pan_diff_content(delta);
+        } else if self.drill.is_files() {
+            let max = self.commit_file_max_col(self.layout.diff_pane_width);
+            self.right_col_offset = apply_pan(self.right_col_offset, delta, max);
+        } else {
+            let max = self.graph_max_col(self.layout.diff_pane_width);
+            self.right_col_offset = apply_pan(self.right_col_offset, delta, max);
+        }
+    }
+
+    fn graph_col_offset(&self) -> u16 {
+        if self.drill.is_files() {
+            self.left_col_offset
+        } else {
+            self.right_col_offset
+        }
+    }
+
+    fn set_graph_col_offset(&mut self, offset: u16) {
+        if self.drill.is_files() {
+            self.left_col_offset = offset;
+        } else {
+            self.right_col_offset = offset;
         }
     }
 
     /// Mouse hscroll: pan the pane under the pointer without moving the
     /// focused row. The workspace tree matches the right pane — scroll does
-    /// not steal the cursor. Click still selects.
+    /// not steal the cursor. Graph / diff under the pointer pan even when
+    /// the other pane holds keyboard focus. Click still selects.
     fn mouse_pan(&mut self, col: u16, delta: i32) {
-        if col < self.layout.right_x && self.drill.is_graph() {
-            let max = self.tree_max_col();
-            self.left_col_offset = apply_pan(self.left_col_offset, delta, max);
-            return;
+        if col >= self.layout.right_x {
+            self.pan_right_pane(delta);
+        } else {
+            self.pan_left_pane(delta);
         }
-        self.pan_focused(delta);
     }
 
     fn tree_max_col(&self) -> usize {
@@ -2218,26 +2289,10 @@ impl AppState {
         let Some(model) = self.graph.as_ref() else {
             return 0;
         };
-        let glyphs = if self.ascii { &ASCII } else { &UNICODE };
-        let pane = pane_width.max(1) as usize;
-        let inner = pane.saturating_sub(1); // scrollbar
-        let cap = graph_gutter_cap(inner.max(1));
-        let label_viewport = inner
-            .saturating_sub(1)
-            .saturating_sub(cap)
-            .saturating_sub(1);
-        let lens: Vec<usize> = model
-            .visible_rows()
-            .iter()
-            .map(|row| format_label(row, glyphs).chars().count())
-            .collect();
-        max_col_offset(&lens, label_viewport.max(1))
+        graph_col_max(model, self.ascii, pane_width, self.graph_scroll > 0)
     }
 
-    fn pan_diff(&mut self, delta: i32) {
-        if self.focus != FocusPane::Right || !self.right_is_diff() {
-            return;
-        }
+    fn pan_diff_content(&mut self, delta: i32) {
         let rows = self.current_diff_rows();
         let gutter = gutter_width(&rows);
         let mut lens = Vec::new();
@@ -6143,6 +6198,117 @@ mod tests {
         assert_eq!(app.drag, SplitDrag::None);
         assert_eq!(effect, Effect::None);
         assert_eq!(app.focus, FocusPane::Right);
+    }
+
+    fn arm_graph_hscrollbar(app: &mut AppState, col_max: u16) {
+        app.layout.term_cols = 160;
+        app.layout.pane_height = 22;
+        app.layout.outer_tree_width = 48;
+        app.layout.right_x = 48;
+        app.layout.graph_hscrollbar_y = Some(12);
+        app.layout.graph_hscrollbar_x = 50;
+        app.layout.graph_hscrollbar_width = 20;
+        app.layout.graph_col_max = col_max;
+        app.right_col_offset = 0;
+        app.focus = FocusPane::Right;
+    }
+
+    #[test]
+    fn graph_horizontal_scrollbar_thumb_drag_updates_offset() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_linear_graph(&mut app, 4);
+        arm_graph_hscrollbar(&mut app, 40);
+        let thumb = workspace_status_graph::graph_scrollbar_thumb(41, 0, 20).expect("thumb");
+        let thumb_col = 50 + thumb.0;
+        let start = app.right_col_offset;
+        assert_eq!(
+            app.dispatch(Action::Click {
+                col: thumb_col,
+                row: 12
+            }),
+            Effect::None
+        );
+        assert_eq!(
+            app.drag,
+            SplitDrag::GraphHScrollbar {
+                origin_col: thumb_col,
+                origin_offset: start
+            }
+        );
+        assert_eq!(app.right_col_offset, start, "thumb grab must not jump");
+        assert_eq!(
+            app.dispatch(Action::Drag {
+                col: thumb_col + 10,
+                row: 12
+            }),
+            Effect::None
+        );
+        assert!(
+            app.right_col_offset > start,
+            "thumb drag should pan, got {}",
+            app.right_col_offset
+        );
+        assert_eq!(app.dispatch(Action::Release), Effect::None);
+        assert_eq!(app.drag, SplitDrag::None);
+        app.dispatch(Action::PanDiff(-20));
+        assert_eq!(app.right_col_offset, 0, "keyboard pan still clamps at 0");
+    }
+
+    #[test]
+    fn mouse_hscroll_pans_graph_under_cursor_without_focus_steal() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        let model = GraphModel {
+            commits: vec![Commit {
+                id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                subject: format!("subject-{}", "y".repeat(80)),
+                parents: Vec::new(),
+                refs: Vec::new(),
+                author_name: "Ada".into(),
+                author_date_unix: 1_700_000_000,
+            }],
+            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            uncommitted: None,
+            ..GraphModel::default()
+        };
+        app.set_graph(
+            model,
+            "app".into(),
+            "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        );
+        app.focus = FocusPane::Left;
+        app.drill = DrillView::Graph;
+        app.layout.right_x = 48;
+        app.layout.diff_pane_width = 20;
+        assert_eq!(app.right_col_offset, 0);
+        assert_eq!(
+            app.dispatch(Action::ScrollWheel {
+                col: 80,
+                row: 4,
+                delta: 5,
+                horizontal: true,
+            }),
+            Effect::None
+        );
+        assert!(
+            app.right_col_offset > 0,
+            "hscroll over the graph must pan even when the tree is focused"
+        );
+        assert_eq!(
+            app.focus,
+            FocusPane::Left,
+            "hscroll must not steal left-pane focus"
+        );
+        app.mouse_enabled = false;
+        let panned = app.right_col_offset;
+        app.dispatch(Action::ScrollWheel {
+            col: 80,
+            row: 4,
+            delta: 5,
+            horizontal: true,
+        });
+        assert_eq!(app.right_col_offset, panned, "mouse off ignores hscroll");
     }
 
     #[test]

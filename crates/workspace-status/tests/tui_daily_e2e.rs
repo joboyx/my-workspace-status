@@ -939,6 +939,51 @@ fn graph_h_l_pans_long_subject_and_j_still_moves() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[test]
+fn mouse_hscroll_pans_graph_and_shows_horizontal_bar() {
+    let (root, workspace) = daily_workspace();
+    seed_long_subject_repo(&workspace, "longsubj");
+    let mut tui = open(&workspace);
+    tui.resize(80, 28);
+    tui.search("longsubj");
+    assert!(tui.right_is_graph(), "right pane should be the graph");
+    assert!(
+        !tui.focus_is_right(),
+        "search leaves keyboard focus on the tree"
+    );
+    let _ = tui.frame();
+    assert!(
+        tui.graph_hscrollbar_track().is_none(),
+        "horizontal bar stays hidden at the left edge"
+    );
+    let col = tui.pane_right_x().saturating_add(2);
+    for _ in 0..80 {
+        tui.mouse_scroll_right(col, 6);
+    }
+    let panned = tui.frame();
+    assert_contains(&panned, "UNIQUE_GRAP");
+    assert!(
+        tui.right_col_offset() > 0,
+        "mouse hscroll should pan the graph under the cursor"
+    );
+    assert!(
+        !tui.focus_is_right(),
+        "mouse hscroll must not steal tree focus"
+    );
+    assert!(
+        tui.graph_hscrollbar_track().is_some(),
+        "horizontal bar is shown once the viewport leaves the left edge"
+    );
+    tui.tab();
+    tui.key('h');
+    tui.key('h');
+    assert!(
+        tui.right_is_graph(),
+        "keyboard h/l still pan a focused graph"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 fn seed_long_subject_repo(workspace: &Path, name: &str) {
     let repo = workspace.join(name);
     fs::create_dir_all(&repo).unwrap();
@@ -1042,38 +1087,45 @@ fn graph_scrollbar_thumb_drag_and_track_jump() {
     );
     tui.tab();
     assert!(tui.focus_is_right());
+    let _ = tui.frame();
+    assert!(
+        tui.graph_scrollbar_col().is_none(),
+        "vertical graph scrollbar stays hidden at the top"
+    );
+    tui.key('G');
     let frame = tui.frame();
     let col = tui
         .graph_scrollbar_col()
-        .expect("graph list should reserve a scrollbar column");
+        .expect("graph list should paint a scrollbar after leaving the top");
     let (track_y, track_h) = tui
         .graph_scrollbar_track()
-        .expect("graph list should expose a scrollbar track");
+        .expect("graph list should expose a scrollbar track after leaving the top");
     assert!(track_h > 2, "track height {track_h} in:\n{frame}");
     let start = tui.graph_scroll();
-    tui.mouse_down(col, track_y);
+    assert!(start > 0, "G should leave the top of the graph");
+    let thumb_y = track_y + track_h.saturating_sub(1);
+    tui.mouse_down(col, thumb_y);
     assert_eq!(
         tui.graph_scroll(),
         start,
-        "thumb grab at the top of the track must not jump"
+        "thumb grab at the bottom of the track must not jump"
     );
-    tui.mouse_drag(col, track_y + track_h.saturating_sub(1));
+    tui.mouse_drag(col, track_y);
     let dragged = tui.graph_scroll();
     assert!(
-        dragged > start,
-        "thumb drag should scroll the graph, start={start} dragged={dragged}"
+        dragged < start,
+        "thumb drag toward the top should scroll up, start={start} dragged={dragged}"
     );
     tui.mouse_up();
     tui.key('j');
     tui.key('k');
     tui.key('G');
     let _ = tui.frame();
-    tui.key('g');
-    tui.key('g');
-    tui.mouse_down(col, track_y + track_h.saturating_sub(1));
+    tui.mouse_down(col, track_y);
     assert!(
-        tui.graph_scroll() > 0,
-        "track click should jump toward the bottom"
+        tui.graph_scroll() < start,
+        "track click toward the top should jump toward that position, now={}",
+        tui.graph_scroll()
     );
     tui.mouse_up();
     let _ = fs::remove_dir_all(root);

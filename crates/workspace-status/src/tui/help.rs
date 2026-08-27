@@ -162,7 +162,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: "m",
-                desc: "mouse · drag pane, split, or graph scrollbar",
+                desc: "mouse · drag pane, split, or graph scrollbars",
             },
             HelpEntry {
                 keys: "Esc",
