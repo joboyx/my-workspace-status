@@ -18,6 +18,12 @@
 //! still dispatch (`BusyAction::Handle`). Only actions that would start
 //! another git write are drained (`Ignore`) so they cannot nest a second
 //! mutating child.
+//!
+//! Held nav (`h`/`j`/`k`/`l`) maps Repeat to the same move as Press. The TTY
+//! loop drops queued copies of that key after each move so a hold cannot
+//! flush as a burst after release. Nested `LoadRightPane` git is not started
+//! from a busy Handle; the in-flight `load_right_pumped` reloads if the
+//! target moved.
 
 use super::action::Action;
 use super::keys::InputMode;
@@ -169,6 +175,15 @@ mod tests {
             }
         );
         assert_eq!(classify_busy_action(&Action::Move(1)), BusyAction::Handle);
+        assert_eq!(
+            classify_busy_action(&Action::PanDiff(-1)),
+            BusyAction::Handle
+        );
+        assert_eq!(
+            classify_busy_action(&Action::ScrollDiff(1)),
+            BusyAction::Handle
+        );
+        assert_eq!(classify_busy_action(&Action::FoldClose), BusyAction::Handle);
         assert_eq!(
             classify_busy_action(&Action::FocusRight),
             BusyAction::Handle

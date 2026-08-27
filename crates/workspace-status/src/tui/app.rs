@@ -8,7 +8,10 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, KeyEvent, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, size as terminal_size, EnterAlternateScreen,
@@ -54,7 +57,7 @@ use super::graph_load::{
     autoload_limit, autoload_skip, load_graph_model, load_graph_model_window, merge_autoload,
     refresh_graph_limit, should_autoload, GraphIdentity, ShouldAutoload,
 };
-use super::keys::event_to_action_with;
+use super::keys::{event_to_action_with, held_nav_key, is_held_nav_backlog, NAV_REPEAT_POLL_MS};
 use super::ops::{format_completed_op, format_running_op, RunningOp};
 use super::render::draw;
 use super::state::AppState;
@@ -83,6 +86,7 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
         let _ = disable_raw_mode();
         return Err(1);
     }
+    push_keyboard_enhancement();
     let backend = CrosstermBackend::new(out);
     let mut terminal = match Terminal::with_options(
         backend,
@@ -105,7 +109,30 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
 fn restore_terminal() {
     let _ = disable_raw_mode();
     let mut end = stdout();
-    let _ = execute!(end, DisableMouseCapture, LeaveAlternateScreen);
+    let _ = execute!(
+        end,
+        PopKeyboardEnhancementFlags,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    );
+}
+
+fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+}
+
+/// Ask the terminal for press / repeat / release on letter keys (`h`/`j`/`k`/`l`).
+///
+/// Terminals that do not support the protocol ignore the CSI. Failures stay
+/// quiet; traditional byte-repeat still maps to Press.
+fn push_keyboard_enhancement() {
+    let mut out = stdout();
+    let _ = execute!(
+        out,
+        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
+    );
 }
 
 fn terminal_size_rect() -> Rect {
@@ -156,6 +183,7 @@ fn run_loop(
     let fetch_ms = fetch_interval_ms(std::env::var("WS_STATUS_FETCH_MS").ok().as_deref());
     let mut last_watch = Instant::now();
     let mut last_fetch = Instant::now();
+    let mut nav_repeat_poll = false;
     loop {
         let remain_watch = watch_remain_ms(last_watch, Instant::now(), watch_ms);
         let remain_fetch = if fetch_ms == 0 {
@@ -166,7 +194,9 @@ fn run_loop(
         let remain_ctrl_c = state
             .ctrl_c_remaining_ms(Instant::now())
             .unwrap_or(u64::MAX);
-        let idle_ms = if state.has_active_flashes() {
+        let idle_ms = if nav_repeat_poll {
+            NAV_REPEAT_POLL_MS
+        } else if state.has_active_flashes() {
             FLASH_TICK_MS
         } else {
             200
@@ -179,10 +209,20 @@ fn run_loop(
                 .max(10),
         );
         if event::poll(timeout).unwrap_or(false) {
+            let mut pending: Option<crossterm::event::Event> = None;
             loop {
-                let Ok(event) = event::read() else {
-                    break;
+                let event = match pending.take() {
+                    Some(event) => event,
+                    None => {
+                        let Ok(event) = event::read() else {
+                            break;
+                        };
+                        event
+                    }
                 };
+                if held_nav_key(&event).is_some() {
+                    nav_repeat_poll = true;
+                }
                 let action = map_event(state, &event);
                 let resized = matches!(action, Action::Resize { .. });
                 if let Action::Resize { cols, rows } = &action {
@@ -194,6 +234,9 @@ fn run_loop(
                 if state.mouse_enabled != mouse_before {
                     sync_mouse_capture(state.mouse_enabled);
                 }
+                if let Some(held) = held_nav_key(&event) {
+                    pending = discard_held_nav_backlog(held);
+                }
                 if matches!(effect, Effect::Quit) {
                     return Ok(());
                 }
@@ -204,12 +247,13 @@ fn run_loop(
                 if resized {
                     state.sync_graph_scroll();
                 }
-                if !event::poll(Duration::from_millis(0)).unwrap_or(false) {
+                if pending.is_none() && !event::poll(Duration::from_millis(0)).unwrap_or(false) {
                     break;
                 }
             }
             continue;
         }
+        nav_repeat_poll = false;
         let _ = state.expire_ctrl_c_prompt(Instant::now());
         if !overlay_blocks_background_ticks(state.input_mode()) {
             if watch_tick_due(last_watch, Instant::now(), watch_ms) {
@@ -252,7 +296,9 @@ enum WorkPump<T> {
 /// Nav / pane switch / cancel dispatch ([`BusyAction::Handle`]). Actions that
 /// would start another git write are drained ([`BusyAction::Ignore`]). Sets
 /// `quit` when the user asked to leave; the caller still waits for in-flight
-/// git to exit.
+/// git to exit. Held nav drops queued copies of the same key. Nested
+/// [`Effect::LoadRightPane`] is skipped so a hold cannot start pane git per
+/// repeat; [`load_right_pumped`] reloads if the target moved.
 fn pump_busy_events(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
@@ -260,9 +306,16 @@ fn pump_busy_events(
     quit: &mut bool,
 ) {
     if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+        let mut pending: Option<crossterm::event::Event> = None;
         loop {
-            let Ok(event) = event::read() else {
-                break;
+            let event = match pending.take() {
+                Some(event) => event,
+                None => {
+                    let Ok(event) = event::read() else {
+                        break;
+                    };
+                    event
+                }
             };
             let action = map_event(state, &event);
             match classify_busy_action(&action) {
@@ -279,8 +332,13 @@ fn pump_busy_events(
                     if state.mouse_enabled != mouse_before {
                         sync_mouse_capture(state.mouse_enabled);
                     }
+                    if let Some(held) = held_nav_key(&event) {
+                        pending = discard_held_nav_backlog(held);
+                    }
                     if matches!(effect, Effect::Quit) {
                         *quit = true;
+                    } else if matches!(effect, Effect::LoadRightPane) {
+                        let _ = terminal.draw(|frame| draw(frame, state));
                     } else if apply_effect(state, effect, opts, terminal, &action_for_load) {
                         *quit = true;
                     } else {
@@ -289,7 +347,7 @@ fn pump_busy_events(
                 }
                 BusyAction::Ignore => {}
             }
-            if !event::poll(Duration::from_millis(0)).unwrap_or(false) {
+            if pending.is_none() && !event::poll(Duration::from_millis(0)).unwrap_or(false) {
                 break;
             }
         }
@@ -481,6 +539,17 @@ struct RightPaneRequest {
     follow_diff: Option<FollowDiffRequest>,
 }
 
+/// Identity of the row a [`RightPaneRequest`] would load. Used to detect
+/// cursor movement while pane git is in flight.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RightPaneTarget {
+    in_graph: bool,
+    file: Option<(String, String)>,
+    graph_repo: Option<String>,
+    follow_files: Option<(String, CommitFileSource)>,
+    follow_diff: Option<(String, CommitFileSource, String)>,
+}
+
 /// Inputs for a depth-2 commit-file diff loaded through [`RightPaneRequest`].
 #[derive(Clone, Debug)]
 struct FollowDiffRequest {
@@ -573,6 +642,22 @@ impl RightPaneRequest {
             graph_limit: refresh_graph_limit(state.graph.as_ref()),
             follow_files,
             follow_diff,
+        }
+    }
+
+    fn target(&self) -> RightPaneTarget {
+        RightPaneTarget {
+            in_graph: self.in_graph,
+            file: self
+                .focused_file
+                .as_ref()
+                .map(|(repo, change)| (repo.clone(), change.path.clone())),
+            graph_repo: self.focused_graph_repo.clone(),
+            follow_files: self.follow_files.clone(),
+            follow_diff: self
+                .follow_diff
+                .as_ref()
+                .map(|diff| (diff.repo.clone(), diff.source.clone(), diff.path.clone())),
         }
     }
 
@@ -682,17 +767,25 @@ fn apply_right_pane_load(state: &mut AppState, payload: RightPaneLoad) {
 
 /// Run right-pane git on a worker. Nav and pane switch stay live; nested
 /// writes are drained. Returns true when the user asked to quit.
+///
+/// If the cursor moved while the worker ran, load again for the new target
+/// instead of leaving the pane on the row that started the request.
 fn load_right_pumped(
     state: &mut AppState,
     opts: &TuiOpts,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> bool {
-    let request = RightPaneRequest::from_state(state);
-    match run_work_pumped(terminal, state, opts, move || request.compute()) {
-        WorkPump::Quit => true,
-        WorkPump::Done(payload) => {
-            apply_right_pane_load(state, payload);
-            false
+    loop {
+        let request = RightPaneRequest::from_state(state);
+        let target = request.target();
+        match run_work_pumped(terminal, state, opts, move || request.compute()) {
+            WorkPump::Quit => return true,
+            WorkPump::Done(payload) => {
+                apply_right_pane_load(state, payload);
+                if RightPaneRequest::from_state(state).target() == target {
+                    return false;
+                }
+            }
         }
     }
 }
@@ -1603,11 +1696,28 @@ fn resume_tui(
     } else {
         execute!(out, EnterAlternateScreen).map_err(|e| e.to_string())?;
     }
+    push_keyboard_enhancement();
     let _ = terminal.hide_cursor();
     let _ = terminal.resize(terminal_size_rect());
     let _ = terminal.clear();
     drain_pending_events();
     Ok(())
+}
+
+/// Drop queued copies of a held nav key (press / repeat / release).
+///
+/// Returns the first event that is not that backlog so it is not lost
+/// (crossterm cannot unread).
+fn discard_held_nav_backlog(held: KeyEvent) -> Option<crossterm::event::Event> {
+    while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+        let Ok(event) = event::read() else {
+            return None;
+        };
+        if !is_held_nav_backlog(held, &event) {
+            return Some(event);
+        }
+    }
+    None
 }
 
 fn run_blocking_editor(
