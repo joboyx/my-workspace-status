@@ -122,25 +122,17 @@ fn pty_ctrl_c_prompts_before_quit() {
 fn pty_tree_sgr_hscroll_pans_clipped_path() {
     let (_root, workspace) = daily_workspace();
     seed_long_path_file(&workspace);
-    let mut tui = PtySession::open(&workspace);
-    tui.resize(64, 24);
-    tui.wait_pred(
-        |screen| left_tree(screen).contains("very-long") && !left_tree(screen).contains("TAIL99"),
-        "clipped long path prefix on the tree row (no TAIL99)",
-        WAIT,
-    );
-    assert_tree_clipped_long_path(&tui.screen());
+    // Start at the clipped size. A later resize can paint a frame where
+    // the prefix was seen, then the next snapshot has no wheel target.
+    let mut tui = PtySession::open_size(&workspace, 64, 24);
+    let _ = tui.wait_clipped_long_path_row(WAIT);
 
     // Same setup as the daily TestBackend case: a short README diff so
     // hscroll over the tree pans the tree, not a long file-diff.
     if let Some(readme_row) = tree_row_containing(&tui.screen(), "README.md") {
         tui.sgr_click(6, readme_row);
-        tui.wait_ms(120);
-        assert_tree_clipped_long_path(&tui.screen());
     }
-
-    let row =
-        tree_row_containing(&tui.screen(), "very-long").expect("tree row with clipped long path");
+    let row = tui.wait_clipped_long_path_row(WAIT);
     let col = 6u16;
 
     for _ in 0..40 {
@@ -208,17 +200,14 @@ mod xfce {
 
         if let Some(readme_row) = tree_row_containing(&tui.screen(), "README.md") {
             tui.click_cell(6, readme_row);
-            tui.wait_pred(
-                |screen| {
-                    left_tree(screen).contains("very-long") && !left_tree(screen).contains("TAIL99")
-                },
-                "tree still clipped after focusing README",
-                WAIT,
-            );
         }
-
-        let row = tree_row_containing(&tui.screen(), "very-long")
-            .expect("tree row with clipped long path");
+        tui.wait_pred(
+            |screen| crate::harness::clipped_long_path_row(screen).is_some(),
+            "clipped long path on a tree row after focusing README",
+            WAIT,
+        );
+        let row = crate::harness::clipped_long_path_row(&tui.screen())
+            .unwrap_or_else(|| panic!("tree row with clipped long path:\n{}", tui.screen()));
         tui.wheel_right_at_cell(6, row, 40);
         tui.wait_pred(
             tree_is_panned_to_tail,

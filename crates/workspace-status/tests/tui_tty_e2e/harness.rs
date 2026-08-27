@@ -255,6 +255,26 @@ impl PtySession {
         }
     }
 
+    /// Wait until the left tree is clipped and a wheel target row exists.
+    ///
+    /// Returns the row from that same frame. A later paint must not pass a
+    /// prefix check then lose the row on a bare `expect`.
+    pub fn wait_clipped_long_path_row(&self, timeout: Duration) -> u16 {
+        let start = Instant::now();
+        loop {
+            let screen = self.screen();
+            if let Some(row) = clipped_long_path_row(&screen) {
+                return row;
+            }
+            if start.elapsed() >= timeout {
+                panic!(
+                    "timeout waiting for clipped long path on a tree row (no TAIL99):\n{screen}"
+                );
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     pub fn wait_ms(&self, ms: u64) {
         thread::sleep(Duration::from_millis(ms));
     }
@@ -317,16 +337,32 @@ fn left_of_split(line: &str) -> String {
 
 /// 0-based screen row of a left-tree cell that contains `needle`.
 ///
-/// Skips the last two rows so a search / hint chip cannot match.
+/// Uses the same rows as [`left_tree`]: skip the top chrome line and the
+/// last two status rows so a search / hint chip cannot match.
 pub fn tree_row_containing(screen: &str, needle: &str) -> Option<u16> {
     let lines: Vec<&str> = screen.lines().collect();
     let end = lines.len().saturating_sub(2);
-    for (i, line) in lines.iter().take(end).enumerate() {
+    let start = usize::from(end > 1);
+    for (i, line) in lines.iter().enumerate().take(end).skip(start) {
         if left_of_split(line).contains(needle) {
             return Some(i as u16);
         }
     }
     None
+}
+
+/// Clipped long-path row on the same frame: prefix visible, `TAIL99` not.
+///
+/// `None` if the prefix is missing, already panned, or there is no tree
+/// row to aim the wheel at. Callers wait on this instead of a bare expect
+/// after resize or click.
+pub fn clipped_long_path_row(screen: &str) -> Option<u16> {
+    let left = left_tree(screen);
+    if left.contains("very-long") && !left.contains("TAIL99") {
+        tree_row_containing(screen, "very-long")
+    } else {
+        None
+    }
 }
 
 pub fn assert_tree_clipped_long_path(screen: &str) {
