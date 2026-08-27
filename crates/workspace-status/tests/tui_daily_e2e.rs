@@ -928,6 +928,141 @@ fn tree_mouse_hscroll_does_not_move_focused_row() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Trackpad hscroll as TTY SGR bytes through the same decoder the live loop
+/// uses (`tty::decode_sgr_mouse`, matching crossterm 0.28 `event::read`).
+/// Motion-bit wheel (`CSI < 99`) is dropped, so it must not pan. Wheel-right
+/// (`CSI < 67`) pans the tree without changing the focused row. Click still
+/// selects; `h` / `l` still fold.
+#[test]
+fn tree_trackpad_sgr_hscroll_pans_without_stealing_focus() {
+    let (root, workspace) = daily_workspace();
+    let long_dir = workspace.join("app/src/app/workspace-tree");
+    fs::create_dir_all(&long_dir).unwrap();
+    fs::write(
+        long_dir.join("very-long-workspace-tree-component-name-TAIL99.ts"),
+        "export const pan = 1;\n",
+    )
+    .unwrap();
+
+    let mut tui = open(&workspace);
+    tui.resize(64, 24);
+    let start = tui.frame();
+    let (readme_col, readme_row) = left_pane_cell_on(&start, &tui, "README.md");
+    tui.mouse_down(readme_col, readme_row);
+    assert!(
+        tui.cursor_label().contains("README.md"),
+        "click a short row before hscroll, cursor={}",
+        tui.cursor_label()
+    );
+    let focused = tui.cursor_id();
+    let was_diff = tui.right_is_diff();
+
+    let clipped = tui.frame();
+    assert_absent(&left_pane(&clipped, tui.pane_right_x()), "TAIL99");
+    let (col, row) = left_pane_cell_on(&clipped, &tui, "very-long");
+    assert!(
+        col < tui.pane_right_x(),
+        "pointer must sit in the left pane, col={col} right_x={}",
+        tui.pane_right_x()
+    );
+
+    for _ in 0..40 {
+        tui.mouse_sgr_motion_scroll_right(col, row);
+    }
+    assert_eq!(
+        tui.cursor_id(),
+        focused,
+        "dropped SGR 99 over a long tree path must not steal the focused row"
+    );
+    assert_eq!(
+        tui.right_is_diff(),
+        was_diff,
+        "dropped SGR 99 must not load a different right pane"
+    );
+    assert_eq!(
+        tui.left_col_offset(),
+        0,
+        "crossterm 0.28 event::read drops SGR 99; the tree must not pan"
+    );
+    let ignored = tui.frame();
+    let ignored_left = left_pane(&ignored, tui.pane_right_x());
+    assert_contains(&ignored_left, "very-long");
+    assert_absent(&ignored_left, "TAIL99");
+
+    for _ in 0..40 {
+        tui.mouse_sgr_scroll_right(col, row);
+    }
+    assert_eq!(
+        tui.cursor_id(),
+        focused,
+        "SGR wheel right over a long tree path must not steal the focused row"
+    );
+    assert_eq!(
+        tui.right_is_diff(),
+        was_diff,
+        "hscroll must not load a different right pane"
+    );
+    let panned = tui.frame();
+    let panned_left = left_pane(&panned, tui.pane_right_x());
+    assert_absent(&panned_left, "very-long");
+    assert_contains(&panned_left, "TAIL99");
+    assert!(
+        tui.left_col_offset() > 0,
+        "SGR wheel right should pan a long tree path"
+    );
+
+    tui.mouse_sgr_shift_wheel_down(col, row);
+    assert_eq!(
+        tui.cursor_id(),
+        focused,
+        "SGR Shift+wheel over the tree must not move the focused row"
+    );
+
+    let before_click = tui.cursor_id();
+    tui.mouse_down(col, row);
+    assert_ne!(
+        tui.cursor_id(),
+        before_click,
+        "click still selects the row under the pointer"
+    );
+
+    for _ in 0..40 {
+        tui.shift_left();
+    }
+    tui.key('G');
+    tui.key('l');
+    let opened = tui.frame();
+    assert_contains(&opened, "lib");
+    tui.key('h');
+    let closed = tui.frame();
+    assert_contains(&closed, "No updates");
+    assert_absent(&closed, "lib");
+    let _ = fs::remove_dir_all(root);
+}
+
+fn left_pane(frame: &str, right_x: u16) -> String {
+    let width = right_x as usize;
+    frame
+        .lines()
+        .map(|line| line.chars().take(width).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn left_pane_cell_on(
+    frame: &str,
+    tui: &workspace_status::tui::HeadlessTui,
+    needle: &str,
+) -> (u16, u16) {
+    let left = left_pane(frame, tui.pane_right_x());
+    for (i, line) in left.lines().enumerate() {
+        if line.contains(needle) {
+            return (tui.tree_inner_x().saturating_add(2), i as u16);
+        }
+    }
+    panic!("left pane should show clipped path `{needle}`:\n{frame}");
+}
+
 #[test]
 fn graph_h_l_pans_long_subject_and_j_still_moves() {
     let (root, workspace) = daily_workspace();

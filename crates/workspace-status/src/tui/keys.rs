@@ -975,6 +975,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sgr_trackpad_hscroll_bytes_map_to_horizontal_pan() {
+        use crate::tui::tty::{
+            decode_sgr_mouse, sgr_mouse_report, SGR_SHIFT_WHEEL_DOWN, SGR_WHEEL_RIGHT,
+            SGR_WHEEL_RIGHT_MOTION,
+        };
+        let right = decode_sgr_mouse(&sgr_mouse_report(SGR_WHEEL_RIGHT, 8, 4)).unwrap();
+        assert_eq!(
+            event_to_action(&right, normal(), false, false),
+            Action::ScrollWheel {
+                col: 8,
+                row: 4,
+                delta: 1,
+                horizontal: true,
+            }
+        );
+        let shift_wheel = decode_sgr_mouse(&sgr_mouse_report(SGR_SHIFT_WHEEL_DOWN, 8, 4)).unwrap();
+        assert_eq!(
+            event_to_action(&shift_wheel, normal(), false, false),
+            Action::ScrollWheel {
+                col: 8,
+                row: 4,
+                delta: 1,
+                horizontal: true,
+            }
+        );
+        assert!(
+            decode_sgr_mouse(&sgr_mouse_report(SGR_WHEEL_RIGHT_MOTION, 8, 4)).is_none(),
+            "live event::read drops SGR 99; keymap must not see a kinder decode"
+        );
+    }
+
     fn ctrl(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL))
     }

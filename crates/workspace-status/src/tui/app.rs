@@ -9,8 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, KeyEvent, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    KeyEvent, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -61,6 +60,7 @@ use super::keys::{event_to_action_with, held_nav_key, is_held_nav_backlog, NAV_R
 use super::ops::{format_completed_op, format_running_op, RunningOp};
 use super::render::draw;
 use super::state::AppState;
+use super::tty::{disable_mouse, enable_mouse, poll_event, read_event};
 use super::watch::{
     checkout_watch_identities, watch_interval_ms, watch_needs_pane_reload, watch_remain_ms,
     watch_tick_due, FLASH_TICK_MS,
@@ -82,7 +82,7 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
     let mut state = AppState::new(opts.cwd.clone(), opts.snapshot.clone(), ascii);
     enable_raw_mode().map_err(|_| 1u8)?;
     let mut out = stdout();
-    if execute!(out, EnterAlternateScreen, EnableMouseCapture).is_err() {
+    if execute!(out, EnterAlternateScreen).is_err() || enable_mouse(&mut out).is_err() {
         let _ = disable_raw_mode();
         return Err(1);
     }
@@ -109,12 +109,8 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
 fn restore_terminal() {
     let _ = disable_raw_mode();
     let mut end = stdout();
-    let _ = execute!(
-        end,
-        PopKeyboardEnhancementFlags,
-        DisableMouseCapture,
-        LeaveAlternateScreen
-    );
+    let _ = disable_mouse(&mut end);
+    let _ = execute!(end, PopKeyboardEnhancementFlags, LeaveAlternateScreen);
 }
 
 fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
@@ -208,13 +204,13 @@ fn run_loop(
                 .min(idle_ms)
                 .max(10),
         );
-        if event::poll(timeout).unwrap_or(false) {
+        if poll_event(timeout).unwrap_or(false) {
             let mut pending: Option<crossterm::event::Event> = None;
             loop {
                 let event = match pending.take() {
                     Some(event) => event,
                     None => {
-                        let Ok(event) = event::read() else {
+                        let Ok(event) = read_event() else {
                             break;
                         };
                         event
@@ -247,7 +243,7 @@ fn run_loop(
                 if resized {
                     state.sync_graph_scroll();
                 }
-                if pending.is_none() && !event::poll(Duration::from_millis(0)).unwrap_or(false) {
+                if pending.is_none() && !poll_event(Duration::from_millis(0)).unwrap_or(false) {
                     break;
                 }
             }
@@ -305,13 +301,13 @@ fn pump_busy_events(
     opts: &TuiOpts,
     quit: &mut bool,
 ) {
-    if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+    if poll_event(Duration::from_millis(50)).unwrap_or(false) {
         let mut pending: Option<crossterm::event::Event> = None;
         loop {
             let event = match pending.take() {
                 Some(event) => event,
                 None => {
-                    let Ok(event) = event::read() else {
+                    let Ok(event) = read_event() else {
                         break;
                     };
                     event
@@ -347,7 +343,7 @@ fn pump_busy_events(
                 }
                 BusyAction::Ignore => {}
             }
-            if pending.is_none() && !event::poll(Duration::from_millis(0)).unwrap_or(false) {
+            if pending.is_none() && !poll_event(Duration::from_millis(0)).unwrap_or(false) {
                 break;
             }
         }
@@ -1669,8 +1665,8 @@ fn head_file_diff(dir: &Path, path: &str, context: Option<u32>) -> DiffContent {
 }
 
 fn drain_pending_events() {
-    while event::poll(Duration::from_millis(0)).unwrap_or(false) {
-        if event::read().is_err() {
+    while poll_event(Duration::from_millis(0)).unwrap_or(false) {
+        if read_event().is_err() {
             break;
         }
     }
@@ -1679,9 +1675,9 @@ fn drain_pending_events() {
 fn sync_mouse_capture(enabled: bool) {
     let mut out = stdout();
     if enabled {
-        let _ = execute!(out, EnableMouseCapture);
+        let _ = enable_mouse(&mut out);
     } else {
-        let _ = execute!(out, DisableMouseCapture);
+        let _ = disable_mouse(&mut out);
     }
 }
 
@@ -1692,7 +1688,8 @@ fn resume_tui(
     enable_raw_mode().map_err(|e| e.to_string())?;
     let mut out = stdout();
     if mouse_enabled {
-        execute!(out, EnterAlternateScreen, EnableMouseCapture).map_err(|e| e.to_string())?;
+        execute!(out, EnterAlternateScreen).map_err(|e| e.to_string())?;
+        enable_mouse(&mut out).map_err(|e| e.to_string())?;
     } else {
         execute!(out, EnterAlternateScreen).map_err(|e| e.to_string())?;
     }
@@ -1709,8 +1706,8 @@ fn resume_tui(
 /// Returns the first event that is not that backlog so it is not lost
 /// (crossterm cannot unread).
 fn discard_held_nav_backlog(held: KeyEvent) -> Option<crossterm::event::Event> {
-    while event::poll(Duration::from_millis(0)).unwrap_or(false) {
-        let Ok(event) = event::read() else {
+    while poll_event(Duration::from_millis(0)).unwrap_or(false) {
+        let Ok(event) = read_event() else {
             return None;
         };
         if !is_held_nav_backlog(held, &event) {
@@ -1729,7 +1726,8 @@ fn run_blocking_editor(
 ) -> Result<(), String> {
     let _ = disable_raw_mode();
     let mut out = stdout();
-    let _ = execute!(out, DisableMouseCapture, LeaveAlternateScreen);
+    let _ = disable_mouse(&mut out);
+    let _ = execute!(out, LeaveAlternateScreen);
     let _ = terminal.show_cursor();
     drain_pending_events();
     let spawn = Command::new(cmd)

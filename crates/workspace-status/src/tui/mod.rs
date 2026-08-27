@@ -28,6 +28,7 @@ mod stash;
 mod state;
 mod theme;
 mod tree;
+pub(crate) mod tty;
 pub(crate) mod viewed;
 pub(crate) mod watch;
 

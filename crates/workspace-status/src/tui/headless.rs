@@ -17,6 +17,10 @@ use super::app::{apply_headless_effect, collect_full_snapshot, TuiOpts};
 use super::keys::event_to_action_with;
 use super::render::draw;
 use super::state::{AppState, FocusPane};
+use super::tty::{
+    decode_sgr_mouse, sgr_mouse_report, SGR_SHIFT_WHEEL_DOWN, SGR_WHEEL_RIGHT,
+    SGR_WHEEL_RIGHT_MOTION,
+};
 
 /// Default TestBackend size. Wide enough for the tree + graph / diff split.
 const WIDTH: u16 = 140;
@@ -317,6 +321,36 @@ impl HeadlessTui {
     /// Shift+wheel down (common terminal encoding of trackpad hscroll).
     pub fn mouse_shift_scroll_down(&mut self, col: u16, row: u16) {
         self.send_mouse_mods(MouseEventKind::ScrollDown, col, row, KeyModifiers::SHIFT);
+    }
+
+    /// Trackpad hscroll as a TTY SGR wheel-right report (`CSI < 67 ; C ; R M`).
+    ///
+    /// `col` / `row` are 0-based cells. The bytes are 1-based, then decoded
+    /// with [`super::tty::decode_sgr_mouse`] (same contract as `read_event`).
+    pub fn mouse_sgr_scroll_right(&mut self, col: u16, row: u16) {
+        self.send_sgr_mouse(&sgr_mouse_report(SGR_WHEEL_RIGHT, col, row));
+    }
+
+    /// Trackpad hscroll as a TTY SGR Shift+wheel-down report (`CSI < 69 ; C ; R M`).
+    pub fn mouse_sgr_shift_wheel_down(&mut self, col: u16, row: u16) {
+        self.send_sgr_mouse(&sgr_mouse_report(SGR_SHIFT_WHEEL_DOWN, col, row));
+    }
+
+    /// Dispatch one decoded SGR mouse report through the real keymap.
+    ///
+    /// Unknown reports are dropped, matching `read_event` / `event::read`
+    /// skipping a crossterm parse error (the TTY never sees those bytes as
+    /// an `Event`).
+    pub fn send_sgr_mouse(&mut self, seq: &[u8]) {
+        let Some(event) = decode_sgr_mouse(seq) else {
+            return;
+        };
+        self.dispatch_event(event);
+    }
+
+    /// Trackpad hscroll as SGR wheel-right with the 1003 motion bit (`CSI < 99 ; C ; R M`).
+    pub fn mouse_sgr_motion_scroll_right(&mut self, col: u16, row: u16) {
+        self.send_sgr_mouse(&sgr_mouse_report(SGR_WHEEL_RIGHT_MOTION, col, row));
     }
 
     /// Inner tree pane origin x from the last paint.

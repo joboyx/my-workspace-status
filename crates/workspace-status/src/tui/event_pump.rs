@@ -333,4 +333,40 @@ mod tests {
             "only DefaultBranch stays a serial per-repo loop; Fetch/Pull/Push must not"
         );
     }
+
+    /// Live loop must read and enable mouse through `tui/tty.rs`. Direct
+    /// `event::read` / `EnableMouseCapture` would skip the shared sequence
+    /// and SGR contract Headless e2e uses.
+    #[test]
+    fn tty_event_loop_must_use_shared_mouse_tty() {
+        let src = include_str!("app.rs");
+        assert!(
+            !src.contains("event::read("),
+            "TTY must call read_event(); event::read skips the shared mouse module"
+        );
+        assert!(
+            !src.contains("event::poll("),
+            "TTY must call poll_event(); event::poll skips the shared mouse module"
+        );
+        assert!(
+            !src.contains("EnableMouseCapture"),
+            "TTY must call enable_mouse(); EnableMouseCapture sets exclusive 1003"
+        );
+        assert!(
+            src.contains("read_event("),
+            "TTY must read via tty::read_event"
+        );
+        assert!(
+            src.contains("poll_event("),
+            "TTY must poll via tty::poll_event"
+        );
+        assert!(
+            src.contains("enable_mouse("),
+            "TTY must enable mouse via tty::enable_mouse"
+        );
+        assert!(
+            src.contains("disable_mouse("),
+            "TTY must disable mouse via tty::disable_mouse"
+        );
+    }
 }
