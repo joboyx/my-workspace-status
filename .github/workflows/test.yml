@@ -31,7 +31,8 @@ jobs:
             if command -v dbus-launch >/dev/null; then
               eval "$(dbus-launch --sh-syntax)"
             fi
-            openbox >/tmp/ws-tty-e2e-openbox.log 2>&1 &
+            openbox --config-file crates/workspace-status/tests/tui_tty_e2e/openbox.xml \
+              >/tmp/ws-tty-e2e-openbox.log 2>&1 &
             sleep 0.4
             cargo test --test tui_tty_e2e -- --ignored --nocapture --test-threads=1
           '

@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 use super::harness::{write_fresh_update_check, COLS, ROWS};
 use super::seed::git_env;
 
+const OPENBOX_RC: &str = include_str!("openbox.xml");
+
 pub struct DesktopSession {
     term: Option<Child>,
     ws_pid: Option<u32>,
@@ -30,10 +32,14 @@ pub struct DesktopSession {
 
 impl DesktopSession {
     pub fn open(workspace: &Path) -> Self {
+        Self::open_size(workspace, COLS, ROWS)
+    }
+
+    pub fn open_size(workspace: &Path, cols: u16, rows: u16) -> Self {
         require_desktop_tools();
-        ensure_openbox();
         let stage = workspace.join(".e2e-desktop");
         fs::create_dir_all(&stage).unwrap();
+        ensure_openbox(&stage);
         let typescript = stage.join("typescript");
         let _ = fs::remove_file(&typescript);
         fs::write(&typescript, []).unwrap();
@@ -80,7 +86,7 @@ impl DesktopSession {
         let mut term = Command::new("xfce4-terminal")
             .args([
                 "--disable-server",
-                &format!("--geometry={COLS}x{ROWS}+24+24"),
+                &format!("--geometry={cols}x{rows}+24+24"),
                 "--hide-menubar",
                 "--hide-toolbar",
                 "--hide-scrollbar",
@@ -108,8 +114,8 @@ impl DesktopSession {
                 .parent()
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| workspace.to_path_buf()),
-            cols: COLS,
-            rows: ROWS,
+            cols,
+            rows,
         };
         session.wait_contains_any(
             &[" tree", "Flat paths", "app", "README"],
@@ -128,7 +134,13 @@ impl DesktopSession {
             .stderr(Stdio::null())
             .status();
         let _ = Command::new("xdotool")
-            .args(["mousemove", "--sync", "--window", &self.wid, "24", "12"])
+            .args(["windowactivate", "--sync", &self.wid])
+            .stderr(Stdio::null())
+            .status();
+        // XTEST warp + click (no `--window`). VTE ignores XSendEvent.
+        let (x, y) = self.cell_root_pixels(2, 1);
+        let _ = Command::new("xdotool")
+            .args(["mousemove", "--sync", &x.to_string(), &y.to_string()])
             .status();
         let _ = Command::new("xdotool")
             .args(["click", "1"])
@@ -143,6 +155,10 @@ impl DesktopSession {
             .status();
         let _ = Command::new("xdotool")
             .args(["windowfocus", "--sync", &self.wid])
+            .stderr(Stdio::null())
+            .status();
+        let _ = Command::new("xdotool")
+            .args(["windowactivate", "--sync", &self.wid])
             .stderr(Stdio::null())
             .status();
         thread::sleep(Duration::from_millis(40));
@@ -174,22 +190,87 @@ impl DesktopSession {
         thread::sleep(Duration::from_millis(120));
     }
 
-    /// VTE wheel right at a pixel inside the left pane (xterm button 7).
-    pub fn wheel_right_tree(&self, times: u32) {
-        self.focus();
-        // Geometry 140x32: (80, 140) sits in the tree, below chrome.
-        let _ = Command::new("xdotool")
-            .args(["mousemove", "--window", &self.wid, "80", "140"])
-            .status();
+    /// Left button via XTEST (no `--window`). Setup only: focus a short
+    /// tree row so hscroll pans the tree, not a long file-diff.
+    pub fn click_cell(&self, col: u16, row: u16) {
+        self.pointer_to_cell(col, row);
+        let status = Command::new("xdotool")
+            .args(["click", "1"])
+            .status()
+            .expect("xdotool click 1");
+        assert!(status.success(), "xdotool click 1 (XTEST) failed");
+        thread::sleep(Duration::from_millis(200));
+    }
+
+    /// VTE wheel right via XTEST. No `--window` on warp or click.
+    ///
+    /// `--window` uses XSendEvent. VTE ignores that, so a later `click 7`
+    /// would fire at the real pointer instead of the tree cell — and an
+    /// earlier desktop "pass" never panned.
+    pub fn wheel_right_at_cell(&self, col: u16, row: u16, times: u32) {
+        self.pointer_to_cell(col, row);
         for _ in 0..times {
             let status = Command::new("xdotool")
-                .args(["click", "--window", &self.wid, "7"])
+                .args(["click", "7"])
                 .status()
                 .expect("xdotool click 7");
-            assert!(status.success(), "xdotool click 7 (wheel right) failed");
+            assert!(
+                status.success(),
+                "xdotool click 7 (XTEST wheel right) failed"
+            );
             thread::sleep(Duration::from_millis(30));
         }
         thread::sleep(Duration::from_millis(200));
+    }
+
+    /// Warp the real X pointer (XTEST). No `--window`.
+    fn pointer_to_cell(&self, col: u16, row: u16) {
+        self.focus();
+        let (x, y) = self.cell_root_pixels(col, row);
+        let status = Command::new("xdotool")
+            .args(["mousemove", "--sync", &x.to_string(), &y.to_string()])
+            .status()
+            .expect("xdotool mousemove");
+        assert!(
+            status.success(),
+            "xdotool mousemove (XTEST) to {x},{y} failed"
+        );
+    }
+
+    fn cell_root_pixels(&self, col: u16, row: u16) -> (i32, i32) {
+        let (origin_x, origin_y, width, height) = self.window_geometry();
+        if width == 0 || height == 0 {
+            panic!("window size is zero");
+        }
+        let cols = f64::from(self.cols.max(1));
+        let rows = f64::from(self.rows.max(1));
+        let x = origin_x + ((f64::from(col) + 0.5) * (f64::from(width) / cols)).round() as i32;
+        let y = origin_y + ((f64::from(row) + 0.5) * (f64::from(height) / rows)).round() as i32;
+        (x.max(1), y.max(1))
+    }
+
+    fn window_geometry(&self) -> (i32, i32, i32, i32) {
+        let out = Command::new("xdotool")
+            .args(["getwindowgeometry", "--shell", &self.wid])
+            .output()
+            .expect("window geometry");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut x = 0i32;
+        let mut y = 0i32;
+        let mut width = 0i32;
+        let mut height = 0i32;
+        for line in text.lines() {
+            if let Some(v) = line.strip_prefix("X=") {
+                x = v.parse().unwrap_or(0);
+            } else if let Some(v) = line.strip_prefix("Y=") {
+                y = v.parse().unwrap_or(0);
+            } else if let Some(v) = line.strip_prefix("WIDTH=") {
+                width = v.parse().unwrap_or(0);
+            } else if let Some(v) = line.strip_prefix("HEIGHT=") {
+                height = v.parse().unwrap_or(0);
+            }
+        }
+        (x, y, width, height)
     }
 
     pub fn screen(&self) -> String {
@@ -200,28 +281,30 @@ impl DesktopSession {
     }
 
     pub fn wait_contains(&self, needle: &str, timeout: Duration) {
-        let start = Instant::now();
-        loop {
-            let screen = self.screen();
-            if screen.contains(needle) {
-                return;
-            }
-            if start.elapsed() >= timeout {
-                panic!("timeout waiting for `{needle}`:\n{screen}");
-            }
-            thread::sleep(Duration::from_millis(40));
-        }
+        self.wait_pred(
+            |screen| screen.contains(needle),
+            &format!("screen contains `{needle}`"),
+            timeout,
+        );
     }
 
     pub fn wait_contains_any(&self, needles: &[&str], timeout: Duration) {
+        self.wait_pred(
+            |screen| needles.iter().any(|n| screen.contains(n)),
+            &format!("screen contains one of {needles:?}"),
+            timeout,
+        );
+    }
+
+    pub fn wait_pred(&self, pred: impl Fn(&str) -> bool, what: &str, timeout: Duration) {
         let start = Instant::now();
         loop {
             let screen = self.screen();
-            if needles.iter().any(|n| screen.contains(n)) {
+            if pred(&screen) {
                 return;
             }
             if start.elapsed() >= timeout {
-                panic!("timeout waiting for one of {needles:?}:\n{screen}");
+                panic!("timeout waiting for {what}:\n{screen}");
             }
             thread::sleep(Duration::from_millis(40));
         }
@@ -266,7 +349,12 @@ fn have(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn ensure_openbox() {
+fn ensure_openbox(stage: &Path) {
+    let rc = stage.join("openbox.xml");
+    fs::write(&rc, OPENBOX_RC.as_bytes()).unwrap();
+    if !have("openbox") {
+        return;
+    }
     let running = Command::new("pgrep")
         .args(["-x", "openbox"])
         .stdout(Stdio::null())
@@ -275,12 +363,14 @@ fn ensure_openbox() {
         .map(|s| s.success())
         .unwrap_or(false);
     if running {
-        return;
-    }
-    if !have("openbox") {
+        // Session Openbox (GitHub Actions `tui-tty-desktop`) should already
+        // have been started with this rc. Do not `--replace`: that would
+        // steal a shared DISPLAY.
         return;
     }
     let _ = Command::new("openbox")
+        .args(["--config-file"])
+        .arg(&rc)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -342,7 +432,7 @@ fn largest_terminal_window() -> Option<String> {
         }
         let area = width.saturating_mul(height);
         // 140x32 cells is well above a leftover 1x1 shell.
-        if area >= 200_000 && best.as_ref().map_or(true, |(_, a)| area > *a) {
+        if area >= 80_000 && best.as_ref().map_or(true, |(_, a)| area > *a) {
             best = Some((wid, area));
         }
     }

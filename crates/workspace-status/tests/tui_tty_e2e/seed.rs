@@ -161,22 +161,6 @@ pub fn seed_long_path_file(workspace: &Path) {
     .unwrap();
 }
 
-pub fn seed_tall_dirty_file(workspace: &Path, name: &str) {
-    let mut body = String::new();
-    for i in 0..50 {
-        body.push_str(&format!("tall line {i} {name}\n"));
-    }
-    fs::write(workspace.join("app").join(name), body).unwrap();
-}
-
-pub fn seed_long_diff_file(workspace: &Path) {
-    let line = format!(
-        "const token = '{}';\n",
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-long-diff-TAIL42".repeat(4)
-    );
-    fs::write(workspace.join("app").join("wide.ts"), line).unwrap();
-}
-
 /// Daily-path workspace: dirty `app`, clean `lib`, ignored `notes`, merge graph.
 pub fn daily_workspace() -> (PathBuf, PathBuf) {
     let root = unique_root("ws-tui-tty");

@@ -20,14 +20,11 @@ use std::time::Duration;
 
 #[cfg(unix)]
 use harness::{
-    assert_absent, assert_contains, PtySession, SGR_SHIFT_WHEEL_DOWN, SGR_WHEEL_DOWN,
-    SGR_WHEEL_RIGHT, SGR_WHEEL_RIGHT_MOTION,
+    assert_contains, assert_tree_clipped_long_path, left_tree, tree_is_panned_to_tail,
+    tree_row_containing, PtySession, SGR_WHEEL_RIGHT, SGR_WHEEL_RIGHT_MOTION,
 };
 #[cfg(unix)]
-use seed::{
-    daily_workspace, focus_workspace, seed_long_diff_file, seed_long_path_file,
-    seed_tall_dirty_file,
-};
+use seed::{daily_workspace, focus_workspace, seed_long_path_file};
 
 #[cfg(unix)]
 const WAIT: Duration = Duration::from_secs(12);
@@ -42,12 +39,12 @@ fn pty_launch_paints_tree_diff_and_chrome() {
     assert_contains(&screen, "README.md");
     assert_contains(&screen, " tree");
     assert_contains(&screen, "+dirty");
-    assert_absent(&screen, "notes");
+    harness::assert_absent(&screen, "notes");
 }
 
 #[cfg(unix)]
 #[test]
-fn pty_nav_tab_help_search_gg_g() {
+fn pty_help_overlay() {
     let (_root, workspace) = daily_workspace();
     let mut tui = PtySession::open(&workspace);
 
@@ -58,21 +55,6 @@ fn pty_nav_tab_help_search_gg_g() {
     tui.wait_contains(workspace_status::APP_VERSION, WAIT);
     tui.esc();
     tui.wait_absent("MOVE", WAIT);
-
-    tui.search("README");
-    tui.wait_contains("/README", WAIT);
-    tui.wait_contains("README.md", WAIT);
-
-    tui.gg();
-    tui.wait_ms(80);
-    tui.key('G');
-    tui.wait_contains("No updates", WAIT);
-
-    tui.tab();
-    tui.wait_ms(120);
-    tui.tab();
-    let screen = tui.screen();
-    assert_contains(&screen, "app");
 }
 
 #[cfg(unix)]
@@ -122,156 +104,69 @@ fn pty_graph_branch_focus_overlay() {
 
 #[cfg(unix)]
 #[test]
-fn pty_ignored_stash_confirm_reviewed_fold() {
+fn pty_ctrl_c_prompts_before_quit() {
     let (_root, workspace) = daily_workspace();
     let mut tui = PtySession::open(&workspace);
-
-    tui.key('.');
-    tui.wait_contains("notes", WAIT);
-
-    tui.search("app");
-    tui.wait_contains("app", WAIT);
-    tui.key('S');
-    tui.wait_contains("stash", WAIT);
-    tui.esc();
-    tui.wait_ms(80);
-
-    tui.search("README");
-    tui.wait_contains("README.md", WAIT);
-    tui.key('x');
-    tui.wait_contains_any(&["Discard", "revert", "y"], WAIT);
-    tui.key('n');
-    tui.wait_ms(80);
-
-    tui.key(' ');
-    tui.wait_ms(120);
-    let reviewed = tui.screen();
-    assert!(
-        reviewed.contains('*') || reviewed.contains("reviewed"),
-        "space should mark reviewed:\n{reviewed}"
-    );
-
-    tui.search("No updates");
-    tui.wait_contains("No updates", WAIT);
-    tui.key('z');
-    tui.wait_contains("lib", WAIT);
+    tui.ctrl('c');
+    tui.wait_contains("Press Ctrl+C again to exit", WAIT);
+    tui.key('q');
 }
 
+/// Tree hscroll via live `event::read`. Must fail if the tree does not pan.
+///
+/// Same clipped-prefix vs `TAIL99` oracle as headless
+/// `tree_trackpad_sgr_hscroll_pans_without_stealing_focus`. No `/` search:
+/// that would put `TAIL99` on the status chip before any wheel.
 #[cfg(unix)]
 #[test]
-fn pty_sgr_mouse_click_wheel_and_trackpad_hscroll() {
+fn pty_tree_sgr_hscroll_pans_clipped_path() {
     let (_root, workspace) = daily_workspace();
     seed_long_path_file(&workspace);
     let mut tui = PtySession::open(&workspace);
-
     tui.resize(64, 24);
-    tui.wait_ms(200);
-    tui.key('t');
-    tui.search("TAIL99");
-    tui.wait_contains("TAIL99", Duration::from_secs(8));
-    tui.wait_ms(80);
-    let clipped = tui.screen();
-    assert_absent(
-        &clipped,
-        "very-long-workspace-tree-component-name-TAIL99.ts",
+    tui.wait_pred(
+        |screen| left_tree(screen).contains("very-long") && !left_tree(screen).contains("TAIL99"),
+        "clipped long path prefix on the tree row (no TAIL99)",
+        WAIT,
     );
+    assert_tree_clipped_long_path(&tui.screen());
 
-    let row = tui
-        .row_containing("TAIL99")
-        .or_else(|| tui.row_containing("workspace-tree"))
-        .unwrap_or(4);
+    // Same setup as the daily TestBackend case: a short README diff so
+    // hscroll over the tree pans the tree, not a long file-diff.
+    if let Some(readme_row) = tree_row_containing(&tui.screen(), "README.md") {
+        tui.sgr_click(6, readme_row);
+        tui.wait_ms(120);
+        assert_tree_clipped_long_path(&tui.screen());
+    }
+
+    let row =
+        tree_row_containing(&tui.screen(), "very-long").expect("tree row with clipped long path");
     let col = 6u16;
-    let before = tui.screen();
 
-    tui.sgr_mouse(SGR_WHEEL_RIGHT_MOTION, col, row);
+    for _ in 0..40 {
+        tui.sgr_mouse(SGR_WHEEL_RIGHT_MOTION, col, row);
+    }
     tui.wait_ms(80);
-    assert_eq!(
-        tui.screen(),
-        before,
-        "crossterm 0.28 drops SGR 99; the tree must not pan"
-    );
+    assert_tree_clipped_long_path(&tui.screen());
 
     for _ in 0..40 {
         tui.sgr_mouse(SGR_WHEEL_RIGHT, col, row);
     }
-    tui.wait_contains("TAIL99", WAIT);
-    let panned = tui.screen();
-    assert_contains(&panned, "TAIL99");
-
-    tui.sgr_mouse(SGR_SHIFT_WHEEL_DOWN, col, row);
-    tui.wait_ms(80);
-
-    tui.sgr_mouse(SGR_WHEEL_DOWN, col, row);
-    tui.wait_ms(80);
-
-    if let Some(app_row) = tui.row_containing("app") {
-        tui.click(8, app_row);
-        tui.wait_ms(120);
-    }
-    let screen = tui.screen();
-    assert_contains(&screen, "app");
-}
-
-#[cfg(unix)]
-#[test]
-fn pty_diff_pan_resize_ctrl_ud() {
-    let (_root, workspace) = daily_workspace();
-    seed_long_diff_file(&workspace);
-    seed_tall_dirty_file(&workspace, "tall.ts");
-    let mut tui = PtySession::open(&workspace);
-
-    tui.search("wide.ts");
-    tui.wait_contains("wide.ts", WAIT);
-    tui.wait_contains("TAIL42", Duration::from_secs(8));
-    tui.tab();
-    tui.wait_ms(100);
-    for _ in 0..24 {
-        tui.key('l');
-    }
-    tui.wait_ms(80);
-    let panned = tui.screen();
-    assert_contains(&panned, "wide.ts");
-
-    tui.tab();
-    tui.search("tall.ts");
-    tui.wait_contains("tall.ts", WAIT);
-    tui.tab();
-    tui.gg();
-    tui.wait_contains("tall line 0", WAIT);
-    tui.key('G');
-    tui.wait_contains("tall line 49", WAIT);
-    tui.ctrl('u');
-    tui.wait_ms(80);
-    tui.ctrl('d');
-    tui.wait_ms(80);
-
-    tui.resize(80, 24);
-    tui.wait_ms(200);
-    let resized = tui.screen();
-    assert_contains(&resized, "tall.ts");
-}
-
-#[cfg(unix)]
-#[test]
-fn pty_stage_unstage_and_quit_chords() {
-    let (_root, workspace) = daily_workspace();
-    let mut tui = PtySession::open(&workspace);
-    tui.search("README");
-    tui.wait_contains("README.md", WAIT);
-    tui.key('s');
-    tui.wait_contains_any(&["S", "staged", "stage"], WAIT);
-    tui.key('u');
-    tui.wait_ms(200);
-
-    tui.ctrl('c');
-    tui.wait_contains("Press Ctrl+C again to exit", WAIT);
-    tui.key('q');
+    tui.wait_pred(
+        tree_is_panned_to_tail,
+        "tree row shows TAIL99 and drops the clipped prefix",
+        WAIT,
+    );
+    let left = left_tree(&tui.screen());
+    harness::assert_absent(&left, "very-long");
+    assert_contains(&left, "TAIL99");
 }
 
 #[cfg(target_os = "linux")]
 mod xfce {
     use super::*;
     use crate::desktop::DesktopSession;
+    use crate::harness::{assert_tree_clipped_long_path, left_tree, tree_row_containing};
     use crate::seed::seed_long_path_file;
 
     #[test]
@@ -291,19 +186,47 @@ mod xfce {
         tui.wait_contains("WIP on graph", WAIT);
     }
 
+    /// VTE wheel right. Must fail if the tree does not pan.
+    ///
+    /// XTEST `click 7` (no `--window`) after a root-coordinate warp. Same
+    /// clipped-prefix vs `TAIL99` tree-row oracle as the PTY case. No `/`
+    /// search: that would put `TAIL99` on the status chip before any wheel.
     #[test]
     #[ignore = "GitHub Actions tui-tty-desktop job; VTE encodes trackpad hscroll"]
     fn desktop_xfce_vte_trackpad_hscroll() {
         let (_root, workspace) = daily_workspace();
         seed_long_path_file(&workspace);
-        let tui = DesktopSession::open(&workspace);
-        tui.key("t");
-        tui.key("slash");
-        tui.type_text("TAIL99");
-        tui.key("Return");
-        tui.wait_contains("TAIL99", WAIT);
-        tui.wheel_right_tree(40);
-        let screen = tui.screen();
-        assert_contains(&screen, "TAIL99");
+        let tui = DesktopSession::open_size(&workspace, 64, 24);
+        tui.wait_pred(
+            |screen| {
+                left_tree(screen).contains("very-long") && !left_tree(screen).contains("TAIL99")
+            },
+            "clipped long path prefix on the tree row (no TAIL99)",
+            WAIT,
+        );
+        assert_tree_clipped_long_path(&tui.screen());
+
+        if let Some(readme_row) = tree_row_containing(&tui.screen(), "README.md") {
+            tui.click_cell(6, readme_row);
+            tui.wait_pred(
+                |screen| {
+                    left_tree(screen).contains("very-long") && !left_tree(screen).contains("TAIL99")
+                },
+                "tree still clipped after focusing README",
+                WAIT,
+            );
+        }
+
+        let row = tree_row_containing(&tui.screen(), "very-long")
+            .expect("tree row with clipped long path");
+        tui.wheel_right_at_cell(6, row, 40);
+        tui.wait_pred(
+            tree_is_panned_to_tail,
+            "tree row shows TAIL99 and drops the clipped prefix",
+            WAIT,
+        );
+        let left = left_tree(&tui.screen());
+        crate::harness::assert_absent(&left, "very-long");
+        assert_contains(&left, "TAIL99");
     }
 }

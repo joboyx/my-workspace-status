@@ -21,14 +21,8 @@ pub const ROWS: u16 = 32;
 
 /// xterm SGR button for wheel right (trackpad hscroll).
 pub const SGR_WHEEL_RIGHT: u8 = 67;
-/// xterm SGR button for Shift+wheel down (common trackpad hscroll encoding).
-pub const SGR_SHIFT_WHEEL_DOWN: u8 = 69;
 /// Wheel right with the 1003 motion bit (`67 | 32`). crossterm 0.28 drops this.
 pub const SGR_WHEEL_RIGHT_MOTION: u8 = 67 | 32;
-/// Vertical wheel down.
-pub const SGR_WHEEL_DOWN: u8 = 65;
-/// Left button down.
-pub const SGR_LEFT_DOWN: u8 = 0;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(12);
 
@@ -180,11 +174,6 @@ impl PtySession {
         self.enter();
     }
 
-    pub fn gg(&mut self) {
-        self.key('g');
-        self.key('g');
-    }
-
     /// Encode one xterm SGR mouse report (`CSI < Cb ; Cx ; Cy M`).
     ///
     /// `col` / `row` are 0-based cells, matching crossterm. The bytes are
@@ -198,18 +187,16 @@ impl PtySession {
         self.send_bytes(seq.as_bytes());
     }
 
-    pub fn sgr_mouse_up(&mut self, col: u16, row: u16) {
+    /// Left press + release. Setup only (focus a short tree row before
+    /// hscroll). Not a click-coverage claim: a no-op click still continues.
+    pub fn sgr_click(&mut self, col: u16, row: u16) {
+        self.sgr_mouse(0, col, row);
         let seq = format!(
             "\x1b[<0;{};{}m",
             col.saturating_add(1),
             row.saturating_add(1)
         );
         self.send_bytes(seq.as_bytes());
-    }
-
-    pub fn click(&mut self, col: u16, row: u16) {
-        self.sgr_mouse(SGR_LEFT_DOWN, col, row);
-        self.sgr_mouse_up(col, row);
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -228,16 +215,6 @@ impl PtySession {
 
     pub fn screen(&self) -> String {
         self.parser.lock().unwrap().screen().contents()
-    }
-
-    /// 0-based row of the first screen line that contains `needle`.
-    pub fn row_containing(&self, needle: &str) -> Option<u16> {
-        for (i, line) in self.screen().lines().enumerate() {
-            if line.contains(needle) {
-                return Some(i as u16);
-            }
-        }
-        None
     }
 
     pub fn wait_contains(&self, needle: &str, timeout: Duration) {
@@ -264,7 +241,7 @@ impl PtySession {
         );
     }
 
-    fn wait_pred(&self, pred: impl Fn(&str) -> bool, what: &str, timeout: Duration) {
+    pub fn wait_pred(&self, pred: impl Fn(&str) -> bool, what: &str, timeout: Duration) {
         let start = Instant::now();
         loop {
             let screen = self.screen();
@@ -311,4 +288,54 @@ pub fn assert_absent(screen: &str, needle: &str) {
         !screen.contains(needle),
         "did not expect `{needle}` in screen:\n{screen}"
     );
+}
+
+/// Left list cells, excluding top/bottom chrome.
+///
+/// A search chip on the status row can contain `TAIL99` without the tree
+/// having panned. Split on the pane join so the right pane is out.
+pub fn left_tree(screen: &str) -> String {
+    let lines: Vec<&str> = screen.lines().collect();
+    let end = lines.len().saturating_sub(2);
+    let start = usize::from(end > 1);
+    lines[start..end]
+        .iter()
+        .map(|line| left_of_split(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn left_of_split(line: &str) -> String {
+    for sep in ["││", "┐┌", "┘└"] {
+        if let Some(idx) = line.find(sep) {
+            return line[..idx].to_string();
+        }
+    }
+    let n = (line.chars().count() * 2 / 5).max(12);
+    line.chars().take(n).collect()
+}
+
+/// 0-based screen row of a left-tree cell that contains `needle`.
+///
+/// Skips the last two rows so a search / hint chip cannot match.
+pub fn tree_row_containing(screen: &str, needle: &str) -> Option<u16> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let end = lines.len().saturating_sub(2);
+    for (i, line) in lines.iter().take(end).enumerate() {
+        if left_of_split(line).contains(needle) {
+            return Some(i as u16);
+        }
+    }
+    None
+}
+
+pub fn assert_tree_clipped_long_path(screen: &str) {
+    let left = left_tree(screen);
+    assert_contains(&left, "very-long");
+    assert_absent(&left, "TAIL99");
+}
+
+pub fn tree_is_panned_to_tail(screen: &str) -> bool {
+    let left = left_tree(screen);
+    left.contains("TAIL99") && !left.contains("very-long")
 }
