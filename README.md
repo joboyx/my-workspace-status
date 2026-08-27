@@ -214,7 +214,7 @@ That isolation is deliberate. Refactors should be able to change implementation 
 | [docs/git-operations.md](./docs/git-operations.md) | Git commands, operation semantics, safety rules |
 | [docs/demo.md](./docs/demo.md) | Demo workspace and screenshot frames |
 | [docs/tui-rust.md](./docs/tui-rust.md) | Ratatui TUI keys, layout, and chrome |
-| [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md) | Real-TTY TUI e2e (PTY in CI, xfce desktop job) |
+| [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md) | Real-TTY TUI e2e (PTY in CI, desktop TTY job: xfce keys + xterm XTEST wheel) |
 | [docs/configuration.md](./docs/configuration.md) | Environment variables, workspace config, keymap |
 
 ## License

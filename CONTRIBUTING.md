@@ -34,7 +34,7 @@ Agents and CI must use `--plain` or `--json`. A TTY run without those flags open
 
 ## Pull requests
 
-Open a pull request against main. GitHub Actions runs `cargo test --workspace` and the xfce TTY e2e job on pull requests and on main.
+Open a pull request against main. GitHub Actions runs `cargo test --workspace` and the desktop TTY e2e job (`tui-tty-desktop`: xfce keys + xterm XTEST wheel) on pull requests and on main.
 
 Keep `SAMPLE_OUTPUT.md` in sync with `crates/workspace-status/tests/snapshot_contract.rs` when output changes.
 
