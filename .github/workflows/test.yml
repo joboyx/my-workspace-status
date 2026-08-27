@@ -22,7 +22,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            xvfb xfce4-terminal xdotool dbus-x11 openbox
+            xvfb xfce4-terminal xterm xdotool dbus-x11 openbox
       - name: Real VTE trackpad e2e
         run: |
           xvfb-run -a -s "-screen 0 1600x1000x24" bash -c '

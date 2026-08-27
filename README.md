@@ -173,7 +173,7 @@ cargo test --workspace
 
 | Area                  | Covered behavior                                                                                                                                                                                |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Real-TTY TUI e2e      | PTY spawn of the binary; live `event::read`. Tree hscroll asserts clipped prefix vs `TAIL99` on the tree row. xfce4-terminal + XTEST wheel in Actions `tui-tty-desktop` ([docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md)) |
+| Real-TTY TUI e2e      | PTY spawn of the binary; live `event::read`. Tree hscroll asserts clipped prefix vs `TAIL99` on the tree row. xfce keys + xterm XTEST wheel in Actions `tui-tty-desktop` ([docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md)) |
 | CLI contract          | `--help` documents `--all`, `--fetch`, `--verbose`, `--pull`, `--default-branch`, `--plain`, `--json`, and `--update` |
 | Snapshot contract     | `--json` and `--plain` share one workspace snapshot; fixture e2e builds a temp workspace and asserts both without a TTY                                                                         |
 | Clean summary         | all-clean default-branch workspaces and mixed clean default/non-default workspaces                                                                                                              |

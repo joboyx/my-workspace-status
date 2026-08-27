@@ -1,9 +1,10 @@
-//! xfce4-terminal + xdotool desktop path.
+//! xfce4-terminal (keys) and xterm (XTEST wheel) desktop path.
 //!
-//! GitHub-hosted runners have no physical trackpad. This driver launches the
-//! real binary inside xfce4-terminal (VTE) under Xvfb and sends keys / wheel
-//! through xdotool so the emulator encodes SGR the way a trackpad would.
-//! Screen text is recovered from a `script(1)` typescript on that TTY.
+//! GitHub-hosted runners have no physical trackpad. Keys go through
+//! xfce4-terminal (VTE). Wheel right is an XTEST pointer event (`click 7`,
+//! no `--window`) in **xterm**: VTE 0.76 does not report X11 buttons 6/7, so
+//! xfce never encodes SGR 67. xterm does. Screen text is recovered from a
+//! `script(1)` typescript on that TTY.
 //!
 //! Ignored in `cargo test --workspace`. The `tui-tty-desktop` GitHub Actions
 //! job runs these tests. Local Linux: see docs/tui-tty-e2e.md.
@@ -20,6 +21,12 @@ use super::seed::git_env;
 
 const OPENBOX_RC: &str = include_str!("openbox.xml");
 
+#[derive(Clone, Copy, Debug)]
+enum Emulator {
+    Xfce,
+    Xterm,
+}
+
 pub struct DesktopSession {
     term: Option<Child>,
     ws_pid: Option<u32>,
@@ -32,11 +39,20 @@ pub struct DesktopSession {
 
 impl DesktopSession {
     pub fn open(workspace: &Path) -> Self {
-        Self::open_size(workspace, COLS, ROWS)
+        Self::open_with(workspace, COLS, ROWS, Emulator::Xfce)
     }
 
     pub fn open_size(workspace: &Path, cols: u16, rows: u16) -> Self {
-        require_desktop_tools();
+        Self::open_with(workspace, cols, rows, Emulator::Xfce)
+    }
+
+    /// xterm encodes XTEST button 7 as SGR 67. VTE does not.
+    pub fn open_xterm_size(workspace: &Path, cols: u16, rows: u16) -> Self {
+        Self::open_with(workspace, cols, rows, Emulator::Xterm)
+    }
+
+    fn open_with(workspace: &Path, cols: u16, rows: u16, emulator: Emulator) -> Self {
+        require_desktop_tools(emulator);
         let stage = workspace.join(".e2e-desktop");
         fs::create_dir_all(&stage).unwrap();
         ensure_openbox(&stage);
@@ -83,27 +99,9 @@ impl DesktopSession {
         perms.set_mode(0o755);
         fs::set_permissions(&launcher, perms).unwrap();
 
-        let mut term = Command::new("xfce4-terminal")
-            .args([
-                "--disable-server",
-                &format!("--geometry={cols}x{rows}+24+24"),
-                "--hide-menubar",
-                "--hide-toolbar",
-                "--hide-scrollbar",
-                "--hide-borders",
-                "--dynamic-title-mode=none",
-                "-T",
-                "WSTTY",
-                "-e",
-            ])
-            .arg(&launcher)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("xfce4-terminal starts");
-
-        let wid = wait_window(&mut term);
+        let mut term = spawn_emulator(emulator, cols, rows, &launcher);
+        let min_area = (u64::from(cols) * u64::from(rows) * 30).max(20_000);
+        let wid = wait_window(&mut term, min_area);
         let ws_pid = wait_tui_pid(bin);
         let session = Self {
             term: Some(term),
@@ -327,17 +325,64 @@ impl Drop for DesktopSession {
     }
 }
 
-fn require_desktop_tools() {
+fn require_desktop_tools(emulator: Emulator) {
     assert!(
         std::env::var_os("DISPLAY").is_some(),
         "desktop TTY e2e needs DISPLAY (GitHub Actions tui-tty-desktop uses xvfb-run). See docs/tui-tty-e2e.md"
     );
-    for bin in ["xfce4-terminal", "xdotool", "script"] {
+    let term = match emulator {
+        Emulator::Xfce => "xfce4-terminal",
+        Emulator::Xterm => "xterm",
+    };
+    for bin in [term, "xdotool", "script"] {
         assert!(
             have(bin),
             "desktop TTY e2e needs `{bin}` on PATH. See docs/tui-tty-e2e.md"
         );
     }
+}
+
+fn spawn_emulator(emulator: Emulator, cols: u16, rows: u16, launcher: &Path) -> Child {
+    let mut cmd = match emulator {
+        Emulator::Xfce => {
+            let mut cmd = Command::new("xfce4-terminal");
+            cmd.args([
+                "--disable-server",
+                &format!("--geometry={cols}x{rows}+24+24"),
+                "--hide-menubar",
+                "--hide-toolbar",
+                "--hide-scrollbar",
+                "--hide-borders",
+                "--dynamic-title-mode=none",
+                "-T",
+                "WSTTY",
+                "-e",
+            ]);
+            cmd
+        }
+        Emulator::Xterm => {
+            let mut cmd = Command::new("xterm");
+            cmd.args([
+                "-b",
+                "0",
+                "+sb",
+                "-tn",
+                "xterm-256color",
+                "-geometry",
+                &format!("{cols}x{rows}+24+24"),
+                "-T",
+                "WSTTY",
+                "-e",
+            ]);
+            cmd
+        }
+    };
+    cmd.arg(launcher)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|e| panic!("{emulator:?} starts: {e}"))
 }
 
 fn have(bin: &str) -> bool {
@@ -379,25 +424,27 @@ fn ensure_openbox(stage: &Path) {
     thread::sleep(Duration::from_millis(400));
 }
 
-fn wait_window(term: &mut Child) -> String {
+fn wait_window(term: &mut Child, min_area: u64) -> String {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(15) {
         if let Ok(Some(status)) = term.try_wait() {
-            panic!("xfce4-terminal exited early: {status}");
+            panic!("desktop terminal exited early: {status}");
         }
-        if let Some(wid) = largest_terminal_window() {
+        if let Some(wid) = largest_terminal_window(min_area) {
             return wid;
         }
         thread::sleep(Duration::from_millis(100));
     }
-    panic!("xfce4-terminal window never appeared");
+    panic!("desktop terminal window never appeared");
 }
 
-fn largest_terminal_window() -> Option<String> {
+fn largest_terminal_window(min_area: u64) -> Option<String> {
     let mut wids = Vec::new();
     for args in [
         ["search", "--name", "WSTTY"].as_slice(),
         ["search", "--class", "xfce4-terminal"].as_slice(),
+        ["search", "--class", "XTerm"].as_slice(),
+        ["search", "--class", "xterm"].as_slice(),
     ] {
         if let Ok(out) = Command::new("xdotool").args(args).output() {
             if out.status.success() {
@@ -432,8 +479,7 @@ fn largest_terminal_window() -> Option<String> {
             }
         }
         let area = width.saturating_mul(height);
-        // 140x32 cells is well above a leftover 1x1 shell.
-        if area >= 80_000 && best.as_ref().map_or(true, |(_, a)| area > *a) {
+        if area >= min_area && best.as_ref().map_or(true, |(_, a)| area > *a) {
             best = Some((wid, area));
         }
     }

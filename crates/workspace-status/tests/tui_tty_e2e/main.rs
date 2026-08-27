@@ -186,17 +186,17 @@ mod xfce {
         tui.wait_contains("WIP on graph", WAIT);
     }
 
-    /// VTE wheel right. Must fail if the tree does not pan.
+    /// XTEST wheel right. Must fail if the tree does not pan.
     ///
-    /// XTEST `click 7` (no `--window`) after a root-coordinate warp. Same
-    /// clipped-prefix vs `TAIL99` tree-row oracle as the PTY case. No `/`
-    /// search: that would put `TAIL99` on the status chip before any wheel.
+    /// XTEST `click 7` (no `--window`) after a root-coordinate warp, in
+    /// xterm (VTE 0.76 does not report buttons 6/7). Same clipped-prefix vs
+    /// `TAIL99` tree-row oracle as the PTY case. No `/` search.
     #[test]
-    #[ignore = "GitHub Actions tui-tty-desktop job; VTE encodes trackpad hscroll"]
-    fn desktop_xfce_vte_trackpad_hscroll() {
+    #[ignore = "GitHub Actions tui-tty-desktop job; xterm encodes XTEST button 7"]
+    fn desktop_xterm_xtest_trackpad_hscroll() {
         let (_root, workspace) = daily_workspace();
         seed_long_path_file(&workspace);
-        let tui = DesktopSession::open_size(&workspace, 64, 24);
+        let tui = DesktopSession::open_xterm_size(&workspace, 64, 24);
         tui.wait_pred(
             |screen| {
                 left_tree(screen).contains("very-long") && !left_tree(screen).contains("TAIL99")
