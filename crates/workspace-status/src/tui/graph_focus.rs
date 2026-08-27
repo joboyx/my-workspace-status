@@ -1,8 +1,10 @@
 //! Graph branch-focus overlay (`o` / `O`).
 //!
-//! Lists local branches. Space marks a set; Enter applies the marks, or the
-//! cursor row when none are marked. The graph then loads ancestors of those
-//! tips instead of `--all`. Empty apply and `O` restore the full graph.
+//! Lists local branches. Space marks a set; Enter applies visible marks, or
+//! the cursor row when none of the visible rows are marked. Marks hidden by
+//! the filter (including the current focus pre-marked on reopen) do not leak
+//! through. The graph then loads ancestors of those tips instead of `--all`.
+//! Empty apply and `O` restore the full graph.
 
 use std::collections::BTreeSet;
 
@@ -21,7 +23,8 @@ pub struct GraphFocusPickerState {
     pub filter: String,
     /// Index into [`Self::visible`].
     pub cursor: usize,
-    /// Names toggled with space. Enter uses this set when it is not empty.
+    /// Names toggled with space. Enter uses this set for rows still visible
+    /// under the filter.
     pub marked: BTreeSet<String>,
 }
 
@@ -97,13 +100,20 @@ impl GraphFocusPickerState {
 
     /// Names to load, or `None` when the filter has no rows (Enter is a no-op).
     ///
-    /// Marked names win. Otherwise the cursor row. An empty vec means clear.
+    /// Visible space-marks win. Hidden marks do not leak through a filter.
+    /// When no visible row is marked, Enter applies the cursor row.
     pub fn apply_names(&self) -> Option<Vec<String>> {
-        if self.visible().is_empty() {
+        let visible = self.visible();
+        if visible.is_empty() {
             return None;
         }
-        if !self.marked.is_empty() {
-            return Some(self.marked.iter().cloned().collect());
+        let visible_marks: Vec<String> = visible
+            .iter()
+            .filter(|branch| self.marked.contains(&branch.name))
+            .map(|branch| branch.name.clone())
+            .collect();
+        if !visible_marks.is_empty() {
+            return Some(visible_marks);
         }
         Some(vec![self.selected()?.name.clone()])
     }
@@ -162,6 +172,47 @@ mod tests {
             &[],
         );
         picker.set_filter("keep".into());
+        assert_eq!(picker.apply_names(), Some(vec!["feature/keep".into()]));
+    }
+
+    #[test]
+    fn filter_then_enter_replaces_hidden_preselection() {
+        let mut picker = GraphFocusPickerState::new(
+            "app".into(),
+            vec![b("main"), b("feature/keep"), b("topic/noise")],
+            &["feature/keep".into()],
+        );
+        picker.set_filter("noise".into());
+        assert_eq!(
+            picker.apply_names(),
+            Some(vec!["topic/noise".into()]),
+            "Enter on a filtered hit should apply that row, not hidden pre-marks"
+        );
+    }
+
+    #[test]
+    fn marking_filtered_row_replaces_hidden_preselection() {
+        let mut picker = GraphFocusPickerState::new(
+            "app".into(),
+            vec![b("main"), b("feature/keep"), b("topic/noise")],
+            &["feature/keep".into()],
+        );
+        picker.set_filter("noise".into());
+        picker.toggle_mark();
+        assert_eq!(
+            picker.apply_names(),
+            Some(vec!["topic/noise".into()]),
+            "space-marking the visible row should apply that row, not union with hidden pre-marks"
+        );
+    }
+
+    #[test]
+    fn enter_with_visible_preselection_keeps_marks() {
+        let picker = GraphFocusPickerState::new(
+            "app".into(),
+            vec![b("main"), b("feature/keep")],
+            &["feature/keep".into()],
+        );
         assert_eq!(picker.apply_names(), Some(vec!["feature/keep".into()]));
     }
 

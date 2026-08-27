@@ -125,7 +125,7 @@ Manual `f` / `p` / `P` / `d` and the background fetch tick paint a trailing brea
 | `c` | Any commit row | Name prompt → `create_branch_at` (ref only, HEAD unchanged). |
 | `m` | Any commit row | Boxed confirm, then merge that ref into the checkout's current HEAD. Local / `origin/*` names when present; tags and unlabeled commits use the commit id. `git merge --ff-only`, else `git merge --no-ff --no-edit` (no rebase). Dirty tracked worktree refuses (`Dirty worktree — commit or stash first`) before the overlay. Conflicts stay uncommitted (no abort, no continue). Linked worktrees only when that checkout row is focused. |
 | `S` | Uncommitted, stash, or commit with stash/dirty ops | Stash overlay (`stash_push -u` / apply / pop / drop as listed). |
-| `o` | Graph list | Local-branch overlay. Space marks a set; Enter applies the marks or the cursor row. Reloads the graph as ancestors of those tips. Overlay Esc cancels. |
+| `o` | Graph list | Local-branch overlay. Space marks a set; Enter applies visible marks or the cursor row. Hidden marks do not leak through a filter. Reloads the graph as ancestors of those tips. Overlay Esc cancels. |
 | `O` | Graph list | Restore `--all`. Also clears from the focus overlay. |
 | `a` / `p` / `D` | Stash row | Apply / pop / drop (drop confirms with `y`/`n`/Esc). |
 
