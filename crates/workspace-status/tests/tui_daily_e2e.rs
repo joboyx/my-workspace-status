@@ -1979,6 +1979,20 @@ fn graph_branch_focus_hides_unrelated_history_and_clears() {
     assert_absent(&focused, "noise-leaf-commit");
     assert_absent(&focused, "main-leaf-commit");
 
+    tui.key('o');
+    for c in "noise".chars() {
+        tui.key(c);
+    }
+    tui.enter();
+    let switched = tui.frame();
+    assert_contains(&switched, "noise-leaf-commit");
+    assert_contains(&switched, "focus-root-commit");
+    assert!(
+        !switched.contains("keep-leaf-commit"),
+        "filter-then-Enter after a focus is on must apply the visible hit, not hidden marks:\n{switched}"
+    );
+    assert_absent(&switched, "main-leaf-commit");
+
     tui.key('O');
     let restored = tui.frame();
     assert_contains(&restored, "keep-leaf-commit");
