@@ -107,7 +107,7 @@ Also bound: `q`, Tab, Home/End, family-row `b`, picker `C`. Confirms are boxed o
 
 Glyphs live in `crates/workspace-status/src/tui/icons.rs`. Labels are built in `tree.rs` (`node_segments`); `render.rs` right-aligns trailing and paints the cursor bar. An empty workspace tree paints muted `No matching rows`. Commit-file lists do the same when loaded and empty; while git is still listing they paint `loading files…`.
 
-Daily-path TUI coverage is `cargo test` (`crates/workspace-status/tests/tui_daily_e2e.rs`) on a TestBackend — no TTY.
+Daily-path TUI coverage is `cargo test` (`crates/workspace-status/tests/tui_daily_e2e.rs`) on a TestBackend — no TTY. Real-TTY coverage (PTY + live `event::read`, plus xfce VTE in Actions) is `crates/workspace-status/tests/tui_tty_e2e/`. See [tui-tty-e2e.md](./tui-tty-e2e.md).
 
 See [tui-model.md](./tui-model.md) for the tree model and action registry.
 

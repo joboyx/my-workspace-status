@@ -159,6 +159,7 @@ The CLI is treated as a black box:
 - The workspace snapshot contract (`--json` and `--plain`) lives in [docs/snapshot.md](./docs/snapshot.md).
 - The snapshot fixture e2e lives in [crates/workspace-status/tests/snapshot_contract.rs](./crates/workspace-status/tests/snapshot_contract.rs).
 - Daily-path TUI coverage lives in [crates/workspace-status/tests/tui_daily_e2e.rs](./crates/workspace-status/tests/tui_daily_e2e.rs).
+- Real-TTY TUI e2e lives in [crates/workspace-status/tests/tui_tty_e2e/](./crates/workspace-status/tests/tui_tty_e2e/). See [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md).
 
 ### Running the test suite
 
@@ -168,10 +169,11 @@ cargo test --workspace
 
 ### Coverage
 
-`cargo test --workspace` covers the snapshot contract, CLI flags, discovery, and the daily TUI path (TestBackend, no TTY):
+`cargo test --workspace` covers the snapshot contract, CLI flags, discovery, the daily TUI path (TestBackend, no TTY), and the real-TTY TUI path (PTY, Unix):
 
 | Area                  | Covered behavior                                                                                                                                                                                |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Real-TTY TUI e2e      | PTY spawn of the binary; keys and xterm SGR mouse bytes through live `event::read`. xfce4-terminal + xdotool in GitHub Actions `tui-tty-desktop` ([docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md)) |
 | CLI contract          | `--help` documents `--all`, `--fetch`, `--verbose`, `--pull`, `--default-branch`, `--plain`, `--json`, and `--update` |
 | Snapshot contract     | `--json` and `--plain` share one workspace snapshot; fixture e2e builds a temp workspace and asserts both without a TTY                                                                         |
 | Clean summary         | all-clean default-branch workspaces and mixed clean default/non-default workspaces                                                                                                              |
@@ -212,6 +214,7 @@ That isolation is deliberate. Refactors should be able to change implementation 
 | [docs/git-operations.md](./docs/git-operations.md) | Git commands, operation semantics, safety rules |
 | [docs/demo.md](./docs/demo.md) | Demo workspace and screenshot frames |
 | [docs/tui-rust.md](./docs/tui-rust.md) | Ratatui TUI keys, layout, and chrome |
+| [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md) | Real-TTY TUI e2e (PTY in CI, xfce desktop job) |
 | [docs/configuration.md](./docs/configuration.md) | Environment variables, workspace config, keymap |
 
 ## License
