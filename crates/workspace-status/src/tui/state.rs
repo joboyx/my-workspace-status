@@ -31,6 +31,7 @@ use super::drill::{
 };
 use super::fetch::background_fetch_targets;
 use super::gates::{dispatch_is_noop, ListFocusTarget};
+use super::graph_focus::GraphFocusPickerState;
 use super::keys::{InputMode, DOUBLE_TAP_MS};
 use super::ops::{
     collect_write_files, format_running_op, op_is_kind_noop, op_targets, push_targets,
@@ -265,6 +266,9 @@ pub struct AppState {
     pub stash_menu: Option<Vec<StashOp>>,
     pub stash_repo: Option<String>,
     pub branch_picker: Option<BranchPickerState>,
+    pub graph_focus_picker: Option<GraphFocusPickerState>,
+    /// Per-repo local branch names whose ancestors the graph shows. `None` = `--all`.
+    pub graph_branch_focus: Option<(String, Vec<String>)>,
     pub create_branch: Option<CreateBranchState>,
     pub flashes: HashMap<String, Instant>,
     pub signatures: BTreeMap<String, String>,
@@ -358,6 +362,8 @@ impl AppState {
             stash_menu: None,
             stash_repo: None,
             branch_picker: None,
+            graph_focus_picker: None,
+            graph_branch_focus: None,
             create_branch: None,
             flashes: HashMap::new(),
             signatures,
@@ -390,6 +396,8 @@ impl AppState {
             InputMode::CreateBranch
         } else if self.branch_picker.is_some() {
             InputMode::BranchPicker
+        } else if self.graph_focus_picker.is_some() {
+            InputMode::GraphFocusPicker
         } else if self.help_open {
             if self.help_search_query.is_some() {
                 InputMode::HelpSearch
@@ -1358,6 +1366,47 @@ impl AppState {
             Action::GraphMerge => {
                 self.drag = SplitDrag::None;
                 self.begin_graph_merge()
+            }
+            Action::GraphFocusBranches => {
+                self.drag = SplitDrag::None;
+                self.begin_graph_focus_picker()
+            }
+            Action::GraphFocusClear => self.clear_graph_branch_focus(),
+            Action::GraphFocusMove(delta) => {
+                if let Some(picker) = self.graph_focus_picker.as_mut() {
+                    picker.move_cursor(delta);
+                }
+                Effect::None
+            }
+            Action::GraphFocusChar(c) => {
+                if let Some(picker) = self.graph_focus_picker.as_mut() {
+                    let mut filter = picker.filter.clone();
+                    filter.push(c);
+                    picker.set_filter(filter);
+                    self.status = format!("focus /{}", picker.filter);
+                }
+                Effect::None
+            }
+            Action::GraphFocusBackspace => {
+                if let Some(picker) = self.graph_focus_picker.as_mut() {
+                    let mut filter = picker.filter.clone();
+                    filter.pop();
+                    picker.set_filter(filter);
+                    self.status = format!("focus /{}", picker.filter);
+                }
+                Effect::None
+            }
+            Action::GraphFocusToggle => {
+                if let Some(picker) = self.graph_focus_picker.as_mut() {
+                    picker.toggle_mark();
+                }
+                Effect::None
+            }
+            Action::GraphFocusSubmit => self.submit_graph_focus_picker(),
+            Action::GraphFocusCancel => {
+                self.graph_focus_picker = None;
+                self.status = "focus cancelled".into();
+                Effect::None
             }
             Action::CycleTheme => self.cycle_theme(),
             Action::Resize { cols, rows: _ } => {
@@ -2849,6 +2898,106 @@ impl AppState {
         let sorted = super::branches::sort_branches_for_picker(branches, default.as_deref());
         self.branch_picker = Some(BranchPickerState::new(repo, sorted));
         self.status.clear();
+    }
+
+    /// Local branch names whose ancestors the current graph should show.
+    pub(crate) fn graph_focus_revs(&self) -> Vec<String> {
+        let owned = self.focused_graph_repo();
+        let repo = self
+            .graph_identity
+            .as_ref()
+            .map(|(repo, _)| repo.as_str())
+            .or(owned.as_deref());
+        let Some(repo) = repo else {
+            return Vec::new();
+        };
+        match &self.graph_branch_focus {
+            Some((focus_repo, names)) if focus_repo == repo && !names.is_empty() => names.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn graph_focus_repo(&self) -> Option<String> {
+        self.graph_identity
+            .as_ref()
+            .map(|(repo, _)| repo.clone())
+            .or_else(|| self.focused_graph_repo())
+    }
+
+    fn begin_graph_focus_picker(&mut self) -> Effect {
+        if !self.graph_pane_focused() {
+            return Effect::None;
+        }
+        let Some(repo) = self.graph_focus_repo() else {
+            return Effect::None;
+        };
+        self.help_open = false;
+        Effect::PrepareGraphFocusPicker { repo }
+    }
+
+    /// Fill the graph focus overlay after git lists local branches.
+    pub fn open_graph_focus_picker(
+        &mut self,
+        repo: String,
+        branches: Vec<crate::git::LocalBranch>,
+    ) {
+        if branches.is_empty() {
+            self.status = "no local branches".into();
+            self.graph_focus_picker = None;
+            return;
+        }
+        let default = self
+            .snapshot
+            .repos
+            .iter()
+            .find(|row| row.repo == repo)
+            .and_then(|row| row.default_branch_override.clone());
+        let sorted = super::branches::sort_branches_for_picker(branches, default.as_deref());
+        let preselected = match &self.graph_branch_focus {
+            Some((focus_repo, names)) if focus_repo == &repo => names.as_slice(),
+            _ => &[],
+        };
+        self.graph_focus_picker = Some(GraphFocusPickerState::new(repo, sorted, preselected));
+        self.status.clear();
+    }
+
+    fn submit_graph_focus_picker(&mut self) -> Effect {
+        let Some(picker) = self.graph_focus_picker.as_ref() else {
+            return Effect::None;
+        };
+        let repo = picker.repo.clone();
+        let Some(names) = picker.apply_names() else {
+            self.status = "no matching branches".into();
+            return Effect::None;
+        };
+        self.graph_focus_picker = None;
+        self.apply_graph_branch_focus(repo, names)
+    }
+
+    fn clear_graph_branch_focus(&mut self) -> Effect {
+        self.graph_focus_picker = None;
+        if self.graph_branch_focus.is_none() {
+            if self.graph_pane_focused() {
+                self.status = "full graph".into();
+            }
+            return Effect::None;
+        }
+        self.apply_graph_branch_focus(self.graph_focus_repo().unwrap_or_default(), Vec::new())
+    }
+
+    fn apply_graph_branch_focus(&mut self, repo: String, names: Vec<String>) -> Effect {
+        self.graph_identity = None;
+        self.graph_cursor = 0;
+        self.graph_scroll = 0;
+        if names.is_empty() {
+            self.graph_branch_focus = None;
+            self.status = "full graph".into();
+        } else {
+            let label = names.join(", ");
+            self.graph_branch_focus = Some((repo, names));
+            self.status = format!("graph focus: {label}");
+        }
+        Effect::LoadRightPane
     }
 
     fn submit_branch_picker(&mut self) -> Effect {

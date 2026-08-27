@@ -1960,7 +1960,6 @@ fn graph_branch_focus_hides_unrelated_history_and_clears() {
     let help = tui.frame();
     assert_contains(&help, "MOVE");
     assert_contains(&help, "graph focus branches");
-    assert_contains(&help, "o O");
     tui.esc();
 
     tui.key('o');

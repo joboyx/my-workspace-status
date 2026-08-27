@@ -83,12 +83,12 @@ After `p` / `P` / `d` / `f`, the TUI refreshes the affected repos and stamps tho
 
 ## Graph load (`tui/graph_load.rs`)
 
-Default window is 300 (`DEFAULT_GRAPH_WINDOW`). `--exclude=refs/stash` precedes `--all`.
+Default window is 300 (`DEFAULT_GRAPH_WINDOW`). `--exclude=refs/stash` precedes `--all`. Graph `o` replaces `--all` with the selected local tips (`refs/heads/<name>`).
 
 | Function | Command | Purpose |
 | --- | --- | --- |
-| `load_graph_model_window` | `log --exclude=refs/stash --all --topo-order --date-order --skip --max-count --pretty=%H%x00%P%x00%s%x00%an%x00%at` | One history page. Always sets the working-tree row (`Some(has_changes)`). |
-| extra `stash^1` | `log --no-walk --ignore-missing --pretty=…` | Missing stash parents appended after the log prefix so autoload skip uses `window`, not `commits.len()` |
+| `load_graph_model_window` | `log --exclude=refs/stash --all --topo-order --date-order --skip --max-count --pretty=%H%x00%P%x00%s%x00%an%x00%at` | One history page. Always sets the working-tree row (`Some(has_changes)`). Empty `focus_branches` uses `--all`; otherwise `log` the named tips (no `--all`) so unrelated history drops. |
+| extra `stash^1` | `log --no-walk --ignore-missing --pretty=…` | Missing stash parents appended after the log prefix so autoload skip uses `window`, not `commits.len()`. Skipped while branch focus is on. |
 | `should_autoload` / `merge_autoload` | next page at `skip + window_count` | Cursor on last loaded row; skip stays at the original window start; `window` grows |
 
 Hidden ignored checkouts stay out of `P` / `S` / `b` unless shown. Linked worktrees are included on `f` / `p` / `P` / `d` only when that row is focused. The background fetch timer (`background_fetch_targets` in `tui/fetch.rs`) includes every snapshot except hidden ignored — linked worktrees and shown ignored repos included. See [tui-rust.md](./tui-rust.md).
@@ -125,6 +125,8 @@ Manual `f` / `p` / `P` / `d` and the background fetch tick paint a trailing brea
 | `c` | Any commit row | Name prompt → `create_branch_at` (ref only, HEAD unchanged). |
 | `m` | Any commit row | Boxed confirm, then merge that ref into the checkout's current HEAD. Local / `origin/*` names when present; tags and unlabeled commits use the commit id. `git merge --ff-only`, else `git merge --no-ff --no-edit` (no rebase). Dirty tracked worktree refuses (`Dirty worktree — commit or stash first`) before the overlay. Conflicts stay uncommitted (no abort, no continue). Linked worktrees only when that checkout row is focused. |
 | `S` | Uncommitted, stash, or commit with stash/dirty ops | Stash overlay (`stash_push -u` / apply / pop / drop as listed). |
+| `o` | Graph list | Local-branch overlay. Space marks a set; Enter applies the marks or the cursor row. Reloads the graph as ancestors of those tips. Overlay Esc cancels. |
+| `O` | Graph list | Restore `--all`. Also clears from the focus overlay. |
 | `a` / `p` / `D` | Stash row | Apply / pop / drop (drop confirms with `y`/`n`/Esc). |
 
 ## Destructive operations

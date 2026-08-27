@@ -210,6 +210,8 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         draw_create_branch(frame, overlay, state);
     } else if state.branch_picker.is_some() {
         draw_branch_picker(frame, overlay, state);
+    } else if state.graph_focus_picker.is_some() {
+        draw_graph_focus_picker(frame, overlay, state);
     } else {
         frame.render_widget(Paragraph::new(status_line(state, overlay.width)), overlay);
     }
@@ -1646,6 +1648,111 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     };
     lines.push(Line::from(Span::styled(
         footer,
+        Style::default().fg(palette.muted),
+    )));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(overlay_block(accent))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let Some(picker) = state.graph_focus_picker.as_ref() else {
+        return;
+    };
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let palette = state.theme.palette();
+    let accent = palette.branch_feature;
+    let visible = picker.visible();
+    let max_rows = 12usize;
+    let start = if visible.len() <= max_rows {
+        0
+    } else {
+        picker
+            .cursor
+            .saturating_sub(max_rows / 2)
+            .min(visible.len() - max_rows)
+    };
+    let window = if visible.is_empty() {
+        Vec::new()
+    } else {
+        visible
+            .iter()
+            .skip(start)
+            .take(max_rows)
+            .copied()
+            .collect::<Vec<_>>()
+    };
+    let filter = if picker.filter.is_empty() {
+        "…"
+    } else {
+        picker.filter.as_str()
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "Focus branches ",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(picker.repo.clone(), Style::default().fg(palette.repo)),
+        Span::styled("  filter: ", Style::default().fg(palette.muted)),
+        Span::styled(filter.to_string(), Style::default().fg(palette.cursor)),
+    ])];
+    if window.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No matching branches",
+            Style::default().fg(palette.muted),
+        )));
+    } else {
+        for (i, branch) in window.iter().enumerate() {
+            let index = start + i;
+            let selected = index == picker.cursor;
+            let marked = picker.marked.contains(&branch.name);
+            let mark = if marked { "[x] " } else { "[ ] " };
+            let current = if branch.current { "* " } else { "  " };
+            let cursor = if selected { "❯ " } else { "  " };
+            let row_bg = if selected {
+                palette.cursor_bg
+            } else {
+                Color::Reset
+            };
+            let name_fg = if marked || branch.current {
+                palette.added
+            } else if selected {
+                palette.file
+            } else {
+                palette.muted
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    cursor.to_string(),
+                    Style::default()
+                        .fg(if selected {
+                            palette.cursor
+                        } else {
+                            palette.muted
+                        })
+                        .bg(row_bg),
+                ),
+                Span::styled(
+                    format!("{mark}{current}{}", branch.name),
+                    Style::default().fg(name_fg).bg(row_bg),
+                ),
+            ]));
+        }
+    }
+    if !state.status.is_empty() {
+        lines.push(Line::from(Span::styled(
+            state.status.clone(),
+            Style::default().fg(overlay_status_color(&state.status, palette)),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "j/k move · type to filter · space toggle · Enter apply · O clear · Esc cancel",
         Style::default().fg(palette.muted),
     )));
     frame.render_widget(Clear, area);

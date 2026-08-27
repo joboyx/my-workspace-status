@@ -153,6 +153,10 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "full-file · keep hunk in view",
             },
             HelpEntry {
+                keys: "o O",
+                desc: "graph focus branches / clear",
+            },
+            HelpEntry {
                 keys: "PgUp PgDn",
                 desc: "page focused pane",
             },
@@ -552,6 +556,7 @@ mod tests {
         assert!(view_keys.contains(&"."));
         assert!(view_keys.contains(&"T"));
         assert!(view_keys.contains(&"Ctrl-o"));
+        assert!(view_keys.contains(&"o O"));
         assert!(view_keys.contains(&"m"));
         assert!(view_keys.contains(&"Esc"));
         assert!(help_match_indices("quit")

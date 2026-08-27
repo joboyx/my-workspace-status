@@ -74,6 +74,8 @@ enum HintActionId {
     GraphCheckout,
     GraphCreateBranch,
     GraphMerge,
+    GraphFocus,
+    GraphFocusClear,
     StashMenu,
     StashApply,
     StashPop,
@@ -248,6 +250,32 @@ const HINT_ACTIONS: &[HintAction] = &[
         focus_left_only: false,
     },
     HintAction {
+        id: HintActionId::GraphFocus,
+        key: "o",
+        label: "focus branches",
+        kinds: &[
+            HintRowKind::GraphCommit,
+            HintRowKind::GraphStash,
+            HintRowKind::GraphUncommitted,
+        ],
+        destructive: false,
+        depths: Some(&[0, 1]),
+        focus_left_only: false,
+    },
+    HintAction {
+        id: HintActionId::GraphFocusClear,
+        key: "O",
+        label: "clear focus",
+        kinds: &[
+            HintRowKind::GraphCommit,
+            HintRowKind::GraphStash,
+            HintRowKind::GraphUncommitted,
+        ],
+        destructive: false,
+        depths: Some(&[0, 1]),
+        focus_left_only: false,
+    },
+    HintAction {
         id: HintActionId::StashMenu,
         key: "S",
         label: "stash",
@@ -338,6 +366,7 @@ pub fn ctrl_c_prompt_pinned(state: &AppState) -> bool {
     is_ctrl_c_exit_prompt(&state.status)
         && state.stash_menu.is_none()
         && state.branch_picker.is_none()
+        && state.graph_focus_picker.is_none()
         && state.create_branch.is_none()
 }
 
@@ -379,6 +408,11 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
         return 5;
     }
     if let Some(picker) = state.branch_picker.as_ref() {
+        let n = picker.visible().len().max(1).min(12) as u16;
+        let extra = u16::from(!state.status.is_empty());
+        return (4u16.saturating_add(n).saturating_add(extra)).min(17);
+    }
+    if let Some(picker) = state.graph_focus_picker.as_ref() {
         let n = picker.visible().len().max(1).min(12) as u16;
         let extra = u16::from(!state.status.is_empty());
         return (4u16.saturating_add(n).saturating_add(extra)).min(17);
@@ -523,6 +557,19 @@ fn graph_action_visible(state: &AppState, action: &HintAction) -> bool {
         HintActionId::GraphCheckout => focused_commit_checkoutable(state),
         HintActionId::GraphCreateBranch | HintActionId::GraphMerge => {
             matches!(state.focused_graph_row(), Some(GraphRow::Commit { .. }))
+        }
+        HintActionId::GraphFocus => true,
+        HintActionId::GraphFocusClear => {
+            state
+                .graph_branch_focus
+                .as_ref()
+                .is_some_and(|(repo, names)| {
+                    !names.is_empty()
+                        && state
+                            .graph_identity
+                            .as_ref()
+                            .is_some_and(|(current, _)| current == repo)
+                })
         }
         HintActionId::StashApply | HintActionId::StashPop | HintActionId::StashDrop => {
             matches!(state.focused_graph_row(), Some(GraphRow::Stash(_)))
@@ -838,6 +885,7 @@ fn status_uses_status_text(state: &AppState) -> bool {
     state.search_mode
         || state.stash_menu.is_some()
         || state.branch_picker.is_some()
+        || state.graph_focus_picker.is_some()
         || state.create_branch.is_some()
 }
 
@@ -924,7 +972,10 @@ pub fn status_line(state: &AppState, width: u16) -> Line<'static> {
     let palette = state.theme.palette();
     let pills = state.theme.pills();
     let surface = hex_color(state.theme.theme().surface);
-    if state.stash_menu.is_some() || state.branch_picker.is_some() || state.create_branch.is_some()
+    if state.stash_menu.is_some()
+        || state.branch_picker.is_some()
+        || state.graph_focus_picker.is_some()
+        || state.create_branch.is_some()
     {
         return Line::from(Span::styled(
             truncate_visible(&state.status, width as usize),

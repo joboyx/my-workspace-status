@@ -529,6 +529,8 @@ struct RightPaneRequest {
     focused_graph_repo: Option<String>,
     same_repo: bool,
     graph_limit: usize,
+    /// Local branch names for `git log` instead of `--all`. Empty = full graph.
+    graph_focus_branches: Vec<String>,
     /// Depth 1: commit / stash / worktree files for the focused graph row.
     follow_files: Option<(String, CommitFileSource)>,
     /// Depth 2: commit-scoped diff for the focused commit-file row.
@@ -636,6 +638,7 @@ impl RightPaneRequest {
             focused_graph_repo,
             same_repo,
             graph_limit: refresh_graph_limit(state.graph.as_ref()),
+            graph_focus_branches: state.graph_focus_revs(),
             follow_files,
             follow_diff,
         }
@@ -695,9 +698,16 @@ impl RightPaneRequest {
                     self.show_ignored,
                     0,
                     self.graph_limit,
+                    &self.graph_focus_branches,
                 )
             } else {
-                load_graph_model(&self.cwd, &self.snapshot, repo, self.show_ignored)
+                load_graph_model(
+                    &self.cwd,
+                    &self.snapshot,
+                    repo,
+                    self.show_ignored,
+                    &self.graph_focus_branches,
+                )
             };
             let files = self.follow_files.as_ref().map(|(file_repo, source)| {
                 let listed = compute_commit_files(&self.cwd.join(file_repo), source);
@@ -1176,6 +1186,13 @@ fn apply_effect_inner(
                 WorkPump::Done(branches) => state.open_branch_picker(repo, branches),
             }
         }
+        Effect::PrepareGraphFocusPicker { repo } => {
+            let dir = opts.cwd.join(&repo);
+            match run_work_pumped(terminal, state, opts, move || list_local_branches(&dir)) {
+                WorkPump::Quit => return true,
+                WorkPump::Done(branches) => state.open_graph_focus_picker(repo, branches),
+            }
+        }
         Effect::CheckoutBranch {
             repo,
             selected_name,
@@ -1529,6 +1546,10 @@ fn apply_headless_inner(state: &mut AppState, effect: Effect, opts: &TuiOpts) {
                 load_right_headless(state);
             }
         }
+        Effect::PrepareGraphFocusPicker { repo } => {
+            let branches = list_local_branches(&opts.cwd.join(&repo));
+            state.open_graph_focus_picker(repo, branches);
+        }
         _ => {}
     }
 }
@@ -1874,6 +1895,7 @@ fn maybe_autoload_graph(
         (repo.clone(), autoload_skip(model), autoload_limit(model))
     };
     let show_ignored = state.show_ignored;
+    let focus_branches = state.graph_focus_revs();
     state.graph_loading_older = true;
     let prev_status = state.status.clone();
     state.status = LOADING_OLDER.to_string();
@@ -1881,8 +1903,9 @@ fn maybe_autoload_graph(
         let _ = terminal.draw(|frame| draw(frame, state));
         let cwd = opts.cwd.clone();
         let snapshot = state.snapshot.clone();
+        let focus = focus_branches.clone();
         match run_work_pumped(terminal, state, opts, move || {
-            load_graph_model_window(&cwd, &snapshot, &repo, show_ignored, skip, limit)
+            load_graph_model_window(&cwd, &snapshot, &repo, show_ignored, skip, limit, &focus)
         }) {
             WorkPump::Quit => {
                 state.graph_loading_older = false;
@@ -1894,7 +1917,15 @@ fn maybe_autoload_graph(
             WorkPump::Done(loaded) => loaded,
         }
     } else {
-        load_graph_model_window(&opts.cwd, &state.snapshot, &repo, show_ignored, skip, limit)
+        load_graph_model_window(
+            &opts.cwd,
+            &state.snapshot,
+            &repo,
+            show_ignored,
+            skip,
+            limit,
+            &focus_branches,
+        )
     };
     let (page, identity) = page_and_identity;
     let Some(current) = state.graph.clone() else {
