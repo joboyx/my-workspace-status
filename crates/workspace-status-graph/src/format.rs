@@ -28,7 +28,7 @@ pub fn format_sync(sync: &SyncState, glyphs: &GlyphSet) -> String {
 }
 
 /// Relative ages only up to 3 hours (iOS notification style). Older
-/// timestamps paint as UTC `YYYY-MM-DD HH:MM`.
+/// timestamps paint as local `YYYY-MM-DD HH:MM`.
 pub const RELATIVE_DATE_LIMIT_SECS: i64 = 3 * 3600;
 
 /// One styled run of graph label / spacer text.
@@ -76,6 +76,10 @@ pub fn overflow_chip_text(hidden: usize) -> String {
 }
 
 /// Compact age or absolute timestamp.
+///
+/// Older than [`RELATIVE_DATE_LIMIT_SECS`] paints the operator-local
+/// civil clock (`YYYY-MM-DD HH:MM`). Search still indexes the UTC form
+/// via [`format_utc_timestamp`].
 pub fn format_relative_date(unix: i64, now_unix: i64) -> String {
     let delta = (now_unix - unix).max(0);
     if delta <= RELATIVE_DATE_LIMIT_SECS {
@@ -87,18 +91,93 @@ pub fn format_relative_date(unix: i64, now_unix: i64) -> String {
         }
         return format!("{}h", delta / 3600);
     }
-    format_utc_timestamp(unix)
+    format_local_timestamp(unix)
 }
 
-/// UTC `YYYY-MM-DD HH:MM` without extra crates.
+/// Operator-local `YYYY-MM-DD HH:MM`. Falls back to UTC when libc
+/// localtime is unavailable.
+pub fn format_local_timestamp(unix: i64) -> String {
+    match local_civil(unix) {
+        Some((year, month, day, hour, min)) => {
+            format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}")
+        }
+        None => format_utc_timestamp(unix),
+    }
+}
+
+/// UTC `YYYY-MM-DD HH:MM` without extra crates. Stable search form.
 pub fn format_utc_timestamp(unix: i64) -> String {
-    let unix = unix.max(0);
+    format_timestamp_at_offset(unix, 0)
+}
+
+/// Civil `YYYY-MM-DD HH:MM` at a fixed UTC offset (seconds east of UTC).
+fn format_timestamp_at_offset(unix: i64, offset_secs: i32) -> String {
+    let unix = unix.saturating_add(i64::from(offset_secs)).max(0);
     let days = unix.div_euclid(86_400);
     let rem = unix.rem_euclid(86_400) as u32;
     let hour = rem / 3600;
     let min = (rem % 3600) / 60;
     let (year, month, day) = civil_from_days(days);
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}")
+}
+
+/// Year, month, day, hour, minute in the operator timezone.
+fn local_civil(unix: i64) -> Option<(i32, u32, u32, u32, u32)> {
+    #[cfg(unix)]
+    {
+        unix_local_civil(unix)
+    }
+    #[cfg(windows)]
+    {
+        windows_local_civil(unix)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = unix;
+        None
+    }
+}
+
+#[cfg(unix)]
+fn unix_local_civil(unix: i64) -> Option<(i32, u32, u32, u32, u32)> {
+    let t = unix as libc::time_t;
+    if t as i64 != unix {
+        return None;
+    }
+    // SAFETY: `tm` is a zeroed `libc::tm`. `localtime_r` writes every field
+    // on success, or returns null without requiring the contents.
+    let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
+    let ptr = unsafe { libc::localtime_r(&t, &mut tm) };
+    if ptr.is_null() {
+        return None;
+    }
+    Some(civil_from_tm(&tm))
+}
+
+#[cfg(windows)]
+fn windows_local_civil(unix: i64) -> Option<(i32, u32, u32, u32, u32)> {
+    let t = unix as libc::time_t;
+    if t as i64 != unix {
+        return None;
+    }
+    // SAFETY: `tm` is a zeroed `libc::tm`. `localtime_s` writes every field
+    // on success (return 0).
+    let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
+    if unsafe { libc::localtime_s(&mut tm, &t) } != 0 {
+        return None;
+    }
+    Some(civil_from_tm(&tm))
+}
+
+#[cfg(any(unix, windows))]
+fn civil_from_tm(tm: &libc::tm) -> (i32, u32, u32, u32, u32) {
+    (
+        tm.tm_year + 1900,
+        (tm.tm_mon + 1) as u32,
+        tm.tm_mday as u32,
+        tm.tm_hour as u32,
+        tm.tm_min as u32,
+    )
 }
 
 /// Howard Hinnant civil-from-days: days since Unix epoch → UTC Y-M-D.
@@ -1136,10 +1215,52 @@ mod tests {
         assert_eq!(format_relative_date(now - 3 * 3600, now), "3h");
         assert_eq!(
             format_relative_date(now - 3 * 3600 - 1, now),
-            "2023-11-14 19:13"
+            format_local_timestamp(now - 3 * 3600 - 1),
         );
-        assert_eq!(format_relative_date(now - 86400, now), "2023-11-13 22:13");
+        assert_eq!(
+            format_relative_date(now - 86400, now),
+            format_local_timestamp(now - 86400),
+        );
         assert_eq!(format_relative_date(now + 10, now), "just now");
+    }
+
+    #[test]
+    fn format_utc_timestamp_stays_civil_utc() {
+        let now = 1_700_000_000;
+        assert_eq!(format_utc_timestamp(now), "2023-11-14 22:13");
+        assert_eq!(format_utc_timestamp(now - 86400), "2023-11-13 22:13");
+        assert_eq!(format_utc_timestamp(now - 3 * 3600 - 1), "2023-11-14 19:13");
+    }
+
+    #[test]
+    fn format_timestamp_at_offset_uses_asia_manila() {
+        let unix = 1_700_000_000;
+        assert_eq!(
+            format_timestamp_at_offset(unix, 8 * 3600),
+            "2023-11-15 06:13"
+        );
+        assert_eq!(
+            format_timestamp_at_offset(unix - 86400, 8 * 3600),
+            "2023-11-14 06:13"
+        );
+        assert_eq!(
+            format_timestamp_at_offset(unix - 3 * 3600 - 1, 8 * 3600),
+            "2023-11-15 03:13"
+        );
+    }
+
+    #[test]
+    fn format_local_timestamp_matches_libc_civil() {
+        let unix = 1_700_000_000;
+        match local_civil(unix) {
+            Some((year, month, day, hour, min)) => {
+                assert_eq!(
+                    format_local_timestamp(unix),
+                    format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}")
+                );
+            }
+            None => assert_eq!(format_local_timestamp(unix), format_utc_timestamp(unix)),
+        }
     }
 
     #[test]
@@ -1374,7 +1495,10 @@ mod tests {
         });
         assert!(line.contains("stash@{0}"), "{line}");
         assert!(line.contains("s1abcde"), "{line}");
-        assert!(line.contains("2023-11-13 22:13"), "{line}");
+        assert!(
+            line.contains(&format_local_timestamp(1_700_000_000 - 86400)),
+            "{line}"
+        );
         assert!(line.contains("Ada Lovelace"), "{line}");
         let ref_at = line.find("stash@{0}").expect("ref");
         let hash_at = line.find("s1abcde").expect("hash");

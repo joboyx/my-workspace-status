@@ -29,6 +29,7 @@ Both go away when DEST is wiped.
 
 - Theme: default Tokyo Night. Do not press `T`.
 - Font: `MesloLGS NF` 13 (romkatv/powerlevel10k-media). Do not set `WS_STATUS_GLYPHS=ascii` when that font is present. Set it only if the font is missing. Do not use MesloLGM Nerd Font Mono — it letter-spaces in xfce4-terminal (VTE sizes cells off the widest Nerd glyph).
+- Graph dates: operator local timezone (relative through 3 hours, then `YYYY-MM-DD HH:MM`). Seed timestamps are Asia/Manila (UTC+8). `capture-demo-stills.sh` sets `TZ=Asia/Manila` so stills match that clock.
 - Some hosts export `NO_COLOR=1`, which paints the first frame gray. Unset `NO_COLOR` and `FORCE_COLOR` before launch.
 - Terminal: at least 140x40. Side-by-side diff needs 100 or more columns. Stay in the default inline diff for stills.
 - Watch and background fetch stay off so frames do not flicker.

@@ -98,7 +98,8 @@ Every **commit** and **stash** is followed by a non-selectable `spacer`
 - **Stash row:** node + subject (full flex). `stash@{n}` is not on this line.
 - **Stash spacer:** live rails + short spur + `stash@{n}` left + right-anchored
   hash / date / author (same drop order as commit spacers: hash → date →
-  author). Relative dates match `format_relative_date`.
+  author). Relative dates match `format_relative_date` (local clock after
+  3 hours).
 
 Between consecutive commits the spacer gutter densifies
 (`prev.stem_down` → `next.stem_up`), including when a parked stash leaf sits
