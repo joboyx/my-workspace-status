@@ -6685,7 +6685,7 @@ mod tests {
         app.dispatch(Action::ScrollWheel {
             col: 8,
             row: 4,
-            delta: 1,
+            delta: -1,
             horizontal: false,
         });
         assert_ne!(
