@@ -413,6 +413,21 @@ impl HeadlessTui {
         Some((self.state.layout.graph_hscrollbar_x, y, width))
     }
 
+    /// Graph list cursor (selectable `visible_rows` index).
+    pub fn graph_cursor(&self) -> usize {
+        self.state.graph_cursor
+    }
+
+    /// Commit-file list cursor.
+    pub fn commit_files_cursor(&self) -> usize {
+        self.state.commit_files_cursor()
+    }
+
+    /// Visible commit-file row count (tree or flat).
+    pub fn commit_files_len(&self) -> usize {
+        self.state.commit_file_rows().len()
+    }
+
     /// Current graph list skip (`graph_scroll`).
     pub fn graph_scroll(&self) -> u16 {
         self.state.graph_scroll

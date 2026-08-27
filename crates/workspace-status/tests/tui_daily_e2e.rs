@@ -288,6 +288,19 @@ fn open(workspace: &Path) -> HeadlessTui {
     HeadlessTui::open(workspace, false)
 }
 
+fn gg(tui: &mut HeadlessTui) {
+    tui.key('g');
+    tui.key('g');
+}
+
+fn seed_tall_dirty_file(workspace: &Path, name: &str) {
+    let mut body = String::new();
+    for i in 0..50 {
+        body.push_str(&format!("tall line {i} {name}\n"));
+    }
+    fs::write(workspace.join("app").join(name), body).unwrap();
+}
+
 fn assert_contains(frame: &str, needle: &str) {
     assert!(
         frame.contains(needle),
@@ -401,6 +414,227 @@ fn dirty_file_paints_diff_pane() {
         frame.contains("dirty") || frame.contains("│"),
         "diff pane should show the dirty file:\n{frame}"
     );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// `gg` / `G` on the focused pane: left tree (including while a file diff is
+/// shown), a focused file diff, the graph, and the commit-file list (including
+/// while a commit diff is shown).
+#[test]
+fn gg_g_jump_focused_pane_including_file_diff() {
+    let (root, workspace) = daily_workspace();
+    seed_tall_dirty_file(&workspace, "unique-gg-file.rs");
+    let merger = workspace.join("merger");
+    fs::write(merger.join("one.txt"), "one\n").unwrap();
+    fs::write(merger.join("two.txt"), "two\n").unwrap();
+    git(&merger, &["add", "one.txt", "two.txt"]);
+    git(&merger, &["commit", "-q", "-m", "two files"]);
+    let mut tui = open(&workspace);
+
+    tui.search("unique-gg-file");
+    let _ = tui.frame();
+    assert!(
+        tui.right_is_diff() && !tui.focus_is_right(),
+        "operator path: left tree focused with the file diff shown:\n{}",
+        tui.frame()
+    );
+    let file_id = tui.cursor_id();
+    assert!(
+        file_id.contains("unique-gg-file"),
+        "search should land on the tall file, got {file_id}"
+    );
+    tui.key('G');
+    assert!(
+        !tui.focus_is_right(),
+        "G on the left pane must not steal focus to the diff"
+    );
+    assert!(
+        tui.cursor_label().contains("No updates"),
+        "G on the left tree (diff shown) should jump to the last row, got {}",
+        tui.cursor_label()
+    );
+    gg(&mut tui);
+    assert!(
+        !tui.focus_is_right(),
+        "gg on the left pane must not steal focus to the right"
+    );
+    assert_eq!(
+        tui.cursor_id(),
+        "workspace",
+        "gg on the left tree should jump to the first row, got {}",
+        tui.cursor_id()
+    );
+
+    tui.search("unique-gg-file");
+    tui.tab();
+    assert!(
+        tui.right_is_diff() && tui.focus_is_right(),
+        "Tab should focus the file diff:\n{}",
+        tui.frame()
+    );
+    for _ in 0..8 {
+        tui.key('j');
+    }
+    let mid = tui.diff_scroll();
+    assert!(
+        mid > 0,
+        "j on a focused tall diff should leave the top, scroll={mid}"
+    );
+    tui.key('G');
+    assert!(
+        tui.diff_scroll() > mid,
+        "G on a focused diff should jump toward the end, mid={mid} after={}",
+        tui.diff_scroll()
+    );
+    assert!(
+        tui.focus_is_right() && tui.right_is_diff(),
+        "G on a focused diff must not leave the diff"
+    );
+    gg(&mut tui);
+    assert_eq!(
+        tui.diff_scroll(),
+        0,
+        "gg on a focused diff should jump to the start"
+    );
+    assert!(
+        tui.focus_is_right() && tui.right_is_diff(),
+        "gg on a focused diff must not leave the diff"
+    );
+
+    tui.esc();
+    if tui.focus_is_right() {
+        tui.esc();
+    }
+    assert!(
+        !tui.focus_is_right() && tui.cursor_id().contains("unique-gg-file"),
+        "Esc should return to the left tree on the file row:\n{}",
+        tui.frame()
+    );
+    tui.key('j');
+    assert!(
+        tui.cursor_id().contains("merger") && tui.right_is_graph(),
+        "j from the tall file should land on merger with the graph:\n{}",
+        tui.frame()
+    );
+    tui.tab();
+    assert!(
+        tui.right_is_graph() && tui.focus_is_right(),
+        "Tab should focus the graph:\n{}",
+        tui.frame()
+    );
+    let graph_start = tui.graph_cursor();
+    tui.key('G');
+    assert_ne!(
+        tui.graph_cursor(),
+        graph_start,
+        "G on the graph should leave the first row"
+    );
+    gg(&mut tui);
+    assert_eq!(
+        tui.graph_cursor(),
+        0,
+        "gg on the graph should jump to the first row, got {}",
+        tui.graph_cursor()
+    );
+
+    tui.key('j');
+    tui.enter();
+    let files = tui.frame();
+    assert!(
+        tui.right_is_files() && tui.focus_is_right(),
+        "Enter on a graph commit should open the file list:\n{files}"
+    );
+    let file_count = tui.commit_files_len();
+    assert!(
+        file_count > 1,
+        "need more than one commit-file row to jump, got {file_count}:\n{files}"
+    );
+    tui.key('G');
+    assert_eq!(
+        tui.commit_files_cursor(),
+        file_count - 1,
+        "G on the commit-file list should jump to the last row"
+    );
+    gg(&mut tui);
+    assert_eq!(
+        tui.commit_files_cursor(),
+        0,
+        "gg on the commit-file list should jump to the first row"
+    );
+
+    tui.esc();
+    if tui.focus_is_right() {
+        tui.esc();
+    }
+    assert!(
+        tui.left_is_graph() && !tui.focus_is_right(),
+        "Esc should leave the graph on the left:\n{}",
+        tui.frame()
+    );
+    tui.key('G');
+    assert_ne!(
+        tui.graph_cursor(),
+        0,
+        "G on a left graph (files on the right) should leave the first row"
+    );
+    gg(&mut tui);
+    assert_eq!(
+        tui.graph_cursor(),
+        0,
+        "gg on a left graph should jump to the first row"
+    );
+
+    tui.search("two files");
+    tui.enter();
+    tui.enter();
+    tui.esc();
+    if tui.focus_is_right() {
+        tui.esc();
+    }
+    assert!(
+        tui.left_is_files() && tui.right_is_diff() && !tui.focus_is_right(),
+        "depth-2 left is the commit-file list with the commit diff shown:\n{}",
+        tui.frame()
+    );
+    let depth2_count = tui.commit_files_len();
+    assert!(
+        depth2_count > 1,
+        "depth-2 commit-file list should have more than one row"
+    );
+    tui.key('G');
+    assert_eq!(
+        tui.commit_files_cursor(),
+        depth2_count - 1,
+        "G on the left commit-file list (diff shown) should jump to the last row"
+    );
+    assert!(
+        tui.right_is_diff() && !tui.focus_is_right(),
+        "left-pane G while a commit diff is shown must keep the diff and left focus"
+    );
+    gg(&mut tui);
+    assert_eq!(
+        tui.commit_files_cursor(),
+        0,
+        "gg on the left commit-file list (diff shown) should jump to the first row"
+    );
+    assert!(
+        tui.right_is_diff() && !tui.focus_is_right(),
+        "left-pane gg while a commit diff is shown must keep the diff and left focus"
+    );
+
+    tui.tab();
+    assert!(
+        tui.right_is_diff() && tui.focus_is_right(),
+        "Tab should focus the commit diff:\n{}",
+        tui.frame()
+    );
+    tui.key('G');
+    gg(&mut tui);
+    assert!(
+        tui.right_is_diff() && tui.focus_is_right(),
+        "gg/G on a focused commit diff must stay on that diff"
+    );
+
     let _ = fs::remove_dir_all(root);
 }
 

@@ -224,6 +224,14 @@ mod tests {
             ListFocusTarget::None,
             &Action::ToggleReviewed
         ));
+        assert!(right_pane_left_list_allowed(
+            ListFocusTarget::None,
+            &Action::MoveToStart
+        ));
+        assert!(right_pane_left_list_allowed(
+            ListFocusTarget::None,
+            &Action::MoveToEnd
+        ));
         assert!(!right_pane_left_list_allowed(
             ListFocusTarget::Graph,
             &Action::Stage
@@ -293,6 +301,18 @@ mod tests {
         ));
         assert!(!dispatch_is_noop(
             &Action::ToggleReviewed,
+            0,
+            true,
+            ListFocusTarget::None
+        ));
+        assert!(!dispatch_is_noop(
+            &Action::MoveToStart,
+            0,
+            true,
+            ListFocusTarget::None
+        ));
+        assert!(!dispatch_is_noop(
+            &Action::MoveToEnd,
             0,
             true,
             ListFocusTarget::None
