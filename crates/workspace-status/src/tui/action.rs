@@ -46,7 +46,7 @@ pub enum Action {
     /// Horizontal pan on the focused pane (tree, graph, commit-files, or diff).
     ///
     /// Positive looks right. Rows stay clipped to the pane; this only
-    /// shifts the viewport.
+    /// shifts the viewport. Keyboard `h` / `l` / Shift+arrows.
     PanDiff(i32),
     /// Toggle unlimited `-U` context on the focused file diff.
     ToggleFullContext,
@@ -58,9 +58,10 @@ pub enum Action {
     ///
     /// Vertical (`horizontal: false`) moves a list cursor or scrolls the
     /// graph / diff viewport. Horizontal (wheel left/right, or Shift+wheel)
-    /// pans without changing the focused row. Over the workspace tree that
-    /// matches the right pane: scroll does not steal the cursor. Click still
-    /// selects. Keyboard `h` / `l` are unchanged.
+    /// pans the pane under the pointer without changing the focused row.
+    /// Over the workspace tree that matches the right pane: scroll does not
+    /// steal the cursor. Click still selects. Keyboard `h` / `l` are
+    /// unchanged.
     ScrollWheel {
         col: u16,
         row: u16,
