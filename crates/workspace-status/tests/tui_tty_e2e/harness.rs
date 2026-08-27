@@ -1,0 +1,341 @@
+//! Spawn the real `workspace-status` binary on a PTY.
+//!
+//! The child runs the live event loop (`tty::poll_event` / `tty::read_event`
+//! → crossterm `event::read`). Keys and xterm SGR mouse reports are written
+//! as bytes on the PTY master — the same path a terminal uses. This is not
+//! `HeadlessTui` and does not construct crossterm `Event` values in memory.
+
+use std::fs;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+
+use super::seed::git_env;
+
+pub const COLS: u16 = 140;
+pub const ROWS: u16 = 32;
+
+/// xterm SGR button for wheel right (trackpad hscroll).
+pub const SGR_WHEEL_RIGHT: u8 = 67;
+/// Wheel right with the 1003 motion bit (`67 | 32`). crossterm 0.28 drops this.
+pub const SGR_WHEEL_RIGHT_MOTION: u8 = 67 | 32;
+
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(12);
+
+pub struct PtySession {
+    child: Box<dyn portable_pty::Child + Send>,
+    writer: Box<dyn Write + Send>,
+    master: Box<dyn MasterPty + Send>,
+    parser: Arc<Mutex<vt100::Parser>>,
+    root: PathBuf,
+    cols: u16,
+    rows: u16,
+}
+
+impl PtySession {
+    pub fn open(workspace: &Path) -> Self {
+        Self::open_size(workspace, COLS, ROWS)
+    }
+
+    pub fn open_size(workspace: &Path, cols: u16, rows: u16) -> Self {
+        assert!(
+            workspace.is_dir(),
+            "workspace must exist: {}",
+            workspace.display()
+        );
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty");
+
+        let bin = env!("CARGO_BIN_EXE_workspace-status");
+        let mut cmd = CommandBuilder::new(bin);
+        cmd.cwd(workspace);
+        for (k, v) in std::env::vars() {
+            if matches!(
+                k.as_str(),
+                "NO_COLOR" | "FORCE_COLOR" | "WS_STATUS_GLYPHS" | "CLICOLOR_FORCE"
+            ) {
+                continue;
+            }
+            cmd.env(k, v);
+        }
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("WS_STATUS_GLYPHS", "ascii");
+        cmd.env("WS_STATUS_WATCH_MS", "0");
+        cmd.env("WS_STATUS_FETCH_MS", "0");
+        cmd.env("LANG", "C.UTF-8");
+        cmd.env("LC_ALL", "C.UTF-8");
+        for (k, v) in git_env() {
+            cmd.env(k, v);
+        }
+
+        let state_home = workspace.join(".e2e-state");
+        fs::create_dir_all(&state_home).unwrap();
+        cmd.env("XDG_STATE_HOME", &state_home);
+        cmd.env(
+            "WS_STATUS_VIEWED_STORE",
+            state_home.join("viewed-files.json"),
+        );
+        let update_store = state_home.join("update-check.json");
+        write_fresh_update_check(&update_store);
+        cmd.env("WS_STATUS_UPDATE_CHECK_STORE", &update_store);
+
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .expect("spawn workspace-status");
+        let mut reader = pair.master.try_clone_reader().expect("clone pty reader");
+        let writer = pair.master.take_writer().expect("pty writer");
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let parser_thread = Arc::clone(&parser);
+        thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        parser_thread.lock().unwrap().process(&buf[..n]);
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let session = Self {
+            child,
+            writer,
+            master: pair.master,
+            parser,
+            root: workspace
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| workspace.to_path_buf()),
+            cols,
+            rows,
+        };
+        session.wait_ready();
+        session
+    }
+
+    fn wait_ready(&self) {
+        self.wait_contains_any(&[" tree", "Flat paths", "app", "README"], DEFAULT_TIMEOUT);
+    }
+
+    pub fn send_bytes(&mut self, bytes: &[u8]) {
+        self.writer.write_all(bytes).expect("write pty");
+        self.writer.flush().expect("flush pty");
+    }
+
+    pub fn key(&mut self, c: char) {
+        let mut buf = [0u8; 4];
+        let s = c.encode_utf8(&mut buf);
+        self.send_bytes(s.as_bytes());
+    }
+
+    pub fn keys(&mut self, s: &str) {
+        for c in s.chars() {
+            self.key(c);
+        }
+    }
+
+    pub fn enter(&mut self) {
+        self.send_bytes(b"\r");
+    }
+
+    pub fn esc(&mut self) {
+        // CSI-u Escape. A lone `\x1b` is the CSI prefix and is easy to lose
+        // against the TUI's keyboard-enhancement flags.
+        self.send_bytes(b"\x1b[27u");
+    }
+
+    pub fn tab(&mut self) {
+        self.send_bytes(b"\t");
+    }
+
+    pub fn ctrl(&mut self, c: char) {
+        let b = (c.to_ascii_lowercase() as u8) & 0x1f;
+        self.send_bytes(&[b]);
+    }
+
+    pub fn search(&mut self, query: &str) {
+        self.key('/');
+        self.keys(query);
+        self.enter();
+    }
+
+    /// Encode one xterm SGR mouse report (`CSI < Cb ; Cx ; Cy M`).
+    ///
+    /// `col` / `row` are 0-based cells, matching crossterm. The bytes are
+    /// 1-based, which is what a TTY sends for trackpad hscroll.
+    pub fn sgr_mouse(&mut self, button: u8, col: u16, row: u16) {
+        let seq = format!(
+            "\x1b[<{button};{};{}M",
+            col.saturating_add(1),
+            row.saturating_add(1)
+        );
+        self.send_bytes(seq.as_bytes());
+    }
+
+    /// Left press + release. Setup only (focus a short tree row before
+    /// hscroll). Not a click-coverage claim: a no-op click still continues.
+    pub fn sgr_click(&mut self, col: u16, row: u16) {
+        self.sgr_mouse(0, col, row);
+        let seq = format!(
+            "\x1b[<0;{};{}m",
+            col.saturating_add(1),
+            row.saturating_add(1)
+        );
+        self.send_bytes(seq.as_bytes());
+    }
+
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        self.master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("resize pty");
+        self.parser.lock().unwrap().set_size(rows, cols);
+        self.cols = cols;
+        self.rows = rows;
+    }
+
+    pub fn screen(&self) -> String {
+        self.parser.lock().unwrap().screen().contents()
+    }
+
+    pub fn wait_contains(&self, needle: &str, timeout: Duration) {
+        self.wait_pred(
+            |screen| screen.contains(needle),
+            &format!("screen contains `{needle}`"),
+            timeout,
+        );
+    }
+
+    pub fn wait_absent(&self, needle: &str, timeout: Duration) {
+        self.wait_pred(
+            |screen| !screen.contains(needle),
+            &format!("screen does not contain `{needle}`"),
+            timeout,
+        );
+    }
+
+    pub fn wait_contains_any(&self, needles: &[&str], timeout: Duration) {
+        self.wait_pred(
+            |screen| needles.iter().any(|n| screen.contains(n)),
+            &format!("screen contains one of {needles:?}"),
+            timeout,
+        );
+    }
+
+    pub fn wait_pred(&self, pred: impl Fn(&str) -> bool, what: &str, timeout: Duration) {
+        let start = Instant::now();
+        loop {
+            let screen = self.screen();
+            if pred(&screen) {
+                return;
+            }
+            if start.elapsed() >= timeout {
+                panic!("timeout waiting for {what}:\n{screen}");
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    pub fn wait_ms(&self, ms: u64) {
+        thread::sleep(Duration::from_millis(ms));
+    }
+}
+
+impl Drop for PtySession {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+pub(crate) fn write_fresh_update_check(path: &Path) {
+    let unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let body = format!("{{\n  \"version\": 1,\n  \"lastCheckUnix\": {unix}\n}}\n");
+    fs::write(path, body).unwrap();
+}
+
+pub fn assert_contains(screen: &str, needle: &str) {
+    assert!(
+        screen.contains(needle),
+        "expected `{needle}` in screen:\n{screen}"
+    );
+}
+
+pub fn assert_absent(screen: &str, needle: &str) {
+    assert!(
+        !screen.contains(needle),
+        "did not expect `{needle}` in screen:\n{screen}"
+    );
+}
+
+/// Left list cells, excluding top/bottom chrome.
+///
+/// A search chip on the status row can contain `TAIL99` without the tree
+/// having panned. Split on the pane join so the right pane is out.
+pub fn left_tree(screen: &str) -> String {
+    let lines: Vec<&str> = screen.lines().collect();
+    let end = lines.len().saturating_sub(2);
+    let start = usize::from(end > 1);
+    lines[start..end]
+        .iter()
+        .map(|line| left_of_split(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn left_of_split(line: &str) -> String {
+    for sep in ["││", "┐┌", "┘└"] {
+        if let Some(idx) = line.find(sep) {
+            return line[..idx].to_string();
+        }
+    }
+    let n = (line.chars().count() * 2 / 5).max(12);
+    line.chars().take(n).collect()
+}
+
+/// 0-based screen row of a left-tree cell that contains `needle`.
+///
+/// Skips the last two rows so a search / hint chip cannot match.
+pub fn tree_row_containing(screen: &str, needle: &str) -> Option<u16> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let end = lines.len().saturating_sub(2);
+    for (i, line) in lines.iter().take(end).enumerate() {
+        if left_of_split(line).contains(needle) {
+            return Some(i as u16);
+        }
+    }
+    None
+}
+
+pub fn assert_tree_clipped_long_path(screen: &str) {
+    let left = left_tree(screen);
+    assert_contains(&left, "very-long");
+    assert_absent(&left, "TAIL99");
+}
+
+pub fn tree_is_panned_to_tail(screen: &str) -> bool {
+    let left = left_tree(screen);
+    left.contains("TAIL99") && !left.contains("very-long")
+}

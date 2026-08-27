@@ -24,3 +24,7 @@ serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.135"
 workspace-status-graph = { path = "../workspace-status-graph" }
 sha2 = "0.10.8"
+
+[dev-dependencies]
+portable-pty = "0.8"
+vt100 = "0.15"
