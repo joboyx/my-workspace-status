@@ -353,6 +353,31 @@ impl HeadlessTui {
         self.send_sgr_mouse(&sgr_mouse_report(SGR_WHEEL_RIGHT_MOTION, col, row));
     }
 
+    /// File-diff horizontal pan (`diff_col_offset`).
+    pub fn diff_col_offset(&self) -> u16 {
+        self.state.diff_col_offset
+    }
+
+    /// File-diff vertical skip (`diff_scroll`).
+    pub fn diff_scroll(&self) -> u16 {
+        self.state.diff_scroll
+    }
+
+    /// Diff horizontal scrollbar track from the last paint, if the bar is up.
+    pub fn diff_hscrollbar_track(&self) -> Option<(u16, u16, u16)> {
+        let y = self.state.layout.diff_hscrollbar_y?;
+        let width = self.state.layout.diff_hscrollbar_width;
+        if width == 0 {
+            return None;
+        }
+        Some((self.state.layout.diff_hscrollbar_x, y, width))
+    }
+
+    /// 0-based diff vertical scrollbar column from the last paint.
+    pub fn diff_scrollbar_col(&self) -> Option<u16> {
+        self.state.layout.diff_scrollbar_x
+    }
+
     /// Inner tree pane origin x from the last paint.
     pub fn tree_inner_x(&self) -> u16 {
         self.state.layout.tree_x
