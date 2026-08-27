@@ -356,6 +356,28 @@ fn tree_shows_dirty_and_folded_no_updates() {
 }
 
 #[test]
+fn held_nav_repeat_moves_again_and_does_not_quit() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    let start = tui.cursor_id();
+    tui.key('j');
+    let after_press = tui.cursor_id();
+    assert_ne!(after_press, start, "press j should move");
+    tui.key_repeat('j');
+    let after_repeat = tui.cursor_id();
+    assert_ne!(
+        after_repeat, after_press,
+        "repeat j should move again, start={start} press={after_press} repeat={after_repeat}"
+    );
+    tui.key_repeat('q');
+    assert!(!tui.did_quit(), "repeat q must not quit");
+    tui.key_repeat('z');
+    tui.key_repeat('g');
+    assert!(!tui.did_quit());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn dirty_file_paints_diff_pane() {
     let (root, workspace) = daily_workspace();
     let mut tui = open(&workspace);

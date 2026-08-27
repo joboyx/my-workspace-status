@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
@@ -78,6 +78,11 @@ impl HeadlessTui {
     /// Send one character through the real keymap.
     pub fn key(&mut self, c: char) {
         self.send(KeyCode::Char(c));
+    }
+
+    /// Send a terminal key-repeat of one character (hold).
+    pub fn key_repeat(&mut self, c: char) {
+        self.send_key_kind(KeyCode::Char(c), KeyModifiers::NONE, KeyEventKind::Repeat);
     }
 
     /// Send Tab.
@@ -396,10 +401,14 @@ impl HeadlessTui {
     }
 
     fn send_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        self.send_key_kind(code, modifiers, KeyEventKind::Press);
+    }
+
+    fn send_key_kind(&mut self, code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) {
         if self.quit {
             return;
         }
-        self.dispatch_event(Event::Key(KeyEvent::new(code, modifiers)));
+        self.dispatch_event(Event::Key(KeyEvent::new_with_kind(code, modifiers, kind)));
     }
 
     fn dispatch_event(&mut self, event: Event) {

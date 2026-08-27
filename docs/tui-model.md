@@ -92,6 +92,6 @@ Graph pane writes (`graphCheckout` / `graphCreateBranch` / `graphMerge` / stash 
 
 ## Keymap
 
-Live keys: [configuration.md](./configuration.md) and [tui-rust.md](./tui-rust.md). `?` paints MOVE / GIT / VIEW from `tui/help.rs`.
+Live keys: [configuration.md](./configuration.md) and [tui-rust.md](./tui-rust.md). `?` paints MOVE / GIT / VIEW from `tui/help.rs`. Held `h`/`j`/`k`/`l` (and arrows) auto-repeat; Repeat of `z`/`g`/writes/quit is ignored so chords stay one-shot.
 
 Quit is a double **Ctrl-C** chord (`tui/ctrl_c_exit.rs`). First press paints `Press Ctrl+C again to exit` for `CTRL_C_EXIT_MS` (2s); second within that window exits. Overlay pickers (stash / branch / create-branch) show the copy inline; otherwise it is a pinned chrome row, never a breadcrumb toast. The chord is handled before overlay modes, so it does not close a picker. `q` also quits immediately (Rust extra). Esc never quits.
