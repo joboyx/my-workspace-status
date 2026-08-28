@@ -6,7 +6,7 @@ Refresh README/demo PNGs from the repo root:
 
     ./scripts/capture-demo-stills.sh
 
-That script seeds, installs MesloLGS NF if needed, and types the hardcoded keys below. Do not invent a fixture or a second capture pipeline.
+That script seeds, installs MesloLGS NF if needed, starts Xvfb and Openbox through `scripts/with-desktop-session.sh`, and types the hardcoded keys below. Do not invent a fixture or a second capture pipeline.
 
 ## Seed
 

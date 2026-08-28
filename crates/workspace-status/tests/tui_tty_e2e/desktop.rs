@@ -7,7 +7,8 @@
 //! `script(1)` typescript on that TTY.
 //!
 //! Ignored in `cargo test --workspace`. The `tui-tty-desktop` GitHub Actions
-//! job runs these tests. Local Linux: see docs/tui-tty-e2e.md.
+//! job runs these tests under `scripts/with-desktop-session.sh`. Local Linux:
+//! see docs/tui-tty-e2e.md.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -19,7 +20,7 @@ use std::time::{Duration, Instant};
 use super::harness::{write_fresh_update_check, COLS, ROWS};
 use super::seed::git_env;
 
-const OPENBOX_RC: &str = include_str!("openbox.xml");
+const OPENBOX_RC: &str = include_str!("../../../../scripts/openbox.xml");
 
 #[derive(Clone, Copy, Debug)]
 enum Emulator {
@@ -335,7 +336,7 @@ impl Drop for DesktopSession {
 fn require_desktop_tools(emulator: Emulator) {
     assert!(
         std::env::var_os("DISPLAY").is_some(),
-        "desktop TTY e2e needs DISPLAY (GitHub Actions tui-tty-desktop uses xvfb-run). See docs/tui-tty-e2e.md"
+        "desktop TTY e2e needs DISPLAY (GitHub Actions tui-tty-desktop uses scripts/with-desktop-session.sh). See docs/tui-tty-e2e.md"
     );
     let term = match emulator {
         Emulator::Xfce => "xfce4-terminal",
@@ -416,9 +417,9 @@ fn ensure_openbox(stage: &Path) {
         .map(|s| s.success())
         .unwrap_or(false);
     if running {
-        // Session Openbox (GitHub Actions `tui-tty-desktop`) should already
-        // have been started with this rc. Do not `--replace`: that would
-        // steal a shared DISPLAY.
+        // Session Openbox (`scripts/with-desktop-session.sh`) should already
+        // have been started with scripts/openbox.xml. Do not `--replace`:
+        // that would steal a shared DISPLAY.
         return;
     }
     let _ = Command::new("openbox")

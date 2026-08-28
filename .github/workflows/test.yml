@@ -25,14 +25,5 @@ jobs:
             xvfb xfce4-terminal xterm xdotool dbus-x11 openbox
       - name: Desktop TTY e2e (xfce keys + xterm XTEST wheel)
         run: |
-          xvfb-run -a -s "-screen 0 1600x1000x24" bash -c '
-            set -euo pipefail
-            export NO_AT_BRIDGE=1 GTK_A11Y=none
-            if command -v dbus-launch >/dev/null; then
-              eval "$(dbus-launch --sh-syntax)"
-            fi
-            openbox --config-file crates/workspace-status/tests/tui_tty_e2e/openbox.xml \
-              >/tmp/ws-tty-e2e-openbox.log 2>&1 &
-            sleep 0.4
+          ./scripts/with-desktop-session.sh --auto -- \
             cargo test --test tui_tty_e2e -- --ignored --nocapture --test-threads=1
-          '

@@ -34,6 +34,7 @@ Do **not** invent spur heuristics (`parent.lane + 1`, spine `◇─╯`, mid-rai
 | Environment variables, workspace config, keybindings, themes | `docs/configuration.md` |
 | Output format of the plain report | `SAMPLE_OUTPUT.md` and `crates/workspace-status/tests/snapshot_contract.rs` |
 | Demo workspace seed or screenshot frames | `docs/demo.md` + `scripts/seed-demo-workspace.sh` + `scripts/capture-demo-stills.sh` |
+| Desktop Xvfb / Openbox session | `scripts/with-desktop-session.sh` + `scripts/openbox.xml` + `docs/tui-tty-e2e.md` |
 
 A change is not complete while its documentation is stale.
 

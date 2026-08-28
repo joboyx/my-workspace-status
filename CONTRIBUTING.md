@@ -28,7 +28,7 @@ Run the same suite that CI runs:
 cargo test --workspace
 ```
 
-That includes the real-TTY PTY e2e on Unix (`crates/workspace-status/tests/tui_tty_e2e/`). GitHub Actions also runs xfce4-terminal (keys) and xterm (XTEST wheel) under `tui-tty-desktop`. See [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md).
+That includes the real-TTY PTY e2e on Unix (`crates/workspace-status/tests/tui_tty_e2e/`). GitHub Actions also runs xfce4-terminal (keys) and xterm (XTEST wheel) under `tui-tty-desktop` via `scripts/with-desktop-session.sh`. See [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md).
 
 Agents and CI must use `--plain` or `--json`. A TTY run without those flags opens the TUI.
 
