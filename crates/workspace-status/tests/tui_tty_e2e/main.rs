@@ -68,6 +68,7 @@ fn tree_cleared_ahead_behind(screen: &str) -> bool {
     !left.contains("v1") && !left.contains("^1")
 }
 
+#[cfg(unix)]
 fn tree_has(screen: &str, needle: &str) -> bool {
     left_tree(screen).contains(needle)
 }

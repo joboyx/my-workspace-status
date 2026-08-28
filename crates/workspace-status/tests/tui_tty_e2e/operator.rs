@@ -297,7 +297,7 @@ fn pty_worktree_w_remove_confirm() {
     tui.wait_contains("/linked-open", WAIT);
     tui.wait_contains("feature/linked-open", WAIT);
     tui.wait_ms(SETTLE_MS);
-    tui.key('W');
+    tui.shift_letter('W');
     tui.wait_contains("Remove worktree", WAIT);
     tui.key('y');
     tui.wait_contains("removed worktree", GIT_WAIT);
@@ -416,8 +416,9 @@ fn pty_ctrl_o_full_file_context() {
     let mut tui = PtySession::open(&workspace);
     tui.search("README");
     tui.wait_contains("UNSTAGED", WAIT);
+    harness::assert_absent(&tui.screen(), " · full");
     tui.ctrl('o');
-    tui.wait_contains("full", WAIT);
+    tui.wait_contains(" · full", WAIT);
 }
 
 /// Startup GitHub Release prompt on a TTY. `n` continues into the TUI.
