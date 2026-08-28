@@ -82,10 +82,19 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     let overlay_h = overlay_status_rows_for(state, area.width);
     let crumb_h = breadcrumb_rows(state);
     let prompt_h = ctrl_c_prompt_rows(state);
+    let chrome_h = crumb_h.saturating_add(prompt_h).saturating_add(overlay_h);
+    // Help keeps its wrapped row budget. Panes take leftover rows (this
+    // can be fewer than the idle Min(3)). A fixed Min(3) clips the last
+    // GIT wrap at the default 140×32 PTY.
+    let pane_min = if state.help_open {
+        area.height.saturating_sub(chrome_h)
+    } else {
+        3
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(3),
+            Constraint::Min(pane_min),
             Constraint::Length(crumb_h),
             Constraint::Length(prompt_h),
             Constraint::Length(overlay_h),
@@ -2016,6 +2025,30 @@ mod tests {
             header.is_some(),
             "help overlay should paint MOVE / GIT / VIEW on one row:\n{text}"
         );
+        assert_help_version_lower_right(&text);
+    }
+
+    #[test]
+    fn help_overlay_paints_last_git_row_at_pty_size() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.help_open = true;
+        let backend = TestBackend::new(140, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        let header = text
+            .lines()
+            .find(|line| line.contains("MOVE") && line.contains("GIT") && line.contains("VIEW"));
+        assert!(
+            header.is_some(),
+            "help overlay should paint MOVE / GIT / VIEW on one row:\n{text}"
+        );
+        assert!(
+            text.contains("apply/pop/drop"),
+            "last GIT wrap must paint at the default PTY size (140×32):\n{text}"
+        );
+        assert!(text.contains("focused stash"), "{text}");
         assert_help_version_lower_right(&text);
     }
 
