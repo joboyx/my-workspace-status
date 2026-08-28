@@ -290,6 +290,16 @@ impl PtySession {
         self.send_bytes(b"\x1b[27u");
     }
 
+    /// xterm CSI PageUp (`ESC [5~`). `event::read` maps this to `KeyCode::PageUp`.
+    pub fn page_up(&mut self) {
+        self.send_bytes(b"\x1b[5~");
+    }
+
+    /// xterm CSI PageDown (`ESC [6~`). `event::read` maps this to `KeyCode::PageDown`.
+    pub fn page_down(&mut self) {
+        self.send_bytes(b"\x1b[6~");
+    }
+
     pub fn tab(&mut self) {
         self.send_bytes(b"\t");
     }
