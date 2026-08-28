@@ -214,10 +214,12 @@ fn pty_n_and_n_pane_next_prev() {
 
 /// CSI PageDown then PageUp jumps the tree by a viewport, not to the ends.
 ///
-/// Launch focuses the first file (`README.md`). A short PTY plus extra
-/// dirty files makes one page smaller than the list. PageDown must leave
-/// `README.md`, load a later file's diff, and stay off the last rows. A
-/// no-op keeps the README diff. `G` would show `page-29` / No updates.
+/// Launch focuses the first file (`README.md`). A file-focused breadcrumb
+/// stays `workspace` (the repo crumb is omitted while the right pane is a
+/// diff). A short PTY plus extra dirty files makes one page smaller than
+/// the list. PageDown must scroll `README.md` off, load a later file's
+/// diff body, and stay off the last rows. A no-op keeps the README diff.
+/// `G` would show `page-29` / No updates.
 #[test]
 fn pty_pgup_pgdn_pages_workspace_tree() {
     let (_root, workspace) = daily_workspace();
@@ -231,7 +233,7 @@ fn pty_pgup_pgdn_pages_workspace_tree() {
             tree_has(screen, "README.md")
                 && !tree_has(screen, "page-29")
                 && !page_file_body_visible(screen)
-                && screen.contains("workspace › app")
+                && screen.contains("UNSTAGED")
         },
         "launch focuses README; last page files stay below the fold",
         GIT_WAIT,
@@ -241,10 +243,10 @@ fn pty_pgup_pgdn_pages_workspace_tree() {
     tui.wait_pred(
         |screen| {
             page_file_body_visible(screen)
+                && screen.contains("UNSTAGED")
                 && !tree_has(screen, "README.md")
                 && !tree_has(screen, "page-29")
                 && !tree_has(screen, "No updates")
-                && screen.contains("workspace › app")
         },
         "PageDown pages the tree (a no-op keeps README; G would show page-29)",
         GIT_WAIT,
@@ -254,9 +256,9 @@ fn pty_pgup_pgdn_pages_workspace_tree() {
     tui.wait_pred(
         |screen| {
             tree_has(screen, "README.md")
+                && screen.contains("UNSTAGED")
                 && !page_file_body_visible(screen)
                 && !tree_has(screen, "page-29")
-                && screen.contains("workspace › app")
         },
         "PageUp returns to README (a no-op keeps the paged file)",
         GIT_WAIT,
