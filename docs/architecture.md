@@ -87,16 +87,16 @@ Graph checkout confirm (and several other graph UX choices) is inspired by [Git 
 
 | Change                | Touch                                                                                                                                                                     |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| New git operation     | `crates/workspace-status/src/git.rs` (add the wrapper), caller in `actions.rs` or `tui/app.rs` / `tui/state.rs`                                                           |
+| New git operation     | `crates/workspace-status/src/git.rs` (add the wrapper), caller in `actions.rs` or `tui/app.rs` / `tui/state/`                                                           |
 | Graph engine / UI     | `crates/workspace-status-graph` + `tui/graph_load.rs` + `tui/render.rs` + helpers in `git.rs`                                                                              |
 | New tree node kind    | `tui/tree.rs` (`NodeKind`, `node_segments`, flatten / fold walks)                                                                                                         |
 | New pane / overlay    | `tui/` module + `chrome.rs` row budget + `render.rs` layout                                                                                                               |
-| Nav shell / drill     | `tui/drill.rs` + `tui/state.rs` + `chrome.rs` breadcrumb                                                                                                                  |
+| Nav shell / drill     | `tui/drill.rs` + `tui/state/` + `chrome.rs` breadcrumb                                                                                                                  |
 | New CLI flag          | `cli.rs` + `tui::HeadlessFlags` / `should_open_tui` if it affects TUI vs headless                                                                                          |
 | TUI startup update check | `update_check.rs` + `cli.rs` (before `run_tui`). Sidecar exec and `--update` notes stay in `update.rs`. TTY spawn must set `WS_STATUS_UPDATE_CHECK_STORE` (CI: `tests/release_watch.rs`) |
 | cargo-dist CI / git-cliff host steps | `.github/workflows/release.yml` + `dist-workspace.toml`. After `dist generate`, restore `workflow_dispatch` and host git-cliff. Guard: `tests/release_watch.rs`. Recipe under **Distribution** |
 | Snapshot contract     | `snapshot.rs` (`build_workspace_snapshot`) + `docs/snapshot.md` + `tests/snapshot_contract.rs`                                                                            |
-| New key binding       | `tui/keys.rs` (`Action`) + `tui/state.rs` dispatch + `tui/help.rs` (`HELP_GROUPS`) + `tui/gates.rs` if the key is row-scoped                                               |
+| New key binding       | `tui/keys.rs` (`Action`) + `tui/state/dispatch.rs` + `tui/help.rs` (`HELP_GROUPS`) + `tui/gates.rs` if the key is row-scoped                                               |
 | Event-loop freeze / overlay ticks / graph autoload / key-repeat | `tui/event_loop.rs` + `tui/scheduler.rs` + `tui/event_pump.rs` + `tui/keys.rs` (CI: `tty_event_loop_must_not_call_sync_pane_git`) |
 | Mouse enable / SGR decode | `tui/tty.rs` (live `poll_event` / `read_event` / `enable_mouse`; Headless SGR through `decode_sgr_mouse`) + the input thread in `tui/event_loop.rs` |
 | Shared TUI e2e seed / hscroll oracle | `crates/workspace-status/tests/common/` — both `tui_headless_e2e` and `tui_tty_e2e`. Not a third harness. See [tui-tty-e2e.md](./tui-tty-e2e.md) |
