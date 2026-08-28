@@ -1,10 +1,9 @@
 //! Additional real-TTY operator paths not claimed by `main.rs`.
 //!
 //! Fold (`h`/`l`, `z`, `zz` subtree), click-to-select, `gg`/`G`, Home/End,
-//! `n`/`N` pane search, PgUp/PgDn, graph `c` create-branch, `r`, ignored
-//! repos, plus other session keys the help overlay lists that a person
-//! actually types.
-//! Same PTY harness: bytes in, painted screen out.
+//! `n`/`N` pane search, PgUp/PgDn, Ctrl-u/d, graph `c` create-branch, `r`,
+//! ignored repos, plus other session keys the help overlay lists that a
+//! person actually types. Same PTY harness: bytes in, painted screen out.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -661,6 +660,70 @@ fn pty_d_switches_to_default_branch() {
     tui.wait_pred(
         |screen| op_finished(screen, "Switched") || screen.contains("Switched 1 repo"),
         "Switched 1 repo without failure",
+        GIT_WAIT,
+    );
+}
+
+/// Extra dirty files so Ctrl-d ±5 cannot clamp to the last row (that is `G`).
+fn seed_tree_half_page_files(workspace: &Path) {
+    let app = workspace.join("app");
+    for i in 0..10 {
+        fs::write(
+            app.join(format!("jump-{i:02}.txt")),
+            format!("jump-{i:02}-body\n"),
+        )
+        .unwrap();
+    }
+}
+
+/// CSI-u Ctrl-d then Ctrl-u jumps the tree ±5 rows. Not a viewport page.
+///
+/// Launch focuses `README.md`. Files sort as README then `jump-00`…
+/// `jump-09`, so +5 lands on `jump-04.txt`. The cursor bar and the right
+/// pane body must both move. A no-op stays on README. `G` would land on
+/// No updates. File-to-file focus keeps the workspace breadcrumb.
+#[test]
+fn pty_ctrl_u_d_jumps_workspace_tree() {
+    let (_root, workspace) = daily_workspace();
+    seed_tree_half_page_files(&workspace);
+
+    let mut tui = PtySession::open(&workspace);
+    tui.wait_contains("README.md", WAIT);
+    tui.wait_contains("UNSTAGED", WAIT);
+    tui.wait_pred(
+        |screen| {
+            tree_cursor_on(screen, "README.md")
+                && !tree_cursor_on(screen, "jump-04.txt")
+                && !screen.contains("jump-04-body")
+                && screen.contains("UNSTAGED")
+        },
+        "launch cursor is README; jump-04 is not focused",
+        GIT_WAIT,
+    );
+
+    tui.ctrl_letter('d');
+    tui.wait_pred(
+        |screen| {
+            tree_cursor_on(screen, "jump-04.txt")
+                && screen.contains("jump-04-body")
+                && screen.contains("NEW")
+                && !tree_cursor_on(screen, "README.md")
+                && !tree_cursor_on(screen, "No updates")
+                && !tree_cursor_on(screen, "jump-09.txt")
+        },
+        "Ctrl-d moves +5 to jump-04 (a no-op stays on README; G would hit No updates)",
+        GIT_WAIT,
+    );
+
+    tui.ctrl_letter('u');
+    tui.wait_pred(
+        |screen| {
+            tree_cursor_on(screen, "README.md")
+                && screen.contains("UNSTAGED")
+                && !tree_cursor_on(screen, "jump-04.txt")
+                && !screen.contains("jump-04-body")
+        },
+        "Ctrl-u returns to README (a no-op keeps jump-04)",
         GIT_WAIT,
     );
 }
