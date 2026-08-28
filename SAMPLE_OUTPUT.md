@@ -47,7 +47,7 @@ The table is sorted by:
 Repo                  Branch                         Sync           Files
 portal-app           🔥 main                        ✅ current      💾 clean
 orders-api           🔥 main                        ⬇️ behind 1     💾 clean
-dotfiles             🚧 feature/JBY-019-status-ui   ✅ current      📝 2 files
+dotfiles             🚧 feature/ABCD-1234-status-ui ✅ current      📝 2 files
 test-repo            🐛 bugfix/ABCD-9999-fix-bug   🔀 1/1         ⚠️ staged+dirty
 local-tool           🔥 main                        ❓ no upstream  💾 clean
 ```
@@ -93,14 +93,14 @@ Linked `git worktree` paths under the workspace cwd appear like any other repo, 
 ```text
 Repo                                       Branch                          Sync         Files
 app                                       🔥 main                         ✅ current   💾 clean
-🔗 app/.worktrees/DEMO-1422-asr-retry    🚧 feature/DEMO-1422-asr-retry 🌱  ✅ current   💾 clean
+🔗 app/.worktrees/feat-login             🚧 feature/login-page 🌱           ✅ current   💾 clean
 
 🌿 Branches (1):
   🚧 feature:
-    - 🔗 app/.worktrees/DEMO-1422-asr-retry (DEMO-1422) 🌱
+    - 🔗 app/.worktrees/feat-login [feature/login-page] 🌱
 
 🔗 Linked worktrees (1):
-    - 🔗 app/.worktrees/DEMO-1422-asr-retry (DEMO-1422) 🌱
+    - 🔗 app/.worktrees/feat-login [feature/login-page] 🌱
 ```
 
 ## Clean Workspace
@@ -138,8 +138,8 @@ Each repo is a lightweight section header prefixed with `📦`, and repos are se
 
 ```text
 File changes
-  📦 dotfiles (JBY-019)
-     └─ ai/common/skills/my-workspace-status
+  📦 dotfiles (ABCD-1234)
+     └─ apps/web/packages/ui
         ├─ 🟡M render.ts
         ├─ 🔵S SAMPLE_OUTPUT.md
         ├─ 🟢A render-preview.md
@@ -163,15 +163,14 @@ File changes
      └─ 🟡M serverless-config.yml
 
   📦 dotfiles
-     └─ ai
-        ├─ codex
-        │  └─ 🟡M config.toml
-        └─ cursor
-           └─ 🟡M hooks.json
+     └─ config
+        ├─ vim
+        │  └─ 🟡M vimrc
+        └─ git
+           └─ 🟡M gitconfig
 
   📦 notes
-     └─ logs
-        └─ 🟢A monitor-order-vbrqjnfplq.log
+     └─ 🟢A inbox.md
 ```
 
 ### File Badges
@@ -236,8 +235,8 @@ my-project           🌿 develop   ✅ current  📝 1 files
 File changes
   📦 dotfiles
      ├─ 🟡M README.md
-     └─ ai/common/skills/my-workspace-status
-        └─ 🟡M workspace-status.sh
+     └─ apps/web/packages/ui
+        └─ 🟡M format.ts
 
   📦 my-project
      └─ src
@@ -257,11 +256,11 @@ dotfiles             🔥 main      ✅ current  📝 2 files
 
 File changes
   📦 dotfiles
-     ├─ ai/common/skills/my-workspace-status
+     ├─ apps/web/packages/ui
      │  ├─ 🟢A SAMPLE_OUTPUT.md
-     │  └─ 🟡M workspace-status.sh
-     └─ notes/tasks
-        └─ 🟢A JBY-019-workspace-status-output-ui.md
+     │  └─ 🟡M format.ts
+     └─ docs
+        └─ 🟢A getting-started.md
 ```
 
 ---
@@ -278,9 +277,9 @@ my-project           🌿 develop   ✅ current  ✨ staged
 
 File changes
   📦 dotfiles
-     └─ ai/common/skills/my-workspace-status
-        ├─ 🔵S workspace-status.sh
-        └─ 🟢A new-feature.sh
+     └─ apps/web/packages/ui
+        ├─ 🔵S format.ts
+        └─ 🟢A new-feature.ts
 
   📦 my-project
      └─ src
@@ -304,8 +303,8 @@ File changes
   📦 dotfiles
      ├─ 🟡M README.md
      ├─ 🟡M config.json
-     └─ ai/common/skills/my-workspace-status
-        └─ 🔵S workspace-status.sh
+     └─ apps/web/packages/ui
+        └─ 🔵S format.ts
 
   📦 my-project
      └─ src
@@ -328,9 +327,9 @@ dotfiles             🔥 main      ✅ current  ⚠️ staged+dirty
 File changes
   📦 dotfiles
      ├─ 🟡M README.md
-     └─ ai/common/skills/my-workspace-status
+     └─ apps/web/packages/ui
         ├─ 🟢A SAMPLE_OUTPUT.md
-        └─ 🟠MS workspace-status.sh
+        └─ 🟠MS format.ts
 ```
 
 ---
@@ -556,6 +555,6 @@ edge-proxy           🌿 hotfix/urgent                   ✅ current  💾 clea
 - Ticket IDs such as `ABCD-1234` are extracted from branch names and shown in repo labels.
 - Summary sections are omitted when empty.
 - Detached HEAD repos are shown in the verbose table as `HEAD (detached)`.
-- File trees collapse single-child directory chains, such as `ai/common/skills/my-workspace-status`.
+- File trees collapse single-child directory chains, such as `apps/web/packages/ui`.
 - Empty discovery prints `ℹ️ No git repos found` (not all-clean).
 - Unborn and status-failed repos appear under `⚠️ Attention` and block the all-clean message.

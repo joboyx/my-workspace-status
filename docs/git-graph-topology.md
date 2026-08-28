@@ -231,7 +231,7 @@ name; not stash leaf paint).
 | Gutter clip window | `crates/workspace-status-graph/src/gutter.rs` (`clip_gutter_shared`) — one left-aligned `[0, cap)` for every row |
 | Regression tests (S0–S7 + park order + gutter dump) | `crates/workspace-status-graph` unit tests + `crates/workspace-status/src/tui/graph_load.rs` |
 
-Canonical skill tree: `ai/common/skills/my-workspace-status/` only.
+Canonical skill file: `SKILL.md` at the repository root.
 
 ### Verify before shipping stash paint
 
@@ -244,7 +244,7 @@ Canonical skill tree: `ai/common/skills/my-workspace-status/` only.
 3. Unit fixtures that already place tip adjacent to parent will **not** catch
    chrono-placement regressions; keep an explicit park / distant-parent test.
 
-### Known gaps / future work (operator still sees failures)
+### Known gaps / future work (remaining failures)
 
 Park-on-parent + 3b→◇ leaf paint landed (PR #54 era). Residual issues — do
 **not** “fix” by reintroducing chrono interleave or `parent.lane + 1`:
@@ -253,8 +253,8 @@ Park-on-parent + 3b→◇ leaf paint landed (PR #54 era). Residual issues — do
 | --- | --- |
 | Orphan pile | **Addressed:** `load_graph_model` lazy-loads missing `stash^1` so those tips park and join. Extra parents insert into the layout walk by date without reshuffling the git window; `%P` targets not in the layout set are dropped so they cannot plant a waiter through the window. Remaining true orphans are parent objects git cannot resolve — still a lone `◇` after uncommitted (no fake spine tee). |
 | Crowded / multi-lane gutters | **Improved:** sibling tips reserve distinct leaf lanes; paint clips the same left window on every row so rails stay aligned; join overlay keeps through-rails (`┼`) instead of eating them. Extreme density (more live lanes than the gutter cap) can still clip the rightmost lanes. |
-| Operator-reported edge cases | Capture failing screenshots + short gutter dump next to S0–S7 before changing paint; extend the config table rather than one-off glyph hacks. |
-| Agent skill copies | Edit **common** only; redeploy/symlink per `ai/AGENTS.md` — do not fork paint logic under `agents/*/skills/`. |
+| Reported edge cases | Capture failing screenshots + short gutter dump next to S0–S7 before changing paint; extend the config table rather than one-off glyph hacks. |
+| Skill copies | Edit `SKILL.md` in this repository. Do not fork a second copy. |
 
 ## Non-goals
 
