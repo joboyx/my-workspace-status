@@ -277,9 +277,11 @@ fn update_prints_release_notes_then_runs_sidecar() {
     "body": "## [0.0.1]\n\n### Features\n\n- Ancient\n\n## Install workspace-status 0.0.1\n"
   }
 ]"###;
+    let fixture = dir.join("releases.json");
+    fs::write(&fixture, json.as_bytes()).unwrap();
     write_script(
         &dir.join("curl"),
-        &format!("#!/bin/sh\ncat <<'EOF'\n{json}\nEOF\n"),
+        &format!("#!/bin/sh\nexec /bin/cat '{}'\n", fixture.display()),
     );
     write_script(
         &dir.join("workspace-status-update"),
