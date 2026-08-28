@@ -1328,13 +1328,14 @@ fn pty_help_enter_does_not_arm_pane_search() {
     );
 
     tui.key('?');
+    // After the overlay row-budget fix, help can cover the whole tree pane.
+    // Assert overlay + Enter-arm here; README cursor only after help closes.
     tui.wait_pred(
         |screen| {
             help_overlay_open(screen)
                 && screen.contains("/ search help")
                 && !pane_search_prompt(screen)
                 && !screen.contains("HELP  /")
-                && tree_cursor_on(screen, "README.md")
         },
         "help overlay lists MOVE/GIT/VIEW and idle `/ search help`",
         WAIT,
@@ -1346,7 +1347,6 @@ fn pty_help_enter_does_not_arm_pane_search() {
             help_searching(screen, "")
                 && screen.contains("HELP  /▏")
                 && !screen.contains("HELP  /quit")
-                && tree_cursor_on(screen, "README.md")
         },
         "help `/` opens overlay search (a no-op keeps `/ search help`; pane `/` paints SEARCH)",
         WAIT,
@@ -1360,7 +1360,6 @@ fn pty_help_enter_does_not_arm_pane_search() {
                 && screen.contains("HELP  /quit▏")
                 && !screen.contains("HELP  /quitn")
                 && help_quit_rows_highlighted(&tui)
-                && tree_cursor_on(&screen, "README.md")
         },
         "typing quit highlights matching help rows; non-matching rows stay visible",
         WAIT,
@@ -1374,7 +1373,6 @@ fn pty_help_enter_does_not_arm_pane_search() {
                 && screen.contains("HELP  /quit▏")
                 && !screen.contains("HELP  /quitn")
                 && help_quit_rows_highlighted(&tui)
-                && tree_cursor_on(&screen, "README.md")
                 && !screen.contains("[README")
                 && !pane_search_prompt(&screen)
         },
@@ -1389,7 +1387,6 @@ fn pty_help_enter_does_not_arm_pane_search() {
             help_searching(&screen, "quitn")
                 && screen.contains("HELP  /quitn▏")
                 && help_quit_rows_unhighlighted(&tui)
-                && tree_cursor_on(&screen, "README.md")
                 && !pane_search_prompt(&screen)
         },
         "n after Enter appends to help search (armed n/N would leave /quit and may move the cursor)",
@@ -1406,7 +1403,6 @@ fn pty_help_enter_does_not_arm_pane_search() {
                 && !screen.contains("Esc clears search")
                 && help_quit_rows_unhighlighted(&tui)
                 && !pane_search_prompt(&screen)
-                && tree_cursor_on(&screen, "README.md")
         },
         "Esc clears help search; help stays (pane `/` would keep SEARCH or /quitn)",
         WAIT,
