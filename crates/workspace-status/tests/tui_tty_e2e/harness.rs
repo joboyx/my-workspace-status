@@ -59,6 +59,34 @@ impl PtySession {
         rows: u16,
         extra_env: &[(&str, &str)],
     ) -> Self {
+        Self::spawn(workspace, cols, rows, extra_env, None, true)
+    }
+
+    /// Spawn without waiting for the TUI. Used when the GitHub Release
+    /// prompt must paint on the primary screen first.
+    pub fn open_pending(
+        workspace: &Path,
+        extra_env: &[(&str, &str)],
+        last_check_unix: u64,
+    ) -> Self {
+        Self::spawn(
+            workspace,
+            COLS,
+            ROWS,
+            extra_env,
+            Some(last_check_unix),
+            false,
+        )
+    }
+
+    fn spawn(
+        workspace: &Path,
+        cols: u16,
+        rows: u16,
+        extra_env: &[(&str, &str)],
+        last_check_unix: Option<u64>,
+        wait_ready: bool,
+    ) -> Self {
         assert!(
             workspace.is_dir(),
             "workspace must exist: {}",
@@ -108,7 +136,7 @@ impl PtySession {
             state_home.join("viewed-files.json"),
         );
         let update_store = state_home.join("update-check.json");
-        write_fresh_update_check(&update_store);
+        write_update_check(&update_store, last_check_unix);
         cmd.env("WS_STATUS_UPDATE_CHECK_STORE", &update_store);
 
         let child = pair
@@ -144,11 +172,14 @@ impl PtySession {
             cols,
             rows,
         };
-        session.wait_ready();
+        if wait_ready {
+            session.wait_ready();
+        }
         session
     }
 
-    fn wait_ready(&self) {
+    /// Wait until the TUI has painted the tree (after the update prompt).
+    pub fn wait_ready(&self) {
         self.wait_contains_any(&[" tree", "Flat paths", "app", "README"], DEFAULT_TIMEOUT);
     }
 
@@ -200,6 +231,25 @@ impl PtySession {
                 self.key(c);
             }
         }
+    }
+
+    /// Unshifted letter press via CSI-u (kind 1). Traditional bytes stay
+    /// [`Self::key`] for printable keys that do not need Repeat.
+    pub fn letter_press(&mut self, letter: char) {
+        let codepoint = u32::from(letter.to_ascii_lowercase());
+        self.csi_u(codepoint, 1, 1);
+    }
+
+    /// Held-key Repeat (`CSI code ; 1 : 2 u`). Must fail if Repeat is ignored.
+    pub fn letter_repeat(&mut self, letter: char) {
+        let codepoint = u32::from(letter.to_ascii_lowercase());
+        self.csi_u(codepoint, 1, 2);
+    }
+
+    /// `gg` chord: two `g` bytes inside the 400ms window.
+    pub fn gg(&mut self) {
+        self.key('g');
+        self.key('g');
     }
 
     pub fn enter(&mut self) {
@@ -352,6 +402,25 @@ impl PtySession {
     pub fn wait_ms(&self, ms: u64) {
         thread::sleep(Duration::from_millis(ms));
     }
+
+    /// Wait until the child process exits (`q` / second Ctrl+C).
+    pub fn wait_exit(&mut self, timeout: Duration) {
+        let start = Instant::now();
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => {}
+                Err(err) => panic!("wait child: {err}"),
+            }
+            if start.elapsed() >= timeout {
+                panic!(
+                    "timeout waiting for TUI process to exit; screen:\n{}",
+                    self.screen()
+                );
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
 }
 
 impl Drop for PtySession {
@@ -362,10 +431,17 @@ impl Drop for PtySession {
 }
 
 pub(crate) fn write_fresh_update_check(path: &Path) {
-    let unix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    write_update_check(path, None);
+}
+
+/// `last_check_unix = None` writes "now" so the startup prompt is skipped.
+pub(crate) fn write_update_check(path: &Path, last_check_unix: Option<u64>) {
+    let unix = last_check_unix.unwrap_or_else(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    });
     let body = format!("{{\n  \"version\": 1,\n  \"lastCheckUnix\": {unix}\n}}\n");
     fs::write(path, body).unwrap();
 }

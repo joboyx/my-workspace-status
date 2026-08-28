@@ -301,3 +301,50 @@ pub fn ahead_workspace() -> (PathBuf, PathBuf) {
     );
     (root, workspace)
 }
+
+/// Primary checkout plus a linked worktree for `W` remove.
+pub fn worktree_workspace() -> (PathBuf, PathBuf) {
+    let root = unique_root("ws-tui-tty-wt");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    seed_primary_and_linked_family(&workspace);
+    (root, workspace)
+}
+
+pub fn seed_primary_and_linked_family(workspace: &Path) {
+    seed_repo(workspace, "app", "main", false);
+    let repo = workspace.join("app");
+    fs::write(repo.join(".gitignore"), ".worktrees/\n").unwrap();
+    git(&repo, &["add", ".gitignore"]);
+    git(&repo, &["commit", "-q", "-m", "ignore linked worktree dir"]);
+    git(&repo, &["checkout", "-q", "-b", "feature/primary-open"]);
+    fs::write(repo.join("primary.txt"), "primary off default\n").unwrap();
+    git(&repo, &["add", "primary.txt"]);
+    git(&repo, &["commit", "-q", "-m", "primary off default"]);
+    fs::create_dir_all(repo.join(".worktrees")).unwrap();
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature/linked-open",
+            ".worktrees/feat",
+            "main",
+        ],
+    );
+    let linked = repo.join(".worktrees/feat");
+    fs::write(linked.join("open.txt"), "linked open vs default\n").unwrap();
+    git(&linked, &["add", "open.txt"]);
+    git(&linked, &["commit", "-q", "-m", "linked open"]);
+}
+
+/// Long line plus many rows so a focused file-diff can pan and scroll.
+pub fn seed_long_diff_file(workspace: &Path, name: &str, tail: &str) {
+    let mut body = format!("{}{tail}\n", "n".repeat(80));
+    for i in 0..40 {
+        body.push_str(&format!("line {i}\n"));
+    }
+    fs::write(workspace.join("app").join(name), body).unwrap();
+}

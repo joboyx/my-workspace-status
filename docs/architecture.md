@@ -98,7 +98,7 @@ Graph checkout confirm (and several other graph UX choices) is inspired by [Git 
 | New key binding       | `tui/keys.rs` (`Action`) + `tui/state.rs` dispatch + `tui/help.rs` (`HELP_GROUPS`) + `tui/gates.rs` if the key is row-scoped                                               |
 | Event-loop freeze / overlay ticks / graph autoload / key-repeat | `tui/event_loop.rs` + `tui/scheduler.rs` + `tui/event_pump.rs` + `tui/keys.rs` (CI: `tty_event_loop_must_not_call_sync_pane_git`) |
 | Mouse enable / SGR decode | `tui/tty.rs` (live `poll_event` / `read_event` / `enable_mouse`; Headless SGR through `decode_sgr_mouse`) + the input thread in `tui/event_loop.rs` |
-| Real-TTY TUI e2e | `crates/workspace-status/tests/tui_tty_e2e/` (PTY in `cargo test`; xfce keys + xterm XTEST wheel in Actions `tui-tty-desktop`). Not TestBackend. See [tui-tty-e2e.md](./tui-tty-e2e.md) |
+| Real-TTY TUI e2e | `crates/workspace-status/tests/tui_tty_e2e/` (PTY in `cargo test`, including fold / click / `gg`/`G` / create-branch / `r` / ignored; xfce keys + xterm XTEST wheel in Actions `tui-tty-desktop`). Not TestBackend. See [tui-tty-e2e.md](./tui-tty-e2e.md) |
 
 ## CLI crate
 
