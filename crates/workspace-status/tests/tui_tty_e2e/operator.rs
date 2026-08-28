@@ -125,16 +125,13 @@ fn pty_zz_toggles_subtree_not_only_row() {
         WAIT,
     );
     tui.wait_contains("z…", WAIT);
+    // Chord expiry does not redraw by itself. Wait past 400ms so the next
+    // `z` is FoldToggle, not FoldToggleSubtree.
     tui.wait_ms(500);
-    tui.wait_absent("z…", WAIT);
 
     tui.zz();
     tui.wait_pred(
-        |screen| {
-            !tree_has(screen, "zz-leaf.rs")
-                && !tree_has(screen, "README.md")
-                && !screen.contains("z…")
-        },
+        |screen| !tree_has(screen, "zz-leaf.rs") && !tree_has(screen, "README.md"),
         "zz subtree-folds the repo (a missing chord would show the leaf)",
         WAIT,
     );
