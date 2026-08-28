@@ -1342,6 +1342,11 @@ impl AppState {
         };
         self.cursor = live;
         if tree_row.foldable && self.is_tree_chevron(col, tree_row.depth) {
+            // Two Downs are a double-click. Skip the second toggle so the
+            // fold from the first click remains. Do not Enter.
+            if is_double {
+                return Effect::None;
+            }
             self.fold_op(FoldOp::Toggle);
             return Effect::LoadRightPane;
         }
@@ -1416,6 +1421,9 @@ impl AppState {
         };
         self.set_commit_file_cursor(live);
         if file_row.foldable && self.is_files_chevron(col, file_row.depth) {
+            if is_double {
+                return Effect::None;
+            }
             self.fold_commit_file(FoldOp::Toggle);
             return Effect::None;
         }
@@ -7046,6 +7054,38 @@ mod tests {
             app.cursor,
             app.rows.iter().position(|r| r.id == "dir:app:src").unwrap()
         );
+        assert!(app.rows.iter().all(|r| r.id != "file:app:src/lib.rs"));
+    }
+
+    #[test]
+    fn double_click_chevron_folds_once_and_does_not_enter() {
+        let mut app = tree_app();
+        app.layout.tree_x = 0;
+        app.layout.tree_y = 1;
+        app.layout.list_offset = 0;
+        app.layout.right_x = 40;
+        let idx = app
+            .rows
+            .iter()
+            .position(|r| r.id == "dir:app:src")
+            .expect("dir");
+        let depth = app.rows[idx].depth;
+        let col = app.layout.tree_x + 1 + (depth as u16) * 2;
+        let row = app.layout.tree_y + idx as u16;
+        app.dispatch(Action::Click { col, row });
+        assert!(app.folds.contains("dir:app:src"));
+        assert_eq!(app.focus, FocusPane::Left);
+        let effect = app.dispatch(Action::Click { col, row });
+        assert!(
+            app.folds.contains("dir:app:src"),
+            "second Down must not undo the fold"
+        );
+        assert_eq!(
+            app.focus,
+            FocusPane::Left,
+            "chevron double-click is not Enter"
+        );
+        assert_eq!(effect, Effect::None);
         assert!(app.rows.iter().all(|r| r.id != "file:app:src/lib.rs"));
     }
 
