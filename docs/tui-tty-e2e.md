@@ -41,7 +41,7 @@ Packages (Debian/Ubuntu): `xvfb xfce4-terminal xterm xdotool dbus-x11 openbox`. 
 
 ## Harness notes
 
-- ASCII glyphs (`WS_STATUS_GLYPHS=ascii`) so CI does not depend on a Nerd Font. This is a test setting, not a product default.
+- ASCII glyphs (`WS_STATUS_GLYPHS=ascii`) so CI does not depend on a Nerd Font. This is a test setting, not a product default. The spawn drops parent `NO_COLOR` / `FORCE_COLOR` so colour claims can paint.
 - Watch and background fetch off by default (`WS_STATUS_WATCH_MS=0`, `WS_STATUS_FETCH_MS=0`). Per-test env overrides (`PtySession::open_with_env`) re-enable watch for the live-input / streamed-collect cases.
 - Isolated `XDG_STATE_HOME` plus a fresh `WS_STATUS_UPDATE_CHECK_STORE` so the GitHub Release prompt does not block mount and the operator XDG file is not written. CI: `crates/workspace-status/tests/release_watch.rs` (`tty_spawn_paths_isolate_update_check_store`). Screenshot stills (`scripts/capture-demo-stills.sh`) use the same isolation.
 - Mouse reports are xterm SGR (`CSI < Cb ; Cx ; Cy M`) with 1-based cells. Motion-bit wheel (`Cb` 99) must not pan (crossterm 0.28 drops it).

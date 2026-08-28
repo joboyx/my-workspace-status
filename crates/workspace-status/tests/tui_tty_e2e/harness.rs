@@ -117,6 +117,10 @@ impl PtySession {
             }
             cmd.env(k, v);
         }
+        // CommandBuilder starts with the parent env. Skipping the copy
+        // above does not drop these; remove them so the TTY paints colour.
+        cmd.env_remove("NO_COLOR");
+        cmd.env_remove("FORCE_COLOR");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("WS_STATUS_GLYPHS", "ascii");
