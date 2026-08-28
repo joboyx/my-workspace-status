@@ -673,15 +673,15 @@ fn focusbox_graph_right_full(screen: &str) -> bool {
         && not_files_search_or_stash(screen)
 }
 
-/// `o` overlay: cursor on the current `* feature/keep` row. Not files drill.
+/// `o` overlay is open. Cursor may sit on any local branch (sort is
+/// authordate). Current checkout still shows `* feature/keep`.
 ///
 /// The overlay covers the status row, so crumb/status helpers do not apply.
 #[cfg(unix)]
-fn graph_focus_overlay_on_current_keep(screen: &str) -> bool {
+fn graph_focus_overlay_open(screen: &str) -> bool {
     panes_tree_unfocused_graph_focused(screen)
         && screen.contains("Focus branches")
         && screen.contains("filter:")
-        && screen.contains("❯")
         && screen.contains("* feature/keep")
         && screen.contains("topic/noise")
         && screen.contains("Enter apply")
@@ -691,6 +691,20 @@ fn graph_focus_overlay_on_current_keep(screen: &str) -> bool {
         && !screen.contains("graph focus:")
         && !screen.contains("drill")
         && not_files_search_or_stash(screen)
+}
+
+/// Overlay filter `feature`: cursor on `feature/keep`. Not `main`.
+///
+/// Overlay `j`/`k` move the cursor, so a query that starts with `k` is
+/// not the filter text. `feature` is unique to `feature/keep`.
+#[cfg(unix)]
+fn graph_focus_overlay_filtered_keep(screen: &str) -> bool {
+    graph_focus_overlay_open(screen)
+        && screen.contains("filter: feature")
+        && screen
+            .lines()
+            .any(|line| line.contains('❯') && line.contains("feature/keep"))
+        && !screen.contains("[ ]   main")
 }
 
 /// Applied keep focus: toast, `O` clear-focus hint, keep-only graph.
@@ -731,7 +745,10 @@ fn graph_focus_cleared_full(screen: &str) -> bool {
         && not_files_search_or_stash(screen)
 }
 
-/// Tab to the graph, `o`, Enter on the current `* feature/keep` row.
+/// Tab to the graph, `o`, filter `feature`, Enter applies `feature/keep`.
+///
+/// Overlay sort is authordate, so cursor 0 is not always the current `*`
+/// row. Filter-then-Enter is the documented apply path.
 #[cfg(unix)]
 fn apply_current_keep_graph_focus(tui: &mut PtySession) {
     tui.wait_pred(
@@ -747,26 +764,33 @@ fn apply_current_keep_graph_focus(tui: &mut PtySession) {
     );
     tui.key('o');
     tui.wait_pred(
-        graph_focus_overlay_on_current_keep,
-        "o opens Focus branches on the current * feature/keep row (files drill / no-op cannot pass)",
+        graph_focus_overlay_open,
+        "o opens Focus branches (files drill / no-op / SEARCH cannot pass)",
+        WAIT,
+    );
+    tui.keys("feature");
+    tui.wait_pred(
+        graph_focus_overlay_filtered_keep,
+        "typing feature filters the overlay onto feature/keep (cursor 0 / main cannot pass)",
         WAIT,
     );
     tui.enter();
     tui.wait_pred(
         graph_focus_applied_keep,
-        "Enter applies the current keep branch: toast, clear-focus hint, keep-only graph",
+        "Enter applies feature/keep: toast, clear-focus hint, keep-only graph",
         GIT_WAIT,
     );
 }
 
-/// Graph `o` / `O`: overlay, apply current branch, CSI-u Shift+O clears.
+/// Graph `o` / `O`: overlay, filter-apply `feature`, CSI-u Shift+O clears.
 ///
-/// Docs + VIEW: `o` opens the local-branch overlay. Enter with no marks
-/// applies the cursor row. While focus is on, the graph is ancestors of
-/// those tips. `O` restores `--all`. Shift+O is CSI-u (`CSI 111 ; 2 : 1 u`
-/// press, `: 3` release), not a raw `'O'` byte. A no-op, an Enter files
-/// drill, `/` SEARCH, or another Shift binding (stash / theme / `G`)
-/// cannot pass. Unmark-then-Enter stays on `pty_graph_focus_unmark_enter_clears`.
+/// Docs + VIEW: `o` opens the local-branch overlay. Type to filter. Enter
+/// with no marks applies the cursor row. While focus is on, the graph is
+/// ancestors of those tips. `O` restores `--all`. Shift+O is CSI-u
+/// (`CSI 111 ; 2 : 1 u` press, `: 3` release), not a raw `'O'` byte. A
+/// no-op, an Enter files drill, `/` SEARCH, overlay Enter on `main`, or
+/// another Shift binding (stash / theme / `G`) cannot pass.
+/// Unmark-then-Enter stays on `pty_graph_focus_unmark_enter_clears`.
 #[cfg(unix)]
 #[test]
 fn pty_graph_branch_focus_overlay() {
