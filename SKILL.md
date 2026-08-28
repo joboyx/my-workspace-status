@@ -10,7 +10,7 @@ triggers:
   - 'show status'
   - 'repository status'
   - 'ws'
-source: 'joboyx/dotfiles'
+source: 'joboyx/my-workspace-status'
 ---
 
 You are helping the user review the status of all git repositories in the current directory.

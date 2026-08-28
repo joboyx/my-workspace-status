@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn ticket_id_from_branch() {
-        assert_eq!(extract_ticket_id("feature/JBY-044-rust-cli"), Some("JBY-044"));
+        assert_eq!(extract_ticket_id("feature/ABCD-1234-rust-cli"), Some("ABCD-1234"));
         assert_eq!(extract_ticket_id("main"), None);
     }
 
