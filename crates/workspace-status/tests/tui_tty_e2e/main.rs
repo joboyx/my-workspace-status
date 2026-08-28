@@ -34,12 +34,12 @@ const WAIT: Duration = Duration::from_secs(12);
 fn pty_launch_paints_tree_diff_and_chrome() {
     let (_root, workspace) = daily_workspace();
     let tui = PtySession::open(&workspace);
-    let screen = tui.screen();
-    assert_contains(&screen, "app");
-    assert_contains(&screen, "README.md");
-    assert_contains(&screen, " tree");
-    assert_contains(&screen, "+dirty");
-    harness::assert_absent(&screen, "notes");
+    tui.wait_contains("app", WAIT);
+    tui.wait_contains("README.md", WAIT);
+    tui.wait_contains(" tree", WAIT);
+    // Right-pane git is pumped. The tree can paint before `+dirty`.
+    tui.wait_contains("+dirty", WAIT);
+    harness::assert_absent(&tui.screen(), "notes");
 }
 
 #[cfg(unix)]
@@ -267,7 +267,10 @@ mod xfce {
         tui.wait_contains("WIP on graph", WAIT);
     }
 
-    /// xfce + XTEST Shift keys: search capitals, Shift+O clears graph focus.
+    /// xfce + XTEST Shift keys: search capitals, unmark-then-Enter, Shift+O.
+    ///
+    /// Overlay toggle is space (`[x]` / `[ ]`), not X. Reopen after `O`
+    /// has no pre-mark; unmark-then-Enter runs while a focus is still on.
     #[test]
     #[ignore = "GitHub Actions tui-tty-desktop job; needs DISPLAY, xfce4-terminal, xdotool"]
     fn desktop_xfce_shift_keys_search_and_clear_focus() {
@@ -294,14 +297,17 @@ mod xfce {
         tui.wait_contains("Focus branches", WAIT);
         tui.type_text("keep");
         tui.key("Return");
+        tui.wait_pred(
+            |screen| !screen.contains("Focus branches"),
+            "focus overlay closed after apply",
+            WAIT,
+        );
         tui.wait_contains("keep-leaf-commit", WAIT);
         tui.wait_pred(
             |screen| !screen.contains("noise-leaf-commit"),
             "noise-leaf-commit hidden after focus",
             WAIT,
         );
-        tui.key("shift+o");
-        tui.wait_contains("noise-leaf-commit", WAIT);
 
         tui.key("o");
         tui.wait_contains("Focus branches", WAIT);
@@ -313,8 +319,25 @@ mod xfce {
             WAIT,
         );
         tui.key("Return");
+        tui.wait_pred(
+            |screen| !screen.contains("Focus branches"),
+            "focus overlay closed after empty apply",
+            WAIT,
+        );
         tui.wait_contains("noise-leaf-commit", WAIT);
         tui.wait_contains("main-leaf-commit", WAIT);
+
+        tui.key("o");
+        tui.wait_contains("Focus branches", WAIT);
+        tui.type_text("keep");
+        tui.key("Return");
+        tui.wait_pred(
+            |screen| !screen.contains("noise-leaf-commit"),
+            "noise-leaf-commit hidden before Shift+O",
+            WAIT,
+        );
+        tui.key("shift+o");
+        tui.wait_contains("noise-leaf-commit", WAIT);
     }
 
     /// XTEST wheel right. Must fail if the tree does not pan.
