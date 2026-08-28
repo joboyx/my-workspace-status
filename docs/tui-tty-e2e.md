@@ -65,7 +65,7 @@ Help overlay (`tui/help.rs` MOVE / GIT / VIEW) plus mouse and overlays. **PTY** 
 | Help `/` search, Enter does not arm | `pty_help_enter_does_not_arm_pane_search` | — | Highlight + rows stay; no pane SEARCH / n/N |
 | `/` pane search | `pty_slash_pane_search` | `desktop_xfce_keys_help_and_search` | Help `/`. SEARCH prompt. Typing jumps. Enter arms `/query`. Cursor + crumb + graph subject. Stay left. Not help search |
 | `n` / `N` pane next/prev | `pty_n_and_n_pane_next_prev` | — | Help `n N`. Typing `n` appends. After Enter, next/prev on the bound pane (not Tab). CSI-u `N`. Cursor + crumb + graph subject. Stay armed / left |
-| Shift+letters in `/` (CSI-u) | `pty_shift_letters_csi_u_type_into_search` | `desktop_xfce_shift_keys_search_and_clear_focus` | |
+| Shift+letters in `/` (CSI-u) | `pty_shift_letters_csi_u_type_into_search` | `desktop_xfce_shift_keys_search_and_clear_focus` | CSI-u Shift+O/S/G/T type capitals into SEARCH. Global Shift bindings must not fire. Not Enter-arm. |
 | Graph drill Enter/Esc | `pty_graph_drill_enter_esc` | — | Enter on a graph-capable tree row focuses that graph. CSI-u Esc restores the left pane and row. Not files drill. Not `/`. |
 | Graph `o` / `O` focus | `pty_graph_branch_focus_overlay` | `desktop_xfce_shift_keys_search_and_clear_focus` | CSI-u `O` |
 | Unmark `[x]` then Enter | `pty_graph_focus_unmark_enter_clears` | `desktop_xfce_shift_keys_search_and_clear_focus` | |
