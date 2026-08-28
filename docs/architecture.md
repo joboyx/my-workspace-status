@@ -93,7 +93,8 @@ Graph checkout confirm (and several other graph UX choices) is inspired by [Git 
 | New pane / overlay    | `tui/` module + `chrome.rs` row budget + `render.rs` layout                                                                                                               |
 | Nav shell / drill     | `tui/drill.rs` + `tui/state.rs` + `chrome.rs` breadcrumb                                                                                                                  |
 | New CLI flag          | `cli.rs` + `tui::HeadlessFlags` / `should_open_tui` if it affects TUI vs headless                                                                                          |
-| TUI startup update check | `update_check.rs` + `cli.rs` (before `run_tui`). Sidecar exec and `--update` notes stay in `update.rs`                                                                                      |
+| TUI startup update check | `update_check.rs` + `cli.rs` (before `run_tui`). Sidecar exec and `--update` notes stay in `update.rs`. TTY spawn must set `WS_STATUS_UPDATE_CHECK_STORE` (CI: `tests/release_watch.rs`) |
+| cargo-dist CI / git-cliff host steps | `.github/workflows/release.yml` + `dist-workspace.toml`. After `dist generate`, restore `workflow_dispatch` and host git-cliff. Guard: `tests/release_watch.rs`. Recipe under **Distribution** |
 | Snapshot contract     | `snapshot.rs` (`build_workspace_snapshot`) + `docs/snapshot.md` + `tests/snapshot_contract.rs`                                                                            |
 | New key binding       | `tui/keys.rs` (`Action`) + `tui/state.rs` dispatch + `tui/help.rs` (`HELP_GROUPS`) + `tui/gates.rs` if the key is row-scoped                                               |
 | Event-loop freeze / overlay ticks / graph autoload / key-repeat | `tui/event_loop.rs` + `tui/scheduler.rs` + `tui/event_pump.rs` + `tui/keys.rs` (CI: `tty_event_loop_must_not_call_sync_pane_git`) |
@@ -130,12 +131,25 @@ See [graph.md](./graph.md).
 
 The CLI is published with [cargo-dist](https://axodotdev.github.io/cargo-dist/) 0.32 (`dist-workspace.toml`).
 `.github/workflows/release.yml` is generated (`dist generate`) and builds GitHub Release archives plus `workspace-status-installer.sh` / `.ps1` on a version tag (linux, macOS, and Windows `x86_64-pc-windows-msvc`; linux/mac aarch64 and x86_64).
-`.github/workflows/tag-release.yml` writes an annotated `vX.Y.Z` on each push to `main` and dispatches Release (`GITHUB_TOKEN` tag pushes do not start other workflows). `allow-dirty = ["ci"]` keeps the extra `workflow_dispatch` on the generated Release workflow, and the host-job git-cliff steps (full history checkout, prepend notes to the cargo-dist announcement). After `dist generate`, re-apply those git-cliff steps.
+`.github/workflows/tag-release.yml` writes an annotated `vX.Y.Z` on each push to `main` and dispatches Release (`GITHUB_TOKEN` tag pushes do not start other workflows). `allow-dirty = ["ci"]` lets generate succeed when `release.yml` has local edits. Generate still rewrites that file.
+Do not set `dispatch-releases = true`. That switch drops tag-push. This repo needs tag-push plus `workflow_dispatch`.
 The host job runs [git-cliff](https://git-cliff.org/) (`cliff.toml`, conventional commits) for the current tag and prepends that changelog to cargo-dist's installer/download body. That is what GitHub Release notes and `ws --update` show.
 Installers place `workspace-status`, `ws`, and `workspace-status-update` in `~/.local/bin`.
 `--update` (`ws --update` / `workspace-status --update`) prints GitHub Release notes for published versions newer than this binary (`CARGO_PKG_VERSION`), then execs `workspace-status-update` from the same directory as the current executable, then PATH. Installer-only historical bodies contribute no notes. A failed notes fetch stays quiet and still runs the sidecar. The sidecar's exit status is the process exit status. That run does not open the TUI or apply repo filters. `install-updater = true` keeps the sidecar in the installer.
 A TTY TUI launch (`ws` / `workspace-status` without `--plain` / `--json` / `--update`) may ask to run that same sidecar **before** the alternate screen mounts: at most every 6 hours it `curl`s the latest published GitHub Release. Newer → `new version available, update? [y/n]`. `y` runs `--update` (notes then sidecar). `n` opens the TUI. Offline / current / parse failure / missing `curl` stay quiet. The last-check time is stored in `$XDG_STATE_HOME/my-workspace-status/update-check.json` (`WS_STATUS_UPDATE_CHECK_STORE` overrides). HeadlessTui tests do not run this check.
+A TTY spawn that can write that file (PTY e2e, desktop e2e, `scripts/capture-demo-stills.sh`) must point `WS_STATUS_UPDATE_CHECK_STORE` at a temp path with a fresh `lastCheckUnix`. Otherwise the default XDG file is overwritten and the prompt can block mount. CI: `crates/workspace-status/tests/release_watch.rs`.
 `workspace-status-graph` is a path library, not a separate dist app. There is no crates.io or Homebrew publish job.
+
+### `dist generate`
+
+1. Install cargo-dist 0.32.0. Match `cargo-dist-version` in `dist-workspace.toml`.
+2. From the repository root, run `dist generate`.
+3. Restore these host-job edits in `.github/workflows/release.yml`:
+   - Keep `on.workflow_dispatch` (`tag-release.yml` dispatches it).
+   - On the host checkout, set `fetch-depth: 0` and `fetch-tags: true`.
+   - Run git-cliff (`orhun/git-cliff-action`, `--current --strip header`).
+   - Prepend that changelog to the cargo-dist announcement before `gh release create`.
+4. Run `cargo test --test release_watch`. That suite fails if generate dropped those steps, or if a TTY spawn path no longer assigns `WS_STATUS_UPDATE_CHECK_STORE`.
 
 ## Decisions
 

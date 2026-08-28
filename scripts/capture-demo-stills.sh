@@ -12,6 +12,10 @@
 # xvfb, xfce4-terminal, and grab tools when missing. Fails loudly instead of
 # writing ASCII/gray frames over good stills. Xvfb + dbus + Openbox come from
 # scripts/with-desktop-session.sh (same session helper as desktop TTY e2e).
+#
+# Isolates XDG_STATE_HOME, WS_STATUS_UPDATE_CHECK_STORE, and
+# WS_STATUS_VIEWED_STORE under tmp/demo-stills-stage/state so a TTY launch
+# does not write the operator last-check or reviewed-mark files.
 set -euo pipefail
 trap '' HUP
 
@@ -22,6 +26,9 @@ source "$SCRIPT_DIR/with-desktop-session.sh"
 DEST="${1:-"$REPO_ROOT/tmp/demo-workspace"}"
 OUT_DIR="$REPO_ROOT/docs/images"
 STAGE_DIR="$REPO_ROOT/tmp/demo-stills-stage"
+STATE_DIR="$STAGE_DIR/state"
+UPDATE_STORE="$STATE_DIR/update-check.json"
+VIEWED_STORE="$STATE_DIR/viewed-files.json"
 FONT_DIR="${HOME}/.local/share/fonts/MesloLGS-NF"
 BIN="$REPO_ROOT/target/release/workspace-status"
 LAUNCHER="$STAGE_DIR/run-tui.sh"
@@ -93,13 +100,18 @@ ensure_bin() {
 }
 
 write_helpers() {
-  mkdir -p "$STAGE_DIR"
+  mkdir -p "$STAGE_DIR" "$STATE_DIR"
+  # Fresh lastCheckUnix so the 6h GitHub Release prompt is not due.
+  printf '{\n  "version": 1,\n  "lastCheckUnix": %s\n}\n' "$(date +%s)" >"$UPDATE_STORE"
   cat >"$LAUNCHER" <<EOF
 #!/usr/bin/env bash
 # Cloud Agent shells export NO_COLOR=1; a gray first frame means it leaked in.
 unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE
 export WS_STATUS_WATCH_MS=0
 export WS_STATUS_FETCH_MS=0
+export XDG_STATE_HOME=$(printf '%q' "$STATE_DIR")
+export WS_STATUS_UPDATE_CHECK_STORE=$(printf '%q' "$UPDATE_STORE")
+export WS_STATUS_VIEWED_STORE=$(printf '%q' "$VIEWED_STORE")
 # Seed timestamps are Asia/Manila; pin TZ so stills match that clock.
 export TZ=Asia/Manila
 export TERM=xterm-256color
@@ -124,9 +136,7 @@ cleanup() {
 trap cleanup EXIT
 
 clear_viewed() {
-  rm -f \
-    "${XDG_STATE_HOME:-$HOME/.local/state}/my-workspace-status/viewed-files.json" \
-    "$HOME/.local/state/my-workspace-status/viewed-files.json"
+  rm -f "$VIEWED_STORE"
 }
 
 window_id() {

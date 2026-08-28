@@ -30,9 +30,15 @@ A TTY `ws` / `workspace-status` launch may ask `new version available, update? [
 
 `HeadlessTui` does not run the check.
 
-PTY and desktop e2e spawn a real TTY binary. Point `WS_STATUS_UPDATE_CHECK_STORE` at a temp file with a fresh `lastCheckUnix`. That keeps the prompt from blocking mount. Tests that drive `--plain` / `--json` / `--update` should also point the store at a temp path. Those modes must not create the file.
+PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` spawn a real TTY binary. Point `WS_STATUS_UPDATE_CHECK_STORE` at a temp file with a fresh `lastCheckUnix`. That keeps the prompt from blocking mount and avoids writing the operator XDG file. Tests that drive `--plain` / `--json` / `--update` should also point the store at a temp path. Those modes must not create the file.
+
+CI fails if a TTY spawn path drops that assignment: `crates/workspace-status/tests/release_watch.rs`.
 
 Env table: [docs/configuration.md](./docs/configuration.md).
+
+## `dist generate`
+
+`.github/workflows/release.yml` is generated. After `dist generate`, restore `workflow_dispatch` and the host-job git-cliff steps. Numbered recipe: [docs/architecture.md](./docs/architecture.md) → **Distribution**. CI: `crates/workspace-status/tests/release_watch.rs`.
 
 ## Graph / stash (read this before paint changes)
 
@@ -64,6 +70,7 @@ Do **not** invent spur heuristics (`parent.lane + 1`, spine `◇─╯`, mid-rai
 | Any git command or operation semantics | `docs/git-operations.md` |
 | Environment variables, workspace config, keybindings, themes | `docs/configuration.md` |
 | TUI test layers (headless / PTY / desktop `#[ignore]`) or `WS_STATUS_UPDATE_CHECK_STORE` | this file, `docs/tui-tty-e2e.md`, `docs/configuration.md` |
+| cargo-dist `dist generate` / Release git-cliff host steps | `docs/architecture.md` (**Distribution**) and `crates/workspace-status/tests/release_watch.rs` |
 | Output format of the plain report | `SAMPLE_OUTPUT.md` and `crates/workspace-status/tests/snapshot_contract.rs` |
 | Demo workspace seed or screenshot frames | `docs/demo.md` + `scripts/seed-demo-workspace.sh` + `scripts/capture-demo-stills.sh` |
 | Desktop Xvfb / Openbox session | `scripts/with-desktop-session.sh` + `scripts/openbox.xml` + `docs/tui-tty-e2e.md` |
@@ -76,6 +83,7 @@ A change is not complete while its documentation is stale.
 - Exported Rust items need rustdoc (`///` or `//!`).
 - The plain-text report is a user-facing contract — changing it means updating `SAMPLE_OUTPUT.md` and the snapshot e2e suite.
 - TTY event loop: do not run git or other blocking I/O on the draw/event thread. The live path is `tui/event_loop.rs` (current-thread Tokio, dedicated input thread, `spawn_blocking` on a `JoinSet`). While exclusive writes or a remote batch run, nav / pane switch / cancel stay live (`BusyAction::Handle`); only actions that start another git write are drained. Headless e2e may stay sync. Guard: `tty_event_loop_must_not_call_sync_pane_git` in `tui/event_pump.rs`.
+- After `dist generate`, restore `workflow_dispatch` and host git-cliff on `release.yml`. TTY stills and e2e must set `WS_STATUS_UPDATE_CHECK_STORE`. Guard: `tty_spawn_paths_isolate_update_check_store` in `tests/release_watch.rs`.
 - This repository is public. Do not commit private workspace paths, personal hostnames, unpublished ticket keys, customer/project names from private work, chat transcripts, screenshots of private work, tokens, or credentials. Use `scripts/seed-demo-workspace.sh` for examples and stills.
 
 ## Demo / screenshots
