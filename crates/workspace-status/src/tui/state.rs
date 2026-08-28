@@ -2971,6 +2971,9 @@ impl AppState {
             return Effect::None;
         };
         self.graph_focus_picker = None;
+        if names.is_empty() {
+            return self.clear_graph_branch_focus();
+        }
         self.apply_graph_branch_focus(repo, names)
     }
 

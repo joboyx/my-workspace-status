@@ -4,7 +4,7 @@
 //! the cursor row when none of the visible rows are marked. Marks hidden by
 //! the filter (including the current focus pre-marked on reopen) do not leak
 //! through. The graph then loads ancestors of those tips instead of `--all`.
-//! Empty apply and `O` restore the full graph.
+//! Unmarking every `[x]` then Enter, and `O`, restore the full graph.
 
 use std::collections::BTreeSet;
 
@@ -26,13 +26,17 @@ pub struct GraphFocusPickerState {
     /// Names toggled with space. Enter uses this set for rows still visible
     /// under the filter.
     pub marked: BTreeSet<String>,
+    /// Enter with no remaining marks restores `--all` when the user cleared
+    /// every `[x]` (including a pre-marked current focus). Filter-then-Enter
+    /// still applies the cursor row while any mark remains, including hidden.
+    empty_apply_clears: bool,
 }
 
 impl GraphFocusPickerState {
     /// Build a picker. `preselected` names that still exist start marked.
     pub fn new(repo: String, branches: Vec<LocalBranch>, preselected: &[String]) -> Self {
         let names: BTreeSet<String> = branches.iter().map(|b| b.name.clone()).collect();
-        let marked = preselected
+        let marked: BTreeSet<String> = preselected
             .iter()
             .filter(|name| names.contains(*name))
             .cloned()
@@ -51,6 +55,7 @@ impl GraphFocusPickerState {
             branches,
             filter: String::new(),
             cursor,
+            empty_apply_clears: !marked.is_empty(),
             marked,
         }
     }
@@ -93,6 +98,7 @@ impl GraphFocusPickerState {
         let Some(name) = self.selected().map(|branch| branch.name.clone()) else {
             return;
         };
+        self.empty_apply_clears = true;
         if !self.marked.remove(&name) {
             self.marked.insert(name);
         }
@@ -101,7 +107,8 @@ impl GraphFocusPickerState {
     /// Names to load, or `None` when the filter has no rows (Enter is a no-op).
     ///
     /// Visible space-marks win. Hidden marks do not leak through a filter.
-    /// When no visible row is marked, Enter applies the cursor row.
+    /// When no visible row is marked, Enter applies the cursor row, except
+    /// after every `[x]` was cleared (`Some([])` → restore `--all`).
     pub fn apply_names(&self) -> Option<Vec<String>> {
         let visible = self.visible();
         if visible.is_empty() {
@@ -114,6 +121,9 @@ impl GraphFocusPickerState {
             .collect();
         if !visible_marks.is_empty() {
             return Some(visible_marks);
+        }
+        if self.marked.is_empty() && self.empty_apply_clears {
+            return Some(Vec::new());
         }
         Some(vec![self.selected()?.name.clone()])
     }
@@ -214,6 +224,31 @@ mod tests {
             &["feature/keep".into()],
         );
         assert_eq!(picker.apply_names(), Some(vec!["feature/keep".into()]));
+    }
+
+    #[test]
+    fn unmarking_preselection_then_enter_clears() {
+        let mut picker = GraphFocusPickerState::new(
+            "app".into(),
+            vec![b("main"), b("feature/keep"), b("topic/noise")],
+            &["feature/keep".into()],
+        );
+        picker.toggle_mark();
+        assert!(picker.marked.is_empty());
+        assert_eq!(
+            picker.apply_names(),
+            Some(Vec::new()),
+            "removing every [x] then Enter must restore --all, not the cursor row"
+        );
+    }
+
+    #[test]
+    fn space_on_then_off_without_prior_focus_clears() {
+        let mut picker =
+            GraphFocusPickerState::new("app".into(), vec![b("main"), b("feature/keep")], &[]);
+        picker.toggle_mark();
+        picker.toggle_mark();
+        assert_eq!(picker.apply_names(), Some(Vec::new()));
     }
 
     #[test]

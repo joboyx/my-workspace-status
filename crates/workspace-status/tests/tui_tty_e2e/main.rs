@@ -34,12 +34,12 @@ const WAIT: Duration = Duration::from_secs(12);
 fn pty_launch_paints_tree_diff_and_chrome() {
     let (_root, workspace) = daily_workspace();
     let tui = PtySession::open(&workspace);
-    let screen = tui.screen();
-    assert_contains(&screen, "app");
-    assert_contains(&screen, "README.md");
-    assert_contains(&screen, " tree");
-    assert_contains(&screen, "+dirty");
-    harness::assert_absent(&screen, "notes");
+    tui.wait_contains("app", WAIT);
+    tui.wait_contains("README.md", WAIT);
+    tui.wait_contains(" tree", WAIT);
+    // Right-pane git is pumped. The tree can paint before `+dirty`.
+    tui.wait_contains("+dirty", WAIT);
+    harness::assert_absent(&tui.screen(), "notes");
 }
 
 #[cfg(unix)]
@@ -100,6 +100,95 @@ fn pty_graph_branch_focus_overlay() {
 
     tui.key('O');
     tui.wait_contains("noise-leaf-commit", WAIT);
+}
+
+/// Shift+O via CSI-u (unshifted codepoint + SHIFT), not a raw `'O'` byte.
+///
+/// The live loop requests press/release on letters. Matching only `Char('O')`
+/// misses `Char('o')` + SHIFT, so this must fail if clear-focus regresses.
+#[cfg(unix)]
+#[test]
+fn pty_shift_o_csi_u_clears_graph_branch_focus() {
+    let (_root, workspace) = focus_workspace();
+    let mut tui = PtySession::open(&workspace);
+    tui.search("focusbox");
+    tui.wait_contains("focusbox", WAIT);
+    tui.tab();
+    tui.wait_contains("keep-leaf-commit", WAIT);
+    tui.wait_contains("noise-leaf-commit", WAIT);
+
+    tui.key('o');
+    tui.wait_contains("Focus branches", WAIT);
+    tui.keys("keep");
+    tui.enter();
+    tui.wait_absent("Focus branches", WAIT);
+    tui.wait_contains("keep-leaf-commit", WAIT);
+    tui.wait_absent("noise-leaf-commit", WAIT);
+
+    tui.shift_letter('O');
+    tui.wait_absent("Focus branches", WAIT);
+    tui.wait_contains("noise-leaf-commit", WAIT);
+    tui.wait_contains("main-leaf-commit", WAIT);
+}
+
+/// `/` then Shift+letters as CSI-u must type into the SEARCH prompt.
+#[cfg(unix)]
+#[test]
+fn pty_shift_letters_csi_u_type_into_search() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = PtySession::open(&workspace);
+    tui.key('/');
+    tui.wait_contains("SEARCH", WAIT);
+    tui.shift_keys("MERGER");
+    tui.wait_contains("MERGER▏", WAIT);
+    tui.enter();
+    tui.wait_contains("/MERGER", WAIT);
+    tui.wait_contains("WIP on graph", WAIT);
+}
+
+/// Shift+S via CSI-u opens the stash overlay (not `s` stage).
+#[cfg(unix)]
+#[test]
+fn pty_shift_s_csi_u_opens_stash_menu() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = PtySession::open(&workspace);
+    tui.search("README");
+    tui.wait_contains("README.md", WAIT);
+    tui.shift_letter('S');
+    tui.wait_contains("Stash ", WAIT);
+    tui.wait_contains("stash", WAIT);
+}
+
+/// Unmark every `[x]` then Enter restores `--all` (does not keep the cursor row).
+#[cfg(unix)]
+#[test]
+fn pty_graph_focus_unmark_enter_clears() {
+    let (_root, workspace) = focus_workspace();
+    let mut tui = PtySession::open(&workspace);
+    tui.search("focusbox");
+    tui.wait_contains("focusbox", WAIT);
+    tui.tab();
+    tui.wait_contains("keep-leaf-commit", WAIT);
+    tui.wait_contains("noise-leaf-commit", WAIT);
+
+    tui.key('o');
+    tui.wait_contains("Focus branches", WAIT);
+    tui.keys("keep");
+    tui.enter();
+    tui.wait_absent("Focus branches", WAIT);
+    tui.wait_contains("keep-leaf-commit", WAIT);
+    tui.wait_absent("noise-leaf-commit", WAIT);
+
+    tui.key('o');
+    tui.wait_contains("Focus branches", WAIT);
+    tui.wait_contains("[x]", WAIT);
+    tui.key(' ');
+    tui.wait_absent("[x]", WAIT);
+    tui.enter();
+    tui.wait_absent("Focus branches", WAIT);
+    tui.wait_contains("noise-leaf-commit", WAIT);
+    tui.wait_contains("main-leaf-commit", WAIT);
+    tui.wait_contains("keep-leaf-commit", WAIT);
 }
 
 #[cfg(unix)]
@@ -176,6 +265,79 @@ mod xfce {
         tui.key("Return");
         tui.wait_contains("merger", WAIT);
         tui.wait_contains("WIP on graph", WAIT);
+    }
+
+    /// xfce + XTEST Shift keys: search capitals, unmark-then-Enter, Shift+O.
+    ///
+    /// Overlay toggle is space (`[x]` / `[ ]`), not X. Reopen after `O`
+    /// has no pre-mark; unmark-then-Enter runs while a focus is still on.
+    #[test]
+    #[ignore = "GitHub Actions tui-tty-desktop job; needs DISPLAY, xfce4-terminal, xdotool"]
+    fn desktop_xfce_shift_keys_search_and_clear_focus() {
+        let (_root, workspace) = focus_workspace();
+        let tui = DesktopSession::open(&workspace);
+        tui.key("slash");
+        tui.key("shift+r");
+        tui.key("shift+e");
+        tui.key("shift+a");
+        tui.key("shift+d");
+        tui.key("shift+m");
+        tui.key("shift+e");
+        tui.wait_contains("README▏", WAIT);
+        tui.key("Escape");
+
+        tui.key("slash");
+        tui.type_text("focusbox");
+        tui.key("Return");
+        tui.wait_contains("focusbox", WAIT);
+        tui.key("Tab");
+        tui.wait_contains("keep-leaf-commit", WAIT);
+        tui.wait_contains("noise-leaf-commit", WAIT);
+        tui.key("o");
+        tui.wait_contains("Focus branches", WAIT);
+        tui.type_text("keep");
+        tui.key("Return");
+        tui.wait_pred(
+            |screen| !screen.contains("Focus branches"),
+            "focus overlay closed after apply",
+            WAIT,
+        );
+        tui.wait_contains("keep-leaf-commit", WAIT);
+        tui.wait_pred(
+            |screen| !screen.contains("noise-leaf-commit"),
+            "noise-leaf-commit hidden after focus",
+            WAIT,
+        );
+
+        tui.key("o");
+        tui.wait_contains("Focus branches", WAIT);
+        tui.wait_contains("[x]", WAIT);
+        tui.key("space");
+        tui.wait_pred(
+            |screen| !screen.contains("[x]"),
+            "[x] mark cleared after space",
+            WAIT,
+        );
+        tui.key("Return");
+        tui.wait_pred(
+            |screen| !screen.contains("Focus branches"),
+            "focus overlay closed after empty apply",
+            WAIT,
+        );
+        tui.wait_contains("noise-leaf-commit", WAIT);
+        tui.wait_contains("main-leaf-commit", WAIT);
+
+        tui.key("o");
+        tui.wait_contains("Focus branches", WAIT);
+        tui.type_text("keep");
+        tui.key("Return");
+        tui.wait_pred(
+            |screen| !screen.contains("noise-leaf-commit"),
+            "noise-leaf-commit hidden before Shift+O",
+            WAIT,
+        );
+        tui.key("shift+o");
+        tui.wait_contains("noise-leaf-commit", WAIT);
     }
 
     /// XTEST wheel right. Must fail if the tree does not pan.
