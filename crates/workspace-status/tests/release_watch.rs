@@ -42,7 +42,9 @@ fn dist_workspace_allows_dirty_ci() {
         "dist-workspace.toml must keep allow-dirty = [\"ci\"] so generate can leave hand-edits on release.yml"
     );
     assert!(
-        !DIST_WORKSPACE.contains("dispatch-releases"),
+        !DIST_WORKSPACE
+            .lines()
+            .any(|line| line.trim_start().starts_with("dispatch-releases")),
         "dispatch-releases = true would drop tag-push; tag-release.yml needs tag-push plus workflow_dispatch"
     );
 }
