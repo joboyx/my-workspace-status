@@ -309,6 +309,17 @@ impl PtySession {
         self.send_bytes(&[b]);
     }
 
+    /// Ctrl+letter via CSI-u (`CSI code ; 5 : 1 u` press, `: 3` release).
+    ///
+    /// Modifier 5 is Control. The live loop requested
+    /// `REPORT_ALL_KEYS_AS_ESCAPE_CODES` plus event types. A C0 byte
+    /// (`\x15` / `\x04`) is a different path. Ctrl-d as `\x04` is also EOT.
+    pub fn ctrl_letter(&mut self, letter: char) {
+        let codepoint = u32::from(letter.to_ascii_lowercase());
+        self.csi_u(codepoint, 5, 1);
+        self.csi_u(codepoint, 5, 3);
+    }
+
     pub fn search(&mut self, query: &str) {
         self.key('/');
         self.keys(query);
