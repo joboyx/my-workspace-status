@@ -1,10 +1,10 @@
 //! Additional real-TTY operator paths not claimed by `main.rs`.
 //!
 //! Fold (`h`/`l`, `z`, `zz` subtree), click-to-select, double-click Enter,
-//! `gg`/`G`, Home/End, `n`/`N` pane search, PgUp/PgDn, Ctrl-u/d, graph `c`
-//! create-branch, `r`, ignored repos, `e` editor, CSI-u `T` theme, plus other
-//! session keys the help overlay lists that a person actually types. Same PTY
-//! harness: bytes in, painted screen out.
+//! `m` mouse toggle, `gg`/`G`, Home/End, `n`/`N` pane search, PgUp/PgDn,
+//! Ctrl-u/d, graph `c` create-branch, `r`, ignored repos, `e` editor,
+//! CSI-u `T` theme, plus other session keys the help overlay lists that a
+//! person actually types. Same PTY harness: bytes in, painted screen out.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -732,6 +732,103 @@ fn pty_double_click_enters_on_hit_row() {
         },
         "double-click at the diff leaf is a no-op (still that diff)",
         WAIT,
+    );
+}
+
+/// Tree `m` toggles mouse reporting. Not graph merge.
+///
+/// Docs / keymap: mouse is on by default. Tree `m` (raw byte) flips
+/// capture and paints `Mouse off` / `Mouse on`. Off ignores SGR clicks.
+/// On selects. A focused graph commit would confirm merge instead.
+///
+/// Default-on click must select `merger`. After `m`, the same click on
+/// README is ignored (cursor and pane stay on merger). After the second
+/// `m`, that click selects README. Toast-only or click-only is red.
+/// A no-op never leaves default-on select.
+#[test]
+fn pty_m_toggles_mouse_capture() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = PtySession::open(&workspace);
+    tui.wait_contains("UNSTAGED", WAIT);
+    tui.wait_contains("README.md", WAIT);
+    tui.wait_pred(
+        |screen| {
+            tree_cursor_on(screen, "README.md")
+                && screen.contains("UNSTAGED")
+                && !screen.contains("Mouse off")
+                && !screen.contains("Mouse on")
+                && !screen.contains("fast-forward if possible")
+        },
+        "launch is tree-file focus with the README diff; mouse status and merge confirm are absent",
+        GIT_WAIT,
+    );
+
+    let merger_row = tree_row_containing(&tui.screen(), "merger")
+        .unwrap_or_else(|| panic!("merger row:\n{}", tui.screen()));
+    tui.sgr_click(TREE_LABEL_COL, merger_row);
+    tui.wait_pred(
+        |screen| {
+            tree_cursor_on(screen, "merger")
+                && !tree_cursor_on(screen, "README.md")
+                && !screen.contains("UNSTAGED")
+                && (screen.contains("Working tree") || screen.contains("WIP on graph"))
+        },
+        "default mouse-on SGR click selects merger (a default-off or dead mouse never loads that pane)",
+        GIT_WAIT,
+    );
+
+    tui.key('m');
+    tui.wait_pred(
+        |screen| {
+            screen.contains("Mouse off")
+                && !screen.contains("Mouse on")
+                && tree_cursor_on(screen, "merger")
+                && !screen.contains("fast-forward if possible")
+                && !screen.contains("UNSTAGED")
+        },
+        "tree `m` paints Mouse off and does not open merge confirm",
+        WAIT,
+    );
+
+    let readme_row = tree_row_containing(&tui.screen(), "README.md")
+        .unwrap_or_else(|| panic!("README row while mouse off:\n{}", tui.screen()));
+    tui.sgr_click(TREE_LABEL_COL, readme_row);
+    tui.wait_ms(SETTLE_MS);
+    tui.wait_pred(
+        |screen| {
+            screen.contains("Mouse off")
+                && !screen.contains("Mouse on")
+                && tree_cursor_on(screen, "merger")
+                && !tree_cursor_on(screen, "README.md")
+                && !screen.contains("UNSTAGED")
+                && (screen.contains("Working tree") || screen.contains("WIP on graph"))
+        },
+        "SGR click is ignored while Mouse off (toast-only would select README)",
+        WAIT,
+    );
+
+    tui.key('m');
+    tui.wait_pred(
+        |screen| {
+            screen.contains("Mouse on")
+                && !screen.contains("Mouse off")
+                && tree_cursor_on(screen, "merger")
+                && !screen.contains("UNSTAGED")
+        },
+        "second tree `m` paints Mouse on",
+        WAIT,
+    );
+    let readme_row = tree_row_containing(&tui.screen(), "README.md")
+        .unwrap_or_else(|| panic!("README row after Mouse on:\n{}", tui.screen()));
+    tui.sgr_click(TREE_LABEL_COL, readme_row);
+    tui.wait_pred(
+        |screen| {
+            tree_cursor_on(screen, "README.md")
+                && !tree_cursor_on(screen, "merger")
+                && screen.contains("UNSTAGED")
+        },
+        "SGR click selects README after Mouse on (status-only would leave merger focused)",
+        GIT_WAIT,
     );
 }
 
