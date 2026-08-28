@@ -30,10 +30,41 @@ use harness::{
     tree_row_containing, PtySession, SGR_WHEEL_RIGHT, SGR_WHEEL_RIGHT_MOTION,
 };
 #[cfg(unix)]
-use seed::{daily_workspace, focus_workspace, seed_long_path_file, stream_workspace};
+use seed::{
+    ahead_workspace, behind_workspace, daily_workspace, focus_workspace, seed_long_path_file,
+    stream_workspace, unfetched_behind_workspace,
+};
 
 #[cfg(unix)]
 const WAIT: Duration = Duration::from_secs(12);
+#[cfg(unix)]
+const GIT_WAIT: Duration = Duration::from_secs(20);
+#[cfg(unix)]
+const SETTLE_MS: u64 = 200;
+
+#[cfg(unix)]
+fn tree_line_containing(screen: &str, needle: &str) -> Option<String> {
+    left_tree(screen)
+        .lines()
+        .find(|line| line.contains(needle))
+        .map(str::to_string)
+}
+
+#[cfg(unix)]
+fn readme_row_reviewed(screen: &str) -> bool {
+    tree_line_containing(screen, "README.md").is_some_and(|line| line.contains('*'))
+}
+
+#[cfg(unix)]
+fn op_finished(screen: &str, verb: &str) -> bool {
+    screen.contains(&format!("{verb} 1 repo")) && !screen.contains("failed")
+}
+
+#[cfg(unix)]
+fn tree_cleared_ahead_behind(screen: &str) -> bool {
+    let left = left_tree(screen);
+    !left.contains("v1") && !left.contains("^1")
+}
 
 #[cfg(unix)]
 #[test]
@@ -380,6 +411,250 @@ fn pty_streamed_collect_updates_focused_repo_before_slow() {
     fs::write(&release, "1\n").unwrap();
 }
 
+/// Space on a dirty file paints the ASCII reviewed mark (`*`) before the badge.
+#[cfg(unix)]
+#[test]
+fn pty_space_marks_dirty_file_reviewed() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = PtySession::open(&workspace);
+    tui.search("README");
+    tui.wait_contains("/README", WAIT);
+    tui.wait_contains("README.md", WAIT);
+    tui.wait_pred(
+        |screen| !readme_row_reviewed(screen),
+        "README row has no reviewed mark yet",
+        WAIT,
+    );
+    tui.wait_ms(SETTLE_MS);
+
+    tui.key(' ');
+    tui.wait_pred(
+        readme_row_reviewed,
+        "README row shows ASCII reviewed mark `*`",
+        WAIT,
+    );
+    tui.key(' ');
+    tui.wait_pred(
+        |screen| !readme_row_reviewed(screen),
+        "second space clears the reviewed mark",
+        WAIT,
+    );
+}
+
+/// `s` stages the focused dirty file; `u` unstages. Diff labels must flip.
+#[cfg(unix)]
+#[test]
+fn pty_stage_and_unstage_dirty_file() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = PtySession::open(&workspace);
+    tui.search("README");
+    tui.wait_contains("/README", WAIT);
+    tui.wait_contains("UNSTAGED", WAIT);
+    tui.wait_contains("stage", WAIT);
+    tui.wait_ms(SETTLE_MS);
+
+    tui.key('s');
+    tui.wait_contains("STAGED", GIT_WAIT);
+    tui.wait_pred(
+        |screen| tree_line_containing(screen, "README.md").is_some_and(|line| line.contains("S ")),
+        "README badge is staged `S `",
+        WAIT,
+    );
+    tui.wait_absent("UNSTAGED", WAIT);
+
+    tui.key('u');
+    tui.wait_contains("UNSTAGED", GIT_WAIT);
+    tui.wait_pred(
+        |screen| tree_line_containing(screen, "README.md").is_some_and(|line| line.contains("M ")),
+        "README badge is modified `M ` after unstage",
+        WAIT,
+    );
+}
+
+/// `f` against a local bare origin. Must fail if fetch is a no-op.
+#[cfg(unix)]
+#[test]
+fn pty_fetch_local_remote_marks_behind() {
+    let (_root, workspace) = unfetched_behind_workspace();
+    let mut tui = PtySession::open(&workspace);
+    tui.search("syncbox");
+    tui.wait_contains("/syncbox", WAIT);
+    tui.wait_contains("Working tree", WAIT);
+    tui.wait_contains("fetch", WAIT);
+    tui.wait_ms(SETTLE_MS);
+
+    tui.key('f');
+    tui.wait_pred(
+        |screen| op_finished(screen, "Fetched") || left_tree(screen).contains("v1"),
+        "Fetched 1 repo or tree shows behind-by-1",
+        GIT_WAIT,
+    );
+    tui.wait_pred(
+        |screen| left_tree(screen).contains("v1"),
+        "tree shows behind-by-1 after fetch",
+        WAIT,
+    );
+    tui.wait_contains("origin-tip-commit", WAIT);
+}
+
+/// `p` on a behind checkout. Must fail if pull is a no-op.
+#[cfg(unix)]
+#[test]
+fn pty_pull_behind_local_remote() {
+    let (_root, workspace) = behind_workspace();
+    let mut tui = PtySession::open(&workspace);
+    tui.search("syncbox");
+    tui.wait_contains("/syncbox", WAIT);
+    tui.wait_contains("origin-tip-commit", WAIT);
+    tui.wait_pred(
+        |screen| left_tree(screen).contains("v1"),
+        "tree shows behind-by-1 before pull",
+        WAIT,
+    );
+    tui.wait_contains("pull", WAIT);
+    tui.wait_ms(SETTLE_MS);
+
+    tui.key('p');
+    tui.wait_pred(
+        |screen| op_finished(screen, "Pulled"),
+        "Pulled 1 repo without failure",
+        GIT_WAIT,
+    );
+    tui.wait_pred(
+        tree_cleared_ahead_behind,
+        "behind mark cleared after pull",
+        WAIT,
+    );
+    tui.tab();
+    tui.wait_contains("origin-tip-commit", WAIT);
+}
+
+/// Shift+P via CSI-u pushes an ahead checkout to the local origin.
+#[cfg(unix)]
+#[test]
+fn pty_shift_p_csi_u_pushes_ahead() {
+    let (_root, workspace) = ahead_workspace();
+    let mut tui = PtySession::open(&workspace);
+    tui.search("syncbox");
+    tui.wait_contains("/syncbox", WAIT);
+    tui.wait_contains("ahead-tip-commit", WAIT);
+    tui.wait_pred(
+        |screen| left_tree(screen).contains("^1"),
+        "tree shows ahead-by-1 before push",
+        WAIT,
+    );
+    tui.wait_contains("push", WAIT);
+    tui.wait_ms(SETTLE_MS);
+
+    tui.shift_letter('P');
+    tui.wait_pred(
+        |screen| op_finished(screen, "Pushed"),
+        "Pushed 1 repo without failure",
+        GIT_WAIT,
+    );
+    tui.wait_pred(
+        tree_cleared_ahead_behind,
+        "ahead mark cleared after push",
+        WAIT,
+    );
+}
+
+/// Graph `m` is the TUI write that creates a commit (merge into HEAD).
+#[cfg(unix)]
+#[test]
+fn pty_graph_merge_creates_commit() {
+    let (_root, workspace) = focus_workspace();
+    let mut tui = PtySession::open(&workspace);
+    tui.search("focusbox");
+    tui.wait_contains("/focusbox", WAIT);
+    tui.tab();
+    tui.wait_contains("keep-leaf-commit", WAIT);
+    tui.wait_contains("main-leaf-commit", WAIT);
+    tui.wait_ms(SETTLE_MS);
+
+    tui.key('/');
+    tui.keys("main-leaf-commit");
+    tui.enter();
+    tui.wait_contains("/main-leaf-commit", WAIT);
+    tui.wait_contains("merge", WAIT);
+    tui.wait_ms(SETTLE_MS);
+    tui.key('m');
+    tui.wait_contains("Merge", WAIT);
+    tui.wait_contains("into", WAIT);
+    tui.key('y');
+    tui.wait_contains("Merge branch 'main'", GIT_WAIT);
+}
+
+/// Create (`S` then `s`), apply (`a`), drop (`D` then `y`) — not menu-open only.
+#[cfg(unix)]
+#[test]
+fn pty_stash_create_apply_and_drop() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = PtySession::open(&workspace);
+    tui.search("README");
+    tui.wait_contains("/README", WAIT);
+    tui.wait_contains("UNSTAGED", WAIT);
+    tui.wait_ms(SETTLE_MS);
+
+    tui.shift_letter('S');
+    tui.wait_contains("s create", WAIT);
+    tui.key('s');
+    tui.wait_contains("Stashed", GIT_WAIT);
+    tui.wait_pred(
+        |screen| !left_tree(screen).contains("README.md"),
+        "stashed README leaves the dirty tree",
+        WAIT,
+    );
+
+    tui.esc();
+    tui.search("app");
+    tui.wait_contains("/app", WAIT);
+    tui.tab();
+    tui.wait_contains("Working tree", WAIT);
+    tui.wait_ms(SETTLE_MS);
+    tui.key('/');
+    tui.keys("stash@{");
+    tui.enter();
+    tui.wait_contains("/stash@{", WAIT);
+    tui.wait_contains("stash@{0}", WAIT);
+    tui.wait_ms(SETTLE_MS);
+
+    tui.key('a');
+    tui.wait_contains("README.md", GIT_WAIT);
+    tui.wait_contains("stash@{0}", WAIT);
+    tui.wait_ms(SETTLE_MS);
+
+    tui.shift_letter('D');
+    tui.wait_contains("Drop", WAIT);
+    tui.wait_contains("stash@{0}", WAIT);
+    tui.key('y');
+    tui.wait_contains("dropped stash@{0}", GIT_WAIT);
+    tui.wait_contains("README.md", WAIT);
+}
+
+/// Graph `p` pops the focused stash (apply + drop).
+#[cfg(unix)]
+#[test]
+fn pty_stash_graph_pop() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = PtySession::open(&workspace);
+    tui.search("merger");
+    tui.wait_contains("/merger", WAIT);
+    tui.tab();
+    tui.wait_contains("WIP on graph", WAIT);
+    tui.wait_ms(SETTLE_MS);
+
+    tui.key('/');
+    tui.keys("stash@{");
+    tui.enter();
+    tui.wait_contains("/stash@{", WAIT);
+    tui.wait_contains("stash@{0}", WAIT);
+    tui.wait_ms(SETTLE_MS);
+    tui.key('p');
+    tui.wait_contains("wip.txt", GIT_WAIT);
+    tui.wait_contains("popped stash@{0}", GIT_WAIT);
+}
+
 #[cfg(target_os = "linux")]
 mod xfce {
     use super::*;
@@ -516,5 +791,205 @@ mod xfce {
         let left = left_tree(&tui.screen());
         crate::harness::assert_absent(&left, "very-long");
         assert_contains(&left, "TAIL99");
+    }
+
+    #[test]
+    #[ignore = "GitHub Actions tui-tty-desktop job; needs DISPLAY, xfce4-terminal, xdotool"]
+    fn desktop_xfce_review_and_stage() {
+        let (_root, workspace) = daily_workspace();
+        let tui = DesktopSession::open(&workspace);
+        tui.key("slash");
+        tui.type_text("README");
+        tui.key("Return");
+        tui.wait_contains("/README", WAIT);
+        tui.wait_contains("UNSTAGED", WAIT);
+        tui.wait_pred(
+            |screen| !readme_row_reviewed(screen),
+            "README row has no reviewed mark yet",
+            WAIT,
+        );
+        tui.wait_ms(SETTLE_MS);
+        tui.key("space");
+        tui.wait_pred(
+            readme_row_reviewed,
+            "README row shows ASCII reviewed mark `*`",
+            WAIT,
+        );
+        tui.key("s");
+        tui.wait_contains("STAGED", GIT_WAIT);
+        tui.wait_absent("UNSTAGED", WAIT);
+        tui.wait_pred(
+            |screen| {
+                tree_line_containing(screen, "README.md").is_some_and(|line| line.contains("S "))
+            },
+            "staged README badge `S `",
+            WAIT,
+        );
+        tui.key("u");
+        tui.wait_contains("UNSTAGED", GIT_WAIT);
+    }
+
+    #[test]
+    #[ignore = "GitHub Actions tui-tty-desktop job; needs DISPLAY, xfce4-terminal, xdotool"]
+    fn desktop_xfce_fetch_then_pull_local_remote() {
+        let (_root, workspace) = unfetched_behind_workspace();
+        let tui = DesktopSession::open(&workspace);
+        tui.key("slash");
+        tui.type_text("syncbox");
+        tui.key("Return");
+        tui.wait_contains("/syncbox", WAIT);
+        tui.wait_contains("Working tree", WAIT);
+        tui.wait_contains("fetch", WAIT);
+        tui.wait_ms(SETTLE_MS);
+        tui.key("f");
+        tui.wait_pred(
+            |screen| op_finished(screen, "Fetched") || left_tree(screen).contains("v1"),
+            "Fetched 1 repo or tree shows behind-by-1",
+            GIT_WAIT,
+        );
+        tui.wait_pred(
+            |screen| left_tree(screen).contains("v1"),
+            "tree shows behind-by-1 after fetch",
+            WAIT,
+        );
+        tui.wait_contains("origin-tip-commit", WAIT);
+        tui.wait_contains("pull", WAIT);
+        tui.wait_ms(SETTLE_MS);
+        tui.key("p");
+        tui.wait_pred(
+            |screen| op_finished(screen, "Pulled"),
+            "Pulled 1 repo without failure",
+            GIT_WAIT,
+        );
+        tui.wait_pred(
+            tree_cleared_ahead_behind,
+            "behind mark cleared after pull",
+            WAIT,
+        );
+        tui.key("Tab");
+        tui.wait_contains("origin-tip-commit", GIT_WAIT);
+    }
+
+    #[test]
+    #[ignore = "GitHub Actions tui-tty-desktop job; needs DISPLAY, xfce4-terminal, xdotool"]
+    fn desktop_xfce_shift_p_pushes_ahead() {
+        let (_root, workspace) = ahead_workspace();
+        let tui = DesktopSession::open(&workspace);
+        tui.key("slash");
+        tui.type_text("syncbox");
+        tui.key("Return");
+        tui.wait_contains("/syncbox", WAIT);
+        tui.wait_contains("ahead-tip-commit", WAIT);
+        tui.wait_pred(
+            |screen| left_tree(screen).contains("^1"),
+            "tree shows ahead-by-1 before push",
+            WAIT,
+        );
+        tui.wait_contains("push", WAIT);
+        tui.wait_ms(SETTLE_MS);
+        tui.key("shift+p");
+        tui.wait_pred(
+            |screen| op_finished(screen, "Pushed"),
+            "Pushed 1 repo without failure",
+            GIT_WAIT,
+        );
+        tui.wait_pred(
+            tree_cleared_ahead_behind,
+            "ahead mark cleared after push",
+            WAIT,
+        );
+    }
+
+    #[test]
+    #[ignore = "GitHub Actions tui-tty-desktop job; needs DISPLAY, xfce4-terminal, xdotool"]
+    fn desktop_xfce_graph_merge_creates_commit() {
+        let (_root, workspace) = focus_workspace();
+        let tui = DesktopSession::open(&workspace);
+        tui.key("slash");
+        tui.type_text("focusbox");
+        tui.key("Return");
+        tui.wait_contains("/focusbox", WAIT);
+        tui.key("Tab");
+        tui.wait_contains("keep-leaf-commit", WAIT);
+        tui.wait_contains("main-leaf-commit", WAIT);
+        tui.wait_ms(SETTLE_MS);
+        tui.key("slash");
+        tui.type_text("main-leaf-commit");
+        tui.key("Return");
+        tui.wait_contains("/main-leaf-commit", WAIT);
+        tui.wait_contains("merge", WAIT);
+        tui.wait_ms(SETTLE_MS);
+        tui.key("m");
+        tui.wait_contains("Merge", WAIT);
+        tui.wait_contains("into", WAIT);
+        tui.key("y");
+        tui.wait_contains("Merge branch 'main'", GIT_WAIT);
+    }
+
+    #[test]
+    #[ignore = "GitHub Actions tui-tty-desktop job; needs DISPLAY, xfce4-terminal, xdotool"]
+    fn desktop_xfce_stash_create_apply_and_drop() {
+        let (_root, workspace) = daily_workspace();
+        let tui = DesktopSession::open(&workspace);
+        tui.key("slash");
+        tui.type_text("README");
+        tui.key("Return");
+        tui.wait_contains("/README", WAIT);
+        tui.wait_contains("UNSTAGED", WAIT);
+        tui.wait_ms(SETTLE_MS);
+        tui.key("shift+s");
+        tui.wait_contains("s create", WAIT);
+        tui.key("s");
+        tui.wait_contains("Stashed", GIT_WAIT);
+        tui.wait_pred(
+            |screen| !left_tree(screen).contains("README.md"),
+            "stashed README leaves the dirty tree",
+            WAIT,
+        );
+        tui.key("Escape");
+        tui.key("slash");
+        tui.type_text("app");
+        tui.key("Return");
+        tui.wait_contains("/app", WAIT);
+        tui.key("Tab");
+        tui.wait_contains("Working tree", WAIT);
+        tui.wait_ms(SETTLE_MS);
+        tui.key("slash");
+        tui.type_text("stash@{");
+        tui.key("Return");
+        tui.wait_contains("/stash@{", WAIT);
+        tui.wait_contains("stash@{0}", WAIT);
+        tui.wait_ms(SETTLE_MS);
+        tui.key("a");
+        tui.wait_contains("README.md", GIT_WAIT);
+        tui.wait_contains("stash@{0}", WAIT);
+        tui.wait_ms(SETTLE_MS);
+        tui.key("shift+d");
+        tui.wait_contains("Drop", WAIT);
+        tui.key("y");
+        tui.wait_contains("dropped stash@{0}", GIT_WAIT);
+    }
+
+    #[test]
+    #[ignore = "GitHub Actions tui-tty-desktop job; needs DISPLAY, xfce4-terminal, xdotool"]
+    fn desktop_xfce_stash_graph_pop() {
+        let (_root, workspace) = daily_workspace();
+        let tui = DesktopSession::open(&workspace);
+        tui.key("slash");
+        tui.type_text("merger");
+        tui.key("Return");
+        tui.wait_contains("/merger", WAIT);
+        tui.key("Tab");
+        tui.wait_contains("WIP on graph", WAIT);
+        tui.wait_ms(SETTLE_MS);
+        tui.key("slash");
+        tui.type_text("stash@{");
+        tui.key("Return");
+        tui.wait_contains("/stash@{", WAIT);
+        tui.wait_contains("stash@{0}", WAIT);
+        tui.wait_ms(SETTLE_MS);
+        tui.key("p");
+        tui.wait_contains("wip.txt", GIT_WAIT);
+        tui.wait_contains("popped stash@{0}", GIT_WAIT);
     }
 }

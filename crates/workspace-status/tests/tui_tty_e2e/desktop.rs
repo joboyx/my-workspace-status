@@ -282,12 +282,24 @@ impl DesktopSession {
         );
     }
 
+    pub fn wait_absent(&self, needle: &str, timeout: Duration) {
+        self.wait_pred(
+            |screen| !screen.contains(needle),
+            &format!("screen does not contain `{needle}`"),
+            timeout,
+        );
+    }
+
     pub fn wait_contains_any(&self, needles: &[&str], timeout: Duration) {
         self.wait_pred(
             |screen| needles.iter().any(|n| screen.contains(n)),
             &format!("screen contains one of {needles:?}"),
             timeout,
         );
+    }
+
+    pub fn wait_ms(&self, ms: u64) {
+        thread::sleep(Duration::from_millis(ms));
     }
 
     pub fn wait_pred(&self, pred: impl Fn(&str) -> bool, what: &str, timeout: Duration) {
