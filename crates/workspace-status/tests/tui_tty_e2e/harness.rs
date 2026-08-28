@@ -369,6 +369,51 @@ impl PtySession {
         self.parser.lock().unwrap().screen().contents()
     }
 
+    /// Fingerprint of every cell fg/bg. Theme cycle must change it.
+    ///
+    /// `screen()` is glyphs only. A colour-only `T` paint can keep the same
+    /// text and still fail this.
+    pub fn color_fingerprint(&self) -> String {
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        let mut out = String::new();
+        for row in 0..self.rows {
+            for col in 0..self.cols {
+                let Some(cell) = screen.cell(row, col) else {
+                    continue;
+                };
+                out.push_str(&format!("{:?}/{:?};", cell.fgcolor(), cell.bgcolor()));
+            }
+        }
+        out
+    }
+
+    /// True when any cell uses this 24-bit colour as fg or bg.
+    pub fn has_rgb(&self, r: u8, g: u8, b: u8) -> bool {
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        for row in 0..self.rows {
+            for col in 0..self.cols {
+                let Some(cell) = screen.cell(row, col) else {
+                    continue;
+                };
+                if color_is_rgb(cell.fgcolor(), r, g, b) || color_is_rgb(cell.bgcolor(), r, g, b) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Wait until [`Self::has_rgb`] is true.
+    pub fn wait_has_rgb(&self, r: u8, g: u8, b: u8, timeout: Duration) {
+        self.wait_pred(
+            |_| self.has_rgb(r, g, b),
+            &format!("cell rgb({r},{g},{b})"),
+            timeout,
+        );
+    }
+
     pub fn wait_contains(&self, needle: &str, timeout: Duration) {
         self.wait_pred(
             |screen| screen.contains(needle),
@@ -494,6 +539,10 @@ pub(crate) fn write_update_check(path: &Path, last_check_unix: Option<u64>) {
     });
     let body = format!("{{\n  \"version\": 1,\n  \"lastCheckUnix\": {unix}\n}}\n");
     fs::write(path, body).unwrap();
+}
+
+fn color_is_rgb(color: vt100::Color, r: u8, g: u8, b: u8) -> bool {
+    matches!(color, vt100::Color::Rgb(cr, cg, cb) if cr == r && cg == g && cb == b)
 }
 
 pub fn assert_contains(screen: &str, needle: &str) {

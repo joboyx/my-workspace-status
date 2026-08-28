@@ -2,9 +2,9 @@
 //!
 //! Fold (`h`/`l`, `z`, `zz` subtree), click-to-select, `gg`/`G`, Home/End,
 //! `n`/`N` pane search, PgUp/PgDn, Ctrl-u/d, graph `c` create-branch, `r`,
-//! ignored repos, `e` editor, plus other session keys the help overlay
-//! lists that a person actually types. Same PTY harness: bytes in, painted
-//! screen out.
+//! ignored repos, `e` editor, CSI-u `T` theme, plus other session keys the
+//! help overlay lists that a person actually types. Same PTY harness: bytes
+//! in, painted screen out.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -646,6 +646,59 @@ fn pty_t_and_i_toggle_view_modes() {
     } else {
         tui.wait_contains("split", WAIT);
     }
+}
+
+/// CSI-u Shift+T cycles the colour theme. Raw `'T'` is a different path.
+///
+/// Launch seeds Tokyo Night. The next id is Monokai. The toast
+/// `theme: Monokai` and Monokai surface RGB are absent before the key.
+/// Lowercase `t` would flip the tree/flat pill instead. A no-op cannot
+/// pass.
+#[test]
+fn pty_shift_t_csi_u_cycles_theme() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = PtySession::open_with_env(&workspace, &[("WS_STATUS_THEME", "tokyo-night")]);
+    tui.wait_contains(" tree", WAIT);
+    tui.wait_contains("README.md", WAIT);
+    tui.wait_pred(
+        |screen| {
+            screen.contains(" tree")
+                && !screen.contains("Flat paths")
+                && !screen.contains("theme: Monokai")
+                && !screen.contains("Monokai")
+        },
+        "Tokyo Night launch has tree chrome and no Monokai toast",
+        WAIT,
+    );
+    assert!(
+        tui.has_rgb(0x1a, 0x1b, 0x26),
+        "Tokyo Night surface must paint before T:\n{}",
+        tui.screen()
+    );
+    assert!(
+        !tui.has_rgb(0x27, 0x28, 0x22),
+        "Monokai surface must be absent before T:\n{}",
+        tui.screen()
+    );
+    let before_colors = tui.color_fingerprint();
+
+    tui.shift_letter('T');
+    tui.wait_pred(
+        |screen| {
+            screen.contains("theme: Monokai")
+                && screen.contains(" tree")
+                && !screen.contains("Flat paths")
+        },
+        "Shift+T paints Monokai chrome (a no-op or t-flat cannot)",
+        WAIT,
+    );
+    tui.wait_has_rgb(0x27, 0x28, 0x22, WAIT);
+    assert_ne!(
+        tui.color_fingerprint(),
+        before_colors,
+        "T must repaint cell colours; a toast-only no-op of the palette fails:\n{}",
+        tui.screen()
+    );
 }
 
 /// `d` switches a clean non-default checkout.
