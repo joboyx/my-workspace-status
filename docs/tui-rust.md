@@ -121,7 +121,7 @@ See [tui-model.md](./tui-model.md) for the tree model and action registry.
 | `-i` / `--tui` | Ratatui TUI even when stdout is not a TTY |
 | `--plain` or `--json` | Snapshot text / JSON (wins over `--tui`) |
 | `-v`, `-p`, `-d` | Headless `--plain` path (with that flag; wins over `--tui`) |
-| `--update` | Exec `workspace-status-update`; never opens the TUI; never runs the startup check |
+| `--update` | Print GitHub Release notes newer than this install, then exec `workspace-status-update`; never opens the TUI; never runs the startup check |
 | TUI startup (TTY stdin+stdout) | If the last check is older than 6 hours, `curl` the latest published GitHub Release. Newer → `new version available, update? [y/n]` before the TUI. `y` runs `--update`. `n` opens the TUI. Fail / current / no `curl` stay quiet |
 | Non-TTY without `--tui` | Headless `--plain` unless `--json` |
 

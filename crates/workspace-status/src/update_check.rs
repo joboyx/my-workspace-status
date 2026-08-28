@@ -4,7 +4,8 @@
 //! `--plain` / `--json` / `--update` never call this. A failed or current
 //! check stays quiet. At most one network fetch per
 //! [`CHECK_INTERVAL`]. The fetch is `curl` GET of GitHub Releases `latest`
-//! (4s timeout; missing `curl` is a quiet failure).
+//! (4s timeout; missing `curl` is a quiet failure). `--update` reuses
+//! the same `curl` helper for the Releases list; it does not call this prompt.
 
 use std::env;
 use std::fs;
@@ -25,6 +26,39 @@ const STORE_VERSION: u32 = 1;
 const STORE_FILE_NAME: &str = "update-check.json";
 const LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/joboyx/my-workspace-status/releases/latest";
+
+/// GET a GitHub API URL with `curl`. `max_time_secs` is `--max-time`.
+///
+/// `WORKSPACE_STATUS_GITHUB_TOKEN` adds a Bearer header when set. Missing
+/// `curl`, a non-zero exit, or non-UTF-8 stdout is an error.
+pub(crate) fn github_get(url: &str, max_time_secs: &str) -> Result<String, String> {
+    let mut cmd = Command::new("curl");
+    cmd.args([
+        "-fsS",
+        "--max-time",
+        max_time_secs,
+        "-H",
+        "User-Agent: workspace-status",
+        "-H",
+        "Accept: application/vnd.github+json",
+    ]);
+    if let Ok(token) = env::var("WORKSPACE_STATUS_GITHUB_TOKEN") {
+        let trimmed = token.trim();
+        if !trimmed.is_empty() {
+            cmd.arg("-H")
+                .arg(format!("Authorization: Bearer {trimmed}"));
+        }
+    }
+    cmd.arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let output = cmd.output().map_err(|err| err.to_string())?;
+    if !output.status.success() {
+        return Err("curl failed".into());
+    }
+    String::from_utf8(output.stdout).map_err(|err| err.to_string())
+}
 
 /// Outcome of the TUI-startup offer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,32 +260,7 @@ where
 }
 
 fn fetch_latest_release_tag() -> Result<String, String> {
-    let mut cmd = Command::new("curl");
-    cmd.args([
-        "-fsS",
-        "--max-time",
-        "4",
-        "-H",
-        "User-Agent: workspace-status",
-        "-H",
-        "Accept: application/vnd.github+json",
-    ]);
-    if let Ok(token) = env::var("WORKSPACE_STATUS_GITHUB_TOKEN") {
-        let trimmed = token.trim();
-        if !trimmed.is_empty() {
-            cmd.arg("-H")
-                .arg(format!("Authorization: Bearer {trimmed}"));
-        }
-    }
-    cmd.arg(LATEST_RELEASE_URL)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let output = cmd.output().map_err(|err| err.to_string())?;
-    if !output.status.success() {
-        return Err("curl failed".into());
-    }
-    let body = String::from_utf8(output.stdout).map_err(|err| err.to_string())?;
+    let body = github_get(LATEST_RELEASE_URL, "4")?;
     parse_release_tag_name(&body).ok_or_else(|| "missing tag_name".into())
 }
 

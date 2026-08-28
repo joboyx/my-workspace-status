@@ -1,4 +1,4 @@
-//! `--update` execs the cargo-dist sidecar and does not open the TUI.
+//! `--update` prints newer GitHub Release notes, then execs the cargo-dist sidecar.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,6 +44,10 @@ fn help_documents_update_flag() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("--update"), "{text}");
     assert!(!text.contains("-U,"), "update should be long-only: {text}");
+    assert!(
+        text.contains("GitHub Release notes") || text.contains("notes since this version"),
+        "help should mention Release notes before the updater: {text}"
+    );
 }
 
 #[cfg(unix)]
@@ -244,6 +248,71 @@ fn update_flag_does_not_run_startup_check() {
     assert!(
         !store.exists(),
         "--update must not write the update-check store"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn update_prints_release_notes_then_runs_sidecar() {
+    let dir = temp_dir();
+    let current = env!("CARGO_PKG_VERSION");
+    let json = r###"[
+  {
+    "tag_name": "v99.0.0",
+    "draft": false,
+    "prerelease": false,
+    "body": "## [99.0.0] - 2026-08-28\n\n### Features\n\n- Show changelog on update\n\n## Install workspace-status 99.0.0\n\ncurl install\n"
+  },
+  {
+    "tag_name": "v98.0.0",
+    "draft": false,
+    "prerelease": false,
+    "body": "## [98.0.0] - 2026-08-27\n\n### Bug Fixes\n\n- Older fix\n\n## Install workspace-status 98.0.0\n\ncurl install\n"
+  },
+  {
+    "tag_name": "v0.0.1",
+    "draft": false,
+    "prerelease": false,
+    "body": "## [0.0.1]\n\n### Features\n\n- Ancient\n\n## Install workspace-status 0.0.1\n"
+  }
+]"###;
+    write_script(
+        &dir.join("curl"),
+        &format!("#!/bin/sh\ncat <<'EOF'\n{json}\nEOF\n"),
+    );
+    write_script(
+        &dir.join("workspace-status-update"),
+        "#!/bin/sh\necho path-sidecar\nexit 0\n",
+    );
+    let out = Command::new(bin())
+        .arg("--update")
+        .env("PATH", &dir)
+        .output()
+        .expect("workspace-status --update with fake curl");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains(&format!("Updating {current} -> 99.0.0")),
+        "{text}"
+    );
+    assert!(text.contains("Show changelog on update"), "{text}");
+    assert!(text.contains("Older fix"), "{text}");
+    assert!(!text.contains("Ancient"), "{text}");
+    assert!(!text.contains("curl install"), "{text}");
+    assert!(
+        text.contains("path-sidecar"),
+        "sidecar should still run after notes: {text}"
+    );
+    let notes_idx = text.find("Show changelog on update").expect("notes");
+    let sidecar_idx = text.find("path-sidecar").expect("sidecar");
+    assert!(
+        notes_idx < sidecar_idx,
+        "notes should print before the sidecar: {text}"
     );
     let _ = fs::remove_dir_all(dir);
 }

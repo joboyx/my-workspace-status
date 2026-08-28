@@ -12,6 +12,10 @@
 #
 # Note that the GitHub Release will be created with a generated
 # title/body based on your changelogs.
+#
+# Custom (allow-dirty = ["ci"]): git-cliff notes for the current tag are
+# prepended to cargo-dist's installer/download announcement. Re-apply the
+# host-job fetch-depth and git-cliff steps after `dist generate`.
 
 name: Release
 permissions:
@@ -230,6 +234,8 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          fetch-depth: 0
+          fetch-tags: true
       - name: Install cached dist
         uses: actions/download-artifact@v8
         with:
@@ -267,17 +273,37 @@ jobs:
         run: |
           # Remove the granular manifests
           rm -f artifacts/*-dist-manifest.json
+      - name: Generate changelog
+        uses: orhun/git-cliff-action@v4
+        id: git-cliff
+        continue-on-error: true
+        with:
+          config: cliff.toml
+          args: --current --strip header
+        env:
+          OUTPUT: ${{ runner.temp }}/changelog.md
+          GITHUB_REPO: ${{ github.repository }}
       - name: Create GitHub Release
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
           ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
           RELEASE_COMMIT: "${{ github.sha }}"
+          CHANGELOG_FILE: ${{ runner.temp }}/changelog.md
         run: |
           # Write and read notes from a file to avoid quoting breaking things
-          echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
+          notes="$RUNNER_TEMP/notes.txt"
+          echo "$ANNOUNCEMENT_BODY" > "$notes"
+          if [ -s "${CHANGELOG_FILE:-}" ] && [ -n "$(tr -d '[:space:]' < "$CHANGELOG_FILE")" ]; then
+            {
+              cat "$CHANGELOG_FILE"
+              printf '\n'
+              cat "$notes"
+            } > "$notes.prepended"
+            mv "$notes.prepended" "$notes"
+          fi
 
-          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$notes" artifacts/*
 
   announce:
     needs:
