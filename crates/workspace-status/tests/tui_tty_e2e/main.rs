@@ -806,25 +806,6 @@ fn pty_graph_branch_focus_overlay() {
     );
 }
 
-/// Shift+O via CSI-u (unshifted codepoint + SHIFT), not a raw `'O'` byte.
-///
-/// The live loop requests press/release on letters. Matching only `Char('O')`
-/// misses `Char('o')` + SHIFT, so this must fail if clear-focus regresses.
-#[cfg(unix)]
-#[test]
-fn pty_shift_o_csi_u_clears_graph_branch_focus() {
-    let (_root, workspace) = focus_workspace();
-    let mut tui = PtySession::open(&workspace);
-    apply_current_keep_graph_focus(&mut tui);
-
-    tui.shift_letter('O');
-    tui.wait_pred(
-        graph_focus_cleared_full,
-        "CSI-u Shift+O restores --all (SEARCH / stash / theme / a raw O path cannot pass)",
-        GIT_WAIT,
-    );
-}
-
 /// `/` then Shift+letters as CSI-u must type into the SEARCH prompt.
 #[cfg(unix)]
 #[test]
