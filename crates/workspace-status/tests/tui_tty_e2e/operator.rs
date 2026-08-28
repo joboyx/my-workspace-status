@@ -243,7 +243,7 @@ fn pty_pgup_pgdn_pages_workspace_tree() {
     tui.wait_pred(
         |screen| {
             page_file_body_visible(screen)
-                && screen.contains("UNSTAGED")
+                && screen.contains("NEW")
                 && !tree_has(screen, "README.md")
                 && !tree_has(screen, "page-29")
                 && !tree_has(screen, "No updates")
