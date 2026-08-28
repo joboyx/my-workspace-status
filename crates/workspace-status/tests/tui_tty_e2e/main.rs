@@ -2,7 +2,7 @@
 //!
 //! Spawns the `workspace-status` binary on a PTY so the live loop's
 //! `event::read` sees keys and xterm SGR mouse bytes. This is not the
-//! TestBackend suite (`tui_daily_e2e.rs`) and not screenshot capture
+//! TestBackend suite (`tui_headless_e2e.rs`) and not screenshot capture
 //! (`scripts/capture-demo-stills.sh`).
 //!
 //! Unix only (PTY). Windows `cargo test --workspace` compiles this crate
@@ -253,7 +253,7 @@ fn pty_tree_sgr_hscroll_pans_clipped_path() {
     let mut tui = PtySession::open_size(&workspace, 64, 24);
     let _ = tui.wait_clipped_long_path_row(WAIT);
 
-    // Same setup as the daily TestBackend case: a short README diff so
+    // Same setup as the headless TestBackend case: a short README diff so
     // hscroll over the tree pans the tree, not a long file-diff.
     if let Some(readme_row) = tree_row_containing(&tui.screen(), "README.md") {
         tui.sgr_click(6, readme_row);

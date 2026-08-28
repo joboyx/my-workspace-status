@@ -1,6 +1,6 @@
 # Real-TTY TUI e2e
 
-Headless TestBackend coverage stays in `crates/workspace-status/tests/tui_daily_e2e.rs`. Screenshot stills stay in `scripts/capture-demo-stills.sh`. This harness is neither.
+Headless TestBackend coverage stays in `crates/workspace-status/tests/tui_headless_e2e.rs`. Screenshot stills stay in `scripts/capture-demo-stills.sh`. This harness is neither.
 
 It drives the real `workspace-status` binary the way a person does: a PTY (and, on Linux, a real terminal emulator). Assertions read the painted screen. It does not construct crossterm `Event` values in memory.
 
@@ -51,10 +51,10 @@ Packages (Debian/Ubuntu): `xvfb xfce4-terminal xterm xdotool dbus-x11 openbox`. 
 - Watch and background fetch off by default (`WS_STATUS_WATCH_MS=0`, `WS_STATUS_FETCH_MS=0`). Per-test env overrides (`PtySession::open_with_env`) re-enable watch for the live-input / streamed-collect cases.
 - Isolated `XDG_STATE_HOME` plus a fresh `WS_STATUS_UPDATE_CHECK_STORE` so the GitHub Release prompt does not block mount.
 - Mouse reports are xterm SGR (`CSI < Cb ; Cx ; Cy M`) with 1-based cells. Motion-bit wheel (`Cb` 99) must not pan (crossterm 0.28 drops it).
-- Tree hscroll asserts a clipped `very-long` prefix on the **tree row**, then `TAIL99` after pan, with the prefix gone. A search chip that already contains `TAIL99` does not count. Same oracle as `tui_daily_e2e` `tree_trackpad_sgr_hscroll_pans_without_stealing_focus`. Do not `/` search the tail first: that puts `TAIL99` on screen before any wheel. Wait for a clipped tree row on the same frame (dump the screen on timeout). Do not `expect` a row after a later `screen()` call.
+- Tree hscroll asserts a clipped `very-long` prefix on the **tree row**, then `TAIL99` after pan, with the prefix gone. A search chip that already contains `TAIL99` does not count. Same oracle as `tui_headless_e2e` `tree_trackpad_sgr_hscroll_pans_without_stealing_focus`. Do not `/` search the tail first: that puts `TAIL99` on screen before any wheel. Wait for a clipped tree row on the same frame (dump the screen on timeout). Do not `expect` a row after a later `screen()` call.
 - Desktop wheel is a real XTEST pointer event: root-coordinate `mousemove --sync` then `click 7`, **no `--window`** on warp or click. VTE ignores `XSendEvent` (`xdotool --window`). The wheel oracle runs in **xterm** because VTE 0.76 does not report buttons 6/7. xfce stays for help/search keys.
 - Openbox is started with `--config-file crates/workspace-status/tests/tui_tty_e2e/openbox.xml` (no decorations) so cell-to-pixel math matches the cell grid. The test does not `--replace` a running WM.
 - Claims kept because they fail on a no-op: launch paint (wait for `+dirty`, not only the tree — right-pane git is a worker), `?` help, graph drill, graph branch focus `o`/`O`, Shift+letter CSI-u (`O` clear focus, `S` stash menu, `/` capitals), graph-focus unmark-then-Enter, Ctrl+C quit prompt, PTY SGR tree pan, watch apply while keys arrive (no `r`), streamed collect (focused tree + pane before a blocked `git status`), desktop help/search, desktop xfce Shift keys (space toggles `[x]`; unmark-then-Enter before `O`), desktop xterm tree pan. Operator writes: Space reviewed (`*` ASCII), `s`/`u` stage/unstage, `f`/`p`/`P` against a local bare origin (no GitHub), graph `m` merge commit, and full stash (`S` create, graph `a`/`p`/`D`). Fold / diff-pan / click are not claimed here.
 - Escape is sent as CSI-u (`CSI 27 u`) so it is not swallowed as a CSI prefix. Unmodified printable keys stay single bytes. Shift+letter uses CSI-u (`CSI code ; 2 : 1 u` press, `: 3` release) so `event::read` sees the same encoding the live loop requested with keyboard enhancement — a raw `'O'` byte is a different path.
 
-Do not add a second screenshot pipeline. Do not replace `tui_daily_e2e.rs`.
+Do not add a second screenshot pipeline. Do not replace `tui_headless_e2e.rs`.

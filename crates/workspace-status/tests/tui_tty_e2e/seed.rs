@@ -1,5 +1,5 @@
 //! Temp git workspaces for the real-TTY e2e. Same seed style as the
-//! headless daily suite — real repos, no mocked git.
+//! headless TestBackend suite — real repos, no mocked git.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -161,7 +161,7 @@ pub fn seed_long_path_file(workspace: &Path) {
     .unwrap();
 }
 
-/// Daily-path workspace: dirty `app`, clean `lib`, ignored `notes`, merge graph.
+/// Dirty `app`, clean `lib`, ignored `notes`, merge graph.
 pub fn daily_workspace() -> (PathBuf, PathBuf) {
     let root = unique_root("ws-tui-tty");
     let workspace = root.join("workspace");
