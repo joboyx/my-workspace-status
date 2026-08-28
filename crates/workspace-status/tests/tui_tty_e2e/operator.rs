@@ -1,9 +1,9 @@
 //! Additional real-TTY operator paths not claimed by `main.rs`.
 //!
-//! Fold (`h`/`l`, `z`, `zz` subtree), click-to-select, `gg`/`G`, `n`/`N`
-//! pane search, graph `c` create-branch, `r`, ignored repos, plus other
-//! session keys the help overlay lists that a person actually types. Same
-//! PTY harness: bytes in, painted screen out.
+//! Fold (`h`/`l`, `z`, `zz` subtree), click-to-select, `gg`/`G`, Home/End,
+//! `n`/`N` pane search, graph `c` create-branch, `r`, ignored repos, plus
+//! other session keys the help overlay lists that a person actually types.
+//! Same PTY harness: bytes in, painted screen out.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -232,6 +232,62 @@ fn pty_gg_and_g_jump_workspace_tree() {
     tui.wait_pred(
         |screen| !tree_has(screen, "app") && !tree_has(screen, "lib"),
         "gg then h folds the workspace root (not only No updates)",
+        WAIT,
+    );
+}
+
+/// Left-tree cursor bar (`▌`) on the row that contains `needle`.
+fn tree_cursor_on(screen: &str, needle: &str) -> bool {
+    left_tree(screen)
+        .lines()
+        .find(|line| line.contains(needle))
+        .is_some_and(|line| line.contains('\u{258C}'))
+}
+
+/// Home / End jump the workspace tree. CSI `1~` / `4~` with event types.
+///
+/// Launch starts on README.md. End must land on No updates (last row).
+/// Home must return to the workspace root. Breadcrumb stays the workspace
+/// label on file, group, and root, so the claim is the cursor bar plus
+/// fold. A no-op leaves the bar on README.md.
+#[test]
+fn pty_home_and_end_jump_workspace_tree() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = PtySession::open(&workspace);
+    tui.wait_contains("README.md", WAIT);
+    tui.wait_pred(
+        |screen| tree_cursor_on(screen, "README.md") && !tree_cursor_on(screen, "No updates"),
+        "launch cursor is the dirty file, not No updates",
+        WAIT,
+    );
+
+    tui.end();
+    tui.wait_pred(
+        |screen| tree_cursor_on(screen, "No updates") && !tree_cursor_on(screen, "README.md"),
+        "End paints the cursor on No updates (a no-op stays on README)",
+        WAIT,
+    );
+    tui.key('l');
+    tui.wait_pred(
+        |screen| tree_has(screen, "lib"),
+        "End then l opens No updates (End actually moved)",
+        WAIT,
+    );
+
+    tui.home();
+    tui.wait_pred(
+        |screen| {
+            tree_cursor_on(screen, "workspace")
+                && !tree_cursor_on(screen, "No updates")
+                && !tree_cursor_on(screen, "README.md")
+        },
+        "Home paints the cursor on the workspace root (a no-op stays on No updates)",
+        WAIT,
+    );
+    tui.key('h');
+    tui.wait_pred(
+        |screen| !tree_has(screen, "app") && !tree_has(screen, "lib"),
+        "Home then h folds the workspace root (not only No updates)",
         WAIT,
     );
 }
