@@ -1,4 +1,4 @@
-//! Daily-path ratatui e2e. TestBackend only — no TTY.
+//! Headless TestBackend e2e. No TTY.
 //!
 //! Covers the tree, file diff, multi-lane graph, search, theme
 //! cycle, commit drill, and hidden ignored repos. Fixtures follow the same

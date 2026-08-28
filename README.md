@@ -158,7 +158,7 @@ The CLI is treated as a black box:
 - Desired output shapes live in [SAMPLE_OUTPUT.md](./SAMPLE_OUTPUT.md).
 - The workspace snapshot contract (`--json` and `--plain`) lives in [docs/snapshot.md](./docs/snapshot.md).
 - The snapshot fixture e2e lives in [crates/workspace-status/tests/snapshot_contract.rs](./crates/workspace-status/tests/snapshot_contract.rs).
-- Daily-path TUI coverage lives in [crates/workspace-status/tests/tui_daily_e2e.rs](./crates/workspace-status/tests/tui_daily_e2e.rs).
+- Headless TUI coverage lives in [crates/workspace-status/tests/tui_headless_e2e.rs](./crates/workspace-status/tests/tui_headless_e2e.rs).
 - Real-TTY TUI e2e lives in [crates/workspace-status/tests/tui_tty_e2e/](./crates/workspace-status/tests/tui_tty_e2e/). See [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md).
 
 ### Running the test suite
@@ -169,7 +169,7 @@ cargo test --workspace
 
 ### Coverage
 
-`cargo test --workspace` covers the snapshot contract, CLI flags, discovery, the daily TUI path (TestBackend, no TTY), and the real-TTY TUI path (PTY, Unix):
+`cargo test --workspace` covers the snapshot contract, CLI flags, discovery, the headless TUI path (TestBackend, no TTY), and the real-TTY TUI path (PTY, Unix):
 
 | Area                  | Covered behavior                                                                                                                                                                                |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
