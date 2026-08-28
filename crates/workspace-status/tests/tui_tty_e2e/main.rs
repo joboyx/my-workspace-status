@@ -77,11 +77,13 @@ fn tree_has(screen: &str, needle: &str) -> bool {
 }
 
 /// Left-tree cursor bar (`▌`) on the row that contains `needle`.
+#[cfg(unix)]
 fn tree_cursor_on(screen: &str, needle: &str) -> bool {
     tree_line_containing(screen, needle).is_some_and(|line| line.contains('\u{258C}'))
 }
 
 /// Breadcrumb is the workspace basename only (file-focused; no repo crumb).
+#[cfg(unix)]
 fn launch_breadcrumb_workspace_only(screen: &str) -> bool {
     let lines: Vec<&str> = screen.lines().collect();
     let Some(crumb) = lines.get(lines.len().saturating_sub(2)) else {
@@ -91,6 +93,7 @@ fn launch_breadcrumb_workspace_only(screen: &str) -> bool {
 }
 
 /// Idle status: directory-tree + preferred split pills, help, file hints.
+#[cfg(unix)]
 fn launch_status_chrome(screen: &str) -> bool {
     let Some(status) = screen.lines().last() else {
         return false;
@@ -110,6 +113,7 @@ fn launch_status_chrome(screen: &str) -> bool {
 }
 
 /// Left tree focused, right diff unfocused (title padding).
+#[cfg(unix)]
 fn launch_panes_left_tree_right_diff(screen: &str) -> bool {
     let Some(top) = screen.lines().next() else {
         return false;
@@ -119,6 +123,7 @@ fn launch_panes_left_tree_right_diff(screen: &str) -> bool {
 
 /// Documented first paint on the daily seed. A blank, graph-first, ignored-
 /// shown, unfolded No-updates, or paint-changed-only frame cannot pass.
+#[cfg(unix)]
 fn documented_launch_first_paint(screen: &str) -> bool {
     let left = left_tree(screen);
     let readme = tree_line_containing(screen, "README.md");
