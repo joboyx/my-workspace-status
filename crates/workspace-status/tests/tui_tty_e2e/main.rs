@@ -753,9 +753,9 @@ fn pty_shift_letters_csi_u_type_into_search() {
         |screen| {
             screen.contains("keep-leaf-commit")
                 && screen.contains("noise-leaf-commit")
-                && screen.contains("O   clear focus")
+                && screen.contains("o   focus branches")
         },
-        "graph shows both leaves; idle hint binds O to clear focus",
+        "graph shows both leaves; o opens focus (O clear is hidden until a focus is on)",
         GIT_WAIT,
     );
 
