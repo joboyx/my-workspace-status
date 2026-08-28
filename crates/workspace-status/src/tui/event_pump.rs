@@ -220,12 +220,14 @@ mod tests {
     }
 
     /// Fails CI if the live TTY path grows a nested pump or a sync pane /
-    /// snapshot / write git call on the loop thread. Headless e2e keeps the
-    /// sync helpers (`load_right_headless`, `reload_snapshot`).
+    /// snapshot / write git call on the loop thread. Headless e2e uses
+    /// [`super::effect::Interpreter::interpret_sync`] (same apply as live).
     #[test]
     fn tty_event_loop_must_not_call_sync_pane_git() {
         let app = include_str!("app.rs");
         let loop_src = include_str!("event_loop.rs");
+        let effect = include_str!("effect.rs");
+        let headless = include_str!("headless.rs");
         let sched = include_str!("scheduler.rs");
 
         for pumped in [
@@ -254,27 +256,39 @@ mod tests {
         );
         assert!(
             app.contains("load_right_headless("),
-            "Headless e2e must keep sync load_right_headless"
+            "unit tests may still call load_right_headless for pane compute"
+        );
+        assert!(
+            !headless.contains("load_right_headless"),
+            "HeadlessTui must not call load_right_headless"
+        );
+        assert!(
+            !headless.contains("apply_headless"),
+            "HeadlessTui must not keep a second apply path"
+        );
+        assert!(
+            headless.contains("interpret_sync("),
+            "HeadlessTui must call Interpreter::interpret_sync"
         );
         assert_eq!(
             app.matches("reload_snapshot(state, opts").count(),
-            1,
-            "only apply_headless_inner may call reload_snapshot(state, opts)"
+            0,
+            "sync reload_snapshot must not return"
         );
         assert_eq!(
             app.matches("reload_repo(state, opts").count(),
-            1,
-            "only apply_headless_inner may call reload_repo(state, opts)"
+            0,
+            "sync reload_repo must not return"
         );
         assert_eq!(
             app.matches("load_commit_files(state, opts").count(),
-            1,
-            "only apply_headless_inner may call load_commit_files(state, opts)"
+            0,
+            "sync load_commit_files must not return"
         );
         assert_eq!(
             app.matches("load_commit_diff(state, opts").count(),
-            1,
-            "only apply_headless_inner may call load_commit_diff(state, opts)"
+            0,
+            "sync load_commit_diff must not return"
         );
 
         assert!(
@@ -286,11 +300,16 @@ mod tests {
             "TTY must join workers on a JoinSet"
         );
         assert!(
+            loop_src.contains("interp.apply("),
+            "live JoinSet completions must call Interpreter::apply"
+        );
+        assert!(
             sched.contains("fn accept_repo_result"),
             "scheduler must gate stale collection generations"
         );
         assert!(
-            !loop_src.contains("collect_full_snapshot("),
+            !loop_src.contains(concat!("collect_full_", "snapshot("))
+                && !effect.contains(concat!("collect_full_", "snapshot(")),
             "live watch/refresh must stream process_repo, not wait on collect_full_snapshot"
         );
 

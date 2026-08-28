@@ -1,8 +1,10 @@
-//! Effect scheduler for the live TTY loop.
+//! Effect scheduler for the live TTY loop and Headless e2e.
 //!
-//! Turns [`Effect`](super::action::Effect) into capped `spawn_blocking` jobs
-//! and decides which [`TaskResult`] values may touch [`super::state::AppState`].
-//! The loop thread applies results; workers never draw.
+//! Turns [`Effect`](super::action::Effect) into capped jobs. The live loop
+//! `spawn_blocking`s them onto a `JoinSet`. Headless runs the same jobs on
+//! the test thread. [`Scheduler`] decides which [`TaskResult`] values may
+//! touch [`super::state::AppState`]. [`super::effect::Interpreter`] applies
+//! those results. Workers never draw.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 

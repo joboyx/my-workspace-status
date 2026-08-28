@@ -79,7 +79,7 @@ CLI `-p` / `-d` (progress strings go to the caller; `--json` sends them to stder
 | `background_fetch_targets` | Snapshot paths for the TUI background fetch timer. Hidden ignored checkouts are omitted. When ignored repos are shown, every snapshot path is included, including linked worktrees. Manual `f` stays on `op_targets`. |
 | `refresh_target` | Workspace / No-updates → whole snapshot; otherwise the focused checkout path. |
 
-After `p` / `P` / `d` / `f`, the TUI refreshes the affected repos and stamps those `repo:<path>` and `checkout:<path>` ids into the flash map. TTY local writes (`s` / `u` / `x` / stash / checkout / create-branch / merge / remove-worktree) run on `spawn_blocking`; error paths still enqueue snapshot + pane so leftover keys cannot flush. Headless e2e stays sync. Independent per-repo `f` / `p` / `P` (and `FetchTick`) share the same four-worker cap.
+After `p` / `P` / `d` / `f`, the TUI refreshes the affected repos and stamps those `repo:<path>` and `checkout:<path>` ids into the flash map. TTY local writes (`s` / `u` / `x` / stash / checkout / create-branch / merge / remove-worktree) run on `spawn_blocking`; error paths still enqueue snapshot + pane so leftover keys cannot flush. Headless e2e pumps the same `tui/effect.rs` interpreter on the test thread. Independent per-repo `f` / `p` / `P` (and `FetchTick`) share the same four-worker cap.
 
 ## Graph load (`tui/graph_load.rs`)
 
