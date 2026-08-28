@@ -14,9 +14,12 @@ use super::{
     assert_contains, op_finished, tree_has, tree_row_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
 use crate::common::hscroll::DIFF_HSCROLL_TAIL;
-use crate::harness::{self, left_tree, PtySession, SGR_WHEEL_RIGHT};
+use crate::harness::{
+    self, left_tree, tree_is_panned_to_tail, PtySession, SGR_WHEEL_DOWN, SGR_WHEEL_RIGHT,
+};
 use crate::seed::{
-    daily_workspace, focus_workspace, seed_long_diff_file, seed_repo, worktree_workspace,
+    daily_workspace, focus_workspace, seed_long_diff_file, seed_long_path_file, seed_repo,
+    worktree_workspace,
 };
 use workspace_status::update_check::UPDATE_PROMPT;
 
@@ -737,17 +740,20 @@ fn pty_double_click_enters_on_hit_row() {
 
 /// Tree `m` toggles mouse reporting. Not graph merge.
 ///
-/// Docs / keymap: mouse is on by default. Tree `m` (raw byte) flips
-/// capture and paints `Mouse off` / `Mouse on`. Off ignores SGR clicks.
-/// On selects. A focused graph commit would confirm merge instead.
+/// Docs / keymap / help: mouse is on by default. Tree `m` (raw byte)
+/// flips capture and paints `Mouse off` / `Mouse on`. Off ignores click,
+/// drag, and wheel. On accepts them. A focused graph commit would confirm
+/// merge instead.
 ///
-/// Default-on click must select `merger`. After `m`, the same click on
-/// README is ignored (cursor and pane stay on merger). After the second
-/// `m`, that click selects README. Toast-only or click-only is red.
-/// A no-op never leaves default-on select.
+/// Default-on click must select `merger`. After `m`, click, vertical
+/// wheel (`Cb` 65), and trackpad hscroll (`Cb` 67) are ignored. After
+/// the second `m`, click selects README, hscroll pans the clipped tree
+/// row, and vertical wheel moves the tree cursor. Toast-only, click-only,
+/// or a no-op is red.
 #[test]
 fn pty_m_toggles_mouse_capture() {
     let (_root, workspace) = daily_workspace();
+    seed_long_path_file(&workspace);
     let mut tui = PtySession::open(&workspace);
     tui.wait_contains("UNSTAGED", WAIT);
     tui.wait_contains("README.md", WAIT);
@@ -762,6 +768,7 @@ fn pty_m_toggles_mouse_capture() {
         "launch is tree-file focus with the README diff; mouse status and merge confirm are absent",
         GIT_WAIT,
     );
+    let _ = tui.wait_clipped_long_path_row(WAIT);
 
     let merger_row = tree_row_containing(&tui.screen(), "merger")
         .unwrap_or_else(|| panic!("merger row:\n{}", tui.screen()));
@@ -807,6 +814,36 @@ fn pty_m_toggles_mouse_capture() {
         WAIT,
     );
 
+    let merger_row = tree_row_containing(&tui.screen(), "merger")
+        .unwrap_or_else(|| panic!("merger row while mouse off:\n{}", tui.screen()));
+    tui.sgr_mouse(SGR_WHEEL_DOWN, TREE_LABEL_COL, merger_row);
+    tui.wait_ms(SETTLE_MS);
+    tui.wait_pred(
+        |screen| {
+            screen.contains("Mouse off")
+                && tree_cursor_on(screen, "merger")
+                && !tree_cursor_on(screen, "README.md")
+                && !screen.contains("UNSTAGED")
+        },
+        "vertical wheel is ignored while Mouse off (ungated wheel would leave merger)",
+        WAIT,
+    );
+
+    let hscroll_row = tui.wait_clipped_long_path_row(WAIT);
+    for _ in 0..40 {
+        tui.sgr_mouse(SGR_WHEEL_RIGHT, 6, hscroll_row);
+    }
+    tui.wait_ms(SETTLE_MS);
+    tui.wait_pred(
+        |screen| {
+            screen.contains("Mouse off")
+                && harness::clipped_long_path_row(screen).is_some()
+                && tree_cursor_on(screen, "merger")
+        },
+        "SGR hscroll is ignored while Mouse off (ungated wheel would pan the tree)",
+        WAIT,
+    );
+
     tui.key('m');
     tui.wait_pred(
         |screen| {
@@ -828,6 +865,25 @@ fn pty_m_toggles_mouse_capture() {
                 && screen.contains("UNSTAGED")
         },
         "SGR click selects README after Mouse on (status-only would leave merger focused)",
+        GIT_WAIT,
+    );
+
+    let hscroll_row = tui.wait_clipped_long_path_row(WAIT);
+    for _ in 0..40 {
+        tui.sgr_mouse(SGR_WHEEL_RIGHT, 6, hscroll_row);
+    }
+    tui.wait_pred(
+        |screen| tree_is_panned_to_tail(screen) && tree_cursor_on(screen, "README.md"),
+        "SGR hscroll pans the tree after Mouse on (gate-only would stay clipped)",
+        WAIT,
+    );
+
+    let readme_row = tree_row_containing(&tui.screen(), "README.md")
+        .unwrap_or_else(|| panic!("README row before wheel on:\n{}", tui.screen()));
+    tui.sgr_mouse(SGR_WHEEL_DOWN, TREE_LABEL_COL, readme_row);
+    tui.wait_pred(
+        |screen| !tree_cursor_on(screen, "README.md"),
+        "vertical wheel moves the tree cursor after Mouse on (gate-only would stay on README)",
         GIT_WAIT,
     );
 }
