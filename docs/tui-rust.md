@@ -46,7 +46,7 @@ To rebuild those frames, run `./scripts/capture-demo-stills.sh` (see [demo.md](.
 | `w` / `W` | Remove the focused linked worktree after a boxed confirm (`y` / `n`). Other rows refuse with `Focus a linked worktree to remove` |
 | `Tab` | Focus the other pane |
 | click | Select a tree, graph, or commit-file row, or focus the right pane. Click the fold chevron to toggle that row's fold |
-| double-click | Same as Enter / drill on the clicked cell. A chevron double-click still folds |
+| double-click | Same as Enter / drill on the clicked cell. A chevron double-click still folds (once; it does not Enter) |
 | `m` | Toggle mouse capture except on a focused graph commit (merge, above). Off ignores click / drag / wheel |
 | drag | Resize the tree / right pane split, or the in-diff side-by-side RULE. Drag a graph scrollbar thumb to scroll; click the track to jump |
 | `i` | Toggle inline / split on a file diff. Split falls back to inline below 100 columns |

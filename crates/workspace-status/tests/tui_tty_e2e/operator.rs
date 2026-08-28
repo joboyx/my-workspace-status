@@ -432,61 +432,100 @@ fn sgr_double_click(tui: &mut PtySession, col: u16, row: u16) {
     tui.sgr_click(col, row);
 }
 
-/// Double-click a list row is Enter (help: `Enter dblclick`, focus right / drill).
+/// Double-click is Enter on the hit row (help: `Enter dblclick`).
 ///
-/// Single-click only selects. Left tree: focus the right pane (`[workspace]`).
-/// Right graph: drill to commit files (`┌ files`, `wip.txt`, stash crumb).
-/// Right files: drill to the file diff (`┌ diff`). A no-op or select-only
-/// click leaves those Enter results off screen.
+/// Docs: left Enter focuses right on the same stack; right Enter drills
+/// graph → commit files → commit diff; a chevron double-click still folds
+/// and must not Enter. A single click only selects. Keyboard Enter on the
+/// graph stash is the drill oracle the mouse pair must match.
 #[test]
 fn pty_double_click_enters_on_hit_row() {
     let (_root, workspace) = daily_workspace();
     let mut tui = PtySession::open(&workspace);
     tui.wait_contains("UNSTAGED", WAIT);
-    tui.wait_contains("README.md", WAIT);
     tui.wait_pred(
-        |screen| !screen.contains("[workspace]") && screen.contains("┌ diff"),
-        "launch is left-focused on the file diff, not Enter",
+        |screen| tree_has(screen, "No updates") && !tree_has(screen, "lib"),
+        "lib stays under the folded No-updates group",
         WAIT,
     );
 
-    let readme_row = tree_row_containing(&tui.screen(), "README.md")
-        .unwrap_or_else(|| panic!("README row:\n{}", tui.screen()));
-    tui.sgr_click(TREE_LABEL_COL, readme_row);
+    let nu_row = tree_row_containing(&tui.screen(), "No updates")
+        .unwrap_or_else(|| panic!("No updates row:\n{}", tui.screen()));
+    sgr_double_click(&mut tui, TREE_DEPTH1_CHEVRON_COL, nu_row);
+    tui.wait_pred(
+        |screen| {
+            tree_has(screen, "lib")
+                && tree_has(screen, "No updates")
+                && !screen.contains("[workspace]")
+                && !screen.contains("┌ files")
+        },
+        "chevron double-click folds once (a second toggle hides lib; Enter would focus right)",
+        WAIT,
+    );
+
+    tui.wait_ms(DOUBLE_CLICK_EXPIRE_MS);
+    let merger_row = tree_row_containing(&tui.screen(), "merger")
+        .unwrap_or_else(|| panic!("merger row:\n{}", tui.screen()));
+    tui.sgr_click(TREE_LABEL_COL, merger_row);
+    tui.wait_contains("WIP on graph", GIT_WAIT);
     tui.wait_ms(DOUBLE_CLICK_EXPIRE_MS);
     tui.wait_pred(
         |screen| {
-            !screen.contains("[workspace]")
-                && screen.contains("UNSTAGED")
-                && screen.contains("┌ tree")
-                && screen.contains("┌ diff")
+            screen.contains("┌ graph")
+                && screen.contains("WIP on graph")
+                && !screen.contains("[merger]")
+                && !screen.contains("┌ files")
         },
-        "single-click README selects only (no right-pane focus)",
+        "single-click merger selects the graph only (left focus)",
         WAIT,
     );
 
-    sgr_double_click(&mut tui, TREE_LABEL_COL, readme_row);
+    sgr_double_click(&mut tui, TREE_LABEL_COL, merger_row);
     tui.wait_pred(
         |screen| {
-            screen.contains("[workspace]")
-                && screen.contains("UNSTAGED")
-                && screen.contains("┌ diff")
+            screen.contains("[merger]")
+                && screen.contains("WIP on graph")
+                && screen.contains("┌ graph")
                 && !screen.contains("┌ files")
                 && !screen.contains("wip.txt")
         },
-        "tree double-click is Enter: focus right on the same diff (select-only would omit [workspace])",
+        "tree double-click is Enter on the hit repo: focus right, do not drill",
         WAIT,
     );
 
     tui.esc();
     tui.wait_pred(
-        |screen| !screen.contains("[workspace]"),
-        "Esc returns left focus before the graph drill",
+        |screen| screen.contains("WIP on graph") && !screen.contains("[merger]"),
+        "Esc unfocuses without popping the graph",
         WAIT,
     );
 
-    tui.search("merger");
-    tui.wait_contains("WIP on graph", GIT_WAIT);
+    tui.tab();
+    tui.wait_contains("Working tree", WAIT);
+    tui.key('j');
+    tui.wait_ms(SETTLE_MS);
+    tui.enter();
+    tui.wait_pred(
+        |screen| {
+            screen.contains("┌ files")
+                && screen.contains("wip.txt")
+                && screen.contains("[stash@{0}]")
+        },
+        "keyboard Enter on the stash row drills to commit files (oracle)",
+        GIT_WAIT,
+    );
+    tui.esc();
+    tui.esc();
+    tui.wait_pred(
+        |screen| {
+            screen.contains("WIP on graph")
+                && !screen.contains("┌ files")
+                && !screen.contains("[stash@{0}]")
+        },
+        "Esc Esc returns to the graph after the keyboard oracle",
+        WAIT,
+    );
+
     tui.wait_ms(DOUBLE_CLICK_EXPIRE_MS);
     let graph_row = screen_row_containing(&tui.screen(), "WIP on graph")
         .unwrap_or_else(|| panic!("graph WIP row:\n{}", tui.screen()));
@@ -494,13 +533,12 @@ fn pty_double_click_enters_on_hit_row() {
     tui.wait_ms(DOUBLE_CLICK_EXPIRE_MS);
     tui.wait_pred(
         |screen| {
-            screen.contains("┌ graph")
-                && screen.contains("[merger]")
+            screen.contains("WIP on graph")
                 && !screen.contains("┌ files")
                 && !screen.contains("wip.txt")
                 && !screen.contains("[stash@{0}]")
         },
-        "single-click the graph row selects and focuses right (no files drill)",
+        "single-click the stash row selects it (no files drill)",
         WAIT,
     );
 
@@ -511,10 +549,9 @@ fn pty_double_click_enters_on_hit_row() {
                 && screen.contains("wip.txt")
                 && screen.contains("[stash@{0}]")
                 && screen.contains("workspace › merger")
-                && screen.contains("files 1")
                 && !screen.contains("[merger]")
         },
-        "graph double-click is Enter: drill to commit files (select-only would stay on the graph)",
+        "graph double-click matches keyboard Enter: drill to that stash's files",
         GIT_WAIT,
     );
 
@@ -529,8 +566,9 @@ fn pty_double_click_enters_on_hit_row() {
                 && screen.contains("wip.txt")
                 && !screen.contains("┌ diff")
                 && !screen.contains("@@")
+                && !screen.contains("+stash me")
         },
-        "single-click the commit-file row stays on the files list (no diff drill)",
+        "single-click the commit-file row stays on the files list",
         WAIT,
     );
 
@@ -538,11 +576,27 @@ fn pty_double_click_enters_on_hit_row() {
     tui.wait_pred(
         |screen| {
             screen.contains("┌ diff")
-                && screen.contains("wip.txt")
-                && (screen.contains("@@") || screen.contains("NEW"))
+                && screen.contains("[wip.txt]")
+                && screen.contains("@@")
+                && screen.contains("+stash me")
         },
-        "files double-click is Enter: open the commit diff (select-only would stay on files)",
+        "files double-click is Enter: open that file's commit diff",
         GIT_WAIT,
+    );
+
+    tui.wait_ms(DOUBLE_CLICK_EXPIRE_MS);
+    sgr_double_click(&mut tui, RIGHT_PANE_COL, file_row);
+    tui.wait_ms(SETTLE_MS);
+    tui.wait_pred(
+        |screen| {
+            screen.contains("┌ diff")
+                && screen.contains("[wip.txt]")
+                && screen.contains("@@")
+                && screen.contains("+stash me")
+                && !screen.contains("┌ graph")
+        },
+        "double-click at the diff leaf is a no-op (still that diff)",
+        WAIT,
     );
 }
 
