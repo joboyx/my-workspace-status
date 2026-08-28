@@ -1,8 +1,9 @@
 //! Additional real-TTY operator paths not claimed by `main.rs`.
 //!
-//! Fold, click-to-select, `gg`/`G`, graph `c` create-branch, `r`, ignored
-//! repos, plus other session keys the help overlay lists that a person
-//! actually types. Same PTY harness: bytes in, painted screen out.
+//! Fold (`h`/`l`, `z`, `zz` subtree), click-to-select, `gg`/`G`, graph `c`
+//! create-branch, `r`, ignored repos, plus other session keys the help
+//! overlay lists that a person actually types. Same PTY harness: bytes in,
+//! painted screen out.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -11,7 +12,7 @@ use super::{
     assert_contains, op_finished, tree_has, tree_row_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
 use crate::common::hscroll::DIFF_HSCROLL_TAIL;
-use crate::harness::{self, PtySession, SGR_WHEEL_RIGHT};
+use crate::harness::{self, left_tree, PtySession, SGR_WHEEL_RIGHT};
 use crate::seed::{daily_workspace, focus_workspace, seed_long_diff_file, worktree_workspace};
 use workspace_status::update_check::UPDATE_PROMPT;
 
@@ -58,6 +59,14 @@ fn pty_fold_h_l_toggles_no_updates_group() {
     );
 }
 
+/// ASCII collapsed chevron (`>`) on the left-tree row that contains `name`.
+fn tree_dir_collapsed(screen: &str, name: &str) -> bool {
+    left_tree(screen)
+        .lines()
+        .find(|line| line.contains(name))
+        .is_some_and(|line| line.contains('>'))
+}
+
 /// `z` on the repo row hides its dirty file. Not Space (reviewed).
 #[test]
 fn pty_z_folds_focused_repo() {
@@ -76,6 +85,66 @@ fn pty_z_folds_focused_repo() {
     tui.wait_pred(
         |screen| !tree_has(screen, "README.md"),
         "z on app hides README.md",
+        WAIT,
+    );
+}
+
+/// `zz` subtree-folds the focused repo. Nested leaf stays hidden after `l`.
+///
+/// First `z` toggles only this row. Second `z` within 400ms is
+/// `toggleSubtree`. A missing chord, a late second `z`, or a no-op leaves
+/// `zz-leaf.rs` visible once `l` opens the repo.
+#[test]
+fn pty_zz_toggles_subtree_not_only_row() {
+    let (_root, workspace) = daily_workspace();
+    fs::create_dir_all(workspace.join("app").join("src")).unwrap();
+    fs::write(
+        workspace.join("app").join("src").join("zz-leaf.rs"),
+        "fn zz_leaf() {}\n",
+    )
+    .unwrap();
+
+    let mut tui = PtySession::open(&workspace);
+    tui.wait_pred(
+        |screen| tree_has(screen, "zz-leaf.rs") && tree_has(screen, "README.md"),
+        "nested leaf is visible before zz",
+        WAIT,
+    );
+
+    tui.search("zz-leaf");
+    tui.wait_contains("/zz-leaf", WAIT);
+    tui.key('k');
+    tui.wait_ms(SETTLE_MS);
+    tui.key('k');
+    tui.wait_ms(SETTLE_MS);
+
+    tui.key('z');
+    tui.wait_pred(
+        |screen| !tree_has(screen, "zz-leaf.rs") && !tree_has(screen, "README.md"),
+        "first z hides the repo children",
+        WAIT,
+    );
+    tui.wait_contains("z…", WAIT);
+    // Chord expiry does not redraw by itself. Wait past 400ms so the next
+    // `z` is FoldToggle, not FoldToggleSubtree.
+    tui.wait_ms(500);
+
+    tui.zz();
+    tui.wait_pred(
+        |screen| !tree_has(screen, "zz-leaf.rs") && !tree_has(screen, "README.md"),
+        "zz subtree-folds the repo (a missing chord would show the leaf)",
+        WAIT,
+    );
+
+    tui.key('l');
+    tui.wait_pred(
+        |screen| {
+            tree_has(screen, "README.md")
+                && tree_has(screen, "src")
+                && !tree_has(screen, "zz-leaf.rs")
+                && tree_dir_collapsed(screen, "src")
+        },
+        "l opens the repo with src still folded (a second FoldToggle would show zz-leaf.rs)",
         WAIT,
     );
 }

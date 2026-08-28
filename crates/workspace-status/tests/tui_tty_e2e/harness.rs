@@ -255,6 +255,14 @@ impl PtySession {
         self.key('g');
     }
 
+    /// `zz` chord: two `z` bytes inside the 400ms window.
+    ///
+    /// First `z` toggles the focused row. The second is `toggleSubtree`.
+    pub fn zz(&mut self) {
+        self.key('z');
+        self.key('z');
+    }
+
     pub fn enter(&mut self) {
         self.send_bytes(b"\r");
     }
