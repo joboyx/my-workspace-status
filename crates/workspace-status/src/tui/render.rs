@@ -531,6 +531,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
     let matches = graph_search_matches(state);
     let pal = state.theme.palette();
     let flash_rows = state.graph_flash_rows();
+    let lane_colors = state.theme.lane_colors();
     GraphWidget::new(model)
         .ascii(state.ascii)
         .selected(Some(state.graph_cursor))
@@ -540,6 +541,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .search_matches(&matches, state.theme.pills().filter.bg)
         .flash_rows(&flash_rows)
         .cursor_style(pal.cursor, pal.cursor_bg)
+        .lane_colors(&lane_colors)
         .label_palette(GraphLabelPalette {
             subject: pal.repo,
             meta: pal.muted,

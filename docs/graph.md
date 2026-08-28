@@ -41,7 +41,8 @@ only when `scroll > 0`; the horizontal bar only when `col_offset > 0`.
 uses the full lane model; every row shares the same left-aligned clip. `GraphWidget::loading_older` paints
 `loading older…` under the list. `GraphWidget::lane_colors` colours each
 gutter cell from `GraphCell.color_lane`; an empty slice uses
-`DEFAULT_LANE_COLORS`.
+`DEFAULT_LANE_COLORS`. The TUI passes the active built-in theme's eight
+colours (`T` cycles).
 `GraphWidget::search_matches` paints the filter/search background on
 selectable visible-row indexes. Spacers stay
 unhighlighted. `GraphWidget::flash_rows` paints the fade background on

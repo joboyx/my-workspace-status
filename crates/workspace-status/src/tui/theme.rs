@@ -93,6 +93,8 @@ pub struct Theme {
     pub surface: &'static str,
     pub palette: ThemePalette,
     pub pill: ThemePill,
+    /// Graph gutter cycle. Tokyo Night matches [`workspace_status_graph::DEFAULT_LANE_COLORS`].
+    pub lane_colors: [&'static str; 8],
 }
 
 /// One status-bar pill (background + foreground).
@@ -186,6 +188,11 @@ impl ThemeId {
             ThemeId::CatppuccinMocha => CATPPUCCIN_MOCHA,
         }
     }
+
+    /// Graph gutter colours for `T`.
+    pub fn lane_colors(self) -> [Color; 8] {
+        self.theme().lane_colors.map(hex_color)
+    }
 }
 
 const TOKYO_NIGHT: Theme = Theme {
@@ -219,6 +226,9 @@ const TOKYO_NIGHT: Theme = Theme {
         filter_bg: "#bb9af7",
         filter_fg: "#1a1b26",
     },
+    lane_colors: [
+        "#7aa2f7", "#bb9af7", "#7dcfff", "#9ece6a", "#e0af68", "#f7768e", "#ff9e64", "#73daca",
+    ],
 };
 
 const MONOKAI: Theme = Theme {
@@ -252,6 +262,9 @@ const MONOKAI: Theme = Theme {
         filter_bg: "#ae81ff",
         filter_fg: "#272822",
     },
+    lane_colors: [
+        "#66d9ef", "#ae81ff", "#a6e22e", "#e6db74", "#f92672", "#fd971f", "#f8f8f2", "#a1efe4",
+    ],
 };
 
 const DRACULA: Theme = Theme {
@@ -285,6 +298,9 @@ const DRACULA: Theme = Theme {
         filter_bg: "#bd93f9",
         filter_fg: "#282a36",
     },
+    lane_colors: [
+        "#8be9fd", "#bd93f9", "#50fa7b", "#f1fa8c", "#ff5555", "#ffb86c", "#ff79c6", "#6272a4",
+    ],
 };
 
 const GRUVBOX_DARK: Theme = Theme {
@@ -318,6 +334,9 @@ const GRUVBOX_DARK: Theme = Theme {
         filter_bg: "#d3869b",
         filter_fg: "#282828",
     },
+    lane_colors: [
+        "#83a598", "#d3869b", "#b8bb26", "#fabd2f", "#fb4934", "#fe8019", "#8ec07c", "#d79921",
+    ],
 };
 
 const CATPPUCCIN_MOCHA: Theme = Theme {
@@ -351,6 +370,9 @@ const CATPPUCCIN_MOCHA: Theme = Theme {
         filter_bg: "#cba6f7",
         filter_fg: "#1e1e2e",
     },
+    lane_colors: [
+        "#89b4fa", "#cba6f7", "#a6e3a1", "#f9e2af", "#f38ba8", "#fab387", "#89dceb", "#f5c2e7",
+    ],
 };
 
 /// Map an env / session string to a built-in theme id.
@@ -457,7 +479,19 @@ mod tests {
             assert_eq!(resolve_theme_id(Some(id.as_str())), id);
             assert!(!id.label().is_empty());
             assert!(id.theme().surface.starts_with('#'));
+            let lanes = id.theme().lane_colors;
+            assert_eq!(lanes.len(), 8);
+            let unique: std::collections::HashSet<_> = lanes.iter().copied().collect();
+            assert_eq!(unique.len(), 8, "{id:?} lane colours must be distinct");
         }
+        assert_eq!(
+            ThemeId::TokyoNight.theme().lane_colors,
+            workspace_status_graph::DEFAULT_LANE_COLORS
+        );
+        assert_ne!(
+            ThemeId::Monokai.theme().lane_colors[0],
+            ThemeId::TokyoNight.theme().lane_colors[0]
+        );
     }
 
     #[test]
