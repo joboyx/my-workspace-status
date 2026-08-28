@@ -99,6 +99,7 @@ Graph checkout confirm (and several other graph UX choices) is inspired by [Git 
 | Event-loop freeze / overlay ticks / graph autoload / key-repeat | `tui/event_loop.rs` + `tui/scheduler.rs` + `tui/event_pump.rs` + `tui/keys.rs` (CI: `tty_event_loop_must_not_call_sync_pane_git`) |
 | Mouse enable / SGR decode | `tui/tty.rs` (live `poll_event` / `read_event` / `enable_mouse`; Headless SGR through `decode_sgr_mouse`) + the input thread in `tui/event_loop.rs` |
 | Real-TTY TUI e2e | `crates/workspace-status/tests/tui_tty_e2e/` (PTY in `cargo test`, including fold / click / `gg`/`G` / create-branch / `r` / ignored; xfce keys + xterm XTEST wheel in Actions `tui-tty-desktop`). Not TestBackend. See [tui-tty-e2e.md](./tui-tty-e2e.md) |
+| Desktop Xvfb / Openbox session | `scripts/with-desktop-session.sh` + `scripts/openbox.xml`. Callers: Actions `tui-tty-desktop`, `scripts/capture-demo-stills.sh`. Do not add a second screenshot pipeline. |
 
 ## CLI crate
 
@@ -139,4 +140,4 @@ A TTY TUI launch (`ws` / `workspace-status` without `--plain` / `--json` / `--up
 
 **Black-box tests against real temporary git repositories.** The plain report's output format is the user-facing contract (`SAMPLE_OUTPUT.md`). Mocked git would let porcelain parsing bugs through — rename arrows, `??` handling, `## branch...upstream [ahead N, behind M]` — which is exactly the class of bug that matters here. `crates/workspace-status/tests/snapshot_contract.rs` and the crate unit tests build real repos per scenario.
 
-**Real-TTY TUI e2e** spawns the `workspace-status` binary on a PTY and writes keys / xterm SGR mouse bytes so `event::read` is the live loop. Headless TestBackend stays in `tui_headless_e2e.rs`. Desktop (xfce4-terminal keys; xterm XTEST wheel) runs in GitHub Actions `tui-tty-desktop` because hosted runners have no trackpad. See [tui-tty-e2e.md](./tui-tty-e2e.md).
+**Real-TTY TUI e2e** spawns the `workspace-status` binary on a PTY and writes keys / xterm SGR mouse bytes so `event::read` is the live loop. Headless TestBackend stays in `tui_headless_e2e.rs`. Desktop (xfce4-terminal keys; xterm XTEST wheel) runs in GitHub Actions `tui-tty-desktop` because hosted runners have no trackpad. That job, and `scripts/capture-demo-stills.sh`, start Xvfb / dbus / Openbox through `scripts/with-desktop-session.sh`. See [tui-tty-e2e.md](./tui-tty-e2e.md).

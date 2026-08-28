@@ -10,21 +10,21 @@
 #
 # Self-contained for a Cursor Cloud Agent Linux VM: installs MesloLGS NF,
 # xvfb, xfce4-terminal, and grab tools when missing. Fails loudly instead of
-# writing ASCII/gray frames over good stills.
+# writing ASCII/gray frames over good stills. Xvfb + dbus + Openbox come from
+# scripts/with-desktop-session.sh (same session helper as desktop TTY e2e).
 set -euo pipefail
 trap '' HUP
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=with-desktop-session.sh
+source "$SCRIPT_DIR/with-desktop-session.sh"
 DEST="${1:-"$REPO_ROOT/tmp/demo-workspace"}"
 OUT_DIR="$REPO_ROOT/docs/images"
 STAGE_DIR="$REPO_ROOT/tmp/demo-stills-stage"
 FONT_DIR="${HOME}/.local/share/fonts/MesloLGS-NF"
 BIN="$REPO_ROOT/target/release/workspace-status"
 LAUNCHER="$STAGE_DIR/run-tui.sh"
-OPENBOX_RC="$STAGE_DIR/openbox.xml"
-DISPLAY_NUM="${WS_STATUS_STILLS_DISPLAY:-99}"
-XVFB_PID=""
 TERM_PID=""
 WID=""
 WS_PID=""
@@ -109,45 +109,6 @@ export GTK_A11Y=none
 exec $(printf '%q' "$BIN")
 EOF
   chmod +x "$LAUNCHER"
-
-  cat >"$OPENBOX_RC" <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<openbox_config xmlns="http://openbox.org/3.4/rc">
-  <theme>
-    <titleLayout></titleLayout>
-    <keepBorder>no</keepBorder>
-  </theme>
-  <applications>
-    <application class="*">
-      <decor>no</decor>
-    </application>
-  </applications>
-</openbox_config>
-EOF
-}
-
-start_xvfb() {
-  have Xvfb || die "Xvfb missing after apt install"
-  if [[ -S "/tmp/.X11-unix/X$DISPLAY_NUM" ]]; then
-    pkill -f "Xvfb :$DISPLAY_NUM" >/dev/null 2>&1 || true
-    sleep 0.2
-  fi
-  Xvfb ":$DISPLAY_NUM" -screen 0 1600x1000x24 -nolisten tcp >/tmp/ws-stills-xvfb.log 2>&1 &
-  XVFB_PID=$!
-  export DISPLAY=":$DISPLAY_NUM"
-  local i
-  for i in $(seq 1 50); do
-    [[ -S "/tmp/.X11-unix/X$DISPLAY_NUM" ]] && return 0
-    sleep 0.1
-  done
-  die "Xvfb :$DISPLAY_NUM did not start (see /tmp/ws-stills-xvfb.log)"
-}
-
-start_wm() {
-  if have openbox; then
-    setsid openbox --config-file "$OPENBOX_RC" >/tmp/ws-stills-openbox.log 2>&1 &
-    sleep 0.4
-  fi
 }
 
 cleanup() {
@@ -156,8 +117,8 @@ cleanup() {
   fi
   pkill -x xfce4-terminal >/dev/null 2>&1 || true
   pkill -f "$BIN" >/dev/null 2>&1 || true
-  if [[ -n "${XVFB_PID:-}" ]] && kill -0 "$XVFB_PID" 2>/dev/null; then
-    kill "$XVFB_PID" 2>/dev/null || true
+  if declare -F ws_desktop_session_stop >/dev/null; then
+    ws_desktop_session_stop
   fi
 }
 trap cleanup EXIT
@@ -437,12 +398,7 @@ ensure_bin
 rm -rf "$STAGE_DIR"
 write_helpers
 
-if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]] && have dbus-launch; then
-  eval "$(dbus-launch --sh-syntax)"
-fi
-
-start_xvfb
-start_wm
+ws_desktop_session_start --display "${WS_STATUS_STILLS_DISPLAY:-99}"
 seed
 
 launch_tui
