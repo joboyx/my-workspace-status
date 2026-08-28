@@ -674,9 +674,10 @@ fn focusbox_graph_right_full(screen: &str) -> bool {
 }
 
 /// `o` overlay: cursor on the current `* feature/keep` row. Not files drill.
+///
+/// The overlay covers the status row, so crumb/status helpers do not apply.
 #[cfg(unix)]
 fn graph_focus_overlay_on_current_keep(screen: &str) -> bool {
-    let crumb = crumb_line(screen);
     panes_tree_unfocused_graph_focused(screen)
         && screen.contains("Focus branches")
         && screen.contains("filter:")
@@ -686,8 +687,8 @@ fn graph_focus_overlay_on_current_keep(screen: &str) -> bool {
         && screen.contains("Enter apply")
         && screen.contains("O clear")
         && screen.contains("Esc cancel")
-        && crumb.contains("[focusbox]")
-        && !crumb.contains("graph focus:")
+        && screen.contains("workspace › [focusbox]")
+        && !screen.contains("graph focus:")
         && !screen.contains("drill")
         && not_files_search_or_stash(screen)
 }
