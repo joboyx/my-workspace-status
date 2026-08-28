@@ -1,9 +1,9 @@
 //! Additional real-TTY operator paths not claimed by `main.rs`.
 //!
-//! Fold (`h`/`l`, `z`, `zz` subtree), click-to-select, `gg`/`G`, graph `c`
-//! create-branch, `r`, ignored repos, plus other session keys the help
-//! overlay lists that a person actually types. Same PTY harness: bytes in,
-//! painted screen out.
+//! Fold (`h`/`l`, `z`, `zz` subtree), click-to-select, `gg`/`G`, `n`/`N`
+//! pane search, graph `c` create-branch, `r`, ignored repos, plus other
+//! session keys the help overlay lists that a person actually types. Same
+//! PTY harness: bytes in, painted screen out.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -13,7 +13,9 @@ use super::{
 };
 use crate::common::hscroll::DIFF_HSCROLL_TAIL;
 use crate::harness::{self, left_tree, PtySession, SGR_WHEEL_RIGHT};
-use crate::seed::{daily_workspace, focus_workspace, seed_long_diff_file, worktree_workspace};
+use crate::seed::{
+    daily_workspace, focus_workspace, seed_long_diff_file, seed_repo, worktree_workspace,
+};
 use workspace_status::update_check::UPDATE_PROMPT;
 
 /// Depth-1 fold chevron column when the tree inner origin is x=1.
@@ -146,6 +148,65 @@ fn pty_zz_toggles_subtree_not_only_row() {
         },
         "l opens the repo with src still folded (a second FoldToggle would show zz-leaf.rs)",
         WAIT,
+    );
+}
+
+/// Armed `/` then `n` / `N` steps pane matches. `n` unfolds the next hit.
+///
+/// Three `main` matches so `N` cannot pass as wrap-`n`. Shift+`N` is CSI-u.
+/// A no-op leaves `lib` folded, or stays on `lib` after `N`.
+#[test]
+fn pty_n_and_n_pane_next_prev() {
+    let (_root, workspace) = daily_workspace();
+    // Third clean `main` checkout so next and prev from `lib` diverge.
+    seed_repo(&workspace, "tools", "main", false);
+
+    let mut tui = PtySession::open(&workspace);
+    tui.wait_contains("README.md", WAIT);
+    tui.wait_pred(
+        |screen| tree_has(screen, "No updates") && !tree_has(screen, "lib"),
+        "lib stays under the folded No-updates group",
+        WAIT,
+    );
+
+    tui.search("main");
+    tui.wait_contains("/main", WAIT);
+    tui.wait_pred(
+        |screen| {
+            screen.contains("/main")
+                && !screen.contains("n next")
+                && !tree_has(screen, "lib")
+                && screen.contains("workspace › app")
+                && screen.contains("Uncommitted changes")
+        },
+        "first /main match is dirty app; lib stays folded; n next hint is gone",
+        GIT_WAIT,
+    );
+
+    tui.key('n');
+    tui.wait_pred(
+        |screen| {
+            tree_has(screen, "lib")
+                && screen.contains("workspace › lib")
+                && screen.contains("Working tree clean")
+                && !screen.contains("workspace › app")
+                && !screen.contains("Uncommitted changes")
+        },
+        "n moves to lib and loads its graph (a no-op leaves lib folded)",
+        GIT_WAIT,
+    );
+
+    tui.shift_letter('N');
+    tui.wait_pred(
+        |screen| {
+            screen.contains("/main")
+                && screen.contains("workspace › app")
+                && screen.contains("Uncommitted changes")
+                && !screen.contains("workspace › lib")
+                && !screen.contains("workspace › tools")
+        },
+        "N returns to app (a no-op stays on lib; wrap-n would land on tools)",
+        GIT_WAIT,
     );
 }
 
