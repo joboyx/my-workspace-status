@@ -13,6 +13,8 @@ mod desktop;
 #[cfg(unix)]
 mod harness;
 #[cfg(unix)]
+mod operator;
+#[cfg(unix)]
 mod seed;
 
 #[cfg(unix)]
@@ -64,6 +66,11 @@ fn op_finished(screen: &str, verb: &str) -> bool {
 fn tree_cleared_ahead_behind(screen: &str) -> bool {
     let left = left_tree(screen);
     !left.contains("v1") && !left.contains("^1")
+}
+
+#[cfg(unix)]
+fn tree_has(screen: &str, needle: &str) -> bool {
+    left_tree(screen).contains(needle)
 }
 
 #[cfg(unix)]

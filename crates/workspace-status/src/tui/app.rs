@@ -1011,6 +1011,24 @@ pub(crate) fn apply_one_repo_snapshot(
     state.apply_watch_snapshot(next);
 }
 
+/// Drop checkouts the latest discovery no longer returned.
+///
+/// Streamed collect keeps unfinished paths from the new generation. Paths
+/// that vanished (worktree remove, deleted repo) never get a `None` result,
+/// so they must leave the snapshot when discovery completes.
+pub(crate) fn drop_undiscovered_checkouts(state: &mut AppState, keep: &[String]) {
+    let gone: Vec<String> = state
+        .snapshot
+        .repos
+        .iter()
+        .map(|row| row.repo.clone())
+        .filter(|path| !keep.iter().any(|k| k == path))
+        .collect();
+    for path in gone {
+        apply_one_repo_snapshot(state, &path, None);
+    }
+}
+
 /// True when the focused checkout's identity or file signatures moved.
 pub(crate) fn focused_repo_needs_pane(
     before_sigs: &std::collections::BTreeMap<String, String>,
@@ -1097,6 +1115,46 @@ mod tests {
         fs::write(dir.join("README.md"), "# seed\n").unwrap();
         git(dir, &["add", "README.md"]);
         git(dir, &["commit", "-q", "-m", "seed"]);
+    }
+
+    fn dummy_repo(name: &str) -> crate::snapshot::RepoSnapshot {
+        crate::snapshot::RepoSnapshot {
+            repo: name.into(),
+            branch: "main".into(),
+            sync_status: crate::snapshot::SyncStatus::NoUpstream,
+            sync_note: String::new(),
+            head: String::new(),
+            has_unstaged: false,
+            has_staged: false,
+            has_untracked: false,
+            changes: vec![],
+            checkout_kind: CheckoutKind::Primary,
+            primary_repo: None,
+            merged_into_default: None,
+            default_branch_override: None,
+        }
+    }
+
+    #[test]
+    fn drop_undiscovered_checkouts_removes_vanished_paths() {
+        let snapshot = build_workspace_snapshot(
+            &[dummy_repo("app"), dummy_repo("linked")],
+            &[],
+            false,
+            &[],
+        );
+        let mut app = AppState::new(std::path::PathBuf::from("/tmp"), snapshot, true);
+        assert_eq!(app.snapshot.repos.len(), 2);
+        drop_undiscovered_checkouts(&mut app, &["app".into()]);
+        let names: Vec<&str> = app
+            .snapshot
+            .repos
+            .iter()
+            .map(|row| row.repo.as_str())
+            .collect();
+        assert_eq!(names, vec!["app"]);
+        drop_undiscovered_checkouts(&mut app, &["app".into()]);
+        assert_eq!(app.snapshot.repos.len(), 1);
     }
 
     #[test]

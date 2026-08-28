@@ -54,7 +54,58 @@ Packages (Debian/Ubuntu): `xvfb xfce4-terminal xterm xdotool dbus-x11 openbox`. 
 - Tree hscroll asserts a clipped `very-long` prefix on the **tree row**, then `TAIL99` after pan, with the prefix gone. A search chip that already contains `TAIL99` does not count. Same oracle as `tui_headless_e2e` `tree_trackpad_sgr_hscroll_pans_without_stealing_focus`. Do not `/` search the tail first: that puts `TAIL99` on screen before any wheel. Wait for a clipped tree row on the same frame (dump the screen on timeout). Do not `expect` a row after a later `screen()` call.
 - Desktop wheel is a real XTEST pointer event: root-coordinate `mousemove --sync` then `click 7`, **no `--window`** on warp or click. VTE ignores `XSendEvent` (`xdotool --window`). The wheel oracle runs in **xterm** because VTE 0.76 does not report buttons 6/7. xfce stays for help/search keys.
 - Openbox is started with `--config-file crates/workspace-status/tests/tui_tty_e2e/openbox.xml` (no decorations) so cell-to-pixel math matches the cell grid. The test does not `--replace` a running WM.
-- Claims kept because they fail on a no-op: launch paint (wait for `+dirty`, not only the tree — right-pane git is a worker), `?` help, graph drill, graph branch focus `o`/`O`, Shift+letter CSI-u (`O` clear focus, `S` stash menu, `/` capitals), graph-focus unmark-then-Enter, Ctrl+C quit prompt, PTY SGR tree pan, watch apply while keys arrive (no `r`), streamed collect (focused tree + pane before a blocked `git status`), desktop help/search, desktop xfce Shift keys (space toggles `[x]`; unmark-then-Enter before `O`), desktop xterm tree pan. Operator writes: Space reviewed (`*` ASCII), `s`/`u` stage/unstage, `f`/`p`/`P` against a local bare origin (no GitHub), graph `m` merge commit, and full stash (`S` create, graph `a`/`p`/`D`). Fold / diff-pan / click are not claimed here.
-- Escape is sent as CSI-u (`CSI 27 u`) so it is not swallowed as a CSI prefix. Unmodified printable keys stay single bytes. Shift+letter uses CSI-u (`CSI code ; 2 : 1 u` press, `: 3` release) so `event::read` sees the same encoding the live loop requested with keyboard enhancement — a raw `'O'` byte is a different path.
+- Claims kept because they fail on a no-op: launch paint (wait for `+dirty`, not only the tree — right-pane git is a worker), `?` help, graph drill, graph branch focus `o`/`O`, Shift+letter CSI-u (`O` clear focus, `S` stash menu, `/` capitals), graph-focus unmark-then-Enter, Ctrl+C quit prompt, PTY SGR tree pan, watch apply while keys arrive (no `r`), streamed collect (focused tree + pane before a blocked `git status`), desktop help/search, desktop xfce Shift keys (space toggles `[x]`; unmark-then-Enter before `O`), desktop xterm tree pan. Operator writes: Space reviewed (`*` ASCII), `s`/`u` stage/unstage, `f`/`p`/`P` against a local bare origin (no GitHub), graph `m` merge commit, and full stash (`S` create, graph `a`/`p`/`D`). Fold, click-to-select, chevron click, right-pane click, `gg`/`G`, graph `c` create-branch, `r`, `.` ignored, `q`, help Enter-arm, revert confirm, worktree `W`, file-diff SGR pan, CSI-u `j` Repeat, picker `C`, `t`/`i`, `d`, `Ctrl-o`, and the startup update prompt are PTY claims in `operator.rs`.
+- Escape is sent as CSI-u (`CSI 27 u`) so it is not swallowed as a CSI prefix. Unmodified printable keys stay single bytes. Shift+letter uses CSI-u (`CSI code ; 2 : 1 u` press, `: 3` release) so `event::read` sees the same encoding the live loop requested with keyboard enhancement — a raw `'O'` byte is a different path. Held nav Repeat is `CSI code ; 1 : 2 u`.
+
+PTY tests are independent processes (own temp workspace + PTY). `cargo test --test tui_tty_e2e` may parallelize them. Desktop stays `--test-threads=1` on one X display. No second screenshot pipeline. Desktop twins exist only where PTY cannot encode the input (XTEST wheel).
+
+## Coverage
+
+Help overlay (`tui/help.rs` MOVE / GIT / VIEW) plus mouse and overlays. **PTY** runs in `cargo test`. **Desktop** is ignored locally and runs on `tui-tty-desktop`. TestBackend-only means `tui_headless_e2e.rs` — not a real-TTY claim.
+
+| Feature | PTY | Desktop | Notes |
+| --- | --- | --- | --- |
+| Launch paint (tree + `+dirty`) | `pty_launch_paints_tree_diff_and_chrome` | — | Right-pane git is a worker |
+| `?` help MOVE/GIT/VIEW | `pty_help_overlay` | `desktop_xfce_keys_help_and_search` | |
+| Help `/` search, Enter does not arm | `pty_help_enter_does_not_arm_pane_search` | — | Highlight only |
+| `/` pane search | `pty_graph_drill_enter_esc` | `desktop_xfce_keys_help_and_search` | |
+| Shift+letters in `/` (CSI-u) | `pty_shift_letters_csi_u_type_into_search` | `desktop_xfce_shift_keys_search_and_clear_focus` | |
+| Graph drill Enter/Esc | `pty_graph_drill_enter_esc` | — | |
+| Graph `o` / `O` focus | `pty_graph_branch_focus_overlay` | `desktop_xfce_shift_keys_search_and_clear_focus` | CSI-u `O` |
+| Unmark `[x]` then Enter | `pty_graph_focus_unmark_enter_clears` | `desktop_xfce_shift_keys_search_and_clear_focus` | |
+| Ctrl+C quit prompt | `pty_ctrl_c_prompts_before_quit` | — | Second Ctrl+C not claimed (sends `q` after) |
+| `q` quit | `pty_q_quits_immediately` | — | Process exits |
+| Tree SGR hscroll `CSI < 67` | `pty_tree_sgr_hscroll_pans_clipped_path` | `desktop_xterm_xtest_trackpad_hscroll` | Desktop: XTEST `click 7` in xterm |
+| Watch while keys (no `r`) | `pty_watch_applies_while_keys_arrive` | — | |
+| Streamed collect | `pty_streamed_collect_updates_focused_repo_before_slow` | — | |
+| Space reviewed `*` | `pty_space_marks_dirty_file_reviewed` | `desktop_xfce_review_and_stage` | |
+| `s` / `u` stage | `pty_stage_and_unstage_dirty_file` | `desktop_xfce_review_and_stage` | |
+| `f` fetch | `pty_fetch_local_remote_marks_behind` | `desktop_xfce_fetch_then_pull_local_remote` | Local bare origin |
+| `p` pull | `pty_pull_behind_local_remote` | `desktop_xfce_fetch_then_pull_local_remote` | |
+| Shift+P push | `pty_shift_p_csi_u_pushes_ahead` | `desktop_xfce_shift_p_pushes_ahead` | |
+| Graph `m` merge | `pty_graph_merge_creates_commit` | `desktop_xfce_graph_merge_creates_commit` | |
+| Stash `S`/`a`/`D` | `pty_stash_create_apply_and_drop` | `desktop_xfce_stash_create_apply_and_drop` | |
+| Graph stash `p` pop | `pty_stash_graph_pop` | `desktop_xfce_stash_graph_pop` | |
+| `h`/`l` fold | `pty_fold_h_l_toggles_no_updates_group` | — | `l` on a file must not open the group |
+| `z` fold | `pty_z_folds_focused_repo` | — | |
+| `gg` / `G` | `pty_gg_and_g_jump_workspace_tree` | — | `G` via CSI-u |
+| Click-to-select row | `pty_click_selects_tree_row` | — | SGR press+release; must change the right pane |
+| Click fold chevron | `pty_click_chevron_toggles_fold` | — | |
+| Click right pane | `pty_click_right_pane_focuses` | — | Breadcrumb `[workspace]` |
+| Graph `c` create-branch | `pty_graph_c_creates_branch_at_commit` | — | Ref only, no checkout |
+| `c` is not commit | `pty_c_on_tree_file_is_not_commit` | — | No overlay on a dirty file |
+| Picker `C` create | `pty_branch_picker_shift_c_creates` | — | |
+| `r` refresh | `pty_r_refreshes_new_dirty_file` | — | Watch off; new file appears (chrome toast is not sticky) |
+| `.` ignored repos | `pty_dot_toggles_ignored_repos` | — | |
+| `x` revert confirm | `pty_revert_confirm_n_cancels` | — | `n` cancels |
+| `W` remove worktree | `pty_worktree_w_remove_confirm` | — | Linked row gone after `y`; TUI has no worktree-add key |
+| File-diff SGR pan | `pty_left_pane_sgr_hscroll_pans_long_diff` | — | Wheel over the left pane |
+| CSI-u `j` Repeat | `pty_key_repeat_j_reaches_no_updates` | — | Kind 2; burst would be drained |
+| `t` / `i` view modes | `pty_t_and_i_toggle_view_modes` | — | |
+| `d` default branch | `pty_d_switches_to_default_branch` | — | |
+| `Ctrl-o` full file | `pty_ctrl_o_full_file_context` | — | |
+| Update prompt | `pty_update_prompt_n_opens_tui` | — | Curl shim; `n` mounts the TUI |
+
+Not claimed on a real TTY (TestBackend and/or no safe operator oracle yet): `zz` subtree (400ms chord), `n`/`N` pane next/prev, Home/End, PgUp/PgDn, Ctrl-u/d, `e` editor (spawns vim), `T` theme (colour only), `m` mouse toggle, double-click Enter, vertical wheel, divider/scrollbar drag, second Ctrl+C quit, `Y` revert+delete, graph `b` checkout, `d` skip-when-dirty. Worktree **add** is not a TUI key (`W` is remove only).
 
 Do not add a second screenshot pipeline. Do not replace `tui_headless_e2e.rs`.
