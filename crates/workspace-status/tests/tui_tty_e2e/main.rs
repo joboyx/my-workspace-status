@@ -76,17 +76,111 @@ fn tree_has(screen: &str, needle: &str) -> bool {
     left_tree(screen).contains(needle)
 }
 
+/// Left-tree cursor bar (`▌`) on the row that contains `needle`.
+#[cfg(unix)]
+fn tree_cursor_on(screen: &str, needle: &str) -> bool {
+    tree_line_containing(screen, needle).is_some_and(|line| line.contains('\u{258C}'))
+}
+
+/// Breadcrumb is the workspace basename only (file-focused; no repo crumb).
+#[cfg(unix)]
+fn launch_breadcrumb_workspace_only(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().collect();
+    let Some(crumb) = lines.get(lines.len().saturating_sub(2)) else {
+        return false;
+    };
+    crumb.trim() == "workspace"
+}
+
+/// Idle status: directory-tree + preferred split pills, help, file hints.
+#[cfg(unix)]
+fn launch_status_chrome(screen: &str) -> bool {
+    let Some(status) = screen.lines().last() else {
+        return false;
+    };
+    status.contains(" tree")
+        && status.contains(" split")
+        && status.contains("? help")
+        && status.contains("focus right")
+        && status.contains("stage")
+        && status.contains("revert")
+        && status.contains("fetch")
+        && status.contains("edit")
+        && status.contains("reviewed")
+        && !status.contains("drill")
+        && !status.contains("SEARCH")
+        && !status.contains("Flat paths")
+}
+
+/// Left tree focused, right diff unfocused (title padding).
+#[cfg(unix)]
+fn launch_panes_left_tree_right_diff(screen: &str) -> bool {
+    let Some(top) = screen.lines().next() else {
+        return false;
+    };
+    top.contains(" tree ") && top.contains(" diff") && !top.contains(" diff ")
+}
+
+/// Documented first paint on the daily seed. A blank, graph-first, ignored-
+/// shown, unfolded No-updates, or paint-changed-only frame cannot pass.
+#[cfg(unix)]
+fn documented_launch_first_paint(screen: &str) -> bool {
+    let left = left_tree(screen);
+    let readme = tree_line_containing(screen, "README.md");
+    let no_updates = tree_line_containing(screen, "No updates");
+    launch_panes_left_tree_right_diff(screen)
+        && left.contains("# workspace")
+        && left.contains("1 changed · all current")
+        && tree_has(screen, "app")
+        && tree_has(screen, "& main")
+        && tree_has(screen, "README.md")
+        && tree_has(screen, "merger")
+        && tree_has(screen, "feature/graph")
+        && tree_has(screen, "No updates")
+        && readme.is_some_and(|line| line.contains('M'))
+        && no_updates.is_some_and(|line| line.contains('>') && line.contains('1'))
+        && !tree_has(screen, "lib")
+        && !screen.contains("notes")
+        && tree_cursor_on(screen, "README.md")
+        && !tree_cursor_on(screen, "workspace")
+        && !tree_cursor_on(screen, "app")
+        && !tree_cursor_on(screen, "merger")
+        && !tree_cursor_on(screen, "No updates")
+        && screen.contains("app/README.md  inline (too narrow)")
+        && screen.contains("UNSTAGED")
+        && screen.contains("+dirty")
+        && screen.contains("@@ -1 +1,2 @@")
+        && launch_breadcrumb_workspace_only(screen)
+        && launch_status_chrome(screen)
+        && !screen.contains("[workspace]")
+        && !screen.contains("workspace ›")
+        && !screen.contains("SEARCH")
+        && !screen.contains("MOVE")
+        && !screen.contains("WIP on graph")
+        && !screen.contains("Working tree")
+        && !screen.contains("focus a repo for the graph")
+        && !screen.contains("No matching rows")
+        && !screen.contains("loading")
+}
+
+/// Spawn paints the documented first chrome. No keys.
+///
+/// Docs: left tree focused, first file selected, file diff on the right,
+/// ignored repos hidden, No updates folded, breadcrumb is the workspace
+/// basename while the right pane is a diff. Right-pane git is a worker, so
+/// a tree-only frame or a `+dirty` substring is not enough. A no-op, a
+/// blank screen, a graph-first launch, or a paint-changed-only assert
+/// cannot pass.
 #[cfg(unix)]
 #[test]
 fn pty_launch_paints_tree_diff_and_chrome() {
     let (_root, workspace) = daily_workspace();
     let tui = PtySession::open(&workspace);
-    tui.wait_contains("app", WAIT);
-    tui.wait_contains("README.md", WAIT);
-    tui.wait_contains(" tree", WAIT);
-    // Right-pane git is pumped. The tree can paint before `+dirty`.
-    tui.wait_contains("+dirty", WAIT);
-    harness::assert_absent(&tui.screen(), "notes");
+    tui.wait_pred(
+        documented_launch_first_paint,
+        "documented first paint: focused tree, README cursor, file diff, breadcrumb, status, seed rows",
+        WAIT,
+    );
 }
 
 #[cfg(unix)]
