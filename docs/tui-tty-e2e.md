@@ -95,10 +95,10 @@ Help overlay (`tui/help.rs` MOVE / GIT / VIEW) plus mouse and overlays. **PTY** 
 | Graph `c` create-branch | `pty_graph_c_creates_branch_at_commit` | — | Ref only, no checkout |
 | `c` is not commit | `pty_c_on_tree_file_is_not_commit` | — | No overlay on a dirty file |
 | Picker `C` create | `pty_branch_picker_shift_c_creates` | — | |
-| `r` refresh | `pty_r_refreshes_new_dirty_file` | — | Watch off |
+| `r` refresh | `pty_r_refreshes_new_dirty_file` | — | Watch off; new file appears (chrome toast is not sticky) |
 | `.` ignored repos | `pty_dot_toggles_ignored_repos` | — | |
 | `x` revert confirm | `pty_revert_confirm_n_cancels` | — | `n` cancels |
-| `W` remove worktree | `pty_worktree_w_remove_confirm` | — | TUI has no worktree-add key |
+| `W` remove worktree | `pty_worktree_w_remove_confirm` | — | Linked row gone after `y`; TUI has no worktree-add key |
 | File-diff SGR pan | `pty_left_pane_sgr_hscroll_pans_long_diff` | — | Wheel over the left pane |
 | CSI-u `j` Repeat | `pty_key_repeat_j_reaches_no_updates` | — | Kind 2; burst would be drained |
 | `t` / `i` view modes | `pty_t_and_i_toggle_view_modes` | — | |

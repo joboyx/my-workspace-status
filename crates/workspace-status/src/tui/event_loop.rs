@@ -33,8 +33,8 @@ use super::app::{
     apply_checkout_compute, apply_merge_compute, apply_one_repo_snapshot, apply_right_pane_load,
     apply_terminal_resize, commit_diff_list, compute_checkout, compute_commit_diff,
     compute_commit_files, compute_merge, compute_reload_repo, discard_held_nav_backlog,
-    discover_config, filter_repo_set, focused_repo_needs_pane, map_event, run_blocking_editor,
-    sync_mouse_capture, RightPaneRequest, RightPaneTarget, TuiOpts,
+    discover_config, drop_undiscovered_checkouts, filter_repo_set, focused_repo_needs_pane,
+    map_event, run_blocking_editor, sync_mouse_capture, RightPaneRequest, RightPaneTarget, TuiOpts,
 };
 use super::drill::CommitFileSource;
 use super::editor::{editor_command, is_detached_editor, resolve_editor};
@@ -1040,10 +1040,13 @@ fn apply_outcome(ctx: &mut LoopCtx<'_>, id: u64, outcome: JobOutcome) {
             {
                 return;
             }
+            let keep: Vec<String> = entries.iter().map(|(p, _, _)| p.clone()).collect();
+            drop_undiscovered_checkouts(ctx.state, &keep);
             ctx.metas = entries
                 .into_iter()
                 .map(|(path, meta, ov)| (path, (meta, ov)))
                 .collect();
+            ctx.presenter.mark();
         }
         JobOutcome::RepoStatus { gen, path, snap } => {
             if !ctx.sched.accept_repo_result(gen, &path) {

@@ -203,11 +203,15 @@ fn pty_r_refreshes_new_dirty_file() {
     let mut tui = PtySession::open(&workspace);
     tui.search("README");
     tui.wait_contains("/README", WAIT);
+    tui.wait_pred(
+        |screen| !tree_has(screen, "r-live.txt"),
+        "new file is absent before r",
+        WAIT,
+    );
     tui.wait_ms(SETTLE_MS);
     fs::write(workspace.join("app").join("r-live.txt"), "refresh me\n").unwrap();
     tui.key('r');
     tui.wait_contains("r-live.txt", GIT_WAIT);
-    tui.wait_contains("refreshed app", WAIT);
 }
 
 /// `.` shows ignored `notes`, then hides it again.
@@ -257,9 +261,14 @@ fn pty_help_enter_does_not_arm_pane_search() {
     tui.wait_contains("Esc clears search", WAIT);
     tui.enter();
     tui.wait_ms(SETTLE_MS);
+    tui.wait_contains("MOVE", WAIT);
+    tui.wait_contains("HELP  /quit", WAIT);
+    tui.esc();
+    tui.wait_contains("MOVE", WAIT);
+    tui.wait_contains("/ search help", WAIT);
+    tui.esc();
+    tui.wait_absent("MOVE", WAIT);
     let screen = tui.screen();
-    assert_contains(&screen, "MOVE");
-    assert_contains(&screen, "Esc clears search");
     harness::assert_absent(&screen, "/quit");
 }
 
@@ -310,13 +319,13 @@ fn pty_left_pane_sgr_hscroll_pans_long_diff() {
     tui.wait_contains("/unique-diffline", WAIT);
     tui.wait_contains("unique-diffline.rs", WAIT);
     tui.wait_pred(
-        |screen| !screen.contains(TAIL),
+        |screen| screen.contains("nnnn") && !screen.contains(TAIL),
         "long diff tail is clipped before pan",
         WAIT,
     );
     let row = tree_row_containing(&tui.screen(), "unique-diffline")
         .unwrap_or_else(|| panic!("long diff file row:\n{}", tui.screen()));
-    for _ in 0..40 {
+    for _ in 0..80 {
         tui.sgr_mouse(SGR_WHEEL_RIGHT, 6, row);
     }
     tui.wait_contains(TAIL, WAIT);
