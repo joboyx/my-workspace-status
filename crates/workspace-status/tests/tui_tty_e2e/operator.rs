@@ -2,8 +2,9 @@
 //!
 //! Fold (`h`/`l`, `z`, `zz` subtree), click-to-select, `gg`/`G`, Home/End,
 //! `n`/`N` pane search, PgUp/PgDn, Ctrl-u/d, graph `c` create-branch, `r`,
-//! ignored repos, plus other session keys the help overlay lists that a
-//! person actually types. Same PTY harness: bytes in, painted screen out.
+//! ignored repos, `e` editor, plus other session keys the help overlay
+//! lists that a person actually types. Same PTY harness: bytes in, painted
+//! screen out.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -738,6 +739,70 @@ fn pty_ctrl_o_full_file_context() {
     harness::assert_absent(&tui.screen(), " · full");
     tui.ctrl('o');
     tui.wait_contains(" · full", WAIT);
+}
+
+/// `e` opens the focused dirty file in `$EDITOR`. A stub editor writes a
+/// marker and exits 0 so the suite cannot hang in vim. A no-op `e` never
+/// creates the marker or remounts with `edited README.md`.
+#[test]
+fn pty_e_opens_focused_file_in_editor() {
+    let (_root, workspace) = daily_workspace();
+    let shim_dir = workspace.join(".e2e-editor-shim");
+    fs::create_dir_all(&shim_dir).unwrap();
+    let stub = shim_dir.join("stub-editor");
+    let marker = shim_dir.join("opened");
+    fs::write(
+        &stub,
+        "#!/bin/sh\n\
+         marker=\"${WS_STATUS_E2E_EDITOR_MARKER:?}\"\n\
+         file=\"\"\n\
+         for a in \"$@\"; do\n\
+           file=\"$a\"\n\
+         done\n\
+         printf '%s\\n' \"$@\" > \"$marker\"\n\
+         if [ -n \"$file\" ]; then\n\
+           printf '\\ne2e-editor-marker\\n' >> \"$file\"\n\
+         fi\n\
+         exit 0\n",
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&stub).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&stub, perms).unwrap();
+    let editor = stub.display().to_string();
+    let marker_s = marker.display().to_string();
+    let mut tui = PtySession::open_with_env(
+        &workspace,
+        &[
+            ("EDITOR", editor.as_str()),
+            ("WS_STATUS_E2E_EDITOR_MARKER", marker_s.as_str()),
+        ],
+    );
+    tui.wait_contains("README.md", WAIT);
+    tui.wait_contains("UNSTAGED", WAIT);
+    tui.wait_pred(
+        |screen| tree_cursor_on(screen, "README.md"),
+        "launch cursor is the dirty file before e",
+        WAIT,
+    );
+    tui.wait_ms(SETTLE_MS);
+
+    tui.key('e');
+    tui.wait_pred(
+        |screen| screen.contains("edited README.md") && tree_has(screen, "README.md"),
+        "TUI remounts with edited README.md after the stub editor exits (a no-op never paints that)",
+        WAIT,
+    );
+    let marker_body = fs::read_to_string(&marker).unwrap_or_default();
+    assert!(
+        marker_body.contains("README.md"),
+        "stub EDITOR must receive the focused file (a no-op never writes the marker):\n{marker_body}"
+    );
+    let readme = fs::read_to_string(workspace.join("app").join("README.md")).unwrap();
+    assert!(
+        readme.contains("e2e-editor-marker"),
+        "stub EDITOR must append to the opened file:\n{readme}"
+    );
 }
 
 /// Startup GitHub Release prompt on a TTY. `n` continues into the TUI.
