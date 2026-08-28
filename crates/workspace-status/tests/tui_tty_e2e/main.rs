@@ -412,26 +412,149 @@ fn pty_help_overlay() {
     );
 }
 
+/// First paint row: pane titles (focused titles pad both sides).
+#[cfg(unix)]
+fn pane_top(screen: &str) -> &str {
+    screen.lines().next().unwrap_or("")
+}
+
+/// Breadcrumb sits on the penultimate row (status is last).
+#[cfg(unix)]
+fn crumb_line(screen: &str) -> &str {
+    let lines: Vec<&str> = screen.lines().collect();
+    lines
+        .get(lines.len().saturating_sub(2))
+        .copied()
+        .unwrap_or("")
+}
+
+#[cfg(unix)]
+fn status_line(screen: &str) -> &str {
+    screen.lines().last().unwrap_or("")
+}
+
+/// Left tree focused, right graph unfocused. Not files / not a file diff.
+#[cfg(unix)]
+fn panes_tree_focused_graph_unfocused(screen: &str) -> bool {
+    let top = pane_top(screen);
+    top.contains(" tree ")
+        && top.contains(" graph")
+        && !top.contains(" graph ")
+        && !top.contains(" files")
+        && !top.contains(" diff")
+}
+
+/// Left tree unfocused, right graph focused (`Enter` on a graph-capable row).
+#[cfg(unix)]
+fn panes_tree_unfocused_graph_focused(screen: &str) -> bool {
+    let top = pane_top(screen);
+    top.contains(" graph ")
+        && top.contains(" tree")
+        && !top.contains(" tree ")
+        && !top.contains(" files")
+        && !top.contains(" diff")
+}
+
+/// Merger graph body. Files drill (`wip.txt` / `┌ files`) cannot pass.
+#[cfg(unix)]
+fn merger_graph_body(screen: &str) -> bool {
+    screen.contains("WIP on graph")
+        && screen.contains("stash@{0}")
+        && screen.contains("feature/graph")
+        && screen.contains("working tree clean")
+        && !screen.contains("wip.txt")
+        && !screen.contains("┌ files")
+        && !screen.contains("[stash@{0}]")
+}
+
+/// File-diff chrome from the launch README row. Must be gone after drill.
+#[cfg(unix)]
+fn still_file_diff(screen: &str) -> bool {
+    screen.contains("app/README.md")
+        || screen.contains("UNSTAGED")
+        || screen.contains("@@ -1 +1,2 @@")
+        || screen.contains("+dirty")
+        || launch_panes_left_tree_right_diff(screen)
+}
+
+/// Left-focused merger row with its graph loaded. Enter has not run.
+#[cfg(unix)]
+fn merger_graph_left_unfocused(screen: &str) -> bool {
+    let crumb = crumb_line(screen);
+    let status = status_line(screen);
+    panes_tree_focused_graph_unfocused(screen)
+        && tree_cursor_on(screen, "merger")
+        && !tree_cursor_on(screen, "README.md")
+        && !tree_cursor_on(screen, "app")
+        && crumb.contains("workspace › merger")
+        && !crumb.contains("[merger]")
+        && status.contains("focus right")
+        && !status.contains("drill")
+        && !status.contains("Esc")
+        && merger_graph_body(screen)
+        && !still_file_diff(screen)
+        && !screen.contains("SEARCH")
+}
+
+/// Documented Enter on a graph-capable tree row: focus the graph, stay
+/// on merger. A no-op, a files drill, or README/file-diff cannot pass.
+#[cfg(unix)]
+fn merger_graph_drilled_right(screen: &str) -> bool {
+    let crumb = crumb_line(screen);
+    let status = status_line(screen);
+    panes_tree_unfocused_graph_focused(screen)
+        && tree_cursor_on(screen, "merger")
+        && !tree_cursor_on(screen, "README.md")
+        && crumb.contains("workspace › [merger]")
+        && status.contains("drill")
+        && status.contains("Esc")
+        && status.contains("back")
+        && !status.contains("focus right")
+        && merger_graph_body(screen)
+        && !still_file_diff(screen)
+        && !screen.contains("SEARCH")
+}
+
+/// Enter on a graph-capable tree row focuses the graph. Esc pops back.
+///
+/// Docs + VIEW: Enter is `focus right / drill`; Esc is `back / unfocus`
+/// and never quits. Launch is the README file diff. `j` moves onto
+/// `merger` (the graph-capable row). Enter must paint the focused graph
+/// for that repo, not keep the file diff and not push commit files.
+/// Esc is CSI-u (`CSI 27 u`). It must restore the left tree and the
+/// merger row. A no-op, a screen-delta-only check, `/` search, Tab, or
+/// `o`/`O` cannot pass.
 #[cfg(unix)]
 #[test]
 fn pty_graph_drill_enter_esc() {
     let (_root, workspace) = daily_workspace();
     let mut tui = PtySession::open(&workspace);
-    tui.search("merger");
-    tui.wait_contains("merger", WAIT);
-    tui.wait_contains("WIP on graph", WAIT);
+    tui.wait_pred(
+        documented_launch_first_paint,
+        "launch is the README file diff (graph drill has not run)",
+        WAIT,
+    );
 
-    tui.tab();
-    tui.wait_contains("Working tree", WAIT);
     tui.key('j');
-    tui.wait_ms(150);
+    tui.wait_pred(
+        merger_graph_left_unfocused,
+        "j lands on merger and loads its graph (left focus, not yet Enter)",
+        GIT_WAIT,
+    );
+
     tui.enter();
-    tui.wait_contains("wip.txt", WAIT);
-    tui.enter();
-    tui.wait_contains_any(&["@@", "NEW", "UNSTAGED", "wip"], WAIT);
+    tui.wait_pred(
+        merger_graph_drilled_right,
+        "Enter on merger focuses that graph (file-diff / files drill / no-op cannot pass)",
+        WAIT,
+    );
+
     tui.esc();
-    tui.esc();
-    tui.wait_contains("WIP on graph", WAIT);
+    tui.wait_pred(
+        merger_graph_left_unfocused,
+        "CSI-u Esc restores the left tree and the merger row",
+        WAIT,
+    );
 }
 
 #[cfg(unix)]
@@ -1288,16 +1411,48 @@ mod xfce {
         let (_root, workspace) = daily_workspace();
         let tui = DesktopSession::open(&workspace);
         tui.key("slash");
+        tui.wait_contains("SEARCH", WAIT);
         tui.type_text("merger");
+        // Typing jumps to merger and starts graph git. Wait for that paint
+        // before Return: xfce can drop Enter while the pane worker runs.
+        tui.wait_pred(
+            |screen| {
+                screen.contains("SEARCH")
+                    && screen.contains("Enter arms query")
+                    && screen.contains("merger▏")
+                    && screen.contains("WIP on graph")
+                    && !screen.contains("/merger")
+            },
+            "SEARCH typing on merger after the graph jump",
+            GIT_WAIT,
+        );
         tui.key("Return");
-        tui.wait_contains("/merger", WAIT);
+        tui.wait_pred(
+            |screen| screen.contains("/merger") && !screen.contains("SEARCH"),
+            "Enter arms /merger; SEARCH closes",
+            WAIT,
+        );
         tui.key("Tab");
         tui.wait_contains("WIP on graph", WAIT);
         tui.wait_ms(SETTLE_MS);
         tui.key("slash");
+        tui.wait_contains("SEARCH", WAIT);
         tui.type_text("stash@{");
+        tui.wait_pred(
+            |screen| {
+                screen.contains("SEARCH")
+                    && screen.contains("Enter arms query")
+                    && screen.contains("stash@{▏")
+            },
+            "SEARCH typing stash@{",
+            WAIT,
+        );
         tui.key("Return");
-        tui.wait_contains("/stash@{", WAIT);
+        tui.wait_pred(
+            |screen| screen.contains("/stash@{") && !screen.contains("SEARCH"),
+            "Enter arms /stash@{",
+            WAIT,
+        );
         tui.wait_contains("stash@{0}", WAIT);
         tui.wait_ms(SETTLE_MS);
         tui.key("p");
