@@ -167,6 +167,8 @@ The CLI is treated as a black box:
 cargo test --workspace
 ```
 
+Agent map of TestBackend vs PTY vs desktop `#[ignore]`, plus `WS_STATUS_UPDATE_CHECK_STORE`: [AGENTS.md](./AGENTS.md).
+
 ### Coverage
 
 `cargo test --workspace` covers the snapshot contract, CLI flags, discovery, the headless TUI path (TestBackend, no TTY), and the real-TTY TUI path (PTY, Unix):
