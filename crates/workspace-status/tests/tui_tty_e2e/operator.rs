@@ -640,7 +640,7 @@ fn pty_home_and_end_jump_workspace_tree() {
             screen.contains("MOVE")
                 && help_lists_home_end_top_bottom(screen)
                 && screen.contains("gg   G")
-                && screen.contains("top / bottom of focused pane")
+                && screen.contains("top / bottom of focused")
                 && screen.contains("PgUp   PgDn")
                 && screen.contains("page focused pane")
         },
