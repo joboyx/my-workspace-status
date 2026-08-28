@@ -37,7 +37,7 @@ Flatten walks depth-first, emitting a `VisibleRow` per node: `id`, `depth`, `nod
 
 ## Fold state
 
-Default folds: ignored repos with children + the `no-updates` group. Non-ignored repos with changes start expanded. `z` toggles immediately and arms a 400ms `zz` window for subtree toggle.
+Default folds: ignored repos with children + the `no-updates` group. Non-ignored repos with changes start expanded. `z` toggles immediately and arms a 400ms `zz` window. Second `z` applies that same fold to foldable descendants.
 
 ## ViewStack / Enter / Esc
 

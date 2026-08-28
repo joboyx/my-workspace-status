@@ -83,7 +83,7 @@ Help overlay (`tui/help.rs` MOVE / GIT / VIEW) plus mouse and overlays. **PTY** 
 | Graph stash `p` pop | `pty_stash_graph_pop` | `desktop_xfce_stash_graph_pop` | |
 | `h`/`l` fold | `pty_fold_h_l_toggles_no_updates_group` | — | `l` on a file must not open the group |
 | `z` fold | `pty_z_folds_focused_repo` | — | |
-| `zz` subtree | `pty_zz_toggles_subtree_not_only_row` | — | 400ms chord. Nested leaf stays folded after `l` |
+| `zz` subtree | `pty_zz_toggles_subtree_not_only_row` | — | 400ms chord. First `z` folds this row (`z…`). Second `z` folds descendants. Nested leaf stays folded after `l`. Late `z` is row-only. Graph is a no-op |
 | `gg` / `G` | `pty_gg_and_g_jump_workspace_tree` | — | `G` via CSI-u |
 | Home / End | `pty_home_and_end_jump_workspace_tree` | — | CSI `1~` / `4~` with event types. Cursor bar + fold |
 | PgUp / PgDn | `pty_pgup_pgdn_pages_workspace_tree` | — | CSI `ESC [5~` / `ESC [6~`. Tree page jump |
