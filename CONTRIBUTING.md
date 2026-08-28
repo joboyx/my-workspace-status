@@ -32,6 +32,10 @@ That includes the real-TTY PTY e2e on Unix (`crates/workspace-status/tests/tui_t
 
 Agents and CI must use `--plain` or `--json`. A TTY run without those flags opens the TUI.
 
+## cargo-dist generate
+
+`.github/workflows/release.yml` is generated. After `dist generate`, restore `on.workflow_dispatch` and the host-job git-cliff steps. Numbered recipe: [docs/architecture.md](./docs/architecture.md) (**Distribution**). `cargo test --test release_watch` fails if those steps are missing, or if a TTY spawn path no longer isolates `WS_STATUS_UPDATE_CHECK_STORE`.
+
 ## Pull requests
 
 Open a pull request against main. GitHub Actions runs `cargo test --workspace` and the desktop TTY e2e job (`tui-tty-desktop`: xfce keys + xterm XTEST wheel) on pull requests and on main.

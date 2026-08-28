@@ -20,5 +20,7 @@ install-updater = true
 # Keep tag-triggered Release CI plus workflow_dispatch (see tag-release.yml).
 # GITHUB_TOKEN tag pushes do not start other workflows.
 # Also keeps git-cliff notes on the generated Release workflow (cliff.toml).
+# After `dist generate`, restore those host steps. Recipe: docs/architecture.md.
+# Do not set dispatch-releases = true (that drops tag-push).
 allow-dirty = ["ci"]
 # GitHub Releases only: do not add Homebrew taps or crates.io publish jobs.
