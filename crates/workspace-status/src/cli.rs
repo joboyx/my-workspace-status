@@ -34,7 +34,8 @@ are set. -v applies to --plain only.\n\n\
 On a TTY TUI launch, if the last GitHub Release check is older than 6 hours\n\
 and a newer published release exists, the process asks whether to update\n\
 before the TUI mounts. --plain, --json, and --update skip that check.\n\n\
---update runs the cargo-dist updater (workspace-status-update) and exits.\n\
+--update prints GitHub Release notes for versions newer than this install,\n\
+then runs the cargo-dist updater (workspace-status-update) and exits.\n\
 That run does not open the TUI or apply repo filters."
 )]
 struct Cli {
@@ -70,7 +71,7 @@ struct Cli {
     #[arg(short = 'i', long = "tui")]
     tui: bool,
 
-    /// Run the installed updater and exit. Does not open the TUI.
+    /// Print GitHub Release notes since this version, then run the updater.
     #[arg(long = "update")]
     update: bool,
 

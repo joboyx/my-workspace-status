@@ -19,5 +19,6 @@ install-path = "~/.local/bin"
 install-updater = true
 # Keep tag-triggered Release CI plus workflow_dispatch (see tag-release.yml).
 # GITHUB_TOKEN tag pushes do not start other workflows.
+# Also keeps git-cliff notes on the generated Release workflow (cliff.toml).
 allow-dirty = ["ci"]
 # GitHub Releases only: do not add Homebrew taps or crates.io publish jobs.
