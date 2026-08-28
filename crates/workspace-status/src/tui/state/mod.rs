@@ -1083,6 +1083,12 @@ impl AppState {
         self.help_search_query = None;
     }
 
+    /// Apply the focused row's current fold state to foldable descendants.
+    ///
+    /// The first `z` already toggled this row and armed the 400ms window.
+    /// The second `z` must not toggle it again. Descendants follow the
+    /// focused row: a folded parent folds the subtree; an open parent
+    /// opens it.
     fn fold_subtree(&mut self) {
         if self.commit_files_list_focused() {
             let Some(row) = self.focused_commit_file_row() else {
@@ -1097,12 +1103,15 @@ impl AppState {
             if ids.is_empty() {
                 return;
             }
-            let opening = self.commit_file_folds.contains(&id);
+            let fold_descendants = self.commit_file_folds.contains(&id);
             for sid in ids {
-                if opening {
-                    self.commit_file_folds.remove(&sid);
-                } else {
+                if sid == id {
+                    continue;
+                }
+                if fold_descendants {
                     self.commit_file_folds.insert(sid);
+                } else {
+                    self.commit_file_folds.remove(&sid);
                 }
             }
             self.restore_commit_file_cursor(Some(&path));
@@ -1118,12 +1127,15 @@ impl AppState {
         if ids.is_empty() {
             return;
         }
-        let opening = self.folds.contains(&row.id);
+        let fold_descendants = self.folds.contains(&row.id);
         for sid in ids {
-            if opening {
-                self.folds.remove(&sid);
-            } else {
+            if sid == row.id {
+                continue;
+            }
+            if fold_descendants {
                 self.folds.insert(sid);
+            } else {
+                self.folds.remove(&sid);
             }
         }
         self.rebuild_rows();
@@ -6803,21 +6815,49 @@ mod tests {
         assert!(!app.folds.contains("dir:app:src"));
         app.dispatch(Action::FoldToggleSubtree);
         assert!(
-            !app.folds.contains("repo:app"),
-            "toggleSubtree on a folded parent opens the subtree"
+            app.folds.contains("repo:app"),
+            "second z must not toggle the parent a second time"
         );
-        assert!(!app.folds.contains("dir:app:src"));
+        assert!(
+            app.folds.contains("dir:app:src"),
+            "second z folds descendants to match the folded parent"
+        );
+        assert!(app.rows.iter().all(|r| r.id != "file:app:src/lib.rs"));
+        assert!(app.rows.iter().all(|r| r.id != "file:app:README.md"));
     }
 
     #[test]
-    fn fold_toggle_subtree_closes_an_open_subtree() {
+    fn zz_on_a_folded_parent_opens_the_subtree() {
         let mut app = tree_app();
         focus_id(&mut app, "repo:app");
+        app.dispatch(Action::FoldToggle);
         app.dispatch(Action::FoldToggleSubtree);
         assert!(app.folds.contains("repo:app"));
         assert!(app.folds.contains("dir:app:src"));
-        assert!(app.rows.iter().all(|r| r.id != "file:app:src/lib.rs"));
-        assert!(app.rows.iter().all(|r| r.id != "file:app:README.md"));
+        app.dispatch(Action::FoldToggle);
+        assert!(!app.folds.contains("repo:app"));
+        assert!(app.folds.contains("dir:app:src"));
+        app.dispatch(Action::FoldToggleSubtree);
+        assert!(!app.folds.contains("repo:app"));
+        assert!(
+            !app.folds.contains("dir:app:src"),
+            "second z opens descendants to match the open parent"
+        );
+        assert!(app.rows.iter().any(|r| r.id == "file:app:src/lib.rs"));
+        assert!(app.rows.iter().any(|r| r.id == "file:app:README.md"));
+    }
+
+    #[test]
+    fn fold_toggle_subtree_does_not_toggle_the_focused_row() {
+        let mut app = tree_app();
+        focus_id(&mut app, "repo:app");
+        app.dispatch(Action::FoldToggleSubtree);
+        assert!(
+            !app.folds.contains("repo:app"),
+            "FoldToggleSubtree must not toggle the parent (first z already did)"
+        );
+        assert!(!app.folds.contains("dir:app:src"));
+        assert!(app.rows.iter().any(|r| r.id == "file:app:src/lib.rs"));
     }
 
     #[test]

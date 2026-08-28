@@ -16,7 +16,7 @@ To rebuild those frames, run `./scripts/capture-demo-stills.sh` (see [demo.md](.
 | `?` | Help overlay (short list, not a wall of text) |
 | `j` / `k` or arrows | Move the focused list. Hold repeats (terminal key-repeat). After a drill, the right pane follows the left row (graph → commit files, commit-file → diff). On a focused file diff, scroll the diff |
 | `z` | Toggle fold on this row |
-| `zz` | First `z` toggles this row immediately and arms a 400ms pending. Second `z` in the window is `toggleSubtree` (no extra toggle). A late second `z` is a new single toggle |
+| `zz` | First `z` toggles this row immediately and arms a 400ms pending. Second `z` in the window applies that same fold to foldable descendants (no extra toggle of this row). A late second `z` is a new single toggle |
 | `t` | Toggle directory tree / flat paths. On the workspace tree this is `tree_mode`. In a commit-files or commit-diff drill this is an independent commit-file tree mode (default tree). Status is `Directory tree` / `Flat paths` |
 | `h` / `l` or left / right | Tree focused: close / open fold. Hold repeats. Shift+Left / Shift+Right pan the focused pane (tree, graph, commit-files, or diff). Graph, commit-file list, or file diff focused: `h` / `l` pan. Horizontal mouse wheel (and Shift+wheel) pans the pane under the cursor without changing keyboard focus. Trackpad hscroll is SGR `66`/`67`. When a file diff has long lines, that report over the left pane pans the diff. Space does not fold |
 | `.` | Show or hide ignored repos |
@@ -62,7 +62,7 @@ To rebuild those frames, run `./scripts/capture-demo-stills.sh` (see [demo.md](.
 
 - Tree of repos, linked worktrees, and dirty files from the same snapshot builder as `--plain` / `--json`. Chrome: status letters on the right, Nerd file/folder/sync glyphs, file-oriented workspace header, branch-labeled linked checkouts
 - Files sit in a directory trie by default. `t` toggles tree / flat on the workspace. Status is `Directory tree` / `Flat paths`
-- Dir rows fold with `z` / `h` / `l`. First `z` toggles immediately and arms a 400ms `zz` window; second `z` is `toggleSubtree`. A dir `s` / `u` / `x` writes files under that dir
+- Dir rows fold with `z` / `h` / `l`. First `z` toggles immediately and arms a 400ms `zz` window; second `z` applies that same fold to foldable descendants. A dir `s` / `u` / `x` writes files under that dir
 - Tree / flat stays in this session. There is no session store on disk. Commit-file lists have their own `t` toggle and the same dir-trie collapse
 - Right pane at depth 0: file diff when a dirty file is focused. Graph pane via `workspace-status-graph` when a repo or worktree is focused
 - File diffs paint `{repo}/{path}  inline|split` (plus ` · full` / ` · pan N`) then STAGED / UNSTAGED / NEW labels and a line-number gutter. After a commit drill to depth 2 the left pane is the commit-file list, so the header is the path. Intra-line / syntax highlight is not implemented yet
