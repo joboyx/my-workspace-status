@@ -1,12 +1,14 @@
 //! Additional real-TTY operator paths not claimed by `main.rs`.
 //!
 //! Fold (`h`/`l`, `z`, `zz` subtree), click-to-select, `gg`/`G`, Home/End,
-//! `n`/`N` pane search, graph `c` create-branch, `r`, ignored repos, plus
-//! other session keys the help overlay lists that a person actually types.
+//! `n`/`N` pane search, PgUp/PgDn, graph `c` create-branch, `r`, ignored
+//! repos, plus other session keys the help overlay lists that a person
+//! actually types.
 //! Same PTY harness: bytes in, painted screen out.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
 use super::{
     assert_contains, op_finished, tree_has, tree_row_containing, GIT_WAIT, SETTLE_MS, WAIT,
@@ -208,6 +210,72 @@ fn pty_n_and_n_pane_next_prev() {
         "N returns to app (a no-op stays on lib; wrap-n would land on tools)",
         GIT_WAIT,
     );
+}
+
+/// CSI PageDown then PageUp jumps the tree by a viewport, not to the ends.
+///
+/// Launch focuses the first file (`README.md`). A short PTY plus extra
+/// dirty files makes one page smaller than the list. PageDown must leave
+/// `README.md`, load a later file's diff, and stay off the last rows. A
+/// no-op keeps the README diff. `G` would show `page-29` / No updates.
+#[test]
+fn pty_pgup_pgdn_pages_workspace_tree() {
+    let (_root, workspace) = daily_workspace();
+    seed_tree_page_files(&workspace);
+
+    let mut tui = PtySession::open_size(&workspace, harness::COLS, 12);
+    tui.wait_contains("README.md", WAIT);
+    tui.wait_contains("UNSTAGED", WAIT);
+    tui.wait_pred(
+        |screen| {
+            tree_has(screen, "README.md")
+                && !tree_has(screen, "page-29")
+                && !page_file_body_visible(screen)
+                && screen.contains("workspace › app")
+        },
+        "launch focuses README; last page files stay below the fold",
+        GIT_WAIT,
+    );
+
+    tui.page_down();
+    tui.wait_pred(
+        |screen| {
+            page_file_body_visible(screen)
+                && !tree_has(screen, "README.md")
+                && !tree_has(screen, "page-29")
+                && !tree_has(screen, "No updates")
+                && screen.contains("workspace › app")
+        },
+        "PageDown pages the tree (a no-op keeps README; G would show page-29)",
+        GIT_WAIT,
+    );
+
+    tui.page_up();
+    tui.wait_pred(
+        |screen| {
+            tree_has(screen, "README.md")
+                && !page_file_body_visible(screen)
+                && !tree_has(screen, "page-29")
+                && screen.contains("workspace › app")
+        },
+        "PageUp returns to README (a no-op keeps the paged file)",
+        GIT_WAIT,
+    );
+}
+
+fn seed_tree_page_files(workspace: &Path) {
+    let app = workspace.join("app");
+    for i in 0..30 {
+        fs::write(
+            app.join(format!("page-{i:02}.txt")),
+            format!("page-{i:02}-body\n"),
+        )
+        .unwrap();
+    }
+}
+
+fn page_file_body_visible(screen: &str) -> bool {
+    (0..30).any(|i| screen.contains(&format!("page-{i:02}-body")))
 }
 
 /// `G` is the last visible row; `gg` returns to the workspace root.
