@@ -557,27 +557,228 @@ fn pty_graph_drill_enter_esc() {
     );
 }
 
+/// First paint row: pane titles (focused titles pad both sides).
+#[cfg(unix)]
+fn pane_top(screen: &str) -> &str {
+    screen.lines().next().unwrap_or("")
+}
+
+/// Breadcrumb sits on the penultimate row (status is last).
+#[cfg(unix)]
+fn crumb_line(screen: &str) -> &str {
+    let lines: Vec<&str> = screen.lines().collect();
+    lines
+        .get(lines.len().saturating_sub(2))
+        .copied()
+        .unwrap_or("")
+}
+
+#[cfg(unix)]
+fn status_line(screen: &str) -> &str {
+    screen.lines().last().unwrap_or("")
+}
+
+/// Left tree focused, right graph unfocused. Not files / not a file diff.
+#[cfg(unix)]
+fn panes_tree_focused_graph_unfocused(screen: &str) -> bool {
+    let top = pane_top(screen);
+    top.contains(" tree ")
+        && top.contains(" graph")
+        && !top.contains(" graph ")
+        && !top.contains(" files")
+        && !top.contains(" diff")
+}
+
+/// Left tree unfocused, right graph focused (Tab onto a graph-capable row).
+#[cfg(unix)]
+fn panes_tree_unfocused_graph_focused(screen: &str) -> bool {
+    let top = pane_top(screen);
+    top.contains(" graph ")
+        && top.contains(" tree")
+        && !top.contains(" tree ")
+        && !top.contains(" files")
+        && !top.contains(" diff")
+}
+
+/// Wrong keys: Enter drills files, `/` types SEARCH, Shift+S opens stash.
+#[cfg(unix)]
+fn not_files_search_or_stash(screen: &str) -> bool {
+    !screen.contains("┌ files")
+        && !screen.contains("keep.txt")
+        && !screen.contains("SEARCH")
+        && !screen.contains("Stash ")
+}
+
+/// `--all` graph for focusbox. Keep, main, and noise tips are all visible.
+#[cfg(unix)]
+fn focusbox_full_graph_body(screen: &str) -> bool {
+    screen.contains("keep-leaf-commit")
+        && screen.contains("noise-leaf-commit")
+        && screen.contains("main-leaf-commit")
+        && screen.contains("focus-root-commit")
+        && screen.contains("working tree clean")
+        && screen.contains("[+feature/keep]")
+        && screen.contains("[topic/noise]")
+        && screen.contains("[main]")
+}
+
+/// Ancestors of `feature/keep` only. A no-op or `--all` cannot pass.
+#[cfg(unix)]
+fn focusbox_keep_only_graph_body(screen: &str) -> bool {
+    screen.contains("keep-leaf-commit")
+        && screen.contains("focus-root-commit")
+        && screen.contains("[+feature/keep]")
+        && !screen.contains("noise-leaf-commit")
+        && !screen.contains("main-leaf-commit")
+        && !screen.contains("[topic/noise]")
+        && !screen.contains("[main]")
+}
+
+/// Graph loaded, left focus, `--all`. Tab / `o` have not run.
+#[cfg(unix)]
+fn focusbox_graph_left_full(screen: &str) -> bool {
+    let crumb = crumb_line(screen);
+    let status = status_line(screen);
+    panes_tree_focused_graph_unfocused(screen)
+        && tree_cursor_on(screen, "focusbox")
+        && crumb.contains("workspace › focusbox")
+        && !crumb.contains("[focusbox]")
+        && !crumb.contains("graph focus:")
+        && status.contains("focus right")
+        && !status.contains("drill")
+        && !status.contains("clear focus")
+        && !screen.contains("Focus branches")
+        && focusbox_full_graph_body(screen)
+        && not_files_search_or_stash(screen)
+}
+
+/// Tab focused the graph. Full `--all` history. Branch focus is off.
+#[cfg(unix)]
+fn focusbox_graph_right_full(screen: &str) -> bool {
+    let crumb = crumb_line(screen);
+    let status = status_line(screen);
+    panes_tree_unfocused_graph_focused(screen)
+        && tree_cursor_on(screen, "focusbox")
+        && crumb.contains("workspace › [focusbox]")
+        && !crumb.contains("graph focus:")
+        && !crumb.contains("full graph")
+        && status.contains("drill")
+        && status.contains("Esc")
+        && status.contains("back")
+        && status.contains("focus branches")
+        && !status.contains("clear focus")
+        && !status.contains("focus right")
+        && !screen.contains("Focus branches")
+        && focusbox_full_graph_body(screen)
+        && not_files_search_or_stash(screen)
+}
+
+/// `o` overlay: cursor on the current `* feature/keep` row. Not files drill.
+#[cfg(unix)]
+fn graph_focus_overlay_on_current_keep(screen: &str) -> bool {
+    let crumb = crumb_line(screen);
+    panes_tree_unfocused_graph_focused(screen)
+        && screen.contains("Focus branches")
+        && screen.contains("filter:")
+        && screen.contains("❯")
+        && screen.contains("* feature/keep")
+        && screen.contains("topic/noise")
+        && screen.contains("Enter apply")
+        && screen.contains("O clear")
+        && screen.contains("Esc cancel")
+        && crumb.contains("[focusbox]")
+        && !crumb.contains("graph focus:")
+        && !screen.contains("drill")
+        && not_files_search_or_stash(screen)
+}
+
+/// Applied keep focus: toast, `O` clear-focus hint, keep-only graph.
+#[cfg(unix)]
+fn graph_focus_applied_keep(screen: &str) -> bool {
+    let crumb = crumb_line(screen);
+    let status = status_line(screen);
+    panes_tree_unfocused_graph_focused(screen)
+        && crumb.contains("[focusbox]")
+        && crumb.contains("graph focus: feature/keep")
+        && status.contains("drill")
+        && status.contains("Esc")
+        && status.contains("back")
+        && status.contains("focus branches")
+        && status.contains("clear focus")
+        && !status.contains("focus right")
+        && !screen.contains("Focus branches")
+        && !screen.contains("Enter apply")
+        && focusbox_keep_only_graph_body(screen)
+        && not_files_search_or_stash(screen)
+}
+
+/// CSI-u Shift+O restored `--all`. Clear-focus hint is gone. Stay on graph.
+#[cfg(unix)]
+fn graph_focus_cleared_full(screen: &str) -> bool {
+    let crumb = crumb_line(screen);
+    let status = status_line(screen);
+    panes_tree_unfocused_graph_focused(screen)
+        && crumb.contains("[focusbox]")
+        && crumb.contains("full graph")
+        && !crumb.contains("graph focus:")
+        && status.contains("drill")
+        && status.contains("focus branches")
+        && !status.contains("clear focus")
+        && !status.contains("focus right")
+        && !screen.contains("Focus branches")
+        && focusbox_full_graph_body(screen)
+        && not_files_search_or_stash(screen)
+}
+
+/// Tab to the graph, `o`, Enter on the current `* feature/keep` row.
+#[cfg(unix)]
+fn apply_current_keep_graph_focus(tui: &mut PtySession) {
+    tui.wait_pred(
+        focusbox_graph_left_full,
+        "focusbox graph loaded on the left (full --all; o / Tab have not run)",
+        GIT_WAIT,
+    );
+    tui.tab();
+    tui.wait_pred(
+        focusbox_graph_right_full,
+        "Tab focuses the graph; full history; branch focus is off",
+        WAIT,
+    );
+    tui.key('o');
+    tui.wait_pred(
+        graph_focus_overlay_on_current_keep,
+        "o opens Focus branches on the current * feature/keep row (files drill / no-op cannot pass)",
+        WAIT,
+    );
+    tui.enter();
+    tui.wait_pred(
+        graph_focus_applied_keep,
+        "Enter applies the current keep branch: toast, clear-focus hint, keep-only graph",
+        GIT_WAIT,
+    );
+}
+
+/// Graph `o` / `O`: overlay, apply current branch, CSI-u Shift+O clears.
+///
+/// Docs + VIEW: `o` opens the local-branch overlay. Enter with no marks
+/// applies the cursor row. While focus is on, the graph is ancestors of
+/// those tips. `O` restores `--all`. Shift+O is CSI-u (`CSI 111 ; 2 : 1 u`
+/// press, `: 3` release), not a raw `'O'` byte. A no-op, an Enter files
+/// drill, `/` SEARCH, or another Shift binding (stash / theme / `G`)
+/// cannot pass. Unmark-then-Enter stays on `pty_graph_focus_unmark_enter_clears`.
 #[cfg(unix)]
 #[test]
 fn pty_graph_branch_focus_overlay() {
     let (_root, workspace) = focus_workspace();
     let mut tui = PtySession::open(&workspace);
-    tui.search("focusbox");
-    tui.wait_contains("focusbox", WAIT);
-    tui.tab();
-    tui.wait_contains("keep-leaf-commit", WAIT);
-    tui.wait_contains("noise-leaf-commit", WAIT);
+    apply_current_keep_graph_focus(&mut tui);
 
-    tui.key('o');
-    tui.wait_contains("Focus branches", WAIT);
-    tui.wait_contains("feature/keep", WAIT);
-    tui.keys("keep");
-    tui.enter();
-    tui.wait_contains("keep-leaf-commit", WAIT);
-    tui.wait_absent("noise-leaf-commit", WAIT);
-
-    tui.key('O');
-    tui.wait_contains("noise-leaf-commit", WAIT);
+    tui.shift_letter('O');
+    tui.wait_pred(
+        graph_focus_cleared_full,
+        "CSI-u Shift+O restores the full graph and drops the clear-focus hint",
+        GIT_WAIT,
+    );
 }
 
 /// Shift+O via CSI-u (unshifted codepoint + SHIFT), not a raw `'O'` byte.
@@ -589,24 +790,14 @@ fn pty_graph_branch_focus_overlay() {
 fn pty_shift_o_csi_u_clears_graph_branch_focus() {
     let (_root, workspace) = focus_workspace();
     let mut tui = PtySession::open(&workspace);
-    tui.search("focusbox");
-    tui.wait_contains("focusbox", WAIT);
-    tui.tab();
-    tui.wait_contains("keep-leaf-commit", WAIT);
-    tui.wait_contains("noise-leaf-commit", WAIT);
-
-    tui.key('o');
-    tui.wait_contains("Focus branches", WAIT);
-    tui.keys("keep");
-    tui.enter();
-    tui.wait_absent("Focus branches", WAIT);
-    tui.wait_contains("keep-leaf-commit", WAIT);
-    tui.wait_absent("noise-leaf-commit", WAIT);
+    apply_current_keep_graph_focus(&mut tui);
 
     tui.shift_letter('O');
-    tui.wait_absent("Focus branches", WAIT);
-    tui.wait_contains("noise-leaf-commit", WAIT);
-    tui.wait_contains("main-leaf-commit", WAIT);
+    tui.wait_pred(
+        graph_focus_cleared_full,
+        "CSI-u Shift+O restores --all (SEARCH / stash / theme / a raw O path cannot pass)",
+        GIT_WAIT,
+    );
 }
 
 /// `/` then Shift+letters as CSI-u must type into the SEARCH prompt.
