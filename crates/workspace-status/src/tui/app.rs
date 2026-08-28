@@ -1,8 +1,8 @@
-//! TUI helpers shared by the async loop and headless e2e.
+//! TUI helpers shared by the async loop and Headless e2e.
 //!
-//! Live TTY I/O lives in [`super::event_loop`]. This module keeps
-//! `run_tui`'s terminal setup, pane/compute apply helpers, and sync
-//! headless effects.
+//! Live TTY I/O lives in [`super::event_loop`]. Effect schedule / spawn / apply
+//! live in [`super::effect`]. This module keeps `run_tui` terminal setup and
+//! pane/compute helpers.
 
 use std::collections::BTreeSet;
 use std::io::{self, stdout};
@@ -21,36 +21,33 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
-use workspace_status_graph::LOADING_OLDER;
 
 use crate::config::WorkspaceStatusConfig;
 use crate::discovery::{collect_snapshots, process_repo, RepoCheckoutMeta};
 use crate::git::{
     checkout_branch, diff_commit_file_ctx, diff_stash_file_ctx, fast_forward_to_remote_ref,
-    git_diff_args, list_commit_name_status, list_local_branches, list_stash_name_status,
-    list_worktree_name_status, merge_into_head, repo_has_local_changes, rev_parse_quiet,
-    MergeIntoHeadResult, NameStatus,
+    git_diff_args, list_commit_name_status, list_stash_name_status, list_worktree_name_status,
+    merge_into_head, repo_has_local_changes, rev_parse_quiet, MergeIntoHeadResult, NameStatus,
 };
 use crate::snapshot::{
     build_workspace_snapshot, repo_snapshots_from_workspace, CheckoutKind, FileChange,
     WorkspaceSnapshot,
 };
 
-use super::action::{Action, Effect};
+use super::action::Action;
 use super::branches::{
     checkout_name_for_ref, is_origin_remote_ref, plan_graph_checkout, GraphCheckoutPlan,
     DIRTY_WORKTREE_STATUS,
 };
 use super::diff::{load_file_diff, DiffContent};
 use super::drill::{CommitFile, CommitFileSource, DrillView};
-use super::event_pump::action_triggers_graph_autoload;
 use super::graph_load::{
-    autoload_limit, autoload_skip, load_graph_model, load_graph_model_window, merge_autoload,
-    refresh_graph_limit, should_autoload, GraphIdentity, ShouldAutoload,
+    load_graph_model, load_graph_model_window, refresh_graph_limit, GraphIdentity,
 };
 use super::keys::{event_to_action_with, is_held_nav_backlog};
 use super::state::AppState;
 use super::tty::{disable_mouse, enable_mouse, poll_event, read_event};
+#[cfg(test)]
 use super::watch::{checkout_watch_identities, watch_needs_pane_reload};
 
 /// Options for the interactive TUI.
@@ -606,91 +603,12 @@ pub(crate) fn run_merge_into_head(
     apply_merge_compute(state, &label, result)
 }
 
-/// Apply pane-load effects without a TTY. Used by the headless e2e harness.
-pub(crate) fn apply_headless_effect(
-    state: &mut AppState,
-    effect: Effect,
-    opts: &TuiOpts,
-    action: &Action,
-) {
-    apply_headless_inner(state, effect, opts);
-    if action_triggers_graph_autoload(action) {
-        let _ = maybe_autoload_graph(state, opts);
-    }
-}
-
-fn apply_headless_inner(state: &mut AppState, effect: Effect, opts: &TuiOpts) {
-    match effect {
-        Effect::None | Effect::Quit => {}
-        Effect::Batch(effects) => {
-            for child in effects {
-                apply_headless_inner(state, child, opts);
-            }
-        }
-        Effect::LoadRightPane => load_right_headless(state),
-        Effect::ReloadSnapshot => {
-            reload_snapshot(state, opts);
-            state.status = "refreshed workspace".into();
-            load_right_headless(state);
-        }
-        Effect::ReloadRepo { repo } => {
-            reload_repo(state, opts, &repo);
-            state.status = format!("refreshed {repo}");
-            load_right_headless(state);
-        }
-        Effect::LoadCommitFiles { repo, source } => {
-            load_commit_files(state, opts, repo, source);
-        }
-        Effect::LoadCommitDiff { repo, source, path } => {
-            load_commit_diff(state, opts, repo, source, path);
-        }
-        Effect::WatchRefresh => {
-            let snapshot = collect_full_snapshot(
-                &opts.cwd,
-                &opts.config,
-                &state.snapshot.filter_repos,
-                state.show_ignored,
-                false,
-            );
-            if apply_watch_snapshot_for_tick(state, snapshot) {
-                load_right_headless(state);
-            }
-        }
-        Effect::PrepareGraphFocusPicker { repo } => {
-            let branches = list_local_branches(&opts.cwd.join(&repo));
-            state.open_graph_focus_picker(repo, branches);
-        }
-        _ => {}
-    }
-}
-
-/// Sync commit-file git. Headless e2e only — the TTY loop loads these on a worker.
-fn load_commit_files(state: &mut AppState, opts: &TuiOpts, repo: String, source: CommitFileSource) {
-    let files = compute_commit_files(&opts.cwd.join(&repo), &source);
-    state.open_commit_files(repo, source, files.into_iter().map(Into::into).collect());
-}
-
 pub(crate) fn compute_commit_files(dir: &Path, source: &CommitFileSource) -> Vec<NameStatus> {
     match source {
         CommitFileSource::Commit { commit_id } => list_commit_name_status(dir, commit_id),
         CommitFileSource::Stash { stash_ref } => list_stash_name_status(dir, stash_ref),
         CommitFileSource::Worktree => list_worktree_name_status(dir),
     }
-}
-
-/// Sync commit-diff git. Headless e2e only — the TTY loop loads these on a worker.
-fn load_commit_diff(
-    state: &mut AppState,
-    opts: &TuiOpts,
-    repo: String,
-    source: CommitFileSource,
-    path: String,
-) {
-    let context = state.commit_diff_context(&repo, &path);
-    let focused = state.focused_file();
-    let content = compute_commit_diff(&opts.cwd, &repo, &source, &path, context, focused.as_ref());
-    let (files, file_cursor) = commit_diff_list(state);
-    state.open_commit_diff(repo, source, files, file_cursor, path, content);
 }
 
 pub(crate) fn commit_diff_list(state: &AppState) -> (Vec<super::drill::CommitFile>, usize) {
@@ -818,18 +736,6 @@ pub(crate) fn run_blocking_editor(
     }
 }
 
-/// Sync snapshot collect. Headless e2e only — the TTY loop streams `process_repo`.
-fn reload_snapshot(state: &mut AppState, opts: &TuiOpts) {
-    let snapshot = collect_full_snapshot(
-        &opts.cwd,
-        &opts.config,
-        &state.snapshot.filter_repos,
-        state.show_ignored,
-        false,
-    );
-    state.apply_watch_snapshot(snapshot);
-}
-
 pub(crate) fn compute_reload_repo(
     cwd: &Path,
     snapshot: &WorkspaceSnapshot,
@@ -867,6 +773,7 @@ pub(crate) fn compute_reload_repo(
 
 /// Apply a watch poll. Returns true when the right pane must reload
 /// (`HEAD` / sync note / dirty set / file signatures moved).
+#[cfg(test)]
 pub(crate) fn apply_watch_snapshot_for_tick(
     state: &mut AppState,
     snapshot: WorkspaceSnapshot,
@@ -882,74 +789,12 @@ pub(crate) fn apply_watch_snapshot_for_tick(
     )
 }
 
-/// Refresh one checkout in place. Missing paths drop out of the snapshot
-/// (focused checkout only). Headless e2e only — the TTY loop reloads one checkout on a worker.
-fn reload_repo(state: &mut AppState, opts: &TuiOpts, repo: &str) {
-    let snapshot = compute_reload_repo(&opts.cwd, &state.snapshot, repo, state.show_ignored);
-    state.apply_watch_snapshot(snapshot);
-}
-
-/// Sync pane git. Headless e2e only — the TTY loop applies [`RightPaneLoad`] from a worker.
+/// Sync pane git for unit tests of [`RightPaneRequest`]. Headless e2e uses
+/// [`super::effect::Interpreter::interpret_sync`].
+#[cfg(test)]
 fn load_right_headless(state: &mut AppState) {
     let payload = RightPaneRequest::from_state(state).compute();
     apply_right_pane_load(state, payload);
-}
-
-/// Fetch the next `git log` page when the cursor sits on the last loaded row.
-///
-/// Headless e2e only. The TTY loop queues autoload as `UserTag::Autoload`.
-fn maybe_autoload_graph(state: &mut AppState, opts: &TuiOpts) -> bool {
-    let (repo, skip, limit) = {
-        if state.graph_loading_older {
-            return false;
-        }
-        if state.right_is_diff() && !state.in_commit_drill() {
-            return false;
-        }
-        let Some(model) = state.graph.as_ref() else {
-            return false;
-        };
-        if !should_autoload(ShouldAutoload {
-            cursor_index: state.graph_cursor,
-            loaded_count: model.visible_rows().len(),
-            has_more: model.has_more,
-            loading: false,
-        }) {
-            return false;
-        }
-        let Some((repo, _)) = state.graph_identity.as_ref() else {
-            return false;
-        };
-        (repo.clone(), autoload_skip(model), autoload_limit(model))
-    };
-    let show_ignored = state.show_ignored;
-    let focus_branches = state.graph_focus_revs();
-    state.graph_loading_older = true;
-    let prev_status = state.status.clone();
-    state.status = LOADING_OLDER.to_string();
-    let (page, identity) = load_graph_model_window(
-        &opts.cwd,
-        &state.snapshot,
-        &repo,
-        show_ignored,
-        skip,
-        limit,
-        &focus_branches,
-    );
-    let Some(current) = state.graph.clone() else {
-        state.graph_loading_older = false;
-        if state.status == LOADING_OLDER {
-            state.status = prev_status;
-        }
-        return false;
-    };
-    let merged = merge_autoload(&current, page);
-    state.set_graph(merged, identity.repo, identity.head);
-    state.graph_loading_older = false;
-    if state.status == LOADING_OLDER {
-        state.status = prev_status;
-    }
-    false
 }
 
 /// Discover every repo (ignored included) so `.` can show them without a walk.
@@ -1072,7 +917,7 @@ mod tests {
     use super::*;
     use crate::config::WorkspaceStatusConfig;
     use crate::git::{exec_git, git_binary, list_local_branches, stage_file};
-    use crate::tui::action::Action;
+    use crate::tui::action::{Action, Effect};
     use crate::tui::branches::DIRTY_WORKTREE_STATUS;
     use std::fs;
     use std::process::Command;
@@ -1137,12 +982,8 @@ mod tests {
 
     #[test]
     fn drop_undiscovered_checkouts_removes_vanished_paths() {
-        let snapshot = build_workspace_snapshot(
-            &[dummy_repo("app"), dummy_repo("linked")],
-            &[],
-            false,
-            &[],
-        );
+        let snapshot =
+            build_workspace_snapshot(&[dummy_repo("app"), dummy_repo("linked")], &[], false, &[]);
         let mut app = AppState::new(std::path::PathBuf::from("/tmp"), snapshot, true);
         assert_eq!(app.snapshot.repos.len(), 2);
         drop_undiscovered_checkouts(&mut app, &["app".into()]);

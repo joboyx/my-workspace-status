@@ -779,8 +779,8 @@ fn fetch_paints_running_op_progress_on_breadcrumb() {
     tui.key('f');
     let frame = tui.frame();
     assert!(
-        frame.contains("Fetching 0/1…") || frame.contains("Fetching 0/"),
-        "manual f should paint repo progress on the breadcrumb:\n{frame}"
+        frame.contains("Fetched"),
+        "manual f must apply fetch through the interpreter (Fetched after git, not only Fetching from dispatch):\n{frame}"
     );
     let _ = fs::remove_dir_all(root);
 }

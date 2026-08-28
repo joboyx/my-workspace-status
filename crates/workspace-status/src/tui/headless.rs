@@ -1,4 +1,8 @@
 //! Headless ratatui session for cargo tests. Uses TestBackend. No TTY.
+//!
+//! Effects go through [`super::effect::Interpreter::interpret_sync`] (same
+//! apply path as the live loop). Jobs run on this thread. TTY `$EDITOR`
+//! (`Effect::EditFile`) is not run.
 
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -13,7 +17,8 @@ use crate::config::{load_workspace_status_config, WorkspaceStatusConfig};
 use crate::snapshot::WorkspaceSnapshot;
 
 use super::action::{Action, Effect};
-use super::app::{apply_headless_effect, collect_full_snapshot, TuiOpts};
+use super::app::{collect_full_snapshot, TuiOpts};
+use super::effect::Interpreter;
 use super::keys::event_to_action_with;
 use super::render::draw;
 use super::state::{AppState, FocusPane};
@@ -30,6 +35,7 @@ const HEIGHT: u16 = 28;
 pub struct HeadlessTui {
     state: AppState,
     opts: TuiOpts,
+    interp: Interpreter,
     width: u16,
     height: u16,
     quit: bool,
@@ -62,15 +68,12 @@ impl HeadlessTui {
             start_fetch: false,
         };
         let mut state = AppState::with_viewed_path(cwd, snapshot, false, viewed_path);
-        apply_headless_effect(
-            &mut state,
-            super::action::Effect::LoadRightPane,
-            &opts,
-            &Action::None,
-        );
+        let mut interp = Interpreter::new();
+        interp.interpret_sync(&mut state, &opts, Effect::LoadRightPane, &Action::None);
         let mut session = Self {
             state,
             opts,
+            interp,
             width: WIDTH,
             height: HEIGHT,
             quit: false,
@@ -110,7 +113,8 @@ impl HeadlessTui {
         );
         let action_for_load = action.clone();
         let effect = self.state.dispatch(action);
-        apply_headless_effect(&mut self.state, effect, &self.opts, &action_for_load);
+        self.interp
+            .interpret_sync(&mut self.state, &self.opts, effect, &action_for_load);
         let _ = self.frame();
         self.state.sync_graph_scroll();
     }
@@ -150,7 +154,8 @@ impl HeadlessTui {
             self.quit = true;
             return;
         }
-        apply_headless_effect(&mut self.state, effect, &self.opts, &Action::WatchTick);
+        self.interp
+            .interpret_sync(&mut self.state, &self.opts, effect, &Action::WatchTick);
     }
 
     /// HEAD sha the graph was last loaded for, if any.
@@ -501,7 +506,8 @@ impl HeadlessTui {
             self.quit = true;
             return;
         }
-        apply_headless_effect(&mut self.state, effect, &self.opts, &action_for_load);
+        self.interp
+            .interpret_sync(&mut self.state, &self.opts, effect, &action_for_load);
     }
 
     fn paint(&mut self) -> Vec<String> {

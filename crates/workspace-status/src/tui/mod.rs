@@ -12,6 +12,7 @@ mod ctrl_c_exit;
 mod diff;
 mod drill;
 pub(crate) mod editor;
+mod effect;
 mod event_loop;
 mod event_pump;
 pub(crate) mod fetch;
