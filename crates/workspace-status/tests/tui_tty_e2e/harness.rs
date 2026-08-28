@@ -22,6 +22,8 @@ use super::seed::git_env;
 pub const COLS: u16 = 140;
 pub const ROWS: u16 = 32;
 
+/// xterm SGR button for wheel down (`ScrollDown`, `Cb` 65).
+pub const SGR_WHEEL_DOWN: u8 = 65;
 /// xterm SGR button for wheel right (trackpad hscroll).
 pub const SGR_WHEEL_RIGHT: u8 = 67;
 /// Wheel right with the 1003 motion bit (`67 | 32`). crossterm 0.28 drops this.
