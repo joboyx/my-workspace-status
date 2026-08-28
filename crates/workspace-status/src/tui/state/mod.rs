@@ -1,6 +1,9 @@
 //! TUI state and Action dispatch.
 
 mod dispatch;
+mod dispatch_drill;
+mod dispatch_keymap;
+mod dispatch_write;
 mod pan;
 
 use std::collections::{BTreeMap, HashMap, HashSet};

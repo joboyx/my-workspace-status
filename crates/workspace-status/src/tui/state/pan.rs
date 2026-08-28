@@ -2,6 +2,7 @@
 
 use workspace_status_graph::graph_col_max;
 
+use super::super::action::{Action, Effect};
 use super::super::diff::{cell_code_width, gutter_width, DiffRow};
 use super::super::search::{apply_pan, list_row_pan_max, max_col_offset};
 use super::super::tree::{row_segments, NodeKind};
@@ -143,5 +144,50 @@ impl AppState {
     fn pan_diff_content(&mut self, delta: i32) {
         let max = self.diff_pan_max();
         self.diff_col_offset = apply_pan(self.diff_col_offset, delta, max);
+    }
+
+    /// Apply `PanDiff` and mouse wheel, including trackpad hscroll.
+    pub(crate) fn dispatch_hscroll(&mut self, action: Action) -> Effect {
+        match action {
+            Action::PanDiff(delta) => {
+                self.pan_focused(delta);
+                Effect::None
+            }
+            Action::ScrollWheel {
+                col,
+                row: _,
+                delta,
+                horizontal,
+            } => {
+                if !self.mouse_enabled {
+                    return Effect::None;
+                }
+                if horizontal {
+                    self.mouse_pan(col, delta);
+                    return Effect::None;
+                }
+                if col >= self.layout.right_x {
+                    self.focus = FocusPane::Right;
+                    if self.drill.is_files() {
+                        self.move_file_cursor(delta)
+                    } else {
+                        self.scroll_right(delta);
+                        Effect::None
+                    }
+                } else if self.drill.is_diff() {
+                    self.focus = FocusPane::Left;
+                    self.move_file_cursor(delta)
+                } else if self.drill.is_files() {
+                    self.focus = FocusPane::Left;
+                    self.move_graph_cursor(delta);
+                    self.follow_graph_files()
+                } else {
+                    self.focus = FocusPane::Left;
+                    self.move_cursor(delta);
+                    Effect::LoadRightPane
+                }
+            }
+            _ => Effect::None,
+        }
     }
 }
