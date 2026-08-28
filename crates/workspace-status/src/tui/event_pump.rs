@@ -4,26 +4,24 @@
 //! start background fetch/watch ticks. Graph autoload must not run on
 //! resize, mouse noise, or swallowed overlay keys.
 //!
-//! Fetch / pull / push of independent checkouts run on a capped worker pool
-//! (`run_capped_pumped`, Ink `FETCH_CONCURRENCY` = 4). Watch collect and
-//! other git still use one worker (`run_work_pumped`). Applying a result
-//! still used to call `load_right` (`git log` / `git diff`) on the draw
-//! thread. Crossterm queued keys and clicks until that join, then the loop
-//! drained them in a burst. Follow-up pane git must stay on the same busy
-//! pump. Unchanged watch snapshots (tree signatures and checkout `HEAD` /
-//! sync note / dirty set) skip the pane reload. The next tick is due from the
-//! start of the interval.
+//! The live TTY loop (`event_loop.rs`) is one async `tokio::select!` over
+//! terminal input, watch/fetch deadlines, `JoinSet` completions, flash /
+//! Ctrl-C, and presentation. Every git/process effect runs on
+//! `spawn_blocking`. Fetch / pull / push of independent checkouts share the
+//! same cap (`env_fetch_concurrency`, default 4). Watch collect streams
+//! `discover_checkouts` then per-repo `process_repo` and applies each
+//! [`crate::snapshot::RepoSnapshot`] as it arrives. Applying a result must
+//! not call `git log` / `git diff` on the loop thread.
 //!
-//! While a worker (or capped batch) runs, nav / pane switch / cancel / quit
-//! still dispatch (`BusyAction::Handle`). Only actions that would start
-//! another git write are drained (`Ignore`) so they cannot nest a second
-//! mutating child.
+//! While exclusive writes or a remote batch are in flight, nav / pane
+//! switch / cancel / quit still dispatch (`BusyAction::Handle`). Only
+//! actions that would start another git write are drained (`Ignore`).
 //!
-//! Held nav (`h`/`j`/`k`/`l`) maps Repeat to the same move as Press. The TTY
-//! loop drops queued copies of that key after each move so a hold cannot
-//! flush as a burst after release. Nested `LoadRightPane` git is not started
-//! from a busy Handle; the in-flight `load_right_pumped` reloads if the
-//! target moved.
+//! Held nav (`h`/`j`/`k`/`l`) maps Repeat to the same move as Press. The
+//! input thread drops queued copies of that key after each move so a hold
+//! cannot flush as a burst after release. Pane loads coalesce by request
+//! id and [`super::app::RightPaneTarget`]; a stale result is discarded and
+//! the latest target is scheduled.
 
 use super::action::Action;
 use super::keys::InputMode;
@@ -221,120 +219,101 @@ mod tests {
         );
     }
 
-    /// Fails CI if TTY `apply_effect_inner` grows a sync `load_right(` /
-    /// `reload_snapshot(state` / commit-file git call / unpumped local write
-    /// (`git add` / stash / checkout / …) again. Headless e2e keeps the sync
-    /// helpers (`load_right_headless`, `reload_snapshot`).
+    /// Fails CI if the live TTY path grows a nested pump or a sync pane /
+    /// snapshot / write git call on the loop thread. Headless e2e keeps the
+    /// sync helpers (`load_right_headless`, `reload_snapshot`).
     #[test]
     fn tty_event_loop_must_not_call_sync_pane_git() {
-        let src = include_str!("app.rs");
+        let app = include_str!("app.rs");
+        let loop_src = include_str!("event_loop.rs");
+        let sched = include_str!("scheduler.rs");
+
+        for pumped in [
+            "fn run_loop(",
+            "fn run_work_pumped",
+            "fn pump_busy_events",
+            "fn run_capped_pumped",
+            "fn run_bulk_remote_pumped",
+            "fn load_right_pumped",
+            "fn apply_effect_inner",
+            "fn reload_snapshot_pumped",
+            "fn reload_repo_pumped",
+            "fn load_commit_files_pumped",
+            "fn load_commit_diff_pumped",
+            "fn run_write_then_refresh_pumped",
+        ] {
+            assert!(
+                !app.contains(pumped) && !loop_src.contains(pumped),
+                "{pumped} must not return to the live TTY path"
+            );
+        }
+
         assert!(
-            !src.contains("load_right("),
-            "TTY must use load_right_pumped; Headless e2e uses load_right_headless. \
-             Re-adding load_right( puts git log / git diff on the draw thread."
+            !app.contains("load_right(") && !loop_src.contains("load_right("),
+            "TTY must not call load_right(; that puts git log / git diff on the loop thread"
         );
         assert!(
-            src.contains("load_right_pumped("),
-            "TTY pane git must stay on load_right_pumped"
-        );
-        assert!(
-            src.contains("load_right_headless("),
+            app.contains("load_right_headless("),
             "Headless e2e must keep sync load_right_headless"
         );
         assert_eq!(
-            src.matches("reload_snapshot(state, opts").count(),
+            app.matches("reload_snapshot(state, opts").count(),
             1,
-            "only apply_headless_inner may call reload_snapshot(state, opts); \
-             TTY must use reload_snapshot_pumped"
+            "only apply_headless_inner may call reload_snapshot(state, opts)"
         );
         assert_eq!(
-            src.matches("reload_repo(state, opts").count(),
+            app.matches("reload_repo(state, opts").count(),
             1,
-            "only apply_headless_inner may call reload_repo(state, opts); \
-             TTY must use reload_repo_pumped"
+            "only apply_headless_inner may call reload_repo(state, opts)"
         );
         assert_eq!(
-            src.matches("load_commit_files(state, opts").count(),
+            app.matches("load_commit_files(state, opts").count(),
             1,
-            "only apply_headless_inner may call load_commit_files(state, opts); \
-             TTY must use load_commit_files_pumped"
+            "only apply_headless_inner may call load_commit_files(state, opts)"
         );
         assert_eq!(
-            src.matches("load_commit_diff(state, opts").count(),
+            app.matches("load_commit_diff(state, opts").count(),
             1,
-            "only apply_headless_inner may call load_commit_diff(state, opts); \
-             TTY must use load_commit_diff_pumped"
+            "only apply_headless_inner may call load_commit_diff(state, opts)"
+        );
+
+        assert!(
+            loop_src.contains("spawn_blocking"),
+            "TTY git/process work must use spawn_blocking"
         );
         assert!(
-            !src.contains("if let Err(err) = stage_file"),
-            "TTY Stage must pump git add; unpumped stage_file blocks the draw thread"
+            loop_src.contains("JoinSet"),
+            "TTY must join workers on a JoinSet"
         );
         assert!(
-            !src.contains("if let Err(err) = unstage_file"),
-            "TTY Unstage must pump git restore --staged"
+            sched.contains("fn accept_repo_result"),
+            "scheduler must gate stale collection generations"
         );
         assert!(
-            !src.contains("if let Err(err) = revert_tracked_file"),
-            "TTY Revert must pump git restore"
+            !loop_src.contains("collect_full_snapshot("),
+            "live watch/refresh must stream process_repo, not wait on collect_full_snapshot"
         );
-        assert!(
-            !src.contains("if let Err(err) = remove_untracked_file"),
-            "TTY Revert must pump git clean"
-        );
-        assert!(
-            !src.contains("match stash_push("),
-            "TTY stash create must pump git stash push"
-        );
-        assert!(
-            !src.contains("match stash_apply("),
-            "TTY stash apply must pump git stash apply"
-        );
-        assert!(
-            !src.contains("match stash_pop("),
-            "TTY stash pop must pump git stash pop"
-        );
-        assert!(
-            !src.contains("match stash_drop("),
-            "TTY stash drop must pump git stash drop"
-        );
-        assert!(
-            !src.contains("match create_branch_checkout("),
-            "TTY create-branch checkout must be pumped"
-        );
-        assert!(
-            !src.contains("match create_branch_at("),
-            "TTY create-branch-at must be pumped"
-        );
-        assert!(
-            !src.contains("match remove_worktree("),
-            "TTY remove-worktree must be pumped"
-        );
-        assert!(
-            !src.contains("if run_checkout_branch(state"),
-            "TTY checkout must pump compute_checkout; run_checkout_branch is tests/sync only"
-        );
-        assert!(
-            !src.contains("if run_merge_into_head(state"),
-            "TTY merge must pump compute_merge; run_merge_into_head is tests/sync only"
-        );
-        assert!(
-            src.contains("run_write_then_refresh_pumped("),
-            "TTY local writes must share the pumped write+refresh helper"
-        );
-        assert!(
-            src.contains("run_capped_pumped("),
-            "TTY fetch/pull/push must use run_capped_pumped so independent repos overlap"
-        );
-        assert!(
-            src.contains("run_bulk_remote_pumped("),
-            "TTY Fetch/Pull/Push must share run_bulk_remote_pumped"
-        );
-        assert_eq!(
-            src.matches("for (i, repo) in repos.iter().enumerate()")
-                .count(),
-            1,
-            "only DefaultBranch stays a serial per-repo loop; Fetch/Pull/Push must not"
-        );
+
+        for banned in [
+            "if let Err(err) = stage_file",
+            "if let Err(err) = unstage_file",
+            "if let Err(err) = revert_tracked_file",
+            "if let Err(err) = remove_untracked_file",
+            "match stash_push(",
+            "match stash_apply(",
+            "match stash_pop(",
+            "match stash_drop(",
+            "match create_branch_checkout(",
+            "match create_branch_at(",
+            "match remove_worktree(",
+            "if run_checkout_branch(state",
+            "if run_merge_into_head(state",
+        ] {
+            assert!(
+                !app.contains(banned) && !loop_src.contains(banned),
+                "{banned} must not run on the TTY loop thread"
+            );
+        }
     }
 
     /// Live loop must read and enable mouse through `tui/tty.rs`. Direct
@@ -342,33 +321,36 @@ mod tests {
     /// and SGR contract Headless e2e uses.
     #[test]
     fn tty_event_loop_must_use_shared_mouse_tty() {
-        let src = include_str!("app.rs");
+        let app = include_str!("app.rs");
+        let loop_src = include_str!("event_loop.rs");
+        for (name, src) in [("app.rs", app), ("event_loop.rs", loop_src)] {
+            assert!(
+                !src.contains("event::read("),
+                "{name} must call read_event(); event::read skips the shared mouse module"
+            );
+            assert!(
+                !src.contains("event::poll("),
+                "{name} must call poll_event(); event::poll skips the shared mouse module"
+            );
+            assert!(
+                !src.contains("EnableMouseCapture"),
+                "{name} must call enable_mouse(); EnableMouseCapture sets exclusive 1003"
+            );
+        }
         assert!(
-            !src.contains("event::read("),
-            "TTY must call read_event(); event::read skips the shared mouse module"
+            loop_src.contains("read_event("),
+            "TTY input thread must read via tty::read_event"
         );
         assert!(
-            !src.contains("event::poll("),
-            "TTY must call poll_event(); event::poll skips the shared mouse module"
+            loop_src.contains("poll_event("),
+            "TTY input thread must poll via tty::poll_event"
         );
         assert!(
-            !src.contains("EnableMouseCapture"),
-            "TTY must call enable_mouse(); EnableMouseCapture sets exclusive 1003"
-        );
-        assert!(
-            src.contains("read_event("),
-            "TTY must read via tty::read_event"
-        );
-        assert!(
-            src.contains("poll_event("),
-            "TTY must poll via tty::poll_event"
-        );
-        assert!(
-            src.contains("enable_mouse("),
+            app.contains("enable_mouse("),
             "TTY must enable mouse via tty::enable_mouse"
         );
         assert!(
-            src.contains("disable_mouse("),
+            app.contains("disable_mouse("),
             "TTY must disable mouse via tty::disable_mouse"
         );
     }

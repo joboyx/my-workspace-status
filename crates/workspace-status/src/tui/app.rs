@@ -1,12 +1,14 @@
-//! Crossterm event loop. First paint happens before any network fetch.
+//! TUI helpers shared by the async loop and headless e2e.
+//!
+//! Live TTY I/O lives in [`super::event_loop`]. This module keeps
+//! `run_tui`'s terminal setup, pane/compute apply helpers, and sync
+//! headless effects.
 
 use std::collections::BTreeSet;
 use std::io::{self, stdout};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossterm::event::{
     KeyEvent, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -21,19 +23,14 @@ use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use workspace_status_graph::LOADING_OLDER;
 
-use crate::actions::switch_repo_to_default_branch;
 use crate::config::WorkspaceStatusConfig;
 use crate::discovery::{collect_snapshots, process_repo, RepoCheckoutMeta};
 use crate::git::{
-    checkout_branch, create_branch_at, create_branch_checkout, diff_commit_file_ctx,
-    diff_stash_file_ctx, exec_git_checked, fast_forward_to_remote_ref, git_diff_args,
-    latest_stash_ref, list_commit_name_status, list_local_branches, list_stash_name_status,
-    list_worktree_name_status, merge_into_head, pull_quiet_detailed, push_quiet,
-    remove_untracked_file, remove_worktree, repo_has_local_changes, rev_parse_quiet,
-    revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop, stash_push, unstage_file,
+    checkout_branch, diff_commit_file_ctx, diff_stash_file_ctx, fast_forward_to_remote_ref,
+    git_diff_args, list_commit_name_status, list_local_branches, list_stash_name_status,
+    list_worktree_name_status, merge_into_head, repo_has_local_changes, rev_parse_quiet,
     MergeIntoHeadResult, NameStatus,
 };
-use crate::parallel::{env_fetch_concurrency, CappedBatch};
 use crate::snapshot::{
     build_workspace_snapshot, repo_snapshots_from_workspace, CheckoutKind, FileChange,
     WorkspaceSnapshot,
@@ -46,25 +43,15 @@ use super::branches::{
 };
 use super::diff::{load_file_diff, DiffContent};
 use super::drill::{CommitFile, CommitFileSource, DrillView};
-use super::editor::{editor_command, is_detached_editor, resolve_editor};
-use super::event_pump::{
-    action_triggers_graph_autoload, classify_busy_action, overlay_blocks_background_ticks,
-    BusyAction,
-};
-use super::fetch::fetch_interval_ms;
+use super::event_pump::action_triggers_graph_autoload;
 use super::graph_load::{
     autoload_limit, autoload_skip, load_graph_model, load_graph_model_window, merge_autoload,
     refresh_graph_limit, should_autoload, GraphIdentity, ShouldAutoload,
 };
-use super::keys::{event_to_action_with, held_nav_key, is_held_nav_backlog, NAV_REPEAT_POLL_MS};
-use super::ops::{format_completed_op, format_running_op, RunningOp};
-use super::render::draw;
+use super::keys::{event_to_action_with, is_held_nav_backlog};
 use super::state::AppState;
 use super::tty::{disable_mouse, enable_mouse, poll_event, read_event};
-use super::watch::{
-    checkout_watch_identities, watch_interval_ms, watch_needs_pane_reload, watch_remain_ms,
-    watch_tick_due, FLASH_TICK_MS,
-};
+use super::watch::{checkout_watch_identities, watch_needs_pane_reload};
 
 /// Options for the interactive TUI.
 pub struct TuiOpts {
@@ -100,7 +87,13 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
             return Err(1);
         }
     };
-    let result = run_loop(&mut terminal, &mut state, &opts);
+    let result = {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .map_err(|_| 1u8)?;
+        rt.block_on(super::event_loop::run(&mut terminal, &mut state, &opts))
+    };
     restore_terminal();
     let _ = terminal.show_cursor();
     result
@@ -123,7 +116,7 @@ fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
 ///
 /// Terminals that do not support the protocol ignore the CSI. Failures stay
 /// quiet; traditional byte-repeat still maps to Press.
-fn push_keyboard_enhancement() {
+pub(crate) fn push_keyboard_enhancement() {
     let mut out = stdout();
     let _ = execute!(
         out,
@@ -131,12 +124,12 @@ fn push_keyboard_enhancement() {
     );
 }
 
-fn terminal_size_rect() -> Rect {
+pub(crate) fn terminal_size_rect() -> Rect {
     let (cols, rows) = terminal_size().unwrap_or((80, 24));
     Rect::new(0, 0, cols.max(1), rows.max(1))
 }
 
-fn map_event(state: &AppState, event: &crossterm::event::Event) -> Action {
+pub(crate) fn map_event(state: &AppState, event: &crossterm::event::Event) -> Action {
     event_to_action_with(
         event,
         state.input_mode(),
@@ -148,7 +141,7 @@ fn map_event(state: &AppState, event: &crossterm::event::Event) -> Action {
     )
 }
 
-fn apply_terminal_resize(
+pub(crate) fn apply_terminal_resize(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     cols: u16,
     rows: u16,
@@ -158,368 +151,13 @@ fn apply_terminal_resize(
         .map_err(|_| 1u8)
 }
 
-fn run_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    state: &mut AppState,
-    opts: &TuiOpts,
-) -> Result<(), u8> {
-    if apply_effect(state, Effect::LoadRightPane, opts, terminal, &Action::None) {
-        return Ok(());
-    }
-    terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
-    if opts.start_fetch {
-        let effect = state.dispatch(Action::Fetch);
-        if apply_effect(state, effect, opts, terminal, &Action::Fetch) {
-            return Ok(());
-        }
-        terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
-    }
-
-    let watch_ms = watch_interval_ms(std::env::var("WS_STATUS_WATCH_MS").ok().as_deref());
-    let fetch_ms = fetch_interval_ms(std::env::var("WS_STATUS_FETCH_MS").ok().as_deref());
-    let mut last_watch = Instant::now();
-    let mut last_fetch = Instant::now();
-    let mut nav_repeat_poll = false;
-    loop {
-        let remain_watch = watch_remain_ms(last_watch, Instant::now(), watch_ms);
-        let remain_fetch = if fetch_ms == 0 {
-            u64::MAX
-        } else {
-            fetch_ms.saturating_sub(last_fetch.elapsed().as_millis() as u64)
-        };
-        let remain_ctrl_c = state
-            .ctrl_c_remaining_ms(Instant::now())
-            .unwrap_or(u64::MAX);
-        let idle_ms = if nav_repeat_poll {
-            NAV_REPEAT_POLL_MS
-        } else if state.has_active_flashes() {
-            FLASH_TICK_MS
-        } else {
-            200
-        };
-        let timeout = Duration::from_millis(
-            remain_watch
-                .min(remain_fetch)
-                .min(remain_ctrl_c)
-                .min(idle_ms)
-                .max(10),
-        );
-        if poll_event(timeout).unwrap_or(false) {
-            let mut pending: Option<crossterm::event::Event> = None;
-            loop {
-                let event = match pending.take() {
-                    Some(event) => event,
-                    None => {
-                        let Ok(event) = read_event() else {
-                            break;
-                        };
-                        event
-                    }
-                };
-                if held_nav_key(&event).is_some() {
-                    nav_repeat_poll = true;
-                }
-                let action = map_event(state, &event);
-                let resized = matches!(action, Action::Resize { .. });
-                if let Action::Resize { cols, rows } = &action {
-                    apply_terminal_resize(terminal, *cols, *rows)?;
-                }
-                let mouse_before = state.mouse_enabled;
-                let action_for_load = action.clone();
-                let effect = state.dispatch(action);
-                if state.mouse_enabled != mouse_before {
-                    sync_mouse_capture(state.mouse_enabled);
-                }
-                if let Some(held) = held_nav_key(&event) {
-                    pending = discard_held_nav_backlog(held);
-                }
-                if matches!(effect, Effect::Quit) {
-                    return Ok(());
-                }
-                if apply_effect(state, effect, opts, terminal, &action_for_load) {
-                    return Ok(());
-                }
-                terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
-                if resized {
-                    state.sync_graph_scroll();
-                }
-                if pending.is_none() && !poll_event(Duration::from_millis(0)).unwrap_or(false) {
-                    break;
-                }
-            }
-            continue;
-        }
-        nav_repeat_poll = false;
-        let _ = state.expire_ctrl_c_prompt(Instant::now());
-        if !overlay_blocks_background_ticks(state.input_mode()) {
-            if watch_tick_due(last_watch, Instant::now(), watch_ms) {
-                last_watch = Instant::now();
-                let effect = state.dispatch(Action::WatchTick);
-                if apply_effect(state, effect, opts, terminal, &Action::WatchTick) {
-                    return Ok(());
-                }
-            }
-            if fetch_ms > 0 && last_fetch.elapsed().as_millis() as u64 >= fetch_ms {
-                let effect = state.dispatch(Action::FetchTick);
-                if apply_effect(state, effect, opts, terminal, &Action::FetchTick) {
-                    return Ok(());
-                }
-                last_fetch = Instant::now();
-            }
-        }
-        terminal.draw(|frame| draw(frame, state)).map_err(|_| 1u8)?;
-    }
-}
-
-fn paint_running_op(
-    state: &mut AppState,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    kind: RunningOp,
-    done: usize,
-    total: usize,
-) {
-    state.status = format_running_op(kind, done, total);
-    let _ = terminal.draw(|frame| draw(frame, state));
-}
-
-enum WorkPump<T> {
-    Done(T),
-    Quit,
-}
-
-/// Drain crossterm while a worker or capped batch owns git children.
-///
-/// Nav / pane switch / cancel dispatch ([`BusyAction::Handle`]). Actions that
-/// would start another git write are drained ([`BusyAction::Ignore`]). Sets
-/// `quit` when the user asked to leave; the caller still waits for in-flight
-/// git to exit. Held nav drops queued copies of the same key. Nested
-/// [`Effect::LoadRightPane`] is skipped so a hold cannot start pane git per
-/// repeat; [`load_right_pumped`] reloads if the target moved.
-fn pump_busy_events(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    state: &mut AppState,
-    opts: &TuiOpts,
-    quit: &mut bool,
-) {
-    if poll_event(Duration::from_millis(50)).unwrap_or(false) {
-        let mut pending: Option<crossterm::event::Event> = None;
-        loop {
-            let event = match pending.take() {
-                Some(event) => event,
-                None => {
-                    let Ok(event) = read_event() else {
-                        break;
-                    };
-                    event
-                }
-            };
-            let action = map_event(state, &event);
-            match classify_busy_action(&action) {
-                BusyAction::Quit => *quit = true,
-                BusyAction::Resize { cols, rows } => {
-                    let _ = apply_terminal_resize(terminal, cols, rows);
-                    let _ = state.dispatch(Action::Resize { cols, rows });
-                    let _ = terminal.draw(|frame| draw(frame, state));
-                }
-                BusyAction::Handle => {
-                    let mouse_before = state.mouse_enabled;
-                    let action_for_load = action.clone();
-                    let effect = state.dispatch(action);
-                    if state.mouse_enabled != mouse_before {
-                        sync_mouse_capture(state.mouse_enabled);
-                    }
-                    if let Some(held) = held_nav_key(&event) {
-                        pending = discard_held_nav_backlog(held);
-                    }
-                    if matches!(effect, Effect::Quit) {
-                        *quit = true;
-                    } else if matches!(effect, Effect::LoadRightPane) {
-                        let _ = terminal.draw(|frame| draw(frame, state));
-                    } else if apply_effect(state, effect, opts, terminal, &action_for_load) {
-                        *quit = true;
-                    } else {
-                        let _ = terminal.draw(|frame| draw(frame, state));
-                    }
-                }
-                BusyAction::Ignore => {}
-            }
-            if pending.is_none() && !poll_event(Duration::from_millis(0)).unwrap_or(false) {
-                break;
-            }
-        }
-    }
-    let _ = terminal.draw(|frame| draw(frame, state));
-}
-
-/// Run `work` on a helper thread while this thread still polls crossterm.
-///
-/// Used for watch snapshot collect, follow-up pane git ([`load_right_pumped`]),
-/// graph autoload, commit files/diff, TTY snapshot reloads, and local git
-/// writes. Independent per-repo fetch / pull / push use [`run_capped_pumped`].
-/// Nav / pane switch / cancel dispatch while the worker runs
-/// ([`BusyAction::Handle`]). Actions that would start another git write are
-/// drained ([`BusyAction::Ignore`]) so they cannot nest a second mutating
-/// child or flush after the join.
-fn run_work_pumped<T: Send + 'static>(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    state: &mut AppState,
-    opts: &TuiOpts,
-    work: impl FnOnce() -> T + Send + 'static,
-) -> WorkPump<T> {
-    let (tx, rx) = mpsc::sync_channel(1);
-    let handle = thread::spawn(move || {
-        let _ = tx.send(work());
-    });
-    let mut quit = false;
-    loop {
-        match rx.try_recv() {
-            Ok(value) => {
-                let _ = handle.join();
-                return if quit {
-                    WorkPump::Quit
-                } else {
-                    WorkPump::Done(value)
-                };
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                let _ = handle.join();
-                return WorkPump::Quit;
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
-        }
-        pump_busy_events(terminal, state, opts, &mut quit);
-    }
-}
-
-/// Run independent per-repo work with [`env_fetch_concurrency`] workers.
-///
-/// Completions arrive as they finish (not as they start). `q` cancels queued
-/// items; in-flight git still runs to completion, same as a single
-/// [`run_work_pumped`] child. Nav / resize stay live via [`pump_busy_events`].
-fn run_capped_pumped<I, T, F>(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    state: &mut AppState,
-    opts: &TuiOpts,
-    items: Vec<I>,
-    work: F,
-    mut on_progress: impl FnMut(
-        &mut AppState,
-        &mut Terminal<CrosstermBackend<io::Stdout>>,
-        usize,
-        usize,
-    ),
-) -> WorkPump<Vec<Option<T>>>
-where
-    I: Send + 'static,
-    T: Send + 'static,
-    F: Fn(I) -> T + Send + Sync + 'static,
-{
-    let total = items.len();
-    if total == 0 {
-        return WorkPump::Done(Vec::new());
-    }
-    let mut batch = CappedBatch::start(items, env_fetch_concurrency(), work);
-    let mut quit = false;
-    loop {
-        while let Some(done) = batch.try_recv() {
-            on_progress(state, terminal, done, total);
-        }
-        if batch.is_finished() {
-            let results = batch.join();
-            return if quit {
-                WorkPump::Quit
-            } else {
-                WorkPump::Done(results)
-            };
-        }
-        if quit {
-            batch.cancel();
-        }
-        pump_busy_events(terminal, state, opts, &mut quit);
-    }
-}
-
-/// Fetch / pull / push many checkouts in parallel. Exclusive writes stay serial.
-///
-/// Progress is `Verb n/N` as completions land. After the batch: `Verbed N
-/// repos` / `(N failed)` — never names. Returns true when the user quit.
-fn run_bulk_remote_pumped<T, F, S>(
-    state: &mut AppState,
-    opts: &TuiOpts,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    repos: Vec<String>,
-    kind: RunningOp,
-    work: F,
-    succeeded: S,
-) -> bool
-where
-    T: Send + 'static,
-    F: Fn(PathBuf) -> T + Send + Sync + 'static,
-    S: Fn(&T) -> bool,
-{
-    let total = repos.len();
-    let cwd = opts.cwd.clone();
-    paint_running_op(state, terminal, kind, 0, total);
-    match run_capped_pumped(
-        terminal,
-        state,
-        opts,
-        repos.clone(),
-        move |repo| work(cwd.join(repo)),
-        |state, terminal, done, total| {
-            paint_running_op(state, terminal, kind, done, total);
-        },
-    ) {
-        WorkPump::Quit => true,
-        WorkPump::Done(results) => {
-            let mut ok = 0usize;
-            let mut failed = 0usize;
-            for slot in results {
-                match slot {
-                    Some(value) if succeeded(&value) => ok += 1,
-                    _ => failed += 1,
-                }
-            }
-            if reload_snapshot_pumped(state, opts, terminal) {
-                return true;
-            }
-            state.stamp_checkout_flashes(&repos);
-            state.status = format_completed_op(kind, ok, failed);
-            load_right_pumped(state, opts, terminal)
-        }
-    }
-}
-
-fn reload_snapshot_pumped(
-    state: &mut AppState,
-    opts: &TuiOpts,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-) -> bool {
-    let cwd = opts.cwd.clone();
-    let config = opts.config.clone();
-    let filter = state.snapshot.filter_repos.clone();
-    let show_ignored = state.show_ignored;
-    match run_work_pumped(terminal, state, opts, move || {
-        collect_full_snapshot(&cwd, &config, &filter, show_ignored, false)
-    }) {
-        WorkPump::Quit => true,
-        WorkPump::Done(snapshot) => {
-            state.apply_snapshot(snapshot);
-            false
-        }
-    }
-}
-
 /// Inputs for right-pane git (`git log` / `git diff` / commit files / commit
 /// diff). Depth 0 loads a graph or worktree file diff. Depth 1 loads files for
 /// the focused graph row. Depth 2 loads that file's commit diff.
 ///
-/// Must stay `Send` so [`load_right_pumped`] can run [`Self::compute`] on a
-/// worker. #60 moved fetch/pull/watch *children* off the draw thread; applying
-/// that result still called this git on the event loop, so crossterm queued
-/// keys and flushed them in a burst.
+/// Must stay `Send` so the TTY loop can run [`Self::compute`] on `spawn_blocking`.
 #[derive(Clone, Debug)]
-struct RightPaneRequest {
+pub(crate) struct RightPaneRequest {
     cwd: std::path::PathBuf,
     snapshot: WorkspaceSnapshot,
     show_ignored: bool,
@@ -540,7 +178,7 @@ struct RightPaneRequest {
 /// Identity of the row a [`RightPaneRequest`] would load. Used to detect
 /// cursor movement while pane git is in flight.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct RightPaneTarget {
+pub(crate) struct RightPaneTarget {
     in_graph: bool,
     file: Option<(String, String)>,
     graph_repo: Option<String>,
@@ -563,7 +201,7 @@ struct FollowDiffRequest {
 /// Git result for [`RightPaneRequest::compute`]. Applied on the draw thread
 /// with no further subprocesses.
 #[derive(Debug)]
-enum RightPaneLoad {
+pub(crate) enum RightPaneLoad {
     Diff {
         repo: String,
         path: String,
@@ -592,7 +230,7 @@ enum RightPaneLoad {
 }
 
 impl RightPaneRequest {
-    fn from_state(state: &AppState) -> Self {
+    pub(crate) fn from_state(state: &AppState) -> Self {
         let focused_file = state.focused_file();
         let focused_graph_repo = state.focused_graph_repo();
         let same_repo = focused_graph_repo.as_ref().is_some_and(|repo| {
@@ -644,7 +282,7 @@ impl RightPaneRequest {
         }
     }
 
-    fn target(&self) -> RightPaneTarget {
+    pub(crate) fn target(&self) -> RightPaneTarget {
         RightPaneTarget {
             in_graph: self.in_graph,
             file: self
@@ -660,7 +298,7 @@ impl RightPaneRequest {
         }
     }
 
-    fn compute(&self) -> RightPaneLoad {
+    pub(crate) fn compute(&self) -> RightPaneLoad {
         if let Some(follow) = &self.follow_diff {
             let content = compute_commit_diff(
                 &self.cwd,
@@ -734,7 +372,7 @@ impl RightPaneRequest {
     }
 }
 
-fn apply_right_pane_load(state: &mut AppState, payload: RightPaneLoad) {
+pub(crate) fn apply_right_pane_load(state: &mut AppState, payload: RightPaneLoad) {
     match payload {
         RightPaneLoad::Diff {
             repo,
@@ -771,541 +409,9 @@ fn apply_right_pane_load(state: &mut AppState, payload: RightPaneLoad) {
     }
 }
 
-/// Run right-pane git on a worker. Nav and pane switch stay live; nested
-/// writes are drained. Returns true when the user asked to quit.
-///
-/// If the cursor moved while the worker ran, load again for the new target
-/// instead of leaving the pane on the row that started the request.
-fn load_right_pumped(
-    state: &mut AppState,
-    opts: &TuiOpts,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-) -> bool {
-    loop {
-        let request = RightPaneRequest::from_state(state);
-        let target = request.target();
-        match run_work_pumped(terminal, state, opts, move || request.compute()) {
-            WorkPump::Quit => return true,
-            WorkPump::Done(payload) => {
-                apply_right_pane_load(state, payload);
-                if RightPaneRequest::from_state(state).target() == target {
-                    return false;
-                }
-            }
-        }
-    }
-}
-
-/// Reload snapshot + pane after a local write. Always runs so an error
-/// return cannot skip the pump and flush queued keys.
-fn refresh_after_write_pumped(
-    state: &mut AppState,
-    opts: &TuiOpts,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-) -> bool {
-    if reload_snapshot_pumped(state, opts, terminal) {
-        return true;
-    }
-    load_right_pumped(state, opts, terminal)
-}
-
-/// Pump a local git write, then always refresh. Error paths still refresh.
-fn run_write_then_refresh_pumped<T: Send + 'static>(
-    state: &mut AppState,
-    opts: &TuiOpts,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    work: impl FnOnce() -> Result<T, String> + Send + 'static,
-    status_ok: impl FnOnce(&T) -> String,
-    status_err: impl FnOnce(&str) -> String,
-) -> bool {
-    let outcome = match run_work_pumped(terminal, state, opts, work) {
-        WorkPump::Quit => return true,
-        WorkPump::Done(result) => result,
-    };
-    let status = match &outcome {
-        Ok(value) => status_ok(value),
-        Err(err) => status_err(err),
-    };
-    if refresh_after_write_pumped(state, opts, terminal) {
-        return true;
-    }
-    state.status = status;
-    false
-}
-
-fn apply_effect(
-    state: &mut AppState,
-    effect: Effect,
-    opts: &TuiOpts,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    action: &Action,
-) -> bool {
-    if apply_effect_inner(state, effect, opts, terminal) {
-        return true;
-    }
-    if action_triggers_graph_autoload(action) {
-        return maybe_autoload_graph(state, opts, Some(terminal));
-    }
-    false
-}
-
-fn apply_effect_inner(
-    state: &mut AppState,
-    effect: Effect,
-    opts: &TuiOpts,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-) -> bool {
-    match effect {
-        Effect::None | Effect::Quit => {}
-        Effect::Batch(effects) => {
-            for child in effects {
-                if apply_effect_inner(state, child, opts, terminal) {
-                    return true;
-                }
-            }
-        }
-        Effect::Fetch { repos } => {
-            if run_bulk_remote_pumped(
-                state,
-                opts,
-                terminal,
-                repos,
-                RunningOp::Fetch,
-                |dir| exec_git_checked(&["fetch", "--quiet"], &dir),
-                Result::is_ok,
-            ) {
-                return true;
-            }
-        }
-        Effect::Pull { repos } => {
-            if run_bulk_remote_pumped(
-                state,
-                opts,
-                terminal,
-                repos,
-                RunningOp::Pull,
-                |dir| pull_quiet_detailed(&dir),
-                |result| result.ok,
-            ) {
-                return true;
-            }
-        }
-        Effect::DefaultBranch { repos } => {
-            let total = repos.len();
-            let mut ok = 0;
-            let mut failed = 0;
-            paint_running_op(state, terminal, RunningOp::DefaultBranch, 0, total);
-            for (i, repo) in repos.iter().enumerate() {
-                let task = state
-                    .snapshot
-                    .repos
-                    .iter()
-                    .find(|r| r.repo == *repo)
-                    .map(|snap| (snap.branch.clone(), snap.default_branch_override.clone()));
-                if let Some((branch, override_name)) = task {
-                    let cwd = opts.cwd.clone();
-                    let repo = repo.clone();
-                    match run_work_pumped(terminal, state, opts, move || {
-                        switch_repo_to_default_branch(
-                            &repo,
-                            &branch,
-                            &cwd,
-                            override_name.as_deref(),
-                        )
-                    }) {
-                        WorkPump::Quit => return true,
-                        WorkPump::Done((success, _)) => {
-                            if success {
-                                ok += 1;
-                            } else {
-                                failed += 1;
-                            }
-                        }
-                    }
-                } else {
-                    failed += 1;
-                }
-                paint_running_op(state, terminal, RunningOp::DefaultBranch, i + 1, total);
-            }
-            if reload_snapshot_pumped(state, opts, terminal) {
-                return true;
-            }
-            state.stamp_checkout_flashes(&repos);
-            state.status = format_completed_op(RunningOp::DefaultBranch, ok, failed);
-            if load_right_pumped(state, opts, terminal) {
-                return true;
-            }
-        }
-        Effect::ReloadSnapshot => {
-            if reload_snapshot_pumped(state, opts, terminal) {
-                return true;
-            }
-            state.status = "refreshed workspace".into();
-            if load_right_pumped(state, opts, terminal) {
-                return true;
-            }
-        }
-        Effect::ReloadRepo { repo } => {
-            if reload_repo_pumped(state, opts, terminal, &repo) {
-                return true;
-            }
-            state.status = format!("refreshed {repo}");
-            if load_right_pumped(state, opts, terminal) {
-                return true;
-            }
-        }
-        Effect::LoadRightPane => {
-            if load_right_pumped(state, opts, terminal) {
-                return true;
-            }
-        }
-        Effect::Stage { repo, paths } => {
-            let dir = opts.cwd.join(&repo);
-            let paths_work = paths.clone();
-            let last = paths.last().cloned().unwrap_or_default();
-            if run_write_then_refresh_pumped(
-                state,
-                opts,
-                terminal,
-                move || {
-                    for path in &paths_work {
-                        stage_file(&dir, path)?;
-                    }
-                    Ok(())
-                },
-                move |_| format!("staged {last}"),
-                |err| format!("stage failed: {err}"),
-            ) {
-                return true;
-            }
-        }
-        Effect::Unstage { repo, paths } => {
-            let dir = opts.cwd.join(&repo);
-            let paths_work = paths.clone();
-            let last = paths.last().cloned().unwrap_or_default();
-            if run_write_then_refresh_pumped(
-                state,
-                opts,
-                terminal,
-                move || {
-                    for path in &paths_work {
-                        unstage_file(&dir, path)?;
-                    }
-                    Ok(())
-                },
-                move |_| format!("unstaged {last}"),
-                |err| format!("unstage failed: {err}"),
-            ) {
-                return true;
-            }
-        }
-        Effect::Revert {
-            repo,
-            tracked,
-            untracked,
-        } => {
-            let dir = opts.cwd.join(&repo);
-            let tracked_work = tracked.clone();
-            let untracked_work = untracked.clone();
-            let ok_status = if tracked.len() + untracked.len() == 1 {
-                if untracked.len() == 1 {
-                    format!("deleted {}", untracked[0])
-                } else {
-                    format!("reverted {}", tracked[0])
-                }
-            } else {
-                format!(
-                    "reverted {} tracked, {} untracked",
-                    tracked.len(),
-                    untracked.len()
-                )
-            };
-            if run_write_then_refresh_pumped(
-                state,
-                opts,
-                terminal,
-                move || {
-                    for path in &tracked_work {
-                        revert_tracked_file(&dir, path)?;
-                    }
-                    for path in &untracked_work {
-                        remove_untracked_file(&dir, path)?;
-                    }
-                    Ok(())
-                },
-                move |_| ok_status,
-                |err| format!("revert failed: {err}"),
-            ) {
-                return true;
-            }
-        }
-        Effect::EditFile { repo, path } => {
-            let editor = resolve_editor(
-                opts.config.editor.as_deref(),
-                std::env::var("EDITOR").ok().as_deref(),
-                std::env::var("VISUAL").ok().as_deref(),
-            );
-            let abs = opts.cwd.join(&repo).join(&path);
-            let (cmd, args) = editor_command(&editor, &abs.to_string_lossy(), None);
-            if is_detached_editor(&editor) {
-                let _ = Command::new(&cmd)
-                    .args(&args)
-                    .current_dir(opts.cwd.join(&repo))
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn();
-                state.status = format!("opened {path}");
-            } else if let Err(err) = run_blocking_editor(
-                terminal,
-                &cmd,
-                &args,
-                &opts.cwd.join(&repo),
-                state.mouse_enabled,
-            ) {
-                state.status = format!("edit failed: {err}");
-            } else {
-                state.status = format!("edited {path}");
-                drain_pending_events();
-                if reload_repo_pumped(state, opts, terminal, &repo) {
-                    return true;
-                }
-                if load_right_pumped(state, opts, terminal) {
-                    return true;
-                }
-            }
-        }
-        Effect::WatchRefresh => {
-            let cwd = opts.cwd.clone();
-            let config = opts.config.clone();
-            let filter = state.snapshot.filter_repos.clone();
-            let show_ignored = state.show_ignored;
-            match run_work_pumped(terminal, state, opts, move || {
-                collect_full_snapshot(&cwd, &config, &filter, show_ignored, false)
-            }) {
-                WorkPump::Quit => return true,
-                WorkPump::Done(snapshot) => {
-                    if apply_watch_snapshot_for_tick(state, snapshot)
-                        && load_right_pumped(state, opts, terminal)
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-        Effect::Push { repos } => {
-            if run_bulk_remote_pumped(
-                state,
-                opts,
-                terminal,
-                repos,
-                RunningOp::Push,
-                |dir| push_quiet(&dir),
-                Result::is_ok,
-            ) {
-                return true;
-            }
-        }
-        Effect::PrepareStashMenu { repo } => {
-            let dir = opts.cwd.join(&repo);
-            match run_work_pumped(terminal, state, opts, move || latest_stash_ref(&dir)) {
-                WorkPump::Quit => return true,
-                WorkPump::Done(latest) => state.open_stash_menu(repo, latest),
-            }
-        }
-        Effect::StashCreate { repo, paths } => {
-            let dir = opts.cwd.join(&repo);
-            let paths_work = paths.clone();
-            let ok_status = if paths.len() == 1 {
-                "Stashed 1 file".to_string()
-            } else if paths.is_empty() {
-                "Stashed".to_string()
-            } else {
-                format!("Stashed {} files", paths.len())
-            };
-            if run_write_then_refresh_pumped(
-                state,
-                opts,
-                terminal,
-                move || stash_push(&dir, &paths_work),
-                move |_| ok_status,
-                |err| format!("stash failed: {err}"),
-            ) {
-                return true;
-            }
-        }
-        Effect::StashApply { repo, stash_ref } => {
-            let dir = opts.cwd.join(&repo);
-            let stash = stash_ref.clone();
-            let stash_status = stash_ref.clone();
-            if run_write_then_refresh_pumped(
-                state,
-                opts,
-                terminal,
-                move || stash_apply(&dir, &stash),
-                move |_| format!("applied {stash_status}"),
-                |err| format!("apply failed: {err}"),
-            ) {
-                return true;
-            }
-        }
-        Effect::StashPop { repo, stash_ref } => {
-            let dir = opts.cwd.join(&repo);
-            let stash = stash_ref.clone();
-            let stash_status = stash_ref.clone();
-            if run_write_then_refresh_pumped(
-                state,
-                opts,
-                terminal,
-                move || stash_pop(&dir, &stash),
-                move |_| format!("popped {stash_status}"),
-                |err| format!("pop failed: {err}"),
-            ) {
-                return true;
-            }
-        }
-        Effect::StashDrop { repo, stash_ref } => {
-            let dir = opts.cwd.join(&repo);
-            let stash = stash_ref.clone();
-            let stash_status = stash_ref.clone();
-            if run_write_then_refresh_pumped(
-                state,
-                opts,
-                terminal,
-                move || stash_drop(&dir, &stash),
-                move |_| format!("dropped {stash_status}"),
-                |err| format!("drop failed: {err}"),
-            ) {
-                return true;
-            }
-        }
-        Effect::PrepareBranchPicker { repo } => {
-            let dir = opts.cwd.join(&repo);
-            match run_work_pumped(terminal, state, opts, move || list_local_branches(&dir)) {
-                WorkPump::Quit => return true,
-                WorkPump::Done(branches) => state.open_branch_picker(repo, branches),
-            }
-        }
-        Effect::PrepareGraphFocusPicker { repo } => {
-            let dir = opts.cwd.join(&repo);
-            match run_work_pumped(terminal, state, opts, move || list_local_branches(&dir)) {
-                WorkPump::Quit => return true,
-                WorkPump::Done(branches) => state.open_graph_focus_picker(repo, branches),
-            }
-        }
-        Effect::CheckoutBranch {
-            repo,
-            selected_name,
-            fast_forward_ref,
-        } => {
-            let dir = opts.cwd.join(&repo);
-            let name = selected_name.clone();
-            let ff = fast_forward_ref.clone();
-            match run_work_pumped(terminal, state, opts, move || {
-                compute_checkout(&dir, &name, ff.as_deref())
-            }) {
-                WorkPump::Quit => return true,
-                WorkPump::Done(result) => {
-                    let changed = apply_checkout_compute(state, repo, result);
-                    if changed && reload_snapshot_pumped(state, opts, terminal) {
-                        return true;
-                    }
-                    if load_right_pumped(state, opts, terminal) {
-                        return true;
-                    }
-                }
-            }
-        }
-        Effect::CreateBranch { repo, name } => {
-            let dir = opts.cwd.join(&repo);
-            let name_work = name.clone();
-            let name_status = name.clone();
-            if run_write_then_refresh_pumped(
-                state,
-                opts,
-                terminal,
-                move || create_branch_checkout(&dir, &name_work),
-                move |_| format!("created {name_status}"),
-                |err| format!("create branch failed: {err}"),
-            ) {
-                return true;
-            }
-        }
-        Effect::CreateBranchAt {
-            repo,
-            name,
-            commit_id,
-        } => {
-            let dir = opts.cwd.join(&repo);
-            let name_work = name.clone();
-            let commit_work = commit_id.clone();
-            let name_status = name.clone();
-            let short = commit_id.get(..7).unwrap_or(&commit_id).to_string();
-            if run_write_then_refresh_pumped(
-                state,
-                opts,
-                terminal,
-                move || create_branch_at(&dir, &name_work, &commit_work),
-                move |_| format!("created {name_status} at {short}"),
-                |err| format!("create branch failed: {err}"),
-            ) {
-                return true;
-            }
-        }
-        Effect::MergeIntoHead { repo, rev, label } => {
-            let dir = opts.cwd.join(&repo);
-            let rev_work = rev.clone();
-            match run_work_pumped(terminal, state, opts, move || {
-                compute_merge(&dir, &rev_work)
-            }) {
-                WorkPump::Quit => return true,
-                WorkPump::Done(result) => {
-                    let changed = apply_merge_compute(state, &label, result);
-                    if changed && reload_snapshot_pumped(state, opts, terminal) {
-                        return true;
-                    }
-                    if load_right_pumped(state, opts, terminal) {
-                        return true;
-                    }
-                }
-            }
-        }
-        Effect::RemoveWorktree {
-            primary,
-            path,
-            force,
-        } => {
-            let primary_dir = opts.cwd.join(&primary);
-            let path_dir = opts.cwd.join(&path);
-            let path_status = path.clone();
-            if run_write_then_refresh_pumped(
-                state,
-                opts,
-                terminal,
-                move || remove_worktree(&primary_dir, &path_dir, force),
-                move |_| format!("removed worktree {path_status}"),
-                |err| format!("remove worktree failed: {err}"),
-            ) {
-                return true;
-            }
-        }
-        Effect::LoadCommitFiles { repo, source } => {
-            if load_commit_files_pumped(state, opts, terminal, repo, source) {
-                return true;
-            }
-        }
-        Effect::LoadCommitDiff { repo, source, path } => {
-            if load_commit_diff_pumped(state, opts, terminal, repo, source, path) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 /// Git-only checkout work. TTY runs this on a worker; tests call it via
 /// [`run_checkout_branch`].
-enum CheckoutCompute {
+pub(crate) enum CheckoutCompute {
     Dirty,
     Failed {
         status: String,
@@ -1322,7 +428,7 @@ enum CheckoutCompute {
 
 /// Git-only merge work. TTY runs this on a worker; tests call it via
 /// [`run_merge_into_head`].
-enum MergeCompute {
+pub(crate) enum MergeCompute {
     Dirty,
     AlreadyUpToDate,
     FastForward,
@@ -1331,7 +437,7 @@ enum MergeCompute {
     Failed(String),
 }
 
-fn compute_checkout(
+pub(crate) fn compute_checkout(
     dir: &Path,
     selected_name: &str,
     fast_forward_ref: Option<&str>,
@@ -1391,7 +497,11 @@ fn compute_checkout(
     }
 }
 
-fn apply_checkout_compute(state: &mut AppState, repo: String, result: CheckoutCompute) -> bool {
+pub(crate) fn apply_checkout_compute(
+    state: &mut AppState,
+    repo: String,
+    result: CheckoutCompute,
+) -> bool {
     match result {
         CheckoutCompute::Dirty => {
             state.status = DIRTY_WORKTREE_STATUS.into();
@@ -1423,7 +533,7 @@ fn apply_checkout_compute(state: &mut AppState, repo: String, result: CheckoutCo
     }
 }
 
-fn compute_merge(dir: &Path, rev: &str) -> MergeCompute {
+pub(crate) fn compute_merge(dir: &Path, rev: &str) -> MergeCompute {
     if repo_has_local_changes(dir) {
         return MergeCompute::Dirty;
     }
@@ -1436,7 +546,7 @@ fn compute_merge(dir: &Path, rev: &str) -> MergeCompute {
     }
 }
 
-fn apply_merge_compute(state: &mut AppState, label: &str, result: MergeCompute) -> bool {
+pub(crate) fn apply_merge_compute(state: &mut AppState, label: &str, result: MergeCompute) -> bool {
     match result {
         MergeCompute::Dirty => {
             state.status = DIRTY_WORKTREE_STATUS.into();
@@ -1505,7 +615,7 @@ pub(crate) fn apply_headless_effect(
 ) {
     apply_headless_inner(state, effect, opts);
     if action_triggers_graph_autoload(action) {
-        let _ = maybe_autoload_graph(state, opts, None);
+        let _ = maybe_autoload_graph(state, opts);
     }
 }
 
@@ -1554,13 +664,13 @@ fn apply_headless_inner(state: &mut AppState, effect: Effect, opts: &TuiOpts) {
     }
 }
 
-/// Sync commit-file git. Headless e2e only — TTY must use [`load_commit_files_pumped`].
+/// Sync commit-file git. Headless e2e only — the TTY loop loads these on a worker.
 fn load_commit_files(state: &mut AppState, opts: &TuiOpts, repo: String, source: CommitFileSource) {
     let files = compute_commit_files(&opts.cwd.join(&repo), &source);
     state.open_commit_files(repo, source, files.into_iter().map(Into::into).collect());
 }
 
-fn compute_commit_files(dir: &Path, source: &CommitFileSource) -> Vec<NameStatus> {
+pub(crate) fn compute_commit_files(dir: &Path, source: &CommitFileSource) -> Vec<NameStatus> {
     match source {
         CommitFileSource::Commit { commit_id } => list_commit_name_status(dir, commit_id),
         CommitFileSource::Stash { stash_ref } => list_stash_name_status(dir, stash_ref),
@@ -1568,30 +678,7 @@ fn compute_commit_files(dir: &Path, source: &CommitFileSource) -> Vec<NameStatus
     }
 }
 
-/// List commit files on a worker. Returns true when the user asked to quit.
-fn load_commit_files_pumped(
-    state: &mut AppState,
-    opts: &TuiOpts,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    repo: String,
-    source: CommitFileSource,
-) -> bool {
-    state.begin_commit_files(repo.clone(), source.clone());
-    let _ = terminal.draw(|frame| draw(frame, state));
-    let dir = opts.cwd.join(&repo);
-    let source_work = source.clone();
-    match run_work_pumped(terminal, state, opts, move || {
-        compute_commit_files(&dir, &source_work)
-    }) {
-        WorkPump::Quit => true,
-        WorkPump::Done(files) => {
-            state.open_commit_files(repo, source, files.into_iter().map(Into::into).collect());
-            false
-        }
-    }
-}
-
-/// Sync commit-diff git. Headless e2e only — TTY must use [`load_commit_diff_pumped`].
+/// Sync commit-diff git. Headless e2e only — the TTY loop loads these on a worker.
 fn load_commit_diff(
     state: &mut AppState,
     opts: &TuiOpts,
@@ -1606,7 +693,7 @@ fn load_commit_diff(
     state.open_commit_diff(repo, source, files, file_cursor, path, content);
 }
 
-fn commit_diff_list(state: &AppState) -> (Vec<super::drill::CommitFile>, usize) {
+pub(crate) fn commit_diff_list(state: &AppState) -> (Vec<super::drill::CommitFile>, usize) {
     match &state.drill {
         super::drill::DrillView::Files { files, cursor, .. } => (files.clone(), *cursor),
         super::drill::DrillView::Diff {
@@ -1616,7 +703,7 @@ fn commit_diff_list(state: &AppState) -> (Vec<super::drill::CommitFile>, usize) 
     }
 }
 
-fn compute_commit_diff(
+pub(crate) fn compute_commit_diff(
     cwd: &Path,
     repo: &str,
     source: &CommitFileSource,
@@ -1643,49 +730,13 @@ fn compute_commit_diff(
     }
 }
 
-/// Load a commit / stash / worktree file diff on a worker.
-///
-/// Returns true when the user asked to quit.
-fn load_commit_diff_pumped(
-    state: &mut AppState,
-    opts: &TuiOpts,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    repo: String,
-    source: CommitFileSource,
-    path: String,
-) -> bool {
-    let context = state.commit_diff_context(&repo, &path);
-    let focused_file = state.focused_file();
-    let (files, file_cursor) = commit_diff_list(state);
-    let cwd = opts.cwd.clone();
-    let repo_work = repo.clone();
-    let source_work = source.clone();
-    let path_work = path.clone();
-    match run_work_pumped(terminal, state, opts, move || {
-        compute_commit_diff(
-            &cwd,
-            &repo_work,
-            &source_work,
-            &path_work,
-            context,
-            focused_file.as_ref(),
-        )
-    }) {
-        WorkPump::Quit => true,
-        WorkPump::Done(content) => {
-            state.open_commit_diff(repo, source, files, file_cursor, path, content);
-            false
-        }
-    }
-}
-
 fn head_file_diff(dir: &Path, path: &str, context: Option<u32>) -> DiffContent {
     let args = git_diff_args(&["diff", "HEAD"], path, context);
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     DiffContent::from_unified(crate::git::exec_git(&refs, dir))
 }
 
-fn drain_pending_events() {
+pub(crate) fn drain_pending_events() {
     while poll_event(Duration::from_millis(0)).unwrap_or(false) {
         if read_event().is_err() {
             break;
@@ -1693,7 +744,7 @@ fn drain_pending_events() {
     }
 }
 
-fn sync_mouse_capture(enabled: bool) {
+pub(crate) fn sync_mouse_capture(enabled: bool) {
     let mut out = stdout();
     if enabled {
         let _ = enable_mouse(&mut out);
@@ -1702,7 +753,7 @@ fn sync_mouse_capture(enabled: bool) {
     }
 }
 
-fn resume_tui(
+pub(crate) fn resume_tui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     mouse_enabled: bool,
 ) -> Result<(), String> {
@@ -1726,7 +777,7 @@ fn resume_tui(
 ///
 /// Returns the first event that is not that backlog so it is not lost
 /// (crossterm cannot unread).
-fn discard_held_nav_backlog(held: KeyEvent) -> Option<crossterm::event::Event> {
+pub(crate) fn discard_held_nav_backlog(held: KeyEvent) -> Option<crossterm::event::Event> {
     while poll_event(Duration::from_millis(0)).unwrap_or(false) {
         let Ok(event) = read_event() else {
             return None;
@@ -1738,7 +789,7 @@ fn discard_held_nav_backlog(held: KeyEvent) -> Option<crossterm::event::Event> {
     None
 }
 
-fn run_blocking_editor(
+pub(crate) fn run_blocking_editor(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     cmd: &str,
     args: &[String],
@@ -1767,7 +818,7 @@ fn run_blocking_editor(
     }
 }
 
-/// Sync snapshot collect. Headless e2e only — TTY must use [`reload_snapshot_pumped`].
+/// Sync snapshot collect. Headless e2e only — the TTY loop streams `process_repo`.
 fn reload_snapshot(state: &mut AppState, opts: &TuiOpts) {
     let snapshot = collect_full_snapshot(
         &opts.cwd,
@@ -1779,7 +830,7 @@ fn reload_snapshot(state: &mut AppState, opts: &TuiOpts) {
     state.apply_watch_snapshot(snapshot);
 }
 
-fn compute_reload_repo(
+pub(crate) fn compute_reload_repo(
     cwd: &Path,
     snapshot: &WorkspaceSnapshot,
     repo: &str,
@@ -1816,7 +867,10 @@ fn compute_reload_repo(
 
 /// Apply a watch poll. Returns true when the right pane must reload
 /// (`HEAD` / sync note / dirty set / file signatures moved).
-fn apply_watch_snapshot_for_tick(state: &mut AppState, snapshot: WorkspaceSnapshot) -> bool {
+pub(crate) fn apply_watch_snapshot_for_tick(
+    state: &mut AppState,
+    snapshot: WorkspaceSnapshot,
+) -> bool {
     let before_sigs = state.signatures.clone();
     let before_checkouts = checkout_watch_identities(&state.snapshot);
     state.apply_watch_snapshot(snapshot);
@@ -1829,35 +883,13 @@ fn apply_watch_snapshot_for_tick(state: &mut AppState, snapshot: WorkspaceSnapsh
 }
 
 /// Refresh one checkout in place. Missing paths drop out of the snapshot
-/// (focused checkout only). Headless e2e only — TTY must use [`reload_repo_pumped`].
+/// (focused checkout only). Headless e2e only — the TTY loop reloads one checkout on a worker.
 fn reload_repo(state: &mut AppState, opts: &TuiOpts, repo: &str) {
     let snapshot = compute_reload_repo(&opts.cwd, &state.snapshot, repo, state.show_ignored);
     state.apply_watch_snapshot(snapshot);
 }
 
-/// Refresh one checkout on a worker. Returns true when the user asked to quit.
-fn reload_repo_pumped(
-    state: &mut AppState,
-    opts: &TuiOpts,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    repo: &str,
-) -> bool {
-    let cwd = opts.cwd.clone();
-    let snapshot = state.snapshot.clone();
-    let repo = repo.to_string();
-    let show_ignored = state.show_ignored;
-    match run_work_pumped(terminal, state, opts, move || {
-        compute_reload_repo(&cwd, &snapshot, &repo, show_ignored)
-    }) {
-        WorkPump::Quit => true,
-        WorkPump::Done(snapshot) => {
-            state.apply_watch_snapshot(snapshot);
-            false
-        }
-    }
-}
-
-/// Sync pane git. Headless e2e only — TTY must use [`load_right_pumped`].
+/// Sync pane git. Headless e2e only — the TTY loop applies [`RightPaneLoad`] from a worker.
 fn load_right_headless(state: &mut AppState) {
     let payload = RightPaneRequest::from_state(state).compute();
     apply_right_pane_load(state, payload);
@@ -1865,12 +897,8 @@ fn load_right_headless(state: &mut AppState) {
 
 /// Fetch the next `git log` page when the cursor sits on the last loaded row.
 ///
-/// Returns true when the user asked to quit during pumped git.
-fn maybe_autoload_graph(
-    state: &mut AppState,
-    opts: &TuiOpts,
-    terminal: Option<&mut Terminal<CrosstermBackend<io::Stdout>>>,
-) -> bool {
+/// Headless e2e only. The TTY loop queues autoload as `UserTag::Autoload`.
+fn maybe_autoload_graph(state: &mut AppState, opts: &TuiOpts) -> bool {
     let (repo, skip, limit) = {
         if state.graph_loading_older {
             return false;
@@ -1899,35 +927,15 @@ fn maybe_autoload_graph(
     state.graph_loading_older = true;
     let prev_status = state.status.clone();
     state.status = LOADING_OLDER.to_string();
-    let page_and_identity = if let Some(terminal) = terminal {
-        let _ = terminal.draw(|frame| draw(frame, state));
-        let cwd = opts.cwd.clone();
-        let snapshot = state.snapshot.clone();
-        let focus = focus_branches.clone();
-        match run_work_pumped(terminal, state, opts, move || {
-            load_graph_model_window(&cwd, &snapshot, &repo, show_ignored, skip, limit, &focus)
-        }) {
-            WorkPump::Quit => {
-                state.graph_loading_older = false;
-                if state.status == LOADING_OLDER {
-                    state.status = prev_status;
-                }
-                return true;
-            }
-            WorkPump::Done(loaded) => loaded,
-        }
-    } else {
-        load_graph_model_window(
-            &opts.cwd,
-            &state.snapshot,
-            &repo,
-            show_ignored,
-            skip,
-            limit,
-            &focus_branches,
-        )
-    };
-    let (page, identity) = page_and_identity;
+    let (page, identity) = load_graph_model_window(
+        &opts.cwd,
+        &state.snapshot,
+        &repo,
+        show_ignored,
+        skip,
+        limit,
+        &focus_branches,
+    );
     let Some(current) = state.graph.clone() else {
         state.graph_loading_older = false;
         if state.status == LOADING_OLDER {
@@ -1970,6 +978,75 @@ pub fn collect_full_snapshot(
         show_ignored,
         filter_repos,
     )
+}
+
+/// Discovery config that still finds ignored repos so `.` can show them.
+pub(crate) fn discover_config(config: &WorkspaceStatusConfig) -> WorkspaceStatusConfig {
+    WorkspaceStatusConfig {
+        ignored_repos: Vec::new(),
+        max_depth: config.max_depth,
+        default_branches: config.default_branches.clone(),
+        editor: config.editor.clone(),
+    }
+}
+
+pub(crate) fn filter_repo_set(
+    filter_repos: &[String],
+) -> Option<std::collections::BTreeSet<String>> {
+    if filter_repos.is_empty() {
+        None
+    } else {
+        Some(filter_repos.iter().cloned().collect())
+    }
+}
+
+/// Apply one checkout result; other repos stay on the previous generation.
+pub(crate) fn apply_one_repo_snapshot(
+    state: &mut AppState,
+    path: &str,
+    snap: Option<crate::snapshot::RepoSnapshot>,
+) {
+    let next =
+        crate::snapshot::replace_repo_in_snapshot(&state.snapshot, path, snap, state.show_ignored);
+    state.apply_watch_snapshot(next);
+}
+
+/// True when the focused checkout's identity or file signatures moved.
+pub(crate) fn focused_repo_needs_pane(
+    before_sigs: &std::collections::BTreeMap<String, String>,
+    before_snap: &WorkspaceSnapshot,
+    state: &AppState,
+    repo: &str,
+) -> bool {
+    let before_id = before_snap
+        .repos
+        .iter()
+        .find(|row| row.repo == repo)
+        .map(super::watch::checkout_watch_identity);
+    let after_id = state
+        .snapshot
+        .repos
+        .iter()
+        .find(|row| row.repo == repo)
+        .map(super::watch::checkout_watch_identity);
+    if before_id != after_id {
+        return true;
+    }
+    let file = format!("file:{repo}:");
+    let chrome_repo = format!("repo:{repo}");
+    let chrome_co = format!("checkout:{repo}");
+    let before: std::collections::BTreeMap<_, _> = before_sigs
+        .iter()
+        .filter(|(k, _)| k.starts_with(&file) || *k == &chrome_repo || *k == &chrome_co)
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let after: std::collections::BTreeMap<_, _> = state
+        .signatures
+        .iter()
+        .filter(|(k, _)| k.starts_with(&file) || *k == &chrome_repo || *k == &chrome_co)
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    before != after
 }
 
 #[cfg(test)]
@@ -2462,7 +1539,7 @@ mod tests {
         assert!(
             pumps >= 5,
             "draw thread must poll while git add runs (got {pumps} pumps); \
-             unpumped stage_file in apply_effect_inner freezes the TUI until the child exits"
+             a sync stage_file on the loop thread freezes the TUI until the child exits"
         );
         result.expect("stage README.md");
         let _ = fs::remove_dir_all(&root);

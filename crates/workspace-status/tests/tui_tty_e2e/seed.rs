@@ -178,6 +178,16 @@ pub fn daily_workspace() -> (PathBuf, PathBuf) {
     (root, workspace)
 }
 
+/// Two visible checkouts for streamed-collect e2e (`fast` clean, `slow` dirty).
+pub fn stream_workspace() -> (PathBuf, PathBuf) {
+    let root = unique_root("ws-tui-tty-stream");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    seed_repo(&workspace, "fast", "feature/fast", false);
+    seed_repo(&workspace, "slow", "feature/slow", true);
+    (root, workspace)
+}
+
 pub fn focus_workspace() -> (PathBuf, PathBuf) {
     let root = unique_root("ws-tui-tty-focus");
     let workspace = root.join("workspace");
