@@ -1064,7 +1064,7 @@ mod tests {
             "Headless interpret_sync must drop EditFile (TTY editor only)"
         );
         assert!(
-            !effect.contains("collect_full_snapshot("),
+            !effect.contains(concat!("collect_full_", "snapshot(")),
             "interpreter watch/refresh must stream process_repo"
         );
     }

@@ -308,8 +308,8 @@ mod tests {
             "scheduler must gate stale collection generations"
         );
         assert!(
-            !loop_src.contains("collect_full_snapshot(")
-                && !effect.contains("collect_full_snapshot("),
+            !loop_src.contains(concat!("collect_full_", "snapshot("))
+                && !effect.contains(concat!("collect_full_", "snapshot(")),
             "live watch/refresh must stream process_repo, not wait on collect_full_snapshot"
         );
 
