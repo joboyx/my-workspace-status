@@ -429,6 +429,11 @@ impl AppState {
         self.rows.get(self.cursor)
     }
 
+    /// Checkout path for the focused tree row, if any.
+    pub fn focused_checkout_path(&self) -> Option<String> {
+        self.focused_row().and_then(|row| row.repo.clone())
+    }
+
     pub fn right_is_diff(&self) -> bool {
         match &self.drill {
             DrillView::Diff { .. } => true,

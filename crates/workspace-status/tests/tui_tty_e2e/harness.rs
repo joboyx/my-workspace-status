@@ -38,10 +38,27 @@ pub struct PtySession {
 
 impl PtySession {
     pub fn open(workspace: &Path) -> Self {
-        Self::open_size(workspace, COLS, ROWS)
+        Self::open_with_env(workspace, &[])
     }
 
     pub fn open_size(workspace: &Path, cols: u16, rows: u16) -> Self {
+        Self::open_size_with_env(workspace, cols, rows, &[])
+    }
+
+    /// Spawn the binary with extra child env after the watch-off defaults.
+    ///
+    /// Existing tests keep `WS_STATUS_WATCH_MS=0` / `WS_STATUS_FETCH_MS=0`
+    /// unless an override is passed here.
+    pub fn open_with_env(workspace: &Path, extra_env: &[(&str, &str)]) -> Self {
+        Self::open_size_with_env(workspace, COLS, ROWS, extra_env)
+    }
+
+    pub fn open_size_with_env(
+        workspace: &Path,
+        cols: u16,
+        rows: u16,
+        extra_env: &[(&str, &str)],
+    ) -> Self {
         assert!(
             workspace.is_dir(),
             "workspace must exist: {}",
@@ -78,6 +95,9 @@ impl PtySession {
         cmd.env("LC_ALL", "C.UTF-8");
         for (k, v) in git_env() {
             cmd.env(k, v);
+        }
+        for (k, v) in extra_env {
+            cmd.env(*k, *v);
         }
 
         let state_home = workspace.join(".e2e-state");
@@ -256,6 +276,27 @@ impl PtySession {
             &format!("screen contains `{needle}`"),
             timeout,
         );
+    }
+
+    /// Wait for `needle` while `tick` runs each poll (live input, not idle).
+    pub fn wait_contains_while(
+        &mut self,
+        needle: &str,
+        timeout: Duration,
+        mut tick: impl FnMut(&mut Self),
+    ) {
+        let start = Instant::now();
+        loop {
+            let screen = self.screen();
+            if screen.contains(needle) {
+                return;
+            }
+            if start.elapsed() >= timeout {
+                panic!("timeout waiting for screen contains `{needle}`:\n{screen}");
+            }
+            tick(self);
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     pub fn wait_absent(&self, needle: &str, timeout: Duration) {

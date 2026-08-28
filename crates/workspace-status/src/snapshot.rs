@@ -226,6 +226,37 @@ pub fn visible_workspace_snapshot(snapshot: &WorkspaceSnapshot) -> WorkspaceSnap
     }
 }
 
+/// Replace or drop one checkout, then rebuild the workspace snapshot.
+///
+/// Repos that are not `repo` stay as they were (previous generation) until
+/// a later result arrives. `None` removes that path.
+pub fn replace_repo_in_snapshot(
+    snapshot: &WorkspaceSnapshot,
+    repo: &str,
+    next: Option<RepoSnapshot>,
+    show_ignored: bool,
+) -> WorkspaceSnapshot {
+    let mut snaps = repo_snapshots_from_workspace(snapshot);
+    match next {
+        Some(row) => {
+            if let Some(slot) = snaps.iter_mut().find(|r| r.repo == repo) {
+                *slot = row;
+            } else {
+                snaps.push(row);
+            }
+        }
+        None => {
+            snaps.retain(|r| r.repo != repo);
+        }
+    }
+    build_workspace_snapshot(
+        &snaps,
+        &snapshot.ignored_repos,
+        show_ignored,
+        &snapshot.filter_repos,
+    )
+}
+
 pub fn repo_snapshots_from_workspace(snapshot: &WorkspaceSnapshot) -> Vec<RepoSnapshot> {
     snapshot
         .repos

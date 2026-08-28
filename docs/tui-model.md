@@ -1,6 +1,6 @@
 # TUI model
 
-Pure data under `crates/workspace-status/src/tui/` (tree, fold, flatten, keymap, live refresh). The event loop is `Action` → `AppState::dispatch` → `Effect`.
+Pure data under `crates/workspace-status/src/tui/` (tree, fold, flatten, keymap, live refresh). The event loop is `Action` → `AppState::dispatch` → `Effect`. Live TTY work is scheduled in `tui/event_loop.rs` / `tui/scheduler.rs`; Headless e2e applies effects synchronously.
 
 ## Node kinds
 
@@ -61,7 +61,7 @@ Default folds: ignored repos with children + the `no-updates` group. Non-ignored
 
 Enter that deepens the stack keeps **right** focus. Esc that pops a depth keeps **left** focus. Esc never quits.
 
-Left-pane `j`/`k`, click, vertical wheel, and search next/prev load the matching right pane through `Effect::LoadRightPane` (the same `load_right` / `run_work_pumped` path as depth 0). Mouse horizontal wheel over the workspace tree pans without `LoadRightPane` (SGR `66`/`67`). Depth 1 graph rows load that commit / stash / worktree's files. Depth 2 file rows load that file's commit diff. Directory rows keep the previous diff. Esc/back and the depth stack stay unchanged.
+Left-pane `j`/`k`, click, vertical wheel, and search next/prev load the matching right pane through `Effect::LoadRightPane` (TTY: `spawn_blocking` + coalesced request id; Headless: `load_right_headless`). Mouse horizontal wheel over the workspace tree pans without `LoadRightPane` (SGR `66`/`67`). Depth 1 graph rows load that commit / stash / worktree's files. Depth 2 file rows load that file's commit diff. Directory rows keep the previous diff. Esc/back and the depth stack stay unchanged. A focused-repo watch/status result that changes checkout or file identity enqueues `LoadRightPane` immediately — it does not wait for the rest of the workspace.
 
 ## App state
 

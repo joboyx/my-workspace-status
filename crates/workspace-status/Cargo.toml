@@ -22,6 +22,7 @@ crossterm = "0.28.1"
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.135"
+tokio = { version = "1.47.1", features = ["rt", "macros", "sync", "time"] }
 workspace-status-graph = { path = "../workspace-status-graph" }
 sha2 = "0.10.8"
 

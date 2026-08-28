@@ -42,7 +42,7 @@ A change is not complete while its documentation is stale.
 - `cargo test --workspace` at the repository root covers `workspace-status` and `workspace-status-graph`.
 - Exported Rust items need rustdoc (`///` or `//!`).
 - The plain-text report is a user-facing contract — changing it means updating `SAMPLE_OUTPUT.md` and the snapshot e2e suite.
-- TTY event loop: do not run git or other blocking I/O on the draw/event thread. Use `run_work_pumped` (and `run_capped_pumped` for independent per-repo fetch / pull / push). While a worker runs, nav / pane switch / cancel stay live (`BusyAction::Handle`); only actions that start another git write are drained. Headless e2e may stay sync. Guard: `tty_event_loop_must_not_call_sync_pane_git` in `tui/event_pump.rs`.
+- TTY event loop: do not run git or other blocking I/O on the draw/event thread. The live path is `tui/event_loop.rs` (current-thread Tokio, dedicated input thread, `spawn_blocking` on a `JoinSet`). While exclusive writes or a remote batch run, nav / pane switch / cancel stay live (`BusyAction::Handle`); only actions that start another git write are drained. Headless e2e may stay sync. Guard: `tty_event_loop_must_not_call_sync_pane_git` in `tui/event_pump.rs`.
 - This repository is public. Do not commit private workspace paths, personal hostnames, unpublished ticket keys, customer/project names from private work, chat transcripts, screenshots of private work, tokens, or credentials. Use `scripts/seed-demo-workspace.sh` for examples and stills.
 
 ## Demo / screenshots

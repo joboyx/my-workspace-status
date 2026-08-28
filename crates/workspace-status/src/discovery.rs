@@ -546,6 +546,28 @@ pub fn process_repo(
     })
 }
 
+/// Discover checkouts (walk + linked worktrees) without running `git status`.
+///
+/// Each entry is `(path, checkout meta, default-branch override)`. Used by
+/// the TTY loop to stream [`process_repo`] jobs after a cheap discover.
+pub fn discover_checkouts(
+    cwd: &Path,
+    config: &WorkspaceStatusConfig,
+    only_repos: Option<&BTreeSet<String>>,
+) -> Vec<(String, RepoCheckoutMeta, Option<String>)> {
+    let walk_primaries = find_repos_with_config(cwd, config, only_repos);
+    let entries = expand_repos_with_linked_worktrees(cwd, &walk_primaries, config, only_repos);
+    let default_branches = &config.default_branches;
+    entries
+        .into_iter()
+        .map(|(repo_path, meta)| {
+            let override_name =
+                override_for_path(&repo_path, meta.primary_repo.as_deref(), default_branches);
+            (repo_path, meta, override_name)
+        })
+        .collect()
+}
+
 /// Walk primaries and linked worktrees, then [`process_repo`] each checkout.
 ///
 /// Independent checkouts run with a cap of 4 (`FETCH_CONCURRENCY`;
@@ -556,16 +578,12 @@ pub fn collect_snapshots(
     config: &WorkspaceStatusConfig,
     only_repos: Option<&BTreeSet<String>>,
 ) -> Vec<RepoSnapshot> {
-    let walk_primaries = find_repos_with_config(cwd, config, only_repos);
-    let entries = expand_repos_with_linked_worktrees(cwd, &walk_primaries, config, only_repos);
+    let entries = discover_checkouts(cwd, config, only_repos);
     let cwd = cwd.to_path_buf();
-    let default_branches = config.default_branches.clone();
     map_with_concurrency(
         entries,
         env_fetch_concurrency(),
-        move |(repo_path, meta)| {
-            let override_name =
-                override_for_path(&repo_path, meta.primary_repo.as_deref(), &default_branches);
+        move |(repo_path, meta, override_name)| {
             process_repo(&repo_path, &cwd, do_fetch, override_name.as_deref(), &meta)
         },
     )
