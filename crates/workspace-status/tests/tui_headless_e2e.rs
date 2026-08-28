@@ -1,112 +1,25 @@
 //! Headless TestBackend e2e. No TTY.
 //!
 //! Covers the tree, file diff, multi-lane graph, search, theme
-//! cycle, commit drill, and hidden ignored repos. Fixtures follow the same
-//! git seed style as `snapshot_contract.rs`.
+//! cycle, commit drill, and hidden ignored repos. Git seeds and the tree
+//! hscroll oracle are shared with `tui_tty_e2e` via `tests/common/`.
+
+mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use common::hscroll::{
+    assert_clipped, assert_panned_to_tail, DIFF_HSCROLL_TAIL, TREE_HSCROLL_PREFIX,
+};
+use common::seed::{
+    daily_workspace, focus_workspace, git, git_env, seed_long_diff_file, seed_long_path_file,
+    seed_primary_and_linked_family, seed_repo,
+};
 use workspace_status::tui::HeadlessTui;
 use workspace_status_graph::UNICODE;
-
-fn git_env() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("GIT_AUTHOR_NAME", "workspace-status e2e"),
-        ("GIT_AUTHOR_EMAIL", "workspace-status-e2e@example.invalid"),
-        ("GIT_COMMITTER_NAME", "workspace-status e2e"),
-        (
-            "GIT_COMMITTER_EMAIL",
-            "workspace-status-e2e@example.invalid",
-        ),
-        ("GIT_CONFIG_GLOBAL", "/dev/null"),
-        ("GIT_CONFIG_NOSYSTEM", "1"),
-    ]
-}
-
-fn git(cwd: &Path, args: &[&str]) {
-    let mut cmd = Command::new("git");
-    cmd.args(args).current_dir(cwd);
-    for (k, v) in git_env() {
-        cmd.env(k, v);
-    }
-    cmd.stdout(Stdio::null()).stderr(Stdio::piped());
-    let out = cmd.output().expect("git runs");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-fn seed_repo(workspace: &Path, name: &str, branch: &str, dirty: bool) {
-    let repo = workspace.join(name);
-    fs::create_dir_all(&repo).unwrap();
-    let init = Command::new("git")
-        .args(["init", "-q", "-b", branch])
-        .current_dir(&repo)
-        .status();
-    if init.map(|s| s.success()).unwrap_or(false) == false {
-        git(&repo, &["init", "-q"]);
-        git(&repo, &["checkout", "-q", "-b", branch]);
-    }
-    git(&repo, &["config", "user.name", "workspace-status e2e"]);
-    git(
-        &repo,
-        &[
-            "config",
-            "user.email",
-            "workspace-status-e2e@example.invalid",
-        ],
-    );
-    fs::write(repo.join("README.md"), format!("# {name}\n")).unwrap();
-    git(&repo, &["add", "README.md"]);
-    git(&repo, &["commit", "-q", "-m", &format!("seed {name}")]);
-    if dirty {
-        fs::write(repo.join("README.md"), format!("# {name}\ndirty\n")).unwrap();
-    }
-}
-
-/// Merge diamond + stash spur on a non-default branch so the repo stays visible.
-fn seed_merge_graph(workspace: &Path, name: &str) {
-    let repo = workspace.join(name);
-    fs::create_dir_all(&repo).unwrap();
-    let init = Command::new("git")
-        .args(["init", "-q", "-b", "main"])
-        .current_dir(&repo)
-        .status();
-    if init.map(|s| s.success()).unwrap_or(false) == false {
-        git(&repo, &["init", "-q"]);
-        git(&repo, &["checkout", "-q", "-b", "main"]);
-    }
-    git(&repo, &["config", "user.name", "workspace-status e2e"]);
-    git(
-        &repo,
-        &[
-            "config",
-            "user.email",
-            "workspace-status-e2e@example.invalid",
-        ],
-    );
-    fs::write(repo.join("README.md"), "# root\n").unwrap();
-    git(&repo, &["add", "README.md"]);
-    git(&repo, &["commit", "-q", "-m", "root"]);
-    git(&repo, &["checkout", "-q", "-b", "left"]);
-    fs::write(repo.join("left.txt"), "left\n").unwrap();
-    git(&repo, &["add", "left.txt"]);
-    git(&repo, &["commit", "-q", "-m", "left"]);
-    git(&repo, &["checkout", "-q", "main"]);
-    fs::write(repo.join("right.txt"), "right\n").unwrap();
-    git(&repo, &["add", "right.txt"]);
-    git(&repo, &["commit", "-q", "-m", "right"]);
-    git(&repo, &["merge", "--no-ff", "-m", "merge", "left"]);
-    git(&repo, &["checkout", "-q", "-b", "feature/graph"]);
-    fs::write(repo.join("wip.txt"), "stash me\n").unwrap();
-    git(&repo, &["add", "wip.txt"]);
-    git(&repo, &["stash", "push", "-q", "-m", "WIP on graph"]);
-}
 
 /// Long linear history so the graph list overflows and shows a scrollbar thumb.
 fn seed_tall_graph(workspace: &Path, name: &str) {
@@ -260,28 +173,6 @@ fn demo_narrow_graph_truncates_chip_name_footer_keeps_full_ref() {
         "h/l pan still leaves the full ref in the footer:\n{panned}"
     );
     let _ = fs::remove_dir_all(&dest);
-}
-
-fn daily_workspace() -> (PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!(
-        "ws-tui-daily-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let workspace = root.join("workspace");
-    fs::create_dir_all(&workspace).unwrap();
-    seed_repo(&workspace, "app", "main", true);
-    seed_repo(&workspace, "lib", "main", false);
-    seed_repo(&workspace, "notes", "main", true);
-    seed_merge_graph(&workspace, "merger");
-    fs::write(
-        workspace.join(".workspace-status-config.json"),
-        "{\n  \"ignoredRepos\": [\"notes\"]\n}\n",
-    )
-    .unwrap();
-    (root, workspace)
 }
 
 fn open(workspace: &Path) -> HeadlessTui {
@@ -1170,13 +1061,7 @@ fn tree_mouse_hscroll_does_not_move_focused_row() {
 #[test]
 fn tree_trackpad_sgr_hscroll_pans_without_stealing_focus() {
     let (root, workspace) = daily_workspace();
-    let long_dir = workspace.join("app/src/app/workspace-tree");
-    fs::create_dir_all(&long_dir).unwrap();
-    fs::write(
-        long_dir.join("very-long-workspace-tree-component-name-TAIL99.ts"),
-        "export const pan = 1;\n",
-    )
-    .unwrap();
+    seed_long_path_file(&workspace);
 
     let mut tui = open(&workspace);
     tui.resize(64, 24);
@@ -1192,8 +1077,8 @@ fn tree_trackpad_sgr_hscroll_pans_without_stealing_focus() {
     let was_diff = tui.right_is_diff();
 
     let clipped = tui.frame();
-    assert_absent(&left_pane(&clipped, tui.pane_right_x()), "TAIL99");
-    let (col, row) = left_pane_cell_on(&clipped, &tui, "very-long");
+    assert_clipped(&left_pane(&clipped, tui.pane_right_x()));
+    let (col, row) = left_pane_cell_on(&clipped, &tui, TREE_HSCROLL_PREFIX);
     assert!(
         col < tui.pane_right_x(),
         "pointer must sit in the left pane, col={col} right_x={}",
@@ -1220,8 +1105,7 @@ fn tree_trackpad_sgr_hscroll_pans_without_stealing_focus() {
     );
     let ignored = tui.frame();
     let ignored_left = left_pane(&ignored, tui.pane_right_x());
-    assert_contains(&ignored_left, "very-long");
-    assert_absent(&ignored_left, "TAIL99");
+    assert_clipped(&ignored_left);
 
     for _ in 0..40 {
         tui.mouse_sgr_scroll_right(col, row);
@@ -1238,8 +1122,7 @@ fn tree_trackpad_sgr_hscroll_pans_without_stealing_focus() {
     );
     let panned = tui.frame();
     let panned_left = left_pane(&panned, tui.pane_right_x());
-    assert_absent(&panned_left, "very-long");
-    assert_contains(&panned_left, "TAIL99");
+    assert_panned_to_tail(&panned_left);
     assert!(
         tui.left_col_offset() > 0,
         "SGR wheel right should pan a long tree path"
@@ -1447,13 +1330,8 @@ fn diff_h_l_pans_long_lines() {
 #[test]
 fn left_pane_trackpad_hscroll_pans_long_diff_and_shows_scrollbars() {
     let (root, workspace) = daily_workspace();
-    let marker = "UNIQUE_DIFF_TAIL";
-    let long = format!("{}{marker}", "n".repeat(80));
-    let mut body = format!("{long}\n");
-    for i in 0..40 {
-        body.push_str(&format!("line {i}\n"));
-    }
-    fs::write(workspace.join("app/unique-diffline.rs"), body).unwrap();
+    let marker = DIFF_HSCROLL_TAIL;
+    seed_long_diff_file(&workspace, "unique-diffline.rs", marker);
 
     let mut tui = open(&workspace);
     tui.resize(80, 24);
@@ -1811,36 +1689,6 @@ const PRIMARY_CHECKOUT_GLYPH: &str = "";
 /// Linked extra glyph (`ICON_LINKED_WORKTREE`).
 const LINKED_WORKTREE_GLYPH: &str = "";
 
-fn seed_primary_and_linked_family(workspace: &Path) {
-    seed_repo(workspace, "app", "main", false);
-    let repo = workspace.join("app");
-    fs::write(repo.join(".gitignore"), ".worktrees/\n").unwrap();
-    git(&repo, &["add", ".gitignore"]);
-    git(&repo, &["commit", "-q", "-m", "ignore linked worktree dir"]);
-    git(&repo, &["checkout", "-q", "-b", "feature/primary-open"]);
-    fs::write(repo.join("primary.txt"), "primary off default\n").unwrap();
-    git(&repo, &["add", "primary.txt"]);
-    git(&repo, &["commit", "-q", "-m", "primary off default"]);
-    fs::write(repo.join("README.md"), "# app\ndirty primary\n").unwrap();
-    fs::create_dir_all(repo.join(".worktrees")).unwrap();
-    git(
-        &repo,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "feature/linked-open",
-            ".worktrees/feat",
-            "main",
-        ],
-    );
-    let linked = repo.join(".worktrees/feat");
-    fs::write(linked.join("open.txt"), "linked open vs default\n").unwrap();
-    git(&linked, &["add", "open.txt"]);
-    git(&linked, &["commit", "-q", "-m", "linked open"]);
-}
-
 fn tree_pane(line: &str) -> &str {
     let rest = line.strip_prefix('│').unwrap_or(line);
     rest.split('│').next().unwrap_or(rest)
@@ -1858,6 +1706,7 @@ fn default_main_worktree_row_omits_pinetree_linked_keeps_mark() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     seed_primary_and_linked_family(&workspace);
+    fs::write(workspace.join("app/README.md"), "# app\ndirty primary\n").unwrap();
     let mut tui = open(&workspace);
     let frame = tui.frame();
     let primary = frame
@@ -1893,57 +1742,9 @@ fn default_main_worktree_row_omits_pinetree_linked_keeps_mark() {
     let _ = fs::remove_dir_all(root);
 }
 
-/// Diverging local branches so focusing one drops the others' unique commits.
-fn seed_branch_focus_graph(workspace: &Path, name: &str) {
-    let repo = workspace.join(name);
-    fs::create_dir_all(&repo).unwrap();
-    let init = Command::new("git")
-        .args(["init", "-q", "-b", "main"])
-        .current_dir(&repo)
-        .status();
-    if init.map(|s| s.success()).unwrap_or(false) == false {
-        git(&repo, &["init", "-q"]);
-        git(&repo, &["checkout", "-q", "-b", "main"]);
-    }
-    git(&repo, &["config", "user.name", "workspace-status e2e"]);
-    git(
-        &repo,
-        &[
-            "config",
-            "user.email",
-            "workspace-status-e2e@example.invalid",
-        ],
-    );
-    fs::write(repo.join("README.md"), "# focus-root-commit\n").unwrap();
-    git(&repo, &["add", "README.md"]);
-    git(&repo, &["commit", "-q", "-m", "focus-root-commit"]);
-    git(&repo, &["checkout", "-q", "-b", "feature/keep"]);
-    fs::write(repo.join("keep.txt"), "keep\n").unwrap();
-    git(&repo, &["add", "keep.txt"]);
-    git(&repo, &["commit", "-q", "-m", "keep-leaf-commit"]);
-    git(&repo, &["checkout", "-q", "main"]);
-    fs::write(repo.join("main.txt"), "main\n").unwrap();
-    git(&repo, &["add", "main.txt"]);
-    git(&repo, &["commit", "-q", "-m", "main-leaf-commit"]);
-    git(&repo, &["checkout", "-q", "-b", "topic/noise", "HEAD~1"]);
-    fs::write(repo.join("noise.txt"), "noise\n").unwrap();
-    git(&repo, &["add", "noise.txt"]);
-    git(&repo, &["commit", "-q", "-m", "noise-leaf-commit"]);
-    git(&repo, &["checkout", "-q", "feature/keep"]);
-}
-
 #[test]
 fn graph_branch_focus_hides_unrelated_history_and_clears() {
-    let root = std::env::temp_dir().join(format!(
-        "ws-tui-graph-focus-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let workspace = root.join("workspace");
-    fs::create_dir_all(&workspace).unwrap();
-    seed_branch_focus_graph(&workspace, "focusbox");
+    let (root, workspace) = focus_workspace();
 
     let mut tui = open(&workspace);
     tui.search("focusbox");

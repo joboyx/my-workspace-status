@@ -14,6 +14,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 
+use super::common::hscroll::{
+    is_clipped, is_panned_to_tail, TREE_HSCROLL_PREFIX, TREE_HSCROLL_TAIL,
+};
 use super::seed::git_env;
 
 pub const COLS: u16 = 140;
@@ -392,7 +395,8 @@ impl PtySession {
             }
             if start.elapsed() >= timeout {
                 panic!(
-                    "timeout waiting for clipped long path on a tree row (no TAIL99):\n{screen}"
+                    "timeout waiting for clipped long path on a tree row (no {}):\n{screen}",
+                    TREE_HSCROLL_TAIL
                 );
             }
             thread::sleep(Duration::from_millis(25));
@@ -462,8 +466,8 @@ pub fn assert_absent(screen: &str, needle: &str) {
 
 /// Left list cells, excluding top/bottom chrome.
 ///
-/// A search chip on the status row can contain `TAIL99` without the tree
-/// having panned. Split on the pane join so the right pane is out.
+/// A search chip on the status row can contain [`TREE_HSCROLL_TAIL`] without
+/// the tree having panned. Split on the pane join so the right pane is out.
 pub fn left_tree(screen: &str) -> String {
     let lines: Vec<&str> = screen.lines().collect();
     let end = lines.len().saturating_sub(2);
@@ -501,27 +505,24 @@ pub fn tree_row_containing(screen: &str, needle: &str) -> Option<u16> {
     None
 }
 
-/// Clipped long-path row on the same frame: prefix visible, `TAIL99` not.
+/// Clipped long-path row on the same frame: prefix visible, tail not.
 ///
 /// `None` if the prefix is missing, already panned, or there is no tree
 /// row to aim the wheel at. Callers wait on this instead of a bare expect
 /// after resize or click.
 pub fn clipped_long_path_row(screen: &str) -> Option<u16> {
     let left = left_tree(screen);
-    if left.contains("very-long") && !left.contains("TAIL99") {
-        tree_row_containing(screen, "very-long")
+    if is_clipped(&left) {
+        tree_row_containing(screen, TREE_HSCROLL_PREFIX)
     } else {
         None
     }
 }
 
 pub fn assert_tree_clipped_long_path(screen: &str) {
-    let left = left_tree(screen);
-    assert_contains(&left, "very-long");
-    assert_absent(&left, "TAIL99");
+    crate::common::hscroll::assert_clipped(&left_tree(screen));
 }
 
 pub fn tree_is_panned_to_tail(screen: &str) -> bool {
-    let left = left_tree(screen);
-    left.contains("TAIL99") && !left.contains("very-long")
+    is_panned_to_tail(&left_tree(screen))
 }

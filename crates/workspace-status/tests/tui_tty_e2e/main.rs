@@ -9,6 +9,9 @@
 //! with no tests.
 
 #[cfg(unix)]
+#[path = "../common/mod.rs"]
+mod common;
+#[cfg(unix)]
 mod desktop;
 #[cfg(unix)]
 mod harness;
@@ -247,9 +250,9 @@ fn pty_ctrl_c_prompts_before_quit() {
 
 /// Tree hscroll via live `event::read`. Must fail if the tree does not pan.
 ///
-/// Same clipped-prefix vs `TAIL99` oracle as headless
-/// `tree_trackpad_sgr_hscroll_pans_without_stealing_focus`. No `/` search:
-/// that would put `TAIL99` on the status chip before any wheel.
+/// Same clipped-prefix vs tail oracle as headless
+/// `tree_trackpad_sgr_hscroll_pans_without_stealing_focus` (`common::hscroll`).
+/// No `/` search: that would put the tail on the status chip before any wheel.
 #[cfg(unix)]
 #[test]
 fn pty_tree_sgr_hscroll_pans_clipped_path() {
@@ -279,12 +282,10 @@ fn pty_tree_sgr_hscroll_pans_clipped_path() {
     }
     tui.wait_pred(
         tree_is_panned_to_tail,
-        "tree row shows TAIL99 and drops the clipped prefix",
+        "tree row shows the hscroll tail and drops the clipped prefix",
         WAIT,
     );
-    let left = left_tree(&tui.screen());
-    harness::assert_absent(&left, "very-long");
-    assert_contains(&left, "TAIL99");
+    crate::common::hscroll::assert_panned_to_tail(&left_tree(&tui.screen()));
 }
 
 /// Continuous harmless input must not starve `WatchTick`.
@@ -763,7 +764,7 @@ mod xfce {
     ///
     /// XTEST `click 7` (no `--window`) after a root-coordinate warp, in
     /// xterm (VTE 0.76 does not report buttons 6/7). Same clipped-prefix vs
-    /// `TAIL99` tree-row oracle as the PTY case. No `/` search.
+    /// tail tree-row oracle as the PTY case (`common::hscroll`). No `/` search.
     #[test]
     #[ignore = "GitHub Actions tui-tty-desktop job; xterm encodes XTEST button 7"]
     fn desktop_xterm_xtest_trackpad_hscroll() {
@@ -771,10 +772,8 @@ mod xfce {
         seed_long_path_file(&workspace);
         let tui = DesktopSession::open_xterm_size(&workspace, 64, 24);
         tui.wait_pred(
-            |screen| {
-                left_tree(screen).contains("very-long") && !left_tree(screen).contains("TAIL99")
-            },
-            "clipped long path prefix on the tree row (no TAIL99)",
+            |screen| crate::common::hscroll::is_clipped(&left_tree(screen)),
+            "clipped long path prefix on the tree row (no tail)",
             WAIT,
         );
         assert_tree_clipped_long_path(&tui.screen());
@@ -792,12 +791,10 @@ mod xfce {
         tui.wheel_right_at_cell(6, row, 40);
         tui.wait_pred(
             tree_is_panned_to_tail,
-            "tree row shows TAIL99 and drops the clipped prefix",
+            "tree row shows the hscroll tail and drops the clipped prefix",
             WAIT,
         );
-        let left = left_tree(&tui.screen());
-        crate::harness::assert_absent(&left, "very-long");
-        assert_contains(&left, "TAIL99");
+        crate::common::hscroll::assert_panned_to_tail(&left_tree(&tui.screen()));
     }
 
     #[test]

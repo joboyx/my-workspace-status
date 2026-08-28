@@ -58,6 +58,7 @@ Do **not** invent spur heuristics (`parent.lane + 1`, spine `◇─╯`, mid-rai
 | Tree nodes, row kinds, fold behaviour, keymap, session state, action registry | `docs/tui-model.md` |
 | Ratatui TUI | `docs/tui-rust.md` |
 | Graph gutter topology, glyphs, junctions, densify rails, stash leaf tips | `docs/git-graph-topology.md` (+ architecture / tui-model pointers) |
+| Shared TUI e2e seed or tree hscroll oracle | `crates/workspace-status/tests/common/` + `docs/tui-tty-e2e.md` |
 | Ratatui graph widget model, rows, or paint | `docs/graph.md` + `crates/workspace-status-graph` |
 | Diff parsing, layout, or syntax highlighting | `docs/diff-rendering.md` |
 | Any git command or operation semantics | `docs/git-operations.md` |
