@@ -263,6 +263,23 @@ impl PtySession {
         self.key('z');
     }
 
+    /// Home as CSI `1 ; 1 : 1 ~` (press) then `: 3` (release).
+    ///
+    /// The live loop requested event types. `event::read` maps CSI `1~` to
+    /// `KeyCode::Home`. `CSI 1 u` is not Home.
+    pub fn home(&mut self) {
+        self.send_bytes(b"\x1b[1;1:1~");
+        self.send_bytes(b"\x1b[1;1:3~");
+    }
+
+    /// End as CSI `4 ; 1 : 1 ~` (press) then `: 3` (release).
+    ///
+    /// Same event-type encoding as [`Self::home`]. `CSI 4 u` is not End.
+    pub fn end(&mut self) {
+        self.send_bytes(b"\x1b[4;1:1~");
+        self.send_bytes(b"\x1b[4;1:3~");
+    }
+
     pub fn enter(&mut self) {
         self.send_bytes(b"\r");
     }
