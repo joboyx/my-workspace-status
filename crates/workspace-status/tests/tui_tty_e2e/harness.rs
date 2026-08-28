@@ -149,6 +149,39 @@ impl PtySession {
         }
     }
 
+    /// Kitty CSI-u one event (`CSI code ; modifier : kind u`).
+    ///
+    /// The live loop pushes `REPORT_ALL_KEYS_AS_ESCAPE_CODES` plus
+    /// `REPORT_EVENT_TYPES`, so Shift+letter is this encoding — not a raw
+    /// UTF-8 byte. Kind 1 is press, 3 is release.
+    pub fn csi_u(&mut self, codepoint: u32, modifier: u8, kind: u8) {
+        let seq = format!("\x1b[{codepoint};{modifier}:{kind}u");
+        self.send_bytes(seq.as_bytes());
+    }
+
+    /// Shift+letter the way `event::read` sees it with keyboard enhancement.
+    ///
+    /// Terminals report the unshifted codepoint with modifier 2 (Shift) and
+    /// a press then a release. A raw `'O'` byte is a different path and does
+    /// not catch that remap.
+    pub fn shift_letter(&mut self, letter: char) {
+        let lower = letter.to_ascii_lowercase();
+        let codepoint = u32::from(lower);
+        self.csi_u(codepoint, 2, 1);
+        self.csi_u(codepoint, 2, 3);
+    }
+
+    /// Type `text` as Shift+letter CSI-u for A–Z, raw bytes otherwise.
+    pub fn shift_keys(&mut self, text: &str) {
+        for c in text.chars() {
+            if c.is_ascii_alphabetic() {
+                self.shift_letter(c);
+            } else {
+                self.key(c);
+            }
+        }
+    }
+
     pub fn enter(&mut self) {
         self.send_bytes(b"\r");
     }
