@@ -394,6 +394,64 @@ impl PtySession {
         out
     }
 
+    /// True when every cell of the first on-screen `needle` uses this 24-bit bg.
+    ///
+    /// Help `/` highlight paints `pills.filter.bg` on matching overlay rows.
+    /// `screen()` is glyphs only, so this is the paint claim.
+    pub fn needle_has_bg(&self, needle: &str, r: u8, g: u8, b: u8) -> bool {
+        match self.first_needle_bgs(needle) {
+            Some(bgs) if !bgs.is_empty() => bgs.iter().all(|bg| *bg == Some((r, g, b))),
+            _ => false,
+        }
+    }
+
+    /// True when `needle` is on screen and no cell of that span uses this bg.
+    pub fn needle_lacks_bg(&self, needle: &str, r: u8, g: u8, b: u8) -> bool {
+        match self.first_needle_bgs(needle) {
+            Some(bgs) if !bgs.is_empty() => bgs.iter().all(|bg| *bg != Some((r, g, b))),
+            _ => false,
+        }
+    }
+
+    /// Background of each cell in the first on-screen `needle`, top to bottom.
+    pub fn first_needle_bgs(&self, needle: &str) -> Option<Vec<Option<(u8, u8, u8)>>> {
+        if needle.is_empty() {
+            return None;
+        }
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        for row in 0..self.rows {
+            let mut text = String::new();
+            let mut cols: Vec<u16> = Vec::new();
+            for col in 0..self.cols {
+                let Some(cell) = screen.cell(row, col) else {
+                    continue;
+                };
+                let contents = cell.contents();
+                if contents.is_empty() {
+                    continue;
+                }
+                for _ in contents.chars() {
+                    cols.push(col);
+                }
+                text.push_str(&contents);
+            }
+            let Some(byte_at) = text.find(needle) else {
+                continue;
+            };
+            let char_at = text[..byte_at].chars().count();
+            let nchars = needle.chars().count();
+            let mut bgs = Vec::with_capacity(nchars);
+            for i in 0..nchars {
+                let col = *cols.get(char_at + i)?;
+                let cell = screen.cell(row, col)?;
+                bgs.push(rgb_of(cell.bgcolor()));
+            }
+            return Some(bgs);
+        }
+        None
+    }
+
     /// True when any cell uses this 24-bit colour as fg or bg.
     pub fn has_rgb(&self, r: u8, g: u8, b: u8) -> bool {
         let parser = self.parser.lock().unwrap();
@@ -549,6 +607,13 @@ pub(crate) fn write_update_check(path: &Path, last_check_unix: Option<u64>) {
 
 fn color_is_rgb(color: vt100::Color, r: u8, g: u8, b: u8) -> bool {
     matches!(color, vt100::Color::Rgb(cr, cg, cb) if cr == r && cg == g && cb == b)
+}
+
+fn rgb_of(color: vt100::Color) -> Option<(u8, u8, u8)> {
+    match color {
+        vt100::Color::Rgb(r, g, b) => Some((r, g, b)),
+        _ => None,
+    }
 }
 
 pub fn assert_contains(screen: &str, needle: &str) {
