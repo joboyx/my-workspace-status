@@ -93,14 +93,14 @@ Linked `git worktree` paths under the workspace cwd appear like any other repo, 
 ```text
 Repo                                       Branch                          Sync         Files
 app                                       🔥 main                         ✅ current   💾 clean
-🔗 app/.worktrees/DEMO-1422-asr-retry    🚧 feature/DEMO-1422-asr-retry 🌱  ✅ current   💾 clean
+🔗 app/.worktrees/feat-login             🚧 feature/login-page 🌱           ✅ current   💾 clean
 
 🌿 Branches (1):
   🚧 feature:
-    - 🔗 app/.worktrees/DEMO-1422-asr-retry (DEMO-1422) 🌱
+    - 🔗 app/.worktrees/feat-login [feature/login-page] 🌱
 
 🔗 Linked worktrees (1):
-    - 🔗 app/.worktrees/DEMO-1422-asr-retry (DEMO-1422) 🌱
+    - 🔗 app/.worktrees/feat-login [feature/login-page] 🌱
 ```
 
 ## Clean Workspace
