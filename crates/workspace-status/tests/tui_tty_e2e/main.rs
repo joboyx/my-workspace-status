@@ -140,7 +140,7 @@ fn pty_shift_letters_csi_u_type_into_search() {
     tui.key('/');
     tui.wait_contains("SEARCH", WAIT);
     tui.shift_keys("MERGER");
-    tui.wait_contains("SEARCH MERGER", WAIT);
+    tui.wait_contains("MERGER▏", WAIT);
     tui.enter();
     tui.wait_contains("/MERGER", WAIT);
     tui.wait_contains("WIP on graph", WAIT);
@@ -280,7 +280,7 @@ mod xfce {
         tui.key("shift+d");
         tui.key("shift+m");
         tui.key("shift+e");
-        tui.wait_contains("SEARCH README", WAIT);
+        tui.wait_contains("README▏", WAIT);
         tui.key("Escape");
 
         tui.key("slash");

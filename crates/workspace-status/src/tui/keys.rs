@@ -131,6 +131,7 @@ fn key_event_to_action(
     graph_commit_focused: bool,
     hl_folds: bool,
 ) -> Action {
+    let key = fold_shift_letter(key);
     match key.kind {
         KeyEventKind::Release => Action::None,
         KeyEventKind::Press => key_to_action(
@@ -160,6 +161,28 @@ fn key_event_to_action(
     }
 }
 
+/// Keyboard enhancement reports Shift+letter as the unshifted codepoint plus
+/// [`KeyModifiers::SHIFT`] (`Char('o')` + SHIFT, not `Char('O')`).
+///
+/// Fold that into the uppercase binding so `O` / `S` / `/` capitals match
+/// what a raw `'O'` byte already does. SHIFT stays set so Shift+h/l still pan.
+fn fold_shift_letter(mut key: KeyEvent) -> KeyEvent {
+    let KeyCode::Char(c) = key.code else {
+        return key;
+    };
+    if !c.is_ascii_lowercase() || !key.modifiers.contains(KeyModifiers::SHIFT) {
+        return key;
+    }
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+    {
+        return key;
+    }
+    key.code = KeyCode::Char(c.to_ascii_uppercase());
+    key
+}
+
 /// Keys that fire again while held (typical terminal key-repeat).
 pub(crate) fn key_repeats_while_held(key: KeyEvent) -> bool {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -168,9 +191,13 @@ pub(crate) fn key_repeats_while_held(key: KeyEvent) -> bool {
     matches!(
         key.code,
         KeyCode::Char('h')
+            | KeyCode::Char('H')
             | KeyCode::Char('j')
+            | KeyCode::Char('J')
             | KeyCode::Char('k')
+            | KeyCode::Char('K')
             | KeyCode::Char('l')
+            | KeyCode::Char('L')
             | KeyCode::Left
             | KeyCode::Right
             | KeyCode::Up
@@ -255,7 +282,9 @@ fn key_to_action(
     match mode {
         InputMode::Help => match key.code {
             KeyCode::Char('/') => Action::SearchStart,
-            KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('?') => Action::ToggleHelp,
+            KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc | KeyCode::Char('?') => {
+                Action::ToggleHelp
+            }
             _ => Action::None,
         },
         InputMode::HelpSearch => match key.code {
@@ -298,7 +327,7 @@ fn key_to_action(
         InputMode::Confirm => match key.code {
             KeyCode::Char('Y') => Action::ConfirmYesClean,
             KeyCode::Char('y') | KeyCode::Enter => Action::ConfirmYes,
-            KeyCode::Char('n') | KeyCode::Esc => Action::ConfirmNo,
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::ConfirmNo,
             _ => Action::None,
         },
         InputMode::SearchPrompt => match key.code {
@@ -325,8 +354,8 @@ fn key_to_action(
             KeyCode::Esc => Action::BranchCancel,
             KeyCode::Enter => Action::BranchSubmit,
             KeyCode::Backspace => Action::BranchBackspace,
-            KeyCode::Char('j') | KeyCode::Down => Action::BranchMove(1),
-            KeyCode::Char('k') | KeyCode::Up => Action::BranchMove(-1),
+            KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::BranchMove(1),
+            KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::BranchMove(-1),
             KeyCode::Char('C') => Action::CreateBranchStart,
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Action::BranchChar(c)
@@ -337,8 +366,8 @@ fn key_to_action(
             KeyCode::Esc => Action::GraphFocusCancel,
             KeyCode::Enter => Action::GraphFocusSubmit,
             KeyCode::Backspace => Action::GraphFocusBackspace,
-            KeyCode::Char('j') | KeyCode::Down => Action::GraphFocusMove(1),
-            KeyCode::Char('k') | KeyCode::Up => Action::GraphFocusMove(-1),
+            KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::GraphFocusMove(1),
+            KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::GraphFocusMove(-1),
             KeyCode::Char(' ') => Action::GraphFocusToggle,
             KeyCode::Char('O') => Action::GraphFocusClear,
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -461,22 +490,26 @@ fn normal_key(
                 Action::PageMove(1)
             }
         }
-        KeyCode::Char('j') | KeyCode::Down => {
+        KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => {
             if focus_right && right_is_diff {
                 Action::ScrollDiff(1)
             } else {
                 Action::Move(1)
             }
         }
-        KeyCode::Char('k') | KeyCode::Up => {
+        KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => {
             if focus_right && right_is_diff {
                 Action::ScrollDiff(-1)
             } else {
                 Action::Move(-1)
             }
         }
-        KeyCode::Char('h') | KeyCode::Left => hl_or_pan(key, -1, focus_right, hl_folds),
-        KeyCode::Char('l') | KeyCode::Right => hl_or_pan(key, 1, focus_right, hl_folds),
+        KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => {
+            hl_or_pan(key, -1, focus_right, hl_folds)
+        }
+        KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Right => {
+            hl_or_pan(key, 1, focus_right, hl_folds)
+        }
         KeyCode::Enter => Action::NavEnter,
         KeyCode::Esc => Action::NavEsc,
         _ => Action::None,
@@ -833,6 +866,56 @@ mod tests {
                 true
             ),
             Action::GraphFocusClear
+        );
+    }
+
+    #[test]
+    fn shift_letter_folds_to_uppercase_binding() {
+        assert_eq!(
+            event_to_action(&shift(KeyCode::Char('o')), normal(), false, true),
+            Action::GraphFocusClear
+        );
+        assert_eq!(
+            event_to_action(&shift(KeyCode::Char('s')), normal(), false, false),
+            Action::StashMenu
+        );
+        assert_eq!(
+            event_to_action(&shift(KeyCode::Char('p')), normal(), false, false),
+            Action::Push
+        );
+        assert_eq!(
+            event_to_action(
+                &shift(KeyCode::Char('m')),
+                InputMode::SearchPrompt,
+                false,
+                false
+            ),
+            Action::SearchChar('M')
+        );
+        assert_eq!(
+            event_to_action(
+                &shift(KeyCode::Char('o')),
+                InputMode::GraphFocusPicker,
+                false,
+                true
+            ),
+            Action::GraphFocusClear
+        );
+        assert_eq!(
+            event_to_action(&shift(KeyCode::Char('y')), InputMode::Confirm, false, false),
+            Action::ConfirmYesClean
+        );
+        assert_eq!(
+            event_to_action_with(
+                &shift(KeyCode::Char('h')),
+                normal(),
+                false,
+                false,
+                false,
+                false,
+                true
+            ),
+            Action::PanDiff(-1)
         );
     }
 
