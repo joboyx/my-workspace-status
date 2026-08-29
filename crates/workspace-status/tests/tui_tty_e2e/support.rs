@@ -641,3 +641,95 @@ pub fn right_of_split(line: &str) -> String {
     }
     String::new()
 }
+
+/// Cells after `wip.txt` on the left-tree file row (trailing chrome).
+pub fn after_wip_name(screen: &str) -> Option<String> {
+    let line = tree_line_containing(screen, "wip.txt")?;
+    let at = line.find("wip.txt")?;
+    Some(line[at + "wip.txt".len()..].to_string())
+}
+
+/// Restored `wip.txt` on the merger tree. Badge `A` is the staged add.
+pub fn merger_wip_added(screen: &str) -> bool {
+    tree_has(screen, "wip.txt")
+        && tree_cursor_on(screen, "merger")
+        && after_wip_name(screen).is_some_and(|after| after.contains('A'))
+}
+
+/// Right pane still lists merger `stash@{0}` (`WIP on graph`).
+pub fn graph_stash_still_listed(screen: &str) -> bool {
+    let right = right_pane(screen);
+    right.contains("WIP on graph") || right.contains("stash@{0}")
+}
+
+/// Pull, apply-only, drop-only, or stash-push toasts. Graph pop is `popped`.
+pub fn no_pull_or_other_stash_write(screen: &str) -> bool {
+    let crumb = crumb_row(screen);
+    !crumb.contains("Pulled")
+        && !crumb.contains("applied")
+        && !crumb.contains("dropped")
+        && !crumb.contains("Stashed")
+        && !crumb.contains("failed")
+}
+
+/// SEARCH / help / stash-menu / pull-idle toasts that are not graph pop.
+pub fn no_wrong_stash_pop_overlays(screen: &str) -> bool {
+    !screen.contains("SEARCH")
+        && !screen.contains("MOVE")
+        && !screen.contains("Stash ")
+        && !screen.contains("Drop stash@{")
+        && !screen.contains("nothing behind to pull")
+        && !screen.contains("no visible repos for that op")
+        && no_mouse_toggle_toast(screen)
+}
+
+/// Tab focused the merger graph. HEAD is clean. Stash is listed. Pop idle.
+pub fn graph_focused_merger_stash_listed(screen: &str) -> bool {
+    merger_graph_drilled_right(screen)
+        && graph_pane_focused(screen)
+        && graph_stash_still_listed(screen)
+        && !tree_has(screen, "wip.txt")
+        && !crumb_row(screen).contains("popped")
+        && no_pull_or_other_stash_write(screen)
+        && no_wrong_stash_pop_overlays(screen)
+}
+
+/// Tab lands on the uncommitted row. Stash is the next `j`.
+pub fn graph_focused_merger_before_stash_pop(screen: &str) -> bool {
+    graph_focused_merger_stash_listed(screen)
+        && graph_cursor_on(screen, "working tree")
+        && !graph_cursor_on(screen, "WIP on graph")
+}
+
+/// Graph cursor on `stash@{0}` (`WIP on graph`). Hint `p` is pop stash.
+pub fn stash_row_ready_to_pop(screen: &str) -> bool {
+    let status = status_row(screen);
+    graph_focused_merger_stash_listed(screen)
+        && graph_cursor_on(screen, "WIP on graph")
+        && !graph_cursor_on(screen, "working tree")
+        && status.contains("apply stash")
+        && status.contains("pop stash")
+        && status.contains("drop stash")
+        && !status.contains("pull")
+}
+
+/// Graph `p` popped `stash@{0}`: apply + drop. Apply-only / drop-only fail.
+pub fn documented_graph_stash_pop(screen: &str) -> bool {
+    let crumb = crumb_row(screen);
+    let status = status_row(screen);
+    graph_pane_focused(screen)
+        && tree_cursor_on(screen, "merger")
+        && merger_wip_added(screen)
+        && !graph_stash_still_listed(screen)
+        && screen.contains("uncommitted changes")
+        && !screen.contains("working tree clean")
+        && crumb.contains("popped stash@{0}")
+        && no_pull_or_other_stash_write(screen)
+        && !status.contains("pop stash")
+        && !status.contains("apply stash")
+        && !status.contains("drop stash")
+        && status.contains("drill")
+        && status.contains(" tree")
+        && status.contains(" split")
+        && no_wrong_stash_pop_overlays(screen)
+}
