@@ -562,6 +562,18 @@ impl PtySession {
         thread::sleep(Duration::from_millis(ms));
     }
 
+    /// Fail if the child has already exited.
+    pub fn assert_running(&mut self, what: &str) {
+        match self.child.try_wait() {
+            Ok(None) => {}
+            Ok(Some(status)) => panic!(
+                "{what}: TUI process exited ({status:?}); screen:\n{}",
+                self.screen()
+            ),
+            Err(err) => panic!("wait child: {err}"),
+        }
+    }
+
     /// Wait until the child process exits with status 0 (`q` / second Ctrl+C).
     pub fn wait_exit(&mut self, timeout: Duration) {
         self.wait_exit_without("", timeout);

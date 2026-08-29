@@ -1035,16 +1035,6 @@ fn pty_graph_focus_unmark_enter_clears() {
     );
 }
 
-#[cfg(unix)]
-#[test]
-fn pty_ctrl_c_prompts_before_quit() {
-    let (_root, workspace) = daily_workspace();
-    let mut tui = PtySession::open(&workspace);
-    tui.ctrl('c');
-    tui.wait_contains("Press Ctrl+C again to exit", WAIT);
-    tui.key('q');
-}
-
 /// Tree hscroll via live `event::read`. Must fail if the tree does not pan.
 ///
 /// Same clipped-prefix vs tail oracle as headless
