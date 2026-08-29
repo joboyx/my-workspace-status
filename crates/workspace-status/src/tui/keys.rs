@@ -131,7 +131,7 @@ fn key_event_to_action(
     graph_commit_focused: bool,
     hl_folds: bool,
 ) -> Action {
-    let key = fold_shift_letter(key);
+    let key = fold_shift_letter(fold_kitty_csi_u_arrows(key));
     match key.kind {
         KeyEventKind::Release => Action::None,
         KeyEventKind::Press => key_to_action(
@@ -161,6 +161,24 @@ fn key_event_to_action(
     }
 }
 
+/// Crossterm 0.28 `event::read` leaves kitty CSI-u arrow codepoints as
+/// [`KeyCode::Char`] in the private-use range (`57350`–`57353`). Fold them
+/// onto Left / Right / Up / Down so Shift+←/→ pan the same as a constructed
+/// [`KeyCode::Left`] event. Keypad arrows (`57417`–`57420`) already map.
+fn fold_kitty_csi_u_arrows(mut key: KeyEvent) -> KeyEvent {
+    let KeyCode::Char(c) = key.code else {
+        return key;
+    };
+    key.code = match u32::from(c) {
+        57350 => KeyCode::Left,
+        57351 => KeyCode::Right,
+        57352 => KeyCode::Up,
+        57353 => KeyCode::Down,
+        _ => return key,
+    };
+    key
+}
+
 /// Keyboard enhancement reports Shift+letter as the unshifted codepoint plus
 /// [`KeyModifiers::SHIFT`] (`Char('o')` + SHIFT, not `Char('O')`).
 ///
@@ -185,6 +203,7 @@ fn fold_shift_letter(mut key: KeyEvent) -> KeyEvent {
 
 /// Keys that fire again while held (typical terminal key-repeat).
 pub(crate) fn key_repeats_while_held(key: KeyEvent) -> bool {
+    let key = fold_kitty_csi_u_arrows(key);
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return matches!(key.code, KeyCode::Char('u') | KeyCode::Char('d'));
     }
@@ -1227,6 +1246,58 @@ mod tests {
             ),
             Action::PanDiff(1)
         );
+        // Kitty CSI-u Left/Right (`57350`/`57351`): crossterm 0.28 yields Char PUA.
+        // 57350 is U+E006, not U+E00E (that is CapsLock 57358).
+        let kitty_left = char::from_u32(57350).unwrap();
+        let kitty_right = char::from_u32(57351).unwrap();
+        assert_eq!(
+            event_to_action_with(
+                &shift(KeyCode::Char(kitty_left)),
+                normal(),
+                false,
+                false,
+                false,
+                false,
+                true
+            ),
+            Action::PanDiff(-1)
+        );
+        assert_eq!(
+            event_to_action_with(
+                &shift(KeyCode::Char(kitty_right)),
+                normal(),
+                false,
+                false,
+                false,
+                false,
+                true
+            ),
+            Action::PanDiff(1)
+        );
+        assert_eq!(
+            event_to_action_with(
+                &key(KeyCode::Char(kitty_left)),
+                normal(),
+                false,
+                false,
+                false,
+                false,
+                true
+            ),
+            Action::FoldClose
+        );
+        assert_eq!(
+            event_to_action_with(
+                &key(KeyCode::Char(kitty_right)),
+                normal(),
+                false,
+                false,
+                false,
+                false,
+                true
+            ),
+            Action::FoldOpen
+        );
         assert_eq!(
             event_to_action_with(
                 &key(KeyCode::Char('h')),
@@ -1600,6 +1671,7 @@ mod tests {
         ));
         assert!(held_nav_key(&key(KeyCode::Char('j'))).is_some());
         assert!(held_nav_key(&key_kind(KeyCode::Char('j'), KeyEventKind::Repeat)).is_some());
+        assert!(held_nav_key(&shift(KeyCode::Char(char::from_u32(57350).unwrap()))).is_some());
         assert!(held_nav_key(&key(KeyCode::Char('q'))).is_none());
         assert!(held_nav_key(&key_kind(KeyCode::Char('j'), KeyEventKind::Release)).is_none());
     }
