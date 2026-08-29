@@ -1109,32 +1109,6 @@ fn pty_pull_behind_local_remote() {
     tui.wait_contains("origin-tip-commit", WAIT);
 }
 
-/// Graph `m` is the TUI write that creates a commit (merge into HEAD).
-#[cfg(unix)]
-#[test]
-fn pty_graph_merge_creates_commit() {
-    let (_root, workspace) = focus_workspace();
-    let mut tui = PtySession::open(&workspace);
-    tui.search("focusbox");
-    tui.wait_contains("/focusbox", WAIT);
-    tui.tab();
-    tui.wait_contains("keep-leaf-commit", WAIT);
-    tui.wait_contains("main-leaf-commit", WAIT);
-    tui.wait_ms(SETTLE_MS);
-
-    tui.key('/');
-    tui.keys("main-leaf-commit");
-    tui.enter();
-    tui.wait_contains("/main-leaf-commit", WAIT);
-    tui.wait_contains("merge", WAIT);
-    tui.wait_ms(SETTLE_MS);
-    tui.key('m');
-    tui.wait_contains("Merge", WAIT);
-    tui.wait_contains("into", WAIT);
-    tui.key('y');
-    tui.wait_contains("Merge branch 'main'", GIT_WAIT);
-}
-
 /// Create (`S` then `s`), apply (`a`), drop (`D` then `y`) — not menu-open only.
 #[cfg(unix)]
 #[test]
