@@ -72,7 +72,7 @@ Help overlay (`tui/help.rs` MOVE / GIT / VIEW) plus mouse and overlays. **PTY** 
 | Ctrl+C quit prompt | `pty_ctrl_c_prompts_before_quit` | — | First CSI-u Control+c. Process stays. Pinned chrome row `Press Ctrl+C again to exit` (not breadcrumb toast, not status pills). Tree stays. Teardown `q`. Second Ctrl+C not claimed |
 | `q` quit | `pty_q_quits_immediately` | — | Process exits. Help `q` / quit, not press twice. Ctrl+C prompt must not paint. Still-alive chrome fails. |
 | Tree SGR hscroll `CSI < 67` | `pty_tree_sgr_hscroll_pans_clipped_path` | `desktop_xterm_xtest_trackpad_hscroll` | Default mouse-on. Motion-bit `CSI < 99` must not pan. Clipped `very-long` then `TAIL99` on the tree row. Not `m` toggle. Not file-diff pan. Desktop: XTEST `click 7` in xterm |
-| Watch while keys (no `r`) | `pty_watch_applies_while_keys_arrive` | — | |
+| Watch while keys (no `r`) | `pty_watch_applies_while_keys_arrive` | — | Watch on (`WS_STATUS_WATCH_MS` >= 500). After first paint, a new dirty path must show on the tree while `j`/`k` arrive. No `r`. Toast-only or frozen-until-`r` fails. |
 | Streamed collect | `pty_streamed_collect_updates_focused_repo_before_slow` | — | |
 | Space reviewed `*` | `pty_space_marks_dirty_file_reviewed` | `desktop_xfce_review_and_stage` | |
 | `s` / `u` stage | `pty_stage_and_unstage_dirty_file` | `desktop_xfce_review_and_stage` | |
