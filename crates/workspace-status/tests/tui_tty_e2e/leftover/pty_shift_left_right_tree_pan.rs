@@ -57,13 +57,16 @@ fn tree_clipped_readme_focus(screen: &str, readme_row: u16) -> bool {
 }
 
 /// Documented Shift+←/→ tree pan: `TAIL99` on the tree row, prefix gone.
+///
+/// After pan, tree labels clip (`README.md` → `md`, `app` / `No updates`
+/// leave the viewport). Do not require those strings. Cursor bar, short
+/// README diff, and no `lib` (No updates stayed folded) still apply.
 fn documented_shift_arrows_panned(screen: &str, readme_row: u16) -> bool {
     tree_is_panned_to_tail(screen)
         && tree_row_containing(screen, TREE_HSCROLL_TAIL).is_some()
         && tree_cursor_bar_on_row(screen, readme_row)
         && launch_panes_left_tree_right_diff(screen)
-        && tree_dir_expanded(screen, "app")
-        && no_updates_group_folded(screen)
+        && !tree_has(screen, "lib")
         && screen.contains("UNSTAGED")
         && screen.contains("+dirty")
         && screen.contains("app/README.md")
