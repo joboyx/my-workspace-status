@@ -114,10 +114,23 @@ fn bottom_graph_thumb(screen: &str) -> Option<(u16, u16)> {
         .max_by_key(|(_, y)| *y)
 }
 
+/// First `║` on the thumb column above the thumb (track, not the thumb itself).
+fn scrollbar_track_top(screen: &str, thumb_col: u16, thumb_row: u16) -> Option<u16> {
+    screen.lines().enumerate().find_map(|(y, line)| {
+        let y = y as u16;
+        if y >= thumb_row {
+            return None;
+        }
+        match line.chars().nth(thumb_col as usize) {
+            Some('║') => Some(y),
+            _ => None,
+        }
+    })
+}
+
 fn history_graph_at_top(screen: &str) -> bool {
     screen.contains("count 29")
         && (screen.contains("Working tree") || screen.contains("working tree clean"))
-        && !screen.contains("count 0")
         && tree_cursor_on(screen, "history")
         && screen.contains("┌ graph")
         && graph_thumb_cells(screen).is_empty()
@@ -207,18 +220,18 @@ fn pty_divider_scrollbar_drag() {
     );
     let (thumb_col, thumb_row) = bottom_graph_thumb(&graph.screen())
         .unwrap_or_else(|| panic!("█ thumb after G:\n{}", graph.screen()));
-    let track_top = graph
-        .screen()
-        .lines()
-        .enumerate()
-        .find_map(|(y, line)| {
-            line.chars()
-                .nth(thumb_col as usize)
-                .is_some_and(|ch| ch == '│' || ch == GRAPH_THUMB)
-                .then_some(y as u16)
-        })
-        .filter(|y| *y < thumb_row)
-        .unwrap_or(2);
+    let track_top =
+        scrollbar_track_top(&graph.screen(), thumb_col, thumb_row).unwrap_or_else(|| {
+            panic!(
+                "║ track above █ at col={thumb_col} row={thumb_row}:\n{}",
+                graph.screen()
+            )
+        });
+    assert!(
+        thumb_row.saturating_sub(track_top) > 8,
+        "track top {track_top} is too close to thumb {thumb_row} (must not aim at the same thumb):\n{}",
+        graph.screen()
+    );
     graph.sgr_mouse(0, thumb_col, thumb_row);
     graph.wait_ms(SETTLE_MS);
     graph.wait_pred(
@@ -249,8 +262,8 @@ fn pty_divider_scrollbar_drag() {
     graph.sgr_click(thumb_col, track_top);
     graph.wait_pred(
         |screen| {
-            !screen.contains("count 0")
-                && screen.contains("count 29")
+            screen.contains("count 29")
+                && (screen.contains("Working tree") || screen.contains("working tree clean"))
                 && tree_cursor_on(screen, "history")
                 && no_wrong_overlays(screen)
         },
