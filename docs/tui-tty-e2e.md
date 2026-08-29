@@ -78,7 +78,7 @@ Help overlay (`tui/help.rs` MOVE / GIT / VIEW) plus mouse and overlays. **PTY** 
 | `s` / `u` stage | `pty_stage_and_unstage_dirty_file` | `desktop_xfce_review_and_stage` | After first paint, `s` stages the focused dirty file (tree `S `, pane STAGED, unstage hint). `u` reverses. A no-op, toast-only, Space `*`, or stash overlay cannot pass. Desktop twin unchanged. |
 | `f` fetch | `pty_fetch_local_remote_marks_behind` | `desktop_xfce_fetch_then_pull_local_remote` | After first paint, workspace `f` fetches the local bare origin. Tree shows syncbox `v1` / `1 behind`. Pull hint appears. `j` onto the repo paints `origin-tip-commit` on the graph. HEAD stays seed. A no-op, pull, push, toast-only, or missing behind mark cannot pass. Desktop twin unchanged. |
 | `p` pull | `pty_pull_behind_local_remote` | `desktop_xfce_fetch_then_pull_local_remote` | |
-| Shift+P push | `pty_shift_p_csi_u_pushes_ahead` | `desktop_xfce_shift_p_pushes_ahead` | |
+| Shift+P push | `pty_shift_p_csi_u_pushes_ahead` | `desktop_xfce_shift_p_pushes_ahead` | After first paint, focused `syncbox` is ahead of a local bare origin. CSI-u Shift+P pushes. Tree drops `^1` / `1 ahead` (`all current`, No updates). Graph HEAD is `ahead-tip-commit` (`[+=main]`). Push hint goes. A no-op, fetch, pull, raw `P`, toast-only, or still-ahead cannot pass. Desktop twin unchanged. |
 | Graph `m` merge | `pty_graph_merge_creates_commit` | `desktop_xfce_graph_merge_creates_commit` | |
 | Stash `S`/`a`/`D` | `pty_stash_create_apply_and_drop` | `desktop_xfce_stash_create_apply_and_drop` | |
 | Graph stash `p` pop | `pty_stash_graph_pop` | `desktop_xfce_stash_graph_pop` | Desktop waits for SEARCH + graph jump before Return |
