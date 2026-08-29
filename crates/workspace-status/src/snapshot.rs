@@ -263,6 +263,26 @@ pub fn replace_repo_in_snapshot(
     )
 }
 
+/// Keep last-good `local_branches` when status failed with an empty list.
+///
+/// A lock or unreadable porcelain is not "the branch is gone." Launch has
+/// no previous snapshot. Comment GC then skips branch wipe while the
+/// checkout is still present.
+pub fn carry_status_failed_local_branches(
+    previous: &WorkspaceSnapshot,
+    mut next: WorkspaceSnapshot,
+) -> WorkspaceSnapshot {
+    for repo in &mut next.repos {
+        if repo.sync_note != "status failed" || !repo.local_branches.is_empty() {
+            continue;
+        }
+        if let Some(prev) = previous.repos.iter().find(|r| r.repo == repo.repo) {
+            repo.local_branches.clone_from(&prev.local_branches);
+        }
+    }
+    next
+}
+
 pub fn repo_snapshots_from_workspace(snapshot: &WorkspaceSnapshot) -> Vec<RepoSnapshot> {
     snapshot
         .repos
@@ -549,5 +569,22 @@ mod tests {
         let visible = visible_workspace_snapshot(&built);
         assert_eq!(visible.repos.len(), 1);
         assert!(visible.repos[0].ignored);
+    }
+
+    #[test]
+    fn status_failed_keeps_previous_local_branches() {
+        let mut good = sample_repo("app", true);
+        good.local_branches = vec!["main".into(), "topic/keep".into()];
+        let previous = build_workspace_snapshot(&[good], &[], false, &[]);
+        let mut failed = sample_repo("app", false);
+        failed.branch = "(unknown)".into();
+        failed.sync_note = "status failed".into();
+        failed.local_branches = Vec::new();
+        let next = build_workspace_snapshot(&[failed], &[], false, &[]);
+        let carried = carry_status_failed_local_branches(&previous, next);
+        assert_eq!(
+            carried.repos[0].local_branches,
+            vec!["main".to_string(), "topic/keep".to_string()]
+        );
     }
 }

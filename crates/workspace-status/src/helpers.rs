@@ -3,6 +3,8 @@
 use crate::snapshot::{CheckoutKind, RepoSnapshot, SyncStatus};
 
 pub const DETACHED_HEAD_BRANCH: &str = "HEAD (detached)";
+/// Porcelain-parse failure. Not a `refs/heads` name.
+pub const UNKNOWN_HEAD_BRANCH: &str = "(unknown)";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchKind {
@@ -96,6 +98,11 @@ pub fn is_detached_head_branch(branch: &str) -> bool {
         || branch == DETACHED_HEAD_BRANCH
         || branch == "HEAD"
         || branch == "(detached)"
+}
+
+/// True when `name` is a real local branch, not detached / `(unknown)`.
+pub fn is_counted_local_branch(name: &str) -> bool {
+    !is_detached_head_branch(name) && name != UNKNOWN_HEAD_BRANCH
 }
 
 pub fn extract_ticket_id(branch: &str) -> Option<&str> {

@@ -16,7 +16,9 @@ use workspace_status_graph::{
     GraphRow, PaintedLine, ASCII, UNICODE,
 };
 
-use crate::snapshot::{CheckoutKind, FileChange, WorkspaceSnapshot};
+use crate::snapshot::{
+    carry_status_failed_local_branches, CheckoutKind, FileChange, WorkspaceSnapshot,
+};
 
 #[cfg(test)]
 use super::action::Action;
@@ -829,6 +831,7 @@ impl AppState {
     }
 
     pub fn apply_snapshot(&mut self, snapshot: WorkspaceSnapshot) {
+        let snapshot = carry_status_failed_local_branches(&self.snapshot, snapshot);
         self.snapshot = snapshot;
         self.snapshot.show_ignored = self.show_ignored;
         self.rebuild_rows();

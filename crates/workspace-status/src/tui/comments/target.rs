@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use crate::helpers::{is_default_branch, is_detached_head_branch};
+use crate::helpers::{is_counted_local_branch, is_default_branch, is_detached_head_branch};
 use crate::snapshot::{CheckoutKind, WorkspaceSnapshot};
 
 use super::super::diff::DiffRow;
@@ -31,21 +31,31 @@ pub struct CommentLiveSet {
 /// Collect live branches, checkouts, and stored commit SHAs from `snapshot`.
 ///
 /// Does not run git. `local_branches` is filled on the snapshot worker.
+/// An empty branch list (status failed / unreadable porcelain) is not
+/// "the branch is gone": stored branch and worktree-line comments stay
+/// while that checkout is still in the snapshot.
 pub fn collect_live_set(snapshot: &WorkspaceSnapshot, store: &CommentStore) -> CommentLiveSet {
     let mut live = CommentLiveSet::default();
+    let mut unknown_branch_list: HashSet<String> = HashSet::new();
     for repo in &snapshot.repos {
         let path = normalize_viewed_path(&repo.repo);
         live.worktrees.insert(path);
         let identity = repo_identity(&repo.repo, repo.primary_repo.as_deref());
         live.identities.insert(identity.clone());
+        let mut known = 0usize;
         for name in &repo.local_branches {
-            if !is_detached_head_branch(name) {
+            if is_counted_local_branch(name) {
                 live.branches.insert((identity.clone(), name.clone()));
+                known += 1;
             }
         }
-        if !is_detached_head_branch(&repo.branch) && !repo.branch.is_empty() {
+        if is_counted_local_branch(&repo.branch) {
             live.branches
                 .insert((identity.clone(), repo.branch.clone()));
+            known += 1;
+        }
+        if known == 0 {
+            unknown_branch_list.insert(identity);
         }
     }
     for key in store.keys() {
@@ -53,6 +63,11 @@ pub fn collect_live_set(snapshot: &WorkspaceSnapshot, store: &CommentStore) -> C
             CommentKey::Commit { repo, sha } | CommentKey::CommitLine { repo, sha, .. } => {
                 if live.identities.contains(repo) {
                     live.commits.insert((repo.clone(), sha.clone()));
+                }
+            }
+            CommentKey::Branch { repo, branch } | CommentKey::WorktreeLine { repo, branch, .. } => {
+                if unknown_branch_list.contains(repo) && is_counted_local_branch(branch) {
+                    live.branches.insert((repo.clone(), branch.clone()));
                 }
             }
             _ => {}
@@ -129,11 +144,13 @@ fn local_branch_names(snapshot: &WorkspaceSnapshot, repo_path: &str) -> Vec<Stri
     let Some(row) = snapshot.repos.iter().find(|r| r.repo == repo_path) else {
         return Vec::new();
     };
-    let mut names = row.local_branches.clone();
-    if !is_detached_head_branch(&row.branch)
-        && !row.branch.is_empty()
-        && !names.contains(&row.branch)
-    {
+    let mut names: Vec<String> = row
+        .local_branches
+        .iter()
+        .filter(|name| is_counted_local_branch(name))
+        .cloned()
+        .collect();
+    if is_counted_local_branch(&row.branch) && !names.contains(&row.branch) {
         names.push(row.branch.clone());
     }
     names
@@ -466,6 +483,36 @@ mod tests {
         let next = gc_comments(&store, &live);
         assert!(next.get(&commit).is_some());
         assert_eq!(next.len(), 1);
+    }
+
+    #[test]
+    fn gc_keeps_branch_comments_when_status_failed() {
+        let mut row = snap(
+            "app",
+            crate::helpers::UNKNOWN_HEAD_BRANCH,
+            CheckoutKind::Primary,
+            None,
+        );
+        row.sync_note = "status failed".into();
+        let snapshot = build_workspace_snapshot(&[row], &[], false, &[]);
+        let branch = CommentKey::Branch {
+            repo: "app".into(),
+            branch: "topic/keep".into(),
+        };
+        let line = CommentKey::WorktreeLine {
+            repo: "app".into(),
+            branch: "topic/keep".into(),
+            path: "a.rs".into(),
+            line: 1,
+        };
+        let mut store = CommentStore::new();
+        store = put_comment(&store, branch.clone(), "b");
+        store = put_comment(&store, line.clone(), "l");
+        let live = collect_live_set(&snapshot, &store);
+        let next = gc_comments(&store, &live);
+        assert_eq!(next.get(&branch).map(String::as_str), Some("b"));
+        assert_eq!(next.get(&line).map(String::as_str), Some("l"));
+        assert!(!live.branches.contains(&("app".into(), "(unknown)".into())));
     }
 
     #[test]

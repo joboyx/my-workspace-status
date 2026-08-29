@@ -45,6 +45,7 @@ mod pty_pull_behind_local_remote;
 mod pty_q_quits_immediately;
 mod pty_r_refreshes_new_dirty_file;
 mod pty_revert_confirm_n_cancels;
+mod pty_semicolon_branch_comment_survives_status_failed;
 mod pty_semicolon_commit_comment_survives_branch_delete;
 mod pty_semicolon_detached_head_survives_watch;
 mod pty_semicolon_line_comment_commit_diff;
