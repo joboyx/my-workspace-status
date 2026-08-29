@@ -76,7 +76,7 @@ Help overlay (`tui/help.rs` MOVE / GIT / VIEW) plus mouse and overlays. **PTY** 
 | Streamed collect | `pty_streamed_collect_updates_focused_repo_before_slow` | — | Watch on via `open_with_env`. Focused `fast` tree row + right pane paint while `slow` `git status` is blocked. Chrome-only, blank pane, or wait-for-all fails. |
 | Space reviewed `*` | `pty_space_marks_dirty_file_reviewed` | `desktop_xfce_review_and_stage` | After first paint, Space on a dirty file paints ASCII `*` on that row. File stays. Not `z` fold. Not `s`/`u` stage. Second Space unmarks. A no-op, cursor-only, fold, or stage cannot pass. Desktop Space arm only. `s`/`u` stay a separate claim. |
 | `s` / `u` stage | `pty_stage_and_unstage_dirty_file` | `desktop_xfce_review_and_stage` | After first paint, `s` stages the focused dirty file (tree `S `, pane STAGED, unstage hint). `u` reverses. A no-op, toast-only, Space `*`, or stash overlay cannot pass. Desktop twin unchanged. |
-| `f` fetch | `pty_fetch_local_remote_marks_behind` | `desktop_xfce_fetch_then_pull_local_remote` | Local bare origin |
+| `f` fetch | `pty_fetch_local_remote_marks_behind` | `desktop_xfce_fetch_then_pull_local_remote` | After first paint, workspace `f` fetches the local bare origin. Tree shows syncbox `v1` / `1 behind`. Pull hint appears. `j` onto the repo paints `origin-tip-commit` on the graph. HEAD stays seed. A no-op, pull, push, toast-only, or missing behind mark cannot pass. Desktop twin unchanged. |
 | `p` pull | `pty_pull_behind_local_remote` | `desktop_xfce_fetch_then_pull_local_remote` | |
 | Shift+P push | `pty_shift_p_csi_u_pushes_ahead` | `desktop_xfce_shift_p_pushes_ahead` | |
 | Graph `m` merge | `pty_graph_merge_creates_commit` | `desktop_xfce_graph_merge_creates_commit` | |

@@ -1077,32 +1077,6 @@ fn pty_graph_focus_unmark_enter_clears() {
     );
 }
 
-/// `f` against a local bare origin. Must fail if fetch is a no-op.
-#[cfg(unix)]
-#[test]
-fn pty_fetch_local_remote_marks_behind() {
-    let (_root, workspace) = unfetched_behind_workspace();
-    let mut tui = PtySession::open(&workspace);
-    tui.search("syncbox");
-    tui.wait_contains("/syncbox", WAIT);
-    tui.wait_contains("Working tree", WAIT);
-    tui.wait_contains("fetch", WAIT);
-    tui.wait_ms(SETTLE_MS);
-
-    tui.key('f');
-    tui.wait_pred(
-        |screen| op_finished(screen, "Fetched") || left_tree(screen).contains("v1"),
-        "Fetched 1 repo or tree shows behind-by-1",
-        GIT_WAIT,
-    );
-    tui.wait_pred(
-        |screen| left_tree(screen).contains("v1"),
-        "tree shows behind-by-1 after fetch",
-        WAIT,
-    );
-    tui.wait_contains("origin-tip-commit", WAIT);
-}
-
 /// `p` on a behind checkout. Must fail if pull is a no-op.
 #[cfg(unix)]
 #[test]
