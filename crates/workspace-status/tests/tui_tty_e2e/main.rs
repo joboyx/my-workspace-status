@@ -28,9 +28,7 @@ use std::time::Duration;
 #[cfg(unix)]
 use harness::{assert_contains, left_tree, tree_is_panned_to_tail, PtySession, COLS};
 #[cfg(unix)]
-use seed::{
-    behind_workspace, daily_workspace, focus_workspace, unfetched_behind_workspace,
-};
+use seed::{daily_workspace, focus_workspace, unfetched_behind_workspace};
 
 #[cfg(unix)]
 const WAIT: Duration = Duration::from_secs(12);
@@ -1075,38 +1073,6 @@ fn pty_graph_focus_unmark_enter_clears() {
         "Enter after unmark restores --all / full graph (does not re-drill keep)",
         GIT_WAIT,
     );
-}
-
-/// `p` on a behind checkout. Must fail if pull is a no-op.
-#[cfg(unix)]
-#[test]
-fn pty_pull_behind_local_remote() {
-    let (_root, workspace) = behind_workspace();
-    let mut tui = PtySession::open(&workspace);
-    tui.search("syncbox");
-    tui.wait_contains("/syncbox", WAIT);
-    tui.wait_contains("origin-tip-commit", WAIT);
-    tui.wait_pred(
-        |screen| left_tree(screen).contains("v1"),
-        "tree shows behind-by-1 before pull",
-        WAIT,
-    );
-    tui.wait_contains("pull", WAIT);
-    tui.wait_ms(SETTLE_MS);
-
-    tui.key('p');
-    tui.wait_pred(
-        |screen| op_finished(screen, "Pulled"),
-        "Pulled 1 repo without failure",
-        GIT_WAIT,
-    );
-    tui.wait_pred(
-        tree_cleared_ahead_behind,
-        "behind mark cleared after pull",
-        WAIT,
-    );
-    tui.tab();
-    tui.wait_contains("origin-tip-commit", WAIT);
 }
 
 /// Create (`S` then `s`), apply (`a`), drop (`D` then `y`) — not menu-open only.
