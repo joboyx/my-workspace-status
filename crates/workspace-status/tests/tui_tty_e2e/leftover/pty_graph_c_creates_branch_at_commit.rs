@@ -142,10 +142,11 @@ fn documented_graph_create_branch_at(screen: &str, overlay_hash: &str) -> bool {
 ///
 /// Docs: Help GIT `C` is picker create+checkout. Keymap: graph-focused `c`
 /// on a commit is `Action::GraphCreateBranch`. Overlay is the name prompt
-/// with `Create branch at <short>`. Enter runs `create_branch_at`
-/// (`git branch -- name commitId`). HEAD stays on the current branch.
-/// Tree-file `c` is a no-op (`pty_c_on_tree_file_is_not_commit`). Picker
-/// `C` stays `pty_branch_picker_shift_c_creates`.
+/// with `Create branch at <short>` and `Enter confirm · Esc cancel`.
+/// Enter runs `create_branch_at` (`git branch -- name commitId`). HEAD
+/// stays on the current branch. Tree-file `c` is a no-op
+/// (`pty_c_on_tree_file_is_not_commit`). Picker `C` stays
+/// `pty_branch_picker_shift_c_creates`.
 ///
 /// After first paint the cursor is already on `focusbox`. Tab focuses
 /// the graph. `/` lands on diverged `main-leaf-commit` (not HEAD

@@ -405,7 +405,10 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
         return 4u16.saturating_add(ops.len() as u16).saturating_add(extra);
     }
     if state.create_branch.is_some() {
-        return 5;
+        // Title + name + confirm footer is 5 rows. Typing writes `status`
+        // (`create {name}`); stash / pickers already grow for that line.
+        let extra = u16::from(!state.status.is_empty());
+        return 5u16.saturating_add(extra);
     }
     if let Some(picker) = state.branch_picker.as_ref() {
         let n = picker.visible().len().max(1).min(12) as u16;
@@ -1309,6 +1312,20 @@ mod tests {
             into: "main".into(),
         });
         assert_eq!(overlay_status_rows(&app), 7);
+    }
+
+    #[test]
+    fn create_branch_overlay_grows_for_status() {
+        use crate::tui::branches::CreateBranchState;
+        let mut app = state();
+        app.create_branch = Some(CreateBranchState {
+            repo: "app".into(),
+            name: String::new(),
+            commit_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+        });
+        assert_eq!(overlay_status_rows(&app), 5);
+        app.status = "create topic".into();
+        assert_eq!(overlay_status_rows(&app), 6);
     }
 
     fn line_plain(line: &Line<'_>) -> String {
