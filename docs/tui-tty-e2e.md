@@ -85,7 +85,7 @@ Help overlay (`tui/help.rs` MOVE / GIT / VIEW) plus mouse and overlays. **PTY** 
 | `h`/`l` fold | `pty_fold_h_l_toggles_no_updates_group` | — | After first paint, `l`/`h` on the dirty file leave No updates folded (`>`, no `lib`); file, cursor, and file-diff stay. `G` then `l` opens the group (`v`, `lib` visible). A second `l` stays open (not `z` toggle). `h` folds (`>`, `lib` hidden). A second `h` stays folded. A no-op, pan, `z` toggle, parent-repo fold, Enter drill, or chevron click cannot pass. |
 | `z` fold | `pty_z_folds_focused_repo` | — | |
 | `zz` subtree | `pty_zz_toggles_subtree_not_only_row` | — | 400ms chord. First `z` folds this row (`z…`). Second `z` folds descendants. Nested leaf stays folded after `l`. Late `z` is row-only. Graph is a no-op |
-| `gg` / `G` | `pty_gg_and_g_jump_workspace_tree` | — | Help MOVE `gg G` top/bottom of focused pane. Two `g` bytes. CSI-u `G`. Lone `g` expires. First/last tree row, not chrome. Extra files so PageDown cannot pass. Cursor + pane + fold |
+| `gg` / `G` | `pty_gg_and_g_jump_workspace_tree` | — | `G` via CSI-u |
 | Home / End | `pty_home_and_end_jump_workspace_tree` | — | Help `Home End` top/bottom. CSI `1~` / `4~` with event types. First/last tree row, not chrome. Extra files so PageDown cannot pass. Cursor + pane + fold |
 | PgUp / PgDn | `pty_pgup_pgdn_pages_workspace_tree` | — | Help VIEW. CSI `ESC [5~` / `ESC [6~`. Viewport − 1. Cursor bar + pane body |
 | Ctrl-u / Ctrl-d | `pty_ctrl_u_d_jumps_workspace_tree` | — | Help VIEW `Ctrl-u Ctrl-d` ±5. CSI-u Control. ±5 rows, not `j` / PgUp/PgDn / Home/End. Two +5 steps. Cursor + pane body. Stay left |
