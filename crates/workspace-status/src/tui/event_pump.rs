@@ -343,6 +343,14 @@ mod tests {
                 "{banned} must not run on the TTY loop thread"
             );
         }
+
+        let comments_target = include_str!("comments/target.rs");
+        for banned in ["list_local_branches", "rev_parse", "exec_git"] {
+            assert!(
+                !comments_target.contains(banned),
+                "comment GC / targeting must not run git ({banned}); use snapshot.local_branches"
+            );
+        }
     }
 
     /// Live loop must read and enable mouse through `tui/tty.rs`. Direct

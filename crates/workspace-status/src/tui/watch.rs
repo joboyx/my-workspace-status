@@ -603,6 +603,7 @@ mod tests {
             primary_repo: None,
             merged_into_default: None,
             default_branch_override: None,
+            local_branches: Vec::new(),
             has_unstaged: !dirty.is_empty(),
             has_staged: false,
             has_untracked: false,

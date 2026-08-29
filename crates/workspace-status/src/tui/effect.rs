@@ -498,6 +498,7 @@ impl Interpreter {
                                         primary_repo: row.primary_repo,
                                         merged_into_default: row.merged_into_default,
                                         default_branch_override: row.default_branch_override,
+                                        local_branches: row.local_branches,
                                     })
                             };
                             JobOutcome::RepoStatus { gen, path, snap }

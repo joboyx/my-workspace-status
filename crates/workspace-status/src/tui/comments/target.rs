@@ -1,10 +1,11 @@
 //! Comment targets, paint markers, and refresh GC.
+//!
+//! Live refs come from the workspace snapshot (`local_branches`, checkout
+//! paths, repo identity). This module does not run git.
 
 use std::collections::{BTreeSet, HashSet};
-use std::path::Path;
 
-use crate::git::{list_local_branches, rev_parse_quiet};
-use crate::helpers::is_default_branch;
+use crate::helpers::{is_default_branch, is_detached_head_branch};
 use crate::snapshot::{CheckoutKind, WorkspaceSnapshot};
 
 use super::super::diff::DiffRow;
@@ -21,51 +22,43 @@ pub struct CommentLiveSet {
     pub branches: BTreeSet<(String, String)>,
     /// Checkout paths that still exist.
     pub worktrees: HashSet<String>,
+    /// Repo identities that still have a checkout (commit comments).
+    pub identities: HashSet<String>,
     /// `(repo, sha)` pairs that still resolve.
     pub commits: HashSet<(String, String)>,
 }
 
-/// Collect live branches, checkouts, and stored commit SHAs that still exist.
-pub fn collect_live_set(
-    snapshot: &WorkspaceSnapshot,
-    cwd: &Path,
-    store: &CommentStore,
-) -> CommentLiveSet {
+/// Collect live branches, checkouts, and stored commit SHAs from `snapshot`.
+///
+/// Does not run git. `local_branches` is filled on the snapshot worker.
+pub fn collect_live_set(snapshot: &WorkspaceSnapshot, store: &CommentStore) -> CommentLiveSet {
     let mut live = CommentLiveSet::default();
     for repo in &snapshot.repos {
         let path = normalize_viewed_path(&repo.repo);
         live.worktrees.insert(path);
         let identity = repo_identity(&repo.repo, repo.primary_repo.as_deref());
-        let dir = cwd.join(&repo.repo);
-        for branch in list_local_branches(&dir) {
+        live.identities.insert(identity.clone());
+        for name in &repo.local_branches {
+            if !is_detached_head_branch(name) {
+                live.branches.insert((identity.clone(), name.clone()));
+            }
+        }
+        if !is_detached_head_branch(&repo.branch) && !repo.branch.is_empty() {
             live.branches
-                .insert((identity.clone(), branch.name.clone()));
+                .insert((identity.clone(), repo.branch.clone()));
         }
     }
-    let mut needed: HashSet<(String, String)> = HashSet::new();
     for key in store.keys() {
         match key {
             CommentKey::Commit { repo, sha } | CommentKey::CommitLine { repo, sha, .. } => {
-                needed.insert((repo.clone(), sha.clone()));
+                if live.identities.contains(repo) {
+                    live.commits.insert((repo.clone(), sha.clone()));
+                }
             }
             _ => {}
         }
     }
-    for (repo, sha) in needed {
-        let dir = cwd.join(&repo);
-        if commit_exists(&dir, &sha) {
-            live.commits.insert((repo, sha));
-        }
-    }
     live
-}
-
-fn commit_exists(cwd: &Path, sha: &str) -> bool {
-    if sha.trim().is_empty() {
-        return false;
-    }
-    let peeled = format!("{sha}^{{commit}}");
-    rev_parse_quiet(&peeled, cwd).is_some() || rev_parse_quiet(sha, cwd).is_some()
 }
 
 /// Drop comments whose branch, worktree, or commit is gone.
@@ -81,8 +74,19 @@ pub fn gc_comments(store: &CommentStore, live: &CommentLiveSet) -> CommentStore 
 
 fn comment_is_live(key: &CommentKey, live: &CommentLiveSet) -> bool {
     match key {
-        CommentKey::Branch { repo, branch } | CommentKey::WorktreeLine { repo, branch, .. } => {
-            live.branches.contains(&(repo.clone(), branch.clone()))
+        CommentKey::Branch { repo, branch } => {
+            if is_detached_head_branch(branch) {
+                live.worktrees.contains(repo) || live.identities.contains(repo)
+            } else {
+                live.branches.contains(&(repo.clone(), branch.clone()))
+            }
+        }
+        CommentKey::WorktreeLine { repo, branch, .. } => {
+            if is_detached_head_branch(branch) {
+                live.identities.contains(repo)
+            } else {
+                live.branches.contains(&(repo.clone(), branch.clone()))
+            }
         }
         CommentKey::Worktree { path } => live.worktrees.contains(path),
         CommentKey::Commit { repo, sha } | CommentKey::CommitLine { repo, sha, .. } => {
@@ -105,12 +109,14 @@ pub fn viewport_line_number(rows: &[DiffRow], scroll: u16) -> Option<u32> {
 }
 
 /// Exactly one non-default local branch, if any.
-pub fn sole_non_default_branch(cwd: &Path, override_name: Option<&str>) -> Option<String> {
-    let branches = list_local_branches(cwd);
-    let non_default: Vec<String> = branches
+pub fn sole_non_default_branch<'a, I>(names: I, override_name: Option<&str>) -> Option<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let non_default: Vec<String> = names
         .into_iter()
-        .map(|b| b.name)
-        .filter(|name| !is_default_branch(name, override_name))
+        .filter(|name| !is_default_branch(name, override_name) && !is_detached_head_branch(name))
+        .map(str::to_string)
         .collect();
     if non_default.len() == 1 {
         Some(non_default[0].clone())
@@ -119,9 +125,22 @@ pub fn sole_non_default_branch(cwd: &Path, override_name: Option<&str>) -> Optio
     }
 }
 
+fn local_branch_names(snapshot: &WorkspaceSnapshot, repo_path: &str) -> Vec<String> {
+    let Some(row) = snapshot.repos.iter().find(|r| r.repo == repo_path) else {
+        return Vec::new();
+    };
+    let mut names = row.local_branches.clone();
+    if !is_detached_head_branch(&row.branch)
+        && !row.branch.is_empty()
+        && !names.contains(&row.branch)
+    {
+        names.push(row.branch.clone());
+    }
+    names
+}
+
 /// Comment key for the focused tree / graph / diff, or `None` for a no-op.
 pub fn resolve_comment_target(
-    cwd: &Path,
     snapshot: &WorkspaceSnapshot,
     tree_row: Option<&VisibleRow>,
     graph_row: Option<&GraphRow>,
@@ -139,7 +158,7 @@ pub fn resolve_comment_target(
         let repo = graph_repo?;
         return resolve_graph_target(snapshot, repo, row);
     }
-    resolve_tree_target(cwd, snapshot, tree_row?)
+    resolve_tree_target(snapshot, tree_row?)
 }
 
 fn resolve_diff_target(
@@ -196,11 +215,7 @@ fn resolve_graph_target(
     }
 }
 
-fn resolve_tree_target(
-    cwd: &Path,
-    snapshot: &WorkspaceSnapshot,
-    row: &VisibleRow,
-) -> Option<CommentKey> {
+fn resolve_tree_target(snapshot: &WorkspaceSnapshot, row: &VisibleRow) -> Option<CommentKey> {
     match row.kind {
         NodeKind::Workspace | NodeKind::Group | NodeKind::Dir | NodeKind::File => None,
         NodeKind::Repo | NodeKind::Checkout => {
@@ -220,20 +235,20 @@ fn resolve_tree_target(
             let is_family = row.chrome.is_family;
             let is_linked = row.chrome.checkout_kind == Some(CheckoutKind::Linked)
                 || snap.map(|r| r.checkout_kind) == Some(CheckoutKind::Linked);
-            if is_linked {
+            let branch = row.chrome.branch.as_str();
+            if is_linked || is_detached_head_branch(branch) {
                 return Some(CommentKey::Worktree {
                     path: normalize_viewed_path(repo_path),
                 });
             }
             if is_family {
-                return repo_root_attach(cwd, repo_path, &identity, override_name);
+                return repo_root_attach(snapshot, repo_path, &identity, override_name);
             }
-            let branch = row.chrome.branch.as_str();
             if branch.is_empty() {
-                return repo_root_attach(cwd, repo_path, &identity, override_name);
+                return repo_root_attach(snapshot, repo_path, &identity, override_name);
             }
             if is_default_branch(branch, override_name) {
-                return repo_root_attach(cwd, repo_path, &identity, override_name);
+                return repo_root_attach(snapshot, repo_path, &identity, override_name);
             }
             Some(CommentKey::Branch {
                 repo: identity,
@@ -244,13 +259,13 @@ fn resolve_tree_target(
 }
 
 fn repo_root_attach(
-    cwd: &Path,
+    snapshot: &WorkspaceSnapshot,
     git_repo: &str,
     identity: &str,
     override_name: Option<&str>,
 ) -> Option<CommentKey> {
-    let dir = cwd.join(git_repo);
-    let branch = sole_non_default_branch(&dir, override_name)?;
+    let names = local_branch_names(snapshot, git_repo);
+    let branch = sole_non_default_branch(names.iter().map(String::as_str), override_name)?;
     Some(CommentKey::Branch {
         repo: identity.to_string(),
         branch,
@@ -285,7 +300,7 @@ pub fn tree_row_has_comment(store: &CommentStore, row: &VisibleRow) -> bool {
         }
         NodeKind::Repo | NodeKind::Checkout => {
             let is_linked = row.chrome.checkout_kind == Some(CheckoutKind::Linked);
-            if is_linked {
+            if is_linked || is_detached_head_branch(&row.chrome.branch) {
                 return store.contains_key(&CommentKey::Worktree {
                     path: normalize_viewed_path(repo_path),
                 });
@@ -380,10 +395,9 @@ pub fn diff_line_has_comment(
 mod tests {
     use super::super::store::{put_comment, CommentKey, CommentStore};
     use super::*;
+    use crate::helpers::DETACHED_HEAD_BRANCH;
     use crate::snapshot::{build_workspace_snapshot, CheckoutKind, RepoSnapshot, SyncStatus};
     use crate::tui::diff::{DiffCell, DiffCellKind, DiffContent, DiffRow};
-    use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn snap(repo: &str, branch: &str, kind: CheckoutKind, primary: Option<&str>) -> RepoSnapshot {
         RepoSnapshot {
@@ -400,11 +414,36 @@ mod tests {
             primary_repo: primary.map(str::to_string),
             merged_into_default: None,
             default_branch_override: None,
+            local_branches: Vec::new(),
         }
+    }
+
+    fn snap_with_branches(
+        repo: &str,
+        branch: &str,
+        kind: CheckoutKind,
+        primary: Option<&str>,
+        branches: &[&str],
+    ) -> RepoSnapshot {
+        let mut row = snap(repo, branch, kind, primary);
+        row.local_branches = branches.iter().map(|s| (*s).to_string()).collect();
+        row
     }
 
     #[test]
     fn gc_drops_gone_branch_keeps_commit() {
+        let snapshot = build_workspace_snapshot(
+            &[snap_with_branches(
+                "app",
+                "main",
+                CheckoutKind::Primary,
+                None,
+                &["main"],
+            )],
+            &[],
+            false,
+            &[],
+        );
         let branch = CommentKey::Branch {
             repo: "app".into(),
             branch: "feature/gone".into(),
@@ -423,11 +462,64 @@ mod tests {
         store = put_comment(&store, branch, "b");
         store = put_comment(&store, line, "l");
         store = put_comment(&store, commit.clone(), "c");
-        let mut live = CommentLiveSet::default();
-        live.commits.insert(("app".into(), "abc".into()));
+        let live = collect_live_set(&snapshot, &store);
         let next = gc_comments(&store, &live);
         assert!(next.get(&commit).is_some());
         assert_eq!(next.len(), 1);
+    }
+
+    #[test]
+    fn detached_primary_row_is_worktree_path_key() {
+        let snapshot = build_workspace_snapshot(
+            &[snap(
+                "app",
+                DETACHED_HEAD_BRANCH,
+                CheckoutKind::Primary,
+                None,
+            )],
+            &[],
+            false,
+            &[],
+        );
+        let row = VisibleRow {
+            kind: NodeKind::Repo,
+            repo: Some("app".into()),
+            chrome: crate::tui::tree::NodeChrome {
+                branch: DETACHED_HEAD_BRANCH.into(),
+                is_family: false,
+                checkout_kind: Some(CheckoutKind::Primary),
+                ..Default::default()
+            },
+            ..VisibleRow::default()
+        };
+        assert_eq!(
+            resolve_tree_target(&snapshot, &row),
+            Some(CommentKey::Worktree { path: "app".into() })
+        );
+        assert!(!matches!(
+            resolve_tree_target(&snapshot, &row),
+            Some(CommentKey::Branch { .. })
+        ));
+    }
+
+    #[test]
+    fn watch_gc_keeps_detached_worktree_comment() {
+        let snapshot = build_workspace_snapshot(
+            &[snap(
+                "app",
+                DETACHED_HEAD_BRANCH,
+                CheckoutKind::Primary,
+                None,
+            )],
+            &[],
+            false,
+            &[],
+        );
+        let key = CommentKey::Worktree { path: "app".into() };
+        let store = put_comment(&CommentStore::new(), key.clone(), "detached note");
+        let live = collect_live_set(&snapshot, &store);
+        let next = gc_comments(&store, &live);
+        assert_eq!(next.get(&key).map(String::as_str), Some("detached note"));
     }
 
     #[test]
@@ -471,19 +563,10 @@ mod tests {
             },
             ..VisibleRow::default()
         };
-        let tmp = std::env::temp_dir().join(format!(
-            "ws-comments-no-git-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = fs::create_dir_all(&tmp);
-        assert!(resolve_tree_target(&tmp, &snapshot, &row).is_none());
+        assert!(resolve_tree_target(&snapshot, &row).is_none());
         row.kind = NodeKind::Workspace;
         row.repo = None;
-        assert!(resolve_tree_target(&tmp, &snapshot, &row).is_none());
-        let _ = fs::remove_dir_all(&tmp);
+        assert!(resolve_tree_target(&snapshot, &row).is_none());
     }
 
     #[test]
@@ -511,7 +594,7 @@ mod tests {
             ..VisibleRow::default()
         };
         assert_eq!(
-            resolve_tree_target(Path::new("/"), &snapshot, &row),
+            resolve_tree_target(&snapshot, &row),
             Some(CommentKey::Worktree {
                 path: "app/.worktrees/feat".into()
             })

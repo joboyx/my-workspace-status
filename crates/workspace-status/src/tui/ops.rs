@@ -333,6 +333,7 @@ mod tests {
             primary_repo: if linked { Some("app".into()) } else { None },
             merged_into_default: None,
             default_branch_override: None,
+            local_branches: Vec::new(),
         }
     }
 

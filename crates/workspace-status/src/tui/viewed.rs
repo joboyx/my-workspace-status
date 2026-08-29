@@ -474,6 +474,7 @@ mod tests {
                 primary_repo: None,
                 merged_into_default: None,
                 default_branch_override: None,
+                local_branches: Vec::new(),
             }],
             &[],
             false,

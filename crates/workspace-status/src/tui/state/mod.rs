@@ -2177,7 +2177,7 @@ impl AppState {
     }
 
     fn reconcile_comment_store(&mut self) {
-        let live = collect_live_set(&self.snapshot, &self.cwd, &self.comment_store);
+        let live = collect_live_set(&self.snapshot, &self.comment_store);
         let next = gc_comments(&self.comment_store, &live);
         if next != self.comment_store {
             self.comment_store = next;
@@ -2200,7 +2200,6 @@ impl AppState {
                 };
                 let line = viewport_line_number(&self.current_diff_rows(), self.diff_scroll);
                 resolve_comment_target(
-                    &self.cwd,
                     &self.snapshot,
                     None,
                     None,
@@ -2216,7 +2215,6 @@ impl AppState {
                 let repo = self.focused_graph_repo();
                 let row = self.focused_graph_row();
                 resolve_comment_target(
-                    &self.cwd,
                     &self.snapshot,
                     None,
                     row.as_ref(),
@@ -2229,7 +2227,6 @@ impl AppState {
                 )
             }
             ListFocusTarget::Tree => resolve_comment_target(
-                &self.cwd,
                 &self.snapshot,
                 self.focused_row(),
                 None,
@@ -3330,6 +3327,7 @@ mod tests {
             primary_repo: None,
             merged_into_default: None,
             default_branch_override: None,
+            local_branches: Vec::new(),
         }
     }
 
@@ -3635,6 +3633,7 @@ mod tests {
                 primary_repo: None,
                 merged_into_default: None,
                 default_branch_override: None,
+                local_branches: Vec::new(),
             }],
             &[],
             false,
@@ -3679,6 +3678,7 @@ mod tests {
             primary_repo: None,
             merged_into_default: None,
             default_branch_override: None,
+            local_branches: Vec::new(),
         }
     }
 
@@ -3836,6 +3836,7 @@ mod tests {
                     primary_repo: Some("app".into()),
                     merged_into_default: None,
                     default_branch_override: None,
+                    local_branches: Vec::new(),
                 },
             ],
             &[],
@@ -4330,6 +4331,7 @@ mod tests {
                     primary_repo: Some("app".into()),
                     merged_into_default: None,
                     default_branch_override: None,
+                    local_branches: Vec::new(),
                 },
                 RepoSnapshot {
                     repo: "notes".into(),
@@ -4345,6 +4347,7 @@ mod tests {
                     primary_repo: None,
                     merged_into_default: None,
                     default_branch_override: None,
+                    local_branches: Vec::new(),
                 },
             ],
             &["notes".into()],
@@ -5108,6 +5111,7 @@ mod tests {
                     primary_repo: Some("app".into()),
                     merged_into_default: Some(false),
                     default_branch_override: None,
+                    local_branches: Vec::new(),
                 },
                 repo("notes", true),
             ],
@@ -5187,6 +5191,7 @@ mod tests {
                 primary_repo: Some("notes".into()),
                 merged_into_default: None,
                 default_branch_override: None,
+                local_branches: Vec::new(),
             }],
             &["notes/.worktrees/feat".into()],
             false,
@@ -6176,6 +6181,7 @@ mod tests {
             primary_repo: None,
             merged_into_default: None,
             default_branch_override: None,
+            local_branches: Vec::new(),
         }
     }
 
