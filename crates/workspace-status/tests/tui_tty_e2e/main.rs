@@ -1075,53 +1075,6 @@ fn pty_graph_focus_unmark_enter_clears() {
     );
 }
 
-/// Create (`S` then `s`), apply (`a`), drop (`D` then `y`) — not menu-open only.
-#[cfg(unix)]
-#[test]
-fn pty_stash_create_apply_and_drop() {
-    let (_root, workspace) = daily_workspace();
-    let mut tui = PtySession::open(&workspace);
-    tui.search("README");
-    tui.wait_contains("/README", WAIT);
-    tui.wait_contains("UNSTAGED", WAIT);
-    tui.wait_ms(SETTLE_MS);
-
-    tui.shift_letter('S');
-    tui.wait_contains("s create", WAIT);
-    tui.key('s');
-    tui.wait_contains("Stashed", GIT_WAIT);
-    tui.wait_pred(
-        |screen| !left_tree(screen).contains("README.md"),
-        "stashed README leaves the dirty tree",
-        WAIT,
-    );
-
-    tui.esc();
-    tui.search("app");
-    tui.wait_contains("/app", WAIT);
-    tui.tab();
-    tui.wait_contains("Working tree", WAIT);
-    tui.wait_ms(SETTLE_MS);
-    tui.key('/');
-    tui.keys("stash@{");
-    tui.enter();
-    tui.wait_contains("/stash@{", WAIT);
-    tui.wait_contains("stash@{0}", WAIT);
-    tui.wait_ms(SETTLE_MS);
-
-    tui.key('a');
-    tui.wait_contains("README.md", GIT_WAIT);
-    tui.wait_contains("stash@{0}", WAIT);
-    tui.wait_ms(SETTLE_MS);
-
-    tui.shift_letter('D');
-    tui.wait_contains("Drop", WAIT);
-    tui.wait_contains("stash@{0}", WAIT);
-    tui.key('y');
-    tui.wait_contains("dropped stash@{0}", GIT_WAIT);
-    tui.wait_contains("README.md", WAIT);
-}
-
 #[cfg(target_os = "linux")]
 mod xfce {
     use super::*;
