@@ -40,6 +40,7 @@ mod pty_pull_behind_local_remote;
 mod pty_q_quits_immediately;
 mod pty_r_refreshes_new_dirty_file;
 mod pty_revert_confirm_n_cancels;
+mod pty_sgr_vertical_wheel_scrolls;
 mod pty_shift_letters_csi_u_type_into_search;
 mod pty_shift_p_csi_u_pushes_ahead;
 mod pty_shift_s_csi_u_opens_stash_menu;
