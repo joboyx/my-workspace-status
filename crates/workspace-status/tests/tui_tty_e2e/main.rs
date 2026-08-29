@@ -29,7 +29,7 @@ use std::time::Duration;
 use harness::{assert_contains, left_tree, tree_is_panned_to_tail, PtySession, COLS};
 #[cfg(unix)]
 use seed::{
-    ahead_workspace, behind_workspace, daily_workspace, focus_workspace, unfetched_behind_workspace,
+    behind_workspace, daily_workspace, focus_workspace, unfetched_behind_workspace,
 };
 
 #[cfg(unix)]
@@ -1109,36 +1109,6 @@ fn pty_pull_behind_local_remote() {
     tui.wait_contains("origin-tip-commit", WAIT);
 }
 
-/// Shift+P via CSI-u pushes an ahead checkout to the local origin.
-#[cfg(unix)]
-#[test]
-fn pty_shift_p_csi_u_pushes_ahead() {
-    let (_root, workspace) = ahead_workspace();
-    let mut tui = PtySession::open(&workspace);
-    tui.search("syncbox");
-    tui.wait_contains("/syncbox", WAIT);
-    tui.wait_contains("ahead-tip-commit", WAIT);
-    tui.wait_pred(
-        |screen| left_tree(screen).contains("^1"),
-        "tree shows ahead-by-1 before push",
-        WAIT,
-    );
-    tui.wait_contains("push", WAIT);
-    tui.wait_ms(SETTLE_MS);
-
-    tui.shift_letter('P');
-    tui.wait_pred(
-        |screen| op_finished(screen, "Pushed"),
-        "Pushed 1 repo without failure",
-        GIT_WAIT,
-    );
-    tui.wait_pred(
-        tree_cleared_ahead_behind,
-        "ahead mark cleared after push",
-        WAIT,
-    );
-}
-
 /// Graph `m` is the TUI write that creates a commit (merge into HEAD).
 #[cfg(unix)]
 #[test]
@@ -1244,7 +1214,7 @@ mod xfce {
         assert_tree_clipped_long_path, left_tree, status_has_tree_hscroll_tail,
         tree_cursor_bar_on_row, tree_row_containing,
     };
-    use crate::seed::seed_long_path_file;
+    use crate::seed::{ahead_workspace, seed_long_path_file};
 
     #[test]
     #[ignore = "GitHub Actions tui-tty-desktop job; needs DISPLAY, xfce4-terminal, xdotool"]
