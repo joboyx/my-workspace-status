@@ -730,3 +730,21 @@ pub fn assert_tree_clipped_long_path(screen: &str) {
 pub fn tree_is_panned_to_tail(screen: &str) -> bool {
     is_panned_to_tail(&left_tree(screen))
 }
+
+/// Cursor bar (`▌`) on a 0-based screen row. After tree hscroll the README
+/// label clips to `md`, so a label search cannot find the focused row.
+pub fn tree_cursor_bar_on_row(screen: &str, row: u16) -> bool {
+    screen
+        .lines()
+        .nth(row as usize)
+        .is_some_and(|line| line.contains('\u{258C}'))
+}
+
+/// Status / hint chrome (last row). A search chip with [`TREE_HSCROLL_TAIL`]
+/// must not count as a tree pan.
+pub fn status_has_tree_hscroll_tail(screen: &str) -> bool {
+    screen
+        .lines()
+        .last()
+        .is_some_and(|line| line.contains(TREE_HSCROLL_TAIL))
+}

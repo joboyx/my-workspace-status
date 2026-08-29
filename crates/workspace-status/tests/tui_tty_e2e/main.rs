@@ -30,14 +30,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
-use harness::{
-    assert_contains, assert_tree_clipped_long_path, left_tree, tree_is_panned_to_tail,
-    tree_row_containing, PtySession, COLS, SGR_WHEEL_RIGHT, SGR_WHEEL_RIGHT_MOTION,
-};
+use harness::{assert_contains, left_tree, tree_is_panned_to_tail, PtySession, COLS};
 #[cfg(unix)]
 use seed::{
-    ahead_workspace, behind_workspace, daily_workspace, focus_workspace, seed_long_path_file,
-    stream_workspace, unfetched_behind_workspace,
+    ahead_workspace, behind_workspace, daily_workspace, focus_workspace, stream_workspace,
+    unfetched_behind_workspace,
 };
 
 #[cfg(unix)]
@@ -1035,46 +1032,6 @@ fn pty_graph_focus_unmark_enter_clears() {
     );
 }
 
-/// Tree hscroll via live `event::read`. Must fail if the tree does not pan.
-///
-/// Same clipped-prefix vs tail oracle as headless
-/// `tree_trackpad_sgr_hscroll_pans_without_stealing_focus` (`common::hscroll`).
-/// No `/` search: that would put the tail on the status chip before any wheel.
-#[cfg(unix)]
-#[test]
-fn pty_tree_sgr_hscroll_pans_clipped_path() {
-    let (_root, workspace) = daily_workspace();
-    seed_long_path_file(&workspace);
-    // Start at the clipped size. A later resize can paint a frame where
-    // the prefix was seen, then the next snapshot has no wheel target.
-    let mut tui = PtySession::open_size(&workspace, 64, 24);
-    let _ = tui.wait_clipped_long_path_row(WAIT);
-
-    // Same setup as the headless TestBackend case: a short README diff so
-    // hscroll over the tree pans the tree, not a long file-diff.
-    if let Some(readme_row) = tree_row_containing(&tui.screen(), "README.md") {
-        tui.sgr_click(6, readme_row);
-    }
-    let row = tui.wait_clipped_long_path_row(WAIT);
-    let col = 6u16;
-
-    for _ in 0..40 {
-        tui.sgr_mouse(SGR_WHEEL_RIGHT_MOTION, col, row);
-    }
-    tui.wait_ms(80);
-    assert_tree_clipped_long_path(&tui.screen());
-
-    for _ in 0..40 {
-        tui.sgr_mouse(SGR_WHEEL_RIGHT, col, row);
-    }
-    tui.wait_pred(
-        tree_is_panned_to_tail,
-        "tree row shows the hscroll tail and drops the clipped prefix",
-        WAIT,
-    );
-    crate::common::hscroll::assert_panned_to_tail(&left_tree(&tui.screen()));
-}
-
 /// Continuous harmless input must not starve `WatchTick`.
 ///
 /// The old loop drained keys and `continue`d, so watch timers only ran on
@@ -1453,8 +1410,12 @@ fn pty_stash_graph_pop() {
 #[cfg(target_os = "linux")]
 mod xfce {
     use super::*;
+    use crate::common::hscroll::TREE_HSCROLL_TAIL;
     use crate::desktop::DesktopSession;
-    use crate::harness::{assert_tree_clipped_long_path, left_tree, tree_row_containing};
+    use crate::harness::{
+        assert_tree_clipped_long_path, left_tree, status_has_tree_hscroll_tail,
+        tree_cursor_bar_on_row, tree_row_containing,
+    };
     use crate::seed::seed_long_path_file;
 
     #[test]
@@ -1551,34 +1512,42 @@ mod xfce {
     ///
     /// XTEST `click 7` (no `--window`) after a root-coordinate warp, in
     /// xterm (VTE 0.76 does not report buttons 6/7). Same clipped-prefix vs
-    /// tail tree-row oracle as the PTY case (`common::hscroll`). No `/` search.
+    /// tail tree-row oracle as the PTY case (`common::hscroll`). No `/`
+    /// search. Wait for a clipped tree row on the same frame. Click README
+    /// so the tree pans, not a long file-diff. Cursor stays on that row.
     #[test]
     #[ignore = "GitHub Actions tui-tty-desktop job; xterm encodes XTEST button 7"]
     fn desktop_xterm_xtest_trackpad_hscroll() {
         let (_root, workspace) = daily_workspace();
         seed_long_path_file(&workspace);
         let tui = DesktopSession::open_xterm_size(&workspace, 64, 24);
-        tui.wait_pred(
-            |screen| crate::common::hscroll::is_clipped(&left_tree(screen)),
-            "clipped long path prefix on the tree row (no tail)",
-            WAIT,
-        );
-        assert_tree_clipped_long_path(&tui.screen());
+        let _ = tui.wait_clipped_long_path_row(WAIT);
 
-        if let Some(readme_row) = tree_row_containing(&tui.screen(), "README.md") {
-            tui.click_cell(6, readme_row);
-        }
+        let readme_hit = tree_row_containing(&tui.screen(), "README.md")
+            .unwrap_or_else(|| panic!("README row at launch:\n{}", tui.screen()));
+        tui.click_cell(6, readme_hit);
         tui.wait_pred(
-            |screen| crate::harness::clipped_long_path_row(screen).is_some(),
-            "clipped long path on a tree row after focusing README",
-            WAIT,
+            |screen| {
+                tree_cursor_on(screen, "README.md")
+                    && screen.contains("UNSTAGED")
+                    && !screen.contains("SEARCH")
+            },
+            "XTEST click loads a short README diff (not the long path)",
+            GIT_WAIT,
         );
-        let row = crate::harness::clipped_long_path_row(&tui.screen())
-            .unwrap_or_else(|| panic!("tree row with clipped long path:\n{}", tui.screen()));
+        let readme_row = tree_row_containing(&tui.screen(), "README.md")
+            .unwrap_or_else(|| panic!("README row before hscroll:\n{}", tui.screen()));
+        let row = tui.wait_clipped_long_path_row(WAIT);
+        assert_tree_clipped_long_path(&tui.screen());
         tui.wheel_right_at_cell(6, row, 40);
         tui.wait_pred(
-            tree_is_panned_to_tail,
-            "tree row shows the hscroll tail and drops the clipped prefix",
+            |screen| {
+                tree_is_panned_to_tail(screen)
+                    && tree_row_containing(screen, TREE_HSCROLL_TAIL).is_some()
+                    && tree_cursor_bar_on_row(screen, readme_row)
+                    && !status_has_tree_hscroll_tail(screen)
+            },
+            "tree row shows TAIL99, drops very-long, keeps README cursor",
             WAIT,
         );
         crate::common::hscroll::assert_panned_to_tail(&left_tree(&tui.screen()));
