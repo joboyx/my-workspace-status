@@ -70,7 +70,7 @@ Help overlay (`tui/help.rs` MOVE / GIT / VIEW) plus mouse and overlays. **PTY** 
 | Graph `o` / `O` focus | `pty_graph_branch_focus_overlay` | `desktop_xfce_shift_keys_search_and_clear_focus` | `o` overlay. Type to filter. Enter applies the hit. CSI-u `O` restores `--all`. Toast + clear-focus hint. Not files drill. Not `/`. |
 | Unmark `[x]` then Enter | `pty_graph_focus_unmark_enter_clears` | `desktop_xfce_shift_keys_search_and_clear_focus` | Space clears `[x]` on the focused overlay row. Enter restores `--all` (`full graph`). A no-op, overlay-close-only, or keep re-drill cannot pass. Not `O`. |
 | Ctrl+C quit prompt | `pty_ctrl_c_prompts_before_quit` | — | Second Ctrl+C not claimed (sends `q` after) |
-| `q` quit | `pty_q_quits_immediately` | — | Process exits |
+| `q` quit | `pty_q_quits_immediately` | — | Process exits. Help `q` / quit, not press twice. Ctrl+C prompt must not paint. Still-alive chrome fails. |
 | Tree SGR hscroll `CSI < 67` | `pty_tree_sgr_hscroll_pans_clipped_path` | `desktop_xterm_xtest_trackpad_hscroll` | Desktop: XTEST `click 7` in xterm |
 | Watch while keys (no `r`) | `pty_watch_applies_while_keys_arrive` | — | |
 | Streamed collect | `pty_streamed_collect_updates_focused_repo_before_slow` | — | |
