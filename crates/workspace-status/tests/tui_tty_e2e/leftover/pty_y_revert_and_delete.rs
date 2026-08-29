@@ -108,8 +108,16 @@ fn app_repo_mixed_dirty(screen: &str) -> bool {
 }
 
 /// Boxed `x` confirm on mixed scope: `y` tracked only, `Y` also deletes.
+///
+/// Confirm owns the bottom rows, so do not read `crumb_row` here.
 fn documented_revert_confirm_mixed_y_deletes(screen: &str) -> bool {
-    app_repo_mixed_dirty(screen)
+    tree_cursor_on(screen, "app")
+        && !tree_cursor_on(screen, "README.md")
+        && !tree_cursor_on(screen, UNTRACKED)
+        && tree_has(screen, "README.md")
+        && tree_has(screen, UNTRACKED)
+        && readme_unstaged_badge(screen)
+        && untracked_a_badge(screen)
         && screen.contains("Revert app?")
         && screen.contains("1 tracked file")
         && screen.contains("discarded")
@@ -118,6 +126,8 @@ fn documented_revert_confirm_mixed_y_deletes(screen: &str) -> bool {
         && screen.contains("revert + delete untracked")
         && screen.contains("cancel")
         && !screen.contains("revert cancelled")
+        && no_wrong_revert_overlays(screen)
+        && no_y_apply_path(screen)
 }
 
 /// CSI-u Shift+Y applied mixed revert+delete. Overlay gone. Toast is counts.
