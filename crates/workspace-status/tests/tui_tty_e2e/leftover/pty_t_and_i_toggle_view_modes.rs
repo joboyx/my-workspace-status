@@ -50,11 +50,15 @@ fn panes_tree_focused_diff_unfocused(screen: &str) -> bool {
         && !top.contains(" files")
 }
 
+fn cursor_on_src_dir(screen: &str) -> bool {
+    src_dir_row(screen).is_some_and(|line| line.contains('\u{258C}'))
+}
+
 fn on_view_rs_file(screen: &str) -> bool {
     tree_cursor_on(screen, "view.rs")
         && !tree_cursor_on(screen, "README.md")
         && !tree_cursor_on(screen, "app")
-        && !tree_cursor_on(screen, "src")
+        && !cursor_on_src_dir(screen)
         && !tree_cursor_on(screen, "merger")
         && !tree_cursor_on(screen, "workspace")
         && tree_has(screen, "README.md")
