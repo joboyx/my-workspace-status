@@ -10,9 +10,9 @@ use crate::snapshot::{
 };
 
 use super::icons::{
-    file_icon, icon_branch, icon_clean, icon_folder, icon_ignored, icon_linked_worktree, icon_repo,
-    icon_viewed, icon_workspace, status_letter_from_change, tui_file_badge, tui_merge_mark,
-    tui_sync_mark, StatusColorRole,
+    file_icon, icon_branch, icon_clean, icon_comment, icon_folder, icon_ignored,
+    icon_linked_worktree, icon_repo, icon_viewed, icon_workspace, status_letter_from_change,
+    tui_file_badge, tui_merge_mark, tui_sync_mark, StatusColorRole,
 };
 
 /// Structural node kind.
@@ -1070,9 +1070,24 @@ pub fn node_segments(
 }
 
 /// Segments for a flattened row. Viewed eye is prepended on dirty file rows
-/// using `icon_viewed` — nf-fa-eye `U+F06E` / `*`.
-pub fn row_segments(row: &VisibleRow, ascii: bool, viewed: bool) -> NodeSegments {
+/// using `icon_viewed` — nf-fa-eye `U+F06E` / `*`. Comment mark uses
+/// `icon_comment` (`"` / nf-fa-comment) on rows that have a live comment.
+pub fn row_segments(row: &VisibleRow, ascii: bool, viewed: bool, commented: bool) -> NodeSegments {
     let mut trailing = row.trailing_segs.clone();
+    if commented {
+        let mut marked = vec![
+            TextSeg {
+                text: icon_comment(ascii).to_string(),
+                role: SegRole::Heading,
+                hex: None,
+                bold: false,
+                dim: false,
+            },
+            text_seg(" ", SegRole::Muted),
+        ];
+        marked.append(&mut trailing);
+        trailing = marked;
+    }
     if viewed && row.kind == NodeKind::File {
         let mut marked = vec![
             TextSeg {
@@ -1150,6 +1165,7 @@ mod tests {
             primary_repo: if linked { Some("app".into()) } else { None },
             merged_into_default: None,
             default_branch_override: None,
+            local_branches: Vec::new(),
         }
     }
 
@@ -1570,13 +1586,13 @@ mod tests {
             .iter()
             .find(|r| r.id == "file:app:README.md")
             .expect("file");
-        let segs = row_segments(file, true, true);
+        let segs = row_segments(file, true, true, false);
         let trail: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(icon_viewed(true), "*");
         assert_eq!(icon_viewed(false), "\u{f06e}");
         assert!(trail.contains(icon_viewed(true)), "{trail}");
         assert!(!trail.contains('\u{25c9}'), "{trail}");
-        let nerd = row_segments(file, false, true);
+        let nerd = row_segments(file, false, true, false);
         let nerd_trail: String = nerd.trailing.iter().map(|s| s.text.as_str()).collect();
         assert!(nerd_trail.contains('\u{f06e}'), "{nerd_trail}");
         assert!(!nerd_trail.contains('\u{25c9}'), "{nerd_trail}");

@@ -107,6 +107,13 @@ impl AppState {
             | Action::GraphFocusSubmit
             | Action::GraphFocusCancel
             | Action::CycleTheme
+            | Action::CommentStart
+            | Action::CommentChar(_)
+            | Action::CommentBackspace
+            | Action::CommentSubmit
+            | Action::CommentCancel
+            | Action::ExportComments
+            | Action::ExportCommentsCancel
             | Action::Resize { .. }
             | Action::None) => self.dispatch_keymap(action, noop),
         }

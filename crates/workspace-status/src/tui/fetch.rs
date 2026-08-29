@@ -81,6 +81,7 @@ mod tests {
             primary_repo: primary.map(str::to_string),
             merged_into_default: None,
             default_branch_override: None,
+            local_branches: Vec::new(),
         }
     }
 

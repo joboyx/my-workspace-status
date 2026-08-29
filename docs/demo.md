@@ -34,7 +34,7 @@ Both go away when DEST is wiped.
 - Terminal: at least 140x40. Side-by-side diff needs 100 or more columns. Stay in the default inline diff for stills.
 - Watch and background fetch stay off so frames do not flicker.
 - Re-run the seed script after any write (`s` / `u` / `x`, stash apply/pop/drop, checkout, reviewed mark).
-- Reviewed marks live in `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (fallback `~/.local/state/my-workspace-status/viewed-files.json`). Delete that file if a `` / `*` survives a reseed. `capture-demo-stills.sh` points `WS_STATUS_VIEWED_STORE` and `WS_STATUS_UPDATE_CHECK_STORE` at `tmp/demo-stills-stage/state` so it does not write those operator files.
+- Reviewed marks live in `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (fallback `~/.local/state/my-workspace-status/viewed-files.json`). Delete that file if a `` / `*` survives a reseed. Comments live in `$XDG_STATE_HOME/my-workspace-status/comments.json`. `capture-demo-stills.sh` points `WS_STATUS_VIEWED_STORE`, `WS_STATUS_COMMENT_STORE`, and `WS_STATUS_UPDATE_CHECK_STORE` at `tmp/demo-stills-stage/state` so it does not write those operator files.
 
 Each shot starts from a fresh launch unless noted. The first cursor is `app` → `src/auth.ts` (unstaged `M`) with the file diff on the right.
 

@@ -32,6 +32,7 @@ use super::app::{
     compute_reload_repo, discover_config, drop_undiscovered_checkouts, filter_repo_set,
     focused_repo_needs_pane, RightPaneRequest, RightPaneTarget, TuiOpts,
 };
+use super::comments;
 use super::drill::CommitFileSource;
 use super::event_pump::action_triggers_graph_autoload;
 use super::graph_load::{
@@ -398,6 +399,10 @@ impl Interpreter {
                 self.commit_diff = Some((repo, source, path));
                 self.sched.enqueue_user_front(UserTag::Pane);
             }
+            Effect::CopyClipboard { text } => {
+                comments::copy_to_clipboard(&text);
+                self.mark();
+            }
         }
     }
 
@@ -493,6 +498,7 @@ impl Interpreter {
                                         primary_repo: row.primary_repo,
                                         merged_into_default: row.merged_into_default,
                                         default_branch_override: row.default_branch_override,
+                                        local_branches: row.local_branches,
                                     })
                             };
                             JobOutcome::RepoStatus { gen, path, snap }

@@ -3,6 +3,7 @@
 use workspace_status_graph::graph_col_max;
 
 use super::super::action::{Action, Effect};
+use super::super::comments::tree_row_has_comment;
 use super::super::diff::{cell_code_width, gutter_width, DiffRow};
 use super::super::search::{apply_pan, list_row_pan_max, max_col_offset};
 use super::super::tree::{row_segments, NodeKind};
@@ -82,7 +83,8 @@ impl AppState {
             .iter()
             .map(|row| {
                 let viewed = row.kind == NodeKind::File && self.reviewed.contains(&row.id);
-                let segs = row_segments(row, self.ascii, viewed);
+                let commented = tree_row_has_comment(&self.comment_store, row);
+                let segs = row_segments(row, self.ascii, viewed, commented);
                 let label: usize = segs.segments.iter().map(|s| visible_width(&s.text)).sum();
                 let trailing: usize = segs.trailing.iter().map(|s| visible_width(&s.text)).sum();
                 list_row_pan_max(label, row.depth, trailing, width)

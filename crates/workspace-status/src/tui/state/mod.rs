@@ -16,7 +16,9 @@ use workspace_status_graph::{
     GraphRow, PaintedLine, ASCII, UNICODE,
 };
 
-use crate::snapshot::{FileChange, WorkspaceSnapshot};
+use crate::snapshot::{
+    carry_status_failed_local_branches, CheckoutKind, FileChange, WorkspaceSnapshot,
+};
 
 #[cfg(test)]
 use super::action::Action;
@@ -24,6 +26,13 @@ use super::action::Effect;
 use super::branches::{
     can_open_branch_picker, checkoutable_branch_names, is_valid_branch_name, merge_rev_for_commit,
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
+};
+#[cfg(not(test))]
+use super::comments::comment_store_path;
+use super::comments::{
+    collect_live_set, comment_key_label, export_markdown, gc_comments, load_comment_store,
+    put_comment, resolve_comment_target, save_comment_store, viewport_line_number, CommentExport,
+    CommentKey, CommentPrompt, CommentStore,
 };
 use super::commit_files::{
     ancestor_dir_ids, collect_foldable_subtree_ids as collect_commit_subtree_ids,
@@ -78,7 +87,6 @@ use super::watch::{
     prune_flashes, prune_ghosts, tree_signatures, GhostRow, GraphFlashDecision, GraphFlashMeta,
 };
 use crate::git::FULL_DIFF_CONTEXT_LINES;
-use crate::snapshot::CheckoutKind;
 
 /// Which pane has keyboard focus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -251,6 +259,10 @@ pub struct AppState {
     pub reviewed: HashSet<String>,
     pub viewed_store: ViewedStore,
     pub viewed_path: PathBuf,
+    pub comment_store: CommentStore,
+    pub comment_path: PathBuf,
+    pub comment: Option<CommentPrompt>,
+    pub comment_export: Option<CommentExport>,
     pub layout: LayoutHit,
     pub ascii: bool,
     pub search_mode: bool,
@@ -324,6 +336,8 @@ impl AppState {
         let cursor = initial_cursor(&rows);
         let signatures = tree_signatures(&tree, &cwd);
         let viewed_store = load_viewed_store(&viewed_path);
+        let comment_path = comment_path_for(&viewed_path);
+        let comment_store = load_comment_store(&comment_path);
         let mut state = Self {
             cwd,
             snapshot,
@@ -353,6 +367,10 @@ impl AppState {
             reviewed: HashSet::new(),
             viewed_store,
             viewed_path,
+            comment_store,
+            comment_path,
+            comment: None,
+            comment_export: None,
             layout: LayoutHit::default(),
             ascii,
             search_mode: false,
@@ -391,6 +409,7 @@ impl AppState {
             last_click: None,
         };
         state.reconcile_viewed_store();
+        state.reconcile_comment_store();
         state
     }
 
@@ -399,6 +418,10 @@ impl AppState {
             InputMode::Confirm
         } else if self.stash_menu.is_some() {
             InputMode::StashMenu
+        } else if self.comment.is_some() {
+            InputMode::Comment
+        } else if self.comment_export.is_some() {
+            InputMode::CommentExport
         } else if self.create_branch.is_some() {
             InputMode::CreateBranch
         } else if self.branch_picker.is_some() {
@@ -808,11 +831,13 @@ impl AppState {
     }
 
     pub fn apply_snapshot(&mut self, snapshot: WorkspaceSnapshot) {
+        let snapshot = carry_status_failed_local_branches(&self.snapshot, snapshot);
         self.snapshot = snapshot;
         self.snapshot.show_ignored = self.show_ignored;
         self.rebuild_rows();
         self.signatures = tree_signatures(&self.tree, &self.cwd);
         self.reconcile_viewed_store();
+        self.reconcile_comment_store();
     }
 
     /// Apply a watch poll. Keeps fold / focus / scroll. Flashes only rows
@@ -2154,6 +2179,114 @@ impl AppState {
         self.reviewed = viewed_row_ids(&self.snapshot, &self.viewed_store, &self.cwd);
     }
 
+    fn reconcile_comment_store(&mut self) {
+        let live = collect_live_set(&self.snapshot, &self.comment_store);
+        let next = gc_comments(&self.comment_store, &live);
+        if next != self.comment_store {
+            self.comment_store = next;
+            save_comment_store(&self.comment_store, &self.comment_path);
+        }
+    }
+
+    fn current_comment_target(&self) -> Option<CommentKey> {
+        match self.list_focus_target() {
+            ListFocusTarget::None => {
+                let source = match &self.drill {
+                    DrillView::Diff { source, .. } => Some(source),
+                    _ => None,
+                };
+                let (repo, path) = match &self.drill {
+                    DrillView::Diff { repo, path, .. } => {
+                        (Some(repo.as_str()), Some(path.as_str()))
+                    }
+                    _ => (self.diff_repo.as_deref(), self.diff_path.as_deref()),
+                };
+                let line = viewport_line_number(&self.current_diff_rows(), self.diff_scroll);
+                resolve_comment_target(
+                    &self.snapshot,
+                    None,
+                    None,
+                    None,
+                    true,
+                    repo,
+                    path,
+                    source,
+                    line,
+                )
+            }
+            ListFocusTarget::Graph => {
+                let repo = self.focused_graph_repo();
+                let row = self.focused_graph_row();
+                resolve_comment_target(
+                    &self.snapshot,
+                    None,
+                    row.as_ref(),
+                    repo.as_deref(),
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            ListFocusTarget::Tree => resolve_comment_target(
+                &self.snapshot,
+                self.focused_row(),
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+            ),
+            ListFocusTarget::CommitFiles => None,
+        }
+    }
+
+    fn begin_comment(&mut self) -> Effect {
+        self.drag = SplitDrag::None;
+        self.help_open = false;
+        self.comment_export = None;
+        let Some(key) = self.current_comment_target() else {
+            self.status = "no comment target".into();
+            return Effect::None;
+        };
+        let body = self.comment_store.get(&key).cloned().unwrap_or_default();
+        let label = comment_key_label(&key);
+        self.comment = Some(CommentPrompt { key, body, label });
+        self.status.clear();
+        Effect::None
+    }
+
+    fn submit_comment(&mut self) -> Effect {
+        let Some(prompt) = self.comment.take() else {
+            return Effect::None;
+        };
+        let empty = prompt.body.trim().is_empty();
+        self.comment_store = put_comment(&self.comment_store, prompt.key, &prompt.body);
+        save_comment_store(&self.comment_store, &self.comment_path);
+        self.status = if empty {
+            "comment deleted".into()
+        } else {
+            "comment saved".into()
+        };
+        Effect::None
+    }
+
+    fn export_comments(&mut self) -> Effect {
+        self.drag = SplitDrag::None;
+        self.help_open = false;
+        self.comment = None;
+        self.reconcile_comment_store();
+        let markdown = export_markdown(&self.comment_store);
+        self.comment_export = Some(CommentExport {
+            markdown: markdown.clone(),
+        });
+        self.status = "copied".into();
+        Effect::CopyClipboard { text: markdown }
+    }
+
     fn refuse_remove_worktree(&mut self) -> Effect {
         self.status = "Focus a linked worktree to remove".into();
         Effect::None
@@ -3103,6 +3236,24 @@ fn default_viewed_path() -> PathBuf {
     viewed_store_path()
 }
 
+fn comment_path_for(viewed_path: &PathBuf) -> PathBuf {
+    if let Ok(override_path) = std::env::var("WS_STATUS_COMMENT_STORE") {
+        let trimmed = override_path.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    #[cfg(test)]
+    {
+        return viewed_path.with_file_name("comments.json");
+    }
+    #[cfg(not(test))]
+    {
+        let _ = viewed_path;
+        comment_store_path()
+    }
+}
+
 /// Ancestor ids to try when a tree-mode row disappears in flat mode.
 fn focus_ancestor_ids(id: &str) -> Vec<String> {
     let Some((kind, rest)) = id.split_once(':') else {
@@ -3179,6 +3330,7 @@ mod tests {
             primary_repo: None,
             merged_into_default: None,
             default_branch_override: None,
+            local_branches: Vec::new(),
         }
     }
 
@@ -3484,6 +3636,7 @@ mod tests {
                 primary_repo: None,
                 merged_into_default: None,
                 default_branch_override: None,
+                local_branches: Vec::new(),
             }],
             &[],
             false,
@@ -3528,6 +3681,7 @@ mod tests {
             primary_repo: None,
             merged_into_default: None,
             default_branch_override: None,
+            local_branches: Vec::new(),
         }
     }
 
@@ -3685,6 +3839,7 @@ mod tests {
                     primary_repo: Some("app".into()),
                     merged_into_default: None,
                     default_branch_override: None,
+                    local_branches: Vec::new(),
                 },
             ],
             &[],
@@ -4179,6 +4334,7 @@ mod tests {
                     primary_repo: Some("app".into()),
                     merged_into_default: None,
                     default_branch_override: None,
+                    local_branches: Vec::new(),
                 },
                 RepoSnapshot {
                     repo: "notes".into(),
@@ -4194,6 +4350,7 @@ mod tests {
                     primary_repo: None,
                     merged_into_default: None,
                     default_branch_override: None,
+                    local_branches: Vec::new(),
                 },
             ],
             &["notes".into()],
@@ -4957,6 +5114,7 @@ mod tests {
                     primary_repo: Some("app".into()),
                     merged_into_default: Some(false),
                     default_branch_override: None,
+                    local_branches: Vec::new(),
                 },
                 repo("notes", true),
             ],
@@ -5036,6 +5194,7 @@ mod tests {
                 primary_repo: Some("notes".into()),
                 merged_into_default: None,
                 default_branch_override: None,
+                local_branches: Vec::new(),
             }],
             &["notes/.worktrees/feat".into()],
             false,
@@ -6025,6 +6184,7 @@ mod tests {
             primary_repo: None,
             merged_into_default: None,
             default_branch_override: None,
+            local_branches: Vec::new(),
         }
     }
 

@@ -50,6 +50,8 @@ const HELP_VIEW_ROWS: &[(&str, &str)] = &[
     ("PgUp PgDn", "page focused pane"),
     ("Ctrl-u Ctrl-d", "page focused ±5"),
     ("m", "mouse · drag pane, split, or graph scrollbars"),
+    (";", "comment focused row / line"),
+    ("y", "copy comments as markdown"),
     ("Esc", "back / unfocus · never quit"),
     ("Enter dblclick", "focus right / drill"),
     ("?", "this help"),

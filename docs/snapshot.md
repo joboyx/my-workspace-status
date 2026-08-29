@@ -49,7 +49,7 @@ Paths are workspace-relative. The snapshot does not include the workspace root, 
 
 Omitted optional keys: `primaryRepo`, `defaultBranchOverride`, and empty change flags on each file.
 
-These fields cover branch, sync, checkout kind, merge-into-default, and file changes. They are not a full commit graph. `HEAD` is collected for TUI live-watch identity and is omitted from `--json`.
+These fields cover branch, sync, checkout kind, merge-into-default, and file changes. They are not a full commit graph. `HEAD` is collected for TUI live-watch identity and is omitted from `--json`. Local `refs/heads` names are collected on the snapshot worker for TUI comment GC and are omitted from `--json`. When status fails, the TUI keeps the last good branch list for GC only if every checkout of that identity has an empty counted list. A successful sibling's live names win.
 
 ## File change object
 

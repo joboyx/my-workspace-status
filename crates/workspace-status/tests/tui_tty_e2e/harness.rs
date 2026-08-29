@@ -144,6 +144,7 @@ impl PtySession {
             "WS_STATUS_VIEWED_STORE",
             state_home.join("viewed-files.json"),
         );
+        cmd.env("WS_STATUS_COMMENT_STORE", state_home.join("comments.json"));
         let update_store = state_home.join("update-check.json");
         write_update_check(&update_store, last_check_unix);
         cmd.env("WS_STATUS_UPDATE_CHECK_STORE", &update_store);

@@ -6,10 +6,10 @@ use std::path::Path;
 
 use crate::config::{default_branch_override_for, WorkspaceStatusConfig};
 use crate::git::{
-    exec_git, exec_git_checked, is_ancestor, list_worktrees_porcelain, resolve_default_branch_name,
-    resolve_default_branch_tip_ref, rev_parse_quiet,
+    exec_git, exec_git_checked, is_ancestor, list_local_branches, list_worktrees_porcelain,
+    resolve_default_branch_name, resolve_default_branch_tip_ref, rev_parse_quiet,
 };
-use crate::helpers::{is_default_branch, DETACHED_HEAD_BRANCH};
+use crate::helpers::{is_default_branch, DETACHED_HEAD_BRANCH, UNKNOWN_HEAD_BRANCH};
 use crate::parallel::{env_fetch_concurrency, map_with_concurrency};
 use crate::snapshot::{CheckoutKind, FileChange, RepoSnapshot, SyncStatus};
 use crate::worktrees::{
@@ -199,7 +199,7 @@ fn failed_repo_snapshot(
 ) -> RepoSnapshot {
     RepoSnapshot {
         repo: repo_path.to_string(),
-        branch: "(unknown)".to_string(),
+        branch: UNKNOWN_HEAD_BRANCH.to_string(),
         sync_status: SyncStatus::NoUpstream,
         sync_note: "status failed".to_string(),
         head: String::new(),
@@ -211,6 +211,7 @@ fn failed_repo_snapshot(
         primary_repo: meta.primary_repo.clone(),
         merged_into_default: None,
         default_branch_override: override_name.map(str::to_string),
+        local_branches: Vec::new(),
     }
 }
 
@@ -529,6 +530,10 @@ pub fn process_repo(
     let has_untracked = !parsed.untracked.is_empty();
     let merged = compute_merged_into_default(&repo_dir, &branch_state.branch, override_name);
     let head = rev_parse_quiet("HEAD", &repo_dir).unwrap_or_default();
+    let local_branches = list_local_branches(&repo_dir)
+        .into_iter()
+        .map(|b| b.name)
+        .collect();
     Some(RepoSnapshot {
         repo: repo_path.to_string(),
         branch: branch_state.branch,
@@ -543,6 +548,7 @@ pub fn process_repo(
         primary_repo: meta.primary_repo.clone(),
         merged_into_default: merged,
         default_branch_override: override_name.map(str::to_string),
+        local_branches,
     })
 }
 

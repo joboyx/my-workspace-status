@@ -108,6 +108,15 @@ pub enum Action {
     CreateBranchBackspace,
     CreateBranchSubmit,
     CreateBranchCancel,
+    /// Open the comment overlay on the focused row or diff line (`;`).
+    CommentStart,
+    CommentChar(char),
+    CommentBackspace,
+    CommentSubmit,
+    CommentCancel,
+    /// Copy live comments as markdown (`y`).
+    ExportComments,
+    ExportCommentsCancel,
     NavEnter,
     NavEsc,
     GraphStashApply,
@@ -245,5 +254,9 @@ pub enum Effect {
         repo: String,
         source: CommitFileSource,
         path: String,
+    },
+    /// Copy markdown to the clipboard (OSC 52 / host tool).
+    CopyClipboard {
+        text: String,
     },
 }

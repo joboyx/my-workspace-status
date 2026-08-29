@@ -37,6 +37,10 @@ pub enum InputMode {
     /// Graph `o` overlay: mark local branches, Enter applies ancestor focus.
     GraphFocusPicker,
     CreateBranch,
+    /// `;` comment overlay (type body, Enter save, empty deletes).
+    Comment,
+    /// `y` markdown export overlay (Esc closes).
+    CommentExport,
 }
 
 /// Map one terminal event to an [`Action`].
@@ -111,7 +115,9 @@ pub fn event_to_action_with(
                     | InputMode::StashMenu
                     | InputMode::BranchPicker
                     | InputMode::GraphFocusPicker
-                    | InputMode::CreateBranch,
+                    | InputMode::CreateBranch
+                    | InputMode::Comment
+                    | InputMode::CommentExport,
             ) {
                 Action::None
             } else {
@@ -233,7 +239,10 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
     let typing = !key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Backspace | KeyCode::Char(_));
     match mode {
-        InputMode::SearchPrompt | InputMode::HelpSearch | InputMode::CreateBranch => typing,
+        InputMode::SearchPrompt
+        | InputMode::HelpSearch
+        | InputMode::CreateBranch
+        | InputMode::Comment => typing,
         InputMode::BranchPicker => match key.code {
             KeyCode::Backspace => true,
             KeyCode::Char('C') => false,
@@ -251,7 +260,8 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
         | InputMode::GPending { .. }
         | InputMode::Confirm
         | InputMode::Help
-        | InputMode::StashMenu => false,
+        | InputMode::StashMenu
+        | InputMode::CommentExport => false,
     }
 }
 
@@ -403,6 +413,19 @@ fn key_to_action(
             }
             _ => Action::None,
         },
+        InputMode::Comment => match key.code {
+            KeyCode::Esc => Action::CommentCancel,
+            KeyCode::Enter => Action::CommentSubmit,
+            KeyCode::Backspace => Action::CommentBackspace,
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::CommentChar(c)
+            }
+            _ => Action::None,
+        },
+        InputMode::CommentExport => match key.code {
+            KeyCode::Esc | KeyCode::Enter => Action::ExportCommentsCancel,
+            _ => Action::None,
+        },
         InputMode::Normal { search_active } => normal_key(
             key,
             search_active,
@@ -482,6 +505,8 @@ fn normal_key(
         KeyCode::Char('w') | KeyCode::Char('W') => Action::RemoveWorktree,
         KeyCode::Char('i') => Action::ToggleDiffMode,
         KeyCode::Char('m') => Action::ToggleMouse,
+        KeyCode::Char(';') => Action::CommentStart,
+        KeyCode::Char('y') => Action::ExportComments,
         KeyCode::Char('n') if search_active => Action::SearchNext,
         KeyCode::Char('N') if search_active => Action::SearchPrev,
         KeyCode::Tab => {
@@ -998,6 +1023,22 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Char('c')), normal(), false, false),
             Action::None
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char(';')), normal(), false, false),
+            Action::CommentStart
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('y')), normal(), false, false),
+            Action::ExportComments
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Enter), InputMode::Comment, false, false),
+            Action::CommentSubmit
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Esc), InputMode::CommentExport, false, false),
+            Action::ExportCommentsCancel
         );
         assert_eq!(
             event_to_action(

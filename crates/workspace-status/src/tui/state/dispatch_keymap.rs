@@ -255,6 +255,33 @@ impl AppState {
                 Effect::None
             }
             Action::CycleTheme => self.cycle_theme(),
+            Action::CommentStart => self.begin_comment(),
+            Action::CommentChar(c) => {
+                if let Some(prompt) = self.comment.as_mut() {
+                    prompt.body.push(c);
+                    self.status = format!("body: {}", prompt.body);
+                }
+                Effect::None
+            }
+            Action::CommentBackspace => {
+                if let Some(prompt) = self.comment.as_mut() {
+                    prompt.body.pop();
+                    self.status = format!("body: {}", prompt.body);
+                }
+                Effect::None
+            }
+            Action::CommentSubmit => self.submit_comment(),
+            Action::CommentCancel => {
+                self.comment = None;
+                self.status = "comment cancelled".into();
+                Effect::None
+            }
+            Action::ExportComments => self.export_comments(),
+            Action::ExportCommentsCancel => {
+                self.comment_export = None;
+                self.status.clear();
+                Effect::None
+            }
             Action::Resize { cols, rows: _ } => {
                 self.apply_terminal_size(cols);
                 Effect::None
