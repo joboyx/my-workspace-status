@@ -89,7 +89,7 @@ Help overlay (`tui/help.rs` MOVE / GIT / VIEW) plus mouse and overlays. **PTY** 
 | Home / End | `pty_home_and_end_jump_workspace_tree` | — | Help `Home End` top/bottom. CSI `1~` / `4~` with event types. First/last tree row, not chrome. Extra files so PageDown cannot pass. Cursor + pane + fold |
 | PgUp / PgDn | `pty_pgup_pgdn_pages_workspace_tree` | — | Help VIEW. CSI `ESC [5~` / `ESC [6~`. Viewport − 1. Cursor bar + pane body |
 | Ctrl-u / Ctrl-d | `pty_ctrl_u_d_jumps_workspace_tree` | — | Help VIEW `Ctrl-u Ctrl-d` ±5. CSI-u Control. ±5 rows, not `j` / PgUp/PgDn / Home/End. Two +5 steps. Cursor + pane body. Stay left |
-| Click-to-select row | `pty_click_selects_tree_row` | — | SGR press+release; must change the right pane |
+| Click-to-select row | `pty_click_selects_tree_row` | — | SGR press+release on the merger label (not the chevron). Selects that row and loads its graph. Stay left. File-diff gone. A no-op, cursor-only, chevron fold, right-pane click, or Enter drill cannot pass. |
 | Click fold chevron | `pty_click_chevron_toggles_fold` | — | |
 | Click right pane | `pty_click_right_pane_focuses` | — | Breadcrumb `[workspace]` |
 | Double-click Enter | `pty_double_click_enters_on_hit_row` | — | Hit-row Enter: tree focuses right, graph matches keyboard drill, files open the diff, leaf no-op. Chevron folds once |
