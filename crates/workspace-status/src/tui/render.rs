@@ -19,6 +19,7 @@ use super::chrome::{
     breadcrumb_line, breadcrumb_rows, ctrl_c_prompt_line, ctrl_c_prompt_rows,
     overlay_status_rows_for, status_line,
 };
+use super::comments::{diff_line_has_comment, graph_row_has_comment, tree_row_has_comment};
 use super::diff::{
     cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, gutter_width,
     section_header, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
@@ -30,9 +31,9 @@ use super::help::{
     HELP_SEARCH_ESC_HINT,
 };
 use super::icons::{
-    icon_branch, icon_diff, icon_merged_into_default, icon_move, icon_open_vs_default,
-    truncate_visible, CURSOR_BAR, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED,
-    FOLD_EXPANDED_ASCII,
+    icon_branch, icon_comment, icon_diff, icon_merged_into_default, icon_move,
+    icon_open_vs_default, truncate_visible, CURSOR_BAR, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII,
+    FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
 };
 use super::search::{
     collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids, slice_cols,
@@ -217,6 +218,10 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         draw_stash_menu(frame, overlay, state);
     } else if state.create_branch.is_some() {
         draw_create_branch(frame, overlay, state);
+    } else if state.comment.is_some() {
+        draw_comment(frame, overlay, state);
+    } else if state.comment_export.is_some() {
+        draw_comment_export(frame, overlay, state);
     } else if state.branch_picker.is_some() {
         draw_branch_picker(frame, overlay, state);
     } else if state.graph_focus_picker.is_some() {
@@ -309,6 +314,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let mut lines = Vec::new();
     for row in painted.iter().skip(start).take(height) {
         let viewed = row.kind == NodeKind::File && state.reviewed.contains(&row.id);
+        let commented = tree_row_has_comment(&state.comment_store, row);
         lines.push(paint_tree_row(
             row,
             width,
@@ -318,6 +324,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             search_bg,
             state.ascii,
             viewed,
+            commented,
             palette,
             state.left_col_offset as usize,
         ));
@@ -334,10 +341,11 @@ fn paint_tree_row(
     search_bg: Color,
     ascii: bool,
     viewed: bool,
+    commented: bool,
     palette: Palette,
     col_offset: usize,
 ) -> Line<'static> {
-    let segs = row_segments(row, ascii, viewed);
+    let segs = row_segments(row, ascii, viewed, commented);
     paint_segmented_row(
         row.depth,
         row.foldable,
@@ -541,6 +549,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
     let pal = state.theme.palette();
     let flash_rows = state.graph_flash_rows();
     let lane_colors = state.theme.lane_colors();
+    let commented_rows = graph_commented_row_indices(state);
     GraphWidget::new(model)
         .ascii(state.ascii)
         .selected(Some(state.graph_cursor))
@@ -549,6 +558,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .loading_older(state.graph_loading_older)
         .search_matches(&matches, state.theme.pills().filter.bg)
         .flash_rows(&flash_rows)
+        .commented_rows(&commented_rows)
         .cursor_style(pal.cursor, pal.cursor_bg)
         .lane_colors(&lane_colors)
         .label_palette(GraphLabelPalette {
@@ -563,6 +573,29 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         })
         .render(area, frame.buffer_mut());
     record_graph_scrollbar(state, area, col_offset);
+}
+
+fn graph_commented_row_indices(state: &AppState) -> Vec<usize> {
+    let Some(model) = state.graph.as_ref() else {
+        return Vec::new();
+    };
+    let Some((repo, _)) = state.graph_identity.as_ref() else {
+        return Vec::new();
+    };
+    let primary = state
+        .snapshot
+        .repos
+        .iter()
+        .find(|r| r.repo == *repo)
+        .and_then(|r| r.primary_repo.as_deref());
+    model
+        .visible_rows()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, row)| {
+            graph_row_has_comment(&state.comment_store, repo, primary, row).then_some(i)
+        })
+        .collect()
 }
 
 fn graph_search_matches(state: &AppState) -> Vec<usize> {
@@ -920,7 +953,15 @@ fn paint_diff_row(
         )),
         DiffRow::Line { left, right } if split && right.is_some() => {
             let cols = side_by_side_column_widths(width, state.diff_split_fraction);
-            let mut spans = paint_cell_spans(left, cols.left_width, gutter, col_offset, palette);
+            let mut spans = paint_cell_spans(
+                left,
+                cols.left_width,
+                gutter,
+                col_offset,
+                palette,
+                state,
+                state.ascii,
+            );
             spans.push(Span::styled(
                 DIFF_RULE.to_string(),
                 Style::default().fg(Color::DarkGray),
@@ -931,12 +972,20 @@ fn paint_diff_row(
                 gutter,
                 col_offset,
                 palette,
+                state,
+                state.ascii,
             ));
             Line::from(spans)
         }
-        DiffRow::Line { left, .. } => {
-            Line::from(paint_cell_spans(left, width, gutter, col_offset, palette))
-        }
+        DiffRow::Line { left, .. } => Line::from(paint_cell_spans(
+            left,
+            width,
+            gutter,
+            col_offset,
+            palette,
+            state,
+            state.ascii,
+        )),
     };
     if search_hit {
         line.spans = line
@@ -965,13 +1014,24 @@ fn paint_cell_spans(
     gutter: usize,
     col_offset: usize,
     palette: Palette,
+    state: &AppState,
+    ascii: bool,
 ) -> Vec<Span<'static>> {
     let width = width as usize;
     let code_w = cell_code_width(width, gutter);
-    let line_no = cell
+    let commented = cell
         .line_no
-        .map(|n| format!("{n:>gutter$}"))
-        .unwrap_or_else(|| " ".repeat(gutter));
+        .is_some_and(|n| diff_cell_has_comment(state, n));
+    let line_no = cell.line_no.map(|n| {
+        if commented && gutter > 0 {
+            let mark = icon_comment(ascii);
+            let rest = gutter.saturating_sub(visible_width(mark));
+            format!("{mark}{n:>rest$}")
+        } else {
+            format!("{n:>gutter$}")
+        }
+    });
+    let line_no = line_no.unwrap_or_else(|| " ".repeat(gutter));
     let plain = slice_visible(&cell.text, col_offset, code_w);
     let sign = cell_sign(cell.kind);
     let accent = cell_accent(cell.kind, palette);
@@ -993,6 +1053,35 @@ fn paint_cell_spans(
         Span::styled(plain, code_style),
         Span::raw(" ".repeat(pad)),
     ]
+}
+
+fn diff_cell_has_comment(state: &AppState, line: u32) -> bool {
+    let (repo, path) = match &state.drill {
+        DrillView::Diff { repo, path, .. } => (Some(repo.as_str()), Some(path.as_str())),
+        _ => (state.diff_repo.as_deref(), state.diff_path.as_deref()),
+    };
+    let Some(repo) = repo else {
+        return false;
+    };
+    let Some(path) = path else {
+        return false;
+    };
+    let source = match &state.drill {
+        DrillView::Diff { source, .. } => Some(source),
+        _ => None,
+    };
+    let snap = state.snapshot.repos.iter().find(|r| r.repo == repo);
+    let primary = snap.and_then(|r| r.primary_repo.as_deref());
+    let branch = snap.map(|r| r.branch.as_str());
+    diff_line_has_comment(
+        &state.comment_store,
+        repo,
+        primary,
+        branch,
+        path,
+        source,
+        line,
+    )
 }
 
 fn cell_accent(kind: DiffCellKind, palette: Palette) -> Option<Style> {
@@ -1817,6 +1906,97 @@ fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
     lines.push(Line::from(Span::styled(
         "Enter confirm · Esc cancel",
+        Style::default().fg(palette.muted),
+    )));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(overlay_block(accent))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_comment(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let Some(prompt) = state.comment.as_ref() else {
+        return;
+    };
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let palette = state.theme.palette();
+    let accent = palette.heading;
+    let body = if prompt.body.is_empty() {
+        "…"
+    } else {
+        prompt.body.as_str()
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Comment",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            prompt.label.clone(),
+            Style::default().fg(palette.muted),
+        )),
+        Line::from(vec![
+            Span::styled("  body: ", Style::default().fg(palette.muted)),
+            Span::styled(body.to_string(), Style::default().fg(palette.cursor)),
+        ]),
+    ];
+    if !state.status.is_empty() {
+        lines.push(Line::from(Span::styled(
+            state.status.clone(),
+            Style::default().fg(overlay_status_color(&state.status, palette)),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "Enter save · empty deletes · Esc cancel",
+        Style::default().fg(palette.muted),
+    )));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(overlay_block(accent))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_comment_export(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let Some(export) = state.comment_export.as_ref() else {
+        return;
+    };
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let palette = state.theme.palette();
+    let accent = palette.heading;
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Comments",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "copied to clipboard",
+            Style::default().fg(palette.added),
+        )),
+    ];
+    for row in export.markdown.lines() {
+        lines.push(Line::from(Span::styled(
+            row.to_string(),
+            Style::default().fg(palette.repo),
+        )));
+    }
+    if !state.status.is_empty() && state.status != "copied" {
+        lines.push(Line::from(Span::styled(
+            state.status.clone(),
+            Style::default().fg(overlay_status_color(&state.status, palette)),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "copied · Esc close",
         Style::default().fg(palette.muted),
     )));
     frame.render_widget(Clear, area);

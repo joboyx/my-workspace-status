@@ -83,6 +83,10 @@ impl DesktopSession {
             "export WS_STATUS_VIEWED_STORE={}\n",
             sh_quote(&state_home.join("viewed-files.json"))
         ));
+        script.push_str(&format!(
+            "export WS_STATUS_COMMENT_STORE={}\n",
+            sh_quote(&state_home.join("comments.json"))
+        ));
         for (k, v) in git_env() {
             script.push_str(&format!("export {k}={}\n", sh_quote_str(v)));
         }

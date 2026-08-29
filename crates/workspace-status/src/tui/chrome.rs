@@ -368,6 +368,8 @@ pub fn ctrl_c_prompt_pinned(state: &AppState) -> bool {
         && state.branch_picker.is_none()
         && state.graph_focus_picker.is_none()
         && state.create_branch.is_none()
+        && state.comment.is_none()
+        && state.comment_export.is_none()
 }
 
 /// Bold quit-prompt line painted between the breadcrumb and the status / overlay.
@@ -409,6 +411,16 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
         // (`create {name}`); stash / pickers already grow for that line.
         let extra = u16::from(!state.status.is_empty());
         return 5u16.saturating_add(extra);
+    }
+    if state.comment.is_some() {
+        // Title + target + body + footer, plus 2 border rows.
+        let extra = u16::from(!state.status.is_empty());
+        return 6u16.saturating_add(extra);
+    }
+    if let Some(export) = state.comment_export.as_ref() {
+        let extra = u16::from(!state.status.is_empty() && state.status != "copied");
+        let body = export.markdown.lines().count() as u16;
+        return (5u16.saturating_add(body).saturating_add(extra)).min(12);
     }
     if let Some(picker) = state.branch_picker.as_ref() {
         let n = picker.visible().len().max(1).min(12) as u16;
@@ -502,7 +514,12 @@ pub fn nav_chrome_hint_segments(depth: u8, focus: FocusPane) -> Vec<HintSegment>
 
 /// Extra chips. Appended after core hints so they truncate first.
 pub fn extra_hint_segments() -> Vec<HintSegment> {
-    vec![hint("Tab", "other pane", false), hint("q", "quit", false)]
+    vec![
+        hint(";", "comment", false),
+        hint("y", "copy comments", false),
+        hint("Tab", "other pane", false),
+        hint("q", "quit", false),
+    ]
 }
 
 fn hint(key: &str, label: &str, destructive: bool) -> HintSegment {
@@ -890,6 +907,8 @@ fn status_uses_status_text(state: &AppState) -> bool {
         || state.branch_picker.is_some()
         || state.graph_focus_picker.is_some()
         || state.create_branch.is_some()
+        || state.comment.is_some()
+        || state.comment_export.is_some()
 }
 
 fn breadcrumb_op_status(state: &AppState) -> String {
@@ -1210,7 +1229,15 @@ mod tests {
         assert!(keys.contains(&"s".into()), "{keys:?}");
         assert!(keys.contains(&"x".into()), "{keys:?}");
         let extras: Vec<String> = extra_hint_segments().into_iter().map(|s| s.key).collect();
-        assert_eq!(extras, vec!["Tab".to_string(), "q".to_string()]);
+        assert_eq!(
+            extras,
+            vec![
+                ";".to_string(),
+                "y".to_string(),
+                "Tab".to_string(),
+                "q".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -1326,6 +1353,29 @@ mod tests {
         assert_eq!(overlay_status_rows(&app), 5);
         app.status = "create topic".into();
         assert_eq!(overlay_status_rows(&app), 6);
+    }
+
+    #[test]
+    fn comment_overlay_grows_for_status() {
+        use crate::tui::comments::{CommentExport, CommentKey, CommentPrompt};
+        let mut app = state();
+        app.comment = Some(CommentPrompt {
+            key: CommentKey::Branch {
+                repo: "app".into(),
+                branch: "feature/x".into(),
+            },
+            body: String::new(),
+            label: "app · branch feature/x".into(),
+        });
+        assert_eq!(overlay_status_rows(&app), 6);
+        app.status = "body: hello".into();
+        assert_eq!(overlay_status_rows(&app), 7);
+        app.comment = None;
+        app.status = "copied".into();
+        app.comment_export = Some(CommentExport {
+            markdown: "# Comments\n\nNo comments.\n".into(),
+        });
+        assert_eq!(overlay_status_rows(&app), 8);
     }
 
     fn line_plain(line: &Line<'_>) -> String {

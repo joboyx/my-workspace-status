@@ -151,6 +151,8 @@ mod tests {
         assert!(overlay_blocks_background_ticks(InputMode::BranchPicker));
         assert!(overlay_blocks_background_ticks(InputMode::GraphFocusPicker));
         assert!(overlay_blocks_background_ticks(InputMode::CreateBranch));
+        assert!(overlay_blocks_background_ticks(InputMode::Comment));
+        assert!(overlay_blocks_background_ticks(InputMode::CommentExport));
         assert!(!overlay_blocks_background_ticks(InputMode::Normal {
             search_active: false
         }));
@@ -216,6 +218,14 @@ mod tests {
         assert_eq!(
             classify_busy_action(&Action::GraphCheckout),
             BusyAction::Ignore
+        );
+        assert_eq!(
+            classify_busy_action(&Action::CommentSubmit),
+            BusyAction::Handle
+        );
+        assert_eq!(
+            classify_busy_action(&Action::ExportComments),
+            BusyAction::Handle
         );
     }
 

@@ -47,9 +47,11 @@ colours (`T` cycles).
 selectable visible-row indexes. Spacers stay
 unhighlighted. `GraphWidget::flash_rows` paints the fade background on
 the same visible-row indexes, including spacers (a flashing commit
-keeps its spacer). The selected cursor still wins: `▌` plus `cursorBg`
-(`GraphWidget::cursor_style`). Spacers keep the background only. The
-widget does not use reverse video for the cursor.
+keeps its spacer). `GraphWidget::commented_rows` marks selectable
+visible-row indexes that have an object comment. Unselected commented
+rows paint `"` in the cursor column. The selected cursor still wins: `▌`
+plus `cursorBg` (`GraphWidget::cursor_style`). Spacers stay unmarked.
+The widget does not use reverse video for the cursor.
 `GraphWidget::col_offset` skips label columns (gutter stays put) so long
 subjects can pan without growing the row.
 

@@ -13,9 +13,10 @@
 # writing ASCII/gray frames over good stills. Xvfb + dbus + Openbox come from
 # scripts/with-desktop-session.sh (same session helper as desktop TTY e2e).
 #
-# Isolates XDG_STATE_HOME, WS_STATUS_UPDATE_CHECK_STORE, and
-# WS_STATUS_VIEWED_STORE under tmp/demo-stills-stage/state so a TTY launch
-# does not write the operator last-check or reviewed-mark files.
+# Isolates XDG_STATE_HOME, WS_STATUS_UPDATE_CHECK_STORE,
+# WS_STATUS_VIEWED_STORE, and WS_STATUS_COMMENT_STORE under
+# tmp/demo-stills-stage/state so a TTY launch does not write the operator
+# last-check, reviewed-mark, or comment files.
 set -euo pipefail
 trap '' HUP
 
@@ -29,6 +30,7 @@ STAGE_DIR="$REPO_ROOT/tmp/demo-stills-stage"
 STATE_DIR="$STAGE_DIR/state"
 UPDATE_STORE="$STATE_DIR/update-check.json"
 VIEWED_STORE="$STATE_DIR/viewed-files.json"
+COMMENT_STORE="$STATE_DIR/comments.json"
 FONT_DIR="${HOME}/.local/share/fonts/MesloLGS-NF"
 BIN="$REPO_ROOT/target/release/workspace-status"
 LAUNCHER="$STAGE_DIR/run-tui.sh"
@@ -112,6 +114,7 @@ export WS_STATUS_FETCH_MS=0
 export XDG_STATE_HOME=$(printf '%q' "$STATE_DIR")
 export WS_STATUS_UPDATE_CHECK_STORE=$(printf '%q' "$UPDATE_STORE")
 export WS_STATUS_VIEWED_STORE=$(printf '%q' "$VIEWED_STORE")
+export WS_STATUS_COMMENT_STORE=$(printf '%q' "$COMMENT_STORE")
 # Seed timestamps are Asia/Manila; pin TZ so stills match that clock.
 export TZ=Asia/Manila
 export TERM=xterm-256color
@@ -136,7 +139,7 @@ cleanup() {
 trap cleanup EXIT
 
 clear_viewed() {
-  rm -f "$VIEWED_STORE"
+  rm -f "$VIEWED_STORE" "$COMMENT_STORE"
 }
 
 window_id() {

@@ -106,6 +106,16 @@ pub fn icon_viewed(ascii: bool) -> &'static str {
     glyph(ascii, ICON_VIEWED_NERD, ICON_VIEWED_ASCII)
 }
 
+/// `ICON_COMMENT` nerd glyph: nf-fa-comment (`U+F075`).
+pub const ICON_COMMENT_NERD: &str = "\u{f075}";
+/// `ICON_COMMENT` ASCII fallback.
+pub const ICON_COMMENT_ASCII: &str = "\"";
+
+/// Comment mark on a row or diff line. Nerd: nf-fa-comment; ASCII: `"`.
+pub fn icon_comment(ascii: bool) -> &'static str {
+    glyph(ascii, ICON_COMMENT_NERD, ICON_COMMENT_ASCII)
+}
+
 const DEFAULT_FILE_GLYPH: &str = "";
 const ASCII_FILE_GLYPH: &str = "·";
 
@@ -517,6 +527,7 @@ mod tests {
             icon_merged_into_default(true),
             icon_open_vs_default(true),
             icon_viewed(true),
+            icon_comment(true),
             ASCII_FILE_GLYPH,
         ];
         let nerd = [
@@ -535,6 +546,7 @@ mod tests {
             icon_merged_into_default(false),
             icon_open_vs_default(false),
             icon_viewed(false),
+            icon_comment(false),
             CURSOR_BAR,
             FOLD_EXPANDED,
             FOLD_COLLAPSED,
@@ -546,6 +558,9 @@ mod tests {
         }
         assert_eq!(icon_workspace(true), "#");
         assert_eq!(icon_viewed(true), "*");
+        assert_eq!(icon_comment(true), "\"");
+        assert_eq!(icon_comment(false), ICON_COMMENT_NERD);
+        assert_eq!(visible_width(icon_comment(false)), 1);
         assert_ne!(icon_viewed(false), icon_clean(false));
         assert_ne!(icon_viewed(false), icon_synced(false));
     }

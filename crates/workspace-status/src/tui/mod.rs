@@ -7,6 +7,7 @@ mod action;
 mod app;
 mod branches;
 mod chrome;
+pub(crate) mod comments;
 mod commit_files;
 mod ctrl_c_exit;
 mod diff;

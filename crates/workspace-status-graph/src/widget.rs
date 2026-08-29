@@ -55,6 +55,7 @@ pub struct GraphWidget<'a> {
     search_matches: &'a [usize],
     search_bg: Option<Color>,
     flash_rows: &'a [(usize, Color)],
+    commented_rows: &'a [usize],
     cursor_fg: Color,
     cursor_bg: Option<Color>,
     label_palette: Option<GraphLabelPalette>,
@@ -76,6 +77,7 @@ impl<'a> GraphWidget<'a> {
             search_matches: &[],
             search_bg: None,
             flash_rows: &[],
+            commented_rows: &[],
             cursor_fg: Color::Cyan,
             cursor_bg: None,
             label_palette: None,
@@ -142,6 +144,15 @@ impl<'a> GraphWidget<'a> {
     /// Cursor and search still win. Unlike search, spacers follow the node.
     pub fn flash_rows(mut self, rows: &'a [(usize, Color)]) -> Self {
         self.flash_rows = rows;
+        self
+    }
+
+    /// Mark object-commented selectable rows (`"` in the cursor column).
+    ///
+    /// `indices` are [`GraphModel::visible_rows`] indexes. Selected rows keep
+    /// `▌`. Spacers stay unmarked.
+    pub fn commented_rows(mut self, indices: &'a [usize]) -> Self {
+        self.commented_rows = indices;
         self
     }
 
@@ -303,6 +314,10 @@ impl Widget for GraphWidget<'_> {
                 && line
                     .row_index
                     .is_some_and(|i| self.search_matches.contains(&i));
+            let commented = line.selectable
+                && line
+                    .row_index
+                    .is_some_and(|i| self.commented_rows.contains(&i));
             let flash_bg = line.row_index.and_then(|i| {
                 self.flash_rows
                     .iter()
@@ -317,6 +332,7 @@ impl Widget for GraphWidget<'_> {
                 line,
                 selected,
                 search_match,
+                commented,
                 self.search_bg,
                 flash_bg,
                 self.cursor_fg,
@@ -429,6 +445,7 @@ fn put_painted_line(
     line: &PaintedLine,
     selected: bool,
     search_match: bool,
+    commented: bool,
     search_bg: Option<Color>,
     flash_bg: Option<Color>,
     cursor_fg: Color,
@@ -444,6 +461,8 @@ fn put_painted_line(
     let row = Rect::new(x, y, width, 1);
     let bar = if selected && line.selectable {
         "▌"
+    } else if commented && line.selectable {
+        "\""
     } else {
         " "
     };
@@ -1737,6 +1756,32 @@ mod tests {
         }
         assert!(saw_bar, "selected graph row should paint ▌");
         assert!(!saw_reversed, "graph cursor should not use reverse video");
+    }
+
+    #[test]
+    fn unselected_commented_row_paints_quote_mark() {
+        let model = sample_model();
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .selected(Some(0))
+                    .commented_rows(&[1, 2, 3, 4, 5])
+                    .cursor_style(Color::Cyan, Color::DarkGray)
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut saw_quote = false;
+        for y in 0..16u16 {
+            if buffer[(0, y)].symbol() == "\"" {
+                saw_quote = true;
+                break;
+            }
+        }
+        assert!(saw_quote, "unselected commented graph row should paint \"");
     }
 
     fn many_ref_commit() -> Commit {
