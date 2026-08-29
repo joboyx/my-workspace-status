@@ -31,8 +31,8 @@ use super::commit_files::{
 };
 use super::ctrl_c_exit::{handle_ctrl_c, is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT};
 use super::diff::{
-    anchor_row_index, build_diff_rows, clamp_diff_scroll, row_search_text, scroll_to_keep_row,
-    DiffContent, DiffRow,
+    anchor_row_text, build_diff_rows, clamp_diff_scroll, find_anchor_row, row_search_text,
+    scroll_to_keep_row, DiffContent, DiffRow,
 };
 use super::drill::{
     source_from_graph_row, stash_ref_from_graph_row, CommitFile, CommitFileSource, DrillView,
@@ -267,7 +267,8 @@ pub struct AppState {
     pub right_col_offset: u16,
     /// File identities currently shown with unlimited `-U` context.
     pub full_context: HashSet<String>,
-    pending_hunk_anchor: Option<usize>,
+    /// Search text of the hunk/change row to keep in view after `-U` reload.
+    pending_hunk_anchor: Option<String>,
     pub confirm: Option<PendingConfirm>,
     pub stash_menu: Option<Vec<StashOp>>,
     pub stash_repo: Option<String>,
@@ -1922,7 +1923,7 @@ impl AppState {
             return Effect::None;
         };
         let rows = self.current_diff_rows();
-        self.pending_hunk_anchor = Some(anchor_row_index(
+        self.pending_hunk_anchor = Some(anchor_row_text(
             &rows,
             self.diff_scroll as usize,
             self.diff_body_height(),
@@ -1944,11 +1945,12 @@ impl AppState {
     }
 
     fn apply_pending_hunk_anchor(&mut self) {
-        let Some(anchor) = self.pending_hunk_anchor.take() else {
+        let Some(needle) = self.pending_hunk_anchor.take() else {
             return;
         };
         let rows = self.current_diff_rows();
-        self.diff_scroll = scroll_to_keep_row(anchor, self.diff_body_height(), rows.len());
+        let idx = find_anchor_row(&rows, &needle);
+        self.diff_scroll = scroll_to_keep_row(idx, self.diff_body_height(), rows.len());
     }
 
     fn focused_file_if_shown(&self) -> Option<(String, FileChange)> {
@@ -6350,6 +6352,50 @@ mod tests {
         }
         assert_eq!(app.diff_context_lines(), None);
         assert!(!app.full_context_active());
+    }
+
+    #[test]
+    fn ctrl_o_reload_keeps_hunk_text_in_view() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.focus = FocusPane::Right;
+        app.layout.diff_pane_height = 8;
+        let hunk_only = DiffContent::from_unified(
+            "@@ -46,7 +46,7 @@\n pad-a\n pad-b\n pad-c\n-WIDE-HUNK-BASE\n+WIDE-HUNK-NEEDLE\n pad-d\n pad-e\n pad-f\n",
+        );
+        app.set_diff("app".into(), "README.md".into(), hunk_only);
+        assert_eq!(app.diff_scroll, 0);
+        match app.dispatch(Action::ToggleFullContext) {
+            Effect::LoadRightPane => {}
+            other => panic!("{other:?}"),
+        }
+        let mut full = String::from("@@ -1,40 +1,40 @@\n");
+        for i in 0..30 {
+            full.push_str(&format!(" HEAD-{i:02}\n"));
+        }
+        full.push_str(
+            " pad-a\n pad-b\n pad-c\n-WIDE-HUNK-BASE\n+WIDE-HUNK-NEEDLE\n pad-d\n pad-e\n pad-f\n",
+        );
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            DiffContent::from_unified(full),
+        );
+        let rows = app.current_diff_rows();
+        let start = app.diff_scroll as usize;
+        let end = (start + 8).min(rows.len());
+        let visible: Vec<String> = rows[start..end].iter().map(row_search_text).collect();
+        assert!(
+            visible
+                .iter()
+                .any(|t| t.contains("WIDE-HUNK-NEEDLE") || t.contains("WIDE-HUNK-BASE")),
+            "hunk must stay in view, got scroll={start} visible={visible:?}"
+        );
+        assert!(
+            visible.iter().all(|t| !t.contains("HEAD-00")),
+            "file start must not replace the hunk, got scroll={start} visible={visible:?}"
+        );
+        assert!(app.diff_scroll > 0, "full-file must not stay at scroll 0");
     }
 
     #[test]

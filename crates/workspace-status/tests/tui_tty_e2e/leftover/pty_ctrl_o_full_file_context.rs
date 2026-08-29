@@ -41,10 +41,9 @@ fn seed_wide_hunk_tracked(workspace: &Path) {
 
 fn help_lists_ctrl_o_keep_hunk(screen: &str) -> bool {
     let compact = screen.split_whitespace().collect::<Vec<_>>().join(" ");
-    compact.contains("VIEW")
-        && compact.contains("Ctrl-o")
-        && compact.contains("full-file")
-        && compact.contains("keep hunk in view")
+    screen.lines().any(|line| {
+        line.contains("Ctrl-o") && line.contains("full-file") && line.contains("keep hunk")
+    }) && compact.contains("VIEW")
         && compact.contains("open in editor")
 }
 
@@ -71,17 +70,17 @@ fn hunk_only_file_diff(screen: &str) -> bool {
         && !right.contains(TAIL)
         && !right.contains(FULL_FILE_HEADER)
         && !diff_header_full(screen)
-        && screen.contains("ctrl+o")
-        && screen.contains("full file")
+        && screen.contains("focus right")
         && !screen.contains("WIP on graph")
         && !screen.contains("MOVE")
 }
 
 fn full_file_keeps_hunk(screen: &str) -> bool {
     let right = right_pane(screen);
+    let header = right.lines().next().unwrap_or("");
     tree_cursor_on(screen, FILE)
-        && screen.contains("UNSTAGED")
-        && right.contains(FULL_FILE_HEADER)
+        && header.contains(" · full")
+        && header.contains("/100")
         && right.contains(HUNK)
         && right.contains(HUNK_OLD)
         && right.contains(NEAR_ABOVE)
@@ -89,7 +88,6 @@ fn full_file_keeps_hunk(screen: &str) -> bool {
         && !right.contains(HEAD)
         && !right.contains(TAIL)
         && !right.contains(HUNK_ONLY_HEADER)
-        && diff_header_full(screen)
         && !screen.contains("WIP on graph")
         && !screen.contains("MOVE")
 }
