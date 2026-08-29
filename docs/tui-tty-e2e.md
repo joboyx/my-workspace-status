@@ -53,6 +53,6 @@ Packages (Debian/Ubuntu): `xvfb xfce4-terminal xterm xdotool dbus-x11 openbox`. 
 
 PTY tests are independent processes (own temp workspace + PTY). `cargo test --test tui_tty_e2e` may parallelize them. Desktop stays `--test-threads=1` on one X display. No second screenshot pipeline. Desktop twins exist only where PTY cannot encode the input (XTEST wheel).
 
-The tests in `crates/workspace-status/tests/tui_tty_e2e/` are the list. Adding a test does not edit this file.
+The tests live under `crates/workspace-status/tests/tui_tty_e2e/leftover/`. Adding a test does not edit this file.
 
 Do not add a second screenshot pipeline. Do not replace `tui_headless_e2e.rs`.
