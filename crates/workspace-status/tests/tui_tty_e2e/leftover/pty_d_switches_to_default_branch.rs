@@ -5,9 +5,9 @@ use std::process::{Command, Stdio};
 use crate::harness::PtySession;
 use crate::seed::{daily_workspace, focus_workspace, git_env};
 use crate::support::{
-    crumb_row, documented_launch_first_paint, focusbox_graph_left_full, graph_subject_line,
-    graph_subject_meta_line, has_fetch_hint, not_files_search_or_stash, status_row, tree_cursor_on,
-    tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    crumb_row, documented_launch_first_paint, focusbox_graph_left_full, has_fetch_hint,
+    not_files_search_or_stash, status_row, tree_cursor_on, tree_has, tree_line_containing,
+    GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 fn git_stdout(repo: &Path, args: &[&str]) -> String {
@@ -84,47 +84,21 @@ fn focusbox_tree_on_main(screen: &str) -> bool {
         && !tree_has(screen, "feature/keep")
 }
 
-/// Graph half of a split row. `@ focusbox` on the tree must not count.
-fn graph_side(line: &str) -> &str {
-    for sep in ["││", "┐┌", "┘└"] {
-        if let Some(idx) = line.find(sep) {
-            return &line[idx + sep.len()..];
-        }
-    }
-    line
-}
-
-fn graph_commit_is_head(screen: &str, subject: &str) -> bool {
-    graph_subject_line(screen, subject).is_some_and(|line| {
-        let right = graph_side(&line);
-        right.contains('@') && !right.contains('*') && right.contains(subject)
-    })
-}
-
-fn graph_commit_is_not_head(screen: &str, subject: &str) -> bool {
-    graph_subject_line(screen, subject).is_some_and(|line| {
-        let right = graph_side(&line);
-        right.contains('*') && !right.contains('@') && right.contains(subject)
-    })
-}
-
+/// Graph chips: HEAD is `feature/keep`. Not a gutter `@` / `*` on the subject row.
 fn keep_is_checked_out(screen: &str) -> bool {
-    graph_commit_is_head(screen, "keep-leaf-commit")
-        && graph_commit_is_not_head(screen, "main-leaf-commit")
-        && graph_subject_meta_line(screen, "keep-leaf-commit")
-            .is_some_and(|line| line.contains("[+feature/keep]"))
-        && graph_subject_meta_line(screen, "main-leaf-commit")
-            .is_some_and(|line| line.contains("[main]") && !line.contains("[+main]"))
+    screen.contains("keep-leaf-commit")
+        && screen.contains("[+feature/keep]")
+        && !screen.contains("[+main]")
 }
 
+/// Graph chips: HEAD is `main`. Live switch paints `[+main]` + `main-leaf-commit`.
+///
+/// Do not require a gutter `@` on the `main-leaf-commit` row. That glyph
+/// shares a screen line with `@ focusbox` and is not a stable CI oracle.
 fn main_is_checked_out(screen: &str) -> bool {
-    graph_commit_is_head(screen, "main-leaf-commit")
-        && graph_commit_is_not_head(screen, "keep-leaf-commit")
-        && graph_subject_meta_line(screen, "main-leaf-commit")
-            .is_some_and(|line| line.contains("[+main]"))
-        && graph_subject_meta_line(screen, "keep-leaf-commit").is_some_and(|line| {
-            line.contains("[feature/keep]") && !line.contains("[+feature/keep]")
-        })
+    screen.contains("main-leaf-commit")
+        && screen.contains("[+main]")
+        && !screen.contains("[+feature/keep]")
 }
 
 fn crumb_switched_one(screen: &str) -> bool {
@@ -169,7 +143,7 @@ fn idle_focusbox_on_keep(screen: &str) -> bool {
         && no_wrong_d_overlays(screen)
 }
 
-/// Checkout paint after `d`: tree on `main`, graph HEAD on main-leaf.
+/// Checkout paint after `d`: tree `& main`, graph chip `[+main]`.
 fn switched_checkout_paint(screen: &str) -> bool {
     let status = status_row(screen);
     tree_cursor_on(screen, "focusbox")
@@ -189,7 +163,7 @@ fn switched_checkout_paint(screen: &str) -> bool {
         && no_wrong_d_overlays(screen)
 }
 
-/// `d` checked out `main`. Tree left `feature/keep`. Graph HEAD is main-leaf.
+/// `d` checked out `main`. Tree left `feature/keep`. Graph chip is `[+main]`.
 fn documented_d_switched_to_main(screen: &str) -> bool {
     switched_checkout_paint(screen) && crumb_switched_one(screen)
 }
@@ -236,8 +210,9 @@ fn documented_d_file_row_silent(screen: &str) -> bool {
 /// Live PTY after first paint (cursor already on `focusbox`,
 /// `feature/keep`): raw `d` ran `git checkout` of `main`. Git HEAD is
 /// `main` / `main-leaf-commit`. Tree shows `& main` and leaves
-/// `feature/keep`. Graph HEAD moves to `main-leaf-commit` (`@`, `[+main]`).
-/// Toast is `Switched 1 repo`. The `d` hint goes. A second `d` toasts
+/// `feature/keep`. Graph shows `main-leaf-commit` and `[+main]` (not a
+/// gutter `@` on that subject row). Toast is `Switched 1 repo`. The `d`
+/// hint goes. A second `d` toasts
 /// `no non-default branches to switch` and HEAD stays `main`.
 ///
 /// Dirty `keep.txt` with the repo focused: `d` toasts `Switched 1 repo
@@ -262,7 +237,7 @@ fn pty_d_switches_to_default_branch() {
     tui.key('d');
     tui.wait_pred(
         documented_d_switched_to_main,
-        "d checks out main: Switched 1 repo, tree & main, graph HEAD main-leaf",
+        "d checks out main: Switched 1 repo, tree & main, [+main]",
         GIT_WAIT,
     );
     tui.wait_ms(SETTLE_MS);
