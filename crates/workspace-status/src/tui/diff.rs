@@ -554,6 +554,34 @@ pub fn scroll_to_keep_row(row_index: usize, view_h: usize, row_count: usize) -> 
     row_index.saturating_sub(prefer).min(max_start) as u16
 }
 
+/// Search text of the first visible add/del (else hunk) at `scroll`.
+///
+/// Full-file reload stores this string. A numeric index from the hunk-only
+/// list would scroll to the file start.
+pub fn anchor_row_text(rows: &[DiffRow], scroll: usize, view_h: usize) -> String {
+    let idx = anchor_row_index(rows, scroll, view_h);
+    rows.get(idx).map(row_search_text).unwrap_or_default()
+}
+
+/// Index of `needle` in the reloaded row list.
+///
+/// Exact search text wins. Then a substring. Then the first change at the
+/// top of the new list.
+pub fn find_anchor_row(rows: &[DiffRow], needle: &str) -> usize {
+    if !needle.is_empty() {
+        if let Some(i) = rows.iter().position(|r| row_search_text(r) == needle) {
+            return i;
+        }
+        if let Some(i) = rows
+            .iter()
+            .position(|r| row_search_text(r).contains(needle))
+        {
+            return i;
+        }
+    }
+    anchor_row_index(rows, 0, rows.len().max(1))
+}
+
 /// First visible add/del in the viewport, else nearest hunk at/above scroll.
 pub fn anchor_row_index(rows: &[DiffRow], scroll: usize, view_h: usize) -> usize {
     if rows.is_empty() {
@@ -827,5 +855,31 @@ index 1111111..2222222 100644
         // 0 section, 1 hunk, 2 ctx, 3 del, 4 add
         assert_eq!(anchor_row_index(&rows, 0, 10), 3);
         assert_eq!(scroll_to_keep_row(3, 9, rows.len()), 0);
+    }
+
+    #[test]
+    fn find_anchor_row_follows_change_text_not_old_index() {
+        let short = build_diff_rows(
+            &DiffContent::from_unified("@@ -46,3 +46,3 @@\n ctx\n-old-line\n+new-line\n"),
+            DiffMode::Inline,
+        );
+        let needle = anchor_row_text(&short, 0, 10);
+        let old_idx = anchor_row_index(&short, 0, 10);
+        let mut body = String::from("@@ -1,20 +1,20 @@\n");
+        for i in 0..15 {
+            body.push_str(&format!(" pad-{i}\n"));
+        }
+        body.push_str("-old-line\n+new-line\n ctx\n");
+        let long = build_diff_rows(&DiffContent::from_unified(body), DiffMode::Inline);
+        let new_idx = find_anchor_row(&long, &needle);
+        assert!(
+            new_idx > old_idx,
+            "full-file change must sit later than the hunk-only index ({old_idx} vs {new_idx})"
+        );
+        assert_eq!(row_search_text(&long[new_idx]), needle);
+        assert!(
+            scroll_to_keep_row(new_idx, 8, long.len()) > scroll_to_keep_row(old_idx, 8, long.len()),
+            "stale hunk-only index would not keep the change in view"
+        );
     }
 }
