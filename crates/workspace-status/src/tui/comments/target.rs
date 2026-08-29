@@ -31,17 +31,22 @@ pub struct CommentLiveSet {
 /// Collect live branches, checkouts, and stored commit SHAs from `snapshot`.
 ///
 /// Does not run git. `local_branches` is filled on the snapshot worker.
-/// An empty branch list (status failed / unreadable porcelain) is not
-/// "the branch is gone": stored branch and worktree-line comments stay
-/// while that checkout is still in the snapshot.
+/// Skip-wipe (keep stored branch comments while porcelain is unreadable)
+/// applies only when every checkout of that identity has an empty counted
+/// list. A successful sibling's names win. Status-failed rows do not add
+/// stored or last-good names when that identity already has counted
+/// branches.
 pub fn collect_live_set(snapshot: &WorkspaceSnapshot, store: &CommentStore) -> CommentLiveSet {
     let mut live = CommentLiveSet::default();
-    let mut unknown_branch_list: HashSet<String> = HashSet::new();
+    let mut authoritative: HashSet<String> = HashSet::new();
     for repo in &snapshot.repos {
         let path = normalize_viewed_path(&repo.repo);
         live.worktrees.insert(path);
         let identity = repo_identity(&repo.repo, repo.primary_repo.as_deref());
         live.identities.insert(identity.clone());
+        if repo.sync_note == "status failed" {
+            continue;
+        }
         let mut known = 0usize;
         for name in &repo.local_branches {
             if is_counted_local_branch(name) {
@@ -54,8 +59,8 @@ pub fn collect_live_set(snapshot: &WorkspaceSnapshot, store: &CommentStore) -> C
                 .insert((identity.clone(), repo.branch.clone()));
             known += 1;
         }
-        if known == 0 {
-            unknown_branch_list.insert(identity);
+        if known > 0 {
+            authoritative.insert(identity);
         }
     }
     for key in store.keys() {
@@ -66,7 +71,10 @@ pub fn collect_live_set(snapshot: &WorkspaceSnapshot, store: &CommentStore) -> C
                 }
             }
             CommentKey::Branch { repo, branch } | CommentKey::WorktreeLine { repo, branch, .. } => {
-                if unknown_branch_list.contains(repo) && is_counted_local_branch(branch) {
+                if live.identities.contains(repo)
+                    && !authoritative.contains(repo)
+                    && is_counted_local_branch(branch)
+                {
                     live.branches.insert((repo.clone(), branch.clone()));
                 }
             }
@@ -513,6 +521,44 @@ mod tests {
         assert_eq!(next.get(&branch).map(String::as_str), Some("b"));
         assert_eq!(next.get(&line).map(String::as_str), Some("l"));
         assert!(!live.branches.contains(&("app".into(), "(unknown)".into())));
+    }
+
+    #[test]
+    fn gc_drops_deleted_branch_when_sibling_status_failed() {
+        let primary = snap_with_branches(
+            "app",
+            "main",
+            CheckoutKind::Primary,
+            None,
+            &["main", "feature/linked-open"],
+        );
+        let mut linked = snap(
+            "app/.worktrees/feat",
+            crate::helpers::UNKNOWN_HEAD_BRANCH,
+            CheckoutKind::Linked,
+            Some("app"),
+        );
+        linked.sync_note = "status failed".into();
+        linked.local_branches = vec!["main".into(), "doomed".into(), "feature/linked-open".into()];
+        let snapshot = build_workspace_snapshot(&[primary, linked], &[], false, &[]);
+        let branch = CommentKey::Branch {
+            repo: "app".into(),
+            branch: "doomed".into(),
+        };
+        let line = CommentKey::WorktreeLine {
+            repo: "app".into(),
+            branch: "doomed".into(),
+            path: "a.rs".into(),
+            line: 1,
+        };
+        let mut store = CommentStore::new();
+        store = put_comment(&store, branch.clone(), "b");
+        store = put_comment(&store, line.clone(), "l");
+        let live = collect_live_set(&snapshot, &store);
+        let next = gc_comments(&store, &live);
+        assert!(next.get(&branch).is_none());
+        assert!(next.get(&line).is_none());
+        assert!(!live.branches.contains(&("app".into(), "doomed".into())));
     }
 
     #[test]

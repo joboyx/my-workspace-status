@@ -47,6 +47,7 @@ mod pty_r_refreshes_new_dirty_file;
 mod pty_revert_confirm_n_cancels;
 mod pty_semicolon_branch_comment_survives_status_failed;
 mod pty_semicolon_commit_comment_survives_branch_delete;
+mod pty_semicolon_deleted_branch_drops_when_sibling_status_failed;
 mod pty_semicolon_detached_head_survives_watch;
 mod pty_semicolon_line_comment_commit_diff;
 mod pty_semicolon_line_comment_dirty_file;

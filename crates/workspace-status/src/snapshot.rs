@@ -1,12 +1,13 @@
 //! Workspace snapshot types and JSON serialization. Matches `docs/snapshot.md`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use serde::Serialize;
 
 use crate::helpers::{
     compare_repo_paths_for_display, get_branch_emoji, get_branch_kind, get_branch_priority,
-    get_sync_priority, is_attention_sync_note, is_default_branch, sorted_unique, BranchKind,
+    get_sync_priority, is_attention_sync_note, is_counted_local_branch, is_default_branch,
+    sorted_unique, BranchKind,
 };
 
 pub const WORKSPACE_SNAPSHOT_VERSION: u32 = 1;
@@ -266,14 +267,28 @@ pub fn replace_repo_in_snapshot(
 /// Keep last-good `local_branches` when status failed with an empty list.
 ///
 /// A lock or unreadable porcelain is not "the branch is gone." Launch has
-/// no previous snapshot. Comment GC then skips branch wipe while the
-/// checkout is still present.
+/// no previous snapshot. Comment GC then skips branch wipe only when every
+/// checkout of that identity has an empty counted list. Do not copy
+/// last-good names onto a failed row when a sibling already listed live
+/// branches.
 pub fn carry_status_failed_local_branches(
     previous: &WorkspaceSnapshot,
     mut next: WorkspaceSnapshot,
 ) -> WorkspaceSnapshot {
+    let mut authoritative: HashSet<String> = HashSet::new();
+    for repo in &next.repos {
+        if repo.sync_note == "status failed" {
+            continue;
+        }
+        if checkout_has_counted_branches(repo) {
+            authoritative.insert(checkout_identity(repo).to_string());
+        }
+    }
     for repo in &mut next.repos {
         if repo.sync_note != "status failed" || !repo.local_branches.is_empty() {
+            continue;
+        }
+        if authoritative.contains(checkout_identity(repo)) {
             continue;
         }
         if let Some(prev) = previous.repos.iter().find(|r| r.repo == repo.repo) {
@@ -281,6 +296,17 @@ pub fn carry_status_failed_local_branches(
         }
     }
     next
+}
+
+fn checkout_identity(row: &WorkspaceRepoSnapshot) -> &str {
+    row.primary_repo.as_deref().unwrap_or(row.repo.as_str())
+}
+
+fn checkout_has_counted_branches(row: &WorkspaceRepoSnapshot) -> bool {
+    row.local_branches
+        .iter()
+        .any(|name| is_counted_local_branch(name))
+        || is_counted_local_branch(&row.branch)
 }
 
 pub fn repo_snapshots_from_workspace(snapshot: &WorkspaceSnapshot) -> Vec<RepoSnapshot> {
@@ -585,6 +611,35 @@ mod tests {
         assert_eq!(
             carried.repos[0].local_branches,
             vec!["main".to_string(), "topic/keep".to_string()]
+        );
+    }
+
+    #[test]
+    fn status_failed_does_not_carry_when_sibling_has_counted_branches() {
+        let mut primary = sample_repo("app", true);
+        primary.local_branches = vec!["main".into(), "doomed".into(), "feature/linked-open".into()];
+        let mut linked = sample_repo("app/.worktrees/feat", false);
+        linked.checkout_kind = CheckoutKind::Linked;
+        linked.primary_repo = Some("app".into());
+        linked.branch = "feature/linked-open".into();
+        linked.local_branches = vec!["main".into(), "doomed".into(), "feature/linked-open".into()];
+        let previous =
+            build_workspace_snapshot(&[primary.clone(), linked.clone()], &[], false, &[]);
+
+        primary.local_branches = vec!["main".into(), "feature/linked-open".into()];
+        linked.branch = "(unknown)".into();
+        linked.sync_note = "status failed".into();
+        linked.local_branches = Vec::new();
+        let next = build_workspace_snapshot(&[primary, linked], &[], false, &[]);
+        let carried = carry_status_failed_local_branches(&previous, next);
+        let failed = carried
+            .repos
+            .iter()
+            .find(|r| r.repo == "app/.worktrees/feat")
+            .unwrap();
+        assert!(
+            failed.local_branches.is_empty(),
+            "successful sibling listed live names; do not carry last-good onto the failed row"
         );
     }
 }
