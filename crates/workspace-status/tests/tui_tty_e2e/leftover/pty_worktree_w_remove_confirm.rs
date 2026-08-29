@@ -148,7 +148,7 @@ fn documented_worktree_removed(screen: &str) -> bool {
 ///
 /// Live PTY after first paint (cursor already on family `@ app`): CSI-u
 /// Shift+W refuses and does not open confirm or drop the linked checkout.
-/// Two `j` land on `L feature/linked-open`. CSI-u Shift+W then paints
+/// `j` then `j` land on `L feature/linked-open`. CSI-u Shift+W then paints
 /// `Remove worktree app/.worktrees/feat?` with open-vs-default, clean
 /// worktree, `y` remove / `n` cancel. `y` toasts `removed worktree
 /// app/.worktrees/feat` and drops that row. Git no longer lists the
@@ -196,10 +196,15 @@ fn pty_worktree_w_remove_confirm() {
     );
 
     tui.key('j');
+    tui.wait_pred(
+        |screen| tree_cursor_on(screen, PRIMARY_BRANCH) && !tree_cursor_on(screen, LINKED_BRANCH),
+        "first j: cursor on primary checkout (not linked)",
+        WAIT,
+    );
     tui.key('j');
     tui.wait_pred(
         linked_ready_to_remove,
-        "two j: cursor on linked checkout; W remove hint; overlay closed",
+        "second j: cursor on linked checkout; W remove hint; overlay closed",
         WAIT,
     );
     tui.wait_ms(SETTLE_MS);
