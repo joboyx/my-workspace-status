@@ -17,7 +17,8 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::harness::{write_fresh_update_check, COLS, ROWS};
+use super::common::hscroll::TREE_HSCROLL_TAIL;
+use super::harness::{clipped_long_path_row, write_fresh_update_check, COLS, ROWS};
 use super::seed::git_env;
 
 const OPENBOX_RC: &str = include_str!("../../../../scripts/openbox.xml");
@@ -301,6 +302,27 @@ impl DesktopSession {
 
     pub fn wait_ms(&self, ms: u64) {
         thread::sleep(Duration::from_millis(ms));
+    }
+
+    /// Wait until the left tree is clipped and a wheel target row exists.
+    ///
+    /// Returns the row from that same frame. A later paint must not pass a
+    /// prefix check then lose the row on a bare `expect`.
+    pub fn wait_clipped_long_path_row(&self, timeout: Duration) -> u16 {
+        let start = Instant::now();
+        loop {
+            let screen = self.screen();
+            if let Some(row) = clipped_long_path_row(&screen) {
+                return row;
+            }
+            if start.elapsed() >= timeout {
+                panic!(
+                    "timeout waiting for clipped long path on a tree row (no {}):\n{screen}",
+                    TREE_HSCROLL_TAIL
+                );
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
     }
 
     pub fn wait_pred(&self, pred: impl Fn(&str) -> bool, what: &str, timeout: Duration) {
