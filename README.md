@@ -175,7 +175,7 @@ Agent map of TestBackend vs PTY vs desktop `#[ignore]`, plus `WS_STATUS_UPDATE_C
 
 | Area                  | Covered behavior                                                                                                                                                                                |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Real-TTY TUI e2e      | PTY spawn of the binary; live `event::read`. Operator writes (review, stage, fetch/pull/push, merge, stash) plus fold, click-to-select, `gg`/`G`, create-branch, `r`, ignored repos, and tree hscroll. xfce keys + xterm XTEST wheel in Actions `tui-tty-desktop` ([docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md)) |
+| Real-TTY TUI e2e      | PTY in `cargo test` plus the Actions `tui-tty-desktop` job. Tests: [crates/workspace-status/tests/tui_tty_e2e/](./crates/workspace-status/tests/tui_tty_e2e/) |
 | CLI contract          | `--help` documents `--all`, `--fetch`, `--verbose`, `--pull`, `--default-branch`, `--plain`, `--json`, and `--update` |
 | Snapshot contract     | `--json` and `--plain` share one workspace snapshot; fixture e2e builds a temp workspace and asserts both without a TTY                                                                         |
 | Clean summary         | all-clean default-branch workspaces and mixed clean default/non-default workspaces                                                                                                              |

@@ -107,7 +107,7 @@ Also bound: `q`, Tab, Home/End, family-row `b`, picker `C`. Confirms are boxed o
 
 Glyphs live in `crates/workspace-status/src/tui/icons.rs`. Labels are built in `tree.rs` (`node_segments`); `render.rs` right-aligns trailing and paints the cursor bar. An empty workspace tree paints muted `No matching rows`. Commit-file lists do the same when loaded and empty; while git is still listing they paint `loading files…`.
 
-Headless TUI coverage is `cargo test` (`crates/workspace-status/tests/tui_headless_e2e.rs`) on a TestBackend — no TTY. Real-TTY coverage (PTY + live `event::read`, plus xfce keys and xterm XTEST wheel in Actions) is `crates/workspace-status/tests/tui_tty_e2e/`, including review / stage / fetch / pull / push / graph merge / full stash, plus fold / click / `gg`/`G` / create-branch / `r` / ignored repos. Shared git seeds and the tree hscroll oracle live in `crates/workspace-status/tests/common/`. Desktop Actions use `scripts/with-desktop-session.sh`. See [tui-tty-e2e.md](./tui-tty-e2e.md).
+Headless TUI coverage is `cargo test` (`crates/workspace-status/tests/tui_headless_e2e.rs`) on a TestBackend — no TTY. Real-TTY coverage (PTY + live `event::read`, plus xfce keys and xterm XTEST wheel in Actions) is `crates/workspace-status/tests/tui_tty_e2e/`. Shared git seeds and the tree hscroll oracle live in `crates/workspace-status/tests/common/`. Desktop Actions use `scripts/with-desktop-session.sh`. See [tui-tty-e2e.md](./tui-tty-e2e.md).
 
 See [tui-model.md](./tui-model.md) for the tree model and action registry.
 
