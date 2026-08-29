@@ -156,6 +156,10 @@ fn noise_leaf_ready_to_checkout(screen: &str) -> bool {
 }
 
 /// Graph `b` checked out the one local name on the focused commit.
+///
+/// Checkout changes graph identity (`repo`, HEAD), so `set_graph`
+/// resets the list cursor to the working-tree row. Stay on that paint.
+/// Cursor still on `keep-leaf-commit` is a no-op.
 fn documented_graph_b_checkout(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);
@@ -168,17 +172,16 @@ fn documented_graph_b_checkout(screen: &str) -> bool {
         && !crumb.contains("Dirty worktree")
         && focusbox_tree_on_noise(screen)
         && noise_is_checked_out(screen)
-        && graph_cursor_on(screen, SUBJECT)
         && !graph_cursor_on(screen, "keep-leaf-commit")
-        && !graph_cursor_on(screen, "working tree")
         && screen.contains("keep-leaf-commit")
         && screen.contains("main-leaf-commit")
+        && screen.contains("topic/noise no-upstream")
         && (screen.contains("working tree clean") || screen.contains("Working tree clean"))
         && status.contains("drill")
+        && status.contains("Esc")
+        && status.contains("back")
         && status.contains(" tree")
         && status.contains(" split")
-        && status.contains("checkout")
-        && status.contains("create branch")
         && no_picker_or_wrong_overlays(screen)
 }
 
@@ -195,7 +198,9 @@ fn documented_graph_b_checkout(screen: &str) -> bool {
 /// the graph. `/` lands on `noise-leaf-commit` (one name `topic/noise`,
 /// not HEAD `feature/keep` and not default `main`). `b` must checkout
 /// that ref with no picker and no Enter. Git HEAD is `topic/noise` /
-/// `noise-leaf-commit`. A no-op, tree picker, files drill, `d` onto
+/// `noise-leaf-commit`. Tree shows `& topic/noise`. Graph chip is
+/// `[+topic/noise]`. Toast is `Checked out topic/noise`, not
+/// `Switched 1 repo`. A no-op, tree picker, files drill, `d` onto
 /// `main`, overlay-only, toast-only, or the wrong ref is red.
 #[test]
 fn pty_graph_b_checkout() {
