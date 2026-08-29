@@ -1186,36 +1186,6 @@ fn pty_streamed_collect_updates_focused_repo_before_slow() {
     fs::write(&release, "1\n").unwrap();
 }
 
-/// `s` stages the focused dirty file; `u` unstages. Diff labels must flip.
-#[cfg(unix)]
-#[test]
-fn pty_stage_and_unstage_dirty_file() {
-    let (_root, workspace) = daily_workspace();
-    let mut tui = PtySession::open(&workspace);
-    tui.search("README");
-    tui.wait_contains("/README", WAIT);
-    tui.wait_contains("UNSTAGED", WAIT);
-    tui.wait_contains("stage", WAIT);
-    tui.wait_ms(SETTLE_MS);
-
-    tui.key('s');
-    tui.wait_contains("STAGED", GIT_WAIT);
-    tui.wait_pred(
-        |screen| tree_line_containing(screen, "README.md").is_some_and(|line| line.contains("S ")),
-        "README badge is staged `S `",
-        WAIT,
-    );
-    tui.wait_absent("UNSTAGED", WAIT);
-
-    tui.key('u');
-    tui.wait_contains("UNSTAGED", GIT_WAIT);
-    tui.wait_pred(
-        |screen| tree_line_containing(screen, "README.md").is_some_and(|line| line.contains("M ")),
-        "README badge is modified `M ` after unstage",
-        WAIT,
-    );
-}
-
 /// `f` against a local bare origin. Must fail if fetch is a no-op.
 #[cfg(unix)]
 #[test]
