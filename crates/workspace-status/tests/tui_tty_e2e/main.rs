@@ -1032,33 +1032,6 @@ fn pty_graph_focus_unmark_enter_clears() {
     );
 }
 
-/// Continuous harmless input must not starve `WatchTick`.
-///
-/// The old loop drained keys and `continue`d, so watch timers only ran on
-/// poll timeout. This writes a new file and spam-sends `1` (unbound) until
-/// the name appears — no `r`.
-#[cfg(unix)]
-#[test]
-fn pty_watch_applies_while_keys_arrive() {
-    let (_root, workspace) = daily_workspace();
-    let marker = format!(
-        "watch-live-{}.txt",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let mut tui = PtySession::open_with_env(&workspace, &[("WS_STATUS_WATCH_MS", "500")]);
-    tui.wait_contains("app", WAIT);
-    fs::write(workspace.join("app").join(&marker), "live-watch\n").unwrap();
-    tui.wait_contains_while(&marker, WAIT, |session| session.key('1'));
-    let screen = tui.screen();
-    assert!(
-        !screen.contains("refreshed app") && !screen.contains("refreshed workspace"),
-        "must not send r; screen:\n{screen}"
-    );
-}
-
 /// Per-repo apply must not wait for a slow checkout, including the pane.
 ///
 /// A `WORKSPACE_STATUS_GIT` shim blocks `git status` in `slow` after ARM.

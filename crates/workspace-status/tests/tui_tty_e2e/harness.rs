@@ -491,16 +491,35 @@ impl PtySession {
         &mut self,
         needle: &str,
         timeout: Duration,
+        tick: impl FnMut(&mut Self),
+    ) {
+        self.wait_pred_while(
+            |screen| screen.contains(needle),
+            &format!("screen contains `{needle}`"),
+            timeout,
+            tick,
+        );
+    }
+
+    /// Wait for `pred` while `tick` runs each poll (live input, not idle).
+    ///
+    /// A screen-delta / paint-changed tick is not enough. `pred` must be
+    /// the painted result (tree path, chrome, process state).
+    pub fn wait_pred_while(
+        &mut self,
+        pred: impl Fn(&str) -> bool,
+        what: &str,
+        timeout: Duration,
         mut tick: impl FnMut(&mut Self),
     ) {
         let start = Instant::now();
         loop {
             let screen = self.screen();
-            if screen.contains(needle) {
+            if pred(&screen) {
                 return;
             }
             if start.elapsed() >= timeout {
-                panic!("timeout waiting for screen contains `{needle}`:\n{screen}");
+                panic!("timeout waiting for {what}:\n{screen}");
             }
             tick(self);
             thread::sleep(Duration::from_millis(20));
