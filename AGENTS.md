@@ -24,6 +24,8 @@ cargo test --test tui_tty_e2e -- --ignored --nocapture --test-threads=1
 
 Screenshot stills stay in `scripts/capture-demo-stills.sh`. That script is not a TUI e2e harness.
 
+Harness, how-to-run, encoding, and desktop-session notes live in [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md). Update that file when those change. Adding a `pty_*` or desktop test does not.
+
 ### `WS_STATUS_UPDATE_CHECK_STORE`
 
 A TTY `ws` / `workspace-status` launch may ask `new version available, update? [y/n]` before the TUI mounts. `--plain`, `--json`, and `--update` skip that check. The check runs at most every 6 hours. Last-check time lives in `$XDG_STATE_HOME/my-workspace-status/update-check.json`. `WS_STATUS_UPDATE_CHECK_STORE` overrides that path.
@@ -69,7 +71,7 @@ Do **not** invent spur heuristics (`parent.lane + 1`, spine `◇─╯`, mid-rai
 | Diff parsing, layout, or syntax highlighting | `docs/diff-rendering.md` |
 | Any git command or operation semantics | `docs/git-operations.md` |
 | Environment variables, workspace config, keybindings, themes | `docs/configuration.md` |
-| TUI test layers (headless / PTY / desktop `#[ignore]`) or `WS_STATUS_UPDATE_CHECK_STORE` | this file, `docs/tui-tty-e2e.md`, `docs/configuration.md` |
+| TUI test layers (headless / PTY / desktop `#[ignore]`) or `WS_STATUS_UPDATE_CHECK_STORE` | this file, `docs/tui-tty-e2e.md` (harness / run / encoding / desktop-session only — a new `pty_*` or desktop test does not edit that file), `docs/configuration.md` |
 | cargo-dist `dist generate` / Release git-cliff host steps | `docs/architecture.md` (**Distribution**) and `crates/workspace-status/tests/release_watch.rs` |
 | Output format of the plain report | `SAMPLE_OUTPUT.md` and `crates/workspace-status/tests/snapshot_contract.rs` |
 | Demo workspace seed or screenshot frames | `docs/demo.md` + `scripts/seed-demo-workspace.sh` + `scripts/capture-demo-stills.sh` |

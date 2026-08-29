@@ -3566,7 +3566,7 @@ fn focused_fast_updated_before_slow(screen: &str, marker: &str) -> bool {
 
 /// Streamed watch collect paints the focused checkout before a blocked peer.
 ///
-/// Docs (`tui-tty-e2e.md` Streamed collect, `tui-rust.md`, `app.rs`): each
+/// Docs (`tui-rust.md`, `app.rs`): each
 /// checkout result applies as it finishes. Unfinished paths stay on the
 /// previous generation. The focused checkout is queued first; its pane
 /// reloads as soon as that identity changes (`focused_repo_needs_pane`).
