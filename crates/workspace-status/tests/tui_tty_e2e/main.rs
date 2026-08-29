@@ -52,9 +52,59 @@ fn tree_line_containing(screen: &str, needle: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Cells after `README.md` on the left-tree file row (trailing chrome).
+#[cfg(unix)]
+fn after_readme_name(screen: &str) -> Option<String> {
+    let line = tree_line_containing(screen, "README.md")?;
+    let at = line.find("README.md")?;
+    Some(line[at + "README.md".len()..].to_string())
+}
+
+/// Trailing ASCII reviewed `*` after `README.md` on the left-tree file row.
+///
+/// The glyph is right-aligned before the status badge. A `*` elsewhere on
+/// the row (or a full-screen substring) must not pass. `UNSTAGED` contains
+/// the letters `STAGED`, so the badge on this row is the stage oracle.
 #[cfg(unix)]
 fn readme_row_reviewed(screen: &str) -> bool {
-    tree_line_containing(screen, "README.md").is_some_and(|line| line.contains('*'))
+    after_readme_name(screen)
+        .is_some_and(|after| after.contains('*') && after.contains('M') && !after.contains('S'))
+}
+
+#[cfg(unix)]
+fn readme_row_unreviewed_unstaged(screen: &str) -> bool {
+    after_readme_name(screen)
+        .is_some_and(|after| !after.contains('*') && after.contains('M') && !after.contains('S'))
+}
+
+/// First paint: dirty README focused, no reviewed `*`. Not a repo row.
+#[cfg(unix)]
+fn idle_dirty_readme_unreviewed(screen: &str) -> bool {
+    tree_cursor_on(screen, "README.md")
+        && !tree_cursor_on(screen, "app")
+        && tree_has(screen, "README.md")
+        && tree_has(screen, "app")
+        && screen.contains("UNSTAGED")
+        && screen.contains("+dirty")
+        && readme_row_unreviewed_unstaged(screen)
+        && !screen.contains("SEARCH")
+        && !screen.contains("MOVE")
+        && !screen.contains("[x]")
+}
+
+/// Space marked the focused dirty file. File stays. Not fold. Not stage.
+#[cfg(unix)]
+fn documented_space_reviewed(screen: &str) -> bool {
+    tree_cursor_on(screen, "README.md")
+        && !tree_cursor_on(screen, "app")
+        && tree_has(screen, "README.md")
+        && tree_has(screen, "app")
+        && screen.contains("UNSTAGED")
+        && screen.contains("+dirty")
+        && readme_row_reviewed(screen)
+        && !screen.contains("SEARCH")
+        && !screen.contains("MOVE")
+        && !screen.contains("[x]")
 }
 
 #[cfg(unix)]
@@ -1136,36 +1186,6 @@ fn pty_streamed_collect_updates_focused_repo_before_slow() {
     fs::write(&release, "1\n").unwrap();
 }
 
-/// Space on a dirty file paints the ASCII reviewed mark (`*`) before the badge.
-#[cfg(unix)]
-#[test]
-fn pty_space_marks_dirty_file_reviewed() {
-    let (_root, workspace) = daily_workspace();
-    let mut tui = PtySession::open(&workspace);
-    tui.search("README");
-    tui.wait_contains("/README", WAIT);
-    tui.wait_contains("README.md", WAIT);
-    tui.wait_pred(
-        |screen| !readme_row_reviewed(screen),
-        "README row has no reviewed mark yet",
-        WAIT,
-    );
-    tui.wait_ms(SETTLE_MS);
-
-    tui.key(' ');
-    tui.wait_pred(
-        readme_row_reviewed,
-        "README row shows ASCII reviewed mark `*`",
-        WAIT,
-    );
-    tui.key(' ');
-    tui.wait_pred(
-        |screen| !readme_row_reviewed(screen),
-        "second space clears the reviewed mark",
-        WAIT,
-    );
-}
-
 /// `s` stages the focused dirty file; `u` unstages. Diff labels must flip.
 #[cfg(unix)]
 #[test]
@@ -1526,26 +1546,24 @@ mod xfce {
         crate::common::hscroll::assert_panned_to_tail(&left_tree(&tui.screen()));
     }
 
+    /// Space reviewed on first-paint dirty README. `s`/`u` stay a separate
+    /// claim; this arm only strengthens the Space-reviewed part.
     #[test]
     #[ignore = "GitHub Actions tui-tty-desktop job; needs DISPLAY, xfce4-terminal, xdotool"]
     fn desktop_xfce_review_and_stage() {
         let (_root, workspace) = daily_workspace();
         let tui = DesktopSession::open(&workspace);
-        tui.key("slash");
-        tui.type_text("README");
-        tui.key("Return");
-        tui.wait_contains("/README", WAIT);
-        tui.wait_contains("UNSTAGED", WAIT);
+        tui.wait_contains("README.md", WAIT);
+        tui.wait_contains("UNSTAGED", GIT_WAIT);
         tui.wait_pred(
-            |screen| !readme_row_reviewed(screen),
-            "README row has no reviewed mark yet",
+            idle_dirty_readme_unreviewed,
+            "first paint: cursor on dirty README, no reviewed mark",
             WAIT,
         );
-        tui.wait_ms(SETTLE_MS);
         tui.key("space");
         tui.wait_pred(
-            readme_row_reviewed,
-            "README row shows ASCII reviewed mark `*`",
+            documented_space_reviewed,
+            "Space paints ASCII `*` on the focused README row; file stays; not staged",
             WAIT,
         );
         tui.key("s");
