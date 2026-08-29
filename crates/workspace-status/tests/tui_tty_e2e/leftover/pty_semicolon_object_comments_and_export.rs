@@ -5,8 +5,8 @@ use std::process::{Command, Stdio};
 use crate::harness::PtySession;
 use crate::seed::{daily_workspace, git, git_env, seed_repo, unique_root, worktree_workspace};
 use crate::support::{
-    documented_launch_first_paint, merger_graph_drilled_right, merger_graph_left_unfocused,
-    tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
+    documented_launch_first_paint, graph_cursor_on, merger_graph_drilled_right,
+    merger_graph_left_unfocused, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 const BRANCH_BODY: &str = "branch-obj-note-e2e";
@@ -119,8 +119,14 @@ fn pty_semicolon_object_comments_and_export() {
 
     tui.key('j');
     tui.wait_pred(
+        |screen| tree_cursor_on(screen, "README.md") && !tree_cursor_on(screen, "merger"),
+        "j from expanded app lands on README.md",
+        WAIT,
+    );
+    tui.key('j');
+    tui.wait_pred(
         merger_graph_left_unfocused,
-        "j lands on merger (feature/graph)",
+        "j from README lands on merger (feature/graph)",
         GIT_WAIT,
     );
     save_overlay_body(&mut tui, BRANCH_BODY);
@@ -137,7 +143,23 @@ fn pty_semicolon_object_comments_and_export() {
         WAIT,
     );
     tui.key('j');
+    tui.wait_pred(
+        |screen| {
+            graph_cursor_on(screen, "WIP on graph") && !graph_cursor_on(screen, "working tree")
+        },
+        "first j selects stash@{0} (not a comment target)",
+        WAIT,
+    );
     tui.key('j');
+    tui.wait_pred(
+        |screen| {
+            graph_cursor_on(screen, "merge")
+                && !graph_cursor_on(screen, "WIP on graph")
+                && !graph_cursor_on(screen, "working tree")
+        },
+        "second j selects the merge commit",
+        WAIT,
+    );
     save_overlay_body(&mut tui, COMMIT_BODY);
     let stored = store_text(&workspace);
     assert!(
@@ -239,8 +261,7 @@ fn pty_semicolon_object_comments_and_export() {
         |screen| {
             export_overlay(screen)
                 && !screen.contains(ATTACH_BODY)
-                && !screen.contains("doomed")
-                && (screen.contains("No comments") || screen.contains("# Comments"))
+                && screen.contains("No comments")
         },
         "y export after GC omits the deleted branch comment",
         WAIT,

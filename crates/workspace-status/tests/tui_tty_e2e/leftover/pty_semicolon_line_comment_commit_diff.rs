@@ -4,8 +4,8 @@ use std::path::Path;
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    documented_launch_first_paint, merger_graph_drilled_right, merger_graph_left_unfocused,
-    GIT_WAIT, WAIT,
+    documented_launch_first_paint, graph_cursor_on, merger_graph_drilled_right,
+    merger_graph_left_unfocused, GIT_WAIT, WAIT,
 };
 
 const BODY: &str = "commit-line-note-e2e";
@@ -33,16 +33,17 @@ fn overlay_closed(screen: &str) -> bool {
 fn commit_files_right(screen: &str) -> bool {
     (screen.contains("left.txt") || screen.contains("right.txt") || screen.contains("README.md"))
         && (screen.contains(" files") || screen.contains("┌ files"))
+        && !screen.contains("wip.txt")
         && !comment_overlay(screen)
 }
 
 fn commit_file_diff(screen: &str) -> bool {
     overlay_closed(screen)
+        && (screen.contains("┌ diff") || screen.contains("UNSTAGED") || screen.contains("@@"))
         && (screen.contains("left.txt")
             || screen.contains("right.txt")
             || screen.contains("README.md"))
-        && (screen.contains(" files") || screen.contains("┌ files"))
-        && (screen.contains("split") || screen.contains("inline"))
+        && !comment_overlay(screen)
 }
 
 fn commit_line_commented(screen: &str) -> bool {
@@ -83,11 +84,27 @@ fn pty_semicolon_line_comment_commit_diff() {
     );
 
     tui.key('j');
+    tui.wait_pred(
+        |screen| {
+            graph_cursor_on(screen, "WIP on graph") && !graph_cursor_on(screen, "working tree")
+        },
+        "first j selects stash@{0} (skip this row)",
+        WAIT,
+    );
     tui.key('j');
+    tui.wait_pred(
+        |screen| {
+            graph_cursor_on(screen, "merge")
+                && !graph_cursor_on(screen, "WIP on graph")
+                && !graph_cursor_on(screen, "working tree")
+        },
+        "second j selects the merge commit (not stash / uncommitted)",
+        WAIT,
+    );
     tui.enter();
     tui.wait_pred(
         commit_files_right,
-        "j j Enter opens a commit file list (not stash / uncommitted)",
+        "Enter on the merge commit opens its file list (not stash)",
         GIT_WAIT,
     );
 

@@ -420,7 +420,7 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
     if let Some(export) = state.comment_export.as_ref() {
         let extra = u16::from(!state.status.is_empty() && state.status != "copied");
         let body = export.markdown.lines().count() as u16;
-        return (5u16.saturating_add(body).saturating_add(extra)).min(12);
+        return (5u16.saturating_add(body).saturating_add(extra)).min(20);
     }
     if let Some(picker) = state.branch_picker.as_ref() {
         let n = picker.visible().len().max(1).min(12) as u16;
