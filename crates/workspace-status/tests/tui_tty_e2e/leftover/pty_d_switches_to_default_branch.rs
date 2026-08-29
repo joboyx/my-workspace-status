@@ -84,14 +84,28 @@ fn focusbox_tree_on_main(screen: &str) -> bool {
         && !tree_has(screen, "feature/keep")
 }
 
+/// Graph half of a split row. `@ focusbox` on the tree must not count.
+fn graph_side(line: &str) -> &str {
+    for sep in ["││", "┐┌", "┘└"] {
+        if let Some(idx) = line.find(sep) {
+            return &line[idx + sep.len()..];
+        }
+    }
+    line
+}
+
 fn graph_commit_is_head(screen: &str, subject: &str) -> bool {
-    graph_subject_line(screen, subject)
-        .is_some_and(|line| line.contains('@') && !line.contains('*'))
+    graph_subject_line(screen, subject).is_some_and(|line| {
+        let right = graph_side(&line);
+        right.contains('@') && !right.contains('*') && right.contains(subject)
+    })
 }
 
 fn graph_commit_is_not_head(screen: &str, subject: &str) -> bool {
-    graph_subject_line(screen, subject)
-        .is_some_and(|line| line.contains('*') && !line.contains('@'))
+    graph_subject_line(screen, subject).is_some_and(|line| {
+        let right = graph_side(&line);
+        right.contains('*') && !right.contains('@') && right.contains(subject)
+    })
 }
 
 fn keep_is_checked_out(screen: &str) -> bool {
