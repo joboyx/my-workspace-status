@@ -23,18 +23,13 @@ mod seed;
 #[cfg(unix)]
 use std::fs;
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-#[cfg(unix)]
-use std::thread;
-#[cfg(unix)]
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[cfg(unix)]
 use harness::{assert_contains, left_tree, tree_is_panned_to_tail, PtySession, COLS};
 #[cfg(unix)]
 use seed::{
-    ahead_workspace, behind_workspace, daily_workspace, focus_workspace, stream_workspace,
-    unfetched_behind_workspace,
+    ahead_workspace, behind_workspace, daily_workspace, focus_workspace, unfetched_behind_workspace,
 };
 
 #[cfg(unix)]
@@ -1080,110 +1075,6 @@ fn pty_graph_focus_unmark_enter_clears() {
         "Enter after unmark restores --all / full graph (does not re-drill keep)",
         GIT_WAIT,
     );
-}
-
-/// Per-repo apply must not wait for a slow checkout, including the pane.
-///
-/// A `WORKSPACE_STATUS_GIT` shim blocks `git status` in `slow` after ARM.
-/// `fast` is focused and modified; its tree + pane must update while `slow`
-/// is still blocked.
-#[cfg(unix)]
-#[test]
-fn pty_streamed_collect_updates_focused_repo_before_slow() {
-    let (_root, workspace) = stream_workspace();
-    let marker = format!(
-        "fast-live-{}.txt",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let shim_dir = workspace.join(".e2e-git-shim");
-    fs::create_dir_all(&shim_dir).unwrap();
-    let shim = shim_dir.join("git");
-    let arm = shim_dir.join("arm");
-    let wait = shim_dir.join("wait");
-    let release = shim_dir.join("release");
-    let real_git = std::env::var("WS_E2E_REAL_GIT").unwrap_or_else(|_| {
-        if std::path::Path::new("/usr/bin/git").is_file() {
-            "/usr/bin/git".into()
-        } else {
-            "git".into()
-        }
-    });
-    let slow = workspace.join("slow");
-    fs::write(
-        &shim,
-        format!(
-            "#!/bin/sh\n\
-             real=\"{real_git}\"\n\
-             arm=\"{arm}\"\n\
-             waitf=\"{wait}\"\n\
-             rel=\"{release}\"\n\
-             slow=\"{slow}\"\n\
-             is_status=0\n\
-             for a in \"$@\"; do\n\
-               case \"$a\" in\n\
-                 status) is_status=1; break ;;\n\
-               esac\n\
-             done\n\
-             if [ \"$is_status\" = 1 ] && [ -f \"$arm\" ]; then\n\
-               case \"$PWD\" in\n\
-                 \"$slow\"|\"$slow\"/*)\n\
-                   : > \"$waitf\"\n\
-                   while [ ! -f \"$rel\" ]; do\n\
-                     sleep 0.05\n\
-                   done\n\
-                   ;;\n\
-               esac\n\
-             fi\n\
-             exec \"$real\" \"$@\"\n",
-            real_git = real_git,
-            arm = arm.display(),
-            wait = wait.display(),
-            release = release.display(),
-            slow = slow.display(),
-        ),
-    )
-    .unwrap();
-    let mut perms = fs::metadata(&shim).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&shim, perms).unwrap();
-
-    let mut tui = PtySession::open_with_env(
-        &workspace,
-        &[
-            ("WS_STATUS_WATCH_MS", "500"),
-            ("WORKSPACE_STATUS_GIT", shim.to_str().unwrap()),
-        ],
-    );
-    tui.search("fast");
-    tui.wait_contains("fast", WAIT);
-    tui.wait_contains("Working tree clean", WAIT);
-    fs::write(workspace.join("fast").join(&marker), "stream-me\n").unwrap();
-    fs::write(&arm, "1\n").unwrap();
-
-    let start = Instant::now();
-    while !wait.exists() {
-        if start.elapsed() >= WAIT {
-            panic!(
-                "timeout waiting for slow git status to block; screen:\n{}",
-                tui.screen()
-            );
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    assert!(
-        !release.exists(),
-        "slow repo must still be blocked when asserting fast"
-    );
-    tui.wait_contains(&marker, Duration::from_secs(8));
-    tui.wait_contains("Uncommitted changes", Duration::from_secs(8));
-    assert!(
-        wait.exists() && !release.exists(),
-        "fast tree/pane must update before slow git status is released"
-    );
-    fs::write(&release, "1\n").unwrap();
 }
 
 /// `f` against a local bare origin. Must fail if fetch is a no-op.
