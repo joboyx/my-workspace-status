@@ -91,7 +91,7 @@ Graph checkout confirm (and several other graph UX choices) is inspired by [Git 
 | Graph engine / UI     | `crates/workspace-status-graph` + `tui/graph_load.rs` + `tui/render.rs` + helpers in `git.rs`                                                                              |
 | New tree node kind    | `tui/tree.rs` (`NodeKind`, `node_segments`, flatten / fold walks)                                                                                                         |
 | New pane / overlay    | `tui/` module + `chrome.rs` row budget + `render.rs` layout                                                                                                               |
-| TUI comments / markdown export | `tui/comments.rs` (store, keys, GC, export) + `;` / `y` in `tui/keys.rs` + `help.rs` + `chrome.rs` overlay budget + `render.rs` |
+| TUI comments / markdown export | `tui/comments/` (`store`, `target` / GC, overlay, markdown export) + `;` / `y` in `tui/keys.rs` + `help.rs` + `chrome.rs` overlay budget + `render.rs` |
 | Nav shell / drill     | `tui/drill.rs` + `tui/state/` + `chrome.rs` breadcrumb                                                                                                                  |
 | New CLI flag          | `cli.rs` + `tui::HeadlessFlags` / `should_open_tui` if it affects TUI vs headless                                                                                          |
 | TUI startup update check | `update_check.rs` + `cli.rs` (before `run_tui`). Sidecar exec and `--update` notes stay in `update.rs`. TTY spawn must set `WS_STATUS_UPDATE_CHECK_STORE` (CI: `tests/release_watch.rs`) |
