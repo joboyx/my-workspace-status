@@ -562,22 +562,48 @@ impl PtySession {
         thread::sleep(Duration::from_millis(ms));
     }
 
-    /// Wait until the child process exits (`q` / second Ctrl+C).
+    /// Wait until the child process exits with status 0 (`q` / second Ctrl+C).
     pub fn wait_exit(&mut self, timeout: Duration) {
+        self.wait_exit_without("", timeout);
+    }
+
+    /// Wait until the child process exits with status 0.
+    ///
+    /// Fail if `forbidden` paints while the child is still alive, or if the
+    /// last frame after exit still contains it. An empty `forbidden` skips
+    /// that check. A still-alive process at timeout is a fail (chrome dump).
+    pub fn wait_exit_without(&mut self, forbidden: &str, timeout: Duration) {
         let start = Instant::now();
         loop {
+            let screen = self.screen();
+            if !forbidden.is_empty() && screen.contains(forbidden) {
+                let alive = matches!(self.child.try_wait(), Ok(None));
+                panic!(
+                    "`{forbidden}` painted ({}); screen:\n{screen}",
+                    if alive {
+                        "process still alive"
+                    } else {
+                        "process exited"
+                    }
+                );
+            }
             match self.child.try_wait() {
-                Ok(Some(_)) => return,
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        panic!("TUI process exited with {status:?}; screen:\n{screen}");
+                    }
+                    return;
+                }
                 Ok(None) => {}
                 Err(err) => panic!("wait child: {err}"),
             }
             if start.elapsed() >= timeout {
                 panic!(
-                    "timeout waiting for TUI process to exit; screen:\n{}",
+                    "timeout waiting for TUI process to exit; still alive with chrome; screen:\n{}",
                     self.screen()
                 );
             }
-            thread::sleep(Duration::from_millis(25));
+            thread::sleep(Duration::from_millis(10));
         }
     }
 }
