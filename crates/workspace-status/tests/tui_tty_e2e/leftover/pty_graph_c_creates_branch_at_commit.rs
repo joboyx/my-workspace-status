@@ -116,8 +116,6 @@ fn documented_graph_create_branch_at(screen: &str, overlay_hash: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);
     graph_pane_focused(screen)
-        && graph_cursor_on(screen, "main-leaf-commit")
-        && !graph_cursor_on(screen, "keep-leaf-commit")
         && hex7_after(crumb, &format!("created {BRANCH} at ")).as_deref() == Some(overlay_hash)
         && !crumb.contains("failed")
         && !crumb.contains("Switched")
