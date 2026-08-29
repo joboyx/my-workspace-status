@@ -444,7 +444,7 @@ fn panes_tree_focused_graph_unfocused(screen: &str) -> bool {
         && !top.contains(" diff")
 }
 
-/// Left tree unfocused, right graph focused (`Enter` on a graph-capable row).
+/// Left tree unfocused, right graph focused. Not files / not a file diff.
 #[cfg(unix)]
 fn panes_tree_unfocused_graph_focused(screen: &str) -> bool {
     let top = pane_top(screen);
@@ -555,49 +555,6 @@ fn pty_graph_drill_enter_esc() {
         "CSI-u Esc restores the left tree and the merger row",
         WAIT,
     );
-}
-
-/// First paint row: pane titles (focused titles pad both sides).
-#[cfg(unix)]
-fn pane_top(screen: &str) -> &str {
-    screen.lines().next().unwrap_or("")
-}
-
-/// Breadcrumb sits on the penultimate row (status is last).
-#[cfg(unix)]
-fn crumb_line(screen: &str) -> &str {
-    let lines: Vec<&str> = screen.lines().collect();
-    lines
-        .get(lines.len().saturating_sub(2))
-        .copied()
-        .unwrap_or("")
-}
-
-#[cfg(unix)]
-fn status_line(screen: &str) -> &str {
-    screen.lines().last().unwrap_or("")
-}
-
-/// Left tree focused, right graph unfocused. Not files / not a file diff.
-#[cfg(unix)]
-fn panes_tree_focused_graph_unfocused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" tree ")
-        && top.contains(" graph")
-        && !top.contains(" graph ")
-        && !top.contains(" files")
-        && !top.contains(" diff")
-}
-
-/// Left tree unfocused, right graph focused (Tab onto a graph-capable row).
-#[cfg(unix)]
-fn panes_tree_unfocused_graph_focused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" graph ")
-        && top.contains(" tree")
-        && !top.contains(" tree ")
-        && !top.contains(" files")
-        && !top.contains(" diff")
 }
 
 /// Wrong keys: Enter drills files, `/` types SEARCH, Shift+S opens stash.
