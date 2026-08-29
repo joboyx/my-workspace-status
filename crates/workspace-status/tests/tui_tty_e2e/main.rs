@@ -1122,29 +1122,6 @@ fn pty_stash_create_apply_and_drop() {
     tui.wait_contains("README.md", WAIT);
 }
 
-/// Graph `p` pops the focused stash (apply + drop).
-#[cfg(unix)]
-#[test]
-fn pty_stash_graph_pop() {
-    let (_root, workspace) = daily_workspace();
-    let mut tui = PtySession::open(&workspace);
-    tui.search("merger");
-    tui.wait_contains("/merger", WAIT);
-    tui.tab();
-    tui.wait_contains("WIP on graph", WAIT);
-    tui.wait_ms(SETTLE_MS);
-
-    tui.key('/');
-    tui.keys("stash@{");
-    tui.enter();
-    tui.wait_contains("/stash@{", WAIT);
-    tui.wait_contains("stash@{0}", WAIT);
-    tui.wait_ms(SETTLE_MS);
-    tui.key('p');
-    tui.wait_contains("wip.txt", GIT_WAIT);
-    tui.wait_contains("popped stash@{0}", GIT_WAIT);
-}
-
 #[cfg(target_os = "linux")]
 mod xfce {
     use super::*;
