@@ -1917,9 +1917,10 @@ fn graph_pane_focused(screen: &str) -> bool {
 }
 
 fn graph_cursor_on(screen: &str, needle: &str) -> bool {
-    screen
-        .lines()
-        .any(|line| line.contains('\u{258C}') && line.contains(needle))
+    screen.lines().any(|line| {
+        let right = right_of_split(line);
+        right.contains('\u{258C}') && right.contains(needle)
+    })
 }
 
 fn no_mouse_toggle_toast(screen: &str) -> bool {
