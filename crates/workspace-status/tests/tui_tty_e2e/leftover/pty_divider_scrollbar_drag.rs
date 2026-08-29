@@ -114,18 +114,27 @@ fn bottom_graph_thumb(screen: &str) -> Option<(u16, u16)> {
         .max_by_key(|(_, y)| *y)
 }
 
-/// First `║` on the thumb column above the thumb (track, not the thumb itself).
-fn scrollbar_track_top(screen: &str, thumb_col: u16, thumb_row: u16) -> Option<u16> {
-    screen.lines().enumerate().find_map(|(y, line)| {
-        let y = y as u16;
-        if y >= thumb_row {
-            return None;
-        }
+/// First and last scrollbar cells (`║` track or `█` thumb) on `thumb_col`.
+///
+/// After `G` the thumb sits mid-track with dead `║` below it. Grab-delta maps
+/// from the press row, so a drag must start on the last track cell (same as
+/// headless `track_y + track_h - 1`), not on that mid-track `█`.
+fn scrollbar_track_span(screen: &str, thumb_col: u16) -> Option<(u16, u16)> {
+    let mut top = None;
+    let mut bottom = None;
+    for (y, line) in screen.lines().enumerate() {
         match line.chars().nth(thumb_col as usize) {
-            Some('║') => Some(y),
-            _ => None,
+            Some('║' | '█') => {
+                let y = y as u16;
+                if top.is_none() {
+                    top = Some(y);
+                }
+                bottom = Some(y);
+            }
+            _ => {}
         }
-    })
+    }
+    Some((top?, bottom?))
 }
 
 fn history_graph_at_top(screen: &str) -> bool {
@@ -158,8 +167,9 @@ fn history_graph_at_bottom(screen: &str) -> bool {
 /// Live PTY, xterm SGR press + `Cb` 32 drag + release:
 /// 1. Divider: `┐┌` moves at least 24 cells right. README stays. No
 ///    focus steal, no Mouse toast.
-/// 2. Graph: `G` on overflowing `history` paints `█`. Thumb drag toward
-///    the top restores `count 29` and hides the bar. Track click jumps.
+/// 2. Graph: `G` on overflowing `history` paints `█`. Drag from the last
+///    `║`/`█` track cell to the first restores `count 29` and hides the
+///    bar. Track click jumps. A mid-track `█` grab cannot reach the top.
 /// A no-op, row-select, pane-steal, or chrome flicker cannot pass.
 #[test]
 fn pty_divider_scrollbar_drag() {
@@ -218,38 +228,38 @@ fn pty_divider_scrollbar_drag() {
         "G scrolls the overflowing graph and paints a █ thumb (a no-op stays on count 29)",
         GIT_WAIT,
     );
-    let (thumb_col, thumb_row) = bottom_graph_thumb(&graph.screen())
-        .unwrap_or_else(|| panic!("█ thumb after G:\n{}", graph.screen()));
-    let track_top =
-        scrollbar_track_top(&graph.screen(), thumb_col, thumb_row).unwrap_or_else(|| {
-            panic!(
-                "║ track above █ at col={thumb_col} row={thumb_row}:\n{}",
-                graph.screen()
-            )
-        });
+    let after_g = graph.screen();
+    let (thumb_col, thumb_row) =
+        bottom_graph_thumb(&after_g).unwrap_or_else(|| panic!("█ thumb after G:\n{after_g}"));
+    let (track_top, track_bottom) = scrollbar_track_span(&after_g, thumb_col).unwrap_or_else(|| {
+        panic!("║/█ track at col={thumb_col}:\n{after_g}")
+    });
     assert!(
-        thumb_row.saturating_sub(track_top) > 8,
-        "track top {track_top} is too close to thumb {thumb_row} (must not aim at the same thumb):\n{}",
-        graph.screen()
+        track_bottom.saturating_sub(track_top) > 8,
+        "track {track_top}..{track_bottom} is too short to drag:\n{after_g}"
     );
-    graph.sgr_mouse(0, thumb_col, thumb_row);
+    assert!(
+        track_bottom > thumb_row,
+        "track end {track_bottom} must sit below mid-track █ {thumb_row} (grab-delta from the thumb cannot reach count 29):\n{after_g}"
+    );
+    graph.sgr_mouse(0, thumb_col, track_bottom);
     graph.wait_ms(SETTLE_MS);
     graph.wait_pred(
         history_graph_at_bottom,
-        "thumb grab at the bottom must not jump (a track click would leave count 0)",
+        "grab at the last track cell must not jump (a click on the top would leave count 0)",
         WAIT,
     );
     graph.sgr_mouse(SGR_LEFT_DRAG, thumb_col, track_top);
     sgr_release(&mut graph, thumb_col, track_top);
     graph.wait_pred(
         history_graph_at_top,
-        "thumb drag toward the top restores count 29 and hides █ (a no-op stays on count 0)",
+        "track drag toward the top restores count 29 and hides █ (a no-op stays on count 0)",
         GIT_WAIT,
     );
     graph.wait_ms(SETTLE_MS);
     graph.wait_pred(
         history_graph_at_top,
-        "graph scroll after thumb drag holds (not a chrome flicker)",
+        "graph scroll after track drag holds (not a chrome flicker)",
         WAIT,
     );
 
