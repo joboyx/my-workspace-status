@@ -69,8 +69,8 @@ use super::stash::{
 };
 use super::theme::{cycle_theme_id, theme_from_env, ThemeId};
 use super::tree::{
-    build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, list_viewport_start,
-    visible_for_tree, visible_window, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
+    build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
+    visible_window, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
 };
 #[cfg(not(test))]
 use super::viewed::viewed_store_path;
@@ -3342,6 +3342,7 @@ mod tests {
     use super::super::gates::ListFocusTarget;
     use super::super::keys::InputMode;
     use super::super::theme::{resolve_theme_id, ThemeId};
+    use super::super::tree::list_viewport_start;
     use super::*;
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,

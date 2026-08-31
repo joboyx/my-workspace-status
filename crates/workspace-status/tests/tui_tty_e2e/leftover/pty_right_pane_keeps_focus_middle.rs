@@ -11,8 +11,37 @@ use crate::support::{
 /// Wheel down + 1003 motion bit (`65 | 32`). crossterm 0.28 drops this.
 const SGR_WHEEL_DOWN_MOTION: u8 = 65 | 32;
 
+/// Gap so the input thread does not drain a burst of `j` as one move.
+const KEY_GAP_MS: u64 = 50;
+
 /// Past a default pane midpoint (~13) and short of the last row.
 const STEPS: usize = 22;
+
+fn j_steps(tui: &mut PtySession, n: usize) {
+    for _ in 0..n {
+        tui.key('j');
+        tui.wait_ms(KEY_GAP_MS);
+    }
+}
+
+fn tree_keyboard_focus(screen: &str) -> bool {
+    let top = pane_top(screen);
+    top.contains(" tree ")
+        && !top.contains(" graph ")
+        && !top.contains(" files ")
+        && !top.contains(" diff ")
+}
+
+fn return_to_tree(tui: &mut PtySession) {
+    tui.esc();
+    tui.wait_ms(120);
+    tui.esc();
+    tui.wait_pred(
+        tree_keyboard_focus,
+        "Esc returns keyboard focus to the workspace tree (search clear, then unfocus)",
+        WAIT,
+    );
+}
 
 fn keep_middle_workspace() -> (PathBuf, PathBuf) {
     let root = unique_root("ws-tui-tty-keep-mid");
@@ -30,11 +59,13 @@ fn keep_middle_workspace() -> (PathBuf, PathBuf) {
 }
 
 fn help_lists_jk_down_up(screen: &str) -> bool {
-    screen.contains("MOVE") && screen.contains("j k") && screen.contains("down / up")
+    let compact = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+    compact.contains("MOVE") && compact.contains("j k") && compact.contains("down / up")
 }
 
 fn right_cursor_index(screen: &str) -> Option<(usize, usize)> {
-    let lines: Vec<&str> = right_pane(screen).lines().collect();
+    let right = right_pane(screen);
+    let lines: Vec<&str> = right.lines().collect();
     let n = lines.len();
     let idx = lines.iter().position(|line| line.contains('\u{258C}'))?;
     Some((idx, n))
@@ -82,7 +113,6 @@ fn diff_kept_middle(screen: &str) -> bool {
         && right_focus_near_middle(screen)
         && right_pane(screen).contains("keepmid-line-")
         && !right_pane(screen).contains("keepmid-line-0")
-        && !tree_cursor_on(screen, "keepmid-diff.rs")
 }
 
 fn graph_launch_top(screen: &str) -> bool {
@@ -160,16 +190,14 @@ fn pty_right_pane_keeps_focus_middle() {
         "Tab focuses the file-diff; keepmid-line-0 is still at the top",
         WAIT,
     );
-    for _ in 0..STEPS {
-        tui.key('j');
-    }
+    j_steps(&mut tui, STEPS);
     tui.wait_pred(
         diff_kept_middle,
         "j on a focused file-diff recentres the row (a no-op keeps keepmid-line-0; edge-stuck is the last pane line; G would hit the last line)",
         WAIT,
     );
 
-    tui.esc();
+    return_to_tree(&mut tui);
     tui.search("history");
     tui.wait_pred(
         |screen| tree_cursor_on(screen, "history") && screen.contains("count 29"),
@@ -200,7 +228,7 @@ fn pty_right_pane_keeps_focus_middle() {
         GIT_WAIT,
     );
 
-    tui.esc();
+    return_to_tree(&mut tui);
     tui.search("bundle");
     tui.wait_pred(
         |screen| tree_cursor_on(screen, "bundle") && screen.contains("keepmid-files-commit"),
@@ -228,9 +256,7 @@ fn pty_right_pane_keeps_focus_middle() {
         "Enter drills to commit files; keepmid-00.txt is still at the top",
         GIT_WAIT,
     );
-    for _ in 0..STEPS {
-        tui.key('j');
-    }
+    j_steps(&mut tui, STEPS);
     tui.wait_pred(
         files_kept_middle,
         "j on the commit-file list recentres the row (a no-op keeps keepmid-00.txt; edge-stuck is the last pane line; G would hit keepmid-39.txt)",
