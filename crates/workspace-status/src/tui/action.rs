@@ -42,6 +42,7 @@ pub enum Action {
     ToggleReviewed,
     FocusLeft,
     FocusRight,
+    /// Move the focused file-diff row. Live `j` / `k` emit [`Self::Move`].
     ScrollDiff(i32),
     /// Horizontal pan on the focused pane (tree, graph, commit-files, or diff).
     ///
@@ -62,9 +63,11 @@ pub enum Action {
     ToggleDiffMode,
     /// Mouse wheel. Positive `delta` is down / right.
     ///
-    /// Vertical (`horizontal: false`) moves a list cursor or scrolls the
-    /// graph / diff viewport. Horizontal (wheel left/right, or Shift+wheel)
-    /// pans the pane under the pointer without changing the focused row.
+    /// Vertical (`horizontal: false`) moves the list cursor under the
+    /// pointer (tree, graph, commit files, or file-diff rows). The viewport
+    /// keeps that focused row near the vertical middle. Horizontal
+    /// (wheel left/right, or Shift+wheel) pans the pane under the pointer
+    /// without changing the focused row.
     /// Over the workspace tree that matches the right pane: scroll does not
     /// steal the cursor. When a file diff has long lines, trackpad hscroll
     /// over the left pane pans that diff. Click still selects. Keyboard

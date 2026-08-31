@@ -21,7 +21,8 @@ use super::chrome::{
 };
 use super::comments::{diff_line_has_comment, graph_row_has_comment, tree_row_has_comment};
 use super::diff::{
-    cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, gutter_width,
+    cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, diff_row_content_width,
+    gutter_width,
     section_header, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
 };
 use super::drill::DrillView;
@@ -793,14 +794,18 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let path = state.diff_header_path();
     let effective = effective_diff_mode(state.diff_mode, area.width);
     let rows = state.current_diff_rows();
-    let vscroll = graph_vscroll_visible(state.diff_scroll);
+    if !rows.is_empty() {
+        state.diff_cursor = state.diff_cursor.min(rows.len() - 1);
+    }
     let hscroll = graph_hscroll_visible(state.diff_col_offset);
-    let v_cols = u16::from(vscroll);
     let h_rows = u16::from(hscroll);
     let list_h = area.height.saturating_sub(1).max(1);
     let line_h = list_h.saturating_sub(h_rows).max(1) as usize;
-    let max_start = rows.len().saturating_sub(line_h);
-    let skip = (state.diff_scroll as usize).min(max_start);
+    let (start, _) = visible_window(rows.len(), state.diff_cursor, line_h);
+    state.diff_scroll = start as u16;
+    let skip = start;
+    let vscroll = graph_vscroll_visible(state.diff_scroll);
+    let v_cols = u16::from(vscroll);
     let mode_label = diff_pane_mode_label(state.diff_mode, effective);
     let header = diff_pane_header(
         &path,
@@ -858,6 +863,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let split = is_side_by_side_split(state.diff_mode, area.width.saturating_sub(v_cols));
     let off = state.diff_col_offset as usize;
     let line_width = area.width.saturating_sub(v_cols).max(1);
+    let content_w = diff_row_content_width(line_width as usize) as u16;
     let content_len = rows.len();
     let painted: Vec<Line> = rows
         .iter()
@@ -867,11 +873,12 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         .map(|(i, row)| {
             paint_diff_row(
                 row,
-                line_width,
+                content_w,
                 gutter,
                 split,
                 off,
                 state,
+                i == state.diff_cursor,
                 state.search_hit == Some(i),
             )
         })
@@ -936,6 +943,7 @@ fn paint_diff_row(
     split: bool,
     col_offset: usize,
     state: &AppState,
+    selected: bool,
     search_hit: bool,
 ) -> Line<'static> {
     let palette = state.theme.palette();
@@ -987,17 +995,33 @@ fn paint_diff_row(
             state.ascii,
         )),
     };
-    if search_hit {
+    let bg = if selected {
+        Some(palette.cursor_bg)
+    } else if search_hit {
+        Some(palette.flash)
+    } else {
+        None
+    };
+    if let Some(bg) = bg {
         line.spans = line
             .spans
             .into_iter()
             .map(|span| {
-                let style = span.style.bg(palette.flash);
+                let style = span.style.bg(bg);
                 Span::styled(span.content.to_string(), style)
             })
             .collect();
     }
-    line
+    let edge = if selected { CURSOR_BAR } else { " " };
+    let mut edge_style = Style::default()
+        .fg(palette.cursor)
+        .add_modifier(Modifier::BOLD);
+    if let Some(bg) = bg {
+        edge_style = edge_style.bg(bg);
+    }
+    let mut spans = vec![Span::styled(edge, edge_style)];
+    spans.extend(line.spans);
+    Line::from(spans)
 }
 
 fn section_style(section: DiffSection, palette: Palette) -> Style {

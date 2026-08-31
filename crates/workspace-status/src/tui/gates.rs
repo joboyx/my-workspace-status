@@ -7,8 +7,9 @@ use super::action::Action;
 
 /// Which list (or diff) the focused pane is driving.
 ///
-/// Tree, graph list, commit-file list, or a
-/// focused file diff (`None`).
+/// Tree, graph list, commit-file list, or a focused file-diff row
+/// (`None`). `j` / `k` and vertical wheel move that focused row. The
+/// viewport keeps it near the vertical middle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ListFocusTarget {
     Tree,
@@ -40,7 +41,7 @@ fn is_tree_write_action(action: &Action) -> bool {
 
 /// Actions that drive a list or row-scoped registry write.
 /// Nav chrome, quit/help/refresh, theme/mouse,
-/// view-mode toggles, diff scroll, and overlay input are excluded.
+/// view-mode toggles, file-diff row move, and overlay input are excluded.
 pub fn is_left_list_action(action: &Action) -> bool {
     matches!(
         action,
