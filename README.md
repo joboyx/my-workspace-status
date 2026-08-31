@@ -125,7 +125,7 @@ Pass one or more repo paths to limit output (e.g. `ws app vendor-docs`). Named r
 
 - **Files** column — dirty/clean working tree (`💾` / `📝` / `✨` / `⚠️`), not “linked worktree”
 - **🔗** — linked git worktree checkout (repo path prefix + `🔗 Linked worktrees` summary)
-- **✅** / **🌱** after a non-default branch — tip merged into default / still open
+- **✅** / **🌱** after a non-default branch — tip merged into default (strict ancestor) / still open (including a just-created branch whose HEAD matches the default tip)
 
 ## Interactive TUI
 
@@ -188,7 +188,7 @@ Agent map of TestBackend vs PTY vs desktop `#[ignore]`, plus `WS_STATUS_UPDATE_C
 | Pull                  | `--pull` updates behind repos (auto-stash dirty worktrees) and refreshes the final summary                                                                                                      |
 | Default branch switch | `--default-branch` switches clean non-default branches back to default and skips dirty repos                                                                                                    |
 | Symlinked / gitfile   | Symlinked directories and repos with a `.git` file (linked worktrees / some submodules) are discovered like regular repos                                                                       |
-| Linked worktrees      | `git worktree list` paths under cwd appear with `🔗`; Files column = dirty/clean; `✅`/`🌱` merge marks; named filters accept `.worktrees/` paths                                               |
+| Linked worktrees      | `git worktree list` paths under cwd appear with `🔗`; Files column = dirty/clean; `✅`/`🌱` merge marks (`✅` only for a strict ancestor of the default tip); named filters accept `.worktrees/` paths |
 | Workspace config      | `ignoredRepos` skips configured repos; `maxDepth` (default 3) caps discovery depth; `defaultBranches` overrides per-repo default; `editor` sets TUI `e` command; `--all` includes ignored repos |
 | Repo filter           | Positional repo paths limit output to named repos; named repos bypass `ignoredRepos`; unknown repos exit with an error                                                                          |
 

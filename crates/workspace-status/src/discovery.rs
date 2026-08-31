@@ -6,8 +6,9 @@ use std::path::Path;
 
 use crate::config::{default_branch_override_for, WorkspaceStatusConfig};
 use crate::git::{
-    exec_git, exec_git_checked, is_ancestor, list_local_branches, list_worktrees_porcelain,
-    resolve_default_branch_name, resolve_default_branch_tip_ref, rev_parse_quiet,
+    exec_git, exec_git_checked, head_equals_ref, is_ancestor, list_local_branches,
+    list_worktrees_porcelain, resolve_default_branch_name, resolve_default_branch_tip_ref,
+    rev_parse_quiet,
 };
 use crate::helpers::{is_default_branch, DETACHED_HEAD_BRANCH, UNKNOWN_HEAD_BRANCH};
 use crate::parallel::{env_fetch_concurrency, map_with_concurrency};
@@ -474,6 +475,9 @@ fn override_for_path(
         .or_else(|| primary_repo.and_then(|p| default_branch_override_for(p, default_branches)))
 }
 
+/// Merge-into-default for one checkout.
+///
+/// Same-commit as the default tip is open (`Some(false)`), not merged.
 fn compute_merged_into_default(
     repo_dir: &Path,
     branch: &str,
@@ -487,11 +491,13 @@ fn compute_merged_into_default(
         return None;
     }
     match resolve_default_branch_tip_ref(repo_dir, &default_branch) {
-        None => classify_merged_into_default(branch, &default_branch, None),
-        Some(tip) => {
-            let ancestor = is_ancestor(repo_dir, "HEAD", &tip);
-            classify_merged_into_default(branch, &default_branch, ancestor)
-        }
+        None => classify_merged_into_default(branch, &default_branch, None, false),
+        Some(tip) => classify_merged_into_default(
+            branch,
+            &default_branch,
+            is_ancestor(repo_dir, "HEAD", &tip),
+            head_equals_ref(repo_dir, &tip),
+        ),
     }
 }
 

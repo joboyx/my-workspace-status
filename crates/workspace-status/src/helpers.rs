@@ -135,6 +135,10 @@ pub fn extract_ticket_id(branch: &str) -> Option<&str> {
     None
 }
 
+/// Plain-report merge mark after a non-default branch name.
+///
+/// `Some(true)` is merged (strict ancestor of the default tip). `Some(false)`
+/// is still open, including HEAD equal to that tip (just-created).
 pub fn format_merge_mark(merged: Option<bool>) -> &'static str {
     match merged {
         Some(true) => " ✅",

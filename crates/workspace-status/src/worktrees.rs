@@ -304,16 +304,26 @@ pub fn resolve_worktree_remove_target(
     WorktreeRemoveTarget { git_cwd, git_path }
 }
 
+/// Whether a non-default checkout is merged into the default branch.
+///
+/// `None` on the default branch, detached HEAD, or when the ancestor probe
+/// did not run. `Some(true)` only when HEAD is a strict ancestor of the
+/// default tip. HEAD equal to that tip is `Some(false)`: a just-created
+/// branch, not merged work.
 pub fn classify_merged_into_default(
     branch: &str,
     default_branch: &str,
     is_ancestor_of_default: Option<bool>,
+    head_equals_default_tip: bool,
 ) -> Option<bool> {
     if branch == default_branch {
         return None;
     }
     if branch == DETACHED_HEAD_BRANCH {
         return None;
+    }
+    if head_equals_default_tip {
+        return Some(false);
     }
     is_ancestor_of_default
 }
@@ -344,16 +354,25 @@ detached
     #[test]
     fn classify_merge_skips_default_and_detached() {
         assert_eq!(
-            classify_merged_into_default("main", "main", Some(true)),
+            classify_merged_into_default("main", "main", Some(true), false),
             None
         );
         assert_eq!(
-            classify_merged_into_default(DETACHED_HEAD_BRANCH, "main", Some(true)),
+            classify_merged_into_default(DETACHED_HEAD_BRANCH, "main", Some(true), false),
             None
         );
         assert_eq!(
-            classify_merged_into_default("feature/x", "main", Some(true)),
+            classify_merged_into_default("feature/x", "main", Some(true), false),
             Some(true)
+        );
+        assert_eq!(
+            classify_merged_into_default("feature/x", "main", Some(true), true),
+            Some(false),
+            "HEAD equal to the default tip is a just-created branch, not merged"
+        );
+        assert_eq!(
+            classify_merged_into_default("feature/x", "main", Some(false), false),
+            Some(false)
         );
     }
 

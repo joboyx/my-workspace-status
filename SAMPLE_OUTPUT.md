@@ -63,8 +63,8 @@ local-tool           🔥 main                        ❓ no upstream  💾 clea
 
 Non-default branches may append a merge-into-default mark after the name:
 
-- `✅` = tip is already merged into the default branch
-- `🌱` = tip is still open (not an ancestor of default)
+- `✅` = tip is a strict ancestor of the default branch (unique commits already landed)
+- `🌱` = tip is still open (not merged), including HEAD equal to the default tip (just created)
 - (no mark) = on default, detached, or default tip not resolvable
 
 Example verbose cell: `🚧 feature/foo 🌱`

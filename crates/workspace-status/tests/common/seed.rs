@@ -253,3 +253,59 @@ pub fn seed_primary_and_linked_family(workspace: &Path) {
     git(&linked, &["add", "open.txt"]);
     git(&linked, &["commit", "-q", "-m", "linked open"]);
 }
+
+/// Primary off default, plus linked extras that prove merge-mark paint.
+///
+/// `feature/just-created` is a new branch at the default tip (open, not
+/// merged). `feature/landed` has unique commits that landed on default
+/// with `--no-ff` (merged checkmark).
+pub fn seed_merge_mark_family(workspace: &Path) {
+    seed_repo(workspace, "app", "main", false);
+    let repo = workspace.join("app");
+    fs::write(repo.join(".gitignore"), ".worktrees/\n").unwrap();
+    git(&repo, &["add", ".gitignore"]);
+    git(&repo, &["commit", "-q", "-m", "ignore linked worktree dir"]);
+    git(&repo, &["checkout", "-q", "-b", "feature/landed"]);
+    fs::write(repo.join("landed.txt"), "unique then merged\n").unwrap();
+    git(&repo, &["add", "landed.txt"]);
+    git(&repo, &["commit", "-q", "-m", "landed unique"]);
+    git(&repo, &["checkout", "-q", "main"]);
+    git(
+        &repo,
+        &[
+            "merge",
+            "--no-ff",
+            "-q",
+            "-m",
+            "merge landed",
+            "feature/landed",
+        ],
+    );
+    git(&repo, &["checkout", "-q", "-b", "feature/primary-open"]);
+    fs::write(repo.join("primary.txt"), "primary off default\n").unwrap();
+    git(&repo, &["add", "primary.txt"]);
+    git(&repo, &["commit", "-q", "-m", "primary off default"]);
+    fs::create_dir_all(repo.join(".worktrees")).unwrap();
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature/just-created",
+            ".worktrees/new",
+            "main",
+        ],
+    );
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            ".worktrees/landed",
+            "feature/landed",
+        ],
+    );
+}

@@ -39,6 +39,7 @@ mod pty_key_repeat_j_reaches_no_updates;
 mod pty_launch_paints_tree_diff_and_chrome;
 mod pty_left_pane_sgr_hscroll_pans_long_diff;
 mod pty_m_toggles_mouse_capture;
+mod pty_merge_mark_default_tip_is_open;
 mod pty_n_and_n_pane_next_prev;
 mod pty_pgup_pgdn_pages_workspace_tree;
 mod pty_pull_behind_local_remote;

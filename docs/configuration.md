@@ -35,7 +35,7 @@ Ignored repos are skipped by discovery (the ignored path and everything under it
 Discovery has two stages:
 
 1. **Directory walk** — under the workspace root, any directory with a `.git` directory or gitfile (some submodules / non-dot linked checkouts) counts as a **primary** repo, up to `maxDepth` path segments. Dot directories (e.g. `.worktrees/`) are **not** entered by the walk.
-2. **Linked worktrees** — for each primary, `git worktree list --porcelain` adds other checkouts whose paths sit under the workspace cwd (typical layout: `app/.worktrees/<branch>`). Those rows get `checkoutKind: 'linked'`, a `🔗` marker, and optional merge-into-default marks (`✅` / `🌱`). The verbose dirty/clean column is **Files** (not “Worktree”).
+2. **Linked worktrees** — for each primary, `git worktree list --porcelain` adds other checkouts whose paths sit under the workspace cwd (typical layout: `app/.worktrees/<branch>`). Those rows get `checkoutKind: 'linked'`, a `🔗` marker, and optional merge-into-default marks (`✅` / `🌱`). `✅` is a strict ancestor of the default tip. HEAD equal to that tip is `🌱` (just created), not merged. The verbose dirty/clean column is **Files** (not “Worktree”).
 
 | `maxDepth`    | Finds (walk)                | Example                |
 | ------------- | --------------------------- | ---------------------- |

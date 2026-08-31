@@ -9,8 +9,8 @@ use std::process::{Command, Stdio};
 
 pub use super::common::seed::{
     daily_workspace, focus_workspace, git, git_env, seed_long_diff_file, seed_long_path_file,
-    seed_long_subject_repo, seed_many_commit_files, seed_primary_and_linked_family, seed_repo,
-    seed_tall_graph, unique_root,
+    seed_long_subject_repo, seed_many_commit_files, seed_merge_mark_family,
+    seed_primary_and_linked_family, seed_repo, seed_tall_graph, unique_root,
 };
 
 use super::common::seed::new_workspace;
@@ -133,5 +133,12 @@ pub fn ahead_workspace() -> (PathBuf, PathBuf) {
 pub fn worktree_workspace() -> (PathBuf, PathBuf) {
     let (root, workspace) = new_workspace("ws-tui-tty-wt");
     seed_primary_and_linked_family(&workspace);
+    (root, workspace)
+}
+
+/// Family with a default-tip linked branch and a truly merged linked branch.
+pub fn merge_mark_workspace() -> (PathBuf, PathBuf) {
+    let (root, workspace) = new_workspace("ws-tui-tty-merge-mark");
+    seed_merge_mark_family(&workspace);
     (root, workspace)
 }

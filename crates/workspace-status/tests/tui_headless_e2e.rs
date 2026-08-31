@@ -17,7 +17,8 @@ use common::hscroll::{
 };
 use common::seed::{
     daily_workspace, focus_workspace, git, git_env, seed_long_diff_file, seed_long_path_file,
-    seed_long_subject_repo, seed_primary_and_linked_family, seed_repo, seed_tall_graph,
+    seed_long_subject_repo, seed_merge_mark_family, seed_primary_and_linked_family, seed_repo,
+    seed_tall_graph,
 };
 use workspace_status::tui::HeadlessTui;
 use workspace_status_graph::UNICODE;
@@ -1644,6 +1645,8 @@ fn watch_tick_updates_ahead_count_without_reload_key() {
 
 /// Open-vs-default mark (`ICON_OPEN_VS_DEFAULT` / nf-fa-tree).
 const OPEN_VS_DEFAULT: &str = "";
+/// Merged-into-default mark (`ICON_MERGED_INTO_DEFAULT` / nf-fa-check-circle).
+const MERGED_INTO_DEFAULT: &str = "";
 /// Nested primary checkout glyph (`ICON_BRANCH`).
 const PRIMARY_CHECKOUT_GLYPH: &str = "";
 /// Linked extra glyph (`ICON_LINKED_WORKTREE`).
@@ -1698,6 +1701,49 @@ fn default_main_worktree_row_omits_pinetree_linked_keeps_mark() {
     assert!(
         linked.contains(OPEN_VS_DEFAULT),
         "linked worktree keeps the open-vs-default mark:\n{linked}\n{frame}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn default_tip_linked_worktree_paints_open_not_merged() {
+    let root = std::env::temp_dir().join(format!(
+        "ws-tui-default-tip-merge-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    seed_merge_mark_family(&workspace);
+    let mut tui = open(&workspace);
+    let frame = tui.frame();
+    let just_created = frame
+        .lines()
+        .map(tree_pane)
+        .find(|line| line.contains(LINKED_WORKTREE_GLYPH) && line.contains("feature/just-created"))
+        .unwrap_or("");
+    let landed = frame
+        .lines()
+        .map(tree_pane)
+        .find(|line| line.contains(LINKED_WORKTREE_GLYPH) && line.contains("feature/landed"))
+        .unwrap_or("");
+    assert!(
+        !just_created.is_empty(),
+        "expected a painted default-tip linked row:\n{frame}"
+    );
+    assert!(
+        !landed.is_empty(),
+        "expected a painted merged linked row:\n{frame}"
+    );
+    assert!(
+        just_created.contains(OPEN_VS_DEFAULT) && !just_created.contains(MERGED_INTO_DEFAULT),
+        "HEAD equal to the default tip must paint open, not merged:\n{just_created}\n{frame}"
+    );
+    assert!(
+        landed.contains(MERGED_INTO_DEFAULT) && !landed.contains(OPEN_VS_DEFAULT),
+        "strict-ancestor linked row must keep the merged check:\n{landed}\n{frame}"
     );
     let _ = fs::remove_dir_all(root);
 }
