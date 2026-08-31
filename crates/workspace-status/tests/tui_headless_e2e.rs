@@ -171,7 +171,9 @@ fn open(workspace: &Path) -> HeadlessTui {
 
 fn gg(tui: &mut HeadlessTui) {
     tui.key('g');
+    tui.key_release('g');
     tui.key('g');
+    tui.key_release('g');
 }
 
 fn seed_tall_dirty_file(workspace: &Path, name: &str) {

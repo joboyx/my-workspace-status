@@ -4,7 +4,7 @@ use crate::harness::PtySession;
 use crate::seed::{daily_workspace, seed_many_commit_files, seed_tall_graph};
 use crate::support::{
     graph_cursor_on, graph_pane_focused, page_file_body_visible, pane_top, right_pane,
-    seed_tree_page_files, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
+    seed_tree_page_files, tree_cursor_on, tree_has, GIT_WAIT, WAIT,
 };
 
 const DIFF_FILE: &str = "keepmid-diff.rs";
@@ -84,6 +84,22 @@ fn right_cursor_on(screen: &str, needle: &str) -> bool {
 fn send_j(tui: &mut PtySession) {
     tui.key('j');
     tui.wait_ms(KEY_GAP_MS);
+}
+
+/// First Esc may clear an armed pane search. A second Esc runs only while
+/// the right pane still holds keyboard focus.
+fn unfocus_right(
+    tui: &mut PtySession,
+    still_right: impl Fn(&str) -> bool,
+    now_left: impl Fn(&str) -> bool,
+    why: &str,
+) {
+    tui.esc();
+    tui.wait_ms(120);
+    if still_right(&tui.screen()) {
+        tui.esc();
+    }
+    tui.wait_pred(now_left, why, WAIT);
 }
 
 fn leave_until(tui: &mut PtySession, still_at_top: impl Fn(&str) -> bool, why: &str) {
@@ -260,11 +276,11 @@ fn pty_gg_jumps_focused_list_or_file_diff() {
         WAIT,
     );
 
-    tui.esc();
-    tui.wait_pred(
+    unfocus_right(
+        &mut tui,
+        panes_diff_focused,
         |screen| panes_tree_focused_diff_unfocused(screen) && tree_cursor_on(screen, DIFF_FILE),
         "Esc returns keyboard focus to the tree on the tall file",
-        WAIT,
     );
 
     tui.search("history");
@@ -281,14 +297,17 @@ fn pty_gg_jumps_focused_list_or_file_diff() {
     );
     leave_until(
         &mut tui,
-        |screen| graph_cursor_on(screen, "working tree"),
+        |screen| {
+            graph_cursor_on(screen, "working tree")
+                || right_pane(screen).contains("working tree clean")
+        },
         "j on a focused graph must leave working tree",
     );
     tui.wait_pred(
         |screen| {
             graph_pane_focused(screen)
                 && !graph_cursor_on(screen, "working tree")
-                && !right_pane(screen).contains("count 29")
+                && !right_pane(screen).contains("working tree clean")
         },
         "graph has left the unique top marker (a later no-op gg cannot pass)",
         WAIT,
@@ -300,19 +319,15 @@ fn pty_gg_jumps_focused_list_or_file_diff() {
         GIT_WAIT,
     );
 
-    tui.esc();
-    tui.wait_ms(SETTLE_MS);
-    if graph_pane_focused(&tui.screen()) {
-        tui.esc();
-    }
-    tui.wait_pred(
+    unfocus_right(
+        &mut tui,
+        graph_pane_focused,
         |screen| {
             !graph_pane_focused(screen)
                 && pane_top(screen).contains(" tree ")
                 && tree_cursor_on(screen, "history")
         },
         "Esc returns keyboard focus to the tree on history",
-        WAIT,
     );
 
     tui.search("bundle");

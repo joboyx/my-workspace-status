@@ -24,6 +24,9 @@ pub enum InputMode {
         search_active: bool,
     },
     /// First `g` armed; second `g` in the window is `gg` (move to start).
+    ///
+    /// Key release is ignored and must not clear this pending. CSI-u with
+    /// event types sends a Release after every Press.
     GPending {
         search_active: bool,
     },

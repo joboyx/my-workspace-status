@@ -92,6 +92,14 @@ impl HeadlessTui {
         self.send_key_kind(KeyCode::Char(c), KeyModifiers::NONE, KeyEventKind::Repeat);
     }
 
+    /// Send a keyboard-enhancement key-release of one character.
+    ///
+    /// The live loop requested `REPORT_EVENT_TYPES`. Release must not
+    /// dispatch (it would clear the `gg` pending).
+    pub fn key_release(&mut self, c: char) {
+        self.send_key_kind(KeyCode::Char(c), KeyModifiers::NONE, KeyEventKind::Release);
+    }
+
     /// Send Tab.
     pub fn tab(&mut self) {
         self.send(KeyCode::Tab);
@@ -496,6 +504,11 @@ impl HeadlessTui {
     }
 
     fn dispatch_event(&mut self, event: Event) {
+        if let Event::Key(key) = &event {
+            if key.kind == KeyEventKind::Release {
+                return;
+            }
+        }
         let action = event_to_action_with(
             &event,
             self.state.input_mode(),
