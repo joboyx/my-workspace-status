@@ -21,7 +21,8 @@ use super::chrome::{
 };
 use super::comments::{diff_line_has_comment, graph_row_has_comment, tree_row_has_comment};
 use super::diff::{
-    cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, gutter_width,
+    cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, diff_row_content_width,
+    gutter_width,
     section_header, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
 };
 use super::drill::DrillView;
@@ -862,7 +863,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let split = is_side_by_side_split(state.diff_mode, area.width.saturating_sub(v_cols));
     let off = state.diff_col_offset as usize;
     let line_width = area.width.saturating_sub(v_cols).max(1);
-    let content_w = line_width.saturating_sub(1).max(1);
+    let content_w = diff_row_content_width(line_width as usize) as u16;
     let content_len = rows.len();
     let painted: Vec<Line> = rows
         .iter()

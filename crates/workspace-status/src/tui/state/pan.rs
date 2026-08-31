@@ -4,7 +4,7 @@ use workspace_status_graph::graph_col_max;
 
 use super::super::action::{Action, Effect};
 use super::super::comments::tree_row_has_comment;
-use super::super::diff::{cell_code_width, gutter_width, DiffRow};
+use super::super::diff::{cell_code_width, diff_row_content_width, gutter_width, DiffRow};
 use super::super::search::{apply_pan, list_row_pan_max, max_col_offset};
 use super::super::tree::{row_segments, NodeKind};
 use super::{AppState, FocusPane};
@@ -136,7 +136,8 @@ impl AppState {
         let gutter = gutter_width(&rows);
         let v_cols = u16::from(self.diff_scroll > 0);
         let pane_w = self.layout.diff_pane_width.saturating_sub(v_cols).max(1) as usize;
-        max_col_offset(&self.diff_line_lens(), cell_code_width(pane_w, gutter))
+        let content_w = diff_row_content_width(pane_w);
+        max_col_offset(&self.diff_line_lens(), cell_code_width(content_w, gutter))
     }
 
     fn diff_can_pan(&self) -> bool {

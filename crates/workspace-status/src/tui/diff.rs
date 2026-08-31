@@ -481,6 +481,11 @@ pub fn cell_sign(kind: DiffCellKind) -> char {
     }
 }
 
+/// Columns left for file-diff text after the cursor bar (`▌` / space).
+pub fn diff_row_content_width(pane_width: usize) -> usize {
+    pane_width.saturating_sub(1).max(1)
+}
+
 /// Code-column width inside one cell (`width - gutter - " │ " - sign`).
 pub fn cell_code_width(col_width: usize, gutter: usize) -> usize {
     col_width.saturating_sub(gutter.saturating_add(4)).max(1)
