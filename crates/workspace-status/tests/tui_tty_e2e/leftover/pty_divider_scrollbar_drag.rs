@@ -1,8 +1,8 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::harness::{tree_row_containing, PtySession, COLS};
-use crate::seed::{daily_workspace, git, seed_repo, unique_root};
+use crate::seed::{daily_workspace, seed_tall_graph, unique_root};
 use crate::support::{
     crumb_row, documented_launch_first_paint, no_mouse_toggle_toast, no_wrong_overlays, pane_top,
     status_row, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, TREE_LABEL_COL, WAIT,
@@ -16,17 +16,6 @@ const GRAPH_THUMB: char = '█';
 
 /// How far right a pane-divider drag must move the join (cells).
 const DIVIDER_DRAG_DELTA: u16 = 24;
-
-fn seed_tall_graph(workspace: &Path, name: &str) {
-    seed_repo(workspace, name, "main", false);
-    let repo = workspace.join(name);
-    for i in 0..30 {
-        fs::write(repo.join("count.txt"), format!("{i}\n")).unwrap();
-        git(&repo, &["add", "count.txt"]);
-        git(&repo, &["commit", "-q", "-m", &format!("count {i}")]);
-    }
-    git(&repo, &["checkout", "-q", "-b", "feature/tall"]);
-}
 
 fn tall_graph_workspace() -> (PathBuf, PathBuf) {
     let root = unique_root("ws-tui-tty-tall-graph");
@@ -231,9 +220,8 @@ fn pty_divider_scrollbar_drag() {
     let after_g = graph.screen();
     let (thumb_col, thumb_row) =
         bottom_graph_thumb(&after_g).unwrap_or_else(|| panic!("█ thumb after G:\n{after_g}"));
-    let (track_top, track_bottom) = scrollbar_track_span(&after_g, thumb_col).unwrap_or_else(|| {
-        panic!("║/█ track at col={thumb_col}:\n{after_g}")
-    });
+    let (track_top, track_bottom) = scrollbar_track_span(&after_g, thumb_col)
+        .unwrap_or_else(|| panic!("║/█ track at col={thumb_col}:\n{after_g}"));
     assert!(
         track_bottom.saturating_sub(track_top) > 8,
         "track {track_top}..{track_bottom} is too short to drag:\n{after_g}"

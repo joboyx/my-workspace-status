@@ -55,6 +55,10 @@ Scroll position is reset only when the focused file changes, so a live refresh o
 
 Split rows (`left + RULE + right`) take column widths from `tui/split.rs`. Default fraction is 0.5. Mouse drag on the RULE (± 1 columns, same band as the tree/diff pane divider) updates a session-only split fraction; it is **not** written to disk, so the next launch resets to 50/50. Drag is armed only while the effective mode is side-by-side (`width ≥ NARROW_SXS`). `i` still toggles inline / split.
 
+## Focused row
+
+A focused file-diff row (section, hunk, or line) paints the same cursor bar as other lists. `j` / `k`, PageUp / PageDown, Ctrl-u / Ctrl-d, click, search, and vertical wheel move that row. The viewport keeps it near the vertical middle (`list_viewport_start`, same helper as the workspace tree). `gg` / `G` and Home / End jump to the first / last row.
+
 ## Horizontal pan
 
 Long diff lines are **not** word-wrapped. `h` / `←` and `l` / `→` pan when the right pane shows a file diff (same keys pan a focused graph or commit-file list). Shift+Left / Shift+Right pan the focused pane, including the tree. Mouse horizontal wheel (and Shift+wheel) pans the pane under the pointer without moving the focused row. When a file diff has long lines, trackpad hscroll (SGR `66`/`67`, same `tui/tty.rs` decode as the live loop) over the left pane pans that diff rather than a short tree label. Offset resets to 0 when the focused file changes. Header shows `· pan N` when offset > 0. A 1-row horizontal bar paints after the viewport leaves the left edge; a 1-column vertical bar paints after the list leaves the top. Rows stay clipped to the pane width.

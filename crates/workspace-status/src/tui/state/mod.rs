@@ -40,8 +40,7 @@ use super::commit_files::{
 };
 use super::ctrl_c_exit::{handle_ctrl_c, is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT};
 use super::diff::{
-    anchor_row_text, build_diff_rows, clamp_diff_scroll, find_anchor_row, row_search_text,
-    scroll_to_keep_row, DiffContent, DiffRow,
+    anchor_row_text, build_diff_rows, find_anchor_row, row_search_text, DiffContent, DiffRow,
 };
 use super::drill::{
     source_from_graph_row, stash_ref_from_graph_row, CommitFile, CommitFileSource, DrillView,
@@ -70,8 +69,8 @@ use super::stash::{
 };
 use super::theme::{cycle_theme_id, theme_from_env, ThemeId};
 use super::tree::{
-    build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
-    visible_window, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
+    build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, list_viewport_start,
+    visible_for_tree, visible_window, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
 };
 #[cfg(not(test))]
 use super::viewed::viewed_store_path;
@@ -254,6 +253,8 @@ pub struct AppState {
     pub drill: DrillView,
     pub diff_content: DiffContent,
     pub diff_scroll: u16,
+    /// Focused file-diff row (section, hunk, or line).
+    pub diff_cursor: usize,
     pub diff_repo: Option<String>,
     pub diff_path: Option<String>,
     pub reviewed: HashSet<String>,
@@ -362,6 +363,7 @@ impl AppState {
             drill: DrillView::Graph,
             diff_content: DiffContent::default(),
             diff_scroll: 0,
+            diff_cursor: 0,
             diff_repo: None,
             diff_path: None,
             reviewed: HashSet::new(),
@@ -503,7 +505,8 @@ impl AppState {
     ///
     /// Depth 0 left is the workspace tree; depth 1 left is the graph; depth 2
     /// left is the commit-file list. Right at depth 2 (and depth 0 file diffs)
-    /// is `None` so `j`/`k` scroll the diff.
+    /// is `None` so `j`/`k` move the focused file-diff row. The viewport keeps
+    /// that row near the vertical middle.
     pub(crate) fn list_focus_target(&self) -> ListFocusTarget {
         match &self.drill {
             DrillView::Graph => {
@@ -847,6 +850,7 @@ impl AppState {
         let folds = self.folds.clone();
         let graph_scroll = self.graph_scroll;
         let diff_scroll = self.diff_scroll;
+        let diff_cursor = self.diff_cursor;
         let before = self.signatures.clone();
         let old_rows = self.rows.clone();
         self.apply_snapshot(snapshot);
@@ -859,6 +863,7 @@ impl AppState {
         }
         self.graph_scroll = graph_scroll;
         self.diff_scroll = diff_scroll;
+        self.diff_cursor = diff_cursor;
         let now = Instant::now();
         self.prune_flash_state(now);
         if is_new_row_set(&before, &self.signatures) {
@@ -1220,31 +1225,12 @@ impl AppState {
         self.restore_commit_file_cursor(Some(&row.path));
     }
 
-    fn scroll_right(&mut self, delta: i32) {
-        if self.right_is_diff() || self.drill.is_diff() {
-            let max = self.diff_scroll_max() as i32;
-            let next = self.diff_scroll as i32 + delta;
-            self.diff_scroll = next.clamp(0, max) as u16;
-        } else {
-            let next = self.graph_scroll as i32 + delta;
-            self.graph_scroll = next.max(0) as u16;
-        }
-    }
-
     fn diff_body_height(&self) -> usize {
         let h_bar = u16::from(self.diff_col_offset > 0);
         self.layout
             .diff_pane_height
             .saturating_sub(1 + h_bar)
             .max(1) as usize
-    }
-
-    fn diff_scroll_max(&self) -> usize {
-        clamp_diff_scroll(
-            usize::MAX,
-            self.current_diff_rows().len(),
-            self.diff_body_height(),
-        )
     }
 
     fn split_layout(&self) -> SplitLayout {
@@ -1355,6 +1341,13 @@ impl AppState {
             if !self.right_is_diff() && self.graph.is_some() {
                 return self.click_graph(row, is_double, true);
             }
+            if self.right_is_diff() || self.drill.is_diff() {
+                self.click_diff(row);
+                if is_double {
+                    return self.nav_enter();
+                }
+                return Effect::None;
+            }
             if is_double {
                 return self.nav_enter();
             }
@@ -1392,6 +1385,27 @@ impl AppState {
             return self.nav_enter();
         }
         Effect::LoadRightPane
+    }
+
+    /// Select the file-diff row under `row` and keep it near the middle.
+    fn click_diff(&mut self, row: u16) {
+        let body_y = self.layout.right_y.saturating_add(1);
+        if row < body_y {
+            return;
+        }
+        if self.layout.diff_hscrollbar_y == Some(row) {
+            return;
+        }
+        let n = self.current_diff_rows().len();
+        if n == 0 {
+            return;
+        }
+        let idx = self.diff_scroll as usize + (row - body_y) as usize;
+        if idx >= n {
+            return;
+        }
+        self.diff_cursor = idx;
+        self.sync_diff_scroll();
     }
 
     fn is_tree_chevron(&self, col: u16, depth: usize) -> bool {
@@ -1436,6 +1450,7 @@ impl AppState {
         };
         if let Some(idx) = line.row_index {
             self.graph_cursor = idx;
+            self.sync_graph_scroll();
             if is_double {
                 return self.nav_enter();
             }
@@ -1581,12 +1596,20 @@ impl AppState {
             && self.diff_path.as_deref() == Some(path.as_str());
         if !same {
             self.diff_scroll = 0;
+            self.diff_cursor = 0;
             self.diff_col_offset = 0;
         }
         self.diff_repo = Some(repo);
         self.diff_path = Some(path);
         self.diff_content = content;
+        let n = self.current_diff_rows().len();
+        if n == 0 {
+            self.diff_cursor = 0;
+        } else {
+            self.diff_cursor = self.diff_cursor.min(n - 1);
+        }
         self.apply_pending_hunk_anchor();
+        self.sync_diff_scroll();
         if self.drill.is_graph() {
             self.graph = None;
         }
@@ -1887,7 +1910,8 @@ impl AppState {
             return;
         };
         self.search_hit = Some(idx);
-        self.diff_scroll = scroll_to_keep_row(idx, self.diff_body_height(), rows.len());
+        self.diff_cursor = idx;
+        self.sync_diff_scroll();
         self.set_search_status(true);
     }
 
@@ -1950,7 +1974,7 @@ impl AppState {
         let rows = self.current_diff_rows();
         self.pending_hunk_anchor = Some(anchor_row_text(
             &rows,
-            self.diff_scroll as usize,
+            self.diff_cursor,
             self.diff_body_height(),
         ));
         if !self.full_context.remove(&id) {
@@ -1975,7 +1999,8 @@ impl AppState {
         };
         let rows = self.current_diff_rows();
         let idx = find_anchor_row(&rows, &needle);
-        self.diff_scroll = scroll_to_keep_row(idx, self.diff_body_height(), rows.len());
+        self.diff_cursor = idx;
+        self.sync_diff_scroll();
     }
 
     fn focused_file_if_shown(&self) -> Option<(String, FileChange)> {
@@ -2201,7 +2226,7 @@ impl AppState {
                     }
                     _ => (self.diff_repo.as_deref(), self.diff_path.as_deref()),
                 };
-                let line = viewport_line_number(&self.current_diff_rows(), self.diff_scroll);
+                let line = viewport_line_number(&self.current_diff_rows(), self.diff_cursor as u16);
                 resolve_comment_target(
                     &self.snapshot,
                     None,
@@ -2891,6 +2916,29 @@ impl AppState {
         self.graph_scroll = start as u16;
     }
 
+    fn sync_diff_scroll(&mut self) {
+        let n = self.current_diff_rows().len();
+        if n == 0 {
+            self.diff_cursor = 0;
+            self.diff_scroll = 0;
+            return;
+        }
+        self.diff_cursor = self.diff_cursor.min(n - 1);
+        let (start, _) = visible_window(n, self.diff_cursor, self.diff_body_height());
+        self.diff_scroll = start as u16;
+    }
+
+    fn move_diff_cursor(&mut self, delta: i32) {
+        let n = self.current_diff_rows().len();
+        if n == 0 {
+            self.diff_cursor = 0;
+            self.diff_scroll = 0;
+            return;
+        }
+        self.diff_cursor = (self.diff_cursor as i32 + delta).clamp(0, n as i32 - 1) as usize;
+        self.sync_diff_scroll();
+    }
+
     fn page_step(&self) -> i32 {
         self.layout.tree_height.max(1).saturating_sub(1).max(1) as i32
     }
@@ -2914,7 +2962,7 @@ impl AppState {
                 self.follow_graph_files()
             }
             ListFocusTarget::None => {
-                self.scroll_right(delta);
+                self.move_diff_cursor(delta);
                 Effect::None
             }
             ListFocusTarget::Tree => {
@@ -2943,12 +2991,9 @@ impl AppState {
                 self.follow_graph_files()
             }
             ListFocusTarget::None => {
-                // Focused file / commit diff: `gg` / Home start, `G` / End end.
-                self.diff_scroll = if end {
-                    self.diff_scroll_max() as u16
-                } else {
-                    0
-                };
+                let n = self.current_diff_rows().len();
+                self.diff_cursor = if end { n.saturating_sub(1) } else { 0 };
+                self.sync_diff_scroll();
                 Effect::None
             }
             ListFocusTarget::Tree => {
@@ -7105,9 +7150,15 @@ mod tests {
         app.focus = FocusPane::Right;
         app.layout.diff_pane_height = 8;
         assert_eq!(app.list_focus_target(), ListFocusTarget::None);
-        app.dispatch(Action::ScrollDiff(3));
+        let view_h = app.diff_body_height();
+        let past_mid = (view_h / 2 + 2) as i32;
+        app.dispatch(Action::Move(past_mid));
         let mid = app.diff_scroll;
-        assert!(mid > 0, "ScrollDiff should leave the top");
+        assert!(
+            mid > 0,
+            "Move past the midpoint should leave the top, scroll={mid} cursor={}",
+            app.diff_cursor
+        );
         app.dispatch(Action::MoveToEnd);
         assert!(
             app.diff_scroll > mid,
@@ -7117,7 +7168,45 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Right);
         app.dispatch(Action::MoveToStart);
         assert_eq!(app.diff_scroll, 0);
+        assert_eq!(app.diff_cursor, 0);
         assert_eq!(app.focus, FocusPane::Right);
+    }
+
+    #[test]
+    fn focused_diff_j_past_midpoint_keeps_focus_near_middle() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        let mut lines = vec!["@@ -1,1 +1,40 @@".into()];
+        lines.extend((0..40).map(|i| format!("+line {i}")));
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            DiffContent::from_lines(lines),
+        );
+        app.focus = FocusPane::Right;
+        app.layout.diff_pane_height = 8;
+        let n = app.current_diff_rows().len();
+        let view_h = app.diff_body_height();
+        assert_eq!(view_h, 7);
+        let steps = view_h / 2 + 3;
+        app.dispatch(Action::Move(steps as i32));
+        assert_eq!(app.diff_cursor, steps);
+        assert_eq!(
+            app.diff_scroll as usize,
+            list_viewport_start(n, app.diff_cursor, view_h)
+        );
+        let offset = app.diff_cursor - app.diff_scroll as usize;
+        assert_eq!(
+            offset,
+            view_h / 2,
+            "focused diff row should sit at the vertical middle, offset={offset} mid={}",
+            view_h / 2
+        );
+        assert_ne!(
+            offset,
+            view_h.saturating_sub(1),
+            "keep-middle must not leave the focused row on the last viewport line"
+        );
     }
 
     #[test]
@@ -7253,6 +7342,60 @@ mod tests {
         app.dispatch(Action::MoveToStart);
         assert_eq!(app.graph_cursor, 0);
         assert_eq!(app.graph_scroll, 0);
+    }
+
+    #[test]
+    fn graph_j_past_midpoint_keeps_focus_near_middle() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_linear_graph(&mut app, 40);
+        app.layout.tree_height = 12;
+        let list_h = app.graph_chrome().list_height.max(1) as usize;
+        assert_eq!(list_h, 10, "list_height from chrome budget");
+        app.graph_cursor = 0;
+        app.sync_graph_scroll();
+        let steps = list_h / 2 + 4;
+        app.dispatch(Action::Move(steps as i32));
+        let idx = painted_focus_index(&app);
+        let scroll = app.graph_scroll as usize;
+        let offset = idx.saturating_sub(scroll);
+        let mid = list_h / 2;
+        assert!(
+            (offset as i32 - mid as i32).abs() <= 1,
+            "focused painted row should sit near the middle: offset={offset} mid={mid} idx={idx} scroll={scroll} list_h={list_h}"
+        );
+        assert_ne!(
+            offset,
+            list_h.saturating_sub(1),
+            "keep-middle must not leave the focused row on the last viewport line"
+        );
+    }
+
+    #[test]
+    fn graph_scrollbar_drag_does_not_recenter_until_focus_moves() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_linear_graph(&mut app, 40);
+        app.layout.tree_height = 12;
+        app.dispatch(Action::MoveToEnd);
+        let cursor = app.graph_cursor;
+        let scrolled = app.graph_scroll;
+        assert!(scrolled > 0, "End should leave the top of the graph");
+        app.graph_scroll = 0;
+        assert_eq!(
+            app.graph_cursor, cursor,
+            "viewport-only scroll must not move the graph cursor"
+        );
+        assert_eq!(
+            app.graph_scroll, 0,
+            "scrollbar drag must keep an independent viewport until the focused row moves"
+        );
+        app.dispatch(Action::Move(0));
+        assert_eq!(app.graph_cursor, cursor);
+        assert_eq!(
+            app.graph_scroll, scrolled,
+            "the next focused-row move recentres the viewport"
+        );
     }
 
     #[test]

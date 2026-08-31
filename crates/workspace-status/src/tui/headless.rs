@@ -368,6 +368,11 @@ impl HeadlessTui {
         self.state.diff_scroll
     }
 
+    /// Focused file-diff row (section, hunk, or line).
+    pub fn diff_cursor(&self) -> usize {
+        self.state.diff_cursor
+    }
+
     /// Diff horizontal scrollbar track from the last paint, if the bar is up.
     pub fn diff_hscrollbar_track(&self) -> Option<(u16, u16, u16)> {
         let y = self.state.layout.diff_hscrollbar_y?;

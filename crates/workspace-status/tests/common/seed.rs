@@ -147,6 +147,34 @@ pub fn seed_long_path_file(workspace: &Path) {
     fs::write(long_dir.join(TREE_HSCROLL_FILE), "export const pan = 1;\n").unwrap();
 }
 
+/// Linear history of 30 commits so the graph list overflows a default pane.
+pub fn seed_tall_graph(workspace: &Path, name: &str) {
+    seed_repo(workspace, name, "main", false);
+    let repo = workspace.join(name);
+    for i in 0..30 {
+        fs::write(repo.join("count.txt"), format!("{i}\n")).unwrap();
+        git(&repo, &["add", "count.txt"]);
+        git(&repo, &["commit", "-q", "-m", &format!("count {i}")]);
+    }
+    git(&repo, &["checkout", "-q", "-b", "feature/tall"]);
+}
+
+/// One commit with many files so the commit-file list overflows a default pane.
+pub fn seed_many_commit_files(workspace: &Path, name: &str, count: usize) {
+    seed_repo(workspace, name, "main", false);
+    let repo = workspace.join(name);
+    for i in 0..count {
+        fs::write(
+            repo.join(format!("keepmid-{i:02}.txt")),
+            format!("keepmid-{i:02}-body\n"),
+        )
+        .unwrap();
+    }
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "keepmid-files-commit"]);
+    git(&repo, &["checkout", "-q", "-b", "feature/files"]);
+}
+
 /// Long line plus many rows so a focused file-diff can pan and scroll.
 ///
 /// `tail` is usually `hscroll::DIFF_HSCROLL_TAIL`.

@@ -16,22 +16,10 @@ use common::hscroll::{
 };
 use common::seed::{
     daily_workspace, focus_workspace, git, git_env, seed_long_diff_file, seed_long_path_file,
-    seed_primary_and_linked_family, seed_repo,
+    seed_primary_and_linked_family, seed_repo, seed_tall_graph,
 };
 use workspace_status::tui::HeadlessTui;
 use workspace_status_graph::UNICODE;
-
-/// Long linear history so the graph list overflows and shows a scrollbar thumb.
-fn seed_tall_graph(workspace: &Path, name: &str) {
-    seed_repo(workspace, name, "main", false);
-    let repo = workspace.join(name);
-    for i in 0..30 {
-        fs::write(repo.join("count.txt"), format!("{i}\n")).unwrap();
-        git(&repo, &["add", "count.txt"]);
-        git(&repo, &["commit", "-q", "-m", &format!("count {i}")]);
-    }
-    git(&repo, &["checkout", "-q", "-b", "feature/tall"]);
-}
 
 fn seed_demo_dest() -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -363,13 +351,14 @@ fn gg_g_jump_focused_pane_including_file_diff() {
         "Tab should focus the file diff:\n{}",
         tui.frame()
     );
-    for _ in 0..8 {
+    for _ in 0..20 {
         tui.key('j');
     }
     let mid = tui.diff_scroll();
     assert!(
         mid > 0,
-        "j on a focused tall diff should leave the top, scroll={mid}"
+        "j past the midpoint on a focused tall diff should leave the top, scroll={mid} cursor={}",
+        tui.diff_cursor()
     );
     tui.key('G');
     assert!(

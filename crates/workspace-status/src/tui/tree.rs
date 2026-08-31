@@ -1114,6 +1114,10 @@ pub fn visible_for_tree(snapshot: &WorkspaceSnapshot) -> WorkspaceSnapshot {
 }
 
 /// First visible index, centred on `cursor`.
+///
+/// Shared by the workspace tree, graph, commit-file list, and file-diff
+/// focused rows. When the focused row moves, the viewport keeps it as
+/// close to the vertical middle as the list length allows.
 pub(crate) fn list_viewport_start(row_count: usize, cursor: usize, height: usize) -> usize {
     let view_height = height.max(1);
     let max_start = row_count.saturating_sub(view_height);

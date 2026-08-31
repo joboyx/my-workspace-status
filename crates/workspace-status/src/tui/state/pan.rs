@@ -172,9 +172,12 @@ impl AppState {
                     self.focus = FocusPane::Right;
                     if self.drill.is_files() {
                         self.move_file_cursor(delta)
-                    } else {
-                        self.scroll_right(delta);
+                    } else if self.right_is_diff() || self.drill.is_diff() {
+                        self.move_diff_cursor(delta);
                         Effect::None
+                    } else {
+                        self.move_graph_cursor(delta);
+                        self.follow_graph_files()
                     }
                 } else if self.drill.is_diff() {
                     self.focus = FocusPane::Left;

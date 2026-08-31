@@ -441,7 +441,7 @@ fn key_to_action(
 fn normal_key(
     key: KeyEvent,
     search_active: bool,
-    right_is_diff: bool,
+    _right_is_diff: bool,
     focus_right: bool,
     graph_stash_focused: bool,
     graph_commit_focused: bool,
@@ -467,18 +467,10 @@ fn normal_key(
         return Action::ToggleFullContext;
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
-        return if focus_right && right_is_diff {
-            Action::ScrollDiff(-5)
-        } else {
-            Action::Move(-5)
-        };
+        return Action::Move(-5);
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d') {
-        return if focus_right && right_is_diff {
-            Action::ScrollDiff(5)
-        } else {
-            Action::Move(5)
-        };
+        return Action::Move(5);
     }
     match key.code {
         KeyCode::Char('T') => Action::CycleTheme,
@@ -520,34 +512,10 @@ fn normal_key(
         KeyCode::Char('g') => Action::ArmGChord,
         KeyCode::Home => Action::MoveToStart,
         KeyCode::End => Action::MoveToEnd,
-        KeyCode::PageUp => {
-            if focus_right && right_is_diff {
-                Action::ScrollDiff(-10)
-            } else {
-                Action::PageMove(-1)
-            }
-        }
-        KeyCode::PageDown => {
-            if focus_right && right_is_diff {
-                Action::ScrollDiff(10)
-            } else {
-                Action::PageMove(1)
-            }
-        }
-        KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => {
-            if focus_right && right_is_diff {
-                Action::ScrollDiff(1)
-            } else {
-                Action::Move(1)
-            }
-        }
-        KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => {
-            if focus_right && right_is_diff {
-                Action::ScrollDiff(-1)
-            } else {
-                Action::Move(-1)
-            }
-        }
+        KeyCode::PageUp => Action::PageMove(-1),
+        KeyCode::PageDown => Action::PageMove(1),
+        KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::Move(1),
+        KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::Move(-1),
         KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => {
             hl_or_pan(key, -1, focus_right, hl_folds)
         }
@@ -818,10 +786,10 @@ mod tests {
     }
 
     #[test]
-    fn right_diff_j_scrolls() {
+    fn right_diff_j_moves_focused_row() {
         assert_eq!(
             event_to_action(&key(KeyCode::Char('j')), normal(), true, true),
-            Action::ScrollDiff(1)
+            Action::Move(1)
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('j')), normal(), true, false),
@@ -1422,11 +1390,11 @@ mod tests {
         );
         assert_eq!(
             event_to_action(&ctrl(KeyCode::Char('d')), normal(), true, true),
-            Action::ScrollDiff(5)
+            Action::Move(5)
         );
         assert_eq!(
             event_to_action(&ctrl(KeyCode::Char('u')), normal(), true, true),
-            Action::ScrollDiff(-5)
+            Action::Move(-5)
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('m')), normal(), false, false),
@@ -1551,7 +1519,7 @@ mod tests {
                 true,
                 true
             ),
-            Action::ScrollDiff(1)
+            Action::Move(1)
         );
         assert_eq!(
             event_to_action(

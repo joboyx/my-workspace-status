@@ -3,6 +3,7 @@
 use std::time::Instant;
 
 use super::super::action::{Action, Effect};
+use super::super::gates::ListFocusTarget;
 use super::super::split::SplitDrag;
 use super::{AppState, FocusPane, FoldOp};
 
@@ -31,6 +32,9 @@ impl AppState {
             Action::PageMove(pages) => {
                 if self.graph_pane_focused() {
                     self.page_graph(pages)
+                } else if self.list_focus_target() == ListFocusTarget::None {
+                    let height = self.diff_body_height().saturating_sub(1).max(1) as i32;
+                    self.move_focused(pages * height)
                 } else {
                     let height = self.page_step();
                     self.move_focused(pages * height)
@@ -74,7 +78,7 @@ impl AppState {
                 Effect::None
             }
             Action::ScrollDiff(delta) => {
-                self.scroll_right(delta);
+                self.move_diff_cursor(delta);
                 Effect::None
             }
             Action::ToggleFullContext => self.toggle_full_context(),
