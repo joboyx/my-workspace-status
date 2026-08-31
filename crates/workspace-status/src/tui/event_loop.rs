@@ -319,6 +319,15 @@ async fn sleep_ms(ms: u64) {
 }
 
 fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event) {
+    // CSI-u with REPORT_EVENT_TYPES sends a Release after every Press.
+    // Map that to no action, and do not dispatch: `dispatch` clears the
+    // `gg` pending on every action except `ArmGChord`, so a Release
+    // `Action::None` would disarm the chord before the second `g`.
+    if let crossterm::event::Event::Key(key) = &event {
+        if key.kind == crossterm::event::KeyEventKind::Release {
+            return;
+        }
+    }
     let action = map_event(ctx.state, &event);
     if ctx.interp.busy_for_writes() {
         match classify_busy_action(&action) {
