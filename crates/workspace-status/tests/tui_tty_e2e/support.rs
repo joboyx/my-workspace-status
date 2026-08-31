@@ -733,3 +733,170 @@ pub fn documented_graph_stash_pop(screen: &str) -> bool {
         && status.contains(" split")
         && no_wrong_stash_pop_overlays(screen)
 }
+
+/// SEARCH / help / merger-stash / stage toasts that are not app stash create.
+pub fn no_stash_wrong_ops(screen: &str) -> bool {
+    !screen.contains("SEARCH")
+        && !screen.contains("MOVE")
+        && !screen.contains("WIP on graph")
+        && !screen.contains("popped")
+        && !crumb_row(screen).contains("staged")
+}
+
+/// App graph lists `stash@{0}` (`WIP on main`). Merger stash cannot pass.
+pub fn app_stash_on_graph(screen: &str) -> bool {
+    screen.contains("WIP on main")
+        && screen.contains("stash@{0}")
+        && screen.contains("seed app")
+        && !screen.contains("WIP on graph")
+}
+
+/// Graph stash row hints. Status chips, not overlay `a apply`.
+pub fn has_graph_stash_hints(screen: &str) -> bool {
+    let status = status_row(screen);
+    status.contains("apply stash") && status.contains("drop stash") && status.contains("pop stash")
+}
+
+/// CSI-u Shift+S opened the create-only overlay on the dirty README.
+pub fn stash_create_overlay_open(screen: &str) -> bool {
+    tree_cursor_on(screen, "README.md")
+        && !tree_cursor_on(screen, "app")
+        && tree_has(screen, "README.md")
+        && readme_unstaged_badge(screen)
+        && pane_unstaged_readme(screen)
+        && screen.contains("Stash app")
+        && screen.contains("s create")
+        && screen.contains("Esc cancel")
+        && !screen.contains("a apply")
+        && !screen.contains("p pop")
+        && !screen.contains("d drop")
+        && !screen.contains("SEARCH")
+        && !screen.contains("MOVE")
+        && !screen.contains("WIP on main")
+}
+
+/// Overlay `s` created a path-scoped stash. README left the tree.
+pub fn documented_stash_created(screen: &str) -> bool {
+    let crumb = crumb_row(screen);
+    tree_cursor_on(screen, "No updates")
+        && !tree_cursor_on(screen, "README.md")
+        && !tree_cursor_on(screen, "app")
+        && !tree_has(screen, "README.md")
+        && !tree_has(screen, "app")
+        && tree_has(screen, "No updates")
+        && tree_has(screen, "0 changed")
+        && crumb.contains("Stashed 1 file")
+        && !screen.contains("Stash app")
+        && !screen.contains("s create")
+        && !screen.contains("UNSTAGED")
+        && !screen.contains("WIP on main")
+        && !crumb.contains("staged")
+        && !crumb.contains("applied")
+        && !crumb.contains("popped")
+        && !crumb.contains("dropped")
+        && no_stash_wrong_ops(screen)
+}
+
+/// `l` unfolded No updates. App is listed. README is gone.
+pub fn no_updates_unfolded_after_stash(screen: &str) -> bool {
+    tree_cursor_on(screen, "No updates")
+        && tree_has(screen, "app")
+        && tree_has(screen, "lib")
+        && !tree_has(screen, "README.md")
+}
+
+/// `l` then `j`: app is focused under No updates. App graph shows the stash.
+pub fn app_focused_stash_visible(screen: &str) -> bool {
+    tree_cursor_on(screen, "app")
+        && !tree_cursor_on(screen, "No updates")
+        && !tree_cursor_on(screen, "README.md")
+        && !tree_has(screen, "README.md")
+        && tree_has(screen, "app")
+        && tree_has(screen, "lib")
+        && tree_has(screen, "No updates")
+        && app_stash_on_graph(screen)
+        && screen.contains("working tree clean")
+        && crumb_row(screen).contains("workspace › app")
+        && !crumb_row(screen).contains("[app]")
+        && tree_pane_focused(screen)
+        && no_stash_wrong_ops(screen)
+}
+
+/// Tab focused the app graph on the working-tree row. Stash is the next row.
+pub fn app_graph_working_tree_focused(screen: &str) -> bool {
+    graph_pane_focused(screen)
+        && tree_cursor_on(screen, "app")
+        && graph_cursor_on(screen, "working tree clean")
+        && !graph_cursor_on(screen, "WIP on main")
+        && app_stash_on_graph(screen)
+        && crumb_row(screen).contains("[app]")
+        && no_stash_wrong_ops(screen)
+}
+
+/// `j` landed on the app stash row. Graph `a` / `D` hints. Not merger.
+pub fn app_graph_stash_row_focused(screen: &str) -> bool {
+    graph_pane_focused(screen)
+        && tree_cursor_on(screen, "app")
+        && graph_cursor_on(screen, "WIP on main")
+        && app_stash_on_graph(screen)
+        && has_graph_stash_hints(screen)
+        && crumb_row(screen).contains("[app]")
+        && !screen.contains("Drop stash@{0}?")
+        && no_stash_wrong_ops(screen)
+}
+
+/// Graph `a` applied. README is dirty again. Stash stays (not pop).
+pub fn documented_stash_applied(screen: &str) -> bool {
+    let crumb = crumb_row(screen);
+    graph_pane_focused(screen)
+        && tree_has(screen, "README.md")
+        && tree_has(screen, "app")
+        && tree_has(screen, "1 changed")
+        && readme_unstaged_badge(screen)
+        && screen.contains("uncommitted changes")
+        && graph_cursor_on(screen, "WIP on main")
+        && app_stash_on_graph(screen)
+        && has_graph_stash_hints(screen)
+        && crumb.contains("applied stash@{0}")
+        && !crumb.contains("popped")
+        && !crumb.contains("dropped")
+        && !crumb.contains("Stashed")
+        && !screen.contains("Drop stash@{0}?")
+        && no_stash_wrong_ops(screen)
+}
+
+/// CSI-u Shift+D opened drop confirm. Stash and dirty README stay until `y`.
+pub fn stash_drop_confirm_open(screen: &str) -> bool {
+    graph_pane_focused(screen)
+        && screen.contains("Drop stash@{0}?")
+        && tree_has(screen, "README.md")
+        && readme_unstaged_badge(screen)
+        && graph_cursor_on(screen, "WIP on main")
+        && app_stash_on_graph(screen)
+        && screen.contains("uncommitted changes")
+        && !screen.contains("SEARCH")
+        && !screen.contains("MOVE")
+        && !screen.contains("WIP on graph")
+        && !screen.contains("popped")
+}
+
+/// Confirm `y` dropped the stash. Dirty README stays. Not pop.
+pub fn documented_stash_dropped(screen: &str) -> bool {
+    let crumb = crumb_row(screen);
+    let status = status_row(screen);
+    graph_pane_focused(screen)
+        && tree_has(screen, "README.md")
+        && tree_has(screen, "app")
+        && tree_has(screen, "1 changed")
+        && readme_unstaged_badge(screen)
+        && screen.contains("uncommitted changes")
+        && graph_cursor_on(screen, "seed app")
+        && !screen.contains("WIP on main")
+        && !screen.contains("Drop stash@{0}?")
+        && !status.contains("apply stash")
+        && !status.contains("drop stash")
+        && crumb.contains("dropped stash@{0}")
+        && !crumb.contains("popped")
+        && !crumb.contains("applied")
+        && no_stash_wrong_ops(screen)
+}
