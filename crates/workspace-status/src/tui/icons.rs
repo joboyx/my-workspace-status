@@ -85,11 +85,15 @@ pub fn icon_no_upstream(ascii: bool) -> &'static str {
 pub fn icon_synced(ascii: bool) -> &'static str {
     glyph(ascii, "", "=")
 }
-/// HEAD is an ancestor of the default-branch tip. Nerd: nf-fa-check-circle; ASCII: `M`.
+/// HEAD is a strict ancestor of the default-branch tip. Nerd: nf-fa-check-circle; ASCII: `M`.
+///
+/// Same-commit as that tip is not merged (`icon_open_vs_default`).
 pub fn icon_merged_into_default(ascii: bool) -> &'static str {
     glyph(ascii, "", "M")
 }
 /// HEAD is not merged into default. Nerd: nf-fa-tree; ASCII: `o`.
+///
+/// Includes a just-created branch whose HEAD matches the default tip.
 pub fn icon_open_vs_default(ascii: bool) -> &'static str {
     glyph(ascii, "", "o")
 }
@@ -379,6 +383,9 @@ pub fn tui_file_badge(change: &FileChange) -> &'static str {
 /* ── Branch / sync ──────────────────────────────────────────────────────── */
 
 /// Merge-into-default mark for TUI branch chrome. Never emoji.
+///
+/// `Some(true)` is the checkmark. `Some(false)` is open, including a
+/// just-created branch whose HEAD matches the default tip.
 pub fn tui_merge_mark(ascii: bool, merged: Option<bool>) -> &'static str {
     match merged {
         Some(true) => icon_merged_into_default(ascii),

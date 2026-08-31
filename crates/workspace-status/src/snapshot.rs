@@ -75,6 +75,11 @@ pub struct RepoSnapshot {
     pub changes: Vec<FileChange>,
     pub checkout_kind: CheckoutKind,
     pub primary_repo: Option<String>,
+    /// Whether HEAD is merged into the default branch.
+    ///
+    /// `Some(true)` only when HEAD is a strict ancestor of the default tip.
+    /// Same-commit as that tip is `Some(false)` (just-created, not merged).
+    /// `None` when not checked, on the default branch, or detached.
     pub merged_into_default: Option<bool>,
     pub default_branch_override: Option<String>,
     /// Local `refs/heads` names. TUI comment GC. Omitted from `--json`.
@@ -95,6 +100,8 @@ pub struct WorkspaceRepoSnapshot {
     pub checkout_kind: CheckoutKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_repo: Option<String>,
+    /// Whether HEAD is merged into the default branch. Same rules as
+    /// [`RepoSnapshot::merged_into_default`].
     pub merged_into_default: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_branch_override: Option<String>,

@@ -237,6 +237,17 @@ pub fn is_ancestor(cwd: &Path, maybe_ancestor: &str, tip: &str) -> Option<bool> 
     }
 }
 
+/// True when `HEAD` and `git_ref` resolve to the same commit SHA.
+///
+/// A just-created branch at the default tip is this case. Same-commit is
+/// not merged work (`classify_merged_into_default`).
+pub fn head_equals_ref(cwd: &Path, git_ref: &str) -> bool {
+    match (rev_parse_quiet("HEAD", cwd), rev_parse_quiet(git_ref, cwd)) {
+        (Some(head), Some(tip)) if !head.is_empty() && !tip.is_empty() => head == tip,
+        _ => false,
+    }
+}
+
 /// First existing tip among `origin/<default>` then `<default>`.
 pub fn resolve_default_branch_tip_ref(cwd: &Path, default_branch: &str) -> Option<String> {
     let origin = format!("origin/{default_branch}");

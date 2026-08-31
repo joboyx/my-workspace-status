@@ -25,6 +25,7 @@ All wrappers in this file attach stdin to `/dev/null` and set `GIT_TERMINAL_PROM
 | `revert_tracked_file` / `remove_untracked_file` | `restore -- <path>` / `clean -f -- <path>` | `Result` | TUI `x`. **Destructive.** |
 | `list_worktrees_porcelain(cwd)` | `worktree list --porcelain` | stdout (or `""`) | Enumerate checkouts for linked-worktree discovery |
 | `is_ancestor(cwd, maybe_ancestor, tip)` | `merge-base --is-ancestor` | `Some(true/false)` / `None` | Merge-into-default probe |
+| `head_equals_ref(cwd, git_ref)` | `rev-parse` of `HEAD` and `git_ref` | boolean | Same-commit as default tip is open, not merged |
 | `resolve_default_branch_tip_ref` / `resolve_default_branch_name` / `get_default_branch` | `rev-parse` / `symbolic-ref` / `show-ref` | branch / tip | Default branch name and tip for classification and `-d` |
 | `create_branch_at(cwd, name, commit_id)` | `branch -- <name> <commitId>` | `Result` | Create a local ref **without** checking it out (graph `c`) |
 | `create_branch_checkout(cwd, name)` | `checkout -b <name> --quiet` | `Result` | Picker `C` |
@@ -48,7 +49,7 @@ Every wrapper that takes a path puts `--` before it, so a file named `-f` or `HE
 | `expand_repos_with_linked_worktrees` | `worktree list --porcelain` per main checkout |
 | `process_repo` (when `do_fetch`) | `fetch --quiet` — failure is caught and ignored; stale refs are better than no output |
 | `process_repo` | `status --porcelain=v1 --branch --ahead-behind --untracked-files=all` |
-| `process_repo` (merge probe) | `resolve_default_branch_name` + `resolve_default_branch_tip_ref` + `merge-base --is-ancestor HEAD <tip>` |
+| `process_repo` (merge probe) | `resolve_default_branch_name` + `resolve_default_branch_tip_ref` + `merge-base --is-ancestor HEAD <tip>` + same-commit SHA compare. Same-commit as the default tip is open, not merged. |
 
 After `find_repos_with_config` (primaries; still skips dot-dirs), discovery lists linked worktrees under the workspace cwd, applies the same ignore / named-filter rules (filter on a primary includes its linked children; filter on a linked path includes only that path), dedupes by path (linked metadata wins), and runs `process_repo` with `checkout_kind` / `primary_repo`. Independent checkouts run with a cap of `FETCH_CONCURRENCY` (4; `WS_STATUS_FETCH_CONCURRENCY`) so a live watch tick is not one-repo-at-a-time. There is no inotify.
 
@@ -105,7 +106,7 @@ Manual `f` / `p` / `P` / `d` and the background fetch tick paint a trailing brea
 
 **Bulk revert with counted confirm.** `x` uses the same `collect_write_files` scope, keeping unstaged or untracked (staged-only skipped). Confirm shows counts; `y`/`Enter` runs `git restore` on tracked targets and **keeps** untracked; `Y` also deletes each untracked via `remove_untracked_file` (per-file `clean -f`, not `clean -fd`). Exception: a single untracked target still deletes on both `y` and `Y`. Empty after filter: `Nothing to discard` (or `Nothing to discard (staged only)` on a staged-only file).
 
-**Remove linked worktree (`W`).** Linked `Checkout` rows only. Confirm shows branch, `merged into default` / `NOT merged into default`, and `--force` when dirty. On Unix, bind-mount aliases remap via inode so gitdir back-pointers match. On Windows, worktree identity is canonical path plus size and mtime (no inode / bind-mount remap).
+**Remove linked worktree (`W`).** Linked `Checkout` rows only. Confirm shows branch, `merged into default` / `NOT merged into default`, and `--force` when dirty. Same-commit as the default tip is `NOT merged into default` (just created). On Unix, bind-mount aliases remap via inode so gitdir back-pointers match. On Windows, worktree identity is canonical path plus size and mtime (no inode / bind-mount remap).
 
 **Reverting an untracked file deletes it.** There is no git object to restore to, so untracked “revert” means remove from disk — irrecoverable. Bulk `y` leaves untracked alone; opt in with `Y`, or press `y` when the only target is one untracked file.
 

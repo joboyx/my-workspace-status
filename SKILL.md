@@ -47,12 +47,12 @@ The CLI produces:
    - Clean default-branch repos are ordered by sync priority first, then default-branch priority, then repo name
    - Format: `<repo-name> <branch-emoji> <branch-name>  <sync-emoji>  <changes-emoji>  [optional-note]`
    - Symlinked directories and repos whose `.git` is a file (some submodules / non-dot linked checkouts) are discovered by the directory walk like regular repos
-   - Linked worktrees under cwd (via `git worktree list`; walk still skips dot dirs such as `.worktrees/`) also appear, with a `🔗` repo prefix and optional `✅`/`🌱` merge-into-default marks on non-default branches; verbose column for dirty/clean state is **Files** (not Worktree)
+   - Linked worktrees under cwd (via `git worktree list`; walk still skips dot dirs such as `.worktrees/`) also appear, with a `🔗` repo prefix and optional `✅`/`🌱` merge-into-default marks on non-default branches (`✅` only when HEAD is a strict ancestor of the default tip; same-commit is `🌱`); verbose column for dirty/clean state is **Files** (not Worktree)
 
 **Emoji Legend:**
 
 - Branch: 🔥 (main/master), 🚧 (feature), 🐛 (bugfix), 🔧 (chore), 🚀 (release), 🌿 (develop / unknown)
-- Merge-into-default (non-default branches): ✅ merged, 🌱 open (omit when unknown / on default)
+- Merge-into-default (non-default branches): ✅ merged (strict ancestor of the default tip), 🌱 open (including HEAD equal to that tip)
 - Sync: ✅ (up-to-date), ⬇️ (behind), ⬆️ (ahead), 🔀 (diverged)
 - Files (dirty/clean working tree): 💾 (clean), 📝 (uncommitted), ✨ (staged), ⚠️ (both staged+uncommitted)
 - Linked checkout: 🔗 prefix on repo path; summary section `🔗 Linked worktrees`

@@ -40,7 +40,7 @@ Paths are workspace-relative. The snapshot does not include the workspace root, 
 | `syncNote` | string | Extra sync text (`ahead by 2`, `status failed`, empty). |
 | `checkoutKind` | string | `primary` or `linked`. |
 | `primaryRepo` | string | Present on linked checkouts. Path of the primary checkout. |
-| `mergedIntoDefault` | boolean or null | Whether HEAD is merged into the default branch. `null` when not checked. |
+| `mergedIntoDefault` | boolean or null | Whether HEAD is merged into the default branch. `true` only when HEAD is a strict ancestor of the default tip. Same-commit as that tip (a just-created branch) is `false`. `null` when not checked, on the default branch, or detached. |
 | `defaultBranchOverride` | string | Present when workspace config sets a default branch for this repo. |
 | `hasUnstaged` | boolean | Unstaged tracked changes. |
 | `hasStaged` | boolean | Staged changes. |

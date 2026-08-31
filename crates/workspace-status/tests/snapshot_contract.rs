@@ -18,7 +18,10 @@ fn git_env() -> Vec<(&'static str, &'static str)> {
         ("GIT_AUTHOR_NAME", "workspace-status e2e"),
         ("GIT_AUTHOR_EMAIL", "workspace-status-e2e@example.invalid"),
         ("GIT_COMMITTER_NAME", "workspace-status e2e"),
-        ("GIT_COMMITTER_EMAIL", "workspace-status-e2e@example.invalid"),
+        (
+            "GIT_COMMITTER_EMAIL",
+            "workspace-status-e2e@example.invalid",
+        ),
     ]
 }
 
@@ -95,7 +98,11 @@ fn run_plain(workspace: &Path, args: &[&str]) -> String {
         cmd.env(k, v);
     }
     let out = cmd.output().expect("run binary");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -234,7 +241,9 @@ fn named_filter_includes_ignored_and_unknown_exits() {
 fn ws_alias_runs_same_binary() {
     let (root, workspace) = fixture();
     let mut cmd = Command::new(ws_bin());
-    cmd.args(["--json"]).current_dir(&workspace).env("TERM", "dumb");
+    cmd.args(["--json"])
+        .current_dir(&workspace)
+        .env("TERM", "dumb");
     let out = cmd.output().unwrap();
     assert!(out.status.success());
     let snapshot: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -248,5 +257,74 @@ fn default_without_flags_is_plain() {
     let plain = run_plain(&workspace, &[]);
     assert!(plain.contains("File changes"));
     assert!(plain.contains("app"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn merged_into_default_skips_same_commit_as_default_tip() {
+    let root = std::env::temp_dir().join(format!(
+        "workspace-status-merge-mark-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    seed_repo(&workspace, "fresh", "main", false);
+    git(
+        &workspace.join("fresh"),
+        &["checkout", "-q", "-b", "feature/just-created"],
+    );
+
+    seed_repo(&workspace, "landed", "main", false);
+    let landed = workspace.join("landed");
+    git(&landed, &["checkout", "-q", "-b", "feature/landed"]);
+    fs::write(landed.join("landed.txt"), "unique then merged\n").unwrap();
+    git(&landed, &["add", "landed.txt"]);
+    git(&landed, &["commit", "-q", "-m", "landed unique"]);
+    git(&landed, &["checkout", "-q", "main"]);
+    git(
+        &landed,
+        &[
+            "merge",
+            "--no-ff",
+            "-q",
+            "-m",
+            "merge landed",
+            "feature/landed",
+        ],
+    );
+    git(&landed, &["checkout", "-q", "feature/landed"]);
+
+    let snapshot = run_json(&workspace, &["--json"]);
+    let repos = snapshot["repos"].as_array().unwrap();
+    let fresh = repos.iter().find(|r| r["repo"] == "fresh").unwrap();
+    let landed_row = repos.iter().find(|r| r["repo"] == "landed").unwrap();
+    assert_eq!(fresh["branch"], "feature/just-created");
+    assert_eq!(
+        fresh["mergedIntoDefault"], false,
+        "HEAD equal to the default tip is not merged: {fresh}"
+    );
+    assert_eq!(landed_row["branch"], "feature/landed");
+    assert_eq!(
+        landed_row["mergedIntoDefault"], true,
+        "strict ancestor of default must stay merged: {landed_row}"
+    );
+
+    let plain = run_plain(&workspace, &["--plain", "--verbose"]);
+    assert!(
+        plain.contains("feature/just-created 🌱"),
+        "plain must mark a default-tip branch open:\n{plain}"
+    );
+    assert!(
+        !plain.contains("feature/just-created ✅"),
+        "plain must not mark a default-tip branch merged:\n{plain}"
+    );
+    assert!(
+        plain.contains("feature/landed ✅"),
+        "plain must keep the merged mark on a strict ancestor:\n{plain}"
+    );
     let _ = fs::remove_dir_all(root);
 }
