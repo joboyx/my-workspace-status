@@ -12,11 +12,12 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::hscroll::{
-    assert_clipped, assert_panned_to_tail, DIFF_HSCROLL_TAIL, TREE_HSCROLL_PREFIX,
+    assert_clipped, assert_panned_to_tail, DIFF_HSCROLL_TAIL, GRAPH_HSCROLL_VISIBLE,
+    TREE_HSCROLL_PREFIX,
 };
 use common::seed::{
     daily_workspace, focus_workspace, git, git_env, seed_long_diff_file, seed_long_path_file,
-    seed_primary_and_linked_family, seed_repo, seed_tall_graph,
+    seed_long_subject_repo, seed_primary_and_linked_family, seed_repo, seed_tall_graph,
 };
 use workspace_status::tui::HeadlessTui;
 use workspace_status_graph::UNICODE;
@@ -1178,20 +1179,20 @@ fn graph_h_l_pans_long_subject_and_j_still_moves() {
     tui.search("longsubj");
     tui.tab();
     assert!(tui.right_is_graph(), "right pane should be the graph");
-    tui.search("UNIQUE_GRAP");
+    tui.search(GRAPH_HSCROLL_VISIBLE);
     tui.esc();
     tui.resize(80, 28);
     let clipped = tui.frame();
     // Footer / list clip to the pane, so the unique tail stays off-screen
     // until pan. Use a prefix of the marker: after max pan the remaining
-    // label viewport is often shorter than UNIQUE_GRAPH_TAIL itself.
-    assert_absent(&clipped, "UNIQUE_GRAP");
+    // label viewport is often shorter than GRAPH_HSCROLL_TAIL itself.
+    assert_absent(&clipped, GRAPH_HSCROLL_VISIBLE);
 
     for _ in 0..120 {
         tui.key('l');
     }
     let panned = tui.frame();
-    assert_contains(&panned, "UNIQUE_GRAP");
+    assert_contains(&panned, GRAPH_HSCROLL_VISIBLE);
 
     tui.key('j');
     tui.key('k');
@@ -1224,7 +1225,7 @@ fn mouse_hscroll_pans_graph_and_shows_horizontal_bar() {
         tui.mouse_scroll_right(col, 6);
     }
     let panned = tui.frame();
-    assert_contains(&panned, "UNIQUE_GRAP");
+    assert_contains(&panned, GRAPH_HSCROLL_VISIBLE);
     assert!(
         tui.right_col_offset() > 0,
         "mouse hscroll should pan the graph under the cursor"
@@ -1245,36 +1246,6 @@ fn mouse_hscroll_pans_graph_and_shows_horizontal_bar() {
         "keyboard h/l still pan a focused graph"
     );
     let _ = fs::remove_dir_all(root);
-}
-
-fn seed_long_subject_repo(workspace: &Path, name: &str) {
-    let repo = workspace.join(name);
-    fs::create_dir_all(&repo).unwrap();
-    let init = Command::new("git")
-        .args(["init", "-q", "-b", "main"])
-        .current_dir(&repo)
-        .status();
-    if init.map(|s| s.success()).unwrap_or(false) == false {
-        git(&repo, &["init", "-q"]);
-        git(&repo, &["checkout", "-q", "-b", "main"]);
-    }
-    git(&repo, &["config", "user.name", "workspace-status e2e"]);
-    git(
-        &repo,
-        &[
-            "config",
-            "user.email",
-            "workspace-status-e2e@example.invalid",
-        ],
-    );
-    fs::write(repo.join("README.md"), "# long\n").unwrap();
-    git(&repo, &["add", "README.md"]);
-    git(&repo, &["commit", "-q", "-m", "root"]);
-    git(&repo, &["checkout", "-q", "-b", "feature/long-subject"]);
-    fs::write(repo.join("wip.txt"), "x\n").unwrap();
-    git(&repo, &["add", "wip.txt"]);
-    let subject = format!("{}UNIQUE_GRAPH_TAIL", "n".repeat(80));
-    git(&repo, &["commit", "-q", "-m", &subject]);
 }
 
 #[test]

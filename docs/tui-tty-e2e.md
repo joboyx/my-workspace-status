@@ -4,7 +4,7 @@ Headless TestBackend coverage stays in `crates/workspace-status/tests/tui_headle
 
 It drives the real `workspace-status` binary the way a person does: a PTY (and, on Linux, a real terminal emulator). Assertions read the painted screen. It does not construct crossterm `Event` values in memory.
 
-Git seeds shared with the TestBackend suite live in `crates/workspace-status/tests/common/seed.rs`. The tree hscroll oracle (clipped `very-long` vs `TAIL99`) lives in `tests/common/hscroll.rs`. Each harness still extracts the left pane itself.
+Git seeds shared with the TestBackend suite live in `crates/workspace-status/tests/common/seed.rs`. The tree hscroll oracle (clipped `very-long` vs `TAIL99`), file-diff tail (`UNIQUE_DIFF_TAIL`), and graph subject prefix (`UNIQUE_GRAP`) live in `tests/common/hscroll.rs`. Each harness still extracts the left pane itself.
 
 ## What runs where
 

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::hscroll::{TREE_HSCROLL_DIR, TREE_HSCROLL_FILE};
+use super::hscroll::{GRAPH_HSCROLL_TAIL, TREE_HSCROLL_DIR, TREE_HSCROLL_FILE};
 
 /// Author / committer plus isolated git config for e2e repos.
 pub fn git_env() -> Vec<(&'static str, &'static str)> {
@@ -173,6 +173,22 @@ pub fn seed_many_commit_files(workspace: &Path, name: &str, count: usize) {
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "keepmid-files-commit"]);
     git(&repo, &["checkout", "-q", "-b", "feature/files"]);
+}
+
+/// Long graph subject so horizontal pan must reveal `UNIQUE_GRAP`.
+///
+/// `n` prefix plus [`GRAPH_HSCROLL_TAIL`]. Do not `/` search the tail first.
+pub fn seed_long_subject_repo(workspace: &Path, name: &str) {
+    let repo = workspace.join(name);
+    init_repo(&repo, "main");
+    fs::write(repo.join("README.md"), "# long\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "root"]);
+    git(&repo, &["checkout", "-q", "-b", "feature/long-subject"]);
+    fs::write(repo.join("wip.txt"), "x\n").unwrap();
+    git(&repo, &["add", "wip.txt"]);
+    let subject = format!("{}{GRAPH_HSCROLL_TAIL}", "n".repeat(80));
+    git(&repo, &["commit", "-q", "-m", &subject]);
 }
 
 /// Long line plus many rows so a focused file-diff can pan and scroll.
