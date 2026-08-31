@@ -25,6 +25,7 @@ mod pty_enter_from_tree_focuses_right;
 mod pty_fetch_local_remote_marks_behind;
 mod pty_fold_h_l_toggles_no_updates_group;
 mod pty_gg_and_g_jump_workspace_tree;
+mod pty_gg_jumps_focused_list_or_file_diff;
 mod pty_graph_b_checkout;
 mod pty_graph_branch_focus_overlay;
 mod pty_graph_c_creates_branch_at_commit;
