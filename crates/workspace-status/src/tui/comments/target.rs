@@ -384,7 +384,10 @@ pub fn comments_in_focus_scope(
 enum ExportScope {
     All,
     Empty,
-    Identities(BTreeSet<String>),
+    Identities {
+        ids: BTreeSet<String>,
+        worktrees: BTreeSet<String>,
+    },
     Checkout {
         identity: String,
         path: String,
@@ -415,7 +418,7 @@ impl ExportScope {
         match self {
             Self::All => true,
             Self::Empty => false,
-            Self::Identities(ids) => identity_key_matches(key, ids),
+            Self::Identities { ids, worktrees } => identity_key_matches(key, ids, worktrees),
             Self::Checkout {
                 identity,
                 path,
@@ -483,27 +486,54 @@ fn path_in_scope(path: &str, scope: &str, prefix: bool) -> bool {
     }
 }
 
-fn identity_key_matches(key: &CommentKey, ids: &BTreeSet<String>) -> bool {
+fn identity_key_matches(
+    key: &CommentKey,
+    ids: &BTreeSet<String>,
+    worktrees: &BTreeSet<String>,
+) -> bool {
     match key {
         CommentKey::Branch { repo, .. }
         | CommentKey::Commit { repo, .. }
         | CommentKey::WorktreeLine { repo, .. }
         | CommentKey::CommitLine { repo, .. } => ids.contains(repo),
-        CommentKey::Worktree { path } => ids
-            .iter()
-            .any(|id| path == id || path.starts_with(&format!("{id}/"))),
+        CommentKey::Worktree { path } => worktrees.contains(path),
     }
 }
 
 fn checkout_key_matches(key: &CommentKey, identity: &str, path: &str, branch: &str) -> bool {
     match key {
         CommentKey::Branch { repo, branch: b } => repo == identity && b == branch,
-        CommentKey::Worktree { path: p } => p == path,
+        CommentKey::Worktree { path: p } => p == path || p == identity,
         CommentKey::WorktreeLine {
             repo, branch: b, ..
         } => repo == identity && b == branch,
         CommentKey::Commit { repo, .. } | CommentKey::CommitLine { repo, .. } => repo == identity,
     }
+}
+
+/// Checkout paths in `snapshot` whose [`repo_identity`] is in `ids`, plus
+/// each identity path itself.
+fn worktree_paths_for_identities(
+    snapshot: &WorkspaceSnapshot,
+    ids: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut paths = ids.clone();
+    for repo in &snapshot.repos {
+        let identity = repo_identity(&repo.repo, repo.primary_repo.as_deref());
+        if ids.contains(&identity) {
+            paths.insert(normalize_viewed_path(&repo.repo));
+        }
+    }
+    paths
+}
+
+fn identities_scope(snapshot: &WorkspaceSnapshot, ids: BTreeSet<String>) -> ExportScope {
+    let worktrees = worktree_paths_for_identities(snapshot, &ids);
+    ExportScope::Identities { ids, worktrees }
+}
+
+fn worktree_on_identity(snapshot: &WorkspaceSnapshot, identity: &str, path: &str) -> bool {
+    worktree_paths_for_identities(snapshot, &BTreeSet::from([identity.to_string()])).contains(path)
 }
 
 fn export_scope(
@@ -538,7 +568,7 @@ fn tree_export_scope(
     match row.kind {
         NodeKind::Workspace => ExportScope::All,
         NodeKind::Group => match find_node(tree, &row.id) {
-            Some(node) => ExportScope::Identities(collect_node_identities(node)),
+            Some(node) => identities_scope(snapshot, collect_node_identities(node)),
             None => ExportScope::Empty,
         },
         NodeKind::File => {
@@ -579,7 +609,7 @@ fn tree_export_scope(
                 if let Some(node) = find_node(tree, &row.id) {
                     ids.extend(collect_node_identities(node));
                 }
-                return ExportScope::Identities(ids);
+                return identities_scope(snapshot, ids);
             }
             ExportScope::Checkout {
                 extra: resolve_tree_target(snapshot, row),
@@ -699,20 +729,39 @@ fn walk_identities(node: &TreeNode, out: &mut BTreeSet<String>) {
 }
 
 /// True when `row` should paint a comment marker.
-pub fn tree_row_has_comment(store: &CommentStore, row: &VisibleRow) -> bool {
-    comments_resolved_state(store, |key| tree_key_on_row(row, key)).is_some()
+///
+/// Family rows match [`CommentKey::Worktree`] for every checkout of the
+/// family identity. Linked-worktree rows match this checkout path and the
+/// identity path, not sibling worktrees. Matching uses snapshot
+/// [`repo_identity`] and checkout paths, not a path prefix.
+pub fn tree_row_has_comment(
+    store: &CommentStore,
+    snapshot: &WorkspaceSnapshot,
+    row: &VisibleRow,
+) -> bool {
+    comments_resolved_state(store, |key| tree_key_on_row(snapshot, row, key)).is_some()
 }
 
 /// True when every comment that paints on `row` is resolved.
-pub fn tree_row_comments_resolved(store: &CommentStore, row: &VisibleRow) -> bool {
-    comments_resolved_state(store, |key| tree_key_on_row(row, key)).unwrap_or(false)
+pub fn tree_row_comments_resolved(
+    store: &CommentStore,
+    snapshot: &WorkspaceSnapshot,
+    row: &VisibleRow,
+) -> bool {
+    comments_resolved_state(store, |key| tree_key_on_row(snapshot, row, key)).unwrap_or(false)
 }
 
-fn tree_key_on_row(row: &VisibleRow, key: &CommentKey) -> bool {
+fn tree_key_on_row(snapshot: &WorkspaceSnapshot, row: &VisibleRow, key: &CommentKey) -> bool {
     let Some(repo_path) = row.repo.as_deref() else {
         return false;
     };
-    let identity = repo_identity(repo_path, row.primary_repo.as_deref());
+    let snap = snapshot.repos.iter().find(|r| r.repo == repo_path);
+    let identity = repo_identity(
+        repo_path,
+        row.primary_repo
+            .as_deref()
+            .or(snap.and_then(|r| r.primary_repo.as_deref())),
+    );
     match row.kind {
         NodeKind::File => {
             let Some(file) = row.file.as_ref() else {
@@ -731,13 +780,6 @@ fn tree_key_on_row(row: &VisibleRow, key: &CommentKey) -> bool {
             }
         }
         NodeKind::Repo | NodeKind::Checkout => {
-            let is_linked = row.chrome.checkout_kind == Some(CheckoutKind::Linked);
-            if is_linked || is_detached_head_branch(&row.chrome.branch) {
-                return matches!(
-                    key,
-                    CommentKey::Worktree { path } if path == &normalize_viewed_path(repo_path)
-                );
-            }
             if row.chrome.is_family {
                 return match key {
                     CommentKey::Branch { repo, .. }
@@ -745,9 +787,24 @@ fn tree_key_on_row(row: &VisibleRow, key: &CommentKey) -> bool {
                     | CommentKey::WorktreeLine { repo, .. }
                     | CommentKey::CommitLine { repo, .. } => repo == &identity,
                     CommentKey::Worktree { path } => {
-                        path == &identity || path.starts_with(&format!("{identity}/"))
+                        worktree_on_identity(snapshot, &identity, path)
                     }
                 };
+            }
+            let is_linked = row.chrome.checkout_kind == Some(CheckoutKind::Linked)
+                || snap.map(|r| r.checkout_kind) == Some(CheckoutKind::Linked);
+            if is_linked {
+                return matches!(
+                    key,
+                    CommentKey::Worktree { path }
+                        if path == &normalize_viewed_path(repo_path) || path == &identity
+                );
+            }
+            if is_detached_head_branch(&row.chrome.branch) {
+                return matches!(
+                    key,
+                    CommentKey::Worktree { path } if path == &normalize_viewed_path(repo_path)
+                );
             }
             if !row.chrome.branch.is_empty()
                 && matches!(
@@ -1805,5 +1862,204 @@ mod tests {
             "src/lib.rs",
             None
         ));
+    }
+
+    fn identity_vs_linked_family_snapshot() -> WorkspaceSnapshot {
+        build_workspace_snapshot(
+            &[
+                snap("app", "main", CheckoutKind::Primary, None),
+                snap(
+                    ".worktrees/app/feat",
+                    "feature/linked-open",
+                    CheckoutKind::Linked,
+                    Some("app"),
+                ),
+                snap(
+                    ".worktrees/app/other",
+                    "feature/linked-other",
+                    CheckoutKind::Linked,
+                    Some("app"),
+                ),
+                snap("other", "main", CheckoutKind::Primary, None),
+            ],
+            &[],
+            false,
+            &[],
+        )
+    }
+
+    fn identity_vs_linked_family_store() -> CommentStore {
+        let mut store = CommentStore::new();
+        store = put_comment(
+            &store,
+            CommentKey::Worktree { path: "app".into() },
+            "on-identity",
+        );
+        store = put_comment(
+            &store,
+            CommentKey::Worktree {
+                path: ".worktrees/app/feat".into(),
+            },
+            "on-worktree",
+        );
+        store = put_comment(
+            &store,
+            CommentKey::Worktree {
+                path: ".worktrees/app/other".into(),
+            },
+            "on-sibling",
+        );
+        store = put_comment(
+            &store,
+            CommentKey::Branch {
+                repo: "app".into(),
+                branch: "feature/linked-open".into(),
+            },
+            "on-branch",
+        );
+        store = put_comment(
+            &store,
+            CommentKey::Worktree {
+                path: "other".into(),
+            },
+            "on-other",
+        );
+        store
+    }
+
+    fn family_app_row() -> VisibleRow {
+        VisibleRow {
+            kind: NodeKind::Repo,
+            repo: Some("app".into()),
+            chrome: NodeChrome {
+                is_family: true,
+                checkout_kind: Some(CheckoutKind::Primary),
+                ..Default::default()
+            },
+            ..VisibleRow::default()
+        }
+    }
+
+    fn linked_worktree_app_feat_row() -> VisibleRow {
+        VisibleRow {
+            kind: NodeKind::Checkout,
+            repo: Some(".worktrees/app/feat".into()),
+            primary_repo: Some("app".into()),
+            chrome: NodeChrome {
+                branch: "feature/linked-open".into(),
+                checkout_kind: Some(CheckoutKind::Linked),
+                ..Default::default()
+            },
+            ..VisibleRow::default()
+        }
+    }
+
+    fn sorted_tree_bodies(
+        store: &CommentStore,
+        snapshot: &WorkspaceSnapshot,
+        row: &VisibleRow,
+    ) -> Vec<String> {
+        let mut bodies = scoped_bodies(store, snapshot, CommentExportList::Tree { row: Some(row) });
+        bodies.sort();
+        bodies
+    }
+
+    #[test]
+    fn export_family_row_includes_identity_and_linked_worktree_object_comments() {
+        let snapshot = identity_vs_linked_family_snapshot();
+        let store = identity_vs_linked_family_store();
+        let row = family_app_row();
+        assert_eq!(
+            sorted_tree_bodies(&store, &snapshot, &row),
+            vec![
+                "on-branch".to_string(),
+                "on-identity".to_string(),
+                "on-sibling".to_string(),
+                "on-worktree".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn export_linked_worktree_row_includes_identity_and_worktree_object_comments() {
+        let snapshot = identity_vs_linked_family_snapshot();
+        let store = identity_vs_linked_family_store();
+        let row = linked_worktree_app_feat_row();
+        assert_eq!(
+            sorted_tree_bodies(&store, &snapshot, &row),
+            vec![
+                "on-branch".to_string(),
+                "on-identity".to_string(),
+                "on-worktree".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn family_row_marks_linked_worktree_object_comment() {
+        let store = put_comment(
+            &CommentStore::new(),
+            CommentKey::Worktree {
+                path: ".worktrees/app/feat".into(),
+            },
+            "on-worktree",
+        );
+        assert!(tree_row_has_comment(
+            &store,
+            &identity_vs_linked_family_snapshot(),
+            &family_app_row()
+        ));
+    }
+
+    #[test]
+    fn linked_worktree_row_marks_identity_object_comment() {
+        let store = put_comment(
+            &CommentStore::new(),
+            CommentKey::Worktree { path: "app".into() },
+            "on-identity",
+        );
+        assert!(tree_row_has_comment(
+            &store,
+            &identity_vs_linked_family_snapshot(),
+            &linked_worktree_app_feat_row()
+        ));
+    }
+
+    #[test]
+    fn linked_worktree_row_omits_sibling_worktree_object_comment() {
+        let snapshot = identity_vs_linked_family_snapshot();
+        let store = put_comment(
+            &CommentStore::new(),
+            CommentKey::Worktree {
+                path: ".worktrees/app/other".into(),
+            },
+            "on-sibling",
+        );
+        assert!(tree_row_has_comment(
+            &store,
+            &snapshot,
+            &family_app_row()
+        ));
+        assert!(!tree_row_has_comment(
+            &store,
+            &snapshot,
+            &linked_worktree_app_feat_row()
+        ));
+    }
+
+    #[test]
+    fn worktree_path_app_other_is_not_family_of_app() {
+        let snapshot = identity_vs_linked_family_snapshot();
+        let store = put_comment(
+            &CommentStore::new(),
+            CommentKey::Worktree {
+                path: "app-other/x".into(),
+            },
+            "on-app-other",
+        );
+        let row = family_app_row();
+        let bodies = sorted_tree_bodies(&store, &snapshot, &row);
+        assert!(!bodies.iter().any(|b| b == "on-app-other"));
+        assert!(!tree_row_has_comment(&store, &snapshot, &row));
     }
 }
