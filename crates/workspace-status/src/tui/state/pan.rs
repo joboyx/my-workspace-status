@@ -87,8 +87,9 @@ impl AppState {
             .iter()
             .map(|row| {
                 let viewed = row.kind == NodeKind::File && self.reviewed.contains(&row.id);
-                let commented = tree_row_has_comment(&self.comment_store, row);
-                let resolved = commented && tree_row_comments_resolved(&self.comment_store, row);
+                let commented = tree_row_has_comment(&self.comment_store, &self.snapshot, row);
+                let resolved = commented
+                    && tree_row_comments_resolved(&self.comment_store, &self.snapshot, row);
                 let segs = row_segments(row, self.ascii, viewed, commented, resolved);
                 let label: usize = segs.segments.iter().map(|s| visible_width(&s.text)).sum();
                 let trailing: usize = segs.trailing.iter().map(|s| visible_width(&s.text)).sum();

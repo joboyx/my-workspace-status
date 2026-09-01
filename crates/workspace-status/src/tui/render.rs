@@ -319,8 +319,9 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let mut lines = Vec::new();
     for row in painted.iter().skip(start).take(height) {
         let viewed = row.kind == NodeKind::File && state.reviewed.contains(&row.id);
-        let commented = tree_row_has_comment(&state.comment_store, row);
-        let resolved = commented && tree_row_comments_resolved(&state.comment_store, row);
+        let commented = tree_row_has_comment(&state.comment_store, &state.snapshot, row);
+        let resolved =
+            commented && tree_row_comments_resolved(&state.comment_store, &state.snapshot, row);
         lines.push(paint_tree_row(
             row,
             width,
