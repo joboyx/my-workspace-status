@@ -7,13 +7,15 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::persist::persist_with_lock;
+use super::persist::{persist_with_lock, LEGACY_WORKSPACE_ID};
 use crate::snapshot::{FileChange, WorkspaceSnapshot};
 
 /// On-disk store version written by save. Load accepts `1` and `2`.
 ///
-/// Version `1` is a flat identity → fingerprint map (the current workspace
-/// bucket). Version `2` namespaces that map under `workspaces.<id>.entries`.
+/// Version `1` is a flat identity → fingerprint map with no workspace id.
+/// Persist keeps those records under `__legacy__`. Version `2` namespaces
+/// that map under `workspaces.<id>.entries`. Load uses the current workspace
+/// bucket when that key exists. Otherwise it uses the legacy map.
 /// Unknown versions load as empty. Persist of a present file that is not
 /// valid version-1 or version-2 UTF-8 JSON returns an error and leaves the
 /// bytes unchanged.
@@ -205,16 +207,16 @@ fn store_to_entries(store: &ViewedStore) -> BTreeMap<String, ViewedEntry> {
         .collect()
 }
 
-fn parse_viewed_workspaces(
-    text: &str,
-    workspace_id: &str,
-) -> io::Result<BTreeMap<String, ViewedStore>> {
+fn parse_viewed_workspaces(text: &str) -> io::Result<BTreeMap<String, ViewedStore>> {
     let parsed: ViewedFile = serde_json::from_str(text)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     match parsed.version {
         1 => {
             let mut map = BTreeMap::new();
-            map.insert(workspace_id.to_string(), entries_to_store(parsed.entries));
+            map.insert(
+                LEGACY_WORKSPACE_ID.to_string(),
+                entries_to_store(parsed.entries),
+            );
             Ok(map)
         }
         2 => Ok(parsed
@@ -229,8 +231,19 @@ fn parse_viewed_workspaces(
     }
 }
 
-fn load_viewed_workspaces(text: &str, workspace_id: &str) -> BTreeMap<String, ViewedStore> {
-    parse_viewed_workspaces(text, workspace_id).unwrap_or_default()
+fn load_viewed_workspaces(text: &str) -> BTreeMap<String, ViewedStore> {
+    parse_viewed_workspaces(text).unwrap_or_default()
+}
+
+fn viewed_store_for_workspace(
+    workspaces: &BTreeMap<String, ViewedStore>,
+    workspace_id: &str,
+) -> ViewedStore {
+    workspaces
+        .get(workspace_id)
+        .or_else(|| workspaces.get(LEGACY_WORKSPACE_ID))
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn viewed_file_v2(workspaces: BTreeMap<String, ViewedStore>) -> ViewedFile {
@@ -259,21 +272,21 @@ fn encode_viewed_file(file: &ViewedFile) -> io::Result<Vec<u8>> {
 }
 
 /// Load the current workspace bucket. Missing or malformed files become empty.
+/// When that bucket is missing, load uses `__legacy__` (version-1 records).
 pub fn load_viewed_store(file_path: &Path, workspace_id: &str) -> ViewedStore {
     let Ok(text) = fs::read_to_string(file_path) else {
         return ViewedStore::new();
     };
-    load_viewed_workspaces(&text, workspace_id)
-        .remove(workspace_id)
-        .unwrap_or_default()
+    viewed_store_for_workspace(&load_viewed_workspaces(&text), workspace_id)
 }
 
 /// Persist `store` as the current workspace bucket (version 2).
 ///
-/// Locks a sibling `*.lock` file, keeps every other workspace bucket, then
-/// atomic-writes. A missing file starts an empty map. A present file that is
-/// not valid version-1 or version-2 UTF-8 JSON returns [`io::Error`] and
-/// leaves the bytes unchanged. Other disk errors also return [`io::Result`].
+/// Locks a sibling `*.lock` file, keeps every other workspace bucket
+/// (including `__legacy__`), then atomic-writes. A missing file starts an
+/// empty map. A present file that is not valid version-1 or version-2 UTF-8
+/// JSON returns [`io::Error`] and leaves the bytes unchanged. Other disk
+/// errors also return [`io::Result`].
 pub fn save_viewed_store(
     store: &ViewedStore,
     file_path: &Path,
@@ -285,9 +298,15 @@ pub fn save_viewed_store(
             Some(bytes) => {
                 let text = std::str::from_utf8(bytes)
                     .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-                parse_viewed_workspaces(text, workspace_id)?
+                parse_viewed_workspaces(text)?
             }
         };
+        if workspace_id == LEGACY_WORKSPACE_ID {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "reserved workspace id",
+            ));
+        }
         workspaces.insert(workspace_id.to_string(), store.clone());
         encode_viewed_file(&viewed_file_v2(workspaces))
     })
@@ -593,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn load_version_1_viewed_as_current_workspace_bucket() {
+    fn load_version_1_viewed_when_workspace_bucket_missing() {
         let (dir, file) = temp_viewed("ws-viewed-v1");
         let (identity, fingerprint) = sample_mark("src/a.ts");
         fs::write(
@@ -605,7 +624,53 @@ mod tests {
         assert_eq!(
             loaded.get(&identity).map(String::as_str),
             Some(fingerprint.as_str()),
-            "version-1 file must load as the current workspace bucket"
+            "version-1 file must load when the current workspace bucket is missing"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_from_other_workspace_keeps_version_1_viewed_records() {
+        let (dir, file) = temp_viewed("ws-viewed-v1-keep");
+        let (id_a, fp_a) = sample_mark("a.ts");
+        let (id_b, fp_b) = sample_mark("b.ts");
+        fs::write(
+            &file,
+            format!(
+                "{{\n  \"version\": 1,\n  \"entries\": {{\n    {}: {{\n      \"fingerprint\": \"{}\"\n    }}\n  }}\n}}\n",
+                serde_json::to_string(&id_a).unwrap(),
+                fp_a
+            ),
+        )
+        .unwrap();
+        let store_b = toggle_viewed(&ViewedStore::new(), &id_b, &fp_b);
+        save_viewed_store(&store_b, &file, "ws-b").unwrap();
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(
+            text.contains("\"__legacy__\""),
+            "version-1 records must stay under the reserved legacy key: {text}"
+        );
+        assert_eq!(
+            load_viewed_store(&file, "ws-a")
+                .get(&id_a)
+                .map(String::as_str),
+            Some(fp_a.as_str()),
+            "save from workspace B against a version-1 file must leave A-shaped records loadable"
+        );
+        assert_eq!(
+            load_viewed_store(&file, "ws-b")
+                .get(&id_b)
+                .map(String::as_str),
+            Some(fp_b.as_str())
+        );
+        let gced = reconcile_viewed(&store_b, &HashMap::new());
+        save_viewed_store(&gced, &file, "ws-b").unwrap();
+        assert_eq!(
+            load_viewed_store(&file, "ws-a")
+                .get(&id_a)
+                .map(String::as_str),
+            Some(fp_a.as_str()),
+            "GC of workspace B must not drop version-1 records under the legacy key"
         );
         let _ = fs::remove_dir_all(&dir);
     }

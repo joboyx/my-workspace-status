@@ -5,13 +5,15 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::super::persist::persist_with_lock;
+use super::super::persist::{persist_with_lock, LEGACY_WORKSPACE_ID};
 use super::super::viewed::normalize_viewed_path;
 
 /// On-disk store version written by save. Load accepts `1` and `2`.
 ///
-/// Version `1` is a flat `entries` list (the current workspace bucket).
-/// Version `2` namespaces those records under `workspaces.<id>.entries`.
+/// Version `1` is a flat `entries` list with no workspace id. Persist keeps
+/// those records under `__legacy__`. Version `2` namespaces records under
+/// `workspaces.<id>.entries`. Load uses the current workspace bucket when
+/// that key exists. Otherwise it uses the legacy map.
 /// Unknown versions load as empty. Persist of a present file that is not
 /// valid version-1 or version-2 UTF-8 JSON returns an error and leaves the
 /// bytes unchanged. `resolved` stays additive on each entry.
@@ -378,16 +380,16 @@ fn store_to_records(store: &CommentStore) -> Vec<CommentRecord> {
         .collect()
 }
 
-fn parse_comment_workspaces(
-    text: &str,
-    workspace_id: &str,
-) -> io::Result<BTreeMap<String, CommentStore>> {
+fn parse_comment_workspaces(text: &str) -> io::Result<BTreeMap<String, CommentStore>> {
     let parsed: CommentFile = serde_json::from_str(text)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     match parsed.version {
         1 => {
             let mut map = BTreeMap::new();
-            map.insert(workspace_id.to_string(), records_to_store(parsed.entries));
+            map.insert(
+                LEGACY_WORKSPACE_ID.to_string(),
+                records_to_store(parsed.entries),
+            );
             Ok(map)
         }
         2 => Ok(parsed
@@ -402,8 +404,19 @@ fn parse_comment_workspaces(
     }
 }
 
-fn load_comment_workspaces(text: &str, workspace_id: &str) -> BTreeMap<String, CommentStore> {
-    parse_comment_workspaces(text, workspace_id).unwrap_or_default()
+fn load_comment_workspaces(text: &str) -> BTreeMap<String, CommentStore> {
+    parse_comment_workspaces(text).unwrap_or_default()
+}
+
+fn comment_store_for_workspace(
+    workspaces: &BTreeMap<String, CommentStore>,
+    workspace_id: &str,
+) -> CommentStore {
+    workspaces
+        .get(workspace_id)
+        .or_else(|| workspaces.get(LEGACY_WORKSPACE_ID))
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn comment_file_v2(workspaces: BTreeMap<String, CommentStore>) -> CommentFile {
@@ -432,21 +445,21 @@ fn encode_comment_file(file: &CommentFile) -> io::Result<Vec<u8>> {
 }
 
 /// Load the current workspace bucket. Missing or malformed files become empty.
+/// When that bucket is missing, load uses `__legacy__` (version-1 records).
 pub fn load_comment_store(file_path: &Path, workspace_id: &str) -> CommentStore {
     let Ok(text) = fs::read_to_string(file_path) else {
         return CommentStore::new();
     };
-    load_comment_workspaces(&text, workspace_id)
-        .remove(workspace_id)
-        .unwrap_or_default()
+    comment_store_for_workspace(&load_comment_workspaces(&text), workspace_id)
 }
 
 /// Persist `store` as the current workspace bucket (version 2).
 ///
-/// Locks a sibling `*.lock` file, keeps every other workspace bucket, then
-/// atomic-writes. A missing file starts an empty map. A present file that is
-/// not valid version-1 or version-2 UTF-8 JSON returns [`io::Error`] and
-/// leaves the bytes unchanged. Other disk errors also return [`io::Result`].
+/// Locks a sibling `*.lock` file, keeps every other workspace bucket
+/// (including `__legacy__`), then atomic-writes. A missing file starts an
+/// empty map. A present file that is not valid version-1 or version-2 UTF-8
+/// JSON returns [`io::Error`] and leaves the bytes unchanged. Other disk
+/// errors also return [`io::Result`].
 pub fn save_comment_store(
     store: &CommentStore,
     file_path: &Path,
@@ -458,9 +471,15 @@ pub fn save_comment_store(
             Some(bytes) => {
                 let text = std::str::from_utf8(bytes)
                     .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-                parse_comment_workspaces(text, workspace_id)?
+                parse_comment_workspaces(text)?
             }
         };
+        if workspace_id == LEGACY_WORKSPACE_ID {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "reserved workspace id",
+            ));
+        }
         workspaces.insert(workspace_id.to_string(), store.clone());
         encode_comment_file(&comment_file_v2(workspaces))
     })
@@ -673,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn load_version_1_comments_as_current_workspace_bucket() {
+    fn load_version_1_comments_when_workspace_bucket_missing() {
         let (dir, file) = temp_json("ws-comments-v1");
         fs::write(
             &file,
@@ -695,7 +714,59 @@ mod tests {
         assert_eq!(
             loaded.get(&branch_key("main")).map(CommentEntry::as_str),
             Some("legacy-note"),
-            "version-1 file must load as the current workspace bucket"
+            "version-1 file must load when the current workspace bucket is missing"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_from_other_workspace_keeps_version_1_comment_records() {
+        use super::super::target::{gc_comments, CommentLiveSet};
+        let (dir, file) = temp_json("ws-comments-v1-keep");
+        fs::write(
+            &file,
+            r#"{
+  "version": 1,
+  "entries": [
+    {
+      "kind": "branch",
+      "repo": "app",
+      "branch": "main",
+      "body": "note-a"
+    }
+  ]
+}
+"#,
+        )
+        .unwrap();
+        let store_b = put_comment(&CommentStore::new(), branch_key("topic"), "note-b");
+        save_comment_store(&store_b, &file, "ws-b").unwrap();
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(
+            text.contains("\"__legacy__\""),
+            "version-1 records must stay under the reserved legacy key: {text}"
+        );
+        assert_eq!(
+            load_comment_store(&file, "ws-a")
+                .get(&branch_key("main"))
+                .map(CommentEntry::as_str),
+            Some("note-a"),
+            "save from workspace B against a version-1 file must leave A-shaped records loadable"
+        );
+        assert_eq!(
+            load_comment_store(&file, "ws-b")
+                .get(&branch_key("topic"))
+                .map(CommentEntry::as_str),
+            Some("note-b")
+        );
+        let gced = gc_comments(&store_b, &CommentLiveSet::default());
+        save_comment_store(&gced, &file, "ws-b").unwrap();
+        assert_eq!(
+            load_comment_store(&file, "ws-a")
+                .get(&branch_key("main"))
+                .map(CommentEntry::as_str),
+            Some("note-a"),
+            "GC of workspace B must not drop version-1 records under the legacy key"
         );
         let _ = fs::remove_dir_all(&dir);
     }

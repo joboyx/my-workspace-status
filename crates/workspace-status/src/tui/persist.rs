@@ -6,6 +6,16 @@ use std::path::{Path, PathBuf};
 
 use fs4::fs_std::FileExt;
 
+/// Reserved workspace map key for version-1 records.
+///
+/// SHA-256 hex workspace ids cannot equal this string. A version-1 file has
+/// a flat `entries` field and no workspace id. Persist writes version 2 and
+/// keeps those records under this key. Save of the current workspace inserts
+/// only that workspace bucket. It does not replace this key. Load uses the
+/// current workspace bucket when that key exists. Otherwise it uses this key.
+/// GC of one cwd must not drop this key.
+pub(crate) const LEGACY_WORKSPACE_ID: &str = "__legacy__";
+
 fn sibling_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut os = path.as_os_str().to_os_string();
     os.push(suffix);
