@@ -32,8 +32,8 @@ use super::comments::comment_store_path;
 use super::comments::{
     collect_live_set, comment_key_label, comments_in_focus_scope, export_markdown, gc_comments,
     load_comment_store, put_comment, resolve_comment_target, save_comment_store,
-    viewport_line_number, CommentExport, CommentExportList, CommentKey, CommentPrompt,
-    CommentStore,
+    viewport_line_number, viewport_line_range, CommentExport, CommentExportList, CommentKey,
+    CommentPrompt, CommentStore,
 };
 use super::commit_files::{
     ancestor_dir_ids, collect_foldable_subtree_ids as collect_commit_subtree_ids,
@@ -284,6 +284,8 @@ pub struct AppState {
     pub comment_path: PathBuf,
     pub comment: Option<CommentPrompt>,
     pub comment_export: Option<CommentExport>,
+    /// Visual-line anchor on a focused file diff (`V`). Cursor is the other end.
+    pub diff_visual_anchor: Option<usize>,
     pub layout: LayoutHit,
     pub ascii: bool,
     pub search_mode: bool,
@@ -394,6 +396,7 @@ impl AppState {
             comment_path,
             comment: None,
             comment_export: None,
+            diff_visual_anchor: None,
             layout: LayoutHit::default(),
             ascii,
             search_mode: false,
@@ -459,6 +462,10 @@ impl AppState {
             }
         } else if self.search_mode {
             InputMode::SearchPrompt
+        } else if self.diff_visual_anchor.is_some()
+            && self.list_focus_target() == ListFocusTarget::None
+        {
+            InputMode::DiffVisual
         } else if self.chord_pending(self.z_pending_at) {
             InputMode::ZPending {
                 search_active: self.search_active,
@@ -1357,9 +1364,11 @@ impl AppState {
         if col >= self.layout.right_x {
             self.focus = FocusPane::Right;
             if self.drill.is_files() {
+                self.clear_diff_visual();
                 return self.click_commit_files(col, row, is_double);
             }
             if !self.right_is_diff() && self.graph.is_some() {
+                self.clear_diff_visual();
                 return self.click_graph(row, is_double, true);
             }
             if self.right_is_diff() || self.drill.is_diff() {
@@ -1375,6 +1384,7 @@ impl AppState {
             return Effect::None;
         }
         self.focus = FocusPane::Left;
+        self.clear_diff_visual();
         if self.drill.is_diff() {
             return self.click_commit_files(col, row, is_double);
         }
@@ -1781,6 +1791,7 @@ impl AppState {
         self.diff_scroll = 0;
         self.diff_cursor = 0;
         self.diff_col_offset = 0;
+        self.clear_diff_visual();
     }
 
     fn adopt_diff_view(&mut self, id: DiffViewId) {
@@ -2273,7 +2284,13 @@ impl AppState {
                     }
                     _ => (self.diff_repo.as_deref(), self.diff_path.as_deref()),
                 };
-                let line = viewport_line_number(&self.current_diff_rows(), self.diff_cursor as u16);
+                let rows = self.current_diff_rows();
+                let (line, end_line) = if let Some(anchor) = self.diff_visual_anchor {
+                    viewport_line_range(&rows, anchor, self.diff_cursor)?
+                } else {
+                    let line = viewport_line_number(&rows, self.diff_cursor as u16)?;
+                    (line, line)
+                };
                 resolve_comment_target(
                     &self.snapshot,
                     None,
@@ -2283,7 +2300,8 @@ impl AppState {
                     repo,
                     path,
                     source,
-                    line,
+                    Some(line),
+                    Some(end_line),
                 )
             }
             ListFocusTarget::Graph => {
@@ -2295,6 +2313,7 @@ impl AppState {
                     row.as_ref(),
                     repo.as_deref(),
                     false,
+                    None,
                     None,
                     None,
                     None,
@@ -2311,9 +2330,48 @@ impl AppState {
                 None,
                 None,
                 None,
+                None,
             ),
             ListFocusTarget::CommitFiles => None,
         }
+    }
+
+    pub(crate) fn clear_diff_visual(&mut self) {
+        self.diff_visual_anchor = None;
+    }
+
+    /// True when visual-line highlight includes painted diff row `idx`.
+    pub fn diff_visual_contains(&self, idx: usize) -> bool {
+        let Some(anchor) = self.diff_visual_anchor else {
+            return false;
+        };
+        let lo = anchor.min(self.diff_cursor);
+        let hi = anchor.max(self.diff_cursor);
+        idx >= lo && idx <= hi
+    }
+
+    fn begin_diff_visual(&mut self) -> Effect {
+        if self.list_focus_target() != ListFocusTarget::None {
+            return Effect::None;
+        }
+        if self.current_diff_rows().is_empty() {
+            self.status = "no highlight target".into();
+            return Effect::None;
+        }
+        self.drag = SplitDrag::None;
+        self.help_open = false;
+        self.comment_export = None;
+        self.diff_visual_anchor = Some(self.diff_cursor);
+        self.status.clear();
+        Effect::None
+    }
+
+    fn cancel_diff_visual(&mut self) -> Effect {
+        if self.diff_visual_anchor.is_some() {
+            self.clear_diff_visual();
+            self.status.clear();
+        }
+        Effect::None
     }
 
     fn begin_comment(&mut self) -> Effect {
@@ -2324,6 +2382,7 @@ impl AppState {
             self.status = "no comment target".into();
             return Effect::None;
         };
+        self.clear_diff_visual();
         let body = self.comment_store.get(&key).cloned().unwrap_or_default();
         let label = comment_key_label(&key);
         self.comment = Some(CommentPrompt { key, body, label });
@@ -3012,9 +3071,13 @@ impl AppState {
         if n == 0 {
             self.diff_cursor = 0;
             self.diff_scroll = 0;
+            self.clear_diff_visual();
             return;
         }
         self.diff_cursor = self.diff_cursor.min(n - 1);
+        if let Some(anchor) = self.diff_visual_anchor {
+            self.diff_visual_anchor = Some(anchor.min(n - 1));
+        }
         let (start, _) = visible_window(n, self.diff_cursor, self.diff_body_height());
         self.diff_scroll = start as u16;
     }
@@ -3024,6 +3087,7 @@ impl AppState {
         if n == 0 {
             self.diff_cursor = 0;
             self.diff_scroll = 0;
+            self.clear_diff_visual();
             return;
         }
         self.diff_cursor = (self.diff_cursor as i32 + delta).clamp(0, n as i32 - 1) as usize;

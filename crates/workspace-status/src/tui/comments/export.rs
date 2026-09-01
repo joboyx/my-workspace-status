@@ -5,6 +5,14 @@ use std::process::{Command, Stdio};
 
 use super::store::{CommentKey, CommentStore};
 
+fn line_span_label(line: u32, end_line: u32) -> String {
+    if end_line == line {
+        line.to_string()
+    } else {
+        format!("{line}-{end_line}")
+    }
+}
+
 /// Markdown for the comments in `store`. Empty store → a short empty notice.
 pub fn export_markdown(store: &CommentStore) -> String {
     if store.is_empty() {
@@ -31,18 +39,28 @@ pub fn export_markdown(store: &CommentStore) -> String {
                 branch,
                 path,
                 line,
+                end_line,
             } => {
                 out.push_str(&format!("## {repo} — branch `{branch}`\n\n"));
-                out.push_str(&format!("- `{path}`:{line} — {}\n", body.trim_end()));
+                out.push_str(&format!(
+                    "- `{path}`:{} — {}\n",
+                    line_span_label(*line, *end_line),
+                    body.trim_end()
+                ));
             }
             CommentKey::CommitLine {
                 repo,
                 sha,
                 path,
                 line,
+                end_line,
             } => {
                 out.push_str(&format!("## {repo} — commit `{sha}`\n\n"));
-                out.push_str(&format!("- `{path}`:{line} — {}\n", body.trim_end()));
+                out.push_str(&format!(
+                    "- `{path}`:{} — {}\n",
+                    line_span_label(*line, *end_line),
+                    body.trim_end()
+                ));
             }
         }
     }
@@ -141,6 +159,7 @@ mod tests {
                 branch: "main".into(),
                 path: "README.md".into(),
                 line: 2,
+                end_line: 2,
             },
             "dirty line",
         );

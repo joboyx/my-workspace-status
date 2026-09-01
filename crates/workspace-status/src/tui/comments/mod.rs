@@ -19,5 +19,6 @@ pub use store::{
 pub use target::{
     collect_live_set, comments_in_focus_scope, commit_file_row_has_comment, diff_line_has_comment,
     gc_comments, graph_row_has_comment, resolve_comment_target, sole_non_default_branch,
-    tree_row_has_comment, viewport_line_number, CommentExportList, CommentLiveSet,
+    tree_row_has_comment, viewport_line_number, viewport_line_range, CommentExportList,
+    CommentLiveSet,
 };

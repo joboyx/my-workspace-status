@@ -173,6 +173,10 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "comment focused row / line",
             },
             HelpEntry {
+                keys: "V",
+                desc: "highlight diff lines for ; comment",
+            },
+            HelpEntry {
                 keys: "y",
                 desc: "copy comments as markdown",
             },
@@ -567,6 +571,7 @@ mod tests {
         assert!(view_keys.contains(&"o O"));
         assert!(view_keys.contains(&"m"));
         assert!(view_keys.contains(&";"));
+        assert!(view_keys.contains(&"V"));
         assert!(view_keys.contains(&"y"));
         assert!(view_keys.contains(&"Esc"));
         assert!(help_match_indices("quit")

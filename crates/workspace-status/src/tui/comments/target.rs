@@ -14,7 +14,7 @@ use super::super::tree::{
     dir_path_from_id, find_node, path_under_dir, NodeKind, TreeNode, VisibleRow,
 };
 use super::super::viewed::normalize_viewed_path;
-use super::store::{repo_identity, CommentKey, CommentStore};
+use super::store::{ordered_line_range, repo_identity, CommentKey, CommentStore};
 use workspace_status_graph::GraphRow;
 
 /// Live refs used to drop stale comments on refresh.
@@ -123,14 +123,41 @@ fn comment_is_live(key: &CommentKey, live: &CommentLiveSet) -> bool {
 /// First numbered line in the viewport (prefer the new/right side).
 pub fn viewport_line_number(rows: &[DiffRow], scroll: u16) -> Option<u32> {
     for row in rows.iter().skip(scroll as usize) {
-        let DiffRow::Line { left, right } = row else {
-            continue;
-        };
-        if let Some(n) = right.as_ref().and_then(|c| c.line_no).or(left.line_no) {
+        if let Some(n) = row_line_number(row) {
             return Some(n);
         }
     }
     None
+}
+
+fn row_line_number(row: &DiffRow) -> Option<u32> {
+    let DiffRow::Line { left, right } = row else {
+        return None;
+    };
+    right.as_ref().and_then(|c| c.line_no).or(left.line_no)
+}
+
+/// Inclusive numbered-line span for painted rows `start..=end`.
+///
+/// Prefers the new/right side. Returns `None` when the range has no
+/// numbered line.
+pub fn viewport_line_range(rows: &[DiffRow], start: usize, end: usize) -> Option<(u32, u32)> {
+    let lo = start.min(end);
+    let hi = start.max(end);
+    let mut first = None;
+    let mut last = None;
+    for row in rows
+        .iter()
+        .skip(lo)
+        .take(hi.saturating_sub(lo).saturating_add(1))
+    {
+        let Some(n) = row_line_number(row) else {
+            continue;
+        };
+        first = Some(first.map_or(n, |f: u32| f.min(n)));
+        last = Some(last.map_or(n, |l: u32| l.max(n)));
+    }
+    Some((first?, last?))
 }
 
 /// Exactly one non-default local branch, if any.
@@ -177,9 +204,17 @@ pub fn resolve_comment_target(
     diff_path: Option<&str>,
     diff_source: Option<&CommitFileSource>,
     diff_line: Option<u32>,
+    diff_end_line: Option<u32>,
 ) -> Option<CommentKey> {
     if diff_focused {
-        return resolve_diff_target(snapshot, diff_repo, diff_path, diff_source, diff_line);
+        return resolve_diff_target(
+            snapshot,
+            diff_repo,
+            diff_path,
+            diff_source,
+            diff_line,
+            diff_end_line,
+        );
     }
     if let Some(row) = graph_row {
         let repo = graph_repo?;
@@ -194,10 +229,12 @@ fn resolve_diff_target(
     diff_path: Option<&str>,
     diff_source: Option<&CommitFileSource>,
     diff_line: Option<u32>,
+    diff_end_line: Option<u32>,
 ) -> Option<CommentKey> {
     let repo_path = diff_repo?;
     let path = diff_path?;
     let line = diff_line?;
+    let (line, end_line) = ordered_line_range(line, diff_end_line.unwrap_or(line));
     let snap = snapshot.repos.iter().find(|r| r.repo == repo_path);
     let identity = repo_identity(repo_path, snap.and_then(|r| r.primary_repo.as_deref()));
     match diff_source {
@@ -206,6 +243,7 @@ fn resolve_diff_target(
             sha: commit_id.clone(),
             path: normalize_viewed_path(path),
             line,
+            end_line,
         }),
         Some(CommitFileSource::Stash { .. }) => None,
         Some(CommitFileSource::Worktree) | None => {
@@ -215,6 +253,7 @@ fn resolve_diff_target(
                 branch,
                 path: normalize_viewed_path(path),
                 line,
+                end_line,
             })
         }
     }
@@ -832,24 +871,25 @@ pub fn diff_line_has_comment(
     let identity = repo_identity(repo, primary);
     let path = normalize_viewed_path(path);
     match source {
-        Some(CommitFileSource::Commit { commit_id }) => {
-            store.contains_key(&CommentKey::CommitLine {
-                repo: identity,
-                sha: commit_id.clone(),
-                path,
-                line,
-            })
-        }
+        Some(CommitFileSource::Commit { commit_id }) => store.keys().any(|key| match key {
+            CommentKey::CommitLine {
+                repo, sha, path: p, ..
+            } => repo == &identity && sha == commit_id && p == &path && key.covers_line(line),
+            _ => false,
+        }),
         Some(CommitFileSource::Stash { .. }) => false,
         Some(CommitFileSource::Worktree) | None => {
             let Some(branch) = branch else {
                 return false;
             };
-            store.contains_key(&CommentKey::WorktreeLine {
-                repo: identity,
-                branch: branch.to_string(),
-                path,
-                line,
+            store.keys().any(|key| match key {
+                CommentKey::WorktreeLine {
+                    repo,
+                    branch: b,
+                    path: p,
+                    ..
+                } => repo == &identity && b == branch && p == &path && key.covers_line(line),
+                _ => false,
             })
         }
     }
@@ -921,6 +961,7 @@ mod tests {
             branch: "feature/gone".into(),
             path: "a.rs".into(),
             line: 1,
+            end_line: 1,
         };
         let commit = CommentKey::Commit {
             repo: "app".into(),
@@ -955,6 +996,7 @@ mod tests {
             branch: "topic/keep".into(),
             path: "a.rs".into(),
             line: 1,
+            end_line: 1,
         };
         let mut store = CommentStore::new();
         store = put_comment(&store, branch.clone(), "b");
@@ -993,6 +1035,7 @@ mod tests {
             branch: "doomed".into(),
             path: "a.rs".into(),
             line: 1,
+            end_line: 1,
         };
         let mut store = CommentStore::new();
         store = put_comment(&store, branch.clone(), "b");
@@ -1078,6 +1121,9 @@ mod tests {
         assert_eq!(viewport_line_number(&rows, 0), Some(2));
         assert_eq!(viewport_line_number(&rows, 1), Some(2));
         assert_eq!(viewport_line_number(&[], 0), None);
+        assert_eq!(viewport_line_range(&rows, 0, 1), Some((2, 2)));
+        assert_eq!(viewport_line_range(&rows, 0, 0), None);
+        assert_eq!(viewport_line_range(&[], 0, 0), None);
         let _ = DiffContent::default();
     }
 
@@ -1447,6 +1493,7 @@ mod tests {
                 sha: "abc".into(),
                 path: "a.rs".into(),
                 line: 3,
+                end_line: 3,
             },
             "l",
         );
@@ -1477,6 +1524,7 @@ mod tests {
                 branch: "main".into(),
                 path: "README.md".into(),
                 line: 2,
+                end_line: 2,
             },
             "l",
         );
@@ -1509,6 +1557,7 @@ mod tests {
                 sha: "abc".into(),
                 path: "src/lib.rs".into(),
                 line: 1,
+                end_line: 1,
             },
             "l",
         );

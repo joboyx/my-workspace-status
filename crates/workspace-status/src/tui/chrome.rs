@@ -522,6 +522,15 @@ pub fn extra_hint_segments() -> Vec<HintSegment> {
     ]
 }
 
+/// Hints while `V` visual-line highlight is on a focused file diff.
+pub fn visual_hint_segments() -> Vec<HintSegment> {
+    vec![
+        hint("j k", "extend range", false),
+        hint(";", "comment range", false),
+        hint("Esc", "cancel highlight", false),
+    ]
+}
+
 fn hint(key: &str, label: &str, destructive: bool) -> HintSegment {
     HintSegment {
         key: key.into(),
@@ -1046,14 +1055,24 @@ fn idle_status_line(
         String::new()
     };
     let message = if z_pending(state) { "z…" } else { "? help" };
+    let visual = state.diff_visual_anchor.is_some();
     let mut used =
         mode_label.len() + 2 + diff_label.len() + 2 + 1 + message.len() + HINT_SEPARATOR.len();
+    if visual {
+        used += "VISUAL".len() + 2;
+    }
     if !search_query.is_empty() {
         used += search_query.len() + 3;
     }
-    let mut hints = nav_chrome_hint_segments(nav_depth(state), state.focus);
-    hints.extend(action_hint_segments(state));
-    hints.extend(extra_hint_segments());
+    let mut hints = if visual {
+        visual_hint_segments()
+    } else {
+        nav_chrome_hint_segments(nav_depth(state), state.focus)
+    };
+    if !visual {
+        hints.extend(action_hint_segments(state));
+        hints.extend(extra_hint_segments());
+    }
     let fitted = fit_hint_segments(&hints, (width as usize).saturating_sub(used));
 
     let mut spans = vec![
@@ -1062,6 +1081,9 @@ fn idle_status_line(
     ];
     if !search_query.is_empty() {
         spans.push(pill_span(&format!("/{search_query}"), pills.filter));
+    }
+    if visual {
+        spans.push(pill_span("VISUAL", pills.filter));
     }
     spans.push(Span::styled(
         format!(" {message}"),

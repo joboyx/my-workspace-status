@@ -33,13 +33,22 @@ pub fn comment_key_label(key: &CommentKey) -> String {
             branch,
             path,
             line,
-        } => format!("{repo} · branch {branch} · {path}:{line}"),
+            end_line,
+        } => format!(
+            "{repo} · branch {branch} · {path}:{}",
+            line_span_label(*line, *end_line)
+        ),
         CommentKey::CommitLine {
             repo,
             sha,
             path,
             line,
-        } => format!("{repo} · commit {} · {path}:{line}", short_sha(sha)),
+            end_line,
+        } => format!(
+            "{repo} · commit {} · {path}:{}",
+            short_sha(sha),
+            line_span_label(*line, *end_line)
+        ),
     }
 }
 
@@ -48,5 +57,13 @@ fn short_sha(sha: &str) -> &str {
         &sha[..7]
     } else {
         sha
+    }
+}
+
+fn line_span_label(line: u32, end_line: u32) -> String {
+    if end_line == line {
+        line.to_string()
+    } else {
+        format!("{line}-{end_line}")
     }
 }
