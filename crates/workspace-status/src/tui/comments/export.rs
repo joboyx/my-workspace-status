@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 
 use super::store::{CommentKey, CommentStore};
 
-/// Markdown for live comments. Empty store → a short empty notice.
+/// Markdown for the comments in `store`. Empty store → a short empty notice.
 pub fn export_markdown(store: &CommentStore) -> String {
     if store.is_empty() {
         return "# Comments\n\nNo comments.\n".to_string();

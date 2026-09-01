@@ -10,7 +10,9 @@ use crate::snapshot::{CheckoutKind, WorkspaceSnapshot};
 
 use super::super::diff::DiffRow;
 use super::super::drill::CommitFileSource;
-use super::super::tree::{NodeKind, VisibleRow};
+use super::super::tree::{
+    dir_path_from_id, find_node, path_under_dir, NodeKind, TreeNode, VisibleRow,
+};
 use super::super::viewed::normalize_viewed_path;
 use super::store::{repo_identity, CommentKey, CommentStore};
 use workspace_status_graph::GraphRow;
@@ -297,6 +299,366 @@ fn repo_root_attach(
     })
 }
 
+/// Pane list used to scope `y` markdown copy.
+pub enum CommentExportList<'a> {
+    /// Workspace tree (depth 0 left).
+    Tree { row: Option<&'a VisibleRow> },
+    /// Graph list (depth 0 right or depth 1 left).
+    Graph {
+        repo: Option<&'a str>,
+        row: Option<&'a GraphRow>,
+    },
+    /// Commit-file list (depth 2 left, or depth 1 right).
+    CommitFiles {
+        repo: &'a str,
+        source: &'a CommitFileSource,
+        path: &'a str,
+        is_dir: bool,
+    },
+    /// Focused numbered file diff.
+    Diff {
+        repo: &'a str,
+        path: &'a str,
+        source: Option<&'a CommitFileSource>,
+    },
+}
+
+/// Live comments under the focused tree / graph / commit-file / diff row.
+///
+/// A file copies that path only. A folder copies descendants under that
+/// path. Unrelated siblings stay out. The workspace row copies every live
+/// comment.
+pub fn comments_in_focus_scope(
+    store: &CommentStore,
+    snapshot: &WorkspaceSnapshot,
+    tree: &TreeNode,
+    list: CommentExportList<'_>,
+) -> CommentStore {
+    let scope = export_scope(snapshot, tree, list);
+    store
+        .iter()
+        .filter(|(key, _)| scope.contains(key))
+        .map(|(key, body)| (key.clone(), body.clone()))
+        .collect()
+}
+
+enum ExportScope {
+    All,
+    Empty,
+    Identities(BTreeSet<String>),
+    Checkout {
+        identity: String,
+        path: String,
+        branch: String,
+        extra: Option<CommentKey>,
+    },
+    WorktreeObject {
+        path: String,
+        identity: String,
+        branch: String,
+    },
+    WorktreePath {
+        identity: String,
+        branch: String,
+        path: String,
+        prefix: bool,
+    },
+    Commit {
+        identity: String,
+        sha: String,
+        path: Option<String>,
+        prefix: bool,
+    },
+}
+
+impl ExportScope {
+    fn contains(&self, key: &CommentKey) -> bool {
+        match self {
+            Self::All => true,
+            Self::Empty => false,
+            Self::Identities(ids) => identity_key_matches(key, ids),
+            Self::Checkout {
+                identity,
+                path,
+                branch,
+                extra,
+            } => extra.as_ref() == Some(key) || checkout_key_matches(key, identity, path, branch),
+            Self::WorktreeObject {
+                path,
+                identity,
+                branch,
+            } => match key {
+                CommentKey::Worktree { path: p } => p == path,
+                CommentKey::WorktreeLine {
+                    repo, branch: b, ..
+                } => repo == identity && b == branch,
+                _ => false,
+            },
+            Self::WorktreePath {
+                identity,
+                branch,
+                path,
+                prefix,
+            } => match key {
+                CommentKey::WorktreeLine {
+                    repo,
+                    branch: b,
+                    path: p,
+                    ..
+                } => repo == identity && b == branch && path_in_scope(p, path, *prefix),
+                _ => false,
+            },
+            Self::Commit {
+                identity,
+                sha,
+                path,
+                prefix,
+            } => match key {
+                CommentKey::Commit { repo, sha: s } => {
+                    path.is_none() && repo == identity && s == sha
+                }
+                CommentKey::CommitLine {
+                    repo,
+                    sha: s,
+                    path: p,
+                    ..
+                } => {
+                    repo == identity
+                        && s == sha
+                        && match path {
+                            None => true,
+                            Some(scope_path) => path_in_scope(p, scope_path, *prefix),
+                        }
+                }
+                _ => false,
+            },
+        }
+    }
+}
+
+fn path_in_scope(path: &str, scope: &str, prefix: bool) -> bool {
+    if prefix {
+        path_under_dir(path, scope)
+    } else {
+        path == scope
+    }
+}
+
+fn identity_key_matches(key: &CommentKey, ids: &BTreeSet<String>) -> bool {
+    match key {
+        CommentKey::Branch { repo, .. }
+        | CommentKey::Commit { repo, .. }
+        | CommentKey::WorktreeLine { repo, .. }
+        | CommentKey::CommitLine { repo, .. } => ids.contains(repo),
+        CommentKey::Worktree { path } => ids
+            .iter()
+            .any(|id| path == id || path.starts_with(&format!("{id}/"))),
+    }
+}
+
+fn checkout_key_matches(key: &CommentKey, identity: &str, path: &str, branch: &str) -> bool {
+    match key {
+        CommentKey::Branch { repo, branch: b } => repo == identity && b == branch,
+        CommentKey::Worktree { path: p } => p == path,
+        CommentKey::WorktreeLine {
+            repo, branch: b, ..
+        } => repo == identity && b == branch,
+        CommentKey::Commit { repo, .. } | CommentKey::CommitLine { repo, .. } => repo == identity,
+    }
+}
+
+fn export_scope(
+    snapshot: &WorkspaceSnapshot,
+    tree: &TreeNode,
+    list: CommentExportList<'_>,
+) -> ExportScope {
+    match list {
+        CommentExportList::Tree { row } => tree_export_scope(snapshot, tree, row),
+        CommentExportList::Graph { repo, row } => graph_export_scope(snapshot, repo, row),
+        CommentExportList::CommitFiles {
+            repo,
+            source,
+            path,
+            is_dir,
+        } => source_path_scope(snapshot, repo, source, path, is_dir),
+        CommentExportList::Diff { repo, path, source } => match source {
+            Some(src) => source_path_scope(snapshot, repo, src, path, false),
+            None => source_path_scope(snapshot, repo, &CommitFileSource::Worktree, path, false),
+        },
+    }
+}
+
+fn tree_export_scope(
+    snapshot: &WorkspaceSnapshot,
+    tree: &TreeNode,
+    row: Option<&VisibleRow>,
+) -> ExportScope {
+    let Some(row) = row else {
+        return ExportScope::Empty;
+    };
+    match row.kind {
+        NodeKind::Workspace => ExportScope::All,
+        NodeKind::Group => match find_node(tree, &row.id) {
+            Some(node) => ExportScope::Identities(collect_node_identities(node)),
+            None => ExportScope::Empty,
+        },
+        NodeKind::File => {
+            let Some(file) = row.file.as_ref() else {
+                return ExportScope::Empty;
+            };
+            let Some((identity, branch, _)) = row_checkout(snapshot, row) else {
+                return ExportScope::Empty;
+            };
+            ExportScope::WorktreePath {
+                identity,
+                branch,
+                path: normalize_viewed_path(&file.path),
+                prefix: false,
+            }
+        }
+        NodeKind::Dir => {
+            let Some((identity, branch, repo_path)) = row_checkout(snapshot, row) else {
+                return ExportScope::Empty;
+            };
+            let Some(dir) = dir_scope_path(row, &repo_path) else {
+                return ExportScope::Empty;
+            };
+            ExportScope::WorktreePath {
+                identity,
+                branch,
+                path: normalize_viewed_path(&dir),
+                prefix: true,
+            }
+        }
+        NodeKind::Repo | NodeKind::Checkout => {
+            let Some((identity, branch, path)) = row_checkout(snapshot, row) else {
+                return ExportScope::Empty;
+            };
+            if row.chrome.is_family {
+                let mut ids = BTreeSet::new();
+                ids.insert(identity);
+                if let Some(node) = find_node(tree, &row.id) {
+                    ids.extend(collect_node_identities(node));
+                }
+                return ExportScope::Identities(ids);
+            }
+            ExportScope::Checkout {
+                extra: resolve_tree_target(snapshot, row),
+                identity,
+                path,
+                branch,
+            }
+        }
+    }
+}
+
+fn graph_export_scope(
+    snapshot: &WorkspaceSnapshot,
+    repo: Option<&str>,
+    row: Option<&GraphRow>,
+) -> ExportScope {
+    let Some(repo) = repo else {
+        return ExportScope::Empty;
+    };
+    let Some(row) = row else {
+        return ExportScope::Empty;
+    };
+    let snap = snapshot.repos.iter().find(|r| r.repo == repo);
+    let identity = repo_identity(repo, snap.and_then(|r| r.primary_repo.as_deref()));
+    match row {
+        GraphRow::Commit { commit, .. } => ExportScope::Commit {
+            identity,
+            sha: commit.id.clone(),
+            path: None,
+            prefix: false,
+        },
+        GraphRow::Uncommitted { .. } => ExportScope::WorktreeObject {
+            path: normalize_viewed_path(repo),
+            identity,
+            branch: snap.map(|r| r.branch.clone()).unwrap_or_default(),
+        },
+        GraphRow::Worktree(wt) => {
+            let wt_path = normalize_viewed_path(&wt.path);
+            let wt_snap = snapshot.repos.iter().find(|r| r.repo == wt.path);
+            ExportScope::WorktreeObject {
+                identity: repo_identity(&wt.path, wt_snap.and_then(|r| r.primary_repo.as_deref())),
+                branch: wt_snap.map(|r| r.branch.clone()).unwrap_or_default(),
+                path: wt_path,
+            }
+        }
+        GraphRow::Stash(_) => ExportScope::Empty,
+    }
+}
+
+fn source_path_scope(
+    snapshot: &WorkspaceSnapshot,
+    repo: &str,
+    source: &CommitFileSource,
+    path: &str,
+    prefix: bool,
+) -> ExportScope {
+    let snap = snapshot.repos.iter().find(|r| r.repo == repo);
+    let identity = repo_identity(repo, snap.and_then(|r| r.primary_repo.as_deref()));
+    let path = normalize_viewed_path(path);
+    match source {
+        CommitFileSource::Commit { commit_id } => ExportScope::Commit {
+            identity,
+            sha: commit_id.clone(),
+            path: Some(path),
+            prefix,
+        },
+        CommitFileSource::Worktree => ExportScope::WorktreePath {
+            identity,
+            branch: snap.map(|r| r.branch.clone()).unwrap_or_default(),
+            path,
+            prefix,
+        },
+        CommitFileSource::Stash { .. } => ExportScope::Empty,
+    }
+}
+
+fn row_checkout(
+    snapshot: &WorkspaceSnapshot,
+    row: &VisibleRow,
+) -> Option<(String, String, String)> {
+    let repo_path = row.repo.as_deref()?;
+    let snap = snapshot.repos.iter().find(|r| r.repo == repo_path);
+    let identity = repo_identity(
+        repo_path,
+        row.primary_repo
+            .as_deref()
+            .or(snap.and_then(|r| r.primary_repo.as_deref())),
+    );
+    let branch = if !row.chrome.branch.is_empty() {
+        row.chrome.branch.clone()
+    } else {
+        snap.map(|r| r.branch.clone()).unwrap_or_default()
+    };
+    Some((identity, branch, normalize_viewed_path(repo_path)))
+}
+
+fn dir_scope_path(row: &VisibleRow, repo_path: &str) -> Option<String> {
+    if !row.chrome.path.is_empty() {
+        return Some(row.chrome.path.clone());
+    }
+    dir_path_from_id(&row.id, repo_path)
+}
+
+fn collect_node_identities(node: &TreeNode) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    walk_identities(node, &mut out);
+    out
+}
+
+fn walk_identities(node: &TreeNode, out: &mut BTreeSet<String>) {
+    if let Some(repo) = node.repo.as_deref() {
+        out.insert(repo_identity(repo, node.primary_repo.as_deref()));
+    }
+    for child in &node.children {
+        walk_identities(child, out);
+    }
+}
+
 /// True when `row` should paint a comment marker.
 pub fn tree_row_has_comment(store: &CommentStore, row: &VisibleRow) -> bool {
     if store.is_empty() {
@@ -421,8 +783,12 @@ mod tests {
     use super::super::store::{put_comment, CommentKey, CommentStore};
     use super::*;
     use crate::helpers::DETACHED_HEAD_BRANCH;
-    use crate::snapshot::{build_workspace_snapshot, CheckoutKind, RepoSnapshot, SyncStatus};
+    use crate::snapshot::{
+        build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
+    };
     use crate::tui::diff::{DiffCell, DiffCellKind, DiffContent, DiffRow};
+    use crate::tui::tree::NodeChrome;
+    use workspace_status_graph::Commit;
 
     fn snap(repo: &str, branch: &str, kind: CheckoutKind, primary: Option<&str>) -> RepoSnapshot {
         RepoSnapshot {
@@ -691,6 +1057,271 @@ mod tests {
             Some(CommentKey::Worktree {
                 path: "app/.worktrees/feat".into()
             })
+        );
+    }
+
+    fn dirty_file(path: &str) -> FileChange {
+        FileChange {
+            path: path.into(),
+            staged_status: None,
+            unstaged_status: Some("M".into()),
+            untracked: false,
+            old_path: None,
+        }
+    }
+
+    fn workspace_tree() -> TreeNode {
+        TreeNode {
+            id: "workspace".into(),
+            kind: NodeKind::Workspace,
+            label: "workspace".into(),
+            repo: None,
+            primary_repo: None,
+            ignored: false,
+            file: None,
+            children: Vec::new(),
+            chrome: NodeChrome::default(),
+        }
+    }
+
+    fn scoped_bodies(
+        store: &CommentStore,
+        snapshot: &WorkspaceSnapshot,
+        list: CommentExportList<'_>,
+    ) -> Vec<String> {
+        let scoped = comments_in_focus_scope(store, snapshot, &workspace_tree(), list);
+        scoped.values().cloned().collect()
+    }
+
+    fn folder_store() -> (WorkspaceSnapshot, CommentStore) {
+        let snapshot = build_workspace_snapshot(
+            &[snap("app", "main", CheckoutKind::Primary, None)],
+            &[],
+            false,
+            &[],
+        );
+        let mut store = CommentStore::new();
+        store = put_comment(
+            &store,
+            CommentKey::WorktreeLine {
+                repo: "app".into(),
+                branch: "main".into(),
+                path: "folder1/file1".into(),
+                line: 1,
+            },
+            "note-file1",
+        );
+        store = put_comment(
+            &store,
+            CommentKey::WorktreeLine {
+                repo: "app".into(),
+                branch: "main".into(),
+                path: "folder1/file2".into(),
+                line: 2,
+            },
+            "note-file2",
+        );
+        store = put_comment(
+            &store,
+            CommentKey::WorktreeLine {
+                repo: "app".into(),
+                branch: "main".into(),
+                path: "README.md".into(),
+                line: 1,
+            },
+            "note-readme",
+        );
+        (snapshot, store)
+    }
+
+    fn file_row(path: &str) -> VisibleRow {
+        VisibleRow {
+            kind: NodeKind::File,
+            repo: Some("app".into()),
+            file: Some(dirty_file(path)),
+            chrome: NodeChrome {
+                path: path.into(),
+                ..Default::default()
+            },
+            ..VisibleRow::default()
+        }
+    }
+
+    fn dir_row(path: &str) -> VisibleRow {
+        VisibleRow {
+            kind: NodeKind::Dir,
+            repo: Some("app".into()),
+            id: format!("dir:app:{path}"),
+            chrome: NodeChrome {
+                path: path.into(),
+                ..Default::default()
+            },
+            ..VisibleRow::default()
+        }
+    }
+
+    #[test]
+    fn export_file_scope_omits_folder_sibling() {
+        let (snapshot, store) = folder_store();
+        let row = file_row("folder1/file2");
+        let bodies = scoped_bodies(
+            &store,
+            &snapshot,
+            CommentExportList::Tree { row: Some(&row) },
+        );
+        assert_eq!(bodies, vec!["note-file2".to_string()]);
+    }
+
+    #[test]
+    fn export_dir_scope_includes_descendants_omits_sibling_file() {
+        let (snapshot, store) = folder_store();
+        let row = dir_row("folder1");
+        let mut bodies = scoped_bodies(
+            &store,
+            &snapshot,
+            CommentExportList::Tree { row: Some(&row) },
+        );
+        bodies.sort();
+        assert_eq!(
+            bodies,
+            vec!["note-file1".to_string(), "note-file2".to_string()]
+        );
+    }
+
+    #[test]
+    fn export_workspace_scope_includes_every_live_comment() {
+        let (snapshot, store) = folder_store();
+        let row = VisibleRow {
+            kind: NodeKind::Workspace,
+            ..VisibleRow::default()
+        };
+        let mut bodies = scoped_bodies(
+            &store,
+            &snapshot,
+            CommentExportList::Tree { row: Some(&row) },
+        );
+        bodies.sort();
+        assert_eq!(
+            bodies,
+            vec![
+                "note-file1".to_string(),
+                "note-file2".to_string(),
+                "note-readme".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn export_graph_commit_omits_branch_and_sibling_commit() {
+        let snapshot = build_workspace_snapshot(
+            &[snap("merger", "feature/graph", CheckoutKind::Primary, None)],
+            &[],
+            false,
+            &[],
+        );
+        let mut store = CommentStore::new();
+        store = put_comment(
+            &store,
+            CommentKey::Branch {
+                repo: "merger".into(),
+                branch: "feature/graph".into(),
+            },
+            "branch-note",
+        );
+        store = put_comment(
+            &store,
+            CommentKey::Commit {
+                repo: "merger".into(),
+                sha: "aaa".into(),
+            },
+            "commit-a",
+        );
+        store = put_comment(
+            &store,
+            CommentKey::Commit {
+                repo: "merger".into(),
+                sha: "bbb".into(),
+            },
+            "commit-b",
+        );
+        let row = GraphRow::Commit {
+            commit: Commit {
+                id: "aaa".into(),
+                ..Default::default()
+            },
+            is_head: false,
+            worktrees: Vec::new(),
+        };
+        let bodies = scoped_bodies(
+            &store,
+            &snapshot,
+            CommentExportList::Graph {
+                repo: Some("merger"),
+                row: Some(&row),
+            },
+        );
+        assert_eq!(bodies, vec!["commit-a".to_string()]);
+    }
+
+    #[test]
+    fn export_repo_row_includes_attached_branch_and_commits() {
+        let snapshot = build_workspace_snapshot(
+            &[snap_with_branches(
+                "app",
+                "main",
+                CheckoutKind::Primary,
+                None,
+                &["main", "doomed"],
+            )],
+            &[],
+            false,
+            &[],
+        );
+        let mut store = CommentStore::new();
+        store = put_comment(
+            &store,
+            CommentKey::Branch {
+                repo: "app".into(),
+                branch: "doomed".into(),
+            },
+            "attached",
+        );
+        store = put_comment(
+            &store,
+            CommentKey::Commit {
+                repo: "app".into(),
+                sha: "dead".into(),
+            },
+            "commit-note",
+        );
+        store = put_comment(
+            &store,
+            CommentKey::WorktreeLine {
+                repo: "other".into(),
+                branch: "main".into(),
+                path: "x.rs".into(),
+                line: 1,
+            },
+            "sibling-repo",
+        );
+        let row = VisibleRow {
+            kind: NodeKind::Repo,
+            repo: Some("app".into()),
+            chrome: NodeChrome {
+                branch: "main".into(),
+                ..Default::default()
+            },
+            ..VisibleRow::default()
+        };
+        let mut bodies = scoped_bodies(
+            &store,
+            &snapshot,
+            CommentExportList::Tree { row: Some(&row) },
+        );
+        bodies.sort();
+        assert_eq!(
+            bodies,
+            vec!["attached".to_string(), "commit-note".to_string()]
         );
     }
 }

@@ -100,7 +100,7 @@ Live TUI keymap (full overlay detail in [docs/configuration.md](./docs/configura
 | `e`                                   | open focused file in configured editor (default vim; config overrides `$EDITOR` / `$VISUAL`). vim leaves the alternate screen; Cursor stays mounted     |
 | `space`                               | toggle reviewed on a dirty file row (eye mark). Stays until that file's diff or contents change. Non-file rows no-op (do not fold)                     |
 | `;`                                   | comment overlay on the focused numbered diff line, or an object comment on a commit / non-default branch / worktree. Empty Enter deletes |
-| `y`                                   | copy live comments as markdown (after GC) and show them in an overlay. Confirm-mode `y` is still revert-yes |
+| `y`                                   | copy comments for the focused row and its descendants as markdown (after GC) and show them in an overlay. Confirm-mode `y` is still revert-yes |
 | `b`                                   | depth 0: local branch picker. Graph commit: checkout local or `origin/*` (confirm when local is out of sync, then fast-forward to that `origin/*` ref) |
 | `c`                                   | graph commit: create branch at commit (name overlay; ref only, no checkout)                                                                            |
 | `m`                                   | graph commit: boxed confirm, then merge that ref into HEAD (`--ff-only`, else `--no-ff --no-edit`). Dirty tracked worktree refuses. Tree / stash / uncommitted `m` toggles mouse reporting |

@@ -132,6 +132,22 @@ fn pty_semicolon_commit_comment_survives_branch_delete() {
         "r refresh after deleting doomed",
         GIT_WAIT,
     );
+    tui.esc();
+    tui.wait_pred(
+        |screen| overlay_closed(screen) && !screen.contains("SEARCH"),
+        "Esc clears graph search so y is not typed into /",
+        WAIT,
+    );
+    tui.esc();
+    tui.wait_pred(
+        |screen| {
+            tree_cursor_on(screen, "app")
+                && overlay_closed(screen)
+                && screen.contains("focus right")
+        },
+        "Esc returns to the app tree row so y copies that checkout",
+        WAIT,
+    );
     tui.key('y');
     tui.wait_pred(
         |screen| export_overlay(screen) && screen.contains(BODY) && !screen.contains("No comments"),

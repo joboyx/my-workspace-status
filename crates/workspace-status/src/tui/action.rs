@@ -117,7 +117,7 @@ pub enum Action {
     CommentBackspace,
     CommentSubmit,
     CommentCancel,
-    /// Copy live comments as markdown (`y`).
+    /// Copy focused-scope comments as markdown (`y`).
     ExportComments,
     ExportCommentsCancel,
     NavEnter,
