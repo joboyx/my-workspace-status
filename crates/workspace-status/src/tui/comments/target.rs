@@ -730,9 +730,10 @@ fn walk_identities(node: &TreeNode, out: &mut BTreeSet<String>) {
 
 /// True when `row` should paint a comment marker.
 ///
-/// Family and linked-worktree rows match [`CommentKey::Worktree`] by snapshot
-/// family membership ([`repo_identity`] and checkout paths), not by path
-/// prefix.
+/// Family rows match [`CommentKey::Worktree`] for every checkout of the
+/// family identity. Linked-worktree rows match this checkout path and the
+/// identity path, not sibling worktrees. Matching uses snapshot
+/// [`repo_identity`] and checkout paths, not a path prefix.
 pub fn tree_row_has_comment(
     store: &CommentStore,
     snapshot: &WorkspaceSnapshot,
@@ -1873,6 +1874,12 @@ mod tests {
                     CheckoutKind::Linked,
                     Some("app"),
                 ),
+                snap(
+                    ".worktrees/app/other",
+                    "feature/linked-other",
+                    CheckoutKind::Linked,
+                    Some("app"),
+                ),
                 snap("other", "main", CheckoutKind::Primary, None),
             ],
             &[],
@@ -1894,6 +1901,13 @@ mod tests {
                 path: ".worktrees/app/feat".into(),
             },
             "on-worktree",
+        );
+        store = put_comment(
+            &store,
+            CommentKey::Worktree {
+                path: ".worktrees/app/other".into(),
+            },
+            "on-sibling",
         );
         store = put_comment(
             &store,
@@ -1960,6 +1974,7 @@ mod tests {
             vec![
                 "on-branch".to_string(),
                 "on-identity".to_string(),
+                "on-sibling".to_string(),
                 "on-worktree".to_string(),
             ]
         );
@@ -2006,6 +2021,28 @@ mod tests {
         assert!(tree_row_has_comment(
             &store,
             &identity_vs_linked_family_snapshot(),
+            &linked_worktree_app_feat_row()
+        ));
+    }
+
+    #[test]
+    fn linked_worktree_row_omits_sibling_worktree_object_comment() {
+        let snapshot = identity_vs_linked_family_snapshot();
+        let store = put_comment(
+            &CommentStore::new(),
+            CommentKey::Worktree {
+                path: ".worktrees/app/other".into(),
+            },
+            "on-sibling",
+        );
+        assert!(tree_row_has_comment(
+            &store,
+            &snapshot,
+            &family_app_row()
+        ));
+        assert!(!tree_row_has_comment(
+            &store,
+            &snapshot,
             &linked_worktree_app_feat_row()
         ));
     }
