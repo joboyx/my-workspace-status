@@ -15,6 +15,7 @@ mod pty_click_selects_tree_row;
 mod pty_ctrl_c_prompts_before_quit;
 mod pty_ctrl_c_second_quit;
 mod pty_ctrl_o_full_file_context;
+mod pty_ctrl_r_resolves_comment_and_copy_tags;
 mod pty_ctrl_u_d_jumps_workspace_tree;
 mod pty_d_switches_to_default_branch;
 mod pty_divider_scrollbar_drag;

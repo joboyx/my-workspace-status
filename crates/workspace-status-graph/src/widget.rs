@@ -58,6 +58,10 @@ pub struct GraphWidget<'a> {
     commented_rows: &'a [usize],
     /// Comment glyph (`ICON_COMMENT`: `"` / nf-fa-comment). Empty uses `"`.
     comment_glyph: &'a str,
+    /// Selectable rows whose comments are all resolved.
+    resolved_comment_rows: &'a [usize],
+    /// Glyph for [`Self::resolved_comment_rows`]. Empty uses `'`.
+    resolved_comment_glyph: &'a str,
     cursor_fg: Color,
     cursor_bg: Option<Color>,
     label_palette: Option<GraphLabelPalette>,
@@ -81,6 +85,8 @@ impl<'a> GraphWidget<'a> {
             flash_rows: &[],
             commented_rows: &[],
             comment_glyph: "\"",
+            resolved_comment_rows: &[],
+            resolved_comment_glyph: "'",
             cursor_fg: Color::Cyan,
             cursor_bg: None,
             label_palette: None,
@@ -166,6 +172,20 @@ impl<'a> GraphWidget<'a> {
     /// match tree and diff marks.
     pub fn comment_glyph(mut self, glyph: &'a str) -> Self {
         self.comment_glyph = glyph;
+        self
+    }
+
+    /// Mark rows whose comments are all resolved (`ICON_COMMENT_RESOLVED`).
+    ///
+    /// Open [`Self::commented_rows`] win when a row is in both lists.
+    pub fn resolved_comment_rows(mut self, indices: &'a [usize]) -> Self {
+        self.resolved_comment_rows = indices;
+        self
+    }
+
+    /// Glyph for [`Self::resolved_comment_rows`]. Default `'`.
+    pub fn resolved_comment_glyph(mut self, glyph: &'a str) -> Self {
+        self.resolved_comment_glyph = glyph;
         self
     }
 
@@ -327,10 +347,16 @@ impl Widget for GraphWidget<'_> {
                 && line
                     .row_index
                     .is_some_and(|i| self.search_matches.contains(&i));
-            let commented = line.selectable
+            let open_comment = line.selectable
                 && line
                     .row_index
                     .is_some_and(|i| self.commented_rows.contains(&i));
+            let resolved_comment = line.selectable
+                && !open_comment
+                && line
+                    .row_index
+                    .is_some_and(|i| self.resolved_comment_rows.contains(&i));
+            let commented = open_comment || resolved_comment;
             let flash_bg = line.row_index.and_then(|i| {
                 self.flash_rows
                     .iter()
@@ -354,7 +380,11 @@ impl Widget for GraphWidget<'_> {
                 fallback,
                 self.label_palette,
                 self.col_offset,
-                self.comment_glyph,
+                if resolved_comment {
+                    self.resolved_comment_glyph
+                } else {
+                    self.comment_glyph
+                },
             );
             y = y.saturating_add(1);
         }
@@ -1931,6 +1961,45 @@ mod tests {
         assert!(
             saw_nerd,
             "commented graph row should paint the supplied glyph"
+        );
+    }
+
+    #[test]
+    fn resolved_comment_row_uses_resolved_glyph() {
+        let model = sample_model();
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .selected(Some(0))
+                    .commented_rows(&[1])
+                    .resolved_comment_rows(&[1, 2])
+                    .resolved_comment_glyph("'")
+                    .cursor_style(Color::Cyan, Color::DarkGray)
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut saw_open = false;
+        let mut saw_resolved = false;
+        for y in 0..16u16 {
+            for x in 0..80u16 {
+                match buffer[(x, y)].symbol() {
+                    "\"" => saw_open = true,
+                    "'" => saw_resolved = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            saw_open,
+            "open commented_rows must win when a row is also in resolved_comment_rows"
+        );
+        assert!(
+            saw_resolved,
+            "resolved-only graph row should paint the resolved glyph"
         );
     }
 

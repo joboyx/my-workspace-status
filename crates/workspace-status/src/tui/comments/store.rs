@@ -8,10 +8,37 @@ use std::path::{Path, PathBuf};
 use super::super::viewed::normalize_viewed_path;
 
 /// On-disk store version. Unknown versions load as empty.
+///
+/// `resolved` is an additive field on each entry. Version stays `1` so an
+/// older file without that field still loads (open / unresolved).
 pub const COMMENT_STORE_VERSION: u32 = 1;
 
-/// identity → body.
-pub type CommentStore = BTreeMap<CommentKey, String>;
+/// identity → body plus resolve state.
+pub type CommentStore = BTreeMap<CommentKey, CommentEntry>;
+
+/// One persisted comment.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommentEntry {
+    /// Comment text. Empty / whitespace-only bodies do not persist.
+    pub body: String,
+    /// True when the operator marked this comment resolved.
+    pub resolved: bool,
+}
+
+impl CommentEntry {
+    /// Open (unresolved) comment with `body`.
+    pub fn open(body: impl Into<String>) -> Self {
+        Self {
+            body: body.into(),
+            resolved: false,
+        }
+    }
+
+    /// Body as `&str`.
+    pub fn as_str(&self) -> &str {
+        self.body.as_str()
+    }
+}
 
 /// One persisted comment key.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -80,13 +107,33 @@ pub fn repo_identity(repo: &str, primary_repo: Option<&str>) -> String {
 }
 
 /// Upsert or delete. Empty / whitespace-only body deletes.
+///
+/// A replace keeps the existing [`CommentEntry::resolved`] flag. New keys
+/// start unresolved. Use [`put_comment_entry`] to set resolve state.
 pub fn put_comment(store: &CommentStore, key: CommentKey, body: &str) -> CommentStore {
+    let resolved = store.get(&key).is_some_and(|entry| entry.resolved);
+    put_comment_entry(store, key, body, resolved)
+}
+
+/// Upsert or delete with an explicit resolve flag.
+pub fn put_comment_entry(
+    store: &CommentStore,
+    key: CommentKey,
+    body: &str,
+    resolved: bool,
+) -> CommentStore {
     let mut next = store.clone();
     let trimmed = body.trim();
     if trimmed.is_empty() {
         next.remove(&key);
     } else {
-        next.insert(key, body.to_string());
+        next.insert(
+            key,
+            CommentEntry {
+                body: body.to_string(),
+                resolved,
+            },
+        );
     }
     next
 }
@@ -104,15 +151,21 @@ enum CommentRecord {
         repo: String,
         branch: String,
         body: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        resolved: bool,
     },
     Commit {
         repo: String,
         sha: String,
         body: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        resolved: bool,
     },
     Worktree {
         path: String,
         body: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        resolved: bool,
     },
     WorktreeLine {
         repo: String,
@@ -122,6 +175,8 @@ enum CommentRecord {
         #[serde(rename = "endLine", default, skip_serializing_if = "Option::is_none")]
         end_line: Option<u32>,
         body: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        resolved: bool,
     },
     CommitLine {
         repo: String,
@@ -131,6 +186,8 @@ enum CommentRecord {
         #[serde(rename = "endLine", default, skip_serializing_if = "Option::is_none")]
         end_line: Option<u32>,
         body: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        resolved: bool,
     },
 }
 
@@ -166,11 +223,25 @@ impl CommentKey {
         }
     }
 
-    fn into_record(self, body: String) -> CommentRecord {
+    fn into_record(self, entry: CommentEntry) -> CommentRecord {
         match self {
-            Self::Branch { repo, branch } => CommentRecord::Branch { repo, branch, body },
-            Self::Commit { repo, sha } => CommentRecord::Commit { repo, sha, body },
-            Self::Worktree { path } => CommentRecord::Worktree { path, body },
+            Self::Branch { repo, branch } => CommentRecord::Branch {
+                repo,
+                branch,
+                body: entry.body,
+                resolved: entry.resolved,
+            },
+            Self::Commit { repo, sha } => CommentRecord::Commit {
+                repo,
+                sha,
+                body: entry.body,
+                resolved: entry.resolved,
+            },
+            Self::Worktree { path } => CommentRecord::Worktree {
+                path,
+                body: entry.body,
+                resolved: entry.resolved,
+            },
             Self::WorktreeLine {
                 repo,
                 branch,
@@ -183,7 +254,8 @@ impl CommentKey {
                 path,
                 line,
                 end_line: record_end_line(line, end_line),
-                body,
+                body: entry.body,
+                resolved: entry.resolved,
             },
             Self::CommitLine {
                 repo,
@@ -197,18 +269,33 @@ impl CommentKey {
                 path,
                 line,
                 end_line: record_end_line(line, end_line),
-                body,
+                body: entry.body,
+                resolved: entry.resolved,
             },
         }
     }
 }
 
 impl CommentRecord {
-    fn into_pair(self) -> Option<(CommentKey, String)> {
-        let (key, body) = match self {
-            Self::Branch { repo, branch, body } => (CommentKey::Branch { repo, branch }, body),
-            Self::Commit { repo, sha, body } => (CommentKey::Commit { repo, sha }, body),
-            Self::Worktree { path, body } => (CommentKey::Worktree { path }, body),
+    fn into_pair(self) -> Option<(CommentKey, CommentEntry)> {
+        let (key, body, resolved) = match self {
+            Self::Branch {
+                repo,
+                branch,
+                body,
+                resolved,
+            } => (CommentKey::Branch { repo, branch }, body, resolved),
+            Self::Commit {
+                repo,
+                sha,
+                body,
+                resolved,
+            } => (CommentKey::Commit { repo, sha }, body, resolved),
+            Self::Worktree {
+                path,
+                body,
+                resolved,
+            } => (CommentKey::Worktree { path }, body, resolved),
             Self::WorktreeLine {
                 repo,
                 branch,
@@ -216,6 +303,7 @@ impl CommentRecord {
                 line,
                 end_line,
                 body,
+                resolved,
             } => {
                 let (line, end_line) = ordered_line_range(line, key_end_line(line, end_line));
                 (
@@ -227,6 +315,7 @@ impl CommentRecord {
                         end_line,
                     },
                     body,
+                    resolved,
                 )
             }
             Self::CommitLine {
@@ -236,6 +325,7 @@ impl CommentRecord {
                 line,
                 end_line,
                 body,
+                resolved,
             } => {
                 let (line, end_line) = ordered_line_range(line, key_end_line(line, end_line));
                 (
@@ -247,13 +337,14 @@ impl CommentRecord {
                         end_line,
                     },
                     body,
+                    resolved,
                 )
             }
         };
         if body.trim().is_empty() {
             None
         } else {
-            Some((key, body))
+            Some((key, CommentEntry { body, resolved }))
         }
     }
 }
@@ -347,7 +438,15 @@ mod tests {
         };
         let mut store = CommentStore::new();
         store = put_comment(&store, key.clone(), "note");
-        assert_eq!(store.get(&key).map(String::as_str), Some("note"));
+        assert_eq!(store.get(&key).map(CommentEntry::as_str), Some("note"));
+        assert!(!store.get(&key).is_some_and(|e| e.resolved));
+        store = put_comment_entry(&store, key.clone(), "note", true);
+        store = put_comment(&store, key.clone(), "edited");
+        assert_eq!(store.get(&key).map(CommentEntry::as_str), Some("edited"));
+        assert!(
+            store.get(&key).is_some_and(|e| e.resolved),
+            "body replace keeps resolved"
+        );
         store = put_comment(&store, key.clone(), "  ");
         assert!(store.is_empty());
     }
@@ -373,7 +472,8 @@ mod tests {
         let store = put_comment(&CommentStore::new(), key.clone(), "wt line");
         save_comment_store(&store, &file);
         let loaded = load_comment_store(&file);
-        assert_eq!(loaded.get(&key).map(String::as_str), Some("wt line"));
+        assert_eq!(loaded.get(&key).map(CommentEntry::as_str), Some("wt line"));
+        assert!(!loaded.get(&key).is_some_and(|e| e.resolved));
         let text = fs::read_to_string(&file).unwrap();
         assert!(
             !text.contains("endLine"),
@@ -389,7 +489,7 @@ mod tests {
         let store = put_comment(&CommentStore::new(), range.clone(), "span");
         save_comment_store(&store, &file);
         let loaded = load_comment_store(&file);
-        assert_eq!(loaded.get(&range).map(String::as_str), Some("span"));
+        assert_eq!(loaded.get(&range).map(CommentEntry::as_str), Some("span"));
         let text = fs::read_to_string(&file).unwrap();
         assert!(
             text.contains("\"endLine\": 2"),
@@ -422,7 +522,25 @@ mod tests {
             line: 3,
             end_line: 3,
         };
-        assert_eq!(loaded.get(&old).map(String::as_str), Some("old"));
+        assert_eq!(loaded.get(&old).map(CommentEntry::as_str), Some("old"));
+        assert!(!loaded.get(&old).is_some_and(|e| e.resolved));
+        let resolved_key = CommentKey::Commit {
+            repo: "app".into(),
+            sha: "deadbeef".into(),
+        };
+        let store = put_comment_entry(&CommentStore::new(), resolved_key.clone(), "done", true);
+        save_comment_store(&store, &file);
+        let loaded = load_comment_store(&file);
+        assert_eq!(
+            loaded.get(&resolved_key).map(CommentEntry::as_str),
+            Some("done")
+        );
+        assert!(loaded.get(&resolved_key).is_some_and(|e| e.resolved));
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(
+            text.contains("\"resolved\": true"),
+            "resolved comments persist the flag: {text}"
+        );
         assert!(load_comment_store(&dir.join("missing.json")).is_empty());
         let _ = fs::remove_dir_all(&dir);
     }

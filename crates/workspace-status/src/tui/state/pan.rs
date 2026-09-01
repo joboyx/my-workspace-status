@@ -3,7 +3,10 @@
 use workspace_status_graph::graph_col_max;
 
 use super::super::action::{Action, Effect};
-use super::super::comments::{commit_file_row_has_comment, tree_row_has_comment};
+use super::super::comments::{
+    commit_file_row_comments_resolved, commit_file_row_has_comment, tree_row_comments_resolved,
+    tree_row_has_comment,
+};
 use super::super::diff::{cell_code_width, diff_row_content_width, gutter_width, DiffRow};
 use super::super::icons::comment_mark_cols;
 use super::super::search::{apply_pan, list_row_pan_max, max_col_offset};
@@ -85,7 +88,8 @@ impl AppState {
             .map(|row| {
                 let viewed = row.kind == NodeKind::File && self.reviewed.contains(&row.id);
                 let commented = tree_row_has_comment(&self.comment_store, row);
-                let segs = row_segments(row, self.ascii, viewed, commented);
+                let resolved = commented && tree_row_comments_resolved(&self.comment_store, row);
+                let segs = row_segments(row, self.ascii, viewed, commented, resolved);
                 let label: usize = segs.segments.iter().map(|s| visible_width(&s.text)).sum();
                 let trailing: usize = segs.trailing.iter().map(|s| visible_width(&s.text)).sum();
                 list_row_pan_max(label, row.depth, trailing, width)
@@ -116,7 +120,19 @@ impl AppState {
                             snap.map(|r| r.branch.as_str()),
                         )
                 });
-                let trailing = with_comment_mark(row.trailing_segs.clone(), self.ascii, commented);
+                let resolved = commented
+                    && scope.is_some_and(|(repo, source)| {
+                        commit_file_row_comments_resolved(
+                            &self.comment_store,
+                            repo,
+                            snap.and_then(|r| r.primary_repo.as_deref()),
+                            source,
+                            &row.path,
+                            snap.map(|r| r.branch.as_str()),
+                        )
+                    });
+                let trailing =
+                    with_comment_mark(row.trailing_segs.clone(), self.ascii, commented, resolved);
                 let label: usize = row.segments.iter().map(|s| visible_width(&s.text)).sum();
                 let trailing_w: usize = trailing.iter().map(|s| visible_width(&s.text)).sum();
                 list_row_pan_max(label, row.depth, trailing_w, width)

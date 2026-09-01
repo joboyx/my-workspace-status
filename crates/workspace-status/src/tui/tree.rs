@@ -10,9 +10,9 @@ use crate::snapshot::{
 };
 
 use super::icons::{
-    file_icon, icon_branch, icon_clean, icon_comment, icon_folder, icon_ignored,
-    icon_linked_worktree, icon_repo, icon_viewed, icon_workspace, status_letter_from_change,
-    tui_file_badge, tui_merge_mark, tui_sync_mark, StatusColorRole,
+    file_icon, icon_branch, icon_clean, icon_comment, icon_comment_resolved, icon_folder,
+    icon_ignored, icon_linked_worktree, icon_repo, icon_viewed, icon_workspace,
+    status_letter_from_change, tui_file_badge, tui_merge_mark, tui_sync_mark, StatusColorRole,
 };
 
 /// Structural node kind.
@@ -1072,17 +1072,27 @@ pub fn node_segments(
 }
 
 /// Prepend `icon_comment` (`"` / nf-fa-comment) when `commented`.
-///
-/// Uncommented rows keep `trailing` unchanged. Tree and commit-file lists
-/// share this so the mark is the same trailing chrome.
-pub fn with_comment_mark(mut trailing: Vec<TextSeg>, ascii: bool, commented: bool) -> Vec<TextSeg> {
+/// Resolved comments use `icon_comment_resolved` (`'` / nf-fa-comment-o)
+/// and muted chrome. Uncommented rows keep `trailing` unchanged. Tree
+/// and commit-file lists share this so the mark is the same trailing chrome.
+pub fn with_comment_mark(
+    mut trailing: Vec<TextSeg>,
+    ascii: bool,
+    commented: bool,
+    resolved: bool,
+) -> Vec<TextSeg> {
     if !commented {
         return trailing;
     }
+    let (glyph, role) = if resolved {
+        (icon_comment_resolved(ascii), SegRole::Muted)
+    } else {
+        (icon_comment(ascii), SegRole::Heading)
+    };
     let mut marked = vec![
         TextSeg {
-            text: icon_comment(ascii).to_string(),
-            role: SegRole::Heading,
+            text: glyph.to_string(),
+            role,
             hex: None,
             bold: false,
             dim: false,
@@ -1097,9 +1107,16 @@ pub fn with_comment_mark(mut trailing: Vec<TextSeg>, ascii: bool, commented: boo
 /// using `icon_viewed` — nf-fa-eye `U+F06E` / `*`. Paint is bold
 /// [`SegRole::Viewed`] (teal/cyan), not muted and not the clean check.
 /// Comment mark uses `icon_comment` (`"` / nf-fa-comment) on rows that have
-/// a live comment.
-pub fn row_segments(row: &VisibleRow, ascii: bool, viewed: bool, commented: bool) -> NodeSegments {
-    let mut trailing = with_comment_mark(row.trailing_segs.clone(), ascii, commented);
+/// a live comment, or `icon_comment_resolved` (`'` / nf-fa-comment-o) when
+/// every comment on that row is resolved.
+pub fn row_segments(
+    row: &VisibleRow,
+    ascii: bool,
+    viewed: bool,
+    commented: bool,
+    resolved: bool,
+) -> NodeSegments {
+    let mut trailing = with_comment_mark(row.trailing_segs.clone(), ascii, commented, resolved);
     if viewed && row.kind == NodeKind::File {
         let mut marked = vec![
             TextSeg {
@@ -1602,13 +1619,13 @@ mod tests {
             .iter()
             .find(|r| r.id == "file:app:README.md")
             .expect("file");
-        let segs = row_segments(file, true, true, false);
+        let segs = row_segments(file, true, true, false, false);
         let trail: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(icon_viewed(true), "*");
         assert_eq!(icon_viewed(false), "\u{f06e}");
         assert!(trail.contains(icon_viewed(true)), "{trail}");
         assert!(!trail.contains('\u{25c9}'), "{trail}");
-        let nerd = row_segments(file, false, true, false);
+        let nerd = row_segments(file, false, true, false, false);
         let nerd_trail: String = nerd.trailing.iter().map(|s| s.text.as_str()).collect();
         assert!(nerd_trail.contains('\u{f06e}'), "{nerd_trail}");
         assert!(!nerd_trail.contains('\u{25c9}'), "{nerd_trail}");
@@ -1640,17 +1657,21 @@ mod tests {
             .iter()
             .find(|r| r.id == "file:app:README.md")
             .expect("file");
-        let segs = row_segments(file, true, false, true);
+        let segs = row_segments(file, true, false, true, false);
         let trail: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(icon_comment(true), "\"");
         assert!(trail.contains('"'), "{trail}");
         assert!(!trail.contains('*'), "{trail}");
-        let unmarked = row_segments(file, true, false, false);
+        let unmarked = row_segments(file, true, false, false, false);
         let unmarked_trail: String = unmarked.trailing.iter().map(|s| s.text.as_str()).collect();
         assert!(!unmarked_trail.contains('"'), "{unmarked_trail}");
-        let nerd = row_segments(file, false, false, true);
+        let nerd = row_segments(file, false, false, true, false);
         let nerd_trail: String = nerd.trailing.iter().map(|s| s.text.as_str()).collect();
         assert!(nerd_trail.contains('\u{f075}'), "{nerd_trail}");
+        let resolved = row_segments(file, true, false, true, true);
+        let resolved_trail: String = resolved.trailing.iter().map(|s| s.text.as_str()).collect();
+        assert!(resolved_trail.contains('\''), "{resolved_trail}");
+        assert!(!resolved_trail.contains('"'), "{resolved_trail}");
     }
 
     #[test]

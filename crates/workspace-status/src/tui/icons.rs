@@ -114,10 +114,23 @@ pub fn icon_viewed(ascii: bool) -> &'static str {
 pub const ICON_COMMENT_NERD: &str = "\u{f075}";
 /// `ICON_COMMENT` ASCII fallback.
 pub const ICON_COMMENT_ASCII: &str = "\"";
+/// Resolved comment nerd glyph: nf-fa-comment-o (`U+F0E5`).
+pub const ICON_COMMENT_RESOLVED_NERD: &str = "\u{f0e5}";
+/// Resolved comment ASCII fallback. Distinct from open `"`.
+pub const ICON_COMMENT_RESOLVED_ASCII: &str = "'";
 
 /// Comment mark on a row or diff line. Nerd: nf-fa-comment; ASCII: `"`.
 pub fn icon_comment(ascii: bool) -> &'static str {
     glyph(ascii, ICON_COMMENT_NERD, ICON_COMMENT_ASCII)
+}
+
+/// Resolved comment mark. Nerd: nf-fa-comment-o; ASCII: `'`.
+pub fn icon_comment_resolved(ascii: bool) -> &'static str {
+    glyph(
+        ascii,
+        ICON_COMMENT_RESOLVED_NERD,
+        ICON_COMMENT_RESOLVED_ASCII,
+    )
 }
 
 /// Display columns reserved for the comment mark on every numbered diff cell.
@@ -126,7 +139,9 @@ pub fn icon_comment(ascii: bool) -> &'static str {
 /// Nerd and ASCII marks are one column (same contract as the rest of this
 /// registry). Themes change colour, not width.
 pub fn comment_mark_cols(ascii: bool) -> usize {
-    visible_width(icon_comment(ascii)).max(1)
+    visible_width(icon_comment(ascii))
+        .max(visible_width(icon_comment_resolved(ascii)))
+        .max(1)
 }
 
 const DEFAULT_FILE_GLYPH: &str = "";
@@ -544,6 +559,7 @@ mod tests {
             icon_open_vs_default(true),
             icon_viewed(true),
             icon_comment(true),
+            icon_comment_resolved(true),
             ASCII_FILE_GLYPH,
         ];
         let nerd = [
@@ -563,6 +579,7 @@ mod tests {
             icon_open_vs_default(false),
             icon_viewed(false),
             icon_comment(false),
+            icon_comment_resolved(false),
             CURSOR_BAR,
             FOLD_EXPANDED,
             FOLD_COLLAPSED,
@@ -576,7 +593,10 @@ mod tests {
         assert_eq!(icon_viewed(true), "*");
         assert_eq!(icon_comment(true), "\"");
         assert_eq!(icon_comment(false), ICON_COMMENT_NERD);
+        assert_eq!(icon_comment_resolved(true), "'");
+        assert_eq!(icon_comment_resolved(false), ICON_COMMENT_RESOLVED_NERD);
         assert_eq!(visible_width(icon_comment(false)), 1);
+        assert_eq!(visible_width(icon_comment_resolved(false)), 1);
         assert_eq!(comment_mark_cols(true), 1);
         assert_eq!(comment_mark_cols(false), 1);
         assert_ne!(icon_viewed(false), icon_clean(false));

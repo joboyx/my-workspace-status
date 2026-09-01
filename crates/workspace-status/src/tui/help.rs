@@ -169,7 +169,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "mouse · drag pane, split, or graph scrollbars",
             },
             HelpEntry {
-                keys: ";",
+                keys: "; Ctrl-R",
                 desc: "comment focused row / line",
             },
             HelpEntry {
@@ -570,7 +570,7 @@ mod tests {
         assert!(view_keys.contains(&"Ctrl-o"));
         assert!(view_keys.contains(&"o O"));
         assert!(view_keys.contains(&"m"));
-        assert!(view_keys.contains(&";"));
+        assert!(view_keys.contains(&"; Ctrl-R"));
         assert!(view_keys.contains(&"V"));
         assert!(view_keys.contains(&"y"));
         assert!(view_keys.contains(&"Esc"));

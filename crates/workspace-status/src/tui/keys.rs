@@ -419,20 +419,26 @@ fn key_to_action(
             }
             _ => Action::None,
         },
-        InputMode::Comment => match key.code {
-            KeyCode::Esc => Action::CommentCancel,
-            KeyCode::Enter => Action::CommentSubmit,
-            KeyCode::Backspace => Action::CommentBackspace,
-            KeyCode::Delete => Action::CommentDelete,
-            KeyCode::Left => Action::CommentLeft,
-            KeyCode::Right => Action::CommentRight,
-            KeyCode::Home => Action::CommentHome,
-            KeyCode::End => Action::CommentEnd,
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Action::CommentChar(c)
+        InputMode::Comment => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                return match key.code {
+                    KeyCode::Char('r') | KeyCode::Char('R') => Action::CommentToggleResolved,
+                    _ => Action::None,
+                };
             }
-            _ => Action::None,
-        },
+            match key.code {
+                KeyCode::Esc => Action::CommentCancel,
+                KeyCode::Enter => Action::CommentSubmit,
+                KeyCode::Backspace => Action::CommentBackspace,
+                KeyCode::Delete => Action::CommentDelete,
+                KeyCode::Left => Action::CommentLeft,
+                KeyCode::Right => Action::CommentRight,
+                KeyCode::Home => Action::CommentHome,
+                KeyCode::End => Action::CommentEnd,
+                KeyCode::Char(c) => Action::CommentChar(c),
+                _ => Action::None,
+            }
+        }
         InputMode::CommentExport => match key.code {
             KeyCode::Esc | KeyCode::Enter => Action::ExportCommentsCancel,
             _ => Action::None,
@@ -1101,6 +1107,14 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Delete), InputMode::Comment, false, false),
             Action::CommentDelete
+        );
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('r')), InputMode::Comment, false, false),
+            Action::CommentToggleResolved
+        );
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('R')), InputMode::Comment, false, false),
+            Action::CommentToggleResolved
         );
         assert_eq!(
             event_to_action(

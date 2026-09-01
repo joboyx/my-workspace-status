@@ -5,6 +5,9 @@ use std::process::{Command, Stdio};
 
 use super::store::{CommentKey, CommentStore};
 
+/// Markdown marker for a resolved comment. Open comments have no tag.
+pub const RESOLVED_MARKDOWN_TAG: &str = "[resolved]";
+
 fn line_span_label(line: u32, end_line: u32) -> String {
     if end_line == line {
         line.to_string()
@@ -13,26 +16,39 @@ fn line_span_label(line: u32, end_line: u32) -> String {
     }
 }
 
+fn resolved_suffix(resolved: bool) -> &'static str {
+    if resolved {
+        " [resolved]"
+    } else {
+        ""
+    }
+}
+
 /// Markdown for the comments in `store`. Empty store → a short empty notice.
+///
+/// Resolved comments stay in the list. The heading or bullet carries
+/// [`RESOLVED_MARKDOWN_TAG`] so a copy can tell resolved from open.
 pub fn export_markdown(store: &CommentStore) -> String {
     if store.is_empty() {
         return "# Comments\n\nNo comments.\n".to_string();
     }
     let mut out = String::from("# Comments\n");
-    for (key, body) in store {
+    for (key, entry) in store {
+        let tag = resolved_suffix(entry.resolved);
+        let body = entry.body.trim_end();
         out.push('\n');
         match key {
             CommentKey::Branch { repo, branch } => {
-                out.push_str(&format!("## {repo} — branch `{branch}`\n\n"));
-                out.push_str(&format!("{}\n", body.trim_end()));
+                out.push_str(&format!("## {repo} — branch `{branch}`{tag}\n\n"));
+                out.push_str(&format!("{body}\n"));
             }
             CommentKey::Commit { repo, sha } => {
-                out.push_str(&format!("## {repo} — commit `{sha}`\n\n"));
-                out.push_str(&format!("{}\n", body.trim_end()));
+                out.push_str(&format!("## {repo} — commit `{sha}`{tag}\n\n"));
+                out.push_str(&format!("{body}\n"));
             }
             CommentKey::Worktree { path } => {
-                out.push_str(&format!("## {path} — worktree\n\n"));
-                out.push_str(&format!("{}\n", body.trim_end()));
+                out.push_str(&format!("## {path} — worktree{tag}\n\n"));
+                out.push_str(&format!("{body}\n"));
             }
             CommentKey::WorktreeLine {
                 repo,
@@ -43,9 +59,8 @@ pub fn export_markdown(store: &CommentStore) -> String {
             } => {
                 out.push_str(&format!("## {repo} — branch `{branch}`\n\n"));
                 out.push_str(&format!(
-                    "- `{path}`:{} — {}\n",
-                    line_span_label(*line, *end_line),
-                    body.trim_end()
+                    "- `{path}`:{}{tag} — {body}\n",
+                    line_span_label(*line, *end_line)
                 ));
             }
             CommentKey::CommitLine {
@@ -57,9 +72,8 @@ pub fn export_markdown(store: &CommentStore) -> String {
             } => {
                 out.push_str(&format!("## {repo} — commit `{sha}`\n\n"));
                 out.push_str(&format!(
-                    "- `{path}`:{} — {}\n",
-                    line_span_label(*line, *end_line),
-                    body.trim_end()
+                    "- `{path}`:{}{tag} — {body}\n",
+                    line_span_label(*line, *end_line)
                 ));
             }
         }
@@ -182,6 +196,45 @@ mod tests {
         assert!(md.contains("commit note"));
         assert!(!md.contains("tokyo-night"));
         assert!(!md.contains("\"kind\""));
+        assert!(
+            !md.contains(RESOLVED_MARKDOWN_TAG),
+            "open comments must not carry the resolved tag: {md}"
+        );
+        store = super::super::store::put_comment_entry(
+            &store,
+            CommentKey::Commit {
+                repo: "merger".into(),
+                sha: "deadbeef".into(),
+            },
+            "commit note",
+            true,
+        );
+        let md = export_markdown(&store);
+        assert!(md.contains("commit note"));
+        assert!(
+            md.contains(&format!("commit `deadbeef` {RESOLVED_MARKDOWN_TAG}")),
+            "resolved object comments must tag the heading: {md}"
+        );
+        store = super::super::store::put_comment_entry(
+            &store,
+            CommentKey::WorktreeLine {
+                repo: "app".into(),
+                branch: "main".into(),
+                path: "README.md".into(),
+                line: 2,
+                end_line: 2,
+            },
+            "dirty line",
+            true,
+        );
+        let md = export_markdown(&store);
+        assert!(md.contains("dirty line"));
+        assert!(
+            md.contains(&format!(
+                "`README.md`:2 {RESOLVED_MARKDOWN_TAG} — dirty line"
+            )),
+            "resolved line comments stay in the copy with a tag: {md}"
+        );
     }
 
     #[test]

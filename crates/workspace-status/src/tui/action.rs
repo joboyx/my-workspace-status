@@ -131,6 +131,8 @@ pub enum Action {
     CommentEnd,
     CommentSubmit,
     CommentCancel,
+    /// Toggle resolve on the open comment overlay (`Ctrl-R`). Enter persists.
+    CommentToggleResolved,
     /// Copy focused-scope comments as markdown (`y`).
     ExportComments,
     ExportCommentsCancel,

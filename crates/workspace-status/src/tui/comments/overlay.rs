@@ -13,6 +13,8 @@ pub struct CommentPrompt {
     pub label: String,
     /// Caret as a Unicode scalar index into [`Self::body`].
     pub cursor: usize,
+    /// Draft resolve flag. Enter persists it with the body.
+    pub resolved: bool,
 }
 
 impl CommentPrompt {
@@ -24,7 +26,14 @@ impl CommentPrompt {
             body,
             label,
             cursor,
+            resolved: false,
         }
+    }
+
+    /// Set the draft resolve flag.
+    pub fn with_resolved(mut self, resolved: bool) -> Self {
+        self.resolved = resolved;
+        self
     }
 
     /// Insert `c` at the caret and advance.

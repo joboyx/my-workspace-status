@@ -310,6 +310,12 @@ impl AppState {
                 Effect::None
             }
             Action::CommentSubmit => self.submit_comment(),
+            Action::CommentToggleResolved => {
+                if let Some(prompt) = self.comment.as_mut() {
+                    prompt.resolved = !prompt.resolved;
+                }
+                Effect::None
+            }
             Action::CommentCancel => {
                 self.comment = None;
                 self.status = "comment cancelled".into();
