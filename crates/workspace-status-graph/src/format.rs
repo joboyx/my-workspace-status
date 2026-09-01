@@ -851,6 +851,9 @@ pub fn format_commit_subject(commit: &Commit) -> String {
 }
 
 /// `[HEAD]` (detached only) + merged ref chips.
+///
+/// On a commit with several refs, the checked-out branch chip is first,
+/// then default-branch / other locals / remotes / tags.
 pub fn format_commit_ref_chips(
     refs: &[GraphRef],
     is_head: bool,
@@ -861,6 +864,9 @@ pub fn format_commit_ref_chips(
 }
 
 /// Like [`format_commit_ref_chips`] with a default-branch override for colour/sort.
+///
+/// Checkout rank still leads; the override only affects the remaining
+/// default-branch / other-local / remote / tag order.
 pub fn format_commit_ref_chips_with(
     refs: &[GraphRef],
     is_head: bool,
@@ -895,6 +901,9 @@ pub(crate) fn commit_ref_chip_parts(
 }
 
 /// One visual chip as styled runs (`[HEAD]`, `[main]`, `[+N]` later).
+///
+/// Named checkout chips sort before other refs; detached `[HEAD]` stays a
+/// prefix chip, not part of that sort.
 fn commit_ref_chip_groups(
     refs: &[GraphRef],
     is_head: bool,
@@ -909,7 +918,7 @@ fn commit_ref_chip_groups(
             kind: LabelKind::ChipHead,
         }]);
     }
-    for chip in merge_commit_ref_chips(refs, default_branch_override) {
+    for chip in merge_commit_ref_chips(refs, is_head, head_branch, default_branch_override) {
         let checkout = chip_is_checkout(&chip, head_branch, is_head);
         groups.push(merged_chip_parts(
             &chip,
@@ -1045,6 +1054,7 @@ impl MergedRefChip {
         }
     }
 
+    /// Rank after checkout: default branch, other locals, unmatched remotes, tags.
     fn sort_key(&self, default_branch_override: Option<&str>) -> u8 {
         match self {
             Self::Merged(n) | Self::Local(n) => {
@@ -1067,8 +1077,14 @@ impl MergedRefChip {
 }
 
 /// Merge local foo + remote */foo into one chip; leave unmatched remotes/tags.
+///
+/// Sort is checkout ([`chip_is_checkout`]) first, then [`MergedRefChip::sort_key`],
+/// then the original index. Named HEAD on this commit leads; detached HEAD
+/// is a separate `[HEAD]` chip and does not change this order.
 fn merge_commit_ref_chips(
     refs: &[GraphRef],
+    is_head: bool,
+    head_branch: Option<&str>,
     default_branch_override: Option<&str>,
 ) -> Vec<MergedRefChip> {
     let locals: Vec<&GraphRef> = refs.iter().filter(|r| r.kind == RefKind::Local).collect();
@@ -1099,13 +1115,28 @@ fn merge_commit_ref_chips(
 
     let mut indexed: Vec<(usize, MergedRefChip)> = chips.into_iter().enumerate().collect();
     indexed.sort_by(|a, b| {
-        a.1.sort_key(default_branch_override)
-            .cmp(&b.1.sort_key(default_branch_override))
+        let a_checkout = if chip_is_checkout(&a.1, head_branch, is_head) {
+            0u8
+        } else {
+            1
+        };
+        let b_checkout = if chip_is_checkout(&b.1, head_branch, is_head) {
+            0u8
+        } else {
+            1
+        };
+        a_checkout
+            .cmp(&b_checkout)
+            .then(
+                a.1.sort_key(default_branch_override)
+                    .cmp(&b.1.sort_key(default_branch_override)),
+            )
             .then(a.0.cmp(&b.0))
     });
     indexed.into_iter().map(|(_, chip)| chip).collect()
 }
 
+/// True when this local/merged chip is the named HEAD branch on this commit.
 fn chip_is_checkout(chip: &MergedRefChip, head_branch: Option<&str>, is_head: bool) -> bool {
     if !is_head {
         return false;
