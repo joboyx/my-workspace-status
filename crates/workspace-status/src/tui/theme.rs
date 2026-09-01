@@ -247,7 +247,7 @@ const MONOKAI: Theme = Theme {
         repo: "#f8f8f2",
         dir: "#66d9ef",
         file: "#f8f8f2",
-        muted: "#a6a28c",
+        muted: "#b8b39c",
         added: "#a6e22e",
         modified: "#e6db74",
         deleted: "#ff6188",
@@ -284,12 +284,12 @@ const DRACULA: Theme = Theme {
         repo: "#f8f8f2",
         dir: "#bd93f9",
         file: "#f8f8f2",
-        muted: "#9fa8da",
+        muted: "#b4bce4",
         added: "#50fa7b",
         modified: "#f1fa8c",
         deleted: "#ff5555",
         renamed: "#8be9fd",
-        viewed: "#8be9fd",
+        viewed: "#aef2ff",
         branch_default: "#bd93f9",
         branch_feature: "#bd93f9",
         head_mark: "#50fa7b",
@@ -326,7 +326,7 @@ const GRUVBOX_DARK: Theme = Theme {
         modified: "#fabd2f",
         deleted: "#fb4934",
         renamed: "#83a598",
-        viewed: "#8ec07c",
+        viewed: "#aedc9a",
         branch_default: "#83a598",
         branch_feature: "#d3869b",
         head_mark: "#fe8019",
@@ -583,10 +583,28 @@ mod tests {
                 "{id:?} deleted contrast {deleted:.2} < {DELETED_FLOOR} vs {}",
                 theme.surface
             );
+            let cursor_bg = pal.cursor_bg;
+            for (name, fg) in [("muted", pal.muted), ("viewed", pal.viewed)] {
+                let ratio = contrast_ratio(fg, cursor_bg);
+                assert!(
+                    ratio >= AA,
+                    "{id:?} {name} contrast {ratio:.2} < {AA} vs cursor_bg {}",
+                    theme.palette.cursor_bg
+                );
+            }
             assert_ne!(
                 pal.viewed, pal.muted,
                 "{id:?} viewed eye must not use muted"
             );
+            assert_ne!(
+                pal.viewed, pal.renamed,
+                "{id:?} viewed must not reuse renamed"
+            );
+            assert_ne!(
+                pal.viewed, pal.heading,
+                "{id:?} viewed must not reuse heading"
+            );
+            assert_ne!(pal.viewed, pal.dir, "{id:?} viewed must not reuse dir");
         }
         let muteds: Vec<_> = THEME_IDS
             .iter()
