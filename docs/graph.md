@@ -48,9 +48,13 @@ selectable visible-row indexes. Spacers stay
 unhighlighted. `GraphWidget::flash_rows` paints the fade background on
 the same visible-row indexes, including spacers (a flashing commit
 keeps its spacer). `GraphWidget::commented_rows` marks selectable
-visible-row indexes that have an object comment. Unselected commented
-rows paint `"` in the cursor column. The selected cursor still wins: `▌`
-plus `cursorBg` (`GraphWidget::cursor_style`). Spacers stay unmarked.
+visible-row indexes that have an object comment or a file-line
+comment for that row. Commented rows paint `ICON_COMMENT` (`"` /
+nf-fa-comment) after the gutter. The selected cursor still wins: `▌`
+plus `cursorBg` (`GraphWidget::cursor_style`). The comment glyph stays
+visible on the selected row. Uncommented rows do not reserve a
+column. Spacers stay unmarked. The TUI passes `icon_comment` so the
+glyph matches tree and diff marks.
 The widget does not use reverse video for the cursor.
 `GraphWidget::col_offset` skips label columns (gutter stays put) so long
 subjects can pan without growing the row.

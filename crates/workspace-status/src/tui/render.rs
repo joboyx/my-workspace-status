@@ -19,7 +19,9 @@ use super::chrome::{
     breadcrumb_line, breadcrumb_rows, ctrl_c_prompt_line, ctrl_c_prompt_rows,
     overlay_status_rows_for, status_line,
 };
-use super::comments::{diff_line_has_comment, graph_row_has_comment, tree_row_has_comment};
+use super::comments::{
+    commit_file_row_has_comment, diff_line_has_comment, graph_row_has_comment, tree_row_has_comment,
+};
 use super::diff::{
     cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, diff_row_content_width,
     gutter_width, section_header, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
@@ -46,7 +48,8 @@ use super::split::{
 use super::state::{AppState, FocusPane, PendingConfirm};
 use super::theme::{hex_color, Palette};
 use super::tree::{
-    row_segments, visible_window, NodeKind, NodeSegments, SegRole, TextSeg, VisibleRow,
+    row_segments, visible_window, with_comment_mark, NodeKind, NodeSegments, SegRole, TextSeg,
+    VisibleRow,
 };
 use crate::helpers::visible_width;
 
@@ -560,6 +563,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .search_matches(&matches, state.theme.pills().filter.bg)
         .flash_rows(&flash_rows)
         .commented_rows(&commented_rows)
+        .comment_glyph(icon_comment(state.ascii))
         .cursor_style(pal.cursor, pal.cursor_bg)
         .lane_colors(&lane_colors)
         .label_palette(GraphLabelPalette {
@@ -589,12 +593,18 @@ fn graph_commented_row_indices(state: &AppState) -> Vec<usize> {
         .iter()
         .find(|r| r.repo == *repo)
         .and_then(|r| r.primary_repo.as_deref());
+    let branch = state
+        .snapshot
+        .repos
+        .iter()
+        .find(|r| r.repo == *repo)
+        .map(|r| r.branch.as_str());
     model
         .visible_rows()
         .iter()
         .enumerate()
         .filter_map(|(i, row)| {
-            graph_row_has_comment(&state.comment_store, repo, primary, row).then_some(i)
+            graph_row_has_comment(&state.comment_store, repo, primary, row, branch).then_some(i)
         })
         .collect()
 }
@@ -736,14 +746,26 @@ fn draw_commit_file_list(
     let searching_files =
         state.search_target == SearchPane::CommitFiles && !state.search_query.trim().is_empty();
     let match_paths = commit_file_search_match_paths(state);
+    let comment_scope = commit_file_comment_scope(state);
     let lines: Vec<Line> = rows
         .iter()
         .skip(start)
         .take(height)
         .map(|row| {
+            let commented = comment_scope.is_some_and(|(repo, primary, branch, source)| {
+                row.is_file()
+                    && commit_file_row_has_comment(
+                        &state.comment_store,
+                        repo,
+                        primary,
+                        source,
+                        &row.path,
+                        branch,
+                    )
+            });
             let segs = NodeSegments {
                 segments: row.segments.clone(),
-                trailing: row.trailing_segs.clone(),
+                trailing: with_comment_mark(row.trailing_segs.clone(), state.ascii, commented),
             };
             let search_match = searching_files
                 && (match_paths.contains(&row.path)
@@ -765,6 +787,29 @@ fn draw_commit_file_list(
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn commit_file_comment_scope(
+    state: &AppState,
+) -> Option<(
+    &str,
+    Option<&str>,
+    Option<&str>,
+    &super::drill::CommitFileSource,
+)> {
+    let (repo, source) = match &state.drill {
+        DrillView::Files { repo, source, .. } | DrillView::Diff { repo, source, .. } => {
+            (repo.as_str(), source)
+        }
+        DrillView::Graph => return None,
+    };
+    let snap = state.snapshot.repos.iter().find(|r| r.repo == repo);
+    Some((
+        repo,
+        snap.and_then(|r| r.primary_repo.as_deref()),
+        snap.map(|r| r.branch.as_str()),
+        source,
+    ))
 }
 
 fn commit_file_search_match_paths(state: &AppState) -> HashSet<String> {
@@ -2052,6 +2097,7 @@ fn draw_comment_export(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 mod tests {
     use super::*;
     use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus};
+    use crate::tui::comments::{put_comment, CommentKey};
     use crate::tui::state::AppState;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -2216,6 +2262,63 @@ mod tests {
         assert!(
             readme[readme_at + "README.md".len()..].contains('M'),
             "commit-file M badge should sit to the right: {readme:?}"
+        );
+    }
+
+    #[test]
+    fn commit_file_row_paints_comment_mark_when_file_has_comments() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.comment_store = put_comment(
+            &state.comment_store,
+            CommentKey::CommitLine {
+                repo: "app".into(),
+                sha: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                path: "README.md".into(),
+                line: 1,
+            },
+            "note",
+        );
+        state.open_commit_files(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![
+                super::super::drill::CommitFile {
+                    status: "A".into(),
+                    path: "src/lib.rs".into(),
+                    old_path: None,
+                },
+                super::super::drill::CommitFile {
+                    status: "M".into(),
+                    path: "README.md".into(),
+                    old_path: None,
+                },
+            ],
+        );
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        let readme = text
+            .lines()
+            .find(|line| line.contains("README.md"))
+            .unwrap_or("");
+        let name_at = readme.find("README.md").expect("README.md");
+        let after = &readme[name_at + "README.md".len()..];
+        assert!(
+            after.contains('"'),
+            "commented commit-file should paint ASCII \": {readme:?}"
+        );
+        let lib = text
+            .lines()
+            .find(|line| line.contains("lib.rs"))
+            .unwrap_or("");
+        let lib_at = lib.find("lib.rs").expect("lib.rs");
+        assert!(
+            !lib[lib_at + "lib.rs".len()..].contains('"'),
+            "uncommented commit-file must not paint \": {lib:?}"
         );
     }
 

@@ -56,6 +56,8 @@ pub struct GraphWidget<'a> {
     search_bg: Option<Color>,
     flash_rows: &'a [(usize, Color)],
     commented_rows: &'a [usize],
+    /// Comment glyph (`ICON_COMMENT`: `"` / nf-fa-comment). Empty uses `"`.
+    comment_glyph: &'a str,
     cursor_fg: Color,
     cursor_bg: Option<Color>,
     label_palette: Option<GraphLabelPalette>,
@@ -78,6 +80,7 @@ impl<'a> GraphWidget<'a> {
             search_bg: None,
             flash_rows: &[],
             commented_rows: &[],
+            comment_glyph: "\"",
             cursor_fg: Color::Cyan,
             cursor_bg: None,
             label_palette: None,
@@ -147,12 +150,22 @@ impl<'a> GraphWidget<'a> {
         self
     }
 
-    /// Mark object-commented selectable rows (`"` in the cursor column).
+    /// Mark commented selectable rows (`ICON_COMMENT` after the gutter).
     ///
     /// `indices` are [`GraphModel::visible_rows`] indexes. Selected rows keep
-    /// `▌`. Spacers stay unmarked.
+    /// `▌`. The comment glyph stays visible on the selected row. Spacers
+    /// stay unmarked. Uncommented rows do not reserve a column.
     pub fn commented_rows(mut self, indices: &'a [usize]) -> Self {
         self.commented_rows = indices;
+        self
+    }
+
+    /// Glyph for [`Self::commented_rows`]. Default `"`.
+    ///
+    /// The TUI passes `icon_comment` so ASCII `"` and nerd nf-fa-comment
+    /// match tree and diff marks.
+    pub fn comment_glyph(mut self, glyph: &'a str) -> Self {
+        self.comment_glyph = glyph;
         self
     }
 
@@ -341,6 +354,7 @@ impl Widget for GraphWidget<'_> {
                 fallback,
                 self.label_palette,
                 self.col_offset,
+                self.comment_glyph,
             );
             y = y.saturating_add(1);
         }
@@ -454,6 +468,7 @@ fn put_painted_line(
     fallback: Color,
     palette: Option<GraphLabelPalette>,
     col_offset: u16,
+    comment_glyph: &str,
 ) {
     if width == 0 {
         return;
@@ -461,8 +476,6 @@ fn put_painted_line(
     let row = Rect::new(x, y, width, 1);
     let bar = if selected && line.selectable {
         "▌"
-    } else if commented && line.selectable {
-        "\""
     } else {
         " "
     };
@@ -508,6 +521,29 @@ fn put_painted_line(
         buf[(col, y)].set_symbol(" ");
         buf[(col, y)].set_style(style);
         col = col.saturating_add(1);
+    }
+    if commented && line.selectable && col < end {
+        let glyph = if comment_glyph.is_empty() {
+            "\""
+        } else {
+            comment_glyph
+        };
+        let mut mark_style = Style::default().fg(cursor_fg).add_modifier(Modifier::BOLD);
+        if let Some(bg) = row_bg {
+            mark_style = mark_style.bg(bg);
+        }
+        buf[(col, y)].set_symbol(glyph);
+        buf[(col, y)].set_style(mark_style);
+        col = col.saturating_add(1);
+        if col < end {
+            let mut gap = Style::default();
+            if let Some(bg) = row_bg {
+                gap = gap.bg(bg);
+            }
+            buf[(col, y)].set_symbol(" ");
+            buf[(col, y)].set_style(gap);
+            col = col.saturating_add(1);
+        }
     }
     let label_w = end.saturating_sub(col);
     if label_w == 0 {
@@ -1775,13 +1811,127 @@ mod tests {
             .expect("draw");
         let buffer = terminal.backend().buffer();
         let mut saw_quote = false;
+        let mut quote_on_cursor = false;
         for y in 0..16u16 {
-            if buffer[(0, y)].symbol() == "\"" {
-                saw_quote = true;
-                break;
+            let mut has_quote = false;
+            let mut has_bar = false;
+            for x in 0..80u16 {
+                let sym = buffer[(x, y)].symbol();
+                if sym == "\"" {
+                    has_quote = true;
+                    saw_quote = true;
+                }
+                if sym == "▌" {
+                    has_bar = true;
+                }
+            }
+            if has_quote && has_bar {
+                quote_on_cursor = true;
             }
         }
         assert!(saw_quote, "unselected commented graph row should paint \"");
+        assert!(
+            !quote_on_cursor,
+            "unselected commented rows should not steal the cursor bar"
+        );
+    }
+
+    #[test]
+    fn selected_commented_row_keeps_bar_and_quote() {
+        let model = sample_model();
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .selected(Some(1))
+                    .commented_rows(&[1])
+                    .cursor_style(Color::Cyan, Color::DarkGray)
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut saw_both = false;
+        for y in 0..16u16 {
+            let mut has_quote = false;
+            let mut has_bar = false;
+            for x in 0..80u16 {
+                let sym = buffer[(x, y)].symbol();
+                if sym == "\"" {
+                    has_quote = true;
+                }
+                if sym == "▌" {
+                    has_bar = true;
+                }
+            }
+            if has_quote && has_bar {
+                saw_both = true;
+                break;
+            }
+        }
+        assert!(
+            saw_both,
+            "selected commented graph row should paint ▌ and \""
+        );
+    }
+
+    #[test]
+    fn uncommented_row_does_not_paint_quote_mark() {
+        let model = sample_model();
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .selected(Some(0))
+                    .cursor_style(Color::Cyan, Color::DarkGray)
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        for y in 0..16u16 {
+            for x in 0..80u16 {
+                assert_ne!(
+                    buffer[(x, y)].symbol(),
+                    "\"",
+                    "uncommented graph must not paint ICON_COMMENT"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn commented_row_uses_supplied_glyph() {
+        let model = sample_model();
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .selected(Some(0))
+                    .commented_rows(&[1])
+                    .comment_glyph("\u{f075}")
+                    .cursor_style(Color::Cyan, Color::DarkGray)
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut saw_nerd = false;
+        for y in 0..16u16 {
+            for x in 0..80u16 {
+                if buffer[(x, y)].symbol() == "\u{f075}" {
+                    saw_nerd = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            saw_nerd,
+            "commented graph row should paint the supplied glyph"
+        );
     }
 
     fn many_ref_commit() -> Commit {

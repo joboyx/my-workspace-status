@@ -29,6 +29,7 @@ mod pty_gg_jumps_focused_list_or_file_diff;
 mod pty_graph_b_checkout;
 mod pty_graph_branch_focus_overlay;
 mod pty_graph_c_creates_branch_at_commit;
+mod pty_graph_comment_indicator;
 mod pty_graph_drill_enter_esc;
 mod pty_graph_focus_unmark_enter_clears;
 mod pty_graph_merge_creates_commit;
