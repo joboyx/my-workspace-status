@@ -119,7 +119,11 @@ enum CommentRecord {
         branch: String,
         path: String,
         line: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "endLine",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
         end_line: Option<u32>,
         body: String,
     },
@@ -128,7 +132,11 @@ enum CommentRecord {
         sha: String,
         path: String,
         line: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "endLine",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
         end_line: Option<u32>,
         body: String,
     },
@@ -163,32 +171,6 @@ impl CommentKey {
                 n >= *line && n <= *end_line
             }
             _ => false,
-        }
-    }
-
-    /// Replace the line span. Object keys are unchanged.
-    pub fn with_line_range(self, start: u32, end: u32) -> Self {
-        let (line, end_line) = ordered_line_range(start, end);
-        match self {
-            Self::WorktreeLine {
-                repo, branch, path, ..
-            } => Self::WorktreeLine {
-                repo,
-                branch,
-                path,
-                line,
-                end_line,
-            },
-            Self::CommitLine {
-                repo, sha, path, ..
-            } => Self::CommitLine {
-                repo,
-                sha,
-                path,
-                line,
-                end_line,
-            },
-            other => other,
         }
     }
 
