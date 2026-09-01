@@ -465,6 +465,7 @@ fn seg_style(seg: &TextSeg, palette: Palette) -> Style {
             SegRole::Modified => palette.modified,
             SegRole::Deleted => palette.deleted,
             SegRole::Renamed => palette.renamed,
+            SegRole::Viewed => palette.viewed,
             SegRole::BranchDefault => palette.branch_default,
             SegRole::BranchFeature => palette.branch_feature,
         }
@@ -1051,14 +1052,12 @@ fn paint_cell_spans(
     let sign = cell_sign(cell.kind);
     let accent = cell_accent(cell.kind, palette);
     let code_style = accent.unwrap_or(Style::default().fg(palette.repo));
-    let muted = Style::default()
-        .fg(palette.muted)
-        .add_modifier(Modifier::DIM);
+    let gutter_style = diff_gutter_style(palette);
     let used = visible_width(&line_no) + 4 + plain.chars().count();
     let pad = width.saturating_sub(used);
     vec![
-        Span::styled(line_no, muted),
-        Span::styled(format!(" {DIFF_RULE} "), muted),
+        Span::styled(line_no, gutter_style),
+        Span::styled(format!(" {DIFF_RULE} "), gutter_style),
         Span::styled(
             sign.to_string(),
             accent
@@ -1088,6 +1087,12 @@ fn format_line_gutter(line_no: Option<u32>, gutter: usize, commented: bool, asci
         None => " ".repeat(gutter),
     };
     format!("{mark}{nums}")
+}
+
+/// Line-number gutter and rule. Muted only. DIM on a dark terminal washes
+/// the numbers out.
+fn diff_gutter_style(palette: Palette) -> Style {
+    Style::default().fg(palette.muted)
 }
 
 fn diff_cell_has_comment(state: &AppState, line: u32) -> bool {
@@ -2756,5 +2761,18 @@ mod tests {
             after.contains("\"10 │") && !after.contains(" 10 │"),
             "comment mark should occupy the reserved column:\n{after}"
         );
+    }
+
+    #[test]
+    fn diff_gutter_uses_muted_without_dim() {
+        for id in crate::tui::theme::THEME_IDS {
+            let palette = id.palette();
+            let style = diff_gutter_style(palette);
+            assert_eq!(style.fg, Some(palette.muted), "{id:?}");
+            assert!(
+                !style.add_modifier.contains(Modifier::DIM),
+                "{id:?} line numbers must not DIM"
+            );
+        }
     }
 }

@@ -23,10 +23,11 @@ render.rs paints section headers, line-number gutter, and cells
 `parse_unified_diff` skips file-level headers (`diff --git`, `index`, `---`, `+++`) until the first `@@`, tracks 1-based `old_no` / `new_no` per line, turns `\ No newline at end of file` into a `meta` line, and turns a `Binary files … differ` line into a single meta hunk with no header. Empty input returns no hunks, which is how "no diff" is detected upstream.
 
 Gutter width sizes the line-number column from the widest number present, minimum 2. A one-column comment mark sits to the left of that number column on every numbered cell, whether or not a comment exists, so adding a comment does not shift the numbers.
+Line numbers and the gutter rule use the theme `muted` colour without DIM so they stay readable on a dark terminal.
 
 ## Highlighting
 
-Intra-line word diff and syntax highlighting are not in this TUI yet. Add/del cells use a solid accent colour. Context and meta lines use the theme's muted / default text.
+Intra-line word diff and syntax highlighting are not in this TUI yet. Add/del cells use a solid accent colour. Context and meta lines use the theme's muted / default text. Line numbers use muted without DIM.
 
 ## Untracked files
 
