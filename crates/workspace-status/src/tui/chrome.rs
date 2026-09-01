@@ -413,9 +413,9 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
         return 5u16.saturating_add(extra);
     }
     if state.comment.is_some() {
-        // Title + target + body + footer, plus 2 border rows.
-        let extra = u16::from(!state.status.is_empty());
-        return 6u16.saturating_add(extra);
+        // Title + target + body + footer, plus 2 border rows. Idle status
+        // stays out of the box; typing does not echo `body:` into `status`.
+        return 6;
     }
     if let Some(export) = state.comment_export.as_ref() {
         let extra = u16::from(!state.status.is_empty() && state.status != "copied");
@@ -1007,6 +1007,8 @@ pub fn status_line(state: &AppState, width: u16) -> Line<'static> {
         || state.branch_picker.is_some()
         || state.graph_focus_picker.is_some()
         || state.create_branch.is_some()
+        || state.comment.is_some()
+        || state.comment_export.is_some()
     {
         return Line::from(Span::styled(
             truncate_visible(&state.status, width as usize),
@@ -1379,20 +1381,24 @@ mod tests {
     }
 
     #[test]
-    fn comment_overlay_grows_for_status() {
+    fn comment_overlay_ignores_status_echo() {
         use crate::tui::comments::{CommentExport, CommentKey, CommentPrompt};
         let mut app = state();
-        app.comment = Some(CommentPrompt {
-            key: CommentKey::Branch {
+        app.comment = Some(CommentPrompt::new(
+            CommentKey::Branch {
                 repo: "app".into(),
                 branch: "feature/x".into(),
             },
-            body: String::new(),
-            label: "app · branch feature/x".into(),
-        });
+            String::new(),
+            "app · branch feature/x".into(),
+        ));
         assert_eq!(overlay_status_rows(&app), 6);
         app.status = "body: hello".into();
-        assert_eq!(overlay_status_rows(&app), 7);
+        assert_eq!(
+            overlay_status_rows(&app),
+            6,
+            "idle / typing status must not grow the comment overlay"
+        );
         app.comment = None;
         app.status = "copied".into();
         app.comment_export = Some(CommentExport {

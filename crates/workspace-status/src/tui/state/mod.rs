@@ -2414,7 +2414,7 @@ impl AppState {
         self.clear_diff_visual();
         let body = self.comment_store.get(&key).cloned().unwrap_or_default();
         let label = comment_key_label(&key);
-        self.comment = Some(CommentPrompt { key, body, label });
+        self.comment = Some(CommentPrompt::new(key, body, label));
         self.status.clear();
         Effect::None
     }
@@ -7876,11 +7876,7 @@ mod tests {
         assert_eq!(prompt.key, range);
         assert_eq!(prompt.body, "range-note");
         assert!(prompt.label.contains("1-2"));
-        app.comment = Some(CommentPrompt {
-            key: prompt.key,
-            body: String::new(),
-            label: prompt.label,
-        });
+        app.comment = Some(CommentPrompt::new(prompt.key, String::new(), prompt.label));
         app.dispatch(Action::CommentSubmit);
         assert!(app.comment_store.get(&range).is_none());
         assert_eq!(app.status, "comment deleted");

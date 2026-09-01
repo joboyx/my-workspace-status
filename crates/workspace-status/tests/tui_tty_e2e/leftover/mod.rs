@@ -52,6 +52,7 @@ mod pty_right_pane_keeps_focus_middle;
 mod pty_right_pane_sgr_hscroll_pans_graph;
 mod pty_right_pane_sgr_hscroll_pans_long_diff;
 mod pty_semicolon_branch_comment_survives_status_failed;
+mod pty_semicolon_comment_textarea_cursor;
 mod pty_semicolon_commit_comment_survives_branch_delete;
 mod pty_semicolon_deleted_branch_drops_when_sibling_status_failed;
 mod pty_semicolon_detached_head_survives_watch;

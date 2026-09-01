@@ -119,6 +119,16 @@ pub enum Action {
     DiffVisualCancel,
     CommentChar(char),
     CommentBackspace,
+    /// Delete the character after the comment caret.
+    CommentDelete,
+    /// Move the comment caret one character left.
+    CommentLeft,
+    /// Move the comment caret one character right.
+    CommentRight,
+    /// Move the comment caret to the start of the body.
+    CommentHome,
+    /// Move the comment caret to the end of the body.
+    CommentEnd,
     CommentSubmit,
     CommentCancel,
     /// Copy focused-scope comments as markdown (`y`).
