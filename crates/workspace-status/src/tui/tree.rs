@@ -83,6 +83,8 @@ pub enum SegRole {
     Modified,
     Deleted,
     Renamed,
+    /// Reviewed eye. Maps to [`crate::tui::theme::Palette::viewed`].
+    Viewed,
     BranchDefault,
     BranchFeature,
 }
@@ -1070,8 +1072,10 @@ pub fn node_segments(
 }
 
 /// Segments for a flattened row. Viewed eye is prepended on dirty file rows
-/// using `icon_viewed` — nf-fa-eye `U+F06E` / `*`. Comment mark uses
-/// `icon_comment` (`"` / nf-fa-comment) on rows that have a live comment.
+/// using `icon_viewed` — nf-fa-eye `U+F06E` / `*`. Paint is bold
+/// [`SegRole::Viewed`] (teal/cyan), not muted and not the clean check.
+/// Comment mark uses `icon_comment` (`"` / nf-fa-comment) on rows that have
+/// a live comment.
 pub fn row_segments(row: &VisibleRow, ascii: bool, viewed: bool, commented: bool) -> NodeSegments {
     let mut trailing = row.trailing_segs.clone();
     if commented {
@@ -1092,9 +1096,9 @@ pub fn row_segments(row: &VisibleRow, ascii: bool, viewed: bool, commented: bool
         let mut marked = vec![
             TextSeg {
                 text: icon_viewed(ascii).to_string(),
-                role: SegRole::Renamed,
+                role: SegRole::Viewed,
                 hex: None,
-                bold: false,
+                bold: true,
                 dim: false,
             },
             text_seg(" ", SegRole::Muted),
@@ -1609,6 +1613,14 @@ mod tests {
             1,
             "{nerd_trail}"
         );
+        let eye = nerd
+            .trailing
+            .iter()
+            .find(|s| s.text == icon_viewed(false))
+            .expect("eye");
+        assert_eq!(eye.role, SegRole::Viewed);
+        assert!(eye.bold);
+        assert!(!eye.dim);
     }
 
     #[test]

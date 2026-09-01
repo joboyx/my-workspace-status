@@ -1,7 +1,8 @@
 //! Built-in TUI colour themes.
 //!
-//! Launch seed is `WS_STATUS_THEME`. `T` cycles in the current session only.
-//! There is no theme file; the cycle stays in the current session.
+//! Palettes assume a dark terminal. Secondary tokens (`muted`, line numbers,
+//! graph meta) stay readable on that surface. Launch seed is `WS_STATUS_THEME`.
+//! `T` cycles in the current session only. There is no theme file.
 
 use ratatui::style::Color;
 
@@ -40,6 +41,8 @@ pub struct Palette {
     pub modified: Color,
     pub deleted: Color,
     pub renamed: Color,
+    /// Reviewed eye (`ICON_VIEWED`). Teal/cyan on dark surfaces.
+    pub viewed: Color,
     pub branch_default: Color,
     pub branch_feature: Color,
     pub head_mark: Color,
@@ -63,6 +66,8 @@ pub struct ThemePalette {
     pub modified: &'static str,
     pub deleted: &'static str,
     pub renamed: &'static str,
+    /// Reviewed eye hex. Teal/cyan on dark surfaces.
+    pub viewed: &'static str,
     pub branch_default: &'static str,
     pub branch_feature: &'static str,
     pub head_mark: &'static str,
@@ -162,6 +167,7 @@ impl ThemeId {
             modified: hex_color(p.modified),
             deleted: hex_color(p.deleted),
             renamed: hex_color(p.renamed),
+            viewed: hex_color(p.viewed),
             branch_default: hex_color(p.branch_default),
             branch_feature: hex_color(p.branch_feature),
             head_mark: hex_color(p.head_mark),
@@ -204,11 +210,12 @@ const TOKYO_NIGHT: Theme = Theme {
         repo: "#c0caf5",
         dir: "#7aa2f7",
         file: "#a9b1d6",
-        muted: "#565f89",
+        muted: "#9aa5ce",
         added: "#9ece6a",
         modified: "#e0af68",
         deleted: "#f7768e",
         renamed: "#7dcfff",
+        viewed: "#73daca",
         branch_default: "#7aa2f7",
         branch_feature: "#bb9af7",
         head_mark: "#e0af68",
@@ -240,11 +247,12 @@ const MONOKAI: Theme = Theme {
         repo: "#f8f8f2",
         dir: "#66d9ef",
         file: "#f8f8f2",
-        muted: "#75715e",
+        muted: "#b8b39c",
         added: "#a6e22e",
         modified: "#e6db74",
-        deleted: "#f92672",
+        deleted: "#ff6188",
         renamed: "#66d9ef",
+        viewed: "#a1efe4",
         branch_default: "#66d9ef",
         branch_feature: "#ae81ff",
         head_mark: "#a6e22e",
@@ -276,11 +284,12 @@ const DRACULA: Theme = Theme {
         repo: "#f8f8f2",
         dir: "#bd93f9",
         file: "#f8f8f2",
-        muted: "#6272a4",
+        muted: "#b4bce4",
         added: "#50fa7b",
         modified: "#f1fa8c",
         deleted: "#ff5555",
         renamed: "#8be9fd",
+        viewed: "#aef2ff",
         branch_default: "#bd93f9",
         branch_feature: "#bd93f9",
         head_mark: "#50fa7b",
@@ -310,14 +319,15 @@ const GRUVBOX_DARK: Theme = Theme {
     palette: ThemePalette {
         heading: "#83a598",
         repo: "#ebdbb2",
-        dir: "#458588",
+        dir: "#8ec07c",
         file: "#ebdbb2",
-        muted: "#928374",
+        muted: "#bdae93",
         added: "#b8bb26",
         modified: "#fabd2f",
         deleted: "#fb4934",
         renamed: "#83a598",
-        branch_default: "#458588",
+        viewed: "#aedc9a",
+        branch_default: "#83a598",
         branch_feature: "#d3869b",
         head_mark: "#fe8019",
         cursor: "#fe8019",
@@ -348,11 +358,12 @@ const CATPPUCCIN_MOCHA: Theme = Theme {
         repo: "#cdd6f4",
         dir: "#89b4fa",
         file: "#cdd6f4",
-        muted: "#6c7086",
+        muted: "#a6adc8",
         added: "#a6e3a1",
         modified: "#f9e2af",
         deleted: "#f38ba8",
         renamed: "#89dceb",
+        viewed: "#94e2d5",
         branch_default: "#89b4fa",
         branch_feature: "#cba6f7",
         head_mark: "#f9e2af",
@@ -509,5 +520,101 @@ mod tests {
             assert_eq!(pal.flash_bg(0.0), None);
             assert_ne!(pal.flash_bg(0.3), pal.flash_bg(1.0));
         }
+    }
+
+    fn srgb_lin(c: u8) -> f64 {
+        let c = f64::from(c) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn relative_luminance(color: Color) -> f64 {
+        let Color::Rgb(r, g, b) = color else {
+            panic!("{color:?} must be rgb");
+        };
+        0.2126 * srgb_lin(r) + 0.7152 * srgb_lin(g) + 0.0722 * srgb_lin(b)
+    }
+
+    fn contrast_ratio(fg: Color, bg: Color) -> f64 {
+        let l1 = relative_luminance(fg);
+        let l2 = relative_luminance(bg);
+        let (lighter, darker) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    #[test]
+    fn dark_surface_foregrounds_meet_aa_contrast() {
+        const AA: f64 = 4.5;
+        const DELETED_FLOOR: f64 = 4.0;
+        for id in THEME_IDS {
+            let theme = id.theme();
+            let surface = hex_color(theme.surface);
+            let pal = id.palette();
+            let tokens = [
+                ("muted", pal.muted),
+                ("viewed", pal.viewed),
+                ("heading", pal.heading),
+                ("repo", pal.repo),
+                ("dir", pal.dir),
+                ("file", pal.file),
+                ("renamed", pal.renamed),
+                ("branch_default", pal.branch_default),
+                ("branch_feature", pal.branch_feature),
+                ("added", pal.added),
+                ("modified", pal.modified),
+                ("head_mark", pal.head_mark),
+                ("cursor", pal.cursor),
+                ("diff_hunk", pal.diff_hunk),
+            ];
+            for (name, fg) in tokens {
+                let ratio = contrast_ratio(fg, surface);
+                assert!(
+                    ratio >= AA,
+                    "{id:?} {name} contrast {ratio:.2} < {AA} vs {}",
+                    theme.surface
+                );
+            }
+            let deleted = contrast_ratio(pal.deleted, surface);
+            assert!(
+                deleted >= DELETED_FLOOR,
+                "{id:?} deleted contrast {deleted:.2} < {DELETED_FLOOR} vs {}",
+                theme.surface
+            );
+            let cursor_bg = pal.cursor_bg;
+            for (name, fg) in [("muted", pal.muted), ("viewed", pal.viewed)] {
+                let ratio = contrast_ratio(fg, cursor_bg);
+                assert!(
+                    ratio >= AA,
+                    "{id:?} {name} contrast {ratio:.2} < {AA} vs cursor_bg {}",
+                    theme.palette.cursor_bg
+                );
+            }
+            assert_ne!(
+                pal.viewed, pal.muted,
+                "{id:?} viewed eye must not use muted"
+            );
+            assert_ne!(
+                pal.viewed, pal.renamed,
+                "{id:?} viewed must not reuse renamed"
+            );
+            assert_ne!(
+                pal.viewed, pal.heading,
+                "{id:?} viewed must not reuse heading"
+            );
+            assert_ne!(pal.viewed, pal.dir, "{id:?} viewed must not reuse dir");
+        }
+        let muteds: Vec<_> = THEME_IDS
+            .iter()
+            .map(|id| id.theme().palette.muted)
+            .collect();
+        let unique: std::collections::HashSet<_> = muteds.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            muteds.len(),
+            "muted hexes must stay unique for leftover theme chrome: {muteds:?}"
+        );
     }
 }

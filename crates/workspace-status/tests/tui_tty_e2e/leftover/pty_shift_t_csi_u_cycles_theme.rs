@@ -13,6 +13,7 @@ struct ThemeChrome {
     surface: (u8, u8, u8),
     pill: (u8, u8, u8),
     heading: (u8, u8, u8),
+    muted: (u8, u8, u8),
 }
 
 /// Docs + help `T` cycle. Wraps after Catppuccin Mocha.
@@ -23,6 +24,7 @@ const THEME_CYCLE: [ThemeChrome; 5] = [
         surface: (0x1a, 0x1b, 0x26),
         pill: (0x3d, 0x59, 0xa1),
         heading: (0x7d, 0xcf, 0xff),
+        muted: (0x9a, 0xa5, 0xce),
     },
     ThemeChrome {
         id: "monokai",
@@ -30,6 +32,7 @@ const THEME_CYCLE: [ThemeChrome; 5] = [
         surface: (0x27, 0x28, 0x22),
         pill: (0x49, 0x48, 0x3e),
         heading: (0x66, 0xd9, 0xef),
+        muted: (0xb8, 0xb3, 0x9c),
     },
     ThemeChrome {
         id: "dracula",
@@ -37,6 +40,7 @@ const THEME_CYCLE: [ThemeChrome; 5] = [
         surface: (0x28, 0x2a, 0x36),
         pill: (0x44, 0x47, 0x5a),
         heading: (0x8b, 0xe9, 0xfd),
+        muted: (0xb4, 0xbc, 0xe4),
     },
     ThemeChrome {
         id: "gruvbox-dark",
@@ -44,6 +48,7 @@ const THEME_CYCLE: [ThemeChrome; 5] = [
         surface: (0x28, 0x28, 0x28),
         pill: (0x50, 0x49, 0x45),
         heading: (0x83, 0xa5, 0x98),
+        muted: (0xbd, 0xae, 0x93),
     },
     ThemeChrome {
         id: "catppuccin-mocha",
@@ -51,6 +56,7 @@ const THEME_CYCLE: [ThemeChrome; 5] = [
         surface: (0x1e, 0x1e, 0x2e),
         pill: (0x45, 0x47, 0x5a),
         heading: (0x89, 0xdc, 0xeb),
+        muted: (0xa6, 0xad, 0xc8),
     },
 ];
 
@@ -86,6 +92,7 @@ fn wait_theme_chrome(tui: &PtySession, theme: &ThemeChrome, expect_toast: bool) 
     tui.wait_has_rgb(theme.surface.0, theme.surface.1, theme.surface.2, WAIT);
     tui.wait_has_rgb(theme.pill.0, theme.pill.1, theme.pill.2, WAIT);
     tui.wait_has_rgb(theme.heading.0, theme.heading.1, theme.heading.2, WAIT);
+    tui.wait_has_rgb(theme.muted.0, theme.muted.1, theme.muted.2, WAIT);
     for other in THEME_CYCLE.iter().filter(|other| other.id != theme.id) {
         assert!(
             !tui.has_rgb(other.surface.0, other.surface.1, other.surface.2),
@@ -104,6 +111,13 @@ fn wait_theme_chrome(tui: &PtySession, theme: &ThemeChrome, expect_toast: bool) 
         assert!(
             !tui.has_rgb(other.heading.0, other.heading.1, other.heading.2),
             "{} heading must not remain after {}:\n{}",
+            other.id,
+            theme.id,
+            tui.screen()
+        );
+        assert!(
+            !tui.has_rgb(other.muted.0, other.muted.1, other.muted.2),
+            "{} muted must not remain after {}:\n{}",
             other.id,
             theme.id,
             tui.screen()
@@ -159,9 +173,9 @@ fn assert_no_theme_store(dir: &Path) {
 /// Help lists `T` cycle theme next to `t` flat/tree. Launch seed
 /// `WS_STATUS_THEME` paints that id. Each Shift+T advances
 /// Tokyo Night → Monokai → Dracula → Gruvbox Dark → Catppuccin Mocha →
-/// Tokyo Night. Toast, surface, mode pill, heading, and graph lane 0 must
-/// all match that id. A no-op, a skipped id, or lowercase `t` cannot pass.
-/// There is no theme file.
+/// Tokyo Night. Toast, surface, mode pill, heading, muted (line numbers /
+/// graph meta), and graph lane 0 must all match that id. A no-op, a skipped
+/// id, or lowercase `t` cannot pass. There is no theme file.
 #[test]
 fn pty_shift_t_csi_u_cycles_theme() {
     let (_root, workspace) = daily_workspace();

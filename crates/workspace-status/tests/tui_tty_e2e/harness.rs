@@ -453,6 +453,64 @@ impl PtySession {
         None
     }
 
+    /// True when the first `glyph` after `needle` on that row uses this fg.
+    ///
+    /// Space-reviewed `*` sits after `README.md`. A screen-wide RGB hit is
+    /// not enough: heading/lane colours can match the viewed token.
+    pub fn glyph_after_needle_has_fg(
+        &self,
+        needle: &str,
+        glyph: char,
+        r: u8,
+        g: u8,
+        b: u8,
+    ) -> bool {
+        match self.glyph_after_needle_fg(needle, glyph) {
+            Some(fg) => fg == Some((r, g, b)),
+            None => false,
+        }
+    }
+
+    /// Foreground of the first `glyph` after `needle` on that row.
+    pub fn glyph_after_needle_fg(&self, needle: &str, glyph: char) -> Option<Option<(u8, u8, u8)>> {
+        if needle.is_empty() {
+            return None;
+        }
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        for row in 0..self.rows {
+            let mut text = String::new();
+            let mut cols: Vec<u16> = Vec::new();
+            for col in 0..self.cols {
+                let Some(cell) = screen.cell(row, col) else {
+                    continue;
+                };
+                let contents = cell.contents();
+                if contents.is_empty() {
+                    continue;
+                }
+                for ch in contents.chars() {
+                    cols.push(col);
+                    text.push(ch);
+                }
+            }
+            let Some(byte_at) = text.find(needle) else {
+                continue;
+            };
+            let char_at = text[..byte_at].chars().count();
+            let after = char_at + needle.chars().count();
+            for i in after..text.chars().count() {
+                if text.chars().nth(i) != Some(glyph) {
+                    continue;
+                }
+                let col = *cols.get(i)?;
+                let cell = screen.cell(row, col)?;
+                return Some(rgb_of(cell.fgcolor()));
+            }
+        }
+        None
+    }
+
     /// True when any cell uses this 24-bit colour as fg or bg.
     pub fn has_rgb(&self, r: u8, g: u8, b: u8) -> bool {
         let parser = self.parser.lock().unwrap();
