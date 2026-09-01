@@ -99,7 +99,8 @@ Live TUI keymap (full overlay detail in [docs/configuration.md](./docs/configura
 | `d`                                   | switch primaries (or the focused checkout) to the default branch and pull when clean; dirty checkouts skipped                                          |
 | `e`                                   | open focused file in configured editor (default vim; config overrides `$EDITOR` / `$VISUAL`). vim leaves the alternate screen; Cursor stays mounted     |
 | `space`                               | toggle reviewed on a dirty file row (eye mark). Stays until that file's diff or contents change. Non-file rows no-op (do not fold)                     |
-| `;`                                   | comment overlay on the focused numbered diff line, or an object comment on a commit / non-default branch / worktree. Empty Enter deletes |
+| `;`                                   | comment overlay on the focused numbered diff line, or an object comment on a commit / non-default branch / worktree. Without highlight, `;` opens the stored span that covers that line. Empty Enter deletes that span |
+| `V`                                   | visual-line highlight on a focused file diff. `j` / `k` and arrows extend or shrink the range. `;` comments that line span. Esc leaves highlight without commenting. Watch reload, split/inline, or a painted-row change drops highlight. No-op on the tree, graph, or a commit-file list. |
 | `y`                                   | copy comments for the focused row and its descendants as markdown (after GC) and show them in an overlay. Confirm-mode `y` is still revert-yes |
 | `b`                                   | depth 0: local branch picker. Graph commit: checkout local or `origin/*` (confirm when local is out of sync, then fast-forward to that `origin/*` ref) |
 | `c`                                   | graph commit: create branch at commit (name overlay; ref only, no checkout)                                                                            |
@@ -113,7 +114,7 @@ Live TUI keymap (full overlay detail in [docs/configuration.md](./docs/configura
 | `Enter`                               | left: focus right; right: drill (stay on right). Double-click a list row runs Enter                                                                    |
 | `Ctrl-C` twice                        | quit (first press prompts; second within ~2s exits)                                                                                                    |
 | `q`                                   | quit immediately (Rust extra)                                                                                                                          |
-| `Esc`                                 | back (right → left, then pop depth). Never quits. Cancels overlays / chords first                                                                      |
+| `Esc`                                 | back (right → left, then pop depth). Never quits. Cancels overlays / chords / visual-line highlight first                                              |
 
 When the right pane loads a new view, rows, or dataset (repo, pane kind, graph contents, or commit-file list key), it resets to the top — first selectable graph row, first commit-file row, or diff scroll 0. A file-diff viewport belongs to one identity (workspace `repo`+`path`, or commit `repo`+source+`path`). A new identity resets vertical and horizontal offsets. Same-view graph rebuilds (width/theme, autoload older) keep the cursor. `Ctrl-o` still keeps the hunk in view. The left tree still restores by id.
 

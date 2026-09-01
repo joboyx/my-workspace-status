@@ -107,6 +107,8 @@ impl AppState {
             | Action::GraphFocusSubmit
             | Action::GraphFocusCancel
             | Action::CycleTheme
+            | Action::DiffVisualStart
+            | Action::DiffVisualCancel
             | Action::CommentStart
             | Action::CommentChar(_)
             | Action::CommentBackspace

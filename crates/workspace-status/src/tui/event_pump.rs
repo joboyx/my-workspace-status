@@ -81,7 +81,10 @@ pub fn classify_busy_action(action: &Action) -> BusyAction {
 pub fn overlay_blocks_background_ticks(mode: InputMode) -> bool {
     !matches!(
         mode,
-        InputMode::Normal { .. } | InputMode::ZPending { .. } | InputMode::GPending { .. }
+        InputMode::Normal { .. }
+            | InputMode::ZPending { .. }
+            | InputMode::GPending { .. }
+            | InputMode::DiffVisual
     )
 }
 
@@ -162,6 +165,7 @@ mod tests {
         assert!(!overlay_blocks_background_ticks(InputMode::GPending {
             search_active: false
         }));
+        assert!(!overlay_blocks_background_ticks(InputMode::DiffVisual));
     }
 
     #[test]

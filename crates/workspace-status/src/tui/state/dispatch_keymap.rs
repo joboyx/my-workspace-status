@@ -24,6 +24,9 @@ impl AppState {
                 self.drag = SplitDrag::None;
                 self.help_open = !self.help_open;
                 self.clear_help_search();
+                if self.help_open {
+                    self.clear_diff_visual();
+                }
                 Effect::None
             }
             Action::Move(delta) => self.move_focused(delta),
@@ -70,6 +73,7 @@ impl AppState {
             Action::ToggleTreeMode => self.toggle_tree_mode(),
             Action::ToggleReviewed => self.toggle_reviewed(),
             Action::FocusLeft => {
+                self.clear_diff_visual();
                 self.focus = FocusPane::Left;
                 Effect::None
             }
@@ -116,6 +120,7 @@ impl AppState {
             }
             Action::SearchStart => {
                 self.drag = SplitDrag::None;
+                self.clear_diff_visual();
                 if self.help_open {
                     self.help_search_query = Some(String::new());
                     Effect::None
@@ -259,6 +264,8 @@ impl AppState {
                 Effect::None
             }
             Action::CycleTheme => self.cycle_theme(),
+            Action::DiffVisualStart => self.begin_diff_visual(),
+            Action::DiffVisualCancel => self.cancel_diff_visual(),
             Action::CommentStart => self.begin_comment(),
             Action::CommentChar(c) => {
                 if let Some(prompt) = self.comment.as_mut() {

@@ -75,6 +75,7 @@ mod pty_t_and_i_toggle_view_modes;
 mod pty_tree_b_picker_enter_checkout;
 mod pty_tree_sgr_hscroll_pans_clipped_path;
 mod pty_update_prompt_n_opens_tui;
+mod pty_v_highlight_comment_range;
 mod pty_watch_applies_while_keys_arrive;
 mod pty_worktree_w_remove_confirm;
 mod pty_x_then_y_discard_tracked;

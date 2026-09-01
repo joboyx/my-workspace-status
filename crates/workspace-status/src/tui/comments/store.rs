@@ -27,14 +27,20 @@ pub enum CommentKey {
         repo: String,
         branch: String,
         path: String,
+        /// Inclusive start (1-based).
         line: u32,
+        /// Inclusive end. Equal to [`Self::WorktreeLine::line`] for one line.
+        end_line: u32,
     },
     /// Line comment on a commit file diff.
     CommitLine {
         repo: String,
         sha: String,
         path: String,
+        /// Inclusive start (1-based).
         line: u32,
+        /// Inclusive end. Equal to [`Self::CommitLine::line`] for one line.
+        end_line: u32,
     },
 }
 
@@ -113,6 +119,8 @@ enum CommentRecord {
         branch: String,
         path: String,
         line: u32,
+        #[serde(rename = "endLine", default, skip_serializing_if = "Option::is_none")]
+        end_line: Option<u32>,
         body: String,
     },
     CommitLine {
@@ -120,11 +128,44 @@ enum CommentRecord {
         sha: String,
         path: String,
         line: u32,
+        #[serde(rename = "endLine", default, skip_serializing_if = "Option::is_none")]
+        end_line: Option<u32>,
         body: String,
     },
 }
 
+/// Inclusive start/end with start ≤ end.
+pub fn ordered_line_range(a: u32, b: u32) -> (u32, u32) {
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+fn record_end_line(line: u32, end_line: u32) -> Option<u32> {
+    if end_line == line {
+        None
+    } else {
+        Some(end_line)
+    }
+}
+
+fn key_end_line(line: u32, end_line: Option<u32>) -> u32 {
+    end_line.unwrap_or(line)
+}
+
 impl CommentKey {
+    /// True when this line comment covers `n` (object keys are false).
+    pub fn covers_line(&self, n: u32) -> bool {
+        match self {
+            Self::WorktreeLine { line, end_line, .. } | Self::CommitLine { line, end_line, .. } => {
+                n >= *line && n <= *end_line
+            }
+            _ => false,
+        }
+    }
+
     fn into_record(self, body: String) -> CommentRecord {
         match self {
             Self::Branch { repo, branch } => CommentRecord::Branch { repo, branch, body },
@@ -135,11 +176,13 @@ impl CommentKey {
                 branch,
                 path,
                 line,
+                end_line,
             } => CommentRecord::WorktreeLine {
                 repo,
                 branch,
                 path,
                 line,
+                end_line: record_end_line(line, end_line),
                 body,
             },
             Self::CommitLine {
@@ -147,11 +190,13 @@ impl CommentKey {
                 sha,
                 path,
                 line,
+                end_line,
             } => CommentRecord::CommitLine {
                 repo,
                 sha,
                 path,
                 line,
+                end_line: record_end_line(line, end_line),
                 body,
             },
         }
@@ -169,31 +214,41 @@ impl CommentRecord {
                 branch,
                 path,
                 line,
+                end_line,
                 body,
-            } => (
-                CommentKey::WorktreeLine {
-                    repo,
-                    branch,
-                    path,
-                    line,
-                },
-                body,
-            ),
+            } => {
+                let (line, end_line) = ordered_line_range(line, key_end_line(line, end_line));
+                (
+                    CommentKey::WorktreeLine {
+                        repo,
+                        branch,
+                        path,
+                        line,
+                        end_line,
+                    },
+                    body,
+                )
+            }
             Self::CommitLine {
                 repo,
                 sha,
                 path,
                 line,
+                end_line,
                 body,
-            } => (
-                CommentKey::CommitLine {
-                    repo,
-                    sha,
-                    path,
-                    line,
-                },
-                body,
-            ),
+            } => {
+                let (line, end_line) = ordered_line_range(line, key_end_line(line, end_line));
+                (
+                    CommentKey::CommitLine {
+                        repo,
+                        sha,
+                        path,
+                        line,
+                        end_line,
+                    },
+                    body,
+                )
+            }
         };
         if body.trim().is_empty() {
             None
@@ -313,11 +368,61 @@ mod tests {
             branch: "main".into(),
             path: "README.md".into(),
             line: 2,
+            end_line: 2,
         };
         let store = put_comment(&CommentStore::new(), key.clone(), "wt line");
         save_comment_store(&store, &file);
         let loaded = load_comment_store(&file);
         assert_eq!(loaded.get(&key).map(String::as_str), Some("wt line"));
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(
+            !text.contains("endLine"),
+            "single-line comments omit endLine: {text}"
+        );
+        let range = CommentKey::WorktreeLine {
+            repo: "app".into(),
+            branch: "main".into(),
+            path: "README.md".into(),
+            line: 1,
+            end_line: 2,
+        };
+        let store = put_comment(&CommentStore::new(), range.clone(), "span");
+        save_comment_store(&store, &file);
+        let loaded = load_comment_store(&file);
+        assert_eq!(loaded.get(&range).map(String::as_str), Some("span"));
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(
+            text.contains("\"endLine\": 2"),
+            "range keeps endLine: {text}"
+        );
+        let legacy = file.with_file_name("legacy.json");
+        fs::write(
+            &legacy,
+            r#"{
+  "version": 1,
+  "entries": [
+    {
+      "kind": "worktreeLine",
+      "repo": "app",
+      "branch": "main",
+      "path": "README.md",
+      "line": 3,
+      "body": "old"
+    }
+  ]
+}
+"#,
+        )
+        .unwrap();
+        let loaded = load_comment_store(&legacy);
+        let old = CommentKey::WorktreeLine {
+            repo: "app".into(),
+            branch: "main".into(),
+            path: "README.md".into(),
+            line: 3,
+            end_line: 3,
+        };
+        assert_eq!(loaded.get(&old).map(String::as_str), Some("old"));
         assert!(load_comment_store(&dir.join("missing.json")).is_empty());
         let _ = fs::remove_dir_all(&dir);
     }

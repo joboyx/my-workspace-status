@@ -835,6 +835,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    state.drop_stale_diff_visual();
     let palette = state.theme.palette();
     let path = state.diff_header_path();
     let effective = effective_diff_mode(state.diff_mode, area.width);
@@ -924,6 +925,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                 off,
                 state,
                 i == state.diff_cursor,
+                state.diff_visual_contains(i),
                 state.search_hit == Some(i),
             )
         })
@@ -989,6 +991,7 @@ fn paint_diff_row(
     col_offset: usize,
     state: &AppState,
     selected: bool,
+    visual: bool,
     search_hit: bool,
 ) -> Line<'static> {
     let palette = state.theme.palette();
@@ -1041,6 +1044,8 @@ fn paint_diff_row(
         )),
     };
     let bg = if selected {
+        Some(palette.cursor_bg)
+    } else if visual {
         Some(palette.cursor_bg)
     } else if search_hit {
         Some(palette.flash)
@@ -2276,6 +2281,7 @@ mod tests {
                 sha: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 path: "README.md".into(),
                 line: 1,
+                end_line: 1,
             },
             "note",
         );
@@ -2850,6 +2856,7 @@ mod tests {
                 branch: "main".into(),
                 path: "README.md".into(),
                 line: 10,
+                end_line: 10,
             },
             "keep numbers still",
         );

@@ -42,6 +42,8 @@ pub enum InputMode {
     CreateBranch,
     /// `;` comment overlay (type body, Enter save, empty deletes).
     Comment,
+    /// `V` visual-line highlight on a focused file diff (`j`/`k` extend).
+    DiffVisual,
     /// `y` markdown export overlay (Esc closes).
     CommentExport,
 }
@@ -261,6 +263,7 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
         InputMode::Normal { .. }
         | InputMode::ZPending { .. }
         | InputMode::GPending { .. }
+        | InputMode::DiffVisual
         | InputMode::Confirm
         | InputMode::Help
         | InputMode::StashMenu
@@ -429,6 +432,7 @@ fn key_to_action(
             KeyCode::Esc | KeyCode::Enter => Action::ExportCommentsCancel,
             _ => Action::None,
         },
+        InputMode::DiffVisual => diff_visual_key(key),
         InputMode::Normal { search_active } => normal_key(
             key,
             search_active,
@@ -438,6 +442,22 @@ fn key_to_action(
             graph_commit_focused,
             hl_folds,
         ),
+    }
+}
+
+/// Visual-line keys on a focused file diff.
+///
+/// `j` / `k` / arrows move (and extend the range). `;` comments that
+/// range. Esc or a second `V` leaves highlight without commenting.
+fn diff_visual_key(key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('V') => Action::DiffVisualCancel,
+        KeyCode::Char(';') => Action::CommentStart,
+        KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::Move(1),
+        KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::Move(-1),
+        KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => Action::PanDiff(-1),
+        KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Right => Action::PanDiff(1),
+        _ => Action::None,
     }
 }
 
@@ -501,6 +521,7 @@ fn normal_key(
         KeyCode::Char('i') => Action::ToggleDiffMode,
         KeyCode::Char('m') => Action::ToggleMouse,
         KeyCode::Char(';') => Action::CommentStart,
+        KeyCode::Char('V') => Action::DiffVisualStart,
         KeyCode::Char('y') => Action::ExportComments,
         KeyCode::Char('n') if search_active => Action::SearchNext,
         KeyCode::Char('N') if search_active => Action::SearchPrev,
@@ -998,6 +1019,55 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Char(';')), normal(), false, false),
             Action::CommentStart
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('V')), normal(), true, true),
+            Action::DiffVisualStart
+        );
+        assert_eq!(
+            event_to_action(&shift(KeyCode::Char('v')), normal(), true, true),
+            Action::DiffVisualStart
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Esc), InputMode::DiffVisual, true, true),
+            Action::DiffVisualCancel
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('V')), InputMode::DiffVisual, true, true),
+            Action::DiffVisualCancel
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char(';')), InputMode::DiffVisual, true, true),
+            Action::CommentStart
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('j')), InputMode::DiffVisual, true, true),
+            Action::Move(1)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Down), InputMode::DiffVisual, true, true),
+            Action::Move(1)
+        );
+        assert_eq!(
+            event_to_action(
+                &key(KeyCode::Char(char::from_u32(57353).unwrap())),
+                InputMode::DiffVisual,
+                true,
+                true
+            ),
+            Action::Move(1)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('k')), InputMode::DiffVisual, true, true),
+            Action::Move(-1)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Up), InputMode::DiffVisual, true, true),
+            Action::Move(-1)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('s')), InputMode::DiffVisual, true, true),
+            Action::None
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('y')), normal(), false, false),

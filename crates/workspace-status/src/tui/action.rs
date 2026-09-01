@@ -113,6 +113,10 @@ pub enum Action {
     CreateBranchCancel,
     /// Open the comment overlay on the focused row or diff line (`;`).
     CommentStart,
+    /// Start visual-line highlight on a focused file diff (`V`).
+    DiffVisualStart,
+    /// Leave visual-line highlight without commenting (Esc).
+    DiffVisualCancel,
     CommentChar(char),
     CommentBackspace,
     CommentSubmit,
