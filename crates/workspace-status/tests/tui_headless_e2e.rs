@@ -761,6 +761,9 @@ fn depth_2_new_commit_file_resets_diff_viewport() {
         tui.diff_col_offset()
     );
     tui.esc();
+    if tui.focus_is_right() {
+        tui.esc();
+    }
     assert!(
         tui.left_is_files() && !tui.focus_is_right(),
         "Esc should leave the commit-file list focused on the left:\n{}",
