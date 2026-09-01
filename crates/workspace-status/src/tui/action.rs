@@ -117,18 +117,10 @@ pub enum Action {
     DiffVisualStart,
     /// Leave visual-line highlight without commenting (Esc).
     DiffVisualCancel,
-    CommentChar(char),
-    CommentBackspace,
-    /// Delete the character after the comment caret.
-    CommentDelete,
-    /// Move the comment caret one character left.
-    CommentLeft,
-    /// Move the comment caret one character right.
-    CommentRight,
-    /// Move the comment caret to the start of the body.
-    CommentHome,
-    /// Move the comment caret to the end of the body.
-    CommentEnd,
+    /// Feed one key to the comment textarea (`tui-textarea` map).
+    ///
+    /// Shift+Enter is a newline. Unmodified Enter is [`Self::CommentSubmit`].
+    CommentInput(crossterm::event::KeyEvent),
     CommentSubmit,
     CommentCancel,
     /// Toggle resolve on the open comment overlay (`Ctrl-R`). Enter persists.

@@ -412,10 +412,11 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
         let extra = u16::from(!state.status.is_empty());
         return 5u16.saturating_add(extra);
     }
-    if state.comment.is_some() {
-        // Title + target + body + footer, plus 2 border rows. Idle status
-        // stays out of the box; typing does not echo `body:` into `status`.
-        return 6;
+    if let Some(prompt) = state.comment.as_ref() {
+        // Title + target + body lines + footer, plus 2 border rows. Idle
+        // status stays out of the box; typing does not echo `body:` into
+        // `status`. Extra body lines grow the box up to the cap.
+        return prompt.overlay_rows();
     }
     if let Some(export) = state.comment_export.as_ref() {
         let extra = u16::from(!state.status.is_empty() && state.status != "copied");
@@ -1392,12 +1393,20 @@ mod tests {
             String::new(),
             "app · branch feature/x".into(),
         ));
-        assert_eq!(overlay_status_rows(&app), 6);
+        assert_eq!(overlay_status_rows(&app), 7);
         app.status = "body: hello".into();
         assert_eq!(
             overlay_status_rows(&app),
-            6,
+            7,
             "idle / typing status must not grow the comment overlay"
+        );
+        if let Some(prompt) = app.comment.as_mut() {
+            prompt.insert_newline();
+        }
+        assert_eq!(
+            overlay_status_rows(&app),
+            8,
+            "a second body line grows the box; status still does not"
         );
         app.comment = None;
         app.status = "copied".into();

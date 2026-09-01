@@ -12,7 +12,10 @@ mod store;
 mod target;
 
 pub use export::{copy_to_clipboard, export_markdown, RESOLVED_MARKDOWN_TAG};
-pub use overlay::{comment_key_label, CommentExport, CommentPrompt};
+pub use overlay::{
+    comment_key_label, comment_overlay_footer_save, CommentExport, CommentPrompt,
+    COMMENT_OVERLAY_FOOTER_EDIT,
+};
 pub use store::{
     comment_store_path, comment_store_path_from_env, load_comment_store, put_comment,
     put_comment_entry, repo_identity, save_comment_store, CommentEntry, CommentKey, CommentStore,

@@ -110,13 +110,7 @@ impl AppState {
             | Action::DiffVisualStart
             | Action::DiffVisualCancel
             | Action::CommentStart
-            | Action::CommentChar(_)
-            | Action::CommentBackspace
-            | Action::CommentDelete
-            | Action::CommentLeft
-            | Action::CommentRight
-            | Action::CommentHome
-            | Action::CommentEnd
+            | Action::CommentInput(_)
             | Action::CommentSubmit
             | Action::CommentCancel
             | Action::CommentToggleResolved

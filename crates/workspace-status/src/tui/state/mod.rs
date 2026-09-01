@@ -2424,13 +2424,10 @@ impl AppState {
         let Some(prompt) = self.comment.take() else {
             return Effect::None;
         };
-        let empty = prompt.body.trim().is_empty();
-        self.comment_store = put_comment_entry(
-            &self.comment_store,
-            prompt.key,
-            &prompt.body,
-            prompt.resolved,
-        );
+        let body = prompt.body();
+        let empty = body.trim().is_empty();
+        self.comment_store =
+            put_comment_entry(&self.comment_store, prompt.key, &body, prompt.resolved);
         save_comment_store(&self.comment_store, &self.comment_path);
         self.status = if empty {
             "comment deleted".into()
@@ -7880,7 +7877,7 @@ mod tests {
         app.dispatch(Action::CommentStart);
         let prompt = app.comment.take().expect("covering overlay");
         assert_eq!(prompt.key, range);
-        assert_eq!(prompt.body, "range-note");
+        assert_eq!(prompt.body(), "range-note");
         assert!(prompt.label.contains("1-2"));
         app.comment = Some(CommentPrompt::new(prompt.key, String::new(), prompt.label));
         app.dispatch(Action::CommentSubmit);
@@ -7905,9 +7902,13 @@ mod tests {
             line: 2,
             end_line: 2,
         };
+        app.comment_store = CommentStore::new();
         app.diff_cursor = line2;
         app.dispatch(Action::CommentStart);
-        app.dispatch(Action::CommentChar('n'));
+        app.dispatch(Action::CommentInput(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('n'),
+            crossterm::event::KeyModifiers::NONE,
+        )));
         app.dispatch(Action::CommentToggleResolved);
         assert!(app.comment.as_ref().is_some_and(|p| p.resolved));
         app.dispatch(Action::CommentSubmit);
@@ -7956,7 +7957,7 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        assert!(prompt.body.is_empty());
+        assert!(prompt.body().is_empty());
     }
 
     #[test]
