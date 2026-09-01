@@ -115,7 +115,7 @@ Live TUI keymap (full overlay detail in [docs/configuration.md](./docs/configura
 | `q`                                   | quit immediately (Rust extra)                                                                                                                          |
 | `Esc`                                 | back (right → left, then pop depth). Never quits. Cancels overlays / chords first                                                                      |
 
-When the right pane loads a new view, rows, or dataset (repo, pane kind, graph contents, or commit-file list key), it resets to the top — first selectable graph row, first commit-file row, or diff scroll 0. Same-view graph rebuilds (width/theme, autoload older) keep the cursor. `Ctrl-o` still keeps the hunk in view. The left tree still restores by id.
+When the right pane loads a new view, rows, or dataset (repo, pane kind, graph contents, or commit-file list key), it resets to the top — first selectable graph row, first commit-file row, or diff scroll 0. A file-diff viewport belongs to one identity (workspace `repo`+`path`, or commit `repo`+source+`path`). A new identity resets vertical and horizontal offsets. Same-view graph rebuilds (width/theme, autoload older) keep the cursor. `Ctrl-o` still keeps the hunk in view. The left tree still restores by id.
 
 **Known limits:**
 
