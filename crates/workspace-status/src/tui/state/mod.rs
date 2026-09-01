@@ -222,6 +222,23 @@ pub struct RevertTarget {
     pub old_path: Option<String>,
 }
 
+/// File-diff that owns `diff_cursor`, `diff_scroll`, and `diff_col_offset`.
+///
+/// A new identity resets those fields to the origin. A same-view reload
+/// (watch, `Ctrl-o` after the hunk anchor) keeps them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DiffViewId {
+    Workspace {
+        repo: String,
+        path: String,
+    },
+    Commit {
+        repo: String,
+        source: CommitFileSource,
+        path: String,
+    },
+}
+
 /// Interactive session state. Dispatch is pure besides the returned [`Effect`].
 #[derive(Clone, Debug)]
 pub struct AppState {
@@ -257,6 +274,8 @@ pub struct AppState {
     pub diff_cursor: usize,
     pub diff_repo: Option<String>,
     pub diff_path: Option<String>,
+    /// Painted file-diff identity. Viewport reset follows this, not paint.
+    diff_view: Option<DiffViewId>,
     pub reviewed: HashSet<String>,
     pub viewed_store: ViewedStore,
     pub viewed_path: PathBuf,
@@ -366,6 +385,7 @@ impl AppState {
             diff_cursor: 0,
             diff_repo: None,
             diff_path: None,
+            diff_view: None,
             reviewed: HashSet::new(),
             viewed_store,
             viewed_path,
@@ -1592,13 +1612,10 @@ impl AppState {
 
     /// Store workspace-file diff content for the right pane.
     pub fn set_diff(&mut self, repo: String, path: String, content: DiffContent) {
-        let same = self.diff_repo.as_deref() == Some(repo.as_str())
-            && self.diff_path.as_deref() == Some(path.as_str());
-        if !same {
-            self.diff_scroll = 0;
-            self.diff_cursor = 0;
-            self.diff_col_offset = 0;
-        }
+        self.adopt_diff_view(DiffViewId::Workspace {
+            repo: repo.clone(),
+            path: path.clone(),
+        });
         self.diff_repo = Some(repo);
         self.diff_path = Some(path);
         self.diff_content = content;
@@ -1625,6 +1642,8 @@ impl AppState {
         self.diff_content = DiffContent::default();
         self.diff_repo = None;
         self.diff_path = None;
+        self.diff_view = None;
+        self.reset_diff_viewport();
         self.graph_signatures.clear();
         self.graph_flash_meta = None;
         self.commit_file_signatures.clear();
@@ -1678,6 +1697,7 @@ impl AppState {
         };
         if !same_source {
             self.commit_file_folds.clear();
+            self.right_col_offset = 0;
         }
         self.commit_files_loading = false;
         self.status = format!("files {}", files.len());
@@ -1728,9 +1748,15 @@ impl AppState {
         path: String,
         content: DiffContent,
     ) {
-        self.diff_scroll = 0;
-        self.diff_col_offset = 0;
-        self.left_col_offset = 0;
+        let entering = !self.drill.is_diff();
+        self.adopt_diff_view(DiffViewId::Commit {
+            repo: repo.clone(),
+            source: source.clone(),
+            path: path.clone(),
+        });
+        if entering {
+            self.left_col_offset = 0;
+        }
         self.status = format!("diff {path}");
         self.drill = DrillView::Diff {
             repo,
@@ -1740,7 +1766,27 @@ impl AppState {
             path,
             content,
         };
+        let n = self.current_diff_rows().len();
+        if n == 0 {
+            self.diff_cursor = 0;
+        } else {
+            self.diff_cursor = self.diff_cursor.min(n - 1);
+        }
         self.apply_pending_hunk_anchor();
+        self.sync_diff_scroll();
+    }
+
+    fn reset_diff_viewport(&mut self) {
+        self.diff_scroll = 0;
+        self.diff_cursor = 0;
+        self.diff_col_offset = 0;
+    }
+
+    fn adopt_diff_view(&mut self, id: DiffViewId) {
+        if self.diff_view.as_ref() != Some(&id) {
+            self.reset_diff_viewport();
+            self.diff_view = Some(id);
+        }
     }
 
     pub fn focused_file(&self) -> Option<(String, FileChange)> {
@@ -3479,6 +3525,53 @@ mod tests {
             path: "README.md".into(),
             old_path: None,
         }]
+    }
+
+    fn sample_commit_source() -> CommitFileSource {
+        CommitFileSource::Commit {
+            commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        }
+    }
+
+    fn two_commit_files() -> Vec<CommitFile> {
+        vec![
+            CommitFile {
+                status: "M".into(),
+                path: "one.rs".into(),
+                old_path: None,
+            },
+            CommitFile {
+                status: "M".into(),
+                path: "two.rs".into(),
+                old_path: None,
+            },
+        ]
+    }
+
+    fn tall_panning_diff() -> DiffContent {
+        let mut body = format!("@@ -0,0 +1,41 @@\n+{}\n", "x".repeat(40));
+        for i in 0..40 {
+            body.push_str(&format!("+line {i}\n"));
+        }
+        DiffContent::from_unified(body)
+    }
+
+    fn pan_and_scroll_focused_diff(app: &mut AppState) {
+        app.focus = FocusPane::Right;
+        app.layout.diff_pane_width = 8;
+        app.layout.diff_pane_height = 8;
+        let steps = (app.diff_body_height() / 2 + 8) as i32;
+        app.dispatch(Action::Move(steps));
+        for _ in 0..8 {
+            app.dispatch(Action::PanDiff(1));
+        }
+        assert!(
+            app.diff_cursor > 0 && app.diff_scroll > 0 && app.diff_col_offset > 0,
+            "need a stale viewport, cursor={} scroll={} pan={}",
+            app.diff_cursor,
+            app.diff_scroll,
+            app.diff_col_offset
+        );
     }
 
     #[test]
@@ -6613,6 +6706,99 @@ mod tests {
         install_graph(&mut app, Vec::new());
         app.focus = FocusPane::Right;
         assert_eq!(app.dispatch(Action::ToggleFullContext), Effect::None);
+    }
+
+    #[test]
+    fn set_diff_new_path_resets_viewport() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.set_diff("app".into(), "README.md".into(), tall_panning_diff());
+        pan_and_scroll_focused_diff(&mut app);
+        app.set_diff("app".into(), "src/lib.rs".into(), tall_panning_diff());
+        assert_eq!(app.diff_cursor, 0);
+        assert_eq!(app.diff_scroll, 0);
+        assert_eq!(app.diff_col_offset, 0);
+    }
+
+    #[test]
+    fn open_commit_diff_new_path_resets_viewport() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        let files = two_commit_files();
+        let source = sample_commit_source();
+        app.open_commit_diff(
+            "app".into(),
+            source.clone(),
+            files.clone(),
+            0,
+            "one.rs".into(),
+            tall_panning_diff(),
+        );
+        pan_and_scroll_focused_diff(&mut app);
+        app.open_commit_diff(
+            "app".into(),
+            source,
+            files,
+            1,
+            "two.rs".into(),
+            tall_panning_diff(),
+        );
+        assert_eq!(app.diff_cursor, 0, "new commit file must drop the old row");
+        assert_eq!(app.diff_scroll, 0, "new commit file must start at the top");
+        assert_eq!(
+            app.diff_col_offset, 0,
+            "new commit file must start at the left"
+        );
+    }
+
+    #[test]
+    fn open_commit_diff_same_path_keeps_viewport() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        let files = two_commit_files();
+        let source = sample_commit_source();
+        app.open_commit_diff(
+            "app".into(),
+            source.clone(),
+            files.clone(),
+            0,
+            "one.rs".into(),
+            tall_panning_diff(),
+        );
+        pan_and_scroll_focused_diff(&mut app);
+        let cursor = app.diff_cursor;
+        let scroll = app.diff_scroll;
+        let pan = app.diff_col_offset;
+        app.open_commit_diff(
+            "app".into(),
+            source,
+            files,
+            0,
+            "one.rs".into(),
+            tall_panning_diff(),
+        );
+        assert_eq!(app.diff_cursor, cursor);
+        assert_eq!(app.diff_scroll, scroll);
+        assert_eq!(app.diff_col_offset, pan);
+    }
+
+    #[test]
+    fn workspace_then_commit_same_path_resets_viewport() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.set_diff("app".into(), "README.md".into(), tall_panning_diff());
+        pan_and_scroll_focused_diff(&mut app);
+        app.open_commit_diff(
+            "app".into(),
+            sample_commit_source(),
+            sample_commit_files(),
+            0,
+            "README.md".into(),
+            tall_panning_diff(),
+        );
+        assert_eq!(app.diff_cursor, 0);
+        assert_eq!(app.diff_scroll, 0);
+        assert_eq!(app.diff_col_offset, 0);
     }
 
     #[test]

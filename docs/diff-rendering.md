@@ -49,7 +49,7 @@ An empty file yields `@@ -0,0 +0,0 @@`. Both stub shapes are chosen so the unifi
 
 The diff cache is keyed by repo + path and validated against `size:mtimeMs`, or `missing`. The mtime key is checked *before* running git, so revisiting an unchanged file costs one `stat` rather than two `git diff` subprocesses. Any refresh that replaces snapshots clears the cache.
 
-Scroll position is reset only when the focused file changes, so a live refresh of the file you are reading leaves you where you were.
+Scroll position is reset only when the painted file-diff identity changes, so a live refresh of the file you are reading leaves you where you were. Workspace diffs key that identity on `repo`+`path`. Depth-2 commit diffs key it on `repo`+source+`path`. A workspace file and a commit file that share a path are different views.
 
 ## Side-by-side column drag
 
@@ -61,7 +61,7 @@ A focused file-diff row (section, hunk, or line) paints the same cursor bar as o
 
 ## Horizontal pan
 
-Long diff lines are **not** word-wrapped. The cursor bar uses one column. Pan max uses the remaining content width so the last character stays reachable. `h` / `←` and `l` / `→` pan when the right pane shows a file diff (same keys pan a focused graph or commit-file list). Shift+Left / Shift+Right pan the focused pane, including the tree. Mouse horizontal wheel (and Shift+wheel) pans the pane under the pointer without moving the focused row. When a file diff has long lines, trackpad hscroll (SGR `66`/`67`, same `tui/tty.rs` decode as the live loop) over the left pane pans that diff rather than a short tree label. Offset resets to 0 when the focused file changes. Header shows `· pan N` when offset > 0. A 1-row horizontal bar paints after the viewport leaves the left edge; a 1-column vertical bar paints after the list leaves the top. Rows stay clipped to the pane width.
+Long diff lines are **not** word-wrapped. The cursor bar uses one column. Pan max uses the remaining content width so the last character stays reachable. `h` / `←` and `l` / `→` pan when the right pane shows a file diff (same keys pan a focused graph or commit-file list). Shift+Left / Shift+Right pan the focused pane, including the tree. Mouse horizontal wheel (and Shift+wheel) pans the pane under the pointer without moving the focused row. When a file diff has long lines, trackpad hscroll (SGR `66`/`67`, same `tui/tty.rs` decode as the live loop) over the left pane pans that diff rather than a short tree label. Offset resets to 0 when the painted file-diff identity changes. Header shows `· pan N` when offset > 0. A 1-row horizontal bar paints after the viewport leaves the left edge; a 1-column vertical bar paints after the list leaves the top. Rows stay clipped to the pane width.
 
 ## Full-file view
 

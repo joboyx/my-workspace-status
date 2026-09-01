@@ -184,6 +184,24 @@ fn seed_tall_dirty_file(workspace: &Path, name: &str) {
     fs::write(workspace.join("app").join(name), body).unwrap();
 }
 
+/// Two committed files that can pan and scroll, so a depth-2 switch can
+/// prove the new view starts at the origin.
+fn seed_two_tall_commit_files(workspace: &Path) {
+    seed_repo(workspace, "scrollbox", "main", false);
+    let repo = workspace.join("scrollbox");
+    let mut alpha = format!("{}ALPHA_PAN_TAIL\n", "n".repeat(80));
+    let mut beta = format!("{}BETA_PAN_TAIL\n", "n".repeat(80));
+    for i in 0..40 {
+        alpha.push_str(&format!("alpha-line-{i}\n"));
+        beta.push_str(&format!("beta-line-{i}\n"));
+    }
+    fs::write(repo.join("alpha.rs"), alpha).unwrap();
+    fs::write(repo.join("beta.rs"), beta).unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "tall-pair-scroll-reset"]);
+    git(&repo, &["checkout", "-q", "-b", "feature/scroll-reset"]);
+}
+
 fn assert_contains(frame: &str, needle: &str) {
     assert!(
         frame.contains(needle),
@@ -692,6 +710,94 @@ fn drill_enter_and_esc_walk_commit_files_diff() {
     assert!(
         tui.right_is_graph(),
         "Esc on the left pane pops to the graph:\n{back_graph}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn depth_2_new_commit_file_resets_diff_viewport() {
+    let (root, workspace) = daily_workspace();
+    seed_two_tall_commit_files(&workspace);
+    let mut tui = open(&workspace);
+    tui.resize(80, 24);
+    tui.search("scrollbox");
+    tui.enter();
+    assert!(
+        tui.right_is_graph() && tui.focus_is_right(),
+        "Enter on scrollbox should focus its graph:\n{}",
+        tui.frame()
+    );
+    tui.search("tall-pair-scroll-reset");
+    tui.enter();
+    let files = tui.frame();
+    assert!(
+        tui.right_is_files() && tui.focus_is_right(),
+        "Enter on the tall-pair commit should open its files:\n{files}"
+    );
+    assert!(
+        files.contains("alpha.rs") && files.contains("beta.rs"),
+        "commit should list both tall files:\n{files}"
+    );
+    tui.enter();
+    let first = tui.frame();
+    assert!(
+        tui.right_is_diff() && tui.focus_is_right(),
+        "Enter on the first commit file should open its diff:\n{first}"
+    );
+    assert_contains(&first, "alpha.rs");
+    tui.key('G');
+    for _ in 0..40 {
+        tui.key('l');
+    }
+    let _ = tui.frame();
+    assert!(
+        tui.diff_scroll() > 0,
+        "G on the first commit diff must leave the top, scroll={}",
+        tui.diff_scroll()
+    );
+    assert!(
+        tui.diff_col_offset() > 0,
+        "l on the first commit diff must leave the left edge, pan={}",
+        tui.diff_col_offset()
+    );
+    tui.esc();
+    if tui.focus_is_right() {
+        tui.esc();
+    }
+    assert!(
+        tui.left_is_files() && !tui.focus_is_right(),
+        "Esc should leave the commit-file list focused on the left:\n{}",
+        tui.frame()
+    );
+    tui.key('j');
+    let second = tui.frame();
+    assert!(
+        tui.right_is_diff() && !tui.focus_is_right(),
+        "j on the left list should load the next commit diff:\n{second}"
+    );
+    assert_contains(&second, "beta.rs");
+    assert_eq!(
+        tui.diff_cursor(),
+        0,
+        "new commit file must drop the previous row"
+    );
+    assert_eq!(
+        tui.diff_scroll(),
+        0,
+        "new commit file must start at the top"
+    );
+    assert_eq!(
+        tui.diff_col_offset(),
+        0,
+        "new commit file must start at the left"
+    );
+    assert!(
+        tui.diff_scrollbar_col().is_none(),
+        "vertical bar stays hidden at the origin:\n{second}"
+    );
+    assert!(
+        !second.contains("pan "),
+        "header must not keep the previous pan:\n{second}"
     );
     let _ = fs::remove_dir_all(root);
 }
