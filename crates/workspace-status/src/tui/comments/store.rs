@@ -119,11 +119,7 @@ enum CommentRecord {
         branch: String,
         path: String,
         line: u32,
-        #[serde(
-            rename = "endLine",
-            default,
-            skip_serializing_if = "Option::is_none"
-        )]
+        #[serde(rename = "endLine", default, skip_serializing_if = "Option::is_none")]
         end_line: Option<u32>,
         body: String,
     },
@@ -132,11 +128,7 @@ enum CommentRecord {
         sha: String,
         path: String,
         line: u32,
-        #[serde(
-            rename = "endLine",
-            default,
-            skip_serializing_if = "Option::is_none"
-        )]
+        #[serde(rename = "endLine", default, skip_serializing_if = "Option::is_none")]
         end_line: Option<u32>,
         body: String,
     },
