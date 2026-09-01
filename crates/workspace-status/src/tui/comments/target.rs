@@ -779,6 +779,17 @@ fn tree_key_on_row(snapshot: &WorkspaceSnapshot, row: &VisibleRow, key: &Comment
             }
         }
         NodeKind::Repo | NodeKind::Checkout => {
+            if row.chrome.is_family {
+                return match key {
+                    CommentKey::Branch { repo, .. }
+                    | CommentKey::Commit { repo, .. }
+                    | CommentKey::WorktreeLine { repo, .. }
+                    | CommentKey::CommitLine { repo, .. } => repo == &identity,
+                    CommentKey::Worktree { path } => {
+                        worktree_on_identity(snapshot, &identity, path)
+                    }
+                };
+            }
             let is_linked = row.chrome.checkout_kind == Some(CheckoutKind::Linked)
                 || snap.map(|r| r.checkout_kind) == Some(CheckoutKind::Linked);
             if is_linked {
@@ -793,17 +804,6 @@ fn tree_key_on_row(snapshot: &WorkspaceSnapshot, row: &VisibleRow, key: &Comment
                     key,
                     CommentKey::Worktree { path } if path == &normalize_viewed_path(repo_path)
                 );
-            }
-            if row.chrome.is_family {
-                return match key {
-                    CommentKey::Branch { repo, .. }
-                    | CommentKey::Commit { repo, .. }
-                    | CommentKey::WorktreeLine { repo, .. }
-                    | CommentKey::CommitLine { repo, .. } => repo == &identity,
-                    CommentKey::Worktree { path } => {
-                        worktree_on_identity(snapshot, &identity, path)
-                    }
-                };
             }
             if !row.chrome.branch.is_empty()
                 && matches!(
