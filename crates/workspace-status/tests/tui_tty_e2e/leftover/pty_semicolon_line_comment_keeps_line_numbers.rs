@@ -4,7 +4,7 @@ use crate::support::{
     documented_launch_first_paint, pane_unstaged_readme, right_pane, tree_cursor_on, GIT_WAIT, WAIT,
 };
 
-const BODY: &str = "gutter-prealloc-e2e";
+const BODY: &str = "keep-nums-e2e";
 
 fn comment_overlay(screen: &str) -> bool {
     screen.contains("Comment")
@@ -99,8 +99,8 @@ fn pty_semicolon_line_comment_keeps_line_numbers() {
         "comment mark leftover must not shift │ after line numbers:\nbefore={before_pane}\nafter={after_pane}"
     );
     let marked = after_pane.lines().any(|line| {
-        let rest = line.strip_prefix('\u{258C}').unwrap_or(line);
-        rest.starts_with('"') && rest.contains(" │ ")
+        line.find(" │ ")
+            .is_some_and(|at| line[..at].contains('"'))
     });
     assert!(
         marked,

@@ -113,15 +113,15 @@ fn tree_presents_flat(screen: &str) -> bool {
 }
 
 fn split_body_line(right: &str) -> bool {
-    right
-        .lines()
-        .any(|line| line.contains("│ 1 │ +fn view()") && !line.trim_start().starts_with("1 │"))
+    right.lines().any(|line| {
+        line.contains("│  1 │ +fn view()") && !line.trim_start().starts_with("1 │")
+    })
 }
 
 fn inline_body_line(right: &str) -> bool {
     right.lines().any(|line| {
         let trimmed = line.trim_start();
-        trimmed.starts_with("1 │ +fn view()") && !line.contains("│ 1 │ +fn view()")
+        trimmed.starts_with("1 │ +fn view()") && !line.contains("│  1 │ +fn view()")
     })
 }
 
