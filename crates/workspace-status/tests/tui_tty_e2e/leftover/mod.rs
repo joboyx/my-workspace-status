@@ -12,6 +12,7 @@ mod pty_c_on_tree_file_is_not_commit;
 mod pty_click_chevron_toggles_fold;
 mod pty_click_right_pane_focuses;
 mod pty_click_selects_tree_row;
+mod pty_comment_store_keeps_foreign_workspace;
 mod pty_ctrl_c_prompts_before_quit;
 mod pty_ctrl_c_second_quit;
 mod pty_ctrl_o_full_file_context;

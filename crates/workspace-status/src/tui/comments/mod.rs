@@ -1,7 +1,8 @@
 //! Local TUI comments and markdown export.
 //!
 //! Persist under `$XDG_STATE_HOME/my-workspace-status/comments.json`.
-//! `WS_STATUS_COMMENT_STORE` overrides that path. Comments never write into
+//! `WS_STATUS_COMMENT_STORE` overrides that path. Records are namespaced
+//! by workspace identity inside that file. Comments never write into
 //! user git repos. `y` copies the focused tree / graph / commit-file / diff
 //! row and descendants under that row (after GC). Resolved comments stay in
 //! that copy and carry `[resolved]` in the markdown.
