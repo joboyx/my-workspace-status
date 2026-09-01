@@ -1806,4 +1806,166 @@ mod tests {
             None
         ));
     }
+
+    fn identity_vs_linked_family_snapshot() -> WorkspaceSnapshot {
+        build_workspace_snapshot(
+            &[
+                snap("app", "main", CheckoutKind::Primary, None),
+                snap(
+                    ".worktrees/app/feat",
+                    "feature/linked-open",
+                    CheckoutKind::Linked,
+                    Some("app"),
+                ),
+                snap("other", "main", CheckoutKind::Primary, None),
+            ],
+            &[],
+            false,
+            &[],
+        )
+    }
+
+    fn identity_vs_linked_family_store() -> CommentStore {
+        let mut store = CommentStore::new();
+        store = put_comment(
+            &store,
+            CommentKey::Worktree { path: "app".into() },
+            "on-identity",
+        );
+        store = put_comment(
+            &store,
+            CommentKey::Worktree {
+                path: ".worktrees/app/feat".into(),
+            },
+            "on-worktree",
+        );
+        store = put_comment(
+            &store,
+            CommentKey::Branch {
+                repo: "app".into(),
+                branch: "feature/linked-open".into(),
+            },
+            "on-branch",
+        );
+        store = put_comment(
+            &store,
+            CommentKey::Worktree {
+                path: "other".into(),
+            },
+            "on-other",
+        );
+        store
+    }
+
+    fn family_app_row() -> VisibleRow {
+        VisibleRow {
+            kind: NodeKind::Repo,
+            repo: Some("app".into()),
+            chrome: NodeChrome {
+                is_family: true,
+                checkout_kind: Some(CheckoutKind::Primary),
+                ..Default::default()
+            },
+            ..VisibleRow::default()
+        }
+    }
+
+    fn linked_worktree_app_feat_row() -> VisibleRow {
+        VisibleRow {
+            kind: NodeKind::Checkout,
+            repo: Some(".worktrees/app/feat".into()),
+            primary_repo: Some("app".into()),
+            chrome: NodeChrome {
+                branch: "feature/linked-open".into(),
+                checkout_kind: Some(CheckoutKind::Linked),
+                ..Default::default()
+            },
+            ..VisibleRow::default()
+        }
+    }
+
+    fn sorted_tree_bodies(
+        store: &CommentStore,
+        snapshot: &WorkspaceSnapshot,
+        row: &VisibleRow,
+    ) -> Vec<String> {
+        let mut bodies = scoped_bodies(
+            store,
+            snapshot,
+            CommentExportList::Tree { row: Some(row) },
+        );
+        bodies.sort();
+        bodies
+    }
+
+    #[test]
+    fn export_family_row_includes_identity_and_linked_worktree_object_comments() {
+        let snapshot = identity_vs_linked_family_snapshot();
+        let store = identity_vs_linked_family_store();
+        let row = family_app_row();
+        assert_eq!(
+            sorted_tree_bodies(&store, &snapshot, &row),
+            vec![
+                "on-branch".to_string(),
+                "on-identity".to_string(),
+                "on-worktree".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn export_linked_worktree_row_includes_identity_and_worktree_object_comments() {
+        let snapshot = identity_vs_linked_family_snapshot();
+        let store = identity_vs_linked_family_store();
+        let row = linked_worktree_app_feat_row();
+        assert_eq!(
+            sorted_tree_bodies(&store, &snapshot, &row),
+            vec![
+                "on-branch".to_string(),
+                "on-identity".to_string(),
+                "on-worktree".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn family_row_marks_linked_worktree_object_comment() {
+        let store = put_comment(
+            &CommentStore::new(),
+            CommentKey::Worktree {
+                path: ".worktrees/app/feat".into(),
+            },
+            "on-worktree",
+        );
+        assert!(tree_row_has_comment(&store, &family_app_row()));
+    }
+
+    #[test]
+    fn linked_worktree_row_marks_identity_object_comment() {
+        let store = put_comment(
+            &CommentStore::new(),
+            CommentKey::Worktree { path: "app".into() },
+            "on-identity",
+        );
+        assert!(tree_row_has_comment(
+            &store,
+            &linked_worktree_app_feat_row()
+        ));
+    }
+
+    #[test]
+    fn worktree_path_app_other_is_not_family_of_app() {
+        let snapshot = identity_vs_linked_family_snapshot();
+        let store = put_comment(
+            &CommentStore::new(),
+            CommentKey::Worktree {
+                path: "app-other/x".into(),
+            },
+            "on-app-other",
+        );
+        let row = family_app_row();
+        let bodies = sorted_tree_bodies(&store, &snapshot, &row);
+        assert!(!bodies.iter().any(|b| b == "on-app-other"));
+        assert!(!tree_row_has_comment(&store, &row));
+    }
 }
