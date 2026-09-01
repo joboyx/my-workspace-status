@@ -12,7 +12,9 @@ use super::super::viewed::normalize_viewed_path;
 ///
 /// Version `1` is a flat `entries` list (the current workspace bucket).
 /// Version `2` namespaces those records under `workspaces.<id>.entries`.
-/// Unknown versions load as empty. `resolved` stays additive on each entry.
+/// Unknown versions load as empty. Persist of a present file that is not
+/// valid version-1 or version-2 UTF-8 JSON returns an error and leaves the
+/// bytes unchanged. `resolved` stays additive on each entry.
 pub const COMMENT_STORE_VERSION: u32 = 2;
 
 /// identity → body plus resolve state.
@@ -376,23 +378,32 @@ fn store_to_records(store: &CommentStore) -> Vec<CommentRecord> {
         .collect()
 }
 
-fn load_comment_workspaces(text: &str, workspace_id: &str) -> BTreeMap<String, CommentStore> {
-    let Ok(parsed) = serde_json::from_str::<CommentFile>(text) else {
-        return BTreeMap::new();
-    };
+fn parse_comment_workspaces(
+    text: &str,
+    workspace_id: &str,
+) -> io::Result<BTreeMap<String, CommentStore>> {
+    let parsed: CommentFile = serde_json::from_str(text)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     match parsed.version {
         1 => {
             let mut map = BTreeMap::new();
             map.insert(workspace_id.to_string(), records_to_store(parsed.entries));
-            map
+            Ok(map)
         }
-        2 => parsed
+        2 => Ok(parsed
             .workspaces
             .into_iter()
             .map(|(id, bucket)| (id, records_to_store(bucket.entries)))
-            .collect(),
-        _ => BTreeMap::new(),
+            .collect()),
+        version => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported comment store version {version}"),
+        )),
     }
+}
+
+fn load_comment_workspaces(text: &str, workspace_id: &str) -> BTreeMap<String, CommentStore> {
+    parse_comment_workspaces(text, workspace_id).unwrap_or_default()
 }
 
 fn comment_file_v2(workspaces: BTreeMap<String, CommentStore>) -> CommentFile {
@@ -433,16 +444,22 @@ pub fn load_comment_store(file_path: &Path, workspace_id: &str) -> CommentStore 
 /// Persist `store` as the current workspace bucket (version 2).
 ///
 /// Locks a sibling `*.lock` file, keeps every other workspace bucket, then
-/// atomic-writes. Disk errors return [`io::Result`].
+/// atomic-writes. A missing file starts an empty map. A present file that is
+/// not valid version-1 or version-2 UTF-8 JSON returns [`io::Error`] and
+/// leaves the bytes unchanged. Other disk errors also return [`io::Result`].
 pub fn save_comment_store(
     store: &CommentStore,
     file_path: &Path,
     workspace_id: &str,
 ) -> io::Result<()> {
     persist_with_lock(file_path, |existing| {
-        let mut workspaces = match existing.and_then(|bytes| std::str::from_utf8(bytes).ok()) {
-            Some(text) => load_comment_workspaces(text, workspace_id),
+        let mut workspaces = match existing {
             None => BTreeMap::new(),
+            Some(bytes) => {
+                let text = std::str::from_utf8(bytes)
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+                parse_comment_workspaces(text, workspace_id)?
+            }
         };
         workspaces.insert(workspace_id.to_string(), store.clone());
         encode_comment_file(&comment_file_v2(workspaces))
@@ -720,6 +737,44 @@ mod tests {
                 .map(CommentEntry::as_str),
             Some("note-b"),
             "persist of workspace A must keep workspace B"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_comment_store_refuses_unreadable_existing_bytes() {
+        let (dir, file) = temp_json("ws-comments-junk");
+        fs::write(
+            &file,
+            r#"{
+  "version": 2,
+  "workspaces": {
+    "ws-b": {
+      "entries": [
+        {
+          "kind": "branch",
+          "repo": "app",
+          "branch": "topic",
+          "body": "note-b"
+        }
+      ]
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
+        fs::write(&file, "not-json").unwrap();
+        let store_a = put_comment(&CommentStore::new(), branch_key("main"), "note-a");
+        let result = save_comment_store(&store_a, &file, "ws-a");
+        assert!(
+            result.is_err(),
+            "save over unreadable bytes must return Err, got {result:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "not-json",
+            "unreadable existing bytes must stay unchanged"
         );
         let _ = fs::remove_dir_all(&dir);
     }

@@ -14,7 +14,9 @@ use crate::snapshot::{FileChange, WorkspaceSnapshot};
 ///
 /// Version `1` is a flat identity → fingerprint map (the current workspace
 /// bucket). Version `2` namespaces that map under `workspaces.<id>.entries`.
-/// Unknown versions load as empty.
+/// Unknown versions load as empty. Persist of a present file that is not
+/// valid version-1 or version-2 UTF-8 JSON returns an error and leaves the
+/// bytes unchanged.
 pub const VIEWED_STORE_VERSION: u32 = 2;
 
 /// Files larger than this hash size only (`huge:<len>`).
@@ -203,23 +205,32 @@ fn store_to_entries(store: &ViewedStore) -> BTreeMap<String, ViewedEntry> {
         .collect()
 }
 
-fn load_viewed_workspaces(text: &str, workspace_id: &str) -> BTreeMap<String, ViewedStore> {
-    let Ok(parsed) = serde_json::from_str::<ViewedFile>(text) else {
-        return BTreeMap::new();
-    };
+fn parse_viewed_workspaces(
+    text: &str,
+    workspace_id: &str,
+) -> io::Result<BTreeMap<String, ViewedStore>> {
+    let parsed: ViewedFile = serde_json::from_str(text)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     match parsed.version {
         1 => {
             let mut map = BTreeMap::new();
             map.insert(workspace_id.to_string(), entries_to_store(parsed.entries));
-            map
+            Ok(map)
         }
-        2 => parsed
+        2 => Ok(parsed
             .workspaces
             .into_iter()
             .map(|(id, bucket)| (id, entries_to_store(bucket.entries)))
-            .collect(),
-        _ => BTreeMap::new(),
+            .collect()),
+        version => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported viewed store version {version}"),
+        )),
     }
+}
+
+fn load_viewed_workspaces(text: &str, workspace_id: &str) -> BTreeMap<String, ViewedStore> {
+    parse_viewed_workspaces(text, workspace_id).unwrap_or_default()
 }
 
 fn viewed_file_v2(workspaces: BTreeMap<String, ViewedStore>) -> ViewedFile {
@@ -260,16 +271,22 @@ pub fn load_viewed_store(file_path: &Path, workspace_id: &str) -> ViewedStore {
 /// Persist `store` as the current workspace bucket (version 2).
 ///
 /// Locks a sibling `*.lock` file, keeps every other workspace bucket, then
-/// atomic-writes. Disk errors return [`io::Result`].
+/// atomic-writes. A missing file starts an empty map. A present file that is
+/// not valid version-1 or version-2 UTF-8 JSON returns [`io::Error`] and
+/// leaves the bytes unchanged. Other disk errors also return [`io::Result`].
 pub fn save_viewed_store(
     store: &ViewedStore,
     file_path: &Path,
     workspace_id: &str,
 ) -> io::Result<()> {
     persist_with_lock(file_path, |existing| {
-        let mut workspaces = match existing.and_then(|bytes| std::str::from_utf8(bytes).ok()) {
-            Some(text) => load_viewed_workspaces(text, workspace_id),
+        let mut workspaces = match existing {
             None => BTreeMap::new(),
+            Some(bytes) => {
+                let text = std::str::from_utf8(bytes)
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+                parse_viewed_workspaces(text, workspace_id)?
+            }
         };
         workspaces.insert(workspace_id.to_string(), store.clone());
         encode_viewed_file(&viewed_file_v2(workspaces))
@@ -621,6 +638,35 @@ mod tests {
                 .map(String::as_str),
             Some(fp_b.as_str()),
             "persist of workspace A must keep workspace B"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_viewed_store_refuses_unreadable_existing_bytes() {
+        let (dir, file) = temp_viewed("ws-viewed-junk");
+        let (id_b, fp_b) = sample_mark("b.ts");
+        fs::write(
+            &file,
+            format!(
+                "{{\n  \"version\": 2,\n  \"workspaces\": {{\n    \"ws-b\": {{\n      \"entries\": {{\n        {}: {{\n          \"fingerprint\": \"{}\"\n        }}\n      }}\n    }}\n  }}\n}}\n",
+                serde_json::to_string(&id_b).unwrap(),
+                fp_b
+            ),
+        )
+        .unwrap();
+        fs::write(&file, "not-json").unwrap();
+        let (id_a, fp_a) = sample_mark("a.ts");
+        let store_a = toggle_viewed(&ViewedStore::new(), &id_a, &fp_a);
+        let result = save_viewed_store(&store_a, &file, "ws-a");
+        assert!(
+            result.is_err(),
+            "save over unreadable bytes must return Err, got {result:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "not-json",
+            "unreadable existing bytes must stay unchanged"
         );
         let _ = fs::remove_dir_all(&dir);
     }
