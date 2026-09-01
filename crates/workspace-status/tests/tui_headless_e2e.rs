@@ -1990,3 +1990,50 @@ fn watch_tick_drops_visual_so_semicolon_is_one_line() {
     assert_contains(&saved, "comment saved");
     let _ = fs::remove_dir_all(root);
 }
+
+fn unwritable_store_path(prefix: &str) -> (PathBuf, PathBuf) {
+    let root = std::env::temp_dir().join(format!(
+        "{prefix}-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let blocker = root.join("not-a-dir");
+    fs::write(&blocker, "x").unwrap();
+    (root, blocker.join("store.json"))
+}
+
+#[test]
+fn semicolon_save_names_failure_when_unwritable() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    let (blocker_root, path) = unwritable_store_path("ws-headless-comment-fail");
+    tui.set_comment_store_path(path);
+    tui.tab();
+    tui.key(';');
+    for c in "fail-note-e2e".chars() {
+        tui.key(c);
+    }
+    tui.enter();
+    let frame = tui.frame();
+    assert_absent(&frame, "comment saved");
+    assert_contains(&frame, "comment save failed");
+    let _ = fs::remove_dir_all(blocker_root);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn space_reviewed_names_save_failure_when_unwritable() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    let (blocker_root, path) = unwritable_store_path("ws-headless-viewed-fail");
+    tui.set_viewed_store_path(path);
+    tui.key(' ');
+    let frame = tui.frame();
+    assert_absent(&frame, "comment saved");
+    assert_contains(&frame, "viewed save failed");
+    let _ = fs::remove_dir_all(blocker_root);
+    let _ = fs::remove_dir_all(root);
+}

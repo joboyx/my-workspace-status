@@ -86,6 +86,16 @@ impl HeadlessTui {
         session
     }
 
+    /// Point comment persist at `path`. Failed-write tests use an unwritable location.
+    pub fn set_comment_store_path(&mut self, path: impl Into<PathBuf>) {
+        self.state.comment_path = path.into();
+    }
+
+    /// Point viewed persist at `path`. Failed-write tests use an unwritable location.
+    pub fn set_viewed_store_path(&mut self, path: impl Into<PathBuf>) {
+        self.state.viewed_path = path.into();
+    }
+
     /// Send one character through the real keymap.
     pub fn key(&mut self, c: char) {
         self.send(KeyCode::Char(c));
