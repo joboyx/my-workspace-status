@@ -3,11 +3,11 @@
 use workspace_status_graph::graph_col_max;
 
 use super::super::action::{Action, Effect};
-use super::super::comments::tree_row_has_comment;
+use super::super::comments::{commit_file_row_has_comment, tree_row_has_comment};
 use super::super::diff::{cell_code_width, diff_row_content_width, gutter_width, DiffRow};
 use super::super::icons::comment_mark_cols;
 use super::super::search::{apply_pan, list_row_pan_max, max_col_offset};
-use super::super::tree::{row_segments, NodeKind};
+use super::super::tree::{row_segments, with_comment_mark, NodeKind};
 use super::{AppState, FocusPane};
 use crate::helpers::visible_width;
 
@@ -96,16 +96,30 @@ impl AppState {
 
     fn commit_file_max_col(&self, pane_width: u16) -> usize {
         let width = pane_width.max(1) as usize;
+        let scope = match &self.drill {
+            super::super::drill::DrillView::Files { repo, source, .. }
+            | super::super::drill::DrillView::Diff { repo, source, .. } => Some((repo, source)),
+            super::super::drill::DrillView::Graph => None,
+        };
+        let snap = scope.and_then(|(repo, _)| self.snapshot.repos.iter().find(|r| r.repo == *repo));
         self.commit_file_rows()
             .iter()
             .map(|row| {
+                let commented = scope.is_some_and(|(repo, source)| {
+                    row.is_file()
+                        && commit_file_row_has_comment(
+                            &self.comment_store,
+                            repo,
+                            snap.and_then(|r| r.primary_repo.as_deref()),
+                            source,
+                            &row.path,
+                            snap.map(|r| r.branch.as_str()),
+                        )
+                });
+                let trailing = with_comment_mark(row.trailing_segs.clone(), self.ascii, commented);
                 let label: usize = row.segments.iter().map(|s| visible_width(&s.text)).sum();
-                let trailing: usize = row
-                    .trailing_segs
-                    .iter()
-                    .map(|s| visible_width(&s.text))
-                    .sum();
-                list_row_pan_max(label, row.depth, trailing, width)
+                let trailing_w: usize = trailing.iter().map(|s| visible_width(&s.text)).sum();
+                list_row_pan_max(label, row.depth, trailing_w, width)
             })
             .max()
             .unwrap_or(0)

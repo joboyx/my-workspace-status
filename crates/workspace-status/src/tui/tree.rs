@@ -1071,27 +1071,35 @@ pub fn node_segments(
     }
 }
 
+/// Prepend `icon_comment` (`"` / nf-fa-comment) when `commented`.
+///
+/// Uncommented rows keep `trailing` unchanged. Tree and commit-file lists
+/// share this so the mark is the same trailing chrome.
+pub fn with_comment_mark(mut trailing: Vec<TextSeg>, ascii: bool, commented: bool) -> Vec<TextSeg> {
+    if !commented {
+        return trailing;
+    }
+    let mut marked = vec![
+        TextSeg {
+            text: icon_comment(ascii).to_string(),
+            role: SegRole::Heading,
+            hex: None,
+            bold: false,
+            dim: false,
+        },
+        text_seg(" ", SegRole::Muted),
+    ];
+    marked.append(&mut trailing);
+    marked
+}
+
 /// Segments for a flattened row. Viewed eye is prepended on dirty file rows
 /// using `icon_viewed` — nf-fa-eye `U+F06E` / `*`. Paint is bold
 /// [`SegRole::Viewed`] (teal/cyan), not muted and not the clean check.
 /// Comment mark uses `icon_comment` (`"` / nf-fa-comment) on rows that have
 /// a live comment.
 pub fn row_segments(row: &VisibleRow, ascii: bool, viewed: bool, commented: bool) -> NodeSegments {
-    let mut trailing = row.trailing_segs.clone();
-    if commented {
-        let mut marked = vec![
-            TextSeg {
-                text: icon_comment(ascii).to_string(),
-                role: SegRole::Heading,
-                hex: None,
-                bold: false,
-                dim: false,
-            },
-            text_seg(" ", SegRole::Muted),
-        ];
-        marked.append(&mut trailing);
-        trailing = marked;
-    }
+    let mut trailing = with_comment_mark(row.trailing_segs.clone(), ascii, commented);
     if viewed && row.kind == NodeKind::File {
         let mut marked = vec![
             TextSeg {
@@ -1621,6 +1629,28 @@ mod tests {
         assert_eq!(eye.role, SegRole::Viewed);
         assert!(eye.bold);
         assert!(!eye.dim);
+    }
+
+    #[test]
+    fn comment_glyph_is_quote_not_eye() {
+        let built = build_workspace_snapshot(&[dirty_repo("app", &["README.md"])], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let file = rows
+            .iter()
+            .find(|r| r.id == "file:app:README.md")
+            .expect("file");
+        let segs = row_segments(file, true, false, true);
+        let trail: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(icon_comment(true), "\"");
+        assert!(trail.contains('"'), "{trail}");
+        assert!(!trail.contains('*'), "{trail}");
+        let unmarked = row_segments(file, true, false, false);
+        let unmarked_trail: String = unmarked.trailing.iter().map(|s| s.text.as_str()).collect();
+        assert!(!unmarked_trail.contains('"'), "{unmarked_trail}");
+        let nerd = row_segments(file, false, false, true);
+        let nerd_trail: String = nerd.trailing.iter().map(|s| s.text.as_str()).collect();
+        assert!(nerd_trail.contains('\u{f075}'), "{nerd_trail}");
     }
 
     #[test]

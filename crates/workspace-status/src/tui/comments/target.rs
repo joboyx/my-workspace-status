@@ -719,26 +719,103 @@ pub fn tree_row_has_comment(store: &CommentStore, row: &VisibleRow) -> bool {
     }
 }
 
-/// True when this graph visible-row index has an object comment.
+/// True when this graph visible row has an object comment or a file-line
+/// comment that belongs on that row.
+///
+/// Commit rows match a commit object comment or any `CommitLine` for that
+/// SHA. Uncommitted matches a worktree object comment or a working-tree
+/// line comment for `branch`. Worktree rows match a worktree object comment
+/// or a working-tree line comment for that checkout's branch. Stash rows
+/// never mark.
 pub fn graph_row_has_comment(
     store: &CommentStore,
     repo: &str,
     primary: Option<&str>,
     row: &GraphRow,
+    branch: Option<&str>,
 ) -> bool {
     let identity = repo_identity(repo, primary);
     match row {
-        GraphRow::Commit { commit, .. } => store.contains_key(&CommentKey::Commit {
-            repo: identity,
-            sha: commit.id.clone(),
-        }),
-        GraphRow::Uncommitted { .. } => store.contains_key(&CommentKey::Worktree {
-            path: normalize_viewed_path(repo),
-        }),
-        GraphRow::Worktree(wt) => store.contains_key(&CommentKey::Worktree {
-            path: normalize_viewed_path(&wt.path),
-        }),
+        GraphRow::Commit { commit, .. } => {
+            store.contains_key(&CommentKey::Commit {
+                repo: identity.clone(),
+                sha: commit.id.clone(),
+            }) || store_has_commit_line(store, &identity, &commit.id)
+        }
+        GraphRow::Uncommitted { .. } => {
+            store.contains_key(&CommentKey::Worktree {
+                path: normalize_viewed_path(repo),
+            }) || store_has_worktree_line(store, &identity, branch)
+        }
+        GraphRow::Worktree(wt) => {
+            store.contains_key(&CommentKey::Worktree {
+                path: normalize_viewed_path(&wt.path),
+            }) || store_has_worktree_line(store, &identity, wt.branch.as_deref())
+        }
         GraphRow::Stash(_) => false,
+    }
+}
+
+fn store_has_commit_line(store: &CommentStore, identity: &str, sha: &str) -> bool {
+    store.keys().any(|key| match key {
+        CommentKey::CommitLine {
+            repo,
+            sha: line_sha,
+            ..
+        } => repo == identity && line_sha == sha,
+        _ => false,
+    })
+}
+
+fn store_has_worktree_line(store: &CommentStore, identity: &str, branch: Option<&str>) -> bool {
+    let Some(branch) = branch else {
+        return false;
+    };
+    store.keys().any(|key| match key {
+        CommentKey::WorktreeLine {
+            repo,
+            branch: key_branch,
+            ..
+        } => repo == identity && key_branch == branch,
+        _ => false,
+    })
+}
+
+/// True when this commit-file row has a line comment.
+///
+/// Directory rows never mark. Stash sources never mark.
+pub fn commit_file_row_has_comment(
+    store: &CommentStore,
+    repo: &str,
+    primary: Option<&str>,
+    source: &CommitFileSource,
+    path: &str,
+    branch: Option<&str>,
+) -> bool {
+    let identity = repo_identity(repo, primary);
+    let path = normalize_viewed_path(path);
+    match source {
+        CommitFileSource::Commit { commit_id } => store.keys().any(|key| match key {
+            CommentKey::CommitLine {
+                repo, sha, path: p, ..
+            } => repo == &identity && sha == commit_id && p == &path,
+            _ => false,
+        }),
+        CommitFileSource::Stash { .. } => false,
+        CommitFileSource::Worktree => {
+            let Some(branch) = branch else {
+                return false;
+            };
+            store.keys().any(|key| match key {
+                CommentKey::WorktreeLine {
+                    repo,
+                    branch: key_branch,
+                    path: p,
+                    ..
+                } => repo == &identity && key_branch == branch && p == &path,
+                _ => false,
+            })
+        }
     }
 }
 
@@ -1323,5 +1400,143 @@ mod tests {
             bodies,
             vec!["attached".to_string(), "commit-note".to_string()]
         );
+    }
+
+    fn commit_row(sha: &str) -> GraphRow {
+        GraphRow::Commit {
+            commit: workspace_status_graph::Commit {
+                id: sha.into(),
+                subject: "subject".into(),
+                ..Default::default()
+            },
+            is_head: false,
+            worktrees: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn graph_commit_row_marks_object_and_file_comments() {
+        let row = commit_row("abc");
+        let mut store = CommentStore::new();
+        assert!(!graph_row_has_comment(&store, "app", None, &row, None));
+        store = put_comment(
+            &store,
+            CommentKey::Commit {
+                repo: "app".into(),
+                sha: "abc".into(),
+            },
+            "c",
+        );
+        assert!(graph_row_has_comment(&store, "app", None, &row, None));
+        assert!(!graph_row_has_comment(
+            &store,
+            "app",
+            None,
+            &GraphRow::Uncommitted { has_changes: true },
+            Some("main")
+        ));
+    }
+
+    #[test]
+    fn graph_commit_row_marks_file_line_comments() {
+        let row = commit_row("abc");
+        let store = put_comment(
+            &CommentStore::new(),
+            CommentKey::CommitLine {
+                repo: "app".into(),
+                sha: "abc".into(),
+                path: "a.rs".into(),
+                line: 3,
+            },
+            "l",
+        );
+        assert!(graph_row_has_comment(&store, "app", None, &row, None));
+        assert!(!graph_row_has_comment(
+            &store,
+            "app",
+            None,
+            &commit_row("other"),
+            None
+        ));
+        assert!(!graph_row_has_comment(
+            &store,
+            "app",
+            None,
+            &GraphRow::Stash(workspace_status_graph::Stash::default()),
+            None
+        ));
+    }
+
+    #[test]
+    fn graph_uncommitted_row_marks_worktree_line_comments() {
+        let row = GraphRow::Uncommitted { has_changes: true };
+        let store = put_comment(
+            &CommentStore::new(),
+            CommentKey::WorktreeLine {
+                repo: "app".into(),
+                branch: "main".into(),
+                path: "README.md".into(),
+                line: 2,
+            },
+            "l",
+        );
+        assert!(graph_row_has_comment(
+            &store,
+            "app",
+            None,
+            &row,
+            Some("main")
+        ));
+        assert!(!graph_row_has_comment(
+            &store,
+            "app",
+            None,
+            &row,
+            Some("other")
+        ));
+        assert!(!graph_row_has_comment(&store, "app", None, &row, None));
+    }
+
+    #[test]
+    fn commit_file_row_marks_line_comments_only() {
+        let source = CommitFileSource::Commit {
+            commit_id: "abc".into(),
+        };
+        let store = put_comment(
+            &CommentStore::new(),
+            CommentKey::CommitLine {
+                repo: "app".into(),
+                sha: "abc".into(),
+                path: "src/lib.rs".into(),
+                line: 1,
+            },
+            "l",
+        );
+        assert!(commit_file_row_has_comment(
+            &store,
+            "app",
+            None,
+            &source,
+            "src/lib.rs",
+            None
+        ));
+        assert!(!commit_file_row_has_comment(
+            &store,
+            "app",
+            None,
+            &source,
+            "README.md",
+            None
+        ));
+        assert!(!commit_file_row_has_comment(
+            &store,
+            "app",
+            None,
+            &CommitFileSource::Stash {
+                stash_ref: "stash@{0}".into()
+            },
+            "src/lib.rs",
+            None
+        ));
     }
 }
