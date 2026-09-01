@@ -97,46 +97,24 @@ fn pty_y_copies_focused_tree_scope() {
     fs::write(folder.join("file2.txt"), "file2 line\n").unwrap();
 
     let mut tui = PtySession::open(&workspace);
-    tui.wait_pred(tree_ready, "launch shows folder1/file1 and file2", WAIT);
-
-    if !tree_cursor_on(&tui.screen(), "file2.txt") {
-        tui.gg();
-        tui.wait_pred(
-            |screen| tree_cursor_on(screen, "workspace"),
-            "gg focuses workspace so j can walk to file2",
-            WAIT,
-        );
-        for _ in 0..8 {
-            if tree_cursor_on(&tui.screen(), "file2.txt") {
-                break;
-            }
-            tui.key('j');
-        }
-        tui.wait_pred(
-            |screen| tree_cursor_on(screen, "file2.txt"),
-            "j lands on file2.txt",
-            WAIT,
-        );
-    }
-
-    save_line_comment(&mut tui, "file2.txt", FILE2_BODY);
-    tui.key('k');
     tui.wait_pred(
-        |screen| tree_cursor_on(screen, "file1.txt") && !tree_cursor_on(screen, "file2.txt"),
-        "k from file2 lands on file1",
+        |screen| tree_ready(screen) && tree_cursor_on(screen, "file1.txt"),
+        "launch focuses folder1/file1.txt",
         WAIT,
     );
+
     save_line_comment(&mut tui, "file1.txt", FILE1_BODY);
-    tui.key('k');
+    tui.key('j');
     tui.wait_pred(
-        |screen| tree_cursor_on(screen, "folder1") && !tree_cursor_on(screen, "file1.txt"),
-        "k from file1 lands on folder1",
+        |screen| tree_cursor_on(screen, "file2.txt") && !tree_cursor_on(screen, "file1.txt"),
+        "j from file1 lands on file2",
         WAIT,
     );
-    tui.key('k');
+    save_line_comment(&mut tui, "file2.txt", FILE2_BODY);
+    tui.key('j');
     tui.wait_pred(
-        |screen| tree_cursor_on(screen, "README.md") && !tree_cursor_on(screen, "folder1"),
-        "k from folder1 lands on README.md",
+        |screen| tree_cursor_on(screen, "README.md") && !tree_cursor_on(screen, "file2.txt"),
+        "j from file2 lands on README.md",
         WAIT,
     );
     save_line_comment(&mut tui, "README.md", README_BODY);
@@ -146,36 +124,10 @@ fn pty_y_copies_focused_tree_scope() {
         "all three line comments must persist:\n{stored}"
     );
 
-    tui.key('j');
+    tui.key('k');
     tui.wait_pred(
-        |screen| tree_cursor_on(screen, "folder1") && !tree_cursor_on(screen, "README.md"),
-        "j from README lands on folder1",
-        WAIT,
-    );
-    tui.key('y');
-    tui.wait_pred(
-        |screen| {
-            export_overlay(screen)
-                && screen.contains(FILE1_BODY)
-                && screen.contains(FILE2_BODY)
-                && !screen.contains(README_BODY)
-        },
-        "y on folder1 copies both files under it, not the sibling README",
-        WAIT,
-    );
-    tui.esc();
-    tui.wait_pred(overlay_closed, "Esc closes the folder1 export", WAIT);
-
-    tui.key('j');
-    tui.wait_pred(
-        |screen| tree_cursor_on(screen, "file1.txt") && !tree_cursor_on(screen, "folder1"),
-        "j from folder1 lands on file1",
-        WAIT,
-    );
-    tui.key('j');
-    tui.wait_pred(
-        |screen| tree_cursor_on(screen, "file2.txt") && !tree_cursor_on(screen, "file1.txt"),
-        "j from file1 lands on file2",
+        |screen| tree_cursor_on(screen, "file2.txt") && !tree_cursor_on(screen, "README.md"),
+        "k from README lands on file2",
         WAIT,
     );
     tui.key('y');
@@ -187,6 +139,32 @@ fn pty_y_copies_focused_tree_scope() {
                 && !screen.contains(README_BODY)
         },
         "y on file2 copies that path only",
+        WAIT,
+    );
+    tui.esc();
+    tui.wait_pred(overlay_closed, "Esc closes the file2 export", WAIT);
+
+    tui.key('k');
+    tui.wait_pred(
+        |screen| tree_cursor_on(screen, "file1.txt") && !tree_cursor_on(screen, "file2.txt"),
+        "k from file2 lands on file1",
+        WAIT,
+    );
+    tui.key('k');
+    tui.wait_pred(
+        |screen| tree_cursor_on(screen, "folder1") && !tree_cursor_on(screen, "file1.txt"),
+        "k from file1 lands on folder1",
+        WAIT,
+    );
+    tui.key('y');
+    tui.wait_pred(
+        |screen| {
+            export_overlay(screen)
+                && screen.contains(FILE1_BODY)
+                && screen.contains(FILE2_BODY)
+                && !screen.contains(README_BODY)
+        },
+        "y on folder1 copies both files under it, not the sibling README",
         WAIT,
     );
 }

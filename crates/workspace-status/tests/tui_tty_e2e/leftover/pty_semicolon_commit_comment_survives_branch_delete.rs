@@ -132,10 +132,20 @@ fn pty_semicolon_commit_comment_survives_branch_delete() {
         "r refresh after deleting doomed",
         GIT_WAIT,
     );
-    tui.gg();
+    tui.esc();
     tui.wait_pred(
-        |screen| tree_cursor_on(screen, "workspace") && overlay_closed(screen),
-        "gg focuses the workspace root so y copies every live comment",
+        |screen| overlay_closed(screen) && !screen.contains("SEARCH"),
+        "Esc clears graph search so y is not typed into /",
+        WAIT,
+    );
+    tui.esc();
+    tui.wait_pred(
+        |screen| {
+            tree_cursor_on(screen, "app")
+                && overlay_closed(screen)
+                && screen.contains("focus right")
+        },
+        "Esc returns to the app tree row so y copies that checkout",
         WAIT,
     );
     tui.key('y');
