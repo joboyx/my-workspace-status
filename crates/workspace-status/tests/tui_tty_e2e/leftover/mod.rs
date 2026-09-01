@@ -56,6 +56,7 @@ mod pty_semicolon_deleted_branch_drops_when_sibling_status_failed;
 mod pty_semicolon_detached_head_survives_watch;
 mod pty_semicolon_line_comment_commit_diff;
 mod pty_semicolon_line_comment_dirty_file;
+mod pty_semicolon_line_comment_keeps_line_numbers;
 mod pty_semicolon_object_comments_and_export;
 mod pty_sgr_vertical_wheel_scrolls;
 mod pty_shift_left_right_tree_pan;

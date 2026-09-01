@@ -120,6 +120,15 @@ pub fn icon_comment(ascii: bool) -> &'static str {
     glyph(ascii, ICON_COMMENT_NERD, ICON_COMMENT_ASCII)
 }
 
+/// Display columns reserved for the comment mark on every numbered diff cell.
+///
+/// Always reserved so adding a comment does not shift line numbers. Both
+/// Nerd and ASCII marks are one column (same contract as the rest of this
+/// registry). Themes change colour, not width.
+pub fn comment_mark_cols(ascii: bool) -> usize {
+    visible_width(icon_comment(ascii)).max(1)
+}
+
 const DEFAULT_FILE_GLYPH: &str = "";
 const ASCII_FILE_GLYPH: &str = "·";
 
@@ -568,6 +577,8 @@ mod tests {
         assert_eq!(icon_comment(true), "\"");
         assert_eq!(icon_comment(false), ICON_COMMENT_NERD);
         assert_eq!(visible_width(icon_comment(false)), 1);
+        assert_eq!(comment_mark_cols(true), 1);
+        assert_eq!(comment_mark_cols(false), 1);
         assert_ne!(icon_viewed(false), icon_clean(false));
         assert_ne!(icon_viewed(false), icon_synced(false));
     }
