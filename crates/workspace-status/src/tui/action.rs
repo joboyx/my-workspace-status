@@ -266,6 +266,9 @@ pub enum Effect {
         source: CommitFileSource,
         path: String,
     },
+    /// Leave Diff without a new load. Bumps the commit-diff generation so a
+    /// late result cannot reopen Diff (Esc Diff→Files). Does not enqueue git.
+    DropCommitDiff,
     /// Copy markdown to the clipboard (OSC 52 / host tool).
     CopyClipboard {
         text: String,

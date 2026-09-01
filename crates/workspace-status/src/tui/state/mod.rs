@@ -3297,7 +3297,7 @@ impl AppState {
                     cursor,
                 };
                 self.status = "files".into();
-                Effect::None
+                Effect::DropCommitDiff
             }
             DrillView::Files { .. } => {
                 self.drill = DrillView::Graph;
@@ -5811,7 +5811,7 @@ mod tests {
         assert!(app.drill.is_diff(), "right Esc unfocuses without popping");
         assert_eq!(app.focus, FocusPane::Left);
         assert!(app.commit_files_list_focused());
-        assert_eq!(app.dispatch(Action::NavEsc), Effect::None);
+        assert_eq!(app.dispatch(Action::NavEsc), Effect::DropCommitDiff);
         assert!(app.drill.is_files());
         assert_eq!(app.focus, FocusPane::Left);
         assert_eq!(app.list_focus_target(), ListFocusTarget::Graph);
