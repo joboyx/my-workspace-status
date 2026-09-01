@@ -173,6 +173,10 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "comment focused row / line",
             },
             HelpEntry {
+                keys: "Ctrl-R",
+                desc: "resolve / unresolve comment (overlay)",
+            },
+            HelpEntry {
                 keys: "V",
                 desc: "highlight diff lines for ; comment",
             },
@@ -571,6 +575,7 @@ mod tests {
         assert!(view_keys.contains(&"o O"));
         assert!(view_keys.contains(&"m"));
         assert!(view_keys.contains(&";"));
+        assert!(view_keys.contains(&"Ctrl-R"));
         assert!(view_keys.contains(&"V"));
         assert!(view_keys.contains(&"y"));
         assert!(view_keys.contains(&"Esc"));

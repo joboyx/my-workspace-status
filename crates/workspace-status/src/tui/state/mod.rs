@@ -31,9 +31,9 @@ use super::branches::{
 use super::comments::comment_store_path;
 use super::comments::{
     collect_live_set, comment_key_label, comments_in_focus_scope, covering_line_comment,
-    export_markdown, gc_comments, load_comment_store, put_comment, resolve_comment_target,
-    save_comment_store, viewport_line_number, viewport_line_range, CommentExport,
-    CommentExportList, CommentKey, CommentPrompt, CommentStore,
+    export_markdown, gc_comments, load_comment_store, put_comment, put_comment_entry,
+    resolve_comment_target, save_comment_store, viewport_line_number, viewport_line_range,
+    CommentExport, CommentExportList, CommentKey, CommentPrompt, CommentStore,
 };
 use super::commit_files::{
     ancestor_dir_ids, collect_foldable_subtree_ids as collect_commit_subtree_ids,
@@ -2412,9 +2412,10 @@ impl AppState {
             return Effect::None;
         };
         self.clear_diff_visual();
-        let body = self.comment_store.get(&key).cloned().unwrap_or_default();
+        let entry = self.comment_store.get(&key).cloned().unwrap_or_default();
         let label = comment_key_label(&key);
-        self.comment = Some(CommentPrompt::new(key, body, label));
+        self.comment =
+            Some(CommentPrompt::new(key, entry.body, label).with_resolved(entry.resolved));
         self.status.clear();
         Effect::None
     }
@@ -2424,7 +2425,12 @@ impl AppState {
             return Effect::None;
         };
         let empty = prompt.body.trim().is_empty();
-        self.comment_store = put_comment(&self.comment_store, prompt.key, &prompt.body);
+        self.comment_store = put_comment_entry(
+            &self.comment_store,
+            prompt.key,
+            &prompt.body,
+            prompt.resolved,
+        );
         save_comment_store(&self.comment_store, &self.comment_path);
         self.status = if empty {
             "comment deleted".into()
@@ -7880,6 +7886,47 @@ mod tests {
         app.dispatch(Action::CommentSubmit);
         assert!(app.comment_store.get(&range).is_none());
         assert_eq!(app.status, "comment deleted");
+    }
+
+    #[test]
+    fn ctrl_r_toggles_resolved_and_enter_persists() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_line_readme());
+        let numbered = numbered_diff_rows(&app);
+        let line2 = numbered
+            .iter()
+            .find(|(_, line)| *line == 2)
+            .map(|(idx, _)| *idx)
+            .expect("line 2");
+        let key = CommentKey::WorktreeLine {
+            repo: "app".into(),
+            branch: "main".into(),
+            path: "README.md".into(),
+            line: 2,
+            end_line: 2,
+        };
+        app.diff_cursor = line2;
+        app.dispatch(Action::CommentStart);
+        app.dispatch(Action::CommentChar('n'));
+        app.dispatch(Action::CommentToggleResolved);
+        assert!(app.comment.as_ref().is_some_and(|p| p.resolved));
+        app.dispatch(Action::CommentSubmit);
+        assert!(app.comment_store.get(&key).is_some_and(|e| e.resolved));
+        assert_eq!(
+            app.comment_store.get(&key).map(|e| e.body.as_str()),
+            Some("n")
+        );
+        let md = crate::tui::comments::export_markdown(&app.comment_store);
+        assert!(md.contains("n"));
+        assert!(md.contains("[resolved]"), "{md}");
+        app.dispatch(Action::CommentStart);
+        app.dispatch(Action::CommentToggleResolved);
+        assert!(app.comment.as_ref().is_some_and(|p| !p.resolved));
+        app.dispatch(Action::CommentSubmit);
+        assert!(app.comment_store.get(&key).is_some_and(|e| !e.resolved));
+        let md = crate::tui::comments::export_markdown(&app.comment_store);
+        assert!(md.contains("n"));
+        assert!(!md.contains("[resolved]"), "{md}");
     }
 
     #[test]

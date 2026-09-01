@@ -700,9 +700,15 @@ fn walk_identities(node: &TreeNode, out: &mut BTreeSet<String>) {
 
 /// True when `row` should paint a comment marker.
 pub fn tree_row_has_comment(store: &CommentStore, row: &VisibleRow) -> bool {
-    if store.is_empty() {
-        return false;
-    }
+    comments_resolved_state(store, |key| tree_key_on_row(row, key)).is_some()
+}
+
+/// True when every comment that paints on `row` is resolved.
+pub fn tree_row_comments_resolved(store: &CommentStore, row: &VisibleRow) -> bool {
+    comments_resolved_state(store, |key| tree_key_on_row(row, key)).unwrap_or(false)
+}
+
+fn tree_key_on_row(row: &VisibleRow, key: &CommentKey) -> bool {
     let Some(repo_path) = row.repo.as_deref() else {
         return false;
     };
@@ -713,7 +719,7 @@ pub fn tree_row_has_comment(store: &CommentStore, row: &VisibleRow) -> bool {
                 return false;
             };
             let path = normalize_viewed_path(&file.path);
-            store.keys().any(|key| match key {
+            match key {
                 CommentKey::WorktreeLine {
                     repo,
                     path: p,
@@ -722,17 +728,18 @@ pub fn tree_row_has_comment(store: &CommentStore, row: &VisibleRow) -> bool {
                 } => repo == &identity && p == &path && branch == &row.chrome.branch,
                 CommentKey::CommitLine { repo, path: p, .. } => repo == &identity && p == &path,
                 _ => false,
-            })
+            }
         }
         NodeKind::Repo | NodeKind::Checkout => {
             let is_linked = row.chrome.checkout_kind == Some(CheckoutKind::Linked);
             if is_linked || is_detached_head_branch(&row.chrome.branch) {
-                return store.contains_key(&CommentKey::Worktree {
-                    path: normalize_viewed_path(repo_path),
-                });
+                return matches!(
+                    key,
+                    CommentKey::Worktree { path } if path == &normalize_viewed_path(repo_path)
+                );
             }
             if row.chrome.is_family {
-                return store.keys().any(|key| match key {
+                return match key {
                     CommentKey::Branch { repo, .. }
                     | CommentKey::Commit { repo, .. }
                     | CommentKey::WorktreeLine { repo, .. }
@@ -740,19 +747,21 @@ pub fn tree_row_has_comment(store: &CommentStore, row: &VisibleRow) -> bool {
                     CommentKey::Worktree { path } => {
                         path == &identity || path.starts_with(&format!("{identity}/"))
                     }
-                });
+                };
             }
             if !row.chrome.branch.is_empty()
-                && store.contains_key(&CommentKey::Branch {
-                    repo: identity.clone(),
-                    branch: row.chrome.branch.clone(),
-                })
+                && matches!(
+                    key,
+                    CommentKey::Branch { repo, branch }
+                        if repo == &identity && branch == &row.chrome.branch
+                )
             {
                 return true;
             }
-            store.contains_key(&CommentKey::Worktree {
-                path: normalize_viewed_path(repo_path),
-            })
+            matches!(
+                key,
+                CommentKey::Worktree { path } if path == &normalize_viewed_path(repo_path)
+            )
         }
         _ => false,
     }
@@ -773,51 +782,67 @@ pub fn graph_row_has_comment(
     row: &GraphRow,
     branch: Option<&str>,
 ) -> bool {
+    comments_resolved_state(store, |key| {
+        graph_key_on_row(repo, primary, row, branch, key)
+    })
+    .is_some()
+}
+
+/// True when every comment that paints on this graph row is resolved.
+pub fn graph_row_comments_resolved(
+    store: &CommentStore,
+    repo: &str,
+    primary: Option<&str>,
+    row: &GraphRow,
+    branch: Option<&str>,
+) -> bool {
+    comments_resolved_state(store, |key| {
+        graph_key_on_row(repo, primary, row, branch, key)
+    })
+    .unwrap_or(false)
+}
+
+fn graph_key_on_row(
+    repo: &str,
+    primary: Option<&str>,
+    row: &GraphRow,
+    branch: Option<&str>,
+    key: &CommentKey,
+) -> bool {
     let identity = repo_identity(repo, primary);
     match row {
-        GraphRow::Commit { commit, .. } => {
-            store.contains_key(&CommentKey::Commit {
-                repo: identity.clone(),
-                sha: commit.id.clone(),
-            }) || store_has_commit_line(store, &identity, &commit.id)
-        }
-        GraphRow::Uncommitted { .. } => {
-            store.contains_key(&CommentKey::Worktree {
-                path: normalize_viewed_path(repo),
-            }) || store_has_worktree_line(store, &identity, branch)
-        }
-        GraphRow::Worktree(wt) => {
-            store.contains_key(&CommentKey::Worktree {
-                path: normalize_viewed_path(&wt.path),
-            }) || store_has_worktree_line(store, &identity, wt.branch.as_deref())
-        }
+        GraphRow::Commit { commit, .. } => match key {
+            CommentKey::Commit { repo, sha } => repo == &identity && sha == &commit.id,
+            CommentKey::CommitLine {
+                repo,
+                sha: line_sha,
+                ..
+            } => repo == &identity && line_sha == &commit.id,
+            _ => false,
+        },
+        GraphRow::Uncommitted { .. } => match key {
+            CommentKey::Worktree { path } => path == &normalize_viewed_path(repo),
+            CommentKey::WorktreeLine {
+                repo,
+                branch: key_branch,
+                ..
+            } => branch.is_some_and(|b| repo == &identity && key_branch == b),
+            _ => false,
+        },
+        GraphRow::Worktree(wt) => match key {
+            CommentKey::Worktree { path } => path == &normalize_viewed_path(&wt.path),
+            CommentKey::WorktreeLine {
+                repo,
+                branch: key_branch,
+                ..
+            } => wt
+                .branch
+                .as_deref()
+                .is_some_and(|b| repo == &identity && key_branch == b),
+            _ => false,
+        },
         GraphRow::Stash(_) => false,
     }
-}
-
-fn store_has_commit_line(store: &CommentStore, identity: &str, sha: &str) -> bool {
-    store.keys().any(|key| match key {
-        CommentKey::CommitLine {
-            repo,
-            sha: line_sha,
-            ..
-        } => repo == identity && line_sha == sha,
-        _ => false,
-    })
-}
-
-fn store_has_worktree_line(store: &CommentStore, identity: &str, branch: Option<&str>) -> bool {
-    let Some(branch) = branch else {
-        return false;
-    };
-    store.keys().any(|key| match key {
-        CommentKey::WorktreeLine {
-            repo,
-            branch: key_branch,
-            ..
-        } => repo == identity && key_branch == branch,
-        _ => false,
-    })
 }
 
 /// True when this commit-file row has a line comment.
@@ -831,30 +856,57 @@ pub fn commit_file_row_has_comment(
     path: &str,
     branch: Option<&str>,
 ) -> bool {
+    comments_resolved_state(store, |key| {
+        commit_file_key_on_row(repo, primary, source, path, branch, key)
+    })
+    .is_some()
+}
+
+/// True when every line comment on this commit-file row is resolved.
+pub fn commit_file_row_comments_resolved(
+    store: &CommentStore,
+    repo: &str,
+    primary: Option<&str>,
+    source: &CommitFileSource,
+    path: &str,
+    branch: Option<&str>,
+) -> bool {
+    comments_resolved_state(store, |key| {
+        commit_file_key_on_row(repo, primary, source, path, branch, key)
+    })
+    .unwrap_or(false)
+}
+
+fn commit_file_key_on_row(
+    repo: &str,
+    primary: Option<&str>,
+    source: &CommitFileSource,
+    path: &str,
+    branch: Option<&str>,
+    key: &CommentKey,
+) -> bool {
     let identity = repo_identity(repo, primary);
     let path = normalize_viewed_path(path);
     match source {
-        CommitFileSource::Commit { commit_id } => store.keys().any(|key| match key {
+        CommitFileSource::Commit { commit_id } => matches!(
+            key,
             CommentKey::CommitLine {
-                repo, sha, path: p, ..
-            } => repo == &identity && sha == commit_id && p == &path,
-            _ => false,
-        }),
+                repo,
+                sha,
+                path: p,
+                ..
+            } if repo == &identity && sha == commit_id && p == &path
+        ),
         CommitFileSource::Stash { .. } => false,
-        CommitFileSource::Worktree => {
-            let Some(branch) = branch else {
-                return false;
-            };
-            store.keys().any(|key| match key {
-                CommentKey::WorktreeLine {
-                    repo,
-                    branch: key_branch,
-                    path: p,
-                    ..
-                } => repo == &identity && key_branch == branch && p == &path,
-                _ => false,
-            })
-        }
+        CommitFileSource::Worktree => match key {
+            CommentKey::WorktreeLine {
+                repo,
+                branch: key_branch,
+                path: p,
+                ..
+            } => branch.is_some_and(|b| repo == &identity && key_branch == b && p == &path),
+            _ => false,
+        },
     }
 }
 
@@ -868,31 +920,77 @@ pub fn diff_line_has_comment(
     source: Option<&CommitFileSource>,
     line: u32,
 ) -> bool {
+    diff_line_comment_state(store, repo, primary, branch, path, source, line).is_some()
+}
+
+/// Resolve state for a painted diff line. `None` when no comment covers
+/// `line`. `Some(true)` when every covering comment is resolved.
+pub fn diff_line_comment_state(
+    store: &CommentStore,
+    repo: &str,
+    primary: Option<&str>,
+    branch: Option<&str>,
+    path: &str,
+    source: Option<&CommitFileSource>,
+    line: u32,
+) -> Option<bool> {
+    comments_resolved_state(store, |key| {
+        diff_line_key_covers(repo, primary, branch, path, source, line, key)
+    })
+}
+
+fn diff_line_key_covers(
+    repo: &str,
+    primary: Option<&str>,
+    branch: Option<&str>,
+    path: &str,
+    source: Option<&CommitFileSource>,
+    line: u32,
+    key: &CommentKey,
+) -> bool {
     let identity = repo_identity(repo, primary);
     let path = normalize_viewed_path(path);
     match source {
-        Some(CommitFileSource::Commit { commit_id }) => store.keys().any(|key| match key {
+        Some(CommitFileSource::Commit { commit_id }) => matches!(
+            key,
             CommentKey::CommitLine {
-                repo, sha, path: p, ..
-            } => repo == &identity && sha == commit_id && p == &path && key.covers_line(line),
-            _ => false,
-        }),
+                repo,
+                sha,
+                path: p,
+                ..
+            } if repo == &identity && sha == commit_id && p == &path && key.covers_line(line)
+        ),
         Some(CommitFileSource::Stash { .. }) => false,
-        Some(CommitFileSource::Worktree) | None => {
-            let Some(branch) = branch else {
-                return false;
-            };
-            store.keys().any(|key| match key {
-                CommentKey::WorktreeLine {
-                    repo,
-                    branch: b,
-                    path: p,
-                    ..
-                } => repo == &identity && b == branch && p == &path && key.covers_line(line),
-                _ => false,
-            })
+        Some(CommitFileSource::Worktree) | None => match key {
+            CommentKey::WorktreeLine {
+                repo,
+                branch: b,
+                path: p,
+                ..
+            } => {
+                branch.is_some_and(|branch| repo == &identity && b == branch && p == &path)
+                    && key.covers_line(line)
+            }
+            _ => false,
+        },
+    }
+}
+
+fn comments_resolved_state(
+    store: &CommentStore,
+    pred: impl Fn(&CommentKey) -> bool,
+) -> Option<bool> {
+    let mut any = false;
+    let mut all_resolved = true;
+    for (key, entry) in store {
+        if pred(key) {
+            any = true;
+            if !entry.resolved {
+                all_resolved = false;
+            }
         }
     }
+    any.then_some(all_resolved)
 }
 
 /// Stored line comment that covers the probe line on the same file.
@@ -968,7 +1066,7 @@ fn line_span_start(key: &CommentKey) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::store::{put_comment, CommentKey, CommentStore};
+    use super::super::store::{put_comment, CommentEntry, CommentKey, CommentStore};
     use super::*;
     use crate::helpers::DETACHED_HEAD_BRANCH;
     use crate::snapshot::{
@@ -1074,8 +1172,8 @@ mod tests {
         store = put_comment(&store, line.clone(), "l");
         let live = collect_live_set(&snapshot, &store);
         let next = gc_comments(&store, &live);
-        assert_eq!(next.get(&branch).map(String::as_str), Some("b"));
-        assert_eq!(next.get(&line).map(String::as_str), Some("l"));
+        assert_eq!(next.get(&branch).map(CommentEntry::as_str), Some("b"));
+        assert_eq!(next.get(&line).map(CommentEntry::as_str), Some("l"));
         assert!(!live.branches.contains(&("app".into(), "(unknown)".into())));
     }
 
@@ -1169,7 +1267,10 @@ mod tests {
         let store = put_comment(&CommentStore::new(), key.clone(), "detached note");
         let live = collect_live_set(&snapshot, &store);
         let next = gc_comments(&store, &live);
-        assert_eq!(next.get(&key).map(String::as_str), Some("detached note"));
+        assert_eq!(
+            next.get(&key).map(CommentEntry::as_str),
+            Some("detached note")
+        );
     }
 
     #[test]
@@ -1326,7 +1427,7 @@ mod tests {
         list: CommentExportList<'_>,
     ) -> Vec<String> {
         let scoped = comments_in_focus_scope(store, snapshot, &workspace_tree(), list);
-        scoped.values().cloned().collect()
+        scoped.values().map(|entry| entry.body.clone()).collect()
     }
 
     fn folder_store() -> (WorkspaceSnapshot, CommentStore) {

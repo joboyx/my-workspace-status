@@ -119,6 +119,7 @@ impl AppState {
             | Action::CommentEnd
             | Action::CommentSubmit
             | Action::CommentCancel
+            | Action::CommentToggleResolved
             | Action::ExportComments
             | Action::ExportCommentsCancel
             | Action::Resize { .. }

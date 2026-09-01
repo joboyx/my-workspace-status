@@ -20,7 +20,8 @@ use super::chrome::{
     overlay_status_rows_for, status_line,
 };
 use super::comments::{
-    commit_file_row_has_comment, diff_line_has_comment, graph_row_has_comment,
+    commit_file_row_comments_resolved, commit_file_row_has_comment, diff_line_comment_state,
+    graph_row_comments_resolved, graph_row_has_comment, tree_row_comments_resolved,
     tree_row_has_comment, CommentPrompt,
 };
 use super::diff::{
@@ -34,9 +35,9 @@ use super::help::{
     HELP_SEARCH_ESC_HINT,
 };
 use super::icons::{
-    comment_mark_cols, icon_branch, icon_comment, icon_diff, icon_merged_into_default, icon_move,
-    icon_open_vs_default, truncate_visible, CURSOR_BAR, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII,
-    FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
+    comment_mark_cols, icon_branch, icon_comment, icon_comment_resolved, icon_diff,
+    icon_merged_into_default, icon_move, icon_open_vs_default, truncate_visible, CURSOR_BAR,
+    FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
 };
 use super::search::{
     collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids, slice_cols,
@@ -319,6 +320,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     for row in painted.iter().skip(start).take(height) {
         let viewed = row.kind == NodeKind::File && state.reviewed.contains(&row.id);
         let commented = tree_row_has_comment(&state.comment_store, row);
+        let resolved = commented && tree_row_comments_resolved(&state.comment_store, row);
         lines.push(paint_tree_row(
             row,
             width,
@@ -329,6 +331,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             state.ascii,
             viewed,
             commented,
+            resolved,
             palette,
             state.left_col_offset as usize,
         ));
@@ -346,10 +349,11 @@ fn paint_tree_row(
     ascii: bool,
     viewed: bool,
     commented: bool,
+    resolved: bool,
     palette: Palette,
     col_offset: usize,
 ) -> Line<'static> {
-    let segs = row_segments(row, ascii, viewed, commented);
+    let segs = row_segments(row, ascii, viewed, commented, resolved);
     paint_segmented_row(
         row.depth,
         row.foldable,
@@ -554,7 +558,8 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
     let pal = state.theme.palette();
     let flash_rows = state.graph_flash_rows();
     let lane_colors = state.theme.lane_colors();
-    let commented_rows = graph_commented_row_indices(state);
+    let commented_rows = graph_commented_row_indices(state, false);
+    let resolved_comment_rows = graph_commented_row_indices(state, true);
     GraphWidget::new(model)
         .ascii(state.ascii)
         .selected(Some(state.graph_cursor))
@@ -564,7 +569,9 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .search_matches(&matches, state.theme.pills().filter.bg)
         .flash_rows(&flash_rows)
         .commented_rows(&commented_rows)
+        .resolved_comment_rows(&resolved_comment_rows)
         .comment_glyph(icon_comment(state.ascii))
+        .resolved_comment_glyph(icon_comment_resolved(state.ascii))
         .cursor_style(pal.cursor, pal.cursor_bg)
         .lane_colors(&lane_colors)
         .label_palette(GraphLabelPalette {
@@ -581,7 +588,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
     record_graph_scrollbar(state, area, col_offset);
 }
 
-fn graph_commented_row_indices(state: &AppState) -> Vec<usize> {
+fn graph_commented_row_indices(state: &AppState, resolved_only: bool) -> Vec<usize> {
     let Some(model) = state.graph.as_ref() else {
         return Vec::new();
     };
@@ -605,7 +612,16 @@ fn graph_commented_row_indices(state: &AppState) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter_map(|(i, row)| {
-            graph_row_has_comment(&state.comment_store, repo, primary, row, branch).then_some(i)
+            if !graph_row_has_comment(&state.comment_store, repo, primary, row, branch) {
+                return None;
+            }
+            let resolved =
+                graph_row_comments_resolved(&state.comment_store, repo, primary, row, branch);
+            if resolved_only {
+                resolved.then_some(i)
+            } else {
+                (!resolved).then_some(i)
+            }
         })
         .collect()
 }
@@ -764,9 +780,25 @@ fn draw_commit_file_list(
                         branch,
                     )
             });
+            let resolved = commented
+                && comment_scope.is_some_and(|(repo, primary, branch, source)| {
+                    commit_file_row_comments_resolved(
+                        &state.comment_store,
+                        repo,
+                        primary,
+                        source,
+                        &row.path,
+                        branch,
+                    )
+                });
             let segs = NodeSegments {
                 segments: row.segments.clone(),
-                trailing: with_comment_mark(row.trailing_segs.clone(), state.ascii, commented),
+                trailing: with_comment_mark(
+                    row.trailing_segs.clone(),
+                    state.ascii,
+                    commented,
+                    resolved,
+                ),
             };
             let search_match = searching_files
                 && (match_paths.contains(&row.path)
@@ -1095,10 +1127,8 @@ fn paint_cell_spans(
     let width = width as usize;
     let mark_w = comment_mark_cols(ascii);
     let code_w = cell_code_width(width, gutter.saturating_add(mark_w));
-    let commented = cell
-        .line_no
-        .is_some_and(|n| diff_cell_has_comment(state, n));
-    let line_no = format_line_gutter(cell.line_no, gutter, commented, ascii);
+    let comment = cell.line_no.and_then(|n| diff_cell_comment_state(state, n));
+    let line_no = format_line_gutter(cell.line_no, gutter, comment, ascii);
     let plain = slice_visible(&cell.text, col_offset, code_w);
     let sign = cell_sign(cell.kind);
     let accent = cell_accent(cell.kind, palette);
@@ -1123,11 +1153,21 @@ fn paint_cell_spans(
 /// Comment-mark column plus right-aligned line number.
 ///
 /// The mark column is reserved on every numbered cell so a comment cannot
-/// steal width from the numbers.
-fn format_line_gutter(line_no: Option<u32>, gutter: usize, commented: bool, ascii: bool) -> String {
+/// steal width from the numbers. `comment` is `None` when unmarked,
+/// `Some(false)` for an open comment, `Some(true)` when resolved.
+fn format_line_gutter(
+    line_no: Option<u32>,
+    gutter: usize,
+    comment: Option<bool>,
+    ascii: bool,
+) -> String {
     let mark_w = comment_mark_cols(ascii);
-    let mark = if commented && line_no.is_some() {
-        let glyph = icon_comment(ascii);
+    let mark = if let (Some(resolved), Some(_)) = (comment, line_no) {
+        let glyph = if resolved {
+            icon_comment_resolved(ascii)
+        } else {
+            icon_comment(ascii)
+        };
         let pad = mark_w.saturating_sub(visible_width(glyph));
         format!("{glyph}{}", " ".repeat(pad))
     } else {
@@ -1146,17 +1186,13 @@ fn diff_gutter_style(palette: Palette) -> Style {
     Style::default().fg(palette.muted)
 }
 
-fn diff_cell_has_comment(state: &AppState, line: u32) -> bool {
+fn diff_cell_comment_state(state: &AppState, line: u32) -> Option<bool> {
     let (repo, path) = match &state.drill {
         DrillView::Diff { repo, path, .. } => (Some(repo.as_str()), Some(path.as_str())),
         _ => (state.diff_repo.as_deref(), state.diff_path.as_deref()),
     };
-    let Some(repo) = repo else {
-        return false;
-    };
-    let Some(path) = path else {
-        return false;
-    };
+    let repo = repo?;
+    let path = path?;
     let source = match &state.drill {
         DrillView::Diff { source, .. } => Some(source),
         _ => None,
@@ -1164,7 +1200,7 @@ fn diff_cell_has_comment(state: &AppState, line: u32) -> bool {
     let snap = state.snapshot.repos.iter().find(|r| r.repo == repo);
     let primary = snap.and_then(|r| r.primary_repo.as_deref());
     let branch = snap.map(|r| r.branch.as_str());
-    diff_line_has_comment(
+    diff_line_comment_state(
         &state.comment_store,
         repo,
         primary,
@@ -2034,9 +2070,19 @@ fn draw_comment(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let palette = state.theme.palette();
     let surface = overlay_surface(state);
     let accent = palette.heading;
+    let title = if prompt.resolved {
+        "Comment · resolved"
+    } else {
+        "Comment"
+    };
+    let resolve_hint = if prompt.resolved {
+        "Ctrl-R unresolve"
+    } else {
+        "Ctrl-R resolve"
+    };
     let lines = vec![
         Line::from(Span::styled(
-            "Comment",
+            title,
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
@@ -2045,7 +2091,7 @@ fn draw_comment(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         )),
         comment_body_line(prompt, palette),
         Line::from(Span::styled(
-            "Enter save · empty deletes · Esc cancel",
+            format!("Enter save · empty deletes · {resolve_hint} · Esc cancel"),
             Style::default().fg(palette.muted),
         )),
     ];
@@ -2514,6 +2560,8 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("Comment"), "{text}");
         assert!(text.contains("hello▏"), "{text}");
+        assert!(text.contains("Ctrl-R resolve"), "{text}");
+        assert!(!text.contains("Comment · resolved"), "{text}");
         assert!(!text.contains("▏hello"), "{text}");
         assert_eq!(
             text.matches("hello").count(),
@@ -2537,6 +2585,15 @@ mod tests {
         let home = buffer_text(&terminal);
         assert!(home.contains("▏hello"), "{home}");
         assert!(!home.contains("hello▏"), "{home}");
+
+        if let Some(prompt) = state.comment.as_mut() {
+            prompt.resolved = true;
+        }
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let resolved = buffer_text(&terminal);
+        assert!(resolved.contains("Comment · resolved"), "{resolved}");
+        assert!(resolved.contains("Ctrl-R unresolve"), "{resolved}");
+        assert!(!resolved.contains("Ctrl-R resolve ·"), "{resolved}");
     }
 
     #[test]
@@ -2840,23 +2897,27 @@ mod tests {
 
     #[test]
     fn format_line_gutter_reserves_mark_column() {
-        let blank_1 = format_line_gutter(Some(1), 2, false, true);
-        let marked_1 = format_line_gutter(Some(1), 2, true, true);
+        let blank_1 = format_line_gutter(Some(1), 2, None, true);
+        let marked_1 = format_line_gutter(Some(1), 2, Some(false), true);
         assert_eq!(visible_width(&blank_1), visible_width(&marked_1));
         assert_eq!(&blank_1[1..], " 1");
         assert_eq!(&marked_1[1..], " 1");
         assert_eq!(blank_1.chars().next(), Some(' '));
         assert_eq!(marked_1.chars().next(), Some('"'));
 
-        let blank_12 = format_line_gutter(Some(12), 2, false, true);
-        let marked_12 = format_line_gutter(Some(12), 2, true, true);
+        let blank_12 = format_line_gutter(Some(12), 2, None, true);
+        let marked_12 = format_line_gutter(Some(12), 2, Some(false), true);
         assert_eq!(visible_width(&blank_12), visible_width(&marked_12));
         assert_eq!(&blank_12[1..], "12");
         assert_eq!(&marked_12[1..], "12");
         assert_eq!(blank_12, " 12");
         assert_eq!(marked_12, "\"12");
 
-        let empty = format_line_gutter(None, 2, false, true);
+        let resolved_12 = format_line_gutter(Some(12), 2, Some(true), true);
+        assert_eq!(visible_width(&resolved_12), visible_width(&marked_12));
+        assert_eq!(resolved_12, "'12");
+
+        let empty = format_line_gutter(None, 2, None, true);
         assert_eq!(visible_width(&empty), visible_width(&blank_1));
         assert_eq!(empty, "   ");
     }

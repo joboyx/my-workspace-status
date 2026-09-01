@@ -51,6 +51,7 @@ const HELP_VIEW_ROWS: &[(&str, &str)] = &[
     ("Ctrl-u Ctrl-d", "page focused ±5"),
     ("m", "mouse · drag pane, split, or graph scrollbars"),
     (";", "comment focused row / line"),
+    ("Ctrl-R", "resolve / unresolve comment (overlay)"),
     ("V", "highlight diff lines for ; comment"),
     ("y", "copy comments as markdown"),
     ("Esc", "back / unfocus · never quit"),
