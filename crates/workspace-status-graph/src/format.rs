@@ -1547,6 +1547,27 @@ mod tests {
     }
 
     #[test]
+    fn checked_out_ref_chips_sort_before_default_branch() {
+        let refs = [
+            GraphRef::local("main"),
+            GraphRef::local("zzz"),
+            GraphRef::tag("v1"),
+        ];
+        assert_eq!(
+            format_commit_ref_chips(&refs, true, Some("zzz"), &ASCII),
+            "[+zzz] [main] [v1]"
+        );
+        assert_eq!(
+            format_commit_ref_chips(&refs, true, Some("main"), &ASCII),
+            "[+main] [zzz] [v1]"
+        );
+        assert_eq!(
+            format_commit_ref_chips(&refs, false, Some("zzz"), &ASCII),
+            "[main] [zzz] [v1]"
+        );
+    }
+
+    #[test]
     fn merged_named_head_is_one_chip() {
         let refs = [GraphRef::local("main"), GraphRef::remote("origin/main")];
         assert_eq!(
