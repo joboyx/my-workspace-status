@@ -1112,7 +1112,7 @@ mod tests {
     use crate::tui::diff::DiffContent;
     use crate::tui::drill::{CommitFile, CommitFileSource, DrillView};
     use crate::tui::graph_load::GraphIdentity;
-    use crate::tui::state::AppState;
+    use crate::tui::state::{AppState, FocusPane};
     use crate::tui::tree::NodeKind;
 
     use super::*;
@@ -1513,6 +1513,46 @@ mod tests {
             }
             other => panic!("matching CommitDiff must open Diff, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn late_commit_diff_after_esc_diff_to_files_does_not_reopen_diff() {
+        let mut state = fixture_state();
+        let source = commit_source();
+        state.open_commit_files("app".into(), source.clone(), vec![commit_file("README.md")]);
+        state.open_commit_diff(
+            "app".into(),
+            source.clone(),
+            vec![commit_file("README.md")],
+            0,
+            "README.md".into(),
+            DiffContent::from_unified("diff --git a/README.md"),
+        );
+        assert!(state.drill.is_diff());
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_commit_diff();
+        state.focus = FocusPane::Left;
+        let effect = state.dispatch(Action::NavEsc);
+        let opts = opts(&state);
+        interp.schedule(&mut state, &opts, effect, &Action::NavEsc);
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CommitDiff {
+                gen,
+                repo: "app".into(),
+                source,
+                files: vec![commit_file("README.md")],
+                file_cursor: 0,
+                path: "README.md".into(),
+                content: DiffContent::from_unified("diff --git a/README.md"),
+            },
+        );
+        assert!(
+            state.drill.is_files(),
+            "late current-gen CommitDiff must not reopen Diff after Esc Diff→Files, got {:?}",
+            state.drill
+        );
     }
 
     #[test]
