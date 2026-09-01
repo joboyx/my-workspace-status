@@ -49,9 +49,10 @@ pub(crate) type JobWork = Box<dyn FnOnce() -> JobOutcome + Send>;
 /// Worker result applied on the loop / Headless thread.
 ///
 /// Autoload, commit-files, commit-diff, and picker outcomes carry a
-/// generation plus the target captured at spawn. Apply drops the result
-/// when that gen is stale or the live drill / identity / focused checkout
-/// no longer matches.
+/// generation plus an immutable target. Autoload identity is the
+/// `GraphIdentity` queued at enqueue; the others capture at spawn.
+/// Apply drops the result when that gen is stale or the live drill /
+/// identity / focused checkout no longer matches.
 pub(crate) enum JobOutcome {
     Discovered {
         gen: u64,
@@ -149,7 +150,7 @@ pub(crate) struct Interpreter {
     merge: Option<(String, String, String)>,
     commit_files: Option<(u64, String, CommitFileSource)>,
     commit_diff: Option<(u64, String, CommitFileSource, String)>,
-    autoload: Option<(u64, String)>,
+    autoload: Option<(u64, GraphIdentity)>,
     default_ok: usize,
     default_failed: usize,
     default_total: usize,
@@ -440,12 +441,18 @@ impl Interpreter {
         }) {
             return;
         }
-        let Some((repo, _)) = state.graph_identity.as_ref() else {
+        let Some((repo, head)) = state.graph_identity.as_ref() else {
             return;
         };
         state.graph_loading_older = true;
         let gen = self.sched.request_autoload();
-        self.autoload = Some((gen, repo.clone()));
+        self.autoload = Some((
+            gen,
+            GraphIdentity {
+                repo: repo.clone(),
+                head: head.clone(),
+            },
+        ));
         state.status = LOADING_OLDER.to_string();
         self.sched.enqueue_user(UserTag::Autoload);
         self.mark();
@@ -1030,7 +1037,7 @@ impl Interpreter {
                 self.sched.note_job_finished(id);
             }
             UserTag::Autoload => {
-                let Some((gen, repo)) = self.autoload.take() else {
+                let Some((gen, identity)) = self.autoload.take() else {
                     self.sched.note_job_finished(id);
                     state.graph_loading_older = false;
                     return;
@@ -1047,16 +1054,7 @@ impl Interpreter {
                 let show_ignored = state.show_ignored;
                 let focus = state.graph_focus_revs();
                 let prev_status = state.status.clone();
-                let identity = match state.graph_identity.as_ref() {
-                    Some((repo, head)) => GraphIdentity {
-                        repo: repo.clone(),
-                        head: head.clone(),
-                    },
-                    None => GraphIdentity {
-                        repo: repo.clone(),
-                        head: String::new(),
-                    },
-                };
+                let repo = identity.repo.clone();
                 spawn(
                     id,
                     Box::new(move || {
@@ -1650,5 +1648,213 @@ mod tests {
             .as_ref()
             .expect("matching graph-focus PrepareBranches must open picker");
         assert_eq!(picker.repo, "app");
+    }
+
+    fn queue_autoload(state: &mut AppState, interp: &mut Interpreter) {
+        focus_repo(state, "app");
+        state.drill = DrillView::Graph;
+        let mut graph = mini_graph(&["aaa"]);
+        graph.has_more = true;
+        state.graph = Some(graph);
+        state.graph_cursor = 10;
+        state.graph_identity = Some(("app".into(), "head-app".into()));
+        interp.maybe_queue_autoload(state);
+        assert!(
+            state.graph_loading_older,
+            "maybe_queue_autoload must enqueue"
+        );
+    }
+
+    #[test]
+    fn autoload_spawn_keeps_enqueued_identity_when_live_graph_moves() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::new();
+        queue_autoload(&mut state, &mut interp);
+        state.graph_identity = Some(("lib".into(), "head-lib".into()));
+        let tui_opts = opts(&state);
+        let mut batch = Vec::new();
+        interp.spawn_ready(&mut state, &tui_opts, &mut |id, work| {
+            batch.push((id, work()));
+        });
+        let identity = batch.into_iter().find_map(|(_, outcome)| match outcome {
+            JobOutcome::Autoload { identity, .. } => Some(identity),
+            _ => None,
+        });
+        let identity = identity.expect("spawned Autoload");
+        assert_eq!(
+            identity,
+            GraphIdentity {
+                repo: "app".into(),
+                head: "head-app".into(),
+            },
+            "autoload JobOutcome identity must be the enqueue-time graph, not live recapture"
+        );
+    }
+
+    #[test]
+    fn stale_autoload_gen_does_not_merge_when_identity_still_matches() {
+        let mut state = fixture_state();
+        state.graph = Some(mini_graph(&["aaa"]));
+        state.graph_identity = Some(("app".into(), "head-app".into()));
+        let mut interp = Interpreter::new();
+        let old = interp.sched.request_autoload();
+        let _latest = interp.sched.request_autoload();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::Autoload {
+                gen: old,
+                page: mini_graph(&["zzz"]),
+                identity: GraphIdentity {
+                    repo: "app".into(),
+                    head: "head-app".into(),
+                },
+                prev_status: String::new(),
+            },
+        );
+        assert_eq!(
+            state.graph_identity,
+            Some(("app".into(), "head-app".into()))
+        );
+        let ids: Vec<_> = state
+            .graph
+            .as_ref()
+            .unwrap()
+            .commits
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["aaa"],
+            "stale autoload gen must not merge when live identity still matches"
+        );
+    }
+
+    #[test]
+    fn stale_commit_files_gen_does_not_fill_when_drill_still_matches() {
+        let mut state = fixture_state();
+        let source = commit_source();
+        state.begin_commit_files("app".into(), source.clone());
+        let mut interp = Interpreter::new();
+        let old = interp.sched.request_commit_files();
+        let _latest = interp.sched.request_commit_files();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CommitFiles {
+                gen: old,
+                repo: "app".into(),
+                source,
+                files: vec![name_status("README.md")],
+            },
+        );
+        match &state.drill {
+            DrillView::Files { files, .. } => {
+                assert!(
+                    files.is_empty(),
+                    "stale CommitFiles gen must not fill the list when drill still matches"
+                )
+            }
+            other => panic!("expected Files drill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stale_commit_diff_gen_does_not_open_when_files_drill_still_matches() {
+        let mut state = fixture_state();
+        let source = commit_source();
+        state.open_commit_files("app".into(), source.clone(), vec![commit_file("README.md")]);
+        let mut interp = Interpreter::new();
+        let old = interp.sched.request_commit_diff();
+        let _latest = interp.sched.request_commit_diff();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CommitDiff {
+                gen: old,
+                repo: "app".into(),
+                source,
+                files: vec![commit_file("README.md")],
+                file_cursor: 0,
+                path: "README.md".into(),
+                content: DiffContent::from_unified("diff --git a/README.md"),
+            },
+        );
+        assert!(
+            state.drill.is_files(),
+            "stale CommitDiff gen must not open Diff when Files target still matches, got {:?}",
+            state.drill
+        );
+    }
+
+    #[test]
+    fn stale_prepare_stash_gen_does_not_open_when_repo_still_matches() {
+        let mut state = fixture_state();
+        focus_repo(&mut state, "app");
+        let mut interp = Interpreter::new();
+        let old = interp.sched.request_prepare_stash();
+        let _latest = interp.sched.request_prepare_stash();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::PrepareStash {
+                gen: old,
+                repo: "app".into(),
+                latest: Some("stash@{0}".into()),
+            },
+        );
+        assert!(
+            state.stash_menu.is_none(),
+            "stale PrepareStash gen must not open the menu when the repo still matches"
+        );
+    }
+
+    #[test]
+    fn stale_prepare_branches_gen_does_not_open_when_repo_still_matches() {
+        let mut state = fixture_state();
+        focus_repo(&mut state, "app");
+        let mut interp = Interpreter::new();
+        let old = interp.sched.request_prepare_branches();
+        let _latest = interp.sched.request_prepare_branches();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::PrepareBranches {
+                gen: old,
+                repo: "app".into(),
+                branches: vec![local_branch("main")],
+                graph_focus: false,
+            },
+        );
+        assert!(
+            state.branch_picker.is_none(),
+            "stale PrepareBranches gen must not open the picker when the repo still matches"
+        );
+    }
+
+    #[test]
+    fn stale_prepare_graph_focus_gen_does_not_open_when_identity_still_matches() {
+        let mut state = fixture_state();
+        state.graph = Some(mini_graph(&["aaa"]));
+        state.graph_identity = Some(("app".into(), "head-app".into()));
+        focus_repo(&mut state, "app");
+        let mut interp = Interpreter::new();
+        let old = interp.sched.request_prepare_branches();
+        let _latest = interp.sched.request_prepare_branches();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::PrepareBranches {
+                gen: old,
+                repo: "app".into(),
+                branches: vec![local_branch("main")],
+                graph_focus: true,
+            },
+        );
+        assert!(
+            state.graph_focus_picker.is_none(),
+            "stale graph-focus gen must not open the picker when identity still matches"
+        );
     }
 }
