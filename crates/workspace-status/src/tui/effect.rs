@@ -33,7 +33,7 @@ use super::app::{
     focused_repo_needs_pane, RightPaneRequest, RightPaneTarget, TuiOpts,
 };
 use super::comments;
-use super::drill::CommitFileSource;
+use super::drill::{CommitFileSource, DrillView};
 use super::event_pump::action_triggers_graph_autoload;
 use super::graph_load::{
     autoload_limit, autoload_skip, load_graph_model_window, merge_autoload, should_autoload,
@@ -47,6 +47,11 @@ use super::state::AppState;
 pub(crate) type JobWork = Box<dyn FnOnce() -> JobOutcome + Send>;
 
 /// Worker result applied on the loop / Headless thread.
+///
+/// Autoload, commit-files, commit-diff, and picker outcomes carry a
+/// generation plus the target captured at spawn. Apply drops the result
+/// when that gen is stale or the live drill / identity / focused checkout
+/// no longer matches.
 pub(crate) enum JobOutcome {
     Discovered {
         gen: u64,
@@ -73,10 +78,12 @@ pub(crate) enum JobOutcome {
         ok: bool,
     },
     PrepareStash {
+        gen: u64,
         repo: String,
         latest: Option<String>,
     },
     PrepareBranches {
+        gen: u64,
         repo: String,
         branches: Vec<crate::git::LocalBranch>,
         graph_focus: bool,
@@ -90,16 +97,19 @@ pub(crate) enum JobOutcome {
         result: super::app::MergeCompute,
     },
     Autoload {
+        gen: u64,
         page: workspace_status_graph::GraphModel,
         identity: GraphIdentity,
         prev_status: String,
     },
     CommitFiles {
+        gen: u64,
         repo: String,
         source: CommitFileSource,
         files: Vec<crate::git::NameStatus>,
     },
     CommitDiff {
+        gen: u64,
         repo: String,
         source: CommitFileSource,
         files: Vec<super::drill::CommitFile>,
@@ -133,13 +143,13 @@ pub(crate) struct Interpreter {
     writes: VecDeque<WriteJob>,
     bulk: Option<BulkState>,
     default_queue: VecDeque<String>,
-    prepare_stash: Option<String>,
-    prepare_branches: Option<(String, bool)>,
+    prepare_stash: Option<(u64, String)>,
+    prepare_branches: Option<(u64, String, bool)>,
     checkout: Option<(String, String, Option<String>)>,
     merge: Option<(String, String, String)>,
-    commit_files: Option<(String, CommitFileSource)>,
-    commit_diff: Option<(String, CommitFileSource, String)>,
-    autoload: Option<String>,
+    commit_files: Option<(u64, String, CommitFileSource)>,
+    commit_diff: Option<(u64, String, CommitFileSource, String)>,
+    autoload: Option<(u64, String)>,
     default_ok: usize,
     default_failed: usize,
     default_total: usize,
@@ -333,15 +343,18 @@ impl Interpreter {
                 Box::new(move || stash_drop(&dir, &stash_ref).map(|_| format!("dropped {label}")))
             }),
             Effect::PrepareStashMenu { repo } => {
-                self.prepare_stash = Some(repo);
+                let gen = self.sched.request_prepare_stash();
+                self.prepare_stash = Some((gen, repo));
                 self.sched.enqueue_user(UserTag::Prepare);
             }
             Effect::PrepareBranchPicker { repo } => {
-                self.prepare_branches = Some((repo, false));
+                let gen = self.sched.request_prepare_branches();
+                self.prepare_branches = Some((gen, repo, false));
                 self.sched.enqueue_user(UserTag::Prepare);
             }
             Effect::PrepareGraphFocusPicker { repo } => {
-                self.prepare_branches = Some((repo, true));
+                let gen = self.sched.request_prepare_branches();
+                self.prepare_branches = Some((gen, repo, true));
                 self.sched.enqueue_user(UserTag::Prepare);
             }
             Effect::CheckoutBranch {
@@ -391,12 +404,14 @@ impl Interpreter {
             }),
             Effect::LoadCommitFiles { repo, source } => {
                 state.begin_commit_files(repo.clone(), source.clone());
-                self.commit_files = Some((repo, source));
+                let gen = self.sched.request_commit_files();
+                self.commit_files = Some((gen, repo, source));
                 self.sched.enqueue_user_front(UserTag::Pane);
                 self.mark();
             }
             Effect::LoadCommitDiff { repo, source, path } => {
-                self.commit_diff = Some((repo, source, path));
+                let gen = self.sched.request_commit_diff();
+                self.commit_diff = Some((gen, repo, source, path));
                 self.sched.enqueue_user_front(UserTag::Pane);
             }
             Effect::CopyClipboard { text } => {
@@ -429,7 +444,8 @@ impl Interpreter {
             return;
         };
         state.graph_loading_older = true;
-        self.autoload = Some(repo.clone());
+        let gen = self.sched.request_autoload();
+        self.autoload = Some((gen, repo.clone()));
         state.status = LOADING_OLDER.to_string();
         self.sched.enqueue_user(UserTag::Autoload);
         self.mark();
@@ -649,23 +665,40 @@ impl Interpreter {
                 }
                 self.mark();
             }
-            JobOutcome::PrepareStash { repo, latest } => {
+            JobOutcome::PrepareStash { gen, repo, latest } => {
                 self.sched.note_user_done(UserTag::Prepare);
-                state.open_stash_menu(repo, latest);
-                self.mark();
+                let accepted = self.sched.accept_prepare_stash_result(gen);
+                let current = state.focused_checkout_path();
+                if accepted && current.as_deref() == Some(repo.as_str()) {
+                    state.open_stash_menu(repo, latest);
+                    self.mark();
+                }
             }
             JobOutcome::PrepareBranches {
+                gen,
                 repo,
                 branches,
                 graph_focus,
             } => {
                 self.sched.note_user_done(UserTag::Prepare);
-                if graph_focus {
-                    state.open_graph_focus_picker(repo, branches);
+                let accepted = self.sched.accept_prepare_branches_result(gen);
+                let current = if graph_focus {
+                    state
+                        .graph_identity
+                        .as_ref()
+                        .map(|(r, _)| r.clone())
+                        .or_else(|| state.focused_graph_repo())
                 } else {
-                    state.open_branch_picker(repo, branches);
+                    state.focused_checkout_path()
+                };
+                if accepted && current.as_deref() == Some(repo.as_str()) {
+                    if graph_focus {
+                        state.open_graph_focus_picker(repo, branches);
+                    } else {
+                        state.open_branch_picker(repo, branches);
+                    }
+                    self.mark();
                 }
-                self.mark();
             }
             JobOutcome::Checkout { repo, result } => {
                 self.sched.note_user_done(UserTag::Write);
@@ -686,30 +719,57 @@ impl Interpreter {
                 self.mark();
             }
             JobOutcome::Autoload {
+                gen,
                 page,
                 identity,
                 prev_status,
             } => {
                 self.sched.note_user_done(UserTag::Autoload);
-                if let Some(current) = state.graph.clone() {
-                    let merged = merge_autoload(&current, page);
-                    state.set_graph(merged, identity.repo, identity.head);
+                let accepted = self.sched.accept_autoload_result(gen);
+                let target_ok = state
+                    .graph_identity
+                    .as_ref()
+                    .is_some_and(|(repo, head)| repo == &identity.repo && head == &identity.head);
+                if accepted && target_ok {
+                    if let Some(current) = state.graph.clone() {
+                        let merged = merge_autoload(&current, page);
+                        state.set_graph(merged, identity.repo, identity.head);
+                    }
                 }
-                state.graph_loading_older = false;
-                if state.status == LOADING_OLDER {
-                    state.status = prev_status;
+                if accepted {
+                    state.graph_loading_older = false;
+                    if state.status == LOADING_OLDER {
+                        state.status = prev_status;
+                    }
+                    self.mark();
                 }
-                self.mark();
             }
             JobOutcome::CommitFiles {
+                gen,
                 repo,
                 source,
                 files,
             } => {
-                state.open_commit_files(repo, source, files.into_iter().map(Into::into).collect());
-                self.mark();
+                let accepted = self.sched.accept_commit_files_result(gen);
+                let current = match &state.drill {
+                    DrillView::Files {
+                        repo: live_repo,
+                        source: live_source,
+                        ..
+                    } => live_repo == &repo && live_source == &source,
+                    _ => false,
+                };
+                if accepted && current {
+                    state.open_commit_files(
+                        repo,
+                        source,
+                        files.into_iter().map(Into::into).collect(),
+                    );
+                    self.mark();
+                }
             }
             JobOutcome::CommitDiff {
+                gen,
                 repo,
                 source,
                 files,
@@ -717,8 +777,25 @@ impl Interpreter {
                 path,
                 content,
             } => {
-                state.open_commit_diff(repo, source, files, file_cursor, path, content);
-                self.mark();
+                let accepted = self.sched.accept_commit_diff_result(gen);
+                let current = match &state.drill {
+                    DrillView::Diff {
+                        repo: live_repo,
+                        source: live_source,
+                        path: live_path,
+                        ..
+                    } => live_repo == &repo && live_source == &source && live_path == &path,
+                    DrillView::Files {
+                        repo: live_repo,
+                        source: live_source,
+                        ..
+                    } => live_repo == &repo && live_source == &source,
+                    DrillView::Graph => false,
+                };
+                if accepted && current {
+                    state.open_commit_diff(repo, source, files, file_cursor, path, content);
+                    self.mark();
+                }
             }
         }
     }
@@ -870,24 +947,25 @@ impl Interpreter {
                 );
             }
             UserTag::Prepare => {
-                if let Some(repo) = self.prepare_stash.take() {
+                if let Some((gen, repo)) = self.prepare_stash.take() {
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
                         Box::new(move || {
                             let latest = latest_stash_ref(&dir);
-                            JobOutcome::PrepareStash { repo, latest }
+                            JobOutcome::PrepareStash { gen, repo, latest }
                         }),
                     );
                     return;
                 }
-                if let Some((repo, graph_focus)) = self.prepare_branches.take() {
+                if let Some((gen, repo, graph_focus)) = self.prepare_branches.take() {
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
                         Box::new(move || {
                             let branches = list_local_branches(&dir);
                             JobOutcome::PrepareBranches {
+                                gen,
                                 repo,
                                 branches,
                                 graph_focus,
@@ -900,7 +978,7 @@ impl Interpreter {
                 self.sched.note_user_done(UserTag::Prepare);
             }
             UserTag::Pane => {
-                if let Some((repo, source)) = self.commit_files.take() {
+                if let Some((gen, repo, source)) = self.commit_files.take() {
                     let dir = opts.cwd.join(&repo);
                     let source_work = source.clone();
                     spawn(
@@ -908,6 +986,7 @@ impl Interpreter {
                         Box::new(move || {
                             let files = compute_commit_files(&dir, &source_work);
                             JobOutcome::CommitFiles {
+                                gen,
                                 repo,
                                 source,
                                 files,
@@ -916,7 +995,7 @@ impl Interpreter {
                     );
                     return;
                 }
-                if let Some((repo, source, path)) = self.commit_diff.take() {
+                if let Some((gen, repo, source, path)) = self.commit_diff.take() {
                     let context = state.commit_diff_context(&repo, &path);
                     let focused = state.focused_file();
                     let (files, file_cursor) = commit_diff_list(state);
@@ -936,6 +1015,7 @@ impl Interpreter {
                                 focused.as_ref(),
                             );
                             JobOutcome::CommitDiff {
+                                gen,
                                 repo,
                                 source,
                                 files,
@@ -950,7 +1030,7 @@ impl Interpreter {
                 self.sched.note_job_finished(id);
             }
             UserTag::Autoload => {
-                let Some(repo) = self.autoload.take() else {
+                let Some((gen, repo)) = self.autoload.take() else {
                     self.sched.note_job_finished(id);
                     state.graph_loading_older = false;
                     return;
@@ -967,10 +1047,20 @@ impl Interpreter {
                 let show_ignored = state.show_ignored;
                 let focus = state.graph_focus_revs();
                 let prev_status = state.status.clone();
+                let identity = match state.graph_identity.as_ref() {
+                    Some((repo, head)) => GraphIdentity {
+                        repo: repo.clone(),
+                        head: head.clone(),
+                    },
+                    None => GraphIdentity {
+                        repo: repo.clone(),
+                        head: String::new(),
+                    },
+                };
                 spawn(
                     id,
                     Box::new(move || {
-                        let (page, identity) = load_graph_model_window(
+                        let (page, _loaded) = load_graph_model_window(
                             &cwd,
                             &snapshot,
                             &repo,
@@ -980,6 +1070,7 @@ impl Interpreter {
                             &focus,
                         );
                         JobOutcome::Autoload {
+                            gen,
                             page,
                             identity,
                             prev_status,
@@ -1008,6 +1099,135 @@ impl Interpreter {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use workspace_status_graph::{Commit, GraphModel};
+
+    use crate::config::WorkspaceStatusConfig;
+    use crate::git::{LocalBranch, NameStatus};
+    use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus};
+    use crate::tui::app::TuiOpts;
+    use crate::tui::diff::DiffContent;
+    use crate::tui::drill::{CommitFile, CommitFileSource, DrillView};
+    use crate::tui::graph_load::GraphIdentity;
+    use crate::tui::state::AppState;
+    use crate::tui::tree::NodeKind;
+
+    use super::*;
+
+    fn repo(name: &str, dirty: bool) -> RepoSnapshot {
+        RepoSnapshot {
+            repo: name.into(),
+            branch: "main".into(),
+            sync_status: SyncStatus::NoUpstream,
+            sync_note: String::new(),
+            head: String::new(),
+            has_unstaged: dirty,
+            has_staged: false,
+            has_untracked: false,
+            changes: if dirty {
+                vec![FileChange {
+                    path: "README.md".into(),
+                    staged_status: None,
+                    unstaged_status: Some("M".into()),
+                    untracked: false,
+                    old_path: None,
+                }]
+            } else {
+                vec![]
+            },
+            checkout_kind: crate::snapshot::CheckoutKind::Primary,
+            primary_repo: None,
+            merged_into_default: None,
+            default_branch_override: None,
+            local_branches: Vec::new(),
+        }
+    }
+
+    fn fixture_state() -> AppState {
+        let snapshot = build_workspace_snapshot(
+            &[repo("app", true), repo("notes", true), repo("lib", true)],
+            &["notes".into()],
+            false,
+            &[],
+        );
+        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+    }
+
+    fn opts(state: &AppState) -> TuiOpts {
+        TuiOpts {
+            cwd: state.cwd.clone(),
+            snapshot: state.snapshot.clone(),
+            config: WorkspaceStatusConfig::with_defaults(),
+            start_fetch: false,
+        }
+    }
+
+    fn mini_graph(ids: &[&str]) -> GraphModel {
+        GraphModel {
+            uncommitted: Some(false),
+            commits: ids
+                .iter()
+                .map(|id| Commit {
+                    id: (*id).into(),
+                    subject: format!("s-{id}"),
+                    ..Commit::default()
+                })
+                .collect(),
+            window: ids.len(),
+            skip: 0,
+            limit: 300,
+            ..GraphModel::default()
+        }
+    }
+
+    fn commit_source() -> CommitFileSource {
+        CommitFileSource::Commit {
+            commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        }
+    }
+
+    fn name_status(path: &str) -> NameStatus {
+        NameStatus {
+            status: "M".into(),
+            path: path.into(),
+            old_path: None,
+        }
+    }
+
+    fn commit_file(path: &str) -> CommitFile {
+        CommitFile {
+            status: "M".into(),
+            path: path.into(),
+            old_path: None,
+        }
+    }
+
+    fn local_branch(name: &str) -> LocalBranch {
+        LocalBranch {
+            name: name.into(),
+            current: name == "main",
+            authordate: 0,
+        }
+    }
+
+    fn focus_repo(state: &mut AppState, name: &str) {
+        let idx = state
+            .rows
+            .iter()
+            .position(|row| {
+                matches!(row.kind, NodeKind::Repo | NodeKind::Checkout)
+                    && row.repo.as_deref() == Some(name)
+            })
+            .unwrap_or_else(|| panic!("missing repo row {name}"));
+        state.cursor = idx;
+    }
+
+    fn apply(interp: &mut Interpreter, state: &mut AppState, outcome: JobOutcome) {
+        let opts = opts(state);
+        interp.apply(state, &opts, 1, outcome);
+    }
+
     /// Headless must drain the same apply function the live loop uses.
     ///
     /// The remaining gap is TTY `$EDITOR` (`Effect::EditFile` → `pending_edit`).
@@ -1073,5 +1293,362 @@ mod tests {
             !effect.contains(concat!("collect_full_", "snapshot(")),
             "interpreter watch/refresh must stream process_repo"
         );
+    }
+
+    #[test]
+    fn late_commit_files_after_graph_does_not_reopen_files() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_commit_files();
+        state.drill = DrillView::Graph;
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CommitFiles {
+                gen,
+                repo: "app".into(),
+                source: commit_source(),
+                files: vec![name_status("README.md")],
+            },
+        );
+        assert!(
+            state.drill.is_graph(),
+            "late CommitFiles must not reopen Files after drill=Graph, got {:?}",
+            state.drill
+        );
+    }
+
+    #[test]
+    fn matching_commit_files_still_applies() {
+        let mut state = fixture_state();
+        let source = commit_source();
+        state.begin_commit_files("app".into(), source.clone());
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_commit_files();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CommitFiles {
+                gen,
+                repo: "app".into(),
+                source,
+                files: vec![name_status("README.md")],
+            },
+        );
+        match &state.drill {
+            DrillView::Files { repo, files, .. } => {
+                assert_eq!(repo, "app");
+                assert_eq!(files.len(), 1);
+                assert_eq!(files[0].path, "README.md");
+            }
+            other => panic!("matching CommitFiles must open Files, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn late_autoload_wrong_identity_does_not_replace_graph() {
+        let mut state = fixture_state();
+        state.graph = Some(mini_graph(&["aaa"]));
+        state.graph_identity = Some(("app".into(), "head-app".into()));
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_autoload();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::Autoload {
+                gen,
+                page: mini_graph(&["zzz"]),
+                identity: GraphIdentity {
+                    repo: "lib".into(),
+                    head: "head-lib".into(),
+                },
+                prev_status: String::new(),
+            },
+        );
+        assert_eq!(
+            state.graph_identity,
+            Some(("app".into(), "head-app".into())),
+            "late Autoload must not replace live graph_identity"
+        );
+        let ids: Vec<_> = state
+            .graph
+            .as_ref()
+            .unwrap()
+            .commits
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["aaa"],
+            "late Autoload must not merge a foreign page"
+        );
+    }
+
+    #[test]
+    fn matching_autoload_still_merges() {
+        let mut state = fixture_state();
+        state.graph = Some(mini_graph(&["aaa"]));
+        state.graph_identity = Some(("app".into(), "head-app".into()));
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_autoload();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::Autoload {
+                gen,
+                page: mini_graph(&["bbb"]),
+                identity: GraphIdentity {
+                    repo: "app".into(),
+                    head: "head-app".into(),
+                },
+                prev_status: String::new(),
+            },
+        );
+        assert_eq!(
+            state.graph_identity,
+            Some(("app".into(), "head-app".into()))
+        );
+        let ids: Vec<_> = state
+            .graph
+            .as_ref()
+            .unwrap()
+            .commits
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["aaa", "bbb"]);
+    }
+
+    #[test]
+    fn late_commit_diff_after_graph_does_not_reopen_diff() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_commit_diff();
+        state.drill = DrillView::Graph;
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CommitDiff {
+                gen,
+                repo: "app".into(),
+                source: commit_source(),
+                files: vec![commit_file("README.md")],
+                file_cursor: 0,
+                path: "README.md".into(),
+                content: DiffContent::from_unified("diff --git a/README.md"),
+            },
+        );
+        assert!(
+            state.drill.is_graph(),
+            "late CommitDiff must not reopen Diff after drill=Graph, got {:?}",
+            state.drill
+        );
+    }
+
+    #[test]
+    fn late_commit_diff_after_other_path_does_not_reopen_old_diff() {
+        let mut state = fixture_state();
+        let source = commit_source();
+        state.open_commit_diff(
+            "app".into(),
+            source.clone(),
+            vec![commit_file("README.md"), commit_file("src.rs")],
+            1,
+            "src.rs".into(),
+            DiffContent::from_unified("diff --git a/src.rs"),
+        );
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_commit_diff();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CommitDiff {
+                gen,
+                repo: "app".into(),
+                source,
+                files: vec![commit_file("README.md")],
+                file_cursor: 0,
+                path: "README.md".into(),
+                content: DiffContent::from_unified("diff --git a/README.md"),
+            },
+        );
+        match &state.drill {
+            DrillView::Diff { path, .. } => {
+                assert_eq!(
+                    path, "src.rs",
+                    "late CommitDiff must not reopen the old path"
+                )
+            }
+            other => panic!("expected Diff for src.rs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn matching_commit_diff_still_applies() {
+        let mut state = fixture_state();
+        let source = commit_source();
+        state.open_commit_files("app".into(), source.clone(), vec![commit_file("README.md")]);
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_commit_diff();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CommitDiff {
+                gen,
+                repo: "app".into(),
+                source,
+                files: vec![commit_file("README.md")],
+                file_cursor: 0,
+                path: "README.md".into(),
+                content: DiffContent::from_unified("diff --git a/README.md"),
+            },
+        );
+        match &state.drill {
+            DrillView::Diff { path, content, .. } => {
+                assert_eq!(path, "README.md");
+                assert!(content.unstaged.contains("README.md"));
+            }
+            other => panic!("matching CommitDiff must open Diff, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn late_prepare_stash_after_repo_change_does_not_open_menu() {
+        let mut state = fixture_state();
+        focus_repo(&mut state, "lib");
+        assert_eq!(state.focused_checkout_path().as_deref(), Some("lib"));
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_prepare_stash();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::PrepareStash {
+                gen,
+                repo: "app".into(),
+                latest: Some("stash@{0}".into()),
+            },
+        );
+        assert!(
+            state.stash_menu.is_none(),
+            "late PrepareStash must not open stash menu after leaving app"
+        );
+        assert!(state.stash_repo.is_none());
+    }
+
+    #[test]
+    fn matching_prepare_stash_still_opens_menu() {
+        let mut state = fixture_state();
+        focus_repo(&mut state, "app");
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_prepare_stash();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::PrepareStash {
+                gen,
+                repo: "app".into(),
+                latest: Some("stash@{0}".into()),
+            },
+        );
+        assert!(
+            state.stash_menu.is_some(),
+            "matching PrepareStash must open stash menu"
+        );
+        assert_eq!(state.stash_repo.as_deref(), Some("app"));
+    }
+
+    #[test]
+    fn late_prepare_branches_after_repo_change_does_not_open_picker() {
+        let mut state = fixture_state();
+        focus_repo(&mut state, "lib");
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_prepare_branches();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::PrepareBranches {
+                gen,
+                repo: "app".into(),
+                branches: vec![local_branch("main")],
+                graph_focus: false,
+            },
+        );
+        assert!(
+            state.branch_picker.is_none(),
+            "late PrepareBranches must not open branch picker after leaving app"
+        );
+    }
+
+    #[test]
+    fn late_prepare_graph_focus_after_identity_change_does_not_open_picker() {
+        let mut state = fixture_state();
+        state.graph = Some(mini_graph(&["aaa"]));
+        state.graph_identity = Some(("lib".into(), "head-lib".into()));
+        focus_repo(&mut state, "lib");
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_prepare_branches();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::PrepareBranches {
+                gen,
+                repo: "app".into(),
+                branches: vec![local_branch("main")],
+                graph_focus: true,
+            },
+        );
+        assert!(
+            state.graph_focus_picker.is_none(),
+            "late graph-focus PrepareBranches must not open picker after leaving app"
+        );
+    }
+
+    #[test]
+    fn matching_prepare_branches_still_opens_picker() {
+        let mut state = fixture_state();
+        focus_repo(&mut state, "app");
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_prepare_branches();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::PrepareBranches {
+                gen,
+                repo: "app".into(),
+                branches: vec![local_branch("main")],
+                graph_focus: false,
+            },
+        );
+        let picker = state
+            .branch_picker
+            .as_ref()
+            .expect("matching PrepareBranches must open branch picker");
+        assert_eq!(picker.repo, "app");
+    }
+
+    #[test]
+    fn matching_prepare_graph_focus_still_opens_picker() {
+        let mut state = fixture_state();
+        state.graph = Some(mini_graph(&["aaa"]));
+        state.graph_identity = Some(("app".into(), "head-app".into()));
+        focus_repo(&mut state, "app");
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_prepare_branches();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::PrepareBranches {
+                gen,
+                repo: "app".into(),
+                branches: vec![local_branch("main")],
+                graph_focus: true,
+            },
+        );
+        let picker = state
+            .graph_focus_picker
+            .as_ref()
+            .expect("matching graph-focus PrepareBranches must open picker");
+        assert_eq!(picker.repo, "app");
     }
 }

@@ -117,6 +117,16 @@ pub struct Scheduler {
     pane_latest: u64,
     pane_inflight: Option<u64>,
     pane_pending: bool,
+    next_autoload_id: u64,
+    autoload_latest: u64,
+    next_commit_files_id: u64,
+    commit_files_latest: u64,
+    next_commit_diff_id: u64,
+    commit_diff_latest: u64,
+    next_prepare_stash_id: u64,
+    prepare_stash_latest: u64,
+    next_prepare_branches_id: u64,
+    prepare_branches_latest: u64,
     exclusive_write: bool,
     default_branch_busy: bool,
     /// Highest status generation accepted per checkout path.
@@ -154,6 +164,16 @@ impl Scheduler {
             pane_latest: 0,
             pane_inflight: None,
             pane_pending: false,
+            next_autoload_id: 1,
+            autoload_latest: 0,
+            next_commit_files_id: 1,
+            commit_files_latest: 0,
+            next_commit_diff_id: 1,
+            commit_diff_latest: 0,
+            next_prepare_stash_id: 1,
+            prepare_stash_latest: 0,
+            next_prepare_branches_id: 1,
+            prepare_branches_latest: 0,
             exclusive_write: false,
             default_branch_busy: false,
             path_gen: HashMap::new(),
@@ -379,6 +399,71 @@ impl Scheduler {
 
     pub fn latest_pane_id(&self) -> u64 {
         self.pane_latest
+    }
+
+    /// Bump the autoload generation on each enqueue.
+    pub fn request_autoload(&mut self) -> u64 {
+        let id = self.next_autoload_id;
+        self.next_autoload_id += 1;
+        self.autoload_latest = id;
+        id
+    }
+
+    /// True when `gen` is still the latest autoload request.
+    pub fn accept_autoload_result(&self, gen: u64) -> bool {
+        gen == self.autoload_latest
+    }
+
+    /// Bump the commit-files generation on each `LoadCommitFiles`.
+    pub fn request_commit_files(&mut self) -> u64 {
+        let id = self.next_commit_files_id;
+        self.next_commit_files_id += 1;
+        self.commit_files_latest = id;
+        id
+    }
+
+    /// True when `gen` is still the latest commit-files request.
+    pub fn accept_commit_files_result(&self, gen: u64) -> bool {
+        gen == self.commit_files_latest
+    }
+
+    /// Bump the commit-diff generation on each `LoadCommitDiff`.
+    pub fn request_commit_diff(&mut self) -> u64 {
+        let id = self.next_commit_diff_id;
+        self.next_commit_diff_id += 1;
+        self.commit_diff_latest = id;
+        id
+    }
+
+    /// True when `gen` is still the latest commit-diff request.
+    pub fn accept_commit_diff_result(&self, gen: u64) -> bool {
+        gen == self.commit_diff_latest
+    }
+
+    /// Bump the stash-menu generation on each `PrepareStashMenu`.
+    pub fn request_prepare_stash(&mut self) -> u64 {
+        let id = self.next_prepare_stash_id;
+        self.next_prepare_stash_id += 1;
+        self.prepare_stash_latest = id;
+        id
+    }
+
+    /// True when `gen` is still the latest stash-menu request.
+    pub fn accept_prepare_stash_result(&self, gen: u64) -> bool {
+        gen == self.prepare_stash_latest
+    }
+
+    /// Bump on each `PrepareBranchPicker` / `PrepareGraphFocusPicker`.
+    pub fn request_prepare_branches(&mut self) -> u64 {
+        let id = self.next_prepare_branches_id;
+        self.next_prepare_branches_id += 1;
+        self.prepare_branches_latest = id;
+        id
+    }
+
+    /// True when `gen` is still the latest branch / graph-focus picker request.
+    pub fn accept_prepare_branches_result(&self, gen: u64) -> bool {
+        gen == self.prepare_branches_latest
     }
 
     pub fn bump_write_gen(&mut self) -> u64 {
@@ -662,5 +747,55 @@ mod tests {
             again.kind,
             SpawnKind::LoadPane { req_id } if req_id == second
         ));
+    }
+
+    #[test]
+    fn stale_autoload_id_is_rejected() {
+        let mut s = Scheduler::new(4);
+        let first = s.request_autoload();
+        let second = s.request_autoload();
+        assert_ne!(first, second);
+        assert!(!s.accept_autoload_result(first));
+        assert!(s.accept_autoload_result(second));
+    }
+
+    #[test]
+    fn stale_commit_files_id_is_rejected() {
+        let mut s = Scheduler::new(4);
+        let first = s.request_commit_files();
+        let second = s.request_commit_files();
+        assert_ne!(first, second);
+        assert!(!s.accept_commit_files_result(first));
+        assert!(s.accept_commit_files_result(second));
+    }
+
+    #[test]
+    fn stale_commit_diff_id_is_rejected() {
+        let mut s = Scheduler::new(4);
+        let first = s.request_commit_diff();
+        let second = s.request_commit_diff();
+        assert_ne!(first, second);
+        assert!(!s.accept_commit_diff_result(first));
+        assert!(s.accept_commit_diff_result(second));
+    }
+
+    #[test]
+    fn stale_prepare_stash_id_is_rejected() {
+        let mut s = Scheduler::new(4);
+        let first = s.request_prepare_stash();
+        let second = s.request_prepare_stash();
+        assert_ne!(first, second);
+        assert!(!s.accept_prepare_stash_result(first));
+        assert!(s.accept_prepare_stash_result(second));
+    }
+
+    #[test]
+    fn stale_prepare_branches_id_is_rejected() {
+        let mut s = Scheduler::new(4);
+        let first = s.request_prepare_branches();
+        let second = s.request_prepare_branches();
+        assert_ne!(first, second);
+        assert!(!s.accept_prepare_branches_result(first));
+        assert!(s.accept_prepare_branches_result(second));
     }
 }
