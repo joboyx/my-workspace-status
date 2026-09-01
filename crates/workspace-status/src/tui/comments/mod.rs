@@ -2,7 +2,8 @@
 //!
 //! Persist under `$XDG_STATE_HOME/my-workspace-status/comments.json`.
 //! `WS_STATUS_COMMENT_STORE` overrides that path. Comments never write into
-//! user git repos.
+//! user git repos. `y` copies the focused tree / graph / commit-file / diff
+//! row and descendants under that row (after GC).
 
 mod export;
 mod overlay;
@@ -16,7 +17,7 @@ pub use store::{
     repo_identity, save_comment_store, CommentKey, CommentStore, COMMENT_STORE_VERSION,
 };
 pub use target::{
-    collect_live_set, diff_line_has_comment, gc_comments, graph_row_has_comment,
-    resolve_comment_target, sole_non_default_branch, tree_row_has_comment, viewport_line_number,
-    CommentLiveSet,
+    collect_live_set, comments_in_focus_scope, diff_line_has_comment, gc_comments,
+    graph_row_has_comment, resolve_comment_target, sole_non_default_branch, tree_row_has_comment,
+    viewport_line_number, CommentExportList, CommentLiveSet,
 };

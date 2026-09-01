@@ -30,9 +30,10 @@ use super::branches::{
 #[cfg(not(test))]
 use super::comments::comment_store_path;
 use super::comments::{
-    collect_live_set, comment_key_label, export_markdown, gc_comments, load_comment_store,
-    put_comment, resolve_comment_target, save_comment_store, viewport_line_number, CommentExport,
-    CommentKey, CommentPrompt, CommentStore,
+    collect_live_set, comment_key_label, comments_in_focus_scope, export_markdown, gc_comments,
+    load_comment_store, put_comment, resolve_comment_target, save_comment_store,
+    viewport_line_number, CommentExport, CommentExportList, CommentKey, CommentPrompt,
+    CommentStore,
 };
 use super::commit_files::{
     ancestor_dir_ids, collect_foldable_subtree_ids as collect_commit_subtree_ids,
@@ -2304,12 +2305,56 @@ impl AppState {
         self.help_open = false;
         self.comment = None;
         self.reconcile_comment_store();
-        let markdown = export_markdown(&self.comment_store);
+        let markdown = export_markdown(&self.scoped_comment_store());
         self.comment_export = Some(CommentExport {
             markdown: markdown.clone(),
         });
         self.status = "copied".into();
         Effect::CopyClipboard { text: markdown }
+    }
+
+    fn scoped_comment_store(&self) -> CommentStore {
+        let graph_repo = self.focused_graph_repo();
+        let graph_row = self.focused_graph_row();
+        let commit_file = self.focused_commit_file_row();
+        let list = match self.list_focus_target() {
+            ListFocusTarget::Tree => CommentExportList::Tree {
+                row: self.focused_row(),
+            },
+            ListFocusTarget::Graph => CommentExportList::Graph {
+                repo: graph_repo.as_deref(),
+                row: graph_row.as_ref(),
+            },
+            ListFocusTarget::CommitFiles => match (&self.drill, commit_file.as_ref()) {
+                (
+                    DrillView::Files { repo, source, .. } | DrillView::Diff { repo, source, .. },
+                    Some(row),
+                ) => CommentExportList::CommitFiles {
+                    repo: repo.as_str(),
+                    source,
+                    path: row.path.as_str(),
+                    is_dir: row.is_dir(),
+                },
+                _ => CommentExportList::Tree {
+                    row: self.focused_row(),
+                },
+            },
+            ListFocusTarget::None => {
+                let (repo, path, source) = match &self.drill {
+                    DrillView::Diff {
+                        repo, path, source, ..
+                    } => (Some(repo.as_str()), Some(path.as_str()), Some(source)),
+                    _ => (self.diff_repo.as_deref(), self.diff_path.as_deref(), None),
+                };
+                match (repo, path) {
+                    (Some(repo), Some(path)) => CommentExportList::Diff { repo, path, source },
+                    _ => CommentExportList::Tree {
+                        row: self.focused_row(),
+                    },
+                }
+            }
+        };
+        comments_in_focus_scope(&self.comment_store, &self.snapshot, &self.tree, list)
     }
 
     fn refuse_remove_worktree(&mut self) -> Effect {

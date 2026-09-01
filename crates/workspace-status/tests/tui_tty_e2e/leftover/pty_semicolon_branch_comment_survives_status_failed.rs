@@ -131,6 +131,12 @@ fn pty_semicolon_branch_comment_survives_status_failed() {
         GIT_WAIT,
     );
     store_kept_branch_comment(&workspace);
+    tui.gg();
+    tui.wait_pred(
+        |screen| tree_cursor_on(screen, "workspace") && overlay_closed(screen),
+        "gg focuses the workspace root so y copies every live comment",
+        WAIT,
+    );
     tui.key('y');
     tui.wait_pred(
         |screen| export_overlay(screen) && screen.contains(BODY) && !screen.contains("No comments"),
@@ -150,6 +156,12 @@ fn pty_semicolon_branch_comment_survives_status_failed() {
         WAIT,
     );
     store_kept_branch_comment(&launch_ws);
+    tui.gg();
+    tui.wait_pred(
+        |screen| tree_cursor_on(screen, "workspace") && overlay_closed(screen),
+        "gg focuses the workspace root so launch y copies every live comment",
+        WAIT,
+    );
     tui.key('y');
     tui.wait_pred(
         |screen| export_overlay(screen) && screen.contains(BODY) && !screen.contains("No comments"),

@@ -77,10 +77,12 @@ fn save_overlay_body(tui: &mut PtySession, body: &str) {
 /// Object comments on commit / branch / worktree, repo-root no-op,
 /// default-branch attach, GC, and `y` markdown export.
 ///
-/// Docs + VIEW: `;` comments the focused row; `y` copies live comments
-/// as markdown. Workspace and default-branch rows with more than one
-/// (or zero) non-default branches are no-ops. A paint-only overlay or
-/// export that still lists a deleted branch is red.
+/// Docs + VIEW: `;` comments the focused row; `y` copies comments for
+/// the focused graph / tree row and descendants under that row. A graph
+/// commit does not export a sibling branch object comment. Workspace
+/// and default-branch rows with more than one (or zero) non-default
+/// branches are no-ops. A paint-only overlay or export that still lists
+/// a deleted branch is red.
 #[test]
 fn pty_semicolon_object_comments_and_export() {
     let (_root, workspace) = daily_workspace();
@@ -170,12 +172,28 @@ fn pty_semicolon_object_comments_and_export() {
     tui.key('y');
     tui.wait_pred(
         |screen| {
+            export_overlay(screen) && screen.contains(COMMIT_BODY) && !screen.contains(BRANCH_BODY)
+        },
+        "y on the focused merge commit copies that commit only (not the branch)",
+        WAIT,
+    );
+    tui.esc();
+    tui.wait_pred(overlay_closed, "Esc closes the export overlay", WAIT);
+    tui.esc();
+    tui.wait_pred(
+        merger_graph_left_unfocused,
+        "Esc returns to the merger tree row",
+        WAIT,
+    );
+    tui.key('y');
+    tui.wait_pred(
+        |screen| {
             export_overlay(screen)
                 && screen.contains(BRANCH_BODY)
                 && screen.contains(COMMIT_BODY)
                 && screen.contains("feature/graph")
         },
-        "y copies live branch + commit comments as markdown",
+        "y on merger copies that checkout (branch + commit descendants)",
         WAIT,
     );
     tui.esc();

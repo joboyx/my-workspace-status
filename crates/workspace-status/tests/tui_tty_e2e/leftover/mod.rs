@@ -76,6 +76,7 @@ mod pty_update_prompt_n_opens_tui;
 mod pty_watch_applies_while_keys_arrive;
 mod pty_worktree_w_remove_confirm;
 mod pty_x_then_y_discard_tracked;
+mod pty_y_copies_focused_tree_scope;
 mod pty_y_revert_and_delete;
 mod pty_z_folds_focused_repo;
 mod pty_zz_toggles_subtree_not_only_row;
