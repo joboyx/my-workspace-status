@@ -24,10 +24,49 @@ fn resolved_suffix(resolved: bool) -> &'static str {
     }
 }
 
+/// Quote every line after the first so a blank line, ATX heading, or list
+/// marker cannot leave the current markdown block.
+fn quote_continuation_lines(body: &str) -> String {
+    let mut lines = body.split('\n');
+    let first = lines.next().unwrap_or("");
+    let mut out = String::from(first);
+    for line in lines {
+        out.push_str("\n  >");
+        if !line.is_empty() {
+            out.push(' ');
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+/// Object-comment body under a `##` heading. One line stays a paragraph.
+/// Several lines are a blockquote so `#` / `-` in the body cannot escape.
+fn object_comment_body(body: &str) -> String {
+    if !body.contains('\n') {
+        return format!("{body}\n");
+    }
+    let mut out = String::new();
+    for (i, line) in body.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push('>');
+        if !line.is_empty() {
+            out.push(' ');
+            out.push_str(line);
+        }
+    }
+    out.push('\n');
+    out
+}
+
 /// Markdown for the comments in `store`. Empty store → a short empty notice.
 ///
 /// Resolved comments stay in the list. The heading or bullet carries
 /// [`RESOLVED_MARKDOWN_TAG`] so a copy can tell resolved from open.
+/// A line comment with a newline stays one bullet. Continuation lines
+/// are quoted.
 pub fn export_markdown(store: &CommentStore) -> String {
     if store.is_empty() {
         return "# Comments\n\nNo comments.\n".to_string();
@@ -40,15 +79,15 @@ pub fn export_markdown(store: &CommentStore) -> String {
         match key {
             CommentKey::Branch { repo, branch } => {
                 out.push_str(&format!("## {repo} — branch `{branch}`{tag}\n\n"));
-                out.push_str(&format!("{body}\n"));
+                out.push_str(&object_comment_body(body));
             }
             CommentKey::Commit { repo, sha } => {
                 out.push_str(&format!("## {repo} — commit `{sha}`{tag}\n\n"));
-                out.push_str(&format!("{body}\n"));
+                out.push_str(&object_comment_body(body));
             }
             CommentKey::Worktree { path } => {
                 out.push_str(&format!("## {path} — worktree{tag}\n\n"));
-                out.push_str(&format!("{body}\n"));
+                out.push_str(&object_comment_body(body));
             }
             CommentKey::WorktreeLine {
                 repo,
@@ -59,8 +98,9 @@ pub fn export_markdown(store: &CommentStore) -> String {
             } => {
                 out.push_str(&format!("## {repo} — branch `{branch}`\n\n"));
                 out.push_str(&format!(
-                    "- `{path}`:{}{tag} — {body}\n",
-                    line_span_label(*line, *end_line)
+                    "- `{path}`:{}{tag} — {}\n",
+                    line_span_label(*line, *end_line),
+                    quote_continuation_lines(body)
                 ));
             }
             CommentKey::CommitLine {
@@ -72,8 +112,9 @@ pub fn export_markdown(store: &CommentStore) -> String {
             } => {
                 out.push_str(&format!("## {repo} — commit `{sha}`\n\n"));
                 out.push_str(&format!(
-                    "- `{path}`:{}{tag} — {body}\n",
-                    line_span_label(*line, *end_line)
+                    "- `{path}`:{}{tag} — {}\n",
+                    line_span_label(*line, *end_line),
+                    quote_continuation_lines(body)
                 ));
             }
         }
@@ -234,6 +275,39 @@ mod tests {
                 "`README.md`:2 {RESOLVED_MARKDOWN_TAG} — dirty line"
             )),
             "resolved line comments stay in the copy with a tag: {md}"
+        );
+    }
+
+    #[test]
+    fn export_markdown_keeps_multiline_line_comment_in_one_bullet() {
+        let store = super::super::store::put_comment_entry(
+            &CommentStore::new(),
+            CommentKey::WorktreeLine {
+                repo: "app".into(),
+                branch: "main".into(),
+                path: "README.md".into(),
+                line: 2,
+                end_line: 2,
+            },
+            "one\n# heading\n- list\n\nmore",
+            true,
+        );
+        let md = export_markdown(&store);
+        assert!(
+            md.contains(&format!(
+                "`README.md`:2 {RESOLVED_MARKDOWN_TAG} — one\n  > # heading\n  > - list\n  >\n  > more\n"
+            )),
+            "continuation lines must stay quoted inside the bullet:\n{md}"
+        );
+        assert_eq!(
+            md.matches("- `").count(),
+            1,
+            "multiline body must not open extra bullets:\n{md}"
+        );
+        assert!(
+            !md.lines()
+                .any(|line| line == "# heading" || line == "- list" || line == "more"),
+            "heading / list / blank-line body must not start a new block:\n{md}"
         );
     }
 

@@ -40,7 +40,8 @@ pub enum InputMode {
     /// Graph `o` overlay: mark local branches, Enter applies ancestor focus.
     GraphFocusPicker,
     CreateBranch,
-    /// `;` comment overlay (type body, Enter save, empty deletes).
+    /// `;` comment overlay (type body, Shift+Enter newline, Enter save,
+    /// Ctrl-R resolve).
     Comment,
     /// `V` visual-line highlight on a focused file diff (`j`/`k` extend).
     DiffVisual,
@@ -246,7 +247,11 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
     match mode {
         InputMode::SearchPrompt | InputMode::HelpSearch | InputMode::CreateBranch => typing,
         InputMode::Comment => {
-            typing || matches!(key.code, KeyCode::Delete | KeyCode::Home | KeyCode::End)
+            typing
+                || matches!(
+                    key.code,
+                    KeyCode::Delete | KeyCode::Home | KeyCode::End | KeyCode::Enter
+                )
         }
         InputMode::BranchPicker => match key.code {
             KeyCode::Backspace => true,
@@ -420,23 +425,17 @@ fn key_to_action(
             _ => Action::None,
         },
         InputMode::Comment => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                return match key.code {
-                    KeyCode::Char('r') | KeyCode::Char('R') => Action::CommentToggleResolved,
-                    _ => Action::None,
-                };
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R'))
+            {
+                return Action::CommentToggleResolved;
             }
             match key.code {
                 KeyCode::Esc => Action::CommentCancel,
-                KeyCode::Enter => Action::CommentSubmit,
-                KeyCode::Backspace => Action::CommentBackspace,
-                KeyCode::Delete => Action::CommentDelete,
-                KeyCode::Left => Action::CommentLeft,
-                KeyCode::Right => Action::CommentRight,
-                KeyCode::Home => Action::CommentHome,
-                KeyCode::End => Action::CommentEnd,
-                KeyCode::Char(c) => Action::CommentChar(c),
-                _ => Action::None,
+                KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    Action::CommentSubmit
+                }
+                _ => Action::CommentInput(key),
             }
         }
         InputMode::CommentExport => match key.code {
@@ -1089,24 +1088,44 @@ mod tests {
             Action::CommentSubmit
         );
         assert_eq!(
+            event_to_action(&shift(KeyCode::Enter), InputMode::Comment, false, false),
+            Action::CommentInput(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT))
+        );
+        assert_eq!(
             event_to_action(&key(KeyCode::Left), InputMode::Comment, false, false),
-            Action::CommentLeft
+            Action::CommentInput(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Right), InputMode::Comment, false, false),
-            Action::CommentRight
+            Action::CommentInput(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Home), InputMode::Comment, false, false),
-            Action::CommentHome
+            Action::CommentInput(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))
         );
         assert_eq!(
             event_to_action(&key(KeyCode::End), InputMode::Comment, false, false),
-            Action::CommentEnd
+            Action::CommentInput(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Delete), InputMode::Comment, false, false),
-            Action::CommentDelete
+            Action::CommentInput(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE))
+        );
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('a')), InputMode::Comment, false, false),
+            Action::CommentInput(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+        );
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('e')), InputMode::Comment, false, false),
+            Action::CommentInput(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+        );
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Left), InputMode::Comment, false, false),
+            Action::CommentInput(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL))
+        );
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Right), InputMode::Comment, false, false),
+            Action::CommentInput(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL))
         );
         assert_eq!(
             event_to_action(&ctrl(KeyCode::Char('r')), InputMode::Comment, false, false),
@@ -1123,7 +1142,7 @@ mod tests {
                 false,
                 false
             ),
-            Action::CommentLeft
+            Action::CommentInput(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Esc), InputMode::CommentExport, false, false),

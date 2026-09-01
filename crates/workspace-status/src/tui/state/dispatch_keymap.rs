@@ -267,45 +267,9 @@ impl AppState {
             Action::DiffVisualStart => self.begin_diff_visual(),
             Action::DiffVisualCancel => self.cancel_diff_visual(),
             Action::CommentStart => self.begin_comment(),
-            Action::CommentChar(c) => {
+            Action::CommentInput(key) => {
                 if let Some(prompt) = self.comment.as_mut() {
-                    prompt.insert_char(c);
-                }
-                Effect::None
-            }
-            Action::CommentBackspace => {
-                if let Some(prompt) = self.comment.as_mut() {
-                    prompt.backspace();
-                }
-                Effect::None
-            }
-            Action::CommentDelete => {
-                if let Some(prompt) = self.comment.as_mut() {
-                    prompt.delete_forward();
-                }
-                Effect::None
-            }
-            Action::CommentLeft => {
-                if let Some(prompt) = self.comment.as_mut() {
-                    prompt.move_left();
-                }
-                Effect::None
-            }
-            Action::CommentRight => {
-                if let Some(prompt) = self.comment.as_mut() {
-                    prompt.move_right();
-                }
-                Effect::None
-            }
-            Action::CommentHome => {
-                if let Some(prompt) = self.comment.as_mut() {
-                    prompt.move_home();
-                }
-                Effect::None
-            }
-            Action::CommentEnd => {
-                if let Some(prompt) = self.comment.as_mut() {
-                    prompt.move_end();
+                    prompt.input(key);
                 }
                 Effect::None
             }

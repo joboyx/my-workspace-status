@@ -20,9 +20,9 @@ use super::chrome::{
     overlay_status_rows_for, status_line,
 };
 use super::comments::{
-    commit_file_row_comments_resolved, commit_file_row_has_comment, diff_line_comment_state,
-    graph_row_comments_resolved, graph_row_has_comment, tree_row_comments_resolved,
-    tree_row_has_comment, CommentPrompt,
+    comment_overlay_footer_save, commit_file_row_comments_resolved, commit_file_row_has_comment,
+    diff_line_comment_state, graph_row_comments_resolved, graph_row_has_comment,
+    tree_row_comments_resolved, tree_row_has_comment, CommentPrompt, COMMENT_OVERLAY_FOOTER_EDIT,
 };
 use super::diff::{
     cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, diff_row_content_width,
@@ -2048,16 +2048,36 @@ fn overlay_block_filled(accent: Color, surface: Color) -> Block<'static> {
     overlay_block(accent).style(Style::default().bg(surface))
 }
 
-fn comment_body_line(prompt: &CommentPrompt, palette: Palette) -> Line<'static> {
-    let cursor = prompt.cursor.min(prompt.body.chars().count());
-    let before: String = prompt.body.chars().take(cursor).collect();
-    let after: String = prompt.body.chars().skip(cursor).collect();
-    Line::from(vec![
-        Span::styled("  body: ", Style::default().fg(palette.muted)),
-        Span::styled(before, Style::default().fg(palette.cursor)),
-        Span::styled("▏", Style::default().fg(palette.cursor)),
-        Span::styled(after, Style::default().fg(palette.cursor)),
-    ])
+fn comment_body_lines(prompt: &CommentPrompt, palette: Palette) -> Vec<Line<'static>> {
+    let (start, _) = prompt.visible_line_range();
+    prompt
+        .painted_lines()
+        .into_iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let prefix = if start + i == 0 {
+                "  body: "
+            } else {
+                "        "
+            };
+            match line.caret {
+                Some(col) => {
+                    let before: String = line.text.chars().take(col).collect();
+                    let after: String = line.text.chars().skip(col).collect();
+                    Line::from(vec![
+                        Span::styled(prefix, Style::default().fg(palette.muted)),
+                        Span::styled(before, Style::default().fg(palette.cursor)),
+                        Span::styled("▏", Style::default().fg(palette.cursor)),
+                        Span::styled(after, Style::default().fg(palette.cursor)),
+                    ])
+                }
+                None => Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(palette.muted)),
+                    Span::styled(line.text, Style::default().fg(palette.cursor)),
+                ]),
+            }
+        })
+        .collect()
 }
 
 fn draw_comment(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -2075,12 +2095,7 @@ fn draw_comment(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     } else {
         "Comment"
     };
-    let resolve_hint = if prompt.resolved {
-        "Ctrl-R unresolve"
-    } else {
-        "Ctrl-R resolve"
-    };
-    let lines = vec![
+    let mut lines = vec![
         Line::from(Span::styled(
             title,
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
@@ -2089,12 +2104,16 @@ fn draw_comment(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             prompt.label.clone(),
             Style::default().fg(palette.muted),
         )),
-        comment_body_line(prompt, palette),
-        Line::from(Span::styled(
-            format!("Enter save · empty deletes · {resolve_hint} · Esc cancel"),
-            Style::default().fg(palette.muted),
-        )),
     ];
+    lines.extend(comment_body_lines(prompt, palette));
+    lines.push(Line::from(Span::styled(
+        comment_overlay_footer_save(prompt.resolved),
+        Style::default().fg(palette.muted),
+    )));
+    lines.push(Line::from(Span::styled(
+        COMMENT_OVERLAY_FOOTER_EDIT,
+        Style::default().fg(palette.muted),
+    )));
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)
@@ -2578,6 +2597,13 @@ mod tests {
             "idle hint chips must not paint through the comment overlay:\n{text}"
         );
 
+        assert!(
+            text.contains("Shift+Enter newline") && text.contains("Ctrl-Left/Right word"),
+            "overlay must advertise textarea keys:\n{text}"
+        );
+        assert!(text.contains("Ctrl-R resolve"), "{text}");
+        assert!(!text.contains("Comment · resolved"), "{text}");
+
         if let Some(prompt) = state.comment.as_mut() {
             prompt.move_home();
         }
@@ -2594,6 +2620,28 @@ mod tests {
         assert!(resolved.contains("Comment · resolved"), "{resolved}");
         assert!(resolved.contains("Ctrl-R unresolve"), "{resolved}");
         assert!(!resolved.contains("Ctrl-R resolve ·"), "{resolved}");
+        assert!(
+            resolved.contains("▏hello"),
+            "resolve toggle must keep the caret:\n{resolved}"
+        );
+
+        if let Some(prompt) = state.comment.as_mut() {
+            prompt.move_end();
+            prompt.insert_newline();
+            prompt.insert_char('x');
+        }
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let multi = buffer_text(&terminal);
+        assert!(multi.contains("hello") && multi.contains("x▏"), "{multi}");
+        assert!(!multi.contains("hellox"), "{multi}");
+        assert!(
+            !multi.contains("? help"),
+            "multiline overlay must still occlude idle chips:\n{multi}"
+        );
+        assert!(
+            multi.contains("Comment · resolved") && multi.contains("Ctrl-R unresolve"),
+            "multiline overlay must keep resolve chrome:\n{multi}"
+        );
     }
 
     #[test]
