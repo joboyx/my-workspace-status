@@ -1344,6 +1344,7 @@ mod tests {
                 branch: "main".into(),
                 path: "folder1/file1".into(),
                 line: 1,
+                end_line: 1,
             },
             "note-file1",
         );
@@ -1354,6 +1355,7 @@ mod tests {
                 branch: "main".into(),
                 path: "folder1/file2".into(),
                 line: 2,
+                end_line: 2,
             },
             "note-file2",
         );
@@ -1364,6 +1366,7 @@ mod tests {
                 branch: "main".into(),
                 path: "README.md".into(),
                 line: 1,
+                end_line: 1,
             },
             "note-readme",
         );
@@ -1537,6 +1540,7 @@ mod tests {
                 branch: "main".into(),
                 path: "x.rs".into(),
                 line: 1,
+                end_line: 1,
             },
             "sibling-repo",
         );
