@@ -5,6 +5,7 @@ use workspace_status_graph::graph_col_max;
 use super::super::action::{Action, Effect};
 use super::super::comments::tree_row_has_comment;
 use super::super::diff::{cell_code_width, diff_row_content_width, gutter_width, DiffRow};
+use super::super::icons::comment_mark_cols;
 use super::super::search::{apply_pan, list_row_pan_max, max_col_offset};
 use super::super::tree::{row_segments, NodeKind};
 use super::{AppState, FocusPane};
@@ -133,7 +134,7 @@ impl AppState {
     /// Max `diff_col_offset` for the painted file diff (0 if it fits).
     pub(crate) fn diff_pan_max(&self) -> usize {
         let rows = self.current_diff_rows();
-        let gutter = gutter_width(&rows);
+        let gutter = gutter_width(&rows).saturating_add(comment_mark_cols(self.ascii));
         let v_cols = u16::from(self.diff_scroll > 0);
         let pane_w = self.layout.diff_pane_width.saturating_sub(v_cols).max(1) as usize;
         let content_w = diff_row_content_width(pane_w);

@@ -22,8 +22,7 @@ use super::chrome::{
 use super::comments::{diff_line_has_comment, graph_row_has_comment, tree_row_has_comment};
 use super::diff::{
     cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, diff_row_content_width,
-    gutter_width,
-    section_header, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
+    gutter_width, section_header, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
 };
 use super::drill::DrillView;
 use super::help::{
@@ -32,7 +31,7 @@ use super::help::{
     HELP_SEARCH_ESC_HINT,
 };
 use super::icons::{
-    icon_branch, icon_comment, icon_diff, icon_merged_into_default, icon_move,
+    comment_mark_cols, icon_branch, icon_comment, icon_diff, icon_merged_into_default, icon_move,
     icon_open_vs_default, truncate_visible, CURSOR_BAR, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII,
     FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
 };
@@ -1042,20 +1041,12 @@ fn paint_cell_spans(
     ascii: bool,
 ) -> Vec<Span<'static>> {
     let width = width as usize;
-    let code_w = cell_code_width(width, gutter);
+    let mark_w = comment_mark_cols(ascii);
+    let code_w = cell_code_width(width, gutter.saturating_add(mark_w));
     let commented = cell
         .line_no
         .is_some_and(|n| diff_cell_has_comment(state, n));
-    let line_no = cell.line_no.map(|n| {
-        if commented && gutter > 0 {
-            let mark = icon_comment(ascii);
-            let rest = gutter.saturating_sub(visible_width(mark));
-            format!("{mark}{n:>rest$}")
-        } else {
-            format!("{n:>gutter$}")
-        }
-    });
-    let line_no = line_no.unwrap_or_else(|| " ".repeat(gutter));
+    let line_no = format_line_gutter(cell.line_no, gutter, commented, ascii);
     let plain = slice_visible(&cell.text, col_offset, code_w);
     let sign = cell_sign(cell.kind);
     let accent = cell_accent(cell.kind, palette);
@@ -1063,7 +1054,7 @@ fn paint_cell_spans(
     let muted = Style::default()
         .fg(palette.muted)
         .add_modifier(Modifier::DIM);
-    let used = gutter + 4 + plain.chars().count();
+    let used = visible_width(&line_no) + 4 + plain.chars().count();
     let pad = width.saturating_sub(used);
     vec![
         Span::styled(line_no, muted),
@@ -1077,6 +1068,26 @@ fn paint_cell_spans(
         Span::styled(plain, code_style),
         Span::raw(" ".repeat(pad)),
     ]
+}
+
+/// Comment-mark column plus right-aligned line number.
+///
+/// The mark column is reserved on every numbered cell so a comment cannot
+/// steal width from the numbers.
+fn format_line_gutter(line_no: Option<u32>, gutter: usize, commented: bool, ascii: bool) -> String {
+    let mark_w = comment_mark_cols(ascii);
+    let mark = if commented && line_no.is_some() {
+        let glyph = icon_comment(ascii);
+        let pad = mark_w.saturating_sub(visible_width(glyph));
+        format!("{glyph}{}", " ".repeat(pad))
+    } else {
+        " ".repeat(mark_w)
+    };
+    let nums = match line_no {
+        Some(n) => format!("{n:>gutter$}"),
+        None => " ".repeat(gutter),
+    };
+    format!("{mark}{nums}")
 }
 
 fn diff_cell_has_comment(state: &AppState, line: u32) -> bool {
@@ -2660,5 +2671,90 @@ mod tests {
         assert!(empty.contains(NO_MATCHING_ROWS), "{empty}");
         assert!(!empty.contains(LOADING_FILES), "{empty}");
         assert!(!empty.contains("no files in this commit"), "{empty}");
+    }
+
+    #[test]
+    fn format_line_gutter_reserves_mark_column() {
+        let blank_1 = format_line_gutter(Some(1), 2, false, true);
+        let marked_1 = format_line_gutter(Some(1), 2, true, true);
+        assert_eq!(visible_width(&blank_1), visible_width(&marked_1));
+        assert_eq!(&blank_1[1..], " 1");
+        assert_eq!(&marked_1[1..], " 1");
+        assert_eq!(blank_1.chars().next(), Some(' '));
+        assert_eq!(marked_1.chars().next(), Some('"'));
+
+        let blank_12 = format_line_gutter(Some(12), 2, false, true);
+        let marked_12 = format_line_gutter(Some(12), 2, true, true);
+        assert_eq!(visible_width(&blank_12), visible_width(&marked_12));
+        assert_eq!(&blank_12[1..], "12");
+        assert_eq!(&marked_12[1..], "12");
+        assert_eq!(blank_12, " 12");
+        assert_eq!(marked_12, "\"12");
+
+        let empty = format_line_gutter(None, 2, false, true);
+        assert_eq!(visible_width(&empty), visible_width(&blank_1));
+        assert_eq!(empty, "   ");
+    }
+
+    fn number_rule_cols(text: &str) -> Vec<usize> {
+        text.lines().filter_map(|line| line.find(" │ ")).collect()
+    }
+
+    #[test]
+    fn comment_mark_does_not_shift_line_numbers() {
+        use crate::tui::comments::{put_comment, CommentKey};
+
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let file = state
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::File)
+            .expect("file row");
+        state.cursor = file;
+        state.set_diff(
+            "app".into(),
+            "README.md".into(),
+            super::super::diff::DiffContent::from_lines(vec![
+                "@@ -10,1 +10,1 @@".into(),
+                "-old line".into(),
+                "+new line".into(),
+            ]),
+        );
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let before = buffer_text(&terminal);
+        let before_cols = number_rule_cols(&before);
+        assert!(
+            !before_cols.is_empty(),
+            "expected numbered gutter rules before a comment:\n{before}"
+        );
+        assert!(
+            before.contains(" 10 │") && !before.contains("\"10 │"),
+            "number column should already include the reserved mark space:\n{before}"
+        );
+
+        state.comment_store = put_comment(
+            &state.comment_store,
+            CommentKey::WorktreeLine {
+                repo: "app".into(),
+                branch: "main".into(),
+                path: "README.md".into(),
+                line: 10,
+            },
+            "keep numbers still",
+        );
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let after = buffer_text(&terminal);
+        let after_cols = number_rule_cols(&after);
+        assert_eq!(
+            before_cols, after_cols,
+            "comment mark must not shift │ after line numbers:\nbefore={before}\nafter={after}"
+        );
+        assert!(
+            after.contains("\"10 │") && !after.contains(" 10 │"),
+            "comment mark should occupy the reserved column:\n{after}"
+        );
     }
 }
