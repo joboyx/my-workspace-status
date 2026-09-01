@@ -20,7 +20,8 @@ use super::chrome::{
     overlay_status_rows_for, status_line,
 };
 use super::comments::{
-    commit_file_row_has_comment, diff_line_has_comment, graph_row_has_comment, tree_row_has_comment,
+    commit_file_row_has_comment, diff_line_has_comment, graph_row_has_comment,
+    tree_row_has_comment, CommentPrompt,
 };
 use super::diff::{
     cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, diff_row_content_width,
@@ -2007,6 +2008,22 @@ fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     );
 }
 
+fn overlay_block_filled(accent: Color, surface: Color) -> Block<'static> {
+    overlay_block(accent).style(Style::default().bg(surface))
+}
+
+fn comment_body_line(prompt: &CommentPrompt, palette: Palette) -> Line<'static> {
+    let cursor = prompt.cursor.min(prompt.body.chars().count());
+    let before: String = prompt.body.chars().take(cursor).collect();
+    let after: String = prompt.body.chars().skip(cursor).collect();
+    Line::from(vec![
+        Span::styled("  body: ", Style::default().fg(palette.muted)),
+        Span::styled(before, Style::default().fg(palette.cursor)),
+        Span::styled("▏", Style::default().fg(palette.cursor)),
+        Span::styled(after, Style::default().fg(palette.cursor)),
+    ])
+}
+
 fn draw_comment(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let Some(prompt) = state.comment.as_ref() else {
         return;
@@ -2015,13 +2032,9 @@ fn draw_comment(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         return;
     }
     let palette = state.theme.palette();
+    let surface = overlay_surface(state);
     let accent = palette.heading;
-    let body = if prompt.body.is_empty() {
-        "…"
-    } else {
-        prompt.body.as_str()
-    };
-    let mut lines = vec![
+    let lines = vec![
         Line::from(Span::styled(
             "Comment",
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
@@ -2030,25 +2043,16 @@ fn draw_comment(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             prompt.label.clone(),
             Style::default().fg(palette.muted),
         )),
-        Line::from(vec![
-            Span::styled("  body: ", Style::default().fg(palette.muted)),
-            Span::styled(body.to_string(), Style::default().fg(palette.cursor)),
-        ]),
+        comment_body_line(prompt, palette),
+        Line::from(Span::styled(
+            "Enter save · empty deletes · Esc cancel",
+            Style::default().fg(palette.muted),
+        )),
     ];
-    if !state.status.is_empty() {
-        lines.push(Line::from(Span::styled(
-            state.status.clone(),
-            Style::default().fg(overlay_status_color(&state.status, palette)),
-        )));
-    }
-    lines.push(Line::from(Span::styled(
-        "Enter save · empty deletes · Esc cancel",
-        Style::default().fg(palette.muted),
-    )));
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)
-            .block(overlay_block(accent))
+            .block(overlay_block_filled(accent, surface))
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -2486,6 +2490,53 @@ mod tests {
         assert!(text.contains("fast-forward"), "{text}");
         assert!(text.contains("merge commit"), "{text}");
         assert!(!text.contains("? y/n"), "{text}");
+    }
+
+    #[test]
+    fn comment_overlay_paints_caret_and_hides_idle_status() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.comment = Some(CommentPrompt::new(
+            CommentKey::WorktreeLine {
+                repo: "app".into(),
+                branch: "main".into(),
+                path: "README.md".into(),
+                line: 1,
+                end_line: 1,
+            },
+            "hello".into(),
+            "app · branch main · README.md:1".into(),
+        ));
+        state.status = "body: hello".into();
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Comment"), "{text}");
+        assert!(text.contains("hello▏"), "{text}");
+        assert!(!text.contains("▏hello"), "{text}");
+        assert_eq!(
+            text.matches("hello").count(),
+            1,
+            "typed body must not also echo as status inside the overlay:\n{text}"
+        );
+        let last = text.lines().last().unwrap_or("");
+        assert!(
+            !last.contains("? help") && !last.contains("focus right"),
+            "idle status must not paint on the last row:\n{last}"
+        );
+        assert!(
+            !text.contains("? help"),
+            "idle hint chips must not paint through the comment overlay:\n{text}"
+        );
+
+        if let Some(prompt) = state.comment.as_mut() {
+            prompt.move_home();
+        }
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let home = buffer_text(&terminal);
+        assert!(home.contains("▏hello"), "{home}");
+        assert!(!home.contains("hello▏"), "{home}");
     }
 
     #[test]

@@ -269,15 +269,43 @@ impl AppState {
             Action::CommentStart => self.begin_comment(),
             Action::CommentChar(c) => {
                 if let Some(prompt) = self.comment.as_mut() {
-                    prompt.body.push(c);
-                    self.status = format!("body: {}", prompt.body);
+                    prompt.insert_char(c);
                 }
                 Effect::None
             }
             Action::CommentBackspace => {
                 if let Some(prompt) = self.comment.as_mut() {
-                    prompt.body.pop();
-                    self.status = format!("body: {}", prompt.body);
+                    prompt.backspace();
+                }
+                Effect::None
+            }
+            Action::CommentDelete => {
+                if let Some(prompt) = self.comment.as_mut() {
+                    prompt.delete_forward();
+                }
+                Effect::None
+            }
+            Action::CommentLeft => {
+                if let Some(prompt) = self.comment.as_mut() {
+                    prompt.move_left();
+                }
+                Effect::None
+            }
+            Action::CommentRight => {
+                if let Some(prompt) = self.comment.as_mut() {
+                    prompt.move_right();
+                }
+                Effect::None
+            }
+            Action::CommentHome => {
+                if let Some(prompt) = self.comment.as_mut() {
+                    prompt.move_home();
+                }
+                Effect::None
+            }
+            Action::CommentEnd => {
+                if let Some(prompt) = self.comment.as_mut() {
+                    prompt.move_end();
                 }
                 Effect::None
             }

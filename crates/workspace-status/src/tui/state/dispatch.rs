@@ -112,6 +112,11 @@ impl AppState {
             | Action::CommentStart
             | Action::CommentChar(_)
             | Action::CommentBackspace
+            | Action::CommentDelete
+            | Action::CommentLeft
+            | Action::CommentRight
+            | Action::CommentHome
+            | Action::CommentEnd
             | Action::CommentSubmit
             | Action::CommentCancel
             | Action::ExportComments

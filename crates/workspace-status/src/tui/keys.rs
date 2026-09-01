@@ -244,10 +244,10 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
     let typing = !key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Backspace | KeyCode::Char(_));
     match mode {
-        InputMode::SearchPrompt
-        | InputMode::HelpSearch
-        | InputMode::CreateBranch
-        | InputMode::Comment => typing,
+        InputMode::SearchPrompt | InputMode::HelpSearch | InputMode::CreateBranch => typing,
+        InputMode::Comment => {
+            typing || matches!(key.code, KeyCode::Delete | KeyCode::Home | KeyCode::End)
+        }
         InputMode::BranchPicker => match key.code {
             KeyCode::Backspace => true,
             KeyCode::Char('C') => false,
@@ -423,6 +423,11 @@ fn key_to_action(
             KeyCode::Esc => Action::CommentCancel,
             KeyCode::Enter => Action::CommentSubmit,
             KeyCode::Backspace => Action::CommentBackspace,
+            KeyCode::Delete => Action::CommentDelete,
+            KeyCode::Left => Action::CommentLeft,
+            KeyCode::Right => Action::CommentRight,
+            KeyCode::Home => Action::CommentHome,
+            KeyCode::End => Action::CommentEnd,
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Action::CommentChar(c)
             }
@@ -1076,6 +1081,35 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Enter), InputMode::Comment, false, false),
             Action::CommentSubmit
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Left), InputMode::Comment, false, false),
+            Action::CommentLeft
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Right), InputMode::Comment, false, false),
+            Action::CommentRight
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Home), InputMode::Comment, false, false),
+            Action::CommentHome
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::End), InputMode::Comment, false, false),
+            Action::CommentEnd
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Delete), InputMode::Comment, false, false),
+            Action::CommentDelete
+        );
+        assert_eq!(
+            event_to_action(
+                &key(KeyCode::Char(char::from_u32(57350).unwrap())),
+                InputMode::Comment,
+                false,
+                false
+            ),
+            Action::CommentLeft
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Esc), InputMode::CommentExport, false, false),
