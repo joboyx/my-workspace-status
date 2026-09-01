@@ -78,7 +78,7 @@ use super::viewed::viewed_store_path;
 use super::viewed::{
     collect_current_fingerprints, fingerprint_file_change, is_viewed, load_viewed_store,
     reconcile_viewed, save_viewed_store, toggle_viewed, viewed_identity, viewed_row_ids,
-    ViewedStore,
+    workspace_store_id, ViewedStore,
 };
 use super::watch::{
     capture_removal_ghosts, changed_row_ids, checkout_flash_ids, commit_file_identity,
@@ -363,9 +363,10 @@ impl AppState {
         let rows = flatten_with(&tree, &folds, ascii);
         let cursor = initial_cursor(&rows);
         let signatures = tree_signatures(&tree, &cwd);
-        let viewed_store = load_viewed_store(&viewed_path);
+        let workspace_id = workspace_store_id(&cwd);
+        let viewed_store = load_viewed_store(&viewed_path, &workspace_id);
         let comment_path = comment_path_for(&viewed_path);
-        let comment_store = load_comment_store(&comment_path);
+        let comment_store = load_comment_store(&comment_path, &workspace_id);
         let mut state = Self {
             cwd,
             snapshot,
@@ -2252,7 +2253,11 @@ impl AppState {
         let identity = viewed_identity(repo, &file.path);
         let fingerprint = fingerprint_file_change(&self.cwd, repo, file);
         self.viewed_store = toggle_viewed(&self.viewed_store, &identity, &fingerprint);
-        save_viewed_store(&self.viewed_store, &self.viewed_path);
+        let _ = save_viewed_store(
+            &self.viewed_store,
+            &self.viewed_path,
+            &workspace_store_id(&self.cwd),
+        );
         if is_viewed(&self.viewed_store, &identity, &fingerprint) {
             self.reviewed.insert(row.id);
         } else {
@@ -2266,7 +2271,11 @@ impl AppState {
         let next = reconcile_viewed(&self.viewed_store, &current);
         if next != self.viewed_store {
             self.viewed_store = next;
-            save_viewed_store(&self.viewed_store, &self.viewed_path);
+            let _ = save_viewed_store(
+                &self.viewed_store,
+                &self.viewed_path,
+                &workspace_store_id(&self.cwd),
+            );
         }
         self.reviewed = viewed_row_ids(&self.snapshot, &self.viewed_store, &self.cwd);
     }
@@ -2276,7 +2285,11 @@ impl AppState {
         let next = gc_comments(&self.comment_store, &live);
         if next != self.comment_store {
             self.comment_store = next;
-            save_comment_store(&self.comment_store, &self.comment_path);
+            let _ = save_comment_store(
+                &self.comment_store,
+                &self.comment_path,
+                &workspace_store_id(&self.cwd),
+            );
         }
     }
 
@@ -2428,12 +2441,19 @@ impl AppState {
         let empty = body.trim().is_empty();
         self.comment_store =
             put_comment_entry(&self.comment_store, prompt.key, &body, prompt.resolved);
-        save_comment_store(&self.comment_store, &self.comment_path);
-        self.status = if empty {
-            "comment deleted".into()
-        } else {
-            "comment saved".into()
-        };
+        if save_comment_store(
+            &self.comment_store,
+            &self.comment_path,
+            &workspace_store_id(&self.cwd),
+        )
+        .is_ok()
+        {
+            self.status = if empty {
+                "comment deleted".into()
+            } else {
+                "comment saved".into()
+            };
+        }
         Effect::None
     }
 
@@ -5526,7 +5546,7 @@ mod tests {
 
     #[test]
     fn reviewed_persists_and_drops_on_fingerprint_change() {
-        use crate::tui::viewed::{load_viewed_store, viewed_identity};
+        use crate::tui::viewed::{load_viewed_store, viewed_identity, workspace_store_id};
         use std::fs;
         let root = std::env::temp_dir().join(format!(
             "ws-reviewed-{}",
@@ -5545,12 +5565,12 @@ mod tests {
         let id = app.focused_row().unwrap().id.clone();
         assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
         assert!(app.reviewed.contains(&id));
-        let loaded = load_viewed_store(&app.viewed_path);
+        let loaded = load_viewed_store(&app.viewed_path, &workspace_store_id(&app.cwd));
         assert!(loaded.contains_key(&viewed_identity("app", "README.md")));
         fs::write(repo_dir.join("README.md"), "# changed\n").unwrap();
         app.apply_snapshot(snapshot);
         assert!(!app.reviewed.contains(&id));
-        assert!(load_viewed_store(&app.viewed_path).is_empty());
+        assert!(load_viewed_store(&app.viewed_path, &workspace_store_id(&app.cwd)).is_empty());
         let _ = fs::remove_dir_all(&root);
     }
 

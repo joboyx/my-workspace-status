@@ -25,6 +25,7 @@ mod help;
 mod icons;
 mod keys;
 mod ops;
+pub(crate) mod persist;
 mod render;
 mod scheduler;
 pub(crate) mod search;

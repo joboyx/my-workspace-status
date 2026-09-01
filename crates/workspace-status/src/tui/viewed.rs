@@ -2,15 +2,20 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::Write;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use super::persist::persist_with_lock;
 use crate::snapshot::{FileChange, WorkspaceSnapshot};
 
-/// On-disk store version. Unknown versions load as empty.
-pub const VIEWED_STORE_VERSION: u32 = 1;
+/// On-disk store version written by save. Load accepts `1` and `2`.
+///
+/// Version `1` is a flat identity → fingerprint map (the current workspace
+/// bucket). Version `2` namespaces that map under `workspaces.<id>.entries`.
+/// Unknown versions load as empty.
+pub const VIEWED_STORE_VERSION: u32 = 2;
 
 /// Files larger than this hash size only (`huge:<len>`).
 pub const HUGE_FILE_BYTES: u64 = 1_000_000;
@@ -63,6 +68,16 @@ pub fn normalize_viewed_path(value: &str) -> String {
         out.pop();
     }
     out
+}
+
+/// Workspace identity for comment and viewed persist buckets.
+///
+/// SHA-256 hex of the canonical cwd path (posix-normalized). When
+/// canonicalize fails, the given path is hashed instead.
+pub fn workspace_store_id(cwd: &Path) -> String {
+    let raw = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let posix = normalize_viewed_path(&raw.to_string_lossy());
+    hex_encode(&Sha256::digest(posix.as_bytes()))
 }
 
 /// Stable identity: workspace-relative repo path + repo-relative file path.
@@ -145,9 +160,17 @@ pub fn reconcile_viewed(store: &ViewedStore, current: &HashMap<String, String>) 
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Default)]
 struct ViewedFile {
     version: u32,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    entries: BTreeMap<String, ViewedEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workspaces: BTreeMap<String, ViewedWorkspaceFile>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct ViewedWorkspaceFile {
     entries: BTreeMap<String, ViewedEntry>,
 }
 
@@ -156,19 +179,9 @@ struct ViewedEntry {
     fingerprint: String,
 }
 
-/// Load a viewed store. Missing or malformed files become empty.
-pub fn load_viewed_store(file_path: &Path) -> ViewedStore {
-    let Ok(text) = fs::read_to_string(file_path) else {
-        return ViewedStore::new();
-    };
-    let Ok(parsed) = serde_json::from_str::<ViewedFile>(&text) else {
-        return ViewedStore::new();
-    };
-    if parsed.version != VIEWED_STORE_VERSION {
-        return ViewedStore::new();
-    }
+fn entries_to_store(entries: BTreeMap<String, ViewedEntry>) -> ViewedStore {
     let mut out = ViewedStore::new();
-    for (key, value) in parsed.entries {
+    for (key, value) in entries {
         if !value.fingerprint.is_empty() {
             out.insert(key, value.fingerprint);
         }
@@ -176,40 +189,91 @@ pub fn load_viewed_store(file_path: &Path) -> ViewedStore {
     out
 }
 
-/// Persist `store` as versioned JSON. Best-effort: disk errors must not crash the TUI.
-pub fn save_viewed_store(store: &ViewedStore, file_path: &Path) {
-    if let Some(parent) = file_path.parent() {
-        if fs::create_dir_all(parent).is_err() {
-            return;
+fn store_to_entries(store: &ViewedStore) -> BTreeMap<String, ViewedEntry> {
+    store
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                ViewedEntry {
+                    fingerprint: v.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn load_viewed_workspaces(text: &str, workspace_id: &str) -> BTreeMap<String, ViewedStore> {
+    let Ok(parsed) = serde_json::from_str::<ViewedFile>(text) else {
+        return BTreeMap::new();
+    };
+    match parsed.version {
+        1 => {
+            let mut map = BTreeMap::new();
+            map.insert(workspace_id.to_string(), entries_to_store(parsed.entries));
+            map
         }
+        2 => parsed
+            .workspaces
+            .into_iter()
+            .map(|(id, bucket)| (id, entries_to_store(bucket.entries)))
+            .collect(),
+        _ => BTreeMap::new(),
     }
-    let file = ViewedFile {
+}
+
+fn viewed_file_v2(workspaces: BTreeMap<String, ViewedStore>) -> ViewedFile {
+    ViewedFile {
         version: VIEWED_STORE_VERSION,
-        entries: store
-            .iter()
-            .map(|(k, v)| {
+        entries: BTreeMap::new(),
+        workspaces: workspaces
+            .into_iter()
+            .map(|(id, store)| {
                 (
-                    k.clone(),
-                    ViewedEntry {
-                        fingerprint: v.clone(),
+                    id,
+                    ViewedWorkspaceFile {
+                        entries: store_to_entries(&store),
                     },
                 )
             })
             .collect(),
-    };
-    let Ok(mut body) = serde_json::to_string_pretty(&file) else {
-        return;
-    };
-    body.push('\n');
-    let tmp = file_path.with_extension("json.tmp");
-    if let Ok(mut f) = fs::File::create(&tmp) {
-        if f.write_all(body.as_bytes()).is_ok() && f.flush().is_ok() {
-            let _ = fs::rename(&tmp, file_path);
-            return;
-        }
     }
-    let _ = fs::write(file_path, body);
-    let _ = fs::remove_file(&tmp);
+}
+
+fn encode_viewed_file(file: &ViewedFile) -> io::Result<Vec<u8>> {
+    let mut body = serde_json::to_vec_pretty(file)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    body.push(b'\n');
+    Ok(body)
+}
+
+/// Load the current workspace bucket. Missing or malformed files become empty.
+pub fn load_viewed_store(file_path: &Path, workspace_id: &str) -> ViewedStore {
+    let Ok(text) = fs::read_to_string(file_path) else {
+        return ViewedStore::new();
+    };
+    load_viewed_workspaces(&text, workspace_id)
+        .remove(workspace_id)
+        .unwrap_or_default()
+}
+
+/// Persist `store` as the current workspace bucket (version 2).
+///
+/// Locks a sibling `*.lock` file, keeps every other workspace bucket, then
+/// atomic-writes. Disk errors return [`io::Result`].
+pub fn save_viewed_store(
+    store: &ViewedStore,
+    file_path: &Path,
+    workspace_id: &str,
+) -> io::Result<()> {
+    persist_with_lock(file_path, |existing| {
+        let mut workspaces = match existing.and_then(|bytes| std::str::from_utf8(bytes).ok()) {
+            Some(text) => load_viewed_workspaces(text, workspace_id),
+            None => BTreeMap::new(),
+        };
+        workspaces.insert(workspace_id.to_string(), store.clone());
+        encode_viewed_file(&viewed_file_v2(workspaces))
+    })
 }
 
 /// Worktree bytes (or `missing` / `huge:<len>`) hashed with the status token.
@@ -287,6 +351,14 @@ mod tests {
             viewed_identity("./demo/", "src\\\\a.ts"),
             viewed_identity("demo", "src/a.ts")
         );
+    }
+
+    #[test]
+    fn workspace_store_id_is_stable_hex() {
+        let id = workspace_store_id(Path::new("/tmp"));
+        assert_eq!(id.len(), 64);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(id, workspace_store_id(Path::new("/tmp")));
     }
 
     #[test]
@@ -424,18 +496,132 @@ mod tests {
         });
         let json = "{\n  \"version\": 1,\n  \"entries\": {\n    \"demo\\u0000src/a.ts\": {\n      \"fingerprint\": \"67da1a55766001c9402f9ca0bcf83d79c6793d1633d3dbff4bafe342c363531e\"\n    }\n  }\n}\n";
         fs::write(&file, json).unwrap();
-        let loaded = load_viewed_store(&file);
+        let loaded = load_viewed_store(&file, "test-ws");
         assert_eq!(
             loaded.get(&identity).map(String::as_str),
             Some(fingerprint.as_str())
         );
-        save_viewed_store(&loaded, &file);
-        let again = load_viewed_store(&file);
+        save_viewed_store(&loaded, &file, "test-ws").unwrap();
+        let again = load_viewed_store(&file, "test-ws");
         assert_eq!(again, loaded);
-        assert!(load_viewed_store(&dir.join("missing.json")).is_empty());
+        assert!(load_viewed_store(&dir.join("missing.json"), "test-ws").is_empty());
         let blocker = dir.join("not-a-dir");
         fs::write(&blocker, "x").unwrap();
-        save_viewed_store(&loaded, &blocker.join("viewed-files.json"));
+        let _ = save_viewed_store(&loaded, &blocker.join("viewed-files.json"), "test-ws");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn temp_viewed(prefix: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "{prefix}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("viewed-files.json");
+        (dir, file)
+    }
+
+    fn sample_mark(path: &str) -> (String, String) {
+        let identity = viewed_identity("demo", path);
+        let fingerprint = viewed_fingerprint(ViewedFingerprintInput {
+            staged_status: None,
+            unstaged_status: Some("M"),
+            untracked: false,
+            old_path: None,
+            content: b"x\n",
+        });
+        (identity, fingerprint)
+    }
+
+    #[test]
+    fn reconcile_persist_keeps_other_workspace_marks() {
+        let (dir, file) = temp_viewed("ws-viewed-gc");
+        let (id_a, fp_a) = sample_mark("a.ts");
+        let (id_b, fp_b) = sample_mark("b.ts");
+        let store_a = toggle_viewed(&ViewedStore::new(), &id_a, &fp_a);
+        let store_b = toggle_viewed(&ViewedStore::new(), &id_b, &fp_b);
+        save_viewed_store(&store_a, &file, "ws-a").unwrap();
+        save_viewed_store(&store_b, &file, "ws-b").unwrap();
+        let gced = reconcile_viewed(&store_a, &HashMap::new());
+        save_viewed_store(&gced, &file, "ws-a").unwrap();
+        let loaded_b = load_viewed_store(&file, "ws-b");
+        assert_eq!(
+            loaded_b.get(&id_b).map(String::as_str),
+            Some(fp_b.as_str()),
+            "reconcile of workspace A must not drop or replace workspace B"
+        );
+        assert!(
+            load_viewed_store(&file, "ws-a").is_empty(),
+            "empty current set must drop workspace A marks"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_viewed_store_returns_err_when_unwritable() {
+        let (dir, _) = temp_viewed("ws-viewed-err");
+        let blocker = dir.join("not-a-dir");
+        fs::write(&blocker, "x").unwrap();
+        let (identity, fingerprint) = sample_mark("a.ts");
+        let store = toggle_viewed(&ViewedStore::new(), &identity, &fingerprint);
+        let result = save_viewed_store(&store, &blocker.join("viewed-files.json"), "ws-a");
+        assert!(
+            result.is_err(),
+            "save to an unwritable path must return Err, got {result:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_version_1_viewed_as_current_workspace_bucket() {
+        let (dir, file) = temp_viewed("ws-viewed-v1");
+        let (identity, fingerprint) = sample_mark("src/a.ts");
+        fs::write(
+            &file,
+            "{\n  \"version\": 1,\n  \"entries\": {\n    \"demo\\u0000src/a.ts\": {\n      \"fingerprint\": \"67da1a55766001c9402f9ca0bcf83d79c6793d1633d3dbff4bafe342c363531e\"\n    }\n  }\n}\n",
+        )
+        .unwrap();
+        let loaded = load_viewed_store(&file, "ws-current");
+        assert_eq!(
+            loaded.get(&identity).map(String::as_str),
+            Some(fingerprint.as_str()),
+            "version-1 file must load as the current workspace bucket"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_viewed_store_merges_other_workspace_bucket() {
+        let (dir, file) = temp_viewed("ws-viewed-merge");
+        let (id_a, fp_a) = sample_mark("a.ts");
+        let (id_b, fp_b) = sample_mark("b.ts");
+        fs::write(
+            &file,
+            format!(
+                "{{\n  \"version\": 2,\n  \"workspaces\": {{\n    \"ws-b\": {{\n      \"entries\": {{\n        {}: {{\n          \"fingerprint\": \"{}\"\n        }}\n      }}\n    }}\n  }}\n}}\n",
+                serde_json::to_string(&id_b).unwrap(),
+                fp_b
+            ),
+        )
+        .unwrap();
+        let store_a = toggle_viewed(&ViewedStore::new(), &id_a, &fp_a);
+        save_viewed_store(&store_a, &file, "ws-a").unwrap();
+        assert_eq!(
+            load_viewed_store(&file, "ws-a")
+                .get(&id_a)
+                .map(String::as_str),
+            Some(fp_a.as_str())
+        );
+        assert_eq!(
+            load_viewed_store(&file, "ws-b")
+                .get(&id_b)
+                .map(String::as_str),
+            Some(fp_b.as_str()),
+            "persist of workspace A must keep workspace B"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
