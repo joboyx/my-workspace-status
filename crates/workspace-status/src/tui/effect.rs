@@ -415,6 +415,9 @@ impl Interpreter {
                 self.commit_diff = Some((gen, repo, source, path));
                 self.sched.enqueue_user_front(UserTag::Pane);
             }
+            Effect::DropCommitDiff => {
+                let _ = self.sched.request_commit_diff();
+            }
             Effect::CopyClipboard { text } => {
                 comments::copy_to_clipboard(&text);
                 self.mark();

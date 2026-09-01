@@ -428,7 +428,7 @@ impl Scheduler {
         gen == self.commit_files_latest
     }
 
-    /// Bump the commit-diff generation on each `LoadCommitDiff`.
+    /// Bump the commit-diff generation on each `LoadCommitDiff` or `DropCommitDiff`.
     pub fn request_commit_diff(&mut self) -> u64 {
         let id = self.next_commit_diff_id;
         self.next_commit_diff_id += 1;
