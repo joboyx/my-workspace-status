@@ -30,7 +30,7 @@ use super::app::{
     apply_checkout_compute, apply_merge_compute, apply_one_repo_snapshot, apply_right_pane_load,
     commit_diff_list, compute_checkout, compute_commit_diff, compute_commit_files, compute_merge,
     compute_reload_repo, discover_config, drop_undiscovered_checkouts, filter_repo_set,
-    focused_repo_needs_pane, RightPaneRequest, RightPaneTarget, TuiOpts,
+    focused_repo_needs_pane, RightPaneLoad, RightPaneRequest, RightPaneTarget, TuiOpts,
 };
 use super::comments;
 use super::drill::{CommitFileSource, DrillView};
@@ -605,6 +605,10 @@ impl Interpreter {
                 let accepted = self.sched.accept_pane_result(req_id);
                 let current = RightPaneRequest::from_state(state).target();
                 if accepted && target == current {
+                    if matches!(&load, RightPaneLoad::Graph { .. }) {
+                        let _ = self.sched.request_autoload();
+                        state.graph_loading_older = false;
+                    }
                     apply_right_pane_load(state, load);
                     self.mark();
                 } else if current != target {
@@ -1728,6 +1732,70 @@ mod tests {
             ids,
             vec!["aaa"],
             "stale autoload gen must not merge when live identity still matches"
+        );
+    }
+
+    #[test]
+    fn late_autoload_after_same_identity_pane_graph_does_not_merge() {
+        let mut state = fixture_state();
+        focus_repo(&mut state, "app");
+        state.drill = DrillView::Graph;
+        state.graph = Some(mini_graph(&["aaa"]));
+        state.graph_identity = Some(("app".into(), "head-app".into()));
+        state.graph_loading_older = true;
+        let mut interp = Interpreter::new();
+        let autoload_gen = interp.sched.request_autoload();
+        let pane_id = interp.sched.request_pane();
+        let target = RightPaneRequest::from_state(&state).target();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::RightPane {
+                req_id: pane_id,
+                target,
+                load: RightPaneLoad::Graph {
+                    model: mini_graph(&["bbb"]),
+                    identity: GraphIdentity {
+                        repo: "app".into(),
+                        head: "head-app".into(),
+                    },
+                    files: None,
+                },
+            },
+        );
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::Autoload {
+                gen: autoload_gen,
+                page: mini_graph(&["zzz"]),
+                identity: GraphIdentity {
+                    repo: "app".into(),
+                    head: "head-app".into(),
+                },
+                prev_status: String::new(),
+            },
+        );
+        assert_eq!(
+            state.graph_identity,
+            Some(("app".into(), "head-app".into()))
+        );
+        let ids: Vec<_> = state
+            .graph
+            .as_ref()
+            .unwrap()
+            .commits
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["bbb"],
+            "late Autoload must not merge the old window into a same-identity pane replace"
+        );
+        assert!(
+            !state.graph_loading_older,
+            "pane graph replace must clear graph_loading_older"
         );
     }
 

@@ -401,7 +401,8 @@ impl Scheduler {
         self.pane_latest
     }
 
-    /// Bump the autoload generation on each enqueue.
+    /// Bump the autoload generation on each enqueue, and when a pane
+    /// load replaces the graph window.
     pub fn request_autoload(&mut self) -> u64 {
         let id = self.next_autoload_id;
         self.next_autoload_id += 1;
