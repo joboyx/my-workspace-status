@@ -1916,3 +1916,77 @@ fn graph_branch_focus_hides_unrelated_history_and_clears() {
     assert_contains(&restored, "focus-root-commit");
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn semicolon_reopens_covering_range_on_marked_line() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    tui.tab();
+    assert!(
+        tui.focus_is_right() && tui.right_is_diff(),
+        "Tab focuses the dirty README diff:\n{}",
+        tui.frame()
+    );
+    tui.key('V');
+    tui.key('j');
+    tui.key('j');
+    tui.key('j');
+    assert_contains(&tui.frame(), "VISUAL");
+    tui.key(';');
+    let overlay = tui.frame();
+    assert_contains(&overlay, "README.md:1-2");
+    for c in "range-note-e2e".chars() {
+        tui.key(c);
+    }
+    tui.enter();
+    let saved = tui.frame();
+    assert_contains(&saved, "comment saved");
+    assert_absent(&saved, "VISUAL");
+    tui.key(';');
+    let reopen = tui.frame();
+    assert_contains(&reopen, "README.md:1-2");
+    assert_contains(&reopen, "range-note-e2e");
+    for _ in 0.."range-note-e2e".len() {
+        tui.backspace();
+    }
+    tui.enter();
+    let deleted = tui.frame();
+    assert_contains(&deleted, "comment deleted");
+    tui.key(';');
+    let empty = tui.frame();
+    assert_absent(&empty, "README.md:1-2");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn watch_tick_drops_visual_so_semicolon_is_one_line() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    tui.tab();
+    tui.key('V');
+    tui.key('j');
+    tui.key('j');
+    tui.key('j');
+    assert_contains(&tui.frame(), "VISUAL");
+    fs::write(
+        workspace.join("app").join("README.md"),
+        "# app\ndirty\nwatch-extra-line\n",
+    )
+    .unwrap();
+    tui.watch_tick();
+    let after = tui.frame();
+    assert_contains(&after, "watch-extra-line");
+    assert_absent(&after, "VISUAL");
+    tui.key(';');
+    let overlay = tui.frame();
+    assert_contains(&overlay, "Comment");
+    assert_absent(&overlay, "README.md:1-2");
+    assert_absent(&overlay, "README.md:1-3");
+    for c in "watch-span-e2e".chars() {
+        tui.key(c);
+    }
+    tui.enter();
+    let saved = tui.frame();
+    assert_contains(&saved, "comment saved");
+    let _ = fs::remove_dir_all(root);
+}

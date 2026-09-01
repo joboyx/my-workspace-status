@@ -30,10 +30,10 @@ use super::branches::{
 #[cfg(not(test))]
 use super::comments::comment_store_path;
 use super::comments::{
-    collect_live_set, comment_key_label, comments_in_focus_scope, export_markdown, gc_comments,
-    load_comment_store, put_comment, resolve_comment_target, save_comment_store,
-    viewport_line_number, viewport_line_range, CommentExport, CommentExportList, CommentKey,
-    CommentPrompt, CommentStore,
+    collect_live_set, comment_key_label, comments_in_focus_scope, covering_line_comment,
+    export_markdown, gc_comments, load_comment_store, put_comment, resolve_comment_target,
+    save_comment_store, viewport_line_number, viewport_line_range, CommentExport,
+    CommentExportList, CommentKey, CommentPrompt, CommentStore,
 };
 use super::commit_files::{
     ancestor_dir_ids, collect_foldable_subtree_ids as collect_commit_subtree_ids,
@@ -286,6 +286,11 @@ pub struct AppState {
     pub comment_export: Option<CommentExport>,
     /// Visual-line anchor on a focused file diff (`V`). Cursor is the other end.
     pub diff_visual_anchor: Option<usize>,
+    /// Painted rows captured when visual-line highlight started.
+    ///
+    /// Highlight drops when this list no longer matches
+    /// [`Self::current_diff_rows`] (watch reload, split/inline, resize).
+    diff_visual_rows: Option<Vec<DiffRow>>,
     pub layout: LayoutHit,
     pub ascii: bool,
     pub search_mode: bool,
@@ -397,6 +402,7 @@ impl AppState {
             comment: None,
             comment_export: None,
             diff_visual_anchor: None,
+            diff_visual_rows: None,
             layout: LayoutHit::default(),
             ascii,
             search_mode: false,
@@ -1562,6 +1568,7 @@ impl AppState {
             DiffMode::SideBySide => "Diff: split".into(),
             DiffMode::Inline => "Diff: inline".into(),
         };
+        self.drop_stale_diff_visual();
         Effect::None
     }
 
@@ -1638,6 +1645,7 @@ impl AppState {
         }
         self.apply_pending_hunk_anchor();
         self.sync_diff_scroll();
+        self.drop_stale_diff_visual();
         if self.drill.is_graph() {
             self.graph = None;
         }
@@ -1785,6 +1793,7 @@ impl AppState {
         }
         self.apply_pending_hunk_anchor();
         self.sync_diff_scroll();
+        self.drop_stale_diff_visual();
     }
 
     fn reset_diff_viewport(&mut self) {
@@ -2285,13 +2294,14 @@ impl AppState {
                     _ => (self.diff_repo.as_deref(), self.diff_path.as_deref()),
                 };
                 let rows = self.current_diff_rows();
+                let visual = self.diff_visual_anchor.is_some();
                 let (line, end_line) = if let Some(anchor) = self.diff_visual_anchor {
                     viewport_line_range(&rows, anchor, self.diff_cursor)?
                 } else {
                     let line = viewport_line_number(&rows, self.diff_cursor as u16)?;
                     (line, line)
                 };
-                resolve_comment_target(
+                let key = resolve_comment_target(
                     &self.snapshot,
                     None,
                     None,
@@ -2302,7 +2312,12 @@ impl AppState {
                     source,
                     Some(line),
                     Some(end_line),
-                )
+                )?;
+                if visual {
+                    Some(key)
+                } else {
+                    Some(covering_line_comment(&self.comment_store, &key).unwrap_or(key))
+                }
             }
             ListFocusTarget::Graph => {
                 let repo = self.focused_graph_repo();
@@ -2338,6 +2353,19 @@ impl AppState {
 
     pub(crate) fn clear_diff_visual(&mut self) {
         self.diff_visual_anchor = None;
+        self.diff_visual_rows = None;
+    }
+
+    /// Drop visual-line highlight when the painted row list changed.
+    pub(crate) fn drop_stale_diff_visual(&mut self) {
+        if self.diff_visual_anchor.is_none() {
+            return;
+        }
+        let current = self.current_diff_rows();
+        match self.diff_visual_rows.as_ref() {
+            Some(snapshot) if snapshot == &current => {}
+            _ => self.clear_diff_visual(),
+        }
     }
 
     /// True when visual-line highlight includes painted diff row `idx`.
@@ -2362,6 +2390,7 @@ impl AppState {
         self.help_open = false;
         self.comment_export = None;
         self.diff_visual_anchor = Some(self.diff_cursor);
+        self.diff_visual_rows = Some(self.current_diff_rows());
         self.status.clear();
         Effect::None
     }
@@ -3075,9 +3104,6 @@ impl AppState {
             return;
         }
         self.diff_cursor = self.diff_cursor.min(n - 1);
-        if let Some(anchor) = self.diff_visual_anchor {
-            self.diff_visual_anchor = Some(anchor.min(n - 1));
-        }
         let (start, _) = visible_window(n, self.diff_cursor, self.diff_body_height());
         self.diff_scroll = start as u16;
     }
@@ -7794,5 +7820,161 @@ mod tests {
         app.dispatch(Action::ToggleMouse);
         assert!(app.mouse_enabled);
         assert!(app.status.contains("on"));
+    }
+
+    fn two_line_readme() -> DiffContent {
+        DiffContent::from_unified("@@ -1 +1,2 @@\n # app\n+dirty\n")
+    }
+
+    fn three_line_readme() -> DiffContent {
+        DiffContent::from_unified("@@ -1 +1,3 @@\n # app\n+dirty\n+watch-extra-line\n")
+    }
+
+    fn numbered_diff_rows(app: &AppState) -> Vec<(usize, u32)> {
+        app.current_diff_rows()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, row)| {
+                let n = match row {
+                    DiffRow::Line { left, right } => {
+                        right.as_ref().and_then(|c| c.line_no).or(left.line_no)
+                    }
+                    _ => None,
+                };
+                n.map(|line| (i, line))
+            })
+            .collect()
+    }
+
+    fn focus_readme_diff(app: &mut AppState, content: DiffContent) {
+        focus_file(app, "README.md");
+        app.focus = FocusPane::Right;
+        app.set_diff("app".into(), "README.md".into(), content);
+    }
+
+    #[test]
+    fn semicolon_without_visual_opens_covering_range() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_line_readme());
+        let numbered = numbered_diff_rows(&app);
+        let line2 = numbered
+            .iter()
+            .find(|(_, line)| *line == 2)
+            .map(|(idx, _)| *idx)
+            .expect("line 2");
+        let range = CommentKey::WorktreeLine {
+            repo: "app".into(),
+            branch: "main".into(),
+            path: "README.md".into(),
+            line: 1,
+            end_line: 2,
+        };
+        app.comment_store = put_comment(&app.comment_store, range.clone(), "range-note");
+        app.diff_cursor = line2;
+        app.dispatch(Action::CommentStart);
+        let prompt = app.comment.take().expect("covering overlay");
+        assert_eq!(prompt.key, range);
+        assert_eq!(prompt.body, "range-note");
+        assert!(prompt.label.contains("1-2"));
+        app.comment = Some(CommentPrompt {
+            key: prompt.key,
+            body: String::new(),
+            label: prompt.label,
+        });
+        app.dispatch(Action::CommentSubmit);
+        assert!(app.comment_store.get(&range).is_none());
+        assert_eq!(app.status, "comment deleted");
+    }
+
+    #[test]
+    fn visual_semicolon_keeps_highlight_span() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_line_readme());
+        let numbered = numbered_diff_rows(&app);
+        assert!(numbered.len() >= 2);
+        let one_line = CommentKey::WorktreeLine {
+            repo: "app".into(),
+            branch: "main".into(),
+            path: "README.md".into(),
+            line: numbered[1].1,
+            end_line: numbered[1].1,
+        };
+        app.comment_store = put_comment(&app.comment_store, one_line, "one");
+        app.diff_cursor = numbered[0].0;
+        app.dispatch(Action::DiffVisualStart);
+        app.diff_cursor = numbered[1].0;
+        app.dispatch(Action::CommentStart);
+        let prompt = app.comment.expect("visual overlay");
+        match prompt.key {
+            CommentKey::WorktreeLine { line, end_line, .. } => {
+                assert_eq!(line, numbered[0].1.min(numbered[1].1));
+                assert_eq!(end_line, numbered[0].1.max(numbered[1].1));
+                assert_ne!(line, end_line);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(prompt.body.is_empty());
+    }
+
+    #[test]
+    fn set_diff_same_file_new_rows_drops_visual() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_line_readme());
+        let numbered = numbered_diff_rows(&app);
+        assert!(numbered.len() >= 2);
+        app.diff_cursor = numbered[0].0;
+        app.dispatch(Action::DiffVisualStart);
+        app.diff_cursor = numbered[1].0;
+        assert!(app.diff_visual_anchor.is_some());
+        app.set_diff("app".into(), "README.md".into(), two_line_readme());
+        assert!(
+            app.diff_visual_anchor.is_some(),
+            "identical rows must keep highlight"
+        );
+        app.set_diff("app".into(), "README.md".into(), three_line_readme());
+        assert!(
+            app.diff_visual_anchor.is_none(),
+            "new painted rows must drop highlight"
+        );
+        app.dispatch(Action::CommentStart);
+        let prompt = app.comment.expect("single-line overlay");
+        match prompt.key {
+            CommentKey::WorktreeLine { line, end_line, .. } => {
+                assert_eq!(line, end_line, "must not store a stale visual span");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn toggle_diff_mode_and_commit_diff_drop_visual() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_line_readme());
+        app.layout.diff_pane_width = 110;
+        app.dispatch(Action::DiffVisualStart);
+        assert!(app.diff_visual_anchor.is_some());
+        app.dispatch(Action::ToggleDiffMode);
+        assert!(
+            app.diff_visual_anchor.is_none(),
+            "split/inline row list change must drop highlight"
+        );
+
+        focus_readme_diff(&mut app, two_line_readme());
+        app.dispatch(Action::DiffVisualStart);
+        assert!(app.diff_visual_anchor.is_some());
+        app.open_commit_diff(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            sample_commit_files(),
+            0,
+            "README.md".into(),
+            three_line_readme(),
+        );
+        assert!(
+            app.diff_visual_anchor.is_none(),
+            "commit diff row list change must drop highlight"
+        );
     }
 }

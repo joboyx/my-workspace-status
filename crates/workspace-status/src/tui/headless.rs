@@ -18,6 +18,7 @@ use crate::snapshot::WorkspaceSnapshot;
 
 use super::action::{Action, Effect};
 use super::app::{collect_full_snapshot, TuiOpts};
+use super::comments::CommentStore;
 use super::effect::Interpreter;
 use super::keys::event_to_action_with;
 use super::render::draw;
@@ -61,6 +62,7 @@ impl HeadlessTui {
         config: WorkspaceStatusConfig,
     ) -> Self {
         let viewed_path = unique_viewed_path();
+        let comment_path = viewed_path.with_file_name("comments.json");
         let opts = TuiOpts {
             cwd: cwd.clone(),
             snapshot: snapshot.clone(),
@@ -68,6 +70,8 @@ impl HeadlessTui {
             start_fetch: false,
         };
         let mut state = AppState::with_viewed_path(cwd, snapshot, false, viewed_path);
+        state.comment_path = comment_path;
+        state.comment_store = CommentStore::new();
         let mut interp = Interpreter::new();
         interp.interpret_sync(&mut state, &opts, Effect::LoadRightPane, &Action::None);
         let mut session = Self {
@@ -145,6 +149,11 @@ impl HeadlessTui {
     /// Send Enter.
     pub fn enter(&mut self) {
         self.send(KeyCode::Enter);
+    }
+
+    /// Send Backspace.
+    pub fn backspace(&mut self) {
+        self.send(KeyCode::Backspace);
     }
 
     /// Send Esc.

@@ -835,6 +835,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    state.drop_stale_diff_visual();
     let palette = state.theme.palette();
     let path = state.diff_header_path();
     let effective = effective_diff_mode(state.diff_mode, area.width);

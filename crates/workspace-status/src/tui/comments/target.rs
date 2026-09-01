@@ -895,6 +895,77 @@ pub fn diff_line_has_comment(
     }
 }
 
+/// Stored line comment that covers the probe line on the same file.
+///
+/// Without visual-line highlight, `;` opens this key when one exists so
+/// the overlay matches the `"` glyph. Visual-line `;` keeps the highlight
+/// span and does not call this.
+///
+/// Overlap: smallest inclusive span, then lowest start line, then
+/// [`CommentKey`] order. A one-line comment on that line wins over a
+/// wider range.
+pub fn covering_line_comment(store: &CommentStore, probe: &CommentKey) -> Option<CommentKey> {
+    let n = match probe {
+        CommentKey::WorktreeLine { line, .. } | CommentKey::CommitLine { line, .. } => *line,
+        _ => return None,
+    };
+    store
+        .keys()
+        .filter(|key| same_file_line_comment(key, probe) && key.covers_line(n))
+        .min_by(|a, b| {
+            line_span_len(a)
+                .cmp(&line_span_len(b))
+                .then_with(|| line_span_start(a).cmp(&line_span_start(b)))
+                .then_with(|| a.cmp(b))
+        })
+        .cloned()
+}
+
+fn same_file_line_comment(a: &CommentKey, b: &CommentKey) -> bool {
+    match (a, b) {
+        (
+            CommentKey::WorktreeLine {
+                repo, branch, path, ..
+            },
+            CommentKey::WorktreeLine {
+                repo: repo2,
+                branch: branch2,
+                path: path2,
+                ..
+            },
+        ) => repo == repo2 && branch == branch2 && path == path2,
+        (
+            CommentKey::CommitLine {
+                repo, sha, path, ..
+            },
+            CommentKey::CommitLine {
+                repo: repo2,
+                sha: sha2,
+                path: path2,
+                ..
+            },
+        ) => repo == repo2 && sha == sha2 && path == path2,
+        _ => false,
+    }
+}
+
+fn line_span_len(key: &CommentKey) -> u32 {
+    match key {
+        CommentKey::WorktreeLine { line, end_line, .. }
+        | CommentKey::CommitLine { line, end_line, .. } => {
+            end_line.saturating_sub(*line).saturating_add(1)
+        }
+        _ => u32::MAX,
+    }
+}
+
+fn line_span_start(key: &CommentKey) -> u32 {
+    match key {
+        CommentKey::WorktreeLine { line, .. } | CommentKey::CommitLine { line, .. } => *line,
+        _ => u32::MAX,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::store::{put_comment, CommentKey, CommentStore};
@@ -1125,6 +1196,48 @@ mod tests {
         assert_eq!(viewport_line_range(&rows, 0, 0), None);
         assert_eq!(viewport_line_range(&[], 0, 0), None);
         let _ = DiffContent::default();
+    }
+
+    fn worktree_line(line: u32, end_line: u32) -> CommentKey {
+        CommentKey::WorktreeLine {
+            repo: "app".into(),
+            branch: "main".into(),
+            path: "README.md".into(),
+            line,
+            end_line,
+        }
+    }
+
+    #[test]
+    fn covering_line_picks_tightest_then_lowest_start() {
+        let probe = worktree_line(2, 2);
+        let wide = worktree_line(1, 4);
+        let mid = worktree_line(2, 3);
+        let one = worktree_line(2, 2);
+        let other_file = CommentKey::WorktreeLine {
+            repo: "app".into(),
+            branch: "main".into(),
+            path: "other.md".into(),
+            line: 1,
+            end_line: 4,
+        };
+        let mut store = CommentStore::new();
+        store = put_comment(&store, wide.clone(), "wide");
+        store = put_comment(&store, other_file, "other");
+        assert_eq!(covering_line_comment(&store, &probe), Some(wide.clone()));
+        store = put_comment(&store, mid.clone(), "mid");
+        assert_eq!(covering_line_comment(&store, &probe), Some(mid.clone()));
+        store = put_comment(&store, one.clone(), "one");
+        assert_eq!(covering_line_comment(&store, &probe), Some(one));
+
+        let left = worktree_line(1, 3);
+        let right = worktree_line(2, 4);
+        let mut tied = CommentStore::new();
+        tied = put_comment(&tied, right, "right");
+        tied = put_comment(&tied, left.clone(), "left");
+        assert_eq!(covering_line_comment(&tied, &probe), Some(left));
+        assert!(covering_line_comment(&CommentStore::new(), &probe).is_none());
+        assert!(covering_line_comment(&store, &worktree_line(9, 9)).is_none());
     }
 
     #[test]
