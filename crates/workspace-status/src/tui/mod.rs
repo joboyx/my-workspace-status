@@ -40,6 +40,7 @@ pub(crate) mod watch;
 
 pub use app::{collect_full_snapshot, run_tui, TuiOpts};
 pub use headless::HeadlessTui;
+pub use viewed::workspace_store_id;
 
 /// CLI flags that decide TUI vs headless. Testable without a real TTY.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

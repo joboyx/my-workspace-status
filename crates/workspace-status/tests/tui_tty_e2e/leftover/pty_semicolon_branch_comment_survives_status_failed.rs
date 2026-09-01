@@ -58,6 +58,42 @@ fn copy_tree(src: &Path, dst: &Path) {
     }
 }
 
+/// After a tree copy, version-2 buckets still use the source cwd hash.
+/// Rename the sole `workspaces` key to the destination cwd identity.
+fn remap_copied_store_workspace(store_path: &Path, cwd: &Path) {
+    let Ok(text) = fs::read_to_string(store_path) else {
+        return;
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    let Some(workspaces) = value.get_mut("workspaces").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+    if workspaces.len() != 1 {
+        return;
+    }
+    let old_key = workspaces.keys().next().cloned().unwrap();
+    let new_id = workspace_status::tui::workspace_store_id(cwd);
+    if old_key == new_id {
+        return;
+    }
+    let bucket = workspaces.remove(&old_key).unwrap();
+    workspaces.insert(new_id, bucket);
+    let mut body = serde_json::to_vec_pretty(&value).expect("encode remapped store");
+    body.push(b'\n');
+    fs::write(store_path, body)
+        .unwrap_or_else(|err| panic!("write remapped {}: {err}", store_path.display()));
+}
+
+fn remap_copied_workspace_stores(workspace: &Path) {
+    remap_copied_store_workspace(&comment_store(workspace), workspace);
+    let viewed = workspace.join(".e2e-state").join("viewed-files.json");
+    if viewed.exists() {
+        remap_copied_store_workspace(&viewed, workspace);
+    }
+}
+
 fn store_kept_branch_comment(workspace: &Path) {
     let stored = store_text(workspace);
     assert!(
@@ -112,6 +148,7 @@ fn pty_semicolon_branch_comment_survives_status_failed() {
     let launch_root = unique_root("ws-tui-e2e-comment-status-failed-launch");
     let launch_ws = launch_root.join("workspace");
     copy_tree(&workspace, &launch_ws);
+    remap_copied_workspace_stores(&launch_ws);
     assert!(
         launch_ws.is_dir(),
         "launch copy must exist: {}",
