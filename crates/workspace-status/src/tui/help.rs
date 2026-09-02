@@ -166,7 +166,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: "m",
-                desc: "mouse · drag pane, split, or graph scrollbars",
+                desc: "mouse · pane/split/graph",
             },
             HelpEntry {
                 keys: "; Ctrl-R",
@@ -177,8 +177,12 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "highlight diff lines for ; comment",
             },
             HelpEntry {
-                keys: "y '",
-                desc: "copy comments / entity ref",
+                keys: "y",
+                desc: "copy comments as markdown",
+            },
+            HelpEntry {
+                keys: "'",
+                desc: "copy entity reference",
             },
             HelpEntry {
                 keys: "Esc",
@@ -572,7 +576,9 @@ mod tests {
         assert!(view_keys.contains(&"m"));
         assert!(view_keys.contains(&"; Ctrl-R"));
         assert!(view_keys.contains(&"V"));
-        assert!(view_keys.contains(&"y '"));
+        assert!(view_keys.contains(&"y"));
+        assert!(view_keys.contains(&"'"));
+        assert!(!view_keys.contains(&"y '"));
         assert!(view_keys.contains(&"Esc"));
         assert!(help_match_indices("quit")
             .iter()
@@ -597,6 +603,10 @@ mod tests {
             "narrow terminals wrap more and take more rows"
         );
         assert!(HELP_KEY_WIDTH >= 18);
+        assert!(
+            help_status_lines(140) <= 32,
+            "leftover 140×32 PTY must still paint Ctrl-C Ctrl-C"
+        );
     }
 
     #[test]

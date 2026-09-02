@@ -2539,6 +2539,39 @@ mod tests {
             Some(EntityRef::Worktree { path, .. }) => assert_eq!(path, "app"),
             other => panic!("{other:?}"),
         }
+        let worktree = GraphRow::Worktree(workspace_status_graph::Worktree {
+            path: "app".into(),
+            head_id: None,
+            branch: Some("main".into()),
+            ignored: false,
+            is_current: false,
+        });
+        match resolve_entity_reference(
+            &snapshot,
+            None,
+            Some(&worktree),
+            Some("app"),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            DiffSide::Unified,
+            None,
+            None,
+            None,
+        ) {
+            Some(entity) => {
+                assert!(
+                    matches!(&entity, EntityRef::Worktree { path, .. } if path == "app"),
+                    "{entity:?}"
+                );
+                let text = super::super::format_entity_reference(&entity);
+                assert!(text.starts_with("kind: worktree\n"), "{text}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
