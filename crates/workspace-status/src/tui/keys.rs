@@ -458,11 +458,13 @@ fn key_to_action(
 /// Visual-line keys on a focused file diff.
 ///
 /// `j` / `k` / arrows move (and extend the range). `;` comments that
-/// range. Esc or a second `V` leaves highlight without commenting.
+/// range. `'` copies an entity reference for the highlighted span. Esc or a
+/// second `V` leaves highlight without commenting.
 fn diff_visual_key(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Esc | KeyCode::Char('V') => Action::DiffVisualCancel,
         KeyCode::Char(';') => Action::CommentStart,
+        KeyCode::Char('\'') => Action::CopyEntityReference,
         KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::Move(1),
         KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::Move(-1),
         KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => Action::PanDiff(-1),
@@ -533,6 +535,7 @@ fn normal_key(
         KeyCode::Char(';') => Action::CommentStart,
         KeyCode::Char('V') => Action::DiffVisualStart,
         KeyCode::Char('y') => Action::ExportComments,
+        KeyCode::Char('\'') => Action::CopyEntityReference,
         KeyCode::Char('n') if search_active => Action::SearchNext,
         KeyCode::Char('N') if search_active => Action::SearchPrev,
         KeyCode::Tab => {
@@ -767,6 +770,10 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Char('s')), mode, false, false),
             Action::SearchChar('s')
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('\'')), mode, false, false),
+            Action::SearchChar('\'')
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Enter), mode, false, false),
@@ -1031,6 +1038,10 @@ mod tests {
             Action::CommentStart
         );
         assert_eq!(
+            event_to_action(&key(KeyCode::Char('\'')), normal(), false, false),
+            Action::CopyEntityReference
+        );
+        assert_eq!(
             event_to_action(&key(KeyCode::Char('V')), normal(), true, true),
             Action::DiffVisualStart
         );
@@ -1049,6 +1060,10 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Char(';')), InputMode::DiffVisual, true, true),
             Action::CommentStart
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('\'')), InputMode::DiffVisual, true, true),
+            Action::CopyEntityReference
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('j')), InputMode::DiffVisual, true, true),
@@ -1082,6 +1097,10 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Char('y')), normal(), false, false),
             Action::ExportComments
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('\'')), InputMode::Comment, false, false),
+            Action::CommentInput(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Enter), InputMode::Comment, false, false),

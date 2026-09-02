@@ -418,8 +418,15 @@ impl Interpreter {
             Effect::DropCommitDiff => {
                 let _ = self.sched.request_commit_diff();
             }
-            Effect::CopyClipboard { text } => {
-                comments::copy_to_clipboard(&text);
+            Effect::CopyClipboard { text, announce } => {
+                let ok = comments::copy_to_clipboard(&text);
+                if announce {
+                    state.status = if ok {
+                        "copied".into()
+                    } else {
+                        "copy failed".into()
+                    };
+                }
                 self.mark();
             }
         }

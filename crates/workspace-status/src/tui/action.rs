@@ -128,6 +128,8 @@ pub enum Action {
     /// Copy focused-scope comments as markdown (`y`).
     ExportComments,
     ExportCommentsCancel,
+    /// Copy a pasteable entity reference for the focused row (`'`).
+    CopyEntityReference,
     NavEnter,
     NavEsc,
     GraphStashApply,
@@ -269,8 +271,12 @@ pub enum Effect {
     /// Leave Diff without a new load. Bumps the commit-diff generation so a
     /// late result cannot reopen Diff (Esc Diff→Files). Does not enqueue git.
     DropCommitDiff,
-    /// Copy markdown to the clipboard (OSC 52 / host tool).
+    /// Copy `text` to the clipboard (OSC 52 / host tool).
     CopyClipboard {
         text: String,
+        /// When true, the interpreter sets `copied` if `copy_to_clipboard`
+        /// succeeds and `copy failed` if it does not. When false, status is
+        /// left to the caller (`y` overlay chrome).
+        announce: bool,
     },
 }

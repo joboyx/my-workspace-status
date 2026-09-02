@@ -7,6 +7,7 @@ mod desktop_xfce_shift_p_pushes_ahead;
 mod desktop_xfce_stash_create_apply_and_drop;
 mod desktop_xfce_stash_graph_pop;
 mod desktop_xterm_xtest_trackpad_hscroll;
+mod pty_apostrophe_copies_entity_reference;
 mod pty_branch_picker_shift_c_creates;
 mod pty_c_on_tree_file_is_not_commit;
 mod pty_click_chevron_toggles_fold;

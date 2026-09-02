@@ -8,12 +8,14 @@ use std::collections::{BTreeSet, HashSet};
 use crate::helpers::{is_counted_local_branch, is_default_branch, is_detached_head_branch};
 use crate::snapshot::{CheckoutKind, WorkspaceSnapshot};
 
-use super::super::diff::DiffRow;
+use super::super::commit_files::CommitFileRow;
+use super::super::diff::{DiffCellKind, DiffRow};
 use super::super::drill::CommitFileSource;
 use super::super::tree::{
     dir_path_from_id, find_node, path_under_dir, NodeKind, TreeNode, VisibleRow,
 };
 use super::super::viewed::normalize_viewed_path;
+use super::reference::{DiffSide, DiffSource, EntityRef};
 use super::store::{ordered_line_range, repo_identity, CommentKey, CommentStore};
 use workspace_status_graph::GraphRow;
 
@@ -221,6 +223,255 @@ pub fn resolve_comment_target(
         return resolve_graph_target(snapshot, repo, row);
     }
     resolve_tree_target(snapshot, tree_row?)
+}
+
+/// Old / new / unified from focused painted diff rows.
+///
+/// Split uses gutter numbers on each side. Inline uses cell kind (`Del` is
+/// old, `Add` is new, context is both). Both sides, or neither, is unified.
+pub fn diff_focus_side(rows: &[DiffRow], start: usize, end: usize) -> DiffSide {
+    let lo = start.min(end);
+    let hi = start.max(end);
+    let mut has_old = false;
+    let mut has_new = false;
+    for row in rows
+        .iter()
+        .skip(lo)
+        .take(hi.saturating_sub(lo).saturating_add(1))
+    {
+        let (old, new) = row_side_flags(row);
+        has_old |= old;
+        has_new |= new;
+    }
+    match (has_old, has_new) {
+        (true, false) => DiffSide::Old,
+        (false, true) => DiffSide::New,
+        _ => DiffSide::Unified,
+    }
+}
+
+fn row_side_flags(row: &DiffRow) -> (bool, bool) {
+    let DiffRow::Line { left, right } = row else {
+        return (false, false);
+    };
+    match right {
+        Some(right) => (left.line_no.is_some(), right.line_no.is_some()),
+        None => match left.kind {
+            DiffCellKind::Del => (true, false),
+            DiffCellKind::Add => (false, true),
+            DiffCellKind::Ctx => (true, true),
+            DiffCellKind::Empty | DiffCellKind::Meta => (false, false),
+        },
+    }
+}
+
+/// Entity reference for the focused tree / graph / commit-file / diff.
+///
+/// Covers file / dir / workspace / family / linked worktree / repo, graph
+/// commit / stash / worktree, commit-file rows, and numbered diff lines.
+/// Returns `None` when there is no copy target (group, empty focus, or a
+/// diff with no numbered line).
+pub fn resolve_entity_reference(
+    snapshot: &WorkspaceSnapshot,
+    tree_row: Option<&VisibleRow>,
+    graph_row: Option<&GraphRow>,
+    graph_repo: Option<&str>,
+    diff_focused: bool,
+    diff_repo: Option<&str>,
+    diff_path: Option<&str>,
+    diff_source: Option<&CommitFileSource>,
+    diff_line: Option<u32>,
+    diff_end_line: Option<u32>,
+    diff_side: DiffSide,
+    commit_file: Option<&CommitFileRow>,
+    commit_file_repo: Option<&str>,
+    workspace_path: Option<&str>,
+) -> Option<EntityRef> {
+    if diff_focused {
+        return resolve_diff_entity(
+            snapshot,
+            diff_repo,
+            diff_path,
+            diff_source,
+            diff_line,
+            diff_end_line,
+            diff_side,
+        );
+    }
+    if let Some(row) = commit_file {
+        return resolve_commit_file_entity(snapshot, commit_file_repo?, row);
+    }
+    if let Some(row) = graph_row {
+        let repo = graph_repo?;
+        return resolve_graph_entity(snapshot, repo, row);
+    }
+    resolve_tree_entity(snapshot, tree_row?, workspace_path)
+}
+
+fn checkout_primary<'a>(
+    snapshot: &'a WorkspaceSnapshot,
+    checkout: &str,
+    row_primary: Option<&'a str>,
+) -> Option<&'a str> {
+    row_primary.or_else(|| {
+        snapshot
+            .repos
+            .iter()
+            .find(|r| r.repo == checkout)
+            .and_then(|r| r.primary_repo.as_deref())
+    })
+}
+
+fn entity_diff_source(source: Option<&CommitFileSource>) -> DiffSource {
+    match source {
+        Some(CommitFileSource::Commit { commit_id }) => DiffSource::Commit {
+            sha: commit_id.clone(),
+        },
+        Some(CommitFileSource::Stash { stash_ref }) => DiffSource::Stash {
+            stash_ref: stash_ref.clone(),
+        },
+        Some(CommitFileSource::Worktree) | None => DiffSource::Worktree,
+    }
+}
+
+fn resolve_diff_entity(
+    snapshot: &WorkspaceSnapshot,
+    diff_repo: Option<&str>,
+    diff_path: Option<&str>,
+    diff_source: Option<&CommitFileSource>,
+    diff_line: Option<u32>,
+    diff_end_line: Option<u32>,
+    side: DiffSide,
+) -> Option<EntityRef> {
+    let repo_path = diff_repo?;
+    let path = diff_path?;
+    let line = diff_line?;
+    let (start_line, end_line) = ordered_line_range(line, diff_end_line.unwrap_or(line));
+    let primary = checkout_primary(snapshot, repo_path, None);
+    Some(EntityRef::diff(
+        repo_path,
+        primary,
+        normalize_viewed_path(path),
+        start_line,
+        end_line,
+        entity_diff_source(diff_source),
+        side,
+    ))
+}
+
+fn resolve_commit_file_entity(
+    snapshot: &WorkspaceSnapshot,
+    repo: &str,
+    row: &CommitFileRow,
+) -> Option<EntityRef> {
+    let primary = checkout_primary(snapshot, repo, None);
+    let path = if row.path.is_empty() {
+        return None;
+    } else {
+        row.path.clone()
+    };
+    if row.is_dir() {
+        Some(EntityRef::dir(repo, primary, path))
+    } else {
+        Some(EntityRef::file(repo, primary, path))
+    }
+}
+
+fn resolve_graph_entity(
+    snapshot: &WorkspaceSnapshot,
+    repo: &str,
+    row: &GraphRow,
+) -> Option<EntityRef> {
+    let primary = checkout_primary(snapshot, repo, None);
+    match row {
+        GraphRow::Commit { commit, .. } => {
+            Some(EntityRef::commit(repo, primary, commit.id.clone()))
+        }
+        GraphRow::Uncommitted { .. } => Some(EntityRef::worktree(
+            repo,
+            primary,
+            normalize_viewed_path(repo),
+        )),
+        GraphRow::Worktree(wt) => Some(EntityRef::worktree(
+            repo,
+            primary,
+            normalize_viewed_path(&wt.path),
+        )),
+        GraphRow::Stash(stash) => Some(EntityRef::stash(
+            repo,
+            primary,
+            stash.stash_ref.clone(),
+            stash.id.clone(),
+            stash.subject.clone(),
+        )),
+    }
+}
+
+fn resolve_tree_entity(
+    snapshot: &WorkspaceSnapshot,
+    row: &VisibleRow,
+    workspace_path: Option<&str>,
+) -> Option<EntityRef> {
+    match row.kind {
+        NodeKind::Group => None,
+        NodeKind::Workspace => Some(EntityRef::workspace(workspace_path?)),
+        NodeKind::File => {
+            let repo_path = row.repo.as_deref()?;
+            let path = file_row_path(row)?;
+            let primary = checkout_primary(snapshot, repo_path, row.primary_repo.as_deref());
+            Some(EntityRef::file(repo_path, primary, path))
+        }
+        NodeKind::Dir => {
+            let repo_path = row.repo.as_deref()?;
+            let path = dir_row_path(row, repo_path)?;
+            let primary = checkout_primary(snapshot, repo_path, row.primary_repo.as_deref());
+            Some(EntityRef::dir(repo_path, primary, path))
+        }
+        NodeKind::Repo | NodeKind::Checkout => {
+            let repo_path = row.repo.as_deref()?;
+            let primary = checkout_primary(snapshot, repo_path, row.primary_repo.as_deref());
+            let path = if row.chrome.path.is_empty() {
+                repo_path
+            } else {
+                row.chrome.path.as_str()
+            };
+            let is_family = row.chrome.is_family;
+            let is_linked = row.chrome.checkout_kind == Some(CheckoutKind::Linked)
+                || snapshot
+                    .repos
+                    .iter()
+                    .find(|r| r.repo == repo_path)
+                    .map(|r| r.checkout_kind)
+                    == Some(CheckoutKind::Linked);
+            if is_linked {
+                Some(EntityRef::worktree(repo_path, primary, path))
+            } else if is_family {
+                Some(EntityRef::family(repo_path, primary, path))
+            } else {
+                Some(EntityRef::repo(repo_path, primary, path))
+            }
+        }
+    }
+}
+
+fn file_row_path(row: &VisibleRow) -> Option<String> {
+    if let Some(file) = row.file.as_ref() {
+        if !file.path.is_empty() {
+            return Some(file.path.clone());
+        }
+    }
+    if row.chrome.path.is_empty() {
+        None
+    } else {
+        Some(row.chrome.path.clone())
+    }
+}
+
+fn dir_row_path(row: &VisibleRow, repo: &str) -> Option<String> {
+    if !row.chrome.path.is_empty() {
+        return Some(row.chrome.path.clone());
+    }
+    dir_path_from_id(&row.id, repo)
 }
 
 fn resolve_diff_target(
@@ -2035,11 +2286,7 @@ mod tests {
             },
             "on-sibling",
         );
-        assert!(tree_row_has_comment(
-            &store,
-            &snapshot,
-            &family_app_row()
-        ));
+        assert!(tree_row_has_comment(&store, &snapshot, &family_app_row()));
         assert!(!tree_row_has_comment(
             &store,
             &snapshot,
@@ -2061,5 +2308,405 @@ mod tests {
         let bodies = sorted_tree_bodies(&store, &snapshot, &row);
         assert!(!bodies.iter().any(|b| b == "on-app-other"));
         assert!(!tree_row_has_comment(&store, &snapshot, &row));
+    }
+
+    fn entity_from_tree(
+        snapshot: &WorkspaceSnapshot,
+        row: &VisibleRow,
+        ws: Option<&str>,
+    ) -> EntityRef {
+        resolve_entity_reference(
+            snapshot,
+            Some(row),
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            DiffSide::Unified,
+            None,
+            None,
+            ws,
+        )
+        .expect("tree entity")
+    }
+
+    #[test]
+    fn entity_file_dir_workspace_repo_family_worktree() {
+        let snapshot = build_workspace_snapshot(
+            &[
+                snap("app", "main", CheckoutKind::Primary, None),
+                snap(
+                    "app/.worktrees/feat",
+                    "feature/linked-open",
+                    CheckoutKind::Linked,
+                    Some("app"),
+                ),
+            ],
+            &[],
+            false,
+            &[],
+        );
+        let file = file_row("src/lib.rs");
+        match entity_from_tree(&snapshot, &file, None) {
+            EntityRef::File { repo, path } => {
+                assert_eq!(repo, "app");
+                assert_eq!(path, "src/lib.rs");
+            }
+            other => panic!("{other:?}"),
+        }
+        let dir = dir_row("src");
+        match entity_from_tree(&snapshot, &dir, None) {
+            EntityRef::Dir { path, .. } => assert_eq!(path, "src"),
+            other => panic!("{other:?}"),
+        }
+        let workspace = VisibleRow {
+            kind: NodeKind::Workspace,
+            ..VisibleRow::default()
+        };
+        match entity_from_tree(&snapshot, &workspace, Some("/tmp/ws")) {
+            EntityRef::Workspace { path } => assert_eq!(path, "/tmp/ws"),
+            other => panic!("{other:?}"),
+        }
+        let family = family_app_row();
+        match entity_from_tree(&snapshot, &family, None) {
+            EntityRef::Family { repo, path } => {
+                assert_eq!(repo, "app");
+                assert_eq!(path, "app");
+            }
+            other => panic!("{other:?}"),
+        }
+        let linked = linked_worktree_app_feat_row();
+        match entity_from_tree(&snapshot, &linked, None) {
+            EntityRef::Worktree { repo, path } => {
+                assert_eq!(repo, "app");
+                assert_eq!(path, ".worktrees/app/feat");
+            }
+            other => panic!("{other:?}"),
+        }
+        let repo_row = VisibleRow {
+            kind: NodeKind::Repo,
+            repo: Some("app".into()),
+            chrome: NodeChrome {
+                path: "app".into(),
+                checkout_kind: Some(CheckoutKind::Primary),
+                ..Default::default()
+            },
+            ..VisibleRow::default()
+        };
+        match entity_from_tree(&snapshot, &repo_row, None) {
+            EntityRef::Repo { repo, path } => {
+                assert_eq!(repo, "app");
+                assert_eq!(path, "app");
+            }
+            other => panic!("{other:?}"),
+        }
+        let group = VisibleRow {
+            kind: NodeKind::Group,
+            ..VisibleRow::default()
+        };
+        assert!(resolve_entity_reference(
+            &snapshot,
+            Some(&group),
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            DiffSide::Unified,
+            None,
+            None,
+            None,
+        )
+        .is_none());
+        assert!(resolve_comment_target(
+            &snapshot,
+            Some(&file),
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn entity_graph_commit_stash_worktree() {
+        let snapshot = build_workspace_snapshot(
+            &[snap("app", "main", CheckoutKind::Primary, None)],
+            &[],
+            false,
+            &[],
+        );
+        let commit = GraphRow::Commit {
+            commit: Commit {
+                id: "abcdef1234567890abcd".into(),
+                ..Commit::default()
+            },
+            is_head: true,
+            worktrees: Vec::new(),
+        };
+        match resolve_entity_reference(
+            &snapshot,
+            None,
+            Some(&commit),
+            Some("app"),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            DiffSide::Unified,
+            None,
+            None,
+            None,
+        ) {
+            Some(EntityRef::Commit { repo, sha }) => {
+                assert_eq!(repo, "app");
+                assert_eq!(sha, "abcdef1234567890abcd");
+            }
+            other => panic!("{other:?}"),
+        }
+        let stash = GraphRow::Stash(workspace_status_graph::Stash {
+            id: "deadbeef1234567890ab".into(),
+            stash_ref: "stash@{0}".into(),
+            subject: "WIP".into(),
+            ..workspace_status_graph::Stash::default()
+        });
+        match resolve_entity_reference(
+            &snapshot,
+            None,
+            Some(&stash),
+            Some("app"),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            DiffSide::Unified,
+            None,
+            None,
+            None,
+        ) {
+            Some(EntityRef::Stash { stash_ref, sha, .. }) => {
+                assert_eq!(stash_ref, "stash@{0}");
+                assert_eq!(sha, "deadbeef1234567890ab");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(resolve_comment_target(
+            &snapshot,
+            None,
+            Some(&stash),
+            Some("app"),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .is_none());
+        let uncommitted = GraphRow::Uncommitted { has_changes: true };
+        match resolve_entity_reference(
+            &snapshot,
+            None,
+            Some(&uncommitted),
+            Some("app"),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            DiffSide::Unified,
+            None,
+            None,
+            None,
+        ) {
+            Some(EntityRef::Worktree { path, .. }) => assert_eq!(path, "app"),
+            other => panic!("{other:?}"),
+        }
+        let worktree = GraphRow::Worktree(workspace_status_graph::Worktree {
+            path: "app".into(),
+            head_id: None,
+            branch: Some("main".into()),
+            ignored: false,
+            is_current: false,
+        });
+        match resolve_entity_reference(
+            &snapshot,
+            None,
+            Some(&worktree),
+            Some("app"),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            DiffSide::Unified,
+            None,
+            None,
+            None,
+        ) {
+            Some(entity) => {
+                assert!(
+                    matches!(&entity, EntityRef::Worktree { path, .. } if path == "app"),
+                    "{entity:?}"
+                );
+                let text = super::super::format_entity_reference(&entity);
+                assert!(text.starts_with("kind: worktree\n"), "{text}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn entity_commit_file_file_and_dir() {
+        let snapshot = build_workspace_snapshot(
+            &[snap("app", "main", CheckoutKind::Primary, None)],
+            &[],
+            false,
+            &[],
+        );
+        let file = crate::tui::commit_files::CommitFileRow {
+            id: "file:README.md".into(),
+            depth: 0,
+            kind: crate::tui::commit_files::CommitFileRowKind::File,
+            label: "README.md".into(),
+            trailing: String::new(),
+            segments: Vec::new(),
+            trailing_segs: Vec::new(),
+            path: "README.md".into(),
+            foldable: false,
+            folded: false,
+            file: None,
+        };
+        match resolve_entity_reference(
+            &snapshot,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            DiffSide::Unified,
+            Some(&file),
+            Some("app"),
+            None,
+        ) {
+            Some(EntityRef::File { path, .. }) => assert_eq!(path, "README.md"),
+            other => panic!("{other:?}"),
+        }
+        let dir = crate::tui::commit_files::CommitFileRow {
+            kind: crate::tui::commit_files::CommitFileRowKind::Dir,
+            path: "src".into(),
+            ..file.clone()
+        };
+        match resolve_entity_reference(
+            &snapshot,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            DiffSide::Unified,
+            Some(&dir),
+            Some("app"),
+            None,
+        ) {
+            Some(EntityRef::Dir { path, .. }) => assert_eq!(path, "src"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn entity_diff_side_from_painted_rows() {
+        let add = DiffRow::Line {
+            left: DiffCell {
+                kind: DiffCellKind::Add,
+                text: "+x".into(),
+                line_no: Some(2),
+            },
+            right: None,
+        };
+        let del = DiffRow::Line {
+            left: DiffCell {
+                kind: DiffCellKind::Del,
+                text: "-y".into(),
+                line_no: Some(1),
+            },
+            right: None,
+        };
+        let ctx = DiffRow::Line {
+            left: DiffCell {
+                kind: DiffCellKind::Ctx,
+                text: " z".into(),
+                line_no: Some(1),
+            },
+            right: None,
+        };
+        assert_eq!(diff_focus_side(&[add.clone()], 0, 0), DiffSide::New);
+        assert_eq!(diff_focus_side(&[del.clone()], 0, 0), DiffSide::Old);
+        assert_eq!(diff_focus_side(&[ctx], 0, 0), DiffSide::Unified);
+        assert_eq!(diff_focus_side(&[add, del], 0, 1), DiffSide::Unified);
+        let snapshot = build_workspace_snapshot(
+            &[snap("app", "main", CheckoutKind::Primary, None)],
+            &[],
+            false,
+            &[],
+        );
+        match resolve_entity_reference(
+            &snapshot,
+            None,
+            None,
+            None,
+            true,
+            Some("app"),
+            Some("README.md"),
+            None,
+            Some(2),
+            Some(2),
+            DiffSide::New,
+            None,
+            None,
+            None,
+        ) {
+            Some(EntityRef::Diff {
+                path,
+                start_line,
+                end_line,
+                source,
+                side,
+                ..
+            }) => {
+                assert_eq!(path, "README.md");
+                assert_eq!(start_line, 2);
+                assert_eq!(end_line, 2);
+                assert_eq!(source, DiffSource::Worktree);
+                assert_eq!(side, DiffSide::New);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

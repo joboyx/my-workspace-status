@@ -116,6 +116,7 @@ impl AppState {
             | Action::CommentToggleResolved
             | Action::ExportComments
             | Action::ExportCommentsCancel
+            | Action::CopyEntityReference
             | Action::Resize { .. }
             | Action::None) => self.dispatch_keymap(action, noop),
         }

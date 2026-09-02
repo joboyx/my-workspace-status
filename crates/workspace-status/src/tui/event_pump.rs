@@ -231,6 +231,10 @@ mod tests {
             classify_busy_action(&Action::ExportComments),
             BusyAction::Handle
         );
+        assert_eq!(
+            classify_busy_action(&Action::CopyEntityReference),
+            BusyAction::Handle
+        );
     }
 
     /// Fails CI if the live TTY path grows a nested pump or a sync pane /

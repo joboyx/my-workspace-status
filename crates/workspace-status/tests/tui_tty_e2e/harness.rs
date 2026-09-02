@@ -36,6 +36,8 @@ pub struct PtySession {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     parser: Arc<Mutex<vt100::Parser>>,
+    /// Decoded OSC 52 clipboard texts (`ESC ] 52 ; c ; <base64> BEL` / ST).
+    clipboard: Arc<Mutex<Vec<String>>>,
     root: PathBuf,
     cols: u16,
     rows: u16,
@@ -156,14 +158,19 @@ impl PtySession {
         let mut reader = pair.master.try_clone_reader().expect("clone pty reader");
         let writer = pair.master.take_writer().expect("pty writer");
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let clipboard = Arc::new(Mutex::new(Vec::<String>::new()));
         let parser_thread = Arc::clone(&parser);
+        let clipboard_thread = Arc::clone(&clipboard);
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
+            let mut pending = Vec::new();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        parser_thread.lock().unwrap().process(&buf[..n]);
+                        let chunk = &buf[..n];
+                        push_osc52(&mut pending, chunk, &clipboard_thread);
+                        parser_thread.lock().unwrap().process(chunk);
                     }
                     Err(_) => break,
                 }
@@ -175,6 +182,7 @@ impl PtySession {
             writer,
             master: pair.master,
             parser,
+            clipboard,
             root: workspace
                 .parent()
                 .map(Path::to_path_buf)
@@ -374,6 +382,42 @@ impl PtySession {
 
     pub fn screen(&self) -> String {
         self.parser.lock().unwrap().screen().contents()
+    }
+
+    /// Decoded OSC 52 clipboard texts from the PTY master, in arrival order.
+    ///
+    /// `vt100` strips OSC 52 from [`Self::screen`]. Copy claims must read
+    /// these payloads (`ESC ] 52 ; c ; <base64> BEL` or ST).
+    pub fn clipboard_payloads(&self) -> Vec<String> {
+        self.clipboard.lock().unwrap().clone()
+    }
+
+    /// Most recent decoded OSC 52 clipboard text.
+    pub fn last_clipboard(&self) -> Option<String> {
+        self.clipboard.lock().unwrap().last().cloned()
+    }
+
+    /// Wait until `pred` is true of [`Self::clipboard_payloads`].
+    pub fn wait_clipboard_pred(
+        &self,
+        pred: impl Fn(&[String]) -> bool,
+        what: &str,
+        timeout: Duration,
+    ) {
+        let start = Instant::now();
+        loop {
+            let payloads = self.clipboard_payloads();
+            if pred(&payloads) {
+                return;
+            }
+            if start.elapsed() >= timeout {
+                panic!(
+                    "timeout waiting for {what}; payloads={payloads:?}:\n{}",
+                    self.screen()
+                );
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
     }
 
     /// Fingerprint of every cell fg/bg. Theme cycle must change it.
@@ -702,6 +746,164 @@ impl Drop for PtySession {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+const OSC52_INTRO: &[u8] = b"\x1b]52;";
+const OSC52_PENDING_MAX: usize = 64 * 1024;
+
+enum Osc52Take {
+    NeedMore,
+    Consumed {
+        payload: Option<String>,
+        skip: usize,
+    },
+}
+
+/// Scan PTY master bytes for OSC 52 clipboard payloads. Split reads stay
+/// in `pending` until BEL or ST.
+fn push_osc52(pending: &mut Vec<u8>, chunk: &[u8], dest: &Arc<Mutex<Vec<String>>>) {
+    pending.extend_from_slice(chunk);
+    loop {
+        match take_osc52(pending) {
+            Osc52Take::NeedMore => break,
+            Osc52Take::Consumed { payload, skip } => {
+                if skip == 0 {
+                    break;
+                }
+                pending.drain(..skip);
+                if let Some(text) = payload {
+                    if !text.is_empty() {
+                        dest.lock().unwrap().push(text);
+                    }
+                }
+            }
+        }
+    }
+    if pending.len() > OSC52_PENDING_MAX {
+        let keep = osc52_prefix_keep(pending);
+        pending.drain(..pending.len() - keep);
+    }
+}
+
+fn take_osc52(pending: &[u8]) -> Osc52Take {
+    match find_bytes(pending, OSC52_INTRO) {
+        None => {
+            let keep = osc52_prefix_keep(pending);
+            let skip = pending.len() - keep;
+            if skip == 0 {
+                Osc52Take::NeedMore
+            } else {
+                Osc52Take::Consumed {
+                    payload: None,
+                    skip,
+                }
+            }
+        }
+        Some(start) => {
+            if start > 0 {
+                return Osc52Take::Consumed {
+                    payload: None,
+                    skip: start,
+                };
+            }
+            let after = OSC52_INTRO.len();
+            let Some(sel_rel) = pending[after..].iter().position(|&b| b == b';') else {
+                return Osc52Take::NeedMore;
+            };
+            let payload_at = after + sel_rel + 1;
+            let rest = &pending[payload_at..];
+            let bel = rest.iter().position(|&b| b == 0x07);
+            let st = find_bytes(rest, b"\x1b\\");
+            let term = match (bel, st) {
+                (Some(b), Some(s)) if b <= s => Some((b, 1)),
+                (Some(_), Some(s)) => Some((s, 2)),
+                (Some(b), None) => Some((b, 1)),
+                (None, Some(s)) => Some((s, 2)),
+                (None, None) => None,
+            };
+            let Some((end_rel, term_len)) = term else {
+                return Osc52Take::NeedMore;
+            };
+            let payload = decode_base64_utf8(&rest[..end_rel]);
+            Osc52Take::Consumed {
+                payload,
+                skip: payload_at + end_rel + term_len,
+            }
+        }
+    }
+}
+
+fn osc52_prefix_keep(buf: &[u8]) -> usize {
+    for n in (1..OSC52_INTRO.len()).rev() {
+        if buf.len() >= n && buf.ends_with(&OSC52_INTRO[..n]) {
+            return n;
+        }
+    }
+    0
+}
+
+fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+fn decode_base64_utf8(input: &[u8]) -> Option<String> {
+    let bytes = decode_base64(input)?;
+    String::from_utf8(bytes).ok()
+}
+
+fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
+    let mut chars: Vec<u8> = input
+        .iter()
+        .copied()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    if chars.is_empty() {
+        return Some(Vec::new());
+    }
+    while chars.len() % 4 != 0 {
+        chars.push(b'=');
+    }
+    let mut out = Vec::with_capacity(chars.len() / 4 * 3);
+    for chunk in chars.chunks(4) {
+        let mut vals = [0u8; 4];
+        let mut pads = 0usize;
+        for (i, b) in chunk.iter().copied().enumerate() {
+            if b == b'=' {
+                pads += 1;
+                vals[i] = 0;
+                continue;
+            }
+            if pads > 0 {
+                return None;
+            }
+            vals[i] = b64_val(b)?;
+        }
+        if pads > 2 {
+            return None;
+        }
+        out.push((vals[0] << 2) | (vals[1] >> 4));
+        if pads < 2 {
+            out.push((vals[1] << 4) | (vals[2] >> 2));
+        }
+        if pads < 1 {
+            out.push((vals[2] << 6) | vals[3]);
+        }
+    }
+    Some(out)
+}
+
+fn b64_val(c: u8) -> Option<u8> {
+    match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
     }
 }
 

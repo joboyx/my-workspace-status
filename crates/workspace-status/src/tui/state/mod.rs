@@ -31,9 +31,10 @@ use super::branches::{
 use super::comments::comment_store_path;
 use super::comments::{
     collect_live_set, comment_key_label, comments_in_focus_scope, covering_line_comment,
-    export_markdown, gc_comments, load_comment_store, put_comment, put_comment_entry,
-    resolve_comment_target, save_comment_store, viewport_line_number, viewport_line_range,
-    CommentExport, CommentExportList, CommentKey, CommentPrompt, CommentStore,
+    diff_focus_side, export_markdown, format_entity_reference, gc_comments, load_comment_store,
+    put_comment, put_comment_entry, resolve_comment_target, resolve_entity_reference,
+    save_comment_store, viewport_line_number, viewport_line_range, CommentExport,
+    CommentExportList, CommentKey, CommentPrompt, CommentStore, DiffSide, EntityRef,
 };
 use super::commit_files::{
     ancestor_dir_ids, collect_foldable_subtree_ids as collect_commit_subtree_ids,
@@ -2370,6 +2371,127 @@ impl AppState {
         }
     }
 
+    fn current_entity_reference(&self) -> Option<EntityRef> {
+        match self.list_focus_target() {
+            ListFocusTarget::None => {
+                let source = match &self.drill {
+                    DrillView::Diff { source, .. } => Some(source),
+                    _ => None,
+                };
+                let (repo, path) = match &self.drill {
+                    DrillView::Diff { repo, path, .. } => {
+                        (Some(repo.as_str()), Some(path.as_str()))
+                    }
+                    _ => (self.diff_repo.as_deref(), self.diff_path.as_deref()),
+                };
+                let rows = self.current_diff_rows();
+                let (start, end) = if let Some(anchor) = self.diff_visual_anchor {
+                    (anchor, self.diff_cursor)
+                } else {
+                    (self.diff_cursor, self.diff_cursor)
+                };
+                let (line, end_line) = if self.diff_visual_anchor.is_some() {
+                    viewport_line_range(&rows, start, end)?
+                } else {
+                    let line = viewport_line_number(&rows, self.diff_cursor as u16)?;
+                    (line, line)
+                };
+                resolve_entity_reference(
+                    &self.snapshot,
+                    None,
+                    None,
+                    None,
+                    true,
+                    repo,
+                    path,
+                    source,
+                    Some(line),
+                    Some(end_line),
+                    diff_focus_side(&rows, start, end),
+                    None,
+                    None,
+                    None,
+                )
+            }
+            ListFocusTarget::Graph => {
+                let repo = self.focused_graph_repo();
+                let row = self.focused_graph_row();
+                resolve_entity_reference(
+                    &self.snapshot,
+                    None,
+                    row.as_ref(),
+                    repo.as_deref(),
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    DiffSide::Unified,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            ListFocusTarget::Tree => {
+                let cwd = self.cwd.to_string_lossy();
+                resolve_entity_reference(
+                    &self.snapshot,
+                    self.focused_row(),
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    DiffSide::Unified,
+                    None,
+                    None,
+                    Some(cwd.as_ref()),
+                )
+            }
+            ListFocusTarget::CommitFiles => {
+                let repo = match &self.drill {
+                    DrillView::Files { repo, .. } | DrillView::Diff { repo, .. } => {
+                        Some(repo.as_str())
+                    }
+                    DrillView::Graph => None,
+                };
+                let row = self.focused_commit_file_row();
+                resolve_entity_reference(
+                    &self.snapshot,
+                    None,
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    DiffSide::Unified,
+                    row.as_ref(),
+                    repo,
+                    None,
+                )
+            }
+        }
+    }
+
+    fn copy_entity_reference(&mut self) -> Effect {
+        let Some(entity) = self.current_entity_reference() else {
+            self.status = "no copy target".into();
+            return Effect::None;
+        };
+        let text = format_entity_reference(&entity);
+        Effect::CopyClipboard {
+            text,
+            announce: true,
+        }
+    }
+
     pub(crate) fn clear_diff_visual(&mut self) {
         self.diff_visual_anchor = None;
         self.diff_visual_rows = None;
@@ -2476,7 +2598,10 @@ impl AppState {
             markdown: markdown.clone(),
         });
         self.status = "copied".into();
-        Effect::CopyClipboard { text: markdown }
+        Effect::CopyClipboard {
+            text: markdown,
+            announce: false,
+        }
     }
 
     fn scoped_comment_store(&self) -> CommentStore {
@@ -8172,5 +8297,131 @@ mod tests {
             app.diff_visual_anchor.is_none(),
             "commit diff row list change must drop highlight"
         );
+    }
+
+    fn assert_copy_clipboard(effect: Effect, kind: &str, needle: &str, announce: bool) -> String {
+        match effect {
+            Effect::CopyClipboard {
+                text,
+                announce: got,
+            } => {
+                assert_eq!(got, announce, "announce");
+                assert!(
+                    text.starts_with("kind:"),
+                    "copy payload must start with kind:: {text}"
+                );
+                assert!(
+                    text.contains(&format!("kind: {kind}")),
+                    "expected kind {kind}: {text}"
+                );
+                assert!(text.contains(needle), "expected {needle} in {text}");
+                text
+            }
+            other => panic!("expected CopyClipboard, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apostrophe_copies_focused_file_without_comment_overlay() {
+        let mut app = state();
+        let store_before = app.comment_store.clone();
+        focus_file(&mut app, "README.md");
+        let effect = app.dispatch(Action::CopyEntityReference);
+        let text = assert_copy_clipboard(effect, "file", "README.md", true);
+        assert!(text.contains("path: README.md"), "{text}");
+        assert_ne!(
+            app.status.as_str(),
+            "copied",
+            "dispatch must not flash copied before the copy"
+        );
+        assert!(app.comment_export.is_none());
+        assert!(app.comment.is_none());
+        assert_eq!(app.comment_store, store_before);
+        app.dispatch(Action::CommentStart);
+        assert!(app.comment.is_none());
+        assert_eq!(app.status, "no comment target");
+    }
+
+    #[test]
+    fn apostrophe_copies_graph_stash() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        install_graph(
+            &mut app,
+            vec![Stash {
+                id: "deadbeef1234567890ab".into(),
+                stash_ref: "stash@{0}".into(),
+                subject: "WIP on main: first".into(),
+                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                ..Stash::default()
+            }],
+        );
+        focus_graph_row(&mut app, |r| matches!(r, GraphRow::Stash(_)));
+        app.dispatch(Action::CommentStart);
+        assert!(app.comment.is_none());
+        assert_eq!(app.status, "no comment target");
+        let effect = app.dispatch(Action::CopyEntityReference);
+        let text = assert_copy_clipboard(effect, "stash", "stash@{0}", true);
+        assert!(text.contains("deadbeef1234567890ab"), "{text}");
+        assert_ne!(app.status.as_str(), "copied");
+        assert!(app.comment_export.is_none());
+    }
+
+    #[test]
+    fn apostrophe_copies_numbered_diff() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_line_readme());
+        let numbered = numbered_diff_rows(&app);
+        let line2 = numbered
+            .iter()
+            .find(|(_, line)| *line == 2)
+            .map(|(idx, _)| *idx)
+            .expect("line 2");
+        app.diff_cursor = line2;
+        let effect = app.dispatch(Action::CopyEntityReference);
+        let text = assert_copy_clipboard(effect, "diff", "README.md", true);
+        assert!(text.contains("path: README.md"), "{text}");
+        assert!(text.contains("lines: 2"), "{text}");
+        assert_ne!(app.status.as_str(), "copied");
+        assert!(app.comment_export.is_none());
+    }
+
+    #[test]
+    fn apostrophe_without_target_sets_status() {
+        let mut app = state();
+        app.folds.remove("group:no-updates");
+        app.rebuild_rows();
+        let idx = app
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::Group)
+            .expect("group");
+        app.cursor = idx;
+        assert_eq!(app.dispatch(Action::CopyEntityReference), Effect::None);
+        assert_eq!(app.status, "no copy target");
+        assert!(app.comment_export.is_none());
+    }
+
+    #[test]
+    fn apostrophe_announces_clipboard_and_y_does_not() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        match app.dispatch(Action::CopyEntityReference) {
+            Effect::CopyClipboard { announce, .. } => assert!(announce),
+            other => panic!("expected CopyClipboard, got {other:?}"),
+        }
+        assert_ne!(
+            app.status.as_str(),
+            "copied",
+            "entity copy leaves status to the interpreter"
+        );
+        assert!(app.comment_export.is_none());
+
+        match app.dispatch(Action::ExportComments) {
+            Effect::CopyClipboard { announce, .. } => assert!(!announce),
+            other => panic!("expected CopyClipboard, got {other:?}"),
+        }
+        assert_eq!(app.status, "copied");
+        assert!(app.comment_export.is_some());
     }
 }
