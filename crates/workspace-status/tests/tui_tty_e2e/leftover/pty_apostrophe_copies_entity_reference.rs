@@ -1,8 +1,6 @@
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
-use crate::support::{
-    documented_launch_first_paint, pane_unstaged_readme, tree_cursor_on, WAIT,
-};
+use crate::support::{documented_launch_first_paint, pane_unstaged_readme, tree_cursor_on, WAIT};
 
 fn overlay_closed(screen: &str) -> bool {
     !screen.contains("Enter save")
@@ -75,9 +73,7 @@ fn pty_apostrophe_copies_entity_reference() {
         "tree-file ' must emit OSC 52, not a silent no-op:\n{}",
         tui.screen()
     );
-    let file = tui
-        .last_clipboard()
-        .expect("kind: file OSC 52 payload");
+    let file = tui.last_clipboard().expect("kind: file OSC 52 payload");
     assert!(
         payload_is_file(&file),
         "tree-file copy must include kind: file and path: README.md:\n{file}"
@@ -108,9 +104,7 @@ fn pty_apostrophe_copies_entity_reference() {
         "diff-line ' must emit a second OSC 52, not a silent no-op:\n{}",
         tui.screen()
     );
-    let diff = tui
-        .last_clipboard()
-        .expect("kind: diff OSC 52 payload");
+    let diff = tui.last_clipboard().expect("kind: diff OSC 52 payload");
     assert!(
         payload_is_diff(&diff),
         "diff copy must include kind: diff, path, and lines:\n{diff}"
