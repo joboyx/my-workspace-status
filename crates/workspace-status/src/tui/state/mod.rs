@@ -2486,8 +2486,10 @@ impl AppState {
             return Effect::None;
         };
         let text = format_entity_reference(&entity);
-        self.status = "copied".into();
-        Effect::CopyClipboard { text }
+        Effect::CopyClipboard {
+            text,
+            announce: true,
+        }
     }
 
     pub(crate) fn clear_diff_visual(&mut self) {
@@ -2596,7 +2598,10 @@ impl AppState {
             markdown: markdown.clone(),
         });
         self.status = "copied".into();
-        Effect::CopyClipboard { text: markdown }
+        Effect::CopyClipboard {
+            text: markdown,
+            announce: false,
+        }
     }
 
     fn scoped_comment_store(&self) -> CommentStore {
@@ -8294,9 +8299,13 @@ mod tests {
         );
     }
 
-    fn assert_copy_clipboard(effect: Effect, kind: &str, needle: &str) -> String {
+    fn assert_copy_clipboard(effect: Effect, kind: &str, needle: &str, announce: bool) -> String {
         match effect {
-            Effect::CopyClipboard { text } => {
+            Effect::CopyClipboard {
+                text,
+                announce: got,
+            } => {
+                assert_eq!(got, announce, "announce");
                 assert!(
                     text.starts_with("kind:"),
                     "copy payload must start with kind:: {text}"
@@ -8318,9 +8327,13 @@ mod tests {
         let store_before = app.comment_store.clone();
         focus_file(&mut app, "README.md");
         let effect = app.dispatch(Action::CopyEntityReference);
-        let text = assert_copy_clipboard(effect, "file", "README.md");
+        let text = assert_copy_clipboard(effect, "file", "README.md", true);
         assert!(text.contains("path: README.md"), "{text}");
-        assert_eq!(app.status, "copied");
+        assert_ne!(
+            app.status.as_str(),
+            "copied",
+            "dispatch must not flash copied before the copy"
+        );
         assert!(app.comment_export.is_none());
         assert!(app.comment.is_none());
         assert_eq!(app.comment_store, store_before);
@@ -8348,9 +8361,9 @@ mod tests {
         assert!(app.comment.is_none());
         assert_eq!(app.status, "no comment target");
         let effect = app.dispatch(Action::CopyEntityReference);
-        let text = assert_copy_clipboard(effect, "stash", "stash@{0}");
+        let text = assert_copy_clipboard(effect, "stash", "stash@{0}", true);
         assert!(text.contains("deadbeef1234567890ab"), "{text}");
-        assert_eq!(app.status, "copied");
+        assert_ne!(app.status.as_str(), "copied");
         assert!(app.comment_export.is_none());
     }
 
@@ -8366,10 +8379,10 @@ mod tests {
             .expect("line 2");
         app.diff_cursor = line2;
         let effect = app.dispatch(Action::CopyEntityReference);
-        let text = assert_copy_clipboard(effect, "diff", "README.md");
+        let text = assert_copy_clipboard(effect, "diff", "README.md", true);
         assert!(text.contains("path: README.md"), "{text}");
         assert!(text.contains("lines: 2"), "{text}");
-        assert_eq!(app.status, "copied");
+        assert_ne!(app.status.as_str(), "copied");
         assert!(app.comment_export.is_none());
     }
 
@@ -8387,5 +8400,28 @@ mod tests {
         assert_eq!(app.dispatch(Action::CopyEntityReference), Effect::None);
         assert_eq!(app.status, "no copy target");
         assert!(app.comment_export.is_none());
+    }
+
+    #[test]
+    fn apostrophe_announces_clipboard_and_y_does_not() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        match app.dispatch(Action::CopyEntityReference) {
+            Effect::CopyClipboard { announce, .. } => assert!(announce),
+            other => panic!("expected CopyClipboard, got {other:?}"),
+        }
+        assert_ne!(
+            app.status.as_str(),
+            "copied",
+            "entity copy leaves status to the interpreter"
+        );
+        assert!(app.comment_export.is_none());
+
+        match app.dispatch(Action::ExportComments) {
+            Effect::CopyClipboard { announce, .. } => assert!(!announce),
+            other => panic!("expected CopyClipboard, got {other:?}"),
+        }
+        assert_eq!(app.status, "copied");
+        assert!(app.comment_export.is_some());
     }
 }
