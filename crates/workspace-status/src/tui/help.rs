@@ -177,8 +177,8 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "highlight diff lines for ; comment",
             },
             HelpEntry {
-                keys: "y",
-                desc: "copy comments as markdown",
+                keys: "y '",
+                desc: "copy comments / entity ref",
             },
             HelpEntry {
                 keys: "Esc",
@@ -572,7 +572,7 @@ mod tests {
         assert!(view_keys.contains(&"m"));
         assert!(view_keys.contains(&"; Ctrl-R"));
         assert!(view_keys.contains(&"V"));
-        assert!(view_keys.contains(&"y"));
+        assert!(view_keys.contains(&"y '"));
         assert!(view_keys.contains(&"Esc"));
         assert!(help_match_indices("quit")
             .iter()

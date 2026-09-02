@@ -286,6 +286,7 @@ impl AppState {
                 Effect::None
             }
             Action::ExportComments => self.export_comments(),
+            Action::CopyEntityReference => self.copy_entity_reference(),
             Action::ExportCommentsCancel => {
                 self.comment_export = None;
                 self.status.clear();

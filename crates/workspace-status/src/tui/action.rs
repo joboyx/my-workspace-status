@@ -128,6 +128,8 @@ pub enum Action {
     /// Copy focused-scope comments as markdown (`y`).
     ExportComments,
     ExportCommentsCancel,
+    /// Copy a pasteable entity reference for the focused row (`'`).
+    CopyEntityReference,
     NavEnter,
     NavEsc,
     GraphStashApply,

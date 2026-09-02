@@ -52,7 +52,7 @@ const HELP_VIEW_ROWS: &[(&str, &str)] = &[
     ("m", "mouse · drag pane, split, or graph scrollbars"),
     ("; Ctrl-R", "comment focused row / line"),
     ("V", "highlight diff lines for ; comment"),
-    ("y", "copy comments as markdown"),
+    ("y '", "copy comments / entity ref"),
     ("Esc", "back / unfocus · never quit"),
     ("Enter dblclick", "focus right / drill"),
     ("?", "this help"),
