@@ -269,43 +269,46 @@ fn tree_shows_dirty_and_folded_no_updates() {
     let _ = fs::remove_dir_all(root);
 }
 
+fn title_row_has_no_focus_glyph(top: &str) -> bool {
+    !top.contains("● tree")
+        && !top.contains("* tree")
+        && !top.contains("● diff")
+        && !top.contains("* diff")
+}
+
 #[test]
-fn focused_pane_title_uses_leading_glyph() {
+fn focused_pane_titles_are_plain_names() {
     let (root, workspace) = daily_workspace();
     let mut tui = open(&workspace);
     let frame = tui.frame();
     let top = frame.lines().next().unwrap_or("");
     assert!(
-        top.contains("● tree"),
-        "first paint focused tree title (nerd):\n{frame}"
+        top.contains("tree"),
+        "first paint left title is tree:\n{frame}"
     );
     assert!(
         top.contains("diff"),
-        "unfocused right title is diff:\n{frame}"
+        "first paint right title is diff:\n{frame}"
     );
     assert!(
-        !top.contains("● diff"),
-        "unfocused diff must not have a focus marker:\n{frame}"
-    );
-    assert!(
-        !top.contains("* tree") && !top.contains("* diff"),
-        "HeadlessTui default is nerd, not ascii:\n{frame}"
+        title_row_has_no_focus_glyph(top),
+        "first paint titles must not mark focus with a glyph:\n{frame}"
     );
 
     tui.tab();
     let frame = tui.frame();
     let top = frame.lines().next().unwrap_or("");
     assert!(
-        top.contains("● diff"),
-        "Tab focuses the diff pane title:\n{frame}"
-    );
-    assert!(
         top.contains("tree"),
-        "unfocused left title is tree:\n{frame}"
+        "after Tab left title is tree:\n{frame}"
     );
     assert!(
-        !top.contains("● tree"),
-        "unfocused tree must not have a focus marker:\n{frame}"
+        top.contains("diff"),
+        "after Tab right title is diff:\n{frame}"
+    );
+    assert!(
+        title_row_has_no_focus_glyph(top),
+        "after Tab titles must not mark focus with a glyph:\n{frame}"
     );
     let _ = fs::remove_dir_all(root);
 }

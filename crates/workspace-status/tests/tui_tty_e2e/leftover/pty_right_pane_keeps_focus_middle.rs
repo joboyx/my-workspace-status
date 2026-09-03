@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use crate::harness::{PtySession, SGR_WHEEL_DOWN};
 use crate::seed::{seed_many_commit_files, seed_repo, seed_tall_graph, unique_root};
 use crate::support::{
-    graph_cursor_on, graph_pane_focused, pane_top, panes_files_focused,
-    panes_graph_focused_files_unfocused, panes_tree_focused_graph_unfocused,
+    graph_cursor_on, graph_pane_focused, panes_files_focused, panes_graph_focused_files_unfocused,
+    panes_tree_focused_diff_unfocused, panes_tree_focused_graph_unfocused,
     panes_tree_unfocused_diff_focused, right_pane, title_has_files, tree_cursor_on, GIT_WAIT,
     RIGHT_PANE_COL, SETTLE_MS, WAIT,
 };
@@ -31,11 +31,7 @@ enum RightList {
 }
 
 fn tree_keyboard_focus(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains("* tree")
-        && !top.contains("* graph")
-        && !top.contains("* files")
-        && !top.contains("* diff")
+    panes_tree_focused_diff_unfocused(screen) || panes_tree_focused_graph_unfocused(screen)
 }
 
 fn return_to_tree(tui: &mut PtySession) {

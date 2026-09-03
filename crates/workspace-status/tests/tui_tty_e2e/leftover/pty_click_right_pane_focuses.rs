@@ -60,8 +60,8 @@ fn click_focuses_readme_diff(screen: &str) -> bool {
 /// same focus move. Chevron click and tree-row click are separate.
 ///
 /// Live PTY after first paint: SGR press+release on the UNSTAGED body
-/// pads ` diff `, brackets `[workspace]`, and swaps `focus right` for
-/// `drill` / Esc back. `j` does not move the tree cursor. Esc unfocuses.
+/// brackets `[workspace]`, and swaps `focus right` for `drill` / Esc back.
+/// `j` does not move the tree cursor. Esc unfocuses.
 /// A no-op, tree-row select, chevron fold, files drill, or paint-only
 /// flicker cannot pass.
 #[test]

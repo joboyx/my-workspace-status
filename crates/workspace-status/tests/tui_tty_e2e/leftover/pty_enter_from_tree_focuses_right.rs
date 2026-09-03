@@ -58,8 +58,8 @@ fn enter_focuses_readme_diff(screen: &str) -> bool {
 /// `Enter dblclick` as `focus right / drill`. Right Enter drills graph to
 /// commit files. Launch is the README file-diff with left tree focused.
 ///
-/// Live PTY after first paint: CSI-u Enter pads ` diff `, brackets
-/// `[workspace]`, and swaps `focus right` for `drill` / Esc back. `j` does
+/// Live PTY after first paint: CSI-u Enter brackets `[workspace]`,
+/// and swaps `focus right` for `drill` / Esc back. `j` does
 /// not move the tree cursor. Esc unfocuses. A no-op, a graph drill, a
 /// files drill, a crumb-only paint, Tab, `/`, or a flicker cannot pass.
 #[test]
