@@ -36,8 +36,8 @@ use super::help::{
 };
 use super::icons::{
     comment_mark_cols, icon_branch, icon_comment, icon_comment_resolved, icon_diff,
-    icon_merged_into_default, icon_move, icon_open_vs_default, truncate_visible, CURSOR_BAR,
-    FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
+    icon_merged_into_default, icon_move, icon_open_vs_default, icon_pane_focus, truncate_visible,
+    CURSOR_BAR, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
 };
 use super::search::{
     collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids, slice_cols,
@@ -59,6 +59,17 @@ use crate::helpers::visible_width;
 const NO_MATCHING_ROWS: &str = "No matching rows";
 /// Commit-file list while git is still listing.
 const LOADING_FILES: &str = "loading files…";
+
+/// Pane `Block::title`: focused is `{icon} {name}`, unfocused is `{name}`.
+///
+/// Names are exactly `tree`, `graph`, `files`, or `diff`.
+fn pane_title(name: &str, focused: bool, ascii: bool) -> String {
+    if focused {
+        format!("{} {name}", icon_pane_focus(ascii))
+    } else {
+        name.to_string()
+    }
+}
 
 fn muted_copy(text: &'static str, palette: Palette) -> Line<'static> {
     Line::from(Span::styled(text, Style::default().fg(palette.muted)))
@@ -133,23 +144,14 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.diff_hscrollbar_y = None;
     state.layout.diff_hscrollbar_x = 0;
     state.layout.diff_hscrollbar_width = 0;
-    let left_title = if left_is_files {
-        if state.focus == FocusPane::Left {
-            " files "
-        } else {
-            " files"
-        }
+    let left_name = if left_is_files {
+        "files"
     } else if left_is_graph {
-        if state.focus == FocusPane::Left {
-            " graph "
-        } else {
-            " graph"
-        }
-    } else if state.focus == FocusPane::Left {
-        " tree "
+        "graph"
     } else {
-        " tree"
+        "tree"
     };
+    let left_title = pane_title(left_name, state.focus == FocusPane::Left, state.ascii);
     let tree_block = Block::default()
         .borders(Borders::ALL)
         .title(left_title)
@@ -174,23 +176,14 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     }
 
     let focused = state.focus == FocusPane::Right;
-    let right_title = if state.drill.is_files() {
-        if focused {
-            " files "
-        } else {
-            " files"
-        }
+    let right_name = if state.drill.is_files() {
+        "files"
     } else if state.drill.is_diff() || state.right_is_diff() {
-        if focused {
-            " diff "
-        } else {
-            " diff"
-        }
-    } else if focused {
-        " graph "
+        "diff"
     } else {
-        " graph"
+        "graph"
     };
+    let right_title = pane_title(right_name, focused, state.ascii);
     let right_block = Block::default()
         .borders(Borders::ALL)
         .title(right_title)
@@ -2242,6 +2235,32 @@ mod tests {
                 .all(|c| c.is_whitespace() || matches!(c, '│' | '╯' | '╮' | '┘' | '┐' | '║' | '┤')),
             "package version should sit in the help overlay lower-right:\n{line}"
         );
+    }
+
+    #[test]
+    fn pane_title_marks_focus_with_leading_glyph() {
+        assert_eq!(pane_title("tree", true, false), "● tree");
+        assert_eq!(pane_title("tree", true, true), "* tree");
+        assert_eq!(pane_title("graph", true, false), "● graph");
+        assert_eq!(pane_title("graph", true, true), "* graph");
+        assert_eq!(pane_title("files", true, false), "● files");
+        assert_eq!(pane_title("files", true, true), "* files");
+        assert_eq!(pane_title("diff", true, false), "● diff");
+        assert_eq!(pane_title("diff", true, true), "* diff");
+    }
+
+    #[test]
+    fn pane_title_unfocused_is_plain_name() {
+        for name in ["tree", "graph", "files", "diff"] {
+            assert_eq!(pane_title(name, false, false), name);
+            assert_eq!(pane_title(name, false, true), name);
+            assert!(!pane_title(name, false, false).contains('●'));
+            assert!(!pane_title(name, false, true).starts_with('*'));
+            assert!(!pane_title(name, false, false).starts_with(' '));
+            assert!(!pane_title(name, false, false).ends_with(' '));
+            assert!(!pane_title(name, false, true).starts_with(' '));
+            assert!(!pane_title(name, false, true).ends_with(' '));
+        }
     }
 
     #[test]

@@ -5,8 +5,8 @@ use crate::harness::PtySession;
 use crate::seed::{daily_workspace, git, seed_repo};
 use crate::support::{
     documented_launch_first_paint, graph_cursor_on, merger_graph_drilled_right,
-    merger_graph_left_unfocused, pane_unstaged_readme, right_of_split, right_pane, tree_cursor_on,
-    tree_line_containing, GIT_WAIT, WAIT,
+    merger_graph_left_unfocused, pane_unstaged_readme, right_of_split, right_pane, title_has_diff,
+    title_has_files, tree_cursor_on, tree_line_containing, GIT_WAIT, WAIT,
 };
 
 const COMMIT_BODY: &str = "graph-commit-mark-e2e";
@@ -74,7 +74,7 @@ fn seed_readme_and_lib_commit(workspace: &Path) {
 fn pair_files_on_right(screen: &str) -> bool {
     let right = right_pane(screen);
     overlay_closed(screen)
-        && (screen.contains(" files") || screen.contains("┌ files"))
+        && title_has_files(screen)
         && right.contains(README_FILE)
         && right.contains(LIB_FILE)
         && right.contains(PAIR_COMMIT)
@@ -87,7 +87,7 @@ fn files_cursor_on(screen: &str, name: &str) -> bool {
 
 fn readme_commit_diff(screen: &str) -> bool {
     overlay_closed(screen)
-        && (screen.contains("┌ diff") || screen.contains("@@"))
+        && (title_has_diff(screen) || screen.contains("@@"))
         && right_pane(screen).contains(README_FILE)
         && !right_pane(screen).contains(LIB_FILE)
         && left_after_name(screen, README_FILE).is_some()

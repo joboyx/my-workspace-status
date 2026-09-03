@@ -3,8 +3,10 @@ use std::fs;
 use crate::harness::PtySession;
 use crate::seed::{daily_workspace, seed_many_commit_files, seed_tall_graph};
 use crate::support::{
-    graph_cursor_on, graph_pane_focused, page_file_body_visible, pane_top, right_pane,
-    seed_tree_page_files, tree_cursor_on, tree_has, GIT_WAIT, WAIT,
+    graph_cursor_on, graph_pane_focused, page_file_body_visible, panes_files_focused,
+    panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused, right_pane,
+    seed_tree_page_files, title_has_files, tree_cursor_on, tree_has, tree_pane_focused, GIT_WAIT,
+    WAIT,
 };
 
 const DIFF_FILE: &str = "keepmid-diff.rs";
@@ -41,32 +43,6 @@ fn help_lists_gg_g_top_bottom(screen: &str) -> bool {
     screen.contains("MOVE")
         && screen.contains("gg   G")
         && screen.contains("top / bottom of focused")
-}
-
-fn panes_tree_focused_diff_unfocused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" tree ")
-        && top.contains(" diff")
-        && !top.contains(" diff ")
-        && !top.contains(" graph")
-        && !top.contains(" files")
-}
-
-fn panes_diff_focused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" diff ")
-        && top.contains(" tree")
-        && !top.contains(" tree ")
-        && !top.contains(" graph")
-        && !top.contains(" files")
-}
-
-fn panes_files_focused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" files ")
-        && top.contains(" graph")
-        && !top.contains(" graph ")
-        && !top.contains(" diff")
 }
 
 fn right_cursor_is_first_body_row(screen: &str) -> bool {
@@ -153,7 +129,7 @@ fn tree_on_readme_not_root(screen: &str) -> bool {
 }
 
 fn diff_at_first_row(screen: &str) -> bool {
-    panes_diff_focused(screen)
+    panes_tree_unfocused_diff_focused(screen)
         && right_cursor_is_first_body_row(screen)
         && right_pane(screen).contains(DIFF_TOP)
         && tree_cursor_on(screen, DIFF_FILE)
@@ -172,7 +148,7 @@ fn graph_at_working_tree(screen: &str) -> bool {
 
 fn files_at_first_row(screen: &str) -> bool {
     panes_files_focused(screen)
-        && screen.contains("┌ files")
+        && title_has_files(screen)
         && right_cursor_on(screen, FILES_TOP)
         && right_pane(screen).contains(FILES_TOP)
 }
@@ -247,7 +223,7 @@ fn pty_gg_jumps_focused_list_or_file_diff() {
     tui.tab();
     tui.wait_pred(
         |screen| {
-            panes_diff_focused(screen)
+            panes_tree_unfocused_diff_focused(screen)
                 && tree_cursor_on(screen, DIFF_FILE)
                 && right_pane(screen).contains(DIFF_TOP)
                 && right_pane(screen).contains('\u{258C}')
@@ -262,7 +238,7 @@ fn pty_gg_jumps_focused_list_or_file_diff() {
     );
     tui.wait_pred(
         |screen| {
-            panes_diff_focused(screen)
+            panes_tree_unfocused_diff_focused(screen)
                 && !right_pane(screen).contains(DIFF_TOP)
                 && right_pane(screen).contains('\u{258C}')
         },
@@ -278,7 +254,7 @@ fn pty_gg_jumps_focused_list_or_file_diff() {
 
     unfocus_right(
         &mut tui,
-        panes_diff_focused,
+        panes_tree_unfocused_diff_focused,
         |screen| panes_tree_focused_diff_unfocused(screen) && tree_cursor_on(screen, DIFF_FILE),
         "Esc returns keyboard focus to the tree on the tall file",
     );
@@ -324,7 +300,7 @@ fn pty_gg_jumps_focused_list_or_file_diff() {
         graph_pane_focused,
         |screen| {
             !graph_pane_focused(screen)
-                && pane_top(screen).contains(" tree ")
+                && tree_pane_focused(screen)
                 && tree_cursor_on(screen, "history")
         },
         "Esc returns keyboard focus to the tree on history",
@@ -355,7 +331,7 @@ fn pty_gg_jumps_focused_list_or_file_diff() {
     tui.wait_pred(
         |screen| {
             panes_files_focused(screen)
-                && screen.contains("┌ files")
+                && title_has_files(screen)
                 && right_pane(screen).contains(FILES_TOP)
                 && right_pane(screen).contains('\u{258C}')
         },

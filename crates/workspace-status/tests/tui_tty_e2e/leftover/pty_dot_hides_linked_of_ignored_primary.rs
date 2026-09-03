@@ -1,21 +1,12 @@
 use crate::harness::{left_tree, PtySession};
 use crate::seed::ignored_primary_family_workspace;
 use crate::support::{
-    crumb_row, no_wrong_overlays, pane_top, status_row, tree_dir_expanded, tree_has,
-    tree_line_containing, SETTLE_MS, WAIT,
+    crumb_row, no_wrong_overlays, panes_tree_focused_diff_unfocused, status_row, tree_dir_expanded,
+    tree_has, tree_line_containing, SETTLE_MS, WAIT,
 };
 
 const LINKED_BRANCH: &str = "feature/linked-open";
 const PRIMARY_BRANCH: &str = "feature/primary-open";
-
-fn panes_tree_focused_diff_unfocused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" tree ")
-        && top.contains(" diff")
-        && !top.contains(" diff ")
-        && !top.contains(" graph")
-        && !top.contains(" files")
-}
 
 fn linked_orphan_on_tree(screen: &str) -> bool {
     let Some(line) = tree_line_containing(screen, LINKED_BRANCH)

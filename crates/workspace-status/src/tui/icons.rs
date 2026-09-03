@@ -55,6 +55,12 @@ pub fn icon_move(ascii: bool) -> &'static str {
 pub fn icon_diff(ascii: bool) -> &'static str {
     glyph(ascii, "", "%")
 }
+/// Focused pane title marker. Nerd: `●` (`U+25CF`); ASCII: `*`.
+///
+/// One terminal column. Not emoji, not CJK.
+pub fn icon_pane_focus(ascii: bool) -> &'static str {
+    glyph(ascii, "\u{25cf}", "*")
+}
 /// Font named in the help footer (`REQUIRED_FONT`).
 pub const REQUIRED_FONT: &str = "MesloLGS NF";
 /// Staged section header. Nerd: nf-oct-package (`U+F487`); ASCII: `#`.
@@ -570,6 +576,7 @@ mod tests {
             icon_comment_resolved(true),
             icon_staged(true),
             icon_changes(true),
+            icon_pane_focus(true),
             ASCII_FILE_GLYPH,
         ];
         let nerd = [
@@ -592,6 +599,7 @@ mod tests {
             icon_comment_resolved(false),
             icon_staged(false),
             icon_changes(false),
+            icon_pane_focus(false),
             CURSOR_BAR,
             FOLD_EXPANDED,
             FOLD_COLLAPSED,
@@ -630,6 +638,20 @@ mod tests {
         assert_ne!(nerd, '\u{25c9}'); // ◉
         assert_ne!(nerd, '\u{f07a}'); // other PUA eye/search lookalike
         assert_eq!(visible_width(icon_viewed(false)), 1);
+    }
+
+    #[test]
+    fn icon_pane_focus_is_one_column() {
+        assert_eq!(icon_pane_focus(false), "●");
+        assert_eq!(icon_pane_focus(true), "*");
+        assert_eq!(
+            u32::from(icon_pane_focus(false).chars().next().expect("glyph")),
+            0x25cf
+        );
+        assert_eq!(visible_width(icon_pane_focus(false)), 1);
+        assert_eq!(visible_width(icon_pane_focus(true)), 1);
+        assert!(!has_wide_emoji(icon_pane_focus(false)));
+        assert!(!has_wide_emoji(icon_pane_focus(true)));
     }
 
     #[test]

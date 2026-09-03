@@ -4,8 +4,8 @@ use crate::harness::{left_tree, PtySession};
 use crate::seed::daily_workspace;
 use crate::support::{
     documented_launch_first_paint, launch_breadcrumb_workspace_only,
-    launch_panes_left_tree_right_diff, launch_status_chrome, no_wrong_overlays, tree_cursor_on,
-    tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    launch_panes_left_tree_right_diff, launch_status_chrome, no_wrong_overlays, title_has_files,
+    tree_cursor_on, tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 const MARKER: &str = "r-live.txt";
@@ -62,7 +62,7 @@ fn documented_r_refreshed_app_dirty_file(screen: &str) -> bool {
         && !screen.contains("focus a repo for the graph")
         && !screen.contains("No matching rows")
         && !screen.contains("loading")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && no_wrong_overlays(screen)
 }
 

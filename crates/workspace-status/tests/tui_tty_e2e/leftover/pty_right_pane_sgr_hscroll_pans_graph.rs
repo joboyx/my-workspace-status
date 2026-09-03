@@ -2,7 +2,8 @@ use crate::common::hscroll::GRAPH_HSCROLL_VISIBLE;
 use crate::harness::{left_tree, PtySession, SGR_WHEEL_RIGHT, SGR_WHEEL_RIGHT_MOTION};
 use crate::seed::{daily_workspace, seed_long_subject_repo};
 use crate::support::{
-    no_wrong_overlays, pane_top, right_pane, status_row, tree_cursor_on, tree_has, SETTLE_MS, WAIT,
+    no_wrong_overlays, panes_tree_focused_graph_unfocused, right_pane, status_row, title_has_files,
+    tree_cursor_on, tree_has, SETTLE_MS, WAIT,
 };
 
 const REPO: &str = "longsubj";
@@ -10,16 +11,6 @@ const REPO: &str = "longsubj";
 const NARROW_RIGHT_COL: u16 = 50;
 /// Graph body row (below the pane title). Same cell as keep-middle wheel.
 const GRAPH_BODY_ROW: u16 = 8;
-
-/// Left tree focused, right graph unfocused. Not files / not a file diff.
-fn panes_tree_focused_graph_unfocused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" tree ")
-        && top.contains(" graph")
-        && !top.contains(" graph ")
-        && !top.contains(" files")
-        && !top.contains(" diff")
-}
 
 fn status_has_graph_tail(screen: &str) -> bool {
     status_row(screen).contains(GRAPH_HSCROLL_VISIBLE)
@@ -39,7 +30,7 @@ fn long_graph_clipped_tree_focus(screen: &str) -> bool {
         && !right.contains(GRAPH_HSCROLL_VISIBLE)
         && !right.contains("app/README.md")
         && !right.contains("UNSTAGED")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && !status_has_graph_tail(screen)
         && no_wrong_overlays(screen)
 }
@@ -61,7 +52,7 @@ fn documented_right_pane_graph_sgr_hscroll_panned(screen: &str) -> bool {
         && right.contains(GRAPH_HSCROLL_VISIBLE)
         && !right.contains("app/README.md")
         && !right.contains("UNSTAGED")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && !status_has_graph_tail(screen)
         && no_wrong_overlays(screen)
 }

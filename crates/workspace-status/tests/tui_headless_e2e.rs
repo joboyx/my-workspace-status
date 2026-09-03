@@ -270,6 +270,47 @@ fn tree_shows_dirty_and_folded_no_updates() {
 }
 
 #[test]
+fn focused_pane_title_uses_leading_glyph() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    let frame = tui.frame();
+    let top = frame.lines().next().unwrap_or("");
+    assert!(
+        top.contains("● tree"),
+        "first paint focused tree title (nerd):\n{frame}"
+    );
+    assert!(
+        top.contains("diff"),
+        "unfocused right title is diff:\n{frame}"
+    );
+    assert!(
+        !top.contains("● diff"),
+        "unfocused diff must not have a focus marker:\n{frame}"
+    );
+    assert!(
+        !top.contains("* tree") && !top.contains("* diff"),
+        "HeadlessTui default is nerd, not ascii:\n{frame}"
+    );
+
+    tui.tab();
+    let frame = tui.frame();
+    let top = frame.lines().next().unwrap_or("");
+    assert!(
+        top.contains("● diff"),
+        "Tab focuses the diff pane title:\n{frame}"
+    );
+    assert!(
+        top.contains("tree"),
+        "unfocused left title is tree:\n{frame}"
+    );
+    assert!(
+        !top.contains("● tree"),
+        "unfocused tree must not have a focus marker:\n{frame}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn held_nav_repeat_moves_again_and_does_not_quit() {
     let (root, workspace) = daily_workspace();
     let mut tui = open(&workspace);
@@ -301,7 +342,7 @@ fn dirty_file_paints_diff_pane() {
         tui.cursor_label()
     );
     let frame = tui.frame();
-    assert_contains(&frame, " diff");
+    assert_contains(&frame, "diff");
     assert_contains(&frame, "README.md");
     assert!(
         frame.contains("inline") || frame.contains("split"),
@@ -546,7 +587,7 @@ fn multi_lane_graph_paints_merge_and_stash_spur() {
     let mut tui = open(&workspace);
     tui.search("merger");
     let frame = tui.frame();
-    assert_contains(&frame, " graph");
+    assert_contains(&frame, "graph");
     assert_contains(&frame, "merge");
     assert_contains(&frame, "stash@{0}");
     assert!(

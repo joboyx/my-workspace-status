@@ -5,8 +5,8 @@ use crate::harness::PtySession;
 use crate::seed::{focus_workspace, git_env};
 use crate::support::{
     crumb_row, focusbox_graph_left_full, graph_cursor_on, graph_pane_focused,
-    graph_subject_meta_line, no_mouse_toggle_toast, status_row, tree_cursor_on, tree_has,
-    tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    graph_subject_meta_line, no_mouse_toggle_toast, status_row, title_has_files, tree_cursor_on,
+    tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 const BRANCH: &str = "topic/noise";
@@ -69,7 +69,7 @@ fn no_picker_or_wrong_overlays(screen: &str) -> bool {
     !screen.contains("MOVE")
         && !screen.contains("Focus branches")
         && !screen.contains("Stash ")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && !screen.contains("Create branch")
         && !screen.contains("Checkout at")
         && !screen.contains("Branch ")

@@ -4,8 +4,8 @@ use std::process::{Command, Stdio};
 use crate::harness::PtySession;
 use crate::seed::{git_env, worktree_workspace};
 use crate::support::{
-    crumb_row, no_mouse_toggle_toast, status_row, tree_cursor_on, tree_has, tree_line_containing,
-    tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
+    crumb_row, no_mouse_toggle_toast, status_row, title_has_files, tree_cursor_on, tree_has,
+    tree_line_containing, tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 const LINKED_PATH: &str = "app/.worktrees/feat";
@@ -49,7 +49,7 @@ fn no_wrong_remove_overlays(screen: &str) -> bool {
         && !screen.contains("Merge main into")
         && !screen.contains("Drop stash@{")
         && !screen.contains("Revert ")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && no_mouse_toggle_toast(screen)
 }
 

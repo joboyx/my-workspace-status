@@ -5,20 +5,11 @@ use crate::harness::{
 };
 use crate::seed::{daily_workspace, seed_long_diff_file};
 use crate::support::{
-    no_wrong_overlays, pane_top, right_pane, status_row, tree_cursor_on, tree_has, SETTLE_MS, WAIT,
+    no_wrong_overlays, panes_tree_focused_diff_unfocused, right_pane, status_row, title_has_files,
+    tree_cursor_on, tree_has, SETTLE_MS, WAIT,
 };
 
 const FILE: &str = "unique-diffline.rs";
-
-/// Left tree focused, right file-diff unfocused. Not graph / not files.
-fn panes_tree_focused_diff_unfocused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" tree ")
-        && top.contains(" diff")
-        && !top.contains(" diff ")
-        && !top.contains(" graph")
-        && !top.contains(" files")
-}
 
 fn status_has_diff_tail(screen: &str) -> bool {
     status_row(screen).contains(DIFF_HSCROLL_TAIL)
@@ -47,7 +38,7 @@ fn long_diff_clipped_tree_focus(screen: &str) -> bool {
         && !right.contains("app/README.md")
         && !right.contains("UNSTAGED")
         && !screen.contains("WIP on graph")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && !status_has_diff_tail(screen)
         && no_wrong_overlays(screen)
 }
@@ -74,7 +65,7 @@ fn documented_left_pane_sgr_hscroll_panned(screen: &str) -> bool {
         && !right.contains("app/README.md")
         && !right.contains("UNSTAGED")
         && !screen.contains("WIP on graph")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && !status_has_diff_tail(screen)
         && no_wrong_overlays(screen)
 }

@@ -2,8 +2,8 @@ use crate::harness::PtySession;
 use crate::seed::behind_workspace;
 use crate::support::{
     crumb_row, graph_subject_line, graph_subject_meta_line, has_fetch_hint, has_pull_hint,
-    status_row, syncbox_row_behind, syncbox_row_current, tree_cursor_on, tree_has, GIT_WAIT,
-    SETTLE_MS, WAIT,
+    panes_tree_focused_graph_unfocused, status_row, syncbox_row_behind, syncbox_row_current,
+    tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 fn no_wrong_pull_overlays(screen: &str) -> bool {
@@ -54,9 +54,6 @@ fn seed_is_ancestor_not_head(screen: &str) -> bool {
 /// First paint: cursor on behind syncbox. Graph HEAD is still the seed.
 fn idle_behind_syncbox(screen: &str) -> bool {
     let status = status_row(screen);
-    let Some(top) = screen.lines().next() else {
-        return false;
-    };
     tree_cursor_on(screen, "syncbox")
         && !tree_cursor_on(screen, "workspace")
         && !tree_cursor_on(screen, "No updates")
@@ -65,8 +62,7 @@ fn idle_behind_syncbox(screen: &str) -> bool {
         && !tree_has(screen, "all current")
         && !tree_has(screen, "No updates")
         && syncbox_row_behind(screen)
-        && top.contains(" tree ")
-        && top.contains(" graph")
+        && panes_tree_focused_graph_unfocused(screen)
         && screen.contains("main v1")
         && screen.contains("Working tree clean")
         && origin_tip_is_remote_not_head(screen)

@@ -115,12 +115,9 @@ pub fn launch_status_chrome(screen: &str) -> bool {
         && !status.contains("Flat paths")
 }
 
-/// Left tree focused, right diff unfocused (title padding).
+/// Left tree focused, right diff unfocused (leading ASCII focus glyph).
 pub fn launch_panes_left_tree_right_diff(screen: &str) -> bool {
-    let Some(top) = screen.lines().next() else {
-        return false;
-    };
-    top.contains(" tree ") && top.contains(" diff") && !top.contains(" diff ")
+    panes_tree_focused_diff_unfocused(screen)
 }
 
 /// Documented first paint on the daily seed. A blank, graph-first, ignored-
@@ -164,9 +161,24 @@ pub fn documented_launch_first_paint(screen: &str) -> bool {
         && !screen.contains("loading")
 }
 
-/// First paint row: pane titles (focused titles pad both sides).
+/// First paint row: pane titles (focused titles lead with `*`).
 pub fn pane_top(screen: &str) -> &str {
     screen.lines().next().unwrap_or("")
+}
+
+/// True when a pane title on the top row names `files`.
+pub fn title_has_files(screen: &str) -> bool {
+    pane_top(screen).contains("files")
+}
+
+/// True when a pane title on the top row names `graph`.
+pub fn title_has_graph(screen: &str) -> bool {
+    pane_top(screen).contains("graph")
+}
+
+/// True when a pane title on the top row names `diff`.
+pub fn title_has_diff(screen: &str) -> bool {
+    pane_top(screen).contains("diff")
 }
 
 /// Breadcrumb sits on the penultimate row (status is last).
@@ -182,34 +194,72 @@ pub fn status_line(screen: &str) -> &str {
     screen.lines().last().unwrap_or("")
 }
 
+/// Left tree focused, right file-diff unfocused. Not graph / not files.
+pub fn panes_tree_focused_diff_unfocused(screen: &str) -> bool {
+    let top = pane_top(screen);
+    top.contains("* tree")
+        && top.contains("diff")
+        && !top.contains("* diff")
+        && !top.contains("graph")
+        && !top.contains("files")
+}
+
+/// Left tree unfocused, right file-diff focused. Not graph / not files.
+pub fn panes_tree_unfocused_diff_focused(screen: &str) -> bool {
+    let top = pane_top(screen);
+    top.contains("* diff")
+        && top.contains("tree")
+        && !top.contains("* tree")
+        && !top.contains("graph")
+        && !top.contains("files")
+}
+
 /// Left tree focused, right graph unfocused. Not files / not a file diff.
 pub fn panes_tree_focused_graph_unfocused(screen: &str) -> bool {
     let top = pane_top(screen);
-    top.contains(" tree ")
-        && top.contains(" graph")
-        && !top.contains(" graph ")
-        && !top.contains(" files")
-        && !top.contains(" diff")
+    top.contains("* tree")
+        && top.contains("graph")
+        && !top.contains("* graph")
+        && !top.contains("files")
+        && !top.contains("diff")
 }
 
 /// Left tree unfocused, right graph focused. Not files / not a file diff.
 pub fn panes_tree_unfocused_graph_focused(screen: &str) -> bool {
     let top = pane_top(screen);
-    top.contains(" graph ")
-        && top.contains(" tree")
-        && !top.contains(" tree ")
-        && !top.contains(" files")
-        && !top.contains(" diff")
+    top.contains("* graph")
+        && top.contains("tree")
+        && !top.contains("* tree")
+        && !top.contains("files")
+        && !top.contains("diff")
 }
 
-/// Merger graph body. Files drill (`wip.txt` / `┌ files`) cannot pass.
+/// Right commit-files focused (left is graph). Not a file diff.
+pub fn panes_files_focused(screen: &str) -> bool {
+    let top = pane_top(screen);
+    top.contains("* files")
+        && top.contains("graph")
+        && !top.contains("* graph")
+        && !top.contains("diff")
+}
+
+/// Left graph focused, right commit-files unfocused. Not a file diff.
+pub fn panes_graph_focused_files_unfocused(screen: &str) -> bool {
+    let top = pane_top(screen);
+    top.contains("* graph")
+        && top.contains("files")
+        && !top.contains("* files")
+        && !top.contains("diff")
+}
+
+/// Merger graph body. Files drill (`wip.txt` / files title) cannot pass.
 pub fn merger_graph_body(screen: &str) -> bool {
     screen.contains("WIP on graph")
         && screen.contains("stash@{0}")
         && screen.contains("feature/graph")
         && screen.contains("working tree clean")
         && !screen.contains("wip.txt")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && !screen.contains("[stash@{0}]")
 }
 
@@ -260,7 +310,7 @@ pub fn merger_graph_drilled_right(screen: &str) -> bool {
 
 /// Wrong keys: Enter drills files, `/` types SEARCH, Shift+S opens stash.
 pub fn not_files_search_or_stash(screen: &str) -> bool {
-    !screen.contains("┌ files")
+    !title_has_files(screen)
         && !screen.contains("keep.txt")
         && !screen.contains("SEARCH")
         && !screen.contains("Stash ")
@@ -584,22 +634,12 @@ pub fn page_file_body_visible(screen: &str) -> bool {
 
 /// Left tree focused, right graph unfocused. Not files / not a file diff.
 pub fn tree_pane_focused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" tree ")
-        && top.contains(" graph")
-        && !top.contains(" graph ")
-        && !top.contains(" files")
-        && !top.contains(" diff")
+    panes_tree_focused_graph_unfocused(screen)
 }
 
 /// Left tree unfocused, right graph focused. Not files / not a file diff.
 pub fn graph_pane_focused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" graph ")
-        && top.contains(" tree")
-        && !top.contains(" tree ")
-        && !top.contains(" files")
-        && !top.contains(" diff")
+    panes_tree_unfocused_graph_focused(screen)
 }
 
 pub fn graph_cursor_on(screen: &str, needle: &str) -> bool {

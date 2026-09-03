@@ -1,9 +1,10 @@
 use crate::harness::{left_tree, PtySession};
 use crate::seed::daily_workspace;
 use crate::support::{
-    crumb_row, documented_launch_first_paint, no_updates_group_folded, no_wrong_overlays, pane_top,
-    pane_unstaged_readme, status_row, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded,
-    tree_has, tree_line_containing, SETTLE_MS, WAIT,
+    crumb_row, documented_launch_first_paint, no_updates_group_folded, no_wrong_overlays,
+    pane_unstaged_readme, panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused,
+    status_row, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded, tree_has,
+    tree_line_containing, SETTLE_MS, WAIT,
 };
 
 fn tree_readme_rows(screen: &str) -> usize {
@@ -47,24 +48,6 @@ fn seed_tree_stays(screen: &str) -> bool {
         && no_updates_group_folded(screen)
         && pane_unstaged_readme(screen)
         && no_wrong_overlays(screen)
-}
-
-fn panes_tree_focused_diff_unfocused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" tree ")
-        && top.contains(" diff")
-        && !top.contains(" diff ")
-        && !top.contains(" graph")
-        && !top.contains(" files")
-}
-
-fn panes_tree_unfocused_diff_focused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" diff ")
-        && top.contains(" tree")
-        && !top.contains(" tree ")
-        && !top.contains(" graph")
-        && !top.contains(" files")
 }
 
 /// Left-focused `.` showed ignored `notes`. Toast-only or No-updates cannot pass.

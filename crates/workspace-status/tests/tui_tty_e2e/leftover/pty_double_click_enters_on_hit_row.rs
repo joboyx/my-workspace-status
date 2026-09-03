@@ -1,7 +1,8 @@
 use crate::harness::{tree_row_containing, PtySession};
 use crate::seed::daily_workspace;
 use crate::support::{
-    tree_has, GIT_WAIT, RIGHT_PANE_COL, SETTLE_MS, TREE_DEPTH1_CHEVRON_COL, TREE_LABEL_COL, WAIT,
+    title_has_diff, title_has_files, title_has_graph, tree_has, GIT_WAIT, RIGHT_PANE_COL,
+    SETTLE_MS, TREE_DEPTH1_CHEVRON_COL, TREE_LABEL_COL, WAIT,
 };
 
 /// Live `last_click` window is 400ms. Wait past it so the next pair is a
@@ -50,7 +51,7 @@ fn pty_double_click_enters_on_hit_row() {
             tree_has(screen, "lib")
                 && tree_has(screen, "No updates")
                 && !screen.contains("[workspace]")
-                && !screen.contains("┌ files")
+                && !title_has_files(screen)
         },
         "chevron double-click folds once (a second toggle hides lib; Enter would focus right)",
         WAIT,
@@ -64,10 +65,10 @@ fn pty_double_click_enters_on_hit_row() {
     tui.wait_ms(DOUBLE_CLICK_EXPIRE_MS);
     tui.wait_pred(
         |screen| {
-            screen.contains("┌ graph")
+            title_has_graph(screen)
                 && screen.contains("WIP on graph")
                 && !screen.contains("[merger]")
-                && !screen.contains("┌ files")
+                && !title_has_files(screen)
         },
         "single-click merger selects the graph only (left focus)",
         WAIT,
@@ -78,8 +79,8 @@ fn pty_double_click_enters_on_hit_row() {
         |screen| {
             screen.contains("[merger]")
                 && screen.contains("WIP on graph")
-                && screen.contains("┌ graph")
-                && !screen.contains("┌ files")
+                && title_has_graph(screen)
+                && !title_has_files(screen)
                 && !screen.contains("wip.txt")
         },
         "tree double-click is Enter on the hit repo: focus right, do not drill",
@@ -100,9 +101,7 @@ fn pty_double_click_enters_on_hit_row() {
     tui.enter();
     tui.wait_pred(
         |screen| {
-            screen.contains("┌ files")
-                && screen.contains("wip.txt")
-                && screen.contains("[stash@{0}]")
+            title_has_files(screen) && screen.contains("wip.txt") && screen.contains("[stash@{0}]")
         },
         "keyboard Enter on the stash row drills to commit files (oracle)",
         GIT_WAIT,
@@ -112,7 +111,7 @@ fn pty_double_click_enters_on_hit_row() {
     tui.wait_pred(
         |screen| {
             screen.contains("WIP on graph")
-                && !screen.contains("┌ files")
+                && !title_has_files(screen)
                 && !screen.contains("[stash@{0}]")
         },
         "Esc Esc returns to the graph after the keyboard oracle",
@@ -127,7 +126,7 @@ fn pty_double_click_enters_on_hit_row() {
     tui.wait_pred(
         |screen| {
             screen.contains("WIP on graph")
-                && !screen.contains("┌ files")
+                && !title_has_files(screen)
                 && !screen.contains("wip.txt")
                 && !screen.contains("[stash@{0}]")
         },
@@ -138,7 +137,7 @@ fn pty_double_click_enters_on_hit_row() {
     sgr_double_click(&mut tui, RIGHT_PANE_COL, graph_row);
     tui.wait_pred(
         |screen| {
-            screen.contains("┌ files")
+            title_has_files(screen)
                 && screen.contains("wip.txt")
                 && screen.contains("[stash@{0}]")
                 && screen.contains("workspace › merger")
@@ -155,9 +154,9 @@ fn pty_double_click_enters_on_hit_row() {
     tui.wait_ms(DOUBLE_CLICK_EXPIRE_MS);
     tui.wait_pred(
         |screen| {
-            screen.contains("┌ files")
+            title_has_files(screen)
                 && screen.contains("wip.txt")
-                && !screen.contains("┌ diff")
+                && !title_has_diff(screen)
                 && !screen.contains("@@")
                 && !screen.contains("+stash me")
         },
@@ -168,7 +167,7 @@ fn pty_double_click_enters_on_hit_row() {
     sgr_double_click(&mut tui, RIGHT_PANE_COL, file_row);
     tui.wait_pred(
         |screen| {
-            screen.contains("┌ diff")
+            title_has_diff(screen)
                 && screen.contains("[wip.txt]")
                 && screen.contains("@@")
                 && screen.contains("+stash me")
@@ -182,11 +181,11 @@ fn pty_double_click_enters_on_hit_row() {
     tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
         |screen| {
-            screen.contains("┌ diff")
+            title_has_diff(screen)
                 && screen.contains("[wip.txt]")
                 && screen.contains("@@")
                 && screen.contains("+stash me")
-                && !screen.contains("┌ graph")
+                && !title_has_graph(screen)
         },
         "double-click at the diff leaf is a no-op (still that diff)",
         WAIT,

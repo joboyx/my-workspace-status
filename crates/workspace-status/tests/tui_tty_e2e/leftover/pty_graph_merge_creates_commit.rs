@@ -2,7 +2,7 @@ use crate::harness::PtySession;
 use crate::seed::focus_workspace;
 use crate::support::{
     crumb_row, graph_cursor_on, graph_pane_focused, no_mouse_toggle_toast, status_row,
-    tree_cursor_on, tree_has, tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
+    title_has_files, tree_cursor_on, tree_has, tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 fn no_merge_confirm(screen: &str) -> bool {
@@ -16,7 +16,7 @@ fn no_wrong_merge_overlays(screen: &str) -> bool {
         && !screen.contains("Create branch")
         && !screen.contains("Focus branches")
         && !screen.contains("Stash ")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && no_mouse_toggle_toast(screen)
 }
 
@@ -95,7 +95,7 @@ fn merge_into_head_confirm(screen: &str) -> bool {
         && !screen.contains("MOVE")
         && !screen.contains("Create branch")
         && !screen.contains("Focus branches")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
 }
 
 /// `y` created a merge commit into HEAD. Fast-forward / no-op cannot pass.
@@ -119,7 +119,7 @@ fn documented_graph_merge_commit(screen: &str) -> bool {
         && !screen.contains("MOVE")
         && !screen.contains("Create branch")
         && !screen.contains("Focus branches")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && status.contains("drill")
         && status.contains(" tree")
         && status.contains(" split")

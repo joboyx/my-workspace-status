@@ -2,8 +2,8 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     crumb_row, documented_launch_first_paint, no_mouse_toggle_toast, no_updates_group_folded,
-    no_wrong_overlays, pane_top, status_row, tree_cursor_on, tree_dir_expanded, tree_has,
-    SETTLE_MS, WAIT,
+    no_wrong_overlays, panes_tree_unfocused_diff_focused, status_row, title_has_files,
+    tree_cursor_on, tree_dir_expanded, tree_has, SETTLE_MS, WAIT,
 };
 
 /// CSI-u Enter (`CSI 13 ; 1 : 1 u` press, `: 3` release).
@@ -13,16 +13,6 @@ use crate::support::{
 fn csi_u_enter(tui: &mut PtySession) {
     tui.csi_u(13, 1, 1);
     tui.csi_u(13, 1, 3);
-}
-
-/// Left tree unfocused, right file-diff focused. Not graph / not files.
-fn panes_tree_unfocused_diff_focused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" diff ")
-        && top.contains(" tree")
-        && !top.contains(" tree ")
-        && !top.contains(" graph")
-        && !top.contains(" files")
 }
 
 /// Enter from the tree file row focused the file-diff. Same stack. No drill.
@@ -54,7 +44,7 @@ fn enter_focuses_readme_diff(screen: &str) -> bool {
         && status.contains(" tree")
         && status.contains(" split")
         && !status.contains("focus right")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && !screen.contains("wip.txt")
         && !screen.contains("WIP on graph")
         && !screen.contains("Working tree")

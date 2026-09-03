@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use crate::harness::{PtySession, SGR_WHEEL_DOWN};
 use crate::seed::{seed_many_commit_files, seed_repo, seed_tall_graph, unique_root};
 use crate::support::{
-    graph_cursor_on, graph_pane_focused, pane_top, right_pane, tree_cursor_on, GIT_WAIT,
+    graph_cursor_on, graph_pane_focused, pane_top, panes_files_focused,
+    panes_graph_focused_files_unfocused, panes_tree_focused_graph_unfocused,
+    panes_tree_unfocused_diff_focused, right_pane, title_has_files, tree_cursor_on, GIT_WAIT,
     RIGHT_PANE_COL, SETTLE_MS, WAIT,
 };
 
@@ -30,10 +32,10 @@ enum RightList {
 
 fn tree_keyboard_focus(screen: &str) -> bool {
     let top = pane_top(screen);
-    top.contains(" tree ")
-        && !top.contains(" graph ")
-        && !top.contains(" files ")
-        && !top.contains(" diff ")
+    top.contains("* tree")
+        && !top.contains("* graph")
+        && !top.contains("* files")
+        && !top.contains("* diff")
 }
 
 fn return_to_tree(tui: &mut PtySession) {
@@ -335,40 +337,6 @@ fn move_stays_middle(tui: &mut PtySession, kind: RightList, send: fn(&mut PtySes
     assert_list_middle(&screen, kind, why);
 }
 
-fn panes_diff_focused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" diff ")
-        && top.contains(" tree")
-        && !top.contains(" tree ")
-        && !top.contains(" graph")
-        && !top.contains(" files")
-}
-
-fn panes_files_focused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" files ")
-        && top.contains(" graph")
-        && !top.contains(" graph ")
-        && !top.contains(" diff")
-}
-
-fn graph_left_focused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" tree ")
-        && top.contains(" graph")
-        && !top.contains(" graph ")
-        && !top.contains(" files")
-        && !top.contains(" diff")
-}
-
-fn files_left_is_graph(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" graph ")
-        && top.contains(" files")
-        && !top.contains(" files ")
-        && !top.contains(" diff")
-}
-
 /// Right-pane `j` / `k` / Down / Up / vertical wheel keep the focused row
 /// at list-body height/2.
 ///
@@ -410,7 +378,7 @@ fn pty_right_pane_keeps_focus_middle() {
     tui.tab();
     tui.wait_pred(
         |screen| {
-            panes_diff_focused(screen)
+            panes_tree_unfocused_diff_focused(screen)
                 && tree_cursor_on(screen, "keepmid-diff.rs")
                 && right_pane(screen).contains("keepmid-line-0")
                 && right_pane(screen).contains('\u{258C}')
@@ -466,12 +434,16 @@ fn pty_right_pane_keeps_focus_middle() {
     );
     unfocus_right(
         &mut tui,
-        panes_diff_focused,
+        panes_tree_unfocused_diff_focused,
         tree_keyboard_focus,
         "Esc unfocuses the file-diff onto the tree",
     );
     tui.tab();
-    tui.wait_pred(panes_diff_focused, "Tab returns to the file-diff", WAIT);
+    tui.wait_pred(
+        panes_tree_unfocused_diff_focused,
+        "Tab returns to the file-diff",
+        WAIT,
+    );
     assert_list_middle(
         &tui.screen(),
         RightList::Diff,
@@ -534,7 +506,7 @@ fn pty_right_pane_keeps_focus_middle() {
     unfocus_right(
         &mut tui,
         graph_pane_focused,
-        graph_left_focused,
+        panes_tree_focused_graph_unfocused,
         "Esc unfocuses the graph onto the tree",
     );
     tui.enter();
@@ -571,7 +543,7 @@ fn pty_right_pane_keeps_focus_middle() {
     tui.wait_pred(
         |screen| {
             panes_files_focused(screen)
-                && screen.contains("┌ files")
+                && title_has_files(screen)
                 && right_pane(screen).contains("keepmid-00.txt")
                 && right_pane(screen).contains('\u{258C}')
         },
@@ -627,7 +599,7 @@ fn pty_right_pane_keeps_focus_middle() {
     unfocus_right(
         &mut tui,
         panes_files_focused,
-        files_left_is_graph,
+        panes_graph_focused_files_unfocused,
         "Esc unfocuses commit files onto the graph",
     );
     tui.tab();
