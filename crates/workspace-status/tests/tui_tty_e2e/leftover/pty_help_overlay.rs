@@ -27,6 +27,7 @@ const HELP_GIT_ROWS: &[(&str, &str)] = &[
     ("u", "unstage scope"),
     ("x", "revert (y/Y)"),
     ("e", "open in editor"),
+    ("E", "open in diff tool"),
     ("space", "mark dirty file reviewed (eye)"),
     ("f", "fetch remotes"),
     ("p", "pull behind"),
@@ -176,6 +177,7 @@ fn documented_help_overlay(screen: &str) -> bool {
         || view_c.contains("stage scope")
         || view_c.contains("down / up")
         || view_c.contains("open in editor")
+        || view_c.contains("open in diff tool")
     {
         return false;
     }
