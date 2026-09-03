@@ -810,6 +810,7 @@ pub fn collect_full_snapshot(
         max_depth: config.max_depth,
         default_branches: config.default_branches.clone(),
         editor: config.editor.clone(),
+        diff_tool: config.diff_tool.clone(),
     };
     let only: Option<BTreeSet<String>> = if filter_repos.is_empty() {
         None
@@ -832,6 +833,7 @@ pub(crate) fn discover_config(config: &WorkspaceStatusConfig) -> WorkspaceStatus
         max_depth: config.max_depth,
         default_branches: config.default_branches.clone(),
         editor: config.editor.clone(),
+        diff_tool: config.diff_tool.clone(),
     }
 }
 

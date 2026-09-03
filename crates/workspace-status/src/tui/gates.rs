@@ -56,6 +56,7 @@ pub fn is_left_list_action(action: &Action) -> bool {
             | Action::Unstage
             | Action::Revert
             | Action::Edit
+            | Action::ExternalDiff
             | Action::ToggleReviewed
             | Action::ToggleFullContext
             | Action::Branch
@@ -103,13 +104,16 @@ fn is_fold_action(action: &Action) -> bool {
 fn is_commit_nav_action(action: &Action) -> bool {
     is_move_action(action)
         || is_fold_action(action)
-        || matches!(action, Action::Edit | Action::ToggleFullContext)
+        || matches!(
+            action,
+            Action::Edit | Action::ExternalDiff | Action::ToggleFullContext
+        )
 }
 
 fn is_diff_file_write(action: &Action) -> bool {
     matches!(
         action,
-        Action::Edit | Action::ToggleFullContext | Action::ToggleReviewed
+        Action::Edit | Action::ExternalDiff | Action::ToggleFullContext | Action::ToggleReviewed
     )
 }
 
@@ -118,7 +122,7 @@ fn is_diff_file_write(action: &Action) -> bool {
 /// Allow-list: graph move/write
 /// (`b`/`c`/`m`/`a`/`p`/`D` as `GraphCheckout` / `GraphCreateBranch` /
 /// `GraphMerge` / stash apply/pop/drop), commit-file nav, diff move, and diff `e` /
-/// Ctrl+O / space. Tree `b` (`Branch`) and `S` (`StashMenu`) stay left-only.
+/// `E` / Ctrl+O / space. Tree `b` (`Branch`) and `S` (`StashMenu`) stay left-only.
 pub fn right_pane_left_list_allowed(target: ListFocusTarget, action: &Action) -> bool {
     let graph_move = target == ListFocusTarget::Graph && is_move_action(action);
     let graph_write = target == ListFocusTarget::Graph && is_graph_write_action(action);
@@ -165,6 +169,7 @@ mod tests {
         assert!(!is_tree_write_blocked(&Action::StashMenu, 1));
         assert!(!is_tree_write_blocked(&Action::ToggleReviewed, 1));
         assert!(!is_tree_write_blocked(&Action::Edit, 1));
+        assert!(!is_tree_write_blocked(&Action::ExternalDiff, 1));
     }
 
     #[test]
@@ -211,11 +216,19 @@ mod tests {
         ));
         assert!(right_pane_left_list_allowed(
             ListFocusTarget::CommitFiles,
+            &Action::ExternalDiff
+        ));
+        assert!(right_pane_left_list_allowed(
+            ListFocusTarget::CommitFiles,
             &Action::ToggleFullContext
         ));
         assert!(right_pane_left_list_allowed(
             ListFocusTarget::None,
             &Action::Edit
+        ));
+        assert!(right_pane_left_list_allowed(
+            ListFocusTarget::None,
+            &Action::ExternalDiff
         ));
         assert!(right_pane_left_list_allowed(
             ListFocusTarget::None,
@@ -269,6 +282,18 @@ mod tests {
             1,
             true,
             ListFocusTarget::CommitFiles
+        ));
+        assert!(!dispatch_is_noop(
+            &Action::ExternalDiff,
+            1,
+            true,
+            ListFocusTarget::CommitFiles
+        ));
+        assert!(!dispatch_is_noop(
+            &Action::ExternalDiff,
+            0,
+            true,
+            ListFocusTarget::None
         ));
         assert!(!dispatch_is_noop(
             &Action::GraphCheckout,

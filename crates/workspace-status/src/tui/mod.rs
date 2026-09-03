@@ -11,6 +11,7 @@ pub(crate) mod comments;
 mod commit_files;
 mod ctrl_c_exit;
 mod diff;
+pub(crate) mod diff_tool;
 mod drill;
 pub(crate) mod editor;
 mod effect;

@@ -16,6 +16,8 @@ pub struct WorkspaceStatusConfig {
     pub max_depth: u32,
     pub default_branches: BTreeMap<String, String>,
     pub editor: Option<String>,
+    /// External diff command (`diffTool`). Blank/omit means default `vimdiff` at resolve time.
+    pub diff_tool: Option<String>,
 }
 
 impl WorkspaceStatusConfig {
@@ -25,6 +27,7 @@ impl WorkspaceStatusConfig {
             max_depth: DEFAULT_MAX_DEPTH,
             default_branches: BTreeMap::new(),
             editor: None,
+            diff_tool: None,
         }
     }
 }
@@ -36,6 +39,7 @@ struct RawConfig {
     max_depth: Option<serde_json::Value>,
     default_branches: Option<serde_json::Value>,
     editor: Option<serde_json::Value>,
+    diff_tool: Option<serde_json::Value>,
 }
 
 fn normalize_ignored(repos: &[String]) -> Vec<String> {
@@ -86,7 +90,9 @@ pub fn load_workspace_status_config(cwd: &Path) -> Result<WorkspaceStatusConfig,
     let mut ignored = Vec::new();
     for repo in parsed.ignored_repos {
         let Some(s) = repo.as_str() else {
-            return Err(format!("{CONFIG_FILENAME} ignoredRepos must contain only strings"));
+            return Err(format!(
+                "{CONFIG_FILENAME} ignoredRepos must contain only strings"
+            ));
         };
         ignored.push(s.to_string());
     }
@@ -95,10 +101,14 @@ pub fn load_workspace_status_config(cwd: &Path) -> Result<WorkspaceStatusConfig,
         None => DEFAULT_MAX_DEPTH,
         Some(v) => {
             let Some(n) = v.as_u64() else {
-                return Err(format!("{CONFIG_FILENAME} maxDepth must be a positive integer"));
+                return Err(format!(
+                    "{CONFIG_FILENAME} maxDepth must be a positive integer"
+                ));
             };
             if n < 1 {
-                return Err(format!("{CONFIG_FILENAME} maxDepth must be a positive integer"));
+                return Err(format!(
+                    "{CONFIG_FILENAME} maxDepth must be a positive integer"
+                ));
             }
             n as u32
         }
@@ -108,7 +118,9 @@ pub fn load_workspace_status_config(cwd: &Path) -> Result<WorkspaceStatusConfig,
         None => BTreeMap::new(),
         Some(v) => {
             let Some(obj) = v.as_object() else {
-                return Err(format!("{CONFIG_FILENAME} defaultBranches must be an object"));
+                return Err(format!(
+                    "{CONFIG_FILENAME} defaultBranches must be an object"
+                ));
             };
             let mut map = BTreeMap::new();
             for (repo, branch) in obj {
@@ -138,11 +150,27 @@ pub fn load_workspace_status_config(cwd: &Path) -> Result<WorkspaceStatusConfig,
         }
     };
 
+    let diff_tool = match parsed.diff_tool {
+        None => None,
+        Some(v) => {
+            let Some(s) = v.as_str() else {
+                return Err(format!("{CONFIG_FILENAME} diffTool must be a string"));
+            };
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+    };
+
     Ok(WorkspaceStatusConfig {
         ignored_repos: normalize_ignored(&ignored),
         max_depth,
         default_branches,
         editor,
+        diff_tool,
     })
 }
 
@@ -165,6 +193,7 @@ mod tests {
         let cfg = load_workspace_status_config(&dir).unwrap();
         assert!(cfg.ignored_repos.is_empty());
         assert_eq!(cfg.max_depth, 3);
+        assert_eq!(cfg.diff_tool, None);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -185,6 +214,61 @@ mod tests {
         .unwrap();
         let cfg = load_workspace_status_config(&dir).unwrap();
         assert_eq!(cfg.ignored_repos, vec!["notes", "vendor"]);
+        assert_eq!(cfg.diff_tool, None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn write_config(dir_prefix: &str, json: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "{dir_prefix}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(CONFIG_FILENAME), json).unwrap();
+        dir
+    }
+
+    #[test]
+    fn omit_diff_tool_is_none() {
+        let dir = write_config("ws-config-omit-diff", r#"{"ignoredRepos":[]}"#);
+        let cfg = load_workspace_status_config(&dir).unwrap();
+        assert_eq!(cfg.diff_tool, None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn diff_tool_vimdiff_is_kept() {
+        let dir = write_config(
+            "ws-config-diff-vim",
+            r#"{"ignoredRepos":[],"diffTool":"vimdiff"}"#,
+        );
+        let cfg = load_workspace_status_config(&dir).unwrap();
+        assert_eq!(cfg.diff_tool.as_deref(), Some("vimdiff"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn blank_diff_tool_is_none() {
+        let dir = write_config(
+            "ws-config-diff-blank",
+            r#"{"ignoredRepos":[],"diffTool":"  "}"#,
+        );
+        let cfg = load_workspace_status_config(&dir).unwrap();
+        assert_eq!(cfg.diff_tool, None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_string_diff_tool_is_error() {
+        let dir = write_config("ws-config-diff-bad", r#"{"ignoredRepos":[],"diffTool":1}"#);
+        let err = load_workspace_status_config(&dir).unwrap_err();
+        assert!(
+            err.contains("diffTool must be a string"),
+            "unexpected error: {err}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

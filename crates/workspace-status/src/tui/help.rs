@@ -80,8 +80,8 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "revert (y/Y)",
             },
             HelpEntry {
-                keys: "e",
-                desc: "open in editor",
+                keys: "e E",
+                desc: "open in editor · open in diff tool",
             },
             HelpEntry {
                 keys: "space",
@@ -560,6 +560,7 @@ mod tests {
         assert!(keys.contains(&"Home End"));
         let git_keys: Vec<&str> = HELP_GROUPS[1].entries.iter().map(|e| e.keys).collect();
         assert!(git_keys.contains(&"m"));
+        assert!(git_keys.contains(&"e E"));
         let move_keys: Vec<&str> = HELP_GROUPS[0].entries.iter().map(|e| e.keys).collect();
         let view_keys: Vec<&str> = HELP_GROUPS[2].entries.iter().map(|e| e.keys).collect();
         assert!(move_keys.contains(&"j k"));

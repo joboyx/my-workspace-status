@@ -22,7 +22,7 @@ use crate::snapshot::{
 
 #[cfg(test)]
 use super::action::Action;
-use super::action::Effect;
+use super::action::{Effect, ExternalDiffKind};
 use super::branches::{
     can_open_branch_picker, checkoutable_branch_names, is_valid_branch_name, merge_rev_for_commit,
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
@@ -702,6 +702,24 @@ impl AppState {
         match &self.drill {
             DrillView::Diff { path, .. } => Some((repo, path.clone())),
             _ => None,
+        }
+    }
+
+    fn external_diff_kind(&self) -> ExternalDiffKind {
+        let source = match &self.drill {
+            DrillView::Files { source, .. } | DrillView::Diff { source, .. } => source,
+            DrillView::Graph => return ExternalDiffKind::Worktree,
+        };
+        match source {
+            CommitFileSource::Worktree => ExternalDiffKind::Worktree,
+            CommitFileSource::Commit { commit_id } => ExternalDiffKind::Rev {
+                left_rev: format!("{commit_id}^"),
+                right_rev: commit_id.clone(),
+            },
+            CommitFileSource::Stash { stash_ref } => ExternalDiffKind::Rev {
+                left_rev: format!("{stash_ref}^1"),
+                right_rev: stash_ref.clone(),
+            },
         }
     }
 
@@ -4725,8 +4743,148 @@ mod tests {
         assert_eq!(app.focused_row().unwrap().id, id);
         assert_eq!(app.folds, folds);
         assert_eq!(app.diff_scroll, 7);
+        assert_eq!(app.status, "edit README.md");
         app.cursor = 0;
         assert_eq!(app.dispatch(Action::Edit), Effect::None);
+    }
+
+    #[test]
+    fn external_diff_same_focus_as_edit() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        match app.dispatch(Action::ExternalDiff) {
+            Effect::ExternalDiff { repo, path, kind } => {
+                assert_eq!(repo, "app");
+                assert_eq!(path, "README.md");
+                assert_eq!(kind, ExternalDiffKind::Worktree);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            app.dispatch(Action::Edit),
+            Effect::EditFile {
+                repo: "app".into(),
+                path: "README.md".into(),
+            }
+        );
+        assert_eq!(app.status, "edit README.md");
+        app.cursor = 0;
+        assert_eq!(app.dispatch(Action::ExternalDiff), Effect::None);
+        assert_eq!(app.status, "focus a file to diff");
+    }
+
+    #[test]
+    fn external_diff_commit_stash_and_worktree_source() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        app.focus = FocusPane::Right;
+        let commit_id = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        app.open_commit_files(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: commit_id.into(),
+            },
+            vec![CommitFile {
+                status: "M".into(),
+                path: "src/lib.rs".into(),
+                old_path: None,
+            }],
+        );
+        let idx = app
+            .commit_file_rows()
+            .iter()
+            .position(|row| row.path == "src/lib.rs")
+            .expect("file");
+        if let DrillView::Files { cursor, .. } = &mut app.drill {
+            *cursor = idx;
+        }
+        match app.dispatch(Action::ExternalDiff) {
+            Effect::ExternalDiff { repo, path, kind } => {
+                assert_eq!(repo, "app");
+                assert_eq!(path, "src/lib.rs");
+                assert_eq!(
+                    kind,
+                    ExternalDiffKind::Rev {
+                        left_rev: format!("{commit_id}^"),
+                        right_rev: commit_id.into(),
+                    }
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        app.open_commit_diff(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: commit_id.into(),
+            },
+            vec![CommitFile {
+                status: "M".into(),
+                path: "src/lib.rs".into(),
+                old_path: None,
+            }],
+            idx,
+            "src/lib.rs".into(),
+            DiffContent::from_lines(vec!["+fn x() {}".into()]),
+        );
+        match app.dispatch(Action::ExternalDiff) {
+            Effect::ExternalDiff { path, kind, .. } => {
+                assert_eq!(path, "src/lib.rs");
+                assert_eq!(
+                    kind,
+                    ExternalDiffKind::Rev {
+                        left_rev: format!("{commit_id}^"),
+                        right_rev: commit_id.into(),
+                    }
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        app.open_commit_files(
+            "app".into(),
+            CommitFileSource::Stash {
+                stash_ref: "stash@{0}".into(),
+            },
+            vec![CommitFile {
+                status: "M".into(),
+                path: "src/lib.rs".into(),
+                old_path: None,
+            }],
+        );
+        if let DrillView::Files { cursor, .. } = &mut app.drill {
+            *cursor = idx;
+        }
+        match app.dispatch(Action::ExternalDiff) {
+            Effect::ExternalDiff { path, kind, .. } => {
+                assert_eq!(path, "src/lib.rs");
+                assert_eq!(
+                    kind,
+                    ExternalDiffKind::Rev {
+                        left_rev: "stash@{0}^1".into(),
+                        right_rev: "stash@{0}".into(),
+                    }
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        app.open_commit_files(
+            "app".into(),
+            CommitFileSource::Worktree,
+            vec![CommitFile {
+                status: "M".into(),
+                path: "src/lib.rs".into(),
+                old_path: None,
+            }],
+        );
+        if let DrillView::Files { cursor, .. } = &mut app.drill {
+            *cursor = idx;
+        }
+        match app.dispatch(Action::ExternalDiff) {
+            Effect::ExternalDiff { path, kind, .. } => {
+                assert_eq!(path, "src/lib.rs");
+                assert_eq!(kind, ExternalDiffKind::Worktree);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

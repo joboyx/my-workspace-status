@@ -29,6 +29,7 @@ You are helping the user review the status of all git repositories in the curren
 - Optional `defaultBranches` map (repo path → branch) overrides the default branch for classification, markers, ordering, and `--default-branch` / TUI `d`; without an entry, defaults are derived as today
 - `maxDepth` (default **3**) controls how many path segments below cwd are searched for git repos (so `acme/light-modules/*` is included by default)
 - Optional `editor` for TUI `e` (same shape as `$EDITOR`). Omit the key or set `"editor": "vim"` for vim (the default). `"editor": "cursor"` opens Cursor IDE. Config overrides `$EDITOR` / `$VISUAL`.
+- Optional `diffTool` for TUI `E` (default vimdiff). `"diffTool": "cursor --diff"` opens Cursor. No `$EDITOR` fallback.
 - Pass one or more repo paths (e.g. `dotfiles`, `dotfiles notes`) to limit output to those repos; named repos are included even when listed in `ignoredRepos`
 - The CLI already formats its own output, so prefer showing it as-is
 - When changing the CLI or its output contract, keep `SAMPLE_OUTPUT.md` and `crates/workspace-status/tests/snapshot_contract.rs` in sync
@@ -98,6 +99,7 @@ Live TUI keymap (full overlay detail in [docs/configuration.md](./docs/configura
 | `P`                                   | push ahead\|diverged\|no-upstream (repo/checkout only; family uses the primary; first publish uses `-u`)                                               |
 | `d`                                   | switch primaries (or the focused checkout) to the default branch and pull when clean; dirty checkouts skipped                                          |
 | `e`                                   | open focused file in configured editor (default vim; config overrides `$EDITOR` / `$VISUAL`). vim leaves the alternate screen; Cursor stays mounted     |
+| `E`                                   | open focused file in configured diff tool (default vimdiff; config `diffTool`). vimdiff leaves the alternate screen; Cursor stays mounted. Same file focus as `e` |
 | `space`                               | toggle reviewed on a dirty file row (eye mark). Stays until that file's diff or contents change. Non-file rows no-op (do not fold)                     |
 | `;`                                   | comment overlay on the focused numbered diff line, or an object comment on a commit / non-default branch / worktree. Without highlight, `;` opens the stored span that covers that line. Empty Enter deletes that span. Shift+Enter inserts a newline. Left / Right / Home / End move the caret (Home / End are the current line). Ctrl-A / Ctrl-E are line start / end. Ctrl-Left / Ctrl-Right move by word; insert and delete apply at the caret. Overlay Ctrl-R toggles resolved |
 | `V`                                   | visual-line highlight on a focused file diff. `j` / `k` and arrows extend or shrink the range. `;` comments that line span. Esc leaves highlight without commenting. Watch reload, split/inline, or a painted-row change drops highlight. No-op on the tree, graph, or a commit-file list. |

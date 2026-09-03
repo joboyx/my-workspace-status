@@ -51,6 +51,8 @@ pub enum UserTag {
     BulkRemote,
     DefaultBranch,
     Prepare,
+    /// External-diff blob + temp prepare (`E`).
+    DiffPrepare,
     Autoload,
 }
 

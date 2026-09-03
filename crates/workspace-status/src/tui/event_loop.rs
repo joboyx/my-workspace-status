@@ -17,13 +17,14 @@ use ratatui::Terminal;
 use tokio::task::JoinSet;
 use tokio::time::{sleep, Duration as TokioDuration};
 
-use super::action::{Action, Effect};
+use super::action::{Action, Effect, ExternalDiffKind};
 use super::app::{
     apply_terminal_resize, discard_held_nav_backlog, map_event, run_blocking_editor,
     sync_mouse_capture, TuiOpts,
 };
+use super::diff_tool::{cleanup_prepared, diff_tool_command, wait_and_cleanup};
 use super::editor::{editor_command, is_detached_editor, resolve_editor};
-use super::effect::{Interpreter, JobOutcome};
+use super::effect::{DiffLaunch, Interpreter, JobOutcome};
 use super::event_pump::{
     action_triggers_graph_autoload, classify_busy_action, overlay_blocks_background_ticks,
     BusyAction,
@@ -258,6 +259,9 @@ pub async fn run(
                 match joined {
                     Ok((id, outcome)) => {
                         ctx.interp.apply(ctx.state, ctx.opts, id, outcome);
+                        if let Some(launch) = ctx.interp.take_pending_diff_launch() {
+                            launch_diff(&mut ctx, launch);
+                        }
                         if ctx.interp.take_dirty() {
                             ctx.presenter.mark();
                         }
@@ -363,6 +367,9 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event) {
     if let Some((repo, path)) = ctx.interp.take_pending_edit() {
         schedule_edit(ctx, repo, path);
     }
+    if let Some((repo, path, kind)) = ctx.interp.take_pending_diff() {
+        ctx.interp.enqueue_diff_prepare(repo, path, kind, ctx.opts);
+    }
     if action_triggers_graph_autoload(&action_for_load) {
         ctx.interp.maybe_queue_autoload(ctx.state);
     }
@@ -418,6 +425,73 @@ fn schedule_edit(ctx: &mut LoopCtx<'_>, repo: String, path: String) {
             ctx.state.status = format!("edited {path}");
             ctx.interp.after_edit(ctx.state, repo);
             if ctx.interp.take_dirty() {
+                ctx.presenter.mark();
+            }
+        }
+    }
+}
+
+fn launch_diff(ctx: &mut LoopCtx<'_>, launch: DiffLaunch) {
+    let DiffLaunch {
+        repo,
+        path,
+        kind,
+        tool,
+        repo_abs,
+        prepared,
+    } = launch;
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            ctx.state.status = format!("diff failed: {err}");
+            ctx.presenter.mark();
+            return;
+        }
+    };
+    let left = prepared.left.to_string_lossy().into_owned();
+    let right = prepared.right.to_string_lossy().into_owned();
+    let (cmd, args) = diff_tool_command(&tool, &left, &right);
+    if is_detached_editor(&tool) {
+        match Command::new(&cmd)
+            .args(&args)
+            .current_dir(&repo_abs)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => {
+                std::thread::spawn(move || {
+                    wait_and_cleanup(child, prepared);
+                });
+                ctx.state.status = format!("opened diff {path}");
+            }
+            Err(err) => {
+                cleanup_prepared(&prepared);
+                ctx.state.status = format!("diff failed: {err}");
+            }
+        }
+        ctx.presenter.mark();
+        return;
+    }
+    ctx.input.pause();
+    let mouse = ctx.state.mouse_enabled;
+    let result = run_blocking_editor(ctx.terminal, &cmd, &args, &repo_abs, mouse);
+    ctx.input.resume();
+    cleanup_prepared(&prepared);
+    match result {
+        Err(err) => {
+            ctx.state.status = format!("diff failed: {err}");
+            ctx.presenter.mark();
+        }
+        Ok(()) => {
+            ctx.state.status = format!("diffed {path}");
+            if matches!(kind, ExternalDiffKind::Worktree) {
+                ctx.interp.after_edit(ctx.state, repo);
+                if ctx.interp.take_dirty() {
+                    ctx.presenter.mark();
+                }
+            } else {
                 ctx.presenter.mark();
             }
         }

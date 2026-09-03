@@ -13,16 +13,18 @@ Read from the resolved workspace root (CLI `-C` / `--workspace` > env `WS_STATUS
   "defaultBranches": {
     "acme/acme-main": "develop"
   },
-  "editor": "vim"
+  "editor": "vim",
+  "diffTool": "vimdiff"
 }
 ```
 
-| Key               | Required                   | Default                   | Meaning                                                                                        |
-| ----------------- | -------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------- |
-| `ignoredRepos`    | yes (when the file exists) | `[]` when file is missing | Repo paths relative to the workspace root to skip                                              |
-| `maxDepth`        | no                         | `3`                       | Walk depth for primary `.git` dirs/gitfiles (dot dirs skipped; linked via `git worktree list`) |
-| `defaultBranches` | no                         | `{}`                      | Map of workspace-relative repo path → sole default branch for that repo                        |
-| `editor`          | no                         | unset (`vim` at resolve)  | Command string for TUI `e` (same shape as `$EDITOR`). Overrides `$EDITOR` / `$VISUAL`.         |
+| Key               | Required                   | Default                       | Meaning                                                                                        |
+| ----------------- | -------------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------- |
+| `ignoredRepos`    | yes (when the file exists) | `[]` when file is missing     | Repo paths relative to the workspace root to skip                                              |
+| `maxDepth`        | no                         | `3`                           | Walk depth for primary `.git` dirs/gitfiles (dot dirs skipped; linked via `git worktree list`) |
+| `defaultBranches` | no                         | `{}`                          | Map of workspace-relative repo path → sole default branch for that repo                        |
+| `editor`          | no                         | unset (`vim` at resolve)      | Command string for TUI `e` (same shape as `$EDITOR`). Overrides `$EDITOR` / `$VISUAL`.         |
+| `diffTool`        | no                         | unset (`vimdiff` at resolve) | Command string for TUI `E`. No `$EDITOR` / `$VISUAL` / `$GIT_EXTERNAL_DIFF` fallback.          |
 
 ### `ignoredRepos`
 
@@ -62,9 +64,38 @@ Optional command string for TUI `e`, same shape as `$EDITOR` (`"vim"`, `"nvim"`,
 - `"editor": "cursor"` opens Cursor IDE without changing the shell `$EDITOR`. Cursor / VS Code stay mounted, so fold, focus, and scroll do not rebuild.
 - Non-blank config `editor` overrides `$EDITOR` / `$VISUAL`. Blank / whitespace-only is treated as unset (fall through). Non-string values throw.
 
+### `diffTool`
+
+Optional command string for TUI `E`. Same argv shape as `editor`. Default is **vimdiff** when the key is omitted or blank. There is no `$EDITOR` / `$VISUAL` / `$GIT_EXTERNAL_DIFF` fallback. This is not `git difftool`. The TUI builds LEFT and RIGHT and runs the command.
+
+Copy-paste samples:
+
+```json
+"diffTool": "vimdiff"
+```
+
+```json
+"diffTool": "cursor --diff"
+```
+
+```json
+"diffTool": "code --diff --wait"
+```
+
+If the string contains `$LOCAL` or `$REMOTE` (git-difftool style), those tokens become LEFT and RIGHT. If neither placeholder is present, LEFT then RIGHT are appended after the parsed argv.
+
+For a workspace-tree file, LEFT is `HEAD:path` when that path exists in HEAD. Untracked or newly added (not in HEAD): LEFT is an empty temp. Deleted worktree file: RIGHT is an empty temp. This is worktree vs HEAD even when the change is staged-only.
+
+Commit and stash file rows: LEFT is the first-parent blob (`rev^:path`), or an empty temp if the path was added. RIGHT is the blob at that rev in a temp (not the worktree file).
+
+- Omit the key, or set `"diffTool": "vimdiff"`, for **vimdiff**. vimdiff takes the TTY. The TUI leaves the alternate screen and resumes the same fold, focus, and scroll. Temps for that session are deleted after vimdiff exits.
+- `"diffTool": "cursor --diff"` and `"diffTool": "code --diff --wait"` spawn detached. Cursor / VS Code stay mounted. A worker waits for that child and deletes only that session's temps. A later `E` does not delete files still open in another GUI.
+- Temps live under `$TMPDIR/workspace-status-ext-diff/<pid>-<nanos>/`. A crash may leave a session directory. Later `E` does not sweep other sessions.
+- Non-blank config `diffTool` is used as-is. Blank / whitespace-only is treated as unset (vimdiff). Non-string values throw.
+
 | Override              | Effect                                                                                                                                                                                                       |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `-a` / `--all`        | `ignoredRepos` is replaced with `[]` for that run; `maxDepth` / `defaultBranches` / `editor` from config are kept                                                                                            |
+| `-a` / `--all`        | `ignoredRepos` is replaced with `[]` for that run; `maxDepth` / `defaultBranches` / `editor` / `diffTool` from config are kept                                                                                |
 | Positional repo paths | Only those repos are processed, and they bypass `ignoredRepos` entirely. Naming a primary includes its linked children under cwd; naming a linked path (e.g. `app/.worktrees/feat`) includes only that path. |
 
 The two overrides differ in the TUI. `-a` replaces the ignored list before the TUI sees it, so the ignored set is empty and the surfaced repos render and fold like any other repo — expanded, no muted name, no ignored glyph. Positional paths leave the loaded config intact, so a named repo that is also in `ignoredRepos` renders with a muted name plus the ignored glyph and starts collapsed.
@@ -162,6 +193,7 @@ See [tui-rust.md](./tui-rust.md) for the same keys with layout notes.
 | `P`                                        | push: repo/checkout when `ahead`, `diverged`, or `no-upstream`. Family → primary only. Focused linked worktree → that path. Not on workspace. Uses `git push --quiet`, or `git push -u <remote> HEAD --quiet` when publishing a new/mis-tracked branch (no force)                                                                                                                                                                                                                                                                                                                                                        |
 | `d`                                        | switch to default branch (and pull when clean): workspace / family → primary checkouts off default; focused checkout (including a linked worktree) → that path. Dirty trees are skipped via `repo_has_local_changes` when leaving the current branch                                                                                                                                                                                                                                                                                                                                                                        |
 | `e`                                        | open focused file in configured editor (default vim; config overrides `$EDITOR` / `$VISUAL`). vim leaves the alternate screen then resumes the session; Cursor / VS Code stay mounted. Works on commit-file rows and on a focused file **diff** at every depth                                                                                                                                                                                                                                                                                                                                                          |
+| `E`                                        | open focused file in configured diff tool (default vimdiff; config `diffTool`). vimdiff leaves the alternate screen then resumes; Cursor / VS Code stay mounted. Same file focus as `e`. LEFT is HEAD when the path exists in HEAD; untracked or new uses an empty LEFT temp; deleted uses an empty RIGHT temp. Staged-only is still vs HEAD                                                                                                                                                                                                          |
 | `space`                                    | toggle reviewed on a dirty workspace-tree file (depth 0). Trailing eye (`` / ASCII `*`), bold teal/cyan (`palette.viewed`) — not the clean check. Persist: repo path + file path identity, SHA-256 of status + worktree bytes. Cleared when that fingerprint changes (edit, stage/unstage, delete). Space again unmarks while contents are unchanged. A failed persist sets `viewed save failed` plus a short IO error on the breadcrumb trailing slot. No-op on repo / dir / workspace / graph / commit-file rows (does not fold)                                                                                                                                                                                                              |
 | `;`                                        | comment overlay on the focused numbered diff line, or an object comment on a commit / non-default branch / worktree. Without highlight, `;` opens the stored span that covers that line (smallest span, then lowest start). Empty Enter deletes that span. Shift+Enter inserts a newline. Left / Right / Home / End move the caret (Home / End are the current line). Ctrl-A / Ctrl-E are line start / end. Ctrl-Left / Ctrl-Right move by word. Insert, Backspace, and Delete apply at the caret. Overlay Ctrl-R toggles resolved (`Comment · resolved`). Enter persists body and resolve state. A failed persist sets `comment save failed` plus a short IO error on the breadcrumb trailing slot (never `comment saved` / `comment deleted`). The overlay replaces the idle status row. Workspace and default-branch rows are not object-comment targets; if the repo has exactly one non-default branch, a comment that would have attached at repo scope attaches to that branch. A primary detached HEAD is a worktree path key, not branch `HEAD (detached)`. Persist: `$XDG_STATE_HOME/my-workspace-status/comments.json` (`WS_STATUS_COMMENT_STORE` overrides). Never writes into user git repos. Graph and commit-file rows paint `ICON_COMMENT` (`"` / nf-fa-comment) when that row has an open comment, or `ICON_COMMENT_RESOLVED` (`'` / nf-fa-comment-o) when every comment on the row is resolved. ASCII marks `"` and `'`. |
 | `V`                                        | visual-line highlight on a focused file diff. `j` / `k` and arrows extend or shrink the range. `;` comments that line span. Esc leaves highlight without commenting. Watch reload, split/inline, or a painted-row change drops highlight. No-op on the tree, graph, or a commit-file list. |

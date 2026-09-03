@@ -2,7 +2,7 @@
 //!
 //! Effects go through [`super::effect::Interpreter::interpret_sync`] (same
 //! apply path as the live loop). Jobs run on this thread. TTY `$EDITOR`
-//! (`Effect::EditFile`) is not run.
+//! (`Effect::EditFile`) and external diff (`Effect::ExternalDiff`) are not run.
 
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};

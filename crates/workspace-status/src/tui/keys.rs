@@ -524,6 +524,7 @@ fn normal_key(
         KeyCode::Char('u') => Action::Unstage,
         KeyCode::Char('x') => Action::Revert,
         KeyCode::Char('e') => Action::Edit,
+        KeyCode::Char('E') => Action::ExternalDiff,
         KeyCode::Char('P') => Action::Push,
         KeyCode::Char('S') => Action::StashMenu,
         KeyCode::Char('b') => Action::Branch,
@@ -748,6 +749,14 @@ mod tests {
             Action::Edit
         );
         assert_eq!(
+            event_to_action(&key(KeyCode::Char('E')), normal(), false, false),
+            Action::ExternalDiff
+        );
+        assert_eq!(
+            event_to_action(&shift(KeyCode::Char('e')), normal(), false, false),
+            Action::ExternalDiff
+        );
+        assert_eq!(
             event_to_action(&key(KeyCode::Char('n')), normal(), false, false),
             Action::None
         );
@@ -770,6 +779,14 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Char('s')), mode, false, false),
             Action::SearchChar('s')
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('E')), mode, false, false),
+            Action::SearchChar('E')
+        );
+        assert_eq!(
+            event_to_action(&shift(KeyCode::Char('e')), mode, false, false),
+            Action::SearchChar('E')
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('\'')), mode, false, false),
@@ -935,6 +952,10 @@ mod tests {
         assert_eq!(
             event_to_action(&shift(KeyCode::Char('p')), normal(), false, false),
             Action::Push
+        );
+        assert_eq!(
+            event_to_action(&shift(KeyCode::Char('e')), normal(), false, false),
+            Action::ExternalDiff
         );
         assert_eq!(
             event_to_action(

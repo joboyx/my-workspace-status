@@ -72,6 +72,18 @@ pub fn exec_git_checked(args: &[&str], cwd: &Path) -> Result<(), String> {
     }
 }
 
+/// Binary-safe blob bytes for `<rev>:<path>` (`git cat-file blob`). Missing path → `None`.
+///
+/// Unlike [`exec_git`], this does not UTF-8-decode or trim stdout.
+/// TTY callers must run this on `spawn_blocking`, not the event loop.
+pub fn blob_bytes(cwd: &Path, rev: &str, path: &str) -> Option<Vec<u8>> {
+    let spec = format!("{rev}:{path}");
+    match run(&["cat-file", "blob", &spec], cwd) {
+        Ok(out) if out.status.success() => Some(out.stdout),
+        _ => None,
+    }
+}
+
 /// True when the worktree or index has tracked changes.
 pub fn repo_has_local_changes(cwd: &Path) -> bool {
     exec_git_status(&["diff", "--quiet"], cwd) != 0
@@ -1185,6 +1197,45 @@ mod tests {
             worktree.iter().any(|f| f.path == "untracked.txt"),
             "{worktree:?}"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn blob_bytes_returns_head_contents_without_utf8_trim() {
+        let dir = std::env::temp_dir().join(format!(
+            "ws-git-blob-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        init_repo(&dir);
+        let payload = b"hello \n\x00\xff";
+        fs::write(dir.join("bin.dat"), payload).unwrap();
+        git(&dir, &["add", "bin.dat"]);
+        git(&dir, &["commit", "-q", "-m", "bin"]);
+        assert_eq!(
+            blob_bytes(&dir, "HEAD", "bin.dat").as_deref(),
+            Some(payload.as_slice())
+        );
+        assert_eq!(
+            blob_bytes(&dir, "HEAD", "README.md").as_deref(),
+            Some(b"# seed\n".as_slice())
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn blob_bytes_missing_path_is_none() {
+        let dir = std::env::temp_dir().join(format!(
+            "ws-git-blob-miss-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        init_repo(&dir);
+        assert_eq!(blob_bytes(&dir, "HEAD", "nope.txt"), None);
         let _ = fs::remove_dir_all(&dir);
     }
 }

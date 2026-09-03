@@ -61,6 +61,7 @@ pub fn classify_busy_action(action: &Action) -> BusyAction {
         | Action::ConfirmYes
         | Action::ConfirmYesClean
         | Action::Edit
+        | Action::ExternalDiff
         | Action::WatchTick
         | Action::FetchTick
         | Action::StashMenuEnter
@@ -219,6 +220,11 @@ mod tests {
         assert_eq!(classify_busy_action(&Action::Push), BusyAction::Ignore);
         assert_eq!(classify_busy_action(&Action::Stage), BusyAction::Ignore);
         assert_eq!(classify_busy_action(&Action::Revert), BusyAction::Ignore);
+        assert_eq!(classify_busy_action(&Action::Edit), BusyAction::Ignore);
+        assert_eq!(
+            classify_busy_action(&Action::ExternalDiff),
+            BusyAction::Ignore
+        );
         assert_eq!(
             classify_busy_action(&Action::GraphCheckout),
             BusyAction::Ignore
@@ -345,12 +351,21 @@ mod tests {
             "match remove_worktree(",
             "if run_checkout_branch(state",
             "if run_merge_into_head(state",
+            "blob_bytes(",
+            "prepare_worktree_diff(",
+            "prepare_rev_diff(",
         ] {
             assert!(
                 !app.contains(banned) && !loop_src.contains(banned),
                 "{banned} must not run on the TTY loop thread"
             );
         }
+        assert!(
+            effect.contains("prepare_worktree_diff(")
+                && effect.contains("prepare_rev_diff(")
+                && effect.contains("UserTag::DiffPrepare"),
+            "E blob/temp prepare must run on spawn_blocking via Interpreter"
+        );
 
         let comments_target = include_str!("comments/target.rs");
         for banned in ["list_local_branches", "rev_parse", "exec_git"] {

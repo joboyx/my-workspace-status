@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use super::super::action::{Action, Effect};
+use super::super::action::{Action, Effect, ExternalDiffKind};
 use super::super::gates::ListFocusTarget;
 use super::super::split::SplitDrag;
 use super::{AppState, FocusPane, FoldOp};
@@ -217,6 +217,23 @@ impl AppState {
                     }
                 } else {
                     self.status = "focus a dirty file to edit".into();
+                    Effect::None
+                }
+            }
+            Action::ExternalDiff => {
+                if let Some((repo, path)) = self.focused_commit_edit_path() {
+                    let kind = self.external_diff_kind();
+                    self.status = format!("diff {path}");
+                    Effect::ExternalDiff { repo, path, kind }
+                } else if let Some((repo, change)) = self.focused_file_if_shown() {
+                    self.status = format!("diff {}", change.path);
+                    Effect::ExternalDiff {
+                        repo,
+                        path: change.path,
+                        kind: ExternalDiffKind::Worktree,
+                    }
+                } else {
+                    self.status = "focus a file to diff".into();
                     Effect::None
                 }
             }
