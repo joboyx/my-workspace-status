@@ -8,9 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub use super::common::seed::{
-    daily_workspace, focus_workspace, git, git_env, seed_long_diff_file, seed_long_path_file,
-    seed_long_subject_repo, seed_many_commit_files, seed_merge_mark_family,
-    seed_primary_and_linked_family, seed_repo, seed_tall_graph, unique_root,
+    daily_workspace, focus_workspace, git, git_env, ignored_primary_family_workspace,
+    seed_long_diff_file, seed_long_path_file, seed_long_subject_repo, seed_many_commit_files,
+    seed_merge_mark_family, seed_primary_and_linked_family, seed_repo, seed_tall_graph,
+    unique_root,
 };
 
 use super::common::seed::new_workspace;

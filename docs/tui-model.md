@@ -29,6 +29,8 @@ Ids are stable path-derived strings, never indices. Three things depend on that:
 
 `build_tree` groups snapshots by `primary_repo` when set, otherwise `repo`. A sole primary → flat `Repo` (today). Primary + linked → family container with `Checkout` children (primary first, then linked by path). Family attention if **any** checkout needs attention; containers with linked children start **expanded**. Within each attention bucket, families sort by primary path.
 
+The tree paints `visible_for_tree` (`visible_workspace_snapshot`). Hidden ignored stay out unless `.` / `-a` shows them, or a named filter names that checkout. Hidden ignored includes a linked worktree whose primary is in `ignoredRepos`, even when that linked row is `ignored=false`. They return with `.` / `-a` as a nested family, not a workspace-root orphan. A linked row whose primary is absent from the snapshot still paints (linked-only). A standalone ignored linked path stays hidden until shown.
+
 A checkout needs attention when it has file changes, is not on its effective default branch (`main` / `master` / `develop`, or a sole `defaultBranches` override when configured), has a non-idle sync (`behind` / `ahead` / `diverged`), **or** has an attention sync note (`no commits yet` / `status failed`). Only default-branch checkouts that are clean, up-to-date with upstream, and free of those notes land under `group:no-updates`. Workspace `sync_summary` counts those attention notes (`N attention`) so an attention-only workspace is not reported as `all current`. Empty discovery yields `no repos` (not `all current`).
 
 Per checkout (or flat repo), children are either flat file nodes or a directory trie (tree mode).

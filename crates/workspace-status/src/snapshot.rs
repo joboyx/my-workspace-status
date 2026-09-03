@@ -223,12 +223,33 @@ pub fn build_workspace_snapshot(
     }
 }
 
+/// True when this checkout is on the ignore list, or its primary is.
+///
+/// Matches background-fetch hide: path or `primary_repo` on the list.
+/// Named-filter exceptions are applied by the caller, not here.
+pub(crate) fn checkout_is_hidden_ignored(repo: &WorkspaceRepoSnapshot, ignored: &[String]) -> bool {
+    if ignored.is_empty() {
+        return false;
+    }
+    ignored
+        .iter()
+        .any(|path| repo.repo == *path || repo.primary_repo.as_deref() == Some(path.as_str()))
+}
+
+/// Visible snapshot: hidden ignored stay out unless shown or named.
+///
+/// Hidden ignored includes linked children of an ignored primary. Do not
+/// retag those rows `ignored`; they still return with `show_ignored`.
 pub fn visible_workspace_snapshot(snapshot: &WorkspaceSnapshot) -> WorkspaceSnapshot {
     let named: BTreeSet<&str> = snapshot.filter_repos.iter().map(String::as_str).collect();
     let repos = snapshot
         .repos
         .iter()
-        .filter(|repo| snapshot.show_ignored || !repo.ignored || named.contains(repo.repo.as_str()))
+        .filter(|repo| {
+            snapshot.show_ignored
+                || named.contains(repo.repo.as_str())
+                || !checkout_is_hidden_ignored(repo, &snapshot.ignored_repos)
+        })
         .cloned()
         .collect();
     WorkspaceSnapshot {

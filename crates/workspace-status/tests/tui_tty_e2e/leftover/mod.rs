@@ -21,6 +21,7 @@ mod pty_ctrl_r_resolves_comment_and_copy_tags;
 mod pty_ctrl_u_d_jumps_workspace_tree;
 mod pty_d_switches_to_default_branch;
 mod pty_divider_scrollbar_drag;
+mod pty_dot_hides_linked_of_ignored_primary;
 mod pty_dot_toggles_ignored_repos;
 mod pty_double_click_enters_on_hit_row;
 mod pty_e_opens_focused_file_in_editor;
