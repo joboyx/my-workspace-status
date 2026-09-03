@@ -5,7 +5,9 @@
 //! launch without `WS_STATUS_UPDATE_CHECK_STORE` writes
 //! `$XDG_STATE_HOME/my-workspace-status/update-check.json` (the operator
 //! last-check file) and can block mount on the GitHub Release prompt.
-//! These tests fail until both hazards stay fixed. Recipe:
+//! A TTY spawn that inherits `WS_STATUS_WORKSPACE` retargets config and
+//! git writes away from the fixture. These tests fail until both hazards
+//! stay fixed. Recipe:
 //! [docs/architecture.md](../../../docs/architecture.md).
 
 const RELEASE_YML: &str = include_str!("../../../.github/workflows/release.yml");
@@ -20,6 +22,14 @@ fn assigns_update_check_store(src: &str) -> bool {
         || src.contains("export WS_STATUS_UPDATE_CHECK_STORE=")
 }
 
+fn isolates_workspace_env(src: &str) -> bool {
+    src.contains("env_remove(\"WS_STATUS_WORKSPACE\")")
+        || src.lines().any(|line| {
+            line.contains("WS_STATUS_WORKSPACE")
+                && (line.contains("env_remove") || line.contains("unset "))
+        })
+}
+
 #[test]
 fn isolated_store_assignment_rejects_comment_only() {
     assert!(!assigns_update_check_store(""));
@@ -32,6 +42,16 @@ fn isolated_store_assignment_rejects_comment_only() {
     ));
     assert!(assigns_update_check_store(
         "cmd.env(\"WS_STATUS_UPDATE_CHECK_STORE\", &store);"
+    ));
+    assert!(!isolates_workspace_env(""));
+    assert!(!isolates_workspace_env("# drop WS_STATUS_WORKSPACE"));
+    assert!(isolates_workspace_env("unset WS_STATUS_WORKSPACE"));
+    assert!(isolates_workspace_env(
+        "unset NO_COLOR FORCE_COLOR WS_STATUS_WORKSPACE"
+    ));
+    assert!(!isolates_workspace_env("export WS_STATUS_WORKSPACE=/tmp"));
+    assert!(isolates_workspace_env(
+        "cmd.env_remove(\"WS_STATUS_WORKSPACE\");"
     ));
 }
 
@@ -118,4 +138,19 @@ fn tty_spawn_paths_isolate_update_check_store() {
         STILLS_SH.contains("lastCheckUnix"),
         "capture-demo-stills.sh must stamp a fresh lastCheckUnix so the 6h window is not due"
     );
+}
+
+#[test]
+fn tty_spawn_paths_isolate_workspace_env() {
+    for (label, src) in [
+        ("tui_tty_e2e/harness.rs", PTY_HARNESS),
+        ("tui_tty_e2e/desktop.rs", DESKTOP_HARNESS),
+        ("scripts/capture-demo-stills.sh", STILLS_SH),
+    ] {
+        assert!(
+            isolates_workspace_env(src),
+            "{label} launches a TTY TUI and must drop parent WS_STATUS_WORKSPACE \
+             (or the spawn uses the operator workspace instead of the fixture)"
+        );
+    }
 }

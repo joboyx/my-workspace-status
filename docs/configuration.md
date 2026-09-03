@@ -2,7 +2,7 @@
 
 ## `.workspace-status-config.json`
 
-Read from the workspace root (the cwd the CLI runs in), by `load_workspace_status_config` in `crates/workspace-status/src/config.rs`. A missing file means nothing is ignored and discovery uses the default depth.
+Read from the resolved workspace root (CLI `-C` / `--workspace` > env `WS_STATUS_WORKSPACE` > process cwd), by `load_workspace_status_config` in `crates/workspace-status/src/config.rs`. A missing file means nothing is ignored and discovery uses the default depth.
 
 `--plain` and `--json` read one workspace snapshot. See [snapshot.md](./snapshot.md).
 
@@ -73,6 +73,7 @@ The two overrides differ in the TUI. `-a` replaces the ignored list before the T
 
 | Variable                  | Default                                                 | Effect                                                                                                                                                                                            |
 | ------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WS_STATUS_WORKSPACE`     | unset (process cwd)                                     | Pin the workspace root used for config, discovery, and comment/viewed identity. Absolute or relative (relative to process cwd, then canonicalized). Blank / whitespace-only is unset. CLI `-C` / `--workspace` overrides this. Missing or non-directory path: error on stderr, exit 1; no silent fallback. `--update` and `--help` do not require a valid workspace. PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` must unset this so the fixture cwd wins. CI: `crates/workspace-status/tests/release_watch.rs`. |
 | `WS_STATUS_GLYPHS`        | unset                                                   | `ascii` replaces every Nerd Font glyph with a one-column ASCII marker (`tui/icons.rs`). Any other value is ignored.                                                                               |
 | `WS_STATUS_WATCH_MS`      | `3000` (`DEFAULT_WATCH_MS`)                             | Live-refresh poll period. `0` disables the poll. Values below `MIN_WATCH_MS` (500) are clamped up. Non-numeric, negative, or empty falls back to the default. File, graph, and commit-file rows flash (~800ms background fade) on add/update/remove of the same row identity. File signatures use status letter or worktree `size:mtimeMs`. Chrome identity includes `HEAD` and `sync_note` so a new local commit or ahead 2→3 reloads status / graph without `r`. A disjoint identity set (repo switch / first paint) seeds and does not flash. The TUI polls local git only (no fetch) and keeps fold, focus, and scroll. Unchanged polls skip the right-pane `git log` / diff reload. The next tick is scheduled from the start of the interval, not after collect finishes. The live loop applies each checkout as it finishes; keys cannot starve the tick. |
 | `WS_STATUS_FETCH_MS`      | `300000` (`DEFAULT_FETCH_MS`)                           | Background `git fetch` period for the TUI. `0` disables. Values below `MIN_FETCH_MS` (30000) are clamped up when enabled. Non-numeric, negative, or empty falls back to the default.              |

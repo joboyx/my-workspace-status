@@ -36,6 +36,8 @@ PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` spawn a real TTY bina
 
 CI fails if a TTY spawn path drops that assignment: `crates/workspace-status/tests/release_watch.rs`.
 
+PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` also unset `WS_STATUS_WORKSPACE` so a parent pin cannot retarget the fixture. CI: `tty_spawn_paths_isolate_workspace_env`.
+
 Env table: [docs/configuration.md](./docs/configuration.md).
 
 ## `dist generate`
