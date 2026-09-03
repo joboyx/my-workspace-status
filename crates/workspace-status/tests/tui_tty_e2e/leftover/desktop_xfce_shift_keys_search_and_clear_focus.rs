@@ -14,14 +14,25 @@ use crate::support::WAIT;
 fn desktop_xfce_shift_keys_search_and_clear_focus() {
     let (_root, workspace) = focus_workspace();
     let tui = DesktopSession::open(&workspace);
+    tui.wait_contains("? help", WAIT);
     tui.key("slash");
+    tui.wait_contains("SEARCH", WAIT);
     tui.key("shift+r");
     tui.key("shift+e");
     tui.key("shift+a");
     tui.key("shift+d");
     tui.key("shift+m");
     tui.key("shift+e");
-    tui.wait_contains("README▏", WAIT);
+    tui.wait_pred(
+        |screen| {
+            screen
+                .lines()
+                .last()
+                .is_some_and(|status| status.contains("SEARCH") && status.contains("README▏"))
+        },
+        "SEARCH prompt has README▏ (Shift+letters typed capitals, not a global Shift binding)",
+        WAIT,
+    );
     tui.key("Escape");
 
     tui.key("slash");
