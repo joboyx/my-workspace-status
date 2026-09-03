@@ -82,10 +82,11 @@ use super::viewed::{
     ViewedStore,
 };
 use super::watch::{
-    capture_removal_ghosts, changed_row_ids, checkout_flash_ids, commit_file_identity,
-    commit_file_signatures, flash_strength, flashable_row_ids, graph_flash_decision,
-    graph_flash_meta, graph_row_identity, graph_row_signatures, is_new_row_set, merge_ghost_rows,
-    prune_flashes, prune_ghosts, tree_signatures, GhostRow, GraphFlashDecision, GraphFlashMeta,
+    capture_removal_ghosts, checkout_flash_ids, commit_file_identity, commit_file_signatures,
+    flash_strength, flashable_row_kinds, graph_flash_decision, graph_flash_meta,
+    graph_row_identity, graph_row_signatures, is_new_row_set, merge_ghost_rows, prune_flashes,
+    prune_ghosts, tree_signatures, FlashKind, FlashStamp, GhostRow, GraphFlashDecision,
+    GraphFlashMeta,
 };
 use crate::git::FULL_DIFF_CONTEXT_LINES;
 
@@ -318,7 +319,7 @@ pub struct AppState {
     /// Per-repo local branch names whose ancestors the graph shows. `None` = `--all`.
     pub graph_branch_focus: Option<(String, Vec<String>)>,
     pub create_branch: Option<CreateBranchState>,
-    pub flashes: HashMap<String, Instant>,
+    pub flashes: HashMap<String, FlashStamp>,
     pub signatures: BTreeMap<String, String>,
     pub graph_signatures: BTreeMap<String, String>,
     graph_flash_meta: Option<GraphFlashMeta>,
@@ -932,11 +933,9 @@ impl AppState {
             &self.signatures,
             now,
         ));
-        let changed = changed_row_ids(&before, &self.signatures);
-        for id in &changed {
-            self.flashes.insert(id.clone(), now);
-        }
-        changed
+        let kinds = flashable_row_kinds(&before, &self.signatures, true);
+        self.stamp_flashes(kinds.iter().cloned(), now);
+        kinds.into_iter().map(|(id, _)| id).collect()
     }
 
     fn ctrl_c(&mut self, now: Instant) -> Effect {
@@ -994,14 +993,18 @@ impl AppState {
 
     /// Fade colour for a row id, if it is still flashing.
     pub fn flash_color(&self, id: &str) -> Option<Color> {
-        let at = self.flashes.get(id)?;
-        let strength = flash_strength(Instant::now().saturating_duration_since(*at));
-        self.theme.palette().flash_bg(strength)
+        let stamp = self.flashes.get(id)?;
+        let strength = flash_strength(Instant::now().saturating_duration_since(stamp.at));
+        self.theme.palette().flash_bg_for(stamp.kind, strength)
     }
 
-    fn stamp_flashes(&mut self, ids: impl IntoIterator<Item = String>, now: Instant) {
-        for id in ids {
-            self.flashes.insert(id, now);
+    fn stamp_flashes(
+        &mut self,
+        stamps: impl IntoIterator<Item = (String, FlashKind)>,
+        now: Instant,
+    ) {
+        for (id, kind) in stamps {
+            self.flashes.insert(id, FlashStamp { at: now, kind });
         }
     }
 
@@ -1010,7 +1013,12 @@ impl AppState {
         let now = Instant::now();
         self.prune_flash_state(now);
         for repo in repos {
-            self.stamp_flashes(checkout_flash_ids(repo), now);
+            self.stamp_flashes(
+                checkout_flash_ids(repo)
+                    .into_iter()
+                    .map(|id| (id, FlashKind::Update)),
+                now,
+            );
         }
     }
 
@@ -1613,8 +1621,8 @@ impl AppState {
                 self.graph_flash_meta = Some(next_meta);
             }
             GraphFlashDecision::Apply { include_adds } => {
-                let ids = flashable_row_ids(&self.graph_signatures, &after, include_adds);
-                self.stamp_flashes(ids, now);
+                let kinds = flashable_row_kinds(&self.graph_signatures, &after, include_adds);
+                self.stamp_flashes(kinds, now);
                 self.graph_signatures = after;
                 self.graph_flash_meta = Some(next_meta);
             }
@@ -1773,7 +1781,7 @@ impl AppState {
                 &after,
                 now,
             ));
-            self.stamp_flashes(flashable_row_ids(&before, &after, true), now);
+            self.stamp_flashes(flashable_row_kinds(&before, &after, true), now);
             self.commit_file_signatures = after;
         }
     }
@@ -4705,6 +4713,31 @@ mod tests {
             !added.contains(&file_id),
             "unchanged readme should not flash: {added:?}"
         );
+        let new_id = added
+            .iter()
+            .find(|id| id.contains("new.rs"))
+            .cloned()
+            .expect("new.rs id");
+        assert_eq!(
+            app.flashes.get(&new_id).map(|stamp| stamp.kind),
+            Some(FlashKind::Add)
+        );
+
+        snapshot.repos[0]
+            .changes
+            .iter_mut()
+            .find(|change| change.path == "README.md")
+            .expect("readme change")
+            .unstaged_status = Some("A".into());
+        let updated = app.apply_watch_snapshot(snapshot.clone());
+        assert!(
+            updated.iter().any(|id| id.contains("README.md")),
+            "updated readme should flash: {updated:?}"
+        );
+        assert_eq!(
+            app.flashes.get(&file_id).map(|stamp| stamp.kind),
+            Some(FlashKind::Update)
+        );
 
         snapshot.repos[0].changes.retain(|c| c.path != "README.md");
         let removed = app.apply_watch_snapshot(snapshot);
@@ -4712,9 +4745,23 @@ mod tests {
             removed.iter().any(|id| id.contains("README.md")),
             "removed readme should flash: {removed:?}"
         );
+        assert_eq!(
+            app.flashes.get(&file_id).map(|stamp| stamp.kind),
+            Some(FlashKind::Remove)
+        );
         assert!(
             app.tree_ghosts.iter().any(|g| g.id.contains("README.md")),
             "removed readme should stay as a ghost"
+        );
+
+        app.stamp_checkout_flashes(&["app".into()]);
+        assert_eq!(
+            app.flashes.get("repo:app").map(|stamp| stamp.kind),
+            Some(FlashKind::Update)
+        );
+        assert_eq!(
+            app.flashes.get("checkout:app").map(|stamp| stamp.kind),
+            Some(FlashKind::Update)
         );
     }
 

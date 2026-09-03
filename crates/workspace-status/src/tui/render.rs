@@ -64,7 +64,7 @@ fn muted_copy(text: &'static str, palette: Palette) -> Line<'static> {
     Line::from(Span::styled(text, Style::default().fg(palette.muted)))
 }
 
-/// Cursor → search match → flash.
+/// Flash → cursor → search match.
 fn row_match_bg(
     selected: bool,
     search_match: bool,
@@ -72,12 +72,14 @@ fn row_match_bg(
     palette: Palette,
     search_bg: Color,
 ) -> Option<Color> {
-    if selected {
+    if flash.is_some() {
+        flash
+    } else if selected {
         Some(palette.cursor_bg)
     } else if search_match {
         Some(search_bg)
     } else {
-        flash
+        None
     }
 }
 
@@ -2647,15 +2649,27 @@ mod tests {
     }
 
     #[test]
-    fn row_match_bg_prefers_cursor_then_search_then_flash() {
+    fn row_match_bg_prefers_flash_then_cursor_then_search() {
         let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
         let search_bg = crate::tui::theme::ThemeId::TokyoNight.pills().filter.bg;
         assert_eq!(
             row_match_bg(true, true, Some(palette.flash), palette, search_bg),
-            Some(palette.cursor_bg)
+            Some(palette.flash)
+        );
+        assert_eq!(
+            row_match_bg(true, false, Some(palette.flash), palette, search_bg),
+            Some(palette.flash)
         );
         assert_eq!(
             row_match_bg(false, true, Some(palette.flash), palette, search_bg),
+            Some(palette.flash)
+        );
+        assert_eq!(
+            row_match_bg(true, true, None, palette, search_bg),
+            Some(palette.cursor_bg)
+        );
+        assert_eq!(
+            row_match_bg(false, true, None, palette, search_bg),
             Some(search_bg)
         );
         assert_eq!(
@@ -2663,6 +2677,58 @@ mod tests {
             Some(palette.flash)
         );
         assert_eq!(row_match_bg(false, false, None, palette, search_bg), None);
+    }
+
+    #[test]
+    fn selected_tree_row_keeps_flash_bg() {
+        let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
+        let segs = NodeSegments {
+            segments: vec![TextSeg {
+                text: "M".into(),
+                role: SegRole::Modified,
+                hex: None,
+                bold: false,
+                dim: false,
+            }],
+            trailing: Vec::new(),
+        };
+        let line = paint_segmented_row(
+            0,
+            false,
+            false,
+            &segs,
+            20,
+            true,
+            Some(palette.flash),
+            true,
+            search_bg_unused(),
+            true,
+            palette,
+            0,
+        );
+        assert!(
+            line.spans.iter().any(|span| span.content == CURSOR_BAR),
+            "cursor bar stays on the selected row"
+        );
+        assert!(
+            line.spans
+                .iter()
+                .any(|span| span.style.bg == Some(palette.flash)),
+            "flash bg must paint on the selected row"
+        );
+        assert!(
+            line.spans
+                .iter()
+                .all(|span| span.style.bg != Some(palette.cursor_bg)),
+            "cursor_bg must not hide the flash"
+        );
+        let search_bg = search_bg_unused();
+        assert!(
+            line.spans
+                .iter()
+                .all(|span| span.style.bg != Some(search_bg)),
+            "search bg must not hide the flash"
+        );
     }
 
     #[test]
