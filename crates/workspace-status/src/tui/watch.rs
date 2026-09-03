@@ -174,6 +174,42 @@ pub fn tree_signatures(tree: &TreeNode, cwd: &Path) -> BTreeMap<String, String> 
         .collect()
 }
 
+/// Why a row is flashing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlashKind {
+    /// Id present in `after`, not in `before`.
+    Add,
+    /// Id in both maps with a different signature.
+    Update,
+    /// Id present in `before`, not in `after`.
+    Remove,
+}
+
+/// One decaying flash stamp.
+#[derive(Clone, Copy, Debug)]
+pub struct FlashStamp {
+    /// When the flash was stamped.
+    pub at: Instant,
+    /// Add, update, or remove.
+    pub kind: FlashKind,
+}
+
+/// Classify one id against a before/after signature pair.
+///
+/// Unchanged ids (same signature in both maps) return `None`.
+pub fn classify_flash(
+    id: &str,
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) -> Option<FlashKind> {
+    match (before.get(id), after.get(id)) {
+        (None, Some(_)) => Some(FlashKind::Add),
+        (Some(prev), Some(next)) if prev != next => Some(FlashKind::Update),
+        (Some(_), None) => Some(FlashKind::Remove),
+        _ => None,
+    }
+}
+
 /// Ids whose signature appeared or changed. Removals are included.
 /// The whole tree is not treated as one change.
 pub fn changed_row_ids(
@@ -191,6 +227,30 @@ pub fn is_new_row_set(before: &BTreeMap<String, String>, after: &BTreeMap<String
     before.is_empty() || after.keys().all(|id| !before.contains_key(id))
 }
 
+/// Ids that should flash for this signature diff, with kind.
+///
+/// `include_adds` is false for graph autoload (older commits appended) so a
+/// longer window does not flash every newly loaded row.
+pub fn flashable_row_kinds(
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+    include_adds: bool,
+) -> Vec<(String, FlashKind)> {
+    let mut out = Vec::new();
+    for id in after.keys().chain(before.keys()) {
+        let Some(kind) = classify_flash(id, before, after) else {
+            continue;
+        };
+        if kind == FlashKind::Add && !include_adds {
+            continue;
+        }
+        out.push((id.clone(), kind));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.dedup();
+    out
+}
+
 /// Ids that should flash for this signature diff.
 ///
 /// `include_adds` is false for graph autoload (older commits appended) so a
@@ -200,24 +260,10 @@ pub fn flashable_row_ids(
     after: &BTreeMap<String, String>,
     include_adds: bool,
 ) -> Vec<String> {
-    let mut out = Vec::new();
-    for (id, sig) in after {
-        if let Some(prev) = before.get(id) {
-            if prev != sig {
-                out.push(id.clone());
-            }
-        } else if include_adds {
-            out.push(id.clone());
-        }
-    }
-    for id in before.keys() {
-        if !after.contains_key(id) {
-            out.push(id.clone());
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
+    flashable_row_kinds(before, after, include_adds)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
 }
 
 /// Linear 1 → 0 over [`FLASH_MS`].
@@ -239,8 +285,8 @@ pub fn flash_active(elapsed: Duration) -> bool {
 }
 
 /// Drop flash stamps that have finished decaying.
-pub fn prune_flashes(flashes: &mut HashMap<String, Instant>, now: Instant) {
-    flashes.retain(|_, at| flash_active(now.saturating_duration_since(*at)));
+pub fn prune_flashes(flashes: &mut HashMap<String, FlashStamp>, now: Instant) {
+    flashes.retain(|_, stamp| flash_active(now.saturating_duration_since(stamp.at)));
 }
 
 /// A removed row kept in place for [`FLASH_MS`] so the flash is visible.
@@ -865,6 +911,65 @@ mod tests {
         assert!(flashed.contains(&"demo#commit:aaa".to_string()));
         assert!(flashed.contains(&"demo#commit:bbb".to_string()));
         assert!(!flashed.contains(&"demo#commit:ccc".to_string()));
+    }
+
+    #[test]
+    fn classifies_add_update_remove_from_signature_maps() {
+        let mut before = BTreeMap::new();
+        before.insert("file:app:a".into(), "M:1".into());
+        before.insert("file:app:b".into(), "M:1".into());
+        before.insert("file:app:c".into(), "M:1".into());
+        let mut after = before.clone();
+        after.insert("file:app:a".into(), "M:2".into());
+        after.insert("file:app:d".into(), "A:1".into());
+        after.remove("file:app:c");
+
+        assert_eq!(
+            classify_flash("file:app:d", &before, &after),
+            Some(FlashKind::Add)
+        );
+        assert_eq!(
+            classify_flash("file:app:a", &before, &after),
+            Some(FlashKind::Update)
+        );
+        assert_eq!(
+            classify_flash("file:app:c", &before, &after),
+            Some(FlashKind::Remove)
+        );
+        assert_eq!(classify_flash("file:app:b", &before, &after), None);
+
+        let kinds = flashable_row_kinds(&before, &after, true);
+        assert_eq!(
+            kinds
+                .iter()
+                .find(|(id, _)| id == "file:app:d")
+                .map(|(_, kind)| *kind),
+            Some(FlashKind::Add)
+        );
+        assert_eq!(
+            kinds
+                .iter()
+                .find(|(id, _)| id == "file:app:a")
+                .map(|(_, kind)| *kind),
+            Some(FlashKind::Update)
+        );
+        assert_eq!(
+            kinds
+                .iter()
+                .find(|(id, _)| id == "file:app:c")
+                .map(|(_, kind)| *kind),
+            Some(FlashKind::Remove)
+        );
+        assert!(kinds.iter().all(|(id, _)| id != "file:app:b"));
+
+        let no_adds = flashable_row_kinds(&before, &after, false);
+        assert!(no_adds.iter().all(|(id, _)| id != "file:app:d"));
+        assert!(no_adds
+            .iter()
+            .any(|(id, kind)| id == "file:app:a" && *kind == FlashKind::Update));
+        assert!(no_adds
+            .iter()
+            .any(|(id, kind)| id == "file:app:c" && *kind == FlashKind::Remove));
     }
 
     #[test]

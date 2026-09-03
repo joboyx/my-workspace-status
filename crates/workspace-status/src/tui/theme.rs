@@ -6,6 +6,8 @@
 
 use ratatui::style::Color;
 
+use super::watch::FlashKind;
+
 /// Built-in dark theme identifiers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ThemeId {
@@ -49,9 +51,18 @@ pub struct Palette {
     pub cursor: Color,
     pub cursor_bg: Color,
     pub diff_hunk: Color,
+    /// Add-flash peak. Equals index 0 of [`Self::flash_ramp`].
     pub flash: Color,
-    /// Four-step fade. Index 0 is [`Self::flash`].
+    /// Four-step add fade. Index 0 is [`Self::flash`].
     pub flash_ramp: [Color; 4],
+    /// Update-flash peak. Index 0 of [`Self::flash_update_ramp`].
+    pub flash_update: Color,
+    /// Four-step update fade.
+    pub flash_update_ramp: [Color; 4],
+    /// Remove-flash peak. Index 0 of [`Self::flash_remove_ramp`].
+    pub flash_remove: Color,
+    /// Four-step remove fade.
+    pub flash_remove_ramp: [Color; 4],
 }
 
 /// Semantic colours used by the ratatui paint.
@@ -74,9 +85,18 @@ pub struct ThemePalette {
     pub cursor: &'static str,
     pub cursor_bg: &'static str,
     pub diff_hunk: &'static str,
+    /// Add-flash peak hex. Index 0 of [`Self::flash_ramp`].
     pub flash: &'static str,
-    /// Four-step fade hex. Index 0 matches [`Self::flash`].
+    /// Four-step add fade hex. Index 0 matches [`Self::flash`].
     pub flash_ramp: [&'static str; 4],
+    /// Update-flash peak hex.
+    pub flash_update: &'static str,
+    /// Four-step update fade hex.
+    pub flash_update_ramp: [&'static str; 4],
+    /// Remove-flash peak hex.
+    pub flash_remove: &'static str,
+    /// Four-step remove fade hex.
+    pub flash_remove_ramp: [&'static str; 4],
 }
 
 /// Status-bar pill hex pairs.
@@ -175,12 +195,11 @@ impl ThemeId {
             cursor_bg: hex_color(p.cursor_bg),
             diff_hunk: hex_color(p.diff_hunk),
             flash: hex_color(p.flash),
-            flash_ramp: [
-                hex_color(p.flash_ramp[0]),
-                hex_color(p.flash_ramp[1]),
-                hex_color(p.flash_ramp[2]),
-                hex_color(p.flash_ramp[3]),
-            ],
+            flash_ramp: p.flash_ramp.map(hex_color),
+            flash_update: hex_color(p.flash_update),
+            flash_update_ramp: p.flash_update_ramp.map(hex_color),
+            flash_remove: hex_color(p.flash_remove),
+            flash_remove_ramp: p.flash_remove_ramp.map(hex_color),
         }
     }
 
@@ -201,6 +220,10 @@ impl ThemeId {
     }
 }
 
+/// Tokyo Night leftover TTY e2e hardcodes these peak RGB values:
+/// add `#516643` = `Rgb(81, 102, 67)`,
+/// update `#6d5942` = `Rgb(109, 89, 66)`,
+/// remove `#774152` = `Rgb(119, 65, 82)`.
 const TOKYO_NIGHT: Theme = Theme {
     id: ThemeId::TokyoNight,
     label: "Tokyo Night",
@@ -222,8 +245,12 @@ const TOKYO_NIGHT: Theme = Theme {
         cursor: "#7aa2f7",
         cursor_bg: "#283457",
         diff_hunk: "#7dcfff",
-        flash: "#3d5236",
-        flash_ramp: ["#3d5236", "#354830", "#2d3d2a", "#273324"],
+        flash: "#516643",
+        flash_ramp: ["#516643", "#3f4d39", "#2f3831", "#25292b"],
+        flash_update: "#6d5942",
+        flash_update_ramp: ["#6d5942", "#514438", "#3a3331", "#2a272b"],
+        flash_remove: "#774152",
+        flash_remove_ramp: ["#774152", "#583443", "#3d2a37", "#2c222e"],
     },
     pill: ThemePill {
         mode_bg: "#3d59a1",
@@ -259,8 +286,12 @@ const MONOKAI: Theme = Theme {
         cursor: "#f8f8f2",
         cursor_bg: "#3e3d32",
         diff_hunk: "#66d9ef",
-        flash: "#3e4a28",
-        flash_ramp: ["#3e4a28", "#353f24", "#2c3420", "#242b1c"],
+        flash: "#5c7627",
+        flash_ramp: ["#5c7627", "#4b5c25", "#3b4624", "#313723"],
+        flash_update: "#777344",
+        flash_update_ramp: ["#777344", "#5c5a39", "#46452f", "#363629"],
+        flash_remove: "#82404d",
+        flash_remove_ramp: ["#82404d", "#63383f", "#4a3132", "#382d2a"],
     },
     pill: ThemePill {
         mode_bg: "#49483e",
@@ -296,8 +327,12 @@ const DRACULA: Theme = Theme {
         cursor: "#bd93f9",
         cursor_bg: "#44475a",
         diff_hunk: "#8be9fd",
-        flash: "#2d4a3e",
-        flash_ramp: ["#2d4a3e", "#274038", "#213632", "#1c2d2b"],
+        flash: "#398153",
+        flash_ramp: ["#398153", "#336449", "#2e4b41", "#2b3b3c"],
+        flash_update: "#7c815a",
+        flash_update_ramp: ["#7c815a", "#60644e", "#484b44", "#383b3d"],
+        flash_remove: "#823c43",
+        flash_remove_ramp: ["#823c43", "#64363f", "#4a313b", "#392d38"],
     },
     pill: ThemePill {
         mode_bg: "#44475a",
@@ -333,8 +368,12 @@ const GRUVBOX_DARK: Theme = Theme {
         cursor: "#fe8019",
         cursor_bg: "#3c3836",
         diff_hunk: "#83a598",
-        flash: "#32361a",
-        flash_ramp: ["#32361a", "#2c3018", "#262a16", "#202314"],
+        flash: "#646627",
+        flash_ramp: ["#646627", "#505127", "#3f4028", "#343428"],
+        flash_update: "#80672b",
+        flash_update_ramp: ["#80672b", "#63522a", "#4a4029", "#393429"],
+        flash_remove: "#81362d",
+        flash_remove_ramp: ["#81362d", "#63312b", "#4a2d2a", "#392b29"],
     },
     pill: ThemePill {
         mode_bg: "#504945",
@@ -370,8 +409,12 @@ const CATPPUCCIN_MOCHA: Theme = Theme {
         cursor: "#89b4fa",
         cursor_bg: "#313244",
         diff_hunk: "#89dceb",
-        flash: "#1e2b1e",
-        flash_ramp: ["#1e2b1e", "#1a261a", "#162116", "#121c12"],
+        flash: "#57715e",
+        flash_ramp: ["#57715e", "#44554e", "#343e40", "#292e37"],
+        flash_update: "#7a7064",
+        flash_update_ramp: ["#7a7064", "#5b5552", "#413d43", "#302e38"],
+        flash_remove: "#774c61",
+        flash_remove_ramp: ["#774c61", "#5a3d50", "#402f42", "#2f2738"],
     },
     pill: ThemePill {
         mode_bg: "#45475a",
@@ -428,8 +471,15 @@ pub fn hex_color(hex: &str) -> Color {
 }
 
 impl Palette {
-    /// Background for a decaying flash. `None` when the flash has expired.
-    pub fn flash_bg(self, strength: f32) -> Option<Color> {
+    fn ramp_for(self, kind: FlashKind) -> [Color; 4] {
+        match kind {
+            FlashKind::Add => self.flash_ramp,
+            FlashKind::Update => self.flash_update_ramp,
+            FlashKind::Remove => self.flash_remove_ramp,
+        }
+    }
+
+    fn ramp_bg(ramp: [Color; 4], strength: f32) -> Option<Color> {
         if strength <= 0.0 {
             return None;
         }
@@ -442,7 +492,17 @@ impl Palette {
         } else {
             3
         };
-        Some(self.flash_ramp[idx])
+        Some(ramp[idx])
+    }
+
+    /// Background for a decaying add flash. `None` when the flash has expired.
+    pub fn flash_bg(self, strength: f32) -> Option<Color> {
+        self.flash_bg_for(FlashKind::Add, strength)
+    }
+
+    /// Background for a decaying flash of `kind`. `None` when expired.
+    pub fn flash_bg_for(self, kind: FlashKind, strength: f32) -> Option<Color> {
+        Self::ramp_bg(self.ramp_for(kind), strength)
     }
 }
 
@@ -520,6 +580,50 @@ mod tests {
             assert_eq!(pal.flash_bg(0.0), None);
             assert_ne!(pal.flash_bg(0.3), pal.flash_bg(1.0));
         }
+    }
+
+    #[test]
+    fn flash_bg_for_dispatches_kind_ramps() {
+        use super::super::watch::FlashKind;
+        for id in THEME_IDS {
+            let pal = id.palette();
+            assert_eq!(pal.flash_ramp[0], pal.flash);
+            assert_eq!(pal.flash_update_ramp[0], pal.flash_update);
+            assert_eq!(pal.flash_remove_ramp[0], pal.flash_remove);
+            assert_eq!(pal.flash_bg_for(FlashKind::Add, 1.0), Some(pal.flash));
+            assert_eq!(
+                pal.flash_bg_for(FlashKind::Update, 1.0),
+                Some(pal.flash_update)
+            );
+            assert_eq!(
+                pal.flash_bg_for(FlashKind::Remove, 1.0),
+                Some(pal.flash_remove)
+            );
+            assert_eq!(pal.flash_bg_for(FlashKind::Add, 0.0), None);
+            assert_eq!(pal.flash_bg_for(FlashKind::Update, 0.0), None);
+            assert_eq!(pal.flash_bg_for(FlashKind::Remove, 0.0), None);
+            assert_eq!(pal.flash_bg(1.0), pal.flash_bg_for(FlashKind::Add, 1.0));
+            assert_ne!(pal.flash, pal.flash_update);
+            assert_ne!(pal.flash, pal.flash_remove);
+            assert_ne!(pal.flash_update, pal.flash_remove);
+            assert_ne!(
+                pal.flash_bg_for(FlashKind::Add, 0.3),
+                pal.flash_bg_for(FlashKind::Add, 1.0)
+            );
+            assert_ne!(
+                pal.flash_bg_for(FlashKind::Update, 0.3),
+                pal.flash_bg_for(FlashKind::Update, 1.0)
+            );
+            assert_ne!(
+                pal.flash_bg_for(FlashKind::Remove, 0.3),
+                pal.flash_bg_for(FlashKind::Remove, 1.0)
+            );
+        }
+        let tokyo = ThemeId::TokyoNight.palette();
+        // Leftover TTY e2e hardcodes Tokyo Night ramp[0] RGB. Keep in sync.
+        assert_eq!(tokyo.flash, Color::Rgb(0x51, 0x66, 0x43));
+        assert_eq!(tokyo.flash_update, Color::Rgb(0x6d, 0x59, 0x42));
+        assert_eq!(tokyo.flash_remove, Color::Rgb(0x77, 0x41, 0x52));
     }
 
     fn srgb_lin(c: u8) -> f64 {

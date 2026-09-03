@@ -150,7 +150,8 @@ impl<'a> GraphWidget<'a> {
     /// Paint flash background on graph rows (node + spacers).
     ///
     /// `rows` are [`GraphModel::visible_rows`] indexes with the fade colour.
-    /// Cursor and search still win. Unlike search, spacers follow the node.
+    /// Flash background wins over cursor and search. The cursor bar (`▌`)
+    /// still marks selection. Unlike search, spacers follow the node.
     pub fn flash_rows(mut self, rows: &'a [(usize, Color)]) -> Self {
         self.flash_rows = rows;
         self
@@ -509,12 +510,14 @@ fn put_painted_line(
     } else {
         " "
     };
-    let row_bg = if selected {
+    let row_bg = if flash_bg.is_some() {
+        flash_bg
+    } else if selected {
         cursor_bg
     } else if search_match {
         search_bg
     } else {
-        flash_bg
+        None
     };
     let mut bar_style = Style::default().fg(cursor_fg).add_modifier(Modifier::BOLD);
     let mut row_style = Style::default();
@@ -1410,17 +1413,18 @@ mod tests {
         }
         let y = stash_line_y.expect("stash subject line");
         assert!(
-            (0..80u16).any(|x| buffer[(x, y)].bg == cursor_bg),
-            "cursor background wins over flash on the node"
+            (0..80u16).any(|x| buffer[(x, y)].bg == flash),
+            "flash background paints the selected node"
         );
-        assert!(
-            (0..80u16).all(|x| buffer[(x, y)].bg != flash),
-            "flash must not paint over the cursor"
+        assert_eq!(
+            buffer[(0, y)].symbol(),
+            "▌",
+            "cursor bar stays on the selected node"
         );
         if let Some(spacer_y) = stash_spacer_y {
             assert!(
-                (0..80u16).any(|x| buffer[(x, spacer_y)].bg == cursor_bg),
-                "cursor background follows the stash spacer"
+                (0..80u16).any(|x| buffer[(x, spacer_y)].bg == flash),
+                "flash background follows the selected stash spacer"
             );
         }
 
