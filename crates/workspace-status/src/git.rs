@@ -75,6 +75,7 @@ pub fn exec_git_checked(args: &[&str], cwd: &Path) -> Result<(), String> {
 /// Binary-safe blob bytes for `<rev>:<path>` (`git cat-file blob`). Missing path → `None`.
 ///
 /// Unlike [`exec_git`], this does not UTF-8-decode or trim stdout.
+/// TTY callers must run this on `spawn_blocking`, not the event loop.
 pub fn blob_bytes(cwd: &Path, rev: &str, path: &str) -> Option<Vec<u8>> {
     let spec = format!("{rev}:{path}");
     match run(&["cat-file", "blob", &spec], cwd) {

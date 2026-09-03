@@ -94,7 +94,7 @@ Graph pane writes (`graphCheckout` / `graphCreateBranch` / `graphMerge` / stash 
 - **Detached GUI** (`cursor`, `code`, `code-insiders`, `codium`, `gvim`, including `--wait`): spawn detached while the TUI stays mounted. Fold, focus, scroll, search, and `show_ignored` stay in `AppState`. File-status updates come from the live watch poll.
 - **TTY editor** (default `vim`): leave the alternate screen, spawn with inherited stdio in the file's repo cwd, restore raw mode, re-enter the alternate screen. Resume drains leftover bytes so the next keypress does not need an extra Enter.
 
-`E` (`Action::ExternalDiff`) uses the same detached-name list. vimdiff takes the TTY like vim.
+`E` (`Action::ExternalDiff`) uses the same detached-name list. vimdiff takes the TTY like vim. Blob/temp prepare is `spawn_blocking`. Each `E` uses its own `$TMPDIR/workspace-status-ext-diff/<pid>-<nanos>/` directory. Detached tools wait for the child on a side thread and delete only that session.
 
 ## Keymap
 

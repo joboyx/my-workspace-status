@@ -22,11 +22,9 @@ use super::app::{
     apply_terminal_resize, discard_held_nav_backlog, map_event, run_blocking_editor,
     sync_mouse_capture, TuiOpts,
 };
-use super::diff_tool::{
-    cleanup_prepared, diff_tool_command, prepare_rev_diff, prepare_worktree_diff, resolve_diff_tool,
-};
+use super::diff_tool::{cleanup_prepared, diff_tool_command, wait_and_cleanup};
 use super::editor::{editor_command, is_detached_editor, resolve_editor};
-use super::effect::{Interpreter, JobOutcome};
+use super::effect::{DiffLaunch, Interpreter, JobOutcome};
 use super::event_pump::{
     action_triggers_graph_autoload, classify_busy_action, overlay_blocks_background_ticks,
     BusyAction,
@@ -261,6 +259,9 @@ pub async fn run(
                 match joined {
                     Ok((id, outcome)) => {
                         ctx.interp.apply(ctx.state, ctx.opts, id, outcome);
+                        if let Some(launch) = ctx.interp.take_pending_diff_launch() {
+                            launch_diff(&mut ctx, launch);
+                        }
                         if ctx.interp.take_dirty() {
                             ctx.presenter.mark();
                         }
@@ -367,7 +368,7 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event) {
         schedule_edit(ctx, repo, path);
     }
     if let Some((repo, path, kind)) = ctx.interp.take_pending_diff() {
-        schedule_diff(ctx, repo, path, kind);
+        ctx.interp.enqueue_diff_prepare(repo, path, kind, ctx.opts);
     }
     if action_triggers_graph_autoload(&action_for_load) {
         ctx.interp.maybe_queue_autoload(ctx.state);
@@ -430,16 +431,15 @@ fn schedule_edit(ctx: &mut LoopCtx<'_>, repo: String, path: String) {
     }
 }
 
-fn schedule_diff(ctx: &mut LoopCtx<'_>, repo: String, path: String, kind: ExternalDiffKind) {
-    let tool = resolve_diff_tool(ctx.opts.config.diff_tool.as_deref());
-    let repo_abs = ctx.opts.cwd.join(&repo);
-    let prepared = match &kind {
-        ExternalDiffKind::Worktree => prepare_worktree_diff(&repo_abs, &path),
-        ExternalDiffKind::Rev {
-            left_rev,
-            right_rev,
-        } => prepare_rev_diff(&repo_abs, left_rev, right_rev, &path),
-    };
+fn launch_diff(ctx: &mut LoopCtx<'_>, launch: DiffLaunch) {
+    let DiffLaunch {
+        repo,
+        path,
+        kind,
+        tool,
+        repo_abs,
+        prepared,
+    } = launch;
     let prepared = match prepared {
         Ok(prepared) => prepared,
         Err(err) => {
@@ -452,14 +452,25 @@ fn schedule_diff(ctx: &mut LoopCtx<'_>, repo: String, path: String, kind: Extern
     let right = prepared.right.to_string_lossy().into_owned();
     let (cmd, args) = diff_tool_command(&tool, &left, &right);
     if is_detached_editor(&tool) {
-        let _ = Command::new(&cmd)
+        match Command::new(&cmd)
             .args(&args)
             .current_dir(&repo_abs)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn();
-        ctx.state.status = format!("opened diff {path}");
+            .spawn()
+        {
+            Ok(child) => {
+                std::thread::spawn(move || {
+                    wait_and_cleanup(child, prepared);
+                });
+                ctx.state.status = format!("opened diff {path}");
+            }
+            Err(err) => {
+                cleanup_prepared(&prepared);
+                ctx.state.status = format!("diff failed: {err}");
+            }
+        }
         ctx.presenter.mark();
         return;
     }

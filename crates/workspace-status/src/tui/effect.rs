@@ -10,7 +10,8 @@
 //!
 //! Headless does not run [`Effect::EditFile`] or [`Effect::ExternalDiff`].
 //! Those arms unmount a TTY `$EDITOR` / diff tool. The live loop consumes
-//! [`Interpreter::take_pending_edit`] and [`Interpreter::take_pending_diff`].
+//! [`Interpreter::take_pending_edit`] and [`Interpreter::take_pending_diff`],
+//! then enqueues blob/temp prepare on `spawn_blocking` before spawning the tool.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -34,6 +35,7 @@ use super::app::{
     focused_repo_needs_pane, RightPaneLoad, RightPaneRequest, RightPaneTarget, TuiOpts,
 };
 use super::comments;
+use super::diff_tool::{prepare_rev_diff, prepare_worktree_diff, resolve_diff_tool, PreparedDiff};
 use super::drill::{CommitFileSource, DrillView};
 use super::event_pump::action_triggers_graph_autoload;
 use super::graph_load::{
@@ -119,6 +121,33 @@ pub(crate) enum JobOutcome {
         path: String,
         content: super::diff::DiffContent,
     },
+    /// Blob bytes + temp files for `E`. Live loop then spawns the tool.
+    DiffPrepared {
+        repo: String,
+        path: String,
+        kind: ExternalDiffKind,
+        tool: String,
+        repo_abs: std::path::PathBuf,
+        prepared: Result<PreparedDiff, String>,
+    },
+}
+
+/// Live TTY launch after [`JobOutcome::DiffPrepared`]. Not used by Headless.
+pub(crate) struct DiffLaunch {
+    pub repo: String,
+    pub path: String,
+    pub kind: ExternalDiffKind,
+    pub tool: String,
+    pub repo_abs: std::path::PathBuf,
+    pub prepared: Result<PreparedDiff, String>,
+}
+
+struct DiffPrepareJob {
+    repo: String,
+    path: String,
+    kind: ExternalDiffKind,
+    tool: String,
+    repo_abs: std::path::PathBuf,
 }
 
 struct BulkState {
@@ -158,6 +187,8 @@ pub(crate) struct Interpreter {
     default_repos: Vec<String>,
     pending_edit: Option<(String, String)>,
     pending_diff: Option<(String, String, ExternalDiffKind)>,
+    diff_prepare: Option<DiffPrepareJob>,
+    pending_diff_launch: Option<DiffLaunch>,
     dirty: bool,
 }
 
@@ -184,6 +215,8 @@ impl Interpreter {
             default_repos: Vec::new(),
             pending_edit: None,
             pending_diff: None,
+            diff_prepare: None,
+            pending_diff_launch: None,
             dirty: false,
         }
     }
@@ -208,6 +241,31 @@ impl Interpreter {
     /// External diff request, if [`Effect::ExternalDiff`] ran since the last take.
     pub(crate) fn take_pending_diff(&mut self) -> Option<(String, String, ExternalDiffKind)> {
         self.pending_diff.take()
+    }
+
+    /// Queue blob/temp prepare on the blocking pool. The live loop launches the tool after apply.
+    pub(crate) fn enqueue_diff_prepare(
+        &mut self,
+        repo: String,
+        path: String,
+        kind: ExternalDiffKind,
+        opts: &TuiOpts,
+    ) {
+        let tool = resolve_diff_tool(opts.config.diff_tool.as_deref());
+        let repo_abs = opts.cwd.join(&repo);
+        self.diff_prepare = Some(DiffPrepareJob {
+            repo,
+            path,
+            kind,
+            tool,
+            repo_abs,
+        });
+        self.sched.enqueue_user(UserTag::DiffPrepare);
+    }
+
+    /// Prepared LEFT/RIGHT paths, if a DiffPrepare worker finished since the last take.
+    pub(crate) fn take_pending_diff_launch(&mut self) -> Option<DiffLaunch> {
+        self.pending_diff_launch.take()
     }
 
     /// Schedule `effect`, then run and apply every job on this thread.
@@ -831,6 +889,25 @@ impl Interpreter {
                     self.mark();
                 }
             }
+            JobOutcome::DiffPrepared {
+                repo,
+                path,
+                kind,
+                tool,
+                repo_abs,
+                prepared,
+            } => {
+                self.sched.note_user_done(UserTag::DiffPrepare);
+                self.pending_diff_launch = Some(DiffLaunch {
+                    repo,
+                    path,
+                    kind,
+                    tool,
+                    repo_abs,
+                    prepared,
+                });
+                self.mark();
+            }
         }
     }
 
@@ -1010,6 +1087,37 @@ impl Interpreter {
                 }
                 self.sched.note_job_finished(id);
                 self.sched.note_user_done(UserTag::Prepare);
+            }
+            UserTag::DiffPrepare => {
+                if let Some(job) = self.diff_prepare.take() {
+                    spawn(
+                        id,
+                        Box::new(move || {
+                            let prepared = match &job.kind {
+                                ExternalDiffKind::Worktree => {
+                                    prepare_worktree_diff(&job.repo_abs, &job.path)
+                                }
+                                ExternalDiffKind::Rev {
+                                    left_rev,
+                                    right_rev,
+                                } => {
+                                    prepare_rev_diff(&job.repo_abs, left_rev, right_rev, &job.path)
+                                }
+                            };
+                            JobOutcome::DiffPrepared {
+                                repo: job.repo,
+                                path: job.path,
+                                kind: job.kind,
+                                tool: job.tool,
+                                repo_abs: job.repo_abs,
+                                prepared,
+                            }
+                        }),
+                    );
+                    return;
+                }
+                self.sched.note_job_finished(id);
+                self.sched.note_user_done(UserTag::DiffPrepare);
             }
             UserTag::Pane => {
                 if let Some((gen, repo, source)) = self.commit_files.take() {
@@ -1316,6 +1424,14 @@ mod tests {
             "live TTY must consume ExternalDiff via take_pending_diff"
         );
         assert!(
+            loop_src.contains("enqueue_diff_prepare"),
+            "live TTY must enqueue blob/temp prepare off the loop thread"
+        );
+        assert!(
+            loop_src.contains("take_pending_diff_launch"),
+            "live TTY must launch the diff tool after temps exist"
+        );
+        assert!(
             effect.contains("let _ = self.take_pending_edit();"),
             "Headless interpret_sync must drop EditFile (TTY editor only)"
         );
@@ -1324,8 +1440,12 @@ mod tests {
             "Headless interpret_sync must drop ExternalDiff (no TTY spawn)"
         );
         assert!(
-            loop_src.contains("fn schedule_diff"),
-            "live TTY must spawn the external diff tool"
+            loop_src.contains("fn launch_diff"),
+            "live TTY must spawn the external diff tool after prepare"
+        );
+        assert!(
+            effect.contains("prepare_worktree_diff"),
+            "blob/temp prepare must run in Interpreter spawn_blocking work"
         );
         assert!(
             !effect.contains(concat!("collect_full_", "snapshot(")),
@@ -1352,6 +1472,35 @@ mod tests {
             interp.take_pending_diff(),
             Some(("app".into(), "README.md".into(), ExternalDiffKind::Worktree))
         );
+    }
+
+    #[test]
+    fn enqueue_diff_prepare_yields_launch_after_worker() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::new();
+        let tui_opts = opts(&state);
+        interp.enqueue_diff_prepare(
+            "app".into(),
+            "README.md".into(),
+            ExternalDiffKind::Worktree,
+            &tui_opts,
+        );
+        let mut outcomes = Vec::new();
+        interp.spawn_ready(&mut state, &tui_opts, &mut |id, work| {
+            outcomes.push((id, work()));
+        });
+        assert_eq!(outcomes.len(), 1, "DiffPrepare must spawn one worker");
+        let (id, outcome) = outcomes.pop().unwrap();
+        assert!(matches!(outcome, JobOutcome::DiffPrepared { .. }));
+        interp.apply(&mut state, &tui_opts, id, outcome);
+        let launch = interp
+            .take_pending_diff_launch()
+            .expect("apply must stage a diff launch");
+        assert_eq!(launch.repo, "app");
+        assert_eq!(launch.path, "README.md");
+        if let Ok(prepared) = launch.prepared {
+            crate::tui::diff_tool::cleanup_prepared(&prepared);
+        }
     }
 
     #[test]

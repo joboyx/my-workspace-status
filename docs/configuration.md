@@ -88,8 +88,9 @@ For a workspace-tree file, LEFT is `HEAD:path` when that path exists in HEAD. Un
 
 Commit and stash file rows: LEFT is the first-parent blob (`rev^:path`), or an empty temp if the path was added. RIGHT is the blob at that rev in a temp (not the worktree file).
 
-- Omit the key, or set `"diffTool": "vimdiff"`, for **vimdiff**. vimdiff takes the TTY. The TUI leaves the alternate screen and resumes the same fold, focus, and scroll.
-- `"diffTool": "cursor --diff"` and `"diffTool": "code --diff --wait"` spawn detached. Cursor / VS Code stay mounted.
+- Omit the key, or set `"diffTool": "vimdiff"`, for **vimdiff**. vimdiff takes the TTY. The TUI leaves the alternate screen and resumes the same fold, focus, and scroll. Temps for that session are deleted after vimdiff exits.
+- `"diffTool": "cursor --diff"` and `"diffTool": "code --diff --wait"` spawn detached. Cursor / VS Code stay mounted. A worker waits for that child and deletes only that session's temps. A later `E` does not delete files still open in another GUI.
+- Temps live under `$TMPDIR/workspace-status-ext-diff/<pid>-<nanos>/`. A crash may leave a session directory. Later `E` does not sweep other sessions.
 - Non-blank config `diffTool` is used as-is. Blank / whitespace-only is treated as unset (vimdiff). Non-string values throw.
 
 | Override              | Effect                                                                                                                                                                                                       |

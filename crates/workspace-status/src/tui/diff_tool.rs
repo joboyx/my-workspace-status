@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Child;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::editor::parse_editor_argv;
@@ -57,25 +58,28 @@ pub struct PreparedDiff {
     pub right: PathBuf,
     left_is_temp: bool,
     right_is_temp: bool,
+    /// Per-session directory under [`ext_diff_temp_dir`]. Never the worktree.
+    session_dir: PathBuf,
 }
 
-/// Remove leftover files from a previous run in the shared temp directory.
-pub fn sweep_stale_diff_temps() {
-    let Ok(entries) = fs::read_dir(ext_diff_temp_dir()) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file() {
-            let _ = fs::remove_file(path);
-        }
-    }
+/// One session directory: `$TMPDIR/workspace-status-ext-diff/<pid>-<nanos>/`.
+///
+/// Later prepares do not delete sibling sessions. A detached GUI keeps this
+/// directory until [`wait_and_cleanup`] runs after the child exits.
+fn new_session_dir() -> Result<PathBuf, String> {
+    let root = ext_diff_temp_dir();
+    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let dir = root.join(format!("{}-{nanos}", std::process::id()));
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
 }
 
 /// `{stem}.{side}.{nanos}.{ext}` so tools that key off the last suffix (vimdiff) see `.rs`, not `{nanos}`.
-fn unique_temp_path(rel_path: &str, side: &str) -> PathBuf {
-    let dir = ext_diff_temp_dir();
-    let _ = fs::create_dir_all(&dir);
+fn unique_temp_path(session_dir: &Path, rel_path: &str, side: &str) -> PathBuf {
     let file_name = Path::new(rel_path)
         .file_name()
         .and_then(|s| s.to_str())
@@ -94,11 +98,16 @@ fn unique_temp_path(rel_path: &str, side: &str) -> PathBuf {
         }
         _ => format!("{file_name}.{side}.{nanos}"),
     };
-    dir.join(name)
+    session_dir.join(name)
 }
 
-fn write_temp_bytes(rel_path: &str, side: &str, bytes: &[u8]) -> Result<PathBuf, String> {
-    let path = unique_temp_path(rel_path, side);
+fn write_temp_bytes(
+    session_dir: &Path,
+    rel_path: &str,
+    side: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, String> {
+    let path = unique_temp_path(session_dir, rel_path, side);
     fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path)
 }
@@ -109,9 +118,9 @@ fn write_temp_bytes(rel_path: &str, side: &str, bytes: &[u8]) -> Result<PathBuf,
 /// an empty file. RIGHT is the absolute worktree path, or an empty temp when the
 /// worktree file is missing (deleted).
 pub fn prepare_worktree_diff(repo_abs: &Path, rel_path: &str) -> Result<PreparedDiff, String> {
-    sweep_stale_diff_temps();
+    let session_dir = new_session_dir()?;
     let left_bytes = blob_bytes(repo_abs, "HEAD", rel_path).unwrap_or_default();
-    let left = write_temp_bytes(rel_path, "left", &left_bytes)?;
+    let left = write_temp_bytes(&session_dir, rel_path, "left", &left_bytes)?;
     let worktree = repo_abs.join(rel_path);
     if worktree.exists() {
         Ok(PreparedDiff {
@@ -119,14 +128,16 @@ pub fn prepare_worktree_diff(repo_abs: &Path, rel_path: &str) -> Result<Prepared
             right: worktree,
             left_is_temp: true,
             right_is_temp: false,
+            session_dir,
         })
     } else {
-        let right = write_temp_bytes(rel_path, "right", &[])?;
+        let right = write_temp_bytes(&session_dir, rel_path, "right", &[])?;
         Ok(PreparedDiff {
             left,
             right,
             left_is_temp: true,
             right_is_temp: true,
+            session_dir,
         })
     }
 }
@@ -140,16 +151,17 @@ pub fn prepare_rev_diff(
     right_rev: &str,
     rel_path: &str,
 ) -> Result<PreparedDiff, String> {
-    sweep_stale_diff_temps();
+    let session_dir = new_session_dir()?;
     let left_bytes = blob_bytes(repo_abs, left_rev, rel_path).unwrap_or_default();
     let right_bytes = blob_bytes(repo_abs, right_rev, rel_path).unwrap_or_default();
-    let left = write_temp_bytes(rel_path, "left", &left_bytes)?;
-    let right = write_temp_bytes(rel_path, "right", &right_bytes)?;
+    let left = write_temp_bytes(&session_dir, rel_path, "left", &left_bytes)?;
+    let right = write_temp_bytes(&session_dir, rel_path, "right", &right_bytes)?;
     Ok(PreparedDiff {
         left,
         right,
         left_is_temp: true,
         right_is_temp: true,
+        session_dir,
     })
 }
 
@@ -161,6 +173,13 @@ pub fn cleanup_prepared(prepared: &PreparedDiff) {
     if prepared.right_is_temp {
         let _ = fs::remove_file(&prepared.right);
     }
+    let _ = fs::remove_dir(&prepared.session_dir);
+}
+
+/// Wait for a detached diff-tool child, then delete this session's temps only.
+pub fn wait_and_cleanup(mut child: Child, prepared: PreparedDiff) {
+    let _ = child.wait();
+    cleanup_prepared(&prepared);
 }
 
 #[cfg(test)]
@@ -343,6 +362,12 @@ mod tests {
         assert_eq!(prepared.right, dir.join("README.md"));
         assert_ne!(prepared.left, dir.join("README.md"));
         assert!(prepared.left.starts_with(ext_diff_temp_dir()));
+        assert!(prepared
+            .left
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .is_some_and(|name| name.starts_with(&format!("{}-", std::process::id()))));
         cleanup_prepared(&prepared);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -399,17 +424,51 @@ mod tests {
     }
 
     #[test]
-    fn prepare_sweeps_stale_temps_from_previous_run() {
+    fn prepare_does_not_delete_other_session_temps() {
         let _lock = lock_temps();
-        let dir = unique_repo("ws-ext-diff-sweep");
+        let dir = unique_repo("ws-ext-diff-nosweep");
         fs::create_dir_all(ext_diff_temp_dir()).unwrap();
-        let leftover = ext_diff_temp_dir().join("leftover-from-previous");
+        let other = ext_diff_temp_dir().join("999999-1");
+        fs::create_dir_all(&other).unwrap();
+        let leftover = other.join("still-open-in-gui.rs");
         fs::write(&leftover, b"stale").unwrap();
         fs::write(dir.join("README.md"), "# dirty\n").unwrap();
         let prepared = prepare_worktree_diff(&dir, "README.md").unwrap();
-        assert!(!leftover.exists());
-        assert!(prepared.left.exists());
+        assert!(
+            leftover.exists(),
+            "other session temps must survive prepare"
+        );
+        assert_ne!(
+            prepared.left.parent().map(Path::as_os_str),
+            Some(other.as_os_str())
+        );
         cleanup_prepared(&prepared);
+        assert!(leftover.exists(), "cleanup must not touch other sessions");
+        let _ = fs::remove_dir_all(&other);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wait_and_cleanup_removes_only_this_session() {
+        let _lock = lock_temps();
+        let dir = unique_repo("ws-ext-diff-wait");
+        fs::write(dir.join("README.md"), "# dirty\n").unwrap();
+        let prepared = prepare_worktree_diff(&dir, "README.md").unwrap();
+        let left = prepared.left.clone();
+        let other = ext_diff_temp_dir().join("888888-2");
+        fs::create_dir_all(&other).unwrap();
+        let leftover = other.join("gui-left.rs");
+        fs::write(&leftover, b"open").unwrap();
+        let child = Command::new(crate::git::git_binary())
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn git --version");
+        wait_and_cleanup(child, prepared);
+        assert!(!left.exists());
+        assert!(leftover.exists());
+        let _ = fs::remove_dir_all(&other);
         let _ = fs::remove_dir_all(&dir);
     }
 
