@@ -141,6 +141,10 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "flat / tree",
             },
             HelpEntry {
+                keys: "",
+                desc: "Staged / Changes when staged",
+            },
+            HelpEntry {
                 keys: ".",
                 desc: "show / hide ignored repos",
             },
@@ -581,6 +585,10 @@ mod tests {
         assert!(view_keys.contains(&"'"));
         assert!(!view_keys.contains(&"y '"));
         assert!(view_keys.contains(&"Esc"));
+        assert!(HELP_GROUPS[2]
+            .entries
+            .iter()
+            .any(|e| e.keys.is_empty() && e.desc == "Staged / Changes when staged"));
         assert!(help_match_indices("quit")
             .iter()
             .any(|&i| { help_entries().nth(i).is_some_and(|e| e.keys == "q") }));
