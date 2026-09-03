@@ -8,7 +8,7 @@
 //! terminal input, watch/fetch deadlines, `JoinSet` completions, flash /
 //! Ctrl-C, and presentation. Every git/process effect runs on
 //! `spawn_blocking`. Fetch / pull / push of independent checkouts share the
-//! same cap (`env_fetch_concurrency`, default 4). Watch collect streams
+//! same cap (`env_fetch_concurrency`, default 10). Watch collect streams
 //! `discover_checkouts` then per-repo `process_repo` and applies each
 //! [`crate::snapshot::RepoSnapshot`] as it arrives. Applying a result must
 //! not call `git log` / `git diff` on the loop thread.

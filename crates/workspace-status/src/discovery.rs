@@ -582,7 +582,7 @@ pub fn discover_checkouts(
 
 /// Walk primaries and linked worktrees, then [`process_repo`] each checkout.
 ///
-/// Independent checkouts run with a cap of 4 (`FETCH_CONCURRENCY`;
+/// Independent checkouts run with a cap of 10 (`FETCH_CONCURRENCY`;
 /// `WS_STATUS_FETCH_CONCURRENCY`). Output order matches discovery order.
 pub fn collect_snapshots(
     cwd: &Path,

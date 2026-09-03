@@ -148,7 +148,7 @@ struct Inflight {
 }
 
 impl Scheduler {
-    /// `cap` is [`crate::parallel::env_fetch_concurrency`] (default 4).
+    /// `cap` is [`crate::parallel::env_fetch_concurrency`] (default 10).
     pub fn new(cap: usize) -> Self {
         Self {
             cap: cap.max(1),
