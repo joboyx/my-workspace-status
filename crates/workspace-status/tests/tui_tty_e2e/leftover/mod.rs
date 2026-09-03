@@ -81,6 +81,7 @@ mod pty_streamed_collect_updates_focused_repo_before_slow;
 mod pty_t_and_i_toggle_view_modes;
 mod pty_tree_b_picker_enter_checkout;
 mod pty_tree_sgr_hscroll_pans_clipped_path;
+mod pty_tree_staged_changes_sections;
 mod pty_update_prompt_n_opens_tui;
 mod pty_uppercase_e_opens_focused_file_in_diff_tool;
 mod pty_v_highlight_comment_range;
