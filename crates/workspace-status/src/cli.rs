@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::actions::{pull_behind_repos, switch_repo_to_default_branch};
@@ -75,9 +75,59 @@ struct Cli {
     #[arg(long = "update")]
     update: bool,
 
+    /// Pin the workspace root (absolute or relative path).
+    #[arg(short = 'C', long = "workspace", value_name = "PATH")]
+    workspace: Option<PathBuf>,
+
     /// Optional workspace-relative repo filters. Named repos bypass ignoredRepos.
     #[arg(value_name = "REPO")]
     filter_repos: Vec<String>,
+}
+
+/// Resolve the workspace root to a canonical absolute directory.
+///
+/// Precedence: CLI `--workspace` / `-C`, then `WS_STATUS_WORKSPACE`, then
+/// `current_dir`. Blank or whitespace-only env is unset. A whitespace-only
+/// CLI path is an error because the flag was passed. Relative paths join onto
+/// `current_dir` before canonicalize. Missing paths and non-directories error;
+/// there is no silent fallback.
+pub(crate) fn resolve_workspace_root(
+    cli_workspace: Option<&Path>,
+    env_workspace: Option<&str>,
+    current_dir: &Path,
+) -> Result<PathBuf, String> {
+    let chosen = if let Some(cli) = cli_workspace {
+        if cli.as_os_str().is_empty() || cli.to_string_lossy().trim().is_empty() {
+            return Err(format!("workspace path is missing: {}", cli.display()));
+        }
+        join_workspace_path(cli, current_dir)
+    } else if let Some(env) = env_workspace.map(str::trim).filter(|s| !s.is_empty()) {
+        join_workspace_path(Path::new(env), current_dir)
+    } else {
+        current_dir.to_path_buf()
+    };
+    canonicalize_workspace_dir(&chosen)
+}
+
+fn join_workspace_path(path: &Path, current_dir: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        current_dir.join(path)
+    }
+}
+
+fn canonicalize_workspace_dir(path: &Path) -> Result<PathBuf, String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| format!("workspace path is missing: {}", path.display()))?;
+    if !canonical.is_dir() {
+        return Err(format!(
+            "workspace path is not a directory: {}",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
 }
 
 fn say(json: bool, line: &str) {
@@ -94,6 +144,15 @@ pub fn cli_main() -> ExitCode {
         return run_self_update();
     }
     let cwd = match env::current_dir() {
+        Ok(p) => p,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let env_workspace = env::var("WS_STATUS_WORKSPACE").ok();
+    let cwd = match resolve_workspace_root(cli.workspace.as_deref(), env_workspace.as_deref(), &cwd)
+    {
         Ok(p) => p,
         Err(err) => {
             eprintln!("{err}");
@@ -239,4 +298,125 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
         println!("{line}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ws-root-{tag}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn canonical(path: &Path) -> PathBuf {
+        path.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn resolve_workspace_root_cli_beats_env_and_cwd() {
+        let cli_dir = unique_dir("cli");
+        let env_dir = unique_dir("env");
+        let cwd_dir = unique_dir("cwd");
+        let got = resolve_workspace_root(
+            Some(cli_dir.as_path()),
+            Some(env_dir.to_str().unwrap()),
+            &cwd_dir,
+        )
+        .unwrap();
+        assert_eq!(got, canonical(&cli_dir));
+        let _ = fs::remove_dir_all(&cli_dir);
+        let _ = fs::remove_dir_all(&env_dir);
+        let _ = fs::remove_dir_all(&cwd_dir);
+    }
+
+    #[test]
+    fn resolve_workspace_root_env_beats_cwd_when_flag_is_none() {
+        let env_dir = unique_dir("env");
+        let cwd_dir = unique_dir("cwd");
+        let got = resolve_workspace_root(None, Some(env_dir.to_str().unwrap()), &cwd_dir).unwrap();
+        assert_eq!(got, canonical(&env_dir));
+        let _ = fs::remove_dir_all(&env_dir);
+        let _ = fs::remove_dir_all(&cwd_dir);
+    }
+
+    #[test]
+    fn resolve_workspace_root_blank_and_whitespace_env_are_ignored() {
+        let cwd_dir = unique_dir("cwd");
+        let expected = canonical(&cwd_dir);
+        let blank = resolve_workspace_root(None, Some(""), &cwd_dir).unwrap();
+        let whitespace = resolve_workspace_root(None, Some(" \t\n"), &cwd_dir).unwrap();
+        assert_eq!(blank, expected);
+        assert_eq!(whitespace, expected);
+        let _ = fs::remove_dir_all(&cwd_dir);
+    }
+
+    #[test]
+    fn resolve_workspace_root_missing_path_errors() {
+        let cwd_dir = unique_dir("cwd");
+        let missing = cwd_dir.join("no-such-workspace");
+        let err = resolve_workspace_root(Some(missing.as_path()), None, &cwd_dir).unwrap_err();
+        assert!(
+            err.contains("missing"),
+            "missing path should say it is missing: {err}"
+        );
+        assert!(
+            err.contains("no-such-workspace"),
+            "missing path error should include the path: {err}"
+        );
+        let env_err =
+            resolve_workspace_root(None, Some(missing.to_str().unwrap()), &cwd_dir).unwrap_err();
+        assert!(
+            env_err.contains("missing"),
+            "missing env path should say it is missing: {env_err}"
+        );
+        let _ = fs::remove_dir_all(&cwd_dir);
+    }
+
+    #[test]
+    fn resolve_workspace_root_file_path_errors() {
+        let cwd_dir = unique_dir("cwd");
+        let file = cwd_dir.join("not-a-dir");
+        fs::write(&file, b"x").unwrap();
+        let err = resolve_workspace_root(Some(file.as_path()), None, &cwd_dir).unwrap_err();
+        assert!(
+            err.contains("not a directory"),
+            "file path should say it is not a directory: {err}"
+        );
+        assert!(
+            err.contains("not-a-dir"),
+            "file path error should include the path: {err}"
+        );
+        let _ = fs::remove_dir_all(&cwd_dir);
+    }
+
+    #[test]
+    fn resolve_workspace_root_relative_path_joins_current_dir() {
+        let cwd_dir = unique_dir("cwd");
+        let child = cwd_dir.join("child");
+        fs::create_dir(&child).unwrap();
+        let got = resolve_workspace_root(Some(Path::new("child")), None, &cwd_dir).unwrap();
+        assert_eq!(got, canonical(&child));
+        let env_got = resolve_workspace_root(None, Some("child"), &cwd_dir).unwrap();
+        assert_eq!(env_got, canonical(&child));
+        let _ = fs::remove_dir_all(&cwd_dir);
+    }
+
+    #[test]
+    fn resolve_workspace_root_whitespace_cli_is_error() {
+        let cwd_dir = unique_dir("cwd");
+        let err = resolve_workspace_root(Some(Path::new("   ")), None, &cwd_dir).unwrap_err();
+        assert_ne!(err, String::new());
+        let _ = fs::remove_dir_all(&cwd_dir);
+    }
 }

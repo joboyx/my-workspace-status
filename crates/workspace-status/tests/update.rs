@@ -50,6 +50,18 @@ fn help_documents_update_flag() {
     );
 }
 
+#[test]
+fn help_documents_workspace_flag() {
+    let out = Command::new(bin())
+        .arg("--help")
+        .output()
+        .expect("workspace-status --help");
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("--workspace"), "{text}");
+    assert!(text.contains("-C"), "{text}");
+}
+
 #[cfg(unix)]
 #[test]
 fn update_runs_path_sidecar_and_forwards_exit() {
