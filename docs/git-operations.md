@@ -74,7 +74,7 @@ CLI `-p` / `-d` (progress strings go to the caller; `--json` sends them to stder
 
 | Function | Purpose |
 | --- | --- |
-| `collect_write_files` | File nodes under the focused row: `[file]` / dir subtree / checkout files / flat-repo files; empty for family containers, workspace, and group. |
+| `collect_write_files` | File nodes under the focused row: `[file]` / dir subtree (Changes dirs use `#unstaged`; Staged dirs are unsuffixed; no section chrome keeps every dirty file under the dir) / section header (checkout files on that side) / checkout files / flat-repo files; empty for family containers, workspace, and group. |
 | `op_targets` | Checkout paths for `f` / `p` / `d`. Workspace and family rows yield primary checkouts only. Group is empty. A linked worktree is included only when that row is focused. Hidden ignored repos are omitted. |
 | `push_targets` | Same primary / focused-worktree rule for `P`. Never on workspace. |
 | `background_fetch_targets` | Snapshot paths for the TUI background fetch timer. Hidden ignored checkouts are omitted. When ignored repos are shown, every snapshot path is included, including linked worktrees. Manual `f` stays on `op_targets`. |
@@ -100,11 +100,11 @@ Manual `f` / `p` / `P` / `d` and the background fetch tick paint a trailing brea
 
 **Renames need both paths.** Staging only the new path leaves the deletion of the old path unstaged, and git then reports the pair as `D` + `A` rather than `R`. Writes apply to each path in order and stop at the first failure.
 
-**Bulk stage / unstage.** `s` / `u` use `collect_write_files`: a file row is itself; a dir or checkout (or flat repo) walks file/dir descendants — never mixes sibling checkouts under a family container. Workspace, group, and family-container rows yield an empty list. Stage keeps files with unstaged or untracked; unstage keeps staged. Empty after filtering: `Nothing to stage` / `Nothing to unstage`. Wrong focus: `Focus a file, dir, checkout, or repo to stage|unstage`.
+**Bulk stage / unstage.** `s` / `u` use `collect_write_files`: a file row is itself; a dir walks descendants on that section side (every Changes dir id ends with `#unstaged`, including when collapse names differ from Staged); a Staged / Changes header walks every dirty file on that side of the checkout; a checkout (or flat repo) walks every dirty file — never mixes sibling checkouts under a family container. Workspace, group, and family-container rows yield an empty list. Stage keeps files with unstaged or untracked; unstage keeps staged. Empty after filtering: `Nothing to stage` / `Nothing to unstage`. Wrong focus: `Focus a file, dir, checkout, or repo to stage|unstage`.
 
 **Focused refresh (`r`).** Reloads the whole workspace on the workspace row or No-updates group, and otherwise one checkout (`refresh_target` → `ReloadSnapshot` vs `ReloadRepo { repo }`).
 
-**Bulk revert with counted confirm.** `x` uses the same `collect_write_files` scope, keeping unstaged or untracked (staged-only skipped). Confirm shows counts; `y`/`Enter` runs `git restore` on tracked targets and **keeps** untracked; `Y` also deletes each untracked via `remove_untracked_file` (per-file `clean -f`, not `clean -fd`). Exception: a single untracked target still deletes on both `y` and `Y`. Empty after filter: `Nothing to discard` (or `Nothing to discard (staged only)` on a staged-only file).
+**Bulk revert with counted confirm.** `x` uses the same `collect_write_files` scope (section headers and dirs stay side-filtered), keeping unstaged or untracked (staged-only skipped). Confirm shows counts; `y`/`Enter` runs `git restore` on tracked targets and **keeps** untracked; `Y` also deletes each untracked via `remove_untracked_file` (per-file `clean -f`, not `clean -fd`). Exception: a single untracked target still deletes on both `y` and `Y`. Empty after filter: `Nothing to discard` (or `Nothing to discard (staged only)` on a staged-only file).
 
 **Remove linked worktree (`W`).** Linked `Checkout` rows only. Confirm shows branch, `merged into default` / `NOT merged into default`, and `--force` when dirty. Same-commit as the default tip is `NOT merged into default` (just created). On Unix, bind-mount aliases remap via inode so gitdir back-pointers match. On Windows, worktree identity is canonical path plus size and mtime (no inode / bind-mount remap).
 

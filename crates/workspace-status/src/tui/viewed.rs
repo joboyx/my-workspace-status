@@ -350,6 +350,8 @@ pub fn collect_current_fingerprints(
 }
 
 /// Row ids whose stored fingerprint still matches the worktree.
+///
+/// Dual MS paths emit both the unsuffixed Staged id and `#unstaged`.
 pub fn viewed_row_ids(
     snapshot: &WorkspaceSnapshot,
     store: &ViewedStore,
@@ -366,6 +368,11 @@ pub fn viewed_row_ids(
             if let Some(fp) = current.get(&identity) {
                 if is_viewed(store, &identity, fp) {
                     ids.insert(format!("file:{}:{}", repo.repo, file.path));
+                    if file.staged_status.is_some()
+                        && (file.unstaged_status.is_some() || file.untracked)
+                    {
+                        ids.insert(format!("file:{}:{}#unstaged", repo.repo, file.path));
+                    }
                 }
             }
         }
@@ -785,6 +792,97 @@ mod tests {
         let current = collect_current_fingerprints(&snap, &dir);
         let next = reconcile_viewed(&store, &current);
         assert!(next.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn dual_ms_change() -> FileChange {
+        FileChange {
+            path: "both.rs".into(),
+            staged_status: Some("M".into()),
+            unstaged_status: Some("M".into()),
+            untracked: false,
+            old_path: None,
+        }
+    }
+
+    fn dual_ms_snapshot(change: FileChange) -> WorkspaceSnapshot {
+        build_workspace_snapshot(
+            &[RepoSnapshot {
+                repo: "demo".into(),
+                branch: "main".into(),
+                sync_status: SyncStatus::NoUpstream,
+                sync_note: String::new(),
+                head: String::new(),
+                has_unstaged: true,
+                has_staged: true,
+                has_untracked: false,
+                changes: vec![change],
+                checkout_kind: CheckoutKind::Primary,
+                primary_repo: None,
+                merged_into_default: None,
+                default_branch_override: None,
+                local_branches: Vec::new(),
+            }],
+            &[],
+            false,
+            &[],
+        )
+    }
+
+    /// Space hashes the snapshot FileChange (both git sides). Reconcile uses
+    /// the same hash, so dual Staged and `#unstaged` ids stay marked.
+    #[test]
+    fn dual_ms_toggle_survives_reconcile_and_emits_both_row_ids() {
+        let dir = std::env::temp_dir().join(format!(
+            "ws-viewed-dual-ms-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(dir.join("demo")).unwrap();
+        fs::write(dir.join("demo/both.rs"), "x\n").unwrap();
+        let change = dual_ms_change();
+        let snap = dual_ms_snapshot(change.clone());
+        let identity = viewed_identity("demo", "both.rs");
+        let staged_split = FileChange {
+            path: change.path.clone(),
+            staged_status: change.staged_status.clone(),
+            unstaged_status: None,
+            untracked: false,
+            old_path: change.old_path.clone(),
+        };
+        let changes_split = FileChange {
+            path: change.path.clone(),
+            staged_status: None,
+            unstaged_status: change.unstaged_status.clone(),
+            untracked: false,
+            old_path: change.old_path.clone(),
+        };
+        let snapshot_fp = fingerprint_file_change(&dir, "demo", &change);
+        for (label, split) in [("staged", &staged_split), ("unstaged", &changes_split)] {
+            assert_ne!(
+                fingerprint_file_change(&dir, "demo", split),
+                snapshot_fp,
+                "split {label} FileChange must not be the viewed fingerprint"
+            );
+            let store = toggle_viewed(&ViewedStore::new(), &identity, &snapshot_fp);
+            let current = collect_current_fingerprints(&snap, &dir);
+            let next = reconcile_viewed(&store, &current);
+            assert_eq!(
+                next, store,
+                "{label}: snapshot fingerprint must survive reconcile_viewed"
+            );
+            let ids = viewed_row_ids(&snap, &next, &dir);
+            assert!(
+                ids.contains("file:demo:both.rs"),
+                "{label}: Staged dual id stays reviewed after reconcile"
+            );
+            assert!(
+                ids.contains("file:demo:both.rs#unstaged"),
+                "{label}: Changes dual id stays reviewed after reconcile"
+            );
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 }

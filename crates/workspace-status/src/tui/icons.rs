@@ -57,6 +57,14 @@ pub fn icon_diff(ascii: bool) -> &'static str {
 }
 /// Font named in the help footer (`REQUIRED_FONT`).
 pub const REQUIRED_FONT: &str = "MesloLGS NF";
+/// Staged section header. Nerd: nf-oct-package (`U+F487`); ASCII: `#`.
+pub fn icon_staged(ascii: bool) -> &'static str {
+    glyph(ascii, "\u{f487}", "#")
+}
+/// Changes section header. Nerd: nf-fa-pencil (`U+F040`); ASCII: `~`.
+pub fn icon_changes(ascii: bool) -> &'static str {
+    glyph(ascii, "\u{f040}", "~")
+}
 pub fn icon_folder(ascii: bool) -> &'static str {
     glyph(ascii, "", "/")
 }
@@ -560,6 +568,8 @@ mod tests {
             icon_viewed(true),
             icon_comment(true),
             icon_comment_resolved(true),
+            icon_staged(true),
+            icon_changes(true),
             ASCII_FILE_GLYPH,
         ];
         let nerd = [
@@ -580,6 +590,8 @@ mod tests {
             icon_viewed(false),
             icon_comment(false),
             icon_comment_resolved(false),
+            icon_staged(false),
+            icon_changes(false),
             CURSOR_BAR,
             FOLD_EXPANDED,
             FOLD_COLLAPSED,
@@ -590,6 +602,10 @@ mod tests {
             assert!(!has_wide_emoji(g), "{g:?}");
         }
         assert_eq!(icon_workspace(true), "#");
+        assert_eq!(icon_staged(true), "#");
+        assert_eq!(icon_changes(true), "~");
+        assert_eq!(icon_staged(false), "\u{f487}");
+        assert_eq!(icon_changes(false), "\u{f040}");
         assert_eq!(icon_viewed(true), "*");
         assert_eq!(icon_comment(true), "\"");
         assert_eq!(icon_comment(false), ICON_COMMENT_NERD);

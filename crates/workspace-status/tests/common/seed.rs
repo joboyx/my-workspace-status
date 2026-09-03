@@ -217,6 +217,18 @@ pub fn daily_workspace() -> (PathBuf, PathBuf) {
     (root, workspace)
 }
 
+/// Daily workspace plus one staged path in `app` so both section headers paint.
+///
+/// `app/README.md` stays unstaged. `app/staged.txt` is `git add`ed. Leftover
+/// PTY (`WS_STATUS_GLYPHS=ascii`) must show `# Staged` and `~ Changes`.
+pub fn staged_and_changes_workspace() -> (PathBuf, PathBuf) {
+    let (root, workspace) = daily_workspace();
+    let app = workspace.join("app");
+    fs::write(app.join("staged.txt"), "staged\n").unwrap();
+    git(&app, &["add", "staged.txt"]);
+    (root, workspace)
+}
+
 /// One checkout with diverging local branches (`focusbox`).
 pub fn focus_workspace() -> (PathBuf, PathBuf) {
     let (root, workspace) = new_workspace("ws-tui-e2e-focus");

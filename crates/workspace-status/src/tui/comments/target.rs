@@ -413,7 +413,7 @@ fn resolve_tree_entity(
     workspace_path: Option<&str>,
 ) -> Option<EntityRef> {
     match row.kind {
-        NodeKind::Group => None,
+        NodeKind::Group | NodeKind::Section => None,
         NodeKind::Workspace => Some(EntityRef::workspace(workspace_path?)),
         NodeKind::File => {
             let repo_path = row.repo.as_deref()?;
@@ -534,7 +534,11 @@ fn resolve_graph_target(
 
 fn resolve_tree_target(snapshot: &WorkspaceSnapshot, row: &VisibleRow) -> Option<CommentKey> {
     match row.kind {
-        NodeKind::Workspace | NodeKind::Group | NodeKind::Dir | NodeKind::File => None,
+        NodeKind::Workspace
+        | NodeKind::Group
+        | NodeKind::Section
+        | NodeKind::Dir
+        | NodeKind::File => None,
         NodeKind::Repo | NodeKind::Checkout => {
             let repo_path = row.repo.as_deref()?;
             let snap = snapshot.repos.iter().find(|r| r.repo == repo_path);
@@ -818,7 +822,7 @@ fn tree_export_scope(
     };
     match row.kind {
         NodeKind::Workspace => ExportScope::All,
-        NodeKind::Group => match find_node(tree, &row.id) {
+        NodeKind::Group | NodeKind::Section => match find_node(tree, &row.id) {
             Some(node) => identities_scope(snapshot, collect_node_identities(node)),
             None => ExportScope::Empty,
         },
