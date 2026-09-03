@@ -47,14 +47,15 @@ colours (`T` cycles).
 selectable visible-row indexes. Spacers stay
 unhighlighted. `GraphWidget::flash_rows` paints the fade background on
 the same visible-row indexes, including spacers (a flashing commit
-keeps its spacer). `GraphWidget::commented_rows` marks selectable
+keeps its spacer). Flash background wins over cursor and search.
+The cursor bar (`▌`) still marks selection. `cursorBg` paints when the
+row is not flashing (`GraphWidget::cursor_style`). `GraphWidget::commented_rows` marks selectable
 visible-row indexes that have an object comment or a file-line
 comment for that row. Commented rows paint `ICON_COMMENT` (`"` /
 nf-fa-comment) after the gutter. `GraphWidget::resolved_comment_rows`
 paints `ICON_COMMENT_RESOLVED` (`'` / nf-fa-comment-o) when every
 comment on that row is resolved. Open `commented_rows` win when a row
-is in both lists. The selected cursor still wins: `▌`
-plus `cursorBg` (`GraphWidget::cursor_style`). The comment glyph stays
+is in both lists. The comment glyph stays
 visible on the selected row. Uncommented rows do not reserve a
 column. Spacers stay unmarked. The TUI passes `icon_comment` /
 `icon_comment_resolved` so the glyphs match tree and diff marks.
