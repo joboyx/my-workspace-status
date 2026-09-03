@@ -61,6 +61,7 @@ pub fn classify_busy_action(action: &Action) -> BusyAction {
         | Action::ConfirmYes
         | Action::ConfirmYesClean
         | Action::Edit
+        | Action::ExternalDiff
         | Action::WatchTick
         | Action::FetchTick
         | Action::StashMenuEnter
@@ -219,6 +220,11 @@ mod tests {
         assert_eq!(classify_busy_action(&Action::Push), BusyAction::Ignore);
         assert_eq!(classify_busy_action(&Action::Stage), BusyAction::Ignore);
         assert_eq!(classify_busy_action(&Action::Revert), BusyAction::Ignore);
+        assert_eq!(classify_busy_action(&Action::Edit), BusyAction::Ignore);
+        assert_eq!(
+            classify_busy_action(&Action::ExternalDiff),
+            BusyAction::Ignore
+        );
         assert_eq!(
             classify_busy_action(&Action::GraphCheckout),
             BusyAction::Ignore

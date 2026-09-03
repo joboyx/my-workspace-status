@@ -96,6 +96,7 @@ impl AppState {
             | Action::SearchNext
             | Action::SearchPrev
             | Action::Edit
+            | Action::ExternalDiff
             | Action::WatchTick
             | Action::FetchTick
             | Action::GraphFocusBranches

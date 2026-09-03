@@ -8,8 +8,9 @@
 //! calls [`Interpreter::interpret_sync`], which runs the same schedule / spawn /
 //! apply functions on the test thread and drains until idle.
 //!
-//! Headless does not run [`Effect::EditFile`]. That arm unmounts a TTY
-//! `$EDITOR`. The live loop consumes [`Interpreter::take_pending_edit`].
+//! Headless does not run [`Effect::EditFile`] or [`Effect::ExternalDiff`].
+//! Those arms unmount a TTY `$EDITOR` / diff tool. The live loop consumes
+//! [`Interpreter::take_pending_edit`] and [`Interpreter::take_pending_diff`].
 
 use std::collections::{HashMap, VecDeque};
 
@@ -25,7 +26,7 @@ use crate::git::{
 use crate::parallel::env_fetch_concurrency;
 use crate::snapshot::RepoSnapshot;
 
-use super::action::{Action, Effect};
+use super::action::{Action, Effect, ExternalDiffKind};
 use super::app::{
     apply_checkout_compute, apply_merge_compute, apply_one_repo_snapshot, apply_right_pane_load,
     commit_diff_list, compute_checkout, compute_commit_diff, compute_commit_files, compute_merge,
@@ -156,6 +157,7 @@ pub(crate) struct Interpreter {
     default_total: usize,
     default_repos: Vec<String>,
     pending_edit: Option<(String, String)>,
+    pending_diff: Option<(String, String, ExternalDiffKind)>,
     dirty: bool,
 }
 
@@ -181,6 +183,7 @@ impl Interpreter {
             default_total: 0,
             default_repos: Vec::new(),
             pending_edit: None,
+            pending_diff: None,
             dirty: false,
         }
     }
@@ -202,10 +205,15 @@ impl Interpreter {
         self.pending_edit.take()
     }
 
+    /// External diff request, if [`Effect::ExternalDiff`] ran since the last take.
+    pub(crate) fn take_pending_diff(&mut self) -> Option<(String, String, ExternalDiffKind)> {
+        self.pending_diff.take()
+    }
+
     /// Schedule `effect`, then run and apply every job on this thread.
     ///
     /// Headless e2e uses this so tests see the same apply path as the live loop.
-    /// [`Effect::EditFile`] is dropped (no TTY editor).
+    /// [`Effect::EditFile`] and [`Effect::ExternalDiff`] are dropped (no TTY spawn).
     pub(crate) fn interpret_sync(
         &mut self,
         state: &mut AppState,
@@ -218,6 +226,7 @@ impl Interpreter {
             self.maybe_queue_autoload(state);
         }
         let _ = self.take_pending_edit();
+        let _ = self.take_pending_diff();
         self.pump_sync(state, opts);
     }
 
@@ -315,6 +324,10 @@ impl Interpreter {
             }),
             Effect::EditFile { repo, path } => {
                 self.pending_edit = Some((repo, path));
+                self.mark();
+            }
+            Effect::ExternalDiff { repo, path, kind } => {
+                self.pending_diff = Some((repo, path, kind));
                 self.mark();
             }
             Effect::StashCreate { repo, paths } => self.enqueue_write({
@@ -1242,7 +1255,8 @@ mod tests {
 
     /// Headless must drain the same apply function the live loop uses.
     ///
-    /// The remaining gap is TTY `$EDITOR` (`Effect::EditFile` → `pending_edit`).
+    /// The remaining gap is TTY `$EDITOR` / external diff
+    /// (`Effect::EditFile` → `pending_edit`, `Effect::ExternalDiff` → `pending_diff`).
     /// This fails if Headless grows a second apply match or live stops calling
     /// [`Interpreter::apply`].
     #[test]
@@ -1298,13 +1312,67 @@ mod tests {
             "live TTY must consume EditFile via take_pending_edit"
         );
         assert!(
+            loop_src.contains("take_pending_diff"),
+            "live TTY must consume ExternalDiff via take_pending_diff"
+        );
+        assert!(
             effect.contains("let _ = self.take_pending_edit();"),
             "Headless interpret_sync must drop EditFile (TTY editor only)"
+        );
+        assert!(
+            effect.contains("let _ = self.take_pending_diff();"),
+            "Headless interpret_sync must drop ExternalDiff (no TTY spawn)"
+        );
+        assert!(
+            loop_src.contains("fn schedule_diff"),
+            "live TTY must spawn the external diff tool"
         );
         assert!(
             !effect.contains(concat!("collect_full_", "snapshot(")),
             "interpreter watch/refresh must stream process_repo"
         );
+    }
+
+    #[test]
+    fn schedule_external_diff_sets_pending() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::new();
+        let tui_opts = opts(&state);
+        interp.schedule(
+            &mut state,
+            &tui_opts,
+            Effect::ExternalDiff {
+                repo: "app".into(),
+                path: "README.md".into(),
+                kind: ExternalDiffKind::Worktree,
+            },
+            &Action::ExternalDiff,
+        );
+        assert_eq!(
+            interp.take_pending_diff(),
+            Some(("app".into(), "README.md".into(), ExternalDiffKind::Worktree))
+        );
+    }
+
+    #[test]
+    fn interpret_sync_drops_pending_external_diff() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::new();
+        let tui_opts = opts(&state);
+        interp.interpret_sync(
+            &mut state,
+            &tui_opts,
+            Effect::ExternalDiff {
+                repo: "app".into(),
+                path: "README.md".into(),
+                kind: ExternalDiffKind::Rev {
+                    left_rev: "HEAD^".into(),
+                    right_rev: "HEAD".into(),
+                },
+            },
+            &Action::ExternalDiff,
+        );
+        assert!(interp.take_pending_diff().is_none());
     }
 
     #[test]

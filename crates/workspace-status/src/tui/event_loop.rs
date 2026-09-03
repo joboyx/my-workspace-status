@@ -17,10 +17,13 @@ use ratatui::Terminal;
 use tokio::task::JoinSet;
 use tokio::time::{sleep, Duration as TokioDuration};
 
-use super::action::{Action, Effect};
+use super::action::{Action, Effect, ExternalDiffKind};
 use super::app::{
     apply_terminal_resize, discard_held_nav_backlog, map_event, run_blocking_editor,
     sync_mouse_capture, TuiOpts,
+};
+use super::diff_tool::{
+    cleanup_prepared, diff_tool_command, prepare_rev_diff, prepare_worktree_diff, resolve_diff_tool,
 };
 use super::editor::{editor_command, is_detached_editor, resolve_editor};
 use super::effect::{Interpreter, JobOutcome};
@@ -363,6 +366,9 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event) {
     if let Some((repo, path)) = ctx.interp.take_pending_edit() {
         schedule_edit(ctx, repo, path);
     }
+    if let Some((repo, path, kind)) = ctx.interp.take_pending_diff() {
+        schedule_diff(ctx, repo, path, kind);
+    }
     if action_triggers_graph_autoload(&action_for_load) {
         ctx.interp.maybe_queue_autoload(ctx.state);
     }
@@ -418,6 +424,63 @@ fn schedule_edit(ctx: &mut LoopCtx<'_>, repo: String, path: String) {
             ctx.state.status = format!("edited {path}");
             ctx.interp.after_edit(ctx.state, repo);
             if ctx.interp.take_dirty() {
+                ctx.presenter.mark();
+            }
+        }
+    }
+}
+
+fn schedule_diff(ctx: &mut LoopCtx<'_>, repo: String, path: String, kind: ExternalDiffKind) {
+    let tool = resolve_diff_tool(ctx.opts.config.diff_tool.as_deref());
+    let repo_abs = ctx.opts.cwd.join(&repo);
+    let prepared = match &kind {
+        ExternalDiffKind::Worktree => prepare_worktree_diff(&repo_abs, &path),
+        ExternalDiffKind::Rev {
+            left_rev,
+            right_rev,
+        } => prepare_rev_diff(&repo_abs, left_rev, right_rev, &path),
+    };
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            ctx.state.status = format!("diff failed: {err}");
+            ctx.presenter.mark();
+            return;
+        }
+    };
+    let left = prepared.left.to_string_lossy().into_owned();
+    let right = prepared.right.to_string_lossy().into_owned();
+    let (cmd, args) = diff_tool_command(&tool, &left, &right);
+    if is_detached_editor(&tool) {
+        let _ = Command::new(&cmd)
+            .args(&args)
+            .current_dir(&repo_abs)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        ctx.state.status = format!("opened diff {path}");
+        ctx.presenter.mark();
+        return;
+    }
+    ctx.input.pause();
+    let mouse = ctx.state.mouse_enabled;
+    let result = run_blocking_editor(ctx.terminal, &cmd, &args, &repo_abs, mouse);
+    ctx.input.resume();
+    cleanup_prepared(&prepared);
+    match result {
+        Err(err) => {
+            ctx.state.status = format!("diff failed: {err}");
+            ctx.presenter.mark();
+        }
+        Ok(()) => {
+            ctx.state.status = format!("diffed {path}");
+            if matches!(kind, ExternalDiffKind::Worktree) {
+                ctx.interp.after_edit(ctx.state, repo);
+                if ctx.interp.take_dirty() {
+                    ctx.presenter.mark();
+                }
+            } else {
                 ctx.presenter.mark();
             }
         }

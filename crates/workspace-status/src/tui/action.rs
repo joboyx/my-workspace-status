@@ -92,6 +92,8 @@ pub enum Action {
     ConfirmYesClean,
     ConfirmNo,
     Edit,
+    /// Open the focused file in the configured external diff tool (`E`).
+    ExternalDiff,
     WatchTick,
     FetchTick,
     RemoveWorktree,
@@ -159,6 +161,15 @@ pub enum Action {
     None,
 }
 
+/// LEFT/RIGHT pair for [`Effect::ExternalDiff`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExternalDiffKind {
+    /// HEAD vs worktree (`prepare_worktree_diff`).
+    Worktree,
+    /// Blob temps at `left_rev` and `right_rev` (`prepare_rev_diff`).
+    Rev { left_rev: String, right_rev: String },
+}
+
 /// Side effect requested after dispatch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
@@ -200,6 +211,12 @@ pub enum Effect {
     EditFile {
         repo: String,
         path: String,
+    },
+    /// Open LEFT/RIGHT in the configured external diff tool (`E`).
+    ExternalDiff {
+        repo: String,
+        path: String,
+        kind: ExternalDiffKind,
     },
     WatchRefresh,
     Push {
