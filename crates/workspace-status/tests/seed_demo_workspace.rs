@@ -52,6 +52,7 @@ fn run_status(workspace: &Path, args: &[&str]) -> std::process::Output {
     cmd.args(args)
         .current_dir(workspace)
         .env("TERM", "dumb")
+        .env_remove("WS_STATUS_WORKSPACE")
         .stdin(Stdio::null());
     for (k, v) in git_env() {
         cmd.env(k, v);

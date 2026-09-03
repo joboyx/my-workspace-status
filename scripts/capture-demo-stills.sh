@@ -16,7 +16,8 @@
 # Isolates XDG_STATE_HOME, WS_STATUS_UPDATE_CHECK_STORE,
 # WS_STATUS_VIEWED_STORE, and WS_STATUS_COMMENT_STORE under
 # tmp/demo-stills-stage/state so a TTY launch does not write the operator
-# last-check, reviewed-mark, or comment files.
+# last-check, reviewed-mark, or comment files. Unsets WS_STATUS_WORKSPACE
+# so the seeded demo dir is the workspace root.
 set -euo pipefail
 trap '' HUP
 
@@ -108,7 +109,7 @@ write_helpers() {
   cat >"$LAUNCHER" <<EOF
 #!/usr/bin/env bash
 # Cloud Agent shells export NO_COLOR=1; a gray first frame means it leaked in.
-unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE
+unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE
 export WS_STATUS_WATCH_MS=0
 export WS_STATUS_FETCH_MS=0
 export XDG_STATE_HOME=$(printf '%q' "$STATE_DIR")
@@ -229,7 +230,7 @@ launch_tui() {
   echo "capture-demo-stills: stop+launch" >&2
   stop_tui
   sleep 0.35
-  unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE
+  unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE
   if [[ -n "${WS_STATUS_GLYPHS:-}" ]]; then
     die "WS_STATUS_GLYPHS is set; refusing ASCII stills while MesloLGS NF is installed."
   fi
@@ -400,7 +401,7 @@ seed() {
 
 cd "$REPO_ROOT"
 # Cloud Agent / CI shells often export these; they paint a gray first frame.
-unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE
+unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE
 export NO_AT_BRIDGE=1
 export GTK_A11Y=none
 export TZ=Asia/Manila

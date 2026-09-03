@@ -115,16 +115,22 @@ impl PtySession {
         for (k, v) in std::env::vars() {
             if matches!(
                 k.as_str(),
-                "NO_COLOR" | "FORCE_COLOR" | "WS_STATUS_GLYPHS" | "CLICOLOR_FORCE"
+                "NO_COLOR"
+                    | "FORCE_COLOR"
+                    | "WS_STATUS_GLYPHS"
+                    | "CLICOLOR_FORCE"
+                    | "WS_STATUS_WORKSPACE"
             ) {
                 continue;
             }
             cmd.env(k, v);
         }
         // CommandBuilder starts with the parent env. Skipping the copy
-        // above does not drop these; remove them so the TTY paints colour.
+        // above does not drop these; remove them so the TTY paints colour
+        // and the fixture cwd wins over an operator WS_STATUS_WORKSPACE.
         cmd.env_remove("NO_COLOR");
         cmd.env_remove("FORCE_COLOR");
+        cmd.env_remove("WS_STATUS_WORKSPACE");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("WS_STATUS_GLYPHS", "ascii");

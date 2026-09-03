@@ -138,7 +138,7 @@ The host job runs [git-cliff](https://git-cliff.org/) (`cliff.toml`, conventiona
 Installers place `workspace-status`, `ws`, and `workspace-status-update` in `~/.local/bin`.
 `--update` (`ws --update` / `workspace-status --update`) prints GitHub Release notes for published versions newer than this binary (`CARGO_PKG_VERSION`), then execs `workspace-status-update` from the same directory as the current executable, then PATH. Installer-only historical bodies contribute no notes. A failed notes fetch stays quiet and still runs the sidecar. The sidecar's exit status is the process exit status. That run does not open the TUI or apply repo filters. `install-updater = true` keeps the sidecar in the installer.
 A TTY TUI launch (`ws` / `workspace-status` without `--plain` / `--json` / `--update`) may ask to run that same sidecar **before** the alternate screen mounts: at most every 6 hours it `curl`s the latest published GitHub Release. Newer → `new version available, update? [y/n]`. `y` runs `--update` (notes then sidecar). `n` opens the TUI. Offline / current / parse failure / missing `curl` stay quiet. The last-check time is stored in `$XDG_STATE_HOME/my-workspace-status/update-check.json` (`WS_STATUS_UPDATE_CHECK_STORE` overrides). HeadlessTui tests do not run this check.
-A TTY spawn that can write that file (PTY e2e, desktop e2e, `scripts/capture-demo-stills.sh`) must point `WS_STATUS_UPDATE_CHECK_STORE` at a temp path with a fresh `lastCheckUnix`. Otherwise the default XDG file is overwritten and the prompt can block mount. CI: `crates/workspace-status/tests/release_watch.rs`.
+A TTY spawn that can write that file (PTY e2e, desktop e2e, `scripts/capture-demo-stills.sh`) must point `WS_STATUS_UPDATE_CHECK_STORE` at a temp path with a fresh `lastCheckUnix`. Otherwise the default XDG file is overwritten and the prompt can block mount. Those same spawn paths must drop parent `WS_STATUS_WORKSPACE` so the fixture cwd wins. CI: `crates/workspace-status/tests/release_watch.rs`.
 `workspace-status-graph` is a path library, not a separate dist app. There is no crates.io or Homebrew publish job.
 
 ### `dist generate`
@@ -150,7 +150,7 @@ A TTY spawn that can write that file (PTY e2e, desktop e2e, `scripts/capture-dem
    - On the host checkout, set `fetch-depth: 0` and `fetch-tags: true`.
    - Run git-cliff (`orhun/git-cliff-action`, `--current --strip header`).
    - Prepend that changelog to the cargo-dist announcement before `gh release create`.
-4. Run `cargo test --test release_watch`. That suite fails if generate dropped those steps, or if a TTY spawn path no longer assigns `WS_STATUS_UPDATE_CHECK_STORE`.
+4. Run `cargo test --test release_watch`. That suite fails if generate dropped those steps, or if a TTY spawn path no longer assigns `WS_STATUS_UPDATE_CHECK_STORE` or no longer drops `WS_STATUS_WORKSPACE`.
 
 ## Decisions
 

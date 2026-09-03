@@ -75,9 +75,14 @@ fn fixture() -> (PathBuf, PathBuf) {
     (root, workspace)
 }
 
+fn isolate_workspace_env(cmd: &mut Command) {
+    cmd.env_remove("WS_STATUS_WORKSPACE");
+}
+
 fn run_json(workspace: &Path, args: &[&str]) -> serde_json::Value {
     let mut cmd = Command::new(bin());
     cmd.args(args).current_dir(workspace).env("TERM", "dumb");
+    isolate_workspace_env(&mut cmd);
     for (k, v) in git_env() {
         cmd.env(k, v);
     }
@@ -94,6 +99,7 @@ fn run_json(workspace: &Path, args: &[&str]) -> serde_json::Value {
 fn run_plain(workspace: &Path, args: &[&str]) -> String {
     let mut cmd = Command::new(bin());
     cmd.args(args).current_dir(workspace).env("TERM", "dumb");
+    isolate_workspace_env(&mut cmd);
     for (k, v) in git_env() {
         cmd.env(k, v);
     }
@@ -158,6 +164,7 @@ fn json_and_plain_match_snapshot_fixture() {
         &Command::new(bin())
             .args(["--json"])
             .current_dir(&workspace)
+            .env_remove("WS_STATUS_WORKSPACE")
             .output()
             .unwrap()
             .stdout
@@ -193,6 +200,7 @@ fn json_fetch_stdout_stays_parseable() {
     cmd.args(["--json", "--fetch"])
         .current_dir(&workspace)
         .env("TERM", "dumb")
+        .env_remove("WS_STATUS_WORKSPACE")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -230,7 +238,9 @@ fn named_filter_includes_ignored_and_unknown_exits() {
     assert_eq!(snapshot["repos"][0]["ignored"], true);
 
     let mut cmd = Command::new(bin());
-    cmd.args(["--json", "missing-repo"]).current_dir(&workspace);
+    cmd.args(["--json", "missing-repo"])
+        .current_dir(&workspace)
+        .env_remove("WS_STATUS_WORKSPACE");
     let out = cmd.output().unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("Unknown repo: missing-repo"));
@@ -243,7 +253,8 @@ fn ws_alias_runs_same_binary() {
     let mut cmd = Command::new(ws_bin());
     cmd.args(["--json"])
         .current_dir(&workspace)
-        .env("TERM", "dumb");
+        .env("TERM", "dumb")
+        .env_remove("WS_STATUS_WORKSPACE");
     let out = cmd.output().unwrap();
     assert!(out.status.success());
     let snapshot: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();

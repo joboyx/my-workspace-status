@@ -197,6 +197,7 @@ fn plain_does_not_run_startup_update_check() {
         .env("XDG_STATE_HOME", &state)
         .env("HOME", &dir)
         .env("TERM", "dumb")
+        .env_remove("WS_STATUS_WORKSPACE")
         .output()
         .expect("workspace-status --plain");
     assert!(
@@ -223,6 +224,7 @@ fn json_does_not_run_startup_update_check() {
         .env("XDG_STATE_HOME", &state)
         .env("HOME", &dir)
         .env("TERM", "dumb")
+        .env_remove("WS_STATUS_WORKSPACE")
         .output()
         .expect("workspace-status --json");
     assert!(
