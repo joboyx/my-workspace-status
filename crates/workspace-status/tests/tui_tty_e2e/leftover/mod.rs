@@ -86,6 +86,7 @@ mod pty_update_prompt_n_opens_tui;
 mod pty_uppercase_e_opens_focused_file_in_diff_tool;
 mod pty_v_highlight_comment_range;
 mod pty_watch_applies_while_keys_arrive;
+mod pty_watch_row_flash_add_and_remove;
 mod pty_worktree_w_remove_confirm;
 mod pty_x_then_y_discard_tracked;
 mod pty_y_copies_focused_tree_scope;
