@@ -2491,6 +2491,29 @@ mod tests {
         state
     }
 
+    fn two_pane_commit_diff_state() -> AppState {
+        let mut state = two_pane_files_state();
+        state.open_commit_diff(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![super::super::drill::CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+            }],
+            0,
+            "README.md".into(),
+            super::super::diff::DiffContent::from_lines(vec![
+                "@@ -1,1 +1,1 @@".into(),
+                "-old line".into(),
+                "+new line".into(),
+            ]),
+        );
+        state
+    }
+
     fn assert_titles_heading_borders_split(state: &mut AppState) {
         let palette = state.theme.palette();
         let backend = TestBackend::new(120, 20);
@@ -2690,6 +2713,18 @@ mod tests {
         assert_cursor_bar_on_focused_list_only(&mut state, "uncommitted", "README.md");
         state.focus = FocusPane::Right;
         assert_cursor_bar_on_focused_list_only(&mut state, "uncommitted", "README.md");
+    }
+
+    #[test]
+    fn cursor_bar_paints_on_focused_list_only_commit_diff() {
+        let mut state = two_pane_commit_diff_state();
+        assert!(state.drill.is_diff());
+        state.focus = FocusPane::Left;
+        assert!(state.commit_files_list_focused());
+        assert_cursor_bar_on_focused_list_only(&mut state, "README.md", "UNSTAGED");
+        state.focus = FocusPane::Right;
+        assert!(!state.commit_files_list_focused());
+        assert_cursor_bar_on_focused_list_only(&mut state, "README.md", "UNSTAGED");
     }
 
     #[test]
