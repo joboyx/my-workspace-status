@@ -21,13 +21,14 @@ const HELP_MOVE_ROWS: &[(&str, &str)] = &[
     ("n N", "next / prev match (after Enter)"),
 ];
 
+/// Painted GIT rows. One `e E` tuple matches the overlay; split `e` / `E`
+/// tuples used to pass because `"E"` is also inside `HEAD`.
 const HELP_GIT_ROWS: &[(&str, &str)] = &[
     ("s", "stage scope"),
     ("S", "stash menu"),
     ("u", "unstage scope"),
     ("x", "revert (y/Y)"),
-    ("e", "open in editor"),
-    ("E", "open in diff tool"),
+    ("e E", "open in editor · open in diff tool"),
     ("space", "mark dirty file reviewed (eye)"),
     ("f", "fetch remotes"),
     ("p", "pull behind"),
@@ -97,9 +98,13 @@ fn help_group_columns(screen: &str) -> Option<[String; 3]> {
     Some(cols)
 }
 
+/// Keys and description must sit as one painted row after wrap-rejoin.
+/// Independent `contains` lets `"E"` pass via `HEAD` in `graph merge into HEAD`,
+/// and lets split `(e)` / `(E)` tuples pass a combined `e E` description.
 fn help_column_has_row(column: &str, keys: &str, desc: &str) -> bool {
     let compact = help_compact(column);
-    compact.contains(&help_compact(keys)) && compact.contains(&help_compact(desc))
+    let row = help_compact(&format!("{keys} {desc}"));
+    compact.contains(&row)
 }
 
 fn help_version_lower_right(screen: &str) -> bool {
@@ -176,8 +181,7 @@ fn documented_help_overlay(screen: &str) -> bool {
         || git_c.contains("cycle theme")
         || view_c.contains("stage scope")
         || view_c.contains("down / up")
-        || view_c.contains("open in editor")
-        || view_c.contains("open in diff tool")
+        || view_c.contains("open in editor · open in diff tool")
     {
         return false;
     }
