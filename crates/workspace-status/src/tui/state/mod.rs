@@ -77,9 +77,9 @@ use super::tree::{
 #[cfg(not(test))]
 use super::viewed::viewed_store_path;
 use super::viewed::{
-    collect_current_fingerprints, fingerprint_file_change, is_viewed, load_viewed_store,
-    reconcile_viewed, save_viewed_store, toggle_viewed, viewed_identity, viewed_row_ids,
-    workspace_store_id, ViewedStore,
+    collect_current_fingerprints, fingerprint_file_change, load_viewed_store, reconcile_viewed,
+    save_viewed_store, toggle_viewed, viewed_identity, viewed_row_ids, workspace_store_id,
+    ViewedStore,
 };
 use super::watch::{
     capture_removal_ghosts, changed_row_ids, checkout_flash_ids, commit_file_identity,
@@ -2277,8 +2277,17 @@ impl AppState {
         let Some(file) = row.file.as_ref() else {
             return Effect::None;
         };
+        let Some(full) = self
+            .snapshot
+            .repos
+            .iter()
+            .find(|r| r.repo == repo)
+            .and_then(|r| r.changes.iter().find(|c| c.path == file.path))
+        else {
+            return Effect::None;
+        };
         let identity = viewed_identity(repo, &file.path);
-        let fingerprint = fingerprint_file_change(&self.cwd, repo, file);
+        let fingerprint = fingerprint_file_change(&self.cwd, repo, full);
         self.viewed_store = toggle_viewed(&self.viewed_store, &identity, &fingerprint);
         if let Err(err) = save_viewed_store(
             &self.viewed_store,
@@ -2287,11 +2296,7 @@ impl AppState {
         ) {
             self.status = persist_failed_status("viewed", err);
         }
-        if is_viewed(&self.viewed_store, &identity, &fingerprint) {
-            self.reviewed.insert(row.id);
-        } else {
-            self.reviewed.remove(&row.id);
-        }
+        self.reviewed = viewed_row_ids(&self.snapshot, &self.viewed_store, &self.cwd);
         Effect::None
     }
 
@@ -6074,6 +6079,93 @@ mod tests {
         app.apply_snapshot(snapshot);
         assert!(!app.reviewed.contains(&id));
         assert!(load_viewed_store(&app.viewed_path, &workspace_store_id(&app.cwd)).is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn dual_ms_repo(name: &str) -> RepoSnapshot {
+        RepoSnapshot {
+            repo: name.into(),
+            branch: "main".into(),
+            sync_status: SyncStatus::NoUpstream,
+            sync_note: String::new(),
+            head: String::new(),
+            has_unstaged: true,
+            has_staged: true,
+            has_untracked: false,
+            changes: vec![FileChange {
+                path: "both.rs".into(),
+                staged_status: Some("M".into()),
+                unstaged_status: Some("M".into()),
+                untracked: false,
+                old_path: None,
+            }],
+            checkout_kind: CheckoutKind::Primary,
+            primary_repo: None,
+            merged_into_default: None,
+            default_branch_override: None,
+            local_branches: Vec::new(),
+        }
+    }
+
+    fn focus_row_id(app: &mut AppState, id: &str) {
+        let idx = app
+            .rows
+            .iter()
+            .position(|r| r.id == id)
+            .unwrap_or_else(|| panic!("missing row {id}"));
+        app.cursor = idx;
+    }
+
+    #[test]
+    fn toggle_reviewed_on_dual_ms_rows_survives_reconcile() {
+        use std::fs;
+        let root = std::env::temp_dir().join(format!(
+            "ws-reviewed-dual-ms-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("ws");
+        let repo_dir = workspace.join("app");
+        fs::create_dir_all(&repo_dir).unwrap();
+        fs::write(repo_dir.join("both.rs"), "x\n").unwrap();
+        let snapshot = build_workspace_snapshot(&[dual_ms_repo("app")], &[], false, &[]);
+        let mut app = AppState::new(workspace, snapshot, true);
+
+        focus_row_id(&mut app, "file:app:both.rs");
+        let staged = app.focused_row().unwrap().file.clone().unwrap();
+        assert_eq!(staged.staged_status.as_deref(), Some("M"));
+        assert_eq!(staged.unstaged_status, None);
+        assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
+        app.reconcile_viewed_store();
+        assert!(
+            app.reviewed.contains("file:app:both.rs"),
+            "Staged dual id must survive reconcile_viewed_store"
+        );
+        assert!(
+            app.reviewed.contains("file:app:both.rs#unstaged"),
+            "Changes dual id must light after Space on Staged + reconcile"
+        );
+
+        assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
+        app.reconcile_viewed_store();
+        assert!(app.reviewed.is_empty());
+
+        focus_row_id(&mut app, "file:app:both.rs#unstaged");
+        let unstaged = app.focused_row().unwrap().file.clone().unwrap();
+        assert_eq!(unstaged.staged_status, None);
+        assert_eq!(unstaged.unstaged_status.as_deref(), Some("M"));
+        assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
+        app.reconcile_viewed_store();
+        assert!(
+            app.reviewed.contains("file:app:both.rs"),
+            "Staged dual id must survive Space on #unstaged + reconcile"
+        );
+        assert!(
+            app.reviewed.contains("file:app:both.rs#unstaged"),
+            "file:…#unstaged must survive reconcile_viewed_store"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
