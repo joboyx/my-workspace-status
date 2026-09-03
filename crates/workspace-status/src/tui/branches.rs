@@ -162,7 +162,11 @@ pub fn can_open_branch_picker(snapshot: &WorkspaceSnapshot, row: &VisibleRow) ->
             };
             !is_family_container(snapshot, repo)
         }
-        NodeKind::File | NodeKind::Dir | NodeKind::Workspace | NodeKind::Group => false,
+        NodeKind::File
+        | NodeKind::Dir
+        | NodeKind::Workspace
+        | NodeKind::Group
+        | NodeKind::Section => false,
     }
 }
 

@@ -1838,7 +1838,9 @@ impl AppState {
     pub fn focused_graph_repo(&self) -> Option<String> {
         let row = self.focused_row()?;
         match row.kind {
-            NodeKind::Repo | NodeKind::Checkout | NodeKind::Dir => row.repo.clone(),
+            NodeKind::Repo | NodeKind::Checkout | NodeKind::Dir | NodeKind::Section => {
+                row.repo.clone()
+            }
             NodeKind::File => None,
             NodeKind::Workspace | NodeKind::Group => None,
         }
@@ -2152,7 +2154,13 @@ impl AppState {
                 "nothing to discard (staged only)".into()
             } else if matches!(
                 self.focused_row().map(|row| row.kind),
-                Some(NodeKind::File | NodeKind::Dir | NodeKind::Repo | NodeKind::Checkout)
+                Some(
+                    NodeKind::File
+                        | NodeKind::Dir
+                        | NodeKind::Repo
+                        | NodeKind::Checkout
+                        | NodeKind::Section
+                )
             ) {
                 "nothing to discard".into()
             } else {
@@ -3495,7 +3503,13 @@ fn empty_write_status(kind: Option<NodeKind>, write: FileWrite) -> String {
         FileWrite::Unstage => "unstage",
     };
     match kind {
-        Some(NodeKind::File | NodeKind::Dir | NodeKind::Repo | NodeKind::Checkout) => {
+        Some(
+            NodeKind::File
+            | NodeKind::Dir
+            | NodeKind::Repo
+            | NodeKind::Checkout
+            | NodeKind::Section,
+        ) => {
             format!("nothing to {verb}")
         }
         _ => format!("focus a file, dir, checkout, or repo to {verb}"),

@@ -784,7 +784,7 @@ pub fn hint_row_kind(state: &AppState) -> HintRowKind {
         Some(NodeKind::Repo) => HintRowKind::Repo,
         Some(NodeKind::Checkout) => HintRowKind::Checkout,
         Some(NodeKind::Group) => HintRowKind::Group,
-        Some(NodeKind::Dir) => HintRowKind::Dir,
+        Some(NodeKind::Dir | NodeKind::Section) => HintRowKind::Dir,
         Some(NodeKind::File) => HintRowKind::File,
         None => HintRowKind::Workspace,
     }

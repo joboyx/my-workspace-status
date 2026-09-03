@@ -134,7 +134,11 @@ pub fn resolve_stash_menu_key(
 /// Checkout path for stash / branch / push on the focused row.
 pub fn checkout_path(row: &VisibleRow) -> Option<String> {
     match row.kind {
-        NodeKind::Repo | NodeKind::Checkout | NodeKind::File | NodeKind::Dir => row.repo.clone(),
+        NodeKind::Repo
+        | NodeKind::Checkout
+        | NodeKind::File
+        | NodeKind::Dir
+        | NodeKind::Section => row.repo.clone(),
         NodeKind::Workspace | NodeKind::Group => None,
     }
 }
@@ -190,7 +194,7 @@ pub fn stash_dirty_for_row(
             let dirty = snap.has_unstaged || snap.has_staged || snap.has_untracked;
             (dirty, None)
         }
-        NodeKind::Workspace | NodeKind::Group => (false, None),
+        NodeKind::Workspace | NodeKind::Group | NodeKind::Section => (false, None),
     }
 }
 

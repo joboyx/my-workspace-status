@@ -10,9 +10,10 @@ use crate::snapshot::{
 };
 
 use super::icons::{
-    file_icon, icon_branch, icon_clean, icon_comment, icon_comment_resolved, icon_folder,
-    icon_ignored, icon_linked_worktree, icon_repo, icon_viewed, icon_workspace,
-    status_letter_from_change, tui_file_badge, tui_merge_mark, tui_sync_mark, StatusColorRole,
+    file_icon, icon_branch, icon_changes, icon_clean, icon_comment, icon_comment_resolved,
+    icon_folder, icon_ignored, icon_linked_worktree, icon_repo, icon_staged, icon_viewed,
+    icon_workspace, status_letter_from_change, tui_file_badge, tui_merge_mark, tui_sync_mark,
+    StatusColorRole,
 };
 
 /// Structural node kind.
@@ -22,6 +23,8 @@ pub enum NodeKind {
     Repo,
     Checkout,
     Group,
+    /// Staged / Changes chrome when a checkout has any staged path.
+    Section,
     Dir,
     File,
 }
@@ -483,9 +486,18 @@ fn collapse_dir(name: String, mut node: MutableDir) -> (String, MutableDir) {
     (collapsed_name, node)
 }
 
-fn make_file_node(repo: &WorkspaceRepoSnapshot, change: &FileChange) -> TreeNode {
+fn make_file_node(
+    repo: &WorkspaceRepoSnapshot,
+    change: &FileChange,
+    unstaged_suffix: bool,
+) -> TreeNode {
+    let id = if unstaged_suffix {
+        format!("file:{}:{}#unstaged", repo.repo, change.path)
+    } else {
+        format!("file:{}:{}", repo.repo, change.path)
+    };
     TreeNode {
-        id: format!("file:{}:{}", repo.repo, change.path),
+        id,
         kind: NodeKind::File,
         label: file_display_name(change),
         repo: Some(repo.repo.clone()),
@@ -504,6 +516,9 @@ fn materialize_dir(
     repo: &WorkspaceRepoSnapshot,
     dir_path: &str,
     node: MutableDir,
+    dual_files: &HashSet<String>,
+    colliding_dirs: &HashSet<String>,
+    changes_side: bool,
 ) -> Vec<TreeNode> {
     let mut dir_entries: Vec<(String, MutableDir)> = node
         .dirs
@@ -521,15 +536,27 @@ fn materialize_dir(
         } else {
             format!("{dir_path}/{name}")
         };
+        let id_suffix = if changes_side && colliding_dirs.contains(&full_path) {
+            "#unstaged"
+        } else {
+            ""
+        };
         children.push(TreeNode {
-            id: format!("dir:{}:{full_path}", repo.repo),
+            id: format!("dir:{}:{full_path}{id_suffix}", repo.repo),
             kind: NodeKind::Dir,
             label: name,
             repo: Some(repo.repo.clone()),
             primary_repo: repo.primary_repo.clone(),
             ignored: repo.ignored,
             file: None,
-            children: materialize_dir(repo, &full_path, child),
+            children: materialize_dir(
+                repo,
+                &full_path,
+                child,
+                dual_files,
+                colliding_dirs,
+                changes_side,
+            ),
             chrome: NodeChrome {
                 path: full_path.clone(),
                 ..NodeChrome::default()
@@ -537,25 +564,176 @@ fn materialize_dir(
         });
     }
     for change in file_entries {
-        children.push(make_file_node(repo, &change));
+        let unstaged_suffix = changes_side && dual_files.contains(&change.path);
+        children.push(make_file_node(repo, &change, unstaged_suffix));
     }
     children
 }
 
-/// File / dir forest under a checkout. Matches `materializeChangeForest`.
-fn materialize_change_forest(repo: &WorkspaceRepoSnapshot, tree_mode: bool) -> Vec<TreeNode> {
+fn staged_side_change(change: &FileChange) -> FileChange {
+    FileChange {
+        path: change.path.clone(),
+        staged_status: change.staged_status.clone(),
+        unstaged_status: None,
+        untracked: false,
+        old_path: change.old_path.clone(),
+    }
+}
+
+fn changes_side_change(change: &FileChange) -> FileChange {
+    FileChange {
+        path: change.path.clone(),
+        staged_status: None,
+        unstaged_status: change.unstaged_status.clone(),
+        untracked: change.untracked,
+        old_path: change.old_path.clone(),
+    }
+}
+
+fn collapse_dir_ref<'a>(name: String, node: &'a MutableDir) -> (String, &'a MutableDir) {
+    let mut collapsed_name = name;
+    let mut node = node;
+    while node.files.is_empty() && node.dirs.len() == 1 {
+        let (child_name, child_node) = node.dirs.iter().next().expect("one child dir");
+        collapsed_name = format!("{collapsed_name}/{child_name}");
+        node = child_node;
+    }
+    (collapsed_name, node)
+}
+
+fn collapsed_dir_paths(prefix: &str, node: &MutableDir) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for (name, child) in &node.dirs {
+        let (collapsed_name, collapsed) = collapse_dir_ref(name.clone(), child);
+        let full = if prefix.is_empty() {
+            collapsed_name
+        } else {
+            format!("{prefix}/{collapsed_name}")
+        };
+        out.insert(full.clone());
+        out.extend(collapsed_dir_paths(&full, collapsed));
+    }
+    out
+}
+
+fn dir_paths_for_changes(changes: &[FileChange]) -> HashSet<String> {
+    let mut root = MutableDir::default();
+    for change in changes {
+        add_change(&mut root, change);
+    }
+    collapsed_dir_paths("", &root)
+}
+
+fn forest_from_changes(
+    repo: &WorkspaceRepoSnapshot,
+    changes: &[FileChange],
+    tree_mode: bool,
+    dual_files: &HashSet<String>,
+    colliding_dirs: &HashSet<String>,
+    changes_side: bool,
+) -> Vec<TreeNode> {
     if !tree_mode {
-        return repo
-            .changes
+        return changes
             .iter()
-            .map(|change| make_file_node(repo, change))
+            .map(|change| {
+                let unstaged_suffix = changes_side && dual_files.contains(&change.path);
+                make_file_node(repo, change, unstaged_suffix)
+            })
             .collect();
     }
     let mut root = MutableDir::default();
-    for change in &repo.changes {
+    for change in changes {
         add_change(&mut root, change);
     }
-    materialize_dir(repo, "", root)
+    materialize_dir(repo, "", root, dual_files, colliding_dirs, changes_side)
+}
+
+fn make_section_node(
+    repo: &WorkspaceRepoSnapshot,
+    side: &str,
+    label: &str,
+    children: Vec<TreeNode>,
+) -> TreeNode {
+    TreeNode {
+        id: format!("section:{}:{side}", repo.repo),
+        kind: NodeKind::Section,
+        label: label.into(),
+        repo: Some(repo.repo.clone()),
+        primary_repo: repo.primary_repo.clone(),
+        ignored: repo.ignored,
+        file: None,
+        children,
+        chrome: NodeChrome {
+            path: repo.repo.clone(),
+            ..NodeChrome::default()
+        },
+    }
+}
+
+/// File / dir forest under a checkout. Matches `materializeChangeForest`.
+///
+/// When any path is staged, children are Staged / Changes section trees
+/// (empty side omitted). Otherwise the checkout's dirty files sit directly
+/// under the repo or worktree, with today's file/dir ids.
+fn materialize_change_forest(repo: &WorkspaceRepoSnapshot, tree_mode: bool) -> Vec<TreeNode> {
+    let empty = HashSet::new();
+    if !repo.changes.iter().any(|c| c.staged_status.is_some()) {
+        return forest_from_changes(repo, &repo.changes, tree_mode, &empty, &empty, false);
+    }
+
+    let staged: Vec<FileChange> = repo
+        .changes
+        .iter()
+        .filter(|c| c.staged_status.is_some())
+        .map(staged_side_change)
+        .collect();
+    let changes: Vec<FileChange> = repo
+        .changes
+        .iter()
+        .filter(|c| c.unstaged_status.is_some() || c.untracked)
+        .map(changes_side_change)
+        .collect();
+    let staged_paths: HashSet<String> = staged.iter().map(|c| c.path.clone()).collect();
+    let dual_files: HashSet<String> = changes
+        .iter()
+        .filter(|c| staged_paths.contains(&c.path))
+        .map(|c| c.path.clone())
+        .collect();
+    let colliding_dirs = if tree_mode {
+        let staged_dirs = dir_paths_for_changes(&staged);
+        dir_paths_for_changes(&changes)
+            .into_iter()
+            .filter(|p| staged_dirs.contains(p))
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
+    let mut children = Vec::new();
+    if !staged.is_empty() {
+        children.push(make_section_node(
+            repo,
+            "staged",
+            "Staged",
+            forest_from_changes(repo, &staged, tree_mode, &empty, &empty, false),
+        ));
+    }
+    if !changes.is_empty() {
+        children.push(make_section_node(
+            repo,
+            "changes",
+            "Changes",
+            forest_from_changes(
+                repo,
+                &changes,
+                tree_mode,
+                &dual_files,
+                &colliding_dirs,
+                true,
+            ),
+        ));
+    }
+    children
 }
 
 /// True when `path` is the dir itself or a child of it.
@@ -564,9 +742,13 @@ pub fn path_under_dir(path: &str, dir: &str) -> bool {
 }
 
 /// Dir path from a `dir:{{repo}}:{{fullPath}}` row id.
+///
+/// A Changes-side suffix (`#unstaged`) is stripped so callers get the
+/// filesystem path.
 pub fn dir_path_from_id(id: &str, repo: &str) -> Option<String> {
     let prefix = format!("dir:{repo}:");
-    id.strip_prefix(&prefix).map(str::to_string)
+    let rest = id.strip_prefix(&prefix)?;
+    Some(rest.strip_suffix("#unstaged").unwrap_or(rest).to_string())
 }
 
 /// Default folds: the No updates group starts closed.
@@ -597,6 +779,7 @@ fn walk_foldable(node: &TreeNode, out: &mut Vec<String>) {
         | NodeKind::Repo
         | NodeKind::Checkout
         | NodeKind::Group
+        | NodeKind::Section
         | NodeKind::Dir => {
             out.push(node.id.clone());
             for child in &node.children {
@@ -1060,6 +1243,20 @@ pub fn node_segments(
             ],
             trailing: vec![text_seg(node.children.len().to_string(), SegRole::Muted)],
         },
+        NodeKind::Section => {
+            let glyph = if node.id.ends_with(":staged") {
+                icon_staged(ascii)
+            } else {
+                icon_changes(ascii)
+            };
+            NodeSegments {
+                segments: vec![
+                    icon_seg(glyph, SegRole::Heading),
+                    text_seg(node.label.clone(), SegRole::Heading),
+                ],
+                trailing: Vec::new(),
+            }
+        }
         NodeKind::Dir => dir_name_segments(&node.label, ascii),
         NodeKind::File => match node.file.as_ref() {
             Some(change) => file_segments(change, tree_mode, ascii),
@@ -1516,15 +1713,23 @@ mod tests {
             .iter()
             .find(|r| r.id == "file:app:staged.rs")
             .expect("S");
-        let both = rows
+        let both_staged = rows
             .iter()
             .find(|r| r.id == "file:app:both.rs")
-            .expect("MS");
+            .expect("staged both.rs");
+        let both_unstaged = rows
+            .iter()
+            .find(|r| r.id == "file:app:both.rs#unstaged")
+            .expect("unstaged both.rs");
         assert_eq!(new.trailing, "A ");
         assert_eq!(staged.trailing, "S ");
-        assert_eq!(both.trailing, "MS");
+        assert_eq!(both_staged.trailing, "S ");
+        assert_eq!(both_unstaged.trailing, "M ");
+        assert_ne!(both_staged.id, both_unstaged.id);
+        assert!(!both_staged.trailing.contains("MS"));
+        assert!(!both_unstaged.trailing.contains("MS"));
         assert!(!new.label.contains('?'));
-        assert!(!both.label.contains("M+"));
+        assert!(!both_staged.label.contains("M+"));
         assert!(new.label.starts_with('·') || new.label.contains("new.ts"));
     }
 
@@ -1786,5 +1991,280 @@ mod tests {
         assert_eq!(visible_window(100, 50, 10), (45, 10));
         assert_eq!(visible_window(8, 7, 20), (0, 8));
         assert_eq!(visible_window(40, 39, 2), (38, 2));
+    }
+
+    fn fc(path: &str, staged: Option<&str>, unstaged: Option<&str>, untracked: bool) -> FileChange {
+        FileChange {
+            path: path.into(),
+            staged_status: staged.map(str::to_string),
+            unstaged_status: unstaged.map(str::to_string),
+            untracked,
+            old_path: None,
+        }
+    }
+
+    fn repo_with_changes(name: &str, changes: Vec<FileChange>) -> RepoSnapshot {
+        let mut snap = repo(name, true, false);
+        snap.has_staged = changes.iter().any(|c| c.staged_status.is_some());
+        snap.has_unstaged = changes.iter().any(|c| c.unstaged_status.is_some());
+        snap.has_untracked = changes.iter().any(|c| c.untracked);
+        snap.changes = changes;
+        snap
+    }
+
+    fn built_tree(changes: Vec<FileChange>, tree_mode: bool) -> TreeNode {
+        let built = build_workspace_snapshot(&[repo_with_changes("app", changes)], &[], false, &[]);
+        build_tree(&visible_for_tree(&built), tree_mode, "ws")
+    }
+
+    #[test]
+    fn unstaged_only_keeps_flat_file_tree_without_sections() {
+        let tree = built_tree(
+            vec![
+                fc("README.md", None, Some("M"), false),
+                fc("src/lib.rs", None, Some("M"), false),
+                fc("new.ts", None, None, true),
+            ],
+            true,
+        );
+        let repo_node = find_node(&tree, "repo:app").expect("repo:app");
+        assert!(
+            repo_node
+                .children
+                .iter()
+                .all(|c| !c.id.starts_with("section:")),
+            "no staged paths must not insert section chrome, got {:?}",
+            repo_node
+                .children
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(find_node(&tree, "section:app:staged").is_none());
+        assert!(find_node(&tree, "section:app:changes").is_none());
+        assert!(find_node(&tree, "dir:app:src").is_some());
+        assert!(find_node(&tree, "file:app:src/lib.rs").is_some());
+        assert!(find_node(&tree, "file:app:README.md").is_some());
+        assert!(find_node(&tree, "file:app:new.ts").is_some());
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        assert!(rows.iter().all(|r| !r.id.starts_with("section:")));
+        assert!(rows.iter().all(|r| !r.id.contains("#unstaged")));
+    }
+
+    #[test]
+    fn staged_paths_split_checkout_into_staged_then_changes_trees() {
+        let tree = built_tree(
+            vec![
+                fc("src/a.rs", Some("M"), None, false),
+                fc("src/b.rs", None, Some("M"), false),
+                fc("staged.rs", Some("A"), None, false),
+                fc("new.ts", None, None, true),
+            ],
+            true,
+        );
+        let repo_node = find_node(&tree, "repo:app").expect("repo:app");
+        assert_eq!(
+            repo_node
+                .children
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["section:app:staged", "section:app:changes"]
+        );
+        assert_eq!(repo_node.children[0].label, "Staged");
+        assert_eq!(repo_node.children[1].label, "Changes");
+        assert_eq!(repo_node.children[0].kind, NodeKind::Section);
+        assert_eq!(repo_node.children[1].kind, NodeKind::Section);
+        assert_eq!(repo_node.children[0].repo.as_deref(), Some("app"));
+        assert!(repo_node.children[0].file.is_none());
+
+        let staged = find_node(&tree, "section:app:staged").expect("staged");
+        assert!(find_node(staged, "dir:app:src").is_some());
+        assert!(find_node(staged, "file:app:src/a.rs").is_some());
+        assert!(find_node(staged, "file:app:staged.rs").is_some());
+        assert!(find_node(staged, "file:app:src/b.rs").is_none());
+        assert!(find_node(staged, "file:app:new.ts").is_none());
+
+        let changes = find_node(&tree, "section:app:changes").expect("changes");
+        assert!(find_node(changes, "dir:app:src#unstaged").is_some());
+        assert!(find_node(changes, "file:app:src/b.rs").is_some());
+        assert!(find_node(changes, "file:app:new.ts").is_some());
+        assert!(find_node(changes, "file:app:src/a.rs").is_none());
+        assert!(find_node(changes, "file:app:staged.rs").is_none());
+
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let staged_file = rows
+            .iter()
+            .find(|r| r.id == "file:app:src/a.rs")
+            .expect("staged a.rs");
+        assert!(!staged_file.in_no_updates);
+        assert_eq!(staged_file.trailing, "S ");
+        let added = rows
+            .iter()
+            .find(|r| r.id == "file:app:staged.rs")
+            .expect("staged add");
+        assert_eq!(added.trailing, "A ");
+        let untracked = rows
+            .iter()
+            .find(|r| r.id == "file:app:new.ts")
+            .expect("untracked");
+        assert_eq!(untracked.trailing, "A ");
+    }
+
+    #[test]
+    fn hide_empty_section_when_all_staged() {
+        let tree = built_tree(vec![fc("only.rs", Some("M"), None, false)], true);
+        let repo_node = find_node(&tree, "repo:app").expect("repo:app");
+        assert_eq!(
+            repo_node
+                .children
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["section:app:staged"]
+        );
+        assert!(find_node(&tree, "section:app:changes").is_none());
+        assert!(find_node(&tree, "file:app:only.rs").is_some());
+    }
+
+    #[test]
+    fn ms_dual_rows_split_letters_and_ids() {
+        let tree = built_tree(vec![fc("both.rs", Some("M"), Some("M"), false)], true);
+        let staged = find_node(&tree, "section:app:staged").expect("staged");
+        let changes = find_node(&tree, "section:app:changes").expect("changes");
+        let staged_file = find_node(staged, "file:app:both.rs").expect("staged file");
+        let changes_file = find_node(changes, "file:app:both.rs#unstaged").expect("changes file");
+        assert_eq!(staged_file.id, "file:app:both.rs");
+        assert_eq!(changes_file.id, "file:app:both.rs#unstaged");
+        assert_ne!(staged_file.id, changes_file.id);
+        let staged_change = staged_file.file.as_ref().expect("staged FileChange");
+        let changes_change = changes_file.file.as_ref().expect("changes FileChange");
+        assert_eq!(staged_change.staged_status.as_deref(), Some("M"));
+        assert!(staged_change.unstaged_status.is_none());
+        assert!(!staged_change.untracked);
+        assert!(changes_change.staged_status.is_none());
+        assert_eq!(changes_change.unstaged_status.as_deref(), Some("M"));
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        assert_eq!(
+            rows.iter()
+                .find(|r| r.id == "file:app:both.rs")
+                .expect("staged row")
+                .trailing,
+            "S "
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|r| r.id == "file:app:both.rs#unstaged")
+                .expect("changes row")
+                .trailing,
+            "M "
+        );
+    }
+
+    #[test]
+    fn section_glyphs_are_ascii_hash_tilde_and_nerd_package_pencil() {
+        let tree = built_tree(
+            vec![
+                fc("staged.rs", Some("M"), None, false),
+                fc("dirty.rs", None, Some("M"), false),
+            ],
+            true,
+        );
+        let ascii = flatten_with(&tree, &HashSet::new(), true);
+        let nerd = flatten_with(&tree, &HashSet::new(), false);
+        let ascii_staged = ascii
+            .iter()
+            .find(|r| r.id == "section:app:staged")
+            .expect("ascii staged");
+        let ascii_changes = ascii
+            .iter()
+            .find(|r| r.id == "section:app:changes")
+            .expect("ascii changes");
+        assert!(
+            ascii_staged.label.contains("Staged"),
+            "{}",
+            ascii_staged.label
+        );
+        assert!(
+            ascii_changes.label.contains("Changes"),
+            "{}",
+            ascii_changes.label
+        );
+        assert!(
+            ascii_staged.label.contains('#'),
+            "ASCII staged glyph, got {}",
+            ascii_staged.label
+        );
+        assert!(
+            ascii_changes.label.contains('~'),
+            "ASCII changes glyph, got {}",
+            ascii_changes.label
+        );
+        let nerd_staged = nerd
+            .iter()
+            .find(|r| r.id == "section:app:staged")
+            .expect("nerd staged");
+        let nerd_changes = nerd
+            .iter()
+            .find(|r| r.id == "section:app:changes")
+            .expect("nerd changes");
+        assert!(
+            nerd_staged.label.contains('\u{f487}'),
+            "nerd staged nf-oct-package, got {}",
+            nerd_staged.label
+        );
+        assert!(
+            nerd_changes.label.contains('\u{f040}'),
+            "nerd changes nf-fa-pencil, got {}",
+            nerd_changes.label
+        );
+        assert_eq!(crate::helpers::visible_width("\u{f487}"), 1);
+        assert_eq!(crate::helpers::visible_width("\u{f040}"), 1);
+        assert_eq!(ascii_staged.segments[0].role, SegRole::Heading);
+        assert_eq!(ascii_changes.segments[0].role, SegRole::Heading);
+    }
+
+    #[test]
+    fn dir_path_from_id_strips_unstaged_suffix() {
+        assert_eq!(
+            dir_path_from_id("dir:app:src", "app").as_deref(),
+            Some("src")
+        );
+        assert_eq!(
+            dir_path_from_id("dir:app:src#unstaged", "app").as_deref(),
+            Some("src")
+        );
+        assert_eq!(
+            dir_path_from_id("dir:app:src/foo#unstaged", "app").as_deref(),
+            Some("src/foo")
+        );
+    }
+
+    #[test]
+    fn split_flat_mode_keeps_file_lists_under_sections() {
+        let tree = built_tree(
+            vec![
+                fc("src/a.rs", Some("M"), None, false),
+                fc("src/b.rs", None, Some("M"), false),
+            ],
+            false,
+        );
+        let repo_node = find_node(&tree, "repo:app").expect("repo:app");
+        assert_eq!(
+            repo_node
+                .children
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["section:app:staged", "section:app:changes"]
+        );
+        let staged = find_node(&tree, "section:app:staged").expect("staged");
+        let changes = find_node(&tree, "section:app:changes").expect("changes");
+        assert!(staged.children.iter().all(|c| c.kind != NodeKind::Dir));
+        assert!(changes.children.iter().all(|c| c.kind != NodeKind::Dir));
+        assert!(find_node(staged, "file:app:src/a.rs").is_some());
+        assert!(find_node(changes, "file:app:src/b.rs").is_some());
+        let rows = flatten(&tree, &HashSet::new());
+        assert!(rows.iter().all(|r| r.kind != NodeKind::Dir));
     }
 }
