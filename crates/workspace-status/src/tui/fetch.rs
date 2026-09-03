@@ -4,7 +4,7 @@
 //! tick run a capped worker pool (`FETCH_CONCURRENCY` = 10;
 //! `WS_STATUS_FETCH_CONCURRENCY`) so independent checkouts overlap.
 
-use crate::snapshot::{WorkspaceRepoSnapshot, WorkspaceSnapshot};
+use crate::snapshot::{checkout_is_hidden_ignored, WorkspaceSnapshot};
 
 /// Default background-fetch period (5 minutes).
 pub const DEFAULT_FETCH_MS: u64 = 300_000;
@@ -29,18 +29,6 @@ pub fn fetch_interval_ms(raw: Option<&str>) -> u64 {
         return 0;
     }
     (parsed as u64).max(MIN_FETCH_MS)
-}
-
-/// True when this checkout is on the ignore list (or its primary is).
-/// Matches `isHiddenIgnoredRepo` without a named-filter exception
-/// (`collectBackgroundFetchTargets` does not pass named repos).
-fn checkout_is_hidden_ignored(repo: &WorkspaceRepoSnapshot, ignored: &[String]) -> bool {
-    if ignored.is_empty() {
-        return false;
-    }
-    ignored
-        .iter()
-        .any(|path| repo.repo == *path || repo.primary_repo.as_deref() == Some(path.as_str()))
 }
 
 /// Snapshot paths the background fetch timer may touch.

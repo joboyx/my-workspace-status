@@ -223,12 +223,38 @@ pub fn build_workspace_snapshot(
     }
 }
 
+/// True when this checkout is on the ignore list, or its primary is.
+///
+/// Matches background-fetch hide: path or `primary_repo` on the list.
+/// Named-filter exceptions are applied by the caller, not here.
+pub(crate) fn checkout_is_hidden_ignored(repo: &WorkspaceRepoSnapshot, ignored: &[String]) -> bool {
+    if ignored.is_empty() {
+        return false;
+    }
+    ignored
+        .iter()
+        .any(|path| repo.repo == *path || repo.primary_repo.as_deref() == Some(path.as_str()))
+}
+
+/// Visible snapshot: hidden ignored stay out unless shown or named.
+///
+/// Hidden ignored includes linked children of an ignored primary. Do not
+/// retag those rows `ignored`; they still return with `show_ignored`.
+/// Naming a primary in `filter_repos` also keeps its linked children.
 pub fn visible_workspace_snapshot(snapshot: &WorkspaceSnapshot) -> WorkspaceSnapshot {
     let named: BTreeSet<&str> = snapshot.filter_repos.iter().map(String::as_str).collect();
     let repos = snapshot
         .repos
         .iter()
-        .filter(|repo| snapshot.show_ignored || !repo.ignored || named.contains(repo.repo.as_str()))
+        .filter(|repo| {
+            snapshot.show_ignored
+                || named.contains(repo.repo.as_str())
+                || repo
+                    .primary_repo
+                    .as_deref()
+                    .is_some_and(|primary| named.contains(primary))
+                || !checkout_is_hidden_ignored(repo, &snapshot.ignored_repos)
+        })
         .cloned()
         .collect();
     WorkspaceSnapshot {
@@ -602,6 +628,35 @@ mod tests {
         let visible = visible_workspace_snapshot(&built);
         assert_eq!(visible.repos.len(), 1);
         assert!(visible.repos[0].ignored);
+    }
+
+    #[test]
+    fn named_filter_includes_linked_children_of_ignored_primary() {
+        let primary = sample_repo("app", true);
+        let mut linked = sample_repo("app/.worktrees/feat", false);
+        linked.checkout_kind = CheckoutKind::Linked;
+        linked.primary_repo = Some("app".into());
+        let built = build_workspace_snapshot(
+            &[primary, linked],
+            &["app".to_string()],
+            false,
+            &["app".to_string()],
+        );
+        let visible = visible_workspace_snapshot(&built);
+        assert_eq!(
+            visible
+                .repos
+                .iter()
+                .map(|r| r.repo.as_str())
+                .collect::<Vec<_>>(),
+            vec!["app", "app/.worktrees/feat"]
+        );
+        let linked = visible
+            .repos
+            .iter()
+            .find(|r| r.repo == "app/.worktrees/feat")
+            .expect("named primary keeps its linked child");
+        assert!(!linked.ignored, "do not retag the linked child ignored");
     }
 
     #[test]

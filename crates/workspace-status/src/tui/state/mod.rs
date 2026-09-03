@@ -3746,6 +3746,80 @@ mod tests {
         assert!(app.rows.iter().all(|r| !r.label.contains("notes")));
     }
 
+    fn ignored_primary_family_hidden(app: &AppState) -> bool {
+        app.rows.iter().all(|r| r.id != "repo:app")
+            && app.rows.iter().all(|r| r.id != "checkout:app")
+            && app.rows.iter().all(|r| r.id != "repo:app/.worktrees/feat")
+            && app
+                .rows
+                .iter()
+                .all(|r| r.id != "checkout:app/.worktrees/feat")
+            && app
+                .rows
+                .iter()
+                .all(|r| !r.label.contains("feature/linked-open"))
+    }
+
+    #[test]
+    fn ignore_toggle_hides_and_shows_linked_child_of_ignored_primary() {
+        let mut linked = repo("app/.worktrees/feat", true);
+        linked.checkout_kind = CheckoutKind::Linked;
+        linked.primary_repo = Some("app".into());
+        linked.branch = "feature/linked-open".into();
+        let snapshot = build_workspace_snapshot(
+            &[repo("app", true), linked, repo("lib", true)],
+            &["app".into()],
+            false,
+            &[],
+        );
+        assert!(
+            snapshot.repos.iter().any(|r| r.repo == "app" && r.ignored),
+            "primary stays tagged ignored"
+        );
+        assert!(
+            snapshot
+                .repos
+                .iter()
+                .any(|r| r.repo == "app/.worktrees/feat" && !r.ignored),
+            "linked child must not be retagged ignored"
+        );
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        assert!(
+            app.rows.iter().any(|r| r.id == "repo:lib"),
+            "visible lib must still paint"
+        );
+        assert!(
+            ignored_primary_family_hidden(&app),
+            "cold start must hide ignored primary and its linked child, got {:?}",
+            app.rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+        );
+
+        let effect = app.dispatch(Action::ToggleShowIgnored);
+        assert_eq!(effect, Effect::LoadRightPane);
+        assert!(app.show_ignored);
+        assert!(app.rows.iter().any(|r| r.id == "repo:app"));
+        assert!(app
+            .rows
+            .iter()
+            .any(|r| r.id == "checkout:app/.worktrees/feat"));
+        assert!(
+            app.rows.iter().all(|r| r.id != "repo:app/.worktrees/feat"),
+            "shown family must nest the linked checkout"
+        );
+        assert!(app
+            .rows
+            .iter()
+            .any(|r| r.label.contains("feature/linked-open")));
+
+        app.dispatch(Action::ToggleShowIgnored);
+        assert!(!app.show_ignored);
+        assert!(
+            ignored_primary_family_hidden(&app),
+            "second toggle must hide both again, got {:?}",
+            app.rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn hidden_ignored_skipped_on_workspace_fetch() {
         let mut app = state();

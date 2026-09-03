@@ -254,6 +254,22 @@ pub fn seed_primary_and_linked_family(workspace: &Path) {
     git(&linked, &["commit", "-q", "-m", "linked open"]);
 }
 
+/// Off-default ignored primary `app` plus linked worktree, and a visible `lib`.
+///
+/// Config `ignoredRepos: ["app"]`. Cold TUI start must hide the family; `.`
+/// shows it nested. `lib` stays on the tree so launch still paints a repo.
+pub fn ignored_primary_family_workspace() -> (PathBuf, PathBuf) {
+    let (root, workspace) = new_workspace("ws-tui-e2e-ignored-primary");
+    seed_primary_and_linked_family(&workspace);
+    seed_repo(&workspace, "lib", "main", true);
+    fs::write(
+        workspace.join(".workspace-status-config.json"),
+        "{\n  \"ignoredRepos\": [\"app\"]\n}\n",
+    )
+    .unwrap();
+    (root, workspace)
+}
+
 /// Primary off default, plus linked extras that prove merge-mark paint.
 ///
 /// `feature/just-created` is a new branch at the default tip (open, not

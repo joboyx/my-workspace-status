@@ -1137,7 +1137,8 @@ pub fn row_segments(
     }
 }
 
-/// Visible snapshot used for the tree: hidden ignored repos stay out.
+/// Visible snapshot used for the tree: hidden ignored stay out, including
+/// linked worktrees of an ignored primary. They return with `.` / `-a`.
 pub fn visible_for_tree(snapshot: &WorkspaceSnapshot) -> WorkspaceSnapshot {
     crate::snapshot::visible_workspace_snapshot(snapshot)
 }
@@ -1227,6 +1228,112 @@ mod tests {
         let tree = build_tree(&visible_for_tree(&built), true, "workspace");
         let rows = flatten(&tree, &HashSet::new());
         assert!(rows.iter().any(|r| r.label.contains("notes")));
+    }
+
+    fn ignored_primary_and_linked_child() -> (RepoSnapshot, RepoSnapshot) {
+        let primary = repo("app", true, false);
+        let mut linked = repo("app/.worktrees/feat", true, true);
+        linked.branch = "feature/linked-open".into();
+        (primary, linked)
+    }
+
+    fn tree_rows(snapshot: &crate::snapshot::WorkspaceSnapshot) -> Vec<VisibleRow> {
+        let tree = build_tree(&visible_for_tree(snapshot), true, "workspace");
+        flatten_with(&tree, &HashSet::new(), true)
+    }
+
+    #[test]
+    fn hidden_ignored_primary_omits_linked_child_from_visible_tree() {
+        let (primary, linked) = ignored_primary_and_linked_child();
+        let built = build_workspace_snapshot(&[primary, linked], &["app".into()], false, &[]);
+        assert!(
+            built.repos.iter().any(|r| r.repo == "app" && r.ignored),
+            "primary stays tagged ignored"
+        );
+        assert!(
+            built
+                .repos
+                .iter()
+                .any(|r| r.repo == "app/.worktrees/feat" && !r.ignored),
+            "linked child must not be retagged ignored"
+        );
+        let rows = tree_rows(&built);
+        assert!(rows.iter().all(|r| r.id != "repo:app"));
+        assert!(rows.iter().all(|r| r.id != "checkout:app"));
+        assert!(
+            rows.iter().all(|r| r.id != "repo:app/.worktrees/feat"),
+            "linked child must not paint as a workspace-root orphan, got {:?}",
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+        );
+        assert!(rows.iter().all(|r| r.id != "checkout:app/.worktrees/feat"));
+        assert!(rows
+            .iter()
+            .all(|r| !r.label.contains("feature/linked-open")));
+        assert!(rows.iter().all(|r| !r.label.contains("app/.worktrees")));
+    }
+
+    #[test]
+    fn show_ignored_nests_linked_child_of_ignored_primary() {
+        let (primary, linked) = ignored_primary_and_linked_child();
+        let built = build_workspace_snapshot(&[primary, linked], &["app".into()], true, &[]);
+        let rows = tree_rows(&built);
+        let family = rows.iter().find(|r| r.id == "repo:app").expect("family");
+        assert!(family.chrome.is_family);
+        assert!(family.trailing.contains("2 wt"), "{}", family.trailing);
+        let checkout = rows
+            .iter()
+            .find(|r| r.id == "checkout:app/.worktrees/feat")
+            .expect("linked checkout");
+        assert_eq!(checkout.kind, NodeKind::Checkout);
+        assert!(checkout.label.contains("feature/linked-open"));
+        assert!(
+            checkout.label.contains('L'),
+            "linked row uses ASCII L, got {}",
+            checkout.label
+        );
+        assert!(
+            rows.iter().all(|r| r.id != "repo:app/.worktrees/feat"),
+            "shown family must not paint a workspace-root orphan"
+        );
+    }
+
+    #[test]
+    fn standalone_ignored_linked_path_omitted_until_shown() {
+        let primary = repo("app", true, false);
+        let mut linked = repo("app/.worktrees/feat", true, true);
+        linked.branch = "feature/linked-open".into();
+        let hidden = build_workspace_snapshot(
+            &[primary.clone(), linked.clone()],
+            &["app/.worktrees/feat".into()],
+            false,
+            &[],
+        );
+        let hidden_rows = tree_rows(&hidden);
+        assert!(hidden_rows.iter().any(|r| r.id == "repo:app"));
+        assert!(hidden_rows
+            .iter()
+            .all(|r| r.id != "checkout:app/.worktrees/feat"));
+        assert!(hidden_rows
+            .iter()
+            .all(|r| r.id != "repo:app/.worktrees/feat"));
+        assert!(hidden_rows
+            .iter()
+            .all(|r| !r.label.contains("feature/linked-open")));
+
+        let shown = build_workspace_snapshot(
+            &[primary, linked],
+            &["app/.worktrees/feat".into()],
+            true,
+            &[],
+        );
+        let shown_rows = tree_rows(&shown);
+        assert!(shown_rows.iter().any(|r| r.id == "repo:app"));
+        assert!(shown_rows
+            .iter()
+            .any(|r| r.id == "checkout:app/.worktrees/feat"));
+        assert!(shown_rows
+            .iter()
+            .all(|r| r.id != "repo:app/.worktrees/feat"));
     }
 
     #[test]
