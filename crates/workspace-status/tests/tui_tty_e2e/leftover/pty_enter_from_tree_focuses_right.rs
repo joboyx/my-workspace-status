@@ -2,8 +2,8 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     crumb_row, documented_launch_first_paint, no_mouse_toggle_toast, no_updates_group_folded,
-    no_wrong_overlays, pane_top, status_row, tree_cursor_on, tree_dir_expanded, tree_has,
-    SETTLE_MS, WAIT,
+    no_wrong_overlays, panes_tree_unfocused_diff_focused, status_row, title_has_files,
+    tree_cursor_on, tree_dir_expanded, tree_has, SETTLE_MS, WAIT,
 };
 
 /// CSI-u Enter (`CSI 13 ; 1 : 1 u` press, `: 3` release).
@@ -15,22 +15,13 @@ fn csi_u_enter(tui: &mut PtySession) {
     tui.csi_u(13, 1, 3);
 }
 
-/// Left tree unfocused, right file-diff focused. Not graph / not files.
-fn panes_tree_unfocused_diff_focused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" diff ")
-        && top.contains(" tree")
-        && !top.contains(" tree ")
-        && !top.contains(" graph")
-        && !top.contains(" files")
-}
-
 /// Enter from the tree file row focused the file-diff. Same stack. No drill.
 fn enter_focuses_readme_diff(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);
     panes_tree_unfocused_diff_focused(screen)
-        && tree_cursor_on(screen, "README.md")
+        && tree_has(screen, "README.md")
+        && !tree_cursor_on(screen, "README.md")
         && !tree_cursor_on(screen, "app")
         && !tree_cursor_on(screen, "workspace")
         && !tree_cursor_on(screen, "merger")
@@ -54,7 +45,7 @@ fn enter_focuses_readme_diff(screen: &str) -> bool {
         && status.contains(" tree")
         && status.contains(" split")
         && !status.contains("focus right")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && !screen.contains("wip.txt")
         && !screen.contains("WIP on graph")
         && !screen.contains("Working tree")
@@ -68,8 +59,8 @@ fn enter_focuses_readme_diff(screen: &str) -> bool {
 /// `Enter dblclick` as `focus right / drill`. Right Enter drills graph to
 /// commit files. Launch is the README file-diff with left tree focused.
 ///
-/// Live PTY after first paint: CSI-u Enter pads ` diff `, brackets
-/// `[workspace]`, and swaps `focus right` for `drill` / Esc back. `j` does
+/// Live PTY after first paint: CSI-u Enter brackets `[workspace]`,
+/// and swaps `focus right` for `drill` / Esc back. `j` does
 /// not move the tree cursor. Esc unfocuses. A no-op, a graph drill, a
 /// files drill, a crumb-only paint, Tab, `/`, or a flicker cannot pass.
 #[test]

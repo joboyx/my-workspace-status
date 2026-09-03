@@ -2,9 +2,9 @@ use crate::harness::{tree_row_containing, PtySession};
 use crate::seed::daily_workspace;
 use crate::support::{
     crumb_row, documented_launch_first_paint, merger_graph_left_unfocused, no_mouse_toggle_toast,
-    no_updates_group_folded, no_wrong_overlays, status_row, tree_cursor_on, tree_dir_expanded,
-    tree_has, tree_pane_focused, GIT_WAIT, SETTLE_MS, TREE_DEPTH1_CHEVRON_COL, TREE_LABEL_COL,
-    WAIT,
+    no_updates_group_folded, no_wrong_overlays, status_row, title_has_files, tree_cursor_on,
+    tree_dir_expanded, tree_has, tree_pane_focused, GIT_WAIT, SETTLE_MS, TREE_DEPTH1_CHEVRON_COL,
+    TREE_LABEL_COL, WAIT,
 };
 
 /// Clicked merger label: cursor + graph pane, stay left, no fold, no Enter.
@@ -24,7 +24,7 @@ fn click_selects_merger_row(screen: &str) -> bool {
         && tree_pane_focused(screen)
         && !screen.contains("[workspace]")
         && !screen.contains("[merger]")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && !screen.contains("wip.txt")
         && !screen.contains("UNSTAGED")
         && !screen.contains("+dirty")

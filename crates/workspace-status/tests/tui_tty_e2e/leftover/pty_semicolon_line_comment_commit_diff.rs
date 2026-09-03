@@ -5,7 +5,7 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     documented_launch_first_paint, graph_cursor_on, merger_graph_drilled_right,
-    merger_graph_left_unfocused, GIT_WAIT, WAIT,
+    merger_graph_left_unfocused, title_has_diff, title_has_files, GIT_WAIT, WAIT,
 };
 
 const BODY: &str = "commit-line-note-e2e";
@@ -32,14 +32,14 @@ fn overlay_closed(screen: &str) -> bool {
 
 fn commit_files_right(screen: &str) -> bool {
     (screen.contains("left.txt") || screen.contains("right.txt") || screen.contains("README.md"))
-        && (screen.contains(" files") || screen.contains("┌ files"))
+        && title_has_files(screen)
         && !screen.contains("wip.txt")
         && !comment_overlay(screen)
 }
 
 fn commit_file_diff(screen: &str) -> bool {
     overlay_closed(screen)
-        && (screen.contains("┌ diff") || screen.contains("UNSTAGED") || screen.contains("@@"))
+        && (title_has_diff(screen) || screen.contains("UNSTAGED") || screen.contains("@@"))
         && (screen.contains("left.txt")
             || screen.contains("right.txt")
             || screen.contains("README.md"))

@@ -42,9 +42,9 @@ fn overlay_closed(screen: &str) -> bool {
 }
 
 fn file_diff_focused(screen: &str) -> bool {
-    tree_cursor_on(screen, FILE)
+    tree_has(screen, FILE)
+        && !tree_cursor_on(screen, FILE)
         && !tree_cursor_on(screen, "README.md")
-        && tree_has(screen, FILE)
         && screen.contains("NEW")
         && screen.contains(NEEDLE)
         && screen.contains("[workspace]")
@@ -75,7 +75,8 @@ fn line10_commented(screen: &str) -> bool {
     overlay_closed(screen)
         && screen.contains("NEW")
         && screen.contains("comment saved")
-        && tree_cursor_on(screen, FILE)
+        && tree_has(screen, FILE)
+        && !tree_cursor_on(screen, FILE)
         && reserved_marked_line10(&right_pane(screen))
 }
 

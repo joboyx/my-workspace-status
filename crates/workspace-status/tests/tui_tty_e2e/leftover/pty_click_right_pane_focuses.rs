@@ -2,8 +2,9 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     crumb_row, documented_launch_first_paint, no_mouse_toggle_toast, no_updates_group_folded,
-    no_wrong_overlays, pane_top, status_row, tree_cursor_on, tree_dir_expanded, tree_has,
-    RIGHT_PANE_COL, SETTLE_MS, TREE_DEPTH1_CHEVRON_COL, TREE_LABEL_COL, WAIT,
+    no_wrong_overlays, panes_tree_unfocused_diff_focused, status_row, title_has_files,
+    tree_cursor_on, tree_dir_expanded, tree_has, RIGHT_PANE_COL, SETTLE_MS,
+    TREE_DEPTH1_CHEVRON_COL, TREE_LABEL_COL, WAIT,
 };
 
 /// 0-based screen row whose full line contains `needle`.
@@ -14,22 +15,13 @@ fn screen_row_containing(screen: &str, needle: &str) -> Option<u16> {
         .find_map(|(i, line)| line.contains(needle).then_some(i as u16))
 }
 
-/// Left tree unfocused, right file-diff focused. Not graph / not files.
-fn panes_tree_unfocused_diff_focused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" diff ")
-        && top.contains(" tree")
-        && !top.contains(" tree ")
-        && !top.contains(" graph")
-        && !top.contains(" files")
-}
-
 /// Clicked file-diff: focus moved right. Same README. No fold. No drill.
 fn click_focuses_readme_diff(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);
     panes_tree_unfocused_diff_focused(screen)
-        && tree_cursor_on(screen, "README.md")
+        && tree_has(screen, "README.md")
+        && !tree_cursor_on(screen, "README.md")
         && !tree_cursor_on(screen, "app")
         && !tree_cursor_on(screen, "workspace")
         && !tree_cursor_on(screen, "merger")
@@ -53,7 +45,7 @@ fn click_focuses_readme_diff(screen: &str) -> bool {
         && status.contains(" tree")
         && status.contains(" split")
         && !status.contains("focus right")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && !screen.contains("wip.txt")
         && !screen.contains("WIP on graph")
         && !screen.contains("Working tree")
@@ -69,8 +61,8 @@ fn click_focuses_readme_diff(screen: &str) -> bool {
 /// same focus move. Chevron click and tree-row click are separate.
 ///
 /// Live PTY after first paint: SGR press+release on the UNSTAGED body
-/// pads ` diff `, brackets `[workspace]`, and swaps `focus right` for
-/// `drill` / Esc back. `j` does not move the tree cursor. Esc unfocuses.
+/// brackets `[workspace]`, and swaps `focus right` for `drill` / Esc back.
+/// `j` does not move the tree cursor. Esc unfocuses.
 /// A no-op, tree-row select, chevron fold, files drill, or paint-only
 /// flicker cannot pass.
 #[test]

@@ -3,8 +3,9 @@ use std::fs;
 use crate::harness::{left_tree, PtySession};
 use crate::seed::daily_workspace;
 use crate::support::{
-    crumb_row, no_updates_group_folded, no_wrong_overlays, pane_top, right_pane, status_row,
-    tree_cursor_on, tree_dir_expanded, tree_has, tree_line_containing, SETTLE_MS, WAIT,
+    crumb_row, no_updates_group_folded, no_wrong_overlays, panes_tree_focused_diff_unfocused,
+    right_pane, status_row, tree_cursor_on, tree_dir_expanded, tree_has, tree_line_containing,
+    SETTLE_MS, WAIT,
 };
 
 /// Wide enough that split actually paints (`NARROW_SXS` is 100). Default 140
@@ -39,15 +40,6 @@ fn help_lists_t_and_i(screen: &str) -> bool {
         && screen.lines().any(|line| {
             line.contains("T") && line.contains("cycle theme") && !line.contains("flat / tree")
         })
-}
-
-fn panes_tree_focused_diff_unfocused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" tree ")
-        && top.contains(" diff")
-        && !top.contains(" diff ")
-        && !top.contains(" graph")
-        && !top.contains(" files")
 }
 
 fn cursor_on_src_dir(screen: &str) -> bool {
@@ -113,9 +105,9 @@ fn tree_presents_flat(screen: &str) -> bool {
 }
 
 fn split_body_line(right: &str) -> bool {
-    right.lines().any(|line| {
-        line.contains("│  1 │ +fn view()") && !line.trim_start().starts_with("1 │")
-    })
+    right
+        .lines()
+        .any(|line| line.contains("│  1 │ +fn view()") && !line.trim_start().starts_with("1 │"))
 }
 
 fn inline_body_line(right: &str) -> bool {

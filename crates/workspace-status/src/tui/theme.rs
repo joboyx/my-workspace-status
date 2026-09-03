@@ -39,6 +39,8 @@ pub struct Palette {
     pub dir: Color,
     pub file: Color,
     pub muted: Color,
+    /// Unfocused pane border. Near-surface dark gray. Darker than [`Self::muted`].
+    pub border_dim: Color,
     pub added: Color,
     pub modified: Color,
     pub deleted: Color,
@@ -73,6 +75,9 @@ pub struct ThemePalette {
     pub dir: &'static str,
     pub file: &'static str,
     pub muted: &'static str,
+    /// Unfocused pane border hex (`palette.borderDim` in docs). Near-surface
+    /// dark gray. Darker than [`Self::muted`]. Not a readable-text token.
+    pub border_dim: &'static str,
     pub added: &'static str,
     pub modified: &'static str,
     pub deleted: &'static str,
@@ -183,6 +188,7 @@ impl ThemeId {
             dir: hex_color(p.dir),
             file: hex_color(p.file),
             muted: hex_color(p.muted),
+            border_dim: hex_color(p.border_dim),
             added: hex_color(p.added),
             modified: hex_color(p.modified),
             deleted: hex_color(p.deleted),
@@ -234,6 +240,7 @@ const TOKYO_NIGHT: Theme = Theme {
         dir: "#7aa2f7",
         file: "#a9b1d6",
         muted: "#9aa5ce",
+        border_dim: "#3b4261",
         added: "#9ece6a",
         modified: "#e0af68",
         deleted: "#f7768e",
@@ -275,6 +282,7 @@ const MONOKAI: Theme = Theme {
         dir: "#66d9ef",
         file: "#f8f8f2",
         muted: "#b8b39c",
+        border_dim: "#49483e",
         added: "#a6e22e",
         modified: "#e6db74",
         deleted: "#ff6188",
@@ -316,6 +324,7 @@ const DRACULA: Theme = Theme {
         dir: "#bd93f9",
         file: "#f8f8f2",
         muted: "#b4bce4",
+        border_dim: "#44475a",
         added: "#50fa7b",
         modified: "#f1fa8c",
         deleted: "#ff5555",
@@ -357,6 +366,7 @@ const GRUVBOX_DARK: Theme = Theme {
         dir: "#8ec07c",
         file: "#ebdbb2",
         muted: "#bdae93",
+        border_dim: "#504945",
         added: "#b8bb26",
         modified: "#fabd2f",
         deleted: "#fb4934",
@@ -398,6 +408,7 @@ const CATPPUCCIN_MOCHA: Theme = Theme {
         dir: "#89b4fa",
         file: "#cdd6f4",
         muted: "#a6adc8",
+        border_dim: "#45475a",
         added: "#a6e3a1",
         modified: "#f9e2af",
         deleted: "#f38ba8",
@@ -719,6 +730,37 @@ mod tests {
             unique.len(),
             muteds.len(),
             "muted hexes must stay unique for leftover theme chrome: {muteds:?}"
+        );
+    }
+
+    #[test]
+    fn border_dim_is_unique_and_darker_than_muted() {
+        const LOCKED: [(ThemeId, &str); 5] = [
+            (ThemeId::TokyoNight, "#3b4261"),
+            (ThemeId::Monokai, "#49483e"),
+            (ThemeId::Dracula, "#44475a"),
+            (ThemeId::GruvboxDark, "#504945"),
+            (ThemeId::CatppuccinMocha, "#45475a"),
+        ];
+        let mut hexes = Vec::new();
+        for (id, hex) in LOCKED {
+            let theme = id.theme();
+            assert_eq!(theme.palette.border_dim, hex, "{id:?} borderDim hex");
+            let pal = id.palette();
+            assert_eq!(pal.border_dim, hex_color(hex), "{id:?} palette.border_dim");
+            let dim_l = relative_luminance(pal.border_dim);
+            let muted_l = relative_luminance(pal.muted);
+            assert!(
+                dim_l < muted_l,
+                "{id:?} luminance(border_dim)={dim_l:.4} must be < luminance(muted)={muted_l:.4}"
+            );
+            hexes.push(hex);
+        }
+        let unique: std::collections::HashSet<_> = hexes.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            hexes.len(),
+            "borderDim hexes must be unique across themes: {hexes:?}"
         );
     }
 }

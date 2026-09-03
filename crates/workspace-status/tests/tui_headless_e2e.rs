@@ -269,6 +269,114 @@ fn tree_shows_dirty_and_folded_no_updates() {
     let _ = fs::remove_dir_all(root);
 }
 
+fn title_row_has_no_focus_glyph(top: &str) -> bool {
+    !top.contains("● tree")
+        && !top.contains("* tree")
+        && !top.contains("● diff")
+        && !top.contains("* diff")
+}
+
+#[test]
+fn focused_pane_titles_are_plain_names() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    let frame = tui.frame();
+    let top = frame.lines().next().unwrap_or("");
+    assert!(
+        top.contains("tree"),
+        "first paint left title is tree:\n{frame}"
+    );
+    assert!(
+        top.contains("diff"),
+        "first paint right title is diff:\n{frame}"
+    );
+    assert!(
+        title_row_has_no_focus_glyph(top),
+        "first paint titles must not mark focus with a glyph:\n{frame}"
+    );
+
+    tui.tab();
+    let frame = tui.frame();
+    let top = frame.lines().next().unwrap_or("");
+    assert!(
+        top.contains("tree"),
+        "after Tab left title is tree:\n{frame}"
+    );
+    assert!(
+        top.contains("diff"),
+        "after Tab right title is diff:\n{frame}"
+    );
+    assert!(
+        title_row_has_no_focus_glyph(top),
+        "after Tab titles must not mark focus with a glyph:\n{frame}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn unfocused_pane_body_is_not_dimmed() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    assert!(
+        !tui.unfocused_pane_body_has_dim(),
+        "left-focused: unfocused right body must not DIM:\n{}",
+        tui.frame()
+    );
+    tui.tab();
+    assert!(tui.focus_is_right(), "Tab focuses the right pane");
+    assert!(
+        !tui.unfocused_pane_body_has_dim(),
+        "right-focused: unfocused left body must not DIM:\n{}",
+        tui.frame()
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+fn tree_line_has_cursor_bar(frame: &str, needle: &str) -> bool {
+    frame.lines().any(|line| {
+        let left = line.split("││").next().unwrap_or(line);
+        left.contains(needle) && left.contains('▌')
+    })
+}
+
+fn right_line_has_cursor_bar(frame: &str, needle: &str) -> bool {
+    frame.lines().any(|line| {
+        let right = line.split("││").nth(1).unwrap_or("");
+        right.contains(needle) && right.contains('▌')
+    })
+}
+
+#[test]
+fn cursor_bar_follows_focused_list_after_tab() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    let frame = tui.frame();
+    assert!(
+        tree_line_has_cursor_bar(&frame, "README.md"),
+        "left-focused tree paints the cursor bar on README.md:\n{frame}"
+    );
+    assert!(
+        !right_line_has_cursor_bar(&frame, "UNSTAGED")
+            && !right_line_has_cursor_bar(&frame, "+dirty"),
+        "unfocused diff must not paint the list cursor bar:\n{frame}"
+    );
+
+    tui.tab();
+    assert!(tui.focus_is_right(), "Tab focuses the right pane");
+    let frame = tui.frame();
+    assert!(
+        !tree_line_has_cursor_bar(&frame, "README.md"),
+        "unfocused tree must not paint the list cursor bar:\n{frame}"
+    );
+    assert!(
+        right_line_has_cursor_bar(&frame, "UNSTAGED")
+            || right_line_has_cursor_bar(&frame, "+dirty")
+            || right_line_has_cursor_bar(&frame, "@@"),
+        "focused diff must paint the list cursor bar:\n{frame}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn held_nav_repeat_moves_again_and_does_not_quit() {
     let (root, workspace) = daily_workspace();
@@ -301,7 +409,7 @@ fn dirty_file_paints_diff_pane() {
         tui.cursor_label()
     );
     let frame = tui.frame();
-    assert_contains(&frame, " diff");
+    assert_contains(&frame, "diff");
     assert_contains(&frame, "README.md");
     assert!(
         frame.contains("inline") || frame.contains("split"),
@@ -546,7 +654,7 @@ fn multi_lane_graph_paints_merge_and_stash_spur() {
     let mut tui = open(&workspace);
     tui.search("merger");
     let frame = tui.frame();
-    assert_contains(&frame, " graph");
+    assert_contains(&frame, "graph");
     assert_contains(&frame, "merge");
     assert_contains(&frame, "stash@{0}");
     assert!(

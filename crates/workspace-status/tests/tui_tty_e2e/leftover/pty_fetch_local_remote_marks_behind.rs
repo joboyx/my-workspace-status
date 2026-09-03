@@ -1,8 +1,8 @@
 use crate::harness::PtySession;
 use crate::seed::unfetched_behind_workspace;
 use crate::support::{
-    crumb_row, has_fetch_hint, has_pull_hint, status_row, syncbox_row_behind, tree_cursor_on,
-    tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    crumb_row, has_fetch_hint, has_pull_hint, panes_tree_focused_graph_unfocused, status_row,
+    syncbox_row_behind, tree_cursor_on, tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 fn no_wrong_fetch_overlays(screen: &str) -> bool {
@@ -25,9 +25,6 @@ fn crumb_fetched_one(screen: &str) -> bool {
 fn idle_unfetched_workspace(screen: &str) -> bool {
     let status = status_row(screen);
     let no_updates = tree_line_containing(screen, "No updates");
-    let Some(top) = screen.lines().next() else {
-        return false;
-    };
     tree_cursor_on(screen, "workspace")
         && !tree_cursor_on(screen, "No updates")
         && !tree_cursor_on(screen, "syncbox")
@@ -36,8 +33,7 @@ fn idle_unfetched_workspace(screen: &str) -> bool {
         && !tree_has(screen, "behind")
         && !tree_has(screen, "syncbox")
         && no_updates.is_some_and(|line| line.contains('>') && line.contains('1'))
-        && top.contains(" tree ")
-        && top.contains(" graph")
+        && panes_tree_focused_graph_unfocused(screen)
         && screen.contains("focus a repo for the graph")
         && !screen.contains("origin-tip-commit")
         && !screen.contains("Fetched")

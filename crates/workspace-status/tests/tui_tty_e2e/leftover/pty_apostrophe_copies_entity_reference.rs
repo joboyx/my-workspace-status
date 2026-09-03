@@ -1,6 +1,8 @@
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
-use crate::support::{documented_launch_first_paint, pane_unstaged_readme, tree_cursor_on, WAIT};
+use crate::support::{
+    documented_launch_first_paint, pane_unstaged_readme, tree_cursor_on, tree_has, WAIT,
+};
 
 fn overlay_closed(screen: &str) -> bool {
     !screen.contains("Enter save")
@@ -20,7 +22,8 @@ fn tree_file_copied(screen: &str) -> bool {
 
 /// Numbered dirty-file diff focused (Tab from the tree file).
 fn right_diff_focused(screen: &str) -> bool {
-    tree_cursor_on(screen, "README.md")
+    tree_has(screen, "README.md")
+        && !tree_cursor_on(screen, "README.md")
         && pane_unstaged_readme(screen)
         && screen.contains("[workspace]")
         && overlay_closed(screen)

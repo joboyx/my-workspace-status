@@ -3,7 +3,7 @@ use crate::seed::daily_workspace;
 use crate::support::{
     crumb_row, documented_launch_first_paint, graph_cursor_on, graph_pane_focused,
     merger_graph_drilled_right, merger_graph_left_unfocused, no_mouse_toggle_toast, right_pane,
-    status_row, tree_cursor_on, tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    status_row, tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 fn no_wrong_stash_pop_overlays(screen: &str) -> bool {
@@ -25,7 +25,7 @@ fn after_wip_name(screen: &str) -> Option<String> {
 /// Restored `wip.txt` on the merger tree. Badge `A` is the staged add.
 fn merger_wip_added(screen: &str) -> bool {
     tree_has(screen, "wip.txt")
-        && tree_cursor_on(screen, "merger")
+        && tree_has(screen, "merger")
         && after_wip_name(screen).is_some_and(|after| after.contains('A'))
 }
 
@@ -78,7 +78,7 @@ fn documented_graph_stash_pop(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);
     graph_pane_focused(screen)
-        && tree_cursor_on(screen, "merger")
+        && tree_has(screen, "merger")
         && merger_wip_added(screen)
         && !graph_stash_still_listed(screen)
         && screen.contains("uncommitted changes")

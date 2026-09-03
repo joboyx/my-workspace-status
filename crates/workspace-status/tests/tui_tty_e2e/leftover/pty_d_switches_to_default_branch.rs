@@ -6,8 +6,8 @@ use crate::harness::PtySession;
 use crate::seed::{daily_workspace, focus_workspace, git_env};
 use crate::support::{
     crumb_row, documented_launch_first_paint, focusbox_graph_left_full, has_fetch_hint,
-    not_files_search_or_stash, status_row, tree_cursor_on, tree_has, tree_line_containing,
-    GIT_WAIT, SETTLE_MS, WAIT,
+    not_files_search_or_stash, status_row, title_has_files, tree_cursor_on, tree_has,
+    tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 fn git_stdout(repo: &Path, args: &[&str]) -> String {
@@ -57,7 +57,7 @@ fn no_wrong_d_overlays(screen: &str) -> bool {
     !screen.contains("SEARCH")
         && !screen.contains("MOVE")
         && !screen.contains("Stash ")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && !screen.contains("Create branch")
         && !screen.contains("Focus branches")
         && !screen.contains("Merge ")

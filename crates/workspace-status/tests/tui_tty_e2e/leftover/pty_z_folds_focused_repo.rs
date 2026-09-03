@@ -81,7 +81,8 @@ fn documented_z_folds_focused_repo(screen: &str) -> bool {
 fn graph_z_leaves_repo_folded(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);
-    tree_cursor_on(screen, "app")
+    tree_has(screen, "app")
+        && !tree_cursor_on(screen, "app")
         && tree_dir_collapsed(screen, "app")
         && !tree_dir_expanded(screen, "app")
         && tree_dir_expanded(screen, "workspace")

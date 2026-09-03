@@ -5,7 +5,8 @@ use crate::harness::PtySession;
 use crate::seed::{focus_workspace, git_env};
 use crate::support::{
     crumb_row, focusbox_graph_left_full, has_fetch_hint, no_mouse_toggle_toast, status_row,
-    tree_cursor_on, tree_has, tree_line_containing, tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
+    title_has_files, tree_cursor_on, tree_has, tree_line_containing, tree_pane_focused, GIT_WAIT,
+    SETTLE_MS, WAIT,
 };
 
 fn git_stdout(repo: &Path, args: &[&str]) -> String {
@@ -62,7 +63,7 @@ fn no_wrong_picker_overlays(screen: &str) -> bool {
     !screen.contains("MOVE")
         && !screen.contains("Focus branches")
         && !screen.contains("Stash ")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && !screen.contains("commit message")
         && !screen.contains("fast-forward if possible")
         && !screen.contains("Merge ")

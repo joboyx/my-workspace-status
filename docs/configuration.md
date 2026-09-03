@@ -178,6 +178,20 @@ On many macOS setups there is no dedicated PageUp key. `Fn+Up` and `Fn+Down` oft
 
 Split falls back to inline below 100 columns (`NARROW_SXS` in `tui/split.rs`); the status line then reads `inline (too narrow)`. Drag the in-diff RULE to resize columns for the rest of the session (resets on next launch).
 
+## Theme tokens
+
+Built-in palettes live in `crates/workspace-status/src/tui/theme.rs`. `WS_STATUS_THEME` seeds the first paint. `T` cycles the same list in this session. There is no theme file.
+
+Unfocused pane borders use `palette.borderDim`. That token is a near-surface dark gray. It is darker than that theme's `muted`. Focused pane borders use `palette.heading`. Pane body text stays full brightness. The TUI does not DIM body text because a pane is unfocused.
+
+| Theme | surface | muted | `palette.borderDim` |
+| --- | --- | --- | --- |
+| Tokyo Night | `#1a1b26` | `#9aa5ce` | `#3b4261` |
+| Monokai | `#272822` | `#b8b39c` | `#49483e` |
+| Dracula | `#282a36` | `#b4bce4` | `#44475a` |
+| Gruvbox Dark | `#282828` | `#bdae93` | `#504945` |
+| Catppuccin Mocha | `#1e1e2e` | `#a6adc8` | `#45475a` |
+
 Graph ref chips: default-branch names use `palette.branchDefault` (distinct from `muted`). Checkout / detached marks use per-theme high-contrast `palette.headMark` (Nerd Font crosshairs / `[HEAD]`). Synced chips put Nerd Font exchange before the branch name. Marks are PUA icons so MesloLGS NF keeps 1-cell metrics. The graph selection footer reuses those same chip colours; it is not a single muted wash.
 
 ## Keymap

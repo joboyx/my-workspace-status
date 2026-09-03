@@ -5,7 +5,7 @@ use crate::harness::PtySession;
 use crate::seed::{focus_workspace, git_env};
 use crate::support::{
     crumb_row, focusbox_graph_left_full, graph_cursor_on, graph_pane_focused,
-    graph_subject_meta_line, no_mouse_toggle_toast, status_row, tree_cursor_on, tree_has,
+    graph_subject_meta_line, no_mouse_toggle_toast, status_row, title_has_files, tree_has,
     tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
@@ -69,7 +69,7 @@ fn no_picker_or_wrong_overlays(screen: &str) -> bool {
     !screen.contains("MOVE")
         && !screen.contains("Focus branches")
         && !screen.contains("Stash ")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && !screen.contains("Create branch")
         && !screen.contains("Checkout at")
         && !screen.contains("Branch ")
@@ -128,7 +128,7 @@ fn graph_focused_diverged_before_checkout(screen: &str) -> bool {
     let status = status_row(screen);
     let crumb = crumb_row(screen);
     graph_pane_focused(screen)
-        && tree_cursor_on(screen, "focusbox")
+        && tree_has(screen, "focusbox")
         && focusbox_tree_on_keep(screen)
         && keep_is_checked_out(screen)
         && focusbox_diverged_graph_body(screen)
@@ -164,7 +164,7 @@ fn documented_graph_b_checkout(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);
     graph_pane_focused(screen)
-        && tree_cursor_on(screen, "focusbox")
+        && tree_has(screen, "focusbox")
         && crumb.contains(&format!("Checked out {BRANCH}"))
         && !crumb.contains("failed")
         && !crumb.contains("Switched")

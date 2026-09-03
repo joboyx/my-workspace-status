@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    documented_launch_first_paint, pane_unstaged_readme, tree_cursor_on, GIT_WAIT, WAIT,
+    documented_launch_first_paint, pane_unstaged_readme, tree_cursor_on, tree_has, GIT_WAIT, WAIT,
 };
 
 const FOREIGN_BODY: &str = "FOREIGN-WS-COMMENT-E2E";
@@ -61,7 +61,8 @@ fn overlay_closed(screen: &str) -> bool {
 }
 
 fn right_diff_focused(screen: &str) -> bool {
-    tree_cursor_on(screen, "README.md")
+    tree_has(screen, "README.md")
+        && !tree_cursor_on(screen, "README.md")
         && pane_unstaged_readme(screen)
         && screen.contains("[workspace]")
         && !comment_overlay(screen)
@@ -71,7 +72,8 @@ fn live_comment_saved(screen: &str) -> bool {
     overlay_closed(screen)
         && pane_unstaged_readme(screen)
         && screen.contains("comment saved")
-        && tree_cursor_on(screen, "README.md")
+        && tree_has(screen, "README.md")
+        && !tree_cursor_on(screen, "README.md")
 }
 
 /// Shared `comments.json` GC/save keeps another workspace's bucket.

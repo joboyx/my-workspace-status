@@ -2,9 +2,9 @@ use crate::harness::{tree_row_containing, PtySession};
 use crate::seed::daily_workspace;
 use crate::support::{
     crumb_row, documented_launch_first_paint, no_mouse_toggle_toast, no_updates_group_folded,
-    no_wrong_overlays, status_row, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded, tree_has,
-    tree_line_containing, tree_pane_focused, GIT_WAIT, SETTLE_MS, TREE_DEPTH1_CHEVRON_COL,
-    TREE_LABEL_COL, WAIT,
+    no_wrong_overlays, status_row, title_has_files, tree_cursor_on, tree_dir_collapsed,
+    tree_dir_expanded, tree_has, tree_line_containing, tree_pane_focused, GIT_WAIT, SETTLE_MS,
+    TREE_DEPTH1_CHEVRON_COL, TREE_LABEL_COL, WAIT,
 };
 
 /// Two Downs on the same cell within 400ms are a double-click. Wait past
@@ -34,7 +34,7 @@ fn chevron_no_wrong_chrome(screen: &str) -> bool {
         && !screen.contains("[workspace]")
         && !screen.contains("[app]")
         && !screen.contains("[merger]")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && !screen.contains("wip.txt")
         && !screen.contains("WIP on graph")
         && status_row(screen).contains(" tree")
@@ -111,7 +111,7 @@ fn chevron_folds_app_repo(screen: &str) -> bool {
         && no_wrong_overlays(screen)
         && no_mouse_toggle_toast(screen)
         && !screen.contains("[workspace]")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
 }
 
 /// SGR click on a tree fold chevron toggles that row.

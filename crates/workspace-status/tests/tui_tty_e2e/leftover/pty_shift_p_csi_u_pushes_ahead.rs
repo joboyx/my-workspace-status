@@ -2,8 +2,8 @@ use crate::harness::PtySession;
 use crate::seed::ahead_workspace;
 use crate::support::{
     after_syncbox_name, crumb_row, graph_subject_line, graph_subject_meta_line, has_fetch_hint,
-    has_pull_hint, status_row, syncbox_row_current, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS,
-    WAIT,
+    has_pull_hint, panes_tree_focused_graph_unfocused, status_row, syncbox_row_current,
+    tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 /// Trailing ASCII ahead-by-1 (`^1`) on the syncbox tree row.
@@ -70,9 +70,6 @@ fn seed_is_ancestor_no_origin_chip(screen: &str) -> bool {
 /// First paint: cursor on ahead syncbox. Graph HEAD is the local tip.
 fn idle_ahead_syncbox(screen: &str) -> bool {
     let status = status_row(screen);
-    let Some(top) = screen.lines().next() else {
-        return false;
-    };
     tree_cursor_on(screen, "syncbox")
         && !tree_cursor_on(screen, "workspace")
         && !tree_cursor_on(screen, "No updates")
@@ -81,8 +78,7 @@ fn idle_ahead_syncbox(screen: &str) -> bool {
         && !tree_has(screen, "all current")
         && !tree_has(screen, "No updates")
         && syncbox_row_ahead(screen)
-        && top.contains(" tree ")
-        && top.contains(" graph")
+        && panes_tree_focused_graph_unfocused(screen)
         && screen.contains("main ^1")
         && screen.contains("Working tree clean")
         && ahead_tip_is_head_not_origin(screen)

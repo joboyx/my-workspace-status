@@ -64,6 +64,8 @@ pub struct GraphWidget<'a> {
     resolved_comment_glyph: &'a str,
     cursor_fg: Color,
     cursor_bg: Option<Color>,
+    /// When false, keep [`Self::selected`] for the footer but do not paint `▌` / `cursorBg`.
+    cursor_bar: bool,
     label_palette: Option<GraphLabelPalette>,
     col_offset: u16,
 }
@@ -89,6 +91,7 @@ impl<'a> GraphWidget<'a> {
             resolved_comment_glyph: "'",
             cursor_fg: Color::Cyan,
             cursor_bg: None,
+            cursor_bar: true,
             label_palette: None,
             col_offset: 0,
         }
@@ -194,6 +197,15 @@ impl<'a> GraphWidget<'a> {
     pub fn cursor_style(mut self, fg: Color, bg: Color) -> Self {
         self.cursor_fg = fg;
         self.cursor_bg = Some(bg);
+        self
+    }
+
+    /// Paint `▌` / `cursorBg` on [`Self::selected`]. Default true.
+    ///
+    /// The TUI turns this off when the graph pane is unfocused so the
+    /// selection footer still tracks the cursor without a list bar.
+    pub fn cursor_bar(mut self, on: bool) -> Self {
+        self.cursor_bar = on;
         self
     }
 
@@ -371,6 +383,7 @@ impl Widget for GraphWidget<'_> {
                 area.width.saturating_sub(v_cols),
                 line,
                 selected,
+                self.cursor_bar,
                 search_match,
                 commented,
                 self.search_bg,
@@ -489,6 +502,7 @@ fn put_painted_line(
     width: u16,
     line: &PaintedLine,
     selected: bool,
+    cursor_bar: bool,
     search_match: bool,
     commented: bool,
     search_bg: Option<Color>,
@@ -505,14 +519,11 @@ fn put_painted_line(
         return;
     }
     let row = Rect::new(x, y, width, 1);
-    let bar = if selected && line.selectable {
-        "▌"
-    } else {
-        " "
-    };
+    let show_bar = selected && cursor_bar && line.selectable;
+    let bar = if show_bar { "▌" } else { " " };
     let row_bg = if flash_bg.is_some() {
         flash_bg
-    } else if selected {
+    } else if selected && cursor_bar {
         cursor_bg
     } else if search_match {
         search_bg
@@ -1826,6 +1837,51 @@ mod tests {
         }
         assert!(saw_bar, "selected graph row should paint ▌");
         assert!(!saw_reversed, "graph cursor should not use reverse video");
+    }
+
+    #[test]
+    fn selected_row_without_cursor_bar_skips_bar_keeps_footer() {
+        let model = sample_model();
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .selected(Some(0))
+                    .cursor_bar(false)
+                    .cursor_style(Color::Cyan, Color::DarkGray)
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut saw_bar = false;
+        let mut last = String::new();
+        let mut prev = String::new();
+        for y in 0..16u16 {
+            let mut line = String::new();
+            for x in 0..80u16 {
+                let cell = &buffer[(x, y)];
+                if cell.symbol() == "▌" {
+                    saw_bar = true;
+                }
+                line.push_str(cell.symbol());
+            }
+            let trimmed = line.trim_end().to_string();
+            if !trimmed.is_empty() {
+                prev = last;
+                last = trimmed;
+            }
+        }
+        assert!(!saw_bar, "unfocused graph must not paint ▌");
+        assert!(
+            prev.contains("Uncommitted changes"),
+            "selection footer subject stays: {prev}"
+        );
+        assert!(
+            last.contains("main"),
+            "selection footer still lists HEAD refs: {last}"
+        );
     }
 
     #[test]

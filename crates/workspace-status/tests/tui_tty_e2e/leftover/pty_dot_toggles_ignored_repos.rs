@@ -1,9 +1,10 @@
 use crate::harness::{left_tree, PtySession};
 use crate::seed::daily_workspace;
 use crate::support::{
-    crumb_row, documented_launch_first_paint, no_updates_group_folded, no_wrong_overlays, pane_top,
-    pane_unstaged_readme, status_row, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded,
-    tree_has, tree_line_containing, SETTLE_MS, WAIT,
+    crumb_row, documented_launch_first_paint, no_updates_group_folded, no_wrong_overlays,
+    pane_unstaged_readme, panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused,
+    status_row, tree_cursor_on, tree_dir_collapsed, tree_dir_expanded, tree_has,
+    tree_line_containing, SETTLE_MS, WAIT,
 };
 
 fn tree_readme_rows(screen: &str) -> usize {
@@ -33,7 +34,7 @@ fn notes_ignored_repo_row(screen: &str) -> bool {
 
 /// Seed rows that `.` must not fold, jump, or send into No-updates.
 fn seed_tree_stays(screen: &str) -> bool {
-    tree_cursor_on(screen, "README.md")
+    tree_has(screen, "README.md")
         && !tree_cursor_on(screen, "notes")
         && !tree_cursor_on(screen, "app")
         && !tree_cursor_on(screen, "merger")
@@ -49,30 +50,13 @@ fn seed_tree_stays(screen: &str) -> bool {
         && no_wrong_overlays(screen)
 }
 
-fn panes_tree_focused_diff_unfocused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" tree ")
-        && top.contains(" diff")
-        && !top.contains(" diff ")
-        && !top.contains(" graph")
-        && !top.contains(" files")
-}
-
-fn panes_tree_unfocused_diff_focused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" diff ")
-        && top.contains(" tree")
-        && !top.contains(" tree ")
-        && !top.contains(" graph")
-        && !top.contains(" files")
-}
-
 /// Left-focused `.` showed ignored `notes`. Toast-only or No-updates cannot pass.
 fn documented_dot_shows_ignored_notes(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);
     let heading = workspace_heading(screen).unwrap_or_default();
     panes_tree_focused_diff_unfocused(screen)
+        && tree_cursor_on(screen, "README.md")
         && seed_tree_stays(screen)
         && notes_ignored_repo_row(screen)
         && tree_readme_rows(screen) == 2
@@ -94,6 +78,7 @@ fn documented_dot_hides_ignored_notes(screen: &str) -> bool {
     let status = status_row(screen);
     let heading = workspace_heading(screen).unwrap_or_default();
     panes_tree_focused_diff_unfocused(screen)
+        && tree_cursor_on(screen, "README.md")
         && seed_tree_stays(screen)
         && tree_line_containing(screen, "notes").is_none()
         && !tree_has(screen, "notes")

@@ -4,8 +4,10 @@ use std::path::PathBuf;
 use crate::harness::{tree_row_containing, PtySession, COLS};
 use crate::seed::{daily_workspace, seed_tall_graph, unique_root};
 use crate::support::{
-    crumb_row, documented_launch_first_paint, no_mouse_toggle_toast, no_wrong_overlays, pane_top,
-    status_row, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, TREE_LABEL_COL, WAIT,
+    crumb_row, documented_launch_first_paint, no_mouse_toggle_toast, no_wrong_overlays,
+    panes_tree_focused_diff_unfocused, panes_tree_focused_graph_unfocused,
+    panes_tree_unfocused_graph_focused, status_row, title_has_graph, tree_cursor_on, tree_has,
+    GIT_WAIT, SETTLE_MS, TREE_LABEL_COL, WAIT,
 };
 
 /// xterm SGR left-button drag (`Cb` 0 + motion bit 32).
@@ -56,11 +58,7 @@ fn sgr_drag(tui: &mut PtySession, from_col: u16, from_row: u16, to_col: u16, to_
 }
 
 fn launch_tree_diff_chrome(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" tree ")
-        && top.contains(" diff")
-        && !top.contains(" diff ")
-        && !top.contains(" graph")
+    panes_tree_focused_diff_unfocused(screen)
         && tree_cursor_on(screen, "README.md")
         && !tree_cursor_on(screen, "app")
         && !tree_cursor_on(screen, "merger")
@@ -129,8 +127,8 @@ fn scrollbar_track_span(screen: &str, thumb_col: u16) -> Option<(u16, u16)> {
 fn history_graph_at_top(screen: &str) -> bool {
     screen.contains("count 29")
         && (screen.contains("Working tree") || screen.contains("working tree clean"))
-        && tree_cursor_on(screen, "history")
-        && screen.contains("┌ graph")
+        && tree_has(screen, "history")
+        && title_has_graph(screen)
         && graph_thumb_cells(screen).is_empty()
         && no_wrong_overlays(screen)
         && no_mouse_toggle_toast(screen)
@@ -139,8 +137,8 @@ fn history_graph_at_top(screen: &str) -> bool {
 fn history_graph_at_bottom(screen: &str) -> bool {
     screen.contains("count 0")
         && !screen.contains("count 29")
-        && tree_cursor_on(screen, "history")
-        && screen.contains("┌ graph")
+        && tree_has(screen, "history")
+        && title_has_graph(screen)
         && bottom_graph_thumb(screen).is_some()
         && no_wrong_overlays(screen)
         && no_mouse_toggle_toast(screen)
@@ -200,14 +198,14 @@ fn pty_divider_scrollbar_drag() {
             tree_cursor_on(screen, "history")
                 && screen.contains("count 29")
                 && (screen.contains("Working tree") || screen.contains("working tree clean"))
-                && screen.contains("┌ graph")
+                && panes_tree_focused_graph_unfocused(screen)
         },
         "tall history paints a graph that still fits at the top (no scrollbar yet)",
         GIT_WAIT,
     );
     graph.tab();
     graph.wait_pred(
-        |screen| pane_top(screen).contains(" graph ") && screen.contains("count 29"),
+        |screen| panes_tree_unfocused_graph_focused(screen) && screen.contains("count 29"),
         "Tab focuses the graph (G on the tree would jump the workspace list)",
         WAIT,
     );
@@ -262,7 +260,7 @@ fn pty_divider_scrollbar_drag() {
         |screen| {
             screen.contains("count 29")
                 && (screen.contains("Working tree") || screen.contains("working tree clean"))
-                && tree_cursor_on(screen, "history")
+                && tree_has(screen, "history")
                 && no_wrong_overlays(screen)
         },
         "track click toward the top jumps the graph (a dead click stays on count 0)",

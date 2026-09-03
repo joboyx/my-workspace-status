@@ -3,7 +3,8 @@ use crate::harness::{left_tree, PtySession};
 use crate::seed::{daily_workspace, seed_long_diff_file};
 use crate::support::{
     crumb_row, launch_breadcrumb_workspace_only, no_updates_group_folded, no_wrong_overlays,
-    pane_top, right_pane, status_row, tree_cursor_on, tree_dir_expanded, tree_has, SETTLE_MS, WAIT,
+    panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused, right_pane, status_row,
+    title_has_files, tree_cursor_on, tree_dir_expanded, tree_has, SETTLE_MS, WAIT,
 };
 
 const FILE: &str = "unique-diffline.rs";
@@ -11,26 +12,6 @@ const FILE: &str = "unique-diffline.rs";
 const PAN_REPEATS: usize = 40;
 /// Gap so the input thread does not drain the held-nav backlog as one move.
 const REPEAT_GAP_MS: u64 = 50;
-
-/// Left tree focused, right file-diff unfocused. Not graph / not files.
-fn panes_tree_focused_diff_unfocused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" tree ")
-        && top.contains(" diff")
-        && !top.contains(" diff ")
-        && !top.contains(" graph")
-        && !top.contains(" files")
-}
-
-/// Left tree unfocused, right file-diff focused. Not graph / not files.
-fn panes_tree_unfocused_diff_focused(screen: &str) -> bool {
-    let top = pane_top(screen);
-    top.contains(" diff ")
-        && top.contains(" tree")
-        && !top.contains(" tree ")
-        && !top.contains(" graph")
-        && !top.contains(" files")
-}
 
 fn status_has_diff_tail(screen: &str) -> bool {
     status_row(screen).contains(DIFF_HSCROLL_TAIL)
@@ -45,12 +26,11 @@ fn help_lists_hl_pan(screen: &str) -> bool {
 }
 
 fn tree_stays_on_long_file(screen: &str) -> bool {
-    tree_cursor_on(screen, FILE)
+    tree_has(screen, FILE)
         && !tree_cursor_on(screen, "README.md")
         && !tree_cursor_on(screen, "app")
         && !tree_cursor_on(screen, "merger")
         && !tree_cursor_on(screen, "No updates")
-        && tree_has(screen, FILE)
         && tree_has(screen, "README.md")
         && tree_has(screen, "app")
         && tree_dir_expanded(screen, "app")
@@ -74,7 +54,7 @@ fn clipped_new_diff(screen: &str) -> bool {
         && !right.contains("app/README.md")
         && !right.contains("UNSTAGED")
         && !screen.contains("WIP on graph")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && !status_has_diff_tail(screen)
 }
 
@@ -91,7 +71,7 @@ fn panned_new_diff(screen: &str) -> bool {
         && !right.contains("app/README.md")
         && !right.contains("UNSTAGED")
         && !screen.contains("WIP on graph")
-        && !screen.contains("┌ files")
+        && !title_has_files(screen)
         && !status_has_diff_tail(screen)
 }
 
@@ -118,6 +98,7 @@ fn idle_chrome_right(screen: &str) -> bool {
 /// Long NEW file-diff is loaded and clipped. Tree is still focused.
 fn long_diff_clipped_tree_focus(screen: &str) -> bool {
     panes_tree_focused_diff_unfocused(screen)
+        && tree_cursor_on(screen, FILE)
         && tree_stays_on_long_file(screen)
         && clipped_new_diff(screen)
         && idle_chrome_left(screen)

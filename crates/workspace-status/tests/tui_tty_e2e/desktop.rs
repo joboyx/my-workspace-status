@@ -119,11 +119,9 @@ impl DesktopSession {
             cols,
             rows,
         };
-        session.wait_contains_any(
-            &[" tree", "Flat paths", "app", "README"],
-            Duration::from_secs(20),
-        );
+        session.wait_contains("? help", Duration::from_secs(20));
         session.grab_input();
+        session.wait_contains("? help", Duration::from_secs(20));
         session
     }
 
@@ -171,7 +169,7 @@ impl DesktopSession {
         self.focus();
         // No --window: VTE ignores synthetic XSendEvent keys. XTEST needs focus.
         let status = Command::new("xdotool")
-            .args(["key", "--delay", "40"])
+            .args(["key", "--clearmodifiers", "--delay", "40"])
             .args(args)
             .status()
             .expect("xdotool key");
@@ -186,7 +184,7 @@ impl DesktopSession {
     pub fn type_text(&self, text: &str) {
         self.focus();
         let status = Command::new("xdotool")
-            .args(["type", "--delay", "40", text])
+            .args(["type", "--clearmodifiers", "--delay", "40", text])
             .status()
             .expect("xdotool type");
         assert!(status.success(), "xdotool type {text:?} failed");

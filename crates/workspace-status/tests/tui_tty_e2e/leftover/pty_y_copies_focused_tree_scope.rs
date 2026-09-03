@@ -51,7 +51,8 @@ fn save_line_comment(tui: &mut PtySession, name: &str, body: &str) {
     tui.tab();
     tui.wait_pred(
         |screen| {
-            tree_cursor_on(screen, name)
+            tree_has(screen, name)
+                && !tree_cursor_on(screen, name)
                 && overlay_closed(screen)
                 && (screen.contains("UNSTAGED")
                     || screen.contains("UNTRACKED")
