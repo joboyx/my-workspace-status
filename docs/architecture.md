@@ -107,9 +107,9 @@ Graph checkout confirm (and several other graph UX choices) is inspired by [Git 
 ## CLI crate
 
 `crates/workspace-status` is the CLI (`workspace-status` and `ws`).
-It implements discovery, `--plain`, `--json`, `-a`/`--all`, `--update`, the TUI-startup GitHub Release prompt, repo filters,
+It implements discovery, `--plain`, `--json`, `-a`/`--all`, `--workspace` / `-C`, `--update`, the TUI-startup GitHub Release prompt, repo filters,
 ignored-repo visibility from snapshot.md, and the ratatui TUI on a TTY.
-CLI flags live in `cli.rs`.
+CLI flags live in `cli.rs`. `--workspace` / `-C` and `WS_STATUS_WORKSPACE` pin the workspace root (CLI flag > env > process cwd) before config load and discovery.
 
 `--fetch`, `--pull`, and `--default-branch` write progress to stderr when `--json` is set. `--json` wins when both `--json` and `--plain` are set. `-v` applies to `--plain` only.
 

@@ -99,7 +99,7 @@ Set WS_STATUS_GLYPHS=ascii for plain markers.
 
 ## Workspace config
 
-`workspace-status` reads `.workspace-status-config.json` from the current workspace root.
+`workspace-status` reads `.workspace-status-config.json` from the workspace root. Pin that root with `-C` / `--workspace <path>` or `WS_STATUS_WORKSPACE` (CLI flag > env > process cwd). Missing or non-directory paths error; they do not fall back to cwd.
 
 ```json
 {
@@ -176,7 +176,7 @@ Agent map of TestBackend vs PTY vs desktop `#[ignore]`, plus `WS_STATUS_UPDATE_C
 | Area                  | Covered behavior                                                                                                                                                                                |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Real-TTY TUI e2e      | PTY in `cargo test` plus the Actions `tui-tty-desktop` job. Tests: [crates/workspace-status/tests/tui_tty_e2e/](./crates/workspace-status/tests/tui_tty_e2e/) |
-| CLI contract          | `--help` documents `--all`, `--fetch`, `--verbose`, `--pull`, `--default-branch`, `--plain`, `--json`, and `--update` |
+| CLI contract          | `--help` documents `--all`, `--fetch`, `--verbose`, `--pull`, `--default-branch`, `--plain`, `--json`, `--update`, and `--workspace` (`-C`) |
 | Snapshot contract     | `--json` and `--plain` share one workspace snapshot; fixture e2e builds a temp workspace and asserts both without a TTY                                                                         |
 | Clean summary         | all-clean default-branch workspaces and mixed clean default/non-default workspaces                                                                                                              |
 | Verbose table         | category ordering, default/non-default grouping, `no-upstream` display, detached HEAD display, and mixed-state table output                                                                     |
