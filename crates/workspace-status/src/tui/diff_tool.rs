@@ -72,10 +72,11 @@ pub fn sweep_stale_diff_temps() {
     }
 }
 
+/// `{stem}.{side}.{nanos}.{ext}` so tools that key off the last suffix (vimdiff) see `.rs`, not `{nanos}`.
 fn unique_temp_path(rel_path: &str, side: &str) -> PathBuf {
     let dir = ext_diff_temp_dir();
     let _ = fs::create_dir_all(&dir);
-    let stem = Path::new(rel_path)
+    let file_name = Path::new(rel_path)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("file");
@@ -83,7 +84,17 @@ fn unique_temp_path(rel_path: &str, side: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    dir.join(format!("{stem}.{side}.{nanos}"))
+    let path = Path::new(file_name);
+    let name = match (
+        path.file_stem().and_then(|s| s.to_str()),
+        path.extension().and_then(|s| s.to_str()),
+    ) {
+        (Some(stem), Some(ext)) if !stem.is_empty() => {
+            format!("{stem}.{side}.{nanos}.{ext}")
+        }
+        _ => format!("{file_name}.{side}.{nanos}"),
+    };
+    dir.join(name)
 }
 
 fn write_temp_bytes(rel_path: &str, side: &str, bytes: &[u8]) -> Result<PathBuf, String> {
@@ -282,6 +293,44 @@ mod tests {
         ));
         init_repo(&dir);
         dir
+    }
+
+    #[test]
+    fn prepared_temp_paths_keep_source_extension_last() {
+        let _lock = lock_temps();
+        let dir = unique_repo("ws-ext-diff-suffix");
+        fs::write(dir.join("src.rs"), "fn a() {}\n").unwrap();
+        git(&dir, &["add", "src.rs"]);
+        git(&dir, &["commit", "-q", "-m", "rs"]);
+        fs::write(dir.join("src.rs"), "fn b() {}\n").unwrap();
+        let prepared = prepare_worktree_diff(&dir, "src.rs").unwrap();
+        assert_eq!(
+            prepared.left.extension().and_then(|s| s.to_str()),
+            Some("rs"),
+            "LEFT temp last suffix should be .rs, got {:?}",
+            prepared.left
+        );
+        cleanup_prepared(&prepared);
+
+        fs::write(dir.join("notes.md"), "# n\n").unwrap();
+        git(&dir, &["add", "notes.md"]);
+        git(&dir, &["commit", "-q", "-m", "md"]);
+        fs::remove_file(dir.join("notes.md")).unwrap();
+        let prepared = prepare_worktree_diff(&dir, "notes.md").unwrap();
+        assert_eq!(
+            prepared.left.extension().and_then(|s| s.to_str()),
+            Some("md"),
+            "LEFT temp last suffix should be .md, got {:?}",
+            prepared.left
+        );
+        assert_eq!(
+            prepared.right.extension().and_then(|s| s.to_str()),
+            Some("md"),
+            "RIGHT temp last suffix should be .md, got {:?}",
+            prepared.right
+        );
+        cleanup_prepared(&prepared);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
