@@ -138,11 +138,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: "t",
-                desc: "flat / tree",
-            },
-            HelpEntry {
-                keys: "",
-                desc: "Staged / Changes when staged",
+                desc: "flat / tree · Staged split",
             },
             HelpEntry {
                 keys: ".",
@@ -585,10 +581,14 @@ mod tests {
         assert!(view_keys.contains(&"'"));
         assert!(!view_keys.contains(&"y '"));
         assert!(view_keys.contains(&"Esc"));
-        assert!(HELP_GROUPS[2]
-            .entries
-            .iter()
-            .any(|e| e.keys.is_empty() && e.desc == "Staged / Changes when staged"));
+        assert_eq!(
+            HELP_GROUPS[2]
+                .entries
+                .iter()
+                .find(|e| e.keys == "t")
+                .map(|e| e.desc),
+            Some("flat / tree · Staged split")
+        );
         assert!(help_match_indices("quit")
             .iter()
             .any(|&i| { help_entries().nth(i).is_some_and(|e| e.keys == "q") }));

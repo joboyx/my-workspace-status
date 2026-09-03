@@ -44,8 +44,7 @@ const HELP_GIT_ROWS: &[(&str, &str)] = &[
 
 const HELP_VIEW_ROWS: &[(&str, &str)] = &[
     ("i", "inline / split"),
-    ("t", "flat / tree"),
-    ("", "Staged / Changes when staged"),
+    ("t", "flat / tree · Staged split"),
     (".", "show / hide ignored repos"),
     ("T", "cycle theme"),
     ("Ctrl-o", "full-file · keep hunk in view"),
