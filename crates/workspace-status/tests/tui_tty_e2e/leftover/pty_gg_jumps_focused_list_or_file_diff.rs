@@ -132,7 +132,8 @@ fn diff_at_first_row(screen: &str) -> bool {
     panes_tree_unfocused_diff_focused(screen)
         && right_cursor_is_first_body_row(screen)
         && right_pane(screen).contains(DIFF_TOP)
-        && tree_cursor_on(screen, DIFF_FILE)
+        && tree_has(screen, DIFF_FILE)
+        && !tree_cursor_on(screen, DIFF_FILE)
         && !tree_cursor_on(screen, "workspace")
         && !tree_cursor_on(screen, "README.md")
 }
@@ -143,7 +144,7 @@ fn graph_at_working_tree(screen: &str) -> bool {
         && right_pane(screen).contains("count 29")
         && !graph_cursor_on(screen, "count 0")
         && !graph_cursor_on(screen, "count 20")
-        && tree_cursor_on(screen, "history")
+        && tree_has(screen, "history")
 }
 
 fn files_at_first_row(screen: &str) -> bool {
@@ -224,7 +225,7 @@ fn pty_gg_jumps_focused_list_or_file_diff() {
     tui.wait_pred(
         |screen| {
             panes_tree_unfocused_diff_focused(screen)
-                && tree_cursor_on(screen, DIFF_FILE)
+                && tree_has(screen, DIFF_FILE)
                 && right_pane(screen).contains(DIFF_TOP)
                 && right_pane(screen).contains('\u{258C}')
         },

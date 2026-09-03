@@ -6,8 +6,8 @@ use crate::seed::{seed_many_commit_files, seed_repo, seed_tall_graph, unique_roo
 use crate::support::{
     graph_cursor_on, graph_pane_focused, panes_files_focused, panes_graph_focused_files_unfocused,
     panes_tree_focused_diff_unfocused, panes_tree_focused_graph_unfocused,
-    panes_tree_unfocused_diff_focused, right_pane, title_has_files, tree_cursor_on, GIT_WAIT,
-    RIGHT_PANE_COL, SETTLE_MS, WAIT,
+    panes_tree_unfocused_diff_focused, right_pane, title_has_files, tree_cursor_on, tree_has,
+    GIT_WAIT, RIGHT_PANE_COL, SETTLE_MS, WAIT,
 };
 
 /// Wheel up (`ScrollUp`, `Cb` 64). Wheel down is [`SGR_WHEEL_DOWN`] (65).
@@ -375,7 +375,7 @@ fn pty_right_pane_keeps_focus_middle() {
     tui.wait_pred(
         |screen| {
             panes_tree_unfocused_diff_focused(screen)
-                && tree_cursor_on(screen, "keepmid-diff.rs")
+                && tree_has(screen, "keepmid-diff.rs")
                 && right_pane(screen).contains("keepmid-line-0")
                 && right_pane(screen).contains('\u{258C}')
         },

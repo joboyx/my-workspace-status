@@ -570,7 +570,6 @@ mod tests {
             icon_comment_resolved(true),
             icon_staged(true),
             icon_changes(true),
-            icon_pane_focus(true),
             ASCII_FILE_GLYPH,
         ];
         let nerd = [
@@ -593,7 +592,6 @@ mod tests {
             icon_comment_resolved(false),
             icon_staged(false),
             icon_changes(false),
-            icon_pane_focus(false),
             CURSOR_BAR,
             FOLD_EXPANDED,
             FOLD_COLLAPSED,

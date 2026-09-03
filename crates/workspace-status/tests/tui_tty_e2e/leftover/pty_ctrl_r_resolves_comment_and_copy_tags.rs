@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    documented_launch_first_paint, pane_unstaged_readme, tree_cursor_on, GIT_WAIT, WAIT,
+    documented_launch_first_paint, pane_unstaged_readme, tree_cursor_on, tree_has, GIT_WAIT, WAIT,
 };
 
 const BODY: &str = "resolve-note-e2e";
@@ -40,7 +40,8 @@ fn export_overlay(screen: &str) -> bool {
 }
 
 fn right_diff_focused(screen: &str) -> bool {
-    tree_cursor_on(screen, "README.md")
+    tree_has(screen, "README.md")
+        && !tree_cursor_on(screen, "README.md")
         && pane_unstaged_readme(screen)
         && screen.contains("[workspace]")
         && !comment_overlay(screen)
@@ -105,7 +106,8 @@ fn pty_ctrl_r_resolves_comment_and_copy_tags() {
                 && pane_unstaged_readme(screen)
                 && screen.contains("comment saved")
                 && screen.contains('\'')
-                && tree_cursor_on(screen, "README.md")
+                && tree_has(screen, "README.md")
+                && !tree_cursor_on(screen, "README.md")
         },
         "Enter saves: overlay gone, ASCII ' resolved mark, toast comment saved",
         GIT_WAIT,

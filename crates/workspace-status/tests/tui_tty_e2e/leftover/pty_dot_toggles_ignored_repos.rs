@@ -34,7 +34,7 @@ fn notes_ignored_repo_row(screen: &str) -> bool {
 
 /// Seed rows that `.` must not fold, jump, or send into No-updates.
 fn seed_tree_stays(screen: &str) -> bool {
-    tree_cursor_on(screen, "README.md")
+    tree_has(screen, "README.md")
         && !tree_cursor_on(screen, "notes")
         && !tree_cursor_on(screen, "app")
         && !tree_cursor_on(screen, "merger")
@@ -56,6 +56,7 @@ fn documented_dot_shows_ignored_notes(screen: &str) -> bool {
     let status = status_row(screen);
     let heading = workspace_heading(screen).unwrap_or_default();
     panes_tree_focused_diff_unfocused(screen)
+        && tree_cursor_on(screen, "README.md")
         && seed_tree_stays(screen)
         && notes_ignored_repo_row(screen)
         && tree_readme_rows(screen) == 2
@@ -77,6 +78,7 @@ fn documented_dot_hides_ignored_notes(screen: &str) -> bool {
     let status = status_row(screen);
     let heading = workspace_heading(screen).unwrap_or_default();
     panes_tree_focused_diff_unfocused(screen)
+        && tree_cursor_on(screen, "README.md")
         && seed_tree_stays(screen)
         && tree_line_containing(screen, "notes").is_none()
         && !tree_has(screen, "notes")

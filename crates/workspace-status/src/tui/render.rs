@@ -63,7 +63,8 @@ const LOADING_FILES: &str = "loading files…";
 /// Pane `Block::title`: the plain pane name for focused and unfocused.
 ///
 /// Names are exactly `tree`, `graph`, `files`, or `diff`. Focus is the
-/// border colour, not a title glyph or space-pad.
+/// border colour, not a title glyph or space-pad. Title text uses
+/// `palette.heading` via `title_style` so it does not inherit `border_style`.
 fn pane_title(name: &str) -> String {
     name.to_string()
 }
@@ -148,14 +149,14 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     } else {
         "tree"
     };
+    let palette = state.theme.palette();
+    let title_style = Style::default().fg(palette.heading);
     let left_title = pane_title(left_name);
     let tree_block = Block::default()
         .borders(Borders::ALL)
         .title(left_title)
-        .border_style(pane_border(
-            state.focus == FocusPane::Left,
-            state.theme.palette(),
-        ));
+        .title_style(title_style)
+        .border_style(pane_border(state.focus == FocusPane::Left, palette));
     let tree_inner = tree_block.inner(panes[0]);
     frame.render_widget(tree_block, panes[0]);
     if left_is_files {
@@ -183,10 +184,8 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     let right_block = Block::default()
         .borders(Borders::ALL)
         .title(right_title)
-        .border_style(pane_border(
-            state.focus == FocusPane::Right,
-            state.theme.palette(),
-        ));
+        .title_style(title_style)
+        .border_style(pane_border(state.focus == FocusPane::Right, palette));
     let right_inner = right_block.inner(panes[1]);
     state.layout.diff_pane_width = right_inner.width;
     state.layout.diff_pane_height = right_inner.height;
@@ -316,7 +315,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         lines.push(paint_tree_row(
             row,
             width,
-            Some(row.id.as_str()) == focus_id,
+            Some(row.id.as_str()) == focus_id && state.focus == FocusPane::Left,
             state.flash_color(&row.id),
             match_ids.contains(&row.id),
             search_bg,
@@ -552,9 +551,15 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
     let lane_colors = state.theme.lane_colors();
     let commented_rows = graph_commented_row_indices(state, false);
     let resolved_comment_rows = graph_commented_row_indices(state, true);
+    let graph_focused = if state.drill.is_files() {
+        state.focus == FocusPane::Left
+    } else {
+        state.focus == FocusPane::Right
+    };
     GraphWidget::new(model)
         .ascii(state.ascii)
         .selected(Some(state.graph_cursor))
+        .cursor_bar(graph_focused)
         .scroll(state.graph_scroll)
         .col_offset(col_offset)
         .loading_older(state.graph_loading_older)
@@ -756,6 +761,11 @@ fn draw_commit_file_list(
         state.search_target == SearchPane::CommitFiles && !state.search_query.trim().is_empty();
     let match_paths = commit_file_search_match_paths(state);
     let comment_scope = commit_file_comment_scope(state);
+    let files_focused = if state.drill.is_diff() {
+        state.focus == FocusPane::Left
+    } else {
+        state.focus == FocusPane::Right
+    };
     let lines: Vec<Line> = rows
         .iter()
         .skip(start)
@@ -801,7 +811,7 @@ fn draw_commit_file_list(
                 row.folded,
                 &segs,
                 width,
-                Some(row.id.as_str()) == focus_id.as_deref(),
+                files_focused && Some(row.id.as_str()) == focus_id.as_deref(),
                 state.commit_file_flash_color(&row.id),
                 search_match,
                 search_bg,
@@ -949,7 +959,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                 split,
                 off,
                 state,
-                i == state.diff_cursor,
+                i == state.diff_cursor && state.focus == FocusPane::Right,
                 state.diff_visual_contains(i),
                 state.search_hit == Some(i),
             )
@@ -2356,6 +2366,330 @@ mod tests {
         assert_unfocused_body_not_dimmed(&mut state);
         state.focus = FocusPane::Right;
         assert_unfocused_body_not_dimmed(&mut state);
+    }
+
+    fn buf_line(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        let mut line = String::new();
+        for x in 0..buf.area().width {
+            line.push_str(buf[(x, y)].symbol());
+        }
+        line
+    }
+
+    fn find_cell_col(buf: &ratatui::buffer::Buffer, y: u16, needle: &str) -> Option<u16> {
+        let chars: Vec<char> = needle.chars().collect();
+        if chars.is_empty() {
+            return None;
+        }
+        let width = buf.area().width;
+        let n = chars.len() as u16;
+        if n > width {
+            return None;
+        }
+        for x in 0..=width - n {
+            let mut ok = true;
+            for (i, ch) in chars.iter().enumerate() {
+                if buf[(x + i as u16, y)].symbol() != ch.to_string() {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                return Some(x);
+            }
+        }
+        None
+    }
+
+    fn title_fg(buf: &ratatui::buffer::Buffer, name: &str) -> Color {
+        let col = find_cell_col(buf, 0, name)
+            .unwrap_or_else(|| panic!("title {name:?} on row 0:\n{}", buf_line(buf, 0)));
+        buf[(col, 0)].fg
+    }
+
+    fn pane_inner_has_cursor_bar(
+        buf: &ratatui::buffer::Buffer,
+        x: u16,
+        y: u16,
+        w: u16,
+        h: u16,
+    ) -> bool {
+        for row in y..y.saturating_add(h) {
+            for col in x..x.saturating_add(w) {
+                if buf[(col, row)].symbol() == CURSOR_BAR {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn pane_row_has_cursor_bg(
+        buf: &ratatui::buffer::Buffer,
+        x: u16,
+        y: u16,
+        w: u16,
+        h: u16,
+        needle: &str,
+        cursor_bg: Color,
+    ) -> bool {
+        for row in y..y.saturating_add(h) {
+            let mut line = String::new();
+            for col in x..x.saturating_add(w) {
+                line.push_str(buf[(col, row)].symbol());
+            }
+            if !line.contains(needle) {
+                continue;
+            }
+            for col in x..x.saturating_add(w) {
+                if buf[(col, row)].bg == cursor_bg {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn two_pane_graph_state() -> AppState {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let repo_row = state
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::Repo)
+            .expect("repo row");
+        state.cursor = repo_row;
+        state.graph = Some(GraphModel {
+            commits: vec![Commit {
+                id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                subject: "seed graph".into(),
+                parents: Vec::new(),
+                refs: vec!["main".into()],
+                author_name: "Ada".into(),
+                author_date_unix: 1_700_000_000,
+            }],
+            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            uncommitted: Some(true),
+            ..GraphModel::default()
+        });
+        state
+    }
+
+    fn two_pane_files_state() -> AppState {
+        let mut state = two_pane_graph_state();
+        state.open_commit_files(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![super::super::drill::CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+            }],
+        );
+        state
+    }
+
+    fn assert_titles_heading_borders_split(state: &mut AppState) {
+        let palette = state.theme.palette();
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, state)).unwrap();
+        let buf = terminal.backend().buffer();
+        let text = buffer_text(&terminal);
+        let top = buf_line(buf, 0);
+        let left_name = if state.drill.is_diff() {
+            "files"
+        } else if state.drill.is_files() {
+            "graph"
+        } else {
+            "tree"
+        };
+        let right_name = if state.drill.is_files() {
+            "files"
+        } else if state.drill.is_diff() || state.right_is_diff() {
+            "diff"
+        } else {
+            "graph"
+        };
+        assert!(
+            top.contains(left_name) && top.contains(right_name),
+            "title row names {left_name}/{right_name}:\n{text}"
+        );
+        let left_title = title_fg(buf, left_name);
+        let right_title = title_fg(buf, right_name);
+        assert_eq!(
+            left_title, palette.heading,
+            "left title {left_name:?} fg must be heading, got {left_title:?}:\n{text}"
+        );
+        assert_eq!(
+            right_title, palette.heading,
+            "right title {right_name:?} fg must be heading, got {right_title:?}:\n{text}"
+        );
+        assert_ne!(
+            left_title, palette.border_dim,
+            "title fg must not be border_dim:\n{text}"
+        );
+        assert_ne!(
+            right_title, palette.border_dim,
+            "unfocused title must not inherit border_dim:\n{text}"
+        );
+        let right_x = find_cell_col(buf, 0, right_name)
+            .unwrap_or_else(|| panic!("right title {right_name:?}:\n{text}"))
+            .saturating_sub(1);
+        let left_border = buf[(0, 0)].fg;
+        let right_border = buf[(right_x, 0)].fg;
+        match state.focus {
+            FocusPane::Left => {
+                assert_eq!(left_border, palette.heading, "focused left border:\n{text}");
+                assert_eq!(
+                    right_border, palette.border_dim,
+                    "unfocused right border is border_dim:\n{text}"
+                );
+            }
+            FocusPane::Right => {
+                assert_eq!(
+                    left_border, palette.border_dim,
+                    "unfocused left border is border_dim:\n{text}"
+                );
+                assert_eq!(
+                    right_border, palette.heading,
+                    "focused right border:\n{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unfocused_pane_title_uses_heading_not_border_dim() {
+        let mut state = two_pane_diff_state();
+        state.focus = FocusPane::Left;
+        assert_titles_heading_borders_split(&mut state);
+        state.focus = FocusPane::Right;
+        assert_titles_heading_borders_split(&mut state);
+
+        let mut graph = two_pane_graph_state();
+        graph.focus = FocusPane::Left;
+        assert_titles_heading_borders_split(&mut graph);
+        graph.focus = FocusPane::Right;
+        assert_titles_heading_borders_split(&mut graph);
+
+        let mut files = two_pane_files_state();
+        files.focus = FocusPane::Left;
+        assert_titles_heading_borders_split(&mut files);
+        files.focus = FocusPane::Right;
+        assert_titles_heading_borders_split(&mut files);
+    }
+
+    fn assert_cursor_bar_on_focused_list_only(
+        state: &mut AppState,
+        left_needle: &str,
+        right_needle: &str,
+    ) {
+        let palette = state.theme.palette();
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, state)).unwrap();
+        let buf = terminal.backend().buffer();
+        let text = buffer_text(&terminal);
+        let left = (
+            state.layout.tree_x,
+            state.layout.tree_y,
+            state.layout.tree_width,
+            state.layout.tree_height,
+        );
+        let right = (
+            state.layout.diff_content_x,
+            state.layout.right_y,
+            state.layout.diff_pane_width,
+            state.layout.diff_pane_height,
+        );
+        let left_bar = pane_inner_has_cursor_bar(buf, left.0, left.1, left.2, left.3);
+        let right_bar = pane_inner_has_cursor_bar(buf, right.0, right.1, right.2, right.3);
+        let left_bg = pane_row_has_cursor_bg(
+            buf,
+            left.0,
+            left.1,
+            left.2,
+            left.3,
+            left_needle,
+            palette.cursor_bg,
+        );
+        let right_bg = pane_row_has_cursor_bg(
+            buf,
+            right.0,
+            right.1,
+            right.2,
+            right.3,
+            right_needle,
+            palette.cursor_bg,
+        );
+        match state.focus {
+            FocusPane::Left => {
+                assert!(
+                    left_bar,
+                    "focused left list must paint {CURSOR_BAR} near {left_needle:?}:\n{text}"
+                );
+                assert!(
+                    left_bg,
+                    "focused left list must paint cursor_bg on {left_needle:?}:\n{text}"
+                );
+                assert!(
+                    !right_bar,
+                    "unfocused right list must not paint {CURSOR_BAR}:\n{text}"
+                );
+                assert!(
+                    !right_bg,
+                    "unfocused right list must not paint cursor_bg as the list cursor:\n{text}"
+                );
+            }
+            FocusPane::Right => {
+                assert!(
+                    !left_bar,
+                    "unfocused left list must not paint {CURSOR_BAR}:\n{text}"
+                );
+                assert!(
+                    !left_bg,
+                    "unfocused left list must not paint cursor_bg as the list cursor:\n{text}"
+                );
+                assert!(
+                    right_bar,
+                    "focused right list must paint {CURSOR_BAR} near {right_needle:?}:\n{text}"
+                );
+                assert!(
+                    right_bg,
+                    "focused right list must paint cursor_bg on {right_needle:?}:\n{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_bar_paints_on_focused_list_only_tree_and_diff() {
+        let mut state = two_pane_diff_state();
+        state.focus = FocusPane::Left;
+        assert_cursor_bar_on_focused_list_only(&mut state, "README.md", "UNSTAGED");
+        state.focus = FocusPane::Right;
+        assert_cursor_bar_on_focused_list_only(&mut state, "README.md", "UNSTAGED");
+    }
+
+    #[test]
+    fn cursor_bar_paints_on_focused_list_only_graph() {
+        let mut state = two_pane_graph_state();
+        state.focus = FocusPane::Left;
+        assert_cursor_bar_on_focused_list_only(&mut state, "app", "uncommitted");
+        state.focus = FocusPane::Right;
+        assert_cursor_bar_on_focused_list_only(&mut state, "app", "uncommitted");
+    }
+
+    #[test]
+    fn cursor_bar_paints_on_focused_list_only_commit_files() {
+        let mut state = two_pane_files_state();
+        state.focus = FocusPane::Left;
+        assert_cursor_bar_on_focused_list_only(&mut state, "uncommitted", "README.md");
+        state.focus = FocusPane::Right;
+        assert_cursor_bar_on_focused_list_only(&mut state, "uncommitted", "README.md");
     }
 
     #[test]

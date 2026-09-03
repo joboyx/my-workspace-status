@@ -52,7 +52,7 @@ fn graph_focused_diverged_before_merge(screen: &str) -> bool {
     let status = status_row(screen);
     let crumb = crumb_row(screen);
     graph_pane_focused(screen)
-        && tree_cursor_on(screen, "focusbox")
+        && tree_has(screen, "focusbox")
         && focusbox_diverged_graph_body(screen)
         && crumb.contains("workspace › [focusbox]")
         && !crumb.contains("Merged")

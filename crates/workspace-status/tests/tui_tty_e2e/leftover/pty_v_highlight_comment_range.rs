@@ -60,7 +60,8 @@ fn overlay_closed(screen: &str) -> bool {
 }
 
 fn right_diff_focused(screen: &str) -> bool {
-    tree_cursor_on(screen, "README.md")
+    tree_has(screen, "README.md")
+        && !tree_cursor_on(screen, "README.md")
         && pane_unstaged_readme(screen)
         && panes_tree_unfocused_diff_focused(screen)
         && screen.contains("[workspace]")
@@ -77,7 +78,8 @@ fn highlight_active(screen: &str) -> bool {
 }
 
 fn right_diff_focused_allow_visual(screen: &str) -> bool {
-    tree_cursor_on(screen, "README.md")
+    tree_has(screen, "README.md")
+        && !tree_cursor_on(screen, "README.md")
         && pane_unstaged_readme(screen)
         && panes_tree_unfocused_diff_focused(screen)
         && screen.contains("[workspace]")
@@ -115,7 +117,8 @@ fn range_commented(screen: &str) -> bool {
         && pane_unstaged_readme(screen)
         && screen.contains('"')
         && screen.contains("comment saved")
-        && tree_cursor_on(screen, "README.md")
+        && tree_has(screen, "README.md")
+        && !tree_cursor_on(screen, "README.md")
         && !screen.contains("VISUAL")
 }
 
@@ -283,7 +286,8 @@ fn pty_semicolon_opens_existing_range_on_covered_line() {
             overlay_closed(screen)
                 && pane_unstaged_readme(screen)
                 && screen.contains("comment deleted")
-                && tree_cursor_on(screen, "README.md")
+                && tree_has(screen, "README.md")
+                && !tree_cursor_on(screen, "README.md")
                 && !screen.contains("VISUAL")
         },
         "empty Enter deletes the covering range (not a no-op single-line key)",

@@ -2,8 +2,8 @@ use crate::harness::PtySession;
 use crate::seed::focus_workspace;
 use crate::support::{
     crumb_row, focusbox_graph_left_full, graph_cursor_on, graph_pane_focused,
-    graph_subject_meta_line, no_mouse_toggle_toast, status_row, title_has_files, tree_cursor_on,
-    tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    graph_subject_meta_line, no_mouse_toggle_toast, status_row, title_has_files, tree_has,
+    tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 const BRANCH: &str = "e2e-at-commit";
@@ -60,7 +60,7 @@ fn graph_focused_diverged_before_create(screen: &str) -> bool {
     let status = status_row(screen);
     let crumb = crumb_row(screen);
     graph_pane_focused(screen)
-        && tree_cursor_on(screen, "focusbox")
+        && tree_has(screen, "focusbox")
         && focusbox_diverged_graph_body(screen)
         && crumb.contains("workspace › [focusbox]")
         && !crumb.contains(&format!("created {BRANCH}"))
@@ -128,7 +128,7 @@ fn documented_graph_create_branch_at(screen: &str, overlay_hash: &str) -> bool {
         && screen.contains("[+feature/keep]")
         && screen.contains("[main]")
         && focusbox_still_on_keep(screen)
-        && tree_cursor_on(screen, "focusbox")
+        && tree_has(screen, "focusbox")
         && status.contains("drill")
         && status.contains(" tree")
         && status.contains(" split")

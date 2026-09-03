@@ -319,7 +319,7 @@ pub fn merger_graph_drilled_right(screen: &str) -> bool {
     let crumb = crumb_line(screen);
     let status = status_line(screen);
     panes_tree_unfocused_graph_focused(screen)
-        && tree_cursor_on(screen, "merger")
+        && tree_has(screen, "merger")
         && !tree_cursor_on(screen, "README.md")
         && crumb.contains("workspace › [merger]")
         && status.contains("drill")
@@ -384,7 +384,7 @@ pub fn focusbox_graph_right_full(screen: &str) -> bool {
     let crumb = crumb_line(screen);
     let status = status_line(screen);
     panes_tree_unfocused_graph_focused(screen)
-        && tree_cursor_on(screen, "focusbox")
+        && tree_has(screen, "focusbox")
         && crumb.contains("workspace › [focusbox]")
         && !crumb.contains("graph focus:")
         && !crumb.contains("full graph")
@@ -715,7 +715,7 @@ pub fn after_wip_name(screen: &str) -> Option<String> {
 /// Restored `wip.txt` on the merger tree. Badge `A` is the staged add.
 pub fn merger_wip_added(screen: &str) -> bool {
     tree_has(screen, "wip.txt")
-        && tree_cursor_on(screen, "merger")
+        && tree_has(screen, "merger")
         && after_wip_name(screen).is_some_and(|after| after.contains('A'))
 }
 
@@ -781,7 +781,7 @@ pub fn documented_graph_stash_pop(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);
     graph_pane_focused(screen)
-        && tree_cursor_on(screen, "merger")
+        && tree_has(screen, "merger")
         && merger_wip_added(screen)
         && !graph_stash_still_listed(screen)
         && screen.contains("uncommitted changes")
@@ -888,7 +888,7 @@ pub fn app_focused_stash_visible(screen: &str) -> bool {
 /// Tab focused the app graph on the working-tree row. Stash is the next row.
 pub fn app_graph_working_tree_focused(screen: &str) -> bool {
     graph_pane_focused(screen)
-        && tree_cursor_on(screen, "app")
+        && tree_has(screen, "app")
         && graph_cursor_on(screen, "working tree clean")
         && !graph_cursor_on(screen, "WIP on main")
         && app_stash_on_graph(screen)
@@ -899,7 +899,7 @@ pub fn app_graph_working_tree_focused(screen: &str) -> bool {
 /// `j` landed on the app stash row. Graph `a` / `D` hints. Not merger.
 pub fn app_graph_stash_row_focused(screen: &str) -> bool {
     graph_pane_focused(screen)
-        && tree_cursor_on(screen, "app")
+        && tree_has(screen, "app")
         && graph_cursor_on(screen, "WIP on main")
         && app_stash_on_graph(screen)
         && has_graph_stash_hints(screen)

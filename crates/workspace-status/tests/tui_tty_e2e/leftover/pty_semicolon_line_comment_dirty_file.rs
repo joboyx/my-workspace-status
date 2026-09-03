@@ -4,7 +4,8 @@ use std::path::Path;
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    documented_launch_first_paint, pane_unstaged_readme, tree_cursor_on, GIT_WAIT, SETTLE_MS, WAIT,
+    documented_launch_first_paint, pane_unstaged_readme, tree_cursor_on, tree_has, GIT_WAIT,
+    SETTLE_MS, WAIT,
 };
 
 const BODY: &str = "wt-line-note-e2e";
@@ -33,7 +34,8 @@ fn overlay_closed(screen: &str) -> bool {
 }
 
 fn right_diff_focused(screen: &str) -> bool {
-    tree_cursor_on(screen, "README.md")
+    tree_has(screen, "README.md")
+        && !tree_cursor_on(screen, "README.md")
         && pane_unstaged_readme(screen)
         && screen.contains("[workspace]")
         && !comment_overlay(screen)
@@ -44,14 +46,16 @@ fn dirty_line_commented(screen: &str) -> bool {
         && pane_unstaged_readme(screen)
         && screen.contains('"')
         && screen.contains("comment saved")
-        && tree_cursor_on(screen, "README.md")
+        && tree_has(screen, "README.md")
+        && !tree_cursor_on(screen, "README.md")
 }
 
 fn dirty_line_uncommented(screen: &str) -> bool {
     overlay_closed(screen)
         && pane_unstaged_readme(screen)
         && screen.contains("comment deleted")
-        && tree_cursor_on(screen, "README.md")
+        && tree_has(screen, "README.md")
+        && !tree_cursor_on(screen, "README.md")
 }
 
 /// `;` on a focused dirty file diff saves a line comment (ASCII `"`).

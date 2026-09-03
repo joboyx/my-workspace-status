@@ -127,7 +127,7 @@ fn scrollbar_track_span(screen: &str, thumb_col: u16) -> Option<(u16, u16)> {
 fn history_graph_at_top(screen: &str) -> bool {
     screen.contains("count 29")
         && (screen.contains("Working tree") || screen.contains("working tree clean"))
-        && tree_cursor_on(screen, "history")
+        && tree_has(screen, "history")
         && title_has_graph(screen)
         && graph_thumb_cells(screen).is_empty()
         && no_wrong_overlays(screen)
@@ -137,7 +137,7 @@ fn history_graph_at_top(screen: &str) -> bool {
 fn history_graph_at_bottom(screen: &str) -> bool {
     screen.contains("count 0")
         && !screen.contains("count 29")
-        && tree_cursor_on(screen, "history")
+        && tree_has(screen, "history")
         && title_has_graph(screen)
         && bottom_graph_thumb(screen).is_some()
         && no_wrong_overlays(screen)
@@ -260,7 +260,7 @@ fn pty_divider_scrollbar_drag() {
         |screen| {
             screen.contains("count 29")
                 && (screen.contains("Working tree") || screen.contains("working tree clean"))
-                && tree_cursor_on(screen, "history")
+                && tree_has(screen, "history")
                 && no_wrong_overlays(screen)
         },
         "track click toward the top jumps the graph (a dead click stays on count 0)",

@@ -26,12 +26,11 @@ fn help_lists_hl_pan(screen: &str) -> bool {
 }
 
 fn tree_stays_on_long_file(screen: &str) -> bool {
-    tree_cursor_on(screen, FILE)
+    tree_has(screen, FILE)
         && !tree_cursor_on(screen, "README.md")
         && !tree_cursor_on(screen, "app")
         && !tree_cursor_on(screen, "merger")
         && !tree_cursor_on(screen, "No updates")
-        && tree_has(screen, FILE)
         && tree_has(screen, "README.md")
         && tree_has(screen, "app")
         && tree_dir_expanded(screen, "app")
@@ -99,6 +98,7 @@ fn idle_chrome_right(screen: &str) -> bool {
 /// Long NEW file-diff is loaded and clipped. Tree is still focused.
 fn long_diff_clipped_tree_focus(screen: &str) -> bool {
     panes_tree_focused_diff_unfocused(screen)
+        && tree_cursor_on(screen, FILE)
         && tree_stays_on_long_file(screen)
         && clipped_new_diff(screen)
         && idle_chrome_left(screen)

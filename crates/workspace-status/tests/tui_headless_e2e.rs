@@ -332,6 +332,51 @@ fn unfocused_pane_body_is_not_dimmed() {
     let _ = fs::remove_dir_all(root);
 }
 
+fn tree_line_has_cursor_bar(frame: &str, needle: &str) -> bool {
+    frame.lines().any(|line| {
+        let left = line.split("││").next().unwrap_or(line);
+        left.contains(needle) && left.contains('▌')
+    })
+}
+
+fn right_line_has_cursor_bar(frame: &str, needle: &str) -> bool {
+    frame.lines().any(|line| {
+        let right = line.split("││").nth(1).unwrap_or("");
+        right.contains(needle) && right.contains('▌')
+    })
+}
+
+#[test]
+fn cursor_bar_follows_focused_list_after_tab() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    let frame = tui.frame();
+    assert!(
+        tree_line_has_cursor_bar(&frame, "README.md"),
+        "left-focused tree paints the cursor bar on README.md:\n{frame}"
+    );
+    assert!(
+        !right_line_has_cursor_bar(&frame, "UNSTAGED")
+            && !right_line_has_cursor_bar(&frame, "+dirty"),
+        "unfocused diff must not paint the list cursor bar:\n{frame}"
+    );
+
+    tui.tab();
+    assert!(tui.focus_is_right(), "Tab focuses the right pane");
+    let frame = tui.frame();
+    assert!(
+        !tree_line_has_cursor_bar(&frame, "README.md"),
+        "unfocused tree must not paint the list cursor bar:\n{frame}"
+    );
+    assert!(
+        right_line_has_cursor_bar(&frame, "UNSTAGED")
+            || right_line_has_cursor_bar(&frame, "+dirty")
+            || right_line_has_cursor_bar(&frame, "@@"),
+        "focused diff must paint the list cursor bar:\n{frame}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn held_nav_repeat_moves_again_and_does_not_quit() {
     let (root, workspace) = daily_workspace();

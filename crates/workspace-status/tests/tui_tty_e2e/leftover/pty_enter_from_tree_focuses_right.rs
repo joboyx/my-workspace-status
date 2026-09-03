@@ -20,7 +20,8 @@ fn enter_focuses_readme_diff(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);
     panes_tree_unfocused_diff_focused(screen)
-        && tree_cursor_on(screen, "README.md")
+        && tree_has(screen, "README.md")
+        && !tree_cursor_on(screen, "README.md")
         && !tree_cursor_on(screen, "app")
         && !tree_cursor_on(screen, "workspace")
         && !tree_cursor_on(screen, "merger")
