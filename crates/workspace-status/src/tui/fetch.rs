@@ -1,7 +1,7 @@
 //! Background fetch period. Independent of [`super::watch`].
 //!
 //! The timer fires [`super::action::Action::FetchTick`]. Manual `f` and that
-//! tick run a capped worker pool (`FETCH_CONCURRENCY` = 4;
+//! tick run a capped worker pool (`FETCH_CONCURRENCY` = 10;
 //! `WS_STATUS_FETCH_CONCURRENCY`) so independent checkouts overlap.
 
 use crate::snapshot::{WorkspaceRepoSnapshot, WorkspaceSnapshot};

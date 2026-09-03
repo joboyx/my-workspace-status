@@ -1,6 +1,6 @@
 //! Bounded parallel map for independent per-repo git work.
 //!
-//! Ink used `mapWithConcurrency` with `FETCH_CONCURRENCY = 4`. Fetch, pull,
+//! Ink used `mapWithConcurrency` with `FETCH_CONCURRENCY = 10`. Fetch, pull,
 //! push, and snapshot collect ([`crate::discovery::process_repo`]) share that
 //! cap. Writes that must stay exclusive on one checkout (stage, commit, merge
 //! into HEAD) stay serial on the event loop.
@@ -12,7 +12,7 @@ use std::thread::{self, JoinHandle};
 use std::vec::IntoIter;
 
 /// Default in-flight cap for independent per-repo git (Ink `FETCH_CONCURRENCY`).
-pub const FETCH_CONCURRENCY: usize = 4;
+pub const FETCH_CONCURRENCY: usize = 10;
 
 /// Cap from `WS_STATUS_FETCH_CONCURRENCY`. Missing / invalid / `0` → [`FETCH_CONCURRENCY`].
 /// Values below 1 clamp to 1.
@@ -388,13 +388,13 @@ mod tests {
     }
 
     #[test]
-    fn default_cap_is_ink_four() {
-        assert_eq!(FETCH_CONCURRENCY, 4);
-        assert_eq!(fetch_concurrency(None), 4);
-        assert_eq!(fetch_concurrency(Some("")), 4);
-        assert_eq!(fetch_concurrency(Some("nope")), 4);
-        assert_eq!(fetch_concurrency(Some("0")), 4);
-        assert_eq!(fetch_concurrency(Some("-1")), 4);
+    fn default_cap_is_ten() {
+        assert_eq!(FETCH_CONCURRENCY, 10);
+        assert_eq!(fetch_concurrency(None), 10);
+        assert_eq!(fetch_concurrency(Some("")), 10);
+        assert_eq!(fetch_concurrency(Some("nope")), 10);
+        assert_eq!(fetch_concurrency(Some("0")), 10);
+        assert_eq!(fetch_concurrency(Some("-1")), 10);
         assert_eq!(fetch_concurrency(Some("8")), 8);
         assert_eq!(fetch_concurrency(Some("1")), 1);
     }
