@@ -281,7 +281,7 @@ fn pane_border(focused: bool, palette: Palette) -> Style {
     if focused {
         Style::default().fg(palette.heading)
     } else {
-        Style::default().fg(palette.muted)
+        Style::default().fg(palette.border_dim)
     }
 }
 
@@ -2261,6 +2261,107 @@ mod tests {
             assert!(!pane_title(name, false, true).starts_with(' '));
             assert!(!pane_title(name, false, true).ends_with(' '));
         }
+    }
+
+    #[test]
+    fn pane_border_focused_is_heading_unfocused_is_border_dim() {
+        for id in crate::tui::theme::THEME_IDS {
+            let palette = id.palette();
+            let focused = pane_border(true, palette);
+            let unfocused = pane_border(false, palette);
+            assert_eq!(focused.fg, Some(palette.heading), "{id:?} focused");
+            assert_eq!(unfocused.fg, Some(palette.border_dim), "{id:?} unfocused");
+            assert_ne!(
+                unfocused.fg,
+                Some(palette.muted),
+                "{id:?} unfocused border is not muted"
+            );
+            assert!(
+                !unfocused.add_modifier.contains(Modifier::DIM),
+                "{id:?} unfocused border uses border_dim, not DIM"
+            );
+        }
+    }
+
+    fn two_pane_diff_state() -> AppState {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let file = state
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::File)
+            .expect("file row");
+        state.cursor = file;
+        state.set_diff(
+            "app".into(),
+            "README.md".into(),
+            super::super::diff::DiffContent::from_lines(vec![
+                "@@ -1,1 +1,1 @@".into(),
+                "-old line".into(),
+                "+new line".into(),
+            ]),
+        );
+        state
+    }
+
+    fn unfocused_inner(state: &AppState) -> (u16, u16, u16, u16) {
+        let layout = &state.layout;
+        match state.focus {
+            FocusPane::Left => (
+                layout.diff_content_x,
+                layout.right_y,
+                layout.diff_pane_width,
+                layout.diff_pane_height,
+            ),
+            FocusPane::Right => (
+                layout.tree_x,
+                layout.tree_y,
+                layout.tree_width,
+                layout.tree_height,
+            ),
+        }
+    }
+
+    fn assert_unfocused_body_not_dimmed(state: &mut AppState) {
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, state)).unwrap();
+        let buf = terminal.backend().buffer();
+        let (x, y, w, h) = unfocused_inner(state);
+        assert!(
+            w > 0 && h > 0,
+            "unfocused inner must exist after paint ({x},{y} {w}x{h})"
+        );
+        let mut saw_body = false;
+        for row in y..y.saturating_add(h) {
+            for col in x..x.saturating_add(w) {
+                let cell = &buf[(col, row)];
+                if cell.symbol().chars().all(|c| c.is_whitespace()) {
+                    continue;
+                }
+                saw_body = true;
+                assert!(
+                    !cell.modifier.contains(Modifier::DIM),
+                    "unfocused body {:?} at ({col},{row}) must not DIM:\n{}",
+                    cell.symbol(),
+                    buffer_text(&terminal)
+                );
+            }
+        }
+        assert!(
+            saw_body,
+            "expected body cells in unfocused pane:\n{}",
+            buffer_text(&terminal)
+        );
+    }
+
+    #[test]
+    fn unfocused_pane_body_is_not_dimmed() {
+        let mut state = two_pane_diff_state();
+        state.focus = FocusPane::Left;
+        assert_unfocused_body_not_dimmed(&mut state);
+        state.focus = FocusPane::Right;
+        assert_unfocused_body_not_dimmed(&mut state);
     }
 
     #[test]

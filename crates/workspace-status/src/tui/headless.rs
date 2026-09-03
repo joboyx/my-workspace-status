@@ -11,6 +11,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::backend::TestBackend;
+use ratatui::style::Modifier;
 use ratatui::Terminal;
 
 use crate::config::{load_workspace_status_config, WorkspaceStatusConfig};
@@ -247,6 +248,44 @@ impl HeadlessTui {
     /// Paint and return the full screen as lines (trailing spaces trimmed).
     pub fn frame(&mut self) -> String {
         self.paint().join("\n")
+    }
+
+    /// Paint. True when a non-space cell inside the unfocused pane (not the
+    /// border or title row) has [`Modifier::DIM`].
+    pub fn unfocused_pane_body_has_dim(&mut self) -> bool {
+        let backend = TestBackend::new(self.width, self.height);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| draw(frame, &mut self.state))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let layout = &self.state.layout;
+        let (x, y, w, h) = match self.state.focus {
+            FocusPane::Left => (
+                layout.diff_content_x,
+                layout.right_y,
+                layout.diff_pane_width,
+                layout.diff_pane_height,
+            ),
+            FocusPane::Right => (
+                layout.tree_x,
+                layout.tree_y,
+                layout.tree_width,
+                layout.tree_height,
+            ),
+        };
+        for row in y..y.saturating_add(h) {
+            for col in x..x.saturating_add(w) {
+                let cell = &buffer[(col, row)];
+                if cell.symbol().chars().all(|c| c.is_whitespace()) {
+                    continue;
+                }
+                if cell.modifier.contains(Modifier::DIM) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Paint and return a fingerprint of cell colours. Theme cycle must change it.

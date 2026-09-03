@@ -311,6 +311,25 @@ fn focused_pane_title_uses_leading_glyph() {
 }
 
 #[test]
+fn unfocused_pane_body_is_not_dimmed() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    assert!(
+        !tui.unfocused_pane_body_has_dim(),
+        "left-focused: unfocused right body must not DIM:\n{}",
+        tui.frame()
+    );
+    tui.tab();
+    assert!(tui.focus_is_right(), "Tab focuses the right pane");
+    assert!(
+        !tui.unfocused_pane_body_has_dim(),
+        "right-focused: unfocused left body must not DIM:\n{}",
+        tui.frame()
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn held_nav_repeat_moves_again_and_does_not_quit() {
     let (root, workspace) = daily_workspace();
     let mut tui = open(&workspace);
