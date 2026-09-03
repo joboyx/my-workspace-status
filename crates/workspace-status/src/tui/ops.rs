@@ -5,7 +5,9 @@ use crate::snapshot::{
     CheckoutKind, FileChange, SyncStatus, WorkspaceRepoSnapshot, WorkspaceSnapshot,
 };
 
-use super::tree::{dir_path_from_id, path_under_dir, NodeKind, VisibleRow};
+use super::tree::{
+    changes_side_change, dir_path_from_id, path_under_dir, staged_side_change, NodeKind, VisibleRow,
+};
 
 /// One dirty file in the focused write scope.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,10 +45,12 @@ fn files_for_repo(snapshot: &WorkspaceSnapshot, repo: &str) -> Vec<ScopedFile> {
 /// File rows stay single-file. Dir rows walk dirty files under that dir
 /// (the dir path itself and its children) filtered to that dir's section
 /// side when Staged / Changes chrome is present. Section rows walk every
-/// dirty file on that side of the checkout. Checkout and flat repo rows
-/// walk every dirty file in that checkout. Family containers, workspace,
-/// and group rows yield no files. Hidden ignored stay out unless shown.
-/// Linked worktrees are included only when that checkout is focused.
+/// dirty file on that side of the checkout. Section and dir collections
+/// split each `FileChange` the same way as tree rows (the other git side
+/// is cleared). Checkout and flat repo rows walk every dirty file in that
+/// checkout. Family containers, workspace, and group rows yield no files.
+/// Hidden ignored stay out unless shown. Linked worktrees are included
+/// only when that checkout is focused.
 pub fn collect_write_files(
     snapshot: &WorkspaceSnapshot,
     focused: Option<&VisibleRow>,
@@ -84,6 +88,7 @@ pub fn collect_write_files(
             under
                 .into_iter()
                 .filter(|file| file_on_section_side(&file.change, changes_side))
+                .map(|file| split_scoped_file(file, changes_side))
                 .collect()
         }
         NodeKind::Section => {
@@ -99,6 +104,7 @@ pub fn collect_write_files(
             files_for_repo(snapshot, repo)
                 .into_iter()
                 .filter(|file| file_on_section_side(&file.change, changes_side))
+                .map(|file| split_scoped_file(file, changes_side))
                 .collect()
         }
         NodeKind::Checkout => {
@@ -125,6 +131,17 @@ fn file_on_section_side(change: &FileChange, changes_side: bool) -> bool {
         change.unstaged_status.is_some() || change.untracked
     } else {
         change.staged_status.is_some()
+    }
+}
+
+fn split_scoped_file(file: ScopedFile, changes_side: bool) -> ScopedFile {
+    ScopedFile {
+        repo: file.repo,
+        change: if changes_side {
+            changes_side_change(&file.change)
+        } else {
+            staged_side_change(&file.change)
+        },
     }
 }
 
@@ -730,6 +747,70 @@ mod tests {
         change.staged_status.is_some()
     }
 
+    fn is_revertible_change(change: &FileChange) -> bool {
+        change.unstaged_status.is_some() || change.untracked
+    }
+
+    fn colliding_dir_ms_snapshot() -> WorkspaceSnapshot {
+        let mut row = dirty("app", false, false, &[]);
+        row.has_staged = true;
+        row.has_unstaged = true;
+        row.changes = vec![
+            FileChange {
+                path: "pkg/a.rs".into(),
+                staged_status: Some("M".into()),
+                unstaged_status: None,
+                untracked: false,
+                old_path: None,
+            },
+            FileChange {
+                path: "pkg/b.rs".into(),
+                staged_status: None,
+                unstaged_status: Some("M".into()),
+                untracked: false,
+                old_path: None,
+            },
+            FileChange {
+                path: "pkg/both.rs".into(),
+                staged_status: Some("M".into()),
+                unstaged_status: Some("M".into()),
+                untracked: false,
+                old_path: None,
+            },
+        ];
+        build_workspace_snapshot(&[row], &[], false, &[])
+    }
+
+    fn one_sided_nested_dirs_snapshot() -> WorkspaceSnapshot {
+        let mut row = dirty("app", false, false, &[]);
+        row.has_staged = true;
+        row.has_unstaged = true;
+        row.changes = vec![
+            FileChange {
+                path: "staged.rs".into(),
+                staged_status: Some("M".into()),
+                unstaged_status: None,
+                untracked: false,
+                old_path: None,
+            },
+            FileChange {
+                path: "src/a.rs".into(),
+                staged_status: Some("M".into()),
+                unstaged_status: None,
+                untracked: false,
+                old_path: None,
+            },
+            FileChange {
+                path: "docs/x.md".into(),
+                staged_status: None,
+                unstaged_status: Some("M".into()),
+                untracked: false,
+                old_path: None,
+            },
+        ];
+        build_workspace_snapshot(&[row], &[], false, &[])
+    }
+
     fn mixed_section_snapshot() -> WorkspaceSnapshot {
         let mut row = dirty("app", false, false, &[]);
         row.has_staged = true;
@@ -802,6 +883,14 @@ mod tests {
             vec!["both.rs", "src/a.rs", "staged.rs"]
         );
         assert!(files.iter().all(|f| is_unstageable_change(&f.change)));
+        assert!(files.iter().all(|f| !is_stageable_change(&f.change)));
+        assert!(files.iter().all(|f| !is_revertible_change(&f.change)));
+        let both = files
+            .iter()
+            .find(|f| f.change.path == "both.rs")
+            .expect("both.rs");
+        assert!(both.change.unstaged_status.is_none());
+        assert!(!both.change.untracked);
     }
 
     #[test]
@@ -815,6 +904,12 @@ mod tests {
         let files = collect_write_files(&snapshot, Some(changes), false);
         assert_eq!(write_paths(&files), vec!["both.rs", "new.ts", "src/b.rs"]);
         assert!(files.iter().all(|f| is_stageable_change(&f.change)));
+        assert!(files.iter().all(|f| !is_unstageable_change(&f.change)));
+        let both = files
+            .iter()
+            .find(|f| f.change.path == "both.rs")
+            .expect("both.rs");
+        assert!(both.change.staged_status.is_none());
     }
 
     #[test]
@@ -880,6 +975,74 @@ mod tests {
         let dir_files = collect_write_files(&snapshot, Some(dir), false);
         assert_eq!(write_paths(&dir_files), vec!["src/b.rs"]);
         assert!(dir_files.iter().all(|f| is_stageable_change(&f.change)));
+    }
+
+    #[test]
+    fn collect_write_files_colliding_dir_ms_file_keeps_one_git_side() {
+        let snapshot = colliding_dir_ms_snapshot();
+        let rows = mixed_section_rows(&snapshot);
+        let staged_dir = rows
+            .iter()
+            .find(|r| r.id == "dir:app:pkg")
+            .expect("staged pkg dir");
+        let changes_dir = rows
+            .iter()
+            .find(|r| r.id == "dir:app:pkg#unstaged")
+            .expect("changes pkg dir");
+        let staged_files = collect_write_files(&snapshot, Some(staged_dir), false);
+        assert_eq!(write_paths(&staged_files), vec!["pkg/a.rs", "pkg/both.rs"]);
+        assert!(staged_files
+            .iter()
+            .all(|f| is_unstageable_change(&f.change)));
+        assert!(staged_files.iter().all(|f| !is_stageable_change(&f.change)));
+        assert!(staged_files
+            .iter()
+            .all(|f| !is_revertible_change(&f.change)));
+        let staged_both = staged_files
+            .iter()
+            .find(|f| f.change.path == "pkg/both.rs")
+            .expect("staged pkg/both.rs");
+        assert_eq!(staged_both.change.staged_status.as_deref(), Some("M"));
+        assert!(staged_both.change.unstaged_status.is_none());
+        assert!(!staged_both.change.untracked);
+        let changes_files = collect_write_files(&snapshot, Some(changes_dir), false);
+        assert_eq!(write_paths(&changes_files), vec!["pkg/b.rs", "pkg/both.rs"]);
+        assert!(changes_files.iter().all(|f| is_stageable_change(&f.change)));
+        assert!(changes_files
+            .iter()
+            .all(|f| !is_unstageable_change(&f.change)));
+        let changes_both = changes_files
+            .iter()
+            .find(|f| f.change.path == "pkg/both.rs")
+            .expect("changes pkg/both.rs");
+        assert!(changes_both.change.staged_status.is_none());
+        assert_eq!(changes_both.change.unstaged_status.as_deref(), Some("M"));
+    }
+
+    #[test]
+    fn collect_write_files_one_sided_nested_dirs_keep_unsuffixed_ids() {
+        let snapshot = one_sided_nested_dirs_snapshot();
+        let rows = mixed_section_rows(&snapshot);
+        assert!(rows.iter().any(|r| r.id == "dir:app:src"));
+        assert!(rows.iter().any(|r| r.id == "dir:app:docs"));
+        assert!(rows.iter().all(|r| r.id != "dir:app:src#unstaged"));
+        assert!(rows.iter().all(|r| r.id != "dir:app:docs#unstaged"));
+        let staged_src = rows
+            .iter()
+            .find(|r| r.id == "dir:app:src")
+            .expect("staged-only src");
+        let changes_docs = rows
+            .iter()
+            .find(|r| r.id == "dir:app:docs")
+            .expect("changes-only docs");
+        assert_eq!(
+            write_paths(&collect_write_files(&snapshot, Some(staged_src), false)),
+            vec!["src/a.rs"]
+        );
+        assert_eq!(
+            write_paths(&collect_write_files(&snapshot, Some(changes_docs), false)),
+            vec!["docs/x.md"]
+        );
     }
 
     #[test]

@@ -570,7 +570,8 @@ fn materialize_dir(
     children
 }
 
-fn staged_side_change(change: &FileChange) -> FileChange {
+/// Keep index status and clear the worktree side (Staged tree rows / bulk writes).
+pub(crate) fn staged_side_change(change: &FileChange) -> FileChange {
     FileChange {
         path: change.path.clone(),
         staged_status: change.staged_status.clone(),
@@ -580,7 +581,8 @@ fn staged_side_change(change: &FileChange) -> FileChange {
     }
 }
 
-fn changes_side_change(change: &FileChange) -> FileChange {
+/// Keep worktree status and clear the index side (Changes tree rows / bulk writes).
+pub(crate) fn changes_side_change(change: &FileChange) -> FileChange {
     FileChange {
         path: change.path.clone(),
         staged_status: None,
