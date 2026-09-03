@@ -43,12 +43,15 @@ fn files_for_repo(snapshot: &WorkspaceSnapshot, repo: &str) -> Vec<ScopedFile> {
 /// Dirty files a stage / unstage / revert should touch for the focused row.
 ///
 /// File rows stay single-file. Dir rows walk dirty files under that dir
-/// (the dir path itself and its children) filtered to that dir's section
-/// side when Staged / Changes chrome is present. Section rows walk every
-/// dirty file on that side of the checkout. Section and dir collections
-/// split each `FileChange` the same way as tree rows (the other git side
-/// is cleared). Checkout and flat repo rows walk every dirty file in that
-/// checkout. Family containers, workspace, and group rows yield no files.
+/// (the dir path itself and its children). Changes dirs encode their side
+/// with a `#unstaged` id suffix and stay on the unstaged/untracked side.
+/// Unsuffixed dirs under a Staged / Changes split stay on the staged side.
+/// Checkouts with no staged paths keep today's unsuffixed dir ids and every
+/// dirty file under the dir. Section rows walk every dirty file on that
+/// side of the checkout. Section and dir collections split each
+/// `FileChange` the same way as tree rows (the other git side is cleared).
+/// Checkout and flat repo rows walk every dirty file in that checkout.
+/// Family containers, workspace, and group rows yield no files.
 /// Hidden ignored stay out unless shown. Linked worktrees are included
 /// only when that checkout is focused.
 pub fn collect_write_files(
@@ -79,12 +82,23 @@ pub fn collect_write_files(
             let Some(dir) = dir_path_from_id(&row.id, repo) else {
                 return Vec::new();
             };
-            let under: Vec<ScopedFile> = files_for_repo(snapshot, repo)
-                .into_iter()
+            let repo_files = files_for_repo(snapshot, repo);
+            let under: Vec<ScopedFile> = repo_files
+                .iter()
                 .filter(|file| path_under_dir(&file.change.path, &dir))
+                .cloned()
                 .collect();
-            let changes_side = row.id.ends_with("#unstaged")
-                || !under.iter().any(|file| file.change.staged_status.is_some());
+            // Changes dirs always carry `#unstaged`. Unsuffixed dirs under a
+            // split checkout are Staged. No Staged/Changes chrome → keep every
+            // dirty file (unstaged-only checkouts still use today's dir ids).
+            let changes_side = row.id.ends_with("#unstaged");
+            if !changes_side
+                && !repo_files
+                    .iter()
+                    .any(|file| file.change.staged_status.is_some())
+            {
+                return under;
+            }
             under
                 .into_iter()
                 .filter(|file| file_on_section_side(&file.change, changes_side))
@@ -781,6 +795,29 @@ mod tests {
         build_workspace_snapshot(&[row], &[], false, &[])
     }
 
+    fn nested_collapse_sides_snapshot() -> WorkspaceSnapshot {
+        let mut row = dirty("app", false, false, &[]);
+        row.has_staged = true;
+        row.has_unstaged = true;
+        row.changes = vec![
+            FileChange {
+                path: "src/lib.rs".into(),
+                staged_status: None,
+                unstaged_status: Some("M".into()),
+                untracked: false,
+                old_path: None,
+            },
+            FileChange {
+                path: "src/deep/mod.rs".into(),
+                staged_status: Some("M".into()),
+                unstaged_status: None,
+                untracked: false,
+                old_path: None,
+            },
+        ];
+        build_workspace_snapshot(&[row], &[], false, &[])
+    }
+
     fn one_sided_nested_dirs_snapshot() -> WorkspaceSnapshot {
         let mut row = dirty("app", false, false, &[]);
         row.has_staged = true;
@@ -1020,20 +1057,20 @@ mod tests {
     }
 
     #[test]
-    fn collect_write_files_one_sided_nested_dirs_keep_unsuffixed_ids() {
+    fn collect_write_files_one_sided_nested_dirs_suffix_changes_only() {
         let snapshot = one_sided_nested_dirs_snapshot();
         let rows = mixed_section_rows(&snapshot);
         assert!(rows.iter().any(|r| r.id == "dir:app:src"));
-        assert!(rows.iter().any(|r| r.id == "dir:app:docs"));
+        assert!(rows.iter().any(|r| r.id == "dir:app:docs#unstaged"));
         assert!(rows.iter().all(|r| r.id != "dir:app:src#unstaged"));
-        assert!(rows.iter().all(|r| r.id != "dir:app:docs#unstaged"));
+        assert!(rows.iter().all(|r| r.id != "dir:app:docs"));
         let staged_src = rows
             .iter()
             .find(|r| r.id == "dir:app:src")
             .expect("staged-only src");
         let changes_docs = rows
             .iter()
-            .find(|r| r.id == "dir:app:docs")
+            .find(|r| r.id == "dir:app:docs#unstaged")
             .expect("changes-only docs");
         assert_eq!(
             write_paths(&collect_write_files(&snapshot, Some(staged_src), false)),
@@ -1043,6 +1080,33 @@ mod tests {
             write_paths(&collect_write_files(&snapshot, Some(changes_docs), false)),
             vec!["docs/x.md"]
         );
+    }
+
+    #[test]
+    fn collect_write_files_collapsed_changes_dir_writes_unstaged_only() {
+        let snapshot = nested_collapse_sides_snapshot();
+        let rows = mixed_section_rows(&snapshot);
+        assert!(rows.iter().any(|r| r.id == "dir:app:src/deep"));
+        assert!(rows.iter().any(|r| r.id == "dir:app:src#unstaged"));
+        assert!(rows.iter().all(|r| r.id != "dir:app:src"));
+        let staged_deep = rows
+            .iter()
+            .find(|r| r.id == "dir:app:src/deep")
+            .expect("staged src/deep");
+        let changes_src = rows
+            .iter()
+            .find(|r| r.id == "dir:app:src#unstaged")
+            .expect("changes src");
+        assert_eq!(
+            write_paths(&collect_write_files(&snapshot, Some(staged_deep), false)),
+            vec!["src/deep/mod.rs"]
+        );
+        let changes_files = collect_write_files(&snapshot, Some(changes_src), false);
+        assert_eq!(write_paths(&changes_files), vec!["src/lib.rs"]);
+        assert!(changes_files.iter().all(|f| is_stageable_change(&f.change)));
+        assert!(changes_files
+            .iter()
+            .all(|f| !is_unstageable_change(&f.change)));
     }
 
     #[test]

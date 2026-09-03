@@ -517,7 +517,6 @@ fn materialize_dir(
     dir_path: &str,
     node: MutableDir,
     dual_files: &HashSet<String>,
-    colliding_dirs: &HashSet<String>,
     changes_side: bool,
 ) -> Vec<TreeNode> {
     let mut dir_entries: Vec<(String, MutableDir)> = node
@@ -536,11 +535,7 @@ fn materialize_dir(
         } else {
             format!("{dir_path}/{name}")
         };
-        let id_suffix = if changes_side && colliding_dirs.contains(&full_path) {
-            "#unstaged"
-        } else {
-            ""
-        };
+        let id_suffix = if changes_side { "#unstaged" } else { "" };
         children.push(TreeNode {
             id: format!("dir:{}:{full_path}{id_suffix}", repo.repo),
             kind: NodeKind::Dir,
@@ -549,14 +544,7 @@ fn materialize_dir(
             primary_repo: repo.primary_repo.clone(),
             ignored: repo.ignored,
             file: None,
-            children: materialize_dir(
-                repo,
-                &full_path,
-                child,
-                dual_files,
-                colliding_dirs,
-                changes_side,
-            ),
+            children: materialize_dir(repo, &full_path, child, dual_files, changes_side),
             chrome: NodeChrome {
                 path: full_path.clone(),
                 ..NodeChrome::default()
@@ -592,46 +580,11 @@ pub(crate) fn changes_side_change(change: &FileChange) -> FileChange {
     }
 }
 
-fn collapse_dir_ref<'a>(name: String, node: &'a MutableDir) -> (String, &'a MutableDir) {
-    let mut collapsed_name = name;
-    let mut node = node;
-    while node.files.is_empty() && node.dirs.len() == 1 {
-        let (child_name, child_node) = node.dirs.iter().next().expect("one child dir");
-        collapsed_name = format!("{collapsed_name}/{child_name}");
-        node = child_node;
-    }
-    (collapsed_name, node)
-}
-
-fn collapsed_dir_paths(prefix: &str, node: &MutableDir) -> HashSet<String> {
-    let mut out = HashSet::new();
-    for (name, child) in &node.dirs {
-        let (collapsed_name, collapsed) = collapse_dir_ref(name.clone(), child);
-        let full = if prefix.is_empty() {
-            collapsed_name
-        } else {
-            format!("{prefix}/{collapsed_name}")
-        };
-        out.insert(full.clone());
-        out.extend(collapsed_dir_paths(&full, collapsed));
-    }
-    out
-}
-
-fn dir_paths_for_changes(changes: &[FileChange]) -> HashSet<String> {
-    let mut root = MutableDir::default();
-    for change in changes {
-        add_change(&mut root, change);
-    }
-    collapsed_dir_paths("", &root)
-}
-
 fn forest_from_changes(
     repo: &WorkspaceRepoSnapshot,
     changes: &[FileChange],
     tree_mode: bool,
     dual_files: &HashSet<String>,
-    colliding_dirs: &HashSet<String>,
     changes_side: bool,
 ) -> Vec<TreeNode> {
     if !tree_mode {
@@ -647,7 +600,7 @@ fn forest_from_changes(
     for change in changes {
         add_change(&mut root, change);
     }
-    materialize_dir(repo, "", root, dual_files, colliding_dirs, changes_side)
+    materialize_dir(repo, "", root, dual_files, changes_side)
 }
 
 fn make_section_node(
@@ -675,12 +628,14 @@ fn make_section_node(
 /// File / dir forest under a checkout. Matches `materializeChangeForest`.
 ///
 /// When any path is staged, children are Staged / Changes section trees
-/// (empty side omitted). Otherwise the checkout's dirty files sit directly
-/// under the repo or worktree, with today's file/dir ids.
+/// (empty side omitted). Changes dirs always use a `#unstaged` id suffix.
+/// Dual MS files use that suffix only when the same path is in both forests.
+/// Otherwise the checkout's dirty files sit directly under the repo or
+/// worktree, with today's file/dir ids.
 fn materialize_change_forest(repo: &WorkspaceRepoSnapshot, tree_mode: bool) -> Vec<TreeNode> {
     let empty = HashSet::new();
     if !repo.changes.iter().any(|c| c.staged_status.is_some()) {
-        return forest_from_changes(repo, &repo.changes, tree_mode, &empty, &empty, false);
+        return forest_from_changes(repo, &repo.changes, tree_mode, &empty, false);
     }
 
     let staged: Vec<FileChange> = repo
@@ -701,15 +656,6 @@ fn materialize_change_forest(repo: &WorkspaceRepoSnapshot, tree_mode: bool) -> V
         .filter(|c| staged_paths.contains(&c.path))
         .map(|c| c.path.clone())
         .collect();
-    let colliding_dirs = if tree_mode {
-        let staged_dirs = dir_paths_for_changes(&staged);
-        dir_paths_for_changes(&changes)
-            .into_iter()
-            .filter(|p| staged_dirs.contains(p))
-            .collect()
-    } else {
-        HashSet::new()
-    };
 
     let mut children = Vec::new();
     if !staged.is_empty() {
@@ -717,7 +663,7 @@ fn materialize_change_forest(repo: &WorkspaceRepoSnapshot, tree_mode: bool) -> V
             repo,
             "staged",
             "Staged",
-            forest_from_changes(repo, &staged, tree_mode, &empty, &empty, false),
+            forest_from_changes(repo, &staged, tree_mode, &empty, false),
         ));
     }
     if !changes.is_empty() {
@@ -725,14 +671,7 @@ fn materialize_change_forest(repo: &WorkspaceRepoSnapshot, tree_mode: bool) -> V
             repo,
             "changes",
             "Changes",
-            forest_from_changes(
-                repo,
-                &changes,
-                tree_mode,
-                &dual_files,
-                &colliding_dirs,
-                true,
-            ),
+            forest_from_changes(repo, &changes, tree_mode, &dual_files, true),
         ));
     }
     children
@@ -2093,6 +2032,7 @@ mod tests {
         assert!(find_node(changes, "file:app:new.ts").is_some());
         assert!(find_node(changes, "file:app:src/a.rs").is_none());
         assert!(find_node(changes, "file:app:staged.rs").is_none());
+        assert!(find_node(changes, "dir:app:src").is_none());
 
         let rows = flatten_with(&tree, &HashSet::new(), true);
         let staged_file = rows
@@ -2240,6 +2180,26 @@ mod tests {
             dir_path_from_id("dir:app:src/foo#unstaged", "app").as_deref(),
             Some("src/foo")
         );
+    }
+
+    #[test]
+    fn changes_dirs_keep_unstaged_suffix_when_collapse_names_differ() {
+        let tree = built_tree(
+            vec![
+                fc("src/lib.rs", None, Some("M"), false),
+                fc("src/deep/mod.rs", Some("M"), None, false),
+            ],
+            true,
+        );
+        let staged = find_node(&tree, "section:app:staged").expect("staged");
+        let changes = find_node(&tree, "section:app:changes").expect("changes");
+        assert!(find_node(staged, "dir:app:src/deep").is_some());
+        assert!(find_node(staged, "file:app:src/deep/mod.rs").is_some());
+        assert!(find_node(staged, "dir:app:src").is_none());
+        assert!(find_node(changes, "dir:app:src#unstaged").is_some());
+        assert!(find_node(changes, "file:app:src/lib.rs").is_some());
+        assert!(find_node(changes, "dir:app:src").is_none());
+        assert!(find_node(changes, "dir:app:src/deep").is_none());
     }
 
     #[test]
