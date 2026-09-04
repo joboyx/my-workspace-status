@@ -337,3 +337,80 @@ pub fn seed_merge_mark_family(workspace: &Path) {
         ],
     );
 }
+
+/// Primary HEAD is a strict ancestor of default, plus linked extras.
+///
+/// `feature/primary-merged` has unique commits that landed on default
+/// with `--no-ff`. `feature/linked-merged` is a different landed branch
+/// (git cannot check out the same branch twice). `feature/just-created`
+/// is a new branch at the default tip (open, not merged).
+pub fn seed_primary_merged_family(workspace: &Path) {
+    seed_repo(workspace, "app", "main", false);
+    let repo = workspace.join("app");
+    fs::write(repo.join(".gitignore"), ".worktrees/\n").unwrap();
+    git(&repo, &["add", ".gitignore"]);
+    git(&repo, &["commit", "-q", "-m", "ignore linked worktree dir"]);
+    git(&repo, &["checkout", "-q", "-b", "feature/linked-merged"]);
+    fs::write(repo.join("linked-merged.txt"), "linked unique then merged\n").unwrap();
+    git(&repo, &["add", "linked-merged.txt"]);
+    git(&repo, &["commit", "-q", "-m", "linked merged unique"]);
+    git(&repo, &["checkout", "-q", "main"]);
+    git(
+        &repo,
+        &[
+            "merge",
+            "--no-ff",
+            "-q",
+            "-m",
+            "merge linked-merged",
+            "feature/linked-merged",
+        ],
+    );
+    git(&repo, &["checkout", "-q", "-b", "feature/primary-merged"]);
+    fs::write(repo.join("primary-merged.txt"), "primary unique then merged\n").unwrap();
+    git(&repo, &["add", "primary-merged.txt"]);
+    git(&repo, &["commit", "-q", "-m", "primary merged unique"]);
+    git(&repo, &["checkout", "-q", "main"]);
+    git(
+        &repo,
+        &[
+            "merge",
+            "--no-ff",
+            "-q",
+            "-m",
+            "merge primary-merged",
+            "feature/primary-merged",
+        ],
+    );
+    git(&repo, &["checkout", "-q", "feature/primary-merged"]);
+    fs::create_dir_all(repo.join(".worktrees")).unwrap();
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature/just-created",
+            ".worktrees/new",
+            "main",
+        ],
+    );
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            ".worktrees/linked",
+            "feature/linked-merged",
+        ],
+    );
+}
+
+/// Family whose primary checkout is merged into default.
+pub fn primary_merged_workspace() -> (PathBuf, PathBuf) {
+    let (root, workspace) = new_workspace("ws-tui-e2e-primary-merged");
+    seed_primary_merged_family(&workspace);
+    (root, workspace)
+}

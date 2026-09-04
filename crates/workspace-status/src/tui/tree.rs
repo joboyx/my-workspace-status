@@ -960,12 +960,21 @@ fn file_segments(change: &FileChange, tree_mode: bool, ascii: bool) -> NodeSegme
     NodeSegments { segments, trailing }
 }
 
-/// Open-vs-default / merged-into-default sit on linked extras only.
-fn linked_merge_mark(node: &TreeNode, ascii: bool) -> &'static str {
-    if node.chrome.checkout_kind == Some(CheckoutKind::Linked) {
-        tui_merge_mark(ascii, node.chrome.merged_into_default)
-    } else {
-        ""
+/// Merge mark next to a checkout branch.
+///
+/// Linked extras paint the full [`tui_merge_mark`] (check or open). Primary
+/// paints the check only when `merged_into_default` is `Some(true)`. Family
+/// containers and other kinds omit the mark. Open-vs-default stays linked-only.
+fn checkout_merge_mark(node: &TreeNode, ascii: bool) -> &'static str {
+    if node.chrome.is_family {
+        return "";
+    }
+    match node.chrome.checkout_kind {
+        Some(CheckoutKind::Linked) => tui_merge_mark(ascii, node.chrome.merged_into_default),
+        Some(CheckoutKind::Primary) if node.chrome.merged_into_default == Some(true) => {
+            tui_merge_mark(ascii, Some(true))
+        }
+        _ => "",
     }
 }
 
@@ -1023,7 +1032,7 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
         &node.chrome.branch,
         node.chrome.default_branch_override.as_deref(),
     );
-    let merge = linked_merge_mark(node, ascii);
+    let merge = checkout_merge_mark(node, ascii);
     let branch_role = if off_default {
         SegRole::BranchFeature
     } else {
@@ -1101,7 +1110,7 @@ fn checkout_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeS
         &node.chrome.branch,
         node.chrome.default_branch_override.as_deref(),
     );
-    let merge = linked_merge_mark(node, ascii);
+    let merge = checkout_merge_mark(node, ascii);
     let branch_role = if off_default {
         SegRole::BranchFeature
     } else {
@@ -1765,6 +1774,64 @@ mod tests {
             linked_row.label.contains('o'),
             "linked extra keeps open-vs-default, got {}",
             linked_row.label
+        );
+    }
+
+    #[test]
+    fn nested_primary_merged_into_default_paints_check() {
+        let mut primary = dirty_repo("app", &["src/a.ts"]);
+        primary.branch = "feature/auth-landed".into();
+        primary.merged_into_default = Some(true);
+        let mut linked = repo("app/.worktrees/feat", true, true);
+        linked.branch = "feature/side-landed".into();
+        linked.merged_into_default = Some(true);
+        let built = build_workspace_snapshot(&[primary, linked], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let primary_row = rows
+            .iter()
+            .find(|r| r.id == "checkout:app")
+            .expect("primary checkout");
+        let linked_row = rows
+            .iter()
+            .find(|r| r.id == "checkout:app/.worktrees/feat")
+            .expect("linked checkout");
+        assert!(
+            primary_row.label.contains('M'),
+            "primary merged into default must paint the check, got {}",
+            primary_row.label
+        );
+        assert!(
+            !primary_row.label.contains('o'),
+            "primary must not paint open-vs-default, got {}",
+            primary_row.label
+        );
+        assert!(
+            linked_row.label.contains('M'),
+            "linked extra keeps the merged check, got {}",
+            linked_row.label
+        );
+    }
+
+    #[test]
+    fn flat_primary_repo_merged_into_default_paints_check() {
+        let mut app = repo("app", true, false);
+        app.branch = "feature/auth-landed".into();
+        app.merged_into_default = Some(true);
+        let built = build_workspace_snapshot(&[app], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let app_row = rows.iter().find(|r| r.id == "repo:app").expect("repo:app");
+        assert_eq!(app_row.kind, NodeKind::Repo);
+        assert!(
+            app_row.label.contains('M'),
+            "flat primary merged into default must paint the check, got {}",
+            app_row.label
+        );
+        assert!(
+            !app_row.label.contains('o'),
+            "flat primary must not paint open-vs-default, got {}",
+            app_row.label
         );
     }
 
