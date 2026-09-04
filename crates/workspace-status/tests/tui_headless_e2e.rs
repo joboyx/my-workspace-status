@@ -2301,6 +2301,16 @@ fn command_palette_disabled_view_gates_keep_palette_open() {
         "full-file must stay dimmed when the right pane is not a file diff"
     );
     assert_contains(&tui.frame(), "Enter run");
+    tui.esc();
+    tui.ctrl_k();
+    type_palette_query(&mut tui, "reviewed");
+    tui.enter();
+    assert_eq!(
+        tui.input_mode(),
+        InputMode::CommandPalette,
+        "reviewed must stay dimmed on a workspace or repo row"
+    );
+    assert_contains(&tui.frame(), "Enter run");
     let _ = fs::remove_dir_all(root);
 }
 

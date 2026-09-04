@@ -384,9 +384,11 @@ impl AppState {
             return Some("not available here".into());
         }
         match action {
-            Action::Pull | Action::DefaultBranch => {
+            Action::Pull | Action::DefaultBranch | Action::Fetch => {
                 let op = if matches!(action, Action::Pull) {
                     Op::Pull
+                } else if matches!(action, Action::Fetch) {
+                    Op::Fetch
                 } else {
                     Op::DefaultBranch
                 };
@@ -505,6 +507,25 @@ impl AppState {
                     None
                 } else {
                     Some("no comment target".into())
+                }
+            }
+            Action::ToggleReviewed => {
+                if self.nav_depth() >= 1 {
+                    Some("not available here".into())
+                } else if self
+                    .focused_row()
+                    .is_some_and(|row| row.kind == super::super::tree::NodeKind::File)
+                {
+                    None
+                } else {
+                    Some("focus a file to mark reviewed".into())
+                }
+            }
+            Action::CopyEntityReference => {
+                if self.current_entity_reference().is_some() {
+                    None
+                } else {
+                    Some("no copy target".into())
                 }
             }
             Action::Branch => match self.focused_row() {
