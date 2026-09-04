@@ -960,12 +960,21 @@ fn file_segments(change: &FileChange, tree_mode: bool, ascii: bool) -> NodeSegme
     NodeSegments { segments, trailing }
 }
 
-/// Open-vs-default / merged-into-default sit on linked extras only.
-fn linked_merge_mark(node: &TreeNode, ascii: bool) -> &'static str {
-    if node.chrome.checkout_kind == Some(CheckoutKind::Linked) {
-        tui_merge_mark(ascii, node.chrome.merged_into_default)
-    } else {
-        ""
+/// Merge mark next to a checkout branch.
+///
+/// Linked extras paint the full [`tui_merge_mark`] (check or open). Primary
+/// paints the check only when `merged_into_default` is `Some(true)`. Family
+/// containers and other kinds omit the mark. Open-vs-default stays linked-only.
+fn checkout_merge_mark(node: &TreeNode, ascii: bool) -> &'static str {
+    if node.chrome.is_family {
+        return "";
+    }
+    match node.chrome.checkout_kind {
+        Some(CheckoutKind::Linked) => tui_merge_mark(ascii, node.chrome.merged_into_default),
+        Some(CheckoutKind::Primary) if node.chrome.merged_into_default == Some(true) => {
+            tui_merge_mark(ascii, Some(true))
+        }
+        _ => "",
     }
 }
 
@@ -1023,7 +1032,7 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
         &node.chrome.branch,
         node.chrome.default_branch_override.as_deref(),
     );
-    let merge = linked_merge_mark(node, ascii);
+    let merge = checkout_merge_mark(node, ascii);
     let branch_role = if off_default {
         SegRole::BranchFeature
     } else {
@@ -1101,7 +1110,7 @@ fn checkout_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeS
         &node.chrome.branch,
         node.chrome.default_branch_override.as_deref(),
     );
-    let merge = linked_merge_mark(node, ascii);
+    let merge = checkout_merge_mark(node, ascii);
     let branch_role = if off_default {
         SegRole::BranchFeature
     } else {
