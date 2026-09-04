@@ -75,8 +75,8 @@ CLI `-p` / `-d` (progress strings go to the caller; `--json` sends them to stder
 | Function | Purpose |
 | --- | --- |
 | `collect_write_files` | File nodes under the focused row: `[file]` / dir subtree (Changes dirs use `#unstaged`; Staged dirs are unsuffixed; no section chrome keeps every dirty file under the dir) / section header (checkout files on that side) / checkout files / flat-repo files; empty for family containers, workspace, and group. |
-| `op_targets` | Checkout paths for `f` / `p` / `d`. Workspace and family rows yield primary checkouts only. Group is empty. A linked worktree is included only when that row is focused. Hidden ignored repos are omitted. |
-| `push_targets` | Same primary / focused-worktree rule for `P`. Never on workspace. |
+| `op_targets` | Checkout paths for `f` / `p` / `d`. Workspace and family rows yield primary checkouts only. Group is empty (`op_is_kind_noop`). A linked worktree is included only when that row is focused. Hidden ignored repos are omitted. |
+| `push_targets` | Focused visible repo or checkout for `P`. Never on workspace, group, file, dir, or section. |
 | `background_fetch_targets` | Snapshot paths for the TUI background fetch timer. Hidden ignored checkouts are omitted. When ignored repos are shown, every snapshot path is included, including linked worktrees. Manual `f` stays on `op_targets`. |
 | `refresh_target` | Workspace / No-updates → whole snapshot; otherwise the focused checkout path. |
 

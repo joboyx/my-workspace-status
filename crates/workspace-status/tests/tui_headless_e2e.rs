@@ -2272,6 +2272,31 @@ fn command_palette_disabled_pull_on_file_keeps_palette_open() {
 }
 
 #[test]
+fn command_palette_disabled_push_on_file_keeps_palette_open() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    tui.search("README");
+    let id = tui.cursor_id();
+    let head = tui.snapshot_head("app");
+    let sync = tui.snapshot_sync_note("app");
+    tui.ctrl_k();
+    type_palette_query(&mut tui, "push");
+    let frame = tui.frame();
+    assert_contains(&frame, "Push");
+    assert_contains(&frame, "repo / checkout only");
+    tui.enter();
+    assert_eq!(tui.input_mode(), InputMode::CommandPalette);
+    assert_eq!(tui.cursor_id(), id);
+    assert_eq!(tui.snapshot_head("app"), head);
+    assert_eq!(tui.snapshot_sync_note("app"), sync);
+    let frame = tui.frame();
+    assert_contains(&frame, "Enter run");
+    assert_contains(&frame, "repo / checkout only");
+    assert_absent(&frame, "nothing to push");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn command_palette_disabled_view_gates_keep_palette_open() {
     let (root, workspace) = daily_workspace();
     let mut tui = open(&workspace);

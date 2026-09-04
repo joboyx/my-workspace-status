@@ -8,6 +8,7 @@ use super::super::command_palette::CommandPaletteState;
 use super::super::gates::{dispatch_is_noop, ListFocusTarget};
 use super::super::ops::{collect_write_files, op_is_kind_noop, Op};
 use super::super::split::SplitDrag;
+use super::super::tree::NodeKind;
 use super::{AppState, FileWrite, FocusPane, FoldOp};
 
 impl AppState {
@@ -396,6 +397,10 @@ impl AppState {
                     .filter(|row| op_is_kind_noop(row.kind, op))
                     .map(|_| "workspace / repo / checkout only".into())
             }
+            Action::Push => match self.focused_row().map(|row| row.kind) {
+                Some(NodeKind::Repo | NodeKind::Checkout) => None,
+                _ => Some("repo / checkout only".into()),
+            },
             Action::RemoveWorktree => {
                 if self.can_remove_focused_worktree() {
                     None
