@@ -237,13 +237,19 @@ pub fn format_completed_op(kind: RunningOp, ok: usize, failed: usize) -> String 
     }
 }
 
-/// True when `p` / `d` must stay a silent no-op on this row kind.
+/// True when `p` / `d` / `f` must stay a silent no-op on this row kind.
 ///
 /// Pull / default-branch are workspace / repo / checkout only.
-/// Fetch stays scoped on file and dir rows.
+/// Fetch stays scoped on file, dir, and section rows.
+/// Group rows have no targets for any of these ops.
 pub fn op_is_kind_noop(kind: NodeKind, op: Op) -> bool {
-    matches!(op, Op::Pull | Op::DefaultBranch)
-        && matches!(kind, NodeKind::File | NodeKind::Dir | NodeKind::Section)
+    match op {
+        Op::Pull | Op::DefaultBranch => matches!(
+            kind,
+            NodeKind::File | NodeKind::Dir | NodeKind::Section | NodeKind::Group
+        ),
+        Op::Fetch => matches!(kind, NodeKind::Group),
+    }
 }
 
 /// Checkout paths that `op` may touch for the focused row.
@@ -252,8 +258,8 @@ pub fn op_is_kind_noop(kind: NodeKind, op: Op) -> bool {
 /// targets. Hidden ignored repos are omitted
 /// unless `show_ignored` is true. Linked worktrees are omitted unless the
 /// focused row is that worktree (or a file inside it). Pull and
-/// default-branch skip file and dir rows; fetch still includes
-/// them.
+/// default-branch skip file, dir, section, and group rows; fetch
+/// still includes file, dir, and section, and skips group.
 pub fn op_targets(
     snapshot: &WorkspaceSnapshot,
     focused: Option<&VisibleRow>,
@@ -735,8 +741,16 @@ mod tests {
         );
         assert!(op_is_kind_noop(NodeKind::File, Op::Pull));
         assert!(op_is_kind_noop(NodeKind::Dir, Op::DefaultBranch));
+        assert!(op_is_kind_noop(NodeKind::Section, Op::Pull));
+        assert!(op_is_kind_noop(NodeKind::Group, Op::Pull));
+        assert!(op_is_kind_noop(NodeKind::Group, Op::DefaultBranch));
+        assert!(op_is_kind_noop(NodeKind::Group, Op::Fetch));
         assert!(!op_is_kind_noop(NodeKind::File, Op::Fetch));
+        assert!(!op_is_kind_noop(NodeKind::Dir, Op::Fetch));
+        assert!(!op_is_kind_noop(NodeKind::Section, Op::Fetch));
         assert!(!op_is_kind_noop(NodeKind::Repo, Op::Pull));
+        assert!(!op_is_kind_noop(NodeKind::Workspace, Op::Pull));
+        assert!(!op_is_kind_noop(NodeKind::Workspace, Op::Fetch));
     }
 
     #[test]

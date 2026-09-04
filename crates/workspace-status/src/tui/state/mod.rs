@@ -27,6 +27,7 @@ use super::branches::{
     can_open_branch_picker, checkoutable_branch_names, is_valid_branch_name, merge_rev_for_commit,
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
 };
+use super::command_palette::CommandPaletteState;
 #[cfg(not(test))]
 use super::comments::comment_store_path;
 use super::comments::{
@@ -319,6 +320,7 @@ pub struct AppState {
     /// Per-repo local branch names whose ancestors the graph shows. `None` = `--all`.
     pub graph_branch_focus: Option<(String, Vec<String>)>,
     pub create_branch: Option<CreateBranchState>,
+    pub command_palette: Option<CommandPaletteState>,
     pub flashes: HashMap<String, FlashStamp>,
     pub signatures: BTreeMap<String, String>,
     pub graph_signatures: BTreeMap<String, String>,
@@ -425,6 +427,7 @@ impl AppState {
             graph_focus_picker: None,
             graph_branch_focus: None,
             create_branch: None,
+            command_palette: None,
             flashes: HashMap::new(),
             signatures,
             graph_signatures: BTreeMap::new(),
@@ -463,6 +466,8 @@ impl AppState {
             InputMode::BranchPicker
         } else if self.graph_focus_picker.is_some() {
             InputMode::GraphFocusPicker
+        } else if self.command_palette.is_some() {
+            InputMode::CommandPalette
         } else if self.help_open {
             if self.help_search_query.is_some() {
                 InputMode::HelpSearch

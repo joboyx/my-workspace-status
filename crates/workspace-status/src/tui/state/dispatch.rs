@@ -118,6 +118,12 @@ impl AppState {
             | Action::ExportComments
             | Action::ExportCommentsCancel
             | Action::CopyEntityReference
+            | Action::ToggleCommandPalette(_)
+            | Action::CommandPaletteMove(_)
+            | Action::CommandPaletteChar(_)
+            | Action::CommandPaletteBackspace
+            | Action::CommandPaletteSubmit
+            | Action::CommandPaletteCancel
             | Action::Resize { .. }
             | Action::None) => self.dispatch_keymap(action, noop),
         }

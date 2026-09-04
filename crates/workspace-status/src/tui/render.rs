@@ -221,6 +221,8 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         draw_branch_picker(frame, overlay, state);
     } else if state.graph_focus_picker.is_some() {
         draw_graph_focus_picker(frame, overlay, state);
+    } else if state.command_palette.is_some() {
+        draw_command_palette(frame, overlay, state);
     } else {
         frame.render_widget(Paragraph::new(status_line(state, overlay.width)), overlay);
     }
@@ -1983,6 +1985,153 @@ fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
     lines.push(Line::from(Span::styled(
         "j/k move · type to filter · space toggle · Enter apply · O clear · Esc cancel",
         Style::default().fg(palette.muted),
+    )));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(overlay_block(accent))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let Some(palette) = state.command_palette.as_ref() else {
+        return;
+    };
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let palette_theme = state.theme.palette();
+    let accent = palette_theme.cursor;
+    let surface = overlay_surface(state);
+    let rows = palette.paint_rows();
+    let max_rows = 12usize;
+    let cursor_paint = rows.iter().position(|row| match row {
+        super::command_palette::PalettePaintRow::Command { index, .. } => *index == palette.cursor,
+        _ => false,
+    });
+    let start = if rows.len() <= max_rows {
+        0
+    } else {
+        let focus = cursor_paint.unwrap_or(0);
+        focus
+            .saturating_sub(max_rows / 2)
+            .min(rows.len() - max_rows)
+    };
+    let window = if rows.is_empty() {
+        Vec::new()
+    } else {
+        rows.iter().skip(start).take(max_rows).cloned().collect()
+    };
+    let prefix = match palette.opened_by {
+        super::action::PaletteOpenedBy::Colon => ":",
+        super::action::PaletteOpenedBy::CtrlK => "Ctrl-k",
+    };
+    let query = if palette.filter.is_empty() {
+        "…"
+    } else {
+        palette.filter.as_str()
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            prefix.to_string(),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ", Style::default()),
+        Span::styled(query.to_string(), Style::default().fg(accent)),
+    ])];
+    if window.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No matching commands",
+            Style::default().fg(palette_theme.muted),
+        )));
+    } else {
+        for row in window {
+            match row {
+                super::command_palette::PalettePaintRow::Header(title) => {
+                    lines.push(Line::from(Span::styled(
+                        title.to_string(),
+                        Style::default()
+                            .fg(palette_theme.heading)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                }
+                super::command_palette::PalettePaintRow::Command { command, index } => {
+                    let selected = index == palette.cursor;
+                    let reason = state.palette_disabled_reason(&command.action);
+                    let disabled = reason.is_some();
+                    let cursor = if selected { "❯ " } else { "  " };
+                    let row_bg = if selected {
+                        palette_theme.cursor_bg
+                    } else {
+                        Color::Reset
+                    };
+                    let mut style = Style::default()
+                        .fg(if selected {
+                            palette_theme.file
+                        } else {
+                            palette_theme.muted
+                        })
+                        .bg(row_bg);
+                    if disabled {
+                        style = style.add_modifier(Modifier::DIM);
+                    }
+                    let mut spans = vec![
+                        Span::styled(
+                            cursor.to_string(),
+                            Style::default()
+                                .fg(if selected {
+                                    accent
+                                } else {
+                                    palette_theme.muted
+                                })
+                                .bg(row_bg),
+                        ),
+                        Span::styled(command.title.to_string(), style),
+                        Span::raw(" "),
+                        key_chip(
+                            command.keys,
+                            if disabled {
+                                palette_theme.muted
+                            } else {
+                                accent
+                            },
+                            surface,
+                        ),
+                    ];
+                    spans.push(Span::styled(
+                        format!("  {}", command.group.title()),
+                        Style::default()
+                            .fg(palette_theme.muted)
+                            .bg(row_bg)
+                            .add_modifier(if disabled {
+                                Modifier::DIM
+                            } else {
+                                Modifier::empty()
+                            }),
+                    ));
+                    lines.push(Line::from(spans));
+                }
+            }
+        }
+    }
+    if !state.status.is_empty() {
+        lines.push(Line::from(Span::styled(
+            state.status.clone(),
+            Style::default().fg(overlay_status_color(&state.status, palette_theme)),
+        )));
+    }
+    let reason = palette
+        .selected()
+        .and_then(|command| state.palette_disabled_reason(&command.action));
+    let footer = match reason {
+        Some(why) => format!("Enter run · Esc close · {why}"),
+        None => "Enter run · Esc close".into(),
+    };
+    lines.push(Line::from(Span::styled(
+        footer,
+        Style::default().fg(palette_theme.muted),
     )));
     frame.render_widget(Clear, area);
     frame.render_widget(

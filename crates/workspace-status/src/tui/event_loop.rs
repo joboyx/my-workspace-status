@@ -26,7 +26,7 @@ use super::diff_tool::{cleanup_prepared, diff_tool_command, wait_and_cleanup};
 use super::editor::{editor_command, is_detached_editor, resolve_editor};
 use super::effect::{DiffLaunch, Interpreter, JobOutcome};
 use super::event_pump::{
-    action_triggers_graph_autoload, classify_busy_action, overlay_blocks_background_ticks,
+    action_triggers_graph_autoload, classify_busy_dispatch, overlay_blocks_background_ticks,
     BusyAction,
 };
 use super::fetch::fetch_interval_ms;
@@ -334,7 +334,15 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event) {
     }
     let action = map_event(ctx.state, &event);
     if ctx.interp.busy_for_writes() {
-        match classify_busy_action(&action) {
+        let palette_submit = if matches!(action, Action::CommandPaletteSubmit) {
+            ctx.state
+                .command_palette
+                .as_ref()
+                .and_then(|palette| palette.selected_action())
+        } else {
+            None
+        };
+        match classify_busy_dispatch(&action, palette_submit) {
             BusyAction::Quit => {
                 ctx.quit = true;
                 return;

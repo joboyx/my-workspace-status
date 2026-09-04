@@ -78,6 +78,19 @@ pub fn classify_busy_action(action: &Action) -> BusyAction {
     }
 }
 
+/// Classify one input while a git write is in flight, including palette Enter.
+///
+/// [`Action::CommandPaletteSubmit`] then dispatches the highlighted catalog
+/// action, so busy classification uses that inner action when provided.
+/// Palette nav / typing stay [`BusyAction::Handle`]. Submit with no inner
+/// action stays Handle (same as [`classify_busy_action`]).
+pub fn classify_busy_dispatch(action: &Action, palette_submit: Option<&Action>) -> BusyAction {
+    match (action, palette_submit) {
+        (Action::CommandPaletteSubmit, Some(inner)) => classify_busy_action(inner),
+        _ => classify_busy_action(action),
+    }
+}
+
 /// True when fetch/watch timers must not start (confirm, help, pickers, …).
 pub fn overlay_blocks_background_ticks(mode: InputMode) -> bool {
     !matches!(
@@ -167,6 +180,7 @@ mod tests {
             search_active: false
         }));
         assert!(!overlay_blocks_background_ticks(InputMode::DiffVisual));
+        assert!(overlay_blocks_background_ticks(InputMode::CommandPalette));
     }
 
     #[test]
@@ -239,6 +253,26 @@ mod tests {
         );
         assert_eq!(
             classify_busy_action(&Action::CopyEntityReference),
+            BusyAction::Handle
+        );
+    }
+
+    #[test]
+    fn command_palette_submit_classifies_as_inner_action() {
+        assert_eq!(
+            classify_busy_dispatch(&Action::CommandPaletteSubmit, Some(&Action::Pull)),
+            BusyAction::Ignore
+        );
+        assert_eq!(
+            classify_busy_dispatch(&Action::CommandPaletteSubmit, Some(&Action::ToggleHelp)),
+            BusyAction::Handle
+        );
+        assert_eq!(
+            classify_busy_dispatch(&Action::CommandPaletteMove(1), None),
+            BusyAction::Handle
+        );
+        assert_eq!(
+            classify_busy_dispatch(&Action::CommandPaletteSubmit, None),
             BusyAction::Handle
         );
     }

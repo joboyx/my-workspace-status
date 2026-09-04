@@ -75,8 +75,8 @@ CLI `-p` / `-d` (progress strings go to the caller; `--json` sends them to stder
 | Function | Purpose |
 | --- | --- |
 | `collect_write_files` | File nodes under the focused row: `[file]` / dir subtree (Changes dirs use `#unstaged`; Staged dirs are unsuffixed; no section chrome keeps every dirty file under the dir) / section header (checkout files on that side) / checkout files / flat-repo files; empty for family containers, workspace, and group. |
-| `op_targets` | Checkout paths for `f` / `p` / `d`. Workspace and family rows yield primary checkouts only. Group is empty. A linked worktree is included only when that row is focused. Hidden ignored repos are omitted. |
-| `push_targets` | Same primary / focused-worktree rule for `P`. Never on workspace. |
+| `op_targets` | Checkout paths for `f` / `p` / `d`. Workspace and family rows yield primary checkouts only. Group is empty (`op_is_kind_noop`). A linked worktree is included only when that row is focused. Hidden ignored repos are omitted. |
+| `push_targets` | Focused visible repo or checkout for `P`. Never on workspace, group, file, dir, or section. |
 | `background_fetch_targets` | Snapshot paths for the TUI background fetch timer. Hidden ignored checkouts are omitted. When ignored repos are shown, every snapshot path is included, including linked worktrees. Manual `f` stays on `op_targets`. |
 | `refresh_target` | Workspace / No-updates → whole snapshot; otherwise the focused checkout path. |
 
@@ -149,4 +149,4 @@ Revert, stash drop, origin-out-of-sync graph checkout, and graph merge use modal
 
 Independent per-repo `git fetch` / `pull` / `push` (manual `f` / `p` / `P` and the background fetch tick) run in parallel with a cap of `FETCH_CONCURRENCY` (10; override `WS_STATUS_FETCH_CONCURRENCY`). Progress is `Fetching n/N…` as each checkout **finishes**, not as it starts. After the batch: `Fetched N repos` / `(N failed)` — never names.
 
-Writes that must stay exclusive on one checkout (stage, unstage, revert, stash, checkout, create-branch, merge into HEAD, default-branch switch) stay serial. While any of those (or a capped batch) is in flight, the event loop stays live; `q` / resize / nav still apply; keys that would start another git write are drained (`BusyAction::Ignore`). Watch/status collect (`discover_checkouts` / `process_repo`) uses the same cap so a live tick is not one-repo-at-a-time. There is no inotify.
+Writes that must stay exclusive on one checkout (stage, unstage, revert, stash, checkout, create-branch, merge into HEAD, default-branch switch) stay serial. While any of those (or a capped batch) is in flight, the event loop stays live; `q` / resize / nav still apply; keys that would start another git write (including command-palette Enter of those keys) are drained (`BusyAction::Ignore`). Watch/status collect (`discover_checkouts` / `process_repo`) uses the same cap so a live tick is not one-repo-at-a-time. There is no inotify.

@@ -7,6 +7,7 @@ mod action;
 mod app;
 mod branches;
 mod chrome;
+mod command_palette;
 pub(crate) mod comments;
 mod commit_files;
 mod ctrl_c_exit;
@@ -41,6 +42,7 @@ pub(crate) mod watch;
 
 pub use app::{collect_full_snapshot, run_tui, TuiOpts};
 pub use headless::HeadlessTui;
+pub use keys::InputMode;
 pub use viewed::workspace_store_id;
 
 /// CLI flags that decide TUI vs headless. Testable without a real TTY.

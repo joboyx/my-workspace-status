@@ -370,6 +370,7 @@ pub fn ctrl_c_prompt_pinned(state: &AppState) -> bool {
         && state.create_branch.is_none()
         && state.comment.is_none()
         && state.comment_export.is_none()
+        && state.command_palette.is_none()
 }
 
 /// Bold quit-prompt line painted between the breadcrumb and the status / overlay.
@@ -430,6 +431,11 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
     }
     if let Some(picker) = state.graph_focus_picker.as_ref() {
         let n = picker.visible().len().max(1).min(12) as u16;
+        let extra = u16::from(!state.status.is_empty());
+        return (4u16.saturating_add(n).saturating_add(extra)).min(17);
+    }
+    if let Some(palette) = state.command_palette.as_ref() {
+        let n = palette.paint_rows().len().max(1).min(12) as u16;
         let extra = u16::from(!state.status.is_empty());
         return (4u16.saturating_add(n).saturating_add(extra)).min(17);
     }
@@ -919,6 +925,7 @@ fn status_uses_status_text(state: &AppState) -> bool {
         || state.create_branch.is_some()
         || state.comment.is_some()
         || state.comment_export.is_some()
+        || state.command_palette.is_some()
 }
 
 fn breadcrumb_op_status(state: &AppState) -> String {
@@ -1414,6 +1421,23 @@ mod tests {
             markdown: "# Comments\n\nNo comments.\n".into(),
         });
         assert_eq!(overlay_status_rows(&app), 8);
+    }
+
+    #[test]
+    fn command_palette_overlay_uses_picker_row_budget() {
+        use crate::tui::action::PaletteOpenedBy;
+        use crate::tui::command_palette::CommandPaletteState;
+        let mut app = state();
+        app.command_palette = Some(CommandPaletteState::new(PaletteOpenedBy::CtrlK));
+        let rows = overlay_status_rows(&app);
+        assert!(rows >= 5, "prompt + list + footer: {rows}");
+        assert!(rows <= 17, "capped like the branch picker: {rows}");
+        app.status = "Press Ctrl+C again to exit".into();
+        assert_eq!(
+            ctrl_c_prompt_rows(&app),
+            0,
+            "palette shows the quit prompt inline"
+        );
     }
 
     fn line_plain(line: &Line<'_>) -> String {

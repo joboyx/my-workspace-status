@@ -2,10 +2,14 @@
 
 use std::time::Instant;
 
-use super::super::action::{Action, Effect, ExternalDiffKind};
-use super::super::gates::ListFocusTarget;
+use super::super::action::{Action, Effect, ExternalDiffKind, PaletteOpenedBy};
+use super::super::branches::can_open_branch_picker;
+use super::super::command_palette::CommandPaletteState;
+use super::super::gates::{dispatch_is_noop, ListFocusTarget};
+use super::super::ops::{collect_write_files, op_is_kind_noop, Op};
 use super::super::split::SplitDrag;
-use super::{AppState, FocusPane, FoldOp};
+use super::super::tree::NodeKind;
+use super::{AppState, FileWrite, FocusPane, FoldOp};
 
 impl AppState {
     /// Apply a list / view / search / hit-test [`Action`].
@@ -313,8 +317,271 @@ impl AppState {
                 self.apply_terminal_size(cols);
                 Effect::None
             }
+            Action::ToggleCommandPalette(opened_by) => self.toggle_command_palette(opened_by),
+            Action::CommandPaletteMove(delta) => {
+                if let Some(palette) = self.command_palette.as_mut() {
+                    palette.move_cursor(delta);
+                }
+                Effect::None
+            }
+            Action::CommandPaletteChar(c) => {
+                if let Some(palette) = self.command_palette.as_mut() {
+                    palette.push_char(c);
+                }
+                Effect::None
+            }
+            Action::CommandPaletteBackspace => {
+                if let Some(palette) = self.command_palette.as_mut() {
+                    palette.backspace();
+                }
+                Effect::None
+            }
+            Action::CommandPaletteSubmit => self.submit_command_palette(),
+            Action::CommandPaletteCancel => {
+                self.command_palette = None;
+                Effect::None
+            }
             Action::None => Effect::None,
             _ => Effect::None,
         }
+    }
+
+    fn toggle_command_palette(&mut self, opened_by: PaletteOpenedBy) -> Effect {
+        if self.command_palette.is_some() {
+            self.command_palette = None;
+        } else {
+            self.drag = SplitDrag::None;
+            self.help_open = false;
+            self.clear_help_search();
+            self.command_palette = Some(CommandPaletteState::new(opened_by));
+        }
+        Effect::None
+    }
+
+    fn submit_command_palette(&mut self) -> Effect {
+        let Some(command) = self
+            .command_palette
+            .as_ref()
+            .and_then(|palette| palette.selected())
+        else {
+            return Effect::None;
+        };
+        if self.palette_disabled_reason(&command.action).is_some() {
+            return Effect::None;
+        }
+        let action = command.action.clone();
+        self.command_palette = None;
+        self.dispatch(action)
+    }
+
+    /// Why the highlighted command cannot run, or `None` if Enter should dispatch.
+    pub(crate) fn palette_disabled_reason(&self, action: &Action) -> Option<String> {
+        if dispatch_is_noop(
+            action,
+            self.nav_depth(),
+            self.focus == FocusPane::Right,
+            self.list_focus_target(),
+        ) {
+            return Some("not available here".into());
+        }
+        match action {
+            Action::Pull | Action::DefaultBranch | Action::Fetch => {
+                let op = if matches!(action, Action::Pull) {
+                    Op::Pull
+                } else if matches!(action, Action::Fetch) {
+                    Op::Fetch
+                } else {
+                    Op::DefaultBranch
+                };
+                self.focused_row()
+                    .filter(|row| op_is_kind_noop(row.kind, op))
+                    .map(|_| "workspace / repo / checkout only".into())
+            }
+            Action::Push => match self.focused_row().map(|row| row.kind) {
+                Some(NodeKind::Repo | NodeKind::Checkout) => None,
+                _ => Some("repo / checkout only".into()),
+            },
+            Action::RemoveWorktree => {
+                if self.can_remove_focused_worktree() {
+                    None
+                } else {
+                    Some("Focus a linked worktree to remove".into())
+                }
+            }
+            Action::Revert => {
+                let scoped =
+                    collect_write_files(&self.snapshot, self.focused_row(), self.show_ignored);
+                let selected = scoped
+                    .into_iter()
+                    .filter(|file| super::is_revertible(&file.change))
+                    .count();
+                if selected > 0 {
+                    None
+                } else {
+                    let staged_only = self.focused_file_if_shown().is_some_and(|(_, change)| {
+                        change.staged_status.is_some()
+                            && change.unstaged_status.is_none()
+                            && !change.untracked
+                    });
+                    Some(if staged_only {
+                        "nothing to discard (staged only)".into()
+                    } else if matches!(
+                        self.focused_row().map(|row| row.kind),
+                        Some(
+                            super::super::tree::NodeKind::File
+                                | super::super::tree::NodeKind::Dir
+                                | super::super::tree::NodeKind::Repo
+                                | super::super::tree::NodeKind::Checkout
+                                | super::super::tree::NodeKind::Section
+                        )
+                    ) {
+                        "nothing to discard".into()
+                    } else {
+                        "focus a file, dir, checkout, or repo to revert".into()
+                    })
+                }
+            }
+            Action::Stage => self.empty_file_write_reason(FileWrite::Stage),
+            Action::Unstage => self.empty_file_write_reason(FileWrite::Unstage),
+            Action::GraphStashApply | Action::GraphStashPop | Action::GraphStashDrop => {
+                if self.graph_stash_focused() {
+                    None
+                } else {
+                    Some("focus a graph stash row".into())
+                }
+            }
+            Action::GraphCheckout | Action::GraphCreateBranch | Action::GraphMerge => {
+                if self.graph_commit_focused() {
+                    None
+                } else {
+                    Some("focus a graph commit".into())
+                }
+            }
+            Action::GraphFocusBranches => {
+                if self.graph_pane_focused() && self.graph_focus_repo().is_some() {
+                    None
+                } else {
+                    Some("focus the graph pane".into())
+                }
+            }
+            Action::GraphFocusClear => {
+                if !self.graph_pane_focused() {
+                    Some("focus the graph pane".into())
+                } else if self.graph_branch_focus.is_none() {
+                    Some("no graph focus to clear".into())
+                } else {
+                    None
+                }
+            }
+            Action::ToggleFullContext => {
+                if self.right_is_diff() && self.displayed_diff_id().is_some() {
+                    None
+                } else {
+                    Some("focus a file diff".into())
+                }
+            }
+            Action::DiffVisualStart => {
+                if self.list_focus_target() != ListFocusTarget::None {
+                    Some("focus a file diff".into())
+                } else if self.current_diff_rows().is_empty() {
+                    Some("no highlight target".into())
+                } else {
+                    None
+                }
+            }
+            Action::Edit => {
+                if self.focused_commit_edit_path().is_some()
+                    || self.focused_file_if_shown().is_some()
+                {
+                    None
+                } else {
+                    Some("focus a dirty file to edit".into())
+                }
+            }
+            Action::ExternalDiff => {
+                if self.focused_commit_edit_path().is_some()
+                    || self.focused_file_if_shown().is_some()
+                {
+                    None
+                } else {
+                    Some("focus a file to diff".into())
+                }
+            }
+            Action::CommentStart => {
+                if self.current_comment_target().is_some() {
+                    None
+                } else {
+                    Some("no comment target".into())
+                }
+            }
+            Action::ToggleReviewed => {
+                if self.nav_depth() >= 1 {
+                    Some("not available here".into())
+                } else if self
+                    .focused_row()
+                    .is_some_and(|row| row.kind == super::super::tree::NodeKind::File)
+                {
+                    None
+                } else {
+                    Some("focus a file to mark reviewed".into())
+                }
+            }
+            Action::CopyEntityReference => {
+                if self.current_entity_reference().is_some() {
+                    None
+                } else {
+                    Some("no copy target".into())
+                }
+            }
+            Action::Branch => match self.focused_row() {
+                Some(row) if can_open_branch_picker(&self.snapshot, row) => None,
+                _ => Some("focus a checkout to pick a branch".into()),
+            },
+            Action::StashMenu => {
+                if self.nav_depth() >= 2 {
+                    Some("not available here".into())
+                } else if self.focused_checkout_if_shown().is_some() {
+                    None
+                } else {
+                    Some("focus a visible repo to stash".into())
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn empty_file_write_reason(&self, write: FileWrite) -> Option<String> {
+        let scoped = collect_write_files(&self.snapshot, self.focused_row(), self.show_ignored);
+        let empty = scoped.iter().all(|file| match write {
+            FileWrite::Stage => !super::is_stageable(&file.change),
+            FileWrite::Unstage => !super::is_unstageable(&file.change),
+        });
+        empty.then(|| super::empty_write_status(self.focused_row().map(|row| row.kind), write))
+    }
+
+    fn can_remove_focused_worktree(&self) -> bool {
+        let Some(row) = self.focused_row() else {
+            return false;
+        };
+        if super::super::stash::row_is_hidden_ignored(row, self.show_ignored) {
+            return false;
+        }
+        if !matches!(
+            row.kind,
+            super::super::tree::NodeKind::Checkout | super::super::tree::NodeKind::Repo
+        ) {
+            return false;
+        }
+        let Some(repo_path) = row.repo.as_deref() else {
+            return false;
+        };
+        self.snapshot
+            .repos
+            .iter()
+            .find(|repo| repo.repo == repo_path)
+            .is_some_and(|snap| {
+                snap.checkout_kind == crate::snapshot::CheckoutKind::Linked
+                    && snap.primary_repo.is_some()
+            })
     }
 }
