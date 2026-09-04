@@ -193,8 +193,8 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "focus right / drill",
             },
             HelpEntry {
-                keys: "?",
-                desc: "this help",
+                keys: "? Ctrl-k :",
+                desc: "help · command palette",
             },
             HelpEntry {
                 keys: "Tab",
@@ -573,6 +573,8 @@ mod tests {
         assert!(view_keys.contains(&"."));
         assert!(view_keys.contains(&"T"));
         assert!(view_keys.contains(&"Ctrl-o"));
+        assert!(view_keys.contains(&"? Ctrl-k :"));
+        assert!(!view_keys.contains(&"?"));
         assert!(view_keys.contains(&"o O"));
         assert!(view_keys.contains(&"m"));
         assert!(view_keys.contains(&"; Ctrl-R"));
@@ -612,9 +614,10 @@ mod tests {
             "narrow terminals wrap more and take more rows"
         );
         assert!(HELP_KEY_WIDTH >= 18);
+        let at_140 = help_status_lines(140);
         assert!(
-            help_status_lines(140) <= 32,
-            "leftover 140×32 PTY must still paint Ctrl-C Ctrl-C"
+            at_140 <= 32,
+            "leftover 140×32 PTY must still paint Ctrl-C Ctrl-C: {at_140}"
         );
     }
 

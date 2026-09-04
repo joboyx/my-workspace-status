@@ -152,6 +152,22 @@ pub enum Action {
     GraphFocusCancel,
     CycleTheme,
     ToggleMouse,
+    /// Open or close the command palette (`Ctrl-k` or `:`).
+    ///
+    /// Stores [`PaletteOpenedBy`] on open so the prompt prefix matches the
+    /// key that opened it. A second open key while the palette is up closes
+    /// it with no run.
+    ToggleCommandPalette(PaletteOpenedBy),
+    /// Move the command-palette highlight (`j` / `k` / arrows).
+    CommandPaletteMove(i32),
+    /// Append a filter character. `j` / `k` are moves, not chars.
+    CommandPaletteChar(char),
+    /// Delete the last filter character.
+    CommandPaletteBackspace,
+    /// Close the palette, then dispatch the highlighted enabled command.
+    CommandPaletteSubmit,
+    /// Esc close. No run.
+    CommandPaletteCancel,
     /// Terminal size changed. Crossterm `Resize` carries the new cols/rows;
     /// ioctl can still report the previous size when the event arrives.
     Resize {
@@ -159,6 +175,15 @@ pub enum Action {
         rows: u16,
     },
     None,
+}
+
+/// Which key opened the command palette.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaletteOpenedBy {
+    /// `:` from Normal or a pending `z` / `g` chord.
+    Colon,
+    /// Ctrl-K from Normal or a pending `z` / `g` chord.
+    CtrlK,
 }
 
 /// LEFT/RIGHT pair for [`Effect::ExternalDiff`].

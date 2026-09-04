@@ -224,6 +224,21 @@ impl HeadlessTui {
         self.send_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
     }
 
+    /// Send Ctrl plus `c` through the real keymap.
+    pub fn ctrl(&mut self, c: char) {
+        self.send_key(KeyCode::Char(c), KeyModifiers::CONTROL);
+    }
+
+    /// Send Ctrl-K (command palette).
+    pub fn ctrl_k(&mut self) {
+        self.ctrl('k');
+    }
+
+    /// Current keymap [`super::keys::InputMode`].
+    pub fn input_mode(&self) -> super::keys::InputMode {
+        self.state.input_mode()
+    }
+
     /// True after `q` or a completed double Ctrl-C.
     pub fn did_quit(&self) -> bool {
         self.quit

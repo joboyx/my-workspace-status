@@ -167,6 +167,7 @@ mod tests {
             search_active: false
         }));
         assert!(!overlay_blocks_background_ticks(InputMode::DiffVisual));
+        assert!(overlay_blocks_background_ticks(InputMode::CommandPalette));
     }
 
     #[test]

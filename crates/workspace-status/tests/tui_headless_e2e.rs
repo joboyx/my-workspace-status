@@ -20,7 +20,7 @@ use common::seed::{
     seed_long_subject_repo, seed_merge_mark_family, seed_primary_and_linked_family,
     seed_primary_merged_family, seed_repo, seed_tall_graph,
 };
-use workspace_status::tui::HeadlessTui;
+use workspace_status::tui::{HeadlessTui, InputMode};
 use workspace_status_graph::UNICODE;
 
 fn seed_demo_dest() -> PathBuf {
@@ -1988,9 +1988,7 @@ fn primary_merged_checkout_paints_check_not_open() {
     let linked_merged = frame
         .lines()
         .map(tree_pane)
-        .find(|line| {
-            line.contains(LINKED_WORKTREE_GLYPH) && line.contains("feature/linked-merged")
-        })
+        .find(|line| line.contains(LINKED_WORKTREE_GLYPH) && line.contains("feature/linked-merged"))
         .unwrap_or("");
     assert!(
         !primary.is_empty(),
@@ -2194,5 +2192,112 @@ fn space_reviewed_names_save_failure_when_unwritable() {
     assert_absent(&frame, "comment saved");
     assert_contains(&frame, "viewed save failed");
     let _ = fs::remove_dir_all(blocker_root);
+    let _ = fs::remove_dir_all(root);
+}
+
+fn type_palette_query(tui: &mut HeadlessTui, query: &str) {
+    for c in query.chars() {
+        tui.key(c);
+    }
+}
+
+#[test]
+fn command_palette_filter_pull_enter_closes_palette() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    gg(&mut tui);
+    tui.ctrl_k();
+    assert_eq!(tui.input_mode(), InputMode::CommandPalette);
+    type_palette_query(&mut tui, "pull");
+    tui.enter();
+    assert_ne!(tui.input_mode(), InputMode::CommandPalette);
+    let frame = tui.frame();
+    assert_absent(&frame, "Enter run");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn command_palette_filter_help_enter_opens_keymap_help() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    tui.ctrl_k();
+    type_palette_query(&mut tui, "help");
+    tui.enter();
+    assert_ne!(tui.input_mode(), InputMode::CommandPalette);
+    assert_eq!(tui.input_mode(), InputMode::Help);
+    let frame = tui.frame();
+    assert_contains(&frame, "MOVE");
+    assert_help_version(&frame);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn command_palette_esc_keeps_cursor() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    tui.search("README");
+    let id = tui.cursor_id();
+    let label = tui.cursor_label();
+    tui.key(':');
+    assert_eq!(tui.input_mode(), InputMode::CommandPalette);
+    tui.esc();
+    assert_ne!(tui.input_mode(), InputMode::CommandPalette);
+    assert_eq!(tui.cursor_id(), id);
+    assert_eq!(tui.cursor_label(), label);
+    assert_absent(&tui.frame(), "Enter run");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn command_palette_disabled_pull_on_file_keeps_palette_open() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    tui.search("README");
+    let id = tui.cursor_id();
+    let head = tui.snapshot_head("app");
+    let sync = tui.snapshot_sync_note("app");
+    tui.ctrl_k();
+    type_palette_query(&mut tui, "pull");
+    tui.enter();
+    assert_eq!(tui.input_mode(), InputMode::CommandPalette);
+    assert_eq!(tui.cursor_id(), id);
+    assert_eq!(tui.snapshot_head("app"), head);
+    assert_eq!(tui.snapshot_sync_note("app"), sync);
+    assert_contains(&tui.frame(), "Enter run");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn command_palette_revert_opens_boxed_confirm() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    tui.search("README");
+    tui.ctrl_k();
+    type_palette_query(&mut tui, "revert");
+    tui.enter();
+    assert_ne!(tui.input_mode(), InputMode::CommandPalette);
+    assert_eq!(tui.input_mode(), InputMode::Confirm);
+    let frame = tui.frame();
+    assert_contains(&frame, "Revert");
+    assert_contains(&frame, "y");
+    assert_contains(&frame, "n");
+    assert_absent(&frame, "Enter run");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn command_palette_does_not_steal_daily_keys() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    tui.key('?');
+    assert_eq!(tui.input_mode(), InputMode::Help);
+    tui.key('?');
+    tui.key('/');
+    assert_eq!(tui.input_mode(), InputMode::SearchPrompt);
+    tui.esc();
+    tui.key('p');
+    assert_ne!(tui.input_mode(), InputMode::CommandPalette);
+    tui.key('P');
+    assert_ne!(tui.input_mode(), InputMode::CommandPalette);
     let _ = fs::remove_dir_all(root);
 }

@@ -4,7 +4,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
-use super::action::Action;
+use super::action::{Action, PaletteOpenedBy};
 
 /// Window for `zz` / `gg` after the first key.
 pub const DOUBLE_TAP_MS: u64 = 400;
@@ -47,6 +47,8 @@ pub enum InputMode {
     DiffVisual,
     /// `y` markdown export overlay (Esc closes).
     CommentExport,
+    /// Command palette (`Ctrl-k` / `:`). Named commands, filter, Enter run.
+    CommandPalette,
 }
 
 /// Map one terminal event to an [`Action`].
@@ -123,7 +125,8 @@ pub fn event_to_action_with(
                     | InputMode::GraphFocusPicker
                     | InputMode::CreateBranch
                     | InputMode::Comment
-                    | InputMode::CommentExport,
+                    | InputMode::CommentExport
+                    | InputMode::CommandPalette,
             ) {
                 Action::None
             } else {
@@ -265,6 +268,12 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
             KeyCode::Char(_) => typing,
             _ => false,
         },
+        InputMode::CommandPalette => match key.code {
+            KeyCode::Backspace => true,
+            KeyCode::Char(':') | KeyCode::Enter | KeyCode::Esc => false,
+            KeyCode::Char(_) => typing,
+            _ => false,
+        },
         InputMode::Normal { .. }
         | InputMode::ZPending { .. }
         | InputMode::GPending { .. }
@@ -318,6 +327,15 @@ fn key_to_action(
 ) -> Action {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Action::CtrlC;
+    }
+    if let Some(opened_by) = palette_open_key(key) {
+        return match mode {
+            InputMode::Normal { .. }
+            | InputMode::ZPending { .. }
+            | InputMode::GPending { .. }
+            | InputMode::CommandPalette => Action::ToggleCommandPalette(opened_by),
+            _ => Action::None,
+        };
     }
     match mode {
         InputMode::Help => match key.code {
@@ -442,6 +460,7 @@ fn key_to_action(
             KeyCode::Esc | KeyCode::Enter => Action::ExportCommentsCancel,
             _ => Action::None,
         },
+        InputMode::CommandPalette => command_palette_key(key),
         InputMode::DiffVisual => diff_visual_key(key),
         InputMode::Normal { search_active } => normal_key(
             key,
@@ -452,6 +471,30 @@ fn key_to_action(
             graph_commit_focused,
             hl_folds,
         ),
+    }
+}
+
+fn palette_open_key(key: KeyEvent) -> Option<PaletteOpenedBy> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('k') {
+        return Some(PaletteOpenedBy::CtrlK);
+    }
+    if !key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char(':') {
+        return Some(PaletteOpenedBy::Colon);
+    }
+    None
+}
+
+fn command_palette_key(key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Esc => Action::CommandPaletteCancel,
+        KeyCode::Enter => Action::CommandPaletteSubmit,
+        KeyCode::Backspace => Action::CommandPaletteBackspace,
+        KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::CommandPaletteMove(1),
+        KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::CommandPaletteMove(-1),
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Action::CommandPaletteChar(c)
+        }
+        _ => Action::None,
     }
 }
 
@@ -1863,5 +1906,223 @@ mod tests {
         assert!(held_nav_key(&shift(KeyCode::Char(char::from_u32(57350).unwrap()))).is_some());
         assert!(held_nav_key(&key(KeyCode::Char('q'))).is_none());
         assert!(held_nav_key(&key_kind(KeyCode::Char('j'), KeyEventKind::Release)).is_none());
+    }
+
+    fn palette() -> InputMode {
+        InputMode::CommandPalette
+    }
+
+    #[test]
+    fn ctrl_k_and_colon_open_command_palette_from_normal() {
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('k')), normal(), false, false),
+            Action::ToggleCommandPalette(super::super::action::PaletteOpenedBy::CtrlK)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char(':')), normal(), false, false),
+            Action::ToggleCommandPalette(super::super::action::PaletteOpenedBy::Colon)
+        );
+    }
+
+    #[test]
+    fn ctrl_k_and_colon_open_from_pending_chords() {
+        let z = InputMode::ZPending {
+            search_active: false,
+        };
+        let g = InputMode::GPending {
+            search_active: false,
+        };
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('k')), z, false, false),
+            Action::ToggleCommandPalette(super::super::action::PaletteOpenedBy::CtrlK)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char(':')), z, false, false),
+            Action::ToggleCommandPalette(super::super::action::PaletteOpenedBy::Colon)
+        );
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('k')), g, false, false),
+            Action::ToggleCommandPalette(super::super::action::PaletteOpenedBy::CtrlK)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char(':')), g, false, false),
+            Action::ToggleCommandPalette(super::super::action::PaletteOpenedBy::Colon)
+        );
+    }
+
+    #[test]
+    fn overlays_swallow_ctrl_k_and_colon() {
+        use super::super::action::PaletteOpenedBy;
+        let overlays = [
+            InputMode::Help,
+            InputMode::HelpSearch,
+            InputMode::SearchPrompt,
+            InputMode::Comment,
+            InputMode::Confirm,
+            InputMode::BranchPicker,
+            InputMode::GraphFocusPicker,
+            InputMode::CreateBranch,
+            InputMode::StashMenu,
+            InputMode::CommentExport,
+            InputMode::DiffVisual,
+        ];
+        for mode in overlays {
+            let ctrl_k = event_to_action(&ctrl(KeyCode::Char('k')), mode, false, false);
+            assert_ne!(
+                ctrl_k,
+                Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK),
+                "{mode:?} must not open the palette"
+            );
+            assert_eq!(ctrl_k, Action::None, "{mode:?} Ctrl-K");
+            let colon = event_to_action(&key(KeyCode::Char(':')), mode, false, false);
+            assert_ne!(
+                colon,
+                Action::ToggleCommandPalette(PaletteOpenedBy::Colon),
+                "{mode:?} must not open the palette"
+            );
+            assert_eq!(colon, Action::None, "{mode:?} colon");
+        }
+    }
+
+    #[test]
+    fn command_palette_keys_move_filter_submit_cancel_and_toggle() {
+        use super::super::action::PaletteOpenedBy;
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('j')), palette(), false, false),
+            Action::CommandPaletteMove(1)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Down), palette(), false, false),
+            Action::CommandPaletteMove(1)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('k')), palette(), false, false),
+            Action::CommandPaletteMove(-1)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Up), palette(), false, false),
+            Action::CommandPaletteMove(-1)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('p')), palette(), false, false),
+            Action::CommandPaletteChar('p')
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Backspace), palette(), false, false),
+            Action::CommandPaletteBackspace
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Enter), palette(), false, false),
+            Action::CommandPaletteSubmit
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Esc), palette(), false, false),
+            Action::CommandPaletteCancel
+        );
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('c')), palette(), false, false),
+            Action::CtrlC
+        );
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('k')), palette(), false, false),
+            Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char(':')), palette(), false, false),
+            Action::ToggleCommandPalette(PaletteOpenedBy::Colon)
+        );
+    }
+
+    #[test]
+    fn command_palette_repeat_types_but_not_enter_or_open_keys() {
+        use super::super::action::PaletteOpenedBy;
+        assert_eq!(
+            event_to_action(
+                &key_kind(KeyCode::Char('a'), KeyEventKind::Repeat),
+                palette(),
+                false,
+                false
+            ),
+            Action::CommandPaletteChar('a')
+        );
+        assert_eq!(
+            event_to_action(
+                &key_kind(KeyCode::Backspace, KeyEventKind::Repeat),
+                palette(),
+                false,
+                false
+            ),
+            Action::CommandPaletteBackspace
+        );
+        assert_eq!(
+            event_to_action(
+                &key_kind(KeyCode::Char('j'), KeyEventKind::Repeat),
+                palette(),
+                false,
+                false
+            ),
+            Action::CommandPaletteMove(1)
+        );
+        assert_eq!(
+            event_to_action(
+                &key_kind(KeyCode::Enter, KeyEventKind::Repeat),
+                palette(),
+                false,
+                false
+            ),
+            Action::None
+        );
+        assert_eq!(
+            event_to_action(
+                &key_kind(KeyCode::Esc, KeyEventKind::Repeat),
+                palette(),
+                false,
+                false
+            ),
+            Action::None
+        );
+        assert_eq!(
+            event_to_action(
+                &key_kind(KeyCode::Char(':'), KeyEventKind::Repeat),
+                palette(),
+                false,
+                false
+            ),
+            Action::None
+        );
+        assert_eq!(
+            event_to_action(
+                &Event::Key(KeyEvent::new_with_kind(
+                    KeyCode::Char('k'),
+                    KeyModifiers::CONTROL,
+                    KeyEventKind::Repeat
+                )),
+                palette(),
+                false,
+                false
+            ),
+            Action::None
+        );
+        assert_ne!(
+            event_to_action(
+                &Event::Key(KeyEvent::new_with_kind(
+                    KeyCode::Char('k'),
+                    KeyModifiers::CONTROL,
+                    KeyEventKind::Repeat
+                )),
+                normal(),
+                false,
+                false
+            ),
+            Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK)
+        );
+    }
+
+    #[test]
+    fn ctrl_p_is_still_pull_not_palette() {
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('p')), normal(), false, false),
+            Action::Pull
+        );
     }
 }
