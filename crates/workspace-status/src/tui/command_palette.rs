@@ -313,6 +313,11 @@ impl CommandPaletteState {
         self.visible().get(self.cursor).copied()
     }
 
+    /// Mapped [`Action`] for the highlighted command, if any.
+    pub fn selected_action(&self) -> Option<&Action> {
+        self.selected().map(|command| &command.action)
+    }
+
     /// Clamp like the branch picker.
     pub fn move_cursor(&mut self, delta: i32) {
         let len = self.visible().len();

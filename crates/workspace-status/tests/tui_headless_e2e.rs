@@ -2213,6 +2213,10 @@ fn command_palette_filter_pull_enter_closes_palette() {
     assert_ne!(tui.input_mode(), InputMode::CommandPalette);
     let frame = tui.frame();
     assert_absent(&frame, "Enter run");
+    assert!(
+        frame.contains("nothing behind to pull") || frame.contains("Pulling"),
+        "palette Pull must dispatch; frame={frame:?}"
+    );
     let _ = fs::remove_dir_all(root);
 }
 
