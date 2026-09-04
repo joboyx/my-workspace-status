@@ -14,7 +14,7 @@ To rebuild those frames, run `./scripts/capture-demo-stills.sh` (see [demo.md](.
 | `Ctrl-C` twice | Quit. First press paints `Press Ctrl+C again to exit`; second within ~2s exits. Overlay pickers show that copy inline |
 | `q` | Quit immediately (Rust extra) |
 | `?` | Help overlay (short list, not a wall of text) |
-| `Ctrl-k` / `:` | Command palette (named commands). Same overlay from Normal and pending `z` / `g`. Type to filter; `j`/`k` move; Enter runs (closes first, then dispatches). Esc closes with no run. `?` / `/` / `p` / `P` stay. Not Ctrl-P |
+| `Ctrl-k` / `:` | Command palette (named commands). Same overlay from Normal and pending `z` / `g`. Type to filter; `j`/`k` move; Enter runs (closes first, then dispatches). Esc closes with no run. Other overlays never open the palette. Text prompts still type `:`. `?` / `/` / `p` / `P` stay. Not Ctrl-P |
 | `j` / `k` or arrows | Move the focused list or file-diff row. Hold repeats (terminal key-repeat). After a drill, the right pane follows the left row (graph → commit files, commit-file → diff). The viewport keeps the focused row near the vertical middle |
 | `z` | Toggle fold on this row |
 | `zz` | First `z` toggles this row immediately and arms a 400ms pending. Second `z` in the window applies that same fold to foldable descendants (no extra toggle of this row). A late second `z` is a new single toggle |

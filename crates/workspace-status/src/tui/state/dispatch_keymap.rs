@@ -450,6 +450,63 @@ impl AppState {
                     Some("focus a graph commit".into())
                 }
             }
+            Action::GraphFocusBranches => {
+                if self.graph_pane_focused() && self.graph_focus_repo().is_some() {
+                    None
+                } else {
+                    Some("focus the graph pane".into())
+                }
+            }
+            Action::GraphFocusClear => {
+                if !self.graph_pane_focused() {
+                    Some("focus the graph pane".into())
+                } else if self.graph_branch_focus.is_none() {
+                    Some("no graph focus to clear".into())
+                } else {
+                    None
+                }
+            }
+            Action::ToggleFullContext => {
+                if self.right_is_diff() && self.displayed_diff_id().is_some() {
+                    None
+                } else {
+                    Some("focus a file diff".into())
+                }
+            }
+            Action::DiffVisualStart => {
+                if self.list_focus_target() != ListFocusTarget::None {
+                    Some("focus a file diff".into())
+                } else if self.current_diff_rows().is_empty() {
+                    Some("no highlight target".into())
+                } else {
+                    None
+                }
+            }
+            Action::Edit => {
+                if self.focused_commit_edit_path().is_some()
+                    || self.focused_file_if_shown().is_some()
+                {
+                    None
+                } else {
+                    Some("focus a dirty file to edit".into())
+                }
+            }
+            Action::ExternalDiff => {
+                if self.focused_commit_edit_path().is_some()
+                    || self.focused_file_if_shown().is_some()
+                {
+                    None
+                } else {
+                    Some("focus a file to diff".into())
+                }
+            }
+            Action::CommentStart => {
+                if self.current_comment_target().is_some() {
+                    None
+                } else {
+                    Some("no comment target".into())
+                }
+            }
             Action::Branch => match self.focused_row() {
                 Some(row) if can_open_branch_picker(&self.snapshot, row) => None,
                 _ => Some("focus a checkout to pick a branch".into()),

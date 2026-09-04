@@ -329,13 +329,22 @@ fn key_to_action(
         return Action::CtrlC;
     }
     if let Some(opened_by) = palette_open_key(key) {
-        return match mode {
+        match mode {
             InputMode::Normal { .. }
             | InputMode::ZPending { .. }
             | InputMode::GPending { .. }
-            | InputMode::CommandPalette => Action::ToggleCommandPalette(opened_by),
-            _ => Action::None,
-        };
+            | InputMode::CommandPalette => {
+                return Action::ToggleCommandPalette(opened_by);
+            }
+            InputMode::SearchPrompt
+            | InputMode::HelpSearch
+            | InputMode::Comment
+            | InputMode::CreateBranch
+            | InputMode::BranchPicker
+            | InputMode::GraphFocusPicker
+            | InputMode::StashMenu => {}
+            _ => return Action::None,
+        }
     }
     match mode {
         InputMode::Help => match key.code {
@@ -1951,7 +1960,7 @@ mod tests {
     }
 
     #[test]
-    fn overlays_swallow_ctrl_k_and_colon() {
+    fn overlays_do_not_open_palette_on_ctrl_k_or_colon() {
         use super::super::action::PaletteOpenedBy;
         let overlays = [
             InputMode::Help,
@@ -1973,15 +1982,112 @@ mod tests {
                 Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK),
                 "{mode:?} must not open the palette"
             );
-            assert_eq!(ctrl_k, Action::None, "{mode:?} Ctrl-K");
             let colon = event_to_action(&key(KeyCode::Char(':')), mode, false, false);
             assert_ne!(
                 colon,
                 Action::ToggleCommandPalette(PaletteOpenedBy::Colon),
                 "{mode:?} must not open the palette"
             );
-            assert_eq!(colon, Action::None, "{mode:?} colon");
         }
+    }
+
+    #[test]
+    fn text_overlays_type_colon() {
+        assert_eq!(
+            event_to_action(
+                &key(KeyCode::Char(':')),
+                InputMode::SearchPrompt,
+                false,
+                false
+            ),
+            Action::SearchChar(':')
+        );
+        assert_eq!(
+            event_to_action(
+                &key(KeyCode::Char(':')),
+                InputMode::HelpSearch,
+                false,
+                false
+            ),
+            Action::SearchChar(':')
+        );
+        assert_eq!(
+            event_to_action(
+                &key(KeyCode::Char(':')),
+                InputMode::CreateBranch,
+                false,
+                false
+            ),
+            Action::CreateBranchChar(':')
+        );
+        assert_eq!(
+            event_to_action(
+                &key(KeyCode::Char(':')),
+                InputMode::BranchPicker,
+                false,
+                false
+            ),
+            Action::BranchChar(':')
+        );
+        assert_eq!(
+            event_to_action(
+                &key(KeyCode::Char(':')),
+                InputMode::GraphFocusPicker,
+                false,
+                false
+            ),
+            Action::GraphFocusChar(':')
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char(':')), InputMode::StashMenu, false, false),
+            Action::StashMenuChar(':')
+        );
+        match event_to_action(&key(KeyCode::Char(':')), InputMode::Comment, false, false) {
+            Action::CommentInput(key) => assert_eq!(key.code, KeyCode::Char(':')),
+            other => panic!("Comment colon must be CommentInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn comment_ctrl_k_is_textarea_input() {
+        match event_to_action(&ctrl(KeyCode::Char('k')), InputMode::Comment, false, false) {
+            Action::CommentInput(key) => {
+                assert_eq!(key.code, KeyCode::Char('k'));
+                assert!(key.modifiers.contains(KeyModifiers::CONTROL));
+            }
+            other => panic!("Comment Ctrl-K must be CommentInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn help_confirm_diff_visual_swallow_ctrl_k_and_colon() {
+        for mode in [
+            InputMode::Help,
+            InputMode::Confirm,
+            InputMode::DiffVisual,
+            InputMode::CommentExport,
+        ] {
+            assert_eq!(
+                event_to_action(&ctrl(KeyCode::Char('k')), mode, false, false),
+                Action::None,
+                "{mode:?} Ctrl-K"
+            );
+            assert_eq!(
+                event_to_action(&key(KeyCode::Char(':')), mode, false, false),
+                Action::None,
+                "{mode:?} colon"
+            );
+        }
+        assert_eq!(
+            event_to_action(
+                &ctrl(KeyCode::Char('k')),
+                InputMode::SearchPrompt,
+                false,
+                false
+            ),
+            Action::None,
+            "search Ctrl-K stays unused (CONTROL is not a typed char)"
+        );
     }
 
     #[test]

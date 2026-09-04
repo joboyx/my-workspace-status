@@ -2272,6 +2272,39 @@ fn command_palette_disabled_pull_on_file_keeps_palette_open() {
 }
 
 #[test]
+fn command_palette_disabled_view_gates_keep_palette_open() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    tui.search("README");
+    let id = tui.cursor_id();
+    for query in ["focus branches", "highlight"] {
+        tui.ctrl_k();
+        type_palette_query(&mut tui, query);
+        tui.enter();
+        assert_eq!(
+            tui.input_mode(),
+            InputMode::CommandPalette,
+            "{query} must stay dimmed on a file row"
+        );
+        assert_eq!(tui.cursor_id(), id, "{query}");
+        assert_contains(&tui.frame(), "Enter run");
+        tui.esc();
+    }
+    tui.esc();
+    gg(&mut tui);
+    tui.ctrl_k();
+    type_palette_query(&mut tui, "full-file");
+    tui.enter();
+    assert_eq!(
+        tui.input_mode(),
+        InputMode::CommandPalette,
+        "full-file must stay dimmed when the right pane is not a file diff"
+    );
+    assert_contains(&tui.frame(), "Enter run");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn command_palette_revert_opens_boxed_confirm() {
     let (root, workspace) = daily_workspace();
     let mut tui = open(&workspace);
