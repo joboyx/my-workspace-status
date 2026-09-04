@@ -48,6 +48,7 @@ mod pty_m_toggles_mouse_capture;
 mod pty_merge_mark_default_tip_is_open;
 mod pty_n_and_n_pane_next_prev;
 mod pty_pgup_pgdn_pages_workspace_tree;
+mod pty_primary_merged_branch_shows_check;
 mod pty_pull_behind_local_remote;
 mod pty_q_quits_immediately;
 mod pty_r_refreshes_new_dirty_file;

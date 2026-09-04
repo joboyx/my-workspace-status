@@ -1769,6 +1769,64 @@ mod tests {
     }
 
     #[test]
+    fn nested_primary_merged_into_default_paints_check() {
+        let mut primary = dirty_repo("app", &["src/a.ts"]);
+        primary.branch = "feature/auth-landed".into();
+        primary.merged_into_default = Some(true);
+        let mut linked = repo("app/.worktrees/feat", true, true);
+        linked.branch = "feature/side-landed".into();
+        linked.merged_into_default = Some(true);
+        let built = build_workspace_snapshot(&[primary, linked], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let primary_row = rows
+            .iter()
+            .find(|r| r.id == "checkout:app")
+            .expect("primary checkout");
+        let linked_row = rows
+            .iter()
+            .find(|r| r.id == "checkout:app/.worktrees/feat")
+            .expect("linked checkout");
+        assert!(
+            primary_row.label.contains('M'),
+            "primary merged into default must paint the check, got {}",
+            primary_row.label
+        );
+        assert!(
+            !primary_row.label.contains('o'),
+            "primary must not paint open-vs-default, got {}",
+            primary_row.label
+        );
+        assert!(
+            linked_row.label.contains('M'),
+            "linked extra keeps the merged check, got {}",
+            linked_row.label
+        );
+    }
+
+    #[test]
+    fn flat_primary_repo_merged_into_default_paints_check() {
+        let mut app = repo("app", true, false);
+        app.branch = "feature/auth-landed".into();
+        app.merged_into_default = Some(true);
+        let built = build_workspace_snapshot(&[app], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let app_row = rows.iter().find(|r| r.id == "repo:app").expect("repo:app");
+        assert_eq!(app_row.kind, NodeKind::Repo);
+        assert!(
+            app_row.label.contains('M'),
+            "flat primary merged into default must paint the check, got {}",
+            app_row.label
+        );
+        assert!(
+            !app_row.label.contains('o'),
+            "flat primary must not paint open-vs-default, got {}",
+            app_row.label
+        );
+    }
+
+    #[test]
     fn flat_primary_repo_uses_repo_glyph_not_worktree() {
         let built = build_workspace_snapshot(&[repo("app", true, false)], &[], false, &[]);
         let tree = build_tree(&visible_for_tree(&built), true, "ws");

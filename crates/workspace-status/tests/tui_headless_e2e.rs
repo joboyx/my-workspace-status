@@ -17,8 +17,8 @@ use common::hscroll::{
 };
 use common::seed::{
     daily_workspace, focus_workspace, git, git_env, seed_long_diff_file, seed_long_path_file,
-    seed_long_subject_repo, seed_merge_mark_family, seed_primary_and_linked_family, seed_repo,
-    seed_tall_graph,
+    seed_long_subject_repo, seed_merge_mark_family, seed_primary_and_linked_family,
+    seed_primary_merged_family, seed_repo, seed_tall_graph,
 };
 use workspace_status::tui::HeadlessTui;
 use workspace_status_graph::UNICODE;
@@ -1960,6 +1960,57 @@ fn default_tip_linked_worktree_paints_open_not_merged() {
     assert!(
         landed.contains(MERGED_INTO_DEFAULT) && !landed.contains(OPEN_VS_DEFAULT),
         "strict-ancestor linked row must keep the merged check:\n{landed}\n{frame}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn primary_merged_checkout_paints_check_not_open() {
+    let root = std::env::temp_dir().join(format!(
+        "ws-tui-primary-merged-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    seed_primary_merged_family(&workspace);
+    let mut tui = open(&workspace);
+    let frame = tui.frame();
+    let primary = frame
+        .lines()
+        .map(tree_pane)
+        .find(|line| {
+            line.contains(PRIMARY_CHECKOUT_GLYPH) && line.contains("feature/primary-merged")
+        })
+        .unwrap_or("");
+    let linked_merged = frame
+        .lines()
+        .map(tree_pane)
+        .find(|line| {
+            line.contains(LINKED_WORKTREE_GLYPH) && line.contains("feature/linked-merged")
+        })
+        .unwrap_or("");
+    assert!(
+        !primary.is_empty(),
+        "expected a painted primary checkout row:\n{frame}"
+    );
+    assert!(
+        !linked_merged.is_empty(),
+        "expected a painted linked merged row:\n{frame}"
+    );
+    assert!(
+        primary.contains(MERGED_INTO_DEFAULT),
+        "primary merged into default must paint the check:\n{primary}\n{frame}"
+    );
+    assert!(
+        !primary.contains(OPEN_VS_DEFAULT),
+        "primary checkout must not paint open-vs-default:\n{primary}\n{frame}"
+    );
+    assert!(
+        linked_merged.contains(MERGED_INTO_DEFAULT),
+        "linked extra keeps the merged check:\n{linked_merged}\n{frame}"
     );
     let _ = fs::remove_dir_all(root);
 }
