@@ -25,6 +25,10 @@ render.rs paints section headers, line-number gutter, and cells
 Gutter width sizes the line-number column from the widest number present, minimum 2. A one-column comment mark sits to the left of that number column on every numbered cell, whether or not a comment exists, so adding a comment does not shift the numbers. Open comments paint `"` / nf-fa-comment. Resolved comments paint `'` / nf-fa-comment-o.
 Line numbers and the gutter rule use the theme `muted` colour without DIM so they stay readable on a dark terminal.
 
+## Display columns
+
+Diff cells clip and pad by **display columns**, not Unicode scalar count. Clip uses `slice_cols`. Pad uses `visible_width` of the clipped text (MesloLGS NF: emoji and other pictographs are two columns; private-use Nerd glyphs stay one). Hunk headers use the same clip. Emoji stay emoji. Do not replace them with ASCII placeholders. Char-count clip or pad under-counts those glyphs, so a split left cell grows and the in-diff RULE leaves the context-row column.
+
 ## Highlighting
 
 Intra-line word diff and syntax highlighting are not in this TUI yet. Add/del cells use a solid accent colour. Context and meta lines use the theme's muted / default text. Line numbers use muted without DIM.

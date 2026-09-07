@@ -315,7 +315,10 @@ pub fn apply_pan(offset: u16, delta: i32, max_offset: usize) -> u16 {
     clamp_col_offset(offset as i32 + delta, max_offset)
 }
 
-/// Slice `text` from `offset` for `width` columns (Unicode scalars).
+/// Slice `text` from `offset` for `width` Unicode scalars.
+///
+/// Diff paint uses [`slice_cols`] (display columns). This helper keeps
+/// scalar skip/take for callers that want char semantics.
 pub fn slice_visible(text: &str, offset: usize, width: usize) -> String {
     text.chars().skip(offset).take(width).collect()
 }
@@ -622,6 +625,11 @@ mod tests {
         assert_eq!(apply_pan(4, 1, 4), 4);
         assert_eq!(slice_cols("abcdefghij", 3, 4), "defg");
         assert_eq!(slice_cols("abcdefghij", 0, 4), "abcd");
+        assert_eq!(slice_cols("😀😀😀", 0, 2), "😀");
+        assert_eq!(slice_cols("😀😀😀", 2, 2), "😀");
+        assert_eq!(slice_cols("ab😀cd", 0, 4), "ab😀");
+        assert_eq!(visible_width(&slice_cols("😀x", 0, 2)), 2);
+        assert_eq!(slice_visible("😀😀", 0, 1), "😀");
         assert_eq!(list_row_pan_max(20, 0, 0, 10), 13);
         assert_eq!(hunk_anchor(&lines, 1).as_deref(), Some("@@ hunk @@"));
         assert_eq!(scroll_to_keep_anchor(&lines, "@@ hunk @@", 9), 0);
