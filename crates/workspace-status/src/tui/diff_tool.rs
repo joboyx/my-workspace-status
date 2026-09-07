@@ -176,7 +176,13 @@ pub fn cleanup_prepared(prepared: &PreparedDiff) {
     let _ = fs::remove_dir(&prepared.session_dir);
 }
 
-/// Wait for a detached diff-tool child, then delete this session's temps only.
+/// Wait for the spawned diff-tool process to exit, then delete this session's
+/// temps only.
+///
+/// GUI CLIs such as Cursor and VS Code return in a few seconds unless the
+/// command includes `--wait`. Cleanup runs when that process exits. Without
+/// `--wait`, the LEFT HEAD temp is gone before the IDE opens the files.
+/// Config `diffTool` is used as-is. Samples use `cursor --diff --wait`.
 pub fn wait_and_cleanup(mut child: Child, prepared: PreparedDiff) {
     let _ = child.wait();
     cleanup_prepared(&prepared);
@@ -216,6 +222,13 @@ mod tests {
         let (cmd, args) = diff_tool_command("cursor --diff", "/tmp/left", "/repo/file.rs");
         assert_eq!(cmd, "cursor");
         assert_eq!(args, vec!["--diff", "/tmp/left", "/repo/file.rs"]);
+    }
+
+    #[test]
+    fn cursor_diff_wait_appends_paths() {
+        let (cmd, args) = diff_tool_command("cursor --diff --wait", "/tmp/left", "/repo/file.rs");
+        assert_eq!(cmd, "cursor");
+        assert_eq!(args, vec!["--diff", "--wait", "/tmp/left", "/repo/file.rs"]);
     }
 
     #[test]
@@ -469,6 +482,37 @@ mod tests {
         assert!(!left.exists());
         assert!(leftover.exists());
         let _ = fs::remove_dir_all(&other);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wait_and_cleanup_keeps_left_temp_until_child_exits() {
+        let _lock = lock_temps();
+        let dir = unique_repo("ws-ext-diff-wait-hold");
+        fs::write(dir.join("README.md"), "# dirty\n").unwrap();
+        let prepared = prepare_worktree_diff(&dir, "README.md").unwrap();
+        let left = prepared.left.clone();
+        let mut child = Command::new(crate::git::git_binary())
+            .args(["hash-object", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn git hash-object --stdin");
+        let stdin = child.stdin.take().expect("piped stdin");
+        let worker = std::thread::spawn(move || {
+            wait_and_cleanup(child, prepared);
+        });
+        assert!(
+            left.exists(),
+            "LEFT HEAD temp must survive while the diff-tool process is still running"
+        );
+        drop(stdin);
+        worker.join().expect("wait_and_cleanup thread");
+        assert!(
+            !left.exists(),
+            "LEFT HEAD temp must be deleted after the diff-tool process exits"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

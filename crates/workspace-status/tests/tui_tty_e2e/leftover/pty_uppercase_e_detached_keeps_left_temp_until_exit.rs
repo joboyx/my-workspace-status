@@ -1,19 +1,11 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{tree_cursor_on, tree_has, GIT_WAIT, WAIT};
-
-fn help_lists_e_e_diff_tool(screen: &str) -> bool {
-    let compact = screen.split_whitespace().collect::<Vec<_>>().join(" ");
-    compact.contains("GIT")
-        && compact.contains("e E")
-        && (compact.contains("open in diff tool") || compact.contains("open in editor"))
-        && compact.contains("Ctrl-o")
-        && compact.contains("full-file")
-}
 
 fn stub_argv(marker_body: &str) -> Vec<&str> {
     marker_body
@@ -23,18 +15,31 @@ fn stub_argv(marker_body: &str) -> Vec<&str> {
         .collect()
 }
 
-/// `E` hands LEFT+RIGHT to config `diffTool`. Help lists that next to `e`.
-/// Ctrl-o is full-file and must not pass as this key. `e` stays editor.
-/// LEFT HEAD temp must exist while the stub holds and must be gone after
-/// the stub exits.
+fn wait_file(path: &Path, timeout: Duration) -> String {
+    let start = Instant::now();
+    loop {
+        if let Ok(body) = fs::read_to_string(path) {
+            if !body.trim().is_empty() {
+                return body;
+            }
+        }
+        if start.elapsed() >= timeout {
+            panic!("timed out waiting for {}", path.display());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Detached GUI `E` (`cursor` in the DETACHED name list). TUI stays mounted.
+/// LEFT HEAD temp must exist while the child holds, then vanish after the
+/// child exits. A spawn that deletes temps when the CLI returns (~2s without
+/// `--wait`) fails. Help row is unchanged.
 ///
-/// Launch starts on README.md. The claim uses a second dirty file so a
-/// tool that always opens the first path cannot pass. A TTY stub paints
-/// chrome, holds the TTY, then exits 0 (a live vimdiff session would hang
-/// `cargo test`). After return, the TUI remounts on the same file. A
-/// no-op, a toast with no spawn, one path, or README-only argv fails.
+/// The stub file name is `cursor` so `is_detached_editor` is true. Config
+/// is `cursor --diff --wait`. Launch starts on README.md. The claim uses a
+/// second dirty file so a tool that always opens the first path cannot pass.
 #[test]
-fn pty_uppercase_e_opens_focused_file_in_diff_tool() {
+fn pty_uppercase_e_detached_keeps_left_temp_until_exit() {
     let (_root, workspace) = daily_workspace();
     fs::write(
         workspace.join("app").join("edit-target.txt"),
@@ -43,7 +48,7 @@ fn pty_uppercase_e_opens_focused_file_in_diff_tool() {
     .unwrap();
     let shim_dir = workspace.join(".e2e-diff-shim");
     fs::create_dir_all(&shim_dir).unwrap();
-    let stub = shim_dir.join("stub-diff-tool");
+    let stub = shim_dir.join("cursor");
     let marker = shim_dir.join("opened");
     let hold = shim_dir.join("hold");
     fs::write(&hold, "1\n").unwrap();
@@ -53,7 +58,6 @@ fn pty_uppercase_e_opens_focused_file_in_diff_tool() {
          marker=\"${WS_STATUS_E2E_DIFF_MARKER:?}\"\n\
          hold=\"${WS_STATUS_E2E_DIFF_HOLD:?}\"\n\
          printf '%s\\n' \"$@\" > \"$marker\"\n\
-         printf '\\n===== STUB-DIFF-CHROME =====\\nopening %s\\n===== STUB-DIFF-CHROME =====\\n' \"$*\"\n\
          i=0\n\
          while [ -f \"$hold\" ] && [ \"$i\" -lt 300 ]; do\n\
            sleep 0.1\n\
@@ -65,7 +69,7 @@ fn pty_uppercase_e_opens_focused_file_in_diff_tool() {
     let mut perms = fs::metadata(&stub).unwrap().permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&stub, perms).unwrap();
-    let tool = stub.display().to_string();
+    let tool = format!("{} --diff --wait", stub.display());
     assert!(
         !tool.contains('"') && !tool.contains('\\'),
         "stub path must be JSON-safe: {tool}"
@@ -99,24 +103,6 @@ fn pty_uppercase_e_opens_focused_file_in_diff_tool() {
         GIT_WAIT,
     );
 
-    tui.key('?');
-    tui.wait_pred(
-        |screen| help_lists_e_e_diff_tool(screen) && screen.contains("MOVE"),
-        "help GIT lists e E / open in diff tool; Ctrl-o stays full-file",
-        WAIT,
-    );
-    tui.esc();
-    tui.wait_pred(
-        |screen| {
-            !screen.contains("open in editor")
-                && !screen.contains("open in diff tool")
-                && tree_cursor_on(screen, "README.md")
-                && screen.contains("? help")
-        },
-        "Esc closes help so E is the diff-tool key, not a help query",
-        WAIT,
-    );
-
     tui.search("edit-target");
     tui.wait_pred(
         |screen| {
@@ -135,54 +121,79 @@ fn pty_uppercase_e_opens_focused_file_in_diff_tool() {
     tui.key('E');
     tui.wait_pred(
         |screen| {
-            screen.contains("STUB-DIFF-CHROME")
-                && screen.contains("edit-target.txt")
+            screen.contains("opened diff edit-target.txt")
+                && !screen.contains("STUB-DIFF-CHROME")
                 && !screen.contains("diffed edit-target.txt")
                 && !screen.contains("edited edit-target.txt")
+                && tree_cursor_on(screen, "edit-target.txt")
+                && screen.contains("unique-edit-target-body")
+                && screen.contains("? help")
                 && !screen.contains(" · full")
         },
-        "E must paint diff-tool chrome for the focused path (a no-op stays idle; Ctrl-o paints full-file)",
+        "detached E stays mounted with opened-diff toast (TTY remount or no-op fails)",
         WAIT,
     );
-    let marker_body = fs::read_to_string(&marker).unwrap_or_default();
+    let marker_body = wait_file(&marker, WAIT);
     let args = stub_argv(&marker_body);
-    eprintln!("diffTool argv ({} paths):\n{marker_body}", args.len());
+    eprintln!(
+        "detached cursor argv ({} paths):\n{marker_body}",
+        args.len()
+    );
     assert!(
-        args.len() >= 2,
-        "diff tool must receive at least two path arguments, got {}:\n{marker_body}",
+        args.iter().any(|a| *a == "--diff") && args.iter().any(|a| *a == "--wait"),
+        "detached config must pass --diff --wait:\n{marker_body}"
+    );
+    assert!(
+        args.len() >= 4,
+        "diff tool must receive flags plus two path arguments, got {}:\n{marker_body}",
         args.len()
     );
     let focused = workspace.join("app").join("edit-target.txt");
     assert!(
         args.iter().any(|a| Path::new(a) == focused.as_path()),
-        "stub diffTool must receive the focused worktree file:\n{marker_body}"
+        "stub cursor must receive the focused worktree file:\n{marker_body}"
     );
     assert!(
         !marker_body.contains("README.md"),
-        "README.md must not be the only path (or any path):\n{marker_body}"
+        "README.md must not be a path:\n{marker_body}"
     );
-    let other = args
+    let left_temp = args
         .iter()
         .copied()
-        .find(|a| Path::new(a) != focused.as_path());
-    let left_arg = other.expect("LEFT temp argv");
-    assert!(
-        left_arg.contains("workspace-status-ext-diff"),
-        "the other argv path must be a temp under workspace-status-ext-diff:\n{marker_body}"
-    );
-    let left_temp = Path::new(left_arg);
+        .find(|a| Path::new(a) != focused.as_path() && a.contains("workspace-status-ext-diff"))
+        .map(Path::new)
+        .expect("LEFT temp argv");
     assert!(
         left_temp.exists(),
-        "LEFT HEAD temp must survive while the stub still holds:\n{}",
+        "LEFT HEAD temp must survive while the detached child holds:\n{}",
+        left_temp.display()
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        left_temp.exists(),
+        "LEFT HEAD temp must still exist after 2s (cleanup-on-CLI-return fails):\n{}",
         left_temp.display()
     );
     fs::remove_file(&hold).unwrap();
 
+    let gone_start = Instant::now();
+    loop {
+        if !left_temp.exists() {
+            break;
+        }
+        if gone_start.elapsed() >= GIT_WAIT {
+            panic!(
+                "LEFT HEAD temp still exists after the detached child exited:\n{}",
+                left_temp.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
     tui.wait_pred(
         |screen| {
-            screen.contains("diffed edit-target.txt")
+            screen.contains("opened diff edit-target.txt")
+                && !screen.contains("diffed edit-target.txt")
                 && !screen.contains("edited edit-target.txt")
-                && !screen.contains("STUB-DIFF-CHROME")
                 && tree_cursor_on(screen, "edit-target.txt")
                 && !tree_cursor_on(screen, "README.md")
                 && tree_has(screen, "README.md")
@@ -192,13 +203,8 @@ fn pty_uppercase_e_opens_focused_file_in_diff_tool() {
                 && !screen.contains(" · full")
                 && !screen.contains("[workspace]")
         },
-        "TUI remounts on the same focused file after the diff tool exits (a toast-only no-op never spawns chrome)",
-        GIT_WAIT,
-    );
-    assert!(
-        !left_temp.exists(),
-        "LEFT HEAD temp must be deleted after the stub exits:\n{}",
-        left_temp.display()
+        "TUI stays mounted on the same focused file after the detached child exits",
+        WAIT,
     );
     let readme = fs::read_to_string(workspace.join("app").join("README.md")).unwrap();
     let target = fs::read_to_string(&focused).unwrap();
@@ -208,6 +214,6 @@ fn pty_uppercase_e_opens_focused_file_in_diff_tool() {
     );
     assert_eq!(
         target, "unique-edit-target-body\n",
-        "stub diffTool must not be required to mutate the focused file:\n{target}"
+        "stub cursor must not be required to mutate the focused file:\n{target}"
     );
 }
