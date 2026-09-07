@@ -117,7 +117,7 @@ Set WS_STATUS_GLYPHS=ascii for plain markers.
 - `maxDepth` — how many path segments below cwd to search for git repos (default **3**, so `group/app/module` is included)
 - `defaultBranches` — optional map of workspace-relative repo path → sole default branch. When set, that branch is used for classification, markers, ordering, and `--default-branch` / TUI `d`. When omitted for a repo, behaviour matches today (classification: `main`/`master`/`develop`; switch target from git).
 - `editor` — optional command for TUI `e` (same shape as `$EDITOR`). Omit the key or set `"editor": "vim"` for vim (the default). `"editor": "cursor"` opens Cursor IDE. Overrides `$EDITOR` / `$VISUAL`.
-- `diffTool` — optional command for TUI `E` (default vimdiff). `"diffTool": "cursor --diff"` opens Cursor. No `$EDITOR` fallback.
+- `diffTool` — optional command for TUI `E` (default vimdiff). `"diffTool": "cursor --diff --wait"` opens Cursor and keeps HEAD temps until the CLI exits. No `$EDITOR` fallback.
 
 Pass `-a` or `--all` to include repos listed in `ignoredRepos` for that run (`maxDepth` is unchanged). In the TUI, `.` shows or hides those repos at runtime (starts shown with `-a`, hidden without it). Hidden ignored repos stay out of workspace operations unless you show them.
 

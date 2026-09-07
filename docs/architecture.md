@@ -35,7 +35,7 @@ stdout_is_tty || flags.force_tui
 | `--update`       | print GitHub Release notes newer than this install, then exec `workspace-status-update` and exit — never opens the TUI or applies repo filters |
 | TUI startup (TTY) | before `run_tui`: at most every 6 hours, fetch the latest published GitHub Release. Newer → `new version available, update? [y/n]`. `y` runs `--update` (notes then sidecar). `n` / fail / current → open the TUI. `--plain` / `--json` / `--update` skip this |
 
-On a TTY the mount loop uses the alternate screen (DEC 1049) so frames stay off the primary scrollback. Leave/re-enter brackets a blocking TTY `$EDITOR` (vim) or `diffTool` (vimdiff). GUI editors such as Cursor spawn detached and stay on the mounted TUI.
+On a TTY the mount loop uses the alternate screen (DEC 1049) so frames stay off the primary scrollback. Leave/re-enter brackets a blocking TTY `$EDITOR` (vim) or `diffTool` (vimdiff). GUI editors such as Cursor spawn detached and stay on the mounted TUI. Config samples use `cursor --diff --wait` so the worker does not delete HEAD temps when the CLI returns.
 
 ## Data pipeline
 
