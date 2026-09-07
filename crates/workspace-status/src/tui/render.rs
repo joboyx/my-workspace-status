@@ -41,7 +41,7 @@ use super::icons::{
 };
 use super::search::{
     collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids, slice_cols,
-    slice_visible, SearchPane,
+    SearchPane,
 };
 use super::split::{
     diff_split_rule_x, effective_diff_mode, is_side_by_side_split, pane_widths,
@@ -1041,7 +1041,7 @@ fn paint_diff_row(
             ))
         }
         DiffRow::Hunk { text } => Line::from(Span::styled(
-            slice_visible(text, 0, width as usize),
+            slice_cols(text, 0, width as usize),
             Style::default().fg(palette.diff_hunk),
         )),
         DiffRow::Line { left, right } if split && right.is_some() => {
@@ -1133,12 +1133,12 @@ fn paint_cell_spans(
     let code_w = cell_code_width(width, gutter.saturating_add(mark_w));
     let comment = cell.line_no.and_then(|n| diff_cell_comment_state(state, n));
     let line_no = format_line_gutter(cell.line_no, gutter, comment, ascii);
-    let plain = slice_visible(&cell.text, col_offset, code_w);
+    let plain = slice_cols(&cell.text, col_offset, code_w);
     let sign = cell_sign(cell.kind);
     let accent = cell_accent(cell.kind, palette);
     let code_style = accent.unwrap_or(Style::default().fg(palette.repo));
     let gutter_style = diff_gutter_style(palette);
-    let used = visible_width(&line_no) + 4 + plain.chars().count();
+    let used = visible_width(&line_no) + 4 + visible_width(&plain);
     let pad = width.saturating_sub(used);
     vec![
         Span::styled(line_no, gutter_style),

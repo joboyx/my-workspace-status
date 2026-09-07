@@ -25,6 +25,7 @@ mod pty_dot_hides_linked_of_ignored_primary;
 mod pty_dot_toggles_ignored_repos;
 mod pty_double_click_enters_on_hit_row;
 mod pty_e_opens_focused_file_in_editor;
+mod pty_emoji_diff_keeps_column_grid;
 mod pty_enter_from_tree_focuses_right;
 mod pty_fetch_local_remote_marks_behind;
 mod pty_fold_h_l_toggles_no_updates_group;
