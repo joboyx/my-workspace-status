@@ -584,6 +584,7 @@ impl Interpreter {
                     let gen = tab.generation;
                     tab.diff_req = tab.diff_req.saturating_add(1);
                     let req_id = tab.diff_req;
+                    tab.path = Some(path.clone());
                     self.compare_diff.push_back(CompareDiffJob {
                         req_id,
                         gen,
@@ -2073,6 +2074,82 @@ mod tests {
             state.tabs.get_id(tab_b).unwrap().path.as_deref(),
             Some("b.txt")
         );
+    }
+
+    #[test]
+    fn compare_diff_return_trip_drops_middle_file() {
+        let mut state = fixture_state();
+        let (tab_id, gen) = open_compare_tab(&mut state);
+        let keep = DiffContent::from_unified("+a\n");
+        {
+            let tab = state.tabs.get_id_mut(tab_id).unwrap();
+            tab.source = Some(compare_source());
+            tab.files = vec![commit_file("a.txt"), commit_file("b.txt")];
+            tab.file_cursor = 0;
+            tab.path = Some("a.txt".into());
+            tab.content = keep.clone();
+        }
+        let mut interp = Interpreter::new();
+        let opts = opts(&state);
+        interp.schedule(
+            &mut state,
+            &opts,
+            Effect::LoadCompareDiff {
+                tab_id,
+                repo: "app".into(),
+                source: compare_source(),
+                path: "b.txt".into(),
+                old_path: None,
+            },
+            &Action::None,
+        );
+        assert_eq!(
+            state.tabs.get_id(tab_id).unwrap().path.as_deref(),
+            Some("b.txt")
+        );
+        interp.schedule(
+            &mut state,
+            &opts,
+            Effect::LoadCompareDiff {
+                tab_id,
+                repo: "app".into(),
+                source: compare_source(),
+                path: "a.txt".into(),
+                old_path: None,
+            },
+            &Action::None,
+        );
+        assert_eq!(state.tabs.get_id(tab_id).unwrap().diff_req, 2);
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CompareDiff {
+                tab_id,
+                req_id: 1,
+                gen,
+                source: compare_source(),
+                path: "b.txt".into(),
+                content: Ok(DiffContent::from_unified("+b\n")),
+            },
+        );
+        let tab = state.tabs.get_id(tab_id).unwrap();
+        assert_eq!(tab.path.as_deref(), Some("a.txt"));
+        assert_eq!(tab.content, keep);
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CompareDiff {
+                tab_id,
+                req_id: 2,
+                gen,
+                source: compare_source(),
+                path: "a.txt".into(),
+                content: Ok(DiffContent::from_unified("+a2\n")),
+            },
+        );
+        let tab = state.tabs.get_id(tab_id).unwrap();
+        assert_eq!(tab.path.as_deref(), Some("a.txt"));
+        assert_eq!(tab.content, DiffContent::from_unified("+a2\n"));
     }
 
     #[test]
