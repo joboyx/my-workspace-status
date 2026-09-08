@@ -36,6 +36,7 @@ pub fn is_compare_mutation(action: &Action) -> bool {
             | Action::Push
             | Action::DefaultBranch
             | Action::Branch
+            | Action::BranchSubmit
             | Action::RemoveWorktree
             | Action::GraphCheckout
             | Action::GraphCreateBranch

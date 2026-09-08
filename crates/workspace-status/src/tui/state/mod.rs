@@ -5740,6 +5740,34 @@ mod tests {
     }
 
     #[test]
+    fn compare_tab_branch_submit_does_not_checkout() {
+        use crate::git::LocalBranch;
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        app.open_branch_picker(
+            "app".into(),
+            vec![
+                LocalBranch {
+                    name: "main".into(),
+                    current: true,
+                    authordate: 1,
+                },
+                LocalBranch {
+                    name: "feature/x".into(),
+                    current: false,
+                    authordate: 2,
+                },
+            ],
+        );
+        app.dispatch(Action::BranchChar('f'));
+        app.tabs.open_or_focus("app".into(), "main".into());
+        assert!(app.is_compare_tab());
+        assert_eq!(app.dispatch(Action::BranchSubmit), Effect::None);
+        assert_eq!(app.status, super::super::tabs::SWITCH_TO_WORKSPACE_TAB);
+        assert!(app.branch_picker.is_some());
+    }
+
+    #[test]
     fn compare_probe_skips_loading_tabs() {
         let mut app = state();
         app.tabs.open_or_focus("app".into(), "main".into());

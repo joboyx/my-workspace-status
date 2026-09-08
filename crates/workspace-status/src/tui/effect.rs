@@ -906,7 +906,8 @@ impl Interpreter {
                 self.sched.note_user_done(UserTag::Prepare);
                 let accepted = self.sched.accept_prepare_stash_result(gen);
                 let current = state.focused_checkout_path();
-                if accepted && current.as_deref() == Some(repo.as_str()) {
+                if accepted && current.as_deref() == Some(repo.as_str()) && !state.is_compare_tab()
+                {
                     state.open_stash_menu(repo, latest);
                     self.mark();
                 }
@@ -928,7 +929,8 @@ impl Interpreter {
                 } else {
                     state.focused_checkout_path()
                 };
-                if accepted && current.as_deref() == Some(repo.as_str()) {
+                if accepted && current.as_deref() == Some(repo.as_str()) && !state.is_compare_tab()
+                {
                     if graph_focus {
                         state.open_graph_focus_picker(repo, branches);
                     } else {
@@ -2789,6 +2791,52 @@ mod tests {
             .as_ref()
             .expect("matching PrepareBranches must open branch picker");
         assert_eq!(picker.repo, "app");
+    }
+
+    #[test]
+    fn prepare_branches_does_not_open_picker_on_compare_tab() {
+        let mut state = fixture_state();
+        focus_repo(&mut state, "app");
+        let _ = open_compare_tab(&mut state);
+        assert!(state.is_compare_tab());
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_prepare_branches();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::PrepareBranches {
+                gen,
+                repo: "app".into(),
+                branches: vec![local_branch("main"), local_branch("feature")],
+                graph_focus: false,
+            },
+        );
+        assert!(
+            state.branch_picker.is_none(),
+            "PrepareBranches must not open the checkout picker on a compare tab"
+        );
+    }
+
+    #[test]
+    fn prepare_stash_does_not_open_menu_on_compare_tab() {
+        let mut state = fixture_state();
+        focus_repo(&mut state, "app");
+        let _ = open_compare_tab(&mut state);
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_prepare_stash();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::PrepareStash {
+                gen,
+                repo: "app".into(),
+                latest: Some("stash@{0}".into()),
+            },
+        );
+        assert!(
+            state.stash_menu.is_none(),
+            "PrepareStash must not open the stash menu on a compare tab"
+        );
     }
 
     #[test]
