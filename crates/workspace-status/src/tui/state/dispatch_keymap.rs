@@ -5,11 +5,12 @@ use std::time::Instant;
 use super::super::action::{Action, Effect, ExternalDiffKind, PaletteOpenedBy};
 use super::super::branches::can_open_branch_picker;
 use super::super::command_palette::CommandPaletteState;
-use super::super::gates::{dispatch_is_noop, ListFocusTarget};
+use super::super::gates::{dispatch_is_noop, is_compare_mutation, ListFocusTarget};
 use super::super::ops::{collect_write_files, op_is_kind_noop, Op};
 use super::super::split::SplitDrag;
 use super::super::tabs::{
-    DEFAULT_BRANCH_NOT_FOUND, FOCUS_A_CHECKOUT, HEAD_HAS_NO_COMMIT, WORKSPACE_TAB_CANNOT_CLOSE,
+    DEFAULT_BRANCH_NOT_FOUND, FOCUS_A_CHECKOUT, HEAD_HAS_NO_COMMIT, SWITCH_TO_WORKSPACE_TAB,
+    WORKSPACE_TAB_CANNOT_CLOSE,
 };
 use super::super::tree::NodeKind;
 use super::{AppState, FileWrite, FocusPane, FoldOp};
@@ -426,6 +427,9 @@ impl AppState {
 
     /// Why the highlighted command cannot run, or `None` if Enter should dispatch.
     pub(crate) fn palette_disabled_reason(&self, action: &Action) -> Option<String> {
+        if self.is_compare_tab() && is_compare_mutation(action) {
+            return Some(SWITCH_TO_WORKSPACE_TAB.into());
+        }
         if dispatch_is_noop(
             action,
             self.nav_depth(),

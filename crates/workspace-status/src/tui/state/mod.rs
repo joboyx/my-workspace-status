@@ -39,7 +39,7 @@ use super::comments::{
 };
 use super::commit_files::{
     ancestor_dir_ids, collect_foldable_subtree_ids as collect_commit_subtree_ids,
-    flatten_commit_files, CommitFileRow,
+    commit_file_cursor_index, flatten_commit_files, CommitFileRow,
 };
 use super::ctrl_c_exit::{handle_ctrl_c, is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT};
 use super::diff::{
@@ -641,7 +641,8 @@ impl AppState {
         self.list_focus_target() == ListFocusTarget::Graph
     }
 
-    fn commit_drill_files(&self) -> Option<&[CommitFile]> {
+    /// Commit-file list for the active compare tab or graph drill.
+    pub(crate) fn commit_drill_files(&self) -> Option<&[CommitFile]> {
         if let Some(tab) = self.tabs.active_compare() {
             return Some(tab.files.as_slice());
         }
@@ -933,19 +934,7 @@ impl AppState {
 
     fn restore_commit_file_cursor(&mut self, path: Option<&str>) {
         let rows = self.commit_file_rows();
-        if rows.is_empty() {
-            self.set_commit_file_cursor(0);
-            return;
-        }
-        let idx = path
-            .and_then(|path| {
-                rows.iter()
-                    .position(|row| row.is_file() && row.path == path)
-                    .or_else(|| rows.iter().position(|row| row.path == path))
-            })
-            .unwrap_or(0)
-            .min(rows.len() - 1);
-        self.set_commit_file_cursor(idx);
+        self.set_commit_file_cursor(commit_file_cursor_index(&rows, path));
     }
 
     fn visible_tree(&self) -> TreeNode {
@@ -998,7 +987,7 @@ impl AppState {
         let path = self.focused_commit_file_row().map(|row| row.path);
         self.commit_tree_mode = !self.commit_tree_mode;
         self.commit_file_folds.clear();
-        if !self.drill.is_graph() {
+        if self.is_compare_tab() || !self.drill.is_graph() {
             self.restore_commit_file_cursor(path.as_deref());
         }
         self.status = if self.commit_tree_mode {
@@ -3959,71 +3948,83 @@ impl AppState {
         self.open_compare_tab(repo, name)
     }
 
+    /// Apply a compare range load. Cursor is a flattened row, not a `files` index.
     pub(crate) fn apply_compare_range(
         &mut self,
         tab_id: u64,
         gen: u64,
         result: Result<super::app::CompareRangeLoad, String>,
     ) -> Option<Effect> {
-        let tab = self.tabs.get_id_mut(tab_id)?;
-        if tab.generation != gen {
-            return None;
+        let (source, keep, checkout) = {
+            let tab = self.tabs.get_id_mut(tab_id)?;
+            if tab.generation != gen {
+                return None;
+            }
+            tab.loading = false;
+            let load = match result {
+                Err(err) => {
+                    tab.error = Some(err);
+                    tab.files.clear();
+                    tab.source = None;
+                    tab.path = None;
+                    tab.content = DiffContent::default();
+                    return None;
+                }
+                Ok(load) => load,
+            };
+            tab.error = None;
+            tab.source = Some(load.source.clone());
+            tab.last_head = Some(load.head);
+            tab.last_base_tip = Some(load.base_tip);
+            let keep = tab
+                .path
+                .clone()
+                .filter(|path| load.files.iter().any(|file| &file.path == path));
+            tab.files = load.files;
+            (load.source, keep, tab.checkout_path.clone())
+        };
+        let mut folds = if self.tabs.active_compare().is_some_and(|tab| tab.id == tab_id) {
+            self.commit_file_folds.clone()
+        } else {
+            self.tabs.get_id(tab_id)?.folds.clone()
+        };
+        if let Some(path) = keep.as_deref() {
+            for id in ancestor_dir_ids(path) {
+                folds.remove(&id);
+            }
         }
-        tab.loading = false;
-        match result {
-            Err(err) => {
-                tab.error = Some(err);
-                tab.files.clear();
-                tab.source = None;
+        let files = self.tabs.get_id(tab_id)?.files.clone();
+        let rows = flatten_commit_files(&files, self.commit_tree_mode, &folds, self.ascii);
+        let cursor = commit_file_cursor_index(&rows, keep.as_deref());
+        let selected = rows.get(cursor).and_then(|row| {
+            row.is_file().then(|| {
+                (
+                    row.path.clone(),
+                    row.file.as_ref().and_then(|file| file.old_path.clone()),
+                )
+            })
+        });
+        if self.tabs.active_compare().is_some_and(|tab| tab.id == tab_id) {
+            self.commit_file_folds = folds.clone();
+        }
+        let tab = self.tabs.get_id_mut(tab_id)?;
+        tab.folds = folds;
+        tab.file_cursor = cursor;
+        match selected {
+            Some((path, old_path)) => {
+                tab.path = Some(path.clone());
+                Some(Effect::LoadCompareDiff {
+                    tab_id,
+                    repo: checkout,
+                    source,
+                    path,
+                    old_path,
+                })
+            }
+            None => {
                 tab.path = None;
                 tab.content = DiffContent::default();
                 None
-            }
-            Ok(load) => {
-                tab.error = None;
-                tab.source = Some(load.source.clone());
-                tab.last_head = Some(load.head);
-                tab.last_base_tip = Some(load.base_tip);
-                let keep = tab
-                    .path
-                    .clone()
-                    .filter(|path| load.files.iter().any(|file| &file.path == path));
-                tab.files = load.files;
-                if let Some(path) = keep {
-                    tab.path = Some(path.clone());
-                    if let Some(idx) = tab.files.iter().position(|file| file.path == path) {
-                        tab.file_cursor = idx;
-                    }
-                    let old_path = tab
-                        .files
-                        .iter()
-                        .find(|file| file.path == path)
-                        .and_then(|file| file.old_path.clone());
-                    Some(Effect::LoadCompareDiff {
-                        tab_id,
-                        repo: tab.checkout_path.clone(),
-                        source: load.source,
-                        path,
-                        old_path,
-                    })
-                } else if tab.files.is_empty() {
-                    tab.path = None;
-                    tab.content = DiffContent::default();
-                    tab.file_cursor = 0;
-                    None
-                } else {
-                    tab.file_cursor = 0;
-                    let path = tab.files[0].path.clone();
-                    let old_path = tab.files[0].old_path.clone();
-                    tab.path = Some(path.clone());
-                    Some(Effect::LoadCompareDiff {
-                        tab_id,
-                        repo: tab.checkout_path.clone(),
-                        source: load.source,
-                        path,
-                        old_path,
-                    })
-                }
             }
         }
     }
@@ -5464,6 +5465,22 @@ mod tests {
         }
     }
 
+    fn compare_range_load(paths: &[&str]) -> crate::tui::app::CompareRangeLoad {
+        crate::tui::app::CompareRangeLoad {
+            source: compare_source(),
+            files: paths
+                .iter()
+                .map(|path| CommitFile {
+                    status: "M".into(),
+                    path: (*path).into(),
+                    old_path: None,
+                })
+                .collect(),
+            head: "ccc".into(),
+            base_tip: "bbb".into(),
+        }
+    }
+
     #[test]
     fn compare_tab_edit_does_not_open_workspace_dirty_file() {
         let mut app = state();
@@ -5501,6 +5518,111 @@ mod tests {
         assert_eq!(app.dispatch(Action::Edit), Effect::None);
         assert_eq!(app.status, "focus a file to edit");
         assert_eq!(app.dispatch(Action::ExternalDiff), Effect::None);
+    }
+
+    #[test]
+    fn apply_compare_range_selects_first_file_not_dir() {
+        let mut app = state();
+        app.tabs.open_or_focus("app".into(), "main".into());
+        app.focus = FocusPane::Left;
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        let follow = app.apply_compare_range(
+            tab_id,
+            gen,
+            Ok(compare_range_load(&["src/view.rs", "README.md"])),
+        );
+        let row = app.focused_commit_file_row().expect("compare row");
+        assert!(row.is_file(), "new compare load must land on a file: {row:?}");
+        assert_eq!(row.path, "src/view.rs");
+        match follow {
+            Some(Effect::LoadCompareDiff { path, .. }) => assert_eq!(path, "src/view.rs"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            app.dispatch(Action::Edit),
+            Effect::EditFile {
+                repo: "app".into(),
+                path: "src/view.rs".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn apply_compare_range_keeps_path_on_flattened_row() {
+        let mut app = state();
+        app.tabs.open_or_focus("app".into(), "main".into());
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        let _ = app.apply_compare_range(
+            tab_id,
+            gen,
+            Ok(compare_range_load(&["src/a.rs", "src/b.rs"])),
+        );
+        app.tabs.active_compare_mut().unwrap().path = Some("src/b.rs".into());
+        let _ = app.apply_compare_range(
+            tab_id,
+            gen,
+            Ok(compare_range_load(&["src/a.rs", "src/b.rs"])),
+        );
+        let row = app.focused_commit_file_row().expect("kept row");
+        assert_eq!(row.path, "src/b.rs");
+        assert!(row.is_file());
+        let files_idx = app
+            .tabs
+            .active_compare()
+            .unwrap()
+            .files
+            .iter()
+            .position(|file| file.path == "src/b.rs")
+            .unwrap();
+        assert_ne!(
+            app.tabs.active_compare().unwrap().file_cursor,
+            files_idx,
+            "cursor must be the flattened row, not the files index"
+        );
+    }
+
+    #[test]
+    fn compare_t_restores_file_cursor() {
+        let mut app = state();
+        app.tabs.open_or_focus("app".into(), "main".into());
+        app.focus = FocusPane::Left;
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        let _ = app.apply_compare_range(tab_id, gen, Ok(compare_range_load(&["src/view.rs"])));
+        assert!(app.focused_commit_file_row().unwrap().is_file());
+        assert!(app.commit_tree_mode);
+        assert_eq!(app.dispatch(Action::ToggleTreeMode), Effect::None);
+        assert!(!app.commit_tree_mode);
+        let row = app.focused_commit_file_row().expect("flat row");
+        assert!(row.is_file());
+        assert_eq!(row.path, "src/view.rs");
+        app.dispatch(Action::ToggleTreeMode);
+        let row = app.focused_commit_file_row().expect("tree row");
+        assert!(row.is_file());
+        assert_eq!(row.path, "src/view.rs");
+    }
+
+    #[test]
+    fn palette_compare_mutations_use_switch_copy() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.tabs.open_or_focus("app".into(), "main".into());
+        for action in [
+            Action::Stage,
+            Action::Revert,
+            Action::Fetch,
+            Action::Branch,
+        ] {
+            assert_eq!(
+                app.palette_disabled_reason(&action).as_deref(),
+                Some(super::super::tabs::SWITCH_TO_WORKSPACE_TAB),
+                "{action:?}"
+            );
+        }
+        assert_eq!(app.dispatch(Action::Stage), Effect::None);
+        assert_eq!(app.status, super::super::tabs::SWITCH_TO_WORKSPACE_TAB);
     }
 
     #[test]

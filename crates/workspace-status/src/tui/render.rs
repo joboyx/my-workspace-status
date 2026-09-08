@@ -908,9 +908,8 @@ fn commit_file_search_match_paths(state: &AppState) -> HashSet<String> {
     if state.search_target != SearchPane::CommitFiles {
         return HashSet::new();
     }
-    let files = match &state.drill {
-        DrillView::Files { files, .. } | DrillView::Diff { files, .. } => files,
-        DrillView::Graph => return HashSet::new(),
+    let Some(files) = state.commit_drill_files() else {
+        return HashSet::new();
     };
     collect_commit_file_match_indices(files, &state.search_query)
         .into_iter()
@@ -3792,6 +3791,66 @@ mod tests {
             ],
         );
         state.focus = FocusPane::Right;
+        state.dispatch(super::super::action::Action::SearchStart);
+        for c in "md".chars() {
+            state.dispatch(super::super::action::Action::SearchChar(c));
+        }
+        let search_bg = state.theme.pills().filter.bg;
+        let cursor_bg = state.theme.palette().cursor_bg;
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let buf = terminal.backend().buffer();
+        let mut a_bg = None;
+        let mut b_bg = None;
+        for y in 0..buf.area().height {
+            let mut line = String::new();
+            for x in 0..buf.area().width {
+                line.push_str(buf[(x, y)].symbol());
+            }
+            if line.contains("a.md") {
+                let col = line.find("a.md").unwrap();
+                a_bg = Some(buf[(col as u16, y)].bg);
+            }
+            if line.contains("b.md") {
+                let col = line.find("b.md").unwrap();
+                b_bg = Some(buf[(col as u16, y)].bg);
+            }
+        }
+        let a_bg = a_bg.expect("a.md file row");
+        let b_bg = b_bg.expect("b.md file row");
+        assert!(
+            a_bg == cursor_bg || b_bg == cursor_bg,
+            "one file match should keep the cursor: a={a_bg:?} b={b_bg:?}"
+        );
+        assert!(
+            a_bg == search_bg || b_bg == search_bg,
+            "the other file match should use search bg: a={a_bg:?} b={b_bg:?} search={search_bg:?}"
+        );
+        assert_ne!(a_bg, b_bg, "cursor and search-match paint must differ");
+    }
+
+    #[test]
+    fn search_match_paints_filter_bg_on_compare_commit_file_rows() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.tabs.open_or_focus("app".into(), "main".into());
+        state.focus = FocusPane::Left;
+        {
+            let tab = state.tabs.active_compare_mut().unwrap();
+            tab.files = vec![
+                super::super::drill::CommitFile {
+                    status: "M".into(),
+                    path: "a.md".into(),
+                    old_path: None,
+                },
+                super::super::drill::CommitFile {
+                    status: "M".into(),
+                    path: "b.md".into(),
+                    old_path: None,
+                },
+            ];
+        }
         state.dispatch(super::super::action::Action::SearchStart);
         for c in "md".chars() {
             state.dispatch(super::super::action::Action::SearchChar(c));

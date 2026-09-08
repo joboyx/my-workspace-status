@@ -72,9 +72,9 @@ A compare tab is depth 0. Left is the committed `base...HEAD` file list. Right i
 
 `CommitFileSource::Compare { base_ref, base_tip, merge_base, head }` is the immutable load key. `base_ref` is the tab key. File list and diff reuse the commit-file / `DiffPane` paint path (`E`, `Ctrl+O`, `/`, selection, external diff). The diff section label is `COMMITTED`. `e` / `E` / `Ctrl+O` on a compare tab use that tab's committed file only. They do not fall through to a parked Workspace dirty file. Empty list or a dir row: `focus a file to edit` / `focus a file to diff`.
 
-Palette commands (no key chips; `Ctrl-k` / `:` only): Diff vs default, Diff vs branch…, Close compare tab. Concrete checkout: flat repo / checkout / section / dir / file, or the checkout that owns the active graph / drill, or the active compare tab. Not Workspace, No-updates, or a family container. Unborn HEAD disables both open commands. Missing default disables Diff vs default. Mutations on a compare tab set `Switch to Workspace tab`.
+Palette commands (no key chips; `Ctrl-k` / `:` only): Diff vs default, Diff vs branch…, Close compare tab. Concrete checkout: flat repo / checkout / section / dir / file, or the checkout that owns the active graph / drill, or the active compare tab. Not Workspace, No-updates, or a family container. Unborn HEAD disables both open commands. Missing default disables Diff vs default. Mutations on a compare tab are disabled in the palette and on dispatch (`Switch to Workspace tab`).
 
-`GPending` before `normal_key`: `g` → `MoveToStart`, `t` → `NextTab`, `T` → `PreviousTab`, `1`…`9` → `JumpToTab` (`1` is Workspace), Esc no-op. Bare `t` stays tree/flat. Bare `T` stays theme. `gg` stays start. Tab actions are `BusyAction::Handle`.
+`GPending` before `normal_key`: `g` → `MoveToStart`, `t` → `NextTab`, `T` → `PreviousTab`, `1`…`9` → `JumpToTab` (`1` is Workspace), Esc no-op. Bare `t` stays tree/flat. Bare `T` stays theme. `gg` stays start. Tab actions are `BusyAction::Handle`. Bare `t` on a compare tab toggles the commit-file trie and keeps the focused file row.
 
 The compare picker is `InputMode::ComparePicker`. Local + `origin/*`. It drops `origin/HEAD` and the current local branch. No create, checkout, or fetch. Empty copy is `No branches to compare`. Apply also requires `compare_picker_pending` to still match that checkout.
 
