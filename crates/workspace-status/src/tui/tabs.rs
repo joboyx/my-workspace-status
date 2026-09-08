@@ -215,14 +215,26 @@ impl TabStrip {
     ///
     /// Activates the tab immediately to the left.
     pub fn close_active_compare(&mut self) -> bool {
-        let Some(index) = self.active.checked_sub(1) else {
+        self.close_at(self.active)
+    }
+
+    /// Close the compare tab at strip `index`. `0` (Workspace) is a no-op.
+    ///
+    /// Closing the active tab activates the tab immediately to the left.
+    /// Closing a tab left of the active tab shifts `active` down by one.
+    pub fn close_at(&mut self, index: usize) -> bool {
+        let Some(cmp_i) = index.checked_sub(1) else {
             return false;
         };
-        if index >= self.compare.len() {
+        if cmp_i >= self.compare.len() {
             return false;
         }
-        self.compare.remove(index);
-        self.active = index;
+        self.compare.remove(cmp_i);
+        if self.active == index {
+            self.active = cmp_i;
+        } else if self.active > index {
+            self.active -= 1;
+        }
         true
     }
 
@@ -328,5 +340,20 @@ mod tests {
         tabs.prev();
         assert_eq!(tabs.active, 2);
         assert_eq!(tabs.labels()[1], "app · vs a");
+    }
+
+    #[test]
+    fn close_at_workspace_is_noop_and_inactive_compare_closes() {
+        let mut tabs = TabStrip::default();
+        tabs.open_or_focus("app".into(), "a".into());
+        tabs.open_or_focus("app".into(), "b".into());
+        assert_eq!(tabs.active, 2);
+        assert!(!tabs.close_at(0));
+        assert_eq!(tabs.active, 2);
+        assert_eq!(tabs.compare.len(), 2);
+        assert!(tabs.close_at(1));
+        assert_eq!(tabs.active, 1);
+        assert_eq!(tabs.compare.len(), 1);
+        assert_eq!(tabs.labels()[1], "app · vs b");
     }
 }

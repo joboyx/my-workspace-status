@@ -455,6 +455,27 @@ impl HeadlessTui {
         }
     }
 
+    /// Status line after the last interpret (not a paint).
+    pub fn status(&self) -> &str {
+        &self.state.status
+    }
+
+    /// Click the compare-tab `[x]` hit for `index`. Workspace has no close hit.
+    pub fn click_tab_close(&mut self, index: usize) {
+        let _ = self.frame();
+        let hit = self
+            .state
+            .layout
+            .tab_close_hits
+            .iter()
+            .find(|(_, _, i)| *i == index)
+            .copied();
+        if let Some((x, width, _)) = hit {
+            self.mouse_down(x + width / 2, self.state.layout.tab_y);
+            self.mouse_up();
+        }
+    }
+
     /// Depth 1 left pane is the graph list.
     pub fn left_is_graph(&self) -> bool {
         !self.state.is_compare_tab() && self.state.drill.is_files()

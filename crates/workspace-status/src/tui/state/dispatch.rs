@@ -14,7 +14,14 @@ impl AppState {
         if !matches!(action, Action::FoldToggle) {
             self.z_pending_at = None;
         }
-        if !matches!(action, Action::ArmGChord) {
+        if !matches!(
+            action,
+            Action::ArmGChord
+                | Action::None
+                | Action::WatchTick
+                | Action::FetchTick
+                | Action::Release
+        ) {
             self.g_pending_at = None;
         }
         if self.is_compare_tab() && super::super::gates::is_compare_mutation(&action) {
