@@ -339,6 +339,13 @@ fn tree_line_has_cursor_bar(frame: &str, needle: &str) -> bool {
     })
 }
 
+fn tree_line_has_inactive_selection(frame: &str, needle: &str) -> bool {
+    frame.lines().any(|line| {
+        let left = line.split("││").next().unwrap_or(line);
+        left.contains(needle) && left.contains('▏')
+    })
+}
+
 fn right_line_has_cursor_bar(frame: &str, needle: &str) -> bool {
     frame.lines().any(|line| {
         let right = line.split("││").nth(1).unwrap_or("");
@@ -346,8 +353,27 @@ fn right_line_has_cursor_bar(frame: &str, needle: &str) -> bool {
     })
 }
 
+fn right_line_has_inactive_selection(frame: &str, needle: &str) -> bool {
+    frame.lines().any(|line| {
+        let right = line.split("││").nth(1).unwrap_or("");
+        right.contains(needle) && right.contains('▏')
+    })
+}
+
+fn right_diff_has_focused_cursor(frame: &str) -> bool {
+    right_line_has_cursor_bar(frame, "UNSTAGED")
+        || right_line_has_cursor_bar(frame, "+dirty")
+        || right_line_has_cursor_bar(frame, "@@")
+}
+
+fn right_diff_has_inactive_selection(frame: &str) -> bool {
+    right_line_has_inactive_selection(frame, "UNSTAGED")
+        || right_line_has_inactive_selection(frame, "+dirty")
+        || right_line_has_inactive_selection(frame, "@@")
+}
+
 #[test]
-fn cursor_bar_follows_focused_list_after_tab() {
+fn cursor_chrome_stays_on_unfocused_list_after_tab() {
     let (root, workspace) = daily_workspace();
     let mut tui = open(&workspace);
     let frame = tui.frame();
@@ -356,9 +382,16 @@ fn cursor_bar_follows_focused_list_after_tab() {
         "left-focused tree paints the cursor bar on README.md:\n{frame}"
     );
     assert!(
-        !right_line_has_cursor_bar(&frame, "UNSTAGED")
-            && !right_line_has_cursor_bar(&frame, "+dirty"),
-        "unfocused diff must not paint the list cursor bar:\n{frame}"
+        !tree_line_has_inactive_selection(&frame, "README.md"),
+        "focused tree must not paint the inactive marker on README.md:\n{frame}"
+    );
+    assert!(
+        right_diff_has_inactive_selection(&frame),
+        "unfocused diff must paint the inactive selection marker:\n{frame}"
+    );
+    assert!(
+        !right_diff_has_focused_cursor(&frame),
+        "unfocused diff must not paint the focused cursor bar:\n{frame}"
     );
 
     tui.tab();
@@ -366,13 +399,19 @@ fn cursor_bar_follows_focused_list_after_tab() {
     let frame = tui.frame();
     assert!(
         !tree_line_has_cursor_bar(&frame, "README.md"),
-        "unfocused tree must not paint the list cursor bar:\n{frame}"
+        "unfocused tree must not paint the focused cursor bar:\n{frame}"
     );
     assert!(
-        right_line_has_cursor_bar(&frame, "UNSTAGED")
-            || right_line_has_cursor_bar(&frame, "+dirty")
-            || right_line_has_cursor_bar(&frame, "@@"),
+        tree_line_has_inactive_selection(&frame, "README.md"),
+        "unfocused tree must paint the inactive selection marker on README.md:\n{frame}"
+    );
+    assert!(
+        right_diff_has_focused_cursor(&frame),
         "focused diff must paint the list cursor bar:\n{frame}"
+    );
+    assert!(
+        !right_diff_has_inactive_selection(&frame),
+        "focused diff must not paint the inactive marker on the selected row:\n{frame}"
     );
     let _ = fs::remove_dir_all(root);
 }

@@ -87,6 +87,11 @@ pub fn tree_cursor_on(screen: &str, needle: &str) -> bool {
     tree_line_containing(screen, needle).is_some_and(|line| line.contains('\u{258C}'))
 }
 
+/// Thinner unfocused selection marker (`▏`) on the left-tree row that contains `needle`.
+pub fn tree_inactive_selection_on(screen: &str, needle: &str) -> bool {
+    tree_line_containing(screen, needle).is_some_and(|line| line.contains('\u{258F}'))
+}
+
 /// Breadcrumb is the workspace basename only (file-focused; no repo crumb).
 pub fn launch_breadcrumb_workspace_only(screen: &str) -> bool {
     let lines: Vec<&str> = screen.lines().collect();
@@ -321,6 +326,8 @@ pub fn merger_graph_drilled_right(screen: &str) -> bool {
     panes_tree_unfocused_graph_focused(screen)
         && tree_has(screen, "merger")
         && !tree_cursor_on(screen, "README.md")
+        && !tree_cursor_on(screen, "merger")
+        && tree_inactive_selection_on(screen, "merger")
         && crumb.contains("workspace › [merger]")
         && status.contains("drill")
         && status.contains("Esc")
@@ -670,6 +677,32 @@ pub fn graph_cursor_on(screen: &str, needle: &str) -> bool {
         let right = right_of_split(line);
         right.contains('\u{258C}') && right.contains(needle)
     })
+}
+
+/// Focused list cursor bar (`▌`) on the right-pane row that contains `needle`.
+pub fn right_cursor_on(screen: &str, needle: &str) -> bool {
+    right_pane(screen)
+        .lines()
+        .any(|line| line.contains('\u{258C}') && line.contains(needle))
+}
+
+/// Thinner unfocused selection marker (`▏`) on the right-pane row that contains `needle`.
+pub fn right_inactive_selection_on(screen: &str, needle: &str) -> bool {
+    right_pane(screen)
+        .lines()
+        .any(|line| line.contains('\u{258F}') && line.contains(needle))
+}
+
+pub fn right_diff_has_focused_cursor(screen: &str) -> bool {
+    right_cursor_on(screen, "UNSTAGED")
+        || right_cursor_on(screen, "+dirty")
+        || right_cursor_on(screen, "@@")
+}
+
+pub fn right_diff_has_inactive_selection(screen: &str) -> bool {
+    right_inactive_selection_on(screen, "UNSTAGED")
+        || right_inactive_selection_on(screen, "+dirty")
+        || right_inactive_selection_on(screen, "@@")
 }
 
 pub fn no_mouse_toggle_toast(screen: &str) -> bool {

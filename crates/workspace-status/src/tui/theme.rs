@@ -52,6 +52,8 @@ pub struct Palette {
     pub head_mark: Color,
     pub cursor: Color,
     pub cursor_bg: Color,
+    /// Selected-row background on an unfocused list. Darker than [`Self::cursor_bg`].
+    pub cursor_bg_inactive: Color,
     pub diff_hunk: Color,
     /// Add-flash peak. Equals index 0 of [`Self::flash_ramp`].
     pub flash: Color,
@@ -89,6 +91,8 @@ pub struct ThemePalette {
     pub head_mark: &'static str,
     pub cursor: &'static str,
     pub cursor_bg: &'static str,
+    /// Unfocused selected-row background hex. Darker than [`Self::cursor_bg`].
+    pub cursor_bg_inactive: &'static str,
     pub diff_hunk: &'static str,
     /// Add-flash peak hex. Index 0 of [`Self::flash_ramp`].
     pub flash: &'static str,
@@ -199,6 +203,7 @@ impl ThemeId {
             head_mark: hex_color(p.head_mark),
             cursor: hex_color(p.cursor),
             cursor_bg: hex_color(p.cursor_bg),
+            cursor_bg_inactive: hex_color(p.cursor_bg_inactive),
             diff_hunk: hex_color(p.diff_hunk),
             flash: hex_color(p.flash),
             flash_ramp: p.flash_ramp.map(hex_color),
@@ -251,6 +256,7 @@ const TOKYO_NIGHT: Theme = Theme {
         head_mark: "#e0af68",
         cursor: "#7aa2f7",
         cursor_bg: "#283457",
+        cursor_bg_inactive: "#21273e",
         diff_hunk: "#7dcfff",
         flash: "#516643",
         flash_ramp: ["#516643", "#3f4d39", "#2f3831", "#25292b"],
@@ -293,6 +299,7 @@ const MONOKAI: Theme = Theme {
         head_mark: "#a6e22e",
         cursor: "#f8f8f2",
         cursor_bg: "#3e3d32",
+        cursor_bg_inactive: "#32322a",
         diff_hunk: "#66d9ef",
         flash: "#5c7627",
         flash_ramp: ["#5c7627", "#4b5c25", "#3b4624", "#313723"],
@@ -335,6 +342,7 @@ const DRACULA: Theme = Theme {
         head_mark: "#50fa7b",
         cursor: "#bd93f9",
         cursor_bg: "#44475a",
+        cursor_bg_inactive: "#363848",
         diff_hunk: "#8be9fd",
         flash: "#398153",
         flash_ramp: ["#398153", "#336449", "#2e4b41", "#2b3b3c"],
@@ -377,6 +385,7 @@ const GRUVBOX_DARK: Theme = Theme {
         head_mark: "#fe8019",
         cursor: "#fe8019",
         cursor_bg: "#3c3836",
+        cursor_bg_inactive: "#32302f",
         diff_hunk: "#83a598",
         flash: "#646627",
         flash_ramp: ["#646627", "#505127", "#3f4028", "#343428"],
@@ -419,6 +428,7 @@ const CATPPUCCIN_MOCHA: Theme = Theme {
         head_mark: "#f9e2af",
         cursor: "#89b4fa",
         cursor_bg: "#313244",
+        cursor_bg_inactive: "#272839",
         diff_hunk: "#89dceb",
         flash: "#57715e",
         flash_ramp: ["#57715e", "#44554e", "#343e40", "#292e37"],
@@ -761,6 +771,53 @@ mod tests {
             unique.len(),
             hexes.len(),
             "borderDim hexes must be unique across themes: {hexes:?}"
+        );
+    }
+
+    #[test]
+    fn cursor_bg_inactive_is_darker_than_cursor_bg() {
+        const LOCKED: [(ThemeId, &str); 5] = [
+            (ThemeId::TokyoNight, "#21273e"),
+            (ThemeId::Monokai, "#32322a"),
+            (ThemeId::Dracula, "#363848"),
+            (ThemeId::GruvboxDark, "#32302f"),
+            (ThemeId::CatppuccinMocha, "#272839"),
+        ];
+        let mut hexes = Vec::new();
+        for (id, hex) in LOCKED {
+            let theme = id.theme();
+            assert_eq!(
+                theme.palette.cursor_bg_inactive, hex,
+                "{id:?} cursorBgInactive hex"
+            );
+            let pal = id.palette();
+            assert_eq!(
+                pal.cursor_bg_inactive,
+                hex_color(hex),
+                "{id:?} palette.cursor_bg_inactive"
+            );
+            assert_ne!(
+                pal.cursor_bg_inactive, pal.cursor_bg,
+                "{id:?} inactive cursor bg must not match focused cursor_bg"
+            );
+            let inactive_l = relative_luminance(pal.cursor_bg_inactive);
+            let cursor_l = relative_luminance(pal.cursor_bg);
+            let surface_l = relative_luminance(hex_color(theme.surface));
+            assert!(
+                inactive_l < cursor_l,
+                "{id:?} luminance(cursor_bg_inactive)={inactive_l:.4} must be < luminance(cursor_bg)={cursor_l:.4}"
+            );
+            assert!(
+                inactive_l > surface_l,
+                "{id:?} luminance(cursor_bg_inactive)={inactive_l:.4} must be > luminance(surface)={surface_l:.4}"
+            );
+            hexes.push(hex);
+        }
+        let unique: std::collections::HashSet<_> = hexes.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            hexes.len(),
+            "cursorBgInactive hexes must be unique across themes: {hexes:?}"
         );
     }
 }

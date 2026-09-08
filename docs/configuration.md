@@ -182,7 +182,7 @@ Split falls back to inline below 100 columns (`NARROW_SXS` in `tui/split.rs`); t
 
 Built-in palettes live in `crates/workspace-status/src/tui/theme.rs`. `WS_STATUS_THEME` seeds the first paint. `T` cycles the same list in this session. There is no theme file.
 
-Unfocused pane borders use `palette.borderDim`. That token is a near-surface dark gray. It is darker than that theme's `muted`. Focused pane borders use `palette.heading`. Pane body text stays full brightness. The TUI does not DIM body text because a pane is unfocused.
+Unfocused pane borders use `palette.borderDim`. That token is a near-surface dark gray. It is darker than that theme's `muted`. Focused pane borders use `palette.heading`. Pane body text stays full brightness. The TUI does not DIM body text because a pane is unfocused. The selected row on an unfocused list keeps a thinner `▏` marker and `palette.cursorBgInactive` (between that theme's surface and `cursorBg`). The focused list still uses `▌` / `cursorBg`.
 
 | Theme | surface | muted | `palette.borderDim` |
 | --- | --- | --- | --- |
