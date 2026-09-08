@@ -588,7 +588,7 @@ impl Interpreter {
                 }
             }
             Effect::PrepareComparePicker { repo } => {
-                let gen = self.sched.request_prepare_branches();
+                let gen = self.sched.request_prepare_compare();
                 self.prepare_compare = Some((gen, repo));
                 self.sched.enqueue_user(UserTag::Prepare);
             }
@@ -1051,10 +1051,9 @@ impl Interpreter {
                 path,
                 content,
             } => {
-                let accepted = state
-                    .tabs
-                    .get_id(tab_id)
-                    .is_some_and(|tab| tab.generation == gen && tab.source.as_ref() == Some(&source));
+                let accepted = state.tabs.get_id(tab_id).is_some_and(|tab| {
+                    tab.generation == gen && tab.source.as_ref() == Some(&source)
+                });
                 state.apply_compare_diff(tab_id, gen, &source, &path, content);
                 if accepted {
                     self.mark();
@@ -1062,7 +1061,7 @@ impl Interpreter {
             }
             JobOutcome::ComparePicker { gen, repo, result } => {
                 self.sched.note_user_done(UserTag::Prepare);
-                let accepted = self.sched.accept_prepare_branches_result(gen);
+                let accepted = self.sched.accept_prepare_compare_result(gen);
                 let waiting = state.compare_picker_pending.as_deref() == Some(repo.as_str());
                 if accepted && waiting {
                     match result {
@@ -1251,6 +1250,17 @@ impl Interpreter {
                     );
                     return;
                 }
+                if let Some((gen, repo)) = self.prepare_compare.take() {
+                    let dir = opts.cwd.join(&repo);
+                    spawn(
+                        id,
+                        Box::new(move || {
+                            let result = list_compare_picker_branches(&dir);
+                            JobOutcome::ComparePicker { gen, repo, result }
+                        }),
+                    );
+                    return;
+                }
                 if let Some((gen, repo, graph_focus)) = self.prepare_branches.take() {
                     let dir = opts.cwd.join(&repo);
                     spawn(
@@ -1263,17 +1273,6 @@ impl Interpreter {
                                 branches,
                                 graph_focus,
                             }
-                        }),
-                    );
-                    return;
-                }
-                if let Some((gen, repo)) = self.prepare_compare.take() {
-                    let dir = opts.cwd.join(&repo);
-                    spawn(
-                        id,
-                        Box::new(move || {
-                            let result = list_compare_picker_branches(&dir);
-                            JobOutcome::ComparePicker { gen, repo, result }
                         }),
                     );
                     return;
@@ -1932,7 +1931,7 @@ mod tests {
         let mut state = fixture_state();
         state.compare_picker_pending = Some("app".into());
         let mut interp = Interpreter::new();
-        let gen = interp.sched.request_prepare_branches();
+        let gen = interp.sched.request_prepare_compare();
         state.abandon_compare_picker();
         apply(
             &mut interp,
@@ -1959,7 +1958,7 @@ mod tests {
         let mut state = fixture_state();
         state.compare_picker_pending = Some("app".into());
         let mut interp = Interpreter::new();
-        let gen = interp.sched.request_prepare_branches();
+        let gen = interp.sched.request_prepare_compare();
         apply(
             &mut interp,
             &mut state,
@@ -1985,7 +1984,7 @@ mod tests {
         let mut state = fixture_state();
         state.compare_picker_pending = Some("lib".into());
         let mut interp = Interpreter::new();
-        let gen = interp.sched.request_prepare_branches();
+        let gen = interp.sched.request_prepare_compare();
         apply(
             &mut interp,
             &mut state,
@@ -2007,6 +2006,32 @@ mod tests {
             state.compare_picker_pending.as_deref(),
             Some("lib"),
             "late app picker must not drop a later lib pending"
+        );
+    }
+
+    #[test]
+    fn compare_picker_survives_branch_picker_gen_bump() {
+        let mut state = fixture_state();
+        state.compare_picker_pending = Some("app".into());
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_prepare_compare();
+        let _ = interp.sched.request_prepare_branches();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::ComparePicker {
+                gen,
+                repo: "app".into(),
+                result: Ok(vec![LocalBranch {
+                    name: "main".into(),
+                    current: true,
+                    authordate: 1,
+                }]),
+            },
+        );
+        assert!(
+            state.compare_picker.is_some(),
+            "branch-picker gen must not drop a matching compare picker"
         );
     }
 

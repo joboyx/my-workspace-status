@@ -147,7 +147,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         .split(chunks[1]);
 
     let left_is_files = state.drill.is_diff() || state.is_compare_tab();
-    let left_is_graph = state.drill.is_files();
+    let left_is_graph = !state.is_compare_tab() && state.drill.is_files();
     state.layout.graph_scrollbar_x = None;
     state.layout.graph_scrollbar_y = 0;
     state.layout.graph_scrollbar_height = 0;
@@ -193,7 +193,9 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         draw_tree(frame, tree_inner, state);
     }
 
-    let right_name = if state.drill.is_files() {
+    let right_name = if state.is_compare_tab() {
+        "diff"
+    } else if state.drill.is_files() {
         "files"
     } else if state.drill.is_diff() || state.right_is_diff() {
         "diff"
@@ -546,6 +548,10 @@ fn slice_segs(segs: &[TextSeg], offset: usize, width: usize) -> Vec<TextSeg> {
 
 fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if area.width == 0 || area.height == 0 {
+        return;
+    }
+    if state.is_compare_tab() {
+        draw_diff_pane(frame, area, state);
         return;
     }
     match &state.drill {
@@ -3828,6 +3834,69 @@ mod tests {
             "the other file match should use search bg: a={a_bg:?} b={b_bg:?} search={search_bg:?}"
         );
         assert_ne!(a_bg, b_bg, "cursor and search-match paint must differ");
+    }
+
+    #[test]
+    fn compare_tab_paints_diff_pane_while_workspace_drill_is_files() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.open_commit_files(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![super::super::drill::CommitFile {
+                status: "M".into(),
+                path: "parked-drill.md".into(),
+                old_path: None,
+            }],
+        );
+        assert!(state.drill.is_files());
+        state.tabs.open_or_focus("app".into(), "main".into());
+        {
+            let tab = state.tabs.active_compare_mut().unwrap();
+            tab.loading = false;
+            tab.path = Some("compare-only.md".into());
+            tab.files = vec![super::super::drill::CommitFile {
+                status: "M".into(),
+                path: "compare-only.md".into(),
+                old_path: None,
+            }];
+            tab.content = super::super::diff::DiffContent::from_compare_lines(vec![
+                "@@ -1,1 +1,1 @@".into(),
+                "-old compare".into(),
+                "+new compare".into(),
+            ]);
+        }
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            state.drill.is_files(),
+            "Workspace drill stays parked: {:?}",
+            state.drill
+        );
+        assert!(
+            text.contains("diff"),
+            "compare right pane title must be diff:\n{text}"
+        );
+        assert!(
+            text.contains("COMMITTED"),
+            "compare right pane must paint DiffPane COMMITTED:\n{text}"
+        );
+        assert!(
+            text.contains("compare-only.md"),
+            "compare file list stays on the left:\n{text}"
+        );
+        assert!(
+            !text.contains("parked-drill.md"),
+            "parked Files drill must not paint as a second file list:\n{text}"
+        );
+        assert!(
+            !text.contains("aaa1111"),
+            "parked commit-detail subtitle must not paint:\n{text}"
+        );
     }
 
     #[test]

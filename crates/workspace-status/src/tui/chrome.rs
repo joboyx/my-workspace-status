@@ -764,7 +764,12 @@ fn hint_tree_row(state: &AppState) -> Option<&super::tree::VisibleRow> {
 }
 
 /// ViewStack depth analogue: graph 0, commit files 1, commit diff 2.
+///
+/// A compare tab is always depth 0 even when Workspace `drill` is Files/Diff.
 pub fn nav_depth(state: &AppState) -> u8 {
+    if state.is_compare_tab() {
+        return 0;
+    }
     match state.drill {
         DrillView::Graph => 0,
         DrillView::Files { .. } => 1,

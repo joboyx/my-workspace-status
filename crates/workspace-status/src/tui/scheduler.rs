@@ -129,6 +129,8 @@ pub struct Scheduler {
     prepare_stash_latest: u64,
     next_prepare_branches_id: u64,
     prepare_branches_latest: u64,
+    next_prepare_compare_id: u64,
+    prepare_compare_latest: u64,
     exclusive_write: bool,
     default_branch_busy: bool,
     /// Highest status generation accepted per checkout path.
@@ -176,6 +178,8 @@ impl Scheduler {
             prepare_stash_latest: 0,
             next_prepare_branches_id: 1,
             prepare_branches_latest: 0,
+            next_prepare_compare_id: 1,
+            prepare_compare_latest: 0,
             exclusive_write: false,
             default_branch_busy: false,
             path_gen: HashMap::new(),
@@ -467,6 +471,19 @@ impl Scheduler {
     /// True when `gen` is still the latest branch / graph-focus picker request.
     pub fn accept_prepare_branches_result(&self, gen: u64) -> bool {
         gen == self.prepare_branches_latest
+    }
+
+    /// Bump on each `PrepareComparePicker`.
+    pub fn request_prepare_compare(&mut self) -> u64 {
+        let id = self.next_prepare_compare_id;
+        self.next_prepare_compare_id += 1;
+        self.prepare_compare_latest = id;
+        id
+    }
+
+    /// True when `gen` is still the latest compare-picker request.
+    pub fn accept_prepare_compare_result(&self, gen: u64) -> bool {
+        gen == self.prepare_compare_latest
     }
 
     pub fn bump_write_gen(&mut self) -> u64 {
@@ -800,5 +817,18 @@ mod tests {
         assert_ne!(first, second);
         assert!(!s.accept_prepare_branches_result(first));
         assert!(s.accept_prepare_branches_result(second));
+    }
+
+    #[test]
+    fn stale_prepare_compare_id_is_rejected() {
+        let mut s = Scheduler::new(4);
+        let first = s.request_prepare_compare();
+        let second = s.request_prepare_compare();
+        assert_ne!(first, second);
+        assert!(!s.accept_prepare_compare_result(first));
+        assert!(s.accept_prepare_compare_result(second));
+        let branch = s.request_prepare_branches();
+        assert!(s.accept_prepare_compare_result(second));
+        assert!(s.accept_prepare_branches_result(branch));
     }
 }

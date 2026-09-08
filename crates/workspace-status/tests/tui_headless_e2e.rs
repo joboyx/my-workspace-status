@@ -2463,6 +2463,43 @@ fn focus_repo_row(tui: &mut HeadlessTui, name: &str) {
 }
 
 #[test]
+fn compare_from_commit_files_drill_paints_diff_pane() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    tui.search("merger");
+    assert!(tui.right_is_graph(), "merger row should load the graph");
+    tui.enter();
+    tui.key('j');
+    tui.key('j');
+    tui.enter();
+    let files = tui.frame();
+    assert!(
+        tui.right_is_files(),
+        "Enter on a graph commit should open the file list:\n{files}"
+    );
+    open_palette_run(&mut tui, "vs default");
+    let frame = tui.frame();
+    assert_eq!(tui.active_tab(), 1, "{frame}");
+    assert!(
+        tui.right_is_diff(),
+        "compare right pane must be DiffPane:\n{frame}"
+    );
+    assert!(
+        !tui.right_is_files(),
+        "parked Files drill must not own the right pane:\n{frame}"
+    );
+    assert!(
+        tui.left_is_files() && !tui.left_is_graph(),
+        "compare left pane is the committed file list:\n{frame}"
+    );
+    assert!(
+        frame.contains("COMMITTED") || frame.contains("No committed changes"),
+        "compare paint is committed-only:\n{frame}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn compare_palette_picker_opens_tab_and_keeps_head() {
     let (root, workspace) = compare_ahead_workspace();
     let repo = workspace.join("app");
@@ -2472,7 +2509,11 @@ fn compare_palette_picker_opens_tab_and_keeps_head() {
     focus_repo_row(&mut tui, "app");
     let snap_before = tui.snapshot_head("app");
     open_palette_run(&mut tui, "vs branch");
-    assert!(tui.compare_picker_open(), "picker must open: {}", tui.frame());
+    assert!(
+        tui.compare_picker_open(),
+        "picker must open: {}",
+        tui.frame()
+    );
     type_palette_query(&mut tui, "main");
     tui.enter();
     assert_eq!(tui.tab_count(), 2);

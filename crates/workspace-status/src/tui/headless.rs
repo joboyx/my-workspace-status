@@ -346,7 +346,7 @@ impl HeadlessTui {
 
     /// Whether the right pane is the commit file list.
     pub fn right_is_files(&self) -> bool {
-        self.state.drill.is_files()
+        !self.state.is_compare_tab() && self.state.drill.is_files()
     }
 
     /// Whether the right pane is the graph.
@@ -457,7 +457,7 @@ impl HeadlessTui {
 
     /// Depth 1 left pane is the graph list.
     pub fn left_is_graph(&self) -> bool {
-        self.state.drill.is_files()
+        !self.state.is_compare_tab() && self.state.drill.is_files()
     }
 
     /// Send Shift+Left (pan the focused pane, including the tree).
