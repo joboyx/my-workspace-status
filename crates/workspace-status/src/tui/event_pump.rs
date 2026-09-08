@@ -388,6 +388,7 @@ mod tests {
             "blob_bytes(",
             "prepare_worktree_diff(",
             "prepare_rev_diff(",
+            "prepare_rev_diff_paths(",
         ] {
             assert!(
                 !app.contains(banned) && !loop_src.contains(banned),
@@ -396,7 +397,7 @@ mod tests {
         }
         assert!(
             effect.contains("prepare_worktree_diff(")
-                && effect.contains("prepare_rev_diff(")
+                && effect.contains("prepare_rev_diff_paths(")
                 && effect.contains("UserTag::DiffPrepare"),
             "E blob/temp prepare must run on spawn_blocking via Interpreter"
         );

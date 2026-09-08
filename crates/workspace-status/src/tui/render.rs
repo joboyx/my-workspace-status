@@ -2769,9 +2769,10 @@ mod tests {
     }
 
     fn title_fg(buf: &ratatui::buffer::Buffer, name: &str) -> Color {
-        let col = find_cell_col(buf, 0, name)
-            .unwrap_or_else(|| panic!("title {name:?} on row 0:\n{}", buf_line(buf, 0)));
-        buf[(col, 0)].fg
+        let y = 1;
+        let col = find_cell_col(buf, y, name)
+            .unwrap_or_else(|| panic!("title {name:?} on row {y}:\n{}", buf_line(buf, y)));
+        buf[(col, y)].fg
     }
 
     fn pane_inner_has_symbol(
@@ -2889,7 +2890,8 @@ mod tests {
         terminal.draw(|frame| draw(frame, state)).unwrap();
         let buf = terminal.backend().buffer();
         let text = buffer_text(&terminal);
-        let top = buf_line(buf, 0);
+        let title_y = 1;
+        let top = buf_line(buf, title_y);
         let left_name = if state.drill.is_diff() {
             "files"
         } else if state.drill.is_files() {
@@ -2926,11 +2928,11 @@ mod tests {
             right_title, palette.border_dim,
             "unfocused title must not inherit border_dim:\n{text}"
         );
-        let right_x = find_cell_col(buf, 0, right_name)
+        let right_x = find_cell_col(buf, title_y, right_name)
             .unwrap_or_else(|| panic!("right title {right_name:?}:\n{text}"))
             .saturating_sub(1);
-        let left_border = buf[(0, 0)].fg;
-        let right_border = buf[(right_x, 0)].fg;
+        let left_border = buf[(0, title_y)].fg;
+        let right_border = buf[(right_x, title_y)].fg;
         match state.focus {
             FocusPane::Left => {
                 assert_eq!(left_border, palette.heading, "focused left border:\n{text}");

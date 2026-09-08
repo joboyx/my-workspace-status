@@ -1425,7 +1425,9 @@ mod tests {
         git(&dir, &["mv", "one.txt", "renamed.txt"]);
         git(&dir, &["commit", "-q", "-m", "rename"]);
         let after_rename = exec_git(&["rev-parse", "HEAD"], &dir);
-        let renamed = list_compare_name_status(&dir, &base, &after_rename).unwrap();
+        // `main` still has `one.txt`. Three-dot from the initial seed commit
+        // sees only an add (`renamed.txt` never existed on that base).
+        let renamed = list_compare_name_status(&dir, &main, &after_rename).unwrap();
         assert!(
             renamed.iter().any(|row| {
                 row.path == "renamed.txt" && row.old_path.as_deref() == Some("one.txt")
