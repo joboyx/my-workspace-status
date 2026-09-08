@@ -125,6 +125,8 @@ pub struct Scheduler {
     commit_files_latest: u64,
     next_commit_diff_id: u64,
     commit_diff_latest: u64,
+    next_compare_diff_id: u64,
+    compare_diff_latest: u64,
     next_prepare_stash_id: u64,
     prepare_stash_latest: u64,
     next_prepare_branches_id: u64,
@@ -174,6 +176,8 @@ impl Scheduler {
             commit_files_latest: 0,
             next_commit_diff_id: 1,
             commit_diff_latest: 0,
+            next_compare_diff_id: 1,
+            compare_diff_latest: 0,
             next_prepare_stash_id: 1,
             prepare_stash_latest: 0,
             next_prepare_branches_id: 1,
@@ -445,6 +449,19 @@ impl Scheduler {
     /// True when `gen` is still the latest commit-diff request.
     pub fn accept_commit_diff_result(&self, gen: u64) -> bool {
         gen == self.commit_diff_latest
+    }
+
+    /// Bump the compare-file diff generation on each `LoadCompareDiff`.
+    pub fn request_compare_diff(&mut self) -> u64 {
+        let id = self.next_compare_diff_id;
+        self.next_compare_diff_id += 1;
+        self.compare_diff_latest = id;
+        id
+    }
+
+    /// True when `gen` is still the latest compare-file diff request.
+    pub fn accept_compare_diff_result(&self, gen: u64) -> bool {
+        gen == self.compare_diff_latest
     }
 
     /// Bump the stash-menu generation on each `PrepareStashMenu`.
@@ -797,6 +814,16 @@ mod tests {
         assert_ne!(first, second);
         assert!(!s.accept_commit_diff_result(first));
         assert!(s.accept_commit_diff_result(second));
+    }
+
+    #[test]
+    fn stale_compare_diff_id_is_rejected() {
+        let mut s = Scheduler::new(4);
+        let first = s.request_compare_diff();
+        let second = s.request_compare_diff();
+        assert_ne!(first, second);
+        assert!(!s.accept_compare_diff_result(first));
+        assert!(s.accept_compare_diff_result(second));
     }
 
     #[test]

@@ -55,9 +55,9 @@ pub(crate) type JobWork = Box<dyn FnOnce() -> JobOutcome + Send>;
 
 /// Worker result applied on the loop / Headless thread.
 ///
-/// Autoload, commit-files, commit-diff, and picker outcomes carry a
-/// generation plus an immutable target. Autoload identity is the
-/// `GraphIdentity` queued at enqueue; the others capture at spawn.
+/// Autoload, commit-files, commit-diff, compare-file-diff, and picker
+/// outcomes carry a generation plus an immutable target. Autoload identity
+/// is the `GraphIdentity` queued at enqueue; the others capture at spawn.
 /// Apply drops the result when that gen is stale or the live drill /
 /// identity / focused checkout no longer matches.
 pub(crate) enum JobOutcome {
@@ -143,6 +143,7 @@ pub(crate) enum JobOutcome {
     /// One compare-file unified diff.
     CompareDiff {
         tab_id: u64,
+        req_id: u64,
         gen: u64,
         source: CommitFileSource,
         path: String,
@@ -201,6 +202,7 @@ struct CompareRangeJob {
 }
 
 struct CompareDiffJob {
+    req_id: u64,
     gen: u64,
     tab_id: u64,
     repo: String,
@@ -580,7 +582,9 @@ impl Interpreter {
             } => {
                 if let Some(tab) = state.tabs.get_id(tab_id) {
                     let gen = tab.generation;
+                    let req_id = self.sched.request_compare_diff();
                     self.compare_diff.push_back(CompareDiffJob {
+                        req_id,
                         gen,
                         tab_id,
                         repo,
@@ -1069,16 +1073,18 @@ impl Interpreter {
             }
             JobOutcome::CompareDiff {
                 tab_id,
+                req_id,
                 gen,
                 source,
                 path,
                 content,
             } => {
-                let accepted = state.tabs.get_id(tab_id).is_some_and(|tab| {
-                    tab.generation == gen && tab.source.as_ref() == Some(&source)
-                });
-                state.apply_compare_diff(tab_id, gen, &source, &path, content);
+                let accepted = self.sched.accept_compare_diff_result(req_id)
+                    && state.tabs.get_id(tab_id).is_some_and(|tab| {
+                        tab.generation == gen && tab.source.as_ref() == Some(&source)
+                    });
                 if accepted {
+                    state.apply_compare_diff(tab_id, gen, &source, &path, content);
                     self.mark();
                 }
             }
@@ -1369,6 +1375,7 @@ impl Interpreter {
                             );
                             JobOutcome::CompareDiff {
                                 tab_id: job.tab_id,
+                                req_id: job.req_id,
                                 gen: job.gen,
                                 source: job.source,
                                 path: job.path,
@@ -1929,11 +1936,13 @@ mod tests {
             tab.path = Some("keep.txt".into());
         }
         let mut interp = Interpreter::new();
+        let req_id = interp.sched.request_compare_diff();
         apply(
             &mut interp,
             &mut state,
             JobOutcome::CompareDiff {
                 tab_id,
+                req_id,
                 gen,
                 source: CommitFileSource::Compare {
                     base_ref: "main".into(),
@@ -1949,6 +1958,52 @@ mod tests {
             state.tabs.active_compare().unwrap().path.as_deref(),
             Some("keep.txt")
         );
+    }
+
+    #[test]
+    fn late_compare_diff_wrong_path_is_discarded() {
+        let mut state = fixture_state();
+        let (tab_id, gen) = open_compare_tab(&mut state);
+        let keep = DiffContent::from_unified(" keep\n");
+        {
+            let tab = state.tabs.active_compare_mut().unwrap();
+            tab.source = Some(compare_source());
+            tab.path = Some("keep.txt".into());
+            tab.content = keep.clone();
+        }
+        let mut interp = Interpreter::new();
+        let stale = interp.sched.request_compare_diff();
+        let latest = interp.sched.request_compare_diff();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CompareDiff {
+                tab_id,
+                req_id: stale,
+                gen,
+                source: compare_source(),
+                path: "stale.txt".into(),
+                content: Ok(DiffContent::from_unified("+stale\n")),
+            },
+        );
+        let tab = state.tabs.active_compare().unwrap();
+        assert_eq!(tab.path.as_deref(), Some("keep.txt"));
+        assert_eq!(tab.content, keep);
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CompareDiff {
+                tab_id,
+                req_id: latest,
+                gen,
+                source: compare_source(),
+                path: "keep.txt".into(),
+                content: Ok(DiffContent::from_unified("+keep\n")),
+            },
+        );
+        let tab = state.tabs.active_compare().unwrap();
+        assert_eq!(tab.path.as_deref(), Some("keep.txt"));
+        assert_eq!(tab.content, DiffContent::from_unified("+keep\n"));
     }
 
     #[test]
