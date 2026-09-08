@@ -2690,7 +2690,7 @@ fn compare_tab_identity_and_esc() {
 }
 
 #[test]
-fn compare_gt_gT_g1_and_unrelated_keys() {
+fn compare_tab_chords_gg_and_unrelated_keys() {
     let (root, workspace) = compare_ahead_workspace();
     let repo = workspace.join("app");
     let mut tui = open(&workspace);
