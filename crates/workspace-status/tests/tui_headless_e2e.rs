@@ -2529,6 +2529,7 @@ fn compare_ahead_behind_diverged_and_unrelated() {
     assert!(files.contains(&"alpha.txt".into()), "ahead {files:?}");
     assert!(tui.compare_error().is_none(), "{:?}", tui.compare_error());
 
+    jump_tab(&mut tui, '1');
     tui.search("behind");
     open_palette_run(&mut tui, "vs default");
     assert!(
@@ -2538,11 +2539,13 @@ fn compare_ahead_behind_diverged_and_unrelated() {
     );
     assert_contains(&tui.frame(), "No committed changes");
 
+    jump_tab(&mut tui, '1');
     tui.search("diverged");
     open_palette_run(&mut tui, "vs default");
     assert_eq!(tui.compare_files(), vec!["feature.txt".to_string()]);
     assert!(!tui.compare_files().iter().any(|p| p == "main-only.txt"));
 
+    jump_tab(&mut tui, '1');
     tui.search("orphan");
     open_palette_run(&mut tui, "vs default");
     let err = tui.compare_error().unwrap_or_default();
@@ -2716,7 +2719,7 @@ fn compare_gt_gT_g1_and_unrelated_keys() {
 
     jump_tab(&mut tui, '1');
     gg(&mut tui);
-    assert_eq!(tui.cursor_label(), "workspace");
+    assert_eq!(tui.cursor_id(), "workspace");
     let theme_before = tui.style_fingerprint();
     tui.key('t');
     assert_contains(&tui.frame(), "Flat paths");
