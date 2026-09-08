@@ -947,8 +947,10 @@ impl Interpreter {
                 if apply_merge_compute(state, &label, result) {
                     self.sched.on_reload_snapshot(state.focused_checkout_path());
                 }
-                self.pane_req = Some(RightPaneRequest::from_state(state));
-                self.sched.request_pane();
+                if !state.is_compare_tab() {
+                    self.pane_req = Some(RightPaneRequest::from_state(state));
+                    self.sched.request_pane();
+                }
                 self.mark();
             }
             JobOutcome::Autoload {
@@ -1515,7 +1517,7 @@ mod tests {
     use crate::config::WorkspaceStatusConfig;
     use crate::git::{LocalBranch, NameStatus};
     use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus};
-    use crate::tui::app::{CompareRangeLoad, TuiOpts};
+    use crate::tui::app::{CompareRangeLoad, MergeCompute, TuiOpts};
     use crate::tui::diff::DiffContent;
     use crate::tui::drill::{CommitFile, CommitFileSource, DrillView};
     use crate::tui::graph_load::GraphIdentity;
@@ -2098,6 +2100,49 @@ mod tests {
             "workspace graph must stay parked on a compare tab"
         );
         assert!(state.drill.is_graph());
+    }
+
+    #[test]
+    fn merge_completion_does_not_request_pane_on_compare_tab() {
+        let mut state = fixture_state();
+        focus_repo(&mut state, "app");
+        state.open_commit_files(
+            "app".into(),
+            commit_source(),
+            vec![commit_file("parked-drill.md")],
+        );
+        let _ = open_compare_tab(&mut state);
+        {
+            let tab = state.tabs.active_compare_mut().unwrap();
+            tab.file_cursor = 3;
+            tab.path = Some("compare.txt".into());
+        }
+        let mut interp = Interpreter::new();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::Merge {
+                label: "origin/main".into(),
+                result: MergeCompute::FastForward,
+            },
+        );
+        assert_eq!(
+            interp.sched.latest_pane_id(),
+            0,
+            "merge on a compare tab must not enqueue LoadPane"
+        );
+        assert!(interp.pane_req.is_none());
+        assert!(state.is_compare_tab());
+        let tab = state.tabs.active_compare().unwrap();
+        assert_eq!(tab.file_cursor, 3);
+        assert_eq!(tab.path.as_deref(), Some("compare.txt"));
+        match &state.drill {
+            DrillView::Files { files, .. } => {
+                assert_eq!(files[0].path, "parked-drill.md");
+            }
+            other => panic!("parked drill must stay Files, got {other:?}"),
+        }
+        assert_eq!(state.status, "Fast-forwarded to origin/main");
     }
 
     #[test]
