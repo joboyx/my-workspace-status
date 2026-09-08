@@ -961,12 +961,22 @@ pub fn assert_absent(screen: &str, needle: &str) {
 pub fn left_tree(screen: &str) -> String {
     let lines: Vec<&str> = screen.lines().collect();
     let end = lines.len().saturating_sub(2);
-    let start = usize::from(end > 1);
+    let start = pane_body_start(lines.len());
     lines[start..end]
         .iter()
         .map(|line| left_of_split(line))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Rows above pane bodies: tab strip, then the `tree` / `diff` title row.
+pub fn pane_body_start(line_count: usize) -> usize {
+    let end = line_count.saturating_sub(2);
+    if end > 2 {
+        2
+    } else {
+        usize::from(end > 1)
+    }
 }
 
 fn left_of_split(line: &str) -> String {
@@ -986,7 +996,7 @@ fn left_of_split(line: &str) -> String {
 pub fn tree_row_containing(screen: &str, needle: &str) -> Option<u16> {
     let lines: Vec<&str> = screen.lines().collect();
     let end = lines.len().saturating_sub(2);
-    let start = usize::from(end > 1);
+    let start = pane_body_start(lines.len());
     for (i, line) in lines.iter().enumerate().take(end).skip(start) {
         if left_of_split(line).contains(needle) {
             return Some(i as u16);

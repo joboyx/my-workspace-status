@@ -166,9 +166,16 @@ pub fn documented_launch_first_paint(screen: &str) -> bool {
         && !screen.contains("loading")
 }
 
-/// First paint row: pane titles (plain names; no focus glyph).
+/// Pane title row (`tree` / `graph` / `files` / `diff`). Skips the tab strip.
 pub fn pane_top(screen: &str) -> &str {
-    screen.lines().next().unwrap_or("")
+    screen
+        .lines()
+        .find(|line| {
+            (line.contains("tree") || line.contains("graph") || line.contains("files"))
+                && (line.contains('─') || line.contains('┐') || line.contains('┌'))
+        })
+        .or_else(|| screen.lines().nth(1))
+        .unwrap_or("")
 }
 
 /// Title row must not mark focus with `*` or `●`. PTY leftover is ASCII.
@@ -721,7 +728,7 @@ pub fn screen_line_from_end(screen: &str, from_end: usize) -> &str {
 pub fn right_pane(screen: &str) -> String {
     let lines: Vec<&str> = screen.lines().collect();
     let end = lines.len().saturating_sub(2);
-    let start = usize::from(end > 1);
+    let start = crate::harness::pane_body_start(lines.len());
     lines[start..end]
         .iter()
         .map(|line| right_of_split(line))
