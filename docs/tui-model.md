@@ -68,15 +68,17 @@ Enter that deepens the stack keeps **right** focus. Esc cancels visual-line high
 
 Compare is a session tab, not a `DrillView` depth and not a `NodeKind`. `tui/tabs.rs` keeps a permanent Workspace tab plus compare tabs in creation order. Identity is `(checkout_path, base_ref)`. The strip label is `<checkout-leaf> · vs <base-ref>`. Workspace cannot close. Close activates the tab to the left. Tabs are session-only.
 
-A compare tab is depth 0. Left is the committed `base...HEAD` file list. Right is `DiffPane`. There is no graph and no nesting. New tab: left focus, first file selected, that diff loads. Enter left → right. Enter right is a no-op. Tab switches panes. After overlay cancel, Esc on compare right focuses left. Esc on compare left closes that tab.
+A compare tab is depth 0. Left is the committed `base...HEAD` file list. Right is `DiffPane`. There is no graph and no nesting. New tab: left focus, first file selected, that diff loads. Enter left → right. Enter right is a no-op. Tab switches panes. After overlay cancel, Esc on compare right focuses left. Esc on compare left closes that tab. Esc on Workspace while a compare-picker job is in flight (picker not open yet) abandons that job so a late result cannot open the overlay.
 
-`CommitFileSource::Compare { base_ref, base_tip, merge_base, head }` is the immutable load key. `base_ref` is the tab key. File list and diff reuse the commit-file / `DiffPane` paint path (`E`, `Ctrl+O`, `/`, selection, external diff). The diff section label is `COMMITTED`.
+`CommitFileSource::Compare { base_ref, base_tip, merge_base, head }` is the immutable load key. `base_ref` is the tab key. File list and diff reuse the commit-file / `DiffPane` paint path (`E`, `Ctrl+O`, `/`, selection, external diff). The diff section label is `COMMITTED`. `e` / `E` / `Ctrl+O` on a compare tab use that tab's committed file only. They do not fall through to a parked Workspace dirty file. Empty list or a dir row: `focus a file to edit` / `focus a file to diff`.
 
 Palette commands (no key chips; `Ctrl-k` / `:` only): Diff vs default, Diff vs branch…, Close compare tab. Concrete checkout: flat repo / checkout / section / dir / file, or the checkout that owns the active graph / drill, or the active compare tab. Not Workspace, No-updates, or a family container. Unborn HEAD disables both open commands. Missing default disables Diff vs default. Mutations on a compare tab set `Switch to Workspace tab`.
 
 `GPending` before `normal_key`: `g` → `MoveToStart`, `t` → `NextTab`, `T` → `PreviousTab`, `1`…`9` → `JumpToTab` (`1` is Workspace), Esc no-op. Bare `t` stays tree/flat. Bare `T` stays theme. `gg` stays start. Tab actions are `BusyAction::Handle`.
 
-The compare picker is `InputMode::ComparePicker`. Local + `origin/*`. It drops `origin/HEAD` and the current local branch. No create, checkout, or fetch. Empty copy is `No branches to compare`.
+The compare picker is `InputMode::ComparePicker`. Local + `origin/*`. It drops `origin/HEAD` and the current local branch. No create, checkout, or fetch. Empty copy is `No branches to compare`. Apply also requires `compare_picker_pending` to still match that checkout.
+
+A background probe reloads a compare tab only when that tab already recorded both SHAs and HEAD or the base-tip SHA then changed. Missing SHAs (first load) and tabs still `loading` are not a change. Dirty-only ticks do not reload. **Refresh** forces. Apply is generation-safe and does not steal focus.
 
 Left-pane `j`/`k`, click, vertical wheel, and search next/prev load the matching right pane through `Effect::LoadRightPane` (TTY: `spawn_blocking` + coalesced request id; Headless: the same `Interpreter::apply` on the test thread). Mouse horizontal wheel over the workspace tree pans without `LoadRightPane` (SGR `66`/`67`). Depth 1 graph rows load that commit / stash / worktree's files. Depth 2 file rows load that file's commit diff. Directory rows keep the previous diff. Esc/back and the depth stack stay unchanged. A focused-repo watch/status result that changes checkout or file identity enqueues `LoadRightPane` immediately — it does not wait for the rest of the workspace.
 

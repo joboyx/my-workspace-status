@@ -88,7 +88,7 @@ git diff --name-status --find-renames <base-sha>...<head-sha> --
 git diff <base-sha>...<head-sha> -- <path>
 ```
 
-`E` on a compare file uses LEFT `<merge-base>:<old-path-or-path>` and RIGHT `<head>:<path>`. Compare never changes HEAD, the index, or the worktree. The picker never checkouts, creates, or fetches.
+`E` on a compare file uses LEFT `<merge-base>:<old-path-or-path>` and RIGHT `<head>:<path>`. Compare never changes HEAD, the index, or the worktree. The picker never checkouts, creates, or fetches. A watch probe reloads only after both SHAs are recorded and HEAD or the base-tip SHA then changes.
 
 ## TUI writes (`tui/ops.rs`, `tui/fetch.rs`, `tui/app.rs`)
 

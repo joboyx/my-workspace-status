@@ -216,6 +216,9 @@ impl AppState {
                 if let Some((repo, path)) = self.focused_commit_edit_path() {
                     self.status = format!("edit {path}");
                     Effect::EditFile { repo, path }
+                } else if self.is_compare_tab() {
+                    self.status = "focus a file to edit".into();
+                    Effect::None
                 } else if let Some((repo, change)) = self.focused_file_if_shown() {
                     self.status = format!("edit {}", change.path);
                     Effect::EditFile {
@@ -232,6 +235,9 @@ impl AppState {
                     let kind = self.external_diff_kind();
                     self.status = format!("diff {path}");
                     Effect::ExternalDiff { repo, path, kind }
+                } else if self.is_compare_tab() {
+                    self.status = "focus a file to diff".into();
+                    Effect::None
                 } else if let Some((repo, change)) = self.focused_file_if_shown() {
                     self.status = format!("diff {}", change.path);
                     Effect::ExternalDiff {
@@ -382,7 +388,7 @@ impl AppState {
             }
             Action::ComparePickerSubmit => self.submit_compare_picker(),
             Action::ComparePickerCancel => {
-                self.compare_picker = None;
+                self.abandon_compare_picker();
                 Effect::None
             }
             Action::None => Effect::None,
@@ -534,18 +540,22 @@ impl AppState {
                 }
             }
             Action::Edit => {
-                if self.focused_commit_edit_path().is_some()
-                    || self.focused_file_if_shown().is_some()
-                {
+                if self.focused_commit_edit_path().is_some() {
+                    None
+                } else if self.is_compare_tab() {
+                    Some("focus a file to edit".into())
+                } else if self.focused_file_if_shown().is_some() {
                     None
                 } else {
                     Some("focus a dirty file to edit".into())
                 }
             }
             Action::ExternalDiff => {
-                if self.focused_commit_edit_path().is_some()
-                    || self.focused_file_if_shown().is_some()
-                {
+                if self.focused_commit_edit_path().is_some() {
+                    None
+                } else if self.is_compare_tab() {
+                    Some("focus a file to diff".into())
+                } else if self.focused_file_if_shown().is_some() {
                     None
                 } else {
                     Some("focus a file to diff".into())

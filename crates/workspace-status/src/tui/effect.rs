@@ -1062,10 +1062,15 @@ impl Interpreter {
             }
             JobOutcome::ComparePicker { gen, repo, result } => {
                 self.sched.note_user_done(UserTag::Prepare);
-                if self.sched.accept_prepare_branches_result(gen) {
+                let accepted = self.sched.accept_prepare_branches_result(gen);
+                let waiting = state.compare_picker_pending.as_deref() == Some(repo.as_str());
+                if accepted && waiting {
                     match result {
                         Ok(branches) => state.open_compare_picker(repo, branches),
-                        Err(err) => state.status = err,
+                        Err(err) => {
+                            state.abandon_compare_picker();
+                            state.status = err;
+                        }
                     }
                     self.mark();
                 }
@@ -1920,6 +1925,103 @@ mod tests {
             state.tabs.active_compare().unwrap().path.as_deref(),
             Some("keep.txt")
         );
+    }
+
+    #[test]
+    fn late_compare_picker_after_abandon_does_not_open() {
+        let mut state = fixture_state();
+        state.compare_picker_pending = Some("app".into());
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_prepare_branches();
+        state.abandon_compare_picker();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::ComparePicker {
+                gen,
+                repo: "app".into(),
+                result: Ok(vec![LocalBranch {
+                    name: "main".into(),
+                    current: true,
+                    authordate: 1,
+                }]),
+            },
+        );
+        assert!(
+            state.compare_picker.is_none(),
+            "late ComparePicker must not open after abandon"
+        );
+        assert!(state.compare_picker_pending.is_none());
+    }
+
+    #[test]
+    fn matching_compare_picker_still_opens() {
+        let mut state = fixture_state();
+        state.compare_picker_pending = Some("app".into());
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_prepare_branches();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::ComparePicker {
+                gen,
+                repo: "app".into(),
+                result: Ok(vec![LocalBranch {
+                    name: "main".into(),
+                    current: true,
+                    authordate: 1,
+                }]),
+            },
+        );
+        assert!(
+            state.compare_picker.is_some(),
+            "matching ComparePicker must open"
+        );
+        assert!(state.compare_picker_pending.is_none());
+    }
+
+    #[test]
+    fn late_compare_picker_does_not_clear_other_pending() {
+        let mut state = fixture_state();
+        state.compare_picker_pending = Some("lib".into());
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_prepare_branches();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::ComparePicker {
+                gen,
+                repo: "app".into(),
+                result: Ok(vec![LocalBranch {
+                    name: "main".into(),
+                    current: true,
+                    authordate: 1,
+                }]),
+            },
+        );
+        assert!(
+            state.compare_picker.is_none(),
+            "wrong-repo ComparePicker must not open"
+        );
+        assert_eq!(
+            state.compare_picker_pending.as_deref(),
+            Some("lib"),
+            "late app picker must not drop a later lib pending"
+        );
+    }
+
+    #[test]
+    fn compare_probe_without_recorded_sha_does_not_force_reload() {
+        let mut state = fixture_state();
+        let (tab_id, gen) = open_compare_tab(&mut state);
+        let follow = state.apply_compare_probe(tab_id, false, None);
+        assert!(follow.is_none());
+        assert_eq!(state.tabs.get_id(tab_id).unwrap().generation, gen);
+        let follow = state.apply_compare_probe(tab_id, true, None);
+        assert!(matches!(
+            follow,
+            Some(Effect::LoadCompareRange { force: true, .. })
+        ));
     }
 
     #[test]

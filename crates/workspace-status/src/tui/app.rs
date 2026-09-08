@@ -661,7 +661,12 @@ pub(crate) fn probe_compare_range(
 ) -> Result<(bool, Option<String>, Option<String>), String> {
     let head = rev_parse_commit(dir, "HEAD")?;
     let base_tip = rev_parse_commit(dir, base_ref)?;
-    let changed = head.as_deref() != last_head || base_tip.as_deref() != last_base_tip;
+    let changed = match (last_head, last_base_tip) {
+        (Some(prev_head), Some(prev_base)) => {
+            head.as_deref() != Some(prev_head) || base_tip.as_deref() != Some(prev_base)
+        }
+        _ => false,
+    };
     Ok((changed, head, base_tip))
 }
 
@@ -1743,5 +1748,37 @@ mod tests {
             Some("ahead by 3 commits")
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn probe_without_recorded_sha_is_not_a_change() {
+        let dir = std::env::temp_dir().join(format!(
+            "ws-probe-none-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        init_repo(&dir);
+        let head = exec_git(&["rev-parse", "HEAD"], &dir);
+        let (changed, got_head, got_base) =
+            probe_compare_range(&dir, "HEAD", None, None).unwrap();
+        assert!(!changed, "missing recorded SHAs must not force a reload");
+        assert_eq!(got_head.as_deref(), Some(head.as_str()));
+        assert_eq!(got_base.as_deref(), Some(head.as_str()));
+        let (changed, _, _) =
+            probe_compare_range(&dir, "HEAD", Some(head.as_str()), Some(head.as_str())).unwrap();
+        assert!(!changed, "equal tips must not reload");
+        fs::write(dir.join("dirty.txt"), "dirty\n").unwrap();
+        let (changed, _, _) =
+            probe_compare_range(&dir, "HEAD", Some(head.as_str()), Some(head.as_str())).unwrap();
+        assert!(!changed, "dirty-only worktree must not reload compare");
+        fs::write(dir.join("next.txt"), "next\n").unwrap();
+        git(&dir, &["add", "next.txt"]);
+        git(&dir, &["commit", "-q", "-m", "move head"]);
+        let (changed, _, _) =
+            probe_compare_range(&dir, "HEAD", Some(head.as_str()), Some(head.as_str())).unwrap();
+        assert!(changed, "HEAD SHA change must reload");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

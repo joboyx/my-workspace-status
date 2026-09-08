@@ -350,6 +350,8 @@ pub struct AppState {
     /// Permanent Workspace plus session compare tabs.
     pub tabs: TabStrip,
     pub compare_picker: Option<BranchPickerState>,
+    /// Checkout waiting for [`Effect::PrepareComparePicker`]. Cleared on open or abandon.
+    pub(crate) compare_picker_pending: Option<String>,
     workspace_park: Option<WorkspacePark>,
     pub flashes: HashMap<String, FlashStamp>,
     pub signatures: BTreeMap<String, String>,
@@ -460,6 +462,7 @@ impl AppState {
             command_palette: None,
             tabs: TabStrip::default(),
             compare_picker: None,
+            compare_picker_pending: None,
             workspace_park: None,
             flashes: HashMap::new(),
             signatures,
@@ -787,6 +790,7 @@ impl AppState {
 
     fn focused_commit_edit_path(&self) -> Option<(String, String)> {
         if let Some(tab) = self.tabs.active_compare() {
+            let _ = tab.source.as_ref()?;
             if self.commit_files_list_focused() {
                 let row = self.focused_commit_file_row()?;
                 if !row.is_file() {
@@ -3639,6 +3643,9 @@ impl AppState {
             }
             return self.close_compare_tab();
         }
+        if self.compare_picker_pending.take().is_some() {
+            return Effect::None;
+        }
         if self.focus == FocusPane::Right {
             self.focus = FocusPane::Left;
             return Effect::None;
@@ -3791,6 +3798,7 @@ impl AppState {
         if index >= self.tabs.len() || index == self.tabs.active {
             return Effect::None;
         }
+        self.abandon_compare_picker();
         self.park_active_session();
         self.tabs.active = index;
         self.apply_active_session();
@@ -3907,6 +3915,7 @@ impl AppState {
             self.status = HEAD_HAS_NO_COMMIT.into();
             return Effect::None;
         }
+        self.compare_picker_pending = Some(checkout.clone());
         Effect::PrepareComparePicker { repo: checkout }
     }
 
@@ -3916,6 +3925,7 @@ impl AppState {
             return Effect::None;
         }
         self.park_active_session();
+        self.abandon_compare_picker();
         self.tabs.close_active_compare();
         self.apply_active_session();
         Effect::None
@@ -3926,8 +3936,14 @@ impl AppState {
         repo: String,
         branches: Vec<crate::git::LocalBranch>,
     ) {
+        self.compare_picker_pending = None;
         self.compare_picker = Some(BranchPickerState::new(repo, branches));
         self.status.clear();
+    }
+
+    pub(crate) fn abandon_compare_picker(&mut self) {
+        self.compare_picker_pending = None;
+        self.compare_picker = None;
     }
 
     pub(crate) fn submit_compare_picker(&mut self) -> Effect {
@@ -4089,6 +4105,7 @@ impl AppState {
         self.tabs
             .compare
             .iter()
+            .filter(|tab| !tab.loading)
             .map(|tab| Effect::ProbeCompareTab {
                 tab_id: tab.id,
                 repo: tab.checkout_path.clone(),
@@ -5436,6 +5453,72 @@ mod tests {
         app.cursor = 0;
         assert_eq!(app.dispatch(Action::ExternalDiff), Effect::None);
         assert_eq!(app.status, "focus a file to diff");
+    }
+
+    fn compare_source() -> CommitFileSource {
+        CommitFileSource::Compare {
+            base_ref: "main".into(),
+            base_tip: "bbb".into(),
+            merge_base: "aaa".into(),
+            head: "ccc".into(),
+        }
+    }
+
+    #[test]
+    fn compare_tab_edit_does_not_open_workspace_dirty_file() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.tabs.open_or_focus("app".into(), "main".into());
+        app.focus = FocusPane::Left;
+        assert_eq!(app.dispatch(Action::Edit), Effect::None);
+        assert_eq!(app.status, "focus a file to edit");
+        assert_eq!(app.dispatch(Action::ExternalDiff), Effect::None);
+        assert_eq!(app.status, "focus a file to diff");
+        assert_eq!(
+            app.palette_disabled_reason(&Action::Edit).as_deref(),
+            Some("focus a file to edit")
+        );
+    }
+
+    #[test]
+    fn compare_tab_edit_skips_dir_row() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.tabs.open_or_focus("app".into(), "main".into());
+        app.focus = FocusPane::Left;
+        {
+            let tab = app.tabs.active_compare_mut().unwrap();
+            tab.source = Some(compare_source());
+            tab.files = vec![CommitFile {
+                status: "A".into(),
+                path: "src/view.rs".into(),
+                old_path: None,
+            }];
+            tab.file_cursor = 0;
+        }
+        let row = app.focused_commit_file_row().expect("compare row");
+        assert!(!row.is_file(), "cursor 0 is the dir: {row:?}");
+        assert_eq!(app.dispatch(Action::Edit), Effect::None);
+        assert_eq!(app.status, "focus a file to edit");
+        assert_eq!(app.dispatch(Action::ExternalDiff), Effect::None);
+    }
+
+    #[test]
+    fn compare_probe_skips_loading_tabs() {
+        let mut app = state();
+        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs.active_compare_mut().unwrap().loading = true;
+        assert!(app.compare_probe_effects().is_empty());
+        app.tabs.active_compare_mut().unwrap().loading = false;
+        assert_eq!(app.compare_probe_effects().len(), 1);
+    }
+
+    #[test]
+    fn nav_esc_abandons_in_flight_compare_picker() {
+        let mut app = state();
+        app.compare_picker_pending = Some("app".into());
+        assert_eq!(app.dispatch(Action::NavEsc), Effect::None);
+        assert!(app.compare_picker_pending.is_none());
     }
 
     #[test]
