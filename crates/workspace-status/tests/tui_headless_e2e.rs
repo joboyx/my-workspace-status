@@ -2794,3 +2794,109 @@ fn compare_click_tab_and_close_workspace_stays() {
     assert_eq!(tui.tab_count(), 1);
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn compare_gt_survives_watch_tick() {
+    let (root, workspace) = compare_ahead_workspace();
+    let mut tui = open(&workspace);
+    tui.search("app");
+    open_palette_run(&mut tui, "vs default");
+    open_palette_run(&mut tui, "vs branch");
+    type_palette_query(&mut tui, "main");
+    tui.enter();
+    assert_eq!(tui.tab_count(), 3);
+    assert_eq!(tui.active_tab(), 2);
+    tui.key('g');
+    tui.watch_tick();
+    tui.key('t');
+    assert_eq!(tui.active_tab(), 0);
+    tui.key('g');
+    tui.watch_tick();
+    tui.key('1');
+    assert_eq!(tui.active_tab(), 0);
+    tui.key('g');
+    tui.watch_tick();
+    tui.key('2');
+    assert_eq!(tui.active_tab(), 1);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn compare_apostrophe_on_diff_copies_not_switch() {
+    let (root, workspace) = compare_ahead_workspace();
+    let mut tui = open(&workspace);
+    tui.search("app");
+    open_palette_run(&mut tui, "vs default");
+    tui.enter();
+    assert!(tui.focus_is_right());
+    tui.key('\'');
+    let frame = tui.frame();
+    assert_absent(&frame, "Switch to Workspace tab");
+    assert!(
+        frame.contains("copied") || tui.status() == "copied" || tui.status() == "copy failed",
+        "compare DiffPane ' must copy, status={}:\n{frame}",
+        tui.status()
+    );
+    assert_ne!(tui.status(), "Switch to Workspace tab");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn compare_wheel_moves_file_list_and_diff() {
+    let (root, workspace) = compare_ahead_workspace();
+    let mut tui = open(&workspace);
+    tui.search("app");
+    open_palette_run(&mut tui, "vs default");
+    let _ = tui.frame();
+    let tree_id = tui.cursor_id();
+    let file_before = tui.compare_file_cursor();
+    tui.mouse_scroll_down(
+        tui.tree_inner_x().saturating_add(2),
+        tui.tree_inner_y().saturating_add(1),
+    );
+    assert_eq!(tui.cursor_id(), tree_id, "parked workspace tree stays");
+    assert_ne!(
+        tui.compare_file_cursor(),
+        file_before,
+        "left compare wheel must move the file list"
+    );
+    tui.enter();
+    assert!(tui.focus_is_right());
+    let file_after_enter = tui.compare_file_cursor();
+    let diff_before = tui.diff_cursor();
+    tui.mouse_scroll_down(
+        tui.pane_right_x().saturating_add(2),
+        tui.tree_inner_y().saturating_add(1),
+    );
+    assert_eq!(
+        tui.compare_file_cursor(),
+        file_after_enter,
+        "right compare wheel must not move the file list"
+    );
+    assert_ne!(
+        tui.diff_cursor(),
+        diff_before,
+        "right compare wheel must move the DiffPane cursor"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn compare_click_tab_close_closes_compare_only() {
+    let (root, workspace) = compare_ahead_workspace();
+    let mut tui = open(&workspace);
+    tui.search("app");
+    open_palette_run(&mut tui, "vs default");
+    let open_frame = tui.frame();
+    assert_contains(&open_frame, "[x]");
+    tui.click_tab_close(0);
+    assert_eq!(tui.active_tab(), 1);
+    assert_eq!(tui.tab_count(), 2);
+    tui.click_tab_close(1);
+    assert_eq!(tui.active_tab(), 0);
+    assert_eq!(tui.tab_count(), 1);
+    let closed = tui.frame();
+    assert_contains(&closed, "Workspace");
+    assert_absent(&closed, "app · vs");
+    let _ = fs::remove_dir_all(root);
+}

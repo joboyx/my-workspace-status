@@ -56,7 +56,6 @@ pub fn is_compare_mutation(action: &Action) -> bool {
             | Action::CommentSubmit
             | Action::CommentToggleResolved
             | Action::ExportComments
-            | Action::CopyEntityReference
             | Action::DiffVisualStart
             | Action::ConfirmYes
             | Action::ConfirmYesClean
@@ -388,5 +387,12 @@ mod tests {
             true,
             ListFocusTarget::Graph
         ));
+    }
+
+    #[test]
+    fn copy_entity_reference_is_not_a_compare_mutation() {
+        assert!(!is_compare_mutation(&Action::CopyEntityReference));
+        assert!(is_compare_mutation(&Action::Stage));
+        assert!(is_compare_mutation(&Action::CommentStart));
     }
 }

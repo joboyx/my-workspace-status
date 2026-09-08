@@ -154,6 +154,8 @@ pub struct LayoutHit {
     pub tab_y: u16,
     /// Hit boxes `(x, width, tab_index)` for the painted strip.
     pub tab_hits: Vec<(u16, u16, usize)>,
+    /// Close `[x]` hit boxes for compare tabs. Workspace never has one.
+    pub tab_close_hits: Vec<(u16, u16, usize)>,
 }
 
 impl Default for LayoutHit {
@@ -191,8 +193,18 @@ impl Default for LayoutHit {
             diff_hscrollbar_width: 0,
             tab_y: 0,
             tab_hits: Vec::new(),
+            tab_close_hits: Vec::new(),
         }
     }
+}
+
+fn hit_tab_box(hits: &[(u16, u16, usize)], tab_y: u16, col: u16, row: u16) -> Option<usize> {
+    if row != tab_y {
+        return None;
+    }
+    hits.iter()
+        .find(|(x, width, _)| col >= *x && col < x.saturating_add(*width))
+        .map(|(_, _, index)| *index)
 }
 
 /// Workspace chrome parked while a compare tab is active.
@@ -1483,6 +1495,9 @@ impl AppState {
     }
 
     fn click(&mut self, col: u16, row: u16) -> Effect {
+        if let Some(index) = self.hit_tab_close(col, row) {
+            return self.close_compare_at(index);
+        }
         if let Some(index) = self.hit_tab(col, row) {
             return self.activate_tab(index);
         }
@@ -2616,15 +2631,22 @@ impl AppState {
     fn current_entity_reference(&self) -> Option<EntityRef> {
         match self.list_focus_target() {
             ListFocusTarget::None => {
-                let source = match &self.drill {
-                    DrillView::Diff { source, .. } => Some(source),
-                    _ => None,
-                };
-                let (repo, path) = match &self.drill {
-                    DrillView::Diff { repo, path, .. } => {
-                        (Some(repo.as_str()), Some(path.as_str()))
+                let (repo, path, source) = if let Some(tab) = self.tabs.active_compare() {
+                    (
+                        Some(tab.checkout_path.as_str()),
+                        tab.path.as_deref(),
+                        tab.source.as_ref(),
+                    )
+                } else {
+                    match &self.drill {
+                        DrillView::Diff {
+                            repo,
+                            path,
+                            source,
+                            ..
+                        } => (Some(repo.as_str()), Some(path.as_str()), Some(source)),
+                        _ => (self.diff_repo.as_deref(), self.diff_path.as_deref(), None),
                     }
-                    _ => (self.diff_repo.as_deref(), self.diff_path.as_deref()),
                 };
                 let rows = self.current_diff_rows();
                 let (start, end) = if let Some(anchor) = self.diff_visual_anchor {
@@ -2695,11 +2717,15 @@ impl AppState {
                 )
             }
             ListFocusTarget::CommitFiles => {
-                let repo = match &self.drill {
-                    DrillView::Files { repo, .. } | DrillView::Diff { repo, .. } => {
-                        Some(repo.as_str())
+                let repo = if let Some(tab) = self.tabs.active_compare() {
+                    Some(tab.checkout_path.as_str())
+                } else {
+                    match &self.drill {
+                        DrillView::Files { repo, .. } | DrillView::Diff { repo, .. } => {
+                            Some(repo.as_str())
+                        }
+                        DrillView::Graph => None,
                     }
-                    DrillView::Graph => None,
                 };
                 let row = self.focused_commit_file_row();
                 resolve_entity_reference(
@@ -3724,14 +3750,11 @@ impl AppState {
     }
 
     fn hit_tab(&self, col: u16, row: u16) -> Option<usize> {
-        if row != self.layout.tab_y {
-            return None;
-        }
-        self.layout
-            .tab_hits
-            .iter()
-            .find(|(x, width, _)| col >= *x && col < x.saturating_add(*width))
-            .map(|(_, _, index)| *index)
+        hit_tab_box(&self.layout.tab_hits, self.layout.tab_y, col, row)
+    }
+
+    fn hit_tab_close(&self, col: u16, row: u16) -> Option<usize> {
+        hit_tab_box(&self.layout.tab_close_hits, self.layout.tab_y, col, row)
     }
 
     fn park_active_session(&mut self) {
@@ -3936,14 +3959,25 @@ impl AppState {
     }
 
     pub(crate) fn close_compare_tab(&mut self) -> Effect {
-        if self.tabs.is_workspace() {
+        self.close_compare_at(self.tabs.active)
+    }
+
+    fn close_compare_at(&mut self, index: usize) -> Effect {
+        if index == 0 {
             self.status = WORKSPACE_TAB_CANNOT_CLOSE.into();
             return Effect::None;
         }
-        self.park_active_session();
-        self.abandon_compare_picker();
-        self.tabs.close_active_compare();
-        self.apply_active_session();
+        let closing_active = index == self.tabs.active;
+        if closing_active {
+            self.park_active_session();
+            self.abandon_compare_picker();
+        }
+        if !self.tabs.close_at(index) {
+            return Effect::None;
+        }
+        if closing_active {
+            self.apply_active_session();
+        }
         Effect::None
     }
 
@@ -5737,6 +5771,163 @@ mod tests {
         }
         assert_eq!(app.dispatch(Action::Stage), Effect::None);
         assert_eq!(app.status, super::super::tabs::SWITCH_TO_WORKSPACE_TAB);
+        assert_eq!(
+            app.palette_disabled_reason(&Action::CopyEntityReference)
+                .as_deref(),
+            Some("no copy target")
+        );
+    }
+
+    #[test]
+    fn compare_apostrophe_copies_diff_and_is_not_a_mutation() {
+        let mut app = state();
+        app.tabs.open_or_focus("app".into(), "main".into());
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        let _ = app.apply_compare_range(tab_id, gen, Ok(compare_range_load(&["README.md"])));
+        app.apply_compare_diff(
+            tab_id,
+            gen,
+            &compare_source(),
+            "README.md",
+            Ok(two_line_readme()),
+        );
+        app.focus = FocusPane::Right;
+        assert_eq!(app.list_focus_target(), ListFocusTarget::None);
+        assert_eq!(
+            app.palette_disabled_reason(&Action::CopyEntityReference),
+            None
+        );
+        let effect = app.dispatch(Action::CopyEntityReference);
+        assert_ne!(app.status, super::super::tabs::SWITCH_TO_WORKSPACE_TAB);
+        let text = assert_copy_clipboard(effect, "diff", "README.md", true);
+        assert!(text.contains("path: README.md"), "{text}");
+        assert!(text.contains("lines:"), "{text}");
+    }
+
+    #[test]
+    fn compare_left_wheel_moves_files_when_workspace_graph_is_parked() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        app.drill = DrillView::Graph;
+        app.tabs.open_or_focus("app".into(), "main".into());
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        let _ = app.apply_compare_range(
+            tab_id,
+            gen,
+            Ok(compare_range_load(&["alpha.txt", "beta.txt"])),
+        );
+        app.focus = FocusPane::Left;
+        app.layout.right_x = 48;
+        let tree_cursor = app.cursor;
+        let file_cursor = app.tabs.active_compare().unwrap().file_cursor;
+        match app.dispatch(Action::ScrollWheel {
+            col: 10,
+            row: 4,
+            delta: 1,
+            horizontal: false,
+        }) {
+            Effect::LoadCompareDiff { path, .. } => assert_eq!(path, "beta.txt"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(app.cursor, tree_cursor, "parked tree cursor stays");
+        assert_eq!(app.drill, DrillView::Graph);
+        assert_ne!(
+            app.tabs.active_compare().unwrap().file_cursor,
+            file_cursor,
+            "compare file list must move"
+        );
+    }
+
+    #[test]
+    fn compare_right_wheel_moves_diff_when_workspace_files_are_parked() {
+        let mut app = state();
+        app.open_commit_files(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![
+                CommitFile {
+                    status: "M".into(),
+                    path: "src/a.rs".into(),
+                    old_path: None,
+                },
+                CommitFile {
+                    status: "M".into(),
+                    path: "src/b.rs".into(),
+                    old_path: None,
+                },
+            ],
+        );
+        assert!(app.drill.is_files());
+        let parked_file_cursor = match &app.drill {
+            DrillView::Files { cursor, .. } => *cursor,
+            other => panic!("{other:?}"),
+        };
+        app.tabs.open_or_focus("app".into(), "main".into());
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        let _ = app.apply_compare_range(tab_id, gen, Ok(compare_range_load(&["README.md"])));
+        app.apply_compare_diff(
+            tab_id,
+            gen,
+            &compare_source(),
+            "README.md",
+            Ok(two_line_readme()),
+        );
+        app.focus = FocusPane::Right;
+        app.layout.right_x = 48;
+        let file_cursor = app.tabs.active_compare().unwrap().file_cursor;
+        let diff_cursor = app.diff_cursor;
+        assert_eq!(
+            app.dispatch(Action::ScrollWheel {
+                col: 80,
+                row: 4,
+                delta: 1,
+                horizontal: false,
+            }),
+            Effect::None
+        );
+        assert_eq!(
+            app.tabs.active_compare().unwrap().file_cursor,
+            file_cursor,
+            "compare file cursor stays"
+        );
+        match &app.drill {
+            DrillView::Files { cursor, .. } => assert_eq!(*cursor, parked_file_cursor),
+            other => panic!("{other:?}"),
+        }
+        assert_ne!(app.diff_cursor, diff_cursor, "compare DiffPane must move");
+    }
+
+    #[test]
+    fn compare_click_close_hits_close_compare_and_workspace_never_closes() {
+        let mut app = state();
+        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs.open_or_focus("app".into(), "develop".into());
+        assert_eq!(app.tabs.active, 2);
+        app.layout.tab_y = 0;
+        app.layout.tab_hits = vec![(0, 12, 0), (13, 20, 1), (34, 22, 2)];
+        app.layout.tab_close_hits = vec![(28, 3, 1), (51, 3, 2)];
+        assert_eq!(
+            app.dispatch(Action::Click {
+                col: 29,
+                row: 0,
+            }),
+            Effect::None
+        );
+        assert_eq!(app.tabs.active, 1);
+        assert_eq!(app.tabs.compare.len(), 1);
+        app.layout.tab_close_hits = vec![(2, 3, 0)];
+        assert_eq!(
+            app.dispatch(Action::Click { col: 3, row: 0 }),
+            Effect::None
+        );
+        assert_eq!(app.status, WORKSPACE_TAB_CANNOT_CLOSE);
+        assert_eq!(app.tabs.active, 1);
+        assert_eq!(app.tabs.compare.len(), 1);
     }
 
     #[test]
@@ -9075,6 +9266,23 @@ mod tests {
         assert!(app.g_pending_at.is_some());
         app.dispatch(Action::MoveToStart);
         assert_eq!(app.cursor, 0);
+        assert!(app.g_pending_at.is_none());
+    }
+
+    #[test]
+    fn g_pending_survives_ticks_none_and_release() {
+        let mut app = state();
+        app.tabs.open_or_focus("app".into(), "main".into());
+        app.dispatch(Action::ArmGChord);
+        assert!(app.g_pending_at.is_some());
+        assert!(matches!(app.input_mode(), InputMode::GPending { .. }));
+        app.dispatch(Action::WatchTick);
+        app.dispatch(Action::None);
+        app.dispatch(Action::FetchTick);
+        app.dispatch(Action::Release);
+        assert!(app.g_pending_at.is_some());
+        assert!(matches!(app.input_mode(), InputMode::GPending { .. }));
+        app.dispatch(Action::ToggleTreeMode);
         assert!(app.g_pending_at.is_none());
     }
 

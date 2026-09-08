@@ -10,6 +10,7 @@ use super::super::comments::{
 use super::super::diff::{cell_code_width, diff_row_content_width, gutter_width, DiffRow};
 use super::super::icons::comment_mark_cols;
 use super::super::search::{apply_pan, list_row_pan_max, max_col_offset};
+use super::super::gates::ListFocusTarget;
 use super::super::tree::{row_segments, with_comment_mark, NodeKind};
 use super::{AppState, FocusPane};
 use crate::helpers::visible_width;
@@ -203,26 +204,23 @@ impl AppState {
                 }
                 if col >= self.layout.right_x {
                     self.focus = FocusPane::Right;
-                    if self.drill.is_files() {
-                        self.move_file_cursor(delta)
-                    } else if self.right_is_diff() || self.drill.is_diff() {
-                        self.move_diff_cursor(delta);
-                        Effect::None
-                    } else {
+                } else {
+                    self.focus = FocusPane::Left;
+                }
+                match self.list_focus_target() {
+                    ListFocusTarget::Tree => {
+                        self.move_cursor(delta);
+                        Effect::LoadRightPane
+                    }
+                    ListFocusTarget::Graph => {
                         self.move_graph_cursor(delta);
                         self.follow_graph_files()
                     }
-                } else if self.drill.is_diff() {
-                    self.focus = FocusPane::Left;
-                    self.move_file_cursor(delta)
-                } else if self.drill.is_files() {
-                    self.focus = FocusPane::Left;
-                    self.move_graph_cursor(delta);
-                    self.follow_graph_files()
-                } else {
-                    self.focus = FocusPane::Left;
-                    self.move_cursor(delta);
-                    Effect::LoadRightPane
+                    ListFocusTarget::CommitFiles => self.move_file_cursor(delta),
+                    ListFocusTarget::None => {
+                        self.move_diff_cursor(delta);
+                        Effect::None
+                    }
                 }
             }
             _ => Effect::None,

@@ -1829,6 +1829,7 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     state.layout.tab_y = area.y;
     state.layout.tab_hits.clear();
+    state.layout.tab_close_hits.clear();
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -1851,12 +1852,25 @@ fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             ));
             x = x.saturating_add(sep_w);
         }
-        let text = format!(" {label} ");
+        let closable = index > 0;
+        let text = if closable {
+            format!(" {label} [x] ")
+        } else {
+            format!(" {label} ")
+        };
         let width = visible_width(&text) as u16;
         if x.saturating_add(width) > end {
             break;
         }
         state.layout.tab_hits.push((x, width, index));
+        if closable {
+            let prefix_w = visible_width(&format!(" {label} ")) as u16;
+            let close_w = visible_width("[x]") as u16;
+            state
+                .layout
+                .tab_close_hits
+                .push((x.saturating_add(prefix_w), close_w, index));
+        }
         let selected = index == active;
         spans.push(Span::styled(
             text,
