@@ -580,9 +580,10 @@ impl Interpreter {
                 path,
                 old_path,
             } => {
-                if let Some(tab) = state.tabs.get_id(tab_id) {
+                if let Some(tab) = state.tabs.get_id_mut(tab_id) {
                     let gen = tab.generation;
-                    let req_id = self.sched.request_compare_diff();
+                    tab.diff_req = tab.diff_req.saturating_add(1);
+                    let req_id = tab.diff_req;
                     self.compare_diff.push_back(CompareDiffJob {
                         req_id,
                         gen,
@@ -1079,10 +1080,11 @@ impl Interpreter {
                 path,
                 content,
             } => {
-                let accepted = self.sched.accept_compare_diff_result(req_id)
-                    && state.tabs.get_id(tab_id).is_some_and(|tab| {
-                        tab.generation == gen && tab.source.as_ref() == Some(&source)
-                    });
+                let accepted = state.tabs.get_id(tab_id).is_some_and(|tab| {
+                    tab.diff_req == req_id
+                        && tab.generation == gen
+                        && tab.source.as_ref() == Some(&source)
+                });
                 if accepted {
                     state.apply_compare_diff(tab_id, gen, &source, &path, content);
                     self.mark();
@@ -1936,13 +1938,13 @@ mod tests {
             tab.path = Some("keep.txt".into());
         }
         let mut interp = Interpreter::new();
-        let req_id = interp.sched.request_compare_diff();
+        state.tabs.active_compare_mut().unwrap().diff_req = 1;
         apply(
             &mut interp,
             &mut state,
             JobOutcome::CompareDiff {
                 tab_id,
-                req_id,
+                req_id: 1,
                 gen,
                 source: CommitFileSource::Compare {
                     base_ref: "main".into(),
@@ -1970,16 +1972,15 @@ mod tests {
             tab.source = Some(compare_source());
             tab.path = Some("keep.txt".into());
             tab.content = keep.clone();
+            tab.diff_req = 2;
         }
         let mut interp = Interpreter::new();
-        let stale = interp.sched.request_compare_diff();
-        let latest = interp.sched.request_compare_diff();
         apply(
             &mut interp,
             &mut state,
             JobOutcome::CompareDiff {
                 tab_id,
-                req_id: stale,
+                req_id: 1,
                 gen,
                 source: compare_source(),
                 path: "stale.txt".into(),
@@ -1994,7 +1995,7 @@ mod tests {
             &mut state,
             JobOutcome::CompareDiff {
                 tab_id,
-                req_id: latest,
+                req_id: 2,
                 gen,
                 source: compare_source(),
                 path: "keep.txt".into(),
@@ -2004,6 +2005,74 @@ mod tests {
         let tab = state.tabs.active_compare().unwrap();
         assert_eq!(tab.path.as_deref(), Some("keep.txt"));
         assert_eq!(tab.content, DiffContent::from_unified("+keep\n"));
+    }
+
+    #[test]
+    fn compare_diff_request_is_per_tab() {
+        let mut state = fixture_state();
+        let (tab_a, gen_a) = open_compare_tab(&mut state);
+        {
+            let tab = state.tabs.get_id_mut(tab_a).unwrap();
+            tab.source = Some(compare_source());
+            tab.diff_req = 1;
+        }
+        state.tabs.open_or_focus("app".into(), "develop".into());
+        let tab_b = state.tabs.active_compare().unwrap().id;
+        {
+            let tab = state.tabs.get_id_mut(tab_b).unwrap();
+            tab.generation = 2;
+            tab.source = Some(CommitFileSource::Compare {
+                base_ref: "develop".into(),
+                base_tip: "bbb".into(),
+                merge_base: "aaa".into(),
+                head: "ccc".into(),
+            });
+            tab.diff_req = 1;
+        }
+        let mut interp = Interpreter::new();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CompareDiff {
+                tab_id: tab_a,
+                req_id: 1,
+                gen: gen_a,
+                source: compare_source(),
+                path: "a.txt".into(),
+                content: Ok(DiffContent::from_unified("+a\n")),
+            },
+        );
+        assert_eq!(
+            state.tabs.get_id(tab_a).unwrap().path.as_deref(),
+            Some("a.txt"),
+            "tab A file diff must apply while tab B is active"
+        );
+        assert!(state.tabs.get_id(tab_b).unwrap().path.is_none());
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CompareDiff {
+                tab_id: tab_b,
+                req_id: 1,
+                gen: 2,
+                source: CommitFileSource::Compare {
+                    base_ref: "develop".into(),
+                    base_tip: "bbb".into(),
+                    merge_base: "aaa".into(),
+                    head: "ccc".into(),
+                },
+                path: "b.txt".into(),
+                content: Ok(DiffContent::from_unified("+b\n")),
+            },
+        );
+        assert_eq!(
+            state.tabs.get_id(tab_a).unwrap().path.as_deref(),
+            Some("a.txt")
+        );
+        assert_eq!(
+            state.tabs.get_id(tab_b).unwrap().path.as_deref(),
+            Some("b.txt")
+        );
     }
 
     #[test]

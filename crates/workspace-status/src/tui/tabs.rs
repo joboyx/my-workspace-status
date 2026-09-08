@@ -87,6 +87,8 @@ pub struct CompareTab {
     pub last_head: Option<String>,
     pub last_base_tip: Option<String>,
     pub loading: bool,
+    /// Latest `LoadCompareDiff` request for this tab.
+    pub diff_req: u64,
 }
 
 impl CompareTab {
@@ -116,6 +118,7 @@ impl CompareTab {
             last_head: None,
             last_base_tip: None,
             loading: true,
+            diff_req: 0,
         }
     }
 
