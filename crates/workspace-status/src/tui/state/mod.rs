@@ -5822,15 +5822,15 @@ mod tests {
         app.layout.right_x = 48;
         let tree_cursor = app.cursor;
         let file_cursor = app.tabs.active_compare().unwrap().file_cursor;
-        assert_eq!(
-            app.dispatch(Action::ScrollWheel {
-                col: 10,
-                row: 4,
-                delta: 1,
-                horizontal: false,
-            }),
-            Effect::None
-        );
+        match app.dispatch(Action::ScrollWheel {
+            col: 10,
+            row: 4,
+            delta: 1,
+            horizontal: false,
+        }) {
+            Effect::LoadCompareDiff { path, .. } => assert_eq!(path, "beta.txt"),
+            other => panic!("{other:?}"),
+        }
         assert_eq!(app.cursor, tree_cursor, "parked tree cursor stays");
         assert_eq!(app.drill, DrillView::Graph);
         assert_ne!(
