@@ -212,6 +212,7 @@ fn failed_repo_snapshot(
         primary_repo: meta.primary_repo.clone(),
         merged_into_default: None,
         default_branch_override: override_name.map(str::to_string),
+        default_tip_ref: None,
         local_branches: Vec::new(),
     }
 }
@@ -536,6 +537,8 @@ pub fn process_repo(
     let has_untracked = !parsed.untracked.is_empty();
     let merged = compute_merged_into_default(&repo_dir, &branch_state.branch, override_name);
     let head = rev_parse_quiet("HEAD", &repo_dir).unwrap_or_default();
+    let default_name = resolve_default_branch_name(&repo_dir, override_name);
+    let default_tip_ref = resolve_default_branch_tip_ref(&repo_dir, &default_name);
     let local_branches = list_local_branches(&repo_dir)
         .into_iter()
         .map(|b| b.name)
@@ -554,6 +557,7 @@ pub fn process_repo(
         primary_repo: meta.primary_repo.clone(),
         merged_into_default: merged,
         default_branch_override: override_name.map(str::to_string),
+        default_tip_ref,
         local_branches,
     })
 }

@@ -820,6 +820,7 @@ mod live_git {
                 primary_repo: None,
                 merged_into_default: None,
                 default_branch_override: None,
+                default_tip_ref: None,
                 local_branches: Vec::new(),
             }],
             &[],

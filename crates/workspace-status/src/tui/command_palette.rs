@@ -160,6 +160,24 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::Refresh,
     },
     PaletteCommand {
+        title: "Diff vs default",
+        keys: "",
+        group: CommandGroup::Git,
+        action: Action::CompareVsDefault,
+    },
+    PaletteCommand {
+        title: "Diff vs branch…",
+        keys: "",
+        group: CommandGroup::Git,
+        action: Action::CompareVsBranch,
+    },
+    PaletteCommand {
+        title: "Close compare tab",
+        keys: "",
+        group: CommandGroup::Git,
+        action: Action::CloseCompareTab,
+    },
+    PaletteCommand {
         title: "Mark reviewed",
         keys: "space",
         group: CommandGroup::Git,
@@ -461,6 +479,24 @@ mod tests {
                 Action::ExternalDiff,
             ),
             ("Refresh", "r", CommandGroup::Git, Action::Refresh),
+            (
+                "Diff vs default",
+                "",
+                CommandGroup::Git,
+                Action::CompareVsDefault,
+            ),
+            (
+                "Diff vs branch…",
+                "",
+                CommandGroup::Git,
+                Action::CompareVsBranch,
+            ),
+            (
+                "Close compare tab",
+                "",
+                CommandGroup::Git,
+                Action::CloseCompareTab,
+            ),
             (
                 "Mark reviewed",
                 "space",

@@ -47,6 +47,14 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "top / bottom of focused pane",
             },
             HelpEntry {
+                keys: "gt gT",
+                desc: "next / prev tab",
+            },
+            HelpEntry {
+                keys: "g1-g9",
+                desc: "jump to tab (1=Workspace)",
+            },
+            HelpEntry {
                 keys: "Home End",
                 desc: "top / bottom",
             },
@@ -564,6 +572,8 @@ mod tests {
         let move_keys: Vec<&str> = HELP_GROUPS[0].entries.iter().map(|e| e.keys).collect();
         let view_keys: Vec<&str> = HELP_GROUPS[2].entries.iter().map(|e| e.keys).collect();
         assert!(move_keys.contains(&"j k"));
+        assert!(move_keys.contains(&"gt gT"));
+        assert!(move_keys.contains(&"g1-g9"));
         assert!(move_keys.contains(&"/"));
         assert!(move_keys.contains(&"n N"));
         assert!(!move_keys.contains(&"PgUp PgDn"));

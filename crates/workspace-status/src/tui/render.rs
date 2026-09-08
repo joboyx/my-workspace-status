@@ -48,6 +48,7 @@ use super::split::{
     side_by_side_column_widths, MIN_PANE_COLS,
 };
 use super::state::{AppState, FocusPane, PendingConfirm};
+use super::tabs::{no_committed_changes_vs, NO_BRANCHES_TO_COMPARE, NO_COMMITTED_CHANGES};
 use super::theme::{hex_color, Palette};
 use super::tree::{
     row_segments, visible_window, with_comment_mark, NodeKind, NodeSegments, SegRole, TextSeg,
@@ -112,7 +113,11 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     let overlay_h = overlay_status_rows_for(state, area.width);
     let crumb_h = breadcrumb_rows(state);
     let prompt_h = ctrl_c_prompt_rows(state);
-    let chrome_h = crumb_h.saturating_add(prompt_h).saturating_add(overlay_h);
+    let tab_h = 1u16;
+    let chrome_h = crumb_h
+        .saturating_add(prompt_h)
+        .saturating_add(overlay_h)
+        .saturating_add(tab_h);
     // Help keeps its wrapped row budget. Panes take leftover rows (this
     // can be fewer than the idle Min(3)). A fixed Min(3) clips the last
     // GIT wrap at the default 140×32 PTY.
@@ -124,12 +129,14 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(tab_h),
             Constraint::Min(pane_min),
             Constraint::Length(crumb_h),
             Constraint::Length(prompt_h),
             Constraint::Length(overlay_h),
         ])
         .split(area);
+    draw_tab_strip(frame, chunks[0], state);
     let widths = pane_widths(area.width, state.tree_fraction);
     let panes = Layout::default()
         .direction(Direction::Horizontal)
@@ -137,9 +144,9 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
             Constraint::Length(widths.tree_width),
             Constraint::Min(MIN_PANE_COLS),
         ])
-        .split(chunks[0]);
+        .split(chunks[1]);
 
-    let left_is_files = state.drill.is_diff();
+    let left_is_files = state.drill.is_diff() || state.is_compare_tab();
     let left_is_graph = state.drill.is_files();
     state.layout.graph_scrollbar_x = None;
     state.layout.graph_scrollbar_y = 0;
@@ -207,17 +214,17 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
 
     if crumb_h > 0 {
         frame.render_widget(
-            Paragraph::new(breadcrumb_line(state, chunks[1].width)),
-            chunks[1],
+            Paragraph::new(breadcrumb_line(state, chunks[2].width)),
+            chunks[2],
         );
     }
     if prompt_h > 0 {
         frame.render_widget(
-            Paragraph::new(ctrl_c_prompt_line(state, chunks[2].width)),
-            chunks[2],
+            Paragraph::new(ctrl_c_prompt_line(state, chunks[3].width)),
+            chunks[3],
         );
     }
-    let overlay = chunks[3];
+    let overlay = chunks[4];
     if state.help_open {
         draw_help(frame, overlay, state);
     } else if state.confirm.is_some() {
@@ -232,6 +239,8 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         draw_comment_export(frame, overlay, state);
     } else if state.branch_picker.is_some() {
         draw_branch_picker(frame, overlay, state);
+    } else if state.compare_picker.is_some() {
+        draw_compare_picker(frame, overlay, state);
     } else if state.graph_focus_picker.is_some() {
         draw_graph_focus_picker(frame, overlay, state);
     } else if state.command_palette.is_some() {
@@ -246,7 +255,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.tree_height = tree_inner.height;
     state.layout.right_x = panes[1].x;
     state.layout.term_cols = area.width;
-    state.layout.pane_height = chunks[0].height;
+    state.layout.pane_height = chunks[1].height;
     state.layout.outer_tree_width = panes[0].width;
     state.layout.diff_pane_width = right_inner.width;
     state.layout.diff_pane_height = right_inner.height;
@@ -260,7 +269,13 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         };
 
     state.layout.right_y = right_inner.y;
-    if let super::drill::DrillView::Diff { file_cursor, .. } = &state.drill {
+    if state.is_compare_tab() {
+        let cursor = state.commit_files_cursor();
+        state.layout.files_list_y = tree_inner.y;
+        let list_h = tree_inner.height as usize;
+        let (start, _) = visible_window(state.painted_commit_file_rows().len(), cursor, list_h);
+        state.layout.files_list_offset = start;
+    } else if let super::drill::DrillView::Diff { file_cursor, .. } = &state.drill {
         let cursor = *file_cursor;
         state.layout.files_list_y = tree_inner.y;
         let list_h = tree_inner.height as usize;
@@ -758,6 +773,25 @@ fn draw_commit_file_list(
     let palette = state.theme.palette();
     let rows = state.painted_commit_file_rows();
     if rows.is_empty() {
+        if let Some(tab) = state.tabs.active_compare() {
+            if let Some(err) = tab.error.as_deref() {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        err.to_string(),
+                        Style::default().fg(palette.muted),
+                    )),
+                    area,
+                );
+                return;
+            }
+            let copy = if tab.loading {
+                LOADING_FILES
+            } else {
+                NO_COMMITTED_CHANGES
+            };
+            frame.render_widget(Paragraph::new(muted_copy(copy, palette)), area);
+            return;
+        }
         let copy = if state.commit_files_loading {
             LOADING_FILES
         } else {
@@ -783,7 +817,7 @@ fn draw_commit_file_list(
         state.search_target == SearchPane::CommitFiles && !state.search_query.trim().is_empty();
     let match_paths = commit_file_search_match_paths(state);
     let comment_scope = commit_file_comment_scope(state);
-    let files_focused = if state.drill.is_diff() {
+    let files_focused = if state.drill.is_diff() || state.is_compare_tab() {
         state.focus == FocusPane::Left
     } else {
         state.focus == FocusPane::Right
@@ -952,10 +986,14 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         height: list_h,
     };
     if rows.is_empty() {
-        let msg = if path.is_empty() {
-            "select a dirty file"
+        let msg = if let Some(tab) = state.tabs.active_compare() {
+            tab.error
+                .clone()
+                .unwrap_or_else(|| no_committed_changes_vs(&tab.base_ref))
+        } else if path.is_empty() {
+            "select a dirty file".to_string()
         } else {
-            "(no diff)"
+            "(no diff)".to_string()
         };
         frame.render_widget(
             Paragraph::new(Span::styled(msg, Style::default().fg(palette.muted))),
@@ -1145,7 +1183,7 @@ fn section_style(section: DiffSection, palette: Palette) -> Style {
     match section {
         DiffSection::Staged => Style::default().fg(palette.added),
         DiffSection::Unstaged => Style::default().fg(palette.modified),
-        DiffSection::New => Style::default().fg(palette.heading),
+        DiffSection::New | DiffSection::Committed => Style::default().fg(palette.heading),
     }
 }
 
@@ -1783,6 +1821,155 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     );
 }
 
+fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
+    state.layout.tab_y = area.y;
+    state.layout.tab_hits.clear();
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let palette = state.theme.palette();
+    let labels = state.tabs.labels();
+    let active = state.tabs.active;
+    let mut spans = Vec::new();
+    let mut x = area.x;
+    let end = area.x.saturating_add(area.width);
+    for (index, label) in labels.iter().enumerate() {
+        if index > 0 {
+            let sep = "│";
+            let sep_w = visible_width(sep) as u16;
+            if x.saturating_add(sep_w) > end {
+                break;
+            }
+            spans.push(Span::styled(
+                sep.to_string(),
+                Style::default().fg(palette.muted),
+            ));
+            x = x.saturating_add(sep_w);
+        }
+        let text = format!(" {label} ");
+        let width = visible_width(&text) as u16;
+        if x.saturating_add(width) > end {
+            break;
+        }
+        state.layout.tab_hits.push((x, width, index));
+        let selected = index == active;
+        spans.push(Span::styled(
+            text,
+            if selected {
+                Style::default()
+                    .fg(palette.cursor)
+                    .bg(palette.cursor_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.muted)
+            },
+        ));
+        x = x.saturating_add(width);
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let Some(picker) = state.compare_picker.as_ref() else {
+        return;
+    };
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let palette = state.theme.palette();
+    let accent = palette.branch_feature;
+    let visible = picker.visible();
+    let max_rows = 12usize;
+    let start = if visible.len() <= max_rows {
+        0
+    } else {
+        picker
+            .cursor
+            .saturating_sub(max_rows / 2)
+            .min(visible.len() - max_rows)
+    };
+    let window = if visible.is_empty() {
+        Vec::new()
+    } else {
+        visible
+            .iter()
+            .skip(start)
+            .take(max_rows)
+            .copied()
+            .collect::<Vec<_>>()
+    };
+    let filter = if picker.filter.is_empty() {
+        "…"
+    } else {
+        picker.filter.as_str()
+    };
+    let title = vec![
+        Span::styled(
+            "Compare ",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(picker.repo.clone(), Style::default().fg(palette.repo)),
+        Span::styled("  filter: ", Style::default().fg(palette.muted)),
+        Span::styled(filter.to_string(), Style::default().fg(palette.cursor)),
+    ];
+    let mut lines = vec![Line::from(title)];
+    if window.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  {NO_BRANCHES_TO_COMPARE}"),
+            Style::default().fg(palette.muted),
+        )));
+    } else {
+        for (i, branch) in window.iter().enumerate() {
+            let index = start + i;
+            let selected = index == picker.cursor;
+            let cursor = if selected { "❯ " } else { "  " };
+            let row_bg = if selected {
+                palette.cursor_bg
+            } else {
+                Color::Reset
+            };
+            let name_fg = if selected {
+                palette.file
+            } else {
+                palette.muted
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    cursor.to_string(),
+                    Style::default()
+                        .fg(if selected {
+                            palette.cursor
+                        } else {
+                            palette.muted
+                        })
+                        .bg(row_bg),
+                ),
+                Span::styled(
+                    format!("  {}", branch.name),
+                    Style::default().fg(name_fg).bg(row_bg),
+                ),
+            ]));
+        }
+    }
+    if !state.status.is_empty() {
+        lines.push(Line::from(Span::styled(
+            state.status.clone(),
+            Style::default().fg(overlay_status_color(&state.status, palette)),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "j/k move · type to filter · Enter compare · Esc close",
+        Style::default().fg(palette.muted),
+    )));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(overlay_block(accent))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let Some(picker) = state.branch_picker.as_ref() else {
         return;
@@ -2384,6 +2571,7 @@ mod tests {
             primary_repo: None,
             merged_into_default: None,
             default_branch_override: None,
+            default_tip_ref: None,
             local_branches: Vec::new(),
         }
     }

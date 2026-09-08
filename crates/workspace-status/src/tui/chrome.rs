@@ -366,6 +366,7 @@ pub fn ctrl_c_prompt_pinned(state: &AppState) -> bool {
     is_ctrl_c_exit_prompt(&state.status)
         && state.stash_menu.is_none()
         && state.branch_picker.is_none()
+        && state.compare_picker.is_none()
         && state.graph_focus_picker.is_none()
         && state.create_branch.is_none()
         && state.comment.is_none()
@@ -425,6 +426,11 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
         return (5u16.saturating_add(body).saturating_add(extra)).min(20);
     }
     if let Some(picker) = state.branch_picker.as_ref() {
+        let n = picker.visible().len().max(1).min(12) as u16;
+        let extra = u16::from(!state.status.is_empty());
+        return (4u16.saturating_add(n).saturating_add(extra)).min(17);
+    }
+    if let Some(picker) = state.compare_picker.as_ref() {
         let n = picker.visible().len().max(1).min(12) as u16;
         let extra = u16::from(!state.status.is_empty());
         return (4u16.saturating_add(n).saturating_add(extra)).min(17);
@@ -882,6 +888,7 @@ fn drill_commit_label(state: &AppState) -> Option<String> {
                 commit_id.clone()
             }
         }
+        CommitFileSource::Compare { base_ref, .. } => format!("{base_ref}...HEAD"),
     })
 }
 
@@ -921,6 +928,7 @@ fn status_uses_status_text(state: &AppState) -> bool {
     state.search_mode
         || state.stash_menu.is_some()
         || state.branch_picker.is_some()
+        || state.compare_picker.is_some()
         || state.graph_focus_picker.is_some()
         || state.create_branch.is_some()
         || state.comment.is_some()
@@ -1013,6 +1021,7 @@ pub fn status_line(state: &AppState, width: u16) -> Line<'static> {
     let surface = hex_color(state.theme.theme().surface);
     if state.stash_menu.is_some()
         || state.branch_picker.is_some()
+        || state.compare_picker.is_some()
         || state.graph_focus_picker.is_some()
         || state.create_branch.is_some()
         || state.comment.is_some()
@@ -1186,6 +1195,7 @@ mod tests {
             primary_repo: None,
             merged_into_default: None,
             default_branch_override: None,
+            default_tip_ref: None,
             local_branches: Vec::new(),
         }
     }

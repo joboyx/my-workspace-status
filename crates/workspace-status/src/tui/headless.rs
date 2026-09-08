@@ -361,7 +361,98 @@ impl HeadlessTui {
 
     /// Depth 2 left pane is the commit-file list.
     pub fn left_is_files(&self) -> bool {
-        self.state.drill.is_diff()
+        self.state.drill.is_diff() || self.state.is_compare_tab()
+    }
+
+    /// Tab strip labels, Workspace first.
+    pub fn tab_labels(&self) -> Vec<String> {
+        self.state.tabs.labels()
+    }
+
+    /// Tab count including Workspace.
+    pub fn tab_count(&self) -> usize {
+        self.state.tabs.len()
+    }
+
+    /// Active tab index. `0` is Workspace.
+    pub fn active_tab(&self) -> usize {
+        self.state.tabs.active
+    }
+
+    /// Active compare-tab error, if any.
+    pub fn compare_error(&self) -> Option<String> {
+        self.state
+            .tabs
+            .active_compare()
+            .and_then(|tab| tab.error.clone())
+    }
+
+    /// Active compare-tab file paths.
+    pub fn compare_files(&self) -> Vec<String> {
+        self.state
+            .tabs
+            .active_compare()
+            .map(|tab| tab.files.iter().map(|file| file.path.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Palette disable reason for the highlighted command.
+    pub fn palette_reason(&self) -> Option<String> {
+        let action = self
+            .state
+            .command_palette
+            .as_ref()
+            .and_then(|palette| palette.selected_action())
+            .cloned()?;
+        self.state.palette_disabled_reason(&action)
+    }
+
+    /// Palette disable reason for `title`, if the command is listed.
+    pub fn palette_reason_for(&self, title: &str) -> Option<String> {
+        let action = {
+            let palette = self.state.command_palette.as_ref()?;
+            palette
+                .visible()
+                .into_iter()
+                .find(|cmd| cmd.title == title)
+                .map(|cmd| cmd.action.clone())?
+        };
+        self.state.palette_disabled_reason(&action)
+    }
+
+    /// Active compare-tab file cursor.
+    pub fn compare_file_cursor(&self) -> usize {
+        self.state
+            .tabs
+            .active_compare()
+            .map(|tab| tab.file_cursor)
+            .unwrap_or(0)
+    }
+
+    /// Shift+letter through the real keymap (`gT`).
+    pub fn shift_key(&mut self, c: char) {
+        self.send_key(KeyCode::Char(c), KeyModifiers::SHIFT);
+    }
+
+    /// True when the compare branch picker overlay is open.
+    pub fn compare_picker_open(&self) -> bool {
+        matches!(self.input_mode(), super::keys::InputMode::ComparePicker)
+    }
+
+    /// Click the tab strip hit for `index` (`0` is Workspace).
+    pub fn click_tab(&mut self, index: usize) {
+        let _ = self.frame();
+        let hit = self
+            .state
+            .layout
+            .tab_hits
+            .iter()
+            .find(|(_, _, i)| *i == index)
+            .copied();
+        if let Some((x, width, _)) = hit {
+            self.mouse_down(x + width / 2, self.state.layout.tab_y);
+            self.mouse_up();
+        }
     }
 
     /// Depth 1 left pane is the graph list.

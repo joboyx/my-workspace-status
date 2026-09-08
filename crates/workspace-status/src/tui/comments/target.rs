@@ -330,7 +330,9 @@ fn entity_diff_source(source: Option<&CommitFileSource>) -> DiffSource {
         Some(CommitFileSource::Stash { stash_ref }) => DiffSource::Stash {
             stash_ref: stash_ref.clone(),
         },
-        Some(CommitFileSource::Worktree) | None => DiffSource::Worktree,
+        Some(CommitFileSource::Worktree)
+        | Some(CommitFileSource::Compare { .. })
+        | None => DiffSource::Worktree,
     }
 }
 
@@ -496,7 +498,7 @@ fn resolve_diff_target(
             line,
             end_line,
         }),
-        Some(CommitFileSource::Stash { .. }) => None,
+        Some(CommitFileSource::Stash { .. }) | Some(CommitFileSource::Compare { .. }) => None,
         Some(CommitFileSource::Worktree) | None => {
             let branch = snap?.branch.clone();
             Some(CommentKey::WorktreeLine {
@@ -937,7 +939,7 @@ fn source_path_scope(
             path,
             prefix,
         },
-        CommitFileSource::Stash { .. } => ExportScope::Empty,
+        CommitFileSource::Stash { .. } | CommitFileSource::Compare { .. } => ExportScope::Empty,
     }
 }
 
@@ -1209,7 +1211,7 @@ fn commit_file_key_on_row(
                 ..
             } if repo == &identity && sha == commit_id && p == &path
         ),
-        CommitFileSource::Stash { .. } => false,
+        CommitFileSource::Stash { .. } | CommitFileSource::Compare { .. } => false,
         CommitFileSource::Worktree => match key {
             CommentKey::WorktreeLine {
                 repo,
@@ -1272,7 +1274,7 @@ fn diff_line_key_covers(
                 ..
             } if repo == &identity && sha == commit_id && p == &path && key.covers_line(line)
         ),
-        Some(CommitFileSource::Stash { .. }) => false,
+        Some(CommitFileSource::Stash { .. }) | Some(CommitFileSource::Compare { .. }) => false,
         Some(CommitFileSource::Worktree) | None => match key {
             CommentKey::WorktreeLine {
                 repo,
@@ -1403,6 +1405,7 @@ mod tests {
             primary_repo: primary.map(str::to_string),
             merged_into_default: None,
             default_branch_override: None,
+            default_tip_ref: None,
             local_branches: Vec::new(),
         }
     }

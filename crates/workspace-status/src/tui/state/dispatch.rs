@@ -17,6 +17,10 @@ impl AppState {
         if !matches!(action, Action::ArmGChord) {
             self.g_pending_at = None;
         }
+        if self.is_compare_tab() && super::super::gates::is_compare_mutation(&action) {
+            self.status = super::super::tabs::SWITCH_TO_WORKSPACE_TAB.into();
+            return Effect::None;
+        }
         let noop = dispatch_is_noop(
             &action,
             self.nav_depth(),
@@ -124,6 +128,17 @@ impl AppState {
             | Action::CommandPaletteBackspace
             | Action::CommandPaletteSubmit
             | Action::CommandPaletteCancel
+            | Action::CompareVsDefault
+            | Action::CompareVsBranch
+            | Action::CloseCompareTab
+            | Action::NextTab
+            | Action::PreviousTab
+            | Action::JumpToTab(_)
+            | Action::ComparePickerMove(_)
+            | Action::ComparePickerChar(_)
+            | Action::ComparePickerBackspace
+            | Action::ComparePickerSubmit
+            | Action::ComparePickerCancel
             | Action::Resize { .. }
             | Action::None) => self.dispatch_keymap(action, noop),
         }

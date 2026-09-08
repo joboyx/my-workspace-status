@@ -151,10 +151,22 @@ pub fn prepare_rev_diff(
     right_rev: &str,
     rel_path: &str,
 ) -> Result<PreparedDiff, String> {
+    prepare_rev_diff_paths(repo_abs, left_rev, right_rev, rel_path, None)
+}
+
+/// Like [`prepare_rev_diff`], with an optional LEFT path for renames.
+pub fn prepare_rev_diff_paths(
+    repo_abs: &Path,
+    left_rev: &str,
+    right_rev: &str,
+    rel_path: &str,
+    left_path: Option<&str>,
+) -> Result<PreparedDiff, String> {
     let session_dir = new_session_dir()?;
-    let left_bytes = blob_bytes(repo_abs, left_rev, rel_path).unwrap_or_default();
+    let left_file = left_path.unwrap_or(rel_path);
+    let left_bytes = blob_bytes(repo_abs, left_rev, left_file).unwrap_or_default();
     let right_bytes = blob_bytes(repo_abs, right_rev, rel_path).unwrap_or_default();
-    let left = write_temp_bytes(&session_dir, rel_path, "left", &left_bytes)?;
+    let left = write_temp_bytes(&session_dir, left_file, "left", &left_bytes)?;
     let right = write_temp_bytes(&session_dir, rel_path, "right", &right_bytes)?;
     Ok(PreparedDiff {
         left,

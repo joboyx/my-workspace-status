@@ -21,8 +21,9 @@ use crate::actions::switch_repo_to_default_branch;
 use crate::discovery::{discover_checkouts, process_repo, RepoCheckoutMeta};
 use crate::git::{
     create_branch_at, create_branch_checkout, exec_git_checked, latest_stash_ref,
-    list_local_branches, pull_quiet_detailed, push_quiet, remove_untracked_file, remove_worktree,
-    revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop, stash_push, unstage_file,
+    list_compare_picker_branches, list_local_branches, pull_quiet_detailed, push_quiet,
+    remove_untracked_file, remove_worktree, revert_tracked_file, stage_file, stash_apply,
+    stash_drop, stash_pop, stash_push, unstage_file,
 };
 use crate::parallel::env_fetch_concurrency;
 use crate::snapshot::RepoSnapshot;
@@ -30,12 +31,15 @@ use crate::snapshot::RepoSnapshot;
 use super::action::{Action, Effect, ExternalDiffKind};
 use super::app::{
     apply_checkout_compute, apply_merge_compute, apply_one_repo_snapshot, apply_right_pane_load,
-    commit_diff_list, compute_checkout, compute_commit_diff, compute_commit_files, compute_merge,
-    compute_reload_repo, discover_config, drop_undiscovered_checkouts, filter_repo_set,
-    focused_repo_needs_pane, RightPaneLoad, RightPaneRequest, RightPaneTarget, TuiOpts,
+    commit_diff_list, compute_checkout, compute_commit_diff, compute_commit_files,
+    compute_compare_diff, compute_compare_range, compute_merge, compute_reload_repo,
+    discover_config, drop_undiscovered_checkouts, filter_repo_set, focused_repo_needs_pane,
+    probe_compare_range, RightPaneLoad, RightPaneRequest, RightPaneTarget, TuiOpts,
 };
 use super::comments;
-use super::diff_tool::{prepare_rev_diff, prepare_worktree_diff, resolve_diff_tool, PreparedDiff};
+use super::diff_tool::{
+    prepare_rev_diff_paths, prepare_worktree_diff, resolve_diff_tool, PreparedDiff,
+};
 use super::drill::{CommitFileSource, DrillView};
 use super::event_pump::action_triggers_graph_autoload;
 use super::graph_load::{
@@ -130,6 +134,31 @@ pub(crate) enum JobOutcome {
         repo_abs: std::path::PathBuf,
         prepared: Result<PreparedDiff, String>,
     },
+    /// Resolved compare endpoints plus the committed file list.
+    CompareRange {
+        tab_id: u64,
+        gen: u64,
+        result: Result<super::app::CompareRangeLoad, String>,
+    },
+    /// One compare-file unified diff.
+    CompareDiff {
+        tab_id: u64,
+        gen: u64,
+        source: CommitFileSource,
+        path: String,
+        content: Result<super::diff::DiffContent, String>,
+    },
+    /// Local + `origin/*` names for the compare picker.
+    ComparePicker {
+        gen: u64,
+        repo: String,
+        result: Result<Vec<crate::git::LocalBranch>, String>,
+    },
+    /// Watch probe: whether HEAD or the base tip moved.
+    CompareProbe {
+        tab_id: u64,
+        result: Result<bool, String>,
+    },
 }
 
 /// Live TTY launch after [`JobOutcome::DiffPrepared`]. Not used by Headless.
@@ -164,6 +193,30 @@ struct WriteJob {
     work: Box<dyn FnOnce() -> Result<String, String> + Send>,
 }
 
+struct CompareRangeJob {
+    gen: u64,
+    tab_id: u64,
+    repo: String,
+    base_ref: String,
+}
+
+struct CompareDiffJob {
+    gen: u64,
+    tab_id: u64,
+    repo: String,
+    source: CommitFileSource,
+    path: String,
+    old_path: Option<String>,
+}
+
+struct CompareProbeJob {
+    tab_id: u64,
+    repo: String,
+    base_ref: String,
+    last_head: Option<String>,
+    last_base_tip: Option<String>,
+}
+
 /// Shared Effect scheduler, spawn, and apply.
 ///
 /// Owns the queues the live `JoinSet` and Headless sync pump drain.
@@ -176,10 +229,14 @@ pub(crate) struct Interpreter {
     default_queue: VecDeque<String>,
     prepare_stash: Option<(u64, String)>,
     prepare_branches: Option<(u64, String, bool)>,
+    prepare_compare: Option<(u64, String)>,
     checkout: Option<(String, String, Option<String>)>,
     merge: Option<(String, String, String)>,
     commit_files: Option<(u64, String, CommitFileSource)>,
     commit_diff: Option<(u64, String, CommitFileSource, String)>,
+    compare_range: VecDeque<CompareRangeJob>,
+    compare_diff: VecDeque<CompareDiffJob>,
+    compare_probe: VecDeque<CompareProbeJob>,
     autoload: Option<(u64, GraphIdentity)>,
     default_ok: usize,
     default_failed: usize,
@@ -204,10 +261,14 @@ impl Interpreter {
             default_queue: VecDeque::new(),
             prepare_stash: None,
             prepare_branches: None,
+            prepare_compare: None,
             checkout: None,
             merge: None,
             commit_files: None,
             commit_diff: None,
+            compare_range: VecDeque::new(),
+            compare_diff: VecDeque::new(),
+            compare_probe: VecDeque::new(),
             autoload: None,
             default_ok: 0,
             default_failed: 0,
@@ -489,6 +550,64 @@ impl Interpreter {
             Effect::DropCommitDiff => {
                 let _ = self.sched.request_commit_diff();
             }
+            Effect::LoadCompareRange {
+                tab_id,
+                repo,
+                base_ref,
+                force,
+            } => {
+                if let Some(gen) = state.begin_compare_range(tab_id, force) {
+                    self.compare_range.push_back(CompareRangeJob {
+                        gen,
+                        tab_id,
+                        repo,
+                        base_ref,
+                    });
+                    self.sched.enqueue_user_front(UserTag::Pane);
+                    self.mark();
+                }
+            }
+            Effect::LoadCompareDiff {
+                tab_id,
+                repo,
+                source,
+                path,
+                old_path,
+            } => {
+                if let Some(tab) = state.tabs.get_id(tab_id) {
+                    let gen = tab.generation;
+                    self.compare_diff.push_back(CompareDiffJob {
+                        gen,
+                        tab_id,
+                        repo,
+                        source,
+                        path,
+                        old_path,
+                    });
+                    self.sched.enqueue_user_front(UserTag::Pane);
+                }
+            }
+            Effect::PrepareComparePicker { repo } => {
+                let gen = self.sched.request_prepare_branches();
+                self.prepare_compare = Some((gen, repo));
+                self.sched.enqueue_user(UserTag::Prepare);
+            }
+            Effect::ProbeCompareTab {
+                tab_id,
+                repo,
+                base_ref,
+                last_head,
+                last_base_tip,
+            } => {
+                self.compare_probe.push_back(CompareProbeJob {
+                    tab_id,
+                    repo,
+                    base_ref,
+                    last_head,
+                    last_base_tip,
+                });
+                self.sched.enqueue_user(UserTag::Pane);
+            }
             Effect::CopyClipboard { text, announce } => {
                 let ok = comments::copy_to_clipboard(&text);
                 if announce {
@@ -602,6 +721,7 @@ impl Interpreter {
                                         primary_repo: row.primary_repo,
                                         merged_into_default: row.merged_into_default,
                                         default_branch_override: row.default_branch_override,
+                                        default_tip_ref: row.default_tip_ref,
                                         local_branches: row.local_branches,
                                     })
                             };
@@ -636,7 +756,7 @@ impl Interpreter {
     pub(crate) fn apply(
         &mut self,
         state: &mut AppState,
-        _opts: &TuiOpts,
+        opts: &TuiOpts,
         id: u64,
         outcome: JobOutcome,
     ) {
@@ -908,6 +1028,63 @@ impl Interpreter {
                 });
                 self.mark();
             }
+            JobOutcome::CompareRange {
+                tab_id,
+                gen,
+                result,
+            } => {
+                let accepted = state
+                    .tabs
+                    .get_id(tab_id)
+                    .is_some_and(|tab| tab.generation == gen);
+                if let Some(follow) = state.apply_compare_range(tab_id, gen, result) {
+                    self.schedule(state, opts, follow, &Action::None);
+                }
+                if accepted {
+                    self.mark();
+                }
+            }
+            JobOutcome::CompareDiff {
+                tab_id,
+                gen,
+                source,
+                path,
+                content,
+            } => {
+                let accepted = state
+                    .tabs
+                    .get_id(tab_id)
+                    .is_some_and(|tab| tab.generation == gen && tab.source.as_ref() == Some(&source));
+                state.apply_compare_diff(tab_id, gen, &source, &path, content);
+                if accepted {
+                    self.mark();
+                }
+            }
+            JobOutcome::ComparePicker { gen, repo, result } => {
+                self.sched.note_user_done(UserTag::Prepare);
+                if self.sched.accept_prepare_branches_result(gen) {
+                    match result {
+                        Ok(branches) => state.open_compare_picker(repo, branches),
+                        Err(err) => state.status = err,
+                    }
+                    self.mark();
+                }
+            }
+            JobOutcome::CompareProbe { tab_id, result } => {
+                let follow = match result {
+                    Ok(changed) => state.apply_compare_probe(tab_id, changed, None),
+                    Err(err) => {
+                        let _ = state.apply_compare_probe(tab_id, false, Some(err));
+                        None
+                    }
+                };
+                if let Some(follow) = follow {
+                    self.schedule(state, opts, follow, &Action::None);
+                }
+                if state.tabs.get_id(tab_id).is_some() {
+                    self.mark();
+                }
+            }
         }
     }
 
@@ -1085,6 +1262,17 @@ impl Interpreter {
                     );
                     return;
                 }
+                if let Some((gen, repo)) = self.prepare_compare.take() {
+                    let dir = opts.cwd.join(&repo);
+                    spawn(
+                        id,
+                        Box::new(move || {
+                            let result = list_compare_picker_branches(&dir);
+                            JobOutcome::ComparePicker { gen, repo, result }
+                        }),
+                    );
+                    return;
+                }
                 self.sched.note_job_finished(id);
                 self.sched.note_user_done(UserTag::Prepare);
             }
@@ -1100,9 +1288,14 @@ impl Interpreter {
                                 ExternalDiffKind::Rev {
                                     left_rev,
                                     right_rev,
-                                } => {
-                                    prepare_rev_diff(&job.repo_abs, left_rev, right_rev, &job.path)
-                                }
+                                    left_path,
+                                } => prepare_rev_diff_paths(
+                                    &job.repo_abs,
+                                    left_rev,
+                                    right_rev,
+                                    &job.path,
+                                    left_path.as_deref(),
+                                ),
                             };
                             JobOutcome::DiffPrepared {
                                 repo: job.repo,
@@ -1120,6 +1313,62 @@ impl Interpreter {
                 self.sched.note_user_done(UserTag::DiffPrepare);
             }
             UserTag::Pane => {
+                if let Some(job) = self.compare_range.pop_front() {
+                    let dir = opts.cwd.join(&job.repo);
+                    spawn(
+                        id,
+                        Box::new(move || JobOutcome::CompareRange {
+                            tab_id: job.tab_id,
+                            gen: job.gen,
+                            result: compute_compare_range(&dir, &job.base_ref),
+                        }),
+                    );
+                    return;
+                }
+                if let Some(job) = self.compare_diff.pop_front() {
+                    let dir = opts.cwd.join(&job.repo);
+                    let context = state.commit_diff_context(&job.repo, &job.path);
+                    spawn(
+                        id,
+                        Box::new(move || {
+                            let content = compute_compare_diff(
+                                &dir,
+                                &job.source,
+                                &job.path,
+                                job.old_path.as_deref(),
+                                context,
+                            );
+                            JobOutcome::CompareDiff {
+                                tab_id: job.tab_id,
+                                gen: job.gen,
+                                source: job.source,
+                                path: job.path,
+                                content,
+                            }
+                        }),
+                    );
+                    return;
+                }
+                if let Some(job) = self.compare_probe.pop_front() {
+                    let dir = opts.cwd.join(&job.repo);
+                    spawn(
+                        id,
+                        Box::new(move || {
+                            let result = probe_compare_range(
+                                &dir,
+                                &job.base_ref,
+                                job.last_head.as_deref(),
+                                job.last_base_tip.as_deref(),
+                            )
+                            .map(|(changed, _, _)| changed);
+                            JobOutcome::CompareProbe {
+                                tab_id: job.tab_id,
+                                result,
+                            }
+                        }),
+                    );
+                    return;
+                }
                 if let Some((gen, repo, source)) = self.commit_files.take() {
                     let dir = opts.cwd.join(&repo);
                     let source_work = source.clone();
@@ -1239,7 +1488,7 @@ mod tests {
     use crate::config::WorkspaceStatusConfig;
     use crate::git::{LocalBranch, NameStatus};
     use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus};
-    use crate::tui::app::TuiOpts;
+    use crate::tui::app::{CompareRangeLoad, TuiOpts};
     use crate::tui::diff::DiffContent;
     use crate::tui::drill::{CommitFile, CommitFileSource, DrillView};
     use crate::tui::graph_load::GraphIdentity;
@@ -1273,6 +1522,7 @@ mod tests {
             primary_repo: None,
             merged_into_default: None,
             default_branch_override: None,
+            default_tip_ref: None,
             local_branches: Vec::new(),
         }
     }
@@ -1517,11 +1767,159 @@ mod tests {
                 kind: ExternalDiffKind::Rev {
                     left_rev: "HEAD^".into(),
                     right_rev: "HEAD".into(),
+                    left_path: None,
                 },
             },
             &Action::ExternalDiff,
         );
         assert!(interp.take_pending_diff().is_none());
+    }
+
+    fn compare_source() -> CommitFileSource {
+        CommitFileSource::Compare {
+            base_ref: "main".into(),
+            base_tip: "bbb".into(),
+            merge_base: "aaa".into(),
+            head: "ccc".into(),
+        }
+    }
+
+    fn compare_load(files: &[&str]) -> CompareRangeLoad {
+        CompareRangeLoad {
+            source: compare_source(),
+            files: files.iter().map(|path| commit_file(path)).collect(),
+            head: "ccc".into(),
+            base_tip: "bbb".into(),
+        }
+    }
+
+    fn open_compare_tab(state: &mut AppState) -> (u64, u64) {
+        state.tabs.open_or_focus("app".into(), "main".into());
+        let tab = state.tabs.active_compare_mut().unwrap();
+        tab.generation = 2;
+        (tab.id, tab.generation)
+    }
+
+    #[test]
+    fn late_compare_range_after_close_does_not_reopen_tab() {
+        let mut state = fixture_state();
+        let (tab_id, gen) = open_compare_tab(&mut state);
+        assert!(state.tabs.close_active_compare());
+        let mut interp = Interpreter::new();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CompareRange {
+                tab_id,
+                gen,
+                result: Ok(compare_load(&["stale.txt"])),
+            },
+        );
+        assert!(state.tabs.is_workspace());
+        assert_eq!(state.tabs.len(), 1);
+    }
+
+    #[test]
+    fn late_compare_range_wrong_gen_does_not_replace_files() {
+        let mut state = fixture_state();
+        let (tab_id, gen) = open_compare_tab(&mut state);
+        state.tabs.active_compare_mut().unwrap().files = vec![commit_file("keep.txt")];
+        let mut interp = Interpreter::new();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CompareRange {
+                tab_id,
+                gen: gen.saturating_sub(1),
+                result: Ok(compare_load(&["stale.txt"])),
+            },
+        );
+        let files: Vec<_> = state
+            .tabs
+            .active_compare()
+            .unwrap()
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
+        assert_eq!(files, vec!["keep.txt"]);
+    }
+
+    #[test]
+    fn matching_compare_range_still_applies() {
+        let mut state = fixture_state();
+        let (tab_id, gen) = open_compare_tab(&mut state);
+        let mut interp = Interpreter::new();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CompareRange {
+                tab_id,
+                gen,
+                result: Ok(compare_load(&["alpha.txt"])),
+            },
+        );
+        let files: Vec<_> = state
+            .tabs
+            .active_compare()
+            .unwrap()
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
+        assert_eq!(files, vec!["alpha.txt"]);
+        assert!(state.tabs.active_compare().unwrap().error.is_none());
+    }
+
+    #[test]
+    fn compare_range_git_failure_is_error_not_empty() {
+        let mut state = fixture_state();
+        let (tab_id, gen) = open_compare_tab(&mut state);
+        let mut interp = Interpreter::new();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CompareRange {
+                tab_id,
+                gen,
+                result: Err("git compare failed".into()),
+            },
+        );
+        let tab = state.tabs.active_compare().unwrap();
+        assert_eq!(tab.error.as_deref(), Some("git compare failed"));
+        assert!(tab.files.is_empty());
+    }
+
+    #[test]
+    fn late_compare_diff_wrong_source_is_discarded() {
+        let mut state = fixture_state();
+        let (tab_id, gen) = open_compare_tab(&mut state);
+        {
+            let tab = state.tabs.active_compare_mut().unwrap();
+            tab.source = Some(compare_source());
+            tab.path = Some("keep.txt".into());
+        }
+        let mut interp = Interpreter::new();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CompareDiff {
+                tab_id,
+                gen,
+                source: CommitFileSource::Compare {
+                    base_ref: "main".into(),
+                    base_tip: "other".into(),
+                    merge_base: "aaa".into(),
+                    head: "ccc".into(),
+                },
+                path: "stale.txt".into(),
+                content: Ok(DiffContent::default()),
+            },
+        );
+        assert_eq!(
+            state.tabs.active_compare().unwrap().path.as_deref(),
+            Some("keep.txt")
+        );
     }
 
     #[test]

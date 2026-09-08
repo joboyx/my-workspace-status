@@ -15,6 +15,16 @@ pub enum CommitFileSource {
     Stash { stash_ref: String },
     /// Dirty worktree versus HEAD.
     Worktree,
+    /// Three-dot compare of committed `base...HEAD` on one checkout.
+    ///
+    /// `base_ref` is the tab key. SHA fields are immutable endpoints for
+    /// one load and stale-result checks.
+    Compare {
+        base_ref: String,
+        base_tip: String,
+        merge_base: String,
+        head: String,
+    },
 }
 
 /// One file in a commit / stash / worktree list.

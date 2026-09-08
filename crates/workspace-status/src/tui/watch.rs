@@ -493,6 +493,12 @@ fn commit_file_source_key(source: &CommitFileSource) -> String {
         CommitFileSource::Commit { commit_id } => format!("commit:{commit_id}"),
         CommitFileSource::Stash { stash_ref } => format!("stash:{stash_ref}"),
         CommitFileSource::Worktree => "worktree".into(),
+        CommitFileSource::Compare {
+            base_ref,
+            base_tip,
+            merge_base,
+            head,
+        } => format!("compare:{base_ref}:{base_tip}:{merge_base}:{head}"),
     }
 }
 
@@ -649,6 +655,7 @@ mod tests {
             primary_repo: None,
             merged_into_default: None,
             default_branch_override: None,
+            default_tip_ref: None,
             local_branches: Vec::new(),
             has_unstaged: !dirty.is_empty(),
             has_staged: false,

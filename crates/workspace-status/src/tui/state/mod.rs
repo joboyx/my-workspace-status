@@ -70,6 +70,10 @@ use super::stash::{
     stash_menu_status, stash_ops_for_context, StashMenuKeyResult, StashOp, StashOpId,
     StashOpsContext,
 };
+use super::tabs::{
+    OpenCompare, TabStrip, DEFAULT_BRANCH_NOT_FOUND, FOCUS_A_CHECKOUT, HEAD_HAS_NO_COMMIT,
+    WORKSPACE_TAB_CANNOT_CLOSE,
+};
 use super::theme::{cycle_theme_id, theme_from_env, ThemeId};
 use super::tree::{
     build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
@@ -146,6 +150,10 @@ pub struct LayoutHit {
     pub diff_hscrollbar_x: u16,
     /// Diff horizontal scrollbar track width.
     pub diff_hscrollbar_width: u16,
+    /// Tab-strip row (always painted).
+    pub tab_y: u16,
+    /// Hit boxes `(x, width, tab_index)` for the painted strip.
+    pub tab_hits: Vec<(u16, u16, usize)>,
 }
 
 impl Default for LayoutHit {
@@ -181,8 +189,26 @@ impl Default for LayoutHit {
             diff_hscrollbar_y: None,
             diff_hscrollbar_x: 0,
             diff_hscrollbar_width: 0,
+            tab_y: 0,
+            tab_hits: Vec::new(),
         }
     }
+}
+
+/// Workspace chrome parked while a compare tab is active.
+#[derive(Clone, Debug)]
+struct WorkspacePark {
+    focus: FocusPane,
+    search_mode: bool,
+    search_active: bool,
+    search_query: String,
+    search_target: SearchPane,
+    search_hit: Option<usize>,
+    left_col_offset: u16,
+    right_col_offset: u16,
+    diff_col_offset: u16,
+    diff_cursor: usize,
+    diff_scroll: u16,
 }
 
 /// Confirm overlay before a destructive file write.
@@ -321,6 +347,10 @@ pub struct AppState {
     pub graph_branch_focus: Option<(String, Vec<String>)>,
     pub create_branch: Option<CreateBranchState>,
     pub command_palette: Option<CommandPaletteState>,
+    /// Permanent Workspace plus session compare tabs.
+    pub tabs: TabStrip,
+    pub compare_picker: Option<BranchPickerState>,
+    workspace_park: Option<WorkspacePark>,
     pub flashes: HashMap<String, FlashStamp>,
     pub signatures: BTreeMap<String, String>,
     pub graph_signatures: BTreeMap<String, String>,
@@ -428,6 +458,9 @@ impl AppState {
             graph_branch_focus: None,
             create_branch: None,
             command_palette: None,
+            tabs: TabStrip::default(),
+            compare_picker: None,
+            workspace_park: None,
             flashes: HashMap::new(),
             signatures,
             graph_signatures: BTreeMap::new(),
@@ -464,6 +497,8 @@ impl AppState {
             InputMode::CreateBranch
         } else if self.branch_picker.is_some() {
             InputMode::BranchPicker
+        } else if self.compare_picker.is_some() {
+            InputMode::ComparePicker
         } else if self.graph_focus_picker.is_some() {
             InputMode::GraphFocusPicker
         } else if self.command_palette.is_some() {
@@ -509,6 +544,9 @@ impl AppState {
     }
 
     pub fn right_is_diff(&self) -> bool {
+        if self.is_compare_tab() {
+            return true;
+        }
         match &self.drill {
             DrillView::Diff { .. } => true,
             DrillView::Files { .. } => false,
@@ -526,11 +564,19 @@ impl AppState {
     }
 
     pub fn in_commit_drill(&self) -> bool {
-        self.drill.is_files() || self.drill.is_diff()
+        self.is_compare_tab() || self.drill.is_files() || self.drill.is_diff()
     }
 
-    /// ViewStack depth: 0 workspace, 1 commit files, 2 commit diff.
+    /// True when a compare tab (not Workspace) is active.
+    pub fn is_compare_tab(&self) -> bool {
+        !self.tabs.is_workspace()
+    }
+
+    /// ViewStack depth: 0 workspace or compare, 1 commit files, 2 commit diff.
     fn nav_depth(&self) -> u8 {
+        if self.is_compare_tab() {
+            return 0;
+        }
         match self.drill {
             DrillView::Graph => 0,
             DrillView::Files { .. } => 1,
@@ -550,6 +596,13 @@ impl AppState {
     /// is `None` so `j`/`k` move the focused file-diff row. The viewport keeps
     /// that row near the vertical middle.
     pub(crate) fn list_focus_target(&self) -> ListFocusTarget {
+        if self.is_compare_tab() {
+            return if self.focus == FocusPane::Left {
+                ListFocusTarget::CommitFiles
+            } else {
+                ListFocusTarget::None
+            };
+        }
         match &self.drill {
             DrillView::Graph => {
                 if self.focus == FocusPane::Left {
@@ -586,6 +639,9 @@ impl AppState {
     }
 
     fn commit_drill_files(&self) -> Option<&[CommitFile]> {
+        if let Some(tab) = self.tabs.active_compare() {
+            return Some(tab.files.as_slice());
+        }
         match &self.drill {
             DrillView::Files { files, .. } | DrillView::Diff { files, .. } => Some(files),
             DrillView::Graph => None,
@@ -593,7 +649,7 @@ impl AppState {
     }
 
     fn files_list_origin_x(&self) -> u16 {
-        if self.drill.is_diff() {
+        if self.is_compare_tab() || self.drill.is_diff() {
             self.layout.tree_x
         } else {
             self.layout.diff_content_x
@@ -601,6 +657,10 @@ impl AppState {
     }
 
     fn set_commit_file_cursor(&mut self, idx: usize) {
+        if let Some(tab) = self.tabs.active_compare_mut() {
+            tab.file_cursor = idx;
+            return;
+        }
         match &mut self.drill {
             DrillView::Files { cursor, .. } => *cursor = idx,
             DrillView::Diff { file_cursor, .. } => *file_cursor = idx,
@@ -635,6 +695,27 @@ impl AppState {
     ///
     /// Directory rows and the already-shown path keep the previous diff.
     fn maybe_load_focused_commit_diff(&self) -> Effect {
+        if let Some(tab) = self.tabs.active_compare() {
+            let Some(row) = self.focused_commit_file_row() else {
+                return Effect::None;
+            };
+            if !row.is_file() {
+                return Effect::None;
+            }
+            if tab.path.as_deref() == Some(row.path.as_str()) {
+                return Effect::None;
+            }
+            let Some(source) = tab.source.clone() else {
+                return Effect::None;
+            };
+            return Effect::LoadCompareDiff {
+                tab_id: tab.id,
+                repo: tab.checkout_path.clone(),
+                source,
+                path: row.path.clone(),
+                old_path: row.file.as_ref().and_then(|file| file.old_path.clone()),
+            };
+        }
         let DrillView::Diff { path, .. } = &self.drill else {
             return Effect::None;
         };
@@ -657,19 +738,21 @@ impl AppState {
     }
 
     pub fn commit_file_rows(&self) -> Vec<CommitFileRow> {
-        let files = match &self.drill {
-            DrillView::Files { files, .. } | DrillView::Diff { files, .. } => files.as_slice(),
-            DrillView::Graph => return Vec::new(),
+        let files = if let Some(tab) = self.tabs.active_compare() {
+            tab.files.as_slice()
+        } else {
+            match &self.drill {
+                DrillView::Files { files, .. } | DrillView::Diff { files, .. } => files.as_slice(),
+                DrillView::Graph => return Vec::new(),
+            }
         };
-        flatten_commit_files(
-            files,
-            self.commit_tree_mode,
-            &self.commit_file_folds,
-            self.ascii,
-        )
+        flatten_commit_files(files, self.commit_tree_mode, &self.commit_file_folds, self.ascii)
     }
 
     pub(crate) fn commit_files_cursor(&self) -> usize {
+        if let Some(tab) = self.tabs.active_compare() {
+            return tab.file_cursor;
+        }
         match &self.drill {
             DrillView::Files { cursor, .. } => *cursor,
             DrillView::Diff { file_cursor, .. } => *file_cursor,
@@ -679,7 +762,7 @@ impl AppState {
 
     /// Highlighted commit-file row when the files list is open.
     pub(crate) fn focused_commit_file_row(&self) -> Option<CommitFileRow> {
-        if self.drill.is_graph() {
+        if self.drill.is_graph() && !self.is_compare_tab() {
             return None;
         }
         let rows = self.commit_file_rows();
@@ -693,7 +776,29 @@ impl AppState {
         self.focused_commit_file_row().map(|row| row.kind)
     }
 
+    fn focused_compare_old_path(&self) -> Option<String> {
+        let tab = self.tabs.active_compare()?;
+        let path = tab.path.as_deref()?;
+        tab.files
+            .iter()
+            .find(|file| file.path == path)
+            .and_then(|file| file.old_path.clone())
+    }
+
     fn focused_commit_edit_path(&self) -> Option<(String, String)> {
+        if let Some(tab) = self.tabs.active_compare() {
+            if self.commit_files_list_focused() {
+                let row = self.focused_commit_file_row()?;
+                if !row.is_file() {
+                    return None;
+                }
+                return Some((tab.checkout_path.clone(), row.path));
+            }
+            return tab
+                .path
+                .as_ref()
+                .map(|path| (tab.checkout_path.clone(), path.clone()));
+        }
         let repo = match &self.drill {
             DrillView::Files { repo, .. } | DrillView::Diff { repo, .. } => repo.clone(),
             DrillView::Graph => return None,
@@ -712,6 +817,18 @@ impl AppState {
     }
 
     fn external_diff_kind(&self) -> ExternalDiffKind {
+        if let Some(tab) = self.tabs.active_compare() {
+            return match &tab.source {
+                Some(CommitFileSource::Compare {
+                    merge_base, head, ..
+                }) => ExternalDiffKind::Rev {
+                    left_rev: merge_base.clone(),
+                    right_rev: head.clone(),
+                    left_path: self.focused_compare_old_path(),
+                },
+                _ => ExternalDiffKind::Worktree,
+            };
+        }
         let source = match &self.drill {
             DrillView::Files { source, .. } | DrillView::Diff { source, .. } => source,
             DrillView::Graph => return ExternalDiffKind::Worktree,
@@ -721,15 +838,30 @@ impl AppState {
             CommitFileSource::Commit { commit_id } => ExternalDiffKind::Rev {
                 left_rev: format!("{commit_id}^"),
                 right_rev: commit_id.clone(),
+                left_path: None,
             },
             CommitFileSource::Stash { stash_ref } => ExternalDiffKind::Rev {
                 left_rev: format!("{stash_ref}^1"),
                 right_rev: stash_ref.clone(),
+                left_path: None,
+            },
+            CommitFileSource::Compare {
+                merge_base, head, ..
+            } => ExternalDiffKind::Rev {
+                left_rev: merge_base.clone(),
+                right_rev: head.clone(),
+                left_path: self.focused_compare_old_path(),
             },
         }
     }
 
     pub(crate) fn commit_detail_meta(&self) -> (String, Option<String>) {
+        if let Some(tab) = self.tabs.active_compare() {
+            return (
+                super::tabs::checkout_leaf(&tab.checkout_path),
+                Some(tab.range_header()),
+            );
+        }
         let (repo, source) = match &self.drill {
             DrillView::Files { repo, source, .. } | DrillView::Diff { repo, source, .. } => {
                 (repo.as_str(), source)
@@ -752,6 +884,7 @@ impl AppState {
                     _ => stash_ref.clone(),
                 })
             }
+            CommitFileSource::Compare { base_ref, .. } => Some(format!("{base_ref}...HEAD")),
             CommitFileSource::Commit { commit_id } => {
                 let short = if commit_id.len() >= 7 {
                     &commit_id[..7]
@@ -1162,10 +1295,20 @@ impl AppState {
     }
 
     fn refresh_effect(&self) -> Effect {
-        match refresh_target(self.focused_row()) {
+        let base = match refresh_target(self.focused_row()) {
             None => Effect::ReloadSnapshot,
             Some(repo) => Effect::ReloadRepo { repo },
+        };
+        if let Some(tab) = self.tabs.active_compare() {
+            let compare = Effect::LoadCompareRange {
+                tab_id: tab.id,
+                repo: tab.checkout_path.clone(),
+                base_ref: tab.base_ref.clone(),
+                force: true,
+            };
+            return Effect::Batch(vec![base, compare]);
         }
+        base
     }
 
     fn move_cursor(&mut self, delta: i32) {
@@ -1340,6 +1483,9 @@ impl AppState {
     }
 
     fn click(&mut self, col: u16, row: u16) -> Effect {
+        if let Some(index) = self.hit_tab(col, row) {
+            return self.activate_tab(index);
+        }
         match hit_split(self.split_layout(), col, row) {
             SplitHit::Pane => {
                 self.drag = SplitDrag::Pane;
@@ -1402,6 +1548,10 @@ impl AppState {
         self.last_click = Some((col, row, now));
         if col >= self.layout.right_x {
             self.focus = FocusPane::Right;
+            if self.is_compare_tab() {
+                self.click_diff(row);
+                return Effect::None;
+            }
             if self.drill.is_files() {
                 self.clear_diff_visual();
                 return self.click_commit_files(col, row, is_double);
@@ -1424,7 +1574,7 @@ impl AppState {
         }
         self.focus = FocusPane::Left;
         self.clear_diff_visual();
-        if self.drill.is_diff() {
+        if self.is_compare_tab() || self.drill.is_diff() {
             return self.click_commit_files(col, row, is_double);
         }
         if self.drill.is_files() {
@@ -1877,6 +2027,9 @@ impl AppState {
     }
 
     fn current_diff_content(&self) -> &DiffContent {
+        if let Some(tab) = self.tabs.active_compare() {
+            return &tab.content;
+        }
         match &self.drill {
             DrillView::Diff { content, .. } => content,
             _ => &self.diff_content,
@@ -1885,6 +2038,14 @@ impl AppState {
 
     /// Path shown in the diff pane header (`repo/path`).
     pub fn diff_header_path(&self) -> String {
+        if let Some(tab) = self.tabs.active_compare() {
+            return match tab.path.as_deref() {
+                Some(path) if !path.is_empty() => {
+                    format!("{}/{}  {}", tab.checkout_path, path, tab.range_header())
+                }
+                _ => tab.range_header(),
+            };
+        }
         match &self.drill {
             DrillView::Diff { repo, path, .. } => format!("{repo}/{path}"),
             _ => match (self.diff_repo.as_deref(), self.diff_path.as_deref()) {
@@ -2026,6 +2187,12 @@ impl AppState {
     }
 
     fn displayed_diff_id(&self) -> Option<String> {
+        if let Some(tab) = self.tabs.active_compare() {
+            return tab
+                .path
+                .as_ref()
+                .map(|path| Self::commit_context_id(&tab.checkout_path, path));
+        }
         match &self.drill {
             DrillView::Diff { repo, path, .. } => Some(Self::commit_context_id(repo, path)),
             DrillView::Graph => {
@@ -2081,6 +2248,22 @@ impl AppState {
         ));
         if !self.full_context.remove(&id) {
             self.full_context.insert(id);
+        }
+        if let Some(tab) = self.tabs.active_compare() {
+            let Some(source) = tab.source.clone() else {
+                return Effect::None;
+            };
+            let Some(path) = tab.path.clone() else {
+                return Effect::None;
+            };
+            let old_path = self.focused_compare_old_path();
+            return Effect::LoadCompareDiff {
+                tab_id: tab.id,
+                repo: tab.checkout_path.clone(),
+                source,
+                path,
+                old_path,
+            };
         }
         match &self.drill {
             DrillView::Diff {
@@ -3393,6 +3576,12 @@ impl AppState {
     }
 
     fn nav_enter(&mut self) -> Effect {
+        if self.is_compare_tab() {
+            if self.focus == FocusPane::Left {
+                self.focus = FocusPane::Right;
+            }
+            return Effect::None;
+        }
         if self.hidden_ignored_focus() {
             self.status = "hidden ignored stay out of drill".into();
             return Effect::None;
@@ -3443,6 +3632,13 @@ impl AppState {
     }
 
     fn nav_esc(&mut self) -> Effect {
+        if self.is_compare_tab() {
+            if self.focus == FocusPane::Right {
+                self.focus = FocusPane::Left;
+                return Effect::None;
+            }
+            return self.close_compare_tab();
+        }
         if self.focus == FocusPane::Right {
             self.focus = FocusPane::Left;
             return Effect::None;
@@ -3507,6 +3703,400 @@ impl AppState {
             }
             StashOpId::Create => Effect::None,
         }
+    }
+
+    fn hit_tab(&self, col: u16, row: u16) -> Option<usize> {
+        if row != self.layout.tab_y {
+            return None;
+        }
+        self.layout
+            .tab_hits
+            .iter()
+            .find(|(x, width, _)| col >= *x && col < x.saturating_add(*width))
+            .map(|(_, _, index)| *index)
+    }
+
+    fn park_active_session(&mut self) {
+        if let Some(tab) = self.tabs.active_compare_mut() {
+            tab.focus_right = self.focus == FocusPane::Right;
+            tab.search_mode = self.search_mode;
+            tab.search_active = self.search_active;
+            tab.search_query = self.search_query.clone();
+            tab.search_hit = self.search_hit;
+            tab.left_col_offset = self.left_col_offset;
+            tab.diff_col_offset = self.diff_col_offset;
+            tab.diff_cursor = self.diff_cursor;
+            tab.diff_scroll = self.diff_scroll;
+            tab.folds = self.commit_file_folds.clone();
+            return;
+        }
+        self.workspace_park = Some(WorkspacePark {
+            focus: self.focus,
+            search_mode: self.search_mode,
+            search_active: self.search_active,
+            search_query: self.search_query.clone(),
+            search_target: self.search_target,
+            search_hit: self.search_hit,
+            left_col_offset: self.left_col_offset,
+            right_col_offset: self.right_col_offset,
+            diff_col_offset: self.diff_col_offset,
+            diff_cursor: self.diff_cursor,
+            diff_scroll: self.diff_scroll,
+        });
+    }
+
+    fn apply_active_session(&mut self) {
+        if let Some(tab) = self.tabs.active_compare() {
+            self.focus = if tab.focus_right {
+                FocusPane::Right
+            } else {
+                FocusPane::Left
+            };
+            self.search_mode = tab.search_mode;
+            self.search_active = tab.search_active;
+            self.search_query = tab.search_query.clone();
+            self.search_target = if tab.search_active || tab.search_mode {
+                if tab.focus_right {
+                    SearchPane::Diff
+                } else {
+                    SearchPane::CommitFiles
+                }
+            } else {
+                SearchPane::CommitFiles
+            };
+            self.search_hit = tab.search_hit;
+            self.left_col_offset = tab.left_col_offset;
+            self.diff_col_offset = tab.diff_col_offset;
+            self.diff_cursor = tab.diff_cursor;
+            self.diff_scroll = tab.diff_scroll;
+            self.commit_file_folds = tab.folds.clone();
+            return;
+        }
+        if let Some(park) = self.workspace_park.take() {
+            self.focus = park.focus;
+            self.search_mode = park.search_mode;
+            self.search_active = park.search_active;
+            self.search_query = park.search_query;
+            self.search_target = park.search_target;
+            self.search_hit = park.search_hit;
+            self.left_col_offset = park.left_col_offset;
+            self.right_col_offset = park.right_col_offset;
+            self.diff_col_offset = park.diff_col_offset;
+            self.diff_cursor = park.diff_cursor;
+            self.diff_scroll = park.diff_scroll;
+        }
+    }
+
+    fn activate_tab(&mut self, index: usize) -> Effect {
+        if index >= self.tabs.len() || index == self.tabs.active {
+            return Effect::None;
+        }
+        self.park_active_session();
+        self.tabs.active = index;
+        self.apply_active_session();
+        Effect::None
+    }
+
+    fn activate_relative_tab(&mut self, delta: i32) -> Effect {
+        let len = self.tabs.len() as i32;
+        if len <= 1 {
+            return Effect::None;
+        }
+        let next = (self.tabs.active as i32 + delta).rem_euclid(len) as usize;
+        self.activate_tab(next)
+    }
+
+    fn jump_to_tab(&mut self, n: u8) -> Effect {
+        if n == 0 {
+            return Effect::None;
+        }
+        self.activate_tab(n as usize - 1)
+    }
+
+    /// Concrete checkout for Diff vs * commands.
+    pub fn compare_target_checkout(&self) -> Option<String> {
+        if let Some(tab) = self.tabs.active_compare() {
+            return Some(tab.checkout_path.clone());
+        }
+        match &self.drill {
+            DrillView::Files { repo, .. } | DrillView::Diff { repo, .. } => {
+                return Some(repo.clone());
+            }
+            DrillView::Graph => {}
+        }
+        if self.graph_pane_focused() {
+            if let Some(repo) = self.focused_graph_repo() {
+                return Some(repo);
+            }
+        }
+        let row = self.focused_row()?;
+        match row.kind {
+            NodeKind::Workspace | NodeKind::Group => None,
+            NodeKind::Repo => {
+                let repo = row.repo.as_deref()?;
+                if super::branches::is_family_container(&self.snapshot, repo) {
+                    None
+                } else {
+                    Some(repo.to_string())
+                }
+            }
+            NodeKind::Checkout | NodeKind::Section | NodeKind::Dir | NodeKind::File => {
+                row.repo.clone()
+            }
+        }
+    }
+
+    fn checkout_head_and_default(
+        &self,
+        checkout: &str,
+    ) -> Option<(&str, Option<&str>)> {
+        self.snapshot.repos.iter().find(|row| row.repo == checkout).map(
+            |row| (row.head.as_str(), row.default_tip_ref.as_deref()),
+        )
+    }
+
+    fn open_compare_tab(&mut self, checkout: String, base_ref: String) -> Effect {
+        self.park_active_session();
+        match self.tabs.open_or_focus(checkout.clone(), base_ref.clone()) {
+            OpenCompare::Focused => {
+                self.apply_active_session();
+                Effect::None
+            }
+            OpenCompare::Created(tab_id) => {
+                self.apply_active_session();
+                self.focus = FocusPane::Left;
+                Effect::LoadCompareRange {
+                    tab_id,
+                    repo: checkout,
+                    base_ref,
+                    force: true,
+                }
+            }
+        }
+    }
+
+    pub(crate) fn compare_vs_default(&mut self) -> Effect {
+        let Some(checkout) = self.compare_target_checkout() else {
+            self.status = FOCUS_A_CHECKOUT.into();
+            return Effect::None;
+        };
+        let Some((head, default_tip)) = self.checkout_head_and_default(&checkout) else {
+            self.status = FOCUS_A_CHECKOUT.into();
+            return Effect::None;
+        };
+        if head.is_empty() {
+            self.status = HEAD_HAS_NO_COMMIT.into();
+            return Effect::None;
+        }
+        let Some(base_ref) = default_tip.map(str::to_string) else {
+            self.status = DEFAULT_BRANCH_NOT_FOUND.into();
+            return Effect::None;
+        };
+        self.open_compare_tab(checkout, base_ref)
+    }
+
+    pub(crate) fn compare_vs_branch(&mut self) -> Effect {
+        let Some(checkout) = self.compare_target_checkout() else {
+            self.status = FOCUS_A_CHECKOUT.into();
+            return Effect::None;
+        };
+        if self
+            .checkout_head_and_default(&checkout)
+            .is_some_and(|(head, _)| head.is_empty())
+        {
+            self.status = HEAD_HAS_NO_COMMIT.into();
+            return Effect::None;
+        }
+        Effect::PrepareComparePicker { repo: checkout }
+    }
+
+    pub(crate) fn close_compare_tab(&mut self) -> Effect {
+        if self.tabs.is_workspace() {
+            self.status = WORKSPACE_TAB_CANNOT_CLOSE.into();
+            return Effect::None;
+        }
+        self.park_active_session();
+        self.tabs.close_active_compare();
+        self.apply_active_session();
+        Effect::None
+    }
+
+    pub(crate) fn open_compare_picker(
+        &mut self,
+        repo: String,
+        branches: Vec<crate::git::LocalBranch>,
+    ) {
+        self.compare_picker = Some(BranchPickerState::new(repo, branches));
+        self.status.clear();
+    }
+
+    pub(crate) fn submit_compare_picker(&mut self) -> Effect {
+        let Some(picker) = self.compare_picker.as_ref() else {
+            return Effect::None;
+        };
+        let Some(name) = picker.selected().map(|branch| branch.name.clone()) else {
+            self.status = super::tabs::NO_BRANCHES_TO_COMPARE.into();
+            return Effect::None;
+        };
+        let repo = picker.repo.clone();
+        self.compare_picker = None;
+        self.open_compare_tab(repo, name)
+    }
+
+    pub(crate) fn apply_compare_range(
+        &mut self,
+        tab_id: u64,
+        gen: u64,
+        result: Result<super::app::CompareRangeLoad, String>,
+    ) -> Option<Effect> {
+        let tab = self.tabs.get_id_mut(tab_id)?;
+        if tab.generation != gen {
+            return None;
+        }
+        tab.loading = false;
+        match result {
+            Err(err) => {
+                tab.error = Some(err);
+                tab.files.clear();
+                tab.source = None;
+                tab.path = None;
+                tab.content = DiffContent::default();
+                None
+            }
+            Ok(load) => {
+                tab.error = None;
+                tab.source = Some(load.source.clone());
+                tab.last_head = Some(load.head);
+                tab.last_base_tip = Some(load.base_tip);
+                let keep = tab
+                    .path
+                    .clone()
+                    .filter(|path| load.files.iter().any(|file| &file.path == path));
+                tab.files = load.files;
+                if let Some(path) = keep {
+                    tab.path = Some(path.clone());
+                    if let Some(idx) = tab.files.iter().position(|file| file.path == path) {
+                        tab.file_cursor = idx;
+                    }
+                    let old_path = tab
+                        .files
+                        .iter()
+                        .find(|file| file.path == path)
+                        .and_then(|file| file.old_path.clone());
+                    Some(Effect::LoadCompareDiff {
+                        tab_id,
+                        repo: tab.checkout_path.clone(),
+                        source: load.source,
+                        path,
+                        old_path,
+                    })
+                } else if tab.files.is_empty() {
+                    tab.path = None;
+                    tab.content = DiffContent::default();
+                    tab.file_cursor = 0;
+                    None
+                } else {
+                    tab.file_cursor = 0;
+                    let path = tab.files[0].path.clone();
+                    let old_path = tab.files[0].old_path.clone();
+                    tab.path = Some(path.clone());
+                    Some(Effect::LoadCompareDiff {
+                        tab_id,
+                        repo: tab.checkout_path.clone(),
+                        source: load.source,
+                        path,
+                        old_path,
+                    })
+                }
+            }
+        }
+    }
+
+    pub(crate) fn apply_compare_diff(
+        &mut self,
+        tab_id: u64,
+        gen: u64,
+        source: &CommitFileSource,
+        path: &str,
+        content: Result<DiffContent, String>,
+    ) {
+        let checkout = {
+            let Some(tab) = self.tabs.get_id_mut(tab_id) else {
+                return;
+            };
+            if tab.generation != gen {
+                return;
+            }
+            if tab.source.as_ref() != Some(source) {
+                return;
+            }
+            match content {
+                Ok(content) => {
+                    tab.path = Some(path.to_string());
+                    tab.content = content;
+                    tab.checkout_path.clone()
+                }
+                Err(err) => {
+                    tab.error = Some(err);
+                    tab.content = DiffContent::default();
+                    return;
+                }
+            }
+        };
+        if self.tabs.active_compare().is_some_and(|live| live.id == tab_id) {
+            self.adopt_diff_view(DiffViewId::Commit {
+                repo: checkout,
+                source: source.clone(),
+                path: path.to_string(),
+            });
+        }
+    }
+
+    pub(crate) fn apply_compare_probe(
+        &mut self,
+        tab_id: u64,
+        changed: bool,
+        error: Option<String>,
+    ) -> Option<Effect> {
+        let tab = self.tabs.get_id_mut(tab_id)?;
+        if let Some(err) = error {
+            tab.error = Some(err);
+            return None;
+        }
+        if !changed {
+            return None;
+        }
+        let repo = tab.checkout_path.clone();
+        let base_ref = tab.base_ref.clone();
+        Some(Effect::LoadCompareRange {
+            tab_id,
+            repo,
+            base_ref,
+            force: true,
+        })
+    }
+
+    pub(crate) fn begin_compare_range(&mut self, tab_id: u64, force: bool) -> Option<u64> {
+        let tab = self.tabs.get_id_mut(tab_id)?;
+        if force {
+            Some(tab.bump_generation())
+        } else {
+            Some(tab.generation)
+        }
+    }
+
+    pub(crate) fn compare_probe_effects(&self) -> Vec<Effect> {
+        self.tabs
+            .compare
+            .iter()
+            .map(|tab| Effect::ProbeCompareTab {
+                tab_id: tab.id,
+                repo: tab.checkout_path.clone(),
+                base_ref: tab.base_ref.clone(),
+                last_head: tab.last_head.clone(),
+                last_base_tip: tab.last_base_tip.clone(),
+            })
+            .collect()
     }
 }
 
@@ -3769,6 +4359,7 @@ mod tests {
             primary_repo: None,
             merged_into_default: None,
             default_branch_override: None,
+            default_tip_ref: None,
             local_branches: Vec::new(),
         }
     }
@@ -4196,6 +4787,7 @@ mod tests {
                 primary_repo: None,
                 merged_into_default: None,
                 default_branch_override: None,
+                default_tip_ref: None,
                 local_branches: Vec::new(),
             }],
             &[],
@@ -4241,6 +4833,7 @@ mod tests {
             primary_repo: None,
             merged_into_default: None,
             default_branch_override: None,
+            default_tip_ref: None,
             local_branches: Vec::new(),
         }
     }
@@ -4399,6 +4992,7 @@ mod tests {
                     primary_repo: Some("app".into()),
                     merged_into_default: None,
                     default_branch_override: None,
+                    default_tip_ref: None,
                     local_branches: Vec::new(),
                 },
             ],
@@ -4878,6 +5472,7 @@ mod tests {
                     ExternalDiffKind::Rev {
                         left_rev: format!("{commit_id}^"),
                         right_rev: commit_id.into(),
+                        left_path: None,
                     }
                 );
             }
@@ -4905,6 +5500,7 @@ mod tests {
                     ExternalDiffKind::Rev {
                         left_rev: format!("{commit_id}^"),
                         right_rev: commit_id.into(),
+                        left_path: None,
                     }
                 );
             }
@@ -4932,6 +5528,7 @@ mod tests {
                     ExternalDiffKind::Rev {
                         left_rev: "stash@{0}^1".into(),
                         right_rev: "stash@{0}".into(),
+                        left_path: None,
                     }
                 );
             }
@@ -5073,6 +5670,7 @@ mod tests {
                     primary_repo: Some("app".into()),
                     merged_into_default: None,
                     default_branch_override: None,
+                    default_tip_ref: None,
                     local_branches: Vec::new(),
                 },
                 RepoSnapshot {
@@ -5089,6 +5687,7 @@ mod tests {
                     primary_repo: None,
                     merged_into_default: None,
                     default_branch_override: None,
+                    default_tip_ref: None,
                     local_branches: Vec::new(),
                 },
             ],
@@ -5853,6 +6452,7 @@ mod tests {
                     primary_repo: Some("app".into()),
                     merged_into_default: Some(false),
                     default_branch_override: None,
+                    default_tip_ref: None,
                     local_branches: Vec::new(),
                 },
                 repo("notes", true),
@@ -5933,6 +6533,7 @@ mod tests {
                 primary_repo: Some("notes".into()),
                 merged_into_default: None,
                 default_branch_override: None,
+                default_tip_ref: None,
                 local_branches: Vec::new(),
             }],
             &["notes/.worktrees/feat".into()],
@@ -6155,6 +6756,7 @@ mod tests {
             primary_repo: None,
             merged_into_default: None,
             default_branch_override: None,
+            default_tip_ref: None,
             local_branches: Vec::new(),
         }
     }
@@ -7128,6 +7730,7 @@ mod tests {
             primary_repo: None,
             merged_into_default: None,
             default_branch_override: None,
+            default_tip_ref: None,
             local_branches: Vec::new(),
         }
     }

@@ -16,12 +16,14 @@ const HUGE_FILE_BYTES: u64 = 1_000_000;
 /// Gutter rule between line numbers and the sign.
 pub const DIFF_RULE: char = '│';
 
-/// Staged / unstaged / untracked section label.
+/// Staged / unstaged / untracked / committed section label.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiffSection {
     Staged,
     Unstaged,
     New,
+    /// Compare-tab three-dot range. Never staged or unstaged.
+    Committed,
 }
 
 /// Cell kind for one side of a diff row.
@@ -79,6 +81,8 @@ pub struct DiffContent {
     pub unstaged: String,
     /// Label the unstaged section `NEW` (untracked synthesised as all-add).
     pub is_new: bool,
+    /// Label the unstaged section `COMMITTED` (compare tabs).
+    pub is_committed: bool,
 }
 
 impl DiffContent {
@@ -88,6 +92,17 @@ impl DiffContent {
             staged: String::new(),
             unstaged: text.into(),
             is_new: false,
+            is_committed: false,
+        }
+    }
+
+    /// Compare-tab unified text. The section label is `COMMITTED`.
+    pub fn from_compare_lines(lines: Vec<String>) -> Self {
+        Self {
+            staged: String::new(),
+            unstaged: lines.join("\n"),
+            is_new: false,
+            is_committed: true,
         }
     }
 
@@ -131,6 +146,7 @@ pub fn load_file_diff(
         staged,
         unstaged,
         is_new: false,
+        is_committed: false,
     }
 }
 
@@ -141,6 +157,7 @@ fn untracked_content(repo_dir: &Path, path: &str) -> DiffContent {
         staged: String::new(),
         unstaged,
         is_new,
+        is_committed: false,
     }
 }
 
@@ -438,7 +455,9 @@ pub fn build_diff_rows(content: &DiffContent, mode: DiffMode) -> Vec<DiffRow> {
     }
     let unstaged = parse_unified_diff(&content.unstaged);
     if !unstaged.is_empty() {
-        let section = if content.is_new {
+        let section = if content.is_committed {
+            DiffSection::Committed
+        } else if content.is_new {
             DiffSection::New
         } else {
             DiffSection::Unstaged
@@ -469,6 +488,7 @@ pub fn section_header(section: DiffSection) -> &'static str {
         DiffSection::Staged => "STAGED",
         DiffSection::Unstaged => "UNSTAGED",
         DiffSection::New => "NEW",
+        DiffSection::Committed => "COMMITTED",
     }
 }
 
@@ -671,6 +691,7 @@ index 1111111..2222222 100644
                 staged: FIXTURE.into(),
                 unstaged: String::new(),
                 is_new: false,
+                is_committed: false,
             },
             DiffMode::Inline,
         );
@@ -684,6 +705,7 @@ index 1111111..2222222 100644
                 staged: FIXTURE.into(),
                 unstaged: FIXTURE.into(),
                 is_new: false,
+                is_committed: false,
             },
             DiffMode::Inline,
         );
@@ -705,6 +727,7 @@ index 1111111..2222222 100644
                 staged: String::new(),
                 unstaged: FIXTURE.into(),
                 is_new: true,
+                is_committed: false,
             },
             DiffMode::Inline,
         );
@@ -718,6 +741,7 @@ index 1111111..2222222 100644
                 staged: FIXTURE.into(),
                 unstaged: String::new(),
                 is_new: false,
+                is_committed: false,
             },
             DiffMode::Inline,
         );
@@ -738,6 +762,7 @@ index 1111111..2222222 100644
                 staged: FIXTURE.into(),
                 unstaged: String::new(),
                 is_new: false,
+                is_committed: false,
             },
             DiffMode::SideBySide,
         );
@@ -807,6 +832,7 @@ index 1111111..2222222 100644
                 staged: FIXTURE.into(),
                 unstaged: String::new(),
                 is_new: false,
+                is_committed: false,
             },
             DiffMode::Inline,
         );
