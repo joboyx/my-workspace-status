@@ -9,6 +9,12 @@ All wrappers in this file attach stdin to `/dev/null` and set `GIT_TERMINAL_PROM
 | Function | Command | Returns | Purpose |
 | --- | --- | --- | --- |
 | `exec_git(args, cwd)` | `<git> <args>` | trimmed stdout, `""` on any failure | Generic read. Swallows errors by design — callers treat empty as "unknown". |
+| `exec_git_stdout(args, cwd)` | `<git> <args>` | `Result<String, String>` | Compare reads. Empty stdout is success. Failure is `Err`. |
+| `rev_parse_commit` | `rev-parse --verify --quiet <ref>^{commit}` | `Result<Option<SHA>>` | Missing ref is `Ok(None)`. Other failures are `Err`. |
+| `merge_base` | `merge-base <a> <b>` | `Result<Option<SHA>>` | Unrelated histories are `Ok(None)`. |
+| `list_compare_name_status` | `diff --name-status --find-renames <base>...<head> --` | `Result<NameStatus[]>` | Committed three-dot file list. |
+| `diff_compare_file_ctx` | `diff <base>...<head> -- <path>` | `Result<lines>` | One compare path. Empty stdout is `(no diff)`. |
+| `list_compare_picker_branches` | `for-each-ref` on `refs/heads/` + `refs/remotes/origin/` | `Result<LocalBranch[]>` | Drops `origin/HEAD` and the current local. No checkout. |
 | `exec_git_status(args, cwd)` | `<git> <args>` | exit code, `-1` on throw | Generic write / predicate. |
 | `exec_git_checked(args, cwd)` | `<git> <args>` | `Result<(), String>` | Surfaces failure to the caller. |
 | `repo_has_local_changes(cwd)` | `diff --quiet`, then `diff --cached --quiet` | boolean | True when either exits non-zero. Untracked files are **not** counted. |
@@ -69,6 +75,20 @@ CLI `-p` / `-d` (progress strings go to the caller; `--json` sends them to stder
 | --- | --- |
 | `pull_behind_repos` | `pull_quiet_detailed` per behind repo. Logs success / stash-pop conflict / failure. |
 | `switch_repo_to_default_branch` | Fetch, checkout default, pull when the remote tip differs. Skips dirty repos. |
+
+## Compare reads (`tui/app.rs` `compute_compare_range` / `compute_compare_diff`)
+
+Default tip is `resolve_default_branch_name` then `resolve_default_branch_tip_ref` (`origin/<default>` before local). Then:
+
+```
+git rev-parse --verify --quiet HEAD^{commit}
+git rev-parse --verify --quiet <base-ref>^{commit}
+git merge-base <base-sha> <head-sha>
+git diff --name-status --find-renames <base-sha>...<head-sha> --
+git diff <base-sha>...<head-sha> -- <path>
+```
+
+`E` on a compare file uses LEFT `<merge-base>:<old-path-or-path>` and RIGHT `<head>:<path>`. Compare never changes HEAD, the index, or the worktree. The picker never checkouts, creates, or fetches.
 
 ## TUI writes (`tui/ops.rs`, `tui/fetch.rs`, `tui/app.rs`)
 
