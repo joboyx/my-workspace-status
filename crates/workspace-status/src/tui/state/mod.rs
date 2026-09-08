@@ -209,6 +209,8 @@ struct WorkspacePark {
     diff_col_offset: u16,
     diff_cursor: usize,
     diff_scroll: u16,
+    commit_file_folds: HashSet<String>,
+    commit_tree_mode: bool,
 }
 
 /// Confirm overlay before a destructive file write.
@@ -3744,6 +3746,7 @@ impl AppState {
             tab.diff_cursor = self.diff_cursor;
             tab.diff_scroll = self.diff_scroll;
             tab.folds = self.commit_file_folds.clone();
+            tab.tree_mode = self.commit_tree_mode;
             return;
         }
         self.workspace_park = Some(WorkspacePark {
@@ -3758,6 +3761,8 @@ impl AppState {
             diff_col_offset: self.diff_col_offset,
             diff_cursor: self.diff_cursor,
             diff_scroll: self.diff_scroll,
+            commit_file_folds: self.commit_file_folds.clone(),
+            commit_tree_mode: self.commit_tree_mode,
         });
     }
 
@@ -3786,6 +3791,7 @@ impl AppState {
             self.diff_cursor = tab.diff_cursor;
             self.diff_scroll = tab.diff_scroll;
             self.commit_file_folds = tab.folds.clone();
+            self.commit_tree_mode = tab.tree_mode;
             return;
         }
         if let Some(park) = self.workspace_park.take() {
@@ -3800,6 +3806,8 @@ impl AppState {
             self.diff_col_offset = park.diff_col_offset;
             self.diff_cursor = park.diff_cursor;
             self.diff_scroll = park.diff_scroll;
+            self.commit_file_folds = park.commit_file_folds;
+            self.commit_tree_mode = park.commit_tree_mode;
         }
     }
 
@@ -4002,11 +4010,11 @@ impl AppState {
             tab.files = load.files;
             (load.source, keep, tab.checkout_path.clone())
         };
-        let mut folds = if self
+        let active = self
             .tabs
             .active_compare()
-            .is_some_and(|tab| tab.id == tab_id)
-        {
+            .is_some_and(|tab| tab.id == tab_id);
+        let mut folds = if active {
             self.commit_file_folds.clone()
         } else {
             self.tabs.get_id(tab_id)?.folds.clone()
@@ -4017,7 +4025,12 @@ impl AppState {
             }
         }
         let files = self.tabs.get_id(tab_id)?.files.clone();
-        let rows = flatten_commit_files(&files, self.commit_tree_mode, &folds, self.ascii);
+        let tree_mode = if active {
+            self.commit_tree_mode
+        } else {
+            self.tabs.get_id(tab_id)?.tree_mode
+        };
+        let rows = flatten_commit_files(&files, tree_mode, &folds, self.ascii);
         let cursor = commit_file_cursor_index(&rows, keep.as_deref());
         let selected = rows.get(cursor).and_then(|row| {
             row.is_file().then(|| {
@@ -5636,6 +5649,78 @@ mod tests {
         let row = app.focused_commit_file_row().expect("tree row");
         assert!(row.is_file());
         assert_eq!(row.path, "src/view.rs");
+    }
+
+    #[test]
+    fn workspace_commit_file_folds_survive_compare_tab() {
+        let mut app = state();
+        let repo = app
+            .snapshot
+            .repos
+            .iter_mut()
+            .find(|row| row.repo == "app")
+            .expect("app");
+        repo.head = "ccc".into();
+        repo.default_tip_ref = Some("origin/main".into());
+        app.open_commit_files(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![
+                CommitFile {
+                    status: "M".into(),
+                    path: "src/a.rs".into(),
+                    old_path: None,
+                },
+                CommitFile {
+                    status: "M".into(),
+                    path: "src/b.rs".into(),
+                    old_path: None,
+                },
+            ],
+        );
+        assert!(app.drill.is_files());
+        assert!(app.commit_tree_mode);
+        let dir = app
+            .commit_file_rows()
+            .iter()
+            .position(|row| row.id == "dir:src")
+            .expect("dir");
+        if let DrillView::Files { cursor, .. } = &mut app.drill {
+            *cursor = dir;
+        }
+        app.dispatch(Action::FoldToggle);
+        assert!(app.commit_file_folds.contains("dir:src"));
+        assert!(app
+            .commit_file_rows()
+            .iter()
+            .all(|row| row.id != "file:src/a.rs"));
+
+        match app.dispatch(Action::CompareVsDefault) {
+            Effect::LoadCompareRange { .. } => {}
+            other => panic!("{other:?}"),
+        }
+        assert!(app.is_compare_tab());
+        assert!(app.commit_file_folds.is_empty());
+        assert!(app.commit_tree_mode);
+        assert_eq!(app.dispatch(Action::ToggleTreeMode), Effect::None);
+        assert!(!app.commit_tree_mode);
+
+        app.dispatch(Action::JumpToTab(1));
+        assert!(!app.is_compare_tab());
+        assert!(app.drill.is_files());
+        assert!(app.commit_tree_mode, "workspace trie restored");
+        assert!(
+            app.commit_file_folds.contains("dir:src"),
+            "workspace folds restored"
+        );
+        assert!(
+            app.commit_file_rows()
+                .iter()
+                .all(|row| row.id != "file:src/a.rs"),
+            "folded dir still hides files"
+        );
     }
 
     #[test]

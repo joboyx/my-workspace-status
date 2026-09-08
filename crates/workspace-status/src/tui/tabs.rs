@@ -73,6 +73,8 @@ pub struct CompareTab {
     /// Left file list when false; right diff when true.
     pub focus_right: bool,
     pub folds: HashSet<String>,
+    /// Commit-file directory tree vs flat paths. Independent of Workspace.
+    pub tree_mode: bool,
     pub left_col_offset: u16,
     pub diff_col_offset: u16,
     pub diff_cursor: usize,
@@ -101,6 +103,7 @@ impl CompareTab {
             content: DiffContent::default(),
             focus_right: false,
             folds: HashSet::new(),
+            tree_mode: true,
             left_col_offset: 0,
             diff_col_offset: 0,
             diff_cursor: 0,
@@ -166,9 +169,7 @@ impl TabStrip {
 
     /// Active compare tab, if any.
     pub fn active_compare(&self) -> Option<&CompareTab> {
-        self.active
-            .checked_sub(1)
-            .and_then(|i| self.compare.get(i))
+        self.active.checked_sub(1).and_then(|i| self.compare.get(i))
     }
 
     /// Mutable active compare tab, if any.
@@ -187,10 +188,10 @@ impl TabStrip {
 
     /// Find a tab by identity. `0` is never returned (Workspace).
     pub fn find(&self, checkout_path: &str, base_ref: &str) -> Option<usize> {
-        self.compare.iter().position(|tab| {
-            tab.checkout_path == checkout_path && tab.base_ref == base_ref
-        })
-        .map(|i| i + 1)
+        self.compare
+            .iter()
+            .position(|tab| tab.checkout_path == checkout_path && tab.base_ref == base_ref)
+            .map(|i| i + 1)
     }
 
     /// Focus an existing identity or append a new compare tab.
@@ -236,7 +237,11 @@ impl TabStrip {
         if len == 0 {
             return;
         }
-        self.active = if self.active == 0 { len - 1 } else { self.active - 1 };
+        self.active = if self.active == 0 {
+            len - 1
+        } else {
+            self.active - 1
+        };
     }
 
     /// Absolute `g1`…`g9`. Missing index is a silent no-op. `1` is Workspace.

@@ -1063,7 +1063,7 @@ fn idle_status_line(
     surface: Color,
     width: u16,
 ) -> Line<'static> {
-    let tree_mode = if nav_depth(state) >= 1 {
+    let tree_mode = if state.is_compare_tab() || nav_depth(state) >= 1 {
         state.commit_tree_mode
     } else {
         state.tree_mode
