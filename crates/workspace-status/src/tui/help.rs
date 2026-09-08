@@ -47,14 +47,6 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "top / bottom of focused pane",
             },
             HelpEntry {
-                keys: "gt gT",
-                desc: "next / prev tab",
-            },
-            HelpEntry {
-                keys: "g1-g9",
-                desc: "jump to tab (1=Workspace)",
-            },
-            HelpEntry {
                 keys: "Home End",
                 desc: "top / bottom",
             },
@@ -65,6 +57,14 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             HelpEntry {
                 keys: "n N",
                 desc: "next / prev match (after Enter)",
+            },
+            HelpEntry {
+                keys: "gt gT",
+                desc: "next / prev tab",
+            },
+            HelpEntry {
+                keys: "g1-g9",
+                desc: "jump to tab (1=Workspace)",
             },
         ],
     },

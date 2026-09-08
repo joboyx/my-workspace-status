@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 
 pub use super::common::seed::{
     compare_ahead_workspace, daily_workspace, focus_workspace, git, git_env, git_stdout,
-    ignored_primary_family_workspace, primary_merged_workspace, seed_compare_ahead,
+    ignored_primary_family_workspace, primary_merged_workspace,
     seed_long_diff_file, seed_long_path_file, seed_long_subject_repo, seed_many_commit_files,
     seed_merge_mark_family, seed_primary_and_linked_family, seed_primary_merged_family, seed_repo,
     seed_tall_graph, staged_and_changes_workspace, unique_root,

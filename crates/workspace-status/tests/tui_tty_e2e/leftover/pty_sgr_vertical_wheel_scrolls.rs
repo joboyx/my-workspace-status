@@ -58,7 +58,7 @@ fn documented_tree_sgr_vertical_wheel_scrolled(screen: &str) -> bool {
 /// Launch keeps README in view and clips `page-29`. Thirty wheel-down
 /// reports land on `page-29.txt`: README leaves, page-29 appears, the
 /// right pane loads `page-29-body`. A no-op stays on README. `j` would
-/// hit page-00. PageDown would hit page-26. `G` would hit No updates.
+/// hit page-00. PageDown would hit page-25. `G` would hit No updates.
 /// Horizontal pan, focus steal to the right pane, or chrome-only flicker
 /// is red.
 #[test]
@@ -91,7 +91,7 @@ fn pty_sgr_vertical_wheel_scrolls() {
     }
     tui.wait_pred(
         documented_tree_sgr_vertical_wheel_scrolled,
-        "tree shows page-29, drops README, loads page-29-body (a no-op stays on README; j would hit page-00; PageDown would hit page-26; G would hit No updates)",
+        "tree shows page-29, drops README, loads page-29-body (a no-op stays on README; j would hit page-00; PageDown would hit page-25; G would hit No updates)",
         GIT_WAIT,
     );
 }

@@ -23,8 +23,8 @@ fn pty_compare_palette_opens_tab() {
     tui.search("app");
     tui.wait_contains("feature/ahead", GIT_WAIT);
     tui.ctrl_letter('k');
-    tui.wait_contains("Diff vs branch", WAIT);
     tui.keys("vs branch");
+    tui.wait_contains("Diff vs branch", WAIT);
     tui.enter();
     tui.wait_pred(
         |screen| screen.contains("Compare") && !screen.contains("Checkout"),

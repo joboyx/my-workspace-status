@@ -7,8 +7,9 @@ use crate::support::{seed_tree_page_files, tree_cursor_on, tree_has, GIT_WAIT, W
 /// Help VIEW lists `PgUp PgDn` as "page focused pane", distinct from
 /// `Ctrl-u Ctrl-d` ±5. This suite sends xterm CSI `ESC [6~` / `ESC [5~`.
 /// Launch focuses `README.md`. Files sort as README then `page-00`…
-/// `page-29`. The default PTY paints 28 tree rows, so one page is 27
-/// (`visible − 1` overlap) and lands on `page-26.txt`. Cursor bar and
+/// `page-29`. The default PTY paints 27 tree rows (tab strip takes one),
+/// so one page is 26 (`visible − 1` overlap) and lands on `page-25.txt`.
+/// Cursor bar and
 /// the right-pane file body must both move. A no-op stays on README.
 /// `j` would land on `page-00`. Ctrl-d would land on `page-04`. `G` /
 /// End would land on No updates. Home would land on the workspace root.
@@ -49,21 +50,21 @@ fn pty_pgup_pgdn_pages_workspace_tree() {
             tree_cursor_on(screen, "README.md")
                 && !tree_cursor_on(screen, "page-00.txt")
                 && !tree_cursor_on(screen, "page-04.txt")
-                && !tree_cursor_on(screen, "page-26.txt")
+                && !tree_cursor_on(screen, "page-25.txt")
                 && !tree_cursor_on(screen, "workspace")
                 && !tree_has(screen, "page-29")
-                && !screen.contains("page-26-body")
+                && !screen.contains("page-25-body")
                 && screen.contains("UNSTAGED")
         },
-        "launch cursor is README; page-26 is not focused",
+        "launch cursor is README; page-25 is not focused",
         GIT_WAIT,
     );
 
     tui.page_down();
     tui.wait_pred(
         |screen| {
-            tree_cursor_on(screen, "page-26.txt")
-                && screen.contains("page-26-body")
+            tree_cursor_on(screen, "page-25.txt")
+                && screen.contains("page-25-body")
                 && screen.contains("NEW")
                 && !tree_cursor_on(screen, "README.md")
                 && !tree_has(screen, "README.md")
@@ -73,7 +74,7 @@ fn pty_pgup_pgdn_pages_workspace_tree() {
                 && !tree_cursor_on(screen, "No updates")
                 && !tree_cursor_on(screen, "workspace")
         },
-        "PageDown pages +27 to page-26 (a no-op stays on README; j would hit page-00; Ctrl-d would hit page-04; G would hit No updates)",
+        "PageDown pages +26 to page-25 (a no-op stays on README; j would hit page-00; Ctrl-d would hit page-04; G would hit No updates)",
         GIT_WAIT,
     );
 
@@ -82,12 +83,12 @@ fn pty_pgup_pgdn_pages_workspace_tree() {
         |screen| {
             tree_cursor_on(screen, "README.md")
                 && screen.contains("UNSTAGED")
-                && !tree_cursor_on(screen, "page-26.txt")
-                && !screen.contains("page-26-body")
+                && !tree_cursor_on(screen, "page-25.txt")
+                && !screen.contains("page-25-body")
                 && !tree_cursor_on(screen, "workspace")
                 && !tree_cursor_on(screen, "No updates")
         },
-        "PageUp returns to README (a no-op keeps page-26; Home would land on workspace)",
+        "PageUp returns to README (a no-op keeps page-25; Home would land on workspace)",
         GIT_WAIT,
     );
 }

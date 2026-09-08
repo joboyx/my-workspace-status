@@ -16,8 +16,8 @@ fn csi_u_gg(tui: &mut PtySession) {
 fn open_default_and_main(tui: &mut PtySession) {
     tui.search("app");
     tui.ctrl_letter('k');
-    tui.wait_contains("Diff vs default", WAIT);
     tui.keys("vs default");
+    tui.wait_contains("Diff vs default", WAIT);
     tui.enter();
     tui.wait_contains("app · vs origin/main", GIT_WAIT);
     tui.ctrl_letter('k');
