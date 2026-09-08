@@ -62,7 +62,7 @@ Split rows (`left + RULE + right`) take column widths from `tui/split.rs`. Defau
 
 ## Focused row
 
-A focused file-diff row (section, hunk, or line) paints the same cursor bar as other lists. `j` / `k`, PageUp / PageDown, Ctrl-u / Ctrl-d, click, search, and vertical wheel move that row. The viewport keeps it near the vertical middle (`list_viewport_start`, same helper as the workspace tree). `gg` / `G` and Home / End jump to the first / last row.
+A focused file-diff row (section, hunk, or line) paints the same cursor bar as other lists. An unfocused file-diff still marks that row with the thinner inactive marker and `cursorBgInactive`. `j` / `k`, PageUp / PageDown, Ctrl-u / Ctrl-d, click, search, and vertical wheel move that row. The viewport keeps it near the vertical middle (`list_viewport_start`, same helper as the workspace tree). `gg` / `G` and Home / End jump to the first / last row.
 
 ## Horizontal pan
 

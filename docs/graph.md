@@ -50,9 +50,10 @@ the same visible-row indexes, including spacers (a flashing commit
 keeps its spacer). Flash background wins over cursor and search.
 The cursor bar (`▌`) still marks selection when `GraphWidget::cursor_bar`
 is on (default). `cursorBg` paints when the row is not flashing
-(`GraphWidget::cursor_style`). The TUI turns the bar off when the graph
-pane is unfocused; [`GraphWidget::selected`] still drives the 2-line
-selection footer. `GraphWidget::commented_rows` marks selectable
+(`GraphWidget::cursor_style`). When the graph pane is unfocused the TUI
+sets `cursor_bar` false and paints the thinner `▏` marker plus
+`cursorBgInactive` (`GraphWidget::cursor_inactive_style`).
+[`GraphWidget::selected`] still drives the 2-line selection footer. `GraphWidget::commented_rows` marks selectable
 visible-row indexes that have an object comment or a file-line
 comment for that row. Commented rows paint `ICON_COMMENT` (`"` /
 nf-fa-comment) after the gutter. `GraphWidget::resolved_comment_rows`

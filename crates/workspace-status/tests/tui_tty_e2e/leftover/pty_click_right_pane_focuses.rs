@@ -2,9 +2,10 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
     crumb_row, documented_launch_first_paint, no_mouse_toggle_toast, no_updates_group_folded,
-    no_wrong_overlays, panes_tree_unfocused_diff_focused, status_row, title_has_files,
-    tree_cursor_on, tree_dir_expanded, tree_has, RIGHT_PANE_COL, SETTLE_MS,
-    TREE_DEPTH1_CHEVRON_COL, TREE_LABEL_COL, WAIT,
+    no_wrong_overlays, panes_tree_unfocused_diff_focused, right_diff_has_focused_cursor,
+    status_row, title_has_files, tree_cursor_on, tree_dir_expanded, tree_has,
+    tree_inactive_selection_on, RIGHT_PANE_COL, SETTLE_MS, TREE_DEPTH1_CHEVRON_COL, TREE_LABEL_COL,
+    WAIT,
 };
 
 /// 0-based screen row whose full line contains `needle`.
@@ -22,6 +23,8 @@ fn click_focuses_readme_diff(screen: &str) -> bool {
     panes_tree_unfocused_diff_focused(screen)
         && tree_has(screen, "README.md")
         && !tree_cursor_on(screen, "README.md")
+        && tree_inactive_selection_on(screen, "README.md")
+        && right_diff_has_focused_cursor(screen)
         && !tree_cursor_on(screen, "app")
         && !tree_cursor_on(screen, "workspace")
         && !tree_cursor_on(screen, "merger")

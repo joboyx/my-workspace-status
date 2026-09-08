@@ -27,8 +27,10 @@ pub const FOLD_EXPANDED_ASCII: &str = "v";
 /// ASCII fold collapsed when `WS_STATUS_GLYPHS=ascii`.
 pub const FOLD_COLLAPSED_ASCII: &str = ">";
 
-/// Cursor accent bar painted in the left-most tree column.
+/// Cursor accent bar painted in the left-most column of a focused list.
 pub const CURSOR_BAR: &str = "▌";
+/// Thinner selection marker on an unfocused list. Same column as [`CURSOR_BAR`].
+pub const CURSOR_BAR_INACTIVE: &str = "▏";
 
 /// Vertical rule between panes and inside the diff gutter.
 #[allow(dead_code)]
@@ -593,6 +595,7 @@ mod tests {
             icon_staged(false),
             icon_changes(false),
             CURSOR_BAR,
+            CURSOR_BAR_INACTIVE,
             FOLD_EXPANDED,
             FOLD_COLLAPSED,
             RULE,

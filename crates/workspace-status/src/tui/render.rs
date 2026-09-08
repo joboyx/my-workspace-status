@@ -37,7 +37,7 @@ use super::help::{
 use super::icons::{
     comment_mark_cols, icon_branch, icon_comment, icon_comment_resolved, icon_diff,
     icon_merged_into_default, icon_move, icon_open_vs_default, truncate_visible, CURSOR_BAR,
-    FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
+    CURSOR_BAR_INACTIVE, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
 };
 use super::search::{
     collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids, slice_cols,
@@ -73,9 +73,10 @@ fn muted_copy(text: &'static str, palette: Palette) -> Line<'static> {
     Line::from(Span::styled(text, Style::default().fg(palette.muted)))
 }
 
-/// Flash → cursor → search match.
+/// Flash → focused cursor → inactive cursor → search match.
 fn row_match_bg(
     selected: bool,
+    focused: bool,
     search_match: bool,
     flash: Option<Color>,
     palette: Palette,
@@ -83,12 +84,24 @@ fn row_match_bg(
 ) -> Option<Color> {
     if flash.is_some() {
         flash
-    } else if selected {
+    } else if selected && focused {
         Some(palette.cursor_bg)
+    } else if selected {
+        Some(palette.cursor_bg_inactive)
     } else if search_match {
         Some(search_bg)
     } else {
         None
+    }
+}
+
+fn selection_marker(selected: bool, focused: bool) -> &'static str {
+    if !selected {
+        " "
+    } else if focused {
+        CURSOR_BAR
+    } else {
+        CURSOR_BAR_INACTIVE
     }
 }
 
@@ -317,7 +330,8 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         lines.push(paint_tree_row(
             row,
             width,
-            Some(row.id.as_str()) == focus_id && state.focus == FocusPane::Left,
+            Some(row.id.as_str()) == focus_id,
+            state.focus == FocusPane::Left,
             state.flash_color(&row.id),
             match_ids.contains(&row.id),
             search_bg,
@@ -336,6 +350,7 @@ fn paint_tree_row(
     row: &VisibleRow,
     width: usize,
     selected: bool,
+    focused: bool,
     flash: Option<Color>,
     search_match: bool,
     search_bg: Color,
@@ -354,6 +369,7 @@ fn paint_tree_row(
         &segs,
         width,
         selected,
+        focused,
         flash,
         search_match,
         search_bg,
@@ -370,6 +386,7 @@ fn paint_segmented_row(
     segs: &NodeSegments,
     width: usize,
     selected: bool,
+    focused: bool,
     flash: Option<Color>,
     search_match: bool,
     search_bg: Color,
@@ -377,20 +394,22 @@ fn paint_segmented_row(
     palette: Palette,
     col_offset: usize,
 ) -> Line<'static> {
-    let bg = row_match_bg(selected, search_match, flash, palette, search_bg);
+    let bg = row_match_bg(selected, focused, search_match, flash, palette, search_bg);
     let trailing_text: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
     let trailing_width = visible_width(&trailing_text);
     let pad = usize::from(trailing_width > 0);
 
     let mut spans: Vec<Span> = Vec::new();
-    let edge = if selected { CURSOR_BAR } else { " " };
-    spans.push(styled_span(
-        edge,
-        Style::default()
-            .fg(palette.cursor)
-            .add_modifier(Modifier::BOLD),
-        bg,
-    ));
+    let edge = selection_marker(selected, focused);
+    let mut edge_style = Style::default().fg(if focused {
+        palette.cursor
+    } else {
+        palette.muted
+    });
+    if focused {
+        edge_style = edge_style.add_modifier(Modifier::BOLD);
+    }
+    spans.push(styled_span(edge, edge_style, bg));
 
     let indent = "  ".repeat(depth);
     spans.push(styled_span(&indent, Style::default(), bg));
@@ -572,6 +591,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .comment_glyph(icon_comment(state.ascii))
         .resolved_comment_glyph(icon_comment_resolved(state.ascii))
         .cursor_style(pal.cursor, pal.cursor_bg)
+        .cursor_inactive_style(pal.muted, pal.cursor_bg_inactive)
         .lane_colors(&lane_colors)
         .label_palette(GraphLabelPalette {
             subject: pal.repo,
@@ -813,7 +833,8 @@ fn draw_commit_file_list(
                 row.folded,
                 &segs,
                 width,
-                files_focused && Some(row.id.as_str()) == focus_id.as_deref(),
+                Some(row.id.as_str()) == focus_id.as_deref(),
+                files_focused,
                 state.commit_file_flash_color(&row.id),
                 search_match,
                 search_bg,
@@ -961,7 +982,8 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                 split,
                 off,
                 state,
-                i == state.diff_cursor && state.focus == FocusPane::Right,
+                i == state.diff_cursor,
+                state.focus == FocusPane::Right,
                 state.diff_visual_contains(i),
                 state.search_hit == Some(i),
             )
@@ -1028,6 +1050,7 @@ fn paint_diff_row(
     col_offset: usize,
     state: &AppState,
     selected: bool,
+    focused: bool,
     visual: bool,
     search_hit: bool,
 ) -> Line<'static> {
@@ -1080,8 +1103,10 @@ fn paint_diff_row(
             state.ascii,
         )),
     };
-    let bg = if selected {
+    let bg = if selected && focused {
         Some(palette.cursor_bg)
+    } else if selected {
+        Some(palette.cursor_bg_inactive)
     } else if visual {
         Some(palette.cursor_bg)
     } else if search_hit {
@@ -1099,10 +1124,15 @@ fn paint_diff_row(
             })
             .collect();
     }
-    let edge = if selected { CURSOR_BAR } else { " " };
-    let mut edge_style = Style::default()
-        .fg(palette.cursor)
-        .add_modifier(Modifier::BOLD);
+    let edge = selection_marker(selected, focused);
+    let mut edge_style = Style::default().fg(if focused {
+        palette.cursor
+    } else {
+        palette.muted
+    });
+    if focused {
+        edge_style = edge_style.add_modifier(Modifier::BOLD);
+    }
     if let Some(bg) = bg {
         edge_style = edge_style.bg(bg);
     }
@@ -2556,16 +2586,17 @@ mod tests {
         buf[(col, 0)].fg
     }
 
-    fn pane_inner_has_cursor_bar(
+    fn pane_inner_has_symbol(
         buf: &ratatui::buffer::Buffer,
         x: u16,
         y: u16,
         w: u16,
         h: u16,
+        symbol: &str,
     ) -> bool {
         for row in y..y.saturating_add(h) {
             for col in x..x.saturating_add(w) {
-                if buf[(col, row)].symbol() == CURSOR_BAR {
+                if buf[(col, row)].symbol() == symbol {
                     return true;
                 }
             }
@@ -2754,7 +2785,7 @@ mod tests {
         assert_titles_heading_borders_split(&mut files);
     }
 
-    fn assert_cursor_bar_on_focused_list_only(
+    fn assert_cursor_chrome_strong_on_focused_weak_on_unfocused(
         state: &mut AppState,
         left_needle: &str,
         right_needle: &str,
@@ -2777,8 +2808,12 @@ mod tests {
             state.layout.diff_pane_width,
             state.layout.diff_pane_height,
         );
-        let left_bar = pane_inner_has_cursor_bar(buf, left.0, left.1, left.2, left.3);
-        let right_bar = pane_inner_has_cursor_bar(buf, right.0, right.1, right.2, right.3);
+        let left_bar = pane_inner_has_symbol(buf, left.0, left.1, left.2, left.3, CURSOR_BAR);
+        let right_bar = pane_inner_has_symbol(buf, right.0, right.1, right.2, right.3, CURSOR_BAR);
+        let left_inactive =
+            pane_inner_has_symbol(buf, left.0, left.1, left.2, left.3, CURSOR_BAR_INACTIVE);
+        let right_inactive =
+            pane_inner_has_symbol(buf, right.0, right.1, right.2, right.3, CURSOR_BAR_INACTIVE);
         let left_bg = pane_row_has_cursor_bg(
             buf,
             left.0,
@@ -2797,6 +2832,24 @@ mod tests {
             right_needle,
             palette.cursor_bg,
         );
+        let left_inactive_bg = pane_row_has_cursor_bg(
+            buf,
+            left.0,
+            left.1,
+            left.2,
+            left.3,
+            left_needle,
+            palette.cursor_bg_inactive,
+        );
+        let right_inactive_bg = pane_row_has_cursor_bg(
+            buf,
+            right.0,
+            right.1,
+            right.2,
+            right.3,
+            right_needle,
+            palette.cursor_bg_inactive,
+        );
         match state.focus {
             FocusPane::Left => {
                 assert!(
@@ -2808,12 +2861,24 @@ mod tests {
                     "focused left list must paint cursor_bg on {left_needle:?}:\n{text}"
                 );
                 assert!(
+                    !left_inactive,
+                    "focused left list must not paint {CURSOR_BAR_INACTIVE}:\n{text}"
+                );
+                assert!(
                     !right_bar,
                     "unfocused right list must not paint {CURSOR_BAR}:\n{text}"
                 );
                 assert!(
+                    right_inactive,
+                    "unfocused right list must paint {CURSOR_BAR_INACTIVE} near {right_needle:?}:\n{text}"
+                );
+                assert!(
                     !right_bg,
-                    "unfocused right list must not paint cursor_bg as the list cursor:\n{text}"
+                    "unfocused right list must not paint focused cursor_bg:\n{text}"
+                );
+                assert!(
+                    right_inactive_bg,
+                    "unfocused right list must paint cursor_bg_inactive on {right_needle:?}:\n{text}"
                 );
             }
             FocusPane::Right => {
@@ -2822,12 +2887,24 @@ mod tests {
                     "unfocused left list must not paint {CURSOR_BAR}:\n{text}"
                 );
                 assert!(
+                    left_inactive,
+                    "unfocused left list must paint {CURSOR_BAR_INACTIVE} near {left_needle:?}:\n{text}"
+                );
+                assert!(
                     !left_bg,
-                    "unfocused left list must not paint cursor_bg as the list cursor:\n{text}"
+                    "unfocused left list must not paint focused cursor_bg:\n{text}"
+                );
+                assert!(
+                    left_inactive_bg,
+                    "unfocused left list must paint cursor_bg_inactive on {left_needle:?}:\n{text}"
                 );
                 assert!(
                     right_bar,
                     "focused right list must paint {CURSOR_BAR} near {right_needle:?}:\n{text}"
+                );
+                assert!(
+                    !right_inactive,
+                    "focused right list must not paint {CURSOR_BAR_INACTIVE}:\n{text}"
                 );
                 assert!(
                     right_bg,
@@ -2838,42 +2915,66 @@ mod tests {
     }
 
     #[test]
-    fn cursor_bar_paints_on_focused_list_only_tree_and_diff() {
+    fn cursor_chrome_strong_on_focused_weak_on_unfocused_tree_and_diff() {
         let mut state = two_pane_diff_state();
         state.focus = FocusPane::Left;
-        assert_cursor_bar_on_focused_list_only(&mut state, "README.md", "UNSTAGED");
+        assert_cursor_chrome_strong_on_focused_weak_on_unfocused(
+            &mut state,
+            "README.md",
+            "UNSTAGED",
+        );
         state.focus = FocusPane::Right;
-        assert_cursor_bar_on_focused_list_only(&mut state, "README.md", "UNSTAGED");
+        assert_cursor_chrome_strong_on_focused_weak_on_unfocused(
+            &mut state,
+            "README.md",
+            "UNSTAGED",
+        );
     }
 
     #[test]
-    fn cursor_bar_paints_on_focused_list_only_graph() {
+    fn cursor_chrome_strong_on_focused_weak_on_unfocused_graph() {
         let mut state = two_pane_graph_state();
         state.focus = FocusPane::Left;
-        assert_cursor_bar_on_focused_list_only(&mut state, "app", "uncommitted");
+        assert_cursor_chrome_strong_on_focused_weak_on_unfocused(&mut state, "app", "uncommitted");
         state.focus = FocusPane::Right;
-        assert_cursor_bar_on_focused_list_only(&mut state, "app", "uncommitted");
+        assert_cursor_chrome_strong_on_focused_weak_on_unfocused(&mut state, "app", "uncommitted");
     }
 
     #[test]
-    fn cursor_bar_paints_on_focused_list_only_commit_files() {
+    fn cursor_chrome_strong_on_focused_weak_on_unfocused_commit_files() {
         let mut state = two_pane_files_state();
         state.focus = FocusPane::Left;
-        assert_cursor_bar_on_focused_list_only(&mut state, "uncommitted", "README.md");
+        assert_cursor_chrome_strong_on_focused_weak_on_unfocused(
+            &mut state,
+            "uncommitted",
+            "README.md",
+        );
         state.focus = FocusPane::Right;
-        assert_cursor_bar_on_focused_list_only(&mut state, "uncommitted", "README.md");
+        assert_cursor_chrome_strong_on_focused_weak_on_unfocused(
+            &mut state,
+            "uncommitted",
+            "README.md",
+        );
     }
 
     #[test]
-    fn cursor_bar_paints_on_focused_list_only_commit_diff() {
+    fn cursor_chrome_strong_on_focused_weak_on_unfocused_commit_diff() {
         let mut state = two_pane_commit_diff_state();
         assert!(state.drill.is_diff());
         state.focus = FocusPane::Left;
         assert!(state.commit_files_list_focused());
-        assert_cursor_bar_on_focused_list_only(&mut state, "README.md", "UNSTAGED");
+        assert_cursor_chrome_strong_on_focused_weak_on_unfocused(
+            &mut state,
+            "README.md",
+            "UNSTAGED",
+        );
         state.focus = FocusPane::Right;
         assert!(!state.commit_files_list_focused());
-        assert_cursor_bar_on_focused_list_only(&mut state, "README.md", "UNSTAGED");
+        assert_cursor_chrome_strong_on_focused_weak_on_unfocused(
+            &mut state,
+            "README.md",
+            "UNSTAGED",
+        );
     }
 
     #[test]
@@ -3285,30 +3386,37 @@ mod tests {
         let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
         let search_bg = crate::tui::theme::ThemeId::TokyoNight.pills().filter.bg;
         assert_eq!(
-            row_match_bg(true, true, Some(palette.flash), palette, search_bg),
+            row_match_bg(true, true, true, Some(palette.flash), palette, search_bg),
             Some(palette.flash)
         );
         assert_eq!(
-            row_match_bg(true, false, Some(palette.flash), palette, search_bg),
+            row_match_bg(true, false, false, Some(palette.flash), palette, search_bg),
             Some(palette.flash)
         );
         assert_eq!(
-            row_match_bg(false, true, Some(palette.flash), palette, search_bg),
+            row_match_bg(false, false, true, Some(palette.flash), palette, search_bg),
             Some(palette.flash)
         );
         assert_eq!(
-            row_match_bg(true, true, None, palette, search_bg),
+            row_match_bg(true, true, true, None, palette, search_bg),
             Some(palette.cursor_bg)
         );
         assert_eq!(
-            row_match_bg(false, true, None, palette, search_bg),
+            row_match_bg(true, false, true, None, palette, search_bg),
+            Some(palette.cursor_bg_inactive)
+        );
+        assert_eq!(
+            row_match_bg(false, false, true, None, palette, search_bg),
             Some(search_bg)
         );
         assert_eq!(
-            row_match_bg(false, false, Some(palette.flash), palette, search_bg),
+            row_match_bg(false, false, false, Some(palette.flash), palette, search_bg),
             Some(palette.flash)
         );
-        assert_eq!(row_match_bg(false, false, None, palette, search_bg), None);
+        assert_eq!(
+            row_match_bg(false, false, false, None, palette, search_bg),
+            None
+        );
     }
 
     #[test]
@@ -3330,6 +3438,7 @@ mod tests {
             false,
             &segs,
             20,
+            true,
             true,
             Some(palette.flash),
             true,
@@ -3382,6 +3491,7 @@ mod tests {
             false,
             &segs,
             20,
+            false,
             false,
             Some(palette.flash),
             false,

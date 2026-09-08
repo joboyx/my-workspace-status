@@ -64,7 +64,11 @@ pub struct GraphWidget<'a> {
     resolved_comment_glyph: &'a str,
     cursor_fg: Color,
     cursor_bg: Option<Color>,
-    /// When false, keep [`Self::selected`] for the footer but do not paint `▌` / `cursorBg`.
+    cursor_inactive_fg: Color,
+    cursor_inactive_bg: Option<Color>,
+    /// When true, paint focused `▌` / `cursorBg`. When false, paint the
+    /// thinner unfocused marker and `cursorBgInactive`. [`Self::selected`]
+    /// still drives the 2-line selection footer.
     cursor_bar: bool,
     label_palette: Option<GraphLabelPalette>,
     col_offset: u16,
@@ -91,6 +95,8 @@ impl<'a> GraphWidget<'a> {
             resolved_comment_glyph: "'",
             cursor_fg: Color::Cyan,
             cursor_bg: None,
+            cursor_inactive_fg: Color::Gray,
+            cursor_inactive_bg: None,
             cursor_bar: true,
             label_palette: None,
             col_offset: 0,
@@ -200,12 +206,20 @@ impl<'a> GraphWidget<'a> {
         self
     }
 
-    /// Paint `▌` / `cursorBg` on [`Self::selected`]. Default true.
+    /// Paint focused `▌` / `cursorBg` when true (default).
     ///
-    /// The TUI turns this off when the graph pane is unfocused so the
-    /// selection footer still tracks the cursor without a list bar.
+    /// False still marks [`Self::selected`] with the thinner unfocused
+    /// marker and [`Self::cursor_inactive_style`]. The selection footer
+    /// still tracks the cursor.
     pub fn cursor_bar(mut self, on: bool) -> Self {
         self.cursor_bar = on;
+        self
+    }
+
+    /// Unfocused selected-row colours. Used when [`Self::cursor_bar`] is off.
+    pub fn cursor_inactive_style(mut self, fg: Color, bg: Color) -> Self {
+        self.cursor_inactive_fg = fg;
+        self.cursor_inactive_bg = Some(bg);
         self
     }
 
@@ -390,6 +404,8 @@ impl Widget for GraphWidget<'_> {
                 flash_bg,
                 self.cursor_fg,
                 self.cursor_bg,
+                self.cursor_inactive_fg,
+                self.cursor_inactive_bg,
                 lane_colors,
                 fallback,
                 self.label_palette,
@@ -509,6 +525,8 @@ fn put_painted_line(
     flash_bg: Option<Color>,
     cursor_fg: Color,
     cursor_bg: Option<Color>,
+    cursor_inactive_fg: Color,
+    cursor_inactive_bg: Option<Color>,
     lane_colors: &[Color],
     fallback: Color,
     palette: Option<GraphLabelPalette>,
@@ -519,18 +537,30 @@ fn put_painted_line(
         return;
     }
     let row = Rect::new(x, y, width, 1);
-    let show_bar = selected && cursor_bar && line.selectable;
-    let bar = if show_bar { "▌" } else { " " };
+    let show_bar = selected && line.selectable;
+    let bar = if !show_bar {
+        " "
+    } else if cursor_bar {
+        "▌"
+    } else {
+        "▏"
+    };
     let row_bg = if flash_bg.is_some() {
         flash_bg
     } else if selected && cursor_bar {
         cursor_bg
+    } else if selected {
+        cursor_inactive_bg
     } else if search_match {
         search_bg
     } else {
         None
     };
-    let mut bar_style = Style::default().fg(cursor_fg).add_modifier(Modifier::BOLD);
+    let mut bar_style = if cursor_bar {
+        Style::default().fg(cursor_fg).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(cursor_inactive_fg)
+    };
     let mut row_style = Style::default();
     if let Some(bg) = row_bg {
         bar_style = bar_style.bg(bg);
@@ -1840,7 +1870,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_row_without_cursor_bar_skips_bar_keeps_footer() {
+    fn selected_row_without_cursor_bar_paints_inactive_keeps_footer() {
         let model = sample_model();
         let backend = TestBackend::new(80, 16);
         let mut terminal = Terminal::new(backend).expect("test backend");
@@ -1856,6 +1886,7 @@ mod tests {
             .expect("draw");
         let buffer = terminal.backend().buffer();
         let mut saw_bar = false;
+        let mut saw_inactive = false;
         let mut last = String::new();
         let mut prev = String::new();
         for y in 0..16u16 {
@@ -1865,6 +1896,9 @@ mod tests {
                 if cell.symbol() == "▌" {
                     saw_bar = true;
                 }
+                if cell.symbol() == "▏" {
+                    saw_inactive = true;
+                }
                 line.push_str(cell.symbol());
             }
             let trimmed = line.trim_end().to_string();
@@ -1873,7 +1907,8 @@ mod tests {
                 last = trimmed;
             }
         }
-        assert!(!saw_bar, "unfocused graph must not paint ▌");
+        assert!(!saw_bar, "unfocused graph must not paint focused ▌");
+        assert!(saw_inactive, "unfocused graph must paint inactive ▏");
         assert!(
             prev.contains("Uncommitted changes"),
             "selection footer subject stays: {prev}"
