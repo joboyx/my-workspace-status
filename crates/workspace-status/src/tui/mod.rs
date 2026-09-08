@@ -34,6 +34,7 @@ pub(crate) mod search;
 mod split;
 mod stash;
 mod state;
+mod tabs;
 mod theme;
 mod tree;
 pub(crate) mod tty;

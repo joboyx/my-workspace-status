@@ -170,7 +170,8 @@ pub fn can_open_branch_picker(snapshot: &WorkspaceSnapshot, row: &VisibleRow) ->
     }
 }
 
-fn is_family_container(snapshot: &WorkspaceSnapshot, primary: &str) -> bool {
+/// True when `primary` is a family container (has linked worktrees).
+pub fn is_family_container(snapshot: &WorkspaceSnapshot, primary: &str) -> bool {
     snapshot.repos.iter().any(|repo| {
         repo.checkout_kind == CheckoutKind::Linked && repo.primary_repo.as_deref() == Some(primary)
     })

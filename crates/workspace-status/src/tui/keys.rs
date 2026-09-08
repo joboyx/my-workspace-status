@@ -37,6 +37,8 @@ pub enum InputMode {
     HelpSearch,
     StashMenu,
     BranchPicker,
+    /// Compare-only branch picker (no checkout).
+    ComparePicker,
     /// Graph `o` overlay: mark local branches, Enter applies ancestor focus.
     GraphFocusPicker,
     CreateBranch,
@@ -122,6 +124,7 @@ pub fn event_to_action_with(
                     | InputMode::HelpSearch
                     | InputMode::StashMenu
                     | InputMode::BranchPicker
+                    | InputMode::ComparePicker
                     | InputMode::GraphFocusPicker
                     | InputMode::CreateBranch
                     | InputMode::Comment
@@ -256,7 +259,7 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
                     KeyCode::Delete | KeyCode::Home | KeyCode::End | KeyCode::Enter
                 )
         }
-        InputMode::BranchPicker => match key.code {
+        InputMode::BranchPicker | InputMode::ComparePicker => match key.code {
             KeyCode::Backspace => true,
             KeyCode::Char('C') => false,
             KeyCode::Char(_) => typing,
@@ -341,6 +344,7 @@ fn key_to_action(
             | InputMode::Comment
             | InputMode::CreateBranch
             | InputMode::BranchPicker
+            | InputMode::ComparePicker
             | InputMode::GraphFocusPicker
             | InputMode::StashMenu => {}
             _ => return Action::None,
@@ -380,6 +384,9 @@ fn key_to_action(
         },
         InputMode::GPending { search_active } => match key.code {
             KeyCode::Char('g') => Action::MoveToStart,
+            KeyCode::Char('t') => Action::NextTab,
+            KeyCode::Char('T') => Action::PreviousTab,
+            KeyCode::Char(c @ '1'..='9') => Action::JumpToTab(c as u8 - b'0'),
             KeyCode::Esc => Action::None,
             _ => normal_key(
                 key,
@@ -414,6 +421,17 @@ fn key_to_action(
             KeyCode::Enter => Action::StashMenuEnter,
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Action::StashMenuChar(c)
+            }
+            _ => Action::None,
+        },
+        InputMode::ComparePicker => match key.code {
+            KeyCode::Esc => Action::ComparePickerCancel,
+            KeyCode::Enter => Action::ComparePickerSubmit,
+            KeyCode::Backspace => Action::ComparePickerBackspace,
+            KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::ComparePickerMove(1),
+            KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::ComparePickerMove(-1),
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::ComparePickerChar(c)
             }
             _ => Action::None,
         },
@@ -1666,6 +1684,45 @@ mod tests {
     }
 
     #[test]
+    fn g_chord_tabs_and_gg_stay_distinct() {
+        let pending = InputMode::GPending {
+            search_active: false,
+        };
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('t')), pending, false, false),
+            Action::NextTab
+        );
+        assert_eq!(
+            event_to_action(&shift(KeyCode::Char('t')), pending, false, false),
+            Action::PreviousTab
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('1')), pending, false, false),
+            Action::JumpToTab(1)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('9')), pending, false, false),
+            Action::JumpToTab(9)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Esc), pending, false, false),
+            Action::None
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('g')), pending, false, false),
+            Action::MoveToStart
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('t')), normal(), false, false),
+            Action::ToggleTreeMode
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('T')), normal(), false, false),
+            Action::CycleTheme
+        );
+    }
+
+    #[test]
     fn gg_chord_arms_then_moves_to_start() {
         assert_eq!(
             event_to_action(&key(KeyCode::Char('g')), normal(), false, false),
@@ -1969,6 +2026,7 @@ mod tests {
             InputMode::Comment,
             InputMode::Confirm,
             InputMode::BranchPicker,
+            InputMode::ComparePicker,
             InputMode::GraphFocusPicker,
             InputMode::CreateBranch,
             InputMode::StashMenu,

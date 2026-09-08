@@ -168,6 +168,28 @@ pub enum Action {
     CommandPaletteSubmit,
     /// Esc close. No run.
     CommandPaletteCancel,
+    /// Open or focus a compare tab versus the checkout default tip.
+    CompareVsDefault,
+    /// Open the compare-only branch picker.
+    CompareVsBranch,
+    /// Close the active compare tab.
+    CloseCompareTab,
+    /// Cycle to the next tab (`gt`).
+    NextTab,
+    /// Cycle to the previous tab (`gT`).
+    PreviousTab,
+    /// Absolute tab index. `1` is Workspace.
+    JumpToTab(u8),
+    /// Move the compare picker highlight.
+    ComparePickerMove(i32),
+    /// Append a compare picker filter character.
+    ComparePickerChar(char),
+    /// Delete the last compare picker filter character.
+    ComparePickerBackspace,
+    /// Open or focus the highlighted compare branch.
+    ComparePickerSubmit,
+    /// Close the compare picker without opening a tab.
+    ComparePickerCancel,
     /// Terminal size changed. Crossterm `Resize` carries the new cols/rows;
     /// ioctl can still report the previous size when the event arrives.
     Resize {
@@ -192,7 +214,12 @@ pub enum ExternalDiffKind {
     /// HEAD vs worktree (`prepare_worktree_diff`).
     Worktree,
     /// Blob temps at `left_rev` and `right_rev` (`prepare_rev_diff`).
-    Rev { left_rev: String, right_rev: String },
+    Rev {
+        left_rev: String,
+        right_rev: String,
+        /// LEFT blob path when it differs from `Effect::ExternalDiff.path` (rename).
+        left_path: Option<String>,
+    },
 }
 
 /// Side effect requested after dispatch.
@@ -313,6 +340,33 @@ pub enum Effect {
     /// Leave Diff without a new load. Bumps the commit-diff generation so a
     /// late result cannot reopen Diff (Esc Diff→Files). Does not enqueue git.
     DropCommitDiff,
+    /// Resolve SHAs and the committed file list for one compare tab.
+    LoadCompareRange {
+        tab_id: u64,
+        repo: String,
+        base_ref: String,
+        force: bool,
+    },
+    /// Load one compare-file diff.
+    LoadCompareDiff {
+        tab_id: u64,
+        repo: String,
+        source: CommitFileSource,
+        path: String,
+        old_path: Option<String>,
+    },
+    /// List local + `origin/*` for the compare picker (no checkout).
+    PrepareComparePicker {
+        repo: String,
+    },
+    /// Probe HEAD / base-tip SHAs for one compare tab after watch.
+    ProbeCompareTab {
+        tab_id: u64,
+        repo: String,
+        base_ref: String,
+        last_head: Option<String>,
+        last_base_tip: Option<String>,
+    },
     /// Copy `text` to the clipboard (OSC 52 / host tool).
     CopyClipboard {
         text: String,

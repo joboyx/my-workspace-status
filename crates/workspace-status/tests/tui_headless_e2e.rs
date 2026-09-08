@@ -16,7 +16,9 @@ use common::hscroll::{
     TREE_HSCROLL_PREFIX,
 };
 use common::seed::{
-    daily_workspace, focus_workspace, git, git_env, seed_long_diff_file, seed_long_path_file,
+    compare_ahead_workspace, daily_workspace, focus_workspace, git, git_env, new_workspace,
+    seed_compare_ahead, seed_compare_behind, seed_compare_diverged, seed_compare_no_default,
+    seed_compare_unborn, seed_compare_unrelated, seed_long_diff_file, seed_long_path_file,
     seed_long_subject_repo, seed_merge_mark_family, seed_primary_and_linked_family,
     seed_primary_merged_family, seed_repo, seed_tall_graph,
 };
@@ -276,12 +278,23 @@ fn title_row_has_no_focus_glyph(top: &str) -> bool {
         && !top.contains("* diff")
 }
 
+fn pane_title_row(frame: &str) -> &str {
+    frame
+        .lines()
+        .find(|line| {
+            (line.contains("tree") || line.contains("graph") || line.contains("files"))
+                && (line.contains('─') || line.contains('┐') || line.contains('┌'))
+        })
+        .or_else(|| frame.lines().nth(1))
+        .unwrap_or("")
+}
+
 #[test]
 fn focused_pane_titles_are_plain_names() {
     let (root, workspace) = daily_workspace();
     let mut tui = open(&workspace);
     let frame = tui.frame();
-    let top = frame.lines().next().unwrap_or("");
+    let top = pane_title_row(&frame);
     assert!(
         top.contains("tree"),
         "first paint left title is tree:\n{frame}"
@@ -297,7 +310,7 @@ fn focused_pane_titles_are_plain_names() {
 
     tui.tab();
     let frame = tui.frame();
-    let top = frame.lines().next().unwrap_or("");
+    let top = pane_title_row(&frame);
     assert!(
         top.contains("tree"),
         "after Tab left title is tree:\n{frame}"
@@ -2410,5 +2423,374 @@ fn command_palette_does_not_steal_daily_keys() {
     assert_ne!(tui.input_mode(), InputMode::CommandPalette);
     tui.key('P');
     assert_ne!(tui.input_mode(), InputMode::CommandPalette);
+    let _ = fs::remove_dir_all(root);
+}
+
+fn open_palette_run(tui: &mut HeadlessTui, query: &str) {
+    tui.ctrl_k();
+    type_palette_query(tui, query);
+    tui.enter();
+}
+
+fn next_tab(tui: &mut HeadlessTui) {
+    tui.key('g');
+    tui.key_release('g');
+    tui.key('t');
+}
+
+fn prev_tab(tui: &mut HeadlessTui) {
+    tui.key('g');
+    tui.key_release('g');
+    tui.shift_key('t');
+}
+
+fn jump_tab(tui: &mut HeadlessTui, n: char) {
+    tui.key('g');
+    tui.key_release('g');
+    tui.key(n);
+}
+
+fn git_head(repo: &Path) -> String {
+    git_stdout(repo, &["rev-parse", "HEAD"])
+}
+
+fn git_branch(repo: &Path) -> String {
+    git_stdout(repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+}
+
+fn focus_repo_row(tui: &mut HeadlessTui, name: &str) {
+    tui.search(name);
+}
+
+#[test]
+fn compare_from_commit_files_drill_paints_diff_pane() {
+    let (root, workspace) = daily_workspace();
+    let mut tui = open(&workspace);
+    tui.search("merger");
+    assert!(tui.right_is_graph(), "merger row should load the graph");
+    tui.enter();
+    tui.key('j');
+    tui.key('j');
+    tui.enter();
+    let files = tui.frame();
+    assert!(
+        tui.right_is_files(),
+        "Enter on a graph commit should open the file list:\n{files}"
+    );
+    open_palette_run(&mut tui, "vs default");
+    let frame = tui.frame();
+    assert_eq!(tui.active_tab(), 1, "{frame}");
+    assert!(
+        tui.right_is_diff(),
+        "compare right pane must be DiffPane:\n{frame}"
+    );
+    assert!(
+        !tui.right_is_files(),
+        "parked Files drill must not own the right pane:\n{frame}"
+    );
+    assert!(
+        tui.left_is_files() && !tui.left_is_graph(),
+        "compare left pane is the committed file list:\n{frame}"
+    );
+    assert!(
+        frame.contains("COMMITTED") || frame.contains("No committed changes"),
+        "compare paint is committed-only:\n{frame}"
+    );
+    tui.watch_tick();
+    let after = tui.frame();
+    assert!(
+        tui.right_is_diff() && !tui.right_is_files(),
+        "watch must not restore the parked Files drill:\n{after}"
+    );
+    assert_eq!(tui.active_tab(), 1, "{after}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn compare_palette_picker_opens_tab_and_keeps_head() {
+    let (root, workspace) = compare_ahead_workspace();
+    let repo = workspace.join("app");
+    let head_before = git_head(&repo);
+    let branch_before = git_branch(&repo);
+    let mut tui = open(&workspace);
+    focus_repo_row(&mut tui, "app");
+    let snap_before = tui.snapshot_head("app");
+    open_palette_run(&mut tui, "vs branch");
+    assert!(
+        tui.compare_picker_open(),
+        "picker must open: {}",
+        tui.frame()
+    );
+    type_palette_query(&mut tui, "main");
+    tui.enter();
+    assert_eq!(tui.tab_count(), 2);
+    assert_eq!(tui.active_tab(), 1);
+    assert_eq!(tui.tab_labels()[1], "app · vs main");
+    assert_eq!(git_head(&repo), head_before);
+    assert_eq!(git_branch(&repo), branch_before);
+    assert_eq!(tui.snapshot_head("app"), snap_before);
+    let files = tui.compare_files();
+    assert!(files.contains(&"alpha.txt".into()), "{files:?}");
+    assert!(files.contains(&"beta.txt".into()), "{files:?}");
+    assert!(!files.iter().any(|p| p.contains("README")), "{files:?}");
+    let frame = tui.frame();
+    assert_contains(&frame, "COMMITTED");
+    assert_contains(&frame, "main...HEAD");
+    assert_absent(&frame, "UNSTAGED");
+    assert!(!tui.focus_is_right());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn compare_vs_default_equal_tips_hides_dirty() {
+    let (root, workspace) = daily_workspace();
+    let repo = workspace.join("app");
+    let head_before = git_head(&repo);
+    let mut tui = open(&workspace);
+    tui.search("README");
+    open_palette_run(&mut tui, "vs default");
+    assert_eq!(tui.tab_labels()[1], "app · vs main");
+    assert!(tui.compare_files().is_empty(), "{:?}", tui.compare_files());
+    let frame = tui.frame();
+    assert_contains(&frame, "No committed changes");
+    assert_contains(&frame, "No committed changes vs main");
+    assert_eq!(git_head(&repo), head_before);
+    tui.key('s');
+    let frame = tui.frame();
+    assert_contains(&frame, "Switch to Workspace tab");
+    assert_eq!(git_head(&repo), head_before);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn compare_ahead_behind_diverged_and_unrelated() {
+    let (root, workspace) = new_workspace("ws-tui-compare-shapes");
+    seed_compare_ahead(&workspace, "ahead");
+    seed_compare_behind(&workspace, "behind");
+    seed_compare_diverged(&workspace, "diverged");
+    seed_compare_unrelated(&workspace, "orphan");
+    let mut tui = open(&workspace);
+
+    tui.search("ahead");
+    open_palette_run(&mut tui, "vs default");
+    let files = tui.compare_files();
+    assert!(files.contains(&"alpha.txt".into()), "ahead {files:?}");
+    assert!(tui.compare_error().is_none(), "{:?}", tui.compare_error());
+
+    jump_tab(&mut tui, '1');
+    tui.search("behind");
+    open_palette_run(&mut tui, "vs default");
+    assert!(
+        tui.compare_files().is_empty(),
+        "behind must be empty: {:?}",
+        tui.compare_files()
+    );
+    assert_contains(&tui.frame(), "No committed changes");
+
+    jump_tab(&mut tui, '1');
+    tui.search("diverged");
+    open_palette_run(&mut tui, "vs default");
+    assert_eq!(tui.compare_files(), vec!["feature.txt".to_string()]);
+    assert!(!tui.compare_files().iter().any(|p| p == "main-only.txt"));
+
+    jump_tab(&mut tui, '1');
+    tui.search("orphan");
+    open_palette_run(&mut tui, "vs default");
+    let err = tui.compare_error().unwrap_or_default();
+    assert!(
+        err.contains("No merge base between"),
+        "unrelated must keep the tab with merge-base error: {err}"
+    );
+    assert_eq!(tui.tab_count(), 5);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn compare_missing_default_and_unborn_disable_open() {
+    let (root, workspace) = new_workspace("ws-tui-compare-disable");
+    seed_compare_no_default(&workspace, "topic");
+    seed_compare_unborn(&workspace, "empty");
+    let mut tui = open(&workspace);
+
+    tui.search("topic");
+    tui.ctrl_k();
+    type_palette_query(&mut tui, "vs default");
+    assert_eq!(
+        tui.palette_reason_for("Diff vs default").as_deref(),
+        Some("Default branch not found")
+    );
+    tui.enter();
+    assert_eq!(tui.tab_count(), 1);
+    tui.esc();
+
+    tui.search("empty");
+    tui.ctrl_k();
+    type_palette_query(&mut tui, "vs default");
+    assert_eq!(
+        tui.palette_reason_for("Diff vs default").as_deref(),
+        Some("HEAD has no commit")
+    );
+    tui.esc();
+    tui.ctrl_k();
+    type_palette_query(&mut tui, "vs branch");
+    assert_eq!(
+        tui.palette_reason_for("Diff vs branch…").as_deref(),
+        Some("HEAD has no commit")
+    );
+    tui.enter();
+    assert_eq!(tui.tab_count(), 1);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn compare_workspace_and_family_are_not_targets() {
+    let (root, workspace) = new_workspace("ws-tui-compare-family");
+    seed_primary_and_linked_family(&workspace);
+    let mut tui = open(&workspace);
+    gg(&mut tui);
+    tui.ctrl_k();
+    type_palette_query(&mut tui, "vs default");
+    assert_eq!(
+        tui.palette_reason_for("Diff vs default").as_deref(),
+        Some("Focus a checkout to compare")
+    );
+    tui.esc();
+    tui.search("app");
+    tui.ctrl_k();
+    type_palette_query(&mut tui, "vs default");
+    assert_eq!(
+        tui.palette_reason_for("Diff vs default").as_deref(),
+        Some("Focus a checkout to compare")
+    );
+    tui.esc();
+    tui.ctrl_k();
+    type_palette_query(&mut tui, "close compare");
+    assert_eq!(
+        tui.palette_reason_for("Close compare tab").as_deref(),
+        Some("Workspace tab cannot be closed")
+    );
+    tui.enter();
+    assert_eq!(tui.tab_count(), 1);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn compare_missing_base_after_create_keeps_tab() {
+    let (root, workspace) = compare_ahead_workspace();
+    let mut tui = open(&workspace);
+    tui.search("app");
+    open_palette_run(&mut tui, "vs default");
+    assert_eq!(tui.tab_labels()[1], "app · vs origin/main");
+    git(
+        &workspace.join("app"),
+        &["update-ref", "-d", "refs/remotes/origin/main"],
+    );
+    tui.key('r');
+    let err = tui.compare_error().unwrap_or_default();
+    assert!(
+        err.contains("Base ref not found: origin/main"),
+        "missing base must keep the tab: {err} / {}",
+        tui.frame()
+    );
+    assert_eq!(tui.active_tab(), 1);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn compare_picker_never_checkouts() {
+    let (root, workspace) = compare_ahead_workspace();
+    let repo = workspace.join("app");
+    let head_before = git_head(&repo);
+    let branch_before = git_branch(&repo);
+    let mut tui = open(&workspace);
+    tui.search("app");
+    open_palette_run(&mut tui, "vs branch");
+    assert!(tui.compare_picker_open());
+    type_palette_query(&mut tui, "zzz-missing");
+    assert_contains(&tui.frame(), "No branches to compare");
+    tui.esc();
+    assert_eq!(git_head(&repo), head_before);
+    assert_eq!(git_branch(&repo), branch_before);
+    assert_eq!(tui.tab_count(), 1);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn compare_tab_identity_and_esc() {
+    let (root, workspace) = compare_ahead_workspace();
+    let mut tui = open(&workspace);
+    tui.search("app");
+    open_palette_run(&mut tui, "vs default");
+    assert_eq!(tui.compare_file_cursor(), 0);
+    tui.key('j');
+    assert_eq!(tui.compare_file_cursor(), 1);
+    open_palette_run(&mut tui, "vs default");
+    assert_eq!(tui.tab_count(), 2);
+    assert_eq!(tui.compare_file_cursor(), 1);
+    tui.enter();
+    assert!(tui.focus_is_right());
+    tui.esc();
+    assert!(!tui.focus_is_right());
+    tui.esc();
+    assert_eq!(tui.active_tab(), 0);
+    assert_eq!(tui.tab_count(), 1);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn compare_tab_chords_gg_and_unrelated_keys() {
+    let (root, workspace) = compare_ahead_workspace();
+    let repo = workspace.join("app");
+    let mut tui = open(&workspace);
+    tui.search("app");
+    open_palette_run(&mut tui, "vs default");
+    open_palette_run(&mut tui, "vs branch");
+    type_palette_query(&mut tui, "main");
+    tui.enter();
+    assert_eq!(tui.tab_count(), 3);
+    assert_eq!(tui.active_tab(), 2);
+    jump_tab(&mut tui, '1');
+    assert_eq!(tui.active_tab(), 0);
+    next_tab(&mut tui);
+    assert_eq!(tui.active_tab(), 1);
+    prev_tab(&mut tui);
+    assert_eq!(tui.active_tab(), 0);
+    jump_tab(&mut tui, '9');
+    assert_eq!(tui.active_tab(), 0);
+
+    next_tab(&mut tui);
+    tui.key('d');
+    assert_contains(&tui.frame(), "Switch to Workspace tab");
+    assert_eq!(git_branch(&repo), "feature/ahead");
+    tui.key('t');
+    assert_eq!(tui.active_tab(), 1);
+
+    jump_tab(&mut tui, '1');
+    gg(&mut tui);
+    assert_eq!(tui.cursor_id(), "workspace");
+    let theme_before = tui.style_fingerprint();
+    tui.key('t');
+    assert_contains(&tui.frame(), "Flat paths");
+    tui.key('T');
+    assert_ne!(tui.style_fingerprint(), theme_before);
+    tui.search("app");
+    tui.key('d');
+    assert_eq!(git_branch(&repo), "main");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn compare_click_tab_and_close_workspace_stays() {
+    let (root, workspace) = compare_ahead_workspace();
+    let mut tui = open(&workspace);
+    tui.search("app");
+    open_palette_run(&mut tui, "vs default");
+    tui.click_tab(0);
+    assert_eq!(tui.active_tab(), 0);
+    tui.click_tab(1);
+    assert_eq!(tui.active_tab(), 1);
+    open_palette_run(&mut tui, "close compare");
+    assert_eq!(tui.active_tab(), 0);
+    assert_eq!(tui.tab_count(), 1);
     let _ = fs::remove_dir_all(root);
 }

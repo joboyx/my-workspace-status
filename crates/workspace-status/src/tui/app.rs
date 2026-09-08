@@ -25,9 +25,10 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 use crate::config::WorkspaceStatusConfig;
 use crate::discovery::{collect_snapshots, process_repo, RepoCheckoutMeta};
 use crate::git::{
-    checkout_branch, diff_commit_file_ctx, diff_stash_file_ctx, fast_forward_to_remote_ref,
-    git_diff_args, list_commit_name_status, list_stash_name_status, list_worktree_name_status,
-    merge_into_head, repo_has_local_changes, rev_parse_quiet, MergeIntoHeadResult, NameStatus,
+    checkout_branch, diff_commit_file_ctx, diff_compare_file_ctx, diff_stash_file_ctx,
+    fast_forward_to_remote_ref, git_diff_args, list_commit_name_status, list_compare_name_status,
+    list_stash_name_status, list_worktree_name_status, merge_base, merge_into_head,
+    repo_has_local_changes, rev_parse_commit, rev_parse_quiet, MergeIntoHeadResult, NameStatus,
 };
 use crate::snapshot::{
     build_workspace_snapshot, repo_snapshots_from_workspace, CheckoutKind, FileChange,
@@ -46,6 +47,7 @@ use super::graph_load::{
 };
 use super::keys::{event_to_action_with, is_held_nav_backlog};
 use super::state::AppState;
+use super::tabs::{base_ref_not_found, no_merge_base, HEAD_HAS_NO_COMMIT};
 use super::tty::{disable_mouse, enable_mouse, poll_event, read_event};
 #[cfg(test)]
 use super::watch::{checkout_watch_identities, watch_needs_pane_reload};
@@ -369,7 +371,11 @@ impl RightPaneRequest {
     }
 }
 
+/// Apply a coalesced right-pane load. Compare tabs ignore this path.
 pub(crate) fn apply_right_pane_load(state: &mut AppState, payload: RightPaneLoad) {
+    if state.is_compare_tab() {
+        return;
+    }
     match payload {
         RightPaneLoad::Diff {
             repo,
@@ -608,7 +614,63 @@ pub(crate) fn compute_commit_files(dir: &Path, source: &CommitFileSource) -> Vec
         CommitFileSource::Commit { commit_id } => list_commit_name_status(dir, commit_id),
         CommitFileSource::Stash { stash_ref } => list_stash_name_status(dir, stash_ref),
         CommitFileSource::Worktree => list_worktree_name_status(dir),
+        CommitFileSource::Compare { .. } => Vec::new(),
     }
+}
+
+/// Resolved compare endpoints plus the committed `base...HEAD` file list.
+pub(crate) struct CompareRangeLoad {
+    /// Immutable compare endpoints for this load.
+    pub source: CommitFileSource,
+    /// Committed `base...HEAD` paths.
+    pub files: Vec<super::drill::CommitFile>,
+    /// HEAD SHA at load time.
+    pub head: String,
+    /// Base tip SHA at load time.
+    pub base_tip: String,
+}
+
+/// Resolve HEAD / base / merge-base and list committed compare files.
+pub(crate) fn compute_compare_range(
+    dir: &Path,
+    base_ref: &str,
+) -> Result<CompareRangeLoad, String> {
+    let head = rev_parse_commit(dir, "HEAD")?.ok_or_else(|| HEAD_HAS_NO_COMMIT.to_string())?;
+    let base_tip = rev_parse_commit(dir, base_ref)?.ok_or_else(|| base_ref_not_found(base_ref))?;
+    let merge = merge_base(dir, &base_tip, &head)?.ok_or_else(|| no_merge_base(base_ref))?;
+    let files = list_compare_name_status(dir, &base_tip, &head)?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    Ok(CompareRangeLoad {
+        source: CommitFileSource::Compare {
+            base_ref: base_ref.to_string(),
+            base_tip: base_tip.clone(),
+            merge_base: merge,
+            head: head.clone(),
+        },
+        files,
+        head,
+        base_tip,
+    })
+}
+
+/// Probe whether compare endpoints moved. `Ok(true)` means reload.
+pub(crate) fn probe_compare_range(
+    dir: &Path,
+    base_ref: &str,
+    last_head: Option<&str>,
+    last_base_tip: Option<&str>,
+) -> Result<(bool, Option<String>, Option<String>), String> {
+    let head = rev_parse_commit(dir, "HEAD")?;
+    let base_tip = rev_parse_commit(dir, base_ref)?;
+    let changed = match (last_head, last_base_tip) {
+        (Some(prev_head), Some(prev_base)) => {
+            head.as_deref() != Some(prev_head) || base_tip.as_deref() != Some(prev_base)
+        }
+        _ => false,
+    };
+    Ok((changed, head, base_tip))
 }
 
 pub(crate) fn commit_diff_list(state: &AppState) -> (Vec<super::drill::CommitFile>, usize) {
@@ -645,7 +707,23 @@ pub(crate) fn compute_commit_diff(
             }
             head_file_diff(&dir, path, context)
         }
+        CommitFileSource::Compare { .. } => DiffContent::default(),
     }
+}
+
+/// Unified compare diff for one path. Failure is `Err`.
+pub(crate) fn compute_compare_diff(
+    dir: &Path,
+    source: &CommitFileSource,
+    path: &str,
+    old_path: Option<&str>,
+    context: Option<u32>,
+) -> Result<DiffContent, String> {
+    let CommitFileSource::Compare { base_tip, head, .. } = source else {
+        return Ok(DiffContent::default());
+    };
+    let lines = diff_compare_file_ctx(dir, base_tip, head, path, old_path, context)?;
+    Ok(DiffContent::from_compare_lines(lines))
 }
 
 fn head_file_diff(dir: &Path, path: &str, context: Option<u32>) -> DiffContent {
@@ -979,6 +1057,7 @@ mod tests {
             primary_repo: None,
             merged_into_default: None,
             default_branch_override: None,
+            default_tip_ref: None,
             local_branches: Vec::new(),
         }
     }
@@ -1669,5 +1748,36 @@ mod tests {
             Some("ahead by 3 commits")
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn probe_without_recorded_sha_is_not_a_change() {
+        let dir = std::env::temp_dir().join(format!(
+            "ws-probe-none-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        init_repo(&dir);
+        let head = exec_git(&["rev-parse", "HEAD"], &dir);
+        let (changed, got_head, got_base) = probe_compare_range(&dir, "HEAD", None, None).unwrap();
+        assert!(!changed, "missing recorded SHAs must not force a reload");
+        assert_eq!(got_head.as_deref(), Some(head.as_str()));
+        assert_eq!(got_base.as_deref(), Some(head.as_str()));
+        let (changed, _, _) =
+            probe_compare_range(&dir, "HEAD", Some(head.as_str()), Some(head.as_str())).unwrap();
+        assert!(!changed, "equal tips must not reload");
+        fs::write(dir.join("dirty.txt"), "dirty\n").unwrap();
+        let (changed, _, _) =
+            probe_compare_range(&dir, "HEAD", Some(head.as_str()), Some(head.as_str())).unwrap();
+        assert!(!changed, "dirty-only worktree must not reload compare");
+        fs::write(dir.join("next.txt"), "next\n").unwrap();
+        git(&dir, &["add", "next.txt"]);
+        git(&dir, &["commit", "-q", "-m", "move head"]);
+        let (changed, _, _) =
+            probe_compare_range(&dir, "HEAD", Some(head.as_str()), Some(head.as_str())).unwrap();
+        assert!(changed, "HEAD SHA change must reload");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

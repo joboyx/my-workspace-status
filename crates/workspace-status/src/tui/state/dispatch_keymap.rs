@@ -5,9 +5,13 @@ use std::time::Instant;
 use super::super::action::{Action, Effect, ExternalDiffKind, PaletteOpenedBy};
 use super::super::branches::can_open_branch_picker;
 use super::super::command_palette::CommandPaletteState;
-use super::super::gates::{dispatch_is_noop, ListFocusTarget};
+use super::super::gates::{dispatch_is_noop, is_compare_mutation, ListFocusTarget};
 use super::super::ops::{collect_write_files, op_is_kind_noop, Op};
 use super::super::split::SplitDrag;
+use super::super::tabs::{
+    DEFAULT_BRANCH_NOT_FOUND, FOCUS_A_CHECKOUT, HEAD_HAS_NO_COMMIT, SWITCH_TO_WORKSPACE_TAB,
+    WORKSPACE_TAB_CANNOT_CLOSE,
+};
 use super::super::tree::NodeKind;
 use super::{AppState, FileWrite, FocusPane, FoldOp};
 
@@ -213,6 +217,9 @@ impl AppState {
                 if let Some((repo, path)) = self.focused_commit_edit_path() {
                     self.status = format!("edit {path}");
                     Effect::EditFile { repo, path }
+                } else if self.is_compare_tab() {
+                    self.status = "focus a file to edit".into();
+                    Effect::None
                 } else if let Some((repo, change)) = self.focused_file_if_shown() {
                     self.status = format!("edit {}", change.path);
                     Effect::EditFile {
@@ -229,6 +236,9 @@ impl AppState {
                     let kind = self.external_diff_kind();
                     self.status = format!("diff {path}");
                     Effect::ExternalDiff { repo, path, kind }
+                } else if self.is_compare_tab() {
+                    self.status = "focus a file to diff".into();
+                    Effect::None
                 } else if let Some((repo, change)) = self.focused_file_if_shown() {
                     self.status = format!("diff {}", change.path);
                     Effect::ExternalDiff {
@@ -241,7 +251,15 @@ impl AppState {
                     Effect::None
                 }
             }
-            Action::WatchTick => Effect::WatchRefresh,
+            Action::WatchTick => {
+                let mut effects = vec![Effect::WatchRefresh];
+                effects.extend(self.compare_probe_effects());
+                if effects.len() == 1 {
+                    Effect::WatchRefresh
+                } else {
+                    Effect::Batch(effects)
+                }
+            }
             Action::FetchTick => self.fetch_tick_effect(),
             Action::GraphFocusBranches => {
                 self.drag = SplitDrag::None;
@@ -341,6 +359,39 @@ impl AppState {
                 self.command_palette = None;
                 Effect::None
             }
+            Action::CompareVsDefault => self.compare_vs_default(),
+            Action::CompareVsBranch => self.compare_vs_branch(),
+            Action::CloseCompareTab => self.close_compare_tab(),
+            Action::NextTab => self.activate_relative_tab(1),
+            Action::PreviousTab => self.activate_relative_tab(-1),
+            Action::JumpToTab(n) => self.jump_to_tab(n),
+            Action::ComparePickerMove(delta) => {
+                if let Some(picker) = self.compare_picker.as_mut() {
+                    picker.move_cursor(delta);
+                }
+                Effect::None
+            }
+            Action::ComparePickerChar(c) => {
+                if let Some(picker) = self.compare_picker.as_mut() {
+                    let mut filter = picker.filter.clone();
+                    filter.push(c);
+                    picker.set_filter(filter);
+                }
+                Effect::None
+            }
+            Action::ComparePickerBackspace => {
+                if let Some(picker) = self.compare_picker.as_mut() {
+                    let mut filter = picker.filter.clone();
+                    filter.pop();
+                    picker.set_filter(filter);
+                }
+                Effect::None
+            }
+            Action::ComparePickerSubmit => self.submit_compare_picker(),
+            Action::ComparePickerCancel => {
+                self.abandon_compare_picker();
+                Effect::None
+            }
             Action::None => Effect::None,
             _ => Effect::None,
         }
@@ -376,6 +427,9 @@ impl AppState {
 
     /// Why the highlighted command cannot run, or `None` if Enter should dispatch.
     pub(crate) fn palette_disabled_reason(&self, action: &Action) -> Option<String> {
+        if self.is_compare_tab() && is_compare_mutation(action) {
+            return Some(SWITCH_TO_WORKSPACE_TAB.into());
+        }
         if dispatch_is_noop(
             action,
             self.nav_depth(),
@@ -490,18 +544,22 @@ impl AppState {
                 }
             }
             Action::Edit => {
-                if self.focused_commit_edit_path().is_some()
-                    || self.focused_file_if_shown().is_some()
-                {
+                if self.focused_commit_edit_path().is_some() {
+                    None
+                } else if self.is_compare_tab() {
+                    Some("focus a file to edit".into())
+                } else if self.focused_file_if_shown().is_some() {
                     None
                 } else {
                     Some("focus a dirty file to edit".into())
                 }
             }
             Action::ExternalDiff => {
-                if self.focused_commit_edit_path().is_some()
-                    || self.focused_file_if_shown().is_some()
-                {
+                if self.focused_commit_edit_path().is_some() {
+                    None
+                } else if self.is_compare_tab() {
+                    Some("focus a file to diff".into())
+                } else if self.focused_file_if_shown().is_some() {
                     None
                 } else {
                     Some("focus a file to diff".into())
@@ -544,6 +602,34 @@ impl AppState {
                     None
                 } else {
                     Some("focus a visible repo to stash".into())
+                }
+            }
+            Action::CompareVsDefault => {
+                let Some(checkout) = self.compare_target_checkout() else {
+                    return Some(FOCUS_A_CHECKOUT.into());
+                };
+                match self.checkout_head_and_default(&checkout) {
+                    Some((head, _)) if head.is_empty() => Some(HEAD_HAS_NO_COMMIT.into()),
+                    Some((_, None)) => Some(DEFAULT_BRANCH_NOT_FOUND.into()),
+                    Some(_) => None,
+                    None => Some(FOCUS_A_CHECKOUT.into()),
+                }
+            }
+            Action::CompareVsBranch => {
+                let Some(checkout) = self.compare_target_checkout() else {
+                    return Some(FOCUS_A_CHECKOUT.into());
+                };
+                match self.checkout_head_and_default(&checkout) {
+                    Some((head, _)) if head.is_empty() => Some(HEAD_HAS_NO_COMMIT.into()),
+                    Some(_) => None,
+                    None => Some(FOCUS_A_CHECKOUT.into()),
+                }
+            }
+            Action::CloseCompareTab => {
+                if self.tabs.is_workspace() {
+                    Some(WORKSPACE_TAB_CANNOT_CLOSE.into())
+                } else {
+                    None
                 }
             }
             _ => None,

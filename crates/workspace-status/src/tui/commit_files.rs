@@ -85,6 +85,21 @@ pub fn flatten_commit_files(
     out
 }
 
+/// Flattened-row index for `path`, or the first file row when `path` is `None`.
+pub fn commit_file_cursor_index(rows: &[CommitFileRow], path: Option<&str>) -> usize {
+    if rows.is_empty() {
+        return 0;
+    }
+    path.and_then(|path| {
+        rows.iter()
+            .position(|row| row.is_file() && row.path == path)
+            .or_else(|| rows.iter().position(|row| row.path == path))
+    })
+    .or_else(|| rows.iter().position(|row| row.is_file()))
+    .unwrap_or(0)
+    .min(rows.len() - 1)
+}
+
 /// Dir or file node in the commit-file forest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitFileNode {
@@ -340,6 +355,10 @@ mod tests {
         assert_eq!(readme.trailing.trim(), "M");
         let dir_idx = rows.iter().position(|r| r.id == "dir:src").unwrap();
         assert_eq!(rows[dir_idx + 1].id, "file:src/lib.rs");
+        let first_file = commit_file_cursor_index(&rows, None);
+        assert_eq!(rows[first_file].id, "file:src/lib.rs");
+        let keep_readme = commit_file_cursor_index(&rows, Some("README.md"));
+        assert_eq!(rows[keep_readme].id, "file:README.md");
     }
 
     #[test]

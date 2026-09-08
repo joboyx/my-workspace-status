@@ -26,18 +26,24 @@ pub fn git_env() -> Vec<(&'static str, &'static str)> {
 
 /// Run `git` in `cwd` with [`git_env`]. Panics on non-zero exit.
 pub fn git(cwd: &Path, args: &[&str]) {
+    let _ = git_stdout(cwd, args);
+}
+
+/// Run `git` in `cwd` and return trimmed stdout. Panics on non-zero exit.
+pub fn git_stdout(cwd: &Path, args: &[&str]) -> String {
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(cwd);
     for (k, v) in git_env() {
         cmd.env(k, v);
     }
-    cmd.stdout(Stdio::null()).stderr(Stdio::piped());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let out = cmd.output().expect("git runs");
     assert!(
         out.status.success(),
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 /// Unique temp directory: `{prefix}-{nanos}`.
@@ -200,6 +206,103 @@ pub fn seed_long_diff_file(workspace: &Path, name: &str, tail: &str) {
         body.push_str(&format!("line {i}\n"));
     }
     fs::write(workspace.join("app").join(name), body).unwrap();
+}
+
+/// Feature checkout two commits ahead of `main`, plus `origin/main`.
+pub fn seed_compare_ahead(workspace: &Path, name: &str) {
+    let repo = workspace.join(name);
+    init_repo(&repo, "main");
+    fs::write(repo.join("README.md"), format!("# {name}\n")).unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "seed main"]);
+    let origin = workspace.join(format!("{name}.origin.git"));
+    git(
+        workspace,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            name,
+            origin.file_name().and_then(|n| n.to_str()).unwrap(),
+        ],
+    );
+    git(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git(&repo, &["fetch", "-q", "origin"]);
+    git(&repo, &["checkout", "-q", "-b", "feature/ahead"]);
+    fs::write(repo.join("alpha.txt"), "alpha-body\n").unwrap();
+    fs::write(repo.join("beta.txt"), "beta-body\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "ahead files"]);
+}
+
+/// Workspace with one ahead compare checkout named `app`.
+pub fn compare_ahead_workspace() -> (PathBuf, PathBuf) {
+    let (root, workspace) = new_workspace("ws-tui-compare-ahead");
+    seed_compare_ahead(&workspace, "app");
+    (root, workspace)
+}
+
+/// Checked out at an ancestor of `main` (behind; three-dot list empty).
+pub fn seed_compare_behind(workspace: &Path, name: &str) {
+    let repo = workspace.join(name);
+    init_repo(&repo, "main");
+    fs::write(repo.join("README.md"), "# root\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "root"]);
+    fs::write(repo.join("later.txt"), "later\n").unwrap();
+    git(&repo, &["add", "later.txt"]);
+    git(&repo, &["commit", "-q", "-m", "later on main"]);
+    git(&repo, &["checkout", "-q", "-b", "feature/behind", "HEAD~1"]);
+}
+
+/// Both sides have unique commits. Three-dot list is the feature file only.
+pub fn seed_compare_diverged(workspace: &Path, name: &str) {
+    let repo = workspace.join(name);
+    init_repo(&repo, "main");
+    fs::write(repo.join("README.md"), "# root\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "root"]);
+    git(&repo, &["checkout", "-q", "-b", "feature/diverged"]);
+    fs::write(repo.join("feature.txt"), "feature-only\n").unwrap();
+    git(&repo, &["add", "feature.txt"]);
+    git(&repo, &["commit", "-q", "-m", "feature side"]);
+    git(&repo, &["checkout", "-q", "main"]);
+    fs::write(repo.join("main-only.txt"), "main-only\n").unwrap();
+    git(&repo, &["add", "main-only.txt"]);
+    git(&repo, &["commit", "-q", "-m", "main side"]);
+    git(&repo, &["checkout", "-q", "feature/diverged"]);
+}
+
+/// `git init` only. HEAD has no commit.
+pub fn seed_compare_unborn(workspace: &Path, name: &str) {
+    init_repo(&workspace.join(name), "main");
+}
+
+/// Sole local branch `topic`. Default tip `main` / `origin/main` is missing.
+pub fn seed_compare_no_default(workspace: &Path, name: &str) {
+    let repo = workspace.join(name);
+    init_repo(&repo, "topic");
+    fs::write(repo.join("README.md"), "# topic\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "topic only"]);
+}
+
+/// HEAD is an orphan with no merge base against `main`.
+pub fn seed_compare_unrelated(workspace: &Path, name: &str) {
+    let repo = workspace.join(name);
+    init_repo(&repo, "main");
+    fs::write(repo.join("README.md"), "# main\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "main root"]);
+    git(&repo, &["checkout", "-q", "--orphan", "orphan"]);
+    git(&repo, &["rm", "-rf", "-q", "--cached", "."]);
+    let _ = fs::remove_file(repo.join("README.md"));
+    fs::write(repo.join("orphan.txt"), "orphan\n").unwrap();
+    git(&repo, &["add", "orphan.txt"]);
+    git(&repo, &["commit", "-q", "-m", "unrelated"]);
 }
 
 /// Dirty `app`, clean `lib`, ignored `notes`, merge graph.

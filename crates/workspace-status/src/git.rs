@@ -660,6 +660,153 @@ fn exec_git_owned(args: &[String], cwd: &Path) -> String {
     exec_git(&refs, cwd)
 }
 
+fn git_failure_message(args: &[&str], out: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+    format!(
+        "git {} exited with code {}",
+        args.first().copied().unwrap_or("git"),
+        out.status.code().unwrap_or(-1)
+    )
+}
+
+/// Run git and return stdout. Failure is `Err`, never an empty success.
+pub fn exec_git_stdout(args: &[&str], cwd: &Path) -> Result<String, String> {
+    match run(args, cwd) {
+        Ok(out) if out.status.success() => {
+            Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+        }
+        Ok(out) => Err(git_failure_message(args, &out)),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Resolve `<ref>^{commit}`. Missing ref is `Ok(None)`. Other failures are `Err`.
+pub fn rev_parse_commit(cwd: &Path, git_ref: &str) -> Result<Option<String>, String> {
+    let verify = format!("{git_ref}^{{commit}}");
+    let args = ["rev-parse", "--verify", "--quiet", verify.as_str()];
+    match run(&args, cwd) {
+        Ok(out) if out.status.success() => {
+            let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            Ok((!sha.is_empty()).then_some(sha))
+        }
+        Ok(out) if out.status.code() == Some(1) => Ok(None),
+        Ok(out) => Err(git_failure_message(&args, &out)),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Three-dot merge base. Unrelated histories are `Ok(None)`.
+pub fn merge_base(cwd: &Path, a: &str, b: &str) -> Result<Option<String>, String> {
+    let args = ["merge-base", a, b];
+    match run(&args, cwd) {
+        Ok(out) if out.status.success() => {
+            let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            Ok((!sha.is_empty()).then_some(sha))
+        }
+        Ok(out) if out.status.code() == Some(1) => Ok(None),
+        Ok(out) => Err(git_failure_message(&args, &out)),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Committed `base...HEAD` paths. Empty stdout is an empty list, not a failure.
+pub fn list_compare_name_status(
+    cwd: &Path,
+    base_sha: &str,
+    head_sha: &str,
+) -> Result<Vec<NameStatus>, String> {
+    let range = format!("{base_sha}...{head_sha}");
+    let stdout = exec_git_stdout(
+        &["diff", "--name-status", "--find-renames", &range, "--"],
+        cwd,
+    )?;
+    Ok(parse_name_status_lines(&stdout))
+}
+
+/// `git diff` argv for one compare path, with optional rename old path.
+pub fn git_compare_diff_args(
+    base_sha: &str,
+    head_sha: &str,
+    path: &str,
+    old_path: Option<&str>,
+    context: Option<u32>,
+) -> Vec<String> {
+    let range = format!("{base_sha}...{head_sha}");
+    let mut args = vec!["diff".to_string()];
+    if let Some(n) = context {
+        args.push(format!("-U{n}"));
+    }
+    args.push(range);
+    args.push("--".into());
+    if let Some(old) = old_path {
+        if old != path {
+            args.push(old.to_string());
+        }
+    }
+    args.push(path.into());
+    args
+}
+
+/// Unified compare diff for one path. Success with empty stdout is `(no diff)`.
+pub fn diff_compare_file_ctx(
+    cwd: &Path,
+    base_sha: &str,
+    head_sha: &str,
+    path: &str,
+    old_path: Option<&str>,
+    context: Option<u32>,
+) -> Result<Vec<String>, String> {
+    let args = git_compare_diff_args(base_sha, head_sha, path, old_path, context);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let stdout = exec_git_stdout(&refs, cwd)?;
+    if stdout.trim().is_empty() {
+        Ok(vec!["(no diff)".into()])
+    } else {
+        Ok(stdout.lines().map(str::to_string).collect())
+    }
+}
+
+/// Local branches plus `origin/*`, excluding `origin/HEAD` and the current local.
+pub fn list_compare_picker_branches(cwd: &Path) -> Result<Vec<LocalBranch>, String> {
+    let raw = exec_git_stdout(
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)\t%(authordate:unix)\t%(HEAD)",
+            "refs/heads/",
+            "refs/remotes/origin/",
+        ],
+        cwd,
+    )?;
+    Ok(parse_compare_picker_branches(&raw))
+}
+
+/// Pure filter for [`list_compare_picker_branches`].
+pub fn parse_compare_picker_branches(raw: &str) -> Vec<LocalBranch> {
+    raw.lines()
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let name = parts.next()?.to_string();
+            if name.is_empty() || name == "origin/HEAD" {
+                return None;
+            }
+            let authordate = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let current = parts.next() == Some("*");
+            if current {
+                return None;
+            }
+            Some(LocalBranch {
+                name,
+                current: false,
+                authordate,
+            })
+        })
+        .collect()
+}
+
 /// First-parent unified diff for one path in a commit.
 pub fn diff_commit_file(cwd: &Path, commit_id: &str, path: &str) -> Vec<String> {
     diff_commit_file_ctx(cwd, commit_id, path, None)
@@ -1237,5 +1384,68 @@ mod tests {
         init_repo(&dir);
         assert_eq!(blob_bytes(&dir, "HEAD", "nope.txt"), None);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compare_wrappers_ahead_behind_diverged_rename_and_failure() {
+        let dir = std::env::temp_dir().join(format!(
+            "ws-git-compare-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        init_repo(&dir);
+        let base = exec_git(&["rev-parse", "HEAD"], &dir);
+        fs::write(dir.join("one.txt"), "one\n").unwrap();
+        git(&dir, &["add", "one.txt"]);
+        git(&dir, &["commit", "-q", "-m", "ahead"]);
+        let head = exec_git(&["rev-parse", "HEAD"], &dir);
+        let ahead = list_compare_name_status(&dir, &base, &head).unwrap();
+        assert!(ahead.iter().any(|row| row.path == "one.txt"), "{ahead:?}");
+        let behind = list_compare_name_status(&dir, &head, &base).unwrap();
+        assert!(behind.is_empty(), "{behind:?}");
+        git(&dir, &["checkout", "-q", "-b", "topic", &base]);
+        fs::write(dir.join("topic.txt"), "topic\n").unwrap();
+        git(&dir, &["add", "topic.txt"]);
+        git(&dir, &["commit", "-q", "-m", "topic"]);
+        git(&dir, &["checkout", "-q", "main"]);
+        fs::write(dir.join("main-only.txt"), "main\n").unwrap();
+        git(&dir, &["add", "main-only.txt"]);
+        git(&dir, &["commit", "-q", "-m", "main-only"]);
+        let main = exec_git(&["rev-parse", "HEAD"], &dir);
+        let topic = exec_git(&["rev-parse", "topic"], &dir);
+        let mb = merge_base(&dir, &main, &topic).unwrap();
+        assert_eq!(mb.as_deref(), Some(base.as_str()));
+        let diverged = list_compare_name_status(&dir, &topic, &main).unwrap();
+        assert!(
+            diverged.iter().any(|row| row.path == "main-only.txt"),
+            "{diverged:?}"
+        );
+        git(&dir, &["mv", "one.txt", "renamed.txt"]);
+        git(&dir, &["commit", "-q", "-m", "rename"]);
+        let after_rename = exec_git(&["rev-parse", "HEAD"], &dir);
+        // `main` still has `one.txt`. Three-dot from the initial seed commit
+        // sees only an add (`renamed.txt` never existed on that base).
+        let renamed = list_compare_name_status(&dir, &main, &after_rename).unwrap();
+        assert!(
+            renamed.iter().any(|row| {
+                row.path == "renamed.txt" && row.old_path.as_deref() == Some("one.txt")
+            }),
+            "{renamed:?}"
+        );
+        assert!(rev_parse_commit(&dir, "no-such-ref").unwrap().is_none());
+        assert!(exec_git_stdout(&["this-is-not-a-git-command"], &dir).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compare_picker_drops_origin_head_and_current_local() {
+        let raw = "main\t1\t*\norigin/HEAD\t2\t\norigin/main\t3\t\nfeature\t4\t\n";
+        let names: Vec<_> = parse_compare_picker_branches(raw)
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        assert_eq!(names, vec!["origin/main", "feature"]);
     }
 }

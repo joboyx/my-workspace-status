@@ -82,6 +82,8 @@ pub struct RepoSnapshot {
     /// `None` when not checked, on the default branch, or detached.
     pub merged_into_default: Option<bool>,
     pub default_branch_override: Option<String>,
+    /// Cached `origin/<default>` then `<default>` tip. Palette only; omitted from `--json`.
+    pub default_tip_ref: Option<String>,
     /// Local `refs/heads` names. TUI comment GC. Omitted from `--json`.
     pub local_branches: Vec<String>,
 }
@@ -105,6 +107,9 @@ pub struct WorkspaceRepoSnapshot {
     pub merged_into_default: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_branch_override: Option<String>,
+    /// Cached `origin/<default>` then `<default>` tip. Palette only; omitted from `--json`.
+    #[serde(skip)]
+    pub default_tip_ref: Option<String>,
     /// Local `refs/heads` names. TUI comment GC. Omitted from `--json`.
     #[serde(skip)]
     pub local_branches: Vec<String>,
@@ -192,6 +197,7 @@ fn to_workspace_repo(snapshot: &RepoSnapshot, ignored: &BTreeSet<String>) -> Wor
         primary_repo: snapshot.primary_repo.clone(),
         merged_into_default: snapshot.merged_into_default,
         default_branch_override: snapshot.default_branch_override.clone(),
+        default_tip_ref: snapshot.default_tip_ref.clone(),
         local_branches: snapshot.local_branches.clone(),
         has_unstaged: snapshot.has_unstaged,
         has_staged: snapshot.has_staged,
@@ -360,6 +366,7 @@ pub fn repo_snapshots_from_workspace(snapshot: &WorkspaceSnapshot) -> Vec<RepoSn
             primary_repo: repo.primary_repo.clone(),
             merged_into_default: repo.merged_into_default,
             default_branch_override: repo.default_branch_override.clone(),
+            default_tip_ref: repo.default_tip_ref.clone(),
             local_branches: repo.local_branches.clone(),
         })
         .collect()
@@ -593,6 +600,7 @@ mod tests {
             primary_repo: None,
             merged_into_default: None,
             default_branch_override: None,
+            default_tip_ref: None,
             local_branches: Vec::new(),
         }
     }
