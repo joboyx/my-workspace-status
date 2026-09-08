@@ -371,7 +371,11 @@ impl RightPaneRequest {
     }
 }
 
+/// Apply a coalesced right-pane load. Compare tabs ignore this path.
 pub(crate) fn apply_right_pane_load(state: &mut AppState, payload: RightPaneLoad) {
+    if state.is_compare_tab() {
+        return;
+    }
     match payload {
         RightPaneLoad::Diff {
             repo,
@@ -632,8 +636,7 @@ pub(crate) fn compute_compare_range(
     base_ref: &str,
 ) -> Result<CompareRangeLoad, String> {
     let head = rev_parse_commit(dir, "HEAD")?.ok_or_else(|| HEAD_HAS_NO_COMMIT.to_string())?;
-    let base_tip =
-        rev_parse_commit(dir, base_ref)?.ok_or_else(|| base_ref_not_found(base_ref))?;
+    let base_tip = rev_parse_commit(dir, base_ref)?.ok_or_else(|| base_ref_not_found(base_ref))?;
     let merge = merge_base(dir, &base_tip, &head)?.ok_or_else(|| no_merge_base(base_ref))?;
     let files = list_compare_name_status(dir, &base_tip, &head)?
         .into_iter()
@@ -716,10 +719,7 @@ pub(crate) fn compute_compare_diff(
     old_path: Option<&str>,
     context: Option<u32>,
 ) -> Result<DiffContent, String> {
-    let CommitFileSource::Compare {
-        base_tip, head, ..
-    } = source
-    else {
+    let CommitFileSource::Compare { base_tip, head, .. } = source else {
         return Ok(DiffContent::default());
     };
     let lines = diff_compare_file_ctx(dir, base_tip, head, path, old_path, context)?;
@@ -1761,8 +1761,7 @@ mod tests {
         ));
         init_repo(&dir);
         let head = exec_git(&["rev-parse", "HEAD"], &dir);
-        let (changed, got_head, got_base) =
-            probe_compare_range(&dir, "HEAD", None, None).unwrap();
+        let (changed, got_head, got_base) = probe_compare_range(&dir, "HEAD", None, None).unwrap();
         assert!(!changed, "missing recorded SHAs must not force a reload");
         assert_eq!(got_head.as_deref(), Some(head.as_str()));
         assert_eq!(got_base.as_deref(), Some(head.as_str()));

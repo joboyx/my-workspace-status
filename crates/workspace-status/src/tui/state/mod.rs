@@ -750,7 +750,12 @@ impl AppState {
                 DrillView::Graph => return Vec::new(),
             }
         };
-        flatten_commit_files(files, self.commit_tree_mode, &self.commit_file_folds, self.ascii)
+        flatten_commit_files(
+            files,
+            self.commit_tree_mode,
+            &self.commit_file_folds,
+            self.ascii,
+        )
     }
 
     pub(crate) fn commit_files_cursor(&self) -> usize {
@@ -1806,6 +1811,9 @@ impl AppState {
 
     /// Store workspace-file diff content for the right pane.
     pub fn set_diff(&mut self, repo: String, path: String, content: DiffContent) {
+        if self.is_compare_tab() {
+            return;
+        }
         self.adopt_diff_view(DiffViewId::Workspace {
             repo: repo.clone(),
             path: path.clone(),
@@ -1828,6 +1836,9 @@ impl AppState {
     }
 
     pub fn clear_right(&mut self) {
+        if self.is_compare_tab() {
+            return;
+        }
         self.graph = None;
         self.graph_identity = None;
         self.graph_cursor = 0;
@@ -1850,6 +1861,9 @@ impl AppState {
     /// Paint uses `loading files…` while `commit_files_loading` is true and
     /// the list is empty.
     pub fn begin_commit_files(&mut self, repo: String, source: CommitFileSource) {
+        if self.is_compare_tab() {
+            return;
+        }
         self.commit_file_folds.clear();
         self.commit_files_loading = true;
         self.right_col_offset = 0;
@@ -1870,6 +1884,9 @@ impl AppState {
         source: CommitFileSource,
         files: Vec<CommitFile>,
     ) {
+        if self.is_compare_tab() {
+            return;
+        }
         let same_source = match &self.drill {
             DrillView::Files {
                 repo: r, source: s, ..
@@ -1943,6 +1960,9 @@ impl AppState {
         path: String,
         content: DiffContent,
     ) {
+        if self.is_compare_tab() {
+            return;
+        }
         let entering = !self.drill.is_diff();
         self.adopt_diff_view(DiffViewId::Commit {
             repo: repo.clone(),
@@ -3843,13 +3863,12 @@ impl AppState {
         }
     }
 
-    fn checkout_head_and_default(
-        &self,
-        checkout: &str,
-    ) -> Option<(&str, Option<&str>)> {
-        self.snapshot.repos.iter().find(|row| row.repo == checkout).map(
-            |row| (row.head.as_str(), row.default_tip_ref.as_deref()),
-        )
+    fn checkout_head_and_default(&self, checkout: &str) -> Option<(&str, Option<&str>)> {
+        self.snapshot
+            .repos
+            .iter()
+            .find(|row| row.repo == checkout)
+            .map(|row| (row.head.as_str(), row.default_tip_ref.as_deref()))
     }
 
     fn open_compare_tab(&mut self, checkout: String, base_ref: String) -> Effect {
@@ -3983,7 +4002,11 @@ impl AppState {
             tab.files = load.files;
             (load.source, keep, tab.checkout_path.clone())
         };
-        let mut folds = if self.tabs.active_compare().is_some_and(|tab| tab.id == tab_id) {
+        let mut folds = if self
+            .tabs
+            .active_compare()
+            .is_some_and(|tab| tab.id == tab_id)
+        {
             self.commit_file_folds.clone()
         } else {
             self.tabs.get_id(tab_id)?.folds.clone()
@@ -4004,7 +4027,11 @@ impl AppState {
                 )
             })
         });
-        if self.tabs.active_compare().is_some_and(|tab| tab.id == tab_id) {
+        if self
+            .tabs
+            .active_compare()
+            .is_some_and(|tab| tab.id == tab_id)
+        {
             self.commit_file_folds = folds.clone();
         }
         let tab = self.tabs.get_id_mut(tab_id)?;
@@ -4060,7 +4087,11 @@ impl AppState {
                 }
             }
         };
-        if self.tabs.active_compare().is_some_and(|live| live.id == tab_id) {
+        if self
+            .tabs
+            .active_compare()
+            .is_some_and(|live| live.id == tab_id)
+        {
             self.adopt_diff_view(DiffViewId::Commit {
                 repo: checkout,
                 source: source.clone(),
@@ -5533,7 +5564,10 @@ mod tests {
             Ok(compare_range_load(&["src/view.rs", "README.md"])),
         );
         let row = app.focused_commit_file_row().expect("compare row");
-        assert!(row.is_file(), "new compare load must land on a file: {row:?}");
+        assert!(
+            row.is_file(),
+            "new compare load must land on a file: {row:?}"
+        );
         assert_eq!(row.path, "src/view.rs");
         match follow {
             Some(Effect::LoadCompareDiff { path, .. }) => assert_eq!(path, "src/view.rs"),
@@ -5609,12 +5643,7 @@ mod tests {
         let mut app = state();
         focus_file(&mut app, "README.md");
         app.tabs.open_or_focus("app".into(), "main".into());
-        for action in [
-            Action::Stage,
-            Action::Revert,
-            Action::Fetch,
-            Action::Branch,
-        ] {
+        for action in [Action::Stage, Action::Revert, Action::Fetch, Action::Branch] {
             assert_eq!(
                 app.palette_disabled_reason(&action).as_deref(),
                 Some(super::super::tabs::SWITCH_TO_WORKSPACE_TAB),

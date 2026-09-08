@@ -374,8 +374,10 @@ impl Interpreter {
                 self.sched.on_reload_repo(repo);
             }
             Effect::LoadRightPane => {
-                self.pane_req = Some(RightPaneRequest::from_state(state));
-                self.sched.request_pane();
+                if !state.is_compare_tab() {
+                    self.pane_req = Some(RightPaneRequest::from_state(state));
+                    self.sched.request_pane();
+                }
             }
             Effect::Fetch { repos } => self.start_bulk(state, RunningOp::Fetch, repos),
             Effect::Pull { repos } => self.start_bulk(state, RunningOp::Pull, repos),
@@ -536,11 +538,13 @@ impl Interpreter {
                 })
             }),
             Effect::LoadCommitFiles { repo, source } => {
-                state.begin_commit_files(repo.clone(), source.clone());
-                let gen = self.sched.request_commit_files();
-                self.commit_files = Some((gen, repo, source));
-                self.sched.enqueue_user_front(UserTag::Pane);
-                self.mark();
+                if !state.is_compare_tab() {
+                    state.begin_commit_files(repo.clone(), source.clone());
+                    let gen = self.sched.request_commit_files();
+                    self.commit_files = Some((gen, repo, source));
+                    self.sched.enqueue_user_front(UserTag::Pane);
+                    self.mark();
+                }
             }
             Effect::LoadCommitDiff { repo, source, path } => {
                 let gen = self.sched.request_commit_diff();
@@ -624,6 +628,9 @@ impl Interpreter {
 
     /// Queue graph autoload when the cursor sits on the last loaded row.
     pub(crate) fn maybe_queue_autoload(&mut self, state: &mut AppState) {
+        if state.is_compare_tab() {
+            return;
+        }
         if state.graph_loading_older {
             return;
         }
@@ -789,6 +796,7 @@ impl Interpreter {
                 let decision = self.sched.note_repo_done(gen, &path);
                 if focused.as_deref() == Some(path.as_str())
                     && focused_repo_needs_pane(&before_sigs, &before_snap, state, &path)
+                    && !state.is_compare_tab()
                 {
                     self.pane_req = Some(RightPaneRequest::from_state(state));
                     self.sched.request_pane();
@@ -804,25 +812,32 @@ impl Interpreter {
                 load,
             } => {
                 let accepted = self.sched.accept_pane_result(req_id);
-                let current = RightPaneRequest::from_state(state).target();
-                if accepted && target == current {
-                    if matches!(&load, RightPaneLoad::Graph { .. }) {
-                        let _ = self.sched.request_autoload();
-                        state.graph_loading_older = false;
+                if state.is_compare_tab() {
+                    // Consume the result. Do not recapture parked Workspace
+                    // drill / tree cursor into a new pane request.
+                } else {
+                    let current = RightPaneRequest::from_state(state).target();
+                    if accepted && target == current {
+                        if matches!(&load, RightPaneLoad::Graph { .. }) {
+                            let _ = self.sched.request_autoload();
+                            state.graph_loading_older = false;
+                        }
+                        apply_right_pane_load(state, load);
+                        self.mark();
+                    } else if current != target {
+                        self.pane_req = Some(RightPaneRequest::from_state(state));
+                        self.sched.request_pane();
                     }
-                    apply_right_pane_load(state, load);
-                    self.mark();
-                } else if current != target {
-                    self.pane_req = Some(RightPaneRequest::from_state(state));
-                    self.sched.request_pane();
                 }
             }
             JobOutcome::Write { status } => {
                 self.sched.note_user_done(UserTag::Write);
                 state.status = status;
                 self.sched.on_reload_snapshot(state.focused_checkout_path());
-                self.pane_req = Some(RightPaneRequest::from_state(state));
-                self.sched.request_pane();
+                if !state.is_compare_tab() {
+                    self.pane_req = Some(RightPaneRequest::from_state(state));
+                    self.sched.request_pane();
+                }
                 self.mark();
             }
             JobOutcome::BulkRemote { kind, ok } => {
@@ -847,8 +862,10 @@ impl Interpreter {
                     state.stamp_checkout_flashes(&bulk.repos);
                     state.status = format_completed_op(kind, bulk.ok, bulk.failed);
                     self.sched.on_reload_snapshot(state.focused_checkout_path());
-                    self.pane_req = Some(RightPaneRequest::from_state(state));
-                    self.sched.request_pane();
+                    if !state.is_compare_tab() {
+                        self.pane_req = Some(RightPaneRequest::from_state(state));
+                        self.sched.request_pane();
+                    }
                 }
             }
             JobOutcome::DefaultBranch { ok } => {
@@ -872,8 +889,10 @@ impl Interpreter {
                     );
                     self.default_repos.clear();
                     self.sched.on_reload_snapshot(state.focused_checkout_path());
-                    self.pane_req = Some(RightPaneRequest::from_state(state));
-                    self.sched.request_pane();
+                    if !state.is_compare_tab() {
+                        self.pane_req = Some(RightPaneRequest::from_state(state));
+                        self.sched.request_pane();
+                    }
                 }
                 self.mark();
             }
@@ -917,8 +936,10 @@ impl Interpreter {
                 if apply_checkout_compute(state, repo, result) {
                     self.sched.on_reload_snapshot(state.focused_checkout_path());
                 }
-                self.pane_req = Some(RightPaneRequest::from_state(state));
-                self.sched.request_pane();
+                if !state.is_compare_tab() {
+                    self.pane_req = Some(RightPaneRequest::from_state(state));
+                    self.sched.request_pane();
+                }
                 self.mark();
             }
             JobOutcome::Merge { label, result } => {
@@ -971,7 +992,7 @@ impl Interpreter {
                     } => live_repo == &repo && live_source == &source,
                     _ => false,
                 };
-                if accepted && current {
+                if accepted && current && !state.is_compare_tab() {
                     state.open_commit_files(
                         repo,
                         source,
@@ -1004,7 +1025,7 @@ impl Interpreter {
                     } => live_repo == &repo && live_source == &source,
                     DrillView::Graph => false,
                 };
-                if accepted && current {
+                if accepted && current && !state.is_compare_tab() {
                     state.open_commit_diff(repo, source, files, file_cursor, path, content);
                     self.mark();
                 }
@@ -1095,8 +1116,10 @@ impl Interpreter {
     /// Reload a checkout after a TTY editor returns.
     pub(crate) fn after_edit(&mut self, state: &mut AppState, repo: String) {
         self.sched.on_reload_repo(repo);
-        self.pane_req = Some(RightPaneRequest::from_state(state));
-        self.sched.request_pane();
+        if !state.is_compare_tab() {
+            self.pane_req = Some(RightPaneRequest::from_state(state));
+            self.sched.request_pane();
+        }
         self.mark();
     }
 
@@ -2033,6 +2056,107 @@ mod tests {
             state.compare_picker.is_some(),
             "branch-picker gen must not drop a matching compare picker"
         );
+    }
+
+    #[test]
+    fn matching_right_pane_does_not_apply_on_compare_tab() {
+        let mut state = fixture_state();
+        focus_repo(&mut state, "app");
+        state.drill = DrillView::Graph;
+        state.graph = Some(mini_graph(&["aaa"]));
+        state.graph_identity = Some(("app".into(), "head-app".into()));
+        state.diff_cursor = 4;
+        let _ = open_compare_tab(&mut state);
+        {
+            let tab = state.tabs.active_compare_mut().unwrap();
+            tab.file_cursor = 3;
+            tab.path = Some("compare.txt".into());
+        }
+        state.diff_cursor = 4;
+        let mut interp = Interpreter::new();
+        let pane_id = interp.sched.request_pane();
+        let target = RightPaneRequest::from_state(&state).target();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::RightPane {
+                req_id: pane_id,
+                target,
+                load: RightPaneLoad::Diff {
+                    repo: "app".into(),
+                    path: "README.md".into(),
+                    content: DiffContent::from_unified("-old\n+new\n"),
+                },
+            },
+        );
+        let tab = state.tabs.active_compare().unwrap();
+        assert_eq!(tab.file_cursor, 3);
+        assert_eq!(tab.path.as_deref(), Some("compare.txt"));
+        assert_eq!(state.diff_cursor, 4);
+        assert!(
+            state.graph.is_some(),
+            "workspace graph must stay parked on a compare tab"
+        );
+        assert!(state.drill.is_graph());
+    }
+
+    #[test]
+    fn matching_commit_files_do_not_apply_on_compare_tab() {
+        let mut state = fixture_state();
+        let source = commit_source();
+        state.open_commit_files(
+            "app".into(),
+            source.clone(),
+            vec![commit_file("parked-drill.md")],
+        );
+        assert!(state.drill.is_files());
+        let _ = open_compare_tab(&mut state);
+        {
+            let tab = state.tabs.active_compare_mut().unwrap();
+            tab.file_cursor = 2;
+            tab.files = vec![commit_file("compare-only.md")];
+        }
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_commit_files();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::CommitFiles {
+                gen,
+                repo: "app".into(),
+                source,
+                files: vec![name_status("late.txt")],
+            },
+        );
+        let tab = state.tabs.active_compare().unwrap();
+        assert_eq!(tab.file_cursor, 2);
+        assert_eq!(tab.files[0].path, "compare-only.md");
+        match &state.drill {
+            DrillView::Files { files, .. } => {
+                assert_eq!(files[0].path, "parked-drill.md");
+            }
+            other => panic!("parked drill must stay Files, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maybe_queue_autoload_skips_compare_tab() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::new();
+        focus_repo(&mut state, "app");
+        state.drill = DrillView::Graph;
+        let mut graph = mini_graph(&["aaa"]);
+        graph.has_more = true;
+        state.graph = Some(graph);
+        state.graph_cursor = 10;
+        state.graph_identity = Some(("app".into(), "head-app".into()));
+        let _ = open_compare_tab(&mut state);
+        interp.maybe_queue_autoload(&mut state);
+        assert!(
+            !state.graph_loading_older,
+            "compare tabs must not enqueue graph autoload"
+        );
+        assert_ne!(state.status, LOADING_OLDER);
     }
 
     #[test]

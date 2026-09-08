@@ -2496,6 +2496,13 @@ fn compare_from_commit_files_drill_paints_diff_pane() {
         frame.contains("COMMITTED") || frame.contains("No committed changes"),
         "compare paint is committed-only:\n{frame}"
     );
+    tui.watch_tick();
+    let after = tui.frame();
+    assert!(
+        tui.right_is_diff() && !tui.right_is_files(),
+        "watch must not restore the parked Files drill:\n{after}"
+    );
+    assert_eq!(tui.active_tab(), 1, "{after}");
     let _ = fs::remove_dir_all(root);
 }
 
