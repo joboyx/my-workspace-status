@@ -149,8 +149,7 @@ fn unix_poll(timeout: Duration) -> io::Result<bool> {
     if !buf.events.is_empty() || pending > 0 {
         return Ok(true);
     }
-    if can_finish_lone_esc(&buf) {
-        buf.lone_esc_ready = true;
+    if arm_lone_esc_after_wait(&mut buf, timeout) {
         return Ok(true);
     }
     Ok(enqueue_resize_if_changed(&mut buf))
@@ -312,6 +311,17 @@ fn take_ready_event(buf: &mut TtyBuf, more_stdin: bool) -> Option<(Event, KeyStr
 
 fn can_finish_lone_esc(buf: &TtyBuf) -> bool {
     buf.raw == [0x1b] && buf.events.is_empty()
+}
+
+/// Arm Escape only after a non-zero poll wait with no further stdin.
+///
+/// `poll_event(0)` (nav backlog drain) must not count as that wait.
+fn arm_lone_esc_after_wait(buf: &mut TtyBuf, timeout: Duration) -> bool {
+    if timeout.is_zero() || !can_finish_lone_esc(buf) {
+        return false;
+    }
+    buf.lone_esc_ready = true;
+    true
 }
 
 fn drain_parsed(buf: &mut TtyBuf, more: bool) {
@@ -998,6 +1008,20 @@ mod tests {
         assert_eq!(key_code(&event), KeyCode::Esc);
         assert_eq!(origin, KeyStrokeOrigin::Protocol);
         assert!(buf.raw.is_empty());
+    }
+
+    #[test]
+    fn zero_poll_timeout_does_not_arm_lone_esc() {
+        let mut buf = empty_tty_buf();
+        buf.raw.extend_from_slice(&[0x1b]);
+        assert!(
+            !arm_lone_esc_after_wait(&mut buf, Duration::ZERO),
+            "poll_event(0) must not treat a leftover ESC as idle"
+        );
+        assert!(!buf.lone_esc_ready);
+        assert!(take_ready_event(&mut buf, false).is_none());
+        assert!(arm_lone_esc_after_wait(&mut buf, Duration::from_millis(16)));
+        assert!(buf.lone_esc_ready);
     }
 
     #[test]
