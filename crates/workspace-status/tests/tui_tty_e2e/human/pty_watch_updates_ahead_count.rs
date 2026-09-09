@@ -85,7 +85,7 @@ fn paints_ahead_three(screen: &str) -> bool {
 fn pty_watch_updates_ahead_count() {
     let (_root, workspace) = watch_ahead_workspace();
     let repo = workspace.join("syncbox");
-    let mut tui = PtySession::open_with_env(&workspace, &[("WS_STATUS_WATCH_MS", "500")]);
+    let tui = PtySession::open_with_env(&workspace, &[("WS_STATUS_WATCH_MS", "500")]);
     tui.wait_contains("syncbox", WAIT);
     tui.wait_contains("watch-ahead-two", GIT_WAIT);
     tui.wait_pred(
