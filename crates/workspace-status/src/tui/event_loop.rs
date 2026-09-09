@@ -114,8 +114,10 @@ fn input_thread(
         if !poll_event(Duration::from_millis(16)).unwrap_or(false) {
             continue;
         }
-        let Ok((event, origin)) = read_event_origin() else {
-            break;
+        let (event, origin) = match read_event_origin() {
+            Ok(ready) => ready,
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(_) => break,
         };
         let leftover = held_nav_key(&event).and_then(discard_held_nav_backlog);
         if tx.blocking_send((event, origin)).is_err() {

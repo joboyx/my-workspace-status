@@ -86,6 +86,7 @@ pub fn read_event_origin() -> io::Result<(Event, KeyStrokeOrigin)> {
 struct TtyBuf {
     raw: Vec<u8>,
     events: VecDeque<(Event, KeyStrokeOrigin)>,
+    last_winsize: Option<(u16, u16)>,
 }
 
 fn tty_buf() -> &'static Mutex<TtyBuf> {
@@ -94,6 +95,7 @@ fn tty_buf() -> &'static Mutex<TtyBuf> {
         Mutex::new(TtyBuf {
             raw: Vec::new(),
             events: VecDeque::new(),
+            last_winsize: None,
         })
     })
 }
@@ -112,11 +114,24 @@ fn unix_poll(timeout: Duration) -> io::Result<bool> {
         if !buf.events.is_empty() {
             return Ok(true);
         }
-        if can_finish_lone_esc(&buf) {
+        if can_finish_lone_esc(&buf) && stdin_pending()? == 0 {
+            return Ok(true);
+        }
+        if stdin_pending()? > 0 {
+            return Ok(true);
+        }
+        if enqueue_resize_if_changed(&mut buf) {
             return Ok(true);
         }
     }
-    event::poll(timeout)
+    // Do not call event::poll. Crossterm poll reads the TTY into its
+    // own parser, so a later FIONREAD sees 0 and event::read tags a
+    // raw `g` as Protocol.
+    if poll_stdin(timeout)? {
+        return Ok(true);
+    }
+    let mut buf = lock_tty_buf();
+    Ok(enqueue_resize_if_changed(&mut buf))
 }
 
 #[cfg(unix)]
@@ -131,15 +146,22 @@ fn unix_read() -> io::Result<(Event, KeyStrokeOrigin)> {
     if let Some(event) = buf.events.pop_front() {
         return Ok(event);
     }
-    if can_finish_lone_esc(&buf) {
+    if can_finish_lone_esc(&buf) && stdin_pending()? == 0 {
         buf.raw.clear();
         return Ok((
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             KeyStrokeOrigin::Protocol,
         ));
     }
-    drop(buf);
-    event::read().map(|event| (event, KeyStrokeOrigin::Protocol))
+    if enqueue_resize_if_changed(&mut buf) {
+        if let Some(event) = buf.events.pop_front() {
+            return Ok(event);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "no TTY event ready",
+    ))
 }
 
 #[cfg(unix)]
@@ -150,6 +172,62 @@ fn stdin_pending() -> io::Result<usize> {
         return Err(io::Error::last_os_error());
     }
     Ok(n.max(0) as usize)
+}
+
+#[cfg(unix)]
+fn poll_stdin(timeout: Duration) -> io::Result<bool> {
+    let mut pfd = libc::pollfd {
+        fd: libc::STDIN_FILENO,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    let n = unsafe { libc::poll(&mut pfd, 1, ms) };
+    if n < 0 {
+        let err = io::Error::last_os_error();
+        if err.kind() == io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        return Err(err);
+    }
+    Ok(n > 0 && pfd.revents & libc::POLLIN != 0)
+}
+
+#[cfg(unix)]
+fn read_winsize() -> io::Result<(u16, u16)> {
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::ioctl(libc::STDIN_FILENO, libc::TIOCGWINSZ, &mut ws) };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((ws.ws_col, ws.ws_row))
+}
+
+fn enqueue_resize_if_changed(buf: &mut TtyBuf) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(size) = read_winsize() else {
+            return false;
+        };
+        match buf.last_winsize {
+            Some(prev) if prev != size => {
+                buf.last_winsize = Some(size);
+                buf.events
+                    .push_back((Event::Resize(size.0, size.1), KeyStrokeOrigin::Protocol));
+                true
+            }
+            None => {
+                buf.last_winsize = Some(size);
+                false
+            }
+            Some(_) => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = buf;
+        false
+    }
 }
 
 #[cfg(unix)]
@@ -201,7 +279,7 @@ enum Take {
 
 /// Parse the next event from `bytes`. `more` is true when more stdin
 /// bytes are already waiting (lone ESC must not become Escape yet).
-pub(crate) fn take_event(bytes: &[u8], more: bool) -> Take {
+fn take_event(bytes: &[u8], more: bool) -> Take {
     if bytes.is_empty() {
         return Take::NeedMore;
     }
@@ -535,6 +613,7 @@ pub(crate) fn parse_tty_chunk(bytes: &[u8]) -> Vec<(Event, KeyStrokeOrigin)> {
     let mut buf = TtyBuf {
         raw: bytes.to_vec(),
         events: VecDeque::new(),
+        last_winsize: None,
     };
     drain_parsed(&mut buf, false);
     buf.events.into_iter().collect()
