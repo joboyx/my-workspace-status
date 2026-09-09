@@ -1,9 +1,10 @@
-//! Shared TTY mouse enable sequence, SGR decode, and live byte reader.
+//! Shared TTY mouse enable sequence, mouse decode, and live byte reader.
 //!
 //! The live event loop reads with [`poll_event`] / [`read_event`]. On Unix
 //! the reader tags each key as [`KeyStrokeOrigin::LegacyByte`] or
-//! [`KeyStrokeOrigin::Protocol`] from the bytes. Headless e2e cannot call
-//! those (no TTY), so it feeds the same bytes through [`decode_sgr_mouse`],
+//! [`KeyStrokeOrigin::Protocol`] from the bytes. It decodes SGR, X10, and
+//! rxvt 1015 mouse the same way crossterm 0.28 does. Headless e2e cannot
+//! call those (no TTY), so it feeds SGR bytes through [`decode_sgr_mouse`],
 //! which matches crossterm's `parse_cb` / `parse_csi_sgr_mouse` including
 //! reports the live reader drops. A kinder clone would go green while a
 //! real TTY no-ops.
@@ -29,8 +30,10 @@ use super::keys::KeyStrokeOrigin;
 /// Crossterm's `EnableMouseCapture` sets all three (`1000h` `1002h` `1003h`);
 /// the last SET wins (any-event). Resetting only `1003` can then leave
 /// tracking off, so clicks, drag, and wheel die. This sequence resets 1003
-/// first, then enables click + button-event tracking and SGR encoding. It
-/// never sets `1003h`. Wheel reports are `66`/`67` without the motion bit.
+/// first, then enables click + button-event tracking, rxvt 1015, and SGR
+/// (`1006h` last). It never sets `1003h`. The Unix reader still decodes
+/// X10 and 1015 when a terminal speaks those instead of SGR. Wheel reports
+/// are `66`/`67` without the motion bit.
 pub const MOUSE_ENABLE: &[u8] = b"\x1b[?1003l\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h";
 
 /// xterm SGR button for wheel right (trackpad hscroll).
@@ -424,7 +427,59 @@ fn take_normal_mouse(bytes: &[u8]) -> Take {
     if bytes.len() < 6 {
         return Take::NeedMore;
     }
-    Take::Skip(6)
+    // X10: ESC [ M Cb Cx Cy. Each payload byte is value + 32.
+    let Some(cb) = bytes[3].checked_sub(32) else {
+        return Take::Skip(6);
+    };
+    let column = u16::from(bytes[4].saturating_sub(32)).saturating_sub(1);
+    let row = u16::from(bytes[5].saturating_sub(32)).saturating_sub(1);
+    match mouse_from_cb(cb, column, row) {
+        Some(event) => Take::Ready(6, event, KeyStrokeOrigin::Protocol),
+        None => Take::Skip(6),
+    }
+}
+
+fn take_rxvt_mouse(bytes: &[u8]) -> Take {
+    // rxvt / DECSET 1015: ESC [ Cb ; Cx ; Cy [;] M. Cb is value + 32.
+    let Ok(body) = std::str::from_utf8(&bytes[2..bytes.len() - 1]) else {
+        return Take::Skip(bytes.len());
+    };
+    let mut split = body.split(';');
+    let Some(cb) = split
+        .next()
+        .and_then(|field| field.parse::<u8>().ok())
+        .and_then(|value| value.checked_sub(32))
+    else {
+        return Take::Skip(bytes.len());
+    };
+    let Some(cx) = split
+        .next()
+        .and_then(|field| field.parse::<u16>().ok())
+        .filter(|value| *value > 0)
+    else {
+        return Take::Skip(bytes.len());
+    };
+    let Some(cy) = split
+        .next()
+        .and_then(|field| field.parse::<u16>().ok())
+        .filter(|value| *value > 0)
+    else {
+        return Take::Skip(bytes.len());
+    };
+    match mouse_from_cb(cb, cx - 1, cy - 1) {
+        Some(event) => Take::Ready(bytes.len(), event, KeyStrokeOrigin::Protocol),
+        None => Take::Skip(bytes.len()),
+    }
+}
+
+fn mouse_from_cb(cb: u8, column: u16, row: u16) -> Option<Event> {
+    let (kind, modifiers) = sgr_button_kind(cb)?;
+    Some(Event::Mouse(MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers,
+    }))
 }
 
 fn take_sgr(bytes: &[u8]) -> Take {
@@ -462,7 +517,8 @@ fn take_csi_numbered(bytes: &[u8]) -> Take {
     match seq[end] {
         b'~' => take_special_key(seq),
         b'u' => take_csi_u(seq),
-        b'R' | b'M' => Take::Skip(seq.len()),
+        b'M' => take_rxvt_mouse(seq),
+        b'R' => Take::Skip(seq.len()),
         _ => take_modified_arrow(seq),
     }
 }
@@ -734,6 +790,7 @@ mod tests {
         assert!(ours.contains("1003l"));
         assert!(ours.contains("1000h"));
         assert!(ours.contains("1002h"));
+        assert!(ours.contains("1015h"));
         assert!(ours.contains("1006h"));
         assert!(
             ours.find("1003l").unwrap() < ours.find("1002h").unwrap(),
@@ -835,5 +892,41 @@ mod tests {
         assert_eq!(mouse.len(), 1);
         assert!(matches!(mouse[0].0, Event::Mouse(_)));
         assert_eq!(mouse[0].1, KeyStrokeOrigin::Protocol);
+    }
+
+    #[test]
+    fn parse_tty_chunk_keeps_x10_and_rxvt_mouse() {
+        // Same fixtures as crossterm 0.28 parse_csi_normal_mouse / rxvt.
+        let x10 = parse_tty_chunk(b"\x1b[M0\x60\x70");
+        assert_eq!(x10.len(), 1);
+        assert_eq!(
+            x10[0].0,
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 63,
+                row: 79,
+                modifiers: KeyModifiers::CONTROL,
+            })
+        );
+        assert_eq!(x10[0].1, KeyStrokeOrigin::Protocol);
+
+        let rxvt = parse_tty_chunk(b"\x1b[32;30;40;M");
+        assert_eq!(rxvt.len(), 1);
+        assert_eq!(
+            rxvt[0].0,
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 29,
+                row: 39,
+                modifiers: KeyModifiers::NONE,
+            })
+        );
+        assert_eq!(rxvt[0].1, KeyStrokeOrigin::Protocol);
+
+        let incomplete = parse_tty_chunk(b"\x1b[M0");
+        assert!(
+            incomplete.is_empty(),
+            "partial X10 must wait for the 6-byte report"
+        );
     }
 }
