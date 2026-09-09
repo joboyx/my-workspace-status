@@ -283,16 +283,15 @@ impl PtySession {
 
     /// Human `gg` as two typeless CSI-u `g` reports.
     ///
-    /// Waits past the protocol echo window. Does not inject Release or a
-    /// typeless key-up. A second report in the same burst is an echo,
-    /// not a second tap.
+    /// The gap is 40ms: inside `DOUBLE_TAP_MS` (400) and under the old
+    /// 80ms echo, but past the few-ms VTE burst. After the completing
+    /// `g`, wait that burst out so the next `g` of `gt` is not dropped.
+    /// Does not inject Release or a typeless key-up.
     pub fn typeless_gg(&mut self) {
         self.csi_u_typeless('g');
-        // `G_CHORD_PROTOCOL_ECHO_MS` is 80. Stay above that window.
-        self.wait_ms(120);
+        self.wait_ms(40);
         self.csi_u_typeless('g');
-        // Completing `g` arms a short echo. Wait it out before the next chord.
-        self.wait_ms(120);
+        self.wait_ms(16);
     }
 
     /// Held-key Repeat (`CSI code ; 1 : 2 u`). Must fail if Repeat is ignored.

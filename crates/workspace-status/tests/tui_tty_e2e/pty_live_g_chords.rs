@@ -63,10 +63,12 @@ fn leave_workspace_root(tui: &mut PtySession) {
     );
 }
 
-/// One typeless CSI-u per tap: `gg` jumps, `gt` / `gT` switch tabs.
+/// One typeless CSI-u per tap: `gg` at 40ms jumps, then `gt` / `gT` switch tabs.
 ///
-/// Compare uses Diff vs default on `app` (alpha.txt / beta.txt), not an
-/// empty "No committed changes" list.
+/// 40ms is inside the 400ms chord and under the old 80ms echo. Compare
+/// uses Diff vs default on `app` (alpha.txt / beta.txt), not an empty
+/// "No committed changes" list. Immediate typeless press+echo `gt` stays
+/// in leftover `pty_compare_gt_chords_and_gg`.
 #[test]
 fn pty_typeless_one_report_gg_and_gt() {
     let (_root, workspace) = compare_ahead_workspace();
@@ -82,7 +84,7 @@ fn pty_typeless_one_report_gg_and_gt() {
                 && !tree_cursor_on(screen, "app")
                 && !tree_or_theme_fired(screen)
         },
-        "typeless one-report gg on the workspace tree jumps to the workspace root",
+        "typeless 40ms one-report gg on the workspace tree jumps to the workspace root",
         WAIT,
     );
 
@@ -125,7 +127,7 @@ fn pty_typeless_one_report_gg_and_gt() {
                 && !tree_cursor_on(screen, "beta.txt")
                 && !tree_or_theme_fired(screen)
         },
-        "typeless one-report gg on a multi-file compare list jumps to the first file",
+        "typeless 40ms one-report gg on a multi-file compare list jumps to the first file",
         WAIT,
     );
 
@@ -133,7 +135,7 @@ fn pty_typeless_one_report_gg_and_gt() {
     tui.csi_u_typeless('t');
     tui.wait_pred(
         |screen| on_compare_local_main(screen) && !tree_or_theme_fired(screen),
-        "typeless one-report gt is NextTab, not ToggleTreeMode",
+        "typeless gt after completing g is NextTab, not ToggleTreeMode",
         WAIT,
     );
 
@@ -142,30 +144,6 @@ fn pty_typeless_one_report_gg_and_gt() {
     tui.wait_pred(
         |screen| on_compare_origin_main(screen) && !tree_or_theme_fired(screen),
         "typeless gT is PreviousTab, not CycleTheme",
-        WAIT,
-    );
-}
-
-/// Immediate typeless pair is still key-up. `t` must stay NextTab.
-#[test]
-fn pty_typeless_echo_gt_is_next_tab() {
-    let (_root, workspace) = compare_ahead_workspace();
-    let mut tui = PtySession::open(&workspace);
-    tui.wait_contains("app", WAIT);
-    open_default_and_main(&mut tui);
-    tui.wait_pred(
-        on_compare_local_main,
-        "setup: active compare is vs local main",
-        GIT_WAIT,
-    );
-
-    tui.csi_u_typeless('g');
-    tui.csi_u_typeless('g');
-    tui.csi_u_typeless('t');
-    tui.csi_u_typeless('t');
-    tui.wait_pred(
-        |screen| on_workspace(screen) && !tree_or_theme_fired(screen),
-        "typeless press+echo gt wraps to Workspace, not Flat paths",
         WAIT,
     );
 }
