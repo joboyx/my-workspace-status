@@ -27,6 +27,10 @@ jobs:
           save-if: false
       - name: Install desktop TTY packages
         run: |
+          # ubuntu-latest images ship a Google Chrome apt source. A stale
+          # Chrome Packages.gz hash fails `apt-get update` and skips the e2e.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+            /etc/apt/sources.list.d/google-chrome.list.save
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             xvfb xfce4-terminal xterm xdotool dbus-x11 openbox
