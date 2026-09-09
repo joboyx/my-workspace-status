@@ -55,6 +55,14 @@ fn panes_narrower(screen: &str, join_wide: u16) -> bool {
     two_pane_idle(screen) && join < join_wide && join_is_a_split(screen, join)
 }
 
+/// Join is back on the wide split. A leftover 80-col paint cannot pass.
+fn panes_restored_wide(screen: &str, join_wide: u16) -> bool {
+    let Some(join) = pane_join_col(screen) else {
+        return false;
+    };
+    two_pane_idle(screen) && join >= join_wide && join_is_a_split(screen, join)
+}
+
 fn list_shorter(screen: &str, join_lines_tall: usize) -> bool {
     two_pane_idle(screen) && join_line_count(screen) < join_lines_tall && has_bottom_corners(screen)
 }
@@ -79,8 +87,13 @@ fn help_overlay_idle(screen: &str) -> bool {
         && help_version_lower_right(screen)
 }
 
-fn help_keeps_overlay(screen: &str, help_wide_joins: usize) -> bool {
-    help_overlay_idle(screen) && (help_wide_joins < 2 || join_line_count(screen) < help_wide_joins)
+/// Wide help left enough `││` rows that a wrap-driven drop is a real signal.
+fn help_wrap_is_meaningful(help_wide_joins: usize) -> bool {
+    help_wide_joins > 4
+}
+
+fn help_wraps_shorter(screen: &str, help_wide_joins: usize) -> bool {
+    help_overlay_idle(screen) && join_line_count(screen) < help_wide_joins
 }
 
 /// Terminal resize relayouts pane split, list height, and the help overlay.
@@ -94,7 +107,9 @@ fn help_keeps_overlay(screen: &str, help_wide_joins: usize) -> bool {
 ///
 /// Fail if resize is a no-op: the wide join stays or vanishes under a
 /// parser clip, `? help` / `┘└` drop off a short grid, or a narrow help
-/// frame loses MOVE / the package version.
+/// frame loses MOVE / the package version. Help opens only after the
+/// join is back on the wide split, so a leftover 80-col paint cannot
+/// host `?`.
 #[test]
 fn pty_terminal_resize_relayouts() {
     let (_root, workspace) = daily_workspace();
@@ -143,31 +158,44 @@ fn pty_terminal_resize_relayouts() {
         WAIT,
     );
 
+    assert!(
+        !panes_restored_wide(&tui.screen(), join_wide),
+        "wide-restore claim must be false on the 80-col short frame:\n{}",
+        tui.screen()
+    );
     tui.resize(200, 48);
     tui.wait_pred(
-        two_pane_idle,
-        "200x48 restore: idle two-pane chrome before help (no dummy key after resize)",
+        |screen| panes_restored_wide(screen, join_wide),
+        "200x48 restore moves the join back right before help (a leftover 80-col paint keeps the narrow join)",
         WAIT,
     );
     tui.key('?');
     tui.wait_pred(
         help_overlay_idle,
-        "help overlay is open with MOVE, idle / search help, and the package version",
+        "help overlay is open on the wide frame with MOVE, idle / search help, and the package version",
         WAIT,
     );
     let help_wide_joins = join_line_count(&tui.screen());
-    if help_wide_joins >= 2 {
+    let wrap_extra = help_wrap_is_meaningful(help_wide_joins);
+    if wrap_extra {
         assert!(
-            !help_keeps_overlay(&tui.screen(), help_wide_joins),
-            "narrow-help wrap claim must be false before resize:\n{}",
+            !help_wraps_shorter(&tui.screen(), help_wide_joins),
+            "help-wrap claim must be false before the 80-col resize:\n{}",
             tui.screen()
         );
     }
 
     tui.resize(80, 48);
     tui.wait_pred(
-        |screen| help_keeps_overlay(screen, help_wide_joins),
-        "narrow help keeps MOVE and the lower-right version (parser clip drops the overlay version)",
+        help_overlay_idle,
+        "narrow help keeps MOVE and the lower-right version (parser clip of a 200-col overlay drops the version)",
         WAIT,
     );
+    if wrap_extra {
+        tui.wait_pred(
+            |screen| help_wraps_shorter(screen, help_wide_joins),
+            "narrow help wrap steals ││ rows (omit this extra when the wide help join count is small)",
+            WAIT,
+        );
+    }
 }
