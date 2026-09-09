@@ -264,6 +264,35 @@ impl PtySession {
         self.csi_u(codepoint, 1, 1);
     }
 
+    /// Typeless CSI-u (`CSI code ; 1 u`). No event type.
+    ///
+    /// Terminals that honor `REPORT_ALL_KEYS_AS_ESCAPE_CODES` and omit
+    /// `REPORT_EVENT_TYPES` send this for a tap. One report per key is
+    /// the live xfce/VTE path. Do not send a second report for key-up
+    /// when the test claims that path.
+    pub fn csi_u_typeless(&mut self, letter: char) {
+        let codepoint = u32::from(letter.to_ascii_lowercase());
+        self.send_bytes(format!("\x1b[{codepoint};1u").as_bytes());
+    }
+
+    /// Typeless CSI-u with Shift (`CSI code ; 2 u`).
+    pub fn csi_u_typeless_shift(&mut self, letter: char) {
+        let codepoint = u32::from(letter.to_ascii_lowercase());
+        self.send_bytes(format!("\x1b[{codepoint};2u").as_bytes());
+    }
+
+    /// Human `gg` as two typeless CSI-u `g` reports.
+    ///
+    /// Waits past the protocol echo window. Does not inject Release or a
+    /// typeless key-up. A second report in the same burst is an echo,
+    /// not a second tap.
+    pub fn typeless_gg(&mut self) {
+        self.csi_u_typeless('g');
+        // `G_CHORD_PROTOCOL_ECHO_MS` is 80. Stay above that window.
+        self.wait_ms(120);
+        self.csi_u_typeless('g');
+    }
+
     /// Held-key Repeat (`CSI code ; 1 : 2 u`). Must fail if Repeat is ignored.
     pub fn letter_repeat(&mut self, letter: char) {
         let codepoint = u32::from(letter.to_ascii_lowercase());

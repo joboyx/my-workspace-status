@@ -18,6 +18,8 @@ mod harness;
 #[cfg(unix)]
 mod leftover;
 #[cfg(unix)]
+mod pty_live_g_chords;
+#[cfg(unix)]
 mod seed;
 #[cfg(unix)]
 mod support;
