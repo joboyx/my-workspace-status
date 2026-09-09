@@ -11,12 +11,14 @@ use super::action::{Action, PaletteOpenedBy};
 /// Window for `zz` / `gg` after the first key.
 pub const DOUBLE_TAP_MS: u64 = 400;
 
-/// Drop a protocol same-key Press only inside this window.
+/// Drop a protocol same-key Press only inside this VTE burst.
 ///
-/// VTE key-up as typeless CSI-u arrives in a few milliseconds. A human
-/// second `g` for `gg` is later. A same-key Press after this window is a
-/// new tap, not an echo. Raw bytes never use this window.
-pub const G_CHORD_PROTOCOL_ECHO_MS: u64 = 80;
+/// Typeless key-up arrives in the same stdin burst (a few milliseconds).
+/// A human second `g` for `gg` is later and must stay inside
+/// [`DOUBLE_TAP_MS`]. An 80 ms window ate that tap and left `GPending`
+/// armed, so a later `t` / `T` fired bare. Raw bytes never use this
+/// window.
+pub const G_CHORD_PROTOCOL_ECHO_MS: u64 = 8;
 
 /// Where a key event's bytes came from.
 ///
@@ -1955,6 +1957,58 @@ mod tests {
         assert!(
             !drop_g_chord_echo_at(&mut echo, pending_g(), &g, KeyStrokeOrigin::Protocol, later),
             "one typeless CSI-u per tap must complete gg after the echo window"
+        );
+    }
+
+    #[test]
+    fn typeless_second_g_at_40ms_is_a_new_tap() {
+        let mut echo = GChordEchoState::default();
+        let g = key(KeyCode::Char('g'));
+        let t0 = Instant::now();
+        assert!(!drop_g_chord_echo_at(
+            &mut echo,
+            normal(),
+            &g,
+            KeyStrokeOrigin::Protocol,
+            t0
+        ));
+        let later = t0 + Duration::from_millis(40);
+        assert!(
+            !drop_g_chord_echo_at(&mut echo, pending_g(), &g, KeyStrokeOrigin::Protocol, later),
+            "40ms is inside DOUBLE_TAP_MS and under the old 80ms echo; completing g must stay"
+        );
+    }
+
+    #[test]
+    fn completing_g_does_not_eat_next_g_after_burst() {
+        let mut echo = GChordEchoState::default();
+        let g = key(KeyCode::Char('g'));
+        let t0 = Instant::now();
+        assert!(!drop_g_chord_echo_at(
+            &mut echo,
+            normal(),
+            &g,
+            KeyStrokeOrigin::Protocol,
+            t0
+        ));
+        let tap2 = t0 + Duration::from_millis(40);
+        assert!(!drop_g_chord_echo_at(
+            &mut echo,
+            pending_g(),
+            &g,
+            KeyStrokeOrigin::Protocol,
+            tap2
+        ));
+        let after_burst = tap2 + Duration::from_millis(G_CHORD_PROTOCOL_ECHO_MS + 1);
+        assert!(
+            !drop_g_chord_echo_at(
+                &mut echo,
+                normal(),
+                &g,
+                KeyStrokeOrigin::Protocol,
+                after_burst
+            ),
+            "completing g must not eat the next g of gt after the VTE burst"
         );
     }
 
