@@ -13,8 +13,10 @@ use std::io::{self, Write};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+#[cfg(not(unix))]
+use crossterm::event;
 use crossterm::event::{
-    self, DisableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
+    DisableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
     MouseEvent, MouseEventKind,
 };
 use crossterm::execute;

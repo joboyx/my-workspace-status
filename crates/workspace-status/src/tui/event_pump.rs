@@ -433,8 +433,8 @@ mod tests {
             );
         }
         assert!(
-            loop_src.contains("read_event("),
-            "TTY input thread must read via tty::read_event"
+            loop_src.contains("read_event_origin("),
+            "TTY input thread must read via tty::read_event_origin"
         );
         assert!(
             loop_src.contains("poll_event("),
