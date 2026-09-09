@@ -131,6 +131,37 @@ pub fn ahead_workspace() -> (PathBuf, PathBuf) {
     (root, workspace)
 }
 
+/// Two clean checkouts (`alpha`, `beta`) on feature branches.
+///
+/// Seed subjects stay `seed alpha` / `seed beta`. Used by live-watch PTY
+/// that commits a new HEAD on `alpha` after first paint.
+pub fn watch_pair_workspace() -> (PathBuf, PathBuf) {
+    let (root, workspace) = new_workspace("ws-tui-tty-watch-pair");
+    seed_repo(&workspace, "alpha", "main", false);
+    seed_repo(&workspace, "beta", "main", false);
+    git(
+        &workspace.join("alpha"),
+        &["checkout", "-q", "-b", "feature/watch"],
+    );
+    git(
+        &workspace.join("beta"),
+        &["checkout", "-q", "-b", "feature/other"],
+    );
+    (root, workspace)
+}
+
+/// Local `syncbox` is two commits ahead of origin.
+///
+/// Subjects are `watch-ahead-one` / `watch-ahead-two` so they cannot
+/// match painted count chrome (`^2`, `main ^2`).
+pub fn watch_ahead_workspace() -> (PathBuf, PathBuf) {
+    let (root, workspace, _remote) = tracking_workspace("ws-tui-tty-watch-ahead", "syncbox");
+    let repo = workspace.join("syncbox");
+    write_commit(&repo, "count.txt", "one\n", "watch-ahead-one");
+    write_commit(&repo, "count.txt", "two\n", "watch-ahead-two");
+    (root, workspace)
+}
+
 /// Primary checkout plus a linked worktree for `W` remove.
 pub fn worktree_workspace() -> (PathBuf, PathBuf) {
     let (root, workspace) = new_workspace("ws-tui-tty-wt");
