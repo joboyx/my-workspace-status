@@ -694,9 +694,10 @@ impl HeadlessTui {
                 return;
             }
         }
+        let input_mode = self.state.input_mode();
         if drop_protocol_dup_g_chord_press(
             &mut self.state.last_g_chord_press,
-            self.state.input_mode(),
+            input_mode,
             &event,
         ) {
             return;

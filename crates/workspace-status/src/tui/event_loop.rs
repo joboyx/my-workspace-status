@@ -334,9 +334,10 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event) {
     }
     // CSI-u without event types sends that release as another Press.
     // Drop the echo so `gt` / `gT` stay tab actions (not `gg` then bare t/T).
+    let input_mode = ctx.state.input_mode();
     if drop_protocol_dup_g_chord_press(
         &mut ctx.state.last_g_chord_press,
-        ctx.state.input_mode(),
+        input_mode,
         &event,
     ) {
         return;
