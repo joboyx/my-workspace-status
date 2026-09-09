@@ -15,12 +15,14 @@ use crate::support::{
 const WATCH_MS: &str = "500";
 
 /// After a Workspace-tree watch apply paint. The timer fired ~collect-ms
-/// earlier; the next 500ms tick is then in about (250, 480)ms.
-const AFTER_APPLY_MS: u64 = 90;
+/// earlier; the next 500ms tick is then in about (250, 480)ms. 160ms
+/// puts that fire inside the 400ms `g` window with slack.
+const AFTER_APPLY_MS: u64 = 160;
 
 /// Wait after arming `g` for that next tick. Must stay under 400ms
-/// (`DOUBLE_TAP_MS`). `WAIT` / `GIT_WAIT` here expires the chord.
-const CHORD_TICK_WAIT_MS: u64 = 390;
+/// (`DOUBLE_TAP_MS`) with host/PTY slack. `WAIT` / `GIT_WAIT` here
+/// expires the chord and can paint ToggleTreeMode for a correct `gt`.
+const CHORD_TICK_WAIT_MS: u64 = 330;
 
 /// After a compare-tab dirty write there is no `g` chord, so a longer
 /// poll+apply wait is safe. Compare paint is committed-only.
@@ -147,9 +149,23 @@ fn g_then_watch_tick_then(tui: &mut PtySession, workspace: &Path, letter: char, 
 }
 
 /// After a phase-lock paint: wait so the next 500ms tick falls inside
-/// the 400ms `g` window, then run the claimed chord.
+/// the 400ms `g` window, then run the claimed chord from Workspace.
 fn claimed_g_after_phase_lock(tui: &mut PtySession, workspace: &Path, letter: char, tag: &str) {
     tui.wait_ms(AFTER_APPLY_MS);
+    g_then_watch_tick_then(tui, workspace, letter, tag);
+}
+
+/// Same timing as [`claimed_g_after_phase_lock`], but `g3` to vs main
+/// first (no long `wait_pred`) so a Workspace jump cannot match a no-op.
+fn claimed_g_from_vs_main_after_phase_lock(
+    tui: &mut PtySession,
+    workspace: &Path,
+    letter: char,
+    tag: &str,
+) {
+    tui.wait_ms(AFTER_APPLY_MS);
+    csi_u_letter(tui, 'g');
+    csi_u_letter(tui, '3');
     g_then_watch_tick_then(tui, workspace, letter, tag);
 }
 
@@ -228,8 +244,8 @@ fn parked_files_drill_returned(screen: &str) -> bool {
 /// Phase-lock on a Workspace-tree dirty path (the apply). Then sleep so
 /// the next 500ms poll falls inside the 400ms `g` window. Watch ticks
 /// do not clear the armed `g`. A `GIT_WAIT` between `g` and `t` expires
-/// the chord and paints ToggleTreeMode. A no-op that stays on vs main
-/// after `gt` must fail.
+/// the chord and paints ToggleTreeMode. `gt` and `g1` start on vs main
+/// so a stay there is a failed no-op.
 #[test]
 fn pty_compare_gt_survives_watch() {
     let (_root, workspace) = compare_ahead_workspace();
@@ -251,10 +267,7 @@ fn pty_compare_gt_survives_watch() {
     );
 
     phase_lock_watch(&mut tui, &workspace, "lgt");
-    tui.wait_ms(AFTER_APPLY_MS);
-    csi_u_letter(&mut tui, 'g');
-    csi_u_letter(&mut tui, '3');
-    g_then_watch_tick_then(&mut tui, &workspace, 't', "gt");
+    claimed_g_from_vs_main_after_phase_lock(&mut tui, &workspace, 't', "gt");
     tui.wait_pred(
         |screen| on_workspace(screen) && !tree_or_theme_fired(screen),
         "gt after a live watch apply is NextTab (wrap to Workspace), not ToggleTreeMode",
@@ -262,10 +275,10 @@ fn pty_compare_gt_survives_watch() {
     );
 
     phase_lock_watch(&mut tui, &workspace, "lg1");
-    claimed_g_after_phase_lock(&mut tui, &workspace, '1', "g1");
+    claimed_g_from_vs_main_after_phase_lock(&mut tui, &workspace, '1', "g1");
     tui.wait_pred(
         |screen| on_workspace(screen) && !tree_or_theme_fired(screen),
-        "g1 after a live watch apply stays on Workspace",
+        "g1 after a live watch apply jumps to Workspace (a stay on vs main is a no-op)",
         WAIT,
     );
 
