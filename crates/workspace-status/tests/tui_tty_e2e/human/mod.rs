@@ -27,6 +27,7 @@ mod pty_compare_gg_first_file_not_dir;
 mod pty_compare_gt_chords_and_gg;
 mod pty_compare_mouse_tab_click;
 mod pty_compare_mouse_tab_close;
+mod pty_compare_palette_disable_guards;
 mod pty_compare_palette_opens_tab;
 mod pty_ctrl_c_prompts_before_quit;
 mod pty_ctrl_c_second_quit;
