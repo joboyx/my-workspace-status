@@ -73,6 +73,7 @@ mod pty_multi_lane_graph_paints_merge_and_stash_spur;
 mod pty_n_and_n_pane_next_prev;
 mod pty_pgup_pgdn_pages_workspace_tree;
 mod pty_primary_merged_branch_shows_check;
+mod pty_primary_omits_open_vs_default_mark;
 mod pty_pull_behind_local_remote;
 mod pty_q_quits_immediately;
 mod pty_r_refreshes_new_dirty_file;
