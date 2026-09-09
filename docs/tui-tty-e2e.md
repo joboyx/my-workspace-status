@@ -37,7 +37,7 @@ cargo test --test tui_tty_e2e -- --ignored --nocapture --test-threads=1
   cargo test --test tui_tty_e2e -- --ignored --nocapture --test-threads=1
 ```
 
-Packages (Debian/Ubuntu): `xvfb xfce4-terminal xterm xdotool dbus-x11 openbox`. `script` is util-linux. `scripts/with-desktop-session.sh` starts Xvfb when `DISPLAY` is unset, then dbus and Openbox (`scripts/openbox.xml`) so xdotool can focus the terminal. `scripts/capture-demo-stills.sh` sources the same helper. Do not invent a second screenshot pipeline.
+Packages (Debian/Ubuntu): `xvfb xfce4-terminal xterm xdotool dbus-x11 openbox`. `script` is util-linux. `scripts/with-desktop-session.sh` starts Xvfb when `DISPLAY` is unset, then dbus and Openbox (`scripts/openbox.xml`) so xdotool can focus the terminal. `scripts/capture-demo-stills.sh` sources the same helper. Do not invent a second screenshot pipeline. The Actions `tui-tty-desktop` job removes the image Chrome apt files (`google-chrome.list` and `google-chrome.sources`) before `apt-get update`. A hash mismatch on that index must not skip xfce or xterm.
 
 ## Harness notes
 

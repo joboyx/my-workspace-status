@@ -27,10 +27,20 @@ jobs:
           save-if: false
       - name: Install desktop TTY packages
         run: |
-          # ubuntu-latest images ship a Google Chrome apt source. A stale
-          # Chrome Packages.gz hash fails `apt-get update` and skips the e2e.
+          # ubuntu-latest ships Chrome as google-chrome.list and
+          # google-chrome.sources. A stale Chrome Packages.gz hash fails
+          # apt-get update and skips the e2e. The .list delete alone is
+          # not enough: apt still reads the DEB822 .sources file.
           sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
-            /etc/apt/sources.list.d/google-chrome.list.save
+            /etc/apt/sources.list.d/google-chrome.list.save \
+            /etc/apt/sources.list.d/google-chrome.sources \
+            /etc/apt/sources.list.d/google-chrome.sources.save
+          sudo find /etc/apt/sources.list.d -iname '*chrome*' -delete || true
+          sudo grep -RIl 'dl.google.com' /etc/apt/sources.list \
+            /etc/apt/sources.list.d 2>/dev/null \
+            | sudo xargs -r rm -f || true
+          sudo find /var/lib/apt/lists -iname '*chrome*' -delete || true
+          sudo find /var/lib/apt/lists -iname '*dl.google.com*' -delete || true
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             xvfb xfce4-terminal xterm xdotool dbus-x11 openbox
