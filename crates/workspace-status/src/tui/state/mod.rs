@@ -51,7 +51,7 @@ use super::drill::{
 use super::fetch::background_fetch_targets;
 use super::gates::ListFocusTarget;
 use super::graph_focus::GraphFocusPickerState;
-use super::keys::{GChordEchoState, InputMode, DOUBLE_TAP_MS};
+use super::keys::{expire_stale_g_chord_echo, GChordEchoState, InputMode, DOUBLE_TAP_MS};
 use super::ops::{
     collect_write_files, format_running_op, op_is_kind_noop, op_targets, push_targets,
     refresh_target, should_delete_untracked, Op, RunningOp, ScopedFile,
@@ -552,6 +552,14 @@ impl AppState {
 
     fn chord_pending(&self, at: Option<Instant>) -> bool {
         at.is_some_and(|t| t.elapsed() <= Duration::from_millis(DOUBLE_TAP_MS))
+    }
+
+    /// Drop a stale arming-`g` echo after [`DOUBLE_TAP_MS`].
+    ///
+    /// Call this before the `g`-chord echo filter so a late `g` is a new
+    /// tap. An echo of `t` / `T` / `1`–`9` after a consumed chord stays.
+    pub(crate) fn expire_stale_g_chord(&mut self) {
+        expire_stale_g_chord_echo(&mut self.g_chord_echo, &mut self.g_pending_at);
     }
 
     pub fn focused_row(&self) -> Option<&VisibleRow> {
@@ -2643,10 +2651,7 @@ impl AppState {
                 } else {
                     match &self.drill {
                         DrillView::Diff {
-                            repo,
-                            path,
-                            source,
-                            ..
+                            repo, path, source, ..
                         } => (Some(repo.as_str()), Some(path.as_str()), Some(source)),
                         _ => (self.diff_repo.as_deref(), self.diff_path.as_deref(), None),
                     }
@@ -5915,19 +5920,13 @@ mod tests {
         app.layout.tab_hits = vec![(0, 12, 0), (13, 20, 1), (34, 22, 2)];
         app.layout.tab_close_hits = vec![(28, 3, 1), (51, 3, 2)];
         assert_eq!(
-            app.dispatch(Action::Click {
-                col: 29,
-                row: 0,
-            }),
+            app.dispatch(Action::Click { col: 29, row: 0 }),
             Effect::None
         );
         assert_eq!(app.tabs.active, 1);
         assert_eq!(app.tabs.compare.len(), 1);
         app.layout.tab_close_hits = vec![(2, 3, 0)];
-        assert_eq!(
-            app.dispatch(Action::Click { col: 3, row: 0 }),
-            Effect::None
-        );
+        assert_eq!(app.dispatch(Action::Click { col: 3, row: 0 }), Effect::None);
         assert_eq!(app.status, WORKSPACE_TAB_CANNOT_CLOSE);
         assert_eq!(app.tabs.active, 1);
         assert_eq!(app.tabs.compare.len(), 1);

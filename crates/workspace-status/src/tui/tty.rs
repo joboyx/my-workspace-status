@@ -1,18 +1,25 @@
-//! Shared TTY mouse enable sequence and SGR decode used by the live loop.
+//! Shared TTY mouse enable sequence, SGR decode, and live byte reader.
 //!
-//! The live event loop reads with [`poll_event`] / [`read_event`] (crossterm
-//! 0.28 `event::poll` / `event::read`). Headless e2e cannot call those (no
-//! TTY), so it feeds the same bytes through [`decode_sgr_mouse`], which matches
-//! crossterm's `parse_cb` / `parse_csi_sgr_mouse` including reports the live
-//! reader drops. A kinder clone would go green while a real TTY no-ops.
+//! The live event loop reads with [`poll_event`] / [`read_event`]. On Unix
+//! the reader tags each key as [`KeyStrokeOrigin::LegacyByte`] or
+//! [`KeyStrokeOrigin::Protocol`] from the bytes. Headless e2e cannot call
+//! those (no TTY), so it feeds the same bytes through [`decode_sgr_mouse`],
+//! which matches crossterm's `parse_cb` / `parse_csi_sgr_mouse` including
+//! reports the live reader drops. A kinder clone would go green while a
+//! real TTY no-ops.
 
+use std::collections::VecDeque;
 use std::io::{self, Write};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use crossterm::event::{
-    self, DisableMouseCapture, Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, DisableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
+    MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
+
+use super::keys::KeyStrokeOrigin;
 
 /// ANSI written to enable mouse capture.
 ///
@@ -44,12 +51,493 @@ pub fn disable_mouse(out: &mut impl Write) -> io::Result<()> {
 
 /// Poll for a TTY event. Live loop only; same reader as [`read_event`].
 pub fn poll_event(timeout: Duration) -> io::Result<bool> {
+    #[cfg(unix)]
+    {
+        unix_poll(timeout)
+    }
+    #[cfg(not(unix))]
+    {
+        event::poll(timeout)
+    }
+}
+
+/// Read one TTY event. Live loop only.
+pub fn read_event() -> io::Result<Event> {
+    read_event_origin().map(|(event, _)| event)
+}
+
+/// Read one TTY event and the origin of its bytes.
+///
+/// Unix tags raw printable / control bytes as
+/// [`KeyStrokeOrigin::LegacyByte`]. CSI-u and other escape sequences
+/// are [`KeyStrokeOrigin::Protocol`]. Windows keeps `event::read` and
+/// tags every event as Protocol.
+pub fn read_event_origin() -> io::Result<(Event, KeyStrokeOrigin)> {
+    #[cfg(unix)]
+    {
+        unix_read()
+    }
+    #[cfg(not(unix))]
+    {
+        event::read().map(|event| (event, KeyStrokeOrigin::Protocol))
+    }
+}
+
+struct TtyBuf {
+    raw: Vec<u8>,
+    events: VecDeque<(Event, KeyStrokeOrigin)>,
+}
+
+fn tty_buf() -> &'static Mutex<TtyBuf> {
+    static BUF: OnceLock<Mutex<TtyBuf>> = OnceLock::new();
+    BUF.get_or_init(|| {
+        Mutex::new(TtyBuf {
+            raw: Vec::new(),
+            events: VecDeque::new(),
+        })
+    })
+}
+
+fn lock_tty_buf() -> std::sync::MutexGuard<'static, TtyBuf> {
+    tty_buf()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+#[cfg(unix)]
+fn unix_poll(timeout: Duration) -> io::Result<bool> {
+    {
+        let mut buf = lock_tty_buf();
+        drain_parsed(&mut buf, stdin_pending()? > 0);
+        if !buf.events.is_empty() {
+            return Ok(true);
+        }
+        if can_finish_lone_esc(&buf) {
+            return Ok(true);
+        }
+    }
     event::poll(timeout)
 }
 
-/// Read one TTY event. Live loop only; crossterm 0.28 `event::read`.
-pub fn read_event() -> io::Result<Event> {
-    event::read()
+#[cfg(unix)]
+fn unix_read() -> io::Result<(Event, KeyStrokeOrigin)> {
+    let pending = stdin_pending()?;
+    let mut buf = lock_tty_buf();
+    if pending > 0 {
+        let bytes = read_stdin(pending)?;
+        buf.raw.extend_from_slice(&bytes);
+    }
+    drain_parsed(&mut buf, stdin_pending()? > 0);
+    if let Some(event) = buf.events.pop_front() {
+        return Ok(event);
+    }
+    if can_finish_lone_esc(&buf) {
+        buf.raw.clear();
+        return Ok((
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            KeyStrokeOrigin::Protocol,
+        ));
+    }
+    drop(buf);
+    event::read().map(|event| (event, KeyStrokeOrigin::Protocol))
+}
+
+#[cfg(unix)]
+fn stdin_pending() -> io::Result<usize> {
+    let mut n: libc::c_int = 0;
+    let rc = unsafe { libc::ioctl(libc::STDIN_FILENO, libc::FIONREAD, &mut n) };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(n.max(0) as usize)
+}
+
+#[cfg(unix)]
+fn read_stdin(n: usize) -> io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; n.max(1)];
+    let nread = unsafe {
+        libc::read(
+            libc::STDIN_FILENO,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len(),
+        )
+    };
+    if nread < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    buf.truncate(nread as usize);
+    Ok(buf)
+}
+
+fn can_finish_lone_esc(buf: &TtyBuf) -> bool {
+    buf.raw == [0x1b] && buf.events.is_empty()
+}
+
+fn drain_parsed(buf: &mut TtyBuf, more: bool) {
+    loop {
+        if buf.raw.is_empty() {
+            return;
+        }
+        match take_event(&buf.raw, more) {
+            Take::NeedMore => return,
+            Take::Skip(n) => {
+                let n = n.min(buf.raw.len()).max(1);
+                buf.raw.drain(..n);
+            }
+            Take::Ready(n, event, origin) => {
+                let n = n.min(buf.raw.len()).max(1);
+                buf.raw.drain(..n);
+                buf.events.push_back((event, origin));
+            }
+        }
+    }
+}
+
+enum Take {
+    NeedMore,
+    Skip(usize),
+    Ready(usize, Event, KeyStrokeOrigin),
+}
+
+/// Parse the next event from `bytes`. `more` is true when more stdin
+/// bytes are already waiting (lone ESC must not become Escape yet).
+pub(crate) fn take_event(bytes: &[u8], more: bool) -> Take {
+    if bytes.is_empty() {
+        return Take::NeedMore;
+    }
+    match bytes[0] {
+        0x1b => take_esc(bytes, more),
+        b'\r' => key_legacy(1, KeyCode::Enter, KeyModifiers::NONE),
+        b'\t' => key_legacy(1, KeyCode::Tab, KeyModifiers::NONE),
+        0x7f => key_legacy(1, KeyCode::Backspace, KeyModifiers::NONE),
+        c @ 0x01..=0x1a => key_legacy(
+            1,
+            KeyCode::Char((c - 1 + b'a') as char),
+            KeyModifiers::CONTROL,
+        ),
+        c @ 0x1c..=0x1f => key_legacy(
+            1,
+            KeyCode::Char((c - 0x1c + b'4') as char),
+            KeyModifiers::CONTROL,
+        ),
+        0x00 => key_legacy(1, KeyCode::Char(' '), KeyModifiers::CONTROL),
+        _ => take_utf8(bytes),
+    }
+}
+
+fn key_legacy(n: usize, code: KeyCode, modifiers: KeyModifiers) -> Take {
+    Take::Ready(
+        n,
+        Event::Key(KeyEvent::new(code, modifiers)),
+        KeyStrokeOrigin::LegacyByte,
+    )
+}
+
+fn key_protocol(n: usize, key: KeyEvent) -> Take {
+    Take::Ready(n, Event::Key(key), KeyStrokeOrigin::Protocol)
+}
+
+fn take_utf8(bytes: &[u8]) -> Take {
+    for n in 1..=bytes.len().min(4) {
+        if let Ok(text) = std::str::from_utf8(&bytes[..n]) {
+            if let Some(c) = text.chars().next() {
+                if c.len_utf8() == n {
+                    let modifiers = if c.is_uppercase() {
+                        KeyModifiers::SHIFT
+                    } else {
+                        KeyModifiers::NONE
+                    };
+                    return key_legacy(n, KeyCode::Char(c), modifiers);
+                }
+            }
+        }
+    }
+    if bytes.len() < 4 {
+        Take::NeedMore
+    } else {
+        Take::Skip(1)
+    }
+}
+
+fn take_esc(bytes: &[u8], more: bool) -> Take {
+    if bytes.len() == 1 {
+        return if more {
+            Take::NeedMore
+        } else {
+            key_protocol(1, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        };
+    }
+    match bytes[1] {
+        b'O' => take_ss3(bytes),
+        b'[' => take_csi(bytes),
+        0x1b => key_protocol(1, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        _ => match take_event(&bytes[1..], more) {
+            Take::NeedMore => Take::NeedMore,
+            Take::Skip(n) => Take::Skip(n + 1),
+            Take::Ready(n, Event::Key(mut key), _) => {
+                key.modifiers |= KeyModifiers::ALT;
+                Take::Ready(n + 1, Event::Key(key), KeyStrokeOrigin::Protocol)
+            }
+            Take::Ready(n, event, _) => Take::Ready(n + 1, event, KeyStrokeOrigin::Protocol),
+        },
+    }
+}
+
+fn take_ss3(bytes: &[u8]) -> Take {
+    if bytes.len() < 3 {
+        return Take::NeedMore;
+    }
+    let code = match bytes[2] {
+        b'D' => KeyCode::Left,
+        b'C' => KeyCode::Right,
+        b'A' => KeyCode::Up,
+        b'B' => KeyCode::Down,
+        b'H' => KeyCode::Home,
+        b'F' => KeyCode::End,
+        val @ b'P'..=b'S' => KeyCode::F(1 + val - b'P'),
+        _ => return Take::Skip(3),
+    };
+    key_protocol(3, KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+fn take_csi(bytes: &[u8]) -> Take {
+    if bytes.len() < 3 {
+        return Take::NeedMore;
+    }
+    match bytes[2] {
+        b'[' => {
+            if bytes.len() < 4 {
+                return Take::NeedMore;
+            }
+            match bytes[3] {
+                val @ b'A'..=b'E' => key_protocol(
+                    4,
+                    KeyEvent::new(KeyCode::F(1 + val - b'A'), KeyModifiers::NONE),
+                ),
+                _ => Take::Skip(4),
+            }
+        }
+        b'D' => key_protocol(3, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+        b'C' => key_protocol(3, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+        b'A' => key_protocol(3, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+        b'B' => key_protocol(3, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        b'H' => key_protocol(3, KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)),
+        b'F' => key_protocol(3, KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
+        b'Z' => key_protocol(
+            3,
+            KeyEvent::new_with_kind(KeyCode::BackTab, KeyModifiers::SHIFT, KeyEventKind::Press),
+        ),
+        b'M' => take_normal_mouse(bytes),
+        b'<' => take_sgr(bytes),
+        b'I' => Take::Ready(3, Event::FocusGained, KeyStrokeOrigin::Protocol),
+        b'O' => Take::Ready(3, Event::FocusLost, KeyStrokeOrigin::Protocol),
+        b'P' => key_protocol(3, KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)),
+        b'Q' => key_protocol(3, KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
+        b'S' => key_protocol(3, KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)),
+        b'?' => take_csi_query(bytes),
+        b';' | b'0'..=b'9' => take_csi_numbered(bytes),
+        _ => Take::Skip(3),
+    }
+}
+
+fn take_normal_mouse(bytes: &[u8]) -> Take {
+    if bytes.len() < 6 {
+        return Take::NeedMore;
+    }
+    Take::Skip(6)
+}
+
+fn take_sgr(bytes: &[u8]) -> Take {
+    let Some(end) = bytes.iter().position(|b| *b == b'M' || *b == b'm') else {
+        return Take::NeedMore;
+    };
+    let seq = &bytes[..=end];
+    match decode_sgr_mouse(seq) {
+        Some(event) => Take::Ready(seq.len(), event, KeyStrokeOrigin::Protocol),
+        None => Take::Skip(seq.len()),
+    }
+}
+
+fn csi_final_index(bytes: &[u8]) -> Option<usize> {
+    bytes
+        .iter()
+        .enumerate()
+        .skip(2)
+        .find(|(_, b)| (64..=126).contains(*b))
+        .map(|(i, _)| i)
+}
+
+fn take_csi_query(bytes: &[u8]) -> Take {
+    match csi_final_index(bytes) {
+        Some(end) => Take::Skip(end + 1),
+        None => Take::NeedMore,
+    }
+}
+
+fn take_csi_numbered(bytes: &[u8]) -> Take {
+    let Some(end) = csi_final_index(bytes) else {
+        return Take::NeedMore;
+    };
+    let seq = &bytes[..=end];
+    match seq[end] {
+        b'~' => take_special_key(seq),
+        b'u' => take_csi_u(seq),
+        b'R' | b'M' => Take::Skip(seq.len()),
+        _ => take_modified_arrow(seq),
+    }
+}
+
+fn take_special_key(bytes: &[u8]) -> Take {
+    let Ok(body) = std::str::from_utf8(&bytes[2..bytes.len() - 1]) else {
+        return Take::Skip(bytes.len());
+    };
+    let mut split = body.split(';');
+    let Ok(first) = split.next().unwrap_or("").parse::<u8>() else {
+        return Take::Skip(bytes.len());
+    };
+    let (modifiers, kind) = parse_mod_kind(split.next());
+    let code = match first {
+        1 | 7 => KeyCode::Home,
+        2 => KeyCode::Insert,
+        3 => KeyCode::Delete,
+        4 | 8 => KeyCode::End,
+        5 => KeyCode::PageUp,
+        6 => KeyCode::PageDown,
+        v @ 11..=15 => KeyCode::F(v - 10),
+        v @ 17..=21 => KeyCode::F(v - 11),
+        v @ 23..=26 => KeyCode::F(v - 12),
+        v @ 28..=29 => KeyCode::F(v - 15),
+        v @ 31..=34 => KeyCode::F(v - 17),
+        _ => return Take::Skip(bytes.len()),
+    };
+    key_protocol(bytes.len(), KeyEvent::new_with_kind(code, modifiers, kind))
+}
+
+fn take_modified_arrow(bytes: &[u8]) -> Take {
+    let (modifiers, kind) = {
+        let Ok(body) = std::str::from_utf8(&bytes[2..bytes.len() - 1]) else {
+            return Take::Skip(bytes.len());
+        };
+        let mut split = body.split(';');
+        split.next();
+        parse_mod_kind(split.next())
+    };
+    let code = match bytes[bytes.len() - 1] {
+        b'A' => KeyCode::Up,
+        b'B' => KeyCode::Down,
+        b'C' => KeyCode::Right,
+        b'D' => KeyCode::Left,
+        b'F' => KeyCode::End,
+        b'H' => KeyCode::Home,
+        b'P' => KeyCode::F(1),
+        b'Q' => KeyCode::F(2),
+        b'R' => KeyCode::F(3),
+        b'S' => KeyCode::F(4),
+        _ => return Take::Skip(bytes.len()),
+    };
+    key_protocol(bytes.len(), KeyEvent::new_with_kind(code, modifiers, kind))
+}
+
+fn take_csi_u(bytes: &[u8]) -> Take {
+    let Ok(body) = std::str::from_utf8(&bytes[2..bytes.len() - 1]) else {
+        return Take::Skip(bytes.len());
+    };
+    let mut split = body.split(';');
+    let Some(code_field) = split.next() else {
+        return Take::Skip(bytes.len());
+    };
+    let mut codes = code_field.split(':');
+    let Ok(codepoint) = codes.next().unwrap_or("").parse::<u32>() else {
+        return Take::Skip(bytes.len());
+    };
+    let (mut modifiers, kind) = parse_mod_kind(split.next());
+    let mut code = if let Some(mapped) = translate_functional(codepoint) {
+        mapped
+    } else if let Some(c) = char::from_u32(codepoint) {
+        match c {
+            '\x1b' => KeyCode::Esc,
+            '\r' => KeyCode::Enter,
+            '\t' if modifiers.contains(KeyModifiers::SHIFT) => KeyCode::BackTab,
+            '\t' => KeyCode::Tab,
+            '\x7f' => KeyCode::Backspace,
+            _ => KeyCode::Char(c),
+        }
+    } else {
+        return Take::Skip(bytes.len());
+    };
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        if let Some(shifted) = codes
+            .next()
+            .and_then(|field| field.parse::<u32>().ok())
+            .and_then(char::from_u32)
+        {
+            code = KeyCode::Char(shifted);
+            modifiers.remove(KeyModifiers::SHIFT);
+        }
+    }
+    key_protocol(bytes.len(), KeyEvent::new_with_kind(code, modifiers, kind))
+}
+
+fn translate_functional(codepoint: u32) -> Option<KeyCode> {
+    Some(match codepoint {
+        57417 => KeyCode::Left,
+        57418 => KeyCode::Right,
+        57419 => KeyCode::Up,
+        57420 => KeyCode::Down,
+        57421 => KeyCode::PageUp,
+        57422 => KeyCode::PageDown,
+        57423 => KeyCode::Home,
+        57424 => KeyCode::End,
+        57425 => KeyCode::Insert,
+        57426 => KeyCode::Delete,
+        57414 => KeyCode::Enter,
+        _ => return None,
+    })
+}
+
+fn parse_mod_kind(field: Option<&str>) -> (KeyModifiers, KeyEventKind) {
+    let Some(field) = field else {
+        return (KeyModifiers::NONE, KeyEventKind::Press);
+    };
+    let mut parts = field.split(':');
+    let Ok(mask) = parts.next().unwrap_or("").parse::<u8>() else {
+        return (KeyModifiers::NONE, KeyEventKind::Press);
+    };
+    let kind = match parts.next().and_then(|part| part.parse::<u8>().ok()) {
+        Some(2) => KeyEventKind::Repeat,
+        Some(3) => KeyEventKind::Release,
+        _ => KeyEventKind::Press,
+    };
+    (parse_modifiers(mask), kind)
+}
+
+fn parse_modifiers(mask: u8) -> KeyModifiers {
+    let bits = mask.saturating_sub(1);
+    let mut modifiers = KeyModifiers::empty();
+    if bits & 1 != 0 {
+        modifiers |= KeyModifiers::SHIFT;
+    }
+    if bits & 2 != 0 {
+        modifiers |= KeyModifiers::ALT;
+    }
+    if bits & 4 != 0 {
+        modifiers |= KeyModifiers::CONTROL;
+    }
+    if bits & 8 != 0 {
+        modifiers |= KeyModifiers::SUPER;
+    }
+    modifiers
+}
+
+/// Parse a byte burst the way the live Unix reader does.
+#[cfg(test)]
+pub(crate) fn parse_tty_chunk(bytes: &[u8]) -> Vec<(Event, KeyStrokeOrigin)> {
+    let mut buf = TtyBuf {
+        raw: bytes.to_vec(),
+        events: VecDeque::new(),
+    };
+    drain_parsed(&mut buf, false);
+    buf.events.into_iter().collect()
 }
 
 /// Encode one xterm SGR mouse report (`CSI < Cb ; Cx ; Cy M`).
@@ -218,5 +706,53 @@ mod tests {
             decode_sgr_mouse(&sgr_mouse_report(SGR_WHEEL_RIGHT_MOTION, 8, 4)).is_none(),
             "crossterm 0.28 event::read drops SGR 99 (wheel right + motion); e2e must not pan on it"
         );
+    }
+
+    fn key_code(event: &Event) -> KeyCode {
+        match event {
+            Event::Key(key) => key.code,
+            other => panic!("expected key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raw_g_bytes_are_legacy_and_csi_u_g_is_protocol() {
+        let raw = parse_tty_chunk(b"gg");
+        assert_eq!(raw.len(), 2);
+        assert_eq!(key_code(&raw[0].0), KeyCode::Char('g'));
+        assert_eq!(raw[0].1, KeyStrokeOrigin::LegacyByte);
+        assert_eq!(raw[1].1, KeyStrokeOrigin::LegacyByte);
+
+        let typed = parse_tty_chunk(b"\x1b[103;1:1u\x1b[103;1:3u");
+        assert_eq!(typed.len(), 2);
+        assert_eq!(key_code(&typed[0].0), KeyCode::Char('g'));
+        assert_eq!(typed[0].1, KeyStrokeOrigin::Protocol);
+        match &typed[1].0 {
+            Event::Key(key) => assert_eq!(key.kind, KeyEventKind::Release),
+            other => panic!("{other:?}"),
+        }
+
+        let typeless = parse_tty_chunk(b"\x1b[103;1u\x1b[103;1u");
+        assert_eq!(typeless.len(), 2);
+        assert!(typeless
+            .iter()
+            .all(|(_, origin)| *origin == KeyStrokeOrigin::Protocol));
+        match &typeless[0].0 {
+            Event::Key(key) => assert_eq!(key.kind, KeyEventKind::Press),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tty_chunk_keeps_home_and_sgr_mouse() {
+        let home = parse_tty_chunk(b"\x1b[1;1:1~");
+        assert_eq!(home.len(), 1);
+        assert_eq!(key_code(&home[0].0), KeyCode::Home);
+        assert_eq!(home[0].1, KeyStrokeOrigin::Protocol);
+
+        let mouse = parse_tty_chunk(&sgr_mouse_report(SGR_WHEEL_RIGHT, 8, 4));
+        assert_eq!(mouse.len(), 1);
+        assert!(matches!(mouse[0].0, Event::Mouse(_)));
+        assert_eq!(mouse[0].1, KeyStrokeOrigin::Protocol);
     }
 }

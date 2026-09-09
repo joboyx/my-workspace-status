@@ -1,5 +1,7 @@
 //! Crossterm events to [`Action`].
 
+use std::time::{Duration, Instant};
+
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -9,11 +11,27 @@ use super::action::{Action, PaletteOpenedBy};
 /// Window for `zz` / `gg` after the first key.
 pub const DOUBLE_TAP_MS: u64 = 400;
 
-/// Last `g`-chord Press and whether a matching release is still due.
+/// Where a key event's bytes came from.
+///
+/// [`KeyStrokeOrigin::Protocol`] is CSI-u (typed or typeless) and every
+/// constructed / headless event. A same-key Press is the release of that
+/// tap. [`KeyStrokeOrigin::LegacyByte`] is a traditional single-byte key.
+/// A same-key Press is a new tap (`gg`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeyStrokeOrigin {
+    /// CSI-u, other escape sequences, Resize, and constructed events.
+    #[default]
+    Protocol,
+    /// Raw / legacy single-byte (or UTF-8) key. Never a protocol echo.
+    LegacyByte,
+}
+
+/// Last `g`-chord Press and whether a matching protocol release is due.
 ///
 /// VTE often sends all-keys CSI-u without event types, so press and
-/// release are both [`KeyEventKind::Press`]. The second Press is the
-/// release of that tap, not a second tap.
+/// release are both [`KeyEventKind::Press`]. That second Press is the
+/// release of that tap, not a second tap. A raw-byte Press is never an
+/// echo.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GChordEchoState {
     last: Option<(KeyCode, KeyModifiers)>,
@@ -38,9 +56,10 @@ pub enum InputMode {
     ///
     /// Key release is ignored and must not clear this pending. CSI-u with
     /// event types sends a Release after every Press. CSI-u without event
-    /// types sends a second Press. That echo is dropped (it is the release
-    /// of the same tap). A real Release clears the echo so human `gg` still
-    /// works.
+    /// types sends a second Press. That protocol echo is dropped (it is
+    /// the release of the same tap). A raw-byte second `g` completes `gg`.
+    /// A real Release also clears the echo. When the pending expires, the
+    /// echo for that arming `g` is cleared.
     GPending {
         search_active: bool,
     },
@@ -73,24 +92,40 @@ fn same_g_chord_key(last: Option<(KeyCode, KeyModifiers)>, key: &KeyEvent) -> bo
 
 fn records_g_chord_press(mode: InputMode, key: &KeyEvent) -> bool {
     matches!(mode, InputMode::GPending { .. })
-        || (matches!(
-            mode,
-            InputMode::Normal { .. } | InputMode::ZPending { .. }
-        ) && matches!(key.code, KeyCode::Char('g')))
+        || (matches!(mode, InputMode::Normal { .. } | InputMode::ZPending { .. })
+            && matches!(key.code, KeyCode::Char('g')))
 }
 
 /// Drop a typeless CSI-u echo of a `g`-chord key. Record the Press when
 /// it arms or consumes [`InputMode::GPending`].
 ///
-/// A real [`KeyEventKind::Release`] of that key clears the echo so the
-/// next Press is a new tap (`gg`). Search, palette, and other overlays
-/// do not record a typed `g`.
+/// Same as [`drop_g_chord_echo`] with [`KeyStrokeOrigin::Protocol`].
+/// Headless constructed events use this path.
 ///
 /// Returns true when the caller must not dispatch (echo or Release).
 pub fn drop_protocol_dup_g_chord_press(
     state: &mut GChordEchoState,
     mode: InputMode,
     event: &Event,
+) -> bool {
+    drop_g_chord_echo(state, mode, event, KeyStrokeOrigin::Protocol)
+}
+
+/// Drop a protocol echo of a `g`-chord key. Record the Press when it
+/// arms or consumes [`InputMode::GPending`].
+///
+/// A [`KeyStrokeOrigin::Protocol`] same-key Press is the release of that
+/// tap and is dropped. A [`KeyStrokeOrigin::LegacyByte`] same-key Press
+/// is a new tap and is not dropped. A real [`KeyEventKind::Release`]
+/// clears the echo so the next protocol Press is a new tap. Search,
+/// palette, and other overlays do not record a typed `g`.
+///
+/// Returns true when the caller must not dispatch (echo or Release).
+pub fn drop_g_chord_echo(
+    state: &mut GChordEchoState,
+    mode: InputMode,
+    event: &Event,
+    origin: KeyStrokeOrigin,
 ) -> bool {
     let Event::Key(key) = event else {
         return false;
@@ -104,6 +139,13 @@ pub fn drop_protocol_dup_g_chord_press(
     if key.kind != KeyEventKind::Press {
         return false;
     }
+    if origin == KeyStrokeOrigin::LegacyByte {
+        if records_g_chord_press(mode, key) {
+            state.last = Some((key.code, key.modifiers));
+            state.awaiting_release = false;
+        }
+        return false;
+    }
     if state.awaiting_release && same_g_chord_key(state.last, key) {
         state.awaiting_release = false;
         return true;
@@ -113,6 +155,25 @@ pub fn drop_protocol_dup_g_chord_press(
         state.awaiting_release = true;
     }
     false
+}
+
+/// Clear a stale arming-`g` echo after [`DOUBLE_TAP_MS`].
+///
+/// After `gt` / `gT` / `g1`–`g9` the pending is already gone and `last`
+/// is that second key. Keep that echo so a typeless release in Normal
+/// does not fire bare `t` / `T`.
+pub fn expire_stale_g_chord_echo(echo: &mut GChordEchoState, g_pending_at: &mut Option<Instant>) {
+    let Some(at) = *g_pending_at else {
+        return;
+    };
+    if at.elapsed() <= Duration::from_millis(DOUBLE_TAP_MS) {
+        return;
+    }
+    *g_pending_at = None;
+    if matches!(echo.last, Some((KeyCode::Char('g'), _))) {
+        echo.last = None;
+        echo.awaiting_release = false;
+    }
 }
 
 /// Map one terminal event to an [`Action`].
@@ -1829,6 +1890,59 @@ mod tests {
         assert!(
             !drop_protocol_dup_g_chord_press(&mut echo, normal(), &g),
             "g after a search query still arms GPending"
+        );
+    }
+
+    #[test]
+    fn raw_byte_second_g_is_not_a_protocol_echo() {
+        let mut echo = GChordEchoState::default();
+        let g = key(KeyCode::Char('g'));
+        assert!(!drop_g_chord_echo(
+            &mut echo,
+            normal(),
+            &g,
+            KeyStrokeOrigin::LegacyByte
+        ));
+        assert!(
+            !drop_g_chord_echo(&mut echo, pending_g(), &g, KeyStrokeOrigin::LegacyByte),
+            "two raw g bytes complete gg"
+        );
+        assert!(
+            drop_g_chord_echo(&mut echo, pending_g(), &g, KeyStrokeOrigin::Protocol),
+            "a protocol same-key Press after a raw g is still an echo"
+        );
+    }
+
+    #[test]
+    fn expired_arming_g_does_not_drop_the_next_protocol_g() {
+        let mut echo = GChordEchoState::default();
+        let mut pending = Some(Instant::now());
+        let g = key(KeyCode::Char('g'));
+        assert!(!drop_protocol_dup_g_chord_press(&mut echo, normal(), &g));
+        expire_stale_g_chord_echo(&mut echo, &mut pending);
+        assert!(pending.is_some(), "fresh pending must stay");
+        pending = Some(Instant::now() - Duration::from_millis(DOUBLE_TAP_MS + 1));
+        expire_stale_g_chord_echo(&mut echo, &mut pending);
+        assert!(pending.is_none());
+        assert!(
+            !drop_protocol_dup_g_chord_press(&mut echo, normal(), &g),
+            "after expiry the next g arms again"
+        );
+    }
+
+    #[test]
+    fn expire_does_not_clear_t_echo_after_next_tab() {
+        let mut echo = GChordEchoState::default();
+        let mut pending = Some(Instant::now());
+        let g = key(KeyCode::Char('g'));
+        let t = key(KeyCode::Char('t'));
+        assert!(!drop_protocol_dup_g_chord_press(&mut echo, normal(), &g));
+        assert!(!drop_protocol_dup_g_chord_press(&mut echo, pending_g(), &t));
+        pending = None;
+        expire_stale_g_chord_echo(&mut echo, &mut pending);
+        assert!(
+            drop_protocol_dup_g_chord_press(&mut echo, normal(), &t),
+            "typeless t release after NextTab must still drop"
         );
     }
 

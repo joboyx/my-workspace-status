@@ -689,6 +689,7 @@ impl HeadlessTui {
     }
 
     fn dispatch_event(&mut self, event: Event) {
+        self.state.expire_stale_g_chord();
         let input_mode = self.state.input_mode();
         if drop_protocol_dup_g_chord_press(&mut self.state.g_chord_echo, input_mode, &event) {
             return;

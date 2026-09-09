@@ -2,7 +2,7 @@
 //!
 //! `run_tui` stays synchronous via a current-thread Tokio runtime. Terminal
 //! bytes are read on a dedicated thread through [`super::tty::poll_event`] /
-//! [`super::tty::read_event`]. Every git/process effect runs on
+//! [`super::tty::read_event_origin`]. Every git/process effect runs on
 //! `spawn_blocking`. [`super::effect::Interpreter`] schedules and applies
 //! those jobs. The loop thread only dispatches, applies results, and draws.
 
@@ -30,10 +30,10 @@ use super::event_pump::{
     BusyAction,
 };
 use super::fetch::fetch_interval_ms;
-use super::keys::{drop_protocol_dup_g_chord_press, held_nav_key};
+use super::keys::{drop_g_chord_echo, held_nav_key, KeyStrokeOrigin};
 use super::render::draw;
 use super::state::AppState;
-use super::tty::{poll_event, read_event};
+use super::tty::{poll_event, read_event_origin};
 use super::watch::{watch_interval_ms, watch_remain_ms, FLASH_TICK_MS};
 
 const INPUT_BATCH: usize = 8;
@@ -47,7 +47,7 @@ enum InputCmd {
 }
 
 struct InputBridge {
-    rx: tokio::sync::mpsc::Receiver<crossterm::event::Event>,
+    rx: tokio::sync::mpsc::Receiver<(crossterm::event::Event, KeyStrokeOrigin)>,
     cmd: std_mpsc::Sender<InputCmd>,
     ack: std_mpsc::Receiver<()>,
 }
@@ -81,7 +81,7 @@ impl InputBridge {
 }
 
 fn input_thread(
-    tx: tokio::sync::mpsc::Sender<crossterm::event::Event>,
+    tx: tokio::sync::mpsc::Sender<(crossterm::event::Event, KeyStrokeOrigin)>,
     cmd_rx: std_mpsc::Receiver<InputCmd>,
     ack_tx: std_mpsc::Sender<()>,
 ) {
@@ -114,11 +114,11 @@ fn input_thread(
         if !poll_event(Duration::from_millis(16)).unwrap_or(false) {
             continue;
         }
-        let Ok(event) = read_event() else {
+        let Ok((event, origin)) = read_event_origin() else {
             break;
         };
         let leftover = held_nav_key(&event).and_then(discard_held_nav_backlog);
-        if tx.blocking_send(event).is_err() {
+        if tx.blocking_send((event, origin)).is_err() {
             break;
         }
         if let Some(extra) = leftover {
@@ -246,11 +246,11 @@ pub async fn run(
 
         tokio::select! {
             event = ctx.input.rx.recv() => {
-                let Some(event) = event else { break; };
-                handle_input(&mut ctx, event);
+                let Some((event, origin)) = event else { break; };
+                handle_input(&mut ctx, event, origin);
                 for _ in 1..INPUT_BATCH {
                     match ctx.input.rx.try_recv() {
-                        Ok(next) => handle_input(&mut ctx, next),
+                        Ok((next, next_origin)) => handle_input(&mut ctx, next, next_origin),
                         Err(_) => break,
                     }
                 }
@@ -322,13 +322,15 @@ async fn sleep_ms(ms: u64) {
     }
 }
 
-fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event) {
+fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: KeyStrokeOrigin) {
     // CSI-u with REPORT_EVENT_TYPES sends a Release after every Press.
     // Do not dispatch it: `dispatch` would clear `GPending`. CSI-u
     // without event types sends that release as another Press. Drop the
-    // echo so `gt` / `gT` stay tab actions (not `gg` then bare t/T).
+    // protocol echo so `gt` / `gT` stay tab actions. A raw-byte second
+    // `g` is a new tap (`gg`). Pending expiry clears a stale arming `g`.
+    ctx.state.expire_stale_g_chord();
     let input_mode = ctx.state.input_mode();
-    if drop_protocol_dup_g_chord_press(&mut ctx.state.g_chord_echo, input_mode, &event) {
+    if drop_g_chord_echo(&mut ctx.state.g_chord_echo, input_mode, &event, origin) {
         return;
     }
     let action = map_event(ctx.state, &event);
