@@ -20,7 +20,7 @@ use common::seed::{
     seed_compare_ahead, seed_compare_behind, seed_compare_diverged, seed_compare_no_default,
     seed_compare_unborn, seed_compare_unrelated, seed_long_diff_file, seed_long_path_file,
     seed_long_subject_repo, seed_merge_mark_family, seed_primary_and_linked_family,
-    seed_primary_merged_family, seed_repo, seed_tall_graph,
+    seed_primary_merged_family, seed_repo, seed_tall_graph, seed_two_tall_commit_files,
 };
 use workspace_status::tui::{HeadlessTui, InputMode};
 use workspace_status_graph::UNICODE;
@@ -184,24 +184,6 @@ fn seed_tall_dirty_file(workspace: &Path, name: &str) {
         body.push_str(&format!("tall line {i} {name}\n"));
     }
     fs::write(workspace.join("app").join(name), body).unwrap();
-}
-
-/// Two committed files that can pan and scroll, so a depth-2 switch can
-/// prove the new view starts at the origin.
-fn seed_two_tall_commit_files(workspace: &Path) {
-    seed_repo(workspace, "scrollbox", "main", false);
-    let repo = workspace.join("scrollbox");
-    let mut alpha = format!("{}ALPHA_PAN_TAIL\n", "n".repeat(80));
-    let mut beta = format!("{}BETA_PAN_TAIL\n", "n".repeat(80));
-    for i in 0..40 {
-        alpha.push_str(&format!("alpha-line-{i}\n"));
-        beta.push_str(&format!("beta-line-{i}\n"));
-    }
-    fs::write(repo.join("alpha.rs"), alpha).unwrap();
-    fs::write(repo.join("beta.rs"), beta).unwrap();
-    git(&repo, &["add", "."]);
-    git(&repo, &["commit", "-q", "-m", "tall-pair-scroll-reset"]);
-    git(&repo, &["checkout", "-q", "-b", "feature/scroll-reset"]);
 }
 
 fn assert_contains(frame: &str, needle: &str) {

@@ -287,6 +287,16 @@ pub fn panes_graph_focused_files_unfocused(screen: &str) -> bool {
     title_row_names(screen, "graph", "files", &["diff"]) && left_pane_focused(screen)
 }
 
+/// Left commit-files focused, right commit-diff unfocused. Not graph.
+pub fn panes_files_focused_diff_unfocused(screen: &str) -> bool {
+    title_row_names(screen, "files", "diff", &["graph"]) && left_pane_focused(screen)
+}
+
+/// Left commit-files unfocused, right commit-diff focused. Not graph.
+pub fn panes_files_unfocused_diff_focused(screen: &str) -> bool {
+    title_row_names(screen, "files", "diff", &["graph"]) && right_pane_focused(screen)
+}
+
 /// Merger graph body. Files drill (`wip.txt` / files title) cannot pass.
 pub fn merger_graph_body(screen: &str) -> bool {
     screen.contains("WIP on graph")
