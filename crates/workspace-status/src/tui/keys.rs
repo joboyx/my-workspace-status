@@ -80,6 +80,9 @@ pub fn is_protocol_dup_g_chord_press(last: Option<LastGChordPress>, key: &KeyEve
 /// Drop a typeless CSI-u echo of a `g`-chord key. Record the Press when
 /// it arms or consumes [`InputMode::GPending`].
 ///
+/// Search, palette, and other overlays do not record a typed `g`. That
+/// would swallow the next real `g` chord.
+///
 /// Returns true when the caller must not dispatch.
 pub fn drop_protocol_dup_g_chord_press(
     last: &mut Option<LastGChordPress>,
