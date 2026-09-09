@@ -264,6 +264,36 @@ impl PtySession {
         self.csi_u(codepoint, 1, 1);
     }
 
+    /// Typeless CSI-u (`CSI code ; 1 u`). No event type.
+    ///
+    /// Terminals that honor `REPORT_ALL_KEYS_AS_ESCAPE_CODES` and omit
+    /// `REPORT_EVENT_TYPES` send this for a tap. One report per key is
+    /// the live xfce/VTE path. Do not send a second report for key-up
+    /// when the test claims that path.
+    pub fn csi_u_typeless(&mut self, letter: char) {
+        let codepoint = u32::from(letter.to_ascii_lowercase());
+        self.send_bytes(format!("\x1b[{codepoint};1u").as_bytes());
+    }
+
+    /// Typeless CSI-u with Shift (`CSI code ; 2 u`).
+    pub fn csi_u_typeless_shift(&mut self, letter: char) {
+        let codepoint = u32::from(letter.to_ascii_lowercase());
+        self.send_bytes(format!("\x1b[{codepoint};2u").as_bytes());
+    }
+
+    /// Human `gg` as two typeless CSI-u `g` reports.
+    ///
+    /// The gap is 40ms: inside `DOUBLE_TAP_MS` (400) and under the old
+    /// 80ms echo, but past the few-ms VTE burst. After the completing
+    /// `g`, wait that burst out so the next `g` of `gt` is not dropped.
+    /// Does not inject Release or a typeless key-up.
+    pub fn typeless_gg(&mut self) {
+        self.csi_u_typeless('g');
+        self.wait_ms(40);
+        self.csi_u_typeless('g');
+        self.wait_ms(16);
+    }
+
     /// Held-key Repeat (`CSI code ; 1 : 2 u`). Must fail if Repeat is ignored.
     pub fn letter_repeat(&mut self, letter: char) {
         let codepoint = u32::from(letter.to_ascii_lowercase());
