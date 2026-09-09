@@ -19,6 +19,7 @@ mod pty_click_chevron_toggles_fold;
 mod pty_click_right_pane_focuses;
 mod pty_click_selects_tree_row;
 mod pty_comment_store_keeps_foreign_workspace;
+mod pty_compare_ahead_behind_diverged_unrelated;
 mod pty_compare_apostrophe_copies_diff;
 mod pty_compare_bare_t_still_tree_flat;
 mod pty_compare_equal_tips_and_picker_guards;

@@ -16,7 +16,10 @@ pub use super::common::seed::{
     staged_and_changes_workspace, unique_root,
 };
 
-use super::common::seed::new_workspace;
+use super::common::seed::{
+    new_workspace, seed_compare_ahead, seed_compare_behind, seed_compare_diverged,
+    seed_compare_unrelated,
+};
 
 fn git_path_arg(path: &Path) -> String {
     path.to_str().expect("utf-8 path").to_string()
@@ -175,6 +178,16 @@ pub fn topic_and_unborn_workspace() -> (PathBuf, PathBuf) {
     let (root, workspace) = new_workspace("ws-tui-tty-topic-unborn");
     seed_compare_no_default(&workspace, "topic");
     seed_compare_unborn(&workspace, "empty");
+    (root, workspace)
+}
+
+/// Ahead, behind, diverged, and unrelated orphan checkouts for Diff vs default.
+pub fn compare_tip_shape_workspace() -> (PathBuf, PathBuf) {
+    let (root, workspace) = new_workspace("ws-tui-tty-compare-shapes");
+    seed_compare_ahead(&workspace, "ahead");
+    seed_compare_behind(&workspace, "behind");
+    seed_compare_diverged(&workspace, "diverged");
+    seed_compare_unrelated(&workspace, "orphan");
     (root, workspace)
 }
 
