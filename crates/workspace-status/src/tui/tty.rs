@@ -3,11 +3,14 @@
 //! The live event loop reads with [`poll_event`] / [`read_event`]. On Unix
 //! the reader tags each key as [`KeyStrokeOrigin::LegacyByte`] or
 //! [`KeyStrokeOrigin::Protocol`] from the bytes. It decodes SGR, X10, and
-//! rxvt 1015 mouse the same way crossterm 0.28 does. Headless e2e cannot
-//! call those (no TTY), so it feeds SGR bytes through [`decode_sgr_mouse`],
-//! which matches crossterm's `parse_cb` / `parse_csi_sgr_mouse` including
-//! reports the live reader drops. A kinder clone would go green while a
-//! real TTY no-ops.
+//! rxvt 1015 mouse the same way crossterm 0.28 does. A lone ESC waits one
+//! poll timeout with no further stdin before it becomes Escape, so a split
+//! CSI / CSI-u report is not an Escape plus leftover keys. A hangup or
+//! 0-byte read is a read error. Headless e2e cannot call those (no TTY),
+//! so it feeds SGR bytes through [`decode_sgr_mouse`], which matches
+//! crossterm's `parse_cb` / `parse_csi_sgr_mouse` including reports the
+//! live reader drops. A kinder clone would go green while a real TTY
+//! no-ops.
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
@@ -92,17 +95,23 @@ struct TtyBuf {
     raw: Vec<u8>,
     events: VecDeque<(Event, KeyStrokeOrigin)>,
     last_winsize: Option<(u16, u16)>,
+    /// Set after [`unix_poll`] waited one timeout with a lone ESC and no
+    /// further stdin. [`unix_read`] emits Escape only when this is set.
+    lone_esc_ready: bool,
+}
+
+fn empty_tty_buf() -> TtyBuf {
+    TtyBuf {
+        raw: Vec::new(),
+        events: VecDeque::new(),
+        last_winsize: None,
+        lone_esc_ready: false,
+    }
 }
 
 fn tty_buf() -> &'static Mutex<TtyBuf> {
     static BUF: OnceLock<Mutex<TtyBuf>> = OnceLock::new();
-    BUF.get_or_init(|| {
-        Mutex::new(TtyBuf {
-            raw: Vec::new(),
-            events: VecDeque::new(),
-            last_winsize: None,
-        })
-    })
+    BUF.get_or_init(|| Mutex::new(empty_tty_buf()))
 }
 
 fn lock_tty_buf() -> std::sync::MutexGuard<'static, TtyBuf> {
@@ -119,15 +128,14 @@ fn unix_poll(timeout: Duration) -> io::Result<bool> {
         if !buf.events.is_empty() {
             return Ok(true);
         }
-        if can_finish_lone_esc(&buf) && stdin_pending()? == 0 {
-            return Ok(true);
-        }
         if stdin_pending()? > 0 {
             return Ok(true);
         }
         if enqueue_resize_if_changed(&mut buf) {
             return Ok(true);
         }
+        // Lone ESC is not ready yet. CSI may still arrive on the next
+        // poll timeout (REPORT_ALL_KEYS_AS_ESCAPE_CODES can split).
     }
     // Do not call event::poll. Crossterm poll reads the TTY into its
     // own parser, so a later FIONREAD sees 0 and event::read tags a
@@ -136,6 +144,15 @@ fn unix_poll(timeout: Duration) -> io::Result<bool> {
         return Ok(true);
     }
     let mut buf = lock_tty_buf();
+    let pending = stdin_pending()?;
+    drain_parsed(&mut buf, pending > 0);
+    if !buf.events.is_empty() || pending > 0 {
+        return Ok(true);
+    }
+    if can_finish_lone_esc(&buf) {
+        buf.lone_esc_ready = true;
+        return Ok(true);
+    }
     Ok(enqueue_resize_if_changed(&mut buf))
 }
 
@@ -146,17 +163,10 @@ fn unix_read() -> io::Result<(Event, KeyStrokeOrigin)> {
     if pending > 0 {
         let bytes = read_stdin(pending)?;
         buf.raw.extend_from_slice(&bytes);
+        buf.lone_esc_ready = false;
     }
-    drain_parsed(&mut buf, stdin_pending()? > 0);
-    if let Some(event) = buf.events.pop_front() {
+    if let Some(event) = take_ready_event(&mut buf, stdin_pending()? > 0) {
         return Ok(event);
-    }
-    if can_finish_lone_esc(&buf) && stdin_pending()? == 0 {
-        buf.raw.clear();
-        return Ok((
-            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-            KeyStrokeOrigin::Protocol,
-        ));
     }
     if enqueue_resize_if_changed(&mut buf) {
         if let Some(event) = buf.events.pop_front() {
@@ -195,7 +205,37 @@ fn poll_stdin(timeout: Duration) -> io::Result<bool> {
         }
         return Err(err);
     }
-    Ok(n > 0 && pfd.revents & libc::POLLIN != 0)
+    classify_poll(n, pfd.revents)
+}
+
+/// Map `poll` return + revents. POLLHUP without POLLIN is hangup, not idle.
+#[cfg(unix)]
+fn classify_poll(n: i32, revents: libc::c_short) -> io::Result<bool> {
+    if n == 0 {
+        return Ok(false);
+    }
+    if revents & libc::POLLIN != 0 {
+        return Ok(true);
+    }
+    if revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+        return Err(tty_hangup_error());
+    }
+    Ok(false)
+}
+
+fn tty_hangup_error() -> io::Error {
+    io::Error::new(io::ErrorKind::UnexpectedEof, "TTY hangup")
+}
+
+/// Map `read` byte count. 0 is hangup, not an empty success.
+fn classify_read(nread: isize) -> io::Result<usize> {
+    if nread < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if nread == 0 {
+        return Err(tty_hangup_error());
+    }
+    Ok(nread as usize)
 }
 
 #[cfg(unix)]
@@ -248,8 +288,26 @@ fn read_stdin(n: usize) -> io::Result<Vec<u8>> {
     if nread < 0 {
         return Err(io::Error::last_os_error());
     }
-    buf.truncate(nread as usize);
+    let nread = classify_read(nread)?;
+    buf.truncate(nread);
     Ok(buf)
+}
+
+fn take_ready_event(buf: &mut TtyBuf, more_stdin: bool) -> Option<(Event, KeyStrokeOrigin)> {
+    drain_parsed(buf, more_stdin);
+    if let Some(event) = buf.events.pop_front() {
+        buf.lone_esc_ready = false;
+        return Some(event);
+    }
+    if buf.lone_esc_ready && can_finish_lone_esc(buf) && !more_stdin {
+        buf.raw.clear();
+        buf.lone_esc_ready = false;
+        return Some((
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            KeyStrokeOrigin::Protocol,
+        ));
+    }
+    None
 }
 
 fn can_finish_lone_esc(buf: &TtyBuf) -> bool {
@@ -344,11 +402,9 @@ fn take_utf8(bytes: &[u8]) -> Take {
 
 fn take_esc(bytes: &[u8], more: bool) -> Take {
     if bytes.len() == 1 {
-        return if more {
-            Take::NeedMore
-        } else {
-            key_protocol(1, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
-        };
+        // Never promote Escape here. Wait one poll timeout with no
+        // further stdin so a split CSI / CSI-u is not leftover keys.
+        return Take::NeedMore;
     }
     match bytes[1] {
         b'O' => take_ss3(bytes),
@@ -668,11 +724,8 @@ fn parse_modifiers(mask: u8) -> KeyModifiers {
 /// Parse a byte burst the way the live Unix reader does.
 #[cfg(test)]
 pub(crate) fn parse_tty_chunk(bytes: &[u8]) -> Vec<(Event, KeyStrokeOrigin)> {
-    let mut buf = TtyBuf {
-        raw: bytes.to_vec(),
-        events: VecDeque::new(),
-        last_winsize: None,
-    };
+    let mut buf = empty_tty_buf();
+    buf.raw.extend_from_slice(bytes);
     drain_parsed(&mut buf, false);
     buf.events.into_iter().collect()
 }
@@ -927,6 +980,65 @@ mod tests {
         assert!(
             incomplete.is_empty(),
             "partial X10 must wait for the 6-byte report"
+        );
+    }
+
+    #[test]
+    fn lone_esc_waits_for_idle_timeout_before_escape() {
+        let mut buf = empty_tty_buf();
+        buf.raw.extend_from_slice(&[0x1b]);
+        assert!(
+            take_ready_event(&mut buf, false).is_none(),
+            "FIONREAD 0 must not promote Escape before one poll timeout"
+        );
+        assert_eq!(buf.raw, [0x1b]);
+
+        buf.lone_esc_ready = true;
+        let (event, origin) = take_ready_event(&mut buf, false).expect("idle timeout");
+        assert_eq!(key_code(&event), KeyCode::Esc);
+        assert_eq!(origin, KeyStrokeOrigin::Protocol);
+        assert!(buf.raw.is_empty());
+    }
+
+    #[test]
+    fn split_csi_after_esc_is_not_escape_plus_keys() {
+        let mut arrow = empty_tty_buf();
+        arrow.raw.extend_from_slice(&[0x1b]);
+        assert!(take_ready_event(&mut arrow, false).is_none());
+        arrow.raw.extend_from_slice(b"[A");
+        arrow.lone_esc_ready = false;
+        let (event, origin) = take_ready_event(&mut arrow, false).expect("Up");
+        assert_eq!(key_code(&event), KeyCode::Up);
+        assert_eq!(origin, KeyStrokeOrigin::Protocol);
+        assert!(take_ready_event(&mut arrow, false).is_none());
+
+        let mut csi_u = empty_tty_buf();
+        csi_u.raw.extend_from_slice(&[0x1b]);
+        assert!(take_ready_event(&mut csi_u, false).is_none());
+        csi_u.raw.extend_from_slice(b"[103;1u");
+        let (event, origin) = take_ready_event(&mut csi_u, false).expect("g");
+        assert_eq!(key_code(&event), KeyCode::Char('g'));
+        assert_eq!(origin, KeyStrokeOrigin::Protocol);
+        assert!(take_ready_event(&mut csi_u, false).is_none());
+    }
+
+    #[test]
+    fn zero_byte_read_is_hangup() {
+        let err = classify_read(0).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(classify_read(4).unwrap(), 4);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn poll_hup_without_pollin_is_hangup() {
+        let err = classify_poll(1, libc::POLLHUP).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(classify_poll(1, libc::POLLIN).unwrap());
+        assert!(classify_poll(1, libc::POLLIN | libc::POLLHUP).unwrap());
+        assert!(
+            !classify_poll(0, libc::POLLHUP).unwrap(),
+            "timeout (n=0) stays idle even if revents is leftover hangup"
         );
     }
 }

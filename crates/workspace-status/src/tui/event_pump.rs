@@ -441,6 +441,10 @@ mod tests {
             "TTY input thread must poll via tty::poll_event"
         );
         assert!(
+            !loop_src.contains("poll_event(Duration::from_millis(16)).unwrap_or(false)"),
+            "poll error (TTY hangup) must stop the input thread"
+        );
+        assert!(
             app.contains("enable_mouse("),
             "TTY must enable mouse via tty::enable_mouse"
         );

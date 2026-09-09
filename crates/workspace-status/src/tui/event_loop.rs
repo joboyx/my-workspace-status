@@ -111,8 +111,10 @@ fn input_thread(
             Err(std_mpsc::TryRecvError::Empty) => {}
             Err(std_mpsc::TryRecvError::Disconnected) => break,
         }
-        if !poll_event(Duration::from_millis(16)).unwrap_or(false) {
-            continue;
+        match poll_event(Duration::from_millis(16)) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(_) => break,
         }
         let (event, origin) = match read_event_origin() {
             Ok(ready) => ready,
