@@ -689,17 +689,8 @@ impl HeadlessTui {
     }
 
     fn dispatch_event(&mut self, event: Event) {
-        if let Event::Key(key) = &event {
-            if key.kind == KeyEventKind::Release {
-                return;
-            }
-        }
         let input_mode = self.state.input_mode();
-        if drop_protocol_dup_g_chord_press(
-            &mut self.state.last_g_chord_press,
-            input_mode,
-            &event,
-        ) {
+        if drop_protocol_dup_g_chord_press(&mut self.state.g_chord_echo, input_mode, &event) {
             return;
         }
         let action = event_to_action_with(

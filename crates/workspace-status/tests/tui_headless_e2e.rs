@@ -9,7 +9,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::hscroll::{
     assert_clipped, assert_panned_to_tail, DIFF_HSCROLL_TAIL, GRAPH_HSCROLL_VISIBLE,
@@ -174,7 +174,6 @@ fn open(workspace: &Path) -> HeadlessTui {
 fn gg(tui: &mut HeadlessTui) {
     tui.key('g');
     tui.key_release('g');
-    std::thread::sleep(Duration::from_millis(50));
     tui.key('g');
     tui.key_release('g');
 }
