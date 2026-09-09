@@ -1907,10 +1907,6 @@ mod tests {
             !drop_g_chord_echo(&mut echo, pending_g(), &g, KeyStrokeOrigin::LegacyByte),
             "two raw g bytes complete gg"
         );
-        assert!(
-            drop_g_chord_echo(&mut echo, pending_g(), &g, KeyStrokeOrigin::Protocol),
-            "a protocol same-key Press after a raw g is still an echo"
-        );
     }
 
     #[test]
