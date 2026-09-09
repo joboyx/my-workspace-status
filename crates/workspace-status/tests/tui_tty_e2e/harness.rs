@@ -1,7 +1,7 @@
 //! Spawn the real `workspace-status` binary on a PTY.
 //!
-//! The child runs the live event loop (`tty::poll_event` / `tty::read_event`
-//! → crossterm `event::read`). Keys and xterm SGR mouse reports are written
+//! The child runs the live event loop (`tty::poll_event` /
+//! `tty::read_event_origin`). Keys and xterm SGR mouse reports are written
 //! as bytes on the PTY master — the same path a terminal uses. This is not
 //! `HeadlessTui` and does not construct crossterm `Event` values in memory.
 
@@ -270,13 +270,13 @@ impl PtySession {
         self.csi_u(codepoint, 1, 2);
     }
 
-    /// `gg` chord: two `g` bytes inside the 400ms window.
+    /// `gg` chord: two raw `g` bytes inside the 400ms window.
     ///
-    /// A CSI-u Release sits between the taps so a typeless echo does not
-    /// swallow the second `g`.
+    /// Do not inject a CSI-u Release between the taps. A human `gg` is
+    /// two Presses. The live reader must complete `MoveToStart` on that
+    /// path.
     pub fn gg(&mut self) {
         self.key('g');
-        self.csi_u(u32::from(b'g'), 1, 3);
         self.key('g');
     }
 
