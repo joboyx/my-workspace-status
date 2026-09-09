@@ -181,6 +181,24 @@ pub fn seed_many_commit_files(workspace: &Path, name: &str, count: usize) {
     git(&repo, &["checkout", "-q", "-b", "feature/files"]);
 }
 
+/// Two committed files that can pan and scroll, so a depth-2 switch can
+/// prove the new view starts at the origin.
+pub fn seed_two_tall_commit_files(workspace: &Path) {
+    seed_repo(workspace, "scrollbox", "main", false);
+    let repo = workspace.join("scrollbox");
+    let mut alpha = format!("{}ALPHA_PAN_TAIL\n", "n".repeat(80));
+    let mut beta = format!("{}BETA_PAN_TAIL\n", "n".repeat(80));
+    for i in 0..40 {
+        alpha.push_str(&format!("alpha-line-{i}\n"));
+        beta.push_str(&format!("beta-line-{i}\n"));
+    }
+    fs::write(repo.join("alpha.rs"), alpha).unwrap();
+    fs::write(repo.join("beta.rs"), beta).unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "tall-pair-scroll-reset"]);
+    git(&repo, &["checkout", "-q", "-b", "feature/scroll-reset"]);
+}
+
 /// Long graph subject so horizontal pan must reveal `UNIQUE_GRAP`.
 ///
 /// `n` prefix plus [`GRAPH_HSCROLL_TAIL`]. Do not `/` search the tail first.
