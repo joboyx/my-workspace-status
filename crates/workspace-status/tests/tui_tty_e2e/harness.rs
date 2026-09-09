@@ -291,6 +291,8 @@ impl PtySession {
         // `G_CHORD_PROTOCOL_ECHO_MS` is 80. Stay above that window.
         self.wait_ms(120);
         self.csi_u_typeless('g');
+        // Completing `g` arms a short echo. Wait it out before the next chord.
+        self.wait_ms(120);
     }
 
     /// Held-key Repeat (`CSI code ; 1 : 2 u`). Must fail if Repeat is ignored.
