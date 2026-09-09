@@ -55,7 +55,9 @@ impl PtySession {
     /// Spawn the binary with extra child env after the watch-off defaults.
     ///
     /// Existing tests keep `WS_STATUS_WATCH_MS=0` / `WS_STATUS_FETCH_MS=0`
-    /// unless an override is passed here.
+    /// unless an override is passed here. `WS_STATUS_COMMENT_STORE` and
+    /// `WS_STATUS_VIEWED_STORE` in `extra_env` replace the `.e2e-state`
+    /// defaults. Tests that omit those keys still use those defaults.
     pub fn open_with_env(workspace: &Path, extra_env: &[(&str, &str)]) -> Self {
         Self::open_size_with_env(workspace, COLS, ROWS, extra_env)
     }
@@ -148,11 +150,16 @@ impl PtySession {
         let state_home = workspace.join(".e2e-state");
         fs::create_dir_all(&state_home).unwrap();
         cmd.env("XDG_STATE_HOME", &state_home);
-        cmd.env(
-            "WS_STATUS_VIEWED_STORE",
-            state_home.join("viewed-files.json"),
-        );
-        cmd.env("WS_STATUS_COMMENT_STORE", state_home.join("comments.json"));
+        let extra_has = |key: &str| extra_env.iter().any(|(k, _)| *k == key);
+        if !extra_has("WS_STATUS_VIEWED_STORE") {
+            cmd.env(
+                "WS_STATUS_VIEWED_STORE",
+                state_home.join("viewed-files.json"),
+            );
+        }
+        if !extra_has("WS_STATUS_COMMENT_STORE") {
+            cmd.env("WS_STATUS_COMMENT_STORE", state_home.join("comments.json"));
+        }
         let update_store = state_home.join("update-check.json");
         write_update_check(&update_store, last_check_unix);
         cmd.env("WS_STATUS_UPDATE_CHECK_STORE", &update_store);
