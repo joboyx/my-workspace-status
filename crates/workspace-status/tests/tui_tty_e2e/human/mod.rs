@@ -94,6 +94,7 @@ mod pty_stash_create_apply_and_drop;
 mod pty_stash_graph_pop;
 mod pty_streamed_collect_updates_focused_repo_before_slow;
 mod pty_t_and_i_toggle_view_modes;
+mod pty_tab_swaps_selection_cursor;
 mod pty_tree_b_picker_enter_checkout;
 mod pty_tree_sgr_hscroll_pans_clipped_path;
 mod pty_tree_staged_changes_sections;
