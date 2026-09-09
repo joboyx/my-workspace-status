@@ -26,6 +26,7 @@ mod pty_compare_equal_tips_and_picker_guards;
 mod pty_compare_esc_closes_tab;
 mod pty_compare_gg_first_file_not_dir;
 mod pty_compare_gt_chords_and_gg;
+mod pty_compare_missing_base_and_wheel;
 mod pty_compare_mouse_tab_click;
 mod pty_compare_mouse_tab_close;
 mod pty_compare_palette_disable_guards;
