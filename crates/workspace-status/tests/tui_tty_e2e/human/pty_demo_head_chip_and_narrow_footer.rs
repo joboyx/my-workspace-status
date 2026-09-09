@@ -110,10 +110,22 @@ fn painted_shorter_than_launch(screen: &str) -> bool {
     screen.lines().count() < usize::from(ROWS)
 }
 
+/// Selection-footer chip. Not the unbracketed `format_sync` header.
 fn narrow_footer_line(screen: &str) -> Option<&str> {
-    screen
-        .lines()
-        .find(|line| line.contains(FULL_REF) && !line.contains("Demo User"))
+    if let Some(line) = merged_chip_footer(screen) {
+        return Some(line);
+    }
+    screen.lines().find(|line| {
+        !line.contains("Demo User")
+            && line.contains(FULL_REF)
+            && line.contains('[')
+            && footer_line_is_chip(line)
+    })
+}
+
+fn footer_line_is_chip(line: &str) -> bool {
+    let chip = first_bracket_chip(line);
+    chip.contains(FULL_REF) || (line.contains('…') && line.contains("…]"))
 }
 
 fn narrow_spacer_line(screen: &str) -> Option<&str> {
