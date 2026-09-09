@@ -271,8 +271,11 @@ impl PtySession {
     }
 
     /// `gg` chord: two `g` bytes inside the 400ms window.
+    ///
+    /// The second tap waits 50ms so a typeless CSI-u echo does not swallow it.
     pub fn gg(&mut self) {
         self.key('g');
+        self.wait_ms(50);
         self.key('g');
     }
 

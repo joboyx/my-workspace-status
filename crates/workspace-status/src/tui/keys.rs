@@ -1,5 +1,7 @@
 //! Crossterm events to [`Action`].
 
+use std::time::{Duration, Instant};
+
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -8,6 +10,14 @@ use super::action::{Action, PaletteOpenedBy};
 
 /// Window for `zz` / `gg` after the first key.
 pub const DOUBLE_TAP_MS: u64 = 400;
+
+/// Same-key Press inside this window is a typeless CSI-u release, not a
+/// second tap. VTE often sends all-keys CSI-u without event types, so
+/// press and release are both [`KeyEventKind::Press`].
+pub const PROTOCOL_DUP_MS: u64 = 40;
+
+/// Last Press that armed or consumed [`InputMode::GPending`].
+pub type LastGChordPress = (KeyCode, KeyModifiers, Instant);
 
 /// Poll while a nav key may still be held, so terminal Repeat arrives at
 /// key-repeat cadence instead of the idle 200ms tick.
@@ -26,7 +36,9 @@ pub enum InputMode {
     /// First `g` armed; second `g` in the window is `gg` (move to start).
     ///
     /// Key release is ignored and must not clear this pending. CSI-u with
-    /// event types sends a Release after every Press.
+    /// event types sends a Release after every Press. CSI-u without event
+    /// types sends a second Press. That echo is dropped when it arrives
+    /// within [`PROTOCOL_DUP_MS`].
     GPending {
         search_active: bool,
     },
@@ -51,6 +63,42 @@ pub enum InputMode {
     CommentExport,
     /// Command palette (`Ctrl-k` / `:`). Named commands, filter, Enter run.
     CommandPalette,
+}
+
+/// True when this Press is a typeless echo of the last `g`-chord key.
+pub fn is_protocol_dup_g_chord_press(last: Option<LastGChordPress>, key: &KeyEvent) -> bool {
+    if key.kind != KeyEventKind::Press {
+        return false;
+    }
+    last.is_some_and(|(code, mods, at)| {
+        code == key.code
+            && mods == key.modifiers
+            && at.elapsed() < Duration::from_millis(PROTOCOL_DUP_MS)
+    })
+}
+
+/// Drop a typeless CSI-u echo of a `g`-chord key. Record the Press when
+/// it arms or consumes [`InputMode::GPending`].
+///
+/// Returns true when the caller must not dispatch.
+pub fn drop_protocol_dup_g_chord_press(
+    last: &mut Option<LastGChordPress>,
+    mode: InputMode,
+    event: &Event,
+) -> bool {
+    let Event::Key(key) = event else {
+        return false;
+    };
+    if key.kind != KeyEventKind::Press {
+        return false;
+    }
+    if is_protocol_dup_g_chord_press(*last, key) {
+        return true;
+    }
+    if matches!(key.code, KeyCode::Char('g')) || matches!(mode, InputMode::GPending { .. }) {
+        *last = Some((key.code, key.modifiers, Instant::now()));
+    }
+    false
 }
 
 /// Map one terminal event to an [`Action`].
@@ -1720,6 +1768,49 @@ mod tests {
             event_to_action(&key(KeyCode::Char('T')), normal(), false, false),
             Action::CycleTheme
         );
+    }
+
+    #[test]
+    fn typeless_csi_u_echo_of_g_chord_key_is_dropped() {
+        let mut last = None;
+        let g = key(KeyCode::Char('g'));
+        assert!(
+            !drop_protocol_dup_g_chord_press(&mut last, normal(), &g),
+            "first g arms the chord"
+        );
+        assert!(last.is_some());
+        assert!(
+            drop_protocol_dup_g_chord_press(&mut last, pending_g(), &g),
+            "typeless g release must not complete gg"
+        );
+        let t = key(KeyCode::Char('t'));
+        assert!(
+            !drop_protocol_dup_g_chord_press(&mut last, pending_g(), &t),
+            "gt still maps"
+        );
+        assert!(
+            drop_protocol_dup_g_chord_press(&mut last, pending_g(), &t),
+            "typeless t release must not fire ToggleTreeMode"
+        );
+        let home = key(KeyCode::Home);
+        assert!(
+            !drop_protocol_dup_g_chord_press(&mut last, pending_g(), &home),
+            "Home is not a g-chord echo"
+        );
+        let old = Instant::now()
+            .checked_sub(Duration::from_millis(PROTOCOL_DUP_MS + 1))
+            .expect("instant");
+        last = Some((KeyCode::Char('g'), KeyModifiers::NONE, old));
+        assert!(
+            !drop_protocol_dup_g_chord_press(&mut last, pending_g(), &g),
+            "human gg after the echo window still completes"
+        );
+    }
+
+    fn pending_g() -> InputMode {
+        InputMode::GPending {
+            search_active: false,
+        }
     }
 
     #[test]

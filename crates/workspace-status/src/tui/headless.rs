@@ -21,7 +21,7 @@ use super::action::{Action, Effect};
 use super::app::{collect_full_snapshot, TuiOpts};
 use super::comments::CommentStore;
 use super::effect::Interpreter;
-use super::keys::event_to_action_with;
+use super::keys::{drop_protocol_dup_g_chord_press, event_to_action_with};
 use super::render::draw;
 use super::state::{AppState, FocusPane};
 use super::tty::{
@@ -693,6 +693,13 @@ impl HeadlessTui {
             if key.kind == KeyEventKind::Release {
                 return;
             }
+        }
+        if drop_protocol_dup_g_chord_press(
+            &mut self.state.last_g_chord_press,
+            self.state.input_mode(),
+            &event,
+        ) {
+            return;
         }
         let action = event_to_action_with(
             &event,

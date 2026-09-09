@@ -30,7 +30,7 @@ use super::event_pump::{
     BusyAction,
 };
 use super::fetch::fetch_interval_ms;
-use super::keys::held_nav_key;
+use super::keys::{drop_protocol_dup_g_chord_press, held_nav_key};
 use super::render::draw;
 use super::state::AppState;
 use super::tty::{poll_event, read_event};
@@ -331,6 +331,15 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event) {
         if key.kind == crossterm::event::KeyEventKind::Release {
             return;
         }
+    }
+    // CSI-u without event types sends that release as another Press.
+    // Drop the echo so `gt` / `gT` stay tab actions (not `gg` then bare t/T).
+    if drop_protocol_dup_g_chord_press(
+        &mut ctx.state.last_g_chord_press,
+        ctx.state.input_mode(),
+        &event,
+    ) {
+        return;
     }
     let action = map_event(ctx.state, &event);
     if ctx.interp.busy_for_writes() {
