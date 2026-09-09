@@ -433,12 +433,16 @@ mod tests {
             );
         }
         assert!(
-            loop_src.contains("read_event("),
-            "TTY input thread must read via tty::read_event"
+            loop_src.contains("read_event_origin("),
+            "TTY input thread must read via tty::read_event_origin"
         );
         assert!(
             loop_src.contains("poll_event("),
             "TTY input thread must poll via tty::poll_event"
+        );
+        assert!(
+            !loop_src.contains("poll_event(Duration::from_millis(16)).unwrap_or(false)"),
+            "poll error (TTY hangup) must stop the input thread"
         );
         assert!(
             app.contains("enable_mouse("),

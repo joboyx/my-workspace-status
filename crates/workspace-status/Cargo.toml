@@ -28,6 +28,9 @@ sha2 = "0.10.8"
 tui-textarea = "0.7"
 fs4 = "0.13"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 portable-pty = "0.8"
 vt100 = "0.15"

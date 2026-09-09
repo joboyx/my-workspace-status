@@ -45,10 +45,11 @@ use super::drill::{CommitFile, CommitFileSource, DrillView};
 use super::graph_load::{
     load_graph_model, load_graph_model_window, refresh_graph_limit, GraphIdentity,
 };
+use super::keys::KeyStrokeOrigin;
 use super::keys::{event_to_action_with, is_held_nav_backlog};
 use super::state::AppState;
 use super::tabs::{base_ref_not_found, no_merge_base, HEAD_HAS_NO_COMMIT};
-use super::tty::{disable_mouse, enable_mouse, poll_event, read_event};
+use super::tty::{disable_mouse, enable_mouse, poll_event, read_event, read_event_origin};
 #[cfg(test)]
 use super::watch::{checkout_watch_identities, watch_needs_pane_reload};
 
@@ -772,14 +773,16 @@ pub(crate) fn resume_tui(
 /// Drop queued copies of a held nav key (press / repeat / release).
 ///
 /// Returns the first event that is not that backlog so it is not lost
-/// (crossterm cannot unread).
-pub(crate) fn discard_held_nav_backlog(held: KeyEvent) -> Option<crossterm::event::Event> {
+/// (the reader cannot unread).
+pub(crate) fn discard_held_nav_backlog(
+    held: KeyEvent,
+) -> Option<(crossterm::event::Event, KeyStrokeOrigin)> {
     while poll_event(Duration::from_millis(0)).unwrap_or(false) {
-        let Ok(event) = read_event() else {
+        let Ok((event, origin)) = read_event_origin() else {
             return None;
         };
         if !is_held_nav_backlog(held, &event) {
-            return Some(event);
+            return Some((event, origin));
         }
     }
     None
