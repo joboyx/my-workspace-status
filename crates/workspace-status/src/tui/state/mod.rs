@@ -3590,8 +3590,13 @@ impl AppState {
     fn move_focused_edge(&mut self, end: bool) -> Effect {
         match self.list_focus_target() {
             ListFocusTarget::CommitFiles => {
-                let n = self.commit_file_rows().len();
-                self.set_commit_file_cursor(if end { n.saturating_sub(1) } else { 0 });
+                let rows = self.commit_file_rows();
+                let idx = if end {
+                    rows.len().saturating_sub(1)
+                } else {
+                    commit_file_cursor_index(&rows, None)
+                };
+                self.set_commit_file_cursor(idx);
                 self.maybe_load_focused_commit_diff()
             }
             ListFocusTarget::Graph => {
@@ -5634,6 +5639,50 @@ mod tests {
                 repo: "app".into(),
                 path: "src/view.rs".into(),
             }
+        );
+    }
+
+    #[test]
+    fn compare_move_to_start_selects_first_file_not_dir() {
+        let mut app = state();
+        app.tabs.open_or_focus("app".into(), "main".into());
+        app.focus = FocusPane::Left;
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        let _ = app.apply_compare_range(
+            tab_id,
+            gen,
+            Ok(compare_range_load(&["src/auth.ts", "src/session.ts"])),
+        );
+        let first = app.focused_commit_file_row().expect("first file");
+        assert!(
+            first.is_file(),
+            "new compare load must land on a file: {first:?}"
+        );
+        assert_eq!(first.path, "src/auth.ts");
+        let rows = app.commit_file_rows();
+        assert!(
+            !rows[0].is_file(),
+            "row 0 is the parent directory: {:?}",
+            rows[0]
+        );
+        assert_eq!(rows[0].path, "src");
+
+        app.dispatch(Action::Move(1));
+        let later = app.focused_commit_file_row().expect("later file");
+        assert_eq!(later.path, "src/session.ts");
+
+        app.dispatch(Action::MoveToStart);
+        let row = app.focused_commit_file_row().expect("gg row");
+        assert!(
+            row.is_file(),
+            "MoveToStart must land on a file, not a directory: {row:?}"
+        );
+        assert_eq!(row.path, "src/auth.ts");
+        assert_ne!(
+            app.tabs.active_compare().unwrap().file_cursor,
+            0,
+            "MoveToStart must not use raw row 0 when that row is a directory"
         );
     }
 
