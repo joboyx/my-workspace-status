@@ -149,7 +149,7 @@ fn history_graph_at_bottom(screen: &str) -> bool {
 /// Help VIEW: `m` = mouse · drag pane, split, or graph scrollbars. Docs:
 /// drag the tree / right splitter to resize (3-column grab). Drag a graph
 /// scrollbar thumb to scroll; click the track to jump. `m` itself is the
-/// capture toggle leftover. In-diff RULE needs a wide pane (`NARROW_SXS`).
+/// capture toggle. In-diff RULE needs a wide pane (`NARROW_SXS`).
 ///
 /// Live PTY, xterm SGR press + `Cb` 32 drag + release:
 /// 1. Divider: `┐┌` moves at least 24 cells right. README stays. No

@@ -57,7 +57,7 @@ fn export_overlay(screen: &str) -> bool {
 /// Commit object comments survive `git branch -D` of a side branch.
 ///
 /// Docs: commit comments stay while the repo identity is still in the
-/// snapshot. `gc_drops_gone_branch_keeps_commit` is not enough: leftover
+/// snapshot. `gc_drops_gone_branch_keeps_commit` is not enough: this test
 /// must save via `;`, delete the branch, refresh, then still see the SHA
 /// in the store and the `y` overlay. A no-op or a store that drops the
 /// body is red.

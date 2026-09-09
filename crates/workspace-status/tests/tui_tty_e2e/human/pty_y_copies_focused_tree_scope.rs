@@ -85,7 +85,7 @@ fn save_line_comment(tui: &mut PtySession, name: &str, body: &str) {
 ///
 /// Docs + VIEW: focus `file2.txt` copies that path; focus `folder1`
 /// copies both files under it; a sibling `README.md` stays out.
-/// Confirm-mode `y` and object-comment leftovers are other tests.
+/// Confirm-mode `y` and object-comment cases are other tests.
 #[test]
 fn pty_y_copies_focused_tree_scope() {
     let root = unique_root("ws-tui-e2e-y-scope");

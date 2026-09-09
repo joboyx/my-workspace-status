@@ -16,7 +16,7 @@ mod desktop;
 #[cfg(unix)]
 mod harness;
 #[cfg(unix)]
-mod leftover;
+mod human;
 #[cfg(unix)]
 mod seed;
 #[cfg(unix)]

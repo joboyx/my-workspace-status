@@ -76,7 +76,7 @@ fn documented_revert_n_cancelled(screen: &str) -> bool {
 /// After first paint the cursor is already on the dirty README. Do not
 /// `/` search (`n` would be next-match if confirm never armed). A no-op,
 /// immediate revert, `y` path, overlay-only paint, or toast-only tick
-/// is red. This leftover does not claim `y` / `Y` apply.
+/// is red. This test does not claim `y` / `Y` apply.
 #[test]
 fn pty_revert_confirm_n_cancels() {
     let (_root, workspace) = daily_workspace();

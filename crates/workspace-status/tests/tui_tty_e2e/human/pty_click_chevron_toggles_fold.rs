@@ -118,7 +118,7 @@ fn chevron_folds_app_repo(screen: &str) -> bool {
 ///
 /// Docs / keymap: click the fold chevron to toggle that row's fold. Help
 /// lists `Enter dblclick` as focus right / drill. A chevron click must
-/// not Enter. Label click and right-pane click are other leftovers.
+/// not Enter. Label click and right-pane click are other tests.
 ///
 /// Live PTY after first paint (cursor on dirty README, No updates folded):
 /// SGR press+release on the No-updates chevron opened the group (`v`,

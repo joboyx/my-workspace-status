@@ -252,7 +252,7 @@ fn pty_t_and_i_toggle_view_modes() {
     tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
         documented_tree_after_restore,
-        "directory tree holds (not a no-op second t or a leftover flat file row)",
+        "directory tree holds (not a no-op second t or a stale flat file row)",
         WAIT,
     );
 
@@ -278,7 +278,7 @@ fn pty_t_and_i_toggle_view_modes() {
     tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
         documented_split_after_restore,
-        "split layout holds (not a no-op second i or a leftover inline add row)",
+        "split layout holds (not a no-op second i or a stale inline add row)",
         WAIT,
     );
 }

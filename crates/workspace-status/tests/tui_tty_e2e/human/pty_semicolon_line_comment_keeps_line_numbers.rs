@@ -55,7 +55,7 @@ fn needle_line(pane: &str) -> Option<&str> {
     pane.lines().find(|line| line.contains(NEEDLE))
 }
 
-/// Byte index of ` │ ` on the 2-digit leftover row (`KEEP-NUMS-10`).
+/// Byte index of ` │ ` on the 2-digit line 10 row (`KEEP-NUMS-10`).
 fn needle_rule_col(pane: &str) -> Option<usize> {
     needle_line(pane).and_then(|line| line.find(" │ "))
 }
@@ -82,7 +82,7 @@ fn line10_commented(screen: &str) -> bool {
 
 /// `;` on a 2-digit numbered diff line must not shift line numbers.
 ///
-/// Hunt leftover: ` │ ` after `10` stays put, and the row is reserved
+/// ` │ ` after `10` stays put, and the row is reserved
 /// `▌ 10 │` / `▌"10 │` rather than stuffed `▌10 │` / `"10 │` grown from
 /// a 2-column number gutter. Daily 1-digit README cannot catch stuffing.
 #[test]
@@ -119,16 +119,16 @@ fn pty_semicolon_line_comment_keeps_line_numbers() {
     tui.search(NEEDLE);
     tui.wait_pred(
         |screen| file_diff_focused(screen) && reserved_blank_line10(&right_pane(screen)),
-        "diff search lands on line 10 leftover `▌ 10 │` (reserved blank, not stuffed `▌10 │`)",
+        "diff search lands on line 10 `▌ 10 │` (reserved blank, not stuffed `▌10 │`)",
         WAIT,
     );
 
     let before = tui.screen();
     let before_pane = right_pane(&before);
-    let before_col = needle_rule_col(&before_pane).expect("line 10 leftover before comment");
+    let before_col = needle_rule_col(&before_pane).expect("line 10 before comment");
     assert!(
         reserved_blank_line10(&before_pane),
-        "reserved blank leftover must be `▌ 10 │`, not stuffed `▌10 │`:\n{before_pane}"
+        "reserved blank must be `▌ 10 │`, not stuffed `▌10 │`:\n{before_pane}"
     );
 
     tui.key(';');
@@ -146,19 +146,19 @@ fn pty_semicolon_line_comment_keeps_line_numbers() {
     tui.enter();
     tui.wait_pred(
         line10_commented,
-        "Enter saves: overlay gone, leftover `▌\"10 │` on KEEP-NUMS-10, toast comment saved",
+        "Enter saves: overlay gone, `▌\"10 │` on KEEP-NUMS-10, toast comment saved",
         GIT_WAIT,
     );
 
     let after = tui.screen();
     let after_pane = right_pane(&after);
-    let after_col = needle_rule_col(&after_pane).expect("line 10 leftover after comment");
+    let after_col = needle_rule_col(&after_pane).expect("line 10 after comment");
     assert_eq!(
         before_col, after_col,
-        "comment mark leftover must not shift │ after the filled number column:\nbefore={before_pane}\nafter={after_pane}"
+        "comment mark must not shift │ after the filled number column:\nbefore={before_pane}\nafter={after_pane}"
     );
     assert!(
         reserved_marked_line10(&after_pane),
-        "ASCII \" leftover must occupy the reserved mark column on line 10:\n{after_pane}"
+        "ASCII \" must occupy the reserved mark column on line 10:\n{after_pane}"
     );
 }

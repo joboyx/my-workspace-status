@@ -627,7 +627,7 @@ mod tests {
         let at_140 = help_status_lines(140);
         assert!(
             at_140 <= 32,
-            "leftover 140×32 PTY must still paint Ctrl-C Ctrl-C: {at_140}"
+            "140×32 PTY must still paint Ctrl-C Ctrl-C: {at_140}"
         );
     }
 

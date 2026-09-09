@@ -179,7 +179,7 @@ fn pty_v_then_semicolon_comments_line_range() {
 /// comment and does not unfocus.
 ///
 /// CSI-u Escape (`CSI 27 u`). If `V` is a no-op, Esc unfocuses the tree
-/// and this leftover is red.
+/// and this test is red.
 #[test]
 fn pty_v_esc_exits_highlight_without_comment() {
     let (_root, workspace) = daily_workspace();

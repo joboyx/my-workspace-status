@@ -43,7 +43,7 @@ fn click_selects_merger_row(screen: &str) -> bool {
 ///
 /// Docs: SGR press+release. Must change the right pane. Setup clicks in
 /// the hscroll test and `m` mouse-toggle clicks are not this claim.
-/// Chevron click and right-pane click are separate leftovers.
+/// Chevron click and right-pane click are separate tests.
 ///
 /// Live PTY after first paint (cursor already on dirty README, file-diff
 /// on the right): SGR press+release on the merger *label* (not the

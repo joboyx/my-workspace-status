@@ -1,3 +1,7 @@
+//! Human-path TTY e2e: live PTY and desktop sessions.
+//!
+//! Each test names the user-visible behavior it checks.
+
 mod desktop_xfce_fetch_then_pull_local_remote;
 mod desktop_xfce_graph_merge_creates_commit;
 mod desktop_xfce_keys_help_and_search;

@@ -76,8 +76,8 @@ fn tree_or_theme_fired(screen: &str) -> bool {
 
 /// On a compare tab, typeless CSI-u `gt` / `gT` must change the active tab.
 ///
-/// Hunt leftover: a strip label or `COMMITTED` leftover from another tab is
-/// not enough. `ToggleTreeMode` (`Flat paths` / ` flat`) or `CycleTheme`
+/// A strip label or `COMMITTED` text from another tab is not enough.
+/// `ToggleTreeMode` (`Flat paths` / ` flat`) or `CycleTheme`
 /// (`theme:`) must fail. Start on the last compare (user POV), not after a
 /// raw-`g` jump that hid the VTE release-as-press hole.
 #[test]

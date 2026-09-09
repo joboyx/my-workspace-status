@@ -43,8 +43,8 @@ fn tree_has_inactive_readme(screen: &str) -> bool {
 /// row is red. First paint is the daily README file-diff with the tree
 /// focused.
 ///
-/// Hunt leftover: Enter (or a missing inactive paint) that drops the
-/// tree marker, or Esc that drops the diff marker, cannot pass. `j` on
+/// Fail if Enter (or a missing inactive paint) drops the
+/// tree marker, or if Esc drops the diff marker. `j` on
 /// the focused file-diff must not move or erase the tree marker.
 #[test]
 fn pty_unfocused_pane_keeps_selection() {

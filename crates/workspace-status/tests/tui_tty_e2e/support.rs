@@ -1,4 +1,4 @@
-//! Shared WAIT, tree, and crumb helpers for leftover TTY e2e.
+//! Shared WAIT, tree, and crumb helpers for human-path TTY e2e.
 
 use std::fs;
 use std::path::Path;
@@ -178,7 +178,7 @@ pub fn pane_top(screen: &str) -> &str {
         .unwrap_or("")
 }
 
-/// Title row must not mark focus with `*` or `●`. PTY leftover is ASCII.
+/// Title row must not mark focus with `*` or `●`. PTY e2e is ASCII.
 fn title_row_has_no_focus_glyph(screen: &str) -> bool {
     let top = pane_top(screen);
     !top.contains("* tree")
