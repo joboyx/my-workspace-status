@@ -75,6 +75,7 @@ mod pty_pull_behind_local_remote;
 mod pty_q_quits_immediately;
 mod pty_r_refreshes_new_dirty_file;
 mod pty_revert_confirm_n_cancels;
+mod pty_revert_confirm_survives_resize;
 mod pty_right_pane_keeps_focus_middle;
 mod pty_right_pane_sgr_hscroll_pans_graph;
 mod pty_right_pane_sgr_hscroll_pans_long_diff;

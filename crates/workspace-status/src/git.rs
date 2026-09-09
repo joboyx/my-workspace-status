@@ -881,9 +881,25 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let out = git_command(&script, &["status"], &dir)
-            .output()
-            .expect("probe runs");
+        // Write + chmod + exec can return ETXTBSY on a busy runner.
+        let out = {
+            let mut last_err = None;
+            let mut result = None;
+            for _ in 0..8 {
+                match git_command(&script, &["status"], &dir).output() {
+                    Ok(out) => {
+                        result = Some(out);
+                        break;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                        last_err = Some(err);
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                    }
+                    Err(err) => panic!("probe runs: {err}"),
+                }
+            }
+            result.unwrap_or_else(|| panic!("probe runs: {last_err:?}"))
+        };
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
             out.status.success(),
