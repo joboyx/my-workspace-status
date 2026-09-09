@@ -56,6 +56,7 @@ mod pty_help_enter_does_not_arm_pane_search;
 mod pty_help_overlay;
 mod pty_home_and_end_jump_workspace_tree;
 mod pty_key_repeat_j_reaches_no_updates;
+mod pty_key_repeat_q_z_g_ignored;
 mod pty_launch_paints_tree_diff_and_chrome;
 mod pty_left_pane_sgr_hscroll_pans_long_diff;
 mod pty_m_toggles_mouse_capture;
