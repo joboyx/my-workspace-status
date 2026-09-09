@@ -9,7 +9,7 @@ use crate::support::{
 };
 
 /// Wide enough that split paints (`NARROW_SXS` is 100). Default 140 falls
-/// back to `inline (too narrow)` and has no in-diff RULE to hunt.
+/// back to `inline (too narrow)` and has no in-diff RULE to check.
 const WIDE_COLS: u16 = 200;
 const WIDE_ROWS: u16 = 32;
 
@@ -37,7 +37,7 @@ fn seed_emoji_left_cell(workspace: &Path) {
 }
 
 /// MesloLGS NF / `visible_width`: pictographs ≥ U+1F300 are two columns.
-fn leftover_display_width(value: &str) -> usize {
+fn display_width(value: &str) -> usize {
     value
         .chars()
         .map(|ch| if (ch as u32) >= 0x1f300 { 2 } else { 1 })
@@ -48,7 +48,7 @@ fn pane_line_containing<'a>(pane: &'a str, needle: &str) -> Option<&'a str> {
     pane.lines().find(|line| line.contains(needle))
 }
 
-/// Display column of the `n`th `│` (0-based) on a leftover row.
+/// Display column of the `n`th `│` (0-based) on a painted row.
 fn nth_rule_display_col(line: &str, n: usize) -> Option<usize> {
     let mut seen = 0usize;
     let mut col = 0usize;
@@ -59,7 +59,7 @@ fn nth_rule_display_col(line: &str, n: usize) -> Option<usize> {
             }
             seen += 1;
         }
-        col += leftover_display_width(&ch.to_string());
+        col += display_width(&ch.to_string());
     }
     None
 }
@@ -123,9 +123,9 @@ fn documented_emoji_split_grid(screen: &str) -> bool {
         && !after.contains(LEFT_MARK)
         && before_rule == emoji_rule
         && after_rule == emoji_rule
-        && leftover_display_width(before) <= usize::from(WIDE_COLS)
-        && leftover_display_width(emoji_row) <= usize::from(WIDE_COLS)
-        && leftover_display_width(after) <= usize::from(WIDE_COLS)
+        && display_width(before) <= usize::from(WIDE_COLS)
+        && display_width(emoji_row) <= usize::from(WIDE_COLS)
+        && display_width(after) <= usize::from(WIDE_COLS)
         && status_row(screen).contains(" split")
         && !status_row(screen).contains(" inline")
         && !screen.contains("WIP on graph")
@@ -140,7 +140,7 @@ fn documented_emoji_split_grid(screen: &str) -> bool {
 /// and the in-diff RULE walks off the context-row column. That wrap also
 /// splits `EMOJI_LEFT` from the paired `hello world` cell.
 ///
-/// Hunt leftover: 200-col PTY so split paints. Search `emoji-grid`. The
+/// Use a 200-col PTY so split paints. Search `emoji-grid`. The
 /// deleted left cell is `EMOJI_LEFT` plus thirty `😀`. The RULE on that
 /// row must match `ASCII_BEFORE` / `ASCII_AFTER`. A no-op, an ASCII
 /// placeholder, a RULE shift, or a wrap fragment is red.
@@ -176,7 +176,7 @@ fn pty_emoji_diff_keeps_column_grid() {
     let screen = tui.screen();
     let right = right_pane(&screen);
     let emoji_row =
-        pane_line_containing(&right, LEFT_MARK).expect("EMOJI_LEFT leftover row after hold");
+        pane_line_containing(&right, LEFT_MARK).expect("EMOJI_LEFT row after hold");
     assert!(
         emoji_row.contains(EMOJI),
         "left cell must keep the emoji glyph, not an ASCII placeholder:\n{right}"
@@ -188,7 +188,7 @@ fn pty_emoji_diff_keeps_column_grid() {
     );
     for line in screen.lines() {
         assert!(
-            leftover_display_width(line) <= usize::from(WIDE_COLS),
+            display_width(line) <= usize::from(WIDE_COLS),
             "under-pad wrap must not grow a screen row past {WIDE_COLS} columns:\n{line}"
         );
     }

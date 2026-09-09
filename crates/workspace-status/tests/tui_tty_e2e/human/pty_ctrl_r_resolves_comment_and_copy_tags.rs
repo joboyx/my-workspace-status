@@ -61,9 +61,9 @@ fn overlay_open(screen: &str) -> bool {
 }
 
 /// Overlay `Ctrl-R` marks a comment resolved. `y` still copies it with
-/// `[resolved]`. A second `Ctrl-R` unresolves. Hunt leftover: missing
-/// overlay chrome, a copy that drops resolved comments, or a copy that
-/// omits the tag is red.
+/// `[resolved]`. A second `Ctrl-R` unresolves. Fail if overlay chrome
+/// is missing, if a copy drops resolved comments, or if a copy omits
+/// the tag.
 #[test]
 fn pty_ctrl_r_resolves_comment_and_copy_tags() {
     let (_root, workspace) = daily_workspace();

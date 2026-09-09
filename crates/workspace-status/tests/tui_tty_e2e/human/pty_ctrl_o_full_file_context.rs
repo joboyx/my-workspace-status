@@ -112,7 +112,7 @@ fn merger_graph_no_full_file(screen: &str) -> bool {
 /// hunk stays on screen. A second Ctrl-o restores hunk-only. Off a file-diff
 /// (graph / repo row) the key refuses. Encoding: CSI-u Control+o
 /// (`CSI 111 ; 5 : 1 u` press, `: 3` release). C0 `\x0f` (`PtySession::ctrl`)
-/// is a different path. A live PTY hunt after first paint used CSI-u.
+/// is a different path. After first paint this path used CSI-u.
 ///
 /// The daily README is too small: the hunk is the whole file. This claim
 /// seeds a tracked dirty file whose default hunk is mid-file. Fail if

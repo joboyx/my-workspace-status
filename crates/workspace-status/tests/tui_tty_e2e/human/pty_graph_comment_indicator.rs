@@ -207,7 +207,7 @@ fn pty_graph_commit_comment_paints_mark() {
 /// A commit-file line comment paints `"` after `README.md` only.
 ///
 /// Unit `commit_file_row_paints_comment_mark_when_file_has_comments`
-/// pins `README.md` vs `src/lib.rs`. This leftover hunts that README row
+/// pins `README.md` vs `src/lib.rs`. This test checks that README row
 /// on a live commit-file list (`j` from the `src` dir, then `lib.rs`).
 /// Esc from the diff focuses the list. A mark on `lib.rs`, every file,
 /// a different listed file, or a toast with no glyph after the name is
@@ -285,7 +285,7 @@ fn pty_graph_commit_file_comment_paints_mark() {
                 && !files_cursor_on(screen, LIB_FILE)
                 && !files_cursor_on(screen, "src")
         },
-        "j from lib.rs hunts the README.md file row",
+        "j from lib.rs lands on the README.md file row",
         WAIT,
     );
     tui.enter();

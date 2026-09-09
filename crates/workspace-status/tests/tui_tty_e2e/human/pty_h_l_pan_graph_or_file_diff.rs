@@ -8,7 +8,7 @@ use crate::support::{
 };
 
 const FILE: &str = "unique-diffline.rs";
-/// Repeats after the first CSI-u press. Live hunt: one press is `· pan 1`.
+/// Repeats after the first CSI-u press. One press is `· pan 1`.
 const PAN_REPEATS: usize = 40;
 /// Gap so the input thread does not drain the held-nav backlog as one move.
 const REPEAT_GAP_MS: u64 = 50;
@@ -249,7 +249,7 @@ fn pty_h_l_pan_graph_or_file_diff() {
     tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
         long_diff_clipped_diff_focus,
-        "restored clip holds (not a no-op h, a fold, or a leftover pan bar)",
+        "restored clip holds (not a no-op h, a fold, or a stale pan bar)",
         WAIT,
     );
 }

@@ -75,7 +75,7 @@ fn documented_right_pane_sgr_hscroll_panned(screen: &str) -> bool {
 /// `event::read` loop. Motion-bit `CSI < 99` is dropped by crossterm 0.28
 /// and must not pan. Horizontal wheel pans the pane under the pointer
 /// without moving the focused row. Keys `h` / `l` already pan a focused
-/// file-diff (`pty_h_l_pan_graph_or_file_diff`). This leftover is the
+/// file-diff (`pty_h_l_pan_graph_or_file_diff`). This test is the
 /// mouse path over the **right** pane. Left-pane SGR over a long diff is
 /// `pty_left_pane_sgr_hscroll_pans_long_diff`.
 ///

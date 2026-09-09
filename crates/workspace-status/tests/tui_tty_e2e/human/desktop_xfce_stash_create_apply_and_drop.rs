@@ -26,8 +26,8 @@ use crate::support::{
 /// diff header `app/README.md` while SEARCH is still typing, so Enter-arm
 /// is never proven. xfce can drop Enter while right-pane git runs. Shift+S
 /// while SEARCH is open types into the query and must not open the stash
-/// overlay. Overlay `S` then `a` / `D` is this leftover. Graph `p` pop is
-/// leftover `desktop_xfce_stash_graph_pop`.
+/// overlay. Overlay `S` then `a` / `D` is this test. Graph `p` pop is
+/// `desktop_xfce_stash_graph_pop`.
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "GitHub Actions tui-tty-desktop job; needs DISPLAY, xfce4-terminal, xdotool"]

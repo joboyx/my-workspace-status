@@ -231,7 +231,7 @@ impl ThemeId {
     }
 }
 
-/// Tokyo Night leftover TTY e2e hardcodes these peak RGB values:
+/// Tokyo Night TTY e2e hardcodes these peak RGB values:
 /// add `#516643` = `Rgb(81, 102, 67)`,
 /// update `#6d5942` = `Rgb(109, 89, 66)`,
 /// remove `#774152` = `Rgb(119, 65, 82)`.
@@ -739,7 +739,7 @@ mod tests {
         assert_eq!(
             unique.len(),
             muteds.len(),
-            "muted hexes must stay unique for leftover theme chrome: {muteds:?}"
+            "muted hexes must stay unique for TTY e2e theme chrome: {muteds:?}"
         );
     }
 

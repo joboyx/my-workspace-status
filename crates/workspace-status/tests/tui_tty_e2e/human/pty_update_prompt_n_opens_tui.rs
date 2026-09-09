@@ -55,10 +55,10 @@ fn curl_log_is_latest_only(log: &str) -> bool {
 /// current / missing curl stay quiet and never print the prompt.
 ///
 /// Encoding: `stdin.read_line` before ratatui mounts. That is not the
-/// TUI keymap. A live PTY hunt: bare `n` echoes and stays on the prompt;
+/// TUI keymap. On a live PTY, bare `n` echoes and stays on the prompt;
 /// CSI-u `n` stays on the prompt; `n` then Enter (`\n` or `\r`) declines.
 /// `PtySession::key('n')` plus [`PtySession::enter`] (`\r`) is that
-/// line. This leftover does not claim `y`.
+/// line. This test does not claim `y`.
 ///
 /// A skipped check, a no-op `n`, an auto-mount without answering, or a
 /// `y` install cannot pass.
@@ -81,7 +81,7 @@ fn pty_update_prompt_n_opens_tui() {
                    exit 0\n\
                    ;;\n\
                  *releases*)\n\
-                   printf '%s\\n' '[ {{\"tag_name\":\"v99.0.0\",\"draft\":false,\"prerelease\":false,\"body\":\"## [99.0.0]\\n\\n### Features\\n\\n- leftover y notes\\n\\n## Install workspace-status 99.0.0\\n\"}} ]'\n\
+                   printf '%s\\n' '[ {{\"tag_name\":\"v99.0.0\",\"draft\":false,\"prerelease\":false,\"body\":\"## [99.0.0]\\n\\n### Features\\n\\n- release notes\\n\\n## Install workspace-status 99.0.0\\n\"}} ]'\n\
                    exit 0\n\
                    ;;\n\
                esac\n\

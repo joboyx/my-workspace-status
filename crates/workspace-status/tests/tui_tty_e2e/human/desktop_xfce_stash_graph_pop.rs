@@ -13,7 +13,7 @@ use crate::support::{
 /// Docs: Help GIT `a p D` = focused stash apply/pop/drop. Keymap: graph
 /// stash row `p` is `Action::GraphStashPop` (`git stash pop` of that
 /// `stash@{n}`). Workspace / tree `p` is `Action::Pull`. Overlay `S`
-/// then `a` / `D` is leftover `desktop_xfce_stash_create_apply_and_drop`.
+/// then `a` / `D` is `desktop_xfce_stash_create_apply_and_drop`.
 /// Pop runs immediately. Drop still confirms.
 ///
 /// After first paint, `j` lands on merger. Tab focuses the graph. `j`

@@ -31,7 +31,7 @@ fn overlay_closed(screen: &str) -> bool {
 /// not drop it (branch `HEAD (detached)` is not a live `refs/heads` name).
 ///
 /// Docs: primary detached HEAD is a worktree path key. Graph `b` is a
-/// typical way to land here; this leftover seeds that checkout so watch
+/// typical way to land here; this test seeds that checkout so watch
 /// apply is the oracle. A Branch key, a no-op overlay, or a store that
 /// empties after the poll is red.
 #[test]

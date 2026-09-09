@@ -46,24 +46,26 @@ fn first_ctrl_c_pinned_prompt(screen: &str) -> bool {
         && !screen.contains("MOVE")
 }
 
-/// First Ctrl+C keeps the process and pins the quit prompt.
+/// Second Ctrl+C within the window quits.
 ///
-/// Docs + VIEW: `Ctrl-C Ctrl-C` / `quit (press twice)`. First press is not
-/// `q` and not the second Ctrl+C. Help overlay lists the row
-/// (`pty_help_overlay`). This claim is idle-tree chrome after one press.
+/// Docs + VIEW: `Ctrl-C Ctrl-C` / `quit (press twice)`. The first-press
+/// test (`pty_ctrl_c_prompts_before_quit`) owns the first-press arm. Help
+/// overlay lists the row (`pty_help_overlay`). This claim is process
+/// exit after that prompt is armed.
 ///
-/// Encoding: CSI-u Control+c (`CSI 99 ; 5 : 1 u` press, `: 3` release).
-/// The live loop requested `REPORT_ALL_KEYS_AS_ESCAPE_CODES` plus event
-/// types. C0 `\x03` (`PtySession::ctrl`) is a different path. A live PTY
-/// hunt after first paint painted the same pinned row for both encodings.
+/// Encoding: CSI-u Control+c (`CSI 99 ; 5 : 1 u` press, `: 3` release)
+/// for both presses. The live loop requested
+/// `REPORT_ALL_KEYS_AS_ESCAPE_CODES` plus event types. C0 `\x03`
+/// (`PtySession::ctrl`) is a different path. `q` is help `quit`, not
+/// this chord.
 ///
-/// Documented result: process stays. Pinned chrome row between the
-/// breadcrumb and the status pills shows `Press Ctrl+C again to exit`.
-/// Tree and pills stay. Fail if the process exits, if the copy is missing
-/// or only a breadcrumb toast, if the status line is replaced, or if
-/// nothing happens. Teardown sends `q` (second Ctrl+C is not claimed).
+/// Documented result: first press pins `Press Ctrl+C again to exit` and
+/// keeps the process. Second press within ~2s exits with status 0.
+/// Fail if the first press already quits, if the second is a no-op, if
+/// the prompt stays armed, or if nothing happens. Do not teardown with
+/// `q`.
 #[test]
-fn pty_ctrl_c_prompts_before_quit() {
+fn pty_ctrl_c_second_quit() {
     let (_root, workspace) = daily_workspace();
     let mut tui = PtySession::open(&workspace);
     tui.wait_contains("README.md", WAIT);
@@ -83,6 +85,6 @@ fn pty_ctrl_c_prompts_before_quit() {
     );
     tui.assert_running("after first Ctrl+C (must not quit)");
 
-    tui.key('q');
+    tui.ctrl_letter('c');
     tui.wait_exit(WAIT);
 }

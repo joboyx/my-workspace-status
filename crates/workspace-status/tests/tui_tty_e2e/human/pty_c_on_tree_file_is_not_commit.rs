@@ -65,7 +65,7 @@ fn help_after_tree_file_c(screen: &str) -> bool {
 /// only `main`. `?` still opened help with picker `C`.
 ///
 /// Graph create-branch (`pty_graph_c_creates_branch_at_commit`) and
-/// picker `C` (`pty_branch_picker_shift_c_creates`) are other leftovers.
+/// picker `C` (`pty_branch_picker_shift_c_creates`) are other tests.
 /// `/README` then "Create branch" absent, a paint-only tick, or a silent
 /// new ref cannot pass.
 #[test]

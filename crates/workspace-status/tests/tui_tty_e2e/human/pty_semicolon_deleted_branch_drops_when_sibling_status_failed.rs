@@ -65,7 +65,7 @@ fn make_status_fail(index: &Path) {
 /// Docs: skip-wipe and last-good carry apply only when every checkout of
 /// that identity has an empty counted list. Two checkouts, `git branch -D`
 /// on the healthy primary, failed sibling, refresh: the deleted-branch
-/// comment must be gone. A leftover that still finds it is red.
+/// comment must be gone. A store that still finds it is red.
 #[test]
 fn pty_semicolon_deleted_branch_drops_when_sibling_status_failed() {
     let root = unique_root("ws-tui-e2e-comment-sibling-failed");

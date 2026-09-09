@@ -123,7 +123,7 @@ fn on_open_no_updates_with_lib(screen: &str) -> bool {
 /// README, still not the last row. Further Repeats walk to folded No
 /// updates and clamp there. Then `l` reveals `lib`. A no-op, a
 /// single-step, a G/End jump on the first Repeat, or paint-only cannot
-/// pass. This leftover does not claim `k` or arrows.
+/// pass. This test does not claim `k` or arrows.
 #[test]
 fn pty_key_repeat_j_reaches_no_updates() {
     let (_root, workspace) = daily_workspace();
