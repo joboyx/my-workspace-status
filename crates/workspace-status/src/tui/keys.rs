@@ -95,7 +95,12 @@ pub fn drop_protocol_dup_g_chord_press(
     if is_protocol_dup_g_chord_press(*last, key) {
         return true;
     }
-    if matches!(key.code, KeyCode::Char('g')) || matches!(mode, InputMode::GPending { .. }) {
+    let record = matches!(mode, InputMode::GPending { .. })
+        || (matches!(
+            mode,
+            InputMode::Normal { .. } | InputMode::ZPending { .. }
+        ) && matches!(key.code, KeyCode::Char('g')));
+    if record {
         *last = Some((key.code, key.modifiers, Instant::now()));
     }
     false
@@ -1804,6 +1809,19 @@ mod tests {
         assert!(
             !drop_protocol_dup_g_chord_press(&mut last, pending_g(), &g),
             "human gg after the echo window still completes"
+        );
+        last = None;
+        assert!(
+            !drop_protocol_dup_g_chord_press(&mut last, InputMode::SearchPrompt, &g),
+            "typed g in search is not a chord press"
+        );
+        assert!(
+            last.is_none(),
+            "search g must not arm the typeless echo window"
+        );
+        assert!(
+            !drop_protocol_dup_g_chord_press(&mut last, normal(), &g),
+            "g after a search query still arms GPending"
         );
     }
 
