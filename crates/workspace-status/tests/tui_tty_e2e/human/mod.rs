@@ -78,6 +78,7 @@ mod pty_revert_confirm_n_cancels;
 mod pty_right_pane_keeps_focus_middle;
 mod pty_right_pane_sgr_hscroll_pans_graph;
 mod pty_right_pane_sgr_hscroll_pans_long_diff;
+mod pty_search_does_not_reveal_hidden_ignored;
 mod pty_semicolon_branch_comment_survives_status_failed;
 mod pty_semicolon_comment_multiline_export;
 mod pty_semicolon_comment_textarea_cursor;
