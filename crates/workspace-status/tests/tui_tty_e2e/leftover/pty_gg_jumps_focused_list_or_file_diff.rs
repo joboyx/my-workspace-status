@@ -28,6 +28,7 @@ fn csi_u_letter(tui: &mut PtySession, letter: char) {
 /// CSI-u `gg` chord: two `g` press+release pairs inside the 400ms window.
 fn csi_u_gg(tui: &mut PtySession) {
     csi_u_letter(tui, 'g');
+    tui.wait_ms(KEY_GAP_MS);
     csi_u_letter(tui, 'g');
 }
 

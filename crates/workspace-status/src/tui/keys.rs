@@ -9,6 +9,17 @@ use super::action::{Action, PaletteOpenedBy};
 /// Window for `zz` / `gg` after the first key.
 pub const DOUBLE_TAP_MS: u64 = 400;
 
+/// Last `g`-chord Press and whether a matching release is still due.
+///
+/// VTE often sends all-keys CSI-u without event types, so press and
+/// release are both [`KeyEventKind::Press`]. The second Press is the
+/// release of that tap, not a second tap.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GChordEchoState {
+    last: Option<(KeyCode, KeyModifiers)>,
+    awaiting_release: bool,
+}
+
 /// Poll while a nav key may still be held, so terminal Repeat arrives at
 /// key-repeat cadence instead of the idle 200ms tick.
 pub const NAV_REPEAT_POLL_MS: u64 = 16;
@@ -26,7 +37,10 @@ pub enum InputMode {
     /// First `g` armed; second `g` in the window is `gg` (move to start).
     ///
     /// Key release is ignored and must not clear this pending. CSI-u with
-    /// event types sends a Release after every Press.
+    /// event types sends a Release after every Press. CSI-u without event
+    /// types sends a second Press. That echo is dropped (it is the release
+    /// of the same tap). A real Release clears the echo so human `gg` still
+    /// works.
     GPending {
         search_active: bool,
     },
@@ -51,6 +65,54 @@ pub enum InputMode {
     CommentExport,
     /// Command palette (`Ctrl-k` / `:`). Named commands, filter, Enter run.
     CommandPalette,
+}
+
+fn same_g_chord_key(last: Option<(KeyCode, KeyModifiers)>, key: &KeyEvent) -> bool {
+    last.is_some_and(|(code, mods)| code == key.code && mods == key.modifiers)
+}
+
+fn records_g_chord_press(mode: InputMode, key: &KeyEvent) -> bool {
+    matches!(mode, InputMode::GPending { .. })
+        || (matches!(
+            mode,
+            InputMode::Normal { .. } | InputMode::ZPending { .. }
+        ) && matches!(key.code, KeyCode::Char('g')))
+}
+
+/// Drop a typeless CSI-u echo of a `g`-chord key. Record the Press when
+/// it arms or consumes [`InputMode::GPending`].
+///
+/// A real [`KeyEventKind::Release`] of that key clears the echo so the
+/// next Press is a new tap (`gg`). Search, palette, and other overlays
+/// do not record a typed `g`.
+///
+/// Returns true when the caller must not dispatch (echo or Release).
+pub fn drop_protocol_dup_g_chord_press(
+    state: &mut GChordEchoState,
+    mode: InputMode,
+    event: &Event,
+) -> bool {
+    let Event::Key(key) = event else {
+        return false;
+    };
+    if key.kind == KeyEventKind::Release {
+        if state.awaiting_release && same_g_chord_key(state.last, key) {
+            state.awaiting_release = false;
+        }
+        return true;
+    }
+    if key.kind != KeyEventKind::Press {
+        return false;
+    }
+    if state.awaiting_release && same_g_chord_key(state.last, key) {
+        state.awaiting_release = false;
+        return true;
+    }
+    if records_g_chord_press(mode, key) {
+        state.last = Some((key.code, key.modifiers));
+        state.awaiting_release = true;
+    }
+    false
 }
 
 /// Map one terminal event to an [`Action`].
@@ -1720,6 +1782,60 @@ mod tests {
             event_to_action(&key(KeyCode::Char('T')), normal(), false, false),
             Action::CycleTheme
         );
+    }
+
+    #[test]
+    fn typeless_csi_u_echo_of_g_chord_key_is_dropped() {
+        let mut echo = GChordEchoState::default();
+        let g = key(KeyCode::Char('g'));
+        let g_release = key_kind(KeyCode::Char('g'), KeyEventKind::Release);
+        assert!(
+            !drop_protocol_dup_g_chord_press(&mut echo, normal(), &g),
+            "first g arms the chord"
+        );
+        assert!(
+            drop_protocol_dup_g_chord_press(&mut echo, pending_g(), &g),
+            "typeless g release must not complete gg"
+        );
+        let t = key(KeyCode::Char('t'));
+        assert!(
+            !drop_protocol_dup_g_chord_press(&mut echo, pending_g(), &t),
+            "gt still maps"
+        );
+        assert!(
+            drop_protocol_dup_g_chord_press(&mut echo, pending_g(), &t),
+            "typeless t release must not fire ToggleTreeMode"
+        );
+        let home = key(KeyCode::Home);
+        assert!(
+            !drop_protocol_dup_g_chord_press(&mut echo, pending_g(), &home),
+            "Home is not a g-chord echo"
+        );
+        echo = GChordEchoState::default();
+        assert!(!drop_protocol_dup_g_chord_press(&mut echo, normal(), &g));
+        assert!(
+            drop_protocol_dup_g_chord_press(&mut echo, pending_g(), &g_release),
+            "typed Release clears the echo"
+        );
+        assert!(
+            !drop_protocol_dup_g_chord_press(&mut echo, pending_g(), &g),
+            "human gg after a real Release still completes"
+        );
+        echo = GChordEchoState::default();
+        assert!(
+            !drop_protocol_dup_g_chord_press(&mut echo, InputMode::SearchPrompt, &g),
+            "typed g in search is not a chord press"
+        );
+        assert!(
+            !drop_protocol_dup_g_chord_press(&mut echo, normal(), &g),
+            "g after a search query still arms GPending"
+        );
+    }
+
+    fn pending_g() -> InputMode {
+        InputMode::GPending {
+            search_active: false,
+        }
     }
 
     #[test]

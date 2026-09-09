@@ -2822,6 +2822,48 @@ fn compare_gt_survives_watch_tick() {
 }
 
 #[test]
+fn compare_gt_survives_typeless_g_echo() {
+    let (root, workspace) = compare_ahead_workspace();
+    let mut tui = open(&workspace);
+    tui.search("app");
+    open_palette_run(&mut tui, "vs default");
+    open_palette_run(&mut tui, "vs branch");
+    type_palette_query(&mut tui, "main");
+    tui.enter();
+    assert_eq!(tui.tab_count(), 3);
+    assert_eq!(tui.active_tab(), 2);
+    tui.key('g');
+    tui.key('g');
+    tui.key('t');
+    tui.key('t');
+    assert_eq!(
+        tui.active_tab(),
+        0,
+        "typeless gt is NextTab, not ToggleTreeMode"
+    );
+    let frame = tui.frame();
+    assert_absent(&frame, "Flat paths");
+    assert_absent(&frame, "theme: ");
+    tui.key('g');
+    tui.key('g');
+    tui.shift_key('t');
+    tui.shift_key('t');
+    assert_eq!(
+        tui.active_tab(),
+        2,
+        "typeless gT is PreviousTab, not CycleTheme"
+    );
+    let frame = tui.frame();
+    assert_absent(&frame, "theme: ");
+    jump_tab(&mut tui, '1');
+    assert_eq!(tui.active_tab(), 0);
+    tui.search("app");
+    gg(&mut tui);
+    assert_eq!(tui.cursor_id(), "workspace");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn compare_apostrophe_on_diff_copies_not_switch() {
     let (root, workspace) = compare_ahead_workspace();
     let mut tui = open(&workspace);

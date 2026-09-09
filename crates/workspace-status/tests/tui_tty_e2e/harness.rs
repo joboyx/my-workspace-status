@@ -271,8 +271,12 @@ impl PtySession {
     }
 
     /// `gg` chord: two `g` bytes inside the 400ms window.
+    ///
+    /// A CSI-u Release sits between the taps so a typeless echo does not
+    /// swallow the second `g`.
     pub fn gg(&mut self) {
         self.key('g');
+        self.csi_u(u32::from(b'g'), 1, 3);
         self.key('g');
     }
 

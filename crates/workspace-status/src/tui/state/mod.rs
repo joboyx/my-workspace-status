@@ -51,7 +51,7 @@ use super::drill::{
 use super::fetch::background_fetch_targets;
 use super::gates::ListFocusTarget;
 use super::graph_focus::GraphFocusPickerState;
-use super::keys::{InputMode, DOUBLE_TAP_MS};
+use super::keys::{GChordEchoState, InputMode, DOUBLE_TAP_MS};
 use super::ops::{
     collect_write_files, format_running_op, op_is_kind_noop, op_targets, push_targets,
     refresh_target, should_delete_untracked, Op, RunningOp, ScopedFile,
@@ -382,6 +382,8 @@ pub struct AppState {
     pub mouse_enabled: bool,
     pub(crate) z_pending_at: Option<Instant>,
     pub(crate) g_pending_at: Option<Instant>,
+    /// Typeless CSI-u release-as-press for `g`-chord keys.
+    pub(crate) g_chord_echo: GChordEchoState,
     pub(crate) ctrl_c_armed_until: Option<Instant>,
     last_click: Option<(u16, u16, Instant)>,
 }
@@ -493,6 +495,7 @@ impl AppState {
             mouse_enabled: true,
             z_pending_at: None,
             g_pending_at: None,
+            g_chord_echo: GChordEchoState::default(),
             ctrl_c_armed_until: None,
             last_click: None,
         };

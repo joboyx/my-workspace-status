@@ -30,7 +30,7 @@ use super::event_pump::{
     BusyAction,
 };
 use super::fetch::fetch_interval_ms;
-use super::keys::held_nav_key;
+use super::keys::{drop_protocol_dup_g_chord_press, held_nav_key};
 use super::render::draw;
 use super::state::AppState;
 use super::tty::{poll_event, read_event};
@@ -324,13 +324,12 @@ async fn sleep_ms(ms: u64) {
 
 fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event) {
     // CSI-u with REPORT_EVENT_TYPES sends a Release after every Press.
-    // Map that to no action, and do not dispatch: `dispatch` clears the
-    // `gg` pending on every action except `ArmGChord`, so a Release
-    // `Action::None` would disarm the chord before the second `g`.
-    if let crossterm::event::Event::Key(key) = &event {
-        if key.kind == crossterm::event::KeyEventKind::Release {
-            return;
-        }
+    // Do not dispatch it: `dispatch` would clear `GPending`. CSI-u
+    // without event types sends that release as another Press. Drop the
+    // echo so `gt` / `gT` stay tab actions (not `gg` then bare t/T).
+    let input_mode = ctx.state.input_mode();
+    if drop_protocol_dup_g_chord_press(&mut ctx.state.g_chord_echo, input_mode, &event) {
+        return;
     }
     let action = map_event(ctx.state, &event);
     if ctx.interp.busy_for_writes() {
