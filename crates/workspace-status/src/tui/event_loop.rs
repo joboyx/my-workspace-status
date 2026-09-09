@@ -329,9 +329,11 @@ async fn sleep_ms(ms: u64) {
 fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: KeyStrokeOrigin) {
     // CSI-u with REPORT_EVENT_TYPES sends a Release after every Press.
     // Do not dispatch it: `dispatch` would clear `GPending`. CSI-u
-    // without event types sends that release as another Press. Drop the
-    // protocol echo so `gt` / `gT` stay tab actions. A raw-byte second
-    // `g` is a new tap (`gg`). Pending expiry clears a stale arming `g`.
+    // without event types sends that release as another Press. Drop a
+    // protocol same-key Press only inside the echo window so `gt` / `gT`
+    // stay tab actions and a later typeless `g` still completes `gg`.
+    // A raw-byte second `g` is a new tap. Pending expiry clears a stale
+    // arming `g`.
     ctx.state.expire_stale_g_chord();
     let input_mode = ctx.state.input_mode();
     if drop_g_chord_echo(&mut ctx.state.g_chord_echo, input_mode, &event, origin) {

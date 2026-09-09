@@ -11,11 +11,19 @@ use super::action::{Action, PaletteOpenedBy};
 /// Window for `zz` / `gg` after the first key.
 pub const DOUBLE_TAP_MS: u64 = 400;
 
+/// Drop a protocol same-key Press only inside this window.
+///
+/// VTE key-up as typeless CSI-u arrives in a few milliseconds. A human
+/// second `g` for `gg` is later. A same-key Press after this window is a
+/// new tap, not an echo. Raw bytes never use this window.
+pub const G_CHORD_PROTOCOL_ECHO_MS: u64 = 80;
+
 /// Where a key event's bytes came from.
 ///
 /// [`KeyStrokeOrigin::Protocol`] is CSI-u (typed or typeless) and every
-/// constructed / headless event. A same-key Press is the release of that
-/// tap. [`KeyStrokeOrigin::LegacyByte`] is a traditional single-byte key.
+/// constructed / headless event. A same-key Press inside
+/// [`G_CHORD_PROTOCOL_ECHO_MS`] is the release of that tap.
+/// [`KeyStrokeOrigin::LegacyByte`] is a traditional single-byte key.
 /// A same-key Press is a new tap (`gg`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum KeyStrokeOrigin {
@@ -29,12 +37,13 @@ pub enum KeyStrokeOrigin {
 /// Last `g`-chord Press and whether a matching protocol release is due.
 ///
 /// VTE often sends all-keys CSI-u without event types, so press and
-/// release are both [`KeyEventKind::Press`]. That second Press is the
-/// release of that tap, not a second tap. A raw-byte Press is never an
-/// echo.
+/// release are both [`KeyEventKind::Press`]. A same-key Press inside
+/// [`G_CHORD_PROTOCOL_ECHO_MS`] is that release. A later same-key Press
+/// is a new tap (`gg`). A raw-byte Press is never an echo.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GChordEchoState {
     last: Option<(KeyCode, KeyModifiers)>,
+    last_at: Option<Instant>,
     awaiting_release: bool,
 }
 
@@ -56,10 +65,11 @@ pub enum InputMode {
     ///
     /// Key release is ignored and must not clear this pending. CSI-u with
     /// event types sends a Release after every Press. CSI-u without event
-    /// types sends a second Press. That protocol echo is dropped (it is
-    /// the release of the same tap). A raw-byte second `g` completes `gg`.
-    /// A real Release also clears the echo. When the pending expires, the
-    /// echo for that arming `g` is cleared.
+    /// types sends a second Press. A protocol same-key Press inside
+    /// [`G_CHORD_PROTOCOL_ECHO_MS`] is that release and is dropped. A
+    /// later protocol `g` completes `gg` (one CSI-u per tap). A raw-byte
+    /// second `g` also completes `gg`. A real Release clears the echo.
+    /// When the pending expires, the echo for that arming `g` is cleared.
     GPending {
         search_active: bool,
     },
@@ -114,11 +124,13 @@ pub fn drop_protocol_dup_g_chord_press(
 /// Drop a protocol echo of a `g`-chord key. Record the Press when it
 /// arms or consumes [`InputMode::GPending`].
 ///
-/// A [`KeyStrokeOrigin::Protocol`] same-key Press is the release of that
-/// tap and is dropped. A [`KeyStrokeOrigin::LegacyByte`] same-key Press
-/// is a new tap and is not dropped. A real [`KeyEventKind::Release`]
-/// clears the echo so the next protocol Press is a new tap. Search,
-/// palette, and other overlays do not record a typed `g`.
+/// A [`KeyStrokeOrigin::Protocol`] same-key Press inside
+/// [`G_CHORD_PROTOCOL_ECHO_MS`] is the release of that tap and is
+/// dropped. A later protocol same-key Press is a new tap. A
+/// [`KeyStrokeOrigin::LegacyByte`] same-key Press is a new tap. A real
+/// [`KeyEventKind::Release`] clears the echo so the next protocol Press
+/// is a new tap. Search, palette, and other overlays do not record a
+/// typed `g`.
 ///
 /// Returns true when the caller must not dispatch (echo or Release).
 pub fn drop_g_chord_echo(
@@ -126,6 +138,16 @@ pub fn drop_g_chord_echo(
     mode: InputMode,
     event: &Event,
     origin: KeyStrokeOrigin,
+) -> bool {
+    drop_g_chord_echo_at(state, mode, event, origin, Instant::now())
+}
+
+fn drop_g_chord_echo_at(
+    state: &mut GChordEchoState,
+    mode: InputMode,
+    event: &Event,
+    origin: KeyStrokeOrigin,
+    now: Instant,
 ) -> bool {
     let Event::Key(key) = event else {
         return false;
@@ -142,16 +164,23 @@ pub fn drop_g_chord_echo(
     if origin == KeyStrokeOrigin::LegacyByte {
         if records_g_chord_press(mode, key) {
             state.last = Some((key.code, key.modifiers));
+            state.last_at = Some(now);
             state.awaiting_release = false;
         }
         return false;
     }
     if state.awaiting_release && same_g_chord_key(state.last, key) {
-        state.awaiting_release = false;
-        return true;
+        let is_echo = state.last_at.is_some_and(|at| {
+            now.saturating_duration_since(at) <= Duration::from_millis(G_CHORD_PROTOCOL_ECHO_MS)
+        });
+        if is_echo {
+            state.awaiting_release = false;
+            return true;
+        }
     }
     if records_g_chord_press(mode, key) {
         state.last = Some((key.code, key.modifiers));
+        state.last_at = Some(now);
         state.awaiting_release = true;
     }
     false
@@ -172,6 +201,7 @@ pub fn expire_stale_g_chord_echo(echo: &mut GChordEchoState, g_pending_at: &mut 
     *g_pending_at = None;
     if matches!(echo.last, Some((KeyCode::Char('g'), _))) {
         echo.last = None;
+        echo.last_at = None;
         echo.awaiting_release = false;
     }
 }
@@ -1906,6 +1936,25 @@ mod tests {
         assert!(
             !drop_g_chord_echo(&mut echo, pending_g(), &g, KeyStrokeOrigin::LegacyByte),
             "two raw g bytes complete gg"
+        );
+    }
+
+    #[test]
+    fn typeless_second_g_after_echo_window_is_a_new_tap() {
+        let mut echo = GChordEchoState::default();
+        let g = key(KeyCode::Char('g'));
+        let t0 = Instant::now();
+        assert!(!drop_g_chord_echo_at(
+            &mut echo,
+            normal(),
+            &g,
+            KeyStrokeOrigin::Protocol,
+            t0
+        ));
+        let later = t0 + Duration::from_millis(G_CHORD_PROTOCOL_ECHO_MS + 1);
+        assert!(
+            !drop_g_chord_echo_at(&mut echo, pending_g(), &g, KeyStrokeOrigin::Protocol, later),
+            "one typeless CSI-u per tap must complete gg after the echo window"
         );
     }
 
