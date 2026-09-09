@@ -7,18 +7,20 @@ use crate::seed::{compare_ahead_workspace, daily_workspace};
 use crate::support::{
     crumb_row, graph_cursor_on, merger_graph_drilled_right, merger_graph_left_unfocused,
     panes_files_focused, panes_files_focused_diff_unfocused, panes_files_unfocused_diff_focused,
-    status_row, title_has_diff, title_has_files, title_has_graph, GIT_WAIT, WAIT,
+    status_row, title_has_diff, title_has_files, title_has_graph, tree_has, tree_line_containing,
+    GIT_WAIT, WAIT,
 };
 
-/// Live poll used by both humans. Tens of ms so a watch apply can land
-/// between `g` and the completing key inside the 400ms chord.
-const WATCH_MS: &str = "50";
+/// Live poll. `watch_interval_ms` clamps any positive value to 500ms.
+const WATCH_MS: &str = "500";
 
-/// Sleep after the dirty write and before the completing chord key.
-///
-/// Must stay well under 400ms. `GIT_WAIT` / `WAIT` here expires the chord
-/// and paints `ToggleTreeMode` for a correct `gt`.
-const CHORD_WATCH_WAIT_MS: u64 = 80;
+/// After a Workspace-tree watch apply paint. The timer fired ~collect-ms
+/// earlier; the next 500ms tick is then in about (250, 480)ms.
+const AFTER_APPLY_MS: u64 = 90;
+
+/// Wait after arming `g` for that next tick. Must stay under 400ms
+/// (`DOUBLE_TAP_MS`). `WAIT` / `GIT_WAIT` here expires the chord.
+const CHORD_TICK_WAIT_MS: u64 = 390;
 
 /// After a compare-tab dirty write there is no `g` chord, so a longer
 /// poll+apply wait is safe. Compare paint is committed-only.
@@ -84,29 +86,71 @@ fn tree_or_theme_fired(screen: &str) -> bool {
         || screen.contains("theme: ")
 }
 
+/// `r` reload toast. Watch apply must not paint this.
+fn refresh_now_toast(screen: &str) -> bool {
+    screen.contains("refreshed app") || screen.contains("refreshed workspace")
+}
+
+/// New dirty path on the tree with the untracked `A` badge, not chrome-only.
+fn tree_shows_watch_dirty_path(screen: &str, name: &str) -> bool {
+    tree_has(screen, name)
+        && tree_line_containing(screen, name).is_some_and(|line| line.contains("A "))
+}
+
 fn unique_dirty_name(tag: &str) -> String {
-    format!(
-        "compare-watch-{tag}-{}.txt",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    )
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    // Short enough to keep the name and `A` badge on the tree row.
+    format!("{tag}{}.txt", n % 1_000_000)
 }
 
 fn write_app_dirty(workspace: &Path, name: &str) {
     fs::write(workspace.join("app").join(name), format!("{name}\n")).unwrap();
 }
 
-/// Arm `g`, write a unique dirty path on `app/`, wait inside the chord,
-/// then send the completing key. Compare tabs hide dirty files, so the
-/// new name is not an oracle.
-fn g_then_live_watch_then(tui: &mut PtySession, workspace: &Path, letter: char, tag: &str) {
+/// Sync to a live watch apply on the Workspace tree (visible oracle).
+///
+/// The paint is the apply. The timer fire was ~collect-ms earlier. Next
+/// timer is ~500ms after that fire. `GPending` is not armed here.
+fn phase_lock_watch(tui: &mut PtySession, workspace: &Path, tag: &str) {
+    tui.wait_pred(
+        |screen| on_workspace(screen) && !tree_or_theme_fired(screen),
+        "phase-lock starts on the Workspace tree (not a compare tab)",
+        WAIT,
+    );
+    let marker = unique_dirty_name(tag);
+    write_app_dirty(workspace, &marker);
+    tui.wait_pred(
+        |screen| {
+            on_workspace(screen)
+                && tree_shows_watch_dirty_path(screen, &marker)
+                && !refresh_now_toast(screen)
+        },
+        "watch paints the new dirty path on the workspace tree (no r toast)",
+        GIT_WAIT,
+    );
+}
+
+/// Arm `g`, write a unique dirty path so the imminent poll is a real
+/// apply, wait inside the 400ms chord, then send the completing key.
+///
+/// No `wait_pred`. Compare tabs hide dirty files, so the new name is
+/// not an oracle here.
+fn g_then_watch_tick_then(tui: &mut PtySession, workspace: &Path, letter: char, tag: &str) {
     let marker = unique_dirty_name(tag);
     csi_u_letter(tui, 'g');
     write_app_dirty(workspace, &marker);
-    tui.wait_ms(CHORD_WATCH_WAIT_MS);
+    tui.wait_ms(CHORD_TICK_WAIT_MS);
     csi_u_letter(tui, letter);
+}
+
+/// After a phase-lock paint: wait so the next 500ms tick falls inside
+/// the 400ms `g` window, then run the claimed chord.
+fn claimed_g_after_phase_lock(tui: &mut PtySession, workspace: &Path, letter: char, tag: &str) {
+    tui.wait_ms(AFTER_APPLY_MS);
+    g_then_watch_tick_then(tui, workspace, letter, tag);
 }
 
 fn palette_open(screen: &str) -> bool {
@@ -181,9 +225,11 @@ fn parked_files_drill_returned(screen: &str) -> bool {
 /// `gt` / `g1` / `g2` stay tab actions when a live watch apply lands
 /// between the chord halves.
 ///
-/// Watch ticks do not clear the armed `g`. A `GIT_WAIT` between `g` and
-/// `t` expires the 400ms window and paints ToggleTreeMode. A no-op that
-/// stays on vs main after `gt` must fail.
+/// Phase-lock on a Workspace-tree dirty path (the apply). Then sleep so
+/// the next 500ms poll falls inside the 400ms `g` window. Watch ticks
+/// do not clear the armed `g`. A `GIT_WAIT` between `g` and `t` expires
+/// the chord and paints ToggleTreeMode. A no-op that stays on vs main
+/// after `gt` must fail.
 #[test]
 fn pty_compare_gt_survives_watch() {
     let (_root, workspace) = compare_ahead_workspace();
@@ -196,21 +242,35 @@ fn pty_compare_gt_survives_watch() {
         GIT_WAIT,
     );
 
-    g_then_live_watch_then(&mut tui, &workspace, 't', "gt");
+    csi_u_letter(&mut tui, 'g');
+    csi_u_letter(&mut tui, 't');
+    tui.wait_pred(
+        |screen| on_workspace(screen) && !tree_or_theme_fired(screen),
+        "setup: gt wraps to Workspace so the watch apply can paint the tree",
+        WAIT,
+    );
+
+    phase_lock_watch(&mut tui, &workspace, "lgt");
+    tui.wait_ms(AFTER_APPLY_MS);
+    csi_u_letter(&mut tui, 'g');
+    csi_u_letter(&mut tui, '3');
+    g_then_watch_tick_then(&mut tui, &workspace, 't', "gt");
     tui.wait_pred(
         |screen| on_workspace(screen) && !tree_or_theme_fired(screen),
         "gt after a live watch apply is NextTab (wrap to Workspace), not ToggleTreeMode",
         WAIT,
     );
 
-    g_then_live_watch_then(&mut tui, &workspace, '1', "g1");
+    phase_lock_watch(&mut tui, &workspace, "lg1");
+    claimed_g_after_phase_lock(&mut tui, &workspace, '1', "g1");
     tui.wait_pred(
         |screen| on_workspace(screen) && !tree_or_theme_fired(screen),
         "g1 after a live watch apply stays on Workspace",
         WAIT,
     );
 
-    g_then_live_watch_then(&mut tui, &workspace, '2', "g2");
+    phase_lock_watch(&mut tui, &workspace, "lg2");
+    claimed_g_after_phase_lock(&mut tui, &workspace, '2', "g2");
     tui.wait_pred(
         |screen| on_compare_origin_main(screen) && !tree_or_theme_fired(screen),
         "g2 after a live watch apply activates vs origin/main",
@@ -271,7 +331,7 @@ fn pty_compare_from_commit_files_drill_survives_watch() {
         GIT_WAIT,
     );
 
-    let marker = unique_dirty_name("files-drill");
+    let marker = unique_dirty_name("fd");
     write_app_dirty(&workspace, &marker);
     tui.wait_ms(COMPARE_WATCH_APPLY_MS);
     tui.wait_pred(
