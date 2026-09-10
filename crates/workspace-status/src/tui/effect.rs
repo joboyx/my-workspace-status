@@ -191,6 +191,12 @@ struct InflightRemote {
     checkout: String,
 }
 
+enum OccupyReason {
+    Remote(InflightRemote),
+    Exclusive,
+    DefaultBranch,
+}
+
 struct KindWave {
     ok: usize,
     failed: usize,
@@ -223,7 +229,7 @@ impl KindWave {
 
 struct RemoteQueue {
     pending: VecDeque<RemoteJob>,
-    occupy: HashMap<String, InflightRemote>,
+    occupy: HashMap<String, OccupyReason>,
     fetch: KindWave,
     pull: KindWave,
     push: KindWave,
@@ -260,6 +266,7 @@ impl RemoteQueue {
 }
 
 struct WriteJob {
+    gitdirs: Vec<String>,
     work: Box<dyn FnOnce() -> Result<String, String> + Send>,
 }
 
@@ -312,8 +319,8 @@ pub(crate) struct Interpreter {
     prepare_stash: Option<(u64, String)>,
     prepare_branches: Option<(u64, String, bool)>,
     prepare_compare: Option<(u64, String)>,
-    checkout: Option<(String, String, Option<String>)>,
-    merge: Option<(String, String, String)>,
+    checkout: Option<(String, String, Option<String>, String)>,
+    merge: Option<(String, String, String, String)>,
     commit_files: Option<(u64, String, CommitFileSource)>,
     commit_diff: Option<(u64, String, CommitFileSource, String)>,
     compare_range: VecDeque<CompareRangeJob>,
@@ -328,6 +335,7 @@ pub(crate) struct Interpreter {
     pending_diff: Option<(String, String, ExternalDiffKind)>,
     diff_prepare: Option<DiffPrepareJob>,
     pending_diff_launch: Option<DiffLaunch>,
+    exclusive_inflight: HashMap<u64, Vec<String>>,
     dirty: bool,
 }
 
@@ -360,6 +368,7 @@ impl Interpreter {
             pending_diff: None,
             diff_prepare: None,
             pending_diff_launch: None,
+            exclusive_inflight: HashMap::new(),
             dirty: false,
         }
     }
@@ -397,6 +406,11 @@ impl Interpreter {
     #[cfg(test)]
     fn write_jobs_queued(&self) -> usize {
         self.writes.len() + usize::from(self.checkout.is_some()) + usize::from(self.merge.is_some())
+    }
+
+    #[cfg(test)]
+    fn default_branch_queued(&self) -> bool {
+        !self.default_queue.is_empty() || self.sched.queued_user_tag(UserTag::DefaultBranch) > 0
     }
 
     /// True when schedule or apply changed state that needs a paint.
@@ -505,36 +519,45 @@ impl Interpreter {
                 self.default_repos = repos.clone();
                 state.status = format_running_op(RunningOp::DefaultBranch, 0, repos.len());
                 self.mark();
+                self.occupy_default_branch(state, &repos);
                 self.default_queue = repos.into();
                 if !self.default_queue.is_empty() {
                     self.sched.enqueue_user(UserTag::DefaultBranch);
                 }
             }
-            Effect::Stage { repo, paths } => self.enqueue_write({
+            Effect::Stage { repo, paths } => {
                 let dir = opts.cwd.join(&repo);
                 let last = paths.last().cloned().unwrap_or_default();
-                Box::new(move || {
-                    for path in &paths {
-                        stage_file(&dir, path)?;
-                    }
-                    Ok(format!("staged {last}"))
-                })
-            }),
-            Effect::Unstage { repo, paths } => self.enqueue_write({
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        for path in &paths {
+                            stage_file(&dir, path)?;
+                        }
+                        Ok(format!("staged {last}"))
+                    }),
+                );
+            }
+            Effect::Unstage { repo, paths } => {
                 let dir = opts.cwd.join(&repo);
                 let last = paths.last().cloned().unwrap_or_default();
-                Box::new(move || {
-                    for path in &paths {
-                        unstage_file(&dir, path)?;
-                    }
-                    Ok(format!("unstaged {last}"))
-                })
-            }),
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        for path in &paths {
+                            unstage_file(&dir, path)?;
+                        }
+                        Ok(format!("unstaged {last}"))
+                    }),
+                );
+            }
             Effect::Revert {
                 repo,
                 tracked,
                 untracked,
-            } => self.enqueue_write({
+            } => {
                 let dir = opts.cwd.join(&repo);
                 let ok_status = if tracked.len() + untracked.len() == 1 {
                     if untracked.len() == 1 {
@@ -549,16 +572,20 @@ impl Interpreter {
                         untracked.len()
                     )
                 };
-                Box::new(move || {
-                    for path in &tracked {
-                        revert_tracked_file(&dir, path)?;
-                    }
-                    for path in &untracked {
-                        remove_untracked_file(&dir, path)?;
-                    }
-                    Ok(ok_status)
-                })
-            }),
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        for path in &tracked {
+                            revert_tracked_file(&dir, path)?;
+                        }
+                        for path in &untracked {
+                            remove_untracked_file(&dir, path)?;
+                        }
+                        Ok(ok_status)
+                    }),
+                );
+            }
             Effect::EditFile { repo, path } => {
                 self.pending_edit = Some((repo, path));
                 self.mark();
@@ -567,7 +594,7 @@ impl Interpreter {
                 self.pending_diff = Some((repo, path, kind));
                 self.mark();
             }
-            Effect::StashCreate { repo, paths } => self.enqueue_write({
+            Effect::StashCreate { repo, paths } => {
                 let dir = opts.cwd.join(&repo);
                 let ok_status = if paths.len() == 1 {
                     "Stashed 1 file".to_string()
@@ -576,23 +603,45 @@ impl Interpreter {
                 } else {
                     format!("Stashed {} files", paths.len())
                 };
-                Box::new(move || stash_push(&dir, &paths).map(|_| ok_status))
-            }),
-            Effect::StashApply { repo, stash_ref } => self.enqueue_write({
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || stash_push(&dir, &paths).map(|_| ok_status)),
+                );
+            }
+            Effect::StashApply { repo, stash_ref } => {
                 let dir = opts.cwd.join(&repo);
                 let label = stash_ref.clone();
-                Box::new(move || stash_apply(&dir, &stash_ref).map(|_| format!("applied {label}")))
-            }),
-            Effect::StashPop { repo, stash_ref } => self.enqueue_write({
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        stash_apply(&dir, &stash_ref).map(|_| format!("applied {label}"))
+                    }),
+                );
+            }
+            Effect::StashPop { repo, stash_ref } => {
                 let dir = opts.cwd.join(&repo);
                 let label = stash_ref.clone();
-                Box::new(move || stash_pop(&dir, &stash_ref).map(|_| format!("popped {label}")))
-            }),
-            Effect::StashDrop { repo, stash_ref } => self.enqueue_write({
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        stash_pop(&dir, &stash_ref).map(|_| format!("popped {label}"))
+                    }),
+                );
+            }
+            Effect::StashDrop { repo, stash_ref } => {
                 let dir = opts.cwd.join(&repo);
                 let label = stash_ref.clone();
-                Box::new(move || stash_drop(&dir, &stash_ref).map(|_| format!("dropped {label}")))
-            }),
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        stash_drop(&dir, &stash_ref).map(|_| format!("dropped {label}"))
+                    }),
+                );
+            }
             Effect::PrepareStashMenu { repo } => {
                 let gen = self.sched.request_prepare_stash();
                 self.prepare_stash = Some((gen, repo));
@@ -613,46 +662,62 @@ impl Interpreter {
                 selected_name,
                 fast_forward_ref,
             } => {
-                self.checkout = Some((repo, selected_name, fast_forward_ref));
+                let gitdir = gitdir_key(state, &repo);
+                self.occupy_exclusive(std::slice::from_ref(&gitdir));
+                self.checkout = Some((repo, selected_name, fast_forward_ref, gitdir));
                 self.sched.enqueue_user(UserTag::Write);
             }
-            Effect::CreateBranch { repo, name } => self.enqueue_write({
+            Effect::CreateBranch { repo, name } => {
                 let dir = opts.cwd.join(&repo);
                 let label = name.clone();
-                Box::new(move || {
-                    create_branch_checkout(&dir, &name).map(|_| format!("created {label}"))
-                })
-            }),
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        create_branch_checkout(&dir, &name).map(|_| format!("created {label}"))
+                    }),
+                );
+            }
             Effect::CreateBranchAt {
                 repo,
                 name,
                 commit_id,
-            } => self.enqueue_write({
+            } => {
                 let dir = opts.cwd.join(&repo);
                 let label = name.clone();
                 let short = commit_id.get(..7).unwrap_or(&commit_id).to_string();
-                Box::new(move || {
-                    create_branch_at(&dir, &name, &commit_id)
-                        .map(|_| format!("created {label} at {short}"))
-                })
-            }),
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        create_branch_at(&dir, &name, &commit_id)
+                            .map(|_| format!("created {label} at {short}"))
+                    }),
+                );
+            }
             Effect::MergeIntoHead { repo, rev, label } => {
-                self.merge = Some((repo, rev, label));
+                let gitdir = gitdir_key(state, &repo);
+                self.occupy_exclusive(std::slice::from_ref(&gitdir));
+                self.merge = Some((repo, rev, label, gitdir));
                 self.sched.enqueue_user(UserTag::Write);
             }
             Effect::RemoveWorktree {
                 primary,
                 path,
                 force,
-            } => self.enqueue_write({
+            } => {
                 let primary_dir = opts.cwd.join(&primary);
                 let path_dir = opts.cwd.join(&path);
                 let label = path.clone();
-                Box::new(move || {
-                    remove_worktree(&primary_dir, &path_dir, force)
-                        .map(|_| format!("removed worktree {label}"))
-                })
-            }),
+                self.enqueue_write(
+                    state,
+                    &[&primary, &path],
+                    Box::new(move || {
+                        remove_worktree(&primary_dir, &path_dir, force)
+                            .map(|_| format!("removed worktree {label}"))
+                    }),
+                );
+            }
             Effect::LoadCommitFiles { repo, source } => {
                 if !state.is_compare_tab() {
                     state.begin_commit_files(repo.clone(), source.clone());
@@ -952,6 +1017,7 @@ impl Interpreter {
             }
             JobOutcome::Write { status } => {
                 self.sched.note_user_done(UserTag::Write);
+                self.release_exclusive(state, id);
                 state.status = status;
                 self.sched.on_reload_snapshot(state.focused_checkout_path());
                 if !state.is_compare_tab() {
@@ -965,7 +1031,10 @@ impl Interpreter {
                     .remote
                     .occupy
                     .iter()
-                    .find(|(_, inf)| inf.checkout == repo)
+                    .find(|(_, occ)| match occ {
+                        OccupyReason::Remote(inf) => inf.checkout == repo,
+                        _ => false,
+                    })
                     .map(|(key, _)| key.clone())
                     .unwrap_or_else(|| gitdir_key(state, &repo));
                 self.remote.occupy.remove(&gitdir);
@@ -980,18 +1049,8 @@ impl Interpreter {
                 self.mark();
                 if self.kind_live(kind) {
                     self.paint_remote_running(state);
-                } else if let Some(wave) = self.remote.wave_mut(kind) {
-                    let repos = std::mem::take(&mut wave.repos);
-                    let ok_n = wave.ok;
-                    let failed_n = wave.failed;
-                    *wave = KindWave::empty();
-                    state.stamp_checkout_flashes(&repos);
-                    state.status = format_completed_op(kind, ok_n, failed_n);
-                    self.sched.on_reload_snapshot(state.focused_checkout_path());
-                    if !state.is_compare_tab() {
-                        self.pane_req = Some(RightPaneRequest::from_state(state));
-                        self.sched.request_pane();
-                    }
+                } else {
+                    self.finish_kind_if_idle(state, kind);
                 }
                 self.pump_remote_slots(state);
             }
@@ -1015,6 +1074,7 @@ impl Interpreter {
                         self.default_failed,
                     );
                     self.default_repos.clear();
+                    self.release_default_branch(state);
                     self.sched.on_reload_snapshot(state.focused_checkout_path());
                     if !state.is_compare_tab() {
                         self.pane_req = Some(RightPaneRequest::from_state(state));
@@ -1062,6 +1122,7 @@ impl Interpreter {
             }
             JobOutcome::Checkout { repo, result } => {
                 self.sched.note_user_done(UserTag::Write);
+                self.release_exclusive(state, id);
                 if apply_checkout_compute(state, repo, result) {
                     self.sched.on_reload_snapshot(state.focused_checkout_path());
                 }
@@ -1073,6 +1134,7 @@ impl Interpreter {
             }
             JobOutcome::Merge { label, result } => {
                 self.sched.note_user_done(UserTag::Write);
+                self.release_exclusive(state, id);
                 if apply_merge_compute(state, &label, result) {
                     self.sched.on_reload_snapshot(state.focused_checkout_path());
                 }
@@ -1261,10 +1323,59 @@ impl Interpreter {
         self.dirty = true;
     }
 
-    fn enqueue_write(&mut self, work: Box<dyn FnOnce() -> Result<String, String> + Send>) {
+    fn enqueue_write(
+        &mut self,
+        state: &AppState,
+        checkouts: &[&str],
+        work: Box<dyn FnOnce() -> Result<String, String> + Send>,
+    ) {
+        let gitdirs: Vec<String> = checkouts
+            .iter()
+            .map(|checkout| gitdir_key(state, checkout))
+            .collect();
+        self.occupy_exclusive(&gitdirs);
         let _ = self.sched.bump_write_gen();
-        self.writes.push_back(WriteJob { work });
+        self.writes.push_back(WriteJob { gitdirs, work });
         self.sched.enqueue_user(UserTag::Write);
+    }
+
+    fn occupy_exclusive(&mut self, gitdirs: &[String]) {
+        for gitdir in gitdirs {
+            self.remote
+                .occupy
+                .entry(gitdir.clone())
+                .or_insert(OccupyReason::Exclusive);
+        }
+    }
+
+    fn occupy_default_branch(&mut self, state: &AppState, repos: &[String]) {
+        for repo in repos {
+            self.remote
+                .occupy
+                .entry(gitdir_key(state, repo))
+                .or_insert(OccupyReason::DefaultBranch);
+        }
+    }
+
+    fn release_exclusive(&mut self, state: &mut AppState, id: u64) {
+        if let Some(gitdirs) = self.exclusive_inflight.remove(&id) {
+            for gitdir in gitdirs {
+                if matches!(
+                    self.remote.occupy.get(&gitdir),
+                    Some(OccupyReason::Exclusive)
+                ) {
+                    self.remote.occupy.remove(&gitdir);
+                }
+            }
+        }
+        self.pump_remote_slots(state);
+    }
+
+    fn release_default_branch(&mut self, state: &mut AppState) {
+        self.remote
+            .occupy
+            .retain(|_, occ| !matches!(occ, OccupyReason::DefaultBranch));
+        self.pump_remote_slots(state);
     }
 
     fn refuse_busy(&mut self, state: &mut AppState) {
@@ -1309,20 +1420,28 @@ impl Interpreter {
         if repos.is_empty() {
             return;
         }
+        let mut flushed = false;
         for checkout in repos {
-            self.enqueue_remote_job(kind, checkout);
+            flushed |= self.enqueue_remote_job(state, kind, checkout);
         }
-        self.paint_remote_running(state);
+        if !flushed {
+            self.paint_remote_running(state);
+        }
         self.pump_remote_slots(state);
         self.mark();
     }
 
-    fn enqueue_remote_job(&mut self, kind: RunningOp, checkout: String) {
+    fn enqueue_remote_job(
+        &mut self,
+        state: &mut AppState,
+        kind: RunningOp,
+        checkout: String,
+    ) -> bool {
         if matches!(kind, RunningOp::DefaultBranch) {
-            return;
+            return false;
         }
         if self.drop_new_remote(&checkout, kind) {
-            return;
+            return false;
         }
 
         let mut fetch_idx = None;
@@ -1347,14 +1466,15 @@ impl Interpreter {
         match kind {
             RunningOp::Fetch => {
                 if saw_fetch || saw_pull {
-                    return;
+                    return false;
                 }
                 self.note_wave_repo(kind, &checkout);
                 self.remote.pending.push_back(RemoteJob { kind, checkout });
+                false
             }
             RunningOp::Pull => {
                 if saw_pull {
-                    return;
+                    return false;
                 }
                 if let Some(i) = fetch_idx {
                     let prev = self.remote.pending[i].checkout.clone();
@@ -1362,26 +1482,32 @@ impl Interpreter {
                     self.remote.pending[i].kind = RunningOp::Pull;
                     self.remote.pending[i].checkout = checkout.clone();
                     self.note_wave_repo(RunningOp::Pull, &checkout);
-                    return;
+                    return self.finish_kind_if_idle(state, RunningOp::Fetch);
                 }
                 self.note_wave_repo(kind, &checkout);
                 self.remote.pending.push_back(RemoteJob { kind, checkout });
+                false
             }
             RunningOp::Push => {
                 if saw_push {
-                    return;
+                    return false;
                 }
                 self.note_wave_repo(kind, &checkout);
                 self.remote.pending.push_back(RemoteJob { kind, checkout });
+                false
             }
-            RunningOp::DefaultBranch => {}
+            RunningOp::DefaultBranch => false,
         }
     }
 
     fn drop_new_remote(&self, checkout: &str, kind: RunningOp) -> bool {
-        self.remote.occupy.values().any(|inf| {
-            inf.checkout == checkout
-                && (inf.kind == kind || (kind == RunningOp::Fetch && inf.kind == RunningOp::Pull))
+        self.remote.occupy.values().any(|occ| match occ {
+            OccupyReason::Remote(inf) => {
+                inf.checkout == checkout
+                    && (inf.kind == kind
+                        || (kind == RunningOp::Fetch && inf.kind == RunningOp::Pull))
+            }
+            _ => false,
         })
     }
 
@@ -1399,7 +1525,35 @@ impl Interpreter {
 
     fn kind_live(&self, kind: RunningOp) -> bool {
         self.remote.pending.iter().any(|job| job.kind == kind)
-            || self.remote.occupy.values().any(|inf| inf.kind == kind)
+            || self.remote.occupy.values().any(|occ| match occ {
+                OccupyReason::Remote(inf) => inf.kind == kind,
+                _ => false,
+            })
+    }
+
+    fn finish_kind_if_idle(&mut self, state: &mut AppState, kind: RunningOp) -> bool {
+        if self.kind_live(kind) {
+            return false;
+        }
+        let Some(wave) = self.remote.wave_mut(kind) else {
+            return false;
+        };
+        if wave.done() == 0 && wave.repos.is_empty() {
+            return false;
+        }
+        let repos = std::mem::take(&mut wave.repos);
+        let ok_n = wave.ok;
+        let failed_n = wave.failed;
+        *wave = KindWave::empty();
+        state.stamp_checkout_flashes(&repos);
+        state.status = format_completed_op(kind, ok_n, failed_n);
+        self.sched.on_reload_snapshot(state.focused_checkout_path());
+        if !state.is_compare_tab() {
+            self.pane_req = Some(RightPaneRequest::from_state(state));
+            self.sched.request_pane();
+        }
+        self.mark();
+        true
     }
 
     fn eligible_remote_count(&self, state: &AppState) -> usize {
@@ -1431,7 +1585,7 @@ impl Interpreter {
                 .remote
                 .occupy
                 .values()
-                .filter(|job| job.kind == kind)
+                .filter(|occ| matches!(occ, OccupyReason::Remote(job) if job.kind == kind))
                 .count();
             let pending = self
                 .remote
@@ -1501,7 +1655,8 @@ impl Interpreter {
     ) {
         match tag {
             UserTag::Write => {
-                if let Some((repo, name, ff)) = self.checkout.take() {
+                if let Some((repo, name, ff, gitdir)) = self.checkout.take() {
+                    self.exclusive_inflight.insert(id, vec![gitdir]);
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
@@ -1512,7 +1667,8 @@ impl Interpreter {
                     );
                     return;
                 }
-                if let Some((repo, rev, label)) = self.merge.take() {
+                if let Some((repo, rev, label, gitdir)) = self.merge.take() {
+                    self.exclusive_inflight.insert(id, vec![gitdir]);
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
@@ -1524,6 +1680,7 @@ impl Interpreter {
                     return;
                 }
                 if let Some(job) = self.writes.pop_front() {
+                    self.exclusive_inflight.insert(id, job.gitdirs);
                     spawn(
                         id,
                         Box::new(move || {
@@ -1553,14 +1710,16 @@ impl Interpreter {
                 let gitdir = gitdir_key(state, &job.checkout);
                 self.remote.occupy.insert(
                     gitdir,
-                    InflightRemote {
+                    OccupyReason::Remote(InflightRemote {
                         kind: job.kind,
                         checkout: job.checkout.clone(),
-                    },
+                    }),
                 );
                 let kind = job.kind;
                 let repo = job.checkout;
                 let dir = opts.cwd.join(&repo);
+                self.paint_remote_running(state);
+                self.mark();
                 spawn(
                     id,
                     Box::new(move || {
@@ -3858,5 +4017,132 @@ mod tests {
         );
         assert!(interp.pending_remotes().is_empty());
         assert_eq!(capture_jobs(&mut interp, &mut state).len(), 0);
+    }
+
+    #[test]
+    fn exclusive_write_blocks_same_gitdir_remote_and_allows_other() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Stage {
+                repo: "app".into(),
+                paths: vec!["README.md".into()],
+            },
+            &Action::Stage,
+        );
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into(), "notes".into()],
+            },
+            &Action::Fetch,
+        );
+        let spawned = capture_jobs(&mut interp, &mut state);
+        assert_eq!(spawned.len(), 2);
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Fetch, "app".into())]
+        );
+        assert_eq!(
+            interp.occupied_gitdirs(),
+            vec!["app".to_string(), "notes".to_string()]
+        );
+
+        apply_id(
+            &mut interp,
+            &mut state,
+            spawned[0].0,
+            JobOutcome::Write {
+                status: "staged README.md".into(),
+            },
+        );
+        let _after = capture_jobs(&mut interp, &mut state);
+        assert!(interp.pending_remotes().is_empty());
+        assert!(interp.occupied_gitdirs().contains(&"app".to_string()));
+        assert!(interp.occupied_gitdirs().contains(&"notes".to_string()));
+    }
+
+    #[test]
+    fn default_branch_refuses_occupied_gitdir() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::DefaultBranch {
+                repos: vec!["app".into(), "notes".into()],
+            },
+            &Action::DefaultBranch,
+        );
+        assert_eq!(state.status, "busy");
+        assert!(!interp.default_branch_queued());
+        assert!(!interp.busy_for_writes());
+
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::DefaultBranch {
+                repos: vec!["notes".into()],
+            },
+            &Action::DefaultBranch,
+        );
+        assert!(interp.default_branch_queued());
+        assert!(interp.busy_for_writes());
+    }
+
+    #[test]
+    fn pull_replacing_last_pending_fetch_completes_fetch_wave() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(1);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into(), "notes".into()],
+            },
+            &Action::Fetch,
+        );
+        let first = capture_jobs(&mut interp, &mut state);
+        assert_eq!(first.len(), 1);
+        apply_id(
+            &mut interp,
+            &mut state,
+            first[0].0,
+            JobOutcome::BulkRemote {
+                kind: RunningOp::Fetch,
+                ok: true,
+                repo: "app".into(),
+            },
+        );
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Fetch, "notes".into())]
+        );
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Pull {
+                repos: vec!["notes".into()],
+            },
+            &Action::Pull,
+        );
+        assert_eq!(state.status, "Fetched 1 repo");
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Pull, "notes".into())]
+        );
     }
 }
