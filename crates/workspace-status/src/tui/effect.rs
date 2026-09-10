@@ -48,7 +48,9 @@ use super::graph_load::{
 use super::ops::{
     format_completed_op, format_mixed_running_op, format_running_op, op_targets, Op, RunningOp,
 };
+use super::branches::is_valid_branch_name;
 use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
+use super::stash::{resolve_stash_menu_key, StashMenuKeyResult, StashOpId};
 use super::state::{AppState, PendingConfirm};
 
 /// Blocking work that produces one [`JobOutcome`].
@@ -327,7 +329,38 @@ fn overlay_write_checkouts(state: &AppState, action: &Action) -> Vec<String> {
             .as_ref()
             .map(|create| vec![create.repo.clone()])
             .unwrap_or_default(),
+        Action::StashMenuEnter => stash_menu_write_checkouts(state, None, true),
+        Action::StashMenuChar(key) => stash_menu_write_checkouts(state, Some(*key), false),
+        Action::BranchSubmit => branch_submit_write_checkouts(state),
         _ => Vec::new(),
+    }
+}
+
+fn stash_menu_write_checkouts(state: &AppState, input: Option<char>, enter: bool) -> Vec<String> {
+    let Some(ops) = state.stash_menu.as_ref() else {
+        return Vec::new();
+    };
+    match resolve_stash_menu_key(input, enter, false, ops) {
+        StashMenuKeyResult::Run(op)
+            if matches!(op.id, StashOpId::Create | StashOpId::Apply | StashOpId::Pop) =>
+        {
+            state.stash_repo.clone().into_iter().collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn branch_submit_write_checkouts(state: &AppState) -> Vec<String> {
+    let Some(picker) = state.branch_picker.as_ref() else {
+        return Vec::new();
+    };
+    if picker.selected().is_some() {
+        return Vec::new();
+    }
+    if is_valid_branch_name(&picker.filter) {
+        vec![picker.repo.clone()]
+    } else {
+        Vec::new()
     }
 }
 
@@ -1419,8 +1452,8 @@ impl Interpreter {
             .contains_key(&gitdir_key(state, checkout))
     }
 
-    /// True when Confirm Yes / create-branch submit would close an overlay
-    /// and then hit occupy refuse. Keep the overlay and set status `busy`.
+    /// True when an overlay submit would close itself and then hit occupy
+    /// refuse. Keep the overlay and set status `busy`.
     pub(crate) fn keep_overlay_if_gitdir_busy(
         &self,
         state: &mut AppState,
@@ -4185,6 +4218,97 @@ mod tests {
         assert!(state.create_branch.is_some());
         assert_eq!(state.status, "busy");
         assert_eq!(interp.write_jobs_queued(), 0);
+    }
+
+    #[test]
+    fn stash_menu_write_on_occupied_gitdir_keeps_menu() {
+        use crate::tui::stash::{StashOp, StashOpId};
+
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+
+        let create = StashOp {
+            id: StashOpId::Create,
+            key: 's',
+            label: "stash",
+            stash_ref: None,
+            paths: Some(vec!["README.md".into()]),
+        };
+        state.stash_repo = Some("app".into());
+        state.stash_menu = Some(vec![create.clone()]);
+        state.status = "stash".into();
+
+        assert!(interp.keep_overlay_if_gitdir_busy(&mut state, &Action::StashMenuEnter));
+        assert!(state.stash_menu.is_some());
+        assert_eq!(state.status, "busy");
+        assert_eq!(interp.write_jobs_queued(), 0);
+
+        state.status = "stash".into();
+        assert!(interp.keep_overlay_if_gitdir_busy(&mut state, &Action::StashMenuChar('s')));
+        assert!(state.stash_menu.is_some());
+        assert_eq!(state.status, "busy");
+
+        let drop = StashOp {
+            id: StashOpId::Drop,
+            key: 'D',
+            label: "drop stash",
+            stash_ref: Some("stash@{0}".into()),
+            paths: None,
+        };
+        state.stash_menu = Some(vec![drop]);
+        state.status = "drop stash".into();
+        assert!(
+            !interp.keep_overlay_if_gitdir_busy(&mut state, &Action::StashMenuEnter),
+            "stash drop opens confirm and must dispatch"
+        );
+        assert!(state.stash_menu.is_some());
+        assert_eq!(state.status, "drop stash");
+    }
+
+    #[test]
+    fn branch_submit_create_on_occupied_gitdir_keeps_picker() {
+        use crate::tui::branches::BranchPickerState;
+
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+
+        let mut picker = BranchPickerState::new("app".into(), vec![local_branch("main")]);
+        picker.set_filter("topic".into());
+        state.branch_picker = Some(picker);
+        state.status = "branch /topic".into();
+
+        assert!(interp.keep_overlay_if_gitdir_busy(&mut state, &Action::BranchSubmit));
+        assert!(state.branch_picker.is_some());
+        assert_eq!(state.status, "busy");
+        assert_eq!(interp.write_jobs_queued(), 0);
+
+        let mut checkout = BranchPickerState::new("app".into(), vec![local_branch("feature")]);
+        checkout.cursor = 0;
+        state.branch_picker = Some(checkout);
+        state.status = "branch".into();
+        assert!(
+            !interp.keep_overlay_if_gitdir_busy(&mut state, &Action::BranchSubmit),
+            "checkout submit keeps the picker until compute applies"
+        );
+        assert_eq!(state.status, "branch");
     }
 
     #[test]

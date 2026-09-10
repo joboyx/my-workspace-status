@@ -175,7 +175,7 @@ Pending jobs coalesce on that checkout only. A second `f` / `p` / `P` enqueues. 
 
 `busy_for_writes` is true only for an exclusive write or default-branch switch (`scheduler.rs`). Remotes are not a workspace mutex. `Fetch` / `Pull` / `Push` / `FetchTick` are `BusyAction::Handle` (`event_pump.rs`). Exclusive writes (stage, unstage, revert, stash, checkout, create-branch, merge into HEAD, remove-worktree, confirm-yes) are Ignore only while exclusive write or default-branch is busy. Default-branch `d` uses the same Ignore rule. Exclusive writes stay serial.
 
-If that gitdir already has a remote, an exclusive write still dispatches. Then `schedule` refuses with breadcrumb `busy`. Confirm Yes and create-branch submit do not close the overlay in that case. Status is `busy`. A free gitdir may write while other repos fetch.
+If that gitdir already has a remote, an exclusive write still dispatches. Then `schedule` refuses with breadcrumb `busy`. Confirm Yes, stash create/apply/pop, and create-branch submit keep the overlay in that case. Branch-picker create from a new name keeps the picker. Status is `busy`. A free gitdir may write while other repos fetch.
 
 If `p` lands during an inflight fetch on that gitdir, dispatch may set `nothing behind to pull`. Unfetched tracking still looks in-sync. The queue then starts Pull after occupy release for those `op_targets` that have inflight or pending Fetch. Right-pane, compare, and drill `Effect::None` Pull do not follow.
 
