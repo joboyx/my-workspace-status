@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::harness::PtySession;
-use crate::seed::{compare_ahead_workspace, daily_workspace};
+use crate::seed::{compare_ahead_workspace, daily_workspace, git};
 use crate::support::{
     crumb_row, graph_cursor_on, merger_graph_drilled_right, merger_graph_left_unfocused,
     panes_files_focused, panes_files_focused_diff_unfocused, panes_files_unfocused_diff_focused,
@@ -14,19 +14,15 @@ use crate::support::{
 /// Live poll. `watch_interval_ms` clamps any positive value to 500ms.
 const WATCH_MS: &str = "500";
 
-/// After a Workspace-tree watch apply paint. The timer fired ~collect-ms
-/// earlier; the next 500ms tick is then in about (250, 480)ms. 160ms
-/// puts that fire inside the 400ms `g` window with slack.
+/// After a watch apply paint. The timer fired ~collect-ms earlier. The
+/// next 500ms tick then falls in about (250, 480)ms. 160ms puts that
+/// fire inside the 400ms `g` window.
 const AFTER_APPLY_MS: u64 = 160;
 
-/// Wait after arming `g` for that next tick. Must stay under 400ms
-/// (`DOUBLE_TAP_MS`) with host/PTY slack. `WAIT` / `GIT_WAIT` here
-/// expires the chord and can paint ToggleTreeMode for a correct `gt`.
-const CHORD_TICK_WAIT_MS: u64 = 330;
-
-/// After a compare-tab dirty write there is no `g` chord, so a longer
-/// poll+apply wait is safe. Compare paint is committed-only.
-const COMPARE_WATCH_APPLY_MS: u64 = 2500;
+/// Fail-closed wait after arming `g` for the next apply paint. Must stay
+/// under 400ms (`DOUBLE_TAP_MS`). `WAIT` / `GIT_WAIT` here expires the
+/// chord and can paint ToggleTreeMode for a correct `gt`.
+const CHORD_APPLY_WAIT: Duration = Duration::from_millis(360);
 
 /// Same gap as other compare palette humans. `keys("vs default")` can
 /// drop the `l` in `default`.
@@ -78,6 +74,10 @@ fn on_compare_local_main(screen: &str) -> bool {
         && !screen.contains("# workspace")
 }
 
+fn on_compare_tab(screen: &str) -> bool {
+    on_compare_origin_main(screen) || on_compare_local_main(screen)
+}
+
 /// ToggleTreeMode toast / pill, or CycleTheme toast.
 fn tree_or_theme_fired(screen: &str) -> bool {
     let crumb = crumb_row(screen);
@@ -108,11 +108,25 @@ fn unique_dirty_name(tag: &str) -> String {
     format!("{tag}{}.txt", n % 1_000_000)
 }
 
-fn write_app_dirty(workspace: &Path, name: &str) {
-    fs::write(workspace.join("app").join(name), format!("{name}\n")).unwrap();
+fn write_repo_file(repo: &Path, name: &str) {
+    fs::write(repo.join(name), format!("{name}\n")).unwrap();
 }
 
-/// Sync to a live watch apply on the Workspace tree (visible oracle).
+fn write_app_dirty(workspace: &Path, name: &str) {
+    write_repo_file(&workspace.join("app"), name);
+}
+
+fn commit_repo_file(repo: &Path, name: &str, message: &str) {
+    git(repo, &["add", name]);
+    git(repo, &["commit", "-q", "-m", message]);
+}
+
+/// Compare list shows `name` after a HEAD move. Dirty paths stay hidden.
+fn compare_shows_committed_path(screen: &str, name: &str) -> bool {
+    on_compare_tab(screen) && screen.contains(name) && !refresh_now_toast(screen)
+}
+
+/// Sync to a live watch apply on the Workspace tree (visible paint).
 ///
 /// The paint is the apply. The timer fire was ~collect-ms earlier. Next
 /// timer is ~500ms after that fire. `GPending` is not armed here.
@@ -135,38 +149,74 @@ fn phase_lock_watch(tui: &mut PtySession, workspace: &Path, tag: &str) {
     );
 }
 
-/// Arm `g`, write a unique dirty path so the imminent poll is a real
-/// apply, wait inside the 400ms chord, then send the completing key.
+/// Sync to a live watch apply on a compare tab (new committed path).
 ///
-/// No `wait_pred`. Compare tabs hide dirty files, so the new name is
-/// not an oracle here.
-fn g_then_watch_tick_then(tui: &mut PtySession, workspace: &Path, letter: char, tag: &str) {
+/// Compare paint is committed-only. A dirty path cannot prove apply.
+fn phase_lock_compare_head(tui: &mut PtySession, repo: &Path, tag: &str) {
+    tui.wait_pred(
+        |screen| on_compare_tab(screen) && !tree_or_theme_fired(screen),
+        "phase-lock starts on a compare tab",
+        WAIT,
+    );
+    let marker = unique_dirty_name(tag);
+    write_repo_file(repo, &marker);
+    commit_repo_file(repo, &marker, "watch phase-lock");
+    tui.wait_pred(
+        |screen| compare_shows_committed_path(screen, &marker),
+        "watch reloads the compare list after the new commit (no r toast)",
+        GIT_WAIT,
+    );
+}
+
+/// Arm `g`, write a unique dirty path, wait until the tree paints it,
+/// then send the completing key. Timeout fails the test. A sleep with
+/// no apply paint cannot pass.
+fn claimed_g_after_tree_apply(tui: &mut PtySession, workspace: &Path, letter: char, tag: &str) {
+    tui.wait_ms(AFTER_APPLY_MS);
+    tui.wait_pred(
+        |screen| on_workspace(screen) && !tree_or_theme_fired(screen),
+        "claimed chord starts on the Workspace tree",
+        WAIT,
+    );
     let marker = unique_dirty_name(tag);
     csi_u_letter(tui, 'g');
     write_app_dirty(workspace, &marker);
-    tui.wait_ms(CHORD_TICK_WAIT_MS);
+    tui.wait_pred(
+        |screen| {
+            on_workspace(screen)
+                && tree_shows_watch_dirty_path(screen, &marker)
+                && !refresh_now_toast(screen)
+        },
+        "watch paints the mid-chord dirty path before the completing key (no apply must not pass)",
+        CHORD_APPLY_WAIT,
+    );
     csi_u_letter(tui, letter);
 }
 
-/// After a phase-lock paint: wait so the next 500ms tick falls inside
-/// the 400ms `g` window, then run the claimed chord from Workspace.
-fn claimed_g_after_phase_lock(tui: &mut PtySession, workspace: &Path, letter: char, tag: &str) {
+/// Arm `g`, commit a unique path, wait until the compare list paints it,
+/// then send `1`. Timeout is red. A stay on the compare tab is a no-op.
+fn claimed_g1_after_compare_head_apply(tui: &mut PtySession, repo: &Path, tag: &str) {
     tui.wait_ms(AFTER_APPLY_MS);
-    g_then_watch_tick_then(tui, workspace, letter, tag);
-}
-
-/// Same timing as [`claimed_g_after_phase_lock`], but `g3` to vs main
-/// first (no long `wait_pred`) so a Workspace jump cannot match a no-op.
-fn claimed_g_from_vs_main_after_phase_lock(
-    tui: &mut PtySession,
-    workspace: &Path,
-    letter: char,
-    tag: &str,
-) {
-    tui.wait_ms(AFTER_APPLY_MS);
+    tui.wait_pred(
+        |screen| on_compare_tab(screen) && !tree_or_theme_fired(screen),
+        "claimed g1 starts on a compare tab (Workspace g1 is a stay)",
+        WAIT,
+    );
+    let marker = unique_dirty_name(tag);
+    let before = tui.screen();
+    assert!(
+        !before.contains(&marker),
+        "mid-chord commit path must be absent before g:\n{before}"
+    );
     csi_u_letter(tui, 'g');
-    csi_u_letter(tui, '3');
-    g_then_watch_tick_then(tui, workspace, letter, tag);
+    write_repo_file(repo, &marker);
+    commit_repo_file(repo, &marker, "watch g1");
+    tui.wait_pred(
+        |screen| compare_shows_committed_path(screen, &marker),
+        "watch reloads the compare list after the mid-chord commit (no apply must not pass)",
+        CHORD_APPLY_WAIT,
+    );
+    csi_u_letter(tui, '1');
 }
 
 fn palette_open(screen: &str) -> bool {
@@ -241,14 +291,17 @@ fn parked_files_drill_returned(screen: &str) -> bool {
 /// `gt` / `g1` / `g2` stay tab actions when a live watch apply lands
 /// between the chord halves.
 ///
-/// Phase-lock on a Workspace-tree dirty path (the apply). Then sleep so
-/// the next 500ms poll falls inside the 400ms `g` window. Watch ticks
-/// do not clear the armed `g`. A `GIT_WAIT` between `g` and `t` expires
-/// the chord and paints ToggleTreeMode. `gt` and `g1` start on vs main
-/// so a stay there is a failed no-op.
+/// `gt` and `g2` start on Workspace. The mid-chord oracle is a new dirty
+/// path with the tree `A` badge. A stay on Workspace is a failed no-op.
+/// `g1` from Workspace is Action::None, so that chord starts on a
+/// compare tab. The mid-chord oracle is a new committed path (compare
+/// paint hides dirty files). Watch ticks do not clear the armed `g`.
+/// A `GIT_WAIT` between `g` and the completing key expires the chord.
+/// Sleep without the apply paint cannot pass.
 #[test]
 fn pty_compare_gt_survives_watch() {
     let (_root, workspace) = compare_ahead_workspace();
+    let app = workspace.join("app");
     let mut tui = PtySession::open_with_env(&workspace, &[("WS_STATUS_WATCH_MS", WATCH_MS)]);
     tui.wait_contains("app", WAIT);
     open_default_and_main(&mut tui);
@@ -267,26 +320,26 @@ fn pty_compare_gt_survives_watch() {
     );
 
     phase_lock_watch(&mut tui, &workspace, "lgt");
-    claimed_g_from_vs_main_after_phase_lock(&mut tui, &workspace, 't', "gt");
+    claimed_g_after_tree_apply(&mut tui, &workspace, 't', "gt");
     tui.wait_pred(
-        |screen| on_workspace(screen) && !tree_or_theme_fired(screen),
-        "gt after a live watch apply is NextTab (wrap to Workspace), not ToggleTreeMode",
+        |screen| on_compare_origin_main(screen) && !tree_or_theme_fired(screen),
+        "gt after a live watch apply is NextTab (vs origin/main), not ToggleTreeMode or a Workspace stay",
         WAIT,
     );
 
-    phase_lock_watch(&mut tui, &workspace, "lg1");
-    claimed_g_from_vs_main_after_phase_lock(&mut tui, &workspace, '1', "g1");
+    phase_lock_compare_head(&mut tui, &app, "lg1");
+    claimed_g1_after_compare_head_apply(&mut tui, &app, "g1");
     tui.wait_pred(
         |screen| on_workspace(screen) && !tree_or_theme_fired(screen),
-        "g1 after a live watch apply jumps to Workspace (a stay on vs main is a no-op)",
+        "g1 after a live watch apply jumps to Workspace (a stay on the compare tab is a no-op)",
         WAIT,
     );
 
     phase_lock_watch(&mut tui, &workspace, "lg2");
-    claimed_g_after_phase_lock(&mut tui, &workspace, '2', "g2");
+    claimed_g_after_tree_apply(&mut tui, &workspace, '2', "g2");
     tui.wait_pred(
         |screen| on_compare_origin_main(screen) && !tree_or_theme_fired(screen),
-        "g2 after a live watch apply activates vs origin/main",
+        "g2 after a live watch apply activates vs origin/main (a Workspace stay is a no-op)",
         WAIT,
     );
 }
@@ -294,10 +347,12 @@ fn pty_compare_gt_survives_watch() {
 /// Diff vs default from a graph Files drill paints DiffPane. Watch keeps it.
 ///
 /// Parked commit-files must not return on the right. Compare paint is
-/// committed-only, so the dirty path is not an oracle.
+/// committed-only. The watch apply oracle is a new committed path on
+/// the compare list. Sleep without that paint cannot pass.
 #[test]
 fn pty_compare_from_commit_files_drill_survives_watch() {
     let (_root, workspace) = daily_workspace();
+    let merger = workspace.join("merger");
     let mut tui = PtySession::open_with_env(&workspace, &[("WS_STATUS_WATCH_MS", WATCH_MS)]);
     tui.wait_contains("README.md", WAIT);
 
@@ -345,11 +400,21 @@ fn pty_compare_from_commit_files_drill_survives_watch() {
     );
 
     let marker = unique_dirty_name("fd");
-    write_app_dirty(&workspace, &marker);
-    tui.wait_ms(COMPARE_WATCH_APPLY_MS);
+    let before = tui.screen();
+    assert!(
+        !before.contains(&marker),
+        "watch commit path must be absent before the disk commit:\n{before}"
+    );
+    write_repo_file(&merger, &marker);
+    commit_repo_file(&merger, &marker, "watch files-drill");
     tui.wait_pred(
-        |screen| compare_from_files_drill(screen) && !parked_files_drill_returned(screen),
-        "watch keeps the compare DiffPane; parked Files drill must not return",
+        |screen| {
+            compare_from_files_drill(screen)
+                && screen.contains(&marker)
+                && !refresh_now_toast(screen)
+                && !parked_files_drill_returned(screen)
+        },
+        "watch reloads the compare list with the new committed path and keeps DiffPane (no apply must not pass)",
         GIT_WAIT,
     );
 }
