@@ -31,6 +31,7 @@ mod pty_compare_mouse_tab_click;
 mod pty_compare_mouse_tab_close;
 mod pty_compare_palette_disable_guards;
 mod pty_compare_palette_opens_tab;
+mod pty_compare_survives_watch;
 mod pty_ctrl_c_prompts_before_quit;
 mod pty_ctrl_c_second_quit;
 mod pty_ctrl_o_full_file_context;
