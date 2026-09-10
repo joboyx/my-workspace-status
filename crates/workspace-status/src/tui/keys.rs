@@ -23,7 +23,7 @@ pub const G_CHORD_PROTOCOL_ECHO_MS: u64 = 8;
 /// Where a key event's bytes came from.
 ///
 /// [`KeyStrokeOrigin::Protocol`] is CSI-u (typed or typeless) and every
-/// constructed / headless event. A same-key Press inside
+/// constructed event. A same-key Press inside
 /// [`G_CHORD_PROTOCOL_ECHO_MS`] is the release of that tap.
 /// [`KeyStrokeOrigin::LegacyByte`] is a traditional single-byte key.
 /// A same-key Press is a new tap (`gg`).
@@ -112,7 +112,7 @@ fn records_g_chord_press(mode: InputMode, key: &KeyEvent) -> bool {
 /// it arms or consumes [`InputMode::GPending`].
 ///
 /// Same as [`drop_g_chord_echo`] with [`KeyStrokeOrigin::Protocol`].
-/// Headless constructed events use this path.
+/// In-memory constructed events use this path.
 ///
 /// Returns true when the caller must not dispatch (echo or Release).
 pub fn drop_protocol_dup_g_chord_press(

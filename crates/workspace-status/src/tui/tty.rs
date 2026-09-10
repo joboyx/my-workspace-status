@@ -6,11 +6,9 @@
 //! rxvt 1015 mouse the same way crossterm 0.28 does. A lone ESC waits one
 //! poll timeout with no further stdin before it becomes Escape, so a split
 //! CSI / CSI-u report is not an Escape plus leftover keys. A hangup or
-//! 0-byte read is a read error. Headless e2e cannot call those (no TTY),
-//! so it feeds SGR bytes through [`decode_sgr_mouse`], which matches
-//! crossterm's `parse_cb` / `parse_csi_sgr_mouse` including reports the
-//! live reader drops. A kinder clone would go green while a real TTY
-//! no-ops.
+//! 0-byte read is a read error. [`decode_sgr_mouse`] matches crossterm's
+//! `parse_cb` / `parse_csi_sgr_mouse`, including reports the live reader
+//! drops. A kinder clone would go green while a real TTY no-ops.
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
@@ -760,7 +758,7 @@ pub(crate) fn sgr_mouse_report(button: u8, col: u16, row: u16) -> Vec<u8> {
 /// the vertical wheel plus bit 2 (`Cb` 68/69). Bit 5 is motion; crossterm
 /// 0.28 returns a parse error for wheel reports that include it (`98`/`99`),
 /// and the live `event::read` loop drops those bytes. Unknown reports are
-/// `None` so Headless e2e no-ops the same way.
+/// `None` so callers no-op the same way.
 pub(crate) fn decode_sgr_mouse(seq: &[u8]) -> Option<Event> {
     if seq.len() < 8 || !seq.starts_with(&[0x1b, b'[', b'<']) {
         return None;

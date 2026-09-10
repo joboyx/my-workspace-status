@@ -102,8 +102,7 @@ fn help_wraps_shorter(screen: &str, help_wide_joins: usize) -> bool {
 /// that up on poll timeout (`TIOCGWINSZ`) with no dummy key. Shift-pan
 /// and tree hscroll stay on `pty_shift_left_right_tree_pan` and
 /// `pty_tree_sgr_hscroll_pans_clipped_path`. Help keymap rows stay on
-/// `pty_help_overlay`. Headless `pane_tree_width` stays on
-/// `terminal_resize_relayouts_panes_gutter_help_and_lists`.
+/// `pty_help_overlay`.
 ///
 /// Fail if resize is a no-op: the wide join stays or vanishes under a
 /// parser clip, `? help` / `┘└` drop off a short grid, or a narrow help

@@ -1,10 +1,9 @@
-//! Tree, file-diff, and graph hscroll oracles shared by TestBackend and PTY e2e.
+//! Tree, file-diff, and graph hscroll oracles for PTY e2e.
 //!
 //! Tree callers pass **left-pane cells only**. A search chip that already
-//! contains [`TREE_HSCROLL_TAIL`] must not count. Extraction stays
-//! harness-specific: TestBackend clips by `pane_right_x`; PTY splits vt100
-//! cells on the join. Graph / file-diff pan asserts the unique tail on the
-//! right pane, not the tree or the search chip.
+//! contains [`TREE_HSCROLL_TAIL`] must not count. The PTY harness splits
+//! vt100 cells on the join. Graph / file-diff pan asserts the unique tail
+//! on the right pane, not the tree or the search chip.
 
 /// Visible prefix of the long tree path while the viewport is at column 0.
 pub const TREE_HSCROLL_PREFIX: &str = "very-long";

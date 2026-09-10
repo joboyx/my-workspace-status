@@ -83,7 +83,6 @@ fn cursor_moved_off_readme(screen: &str) -> bool {
 /// Boxed `x` confirm stays armed across a live PTY resize, swallows `j`,
 /// then `n` still cancels.
 ///
-/// Sibling of headless `confirm_overlay_keeps_y_n_after_resize`. Docs:
 /// Help GIT `x` is revert (`y`/`Y`). Configuration: `x` confirms with
 /// counts (`y` tracked only, `Y` also deletes untracked); `n` / Esc
 /// cancel. Keymap: `x` is `Action::Revert` (opens `PendingConfirm::Revert`);

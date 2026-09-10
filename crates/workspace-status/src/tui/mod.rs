@@ -22,7 +22,6 @@ pub(crate) mod fetch;
 mod gates;
 mod graph_focus;
 mod graph_load;
-mod headless;
 mod help;
 mod icons;
 mod keys;
@@ -42,7 +41,6 @@ pub(crate) mod viewed;
 pub(crate) mod watch;
 
 pub use app::{collect_full_snapshot, run_tui, TuiOpts};
-pub use headless::HeadlessTui;
 pub use keys::InputMode;
 pub use viewed::workspace_store_id;
 
