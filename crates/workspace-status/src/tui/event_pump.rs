@@ -347,6 +347,16 @@ mod tests {
             loop_src.contains("interp.apply("),
             "live JoinSet completions must call Interpreter::apply"
         );
+        let overlay_gate = loop_src
+            .find("keep_overlay_if_gitdir_busy")
+            .expect("Confirm Yes must keep the overlay when that gitdir is occupied");
+        let dispatch = loop_src
+            .find("let effect = ctx.state.dispatch(action)")
+            .expect("live loop must dispatch after the overlay occupy gate");
+        assert!(
+            overlay_gate < dispatch,
+            "keep_overlay_if_gitdir_busy must run before dispatch takes the overlay"
+        );
         assert!(
             sched.contains("fn accept_repo_result"),
             "scheduler must gate stale collection generations"

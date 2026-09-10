@@ -49,7 +49,7 @@ use super::ops::{
     format_completed_op, format_mixed_running_op, format_running_op, op_targets, Op, RunningOp,
 };
 use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
-use super::state::AppState;
+use super::state::{AppState, PendingConfirm};
 
 /// Blocking work that produces one [`JobOutcome`].
 pub(crate) type JobWork = Box<dyn FnOnce() -> JobOutcome + Send>;
@@ -306,6 +306,29 @@ fn gitdir_key(state: &AppState, checkout: &str) -> String {
         .find(|row| row.repo == checkout)
         .map(|row| row.primary_repo.clone().unwrap_or_else(|| row.repo.clone()))
         .unwrap_or_else(|| checkout.to_string())
+}
+
+fn overlay_write_checkouts(state: &AppState, action: &Action) -> Vec<String> {
+    match action {
+        Action::ConfirmYes | Action::ConfirmYesClean => match state.confirm.as_ref() {
+            Some(PendingConfirm::Revert { targets, .. }) => {
+                targets.iter().map(|t| t.repo.clone()).collect()
+            }
+            Some(PendingConfirm::StashDrop { repo, .. })
+            | Some(PendingConfirm::CheckoutOutOfSync { repo, .. })
+            | Some(PendingConfirm::MergeIntoHead { repo, .. }) => vec![repo.clone()],
+            Some(PendingConfirm::RemoveWorktree { primary, path, .. }) => {
+                vec![primary.clone(), path.clone()]
+            }
+            None => Vec::new(),
+        },
+        Action::CreateBranchSubmit => state
+            .create_branch
+            .as_ref()
+            .map(|create| vec![create.repo.clone()])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
 }
 
 /// Shared Effect scheduler, spawn, and apply.
@@ -1394,6 +1417,25 @@ impl Interpreter {
         self.remote
             .occupy
             .contains_key(&gitdir_key(state, checkout))
+    }
+
+    /// True when Confirm Yes / create-branch submit would close an overlay
+    /// and then hit occupy refuse. Keep the overlay and set status `busy`.
+    pub(crate) fn keep_overlay_if_gitdir_busy(
+        &self,
+        state: &mut AppState,
+        action: &Action,
+    ) -> bool {
+        let checkouts = overlay_write_checkouts(state, action);
+        if checkouts
+            .iter()
+            .any(|checkout| self.remote_gitdir_busy(state, checkout))
+        {
+            state.status = "busy".to_string();
+            true
+        } else {
+            false
+        }
     }
 
     fn refuse_exclusive_if_busy(&mut self, state: &mut AppState, effect: &Effect) -> bool {
@@ -4057,6 +4099,92 @@ mod tests {
         );
         assert_eq!(interp.write_jobs_queued(), 1);
         assert!(interp.busy_for_writes());
+    }
+
+    #[test]
+    fn confirm_yes_on_occupied_gitdir_keeps_overlay() {
+        use crate::tui::state::{PendingConfirm, RevertTarget};
+
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+
+        state.confirm = Some(PendingConfirm::Revert {
+            targets: vec![RevertTarget {
+                repo: "app".into(),
+                path: "README.md".into(),
+                untracked: false,
+                old_path: None,
+            }],
+            label: "README.md".into(),
+        });
+        state.status = "confirm revert app?".into();
+
+        assert!(
+            interp.keep_overlay_if_gitdir_busy(&mut state, &Action::ConfirmYes),
+            "must not dispatch ConfirmYes while that gitdir is occupied"
+        );
+        assert!(state.confirm.is_some(), "revert overlay must stay pending");
+        assert_eq!(state.status, "busy");
+        assert_eq!(interp.write_jobs_queued(), 0);
+
+        assert!(interp.keep_overlay_if_gitdir_busy(&mut state, &Action::ConfirmYesClean));
+        assert!(state.confirm.is_some());
+
+        state.confirm = Some(PendingConfirm::Revert {
+            targets: vec![RevertTarget {
+                repo: "notes".into(),
+                path: "README.md".into(),
+                untracked: false,
+                old_path: None,
+            }],
+            label: "README.md".into(),
+        });
+        state.status = "confirm revert notes?".into();
+        assert!(
+            !interp.keep_overlay_if_gitdir_busy(&mut state, &Action::ConfirmYes),
+            "free gitdir ConfirmYes must dispatch"
+        );
+        assert!(state.confirm.is_some());
+        assert_eq!(state.status, "confirm revert notes?");
+        assert_eq!(interp.write_jobs_queued(), 0);
+    }
+
+    #[test]
+    fn create_branch_submit_on_occupied_gitdir_keeps_prompt() {
+        use crate::tui::branches::CreateBranchState;
+
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+
+        state.create_branch = Some(CreateBranchState {
+            repo: "app".into(),
+            name: "topic".into(),
+            commit_id: None,
+        });
+        state.status = "new branch".into();
+
+        assert!(interp.keep_overlay_if_gitdir_busy(&mut state, &Action::CreateBranchSubmit));
+        assert!(state.create_branch.is_some());
+        assert_eq!(state.status, "busy");
+        assert_eq!(interp.write_jobs_queued(), 0);
     }
 
     #[test]

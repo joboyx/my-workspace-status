@@ -362,6 +362,10 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
             BusyAction::Handle => {}
         }
     }
+    if ctx.interp.keep_overlay_if_gitdir_busy(ctx.state, &action) {
+        ctx.presenter.mark();
+        return;
+    }
     if let Action::Resize { cols, rows } = &action {
         let _ = apply_terminal_resize(ctx.terminal, *cols, *rows);
     }

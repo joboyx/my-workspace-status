@@ -106,7 +106,7 @@ Write scope for bulk git (`f` / `p` / `P` / `d`): primaries on workspace/family 
 
 Independent checkouts run fetch / pull / push in parallel (`FETCH_CONCURRENCY` = 10) on the per-gitdir remote queue in `tui/effect.rs`. Occupy key is `primary_repo` when set, else the checkout path. A second `f` / `p` / `P` enqueues. Pending jobs coalesce on that checkout. `Fetch` / `Pull` / `Push` / `FetchTick` are `BusyAction::Handle`. Exclusive writes are Ignore only while exclusive write or default-branch is busy.
 
-An exclusive write on an occupied gitdir still dispatches. Then `schedule` refuses with breadcrumb `busy`. A free gitdir may write while other repos fetch. If `p` lands during an inflight fetch on that gitdir, Pull still queues when dispatch set `nothing behind to pull`. Right-pane, compare, and drill `Effect::None` Pull do not follow.
+An exclusive write on an occupied gitdir still dispatches. Then `schedule` refuses with breadcrumb `busy`. Confirm Yes and create-branch submit keep the overlay in that case. Status is `busy`. A free gitdir may write while other repos fetch. If `p` lands during an inflight fetch on that gitdir, Pull still queues when dispatch set `nothing behind to pull`. Right-pane, compare, and drill `Effect::None` Pull do not follow.
 
 Mixed kinds paint `Fetching 1 · Pulling 1…` or `Fetching 1/2 · queued 1`. After those ops finish, `status` is a count (`Fetched N repos`, with ` (N failed)` if any) — never a list of names.
 
