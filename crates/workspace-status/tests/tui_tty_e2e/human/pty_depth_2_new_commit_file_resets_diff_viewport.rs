@@ -12,7 +12,7 @@ const BETA: &str = "beta.rs";
 const ALPHA_TOP: &str = "alpha-line-0";
 const COMMIT: &str = "tall-pair-scroll-reset";
 const REPO: &str = "scrollbox";
-/// Repeats after the first CSI-u press. Headless used 40 `l` keys.
+/// Repeats after the first CSI-u press.
 const PAN_REPEATS: usize = 40;
 /// Gap so the input thread does not drain the held-nav backlog as one move.
 const REPEAT_GAP_MS: u64 = 50;

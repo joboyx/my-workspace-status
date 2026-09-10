@@ -2,8 +2,8 @@
 //!
 //! The child runs the live event loop (`tty::poll_event` /
 //! `tty::read_event_origin`). Keys and xterm SGR mouse reports are written
-//! as bytes on the PTY master — the same path a terminal uses. This is not
-//! `HeadlessTui` and does not construct crossterm `Event` values in memory.
+//! as bytes on the PTY master — the same path a terminal uses. It does not
+//! construct crossterm `Event` values in memory.
 
 use std::fs;
 use std::io::{Read, Write};

@@ -1,4 +1,4 @@
-//! Temp git workspaces shared by TestBackend and PTY TUI e2e.
+//! Temp git workspaces for PTY TUI e2e.
 //!
 //! Real repos, no mocked git. Same seed style as `snapshot_contract.rs`.
 

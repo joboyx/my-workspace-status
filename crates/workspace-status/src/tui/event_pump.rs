@@ -278,14 +278,12 @@ mod tests {
     }
 
     /// Fails CI if the live TTY path grows a nested pump or a sync pane /
-    /// snapshot / write git call on the loop thread. Headless e2e uses
-    /// [`super::effect::Interpreter::interpret_sync`] (same apply as live).
+    /// snapshot / write git call on the loop thread.
     #[test]
     fn tty_event_loop_must_not_call_sync_pane_git() {
         let app = include_str!("app.rs");
         let loop_src = include_str!("event_loop.rs");
         let effect = include_str!("effect.rs");
-        let headless = include_str!("headless.rs");
         let sched = include_str!("scheduler.rs");
 
         for pumped in [
@@ -315,18 +313,6 @@ mod tests {
         assert!(
             app.contains("load_right_headless("),
             "unit tests may still call load_right_headless for pane compute"
-        );
-        assert!(
-            !headless.contains("load_right_headless"),
-            "HeadlessTui must not call load_right_headless"
-        );
-        assert!(
-            !headless.contains("apply_headless"),
-            "HeadlessTui must not keep a second apply path"
-        );
-        assert!(
-            headless.contains("interpret_sync("),
-            "HeadlessTui must call Interpreter::interpret_sync"
         );
         assert_eq!(
             app.matches("reload_snapshot(state, opts").count(),
@@ -413,7 +399,7 @@ mod tests {
 
     /// Live loop must read and enable mouse through `tui/tty.rs`. Direct
     /// `event::read` / `EnableMouseCapture` would skip the shared sequence
-    /// and SGR contract Headless e2e uses.
+    /// and SGR contract.
     #[test]
     fn tty_event_loop_must_use_shared_mouse_tty() {
         let app = include_str!("app.rs");

@@ -3,7 +3,7 @@ use crate::seed::daily_workspace;
 use crate::support::WAIT;
 
 /// Package version sits on the help overlay lower-right, same idea as
-/// `pty_help_overlay` / headless `assert_help_version`.
+/// `pty_help_overlay`.
 fn help_version_lower_right(screen: &str) -> bool {
     let version = workspace_status::APP_VERSION;
     let Some(line) = screen.lines().rev().find(|line| line.contains(version)) else {

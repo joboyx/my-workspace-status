@@ -1,10 +1,10 @@
 # Real-TTY TUI e2e
 
-Headless TestBackend coverage stays in `crates/workspace-status/tests/tui_headless_e2e.rs`. Screenshot stills stay in `scripts/capture-demo-stills.sh`. This harness is neither.
+This is the human TUI e2e. Screenshot stills stay in `scripts/capture-demo-stills.sh`. This harness is not that capture script.
 
 It drives the real `workspace-status` binary the way a person does: a PTY (and, on Linux, a real terminal emulator). Assertions read the painted screen. It does not construct crossterm `Event` values in memory.
 
-Git seeds shared with the TestBackend suite live in `crates/workspace-status/tests/common/seed.rs`. `seed_two_tall_commit_files` adds a pair of long committed files so a file switch in a commit diff can prove the new view starts at the origin. The tree hscroll oracle (clipped `very-long` vs `TAIL99`), file-diff tail (`UNIQUE_DIFF_TAIL`), and graph subject prefix (`UNIQUE_GRAP`) live in `tests/common/hscroll.rs`. Each harness still extracts the left pane itself.
+Git seeds live in `crates/workspace-status/tests/common/seed.rs`. `seed_two_tall_commit_files` adds a pair of long committed files so a file switch in a commit diff can prove the new view starts at the origin. The tree hscroll oracle (clipped `very-long` vs `TAIL99`), file-diff tail (`UNIQUE_DIFF_TAIL`), and graph subject prefix (`UNIQUE_GRAP`) live in `tests/common/hscroll.rs`. The PTY harness extracts the left pane itself.
 
 ## What runs where
 
@@ -48,7 +48,7 @@ Packages (Debian/Ubuntu): `xvfb xfce4-terminal xterm xdotool dbus-x11 openbox`. 
 - Parent `WS_STATUS_WORKSPACE` is dropped so the fixture cwd is the workspace root. CI: `tty_spawn_paths_isolate_workspace_env`.
 - The PTY harness can decode OSC 52 clipboard payloads from the master byte stream (`PtySession::clipboard_payloads` / `last_clipboard`). `vt100` strips OSC 52 from the painted screen, so copy claims must read the raw bytes (`ESC ] 52 ; c ; <base64> BEL` or ST). Adding a `pty_*` test still does not require other edits to this file.
 - Mouse reports are xterm SGR (`CSI < Cb ; Cx ; Cy M`) with 1-based cells. Motion-bit wheel (`Cb` 99) must not pan (crossterm 0.28 drops it).
-- Tree hscroll asserts a clipped `very-long` prefix on the **tree row**, then `TAIL99` after pan, with the prefix gone. A search chip that already contains `TAIL99` does not count. Prefix, tail, and predicates live in `crates/workspace-status/tests/common/hscroll.rs` (shared with `tui_headless_e2e`). Do not `/` search the tail first: that puts `TAIL99` on screen before any wheel. Wait for a clipped tree row on the same frame (dump the screen on timeout). Do not `expect` a row after a later `screen()` call.
+- Tree hscroll asserts a clipped `very-long` prefix on the **tree row**, then `TAIL99` after pan, with the prefix gone. A search chip that already contains `TAIL99` does not count. Prefix, tail, and predicates live in `crates/workspace-status/tests/common/hscroll.rs`. Do not `/` search the tail first: that puts `TAIL99` on screen before any wheel. Wait for a clipped tree row on the same frame (dump the screen on timeout). Do not `expect` a row after a later `screen()` call.
 - Desktop wheel is a real XTEST pointer event: root-coordinate `mousemove --sync` then `click 7`, **no `--window`** on warp or click. VTE ignores `XSendEvent` (`xdotool --window`). The wheel oracle runs in **xterm** because VTE 0.76 does not report buttons 6/7. xfce stays for help/search keys.
 - Openbox is started by `scripts/with-desktop-session.sh` with `scripts/openbox.xml` (no decorations) so cell-to-pixel math matches the cell grid. The test does not `--replace` a running WM. The Rust desktop harness only starts Openbox when none is running (local `DISPLAY` without the helper).
 - Desktop xfce `/` arm: wait for SEARCH and the live jump (graph subject) before Return. xfce can drop Enter while right-pane git runs. PTY byte writes do not have that race. Graph stash pop on xfce uses `j` / Tab / `j` / `p`, not SEARCH. Stash create on xfce waits first-paint README, then Shift+S, not `/README`.
@@ -60,4 +60,4 @@ PTY tests are independent processes (own temp workspace + PTY). `cargo test --te
 
 The tests live under `crates/workspace-status/tests/tui_tty_e2e/human/`. Adding a test does not edit this file.
 
-Do not add a second screenshot pipeline. Do not replace `tui_headless_e2e.rs`.
+Do not add a second screenshot pipeline.

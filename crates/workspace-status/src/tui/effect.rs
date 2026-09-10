@@ -1,14 +1,13 @@
-//! Shared Effect interpreter for the live TTY loop and Headless e2e.
+//! Shared Effect interpreter for the live TTY loop.
 //!
 //! `Action` still goes through [`AppState::dispatch`](super::state::AppState::dispatch).
 //! This module turns [`Effect`] into Scheduler jobs, runs the blocking work,
 //! and applies [`JobOutcome`] to [`AppState`].
 //!
-//! The live loop (`event_loop.rs`) spawns each job on a `JoinSet`. Headless
-//! calls [`Interpreter::interpret_sync`], which runs the same schedule / spawn /
-//! apply functions on the test thread and drains until idle.
-//!
-//! Headless does not run [`Effect::EditFile`] or [`Effect::ExternalDiff`].
+//! The live loop (`event_loop.rs`) spawns each job on a `JoinSet`.
+//! [`Interpreter::interpret_sync`] runs the same schedule / spawn / apply
+//! functions on the calling thread and drains until idle. Unit tests use that
+//! sync path. It does not run [`Effect::EditFile`] or [`Effect::ExternalDiff`].
 //! Those arms unmount a TTY `$EDITOR` / diff tool. The live loop consumes
 //! [`Interpreter::take_pending_edit`] and [`Interpreter::take_pending_diff`],
 //! then enqueues blob/temp prepare on `spawn_blocking` before spawning the tool.
@@ -53,7 +52,7 @@ use super::state::AppState;
 /// Blocking work that produces one [`JobOutcome`].
 pub(crate) type JobWork = Box<dyn FnOnce() -> JobOutcome + Send>;
 
-/// Worker result applied on the loop / Headless thread.
+/// Worker result applied on the loop thread.
 ///
 /// Autoload, commit-files, commit-diff, compare-file-diff, and picker
 /// outcomes carry a generation plus an immutable target. Autoload identity
@@ -162,7 +161,7 @@ pub(crate) enum JobOutcome {
     },
 }
 
-/// Live TTY launch after [`JobOutcome::DiffPrepared`]. Not used by Headless.
+/// Live TTY launch after [`JobOutcome::DiffPrepared`].
 pub(crate) struct DiffLaunch {
     pub repo: String,
     pub path: String,
@@ -221,7 +220,7 @@ struct CompareProbeJob {
 
 /// Shared Effect scheduler, spawn, and apply.
 ///
-/// Owns the queues the live `JoinSet` and Headless sync pump drain.
+/// Owns the queues the live `JoinSet` and the sync pump drain.
 pub(crate) struct Interpreter {
     sched: Scheduler,
     metas: HashMap<String, (RepoCheckoutMeta, Option<String>)>,
@@ -333,8 +332,9 @@ impl Interpreter {
 
     /// Schedule `effect`, then run and apply every job on this thread.
     ///
-    /// Headless e2e uses this so tests see the same apply path as the live loop.
+    /// Unit tests use this so they see the same apply path as the live loop.
     /// [`Effect::EditFile`] and [`Effect::ExternalDiff`] are dropped (no TTY spawn).
+    #[cfg(test)]
     pub(crate) fn interpret_sync(
         &mut self,
         state: &mut AppState,
@@ -1504,6 +1504,7 @@ impl Interpreter {
         }
     }
 
+    #[cfg(test)]
     fn pump_sync(&mut self, state: &mut AppState, opts: &TuiOpts) {
         loop {
             let mut batch = Vec::new();
@@ -1652,22 +1653,21 @@ mod tests {
         interp.apply(state, &opts, 1, outcome);
     }
 
-    /// Headless must drain the same apply function the live loop uses.
+    /// The live loop must drain the same apply function unit tests use.
     ///
     /// The remaining gap is TTY `$EDITOR` / external diff
     /// (`Effect::EditFile` → `pending_edit`, `Effect::ExternalDiff` → `pending_diff`).
-    /// This fails if Headless grows a second apply match or live stops calling
+    /// This fails if a second apply match returns or live stops calling
     /// [`Interpreter::apply`].
     #[test]
-    fn headless_and_live_share_apply_path() {
+    fn live_loop_shares_interpreter_apply() {
         let effect = include_str!("effect.rs");
-        let headless = include_str!("headless.rs");
         let loop_src = include_str!("event_loop.rs");
         let app = include_str!("app.rs");
 
         assert!(
             effect.contains("pub(crate) fn interpret_sync"),
-            "Headless entry must stay on Interpreter::interpret_sync"
+            "sync tests must stay on Interpreter::interpret_sync"
         );
         assert!(
             effect.contains("pub(crate) fn apply("),
@@ -1676,18 +1676,6 @@ mod tests {
         assert!(
             effect.contains("pub(crate) fn schedule("),
             "one schedule function must exist"
-        );
-        assert!(
-            headless.contains("interpret_sync("),
-            "HeadlessTui must call interpret_sync"
-        );
-        assert!(
-            !headless.contains("JoinSet"),
-            "Headless stays a sync pump; live owns the JoinSet"
-        );
-        assert!(
-            !headless.contains("apply_headless"),
-            "Headless must not keep a second apply_headless path"
         );
         assert!(
             !app.contains("fn apply_headless"),
@@ -1724,11 +1712,11 @@ mod tests {
         );
         assert!(
             effect.contains("let _ = self.take_pending_edit();"),
-            "Headless interpret_sync must drop EditFile (TTY editor only)"
+            "interpret_sync must drop EditFile (TTY editor only)"
         );
         assert!(
             effect.contains("let _ = self.take_pending_diff();"),
-            "Headless interpret_sync must drop ExternalDiff (no TTY spawn)"
+            "interpret_sync must drop ExternalDiff (no TTY spawn)"
         );
         assert!(
             loop_src.contains("fn launch_diff"),

@@ -63,8 +63,7 @@ fn documented_right_pane_graph_sgr_hscroll_panned(screen: &str) -> bool {
 /// `event::read` loop. Motion-bit `CSI < 99` is dropped by crossterm 0.28
 /// and must not pan. Horizontal wheel pans the pane under the pointer
 /// without moving the focused row or stealing keyboard focus. Keys
-/// `h` / `l` already pan a focused graph. Headless
-/// `mouse_hscroll_pans_graph_and_shows_horizontal_bar` is not this proof.
+/// `h` / `l` already pan a focused graph.
 ///
 /// Live PTY (80×28 so `UNIQUE_GRAP` clips): `/longsubj` loads the graph.
 /// Do not `/` search the tail. Wheel over the right pane must put

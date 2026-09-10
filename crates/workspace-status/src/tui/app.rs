@@ -1,4 +1,4 @@
-//! TUI helpers shared by the async loop and Headless e2e.
+//! TUI helpers for the async event loop.
 //!
 //! Live TTY I/O lives in [`super::event_loop`]. Effect schedule / spawn / apply
 //! live in [`super::effect`]. This module keeps `run_tui` terminal setup and
@@ -870,8 +870,7 @@ pub(crate) fn apply_watch_snapshot_for_tick(
     )
 }
 
-/// Sync pane git for unit tests of [`RightPaneRequest`]. Headless e2e uses
-/// [`super::effect::Interpreter::interpret_sync`].
+/// Sync pane git for unit tests of [`RightPaneRequest`].
 #[cfg(test)]
 fn load_right_headless(state: &mut AppState) {
     let payload = RightPaneRequest::from_state(state).compute();

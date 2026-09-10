@@ -104,8 +104,8 @@ fn bottom_graph_thumb(screen: &str) -> Option<(u16, u16)> {
 /// First and last scrollbar cells (`║` track or `█` thumb) on `thumb_col`.
 ///
 /// After `G` the thumb sits mid-track with dead `║` below it. Grab-delta maps
-/// from the press row, so a drag must start on the last track cell (same as
-/// headless `track_y + track_h - 1`), not on that mid-track `█`.
+/// from the press row, so a drag must start on the last track cell
+/// (`track_y + track_h - 1`), not on that mid-track `█`.
 fn scrollbar_track_span(screen: &str, thumb_col: u16) -> Option<(u16, u16)> {
     let mut top = None;
     let mut bottom = None;
