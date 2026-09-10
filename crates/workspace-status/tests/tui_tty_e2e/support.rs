@@ -643,6 +643,29 @@ pub fn syncbox_row_behind(screen: &str) -> bool {
     after_syncbox_name(screen).is_some_and(|after| after.contains("v1") && after.contains("& main"))
 }
 
+/// Cells after `name` on the left-tree row (branch + sync mark).
+pub fn after_repo_name(screen: &str, name: &str) -> Option<String> {
+    let line = tree_line_containing(screen, name)?;
+    let at = line.find(name)?;
+    Some(line[at + name.len()..].to_string())
+}
+
+/// Trailing ASCII behind-by-1 (`v1`) on the named left-tree repo row.
+pub fn repo_row_behind(screen: &str, name: &str) -> bool {
+    after_repo_name(screen, name)
+        .is_some_and(|after| after.contains("v1") && after.contains("& main"))
+}
+
+/// Trailing in-sync mark on the named left-tree repo row (No updates `.`).
+pub fn repo_row_in_sync(screen: &str, name: &str) -> bool {
+    after_repo_name(screen, name).is_some_and(|after| {
+        after.contains("& main")
+            && after.contains('.')
+            && !after.contains("^1")
+            && !after.contains("v1")
+    })
+}
+
 pub fn has_fetch_hint(screen: &str) -> bool {
     status_row(screen).contains("fetch")
 }

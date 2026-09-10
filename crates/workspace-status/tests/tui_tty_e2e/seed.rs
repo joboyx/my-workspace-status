@@ -45,18 +45,36 @@ pub fn stream_workspace() -> (PathBuf, PathBuf) {
     (root, workspace)
 }
 
+fn init_bare_remote(remote: &Path) {
+    let init = Command::new("git")
+        .args(["init", "-q", "--bare", "-b", "main"])
+        .arg(remote)
+        .status();
+    if init.map(|s| s.success()).unwrap_or(false) == false {
+        fs::create_dir_all(remote).unwrap();
+        git(remote, &["init", "-q", "--bare"]);
+    }
+}
+
 /// Bare origin under `root` so fetch / pull / push stay off the network.
 pub fn seed_bare_remote(root: &Path) -> PathBuf {
     let remote = root.join("origin.git");
-    let init = Command::new("git")
-        .args(["init", "-q", "--bare", "-b", "main"])
-        .arg(&remote)
-        .status();
-    if init.map(|s| s.success()).unwrap_or(false) == false {
-        fs::create_dir_all(&remote).unwrap();
-        git(&remote, &["init", "-q", "--bare"]);
-    }
+    init_bare_remote(&remote);
     remote
+}
+
+/// One tracking primary whose origin is a commit ahead and not yet fetched.
+fn seed_unfetched_tracking(root: &Path, workspace: &Path, name: &str) {
+    let remote = root.join(format!("{name}-origin.git"));
+    init_bare_remote(&remote);
+    seed_tracking_repo(workspace, name, &remote);
+    push_commit_to_remote(
+        &remote,
+        &root.join(format!("{name}-helper")),
+        "origin-tip.txt",
+        "from origin\n",
+        &format!("origin-tip-{name}"),
+    );
 }
 
 fn seed_tracking_repo(workspace: &Path, name: &str, remote: &Path) {
@@ -113,6 +131,20 @@ pub fn unfetched_behind_workspace() -> (PathBuf, PathBuf) {
         "from origin\n",
         "origin-tip-commit",
     );
+    (root, workspace)
+}
+
+/// Two tracking primaries (`alpha`, `beta`) on one workspace. Each origin is
+/// one commit ahead; local status still looks in-sync until fetch.
+///
+/// ASCII names stay visible after unfolding No updates. Each checkout has
+/// its own bare origin so a fetch of one cannot mark the other behind.
+pub fn two_unfetched_behind_workspace() -> (PathBuf, PathBuf) {
+    let root = unique_root("ws-tui-tty-fetch-pair");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    seed_unfetched_tracking(&root, &workspace, "alpha");
+    seed_unfetched_tracking(&root, &workspace, "beta");
     (root, workspace)
 }
 
