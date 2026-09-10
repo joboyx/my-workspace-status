@@ -65,7 +65,7 @@ Unborn repos (`## No commits yet on <branch>`) become a normal snapshot with `sy
 
 ## `crates/workspace-status/src/parallel.rs`
 
-Bounded map (`map_with_concurrency` / `CappedBatch`) used by `collect_snapshots` and TTY fetch / pull / push. Cap is `FETCH_CONCURRENCY` (10; `WS_STATUS_FETCH_CONCURRENCY`). Completions are counted as jobs **finish**. Exclusive checkout writes stay serial in `tui/app.rs`.
+Bounded map (`map_with_concurrency` / `CappedBatch`) used by CLI `collect_snapshots` and tests. Cap is `FETCH_CONCURRENCY` (10; `WS_STATUS_FETCH_CONCURRENCY`). Completions are counted as jobs **finish**. The live TTY path is Scheduler JoinSet `spawn_blocking` in `tui/effect.rs`. Exclusive checkout writes stay serial there.
 
 ## `crates/workspace-status/src/actions.rs`
 
@@ -90,7 +90,7 @@ git diff <base-sha>...<head-sha> -- <path>
 
 `E` on a compare file uses LEFT `<merge-base>:<old-path-or-path>` and RIGHT `<head>:<path>`. Compare never changes HEAD, the index, or the worktree. The picker never checkouts, creates, or fetches. A watch probe reloads only after both SHAs are recorded and HEAD or the base-tip SHA then changes.
 
-## TUI writes (`tui/ops.rs`, `tui/fetch.rs`, `tui/app.rs`)
+## TUI writes (`tui/ops.rs`, `tui/fetch.rs`, `tui/effect.rs`)
 
 | Function | Purpose |
 | --- | --- |
@@ -100,7 +100,7 @@ git diff <base-sha>...<head-sha> -- <path>
 | `background_fetch_targets` | Snapshot paths for the TUI background fetch timer. Hidden ignored checkouts are omitted. When ignored repos are shown, every snapshot path is included, including linked worktrees. Manual `f` stays on `op_targets`. |
 | `refresh_target` | Workspace / No-updates → whole snapshot; otherwise the focused checkout path. |
 
-After `p` / `P` / `d` / `f`, the TUI refreshes the affected repos and stamps those `repo:<path>` and `checkout:<path>` ids into the flash map. TTY local writes (`s` / `u` / `x` / stash / checkout / create-branch / merge / remove-worktree) run on `spawn_blocking`; error paths still enqueue snapshot + pane so leftover keys cannot flush. Independent per-repo `f` / `p` / `P` (and `FetchTick`) share the same four-worker cap.
+After `p` / `P` / `d` / `f`, the TUI refreshes the affected repos and stamps those `repo:<path>` and `checkout:<path>` ids into the flash map. TTY local writes (`s` / `u` / `x` / stash / checkout / create-branch / merge / remove-worktree) run on `spawn_blocking` in `tui/effect.rs`. Error paths still enqueue snapshot + pane so leftover keys cannot flush. Independent per-repo `f` / `p` / `P` (and `FetchTick`) share the per-gitdir remote queue. Cap is `FETCH_CONCURRENCY` (10).
 
 ## Graph load (`tui/graph_load.rs`)
 
@@ -114,7 +114,7 @@ Default window is 300 (`DEFAULT_GRAPH_WINDOW`). `--exclude=refs/stash` precedes 
 
 Hidden ignored checkouts stay out of `P` / `S` / `b` unless shown. Linked worktrees are included on `f` / `p` / `P` / `d` only when that row is focused. The background fetch timer (`background_fetch_targets` in `tui/fetch.rs`) includes every snapshot except hidden ignored — linked worktrees and shown ignored repos included. See [tui-rust.md](./tui-rust.md).
 
-Manual `f` / `p` / `P` / `d` and the background fetch tick paint a trailing breadcrumb counter (`Fetching n/N…`, `Pulling n/N…`, `Pushing n/N…`, `Switching n/N…`) and redraw as each repo completes (not as it starts). Fetch / pull / push of independent checkouts overlap under `FETCH_CONCURRENCY` (10). When the op finishes, that slot is a count (`Fetched N repos`, `Pulled N repos`, `Pushed N repos`, `Switched N repos`), with ` (N failed)` if any failed — never a list of names. The hint row stays pills + keys. Graph autoload still uses `loading older…`. Those git children (and watch / full-snapshot reload) run on `spawn_blocking` so resize and quit still reach the event loop; overlay modes do not start the watch or fetch timers. Watch collect applies each checkout as it finishes. The follow-up right-pane reload (`git log` / file `diff` / commit files after fetch / pull / push / watch / left-pane movement at every depth) is another worker job. An unchanged watch snapshot (tree signatures **and** checkout `HEAD` / sync note / dirty set) skips it. The next watch tick is scheduled from the start of the interval.
+Manual `f` / `p` / `P` / `d` and the background fetch tick paint a trailing breadcrumb counter (`Fetching n/N…`, `Pulling n/N…`, `Pushing n/N…`, `Switching n/N…`) and redraw as each repo completes (not as it starts). Fetch / pull / push of independent checkouts overlap under `FETCH_CONCURRENCY` (10) on the per-gitdir remote queue. Mixed kinds paint `Fetching 1 · Pulling 1…` or `Fetching 1/2 · queued 1`. When the op finishes, that slot is a count (`Fetched N repos`, `Pulled N repos`, `Pushed N repos`, `Switched N repos`), with ` (N failed)` if any failed — never a list of names. The hint row stays pills + keys. Graph autoload still uses `loading older…`. Those git children (and watch / full-snapshot reload) run on `spawn_blocking` so resize and quit still reach the event loop; overlay modes do not start the watch or fetch timers. Watch collect applies each checkout as it finishes. The follow-up right-pane reload (`git log` / file `diff` / commit files after fetch / pull / push / watch / left-pane movement at every depth) is another worker job. An unchanged watch snapshot (tree signatures **and** checkout `HEAD` / sync note / dirty set) skips it. The next watch tick is scheduled from the start of the interval.
 
 ## Non-obvious semantics
 
@@ -167,6 +167,20 @@ Revert, stash drop, origin-out-of-sync graph checkout, and graph merge use modal
 
 ## Write serialisation
 
-Independent per-repo `git fetch` / `pull` / `push` (manual `f` / `p` / `P` and the background fetch tick) run in parallel with a cap of `FETCH_CONCURRENCY` (10; override `WS_STATUS_FETCH_CONCURRENCY`). Progress is `Fetching n/N…` as each checkout **finishes**, not as it starts. After the batch: `Fetched N repos` / `(N failed)` — never names.
+Independent per-repo `git fetch`, `pull`, and `push` share one remote queue per gitdir. Manual `f` / `p` / `P` and the background fetch tick use that queue in `tui/effect.rs` (`RemoteQueue`). Occupy key is snapshot `primary_repo` when set. Otherwise the key is the checkout path. Linked worktrees of one repo share that key.
 
-Writes that must stay exclusive on one checkout (stage, unstage, revert, stash, checkout, create-branch, merge into HEAD, default-branch switch) stay serial. While any of those (or a capped batch) is in flight, the event loop stays live; `q` / resize / nav still apply; keys that would start another git write (including command-palette Enter of those keys) are drained (`BusyAction::Ignore`). Watch/status collect (`discover_checkouts` / `process_repo`) uses the same cap so a live tick is not one-repo-at-a-time. There is no inotify.
+The Scheduler JoinSet starts a job when that gitdir is free. Cap is `env_fetch_concurrency()` (default 10). Override with `WS_STATUS_FETCH_CONCURRENCY`. `CappedBatch` is CLI `collect_snapshots` and tests. The live TTY path is Scheduler JoinSet `spawn_blocking`.
+
+Pending jobs coalesce on that checkout only. A second `f` / `p` / `P` enqueues. Duplicate Fetch stays one pending job. A pending Fetch becomes Pull, and Pull drops a later Fetch. Push stays in FIFO order with Fetch and Pull. An inflight same-kind job does not queue a duplicate.
+
+`busy_for_writes` is true only for an exclusive write or default-branch switch (`scheduler.rs`). Remotes are not a workspace mutex. `Fetch` / `Pull` / `Push` / `FetchTick` are `BusyAction::Handle` (`event_pump.rs`). Exclusive writes (stage, unstage, revert, stash, checkout, create-branch, merge into HEAD, remove-worktree, confirm-yes) are Ignore only while exclusive write or default-branch is busy. Default-branch `d` uses the same Ignore rule. Exclusive writes stay serial.
+
+If that gitdir already has a remote, dispatch still runs. Then `schedule` refuses the exclusive write with breadcrumb `busy`. A free gitdir may write while other repos fetch.
+
+If `p` lands during an inflight fetch on that gitdir, dispatch may set `nothing behind to pull`. Unfetched tracking still looks in-sync. The queue then starts Pull after occupy release for those `op_targets` that have inflight or pending Fetch. Right-pane, compare, and drill `Effect::None` Pull do not follow.
+
+Progress is `Fetching n/N…` as each checkout finishes. Mixed kinds paint `Fetching 1 · Pulling 1…` or `Fetching 1/2 · queued 1`. After a kind finishes, the slot is `Fetched N repos` with `(N failed)` if any failed. The slot never lists repo names.
+
+Quit drops remotes that have not started. In-flight git is unchanged.
+
+Watch/status collect (`discover_checkouts` / `process_repo`) uses the same JoinSet cap. A live tick is not one-repo-at-a-time. There is no inotify.
