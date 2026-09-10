@@ -492,7 +492,7 @@ impl Interpreter {
         match effect {
             Effect::Quit => {}
             Effect::None => {
-                if matches!(action, Action::Pull) {
+                if matches!(action, Action::Pull) && state.status == "nothing behind to pull" {
                     self.enqueue_pull_after_inflight_fetch(state);
                 }
             }
@@ -1423,25 +1423,24 @@ impl Interpreter {
         busy
     }
 
-    fn fetch_live_for(&self, checkout: &str) -> bool {
+    fn fetch_live_for(&self, state: &AppState, checkout: &str) -> bool {
+        let gitdir = gitdir_key(state, checkout);
         self.remote
             .pending
             .iter()
-            .any(|job| job.checkout == checkout && job.kind == RunningOp::Fetch)
-            || self.remote.occupy.values().any(|occ| match occ {
-                OccupyReason::Remote(inf) => {
-                    inf.checkout == checkout && inf.kind == RunningOp::Fetch
-                }
-                _ => false,
-            })
+            .any(|job| job.kind == RunningOp::Fetch && gitdir_key(state, &job.checkout) == gitdir)
+            || matches!(
+                self.remote.occupy.get(&gitdir),
+                Some(OccupyReason::Remote(inf)) if inf.kind == RunningOp::Fetch
+            )
     }
 
-    /// Queue pull when `p` lands during an inflight/pending fetch on that checkout.
+    /// Queue pull when `p` lands during an inflight/pending fetch on that gitdir.
     ///
-    /// Dispatch keeps idle in-sync `p` as [`Effect::None`] (`nothing behind to
-    /// pull`). An unfetched tracking checkout still looks in-sync, so the same
-    /// path would drop `p` while fetch occupies the gitdir. Pull must wait for
-    /// occupy release instead of no-op.
+    /// Dispatch keeps idle in-sync `p` as [`Effect::None`] and status
+    /// `nothing behind to pull`. An unfetched tracking checkout still looks
+    /// in-sync, so that path would drop `p` while fetch occupies the gitdir.
+    /// Other None Pull paths (right pane, compare tab, drill) must not follow.
     fn enqueue_pull_after_inflight_fetch(&mut self, state: &mut AppState) {
         let targets = op_targets(
             &state.snapshot,
@@ -1451,7 +1450,7 @@ impl Interpreter {
         );
         let follow: Vec<String> = targets
             .into_iter()
-            .filter(|checkout| self.fetch_live_for(checkout))
+            .filter(|checkout| self.fetch_live_for(state, checkout))
             .collect();
         if follow.is_empty() {
             return;
@@ -2176,10 +2175,7 @@ mod tests {
         let idx = state
             .rows
             .iter()
-            .position(|row| {
-                matches!(row.kind, NodeKind::Repo | NodeKind::Checkout)
-                    && row.repo.as_deref() == Some(name)
-            })
+            .position(|row| row.repo.as_deref() == Some(name))
             .unwrap_or_else(|| panic!("missing repo row {name}"));
         state.cursor = idx;
     }
@@ -3808,12 +3804,58 @@ mod tests {
             &Action::Fetch,
         );
         assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+        state.status = "nothing behind to pull".into();
         schedule_effect(&mut interp, &mut state, Effect::None, &Action::Pull);
         assert_eq!(
             interp.pending_remotes(),
             vec![(RunningOp::Pull, "app".into())]
         );
         assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
+    }
+
+    #[test]
+    fn pull_none_without_behind_status_does_not_queue() {
+        let mut state = fixture_state();
+        focus_repo(&mut state, "app");
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+        state.status = "Fetching 0/1…".into();
+        schedule_effect(&mut interp, &mut state, Effect::None, &Action::Pull);
+        assert!(interp.pending_remotes().is_empty());
+    }
+
+    #[test]
+    fn pull_none_on_linked_checkout_follows_primary_fetch() {
+        let mut state = linked_fixture();
+        state.folds.remove("group:no-updates");
+        state.rebuild_rows();
+        focus_repo(&mut state, "wt");
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+        state.status = "nothing behind to pull".into();
+        schedule_effect(&mut interp, &mut state, Effect::None, &Action::Pull);
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Pull, "wt".into())]
+        );
+        assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 0);
     }
 
     #[test]
