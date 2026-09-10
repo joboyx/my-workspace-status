@@ -45,7 +45,9 @@ use super::graph_load::{
     autoload_limit, autoload_skip, load_graph_model_window, merge_autoload, should_autoload,
     GraphIdentity, ShouldAutoload,
 };
-use super::ops::{format_completed_op, format_mixed_running_op, format_running_op, RunningOp};
+use super::ops::{
+    format_completed_op, format_mixed_running_op, format_running_op, op_targets, Op, RunningOp,
+};
 use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
 use super::state::AppState;
 
@@ -488,7 +490,12 @@ impl Interpreter {
             return;
         }
         match effect {
-            Effect::None | Effect::Quit => {}
+            Effect::Quit => {}
+            Effect::None => {
+                if matches!(action, Action::Pull) {
+                    self.enqueue_pull_after_inflight_fetch(state);
+                }
+            }
             Effect::Batch(effects) => {
                 for child in effects {
                     self.schedule(state, opts, child, action);
@@ -1414,6 +1421,42 @@ impl Interpreter {
             self.refuse_busy(state);
         }
         busy
+    }
+
+    fn fetch_live_for(&self, checkout: &str) -> bool {
+        self.remote
+            .pending
+            .iter()
+            .any(|job| job.checkout == checkout && job.kind == RunningOp::Fetch)
+            || self.remote.occupy.values().any(|occ| match occ {
+                OccupyReason::Remote(inf) => {
+                    inf.checkout == checkout && inf.kind == RunningOp::Fetch
+                }
+                _ => false,
+            })
+    }
+
+    /// Queue pull when `p` lands during an inflight/pending fetch on that checkout.
+    ///
+    /// Dispatch keeps idle in-sync `p` as [`Effect::None`] (`nothing behind to
+    /// pull`). An unfetched tracking checkout still looks in-sync, so the same
+    /// path would drop `p` while fetch occupies the gitdir. Pull must wait for
+    /// occupy release instead of no-op.
+    fn enqueue_pull_after_inflight_fetch(&mut self, state: &mut AppState) {
+        let targets = op_targets(
+            &state.snapshot,
+            state.focused_row(),
+            state.show_ignored,
+            Op::Pull,
+        );
+        let follow: Vec<String> = targets
+            .into_iter()
+            .filter(|checkout| self.fetch_live_for(checkout))
+            .collect();
+        if follow.is_empty() {
+            return;
+        }
+        self.start_bulk(state, RunningOp::Pull, follow);
     }
 
     fn start_bulk(&mut self, state: &mut AppState, kind: RunningOp, repos: Vec<String>) {
@@ -3749,6 +3792,28 @@ mod tests {
         let _spawned = capture_jobs(&mut interp, &mut state);
         assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
         assert!(interp.pending_remotes().is_empty());
+    }
+
+    #[test]
+    fn pull_none_during_inflight_fetch_still_queues() {
+        let mut state = fixture_state();
+        focus_repo(&mut state, "app");
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+        schedule_effect(&mut interp, &mut state, Effect::None, &Action::Pull);
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Pull, "app".into())]
+        );
+        assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
     }
 
     #[test]
