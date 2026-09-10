@@ -21,4 +21,6 @@ mod pty_live_g_chords;
 #[cfg(unix)]
 mod seed;
 #[cfg(unix)]
+mod slow_git;
+#[cfg(unix)]
 mod support;

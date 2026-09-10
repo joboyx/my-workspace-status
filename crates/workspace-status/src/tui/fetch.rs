@@ -1,8 +1,9 @@
 //! Background fetch period. Independent of [`super::watch`].
 //!
 //! The timer fires [`super::action::Action::FetchTick`]. Manual `f` and that
-//! tick run a capped worker pool (`FETCH_CONCURRENCY` = 10;
-//! `WS_STATUS_FETCH_CONCURRENCY`) so independent checkouts overlap.
+//! tick enqueue on the per-gitdir remote queue in [`super::effect`]
+//! (`FETCH_CONCURRENCY` = 10; `WS_STATUS_FETCH_CONCURRENCY`) so independent
+//! gitdirs overlap.
 
 use crate::snapshot::{checkout_is_hidden_ignored, WorkspaceSnapshot};
 

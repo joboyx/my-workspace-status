@@ -12,7 +12,7 @@
 //! [`Interpreter::take_pending_edit`] and [`Interpreter::take_pending_diff`],
 //! then enqueues blob/temp prepare on `spawn_blocking` before spawning the tool.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use workspace_status_graph::LOADING_OLDER;
 
@@ -45,9 +45,13 @@ use super::graph_load::{
     autoload_limit, autoload_skip, load_graph_model_window, merge_autoload, should_autoload,
     GraphIdentity, ShouldAutoload,
 };
-use super::ops::{format_completed_op, format_running_op, RunningOp};
+use super::ops::{
+    format_completed_op, format_mixed_running_op, format_running_op, op_targets, Op, RunningOp,
+};
+use super::branches::is_valid_branch_name;
 use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
-use super::state::AppState;
+use super::stash::{resolve_stash_menu_key, StashMenuKeyResult, StashOpId};
+use super::state::{AppState, PendingConfirm};
 
 /// Blocking work that produces one [`JobOutcome`].
 pub(crate) type JobWork = Box<dyn FnOnce() -> JobOutcome + Send>;
@@ -80,6 +84,8 @@ pub(crate) enum JobOutcome {
     BulkRemote {
         kind: RunningOp,
         ok: bool,
+        /// Checkout path the worker ran in. Occupancy releases this gitdir.
+        repo: String,
     },
     DefaultBranch {
         ok: bool,
@@ -179,17 +185,92 @@ struct DiffPrepareJob {
     repo_abs: std::path::PathBuf,
 }
 
-struct BulkState {
+struct RemoteJob {
     kind: RunningOp,
-    remaining: VecDeque<String>,
-    inflight: usize,
-    done: usize,
+    checkout: String,
+}
+
+struct InflightRemote {
+    kind: RunningOp,
+    checkout: String,
+}
+
+enum OccupyReason {
+    Remote(InflightRemote),
+    Exclusive,
+    DefaultBranch,
+}
+
+struct KindWave {
     ok: usize,
     failed: usize,
     repos: Vec<String>,
 }
 
+impl KindWave {
+    fn empty() -> Self {
+        Self {
+            ok: 0,
+            failed: 0,
+            repos: Vec::new(),
+        }
+    }
+
+    fn done(&self) -> usize {
+        self.ok + self.failed
+    }
+
+    fn note_repo(&mut self, checkout: &str) {
+        if !self.repos.iter().any(|row| row == checkout) {
+            self.repos.push(checkout.to_string());
+        }
+    }
+
+    fn remove_repo(&mut self, checkout: &str) {
+        self.repos.retain(|row| row != checkout);
+    }
+}
+
+struct RemoteQueue {
+    pending: VecDeque<RemoteJob>,
+    occupy: HashMap<String, OccupyReason>,
+    fetch: KindWave,
+    pull: KindWave,
+    push: KindWave,
+}
+
+impl RemoteQueue {
+    fn new() -> Self {
+        Self {
+            pending: VecDeque::new(),
+            occupy: HashMap::new(),
+            fetch: KindWave::empty(),
+            pull: KindWave::empty(),
+            push: KindWave::empty(),
+        }
+    }
+
+    fn wave_mut(&mut self, kind: RunningOp) -> Option<&mut KindWave> {
+        match kind {
+            RunningOp::Fetch => Some(&mut self.fetch),
+            RunningOp::Pull => Some(&mut self.pull),
+            RunningOp::Push => Some(&mut self.push),
+            RunningOp::DefaultBranch => None,
+        }
+    }
+
+    fn wave(&self, kind: RunningOp) -> Option<&KindWave> {
+        match kind {
+            RunningOp::Fetch => Some(&self.fetch),
+            RunningOp::Pull => Some(&self.pull),
+            RunningOp::Push => Some(&self.push),
+            RunningOp::DefaultBranch => None,
+        }
+    }
+}
+
 struct WriteJob {
+    gitdirs: Vec<String>,
     work: Box<dyn FnOnce() -> Result<String, String> + Send>,
 }
 
@@ -218,6 +299,71 @@ struct CompareProbeJob {
     last_base_tip: Option<String>,
 }
 
+/// Occupancy key: linked checkouts use `primary_repo`, else the checkout path.
+fn gitdir_key(state: &AppState, checkout: &str) -> String {
+    state
+        .snapshot
+        .repos
+        .iter()
+        .find(|row| row.repo == checkout)
+        .map(|row| row.primary_repo.clone().unwrap_or_else(|| row.repo.clone()))
+        .unwrap_or_else(|| checkout.to_string())
+}
+
+fn overlay_write_checkouts(state: &AppState, action: &Action) -> Vec<String> {
+    match action {
+        Action::ConfirmYes | Action::ConfirmYesClean => match state.confirm.as_ref() {
+            Some(PendingConfirm::Revert { targets, .. }) => {
+                targets.iter().map(|t| t.repo.clone()).collect()
+            }
+            Some(PendingConfirm::StashDrop { repo, .. })
+            | Some(PendingConfirm::CheckoutOutOfSync { repo, .. })
+            | Some(PendingConfirm::MergeIntoHead { repo, .. }) => vec![repo.clone()],
+            Some(PendingConfirm::RemoveWorktree { primary, path, .. }) => {
+                vec![primary.clone(), path.clone()]
+            }
+            None => Vec::new(),
+        },
+        Action::CreateBranchSubmit => state
+            .create_branch
+            .as_ref()
+            .map(|create| vec![create.repo.clone()])
+            .unwrap_or_default(),
+        Action::StashMenuEnter => stash_menu_write_checkouts(state, None, true),
+        Action::StashMenuChar(key) => stash_menu_write_checkouts(state, Some(*key), false),
+        Action::BranchSubmit => branch_submit_write_checkouts(state),
+        _ => Vec::new(),
+    }
+}
+
+fn stash_menu_write_checkouts(state: &AppState, input: Option<char>, enter: bool) -> Vec<String> {
+    let Some(ops) = state.stash_menu.as_ref() else {
+        return Vec::new();
+    };
+    match resolve_stash_menu_key(input, enter, false, ops) {
+        StashMenuKeyResult::Run(op)
+            if matches!(op.id, StashOpId::Create | StashOpId::Apply | StashOpId::Pop) =>
+        {
+            state.stash_repo.clone().into_iter().collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn branch_submit_write_checkouts(state: &AppState) -> Vec<String> {
+    let Some(picker) = state.branch_picker.as_ref() else {
+        return Vec::new();
+    };
+    if picker.selected().is_some() {
+        return Vec::new();
+    }
+    if is_valid_branch_name(&picker.filter) {
+        vec![picker.repo.clone()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Shared Effect scheduler, spawn, and apply.
 ///
 /// Owns the queues the live `JoinSet` and the sync pump drain.
@@ -226,13 +372,13 @@ pub(crate) struct Interpreter {
     metas: HashMap<String, (RepoCheckoutMeta, Option<String>)>,
     pane_req: Option<RightPaneRequest>,
     writes: VecDeque<WriteJob>,
-    bulk: Option<BulkState>,
+    remote: RemoteQueue,
     default_queue: VecDeque<String>,
     prepare_stash: Option<(u64, String)>,
     prepare_branches: Option<(u64, String, bool)>,
     prepare_compare: Option<(u64, String)>,
-    checkout: Option<(String, String, Option<String>)>,
-    merge: Option<(String, String, String)>,
+    checkout: Option<(String, String, Option<String>, String)>,
+    merge: Option<(String, String, String, String)>,
     commit_files: Option<(u64, String, CommitFileSource)>,
     commit_diff: Option<(u64, String, CommitFileSource, String)>,
     compare_range: VecDeque<CompareRangeJob>,
@@ -247,6 +393,7 @@ pub(crate) struct Interpreter {
     pending_diff: Option<(String, String, ExternalDiffKind)>,
     diff_prepare: Option<DiffPrepareJob>,
     pending_diff_launch: Option<DiffLaunch>,
+    exclusive_inflight: HashMap<u64, Vec<String>>,
     dirty: bool,
 }
 
@@ -258,7 +405,7 @@ impl Interpreter {
             metas: HashMap::new(),
             pane_req: None,
             writes: VecDeque::new(),
-            bulk: None,
+            remote: RemoteQueue::new(),
             default_queue: VecDeque::new(),
             prepare_stash: None,
             prepare_branches: None,
@@ -279,13 +426,49 @@ impl Interpreter {
             pending_diff: None,
             diff_prepare: None,
             pending_diff_launch: None,
+            exclusive_inflight: HashMap::new(),
             dirty: false,
         }
     }
 
-    /// True when an exclusive write or remote batch is in flight or queued.
+    /// True when an exclusive write or default-branch switch is in flight or queued.
+    ///
+    /// Remote fetch / pull / push use the per-gitdir queue and do not set this.
     pub(crate) fn busy_for_writes(&self) -> bool {
         self.sched.busy_for_writes()
+    }
+
+    #[cfg(test)]
+    fn with_cap(cap: usize) -> Self {
+        let mut this = Self::new();
+        this.sched = Scheduler::new(cap);
+        this
+    }
+
+    #[cfg(test)]
+    fn pending_remotes(&self) -> Vec<(RunningOp, String)> {
+        self.remote
+            .pending
+            .iter()
+            .map(|job| (job.kind, job.checkout.clone()))
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn occupied_gitdirs(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self.remote.occupy.keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    #[cfg(test)]
+    fn write_jobs_queued(&self) -> usize {
+        self.writes.len() + usize::from(self.checkout.is_some()) + usize::from(self.merge.is_some())
+    }
+
+    #[cfg(test)]
+    fn default_branch_queued(&self) -> bool {
+        !self.default_queue.is_empty() || self.sched.queued_user_tag(UserTag::DefaultBranch) > 0
     }
 
     /// True when schedule or apply changed state that needs a paint.
@@ -359,8 +542,16 @@ impl Interpreter {
         effect: Effect,
         action: &Action,
     ) {
+        if self.refuse_exclusive_if_busy(state, &effect) {
+            return;
+        }
         match effect {
-            Effect::None | Effect::Quit => {}
+            Effect::Quit => {}
+            Effect::None => {
+                if matches!(action, Action::Pull) && state.status == "nothing behind to pull" {
+                    self.enqueue_pull_after_inflight_fetch(state);
+                }
+            }
             Effect::Batch(effects) => {
                 for child in effects {
                     self.schedule(state, opts, child, action);
@@ -391,36 +582,45 @@ impl Interpreter {
                 self.default_repos = repos.clone();
                 state.status = format_running_op(RunningOp::DefaultBranch, 0, repos.len());
                 self.mark();
+                self.occupy_default_branch(state, &repos);
                 self.default_queue = repos.into();
                 if !self.default_queue.is_empty() {
                     self.sched.enqueue_user(UserTag::DefaultBranch);
                 }
             }
-            Effect::Stage { repo, paths } => self.enqueue_write({
+            Effect::Stage { repo, paths } => {
                 let dir = opts.cwd.join(&repo);
                 let last = paths.last().cloned().unwrap_or_default();
-                Box::new(move || {
-                    for path in &paths {
-                        stage_file(&dir, path)?;
-                    }
-                    Ok(format!("staged {last}"))
-                })
-            }),
-            Effect::Unstage { repo, paths } => self.enqueue_write({
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        for path in &paths {
+                            stage_file(&dir, path)?;
+                        }
+                        Ok(format!("staged {last}"))
+                    }),
+                );
+            }
+            Effect::Unstage { repo, paths } => {
                 let dir = opts.cwd.join(&repo);
                 let last = paths.last().cloned().unwrap_or_default();
-                Box::new(move || {
-                    for path in &paths {
-                        unstage_file(&dir, path)?;
-                    }
-                    Ok(format!("unstaged {last}"))
-                })
-            }),
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        for path in &paths {
+                            unstage_file(&dir, path)?;
+                        }
+                        Ok(format!("unstaged {last}"))
+                    }),
+                );
+            }
             Effect::Revert {
                 repo,
                 tracked,
                 untracked,
-            } => self.enqueue_write({
+            } => {
                 let dir = opts.cwd.join(&repo);
                 let ok_status = if tracked.len() + untracked.len() == 1 {
                     if untracked.len() == 1 {
@@ -435,16 +635,20 @@ impl Interpreter {
                         untracked.len()
                     )
                 };
-                Box::new(move || {
-                    for path in &tracked {
-                        revert_tracked_file(&dir, path)?;
-                    }
-                    for path in &untracked {
-                        remove_untracked_file(&dir, path)?;
-                    }
-                    Ok(ok_status)
-                })
-            }),
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        for path in &tracked {
+                            revert_tracked_file(&dir, path)?;
+                        }
+                        for path in &untracked {
+                            remove_untracked_file(&dir, path)?;
+                        }
+                        Ok(ok_status)
+                    }),
+                );
+            }
             Effect::EditFile { repo, path } => {
                 self.pending_edit = Some((repo, path));
                 self.mark();
@@ -453,7 +657,7 @@ impl Interpreter {
                 self.pending_diff = Some((repo, path, kind));
                 self.mark();
             }
-            Effect::StashCreate { repo, paths } => self.enqueue_write({
+            Effect::StashCreate { repo, paths } => {
                 let dir = opts.cwd.join(&repo);
                 let ok_status = if paths.len() == 1 {
                     "Stashed 1 file".to_string()
@@ -462,23 +666,45 @@ impl Interpreter {
                 } else {
                     format!("Stashed {} files", paths.len())
                 };
-                Box::new(move || stash_push(&dir, &paths).map(|_| ok_status))
-            }),
-            Effect::StashApply { repo, stash_ref } => self.enqueue_write({
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || stash_push(&dir, &paths).map(|_| ok_status)),
+                );
+            }
+            Effect::StashApply { repo, stash_ref } => {
                 let dir = opts.cwd.join(&repo);
                 let label = stash_ref.clone();
-                Box::new(move || stash_apply(&dir, &stash_ref).map(|_| format!("applied {label}")))
-            }),
-            Effect::StashPop { repo, stash_ref } => self.enqueue_write({
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        stash_apply(&dir, &stash_ref).map(|_| format!("applied {label}"))
+                    }),
+                );
+            }
+            Effect::StashPop { repo, stash_ref } => {
                 let dir = opts.cwd.join(&repo);
                 let label = stash_ref.clone();
-                Box::new(move || stash_pop(&dir, &stash_ref).map(|_| format!("popped {label}")))
-            }),
-            Effect::StashDrop { repo, stash_ref } => self.enqueue_write({
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        stash_pop(&dir, &stash_ref).map(|_| format!("popped {label}"))
+                    }),
+                );
+            }
+            Effect::StashDrop { repo, stash_ref } => {
                 let dir = opts.cwd.join(&repo);
                 let label = stash_ref.clone();
-                Box::new(move || stash_drop(&dir, &stash_ref).map(|_| format!("dropped {label}")))
-            }),
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        stash_drop(&dir, &stash_ref).map(|_| format!("dropped {label}"))
+                    }),
+                );
+            }
             Effect::PrepareStashMenu { repo } => {
                 let gen = self.sched.request_prepare_stash();
                 self.prepare_stash = Some((gen, repo));
@@ -499,46 +725,62 @@ impl Interpreter {
                 selected_name,
                 fast_forward_ref,
             } => {
-                self.checkout = Some((repo, selected_name, fast_forward_ref));
+                let gitdir = gitdir_key(state, &repo);
+                self.occupy_exclusive(std::slice::from_ref(&gitdir));
+                self.checkout = Some((repo, selected_name, fast_forward_ref, gitdir));
                 self.sched.enqueue_user(UserTag::Write);
             }
-            Effect::CreateBranch { repo, name } => self.enqueue_write({
+            Effect::CreateBranch { repo, name } => {
                 let dir = opts.cwd.join(&repo);
                 let label = name.clone();
-                Box::new(move || {
-                    create_branch_checkout(&dir, &name).map(|_| format!("created {label}"))
-                })
-            }),
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        create_branch_checkout(&dir, &name).map(|_| format!("created {label}"))
+                    }),
+                );
+            }
             Effect::CreateBranchAt {
                 repo,
                 name,
                 commit_id,
-            } => self.enqueue_write({
+            } => {
                 let dir = opts.cwd.join(&repo);
                 let label = name.clone();
                 let short = commit_id.get(..7).unwrap_or(&commit_id).to_string();
-                Box::new(move || {
-                    create_branch_at(&dir, &name, &commit_id)
-                        .map(|_| format!("created {label} at {short}"))
-                })
-            }),
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        create_branch_at(&dir, &name, &commit_id)
+                            .map(|_| format!("created {label} at {short}"))
+                    }),
+                );
+            }
             Effect::MergeIntoHead { repo, rev, label } => {
-                self.merge = Some((repo, rev, label));
+                let gitdir = gitdir_key(state, &repo);
+                self.occupy_exclusive(std::slice::from_ref(&gitdir));
+                self.merge = Some((repo, rev, label, gitdir));
                 self.sched.enqueue_user(UserTag::Write);
             }
             Effect::RemoveWorktree {
                 primary,
                 path,
                 force,
-            } => self.enqueue_write({
+            } => {
                 let primary_dir = opts.cwd.join(&primary);
                 let path_dir = opts.cwd.join(&path);
                 let label = path.clone();
-                Box::new(move || {
-                    remove_worktree(&primary_dir, &path_dir, force)
-                        .map(|_| format!("removed worktree {label}"))
-                })
-            }),
+                self.enqueue_write(
+                    state,
+                    &[&primary, &path],
+                    Box::new(move || {
+                        remove_worktree(&primary_dir, &path_dir, force)
+                            .map(|_| format!("removed worktree {label}"))
+                    }),
+                );
+            }
             Effect::LoadCommitFiles { repo, source } => {
                 if !state.is_compare_tab() {
                     state.begin_commit_files(repo.clone(), source.clone());
@@ -838,6 +1080,7 @@ impl Interpreter {
             }
             JobOutcome::Write { status } => {
                 self.sched.note_user_done(UserTag::Write);
+                self.release_exclusive(state, id);
                 state.status = status;
                 self.sched.on_reload_snapshot(state.focused_checkout_path());
                 if !state.is_compare_tab() {
@@ -846,33 +1089,33 @@ impl Interpreter {
                 }
                 self.mark();
             }
-            JobOutcome::BulkRemote { kind, ok } => {
-                let finished = if let Some(bulk) = self.bulk.as_mut() {
-                    bulk.inflight = bulk.inflight.saturating_sub(1);
-                    bulk.done += 1;
+            JobOutcome::BulkRemote { kind, ok, repo } => {
+                let gitdir = self
+                    .remote
+                    .occupy
+                    .iter()
+                    .find(|(_, occ)| match occ {
+                        OccupyReason::Remote(inf) => inf.checkout == repo,
+                        _ => false,
+                    })
+                    .map(|(key, _)| key.clone())
+                    .unwrap_or_else(|| gitdir_key(state, &repo));
+                self.remote.occupy.remove(&gitdir);
+                if let Some(wave) = self.remote.wave_mut(kind) {
                     if ok {
-                        bulk.ok += 1;
+                        wave.ok += 1;
                     } else {
-                        bulk.failed += 1;
+                        wave.failed += 1;
                     }
-                    state.status = format_running_op(kind, bulk.done, bulk.repos.len());
-                    bulk.remaining.is_empty() && bulk.inflight == 0
-                } else {
-                    false
-                };
-                self.mark();
-                if finished {
-                    let Some(bulk) = self.bulk.take() else {
-                        return;
-                    };
-                    state.stamp_checkout_flashes(&bulk.repos);
-                    state.status = format_completed_op(kind, bulk.ok, bulk.failed);
-                    self.sched.on_reload_snapshot(state.focused_checkout_path());
-                    if !state.is_compare_tab() {
-                        self.pane_req = Some(RightPaneRequest::from_state(state));
-                        self.sched.request_pane();
-                    }
+                    wave.note_repo(&repo);
                 }
+                self.mark();
+                if self.kind_live(kind) {
+                    self.paint_remote_running(state);
+                } else {
+                    self.finish_kind_if_idle(state, kind);
+                }
+                self.pump_remote_slots(state);
             }
             JobOutcome::DefaultBranch { ok } => {
                 self.sched.note_user_done(UserTag::DefaultBranch);
@@ -894,6 +1137,7 @@ impl Interpreter {
                         self.default_failed,
                     );
                     self.default_repos.clear();
+                    self.release_default_branch(state);
                     self.sched.on_reload_snapshot(state.focused_checkout_path());
                     if !state.is_compare_tab() {
                         self.pane_req = Some(RightPaneRequest::from_state(state));
@@ -941,6 +1185,7 @@ impl Interpreter {
             }
             JobOutcome::Checkout { repo, result } => {
                 self.sched.note_user_done(UserTag::Write);
+                self.release_exclusive(state, id);
                 if apply_checkout_compute(state, repo, result) {
                     self.sched.on_reload_snapshot(state.focused_checkout_path());
                 }
@@ -952,6 +1197,7 @@ impl Interpreter {
             }
             JobOutcome::Merge { label, result } => {
                 self.sched.note_user_done(UserTag::Write);
+                self.release_exclusive(state, id);
                 if apply_merge_compute(state, &label, result) {
                     self.sched.on_reload_snapshot(state.focused_checkout_path());
                 }
@@ -1140,31 +1386,380 @@ impl Interpreter {
         self.dirty = true;
     }
 
-    fn enqueue_write(&mut self, work: Box<dyn FnOnce() -> Result<String, String> + Send>) {
+    fn enqueue_write(
+        &mut self,
+        state: &AppState,
+        checkouts: &[&str],
+        work: Box<dyn FnOnce() -> Result<String, String> + Send>,
+    ) {
+        let gitdirs: Vec<String> = checkouts
+            .iter()
+            .map(|checkout| gitdir_key(state, checkout))
+            .collect();
+        self.occupy_exclusive(&gitdirs);
         let _ = self.sched.bump_write_gen();
-        self.writes.push_back(WriteJob { work });
+        self.writes.push_back(WriteJob { gitdirs, work });
         self.sched.enqueue_user(UserTag::Write);
+    }
+
+    fn occupy_exclusive(&mut self, gitdirs: &[String]) {
+        for gitdir in gitdirs {
+            self.remote
+                .occupy
+                .entry(gitdir.clone())
+                .or_insert(OccupyReason::Exclusive);
+        }
+    }
+
+    fn occupy_default_branch(&mut self, state: &AppState, repos: &[String]) {
+        for repo in repos {
+            self.remote
+                .occupy
+                .entry(gitdir_key(state, repo))
+                .or_insert(OccupyReason::DefaultBranch);
+        }
+    }
+
+    fn release_exclusive(&mut self, state: &mut AppState, id: u64) {
+        if let Some(gitdirs) = self.exclusive_inflight.remove(&id) {
+            for gitdir in gitdirs {
+                if matches!(
+                    self.remote.occupy.get(&gitdir),
+                    Some(OccupyReason::Exclusive)
+                ) {
+                    self.remote.occupy.remove(&gitdir);
+                }
+            }
+        }
+        self.pump_remote_slots(state);
+    }
+
+    fn release_default_branch(&mut self, state: &mut AppState) {
+        self.remote
+            .occupy
+            .retain(|_, occ| !matches!(occ, OccupyReason::DefaultBranch));
+        self.pump_remote_slots(state);
+    }
+
+    fn refuse_busy(&mut self, state: &mut AppState) {
+        state.status = "busy".to_string();
+        self.mark();
+    }
+
+    fn remote_gitdir_busy(&self, state: &AppState, checkout: &str) -> bool {
+        self.remote
+            .occupy
+            .contains_key(&gitdir_key(state, checkout))
+    }
+
+    /// True when an overlay submit would close itself and then hit occupy
+    /// refuse. Keep the overlay and set status `busy`.
+    pub(crate) fn keep_overlay_if_gitdir_busy(
+        &self,
+        state: &mut AppState,
+        action: &Action,
+    ) -> bool {
+        let checkouts = overlay_write_checkouts(state, action);
+        if checkouts
+            .iter()
+            .any(|checkout| self.remote_gitdir_busy(state, checkout))
+        {
+            state.status = "busy".to_string();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn refuse_exclusive_if_busy(&mut self, state: &mut AppState, effect: &Effect) -> bool {
+        let busy = match effect {
+            Effect::Stage { repo, .. }
+            | Effect::Unstage { repo, .. }
+            | Effect::Revert { repo, .. }
+            | Effect::StashCreate { repo, .. }
+            | Effect::StashApply { repo, .. }
+            | Effect::StashPop { repo, .. }
+            | Effect::StashDrop { repo, .. }
+            | Effect::CheckoutBranch { repo, .. }
+            | Effect::CreateBranch { repo, .. }
+            | Effect::CreateBranchAt { repo, .. }
+            | Effect::MergeIntoHead { repo, .. } => self.remote_gitdir_busy(state, repo),
+            Effect::RemoveWorktree { primary, path, .. } => {
+                self.remote_gitdir_busy(state, primary) || self.remote_gitdir_busy(state, path)
+            }
+            Effect::DefaultBranch { repos } => repos
+                .iter()
+                .any(|repo| self.remote_gitdir_busy(state, repo)),
+            _ => false,
+        };
+        if busy {
+            self.refuse_busy(state);
+        }
+        busy
+    }
+
+    fn fetch_live_for(&self, state: &AppState, checkout: &str) -> bool {
+        let gitdir = gitdir_key(state, checkout);
+        self.remote
+            .pending
+            .iter()
+            .any(|job| job.kind == RunningOp::Fetch && gitdir_key(state, &job.checkout) == gitdir)
+            || matches!(
+                self.remote.occupy.get(&gitdir),
+                Some(OccupyReason::Remote(inf)) if inf.kind == RunningOp::Fetch
+            )
+    }
+
+    /// Queue pull when `p` lands during an inflight/pending fetch on that gitdir.
+    ///
+    /// Dispatch keeps idle in-sync `p` as [`Effect::None`] and status
+    /// `nothing behind to pull`. An unfetched tracking checkout still looks
+    /// in-sync, so that path would drop `p` while fetch occupies the gitdir.
+    /// Other None Pull paths (right pane, compare tab, drill) must not follow.
+    fn enqueue_pull_after_inflight_fetch(&mut self, state: &mut AppState) {
+        let targets = op_targets(
+            &state.snapshot,
+            state.focused_row(),
+            state.show_ignored,
+            Op::Pull,
+        );
+        let follow: Vec<String> = targets
+            .into_iter()
+            .filter(|checkout| self.fetch_live_for(state, checkout))
+            .collect();
+        if follow.is_empty() {
+            return;
+        }
+        self.start_bulk(state, RunningOp::Pull, follow);
     }
 
     fn start_bulk(&mut self, state: &mut AppState, kind: RunningOp, repos: Vec<String>) {
         if repos.is_empty() {
             return;
         }
-        state.status = format_running_op(kind, 0, repos.len());
+        let mut flushed = false;
+        for checkout in repos {
+            flushed |= self.enqueue_remote_job(state, kind, checkout);
+        }
+        if !flushed {
+            self.paint_remote_running(state);
+        }
+        self.pump_remote_slots(state);
         self.mark();
-        let n = repos.len();
-        self.bulk = Some(BulkState {
-            kind,
-            remaining: repos.iter().cloned().collect(),
-            inflight: 0,
-            done: 0,
-            ok: 0,
-            failed: 0,
-            repos,
-        });
-        for _ in 0..n {
+    }
+
+    fn enqueue_remote_job(
+        &mut self,
+        state: &mut AppState,
+        kind: RunningOp,
+        checkout: String,
+    ) -> bool {
+        if matches!(kind, RunningOp::DefaultBranch) {
+            return false;
+        }
+        if self.drop_new_remote(&checkout, kind) {
+            return false;
+        }
+
+        let mut fetch_idx = None;
+        let mut saw_fetch = false;
+        let mut saw_pull = false;
+        let mut saw_push = false;
+        for (i, job) in self.remote.pending.iter().enumerate() {
+            if job.checkout != checkout {
+                continue;
+            }
+            match job.kind {
+                RunningOp::Fetch => {
+                    saw_fetch = true;
+                    fetch_idx = Some(i);
+                }
+                RunningOp::Pull => saw_pull = true,
+                RunningOp::Push => saw_push = true,
+                RunningOp::DefaultBranch => {}
+            }
+        }
+
+        match kind {
+            RunningOp::Fetch => {
+                if saw_fetch || saw_pull {
+                    return false;
+                }
+                self.note_wave_repo(kind, &checkout);
+                self.remote.pending.push_back(RemoteJob { kind, checkout });
+                false
+            }
+            RunningOp::Pull => {
+                if saw_pull {
+                    return false;
+                }
+                if let Some(i) = fetch_idx {
+                    let prev = self.remote.pending[i].checkout.clone();
+                    self.remove_wave_repo(RunningOp::Fetch, &prev);
+                    self.remote.pending[i].kind = RunningOp::Pull;
+                    self.remote.pending[i].checkout = checkout.clone();
+                    self.note_wave_repo(RunningOp::Pull, &checkout);
+                    return self.finish_kind_if_idle(state, RunningOp::Fetch);
+                }
+                self.note_wave_repo(kind, &checkout);
+                self.remote.pending.push_back(RemoteJob { kind, checkout });
+                false
+            }
+            RunningOp::Push => {
+                if saw_push {
+                    return false;
+                }
+                self.note_wave_repo(kind, &checkout);
+                self.remote.pending.push_back(RemoteJob { kind, checkout });
+                false
+            }
+            RunningOp::DefaultBranch => false,
+        }
+    }
+
+    fn drop_new_remote(&self, checkout: &str, kind: RunningOp) -> bool {
+        self.remote.occupy.values().any(|occ| match occ {
+            OccupyReason::Remote(inf) => {
+                inf.checkout == checkout
+                    && (inf.kind == kind
+                        || (kind == RunningOp::Fetch && inf.kind == RunningOp::Pull))
+            }
+            _ => false,
+        })
+    }
+
+    fn note_wave_repo(&mut self, kind: RunningOp, checkout: &str) {
+        if let Some(wave) = self.remote.wave_mut(kind) {
+            wave.note_repo(checkout);
+        }
+    }
+
+    fn remove_wave_repo(&mut self, kind: RunningOp, checkout: &str) {
+        if let Some(wave) = self.remote.wave_mut(kind) {
+            wave.remove_repo(checkout);
+        }
+    }
+
+    fn kind_live(&self, kind: RunningOp) -> bool {
+        self.remote.pending.iter().any(|job| job.kind == kind)
+            || self.remote.occupy.values().any(|occ| match occ {
+                OccupyReason::Remote(inf) => inf.kind == kind,
+                _ => false,
+            })
+    }
+
+    fn finish_kind_if_idle(&mut self, state: &mut AppState, kind: RunningOp) -> bool {
+        if self.kind_live(kind) {
+            return false;
+        }
+        let Some(wave) = self.remote.wave_mut(kind) else {
+            return false;
+        };
+        if wave.done() == 0 && wave.repos.is_empty() {
+            return false;
+        }
+        let repos = std::mem::take(&mut wave.repos);
+        let ok_n = wave.ok;
+        let failed_n = wave.failed;
+        *wave = KindWave::empty();
+        state.stamp_checkout_flashes(&repos);
+        state.status = format_completed_op(kind, ok_n, failed_n);
+        self.sched.on_reload_snapshot(state.focused_checkout_path());
+        if !state.is_compare_tab() {
+            self.pane_req = Some(RightPaneRequest::from_state(state));
+            self.sched.request_pane();
+        }
+        self.mark();
+        true
+    }
+
+    fn eligible_remote_count(&self, state: &AppState) -> usize {
+        let mut reserved: HashSet<String> = self.remote.occupy.keys().cloned().collect();
+        let mut n = 0;
+        for job in &self.remote.pending {
+            let gitdir = gitdir_key(state, &job.checkout);
+            if reserved.contains(&gitdir) {
+                continue;
+            }
+            reserved.insert(gitdir);
+            n += 1;
+        }
+        n
+    }
+
+    fn pump_remote_slots(&mut self, state: &AppState) {
+        let need = self.eligible_remote_count(state);
+        let have = self.sched.queued_user_tag(UserTag::BulkRemote);
+        for _ in have..need {
             self.sched.enqueue_user(UserTag::BulkRemote);
         }
+    }
+
+    fn paint_remote_running(&self, state: &mut AppState) {
+        let mut progress = Vec::new();
+        for kind in [RunningOp::Fetch, RunningOp::Pull, RunningOp::Push] {
+            let inflight = self
+                .remote
+                .occupy
+                .values()
+                .filter(|occ| matches!(occ, OccupyReason::Remote(job) if job.kind == kind))
+                .count();
+            let pending = self
+                .remote
+                .pending
+                .iter()
+                .filter(|job| job.kind == kind)
+                .count();
+            let done = self.remote.wave(kind).map(|wave| wave.done()).unwrap_or(0);
+            if inflight + pending == 0 {
+                continue;
+            }
+            progress.push((kind, done, inflight, pending));
+        }
+        if progress.is_empty() {
+            return;
+        }
+        let inflight_parts: Vec<(RunningOp, usize)> = progress
+            .iter()
+            .filter(|(_, _, inflight, _)| *inflight > 0)
+            .map(|(kind, _, inflight, _)| (*kind, *inflight))
+            .collect();
+        if inflight_parts.len() >= 2 {
+            state.status = format_mixed_running_op(&inflight_parts, 0, None);
+            return;
+        }
+        if inflight_parts.len() == 1 {
+            let run = inflight_parts[0].0;
+            let (done, inflight, pending) = progress
+                .iter()
+                .find(|(kind, ..)| *kind == run)
+                .map(|(_, done, inflight, pending)| (*done, *inflight, *pending))
+                .unwrap_or((0, 0, 0));
+            let total = done + inflight + pending;
+            let other_queued: usize = progress
+                .iter()
+                .filter(|(kind, ..)| *kind != run)
+                .map(|(_, _, _, pending)| *pending)
+                .sum();
+            if other_queued > 0 {
+                state.status = format_mixed_running_op(&[], other_queued, Some((run, done, total)));
+            } else {
+                state.status = format_running_op(run, done, total);
+            }
+            return;
+        }
+        if progress.len() == 1 {
+            let (kind, done, inflight, pending) = progress[0];
+            state.status = format_running_op(kind, done, done + inflight + pending);
+            return;
+        }
+        let (kind, done, inflight, pending) = progress[0];
+        let other: usize = progress[1..]
+            .iter()
+            .map(|(_, _, _, pending)| *pending)
+            .sum();
+        state.status =
+            format_mixed_running_op(&[], other, Some((kind, done, done + inflight + pending)));
     }
 
     fn spawn_user(
@@ -1177,7 +1772,8 @@ impl Interpreter {
     ) {
         match tag {
             UserTag::Write => {
-                if let Some((repo, name, ff)) = self.checkout.take() {
+                if let Some((repo, name, ff, gitdir)) = self.checkout.take() {
+                    self.exclusive_inflight.insert(id, vec![gitdir]);
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
@@ -1188,7 +1784,8 @@ impl Interpreter {
                     );
                     return;
                 }
-                if let Some((repo, rev, label)) = self.merge.take() {
+                if let Some((repo, rev, label, gitdir)) = self.merge.take() {
+                    self.exclusive_inflight.insert(id, vec![gitdir]);
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
@@ -1200,6 +1797,7 @@ impl Interpreter {
                     return;
                 }
                 if let Some(job) = self.writes.pop_front() {
+                    self.exclusive_inflight.insert(id, job.gitdirs);
                     spawn(
                         id,
                         Box::new(move || {
@@ -1216,17 +1814,29 @@ impl Interpreter {
                 self.sched.note_user_done(UserTag::Write);
             }
             UserTag::BulkRemote => {
-                let Some(bulk) = self.bulk.as_mut() else {
+                let Some(idx) = self.remote.pending.iter().position(|job| {
+                    !self
+                        .remote
+                        .occupy
+                        .contains_key(&gitdir_key(state, &job.checkout))
+                }) else {
                     self.sched.note_job_finished(id);
                     return;
                 };
-                let Some(repo) = bulk.remaining.pop_front() else {
-                    self.sched.note_job_finished(id);
-                    return;
-                };
-                bulk.inflight += 1;
-                let kind = bulk.kind;
+                let job = self.remote.pending.remove(idx).expect("eligible remote");
+                let gitdir = gitdir_key(state, &job.checkout);
+                self.remote.occupy.insert(
+                    gitdir,
+                    OccupyReason::Remote(InflightRemote {
+                        kind: job.kind,
+                        checkout: job.checkout.clone(),
+                    }),
+                );
+                let kind = job.kind;
+                let repo = job.checkout;
                 let dir = opts.cwd.join(&repo);
+                self.paint_remote_running(state);
+                self.mark();
                 spawn(
                     id,
                     Box::new(move || {
@@ -1238,7 +1848,7 @@ impl Interpreter {
                             RunningOp::Push => push_quiet(&dir).is_ok(),
                             RunningOp::DefaultBranch => false,
                         };
-                        JobOutcome::BulkRemote { kind, ok }
+                        JobOutcome::BulkRemote { kind, ok, repo }
                     }),
                 );
             }
@@ -1640,10 +2250,7 @@ mod tests {
         let idx = state
             .rows
             .iter()
-            .position(|row| {
-                matches!(row.kind, NodeKind::Repo | NodeKind::Checkout)
-                    && row.repo.as_deref() == Some(name)
-            })
+            .position(|row| row.repo.as_deref() == Some(name))
             .unwrap_or_else(|| panic!("missing repo row {name}"));
         state.cursor = idx;
     }
@@ -3121,6 +3728,780 @@ mod tests {
         assert!(
             state.graph_focus_picker.is_none(),
             "stale graph-focus gen must not open the picker when identity still matches"
+        );
+    }
+
+    fn capture_jobs(interp: &mut Interpreter, state: &mut AppState) -> Vec<(u64, JobWork)> {
+        let tui_opts = opts(state);
+        let mut jobs = Vec::new();
+        interp.spawn_ready(state, &tui_opts, &mut |id, work| {
+            jobs.push((id, work));
+        });
+        jobs
+    }
+
+    fn schedule_effect(
+        interp: &mut Interpreter,
+        state: &mut AppState,
+        effect: Effect,
+        action: &Action,
+    ) {
+        let tui_opts = opts(state);
+        interp.schedule(state, &tui_opts, effect, action);
+    }
+
+    fn apply_id(interp: &mut Interpreter, state: &mut AppState, id: u64, outcome: JobOutcome) {
+        let tui_opts = opts(state);
+        interp.apply(state, &tui_opts, id, outcome);
+    }
+
+    fn linked_fixture() -> AppState {
+        let mut wt = repo("wt", false);
+        wt.checkout_kind = crate::snapshot::CheckoutKind::Linked;
+        wt.primary_repo = Some("app".into());
+        let snapshot = build_workspace_snapshot(&[repo("app", false), wt], &[], false, &[]);
+        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+    }
+
+    #[test]
+    fn fetch_a_inflight_and_fetch_b_both_spawn_under_cap() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(2);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        let first = capture_jobs(&mut interp, &mut state);
+        assert_eq!(first.len(), 1);
+        assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
+
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["notes".into()],
+            },
+            &Action::Fetch,
+        );
+        let second = capture_jobs(&mut interp, &mut state);
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            interp.occupied_gitdirs(),
+            vec!["app".to_string(), "notes".to_string()]
+        );
+
+        let mut capped = Interpreter::with_cap(1);
+        let mut capped_state = fixture_state();
+        schedule_effect(
+            &mut capped,
+            &mut capped_state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut capped, &mut capped_state).len(), 1);
+        schedule_effect(
+            &mut capped,
+            &mut capped_state,
+            Effect::Fetch {
+                repos: vec!["notes".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut capped, &mut capped_state).len(), 0);
+        assert_eq!(capped.occupied_gitdirs(), vec!["app".to_string()]);
+        assert_eq!(
+            capped.pending_remotes(),
+            vec![(RunningOp::Fetch, "notes".into())]
+        );
+    }
+
+    #[test]
+    fn pull_same_gitdir_waits_for_inflight_fetch() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        let first = capture_jobs(&mut interp, &mut state);
+        assert_eq!(first.len(), 1);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Pull {
+                repos: vec!["app".into()],
+            },
+            &Action::Pull,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 0);
+        assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Pull, "app".into())]
+        );
+
+        apply_id(
+            &mut interp,
+            &mut state,
+            first[0].0,
+            JobOutcome::BulkRemote {
+                kind: RunningOp::Fetch,
+                ok: true,
+                repo: "app".into(),
+            },
+        );
+        let _spawned = capture_jobs(&mut interp, &mut state);
+        assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
+        assert!(interp.pending_remotes().is_empty());
+    }
+
+    #[test]
+    fn pull_none_during_inflight_fetch_still_queues() {
+        let mut state = fixture_state();
+        focus_repo(&mut state, "app");
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+        state.status = "nothing behind to pull".into();
+        schedule_effect(&mut interp, &mut state, Effect::None, &Action::Pull);
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Pull, "app".into())]
+        );
+        assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
+    }
+
+    #[test]
+    fn pull_none_without_behind_status_does_not_queue() {
+        let mut state = fixture_state();
+        focus_repo(&mut state, "app");
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+        state.status = "Fetching 0/1…".into();
+        schedule_effect(&mut interp, &mut state, Effect::None, &Action::Pull);
+        assert!(interp.pending_remotes().is_empty());
+    }
+
+    #[test]
+    fn pull_none_on_linked_checkout_follows_primary_fetch() {
+        let mut state = linked_fixture();
+        state.folds.remove("group:no-updates");
+        state.rebuild_rows();
+        focus_repo(&mut state, "wt");
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+        state.status = "nothing behind to pull".into();
+        schedule_effect(&mut interp, &mut state, Effect::None, &Action::Pull);
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Pull, "wt".into())]
+        );
+        assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 0);
+    }
+
+    #[test]
+    fn pending_fetch_coalesces_duplicate_fetch() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Fetch, "app".into())]
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+    }
+
+    #[test]
+    fn pending_fetch_replaced_by_pull() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Pull {
+                repos: vec!["app".into()],
+            },
+            &Action::Pull,
+        );
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Pull, "app".into())]
+        );
+    }
+
+    #[test]
+    fn fetchtick_coalesces_same_checkouts_and_enqueues_extra() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        let first = capture_jobs(&mut interp, &mut state);
+        assert_eq!(first.len(), 1);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into(), "notes".into()],
+            },
+            &Action::FetchTick,
+        );
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Fetch, "notes".into())]
+        );
+        let extra = capture_jobs(&mut interp, &mut state);
+        assert_eq!(extra.len(), 1);
+        assert_eq!(
+            interp.occupied_gitdirs(),
+            vec!["app".to_string(), "notes".to_string()]
+        );
+        assert!(interp.pending_remotes().is_empty());
+    }
+
+    #[test]
+    fn start_bulk_keeps_live_other_kind_batch() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Pull {
+                repos: vec!["notes".into()],
+            },
+            &Action::Pull,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+        assert_eq!(
+            interp.occupied_gitdirs(),
+            vec!["app".to_string(), "notes".to_string()]
+        );
+    }
+
+    #[test]
+    fn linked_checkout_occupies_primary_gitdir() {
+        let mut state = linked_fixture();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        let first = capture_jobs(&mut interp, &mut state);
+        assert_eq!(first.len(), 1);
+        assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["wt".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 0);
+        assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Fetch, "wt".into())]
+        );
+        apply_id(
+            &mut interp,
+            &mut state,
+            first[0].0,
+            JobOutcome::BulkRemote {
+                kind: RunningOp::Fetch,
+                ok: true,
+                repo: "app".into(),
+            },
+        );
+        let second = capture_jobs(&mut interp, &mut state);
+        assert_eq!(second.len(), 1);
+        assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
+        assert!(interp.pending_remotes().is_empty());
+    }
+
+    #[test]
+    fn exclusive_write_refuses_occupied_gitdir_and_allows_free() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Stage {
+                repo: "app".into(),
+                paths: vec!["README.md".into()],
+            },
+            &Action::Stage,
+        );
+        assert_eq!(state.status, "busy");
+        assert_eq!(interp.write_jobs_queued(), 0);
+        assert!(!interp.busy_for_writes());
+
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Stage {
+                repo: "notes".into(),
+                paths: vec!["README.md".into()],
+            },
+            &Action::Stage,
+        );
+        assert_eq!(interp.write_jobs_queued(), 1);
+        assert!(interp.busy_for_writes());
+    }
+
+    #[test]
+    fn confirm_yes_on_occupied_gitdir_keeps_overlay() {
+        use crate::tui::state::{PendingConfirm, RevertTarget};
+
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+
+        state.confirm = Some(PendingConfirm::Revert {
+            targets: vec![RevertTarget {
+                repo: "app".into(),
+                path: "README.md".into(),
+                untracked: false,
+                old_path: None,
+            }],
+            label: "README.md".into(),
+        });
+        state.status = "confirm revert app?".into();
+
+        assert!(
+            interp.keep_overlay_if_gitdir_busy(&mut state, &Action::ConfirmYes),
+            "must not dispatch ConfirmYes while that gitdir is occupied"
+        );
+        assert!(state.confirm.is_some(), "revert overlay must stay pending");
+        assert_eq!(state.status, "busy");
+        assert_eq!(interp.write_jobs_queued(), 0);
+
+        assert!(interp.keep_overlay_if_gitdir_busy(&mut state, &Action::ConfirmYesClean));
+        assert!(state.confirm.is_some());
+
+        state.confirm = Some(PendingConfirm::Revert {
+            targets: vec![RevertTarget {
+                repo: "notes".into(),
+                path: "README.md".into(),
+                untracked: false,
+                old_path: None,
+            }],
+            label: "README.md".into(),
+        });
+        state.status = "confirm revert notes?".into();
+        assert!(
+            !interp.keep_overlay_if_gitdir_busy(&mut state, &Action::ConfirmYes),
+            "free gitdir ConfirmYes must dispatch"
+        );
+        assert!(state.confirm.is_some());
+        assert_eq!(state.status, "confirm revert notes?");
+        assert_eq!(interp.write_jobs_queued(), 0);
+    }
+
+    #[test]
+    fn create_branch_submit_on_occupied_gitdir_keeps_prompt() {
+        use crate::tui::branches::CreateBranchState;
+
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+
+        state.create_branch = Some(CreateBranchState {
+            repo: "app".into(),
+            name: "topic".into(),
+            commit_id: None,
+        });
+        state.status = "new branch".into();
+
+        assert!(interp.keep_overlay_if_gitdir_busy(&mut state, &Action::CreateBranchSubmit));
+        assert!(state.create_branch.is_some());
+        assert_eq!(state.status, "busy");
+        assert_eq!(interp.write_jobs_queued(), 0);
+    }
+
+    #[test]
+    fn stash_menu_write_on_occupied_gitdir_keeps_menu() {
+        use crate::tui::stash::{StashOp, StashOpId};
+
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+
+        let create = StashOp {
+            id: StashOpId::Create,
+            key: 's',
+            label: "stash",
+            stash_ref: None,
+            paths: Some(vec!["README.md".into()]),
+        };
+        state.stash_repo = Some("app".into());
+        state.stash_menu = Some(vec![create.clone()]);
+        state.status = "stash".into();
+
+        assert!(interp.keep_overlay_if_gitdir_busy(&mut state, &Action::StashMenuEnter));
+        assert!(state.stash_menu.is_some());
+        assert_eq!(state.status, "busy");
+        assert_eq!(interp.write_jobs_queued(), 0);
+
+        state.status = "stash".into();
+        assert!(interp.keep_overlay_if_gitdir_busy(&mut state, &Action::StashMenuChar('s')));
+        assert!(state.stash_menu.is_some());
+        assert_eq!(state.status, "busy");
+
+        let drop = StashOp {
+            id: StashOpId::Drop,
+            key: 'D',
+            label: "drop stash",
+            stash_ref: Some("stash@{0}".into()),
+            paths: None,
+        };
+        state.stash_menu = Some(vec![drop]);
+        state.status = "drop stash".into();
+        assert!(
+            !interp.keep_overlay_if_gitdir_busy(&mut state, &Action::StashMenuEnter),
+            "stash drop opens confirm and must dispatch"
+        );
+        assert!(state.stash_menu.is_some());
+        assert_eq!(state.status, "drop stash");
+    }
+
+    #[test]
+    fn branch_submit_create_on_occupied_gitdir_keeps_picker() {
+        use crate::tui::branches::BranchPickerState;
+
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+
+        let mut picker = BranchPickerState::new("app".into(), vec![local_branch("main")]);
+        picker.set_filter("topic".into());
+        state.branch_picker = Some(picker);
+        state.status = "branch /topic".into();
+
+        assert!(interp.keep_overlay_if_gitdir_busy(&mut state, &Action::BranchSubmit));
+        assert!(state.branch_picker.is_some());
+        assert_eq!(state.status, "busy");
+        assert_eq!(interp.write_jobs_queued(), 0);
+
+        let mut checkout = BranchPickerState::new("app".into(), vec![local_branch("feature")]);
+        checkout.cursor = 0;
+        state.branch_picker = Some(checkout);
+        state.status = "branch".into();
+        assert!(
+            !interp.keep_overlay_if_gitdir_busy(&mut state, &Action::BranchSubmit),
+            "checkout submit keeps the picker until compute applies"
+        );
+        assert_eq!(state.status, "branch");
+    }
+
+    #[test]
+    fn busy_for_writes_false_for_remotes_true_for_write_and_default_branch() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert!(!interp.busy_for_writes());
+        let _ = capture_jobs(&mut interp, &mut state);
+        assert!(!interp.busy_for_writes());
+
+        let mut write_state = fixture_state();
+        let mut write_interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut write_interp,
+            &mut write_state,
+            Effect::Stage {
+                repo: "app".into(),
+                paths: vec!["README.md".into()],
+            },
+            &Action::Stage,
+        );
+        assert!(write_interp.busy_for_writes());
+
+        let mut switch_state = fixture_state();
+        let mut switch_interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut switch_interp,
+            &mut switch_state,
+            Effect::DefaultBranch {
+                repos: vec!["app".into()],
+            },
+            &Action::DefaultBranch,
+        );
+        assert!(switch_interp.busy_for_writes());
+    }
+
+    #[test]
+    fn inflight_fetch_plus_same_checkout_fetch_does_not_queue() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert!(interp.pending_remotes().is_empty());
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 0);
+    }
+
+    #[test]
+    fn exclusive_write_blocks_same_gitdir_remote_and_allows_other() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Stage {
+                repo: "app".into(),
+                paths: vec!["README.md".into()],
+            },
+            &Action::Stage,
+        );
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into(), "notes".into()],
+            },
+            &Action::Fetch,
+        );
+        let spawned = capture_jobs(&mut interp, &mut state);
+        assert_eq!(spawned.len(), 2);
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Fetch, "app".into())]
+        );
+        assert_eq!(
+            interp.occupied_gitdirs(),
+            vec!["app".to_string(), "notes".to_string()]
+        );
+
+        apply_id(
+            &mut interp,
+            &mut state,
+            spawned[0].0,
+            JobOutcome::Write {
+                status: "staged README.md".into(),
+            },
+        );
+        let _after = capture_jobs(&mut interp, &mut state);
+        assert!(interp.pending_remotes().is_empty());
+        assert!(interp.occupied_gitdirs().contains(&"app".to_string()));
+        assert!(interp.occupied_gitdirs().contains(&"notes".to_string()));
+    }
+
+    #[test]
+    fn default_branch_refuses_occupied_gitdir() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::DefaultBranch {
+                repos: vec!["app".into(), "notes".into()],
+            },
+            &Action::DefaultBranch,
+        );
+        assert_eq!(state.status, "busy");
+        assert!(!interp.default_branch_queued());
+        assert!(!interp.busy_for_writes());
+
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::DefaultBranch {
+                repos: vec!["notes".into()],
+            },
+            &Action::DefaultBranch,
+        );
+        assert!(interp.default_branch_queued());
+        assert!(interp.busy_for_writes());
+    }
+
+    #[test]
+    fn pull_replacing_last_pending_fetch_completes_fetch_wave() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(1);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into(), "notes".into()],
+            },
+            &Action::Fetch,
+        );
+        let first = capture_jobs(&mut interp, &mut state);
+        assert_eq!(first.len(), 1);
+        apply_id(
+            &mut interp,
+            &mut state,
+            first[0].0,
+            JobOutcome::BulkRemote {
+                kind: RunningOp::Fetch,
+                ok: true,
+                repo: "app".into(),
+            },
+        );
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Fetch, "notes".into())]
+        );
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Pull {
+                repos: vec!["notes".into()],
+            },
+            &Action::Pull,
+        );
+        assert_eq!(state.status, "Fetched 1 repo");
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Pull, "notes".into())]
         );
     }
 }

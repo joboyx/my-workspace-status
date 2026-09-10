@@ -1,9 +1,10 @@
 //! Bounded parallel map for independent per-repo git work.
 //!
-//! Ink used `mapWithConcurrency` with `FETCH_CONCURRENCY = 10`. Fetch, pull,
-//! push, and snapshot collect ([`crate::discovery::process_repo`]) share that
-//! cap. Writes that must stay exclusive on one checkout (stage, commit, merge
-//! into HEAD) stay serial on the event loop.
+//! Ink used `mapWithConcurrency` with `FETCH_CONCURRENCY = 10`. Snapshot
+//! collect ([`crate::discovery::process_repo`]) and tests share that cap
+//! via [`CappedBatch`]. Live TTY fetch / pull / push use the Scheduler
+//! JoinSet in `tui/effect.rs` with the same cap. Writes that must stay
+//! exclusive on one checkout (stage, commit, merge into HEAD) stay serial.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -54,7 +55,8 @@ where
         .collect()
 }
 
-/// Streaming capped map so the TUI can paint `Fetching n/N` as completions land.
+/// Streaming capped map. CLI `collect_snapshots` and tests use this.
+/// The live TTY fetch / pull / push path is the Scheduler JoinSet in `tui/effect.rs`.
 pub struct CappedBatch<U> {
     rx: Receiver<(usize, U)>,
     cancel: Arc<AtomicBool>,

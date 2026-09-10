@@ -13,9 +13,10 @@
 //! [`crate::snapshot::RepoSnapshot`] as it arrives. Applying a result must
 //! not call `git log` / `git diff` on the loop thread.
 //!
-//! While exclusive writes or a remote batch are in flight, nav / pane
-//! switch / cancel / quit still dispatch (`BusyAction::Handle`). Only
-//! actions that would start another git write are drained (`Ignore`).
+//! While exclusive writes are in flight, nav / pane switch / cancel / quit
+//! still dispatch (`BusyAction::Handle`). Only actions that would start
+//! another exclusive git write are drained (`Ignore`). Fetch / pull / push
+//! / FetchTick stay Handle so they enqueue on the per-gitdir remote queue.
 //!
 //! Held nav (`h`/`j`/`k`/`l`) maps Repeat to the same move as Press. The
 //! input thread drops queued copies of that key after each move so a hold
@@ -39,10 +40,12 @@ pub enum BusyAction {
     Quit,
 }
 
-/// Classify one dispatched action during an in-flight git op.
+/// Classify one dispatched action during an in-flight exclusive write.
 ///
-/// Writes (`f` / `p` / `s` / confirm-yes / …) are [`BusyAction::Ignore`] so
-/// they cannot start a second mutating child. Everything else stays live:
+/// Exclusive writes (`s` / confirm-yes / stash / checkout / merge / …) are
+/// [`BusyAction::Ignore`] so they cannot start a second mutating child.
+/// Fetch / pull / push / FetchTick are [`BusyAction::Handle`] so they
+/// enqueue on the per-gitdir remote queue. Everything else stays live:
 /// move, click, wheel, Tab, Esc, help, search, overlay cancel.
 pub fn classify_busy_action(action: &Action) -> BusyAction {
     match action {
@@ -51,10 +54,7 @@ pub fn classify_busy_action(action: &Action) -> BusyAction {
             cols: *cols,
             rows: *rows,
         },
-        Action::Fetch
-        | Action::Pull
-        | Action::Push
-        | Action::DefaultBranch
+        Action::DefaultBranch
         | Action::Stage
         | Action::Unstage
         | Action::Revert
@@ -63,7 +63,6 @@ pub fn classify_busy_action(action: &Action) -> BusyAction {
         | Action::Edit
         | Action::ExternalDiff
         | Action::WatchTick
-        | Action::FetchTick
         | Action::StashMenuEnter
         | Action::GraphStashApply
         | Action::GraphStashPop
@@ -229,9 +228,10 @@ mod tests {
             classify_busy_action(&Action::ConfirmYes),
             BusyAction::Ignore
         );
-        assert_eq!(classify_busy_action(&Action::Fetch), BusyAction::Ignore);
-        assert_eq!(classify_busy_action(&Action::Pull), BusyAction::Ignore);
-        assert_eq!(classify_busy_action(&Action::Push), BusyAction::Ignore);
+        assert_eq!(classify_busy_action(&Action::Fetch), BusyAction::Handle);
+        assert_eq!(classify_busy_action(&Action::Pull), BusyAction::Handle);
+        assert_eq!(classify_busy_action(&Action::Push), BusyAction::Handle);
+        assert_eq!(classify_busy_action(&Action::FetchTick), BusyAction::Handle);
         assert_eq!(classify_busy_action(&Action::Stage), BusyAction::Ignore);
         assert_eq!(classify_busy_action(&Action::Revert), BusyAction::Ignore);
         assert_eq!(classify_busy_action(&Action::Edit), BusyAction::Ignore);
@@ -261,7 +261,7 @@ mod tests {
     fn command_palette_submit_classifies_as_inner_action() {
         assert_eq!(
             classify_busy_dispatch(&Action::CommandPaletteSubmit, Some(&Action::Pull)),
-            BusyAction::Ignore
+            BusyAction::Handle
         );
         assert_eq!(
             classify_busy_dispatch(&Action::CommandPaletteSubmit, Some(&Action::ToggleHelp)),
@@ -346,6 +346,16 @@ mod tests {
         assert!(
             loop_src.contains("interp.apply("),
             "live JoinSet completions must call Interpreter::apply"
+        );
+        let overlay_gate = loop_src
+            .find("keep_overlay_if_gitdir_busy")
+            .expect("Confirm Yes must keep the overlay when that gitdir is occupied");
+        let dispatch = loop_src
+            .find("let effect = ctx.state.dispatch(action)")
+            .expect("live loop must dispatch after the overlay occupy gate");
+        assert!(
+            overlay_gate < dispatch,
+            "keep_overlay_if_gitdir_busy must run before dispatch takes the overlay"
         );
         assert!(
             sched.contains("fn accept_repo_result"),

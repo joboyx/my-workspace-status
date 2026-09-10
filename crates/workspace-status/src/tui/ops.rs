@@ -198,22 +198,56 @@ pub enum RunningOp {
     DefaultBranch,
 }
 
+fn running_op_verb(kind: RunningOp) -> &'static str {
+    match kind {
+        RunningOp::Fetch => "Fetching",
+        RunningOp::Pull => "Pulling",
+        RunningOp::Push => "Pushing",
+        RunningOp::DefaultBranch => "Switching",
+    }
+}
+
 /// Progress line for a running workspace op: `Pulling 2/18…`.
 ///
 /// `total == 0` drops the counter (`Pulling…`). The status line keeps
 /// mode pills and hints; this string is the breadcrumb trailing slot.
 pub fn format_running_op(kind: RunningOp, done: usize, total: usize) -> String {
-    let verb = match kind {
-        RunningOp::Fetch => "Fetching",
-        RunningOp::Pull => "Pulling",
-        RunningOp::Push => "Pushing",
-        RunningOp::DefaultBranch => "Switching",
-    };
+    let verb = running_op_verb(kind);
     if total == 0 {
         format!("{verb}…")
     } else {
         format!("{verb} {done}/{total}…")
     }
+}
+
+/// Mixed breadcrumb trailing slot when more than one remote kind is live.
+///
+/// Overlapping inflight kinds join counts without totals
+/// (`Fetching 1 · Pulling 1…`). One progressing kind plus other queued
+/// jobs uses `Fetching 1/2 · queued 1`. Repo names never appear here.
+pub fn format_mixed_running_op(
+    inflight: &[(RunningOp, usize)],
+    queued: usize,
+    progress: Option<(RunningOp, usize, usize)>,
+) -> String {
+    if inflight.len() >= 2 {
+        let body = inflight
+            .iter()
+            .map(|(kind, n)| format!("{} {n}", running_op_verb(*kind)))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        return format!("{body}…");
+    }
+    if let Some((kind, done, total)) = progress {
+        if queued > 0 {
+            return format!("{} {done}/{total} · queued {queued}", running_op_verb(kind));
+        }
+        return format_running_op(kind, done, total);
+    }
+    if let Some((kind, n)) = inflight.first() {
+        return format!("{} {n}…", running_op_verb(*kind));
+    }
+    String::new()
 }
 
 /// Completion line for a finished workspace op: `Pulled 3 repos`.
@@ -1134,6 +1168,14 @@ mod tests {
             "Switching 0/5…"
         );
         assert_eq!(format_running_op(RunningOp::Pull, 0, 0), "Pulling…");
+        assert_eq!(
+            format_mixed_running_op(&[(RunningOp::Fetch, 1), (RunningOp::Pull, 1)], 0, None),
+            "Fetching 1 · Pulling 1…"
+        );
+        assert_eq!(
+            format_mixed_running_op(&[], 1, Some((RunningOp::Fetch, 1, 2))),
+            "Fetching 1/2 · queued 1"
+        );
     }
 
     #[test]
