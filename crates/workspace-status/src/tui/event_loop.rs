@@ -285,9 +285,7 @@ pub async fn run(
             }
             _ = sleep_ms(fetch_remain) => {
                 ctx.last_fetch = Instant::now();
-                if !overlay_blocks_background_ticks(ctx.state.input_mode())
-                    && !ctx.interp.busy_for_writes()
-                {
+                if !overlay_blocks_background_ticks(ctx.state.input_mode()) {
                     let effect = ctx.state.dispatch(Action::FetchTick);
                     ctx.interp.schedule(ctx.state, ctx.opts, effect, &Action::FetchTick);
                     if ctx.interp.take_dirty() {

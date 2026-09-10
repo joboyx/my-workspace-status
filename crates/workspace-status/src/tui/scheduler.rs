@@ -215,13 +215,16 @@ impl Scheduler {
         self.latched_watch
     }
 
+    /// True when an exclusive write or default-branch switch is in flight or queued.
+    ///
+    /// Remote fetch / pull / push use the per-gitdir queue and do not set this.
     pub fn busy_for_writes(&self) -> bool {
         self.exclusive_write
             || self.inflight.values().any(|job| {
                 matches!(
                     job.kind,
                     SpawnKind::UserWork {
-                        tag: UserTag::Write | UserTag::BulkRemote | UserTag::DefaultBranch
+                        tag: UserTag::Write | UserTag::DefaultBranch
                     }
                 )
             })
@@ -229,10 +232,18 @@ impl Scheduler {
                 matches!(
                     kind,
                     SpawnKind::UserWork {
-                        tag: UserTag::Write | UserTag::BulkRemote | UserTag::DefaultBranch
+                        tag: UserTag::Write | UserTag::DefaultBranch
                     }
                 )
             })
+    }
+
+    /// Count of queued [`SpawnKind::UserWork`] slots with this tag.
+    pub(crate) fn queued_user_tag(&self, tag: UserTag) -> usize {
+        self.user_queue
+            .iter()
+            .filter(|kind| matches!(kind, SpawnKind::UserWork { tag: t } if *t == tag))
+            .count()
     }
 
     /// Watch tick. Starts a collect, or latches one rerun if one is running.
@@ -831,5 +842,31 @@ mod tests {
         let branch = s.request_prepare_branches();
         assert!(s.accept_prepare_compare_result(second));
         assert!(s.accept_prepare_branches_result(branch));
+    }
+
+    #[test]
+    fn busy_for_writes_ignores_bulk_remote() {
+        let mut s = Scheduler::new(4);
+        s.enqueue_user(UserTag::BulkRemote);
+        assert!(!s.busy_for_writes());
+        let spawned = s.spawn_ready();
+        assert_eq!(spawned.len(), 1);
+        assert!(!s.busy_for_writes());
+        s.note_job_finished(spawned[0].id);
+        s.note_user_done(UserTag::BulkRemote);
+        s.enqueue_user(UserTag::Write);
+        assert!(s.busy_for_writes());
+    }
+
+    #[test]
+    fn busy_for_writes_true_for_default_branch() {
+        let mut s = Scheduler::new(4);
+        s.enqueue_user(UserTag::DefaultBranch);
+        assert!(s.busy_for_writes());
+        let spawned = s.spawn_ready();
+        assert!(s.busy_for_writes());
+        s.note_job_finished(spawned[0].id);
+        s.note_user_done(UserTag::DefaultBranch);
+        assert!(!s.busy_for_writes());
     }
 }

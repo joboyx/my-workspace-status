@@ -12,7 +12,7 @@
 //! [`Interpreter::take_pending_edit`] and [`Interpreter::take_pending_diff`],
 //! then enqueues blob/temp prepare on `spawn_blocking` before spawning the tool.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use workspace_status_graph::LOADING_OLDER;
 
@@ -45,7 +45,7 @@ use super::graph_load::{
     autoload_limit, autoload_skip, load_graph_model_window, merge_autoload, should_autoload,
     GraphIdentity, ShouldAutoload,
 };
-use super::ops::{format_completed_op, format_running_op, RunningOp};
+use super::ops::{format_completed_op, format_mixed_running_op, format_running_op, RunningOp};
 use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
 use super::state::AppState;
 
@@ -80,6 +80,8 @@ pub(crate) enum JobOutcome {
     BulkRemote {
         kind: RunningOp,
         ok: bool,
+        /// Checkout path the worker ran in. Occupancy releases this gitdir.
+        repo: String,
     },
     DefaultBranch {
         ok: bool,
@@ -179,14 +181,82 @@ struct DiffPrepareJob {
     repo_abs: std::path::PathBuf,
 }
 
-struct BulkState {
+struct RemoteJob {
     kind: RunningOp,
-    remaining: VecDeque<String>,
-    inflight: usize,
-    done: usize,
+    checkout: String,
+}
+
+struct InflightRemote {
+    kind: RunningOp,
+    checkout: String,
+}
+
+struct KindWave {
     ok: usize,
     failed: usize,
     repos: Vec<String>,
+}
+
+impl KindWave {
+    fn empty() -> Self {
+        Self {
+            ok: 0,
+            failed: 0,
+            repos: Vec::new(),
+        }
+    }
+
+    fn done(&self) -> usize {
+        self.ok + self.failed
+    }
+
+    fn note_repo(&mut self, checkout: &str) {
+        if !self.repos.iter().any(|row| row == checkout) {
+            self.repos.push(checkout.to_string());
+        }
+    }
+
+    fn remove_repo(&mut self, checkout: &str) {
+        self.repos.retain(|row| row != checkout);
+    }
+}
+
+struct RemoteQueue {
+    pending: VecDeque<RemoteJob>,
+    occupy: HashMap<String, InflightRemote>,
+    fetch: KindWave,
+    pull: KindWave,
+    push: KindWave,
+}
+
+impl RemoteQueue {
+    fn new() -> Self {
+        Self {
+            pending: VecDeque::new(),
+            occupy: HashMap::new(),
+            fetch: KindWave::empty(),
+            pull: KindWave::empty(),
+            push: KindWave::empty(),
+        }
+    }
+
+    fn wave_mut(&mut self, kind: RunningOp) -> Option<&mut KindWave> {
+        match kind {
+            RunningOp::Fetch => Some(&mut self.fetch),
+            RunningOp::Pull => Some(&mut self.pull),
+            RunningOp::Push => Some(&mut self.push),
+            RunningOp::DefaultBranch => None,
+        }
+    }
+
+    fn wave(&self, kind: RunningOp) -> Option<&KindWave> {
+        match kind {
+            RunningOp::Fetch => Some(&self.fetch),
+            RunningOp::Pull => Some(&self.pull),
+            RunningOp::Push => Some(&self.push),
+            RunningOp::DefaultBranch => None,
+        }
+    }
 }
 
 struct WriteJob {
@@ -218,6 +288,17 @@ struct CompareProbeJob {
     last_base_tip: Option<String>,
 }
 
+/// Occupancy key: linked checkouts use `primary_repo`, else the checkout path.
+fn gitdir_key(state: &AppState, checkout: &str) -> String {
+    state
+        .snapshot
+        .repos
+        .iter()
+        .find(|row| row.repo == checkout)
+        .map(|row| row.primary_repo.clone().unwrap_or_else(|| row.repo.clone()))
+        .unwrap_or_else(|| checkout.to_string())
+}
+
 /// Shared Effect scheduler, spawn, and apply.
 ///
 /// Owns the queues the live `JoinSet` and the sync pump drain.
@@ -226,7 +307,7 @@ pub(crate) struct Interpreter {
     metas: HashMap<String, (RepoCheckoutMeta, Option<String>)>,
     pane_req: Option<RightPaneRequest>,
     writes: VecDeque<WriteJob>,
-    bulk: Option<BulkState>,
+    remote: RemoteQueue,
     default_queue: VecDeque<String>,
     prepare_stash: Option<(u64, String)>,
     prepare_branches: Option<(u64, String, bool)>,
@@ -258,7 +339,7 @@ impl Interpreter {
             metas: HashMap::new(),
             pane_req: None,
             writes: VecDeque::new(),
-            bulk: None,
+            remote: RemoteQueue::new(),
             default_queue: VecDeque::new(),
             prepare_stash: None,
             prepare_branches: None,
@@ -283,9 +364,39 @@ impl Interpreter {
         }
     }
 
-    /// True when an exclusive write or remote batch is in flight or queued.
+    /// True when an exclusive write or default-branch switch is in flight or queued.
+    ///
+    /// Remote fetch / pull / push use the per-gitdir queue and do not set this.
     pub(crate) fn busy_for_writes(&self) -> bool {
         self.sched.busy_for_writes()
+    }
+
+    #[cfg(test)]
+    fn with_cap(cap: usize) -> Self {
+        let mut this = Self::new();
+        this.sched = Scheduler::new(cap);
+        this
+    }
+
+    #[cfg(test)]
+    fn pending_remotes(&self) -> Vec<(RunningOp, String)> {
+        self.remote
+            .pending
+            .iter()
+            .map(|job| (job.kind, job.checkout.clone()))
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn occupied_gitdirs(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self.remote.occupy.keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    #[cfg(test)]
+    fn write_jobs_queued(&self) -> usize {
+        self.writes.len() + usize::from(self.checkout.is_some()) + usize::from(self.merge.is_some())
     }
 
     /// True when schedule or apply changed state that needs a paint.
@@ -359,6 +470,9 @@ impl Interpreter {
         effect: Effect,
         action: &Action,
     ) {
+        if self.refuse_exclusive_if_busy(state, &effect) {
+            return;
+        }
         match effect {
             Effect::None | Effect::Quit => {}
             Effect::Batch(effects) => {
@@ -846,33 +960,40 @@ impl Interpreter {
                 }
                 self.mark();
             }
-            JobOutcome::BulkRemote { kind, ok } => {
-                let finished = if let Some(bulk) = self.bulk.as_mut() {
-                    bulk.inflight = bulk.inflight.saturating_sub(1);
-                    bulk.done += 1;
+            JobOutcome::BulkRemote { kind, ok, repo } => {
+                let gitdir = self
+                    .remote
+                    .occupy
+                    .iter()
+                    .find(|(_, inf)| inf.checkout == repo)
+                    .map(|(key, _)| key.clone())
+                    .unwrap_or_else(|| gitdir_key(state, &repo));
+                self.remote.occupy.remove(&gitdir);
+                if let Some(wave) = self.remote.wave_mut(kind) {
                     if ok {
-                        bulk.ok += 1;
+                        wave.ok += 1;
                     } else {
-                        bulk.failed += 1;
+                        wave.failed += 1;
                     }
-                    state.status = format_running_op(kind, bulk.done, bulk.repos.len());
-                    bulk.remaining.is_empty() && bulk.inflight == 0
-                } else {
-                    false
-                };
+                    wave.note_repo(&repo);
+                }
                 self.mark();
-                if finished {
-                    let Some(bulk) = self.bulk.take() else {
-                        return;
-                    };
-                    state.stamp_checkout_flashes(&bulk.repos);
-                    state.status = format_completed_op(kind, bulk.ok, bulk.failed);
+                if self.kind_live(kind) {
+                    self.paint_remote_running(state);
+                } else if let Some(wave) = self.remote.wave_mut(kind) {
+                    let repos = std::mem::take(&mut wave.repos);
+                    let ok_n = wave.ok;
+                    let failed_n = wave.failed;
+                    *wave = KindWave::empty();
+                    state.stamp_checkout_flashes(&repos);
+                    state.status = format_completed_op(kind, ok_n, failed_n);
                     self.sched.on_reload_snapshot(state.focused_checkout_path());
                     if !state.is_compare_tab() {
                         self.pane_req = Some(RightPaneRequest::from_state(state));
                         self.sched.request_pane();
                     }
                 }
+                self.pump_remote_slots(state);
             }
             JobOutcome::DefaultBranch { ok } => {
                 self.sched.note_user_done(UserTag::DefaultBranch);
@@ -1146,25 +1267,228 @@ impl Interpreter {
         self.sched.enqueue_user(UserTag::Write);
     }
 
+    fn refuse_busy(&mut self, state: &mut AppState) {
+        state.status = "busy".to_string();
+        self.mark();
+    }
+
+    fn remote_gitdir_busy(&self, state: &AppState, checkout: &str) -> bool {
+        self.remote
+            .occupy
+            .contains_key(&gitdir_key(state, checkout))
+    }
+
+    fn refuse_exclusive_if_busy(&mut self, state: &mut AppState, effect: &Effect) -> bool {
+        let busy = match effect {
+            Effect::Stage { repo, .. }
+            | Effect::Unstage { repo, .. }
+            | Effect::Revert { repo, .. }
+            | Effect::StashCreate { repo, .. }
+            | Effect::StashApply { repo, .. }
+            | Effect::StashPop { repo, .. }
+            | Effect::StashDrop { repo, .. }
+            | Effect::CheckoutBranch { repo, .. }
+            | Effect::CreateBranch { repo, .. }
+            | Effect::CreateBranchAt { repo, .. }
+            | Effect::MergeIntoHead { repo, .. } => self.remote_gitdir_busy(state, repo),
+            Effect::RemoveWorktree { primary, path, .. } => {
+                self.remote_gitdir_busy(state, primary) || self.remote_gitdir_busy(state, path)
+            }
+            Effect::DefaultBranch { repos } => repos
+                .iter()
+                .any(|repo| self.remote_gitdir_busy(state, repo)),
+            _ => false,
+        };
+        if busy {
+            self.refuse_busy(state);
+        }
+        busy
+    }
+
     fn start_bulk(&mut self, state: &mut AppState, kind: RunningOp, repos: Vec<String>) {
         if repos.is_empty() {
             return;
         }
-        state.status = format_running_op(kind, 0, repos.len());
+        for checkout in repos {
+            self.enqueue_remote_job(kind, checkout);
+        }
+        self.paint_remote_running(state);
+        self.pump_remote_slots(state);
         self.mark();
-        let n = repos.len();
-        self.bulk = Some(BulkState {
-            kind,
-            remaining: repos.iter().cloned().collect(),
-            inflight: 0,
-            done: 0,
-            ok: 0,
-            failed: 0,
-            repos,
-        });
-        for _ in 0..n {
+    }
+
+    fn enqueue_remote_job(&mut self, kind: RunningOp, checkout: String) {
+        if matches!(kind, RunningOp::DefaultBranch) {
+            return;
+        }
+        if self.drop_new_remote(&checkout, kind) {
+            return;
+        }
+
+        let mut fetch_idx = None;
+        let mut saw_fetch = false;
+        let mut saw_pull = false;
+        let mut saw_push = false;
+        for (i, job) in self.remote.pending.iter().enumerate() {
+            if job.checkout != checkout {
+                continue;
+            }
+            match job.kind {
+                RunningOp::Fetch => {
+                    saw_fetch = true;
+                    fetch_idx = Some(i);
+                }
+                RunningOp::Pull => saw_pull = true,
+                RunningOp::Push => saw_push = true,
+                RunningOp::DefaultBranch => {}
+            }
+        }
+
+        match kind {
+            RunningOp::Fetch => {
+                if saw_fetch || saw_pull {
+                    return;
+                }
+                self.note_wave_repo(kind, &checkout);
+                self.remote.pending.push_back(RemoteJob { kind, checkout });
+            }
+            RunningOp::Pull => {
+                if saw_pull {
+                    return;
+                }
+                if let Some(i) = fetch_idx {
+                    let prev = self.remote.pending[i].checkout.clone();
+                    self.remove_wave_repo(RunningOp::Fetch, &prev);
+                    self.remote.pending[i].kind = RunningOp::Pull;
+                    self.remote.pending[i].checkout = checkout.clone();
+                    self.note_wave_repo(RunningOp::Pull, &checkout);
+                    return;
+                }
+                self.note_wave_repo(kind, &checkout);
+                self.remote.pending.push_back(RemoteJob { kind, checkout });
+            }
+            RunningOp::Push => {
+                if saw_push {
+                    return;
+                }
+                self.note_wave_repo(kind, &checkout);
+                self.remote.pending.push_back(RemoteJob { kind, checkout });
+            }
+            RunningOp::DefaultBranch => {}
+        }
+    }
+
+    fn drop_new_remote(&self, checkout: &str, kind: RunningOp) -> bool {
+        self.remote.occupy.values().any(|inf| {
+            inf.checkout == checkout
+                && (inf.kind == kind || (kind == RunningOp::Fetch && inf.kind == RunningOp::Pull))
+        })
+    }
+
+    fn note_wave_repo(&mut self, kind: RunningOp, checkout: &str) {
+        if let Some(wave) = self.remote.wave_mut(kind) {
+            wave.note_repo(checkout);
+        }
+    }
+
+    fn remove_wave_repo(&mut self, kind: RunningOp, checkout: &str) {
+        if let Some(wave) = self.remote.wave_mut(kind) {
+            wave.remove_repo(checkout);
+        }
+    }
+
+    fn kind_live(&self, kind: RunningOp) -> bool {
+        self.remote.pending.iter().any(|job| job.kind == kind)
+            || self.remote.occupy.values().any(|inf| inf.kind == kind)
+    }
+
+    fn eligible_remote_count(&self, state: &AppState) -> usize {
+        let mut reserved: HashSet<String> = self.remote.occupy.keys().cloned().collect();
+        let mut n = 0;
+        for job in &self.remote.pending {
+            let gitdir = gitdir_key(state, &job.checkout);
+            if reserved.contains(&gitdir) {
+                continue;
+            }
+            reserved.insert(gitdir);
+            n += 1;
+        }
+        n
+    }
+
+    fn pump_remote_slots(&mut self, state: &AppState) {
+        let need = self.eligible_remote_count(state);
+        let have = self.sched.queued_user_tag(UserTag::BulkRemote);
+        for _ in have..need {
             self.sched.enqueue_user(UserTag::BulkRemote);
         }
+    }
+
+    fn paint_remote_running(&self, state: &mut AppState) {
+        let mut progress = Vec::new();
+        for kind in [RunningOp::Fetch, RunningOp::Pull, RunningOp::Push] {
+            let inflight = self
+                .remote
+                .occupy
+                .values()
+                .filter(|job| job.kind == kind)
+                .count();
+            let pending = self
+                .remote
+                .pending
+                .iter()
+                .filter(|job| job.kind == kind)
+                .count();
+            let done = self.remote.wave(kind).map(|wave| wave.done()).unwrap_or(0);
+            if inflight + pending == 0 {
+                continue;
+            }
+            progress.push((kind, done, inflight, pending));
+        }
+        if progress.is_empty() {
+            return;
+        }
+        let inflight_parts: Vec<(RunningOp, usize)> = progress
+            .iter()
+            .filter(|(_, _, inflight, _)| *inflight > 0)
+            .map(|(kind, _, inflight, _)| (*kind, *inflight))
+            .collect();
+        if inflight_parts.len() >= 2 {
+            state.status = format_mixed_running_op(&inflight_parts, 0, None);
+            return;
+        }
+        if inflight_parts.len() == 1 {
+            let run = inflight_parts[0].0;
+            let (done, inflight, pending) = progress
+                .iter()
+                .find(|(kind, ..)| *kind == run)
+                .map(|(_, done, inflight, pending)| (*done, *inflight, *pending))
+                .unwrap_or((0, 0, 0));
+            let total = done + inflight + pending;
+            let other_queued: usize = progress
+                .iter()
+                .filter(|(kind, ..)| *kind != run)
+                .map(|(_, _, _, pending)| *pending)
+                .sum();
+            if other_queued > 0 {
+                state.status = format_mixed_running_op(&[], other_queued, Some((run, done, total)));
+            } else {
+                state.status = format_running_op(run, done, total);
+            }
+            return;
+        }
+        if progress.len() == 1 {
+            let (kind, done, inflight, pending) = progress[0];
+            state.status = format_running_op(kind, done, done + inflight + pending);
+            return;
+        }
+        let (kind, done, inflight, pending) = progress[0];
+        let other: usize = progress[1..]
+            .iter()
+            .map(|(_, _, _, pending)| *pending)
+            .sum();
+        state.status =
+            format_mixed_running_op(&[], other, Some((kind, done, done + inflight + pending)));
     }
 
     fn spawn_user(
@@ -1216,16 +1540,26 @@ impl Interpreter {
                 self.sched.note_user_done(UserTag::Write);
             }
             UserTag::BulkRemote => {
-                let Some(bulk) = self.bulk.as_mut() else {
+                let Some(idx) = self.remote.pending.iter().position(|job| {
+                    !self
+                        .remote
+                        .occupy
+                        .contains_key(&gitdir_key(state, &job.checkout))
+                }) else {
                     self.sched.note_job_finished(id);
                     return;
                 };
-                let Some(repo) = bulk.remaining.pop_front() else {
-                    self.sched.note_job_finished(id);
-                    return;
-                };
-                bulk.inflight += 1;
-                let kind = bulk.kind;
+                let job = self.remote.pending.remove(idx).expect("eligible remote");
+                let gitdir = gitdir_key(state, &job.checkout);
+                self.remote.occupy.insert(
+                    gitdir,
+                    InflightRemote {
+                        kind: job.kind,
+                        checkout: job.checkout.clone(),
+                    },
+                );
+                let kind = job.kind;
+                let repo = job.checkout;
                 let dir = opts.cwd.join(&repo);
                 spawn(
                     id,
@@ -1238,7 +1572,7 @@ impl Interpreter {
                             RunningOp::Push => push_quiet(&dir).is_ok(),
                             RunningOp::DefaultBranch => false,
                         };
-                        JobOutcome::BulkRemote { kind, ok }
+                        JobOutcome::BulkRemote { kind, ok, repo }
                     }),
                 );
             }
@@ -3122,5 +3456,407 @@ mod tests {
             state.graph_focus_picker.is_none(),
             "stale graph-focus gen must not open the picker when identity still matches"
         );
+    }
+
+    fn capture_jobs(interp: &mut Interpreter, state: &mut AppState) -> Vec<(u64, JobWork)> {
+        let tui_opts = opts(state);
+        let mut jobs = Vec::new();
+        interp.spawn_ready(state, &tui_opts, &mut |id, work| {
+            jobs.push((id, work));
+        });
+        jobs
+    }
+
+    fn schedule_effect(
+        interp: &mut Interpreter,
+        state: &mut AppState,
+        effect: Effect,
+        action: &Action,
+    ) {
+        let tui_opts = opts(state);
+        interp.schedule(state, &tui_opts, effect, action);
+    }
+
+    fn apply_id(interp: &mut Interpreter, state: &mut AppState, id: u64, outcome: JobOutcome) {
+        let tui_opts = opts(state);
+        interp.apply(state, &tui_opts, id, outcome);
+    }
+
+    fn linked_fixture() -> AppState {
+        let mut wt = repo("wt", false);
+        wt.checkout_kind = crate::snapshot::CheckoutKind::Linked;
+        wt.primary_repo = Some("app".into());
+        let snapshot = build_workspace_snapshot(&[repo("app", false), wt], &[], false, &[]);
+        AppState::new(PathBuf::from("/tmp"), snapshot, true)
+    }
+
+    #[test]
+    fn fetch_a_inflight_and_fetch_b_both_spawn_under_cap() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(2);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        let first = capture_jobs(&mut interp, &mut state);
+        assert_eq!(first.len(), 1);
+        assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
+
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["notes".into()],
+            },
+            &Action::Fetch,
+        );
+        let second = capture_jobs(&mut interp, &mut state);
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            interp.occupied_gitdirs(),
+            vec!["app".to_string(), "notes".to_string()]
+        );
+
+        let mut capped = Interpreter::with_cap(1);
+        let mut capped_state = fixture_state();
+        schedule_effect(
+            &mut capped,
+            &mut capped_state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut capped, &mut capped_state).len(), 1);
+        schedule_effect(
+            &mut capped,
+            &mut capped_state,
+            Effect::Fetch {
+                repos: vec!["notes".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut capped, &mut capped_state).len(), 0);
+        assert_eq!(capped.occupied_gitdirs(), vec!["app".to_string()]);
+        assert_eq!(
+            capped.pending_remotes(),
+            vec![(RunningOp::Fetch, "notes".into())]
+        );
+    }
+
+    #[test]
+    fn pull_same_gitdir_waits_for_inflight_fetch() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        let first = capture_jobs(&mut interp, &mut state);
+        assert_eq!(first.len(), 1);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Pull {
+                repos: vec!["app".into()],
+            },
+            &Action::Pull,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 0);
+        assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Pull, "app".into())]
+        );
+
+        apply_id(
+            &mut interp,
+            &mut state,
+            first[0].0,
+            JobOutcome::BulkRemote {
+                kind: RunningOp::Fetch,
+                ok: true,
+                repo: "app".into(),
+            },
+        );
+        let _spawned = capture_jobs(&mut interp, &mut state);
+        assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
+        assert!(interp.pending_remotes().is_empty());
+    }
+
+    #[test]
+    fn pending_fetch_coalesces_duplicate_fetch() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Fetch, "app".into())]
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+    }
+
+    #[test]
+    fn pending_fetch_replaced_by_pull() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Pull {
+                repos: vec!["app".into()],
+            },
+            &Action::Pull,
+        );
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Pull, "app".into())]
+        );
+    }
+
+    #[test]
+    fn fetchtick_coalesces_same_checkouts_and_enqueues_extra() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        let first = capture_jobs(&mut interp, &mut state);
+        assert_eq!(first.len(), 1);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into(), "notes".into()],
+            },
+            &Action::FetchTick,
+        );
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Fetch, "notes".into())]
+        );
+        let extra = capture_jobs(&mut interp, &mut state);
+        assert_eq!(extra.len(), 1);
+        assert_eq!(
+            interp.occupied_gitdirs(),
+            vec!["app".to_string(), "notes".to_string()]
+        );
+        assert!(interp.pending_remotes().is_empty());
+    }
+
+    #[test]
+    fn start_bulk_keeps_live_other_kind_batch() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Pull {
+                repos: vec!["notes".into()],
+            },
+            &Action::Pull,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+        assert_eq!(
+            interp.occupied_gitdirs(),
+            vec!["app".to_string(), "notes".to_string()]
+        );
+    }
+
+    #[test]
+    fn linked_checkout_occupies_primary_gitdir() {
+        let mut state = linked_fixture();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        let first = capture_jobs(&mut interp, &mut state);
+        assert_eq!(first.len(), 1);
+        assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["wt".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 0);
+        assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Fetch, "wt".into())]
+        );
+        apply_id(
+            &mut interp,
+            &mut state,
+            first[0].0,
+            JobOutcome::BulkRemote {
+                kind: RunningOp::Fetch,
+                ok: true,
+                repo: "app".into(),
+            },
+        );
+        let second = capture_jobs(&mut interp, &mut state);
+        assert_eq!(second.len(), 1);
+        assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
+        assert!(interp.pending_remotes().is_empty());
+    }
+
+    #[test]
+    fn exclusive_write_refuses_occupied_gitdir_and_allows_free() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Stage {
+                repo: "app".into(),
+                paths: vec!["README.md".into()],
+            },
+            &Action::Stage,
+        );
+        assert_eq!(state.status, "busy");
+        assert_eq!(interp.write_jobs_queued(), 0);
+        assert!(!interp.busy_for_writes());
+
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Stage {
+                repo: "notes".into(),
+                paths: vec!["README.md".into()],
+            },
+            &Action::Stage,
+        );
+        assert_eq!(interp.write_jobs_queued(), 1);
+        assert!(interp.busy_for_writes());
+    }
+
+    #[test]
+    fn busy_for_writes_false_for_remotes_true_for_write_and_default_branch() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert!(!interp.busy_for_writes());
+        let _ = capture_jobs(&mut interp, &mut state);
+        assert!(!interp.busy_for_writes());
+
+        let mut write_state = fixture_state();
+        let mut write_interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut write_interp,
+            &mut write_state,
+            Effect::Stage {
+                repo: "app".into(),
+                paths: vec!["README.md".into()],
+            },
+            &Action::Stage,
+        );
+        assert!(write_interp.busy_for_writes());
+
+        let mut switch_state = fixture_state();
+        let mut switch_interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut switch_interp,
+            &mut switch_state,
+            Effect::DefaultBranch {
+                repos: vec!["app".into()],
+            },
+            &Action::DefaultBranch,
+        );
+        assert!(switch_interp.busy_for_writes());
+    }
+
+    #[test]
+    fn inflight_fetch_plus_same_checkout_fetch_does_not_queue() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert!(interp.pending_remotes().is_empty());
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 0);
     }
 }
