@@ -1,8 +1,8 @@
 # Diff rendering
 
-`crates/workspace-status/src/tui/diff.rs` (paint in `tui/render.rs`). Path header,
-line-number gutter, and STAGED / UNSTAGED / NEW / COMMITTED labels. Intra-line word diff and
-syntax highlighting are not implemented yet.
+`crates/workspace-status/src/tui/diff.rs` (paint in `tui/render.rs`, syntax in
+`tui/syntax.rs`). Path header, line-number gutter, and STAGED / UNSTAGED / NEW / COMMITTED
+labels. Intra-line word diff is not implemented yet.
 
 ## Pipeline
 
@@ -29,11 +29,15 @@ Line numbers and the gutter rule use the theme `muted` colour without DIM so the
 
 ## Display columns
 
-Diff cells clip and pad by **display columns**, not Unicode scalar count. Clip uses `slice_cols`. Pad uses `visible_width` of the clipped text (MesloLGS NF: emoji and other pictographs are two columns; private-use Nerd glyphs stay one). Hunk headers use the same clip. Emoji stay emoji. Do not replace them with ASCII placeholders. Char-count clip or pad under-counts those glyphs, so a split left cell grows and the in-diff RULE leaves the context-row column.
+Diff cells clip and pad by **display columns**, not Unicode scalar count. Clip uses `slice_cols` (meta / hunk) or `slice_styled_cols` (syntax spans). Pad uses `visible_width` of the clipped text (MesloLGS NF: emoji and other pictographs are two columns; private-use Nerd glyphs stay one). Hunk headers use the same clip. Emoji stay emoji. Do not replace them with ASCII placeholders. Char-count clip or pad under-counts those glyphs, so a split left cell grows and the in-diff RULE leaves the context-row column.
 
 ## Highlighting
 
-Intra-line word diff and syntax highlighting are not in this TUI yet. Add/del cells use a solid accent colour. Context and meta lines use the theme's muted / default text. Line numbers use muted without DIM.
+Syntax highlighting uses `two-face` (syntect). Language comes from the file path (basename, then extension). An unknown path uses Plain Text and the theme `repo` foreground. Tokens set **foreground** only.
+
+Add and del rows keep `palette.diffAddBg` / `palette.diffDelBg` on the gutter, sign, code, and pad. The `+` / `-` signs stay `added` / `deleted` (bold). Cursor, visual-line, and search overlays still replace that row background. A syntax colour that fails a contrast floor of 3.0 against the add/del background falls back to `repo`. Syntect parse state is kept across hunk lines (old-file vs new-file streams) so a JSON property line after `{` still gets token colours.
+
+Context lines use the same token foregrounds on the surface (no add/del tint). Meta lines stay muted. Line numbers use muted without DIM. Intra-line word diff is still out of scope.
 
 ## Untracked files
 

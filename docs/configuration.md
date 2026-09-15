@@ -194,6 +194,8 @@ Unfocused pane borders use `palette.borderDim`. That token is a near-surface dar
 
 Graph ref chips: default-branch names use `palette.branchDefault` (distinct from `muted`). Checkout / detached marks use per-theme high-contrast `palette.headMark` (Nerd Font crosshairs / `[HEAD]`). Synced chips put Nerd Font exchange before the branch name. Marks are PUA icons so MesloLGS NF keeps 1-cell metrics. The graph selection footer reuses those same chip colours; it is not a single muted wash.
 
+File-diff add/del rows use `palette.diffAddBg` / `palette.diffDelBg` behind syntax foregrounds. The `+` / `-` signs keep `added` / `deleted`. Cursor, visual highlight, and search overlay still replace that row background. Tokyo Night: `diffAddBg` `#3f4d39`, `diffDelBg` `#583443`.
+
 ## Keymap
 
 See [tui-rust.md](./tui-rust.md) for the same keys with layout notes.
