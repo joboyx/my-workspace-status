@@ -1,7 +1,8 @@
 //! File-diff load, unified-diff parse, and numbered rows.
 //!
 //! Path header, line-number gutter, and STAGED / UNSTAGED / NEW labels.
-//! Intra-line / syntax highlight stays out of scope.
+//! Syntax highlighting lives in [`super::syntax`] and paint. Intra-line
+//! word diff stays out of scope.
 
 use std::path::Path;
 

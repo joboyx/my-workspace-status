@@ -48,6 +48,7 @@ use super::split::{
     side_by_side_column_widths, MIN_PANE_COLS,
 };
 use super::state::{AppState, FocusPane, PendingConfirm};
+use super::syntax::{highlight_diff_rows, slice_styled_cols};
 use super::tabs::{no_committed_changes_vs, NO_BRANCHES_TO_COMPARE, NO_COMMITTED_CHANGES};
 use super::theme::{hex_color, Palette};
 use super::tree::{
@@ -1012,6 +1013,15 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let line_width = area.width.saturating_sub(v_cols).max(1);
     let content_w = diff_row_content_width(line_width as usize) as u16;
     let content_len = rows.len();
+    let syntax_path = diff_syntax_path(state);
+    let syntax = highlight_diff_rows(
+        syntax_path,
+        &rows,
+        state.theme,
+        palette.repo,
+        palette.diff_add_bg,
+        palette.diff_del_bg,
+    );
     let painted: Vec<Line> = rows
         .iter()
         .enumerate()
@@ -1029,6 +1039,8 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                 state.focus == FocusPane::Right,
                 state.diff_visual_contains(i),
                 state.search_hit == Some(i),
+                syntax.left(i),
+                syntax.right(i),
             )
         })
         .collect();
@@ -1096,6 +1108,8 @@ fn paint_diff_row(
     focused: bool,
     visual: bool,
     search_hit: bool,
+    left_syntax: &[(String, Color)],
+    right_syntax: &[(String, Color)],
 ) -> Line<'static> {
     let palette = state.theme.palette();
     let mut line = match row {
@@ -1120,6 +1134,7 @@ fn paint_diff_row(
                 palette,
                 state,
                 state.ascii,
+                left_syntax,
             );
             spans.push(Span::styled(
                 DIFF_RULE.to_string(),
@@ -1133,6 +1148,7 @@ fn paint_diff_row(
                 palette,
                 state,
                 state.ascii,
+                right_syntax,
             ));
             Line::from(spans)
         }
@@ -1144,6 +1160,7 @@ fn paint_diff_row(
             palette,
             state,
             state.ascii,
+            left_syntax,
         )),
     };
     let bg = if selected && focused {
@@ -1200,31 +1217,83 @@ fn paint_cell_spans(
     palette: Palette,
     state: &AppState,
     ascii: bool,
+    syntax: &[(String, Color)],
 ) -> Vec<Span<'static>> {
     let width = width as usize;
     let mark_w = comment_mark_cols(ascii);
     let code_w = cell_code_width(width, gutter.saturating_add(mark_w));
     let comment = cell.line_no.and_then(|n| diff_cell_comment_state(state, n));
     let line_no = format_line_gutter(cell.line_no, gutter, comment, ascii);
-    let plain = slice_cols(&cell.text, col_offset, code_w);
     let sign = cell_sign(cell.kind);
     let accent = cell_accent(cell.kind, palette);
-    let code_style = accent.unwrap_or(Style::default().fg(palette.repo));
-    let gutter_style = diff_gutter_style(palette);
-    let used = visible_width(&line_no) + 4 + visible_width(&plain);
+    let row_bg = cell_row_bg(cell.kind, palette);
+    let gutter_style = with_row_bg(diff_gutter_style(palette), row_bg);
+    let sign_style = with_row_bg(
+        accent
+            .unwrap_or(Style::default())
+            .add_modifier(Modifier::BOLD),
+        row_bg,
+    );
+    let code_parts = paint_code_parts(cell, syntax, col_offset, code_w, palette);
+    let used = visible_width(&line_no)
+        + 4
+        + code_parts
+            .iter()
+            .map(|(text, _)| visible_width(text))
+            .sum::<usize>();
     let pad = width.saturating_sub(used);
-    vec![
+    let mut spans = vec![
         Span::styled(line_no, gutter_style),
         Span::styled(format!(" {DIFF_RULE} "), gutter_style),
-        Span::styled(
-            sign.to_string(),
-            accent
-                .unwrap_or(Style::default())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(plain, code_style),
-        Span::raw(" ".repeat(pad)),
-    ]
+        Span::styled(sign.to_string(), sign_style),
+    ];
+    for (text, fg) in code_parts {
+        spans.push(Span::styled(
+            text,
+            with_row_bg(Style::default().fg(fg), row_bg),
+        ));
+    }
+    spans.push(Span::styled(
+        " ".repeat(pad),
+        with_row_bg(Style::default(), row_bg),
+    ));
+    spans
+}
+
+fn paint_code_parts(
+    cell: &DiffCell,
+    syntax: &[(String, Color)],
+    col_offset: usize,
+    code_w: usize,
+    palette: Palette,
+) -> Vec<(String, Color)> {
+    match cell.kind {
+        DiffCellKind::Empty => Vec::new(),
+        DiffCellKind::Meta => vec![(slice_cols(&cell.text, col_offset, code_w), palette.muted)],
+        _ => slice_styled_cols(syntax, col_offset, code_w),
+    }
+}
+
+fn with_row_bg(style: Style, row_bg: Option<Color>) -> Style {
+    match row_bg {
+        Some(bg) => style.bg(bg),
+        None => style,
+    }
+}
+
+fn cell_row_bg(kind: DiffCellKind, palette: Palette) -> Option<Color> {
+    match kind {
+        DiffCellKind::Add => Some(palette.diff_add_bg),
+        DiffCellKind::Del => Some(palette.diff_del_bg),
+        DiffCellKind::Ctx | DiffCellKind::Meta | DiffCellKind::Empty => None,
+    }
+}
+
+fn diff_syntax_path(state: &AppState) -> &str {
+    match &state.drill {
+        DrillView::Diff { path, .. } => path.as_str(),
+        _ => state.diff_path.as_deref().unwrap_or(""),
+    }
 }
 
 /// Comment-mark column plus right-aligned line number.
@@ -2692,6 +2761,113 @@ mod tests {
             ]),
         );
         state
+    }
+
+    fn json_syntax_diff_state() -> AppState {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let file = state
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::File)
+            .expect("file row");
+        state.cursor = file;
+        state.focus = FocusPane::Left;
+        state.set_diff(
+            "app".into(),
+            "pack.json".into(),
+            super::super::diff::DiffContent::from_lines(vec![
+                "@@ -1,3 +1,4 @@".into(),
+                " {".into(),
+                r#"-  "ttlMs": 5000"#.into(),
+                r#"+  "ttlMs": 2000"#.into(),
+                r#"+  "name": "alpha-syntax""#.into(),
+                " }".into(),
+            ]),
+        );
+        state
+    }
+
+    fn first_row_with(buf: &ratatui::buffer::Buffer, needle: &str) -> Option<u16> {
+        for y in 0..buf.area().height {
+            if buf_line(buf, y).contains(needle) {
+                return Some(y);
+            }
+        }
+        None
+    }
+
+    fn needle_cells<'a>(
+        buf: &'a ratatui::buffer::Buffer,
+        y: u16,
+        needle: &str,
+    ) -> Vec<&'a ratatui::buffer::Cell> {
+        let start = find_cell_col(buf, y, needle).expect(needle);
+        (0..needle.chars().count() as u16)
+            .map(|i| &buf[(start + i, y)])
+            .collect()
+    }
+
+    #[test]
+    fn json_diff_keeps_signs_row_backgrounds_and_syntax_fg() {
+        let mut state = json_syntax_diff_state();
+        let palette = state.theme.palette();
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let buf = terminal.backend().buffer();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("pack.json"), "{text}");
+        assert!(text.contains("alpha-syntax"), "{text}");
+        assert!(text.contains("ttlMs"), "{text}");
+
+        let add_y = first_row_with(buf, "alpha-syntax").expect("add JSON line");
+        let del_y = first_row_with(buf, r#""ttlMs": 5000"#).expect("del JSON line");
+        let add_cells = needle_cells(buf, add_y, "alpha-syntax");
+        let add_span = needle_cells(buf, add_y, r#""name": "alpha-syntax""#);
+        assert!(
+            add_cells.iter().all(|cell| cell.bg == palette.diff_add_bg),
+            "add-line syntax must keep diff_add_bg, not a syntect background:\n{text}"
+        );
+        let del_cells = needle_cells(buf, del_y, "5000");
+        assert!(
+            del_cells.iter().all(|cell| cell.bg == palette.diff_del_bg),
+            "del-line syntax must keep diff_del_bg:\n{text}"
+        );
+
+        let add_line = buf_line(buf, add_y);
+        let plus_at = find_cell_col(buf, add_y, "+").expect("add sign");
+        let plus = &buf[(plus_at, add_y)];
+        assert_eq!(
+            plus.fg, palette.added,
+            "add sign stays added fg: {add_line}"
+        );
+        assert_eq!(
+            plus.bg, palette.diff_add_bg,
+            "add sign sits on the add row background"
+        );
+
+        let del_line = buf_line(buf, del_y);
+        let minus_at = find_cell_col(buf, del_y, "-").expect("del sign");
+        let minus = &buf[(minus_at, del_y)];
+        assert_eq!(
+            minus.fg, palette.deleted,
+            "del sign stays deleted fg: {del_line}"
+        );
+        assert_eq!(
+            minus.bg, palette.diff_del_bg,
+            "del sign sits on the del row background"
+        );
+
+        let add_fgs: std::collections::HashSet<_> = add_span.iter().map(|cell| cell.fg).collect();
+        assert!(
+            add_fgs.len() >= 2,
+            "JSON tokens on an add line should use more than one fg: {add_fgs:?}\n{text}"
+        );
+        assert!(
+            add_cells.iter().any(|cell| cell.fg != palette.added),
+            "syntax fg must not wash the add line with the added accent: {add_line}"
+        );
     }
 
     fn unfocused_inner(state: &AppState) -> (u16, u16, u16, u16) {

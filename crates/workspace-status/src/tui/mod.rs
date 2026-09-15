@@ -33,6 +33,7 @@ pub(crate) mod search;
 mod split;
 mod stash;
 mod state;
+pub(crate) mod syntax;
 mod tabs;
 mod theme;
 mod tree;

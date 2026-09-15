@@ -55,6 +55,10 @@ pub struct Palette {
     /// Selected-row background on an unfocused list. Darker than [`Self::cursor_bg`].
     pub cursor_bg_inactive: Color,
     pub diff_hunk: Color,
+    /// Add-line row background. Syntax fg paints on top. Cursor overlay wins.
+    pub diff_add_bg: Color,
+    /// Del-line row background. Syntax fg paints on top. Cursor overlay wins.
+    pub diff_del_bg: Color,
     /// Add-flash peak. Equals index 0 of [`Self::flash_ramp`].
     pub flash: Color,
     /// Four-step add fade. Index 0 is [`Self::flash`].
@@ -94,6 +98,10 @@ pub struct ThemePalette {
     /// Unfocused selected-row background hex. Darker than [`Self::cursor_bg`].
     pub cursor_bg_inactive: &'static str,
     pub diff_hunk: &'static str,
+    /// Add-line row background hex (`palette.diffAddBg` in docs).
+    pub diff_add_bg: &'static str,
+    /// Del-line row background hex (`palette.diffDelBg` in docs).
+    pub diff_del_bg: &'static str,
     /// Add-flash peak hex. Index 0 of [`Self::flash_ramp`].
     pub flash: &'static str,
     /// Four-step add fade hex. Index 0 matches [`Self::flash`].
@@ -205,6 +213,8 @@ impl ThemeId {
             cursor_bg: hex_color(p.cursor_bg),
             cursor_bg_inactive: hex_color(p.cursor_bg_inactive),
             diff_hunk: hex_color(p.diff_hunk),
+            diff_add_bg: hex_color(p.diff_add_bg),
+            diff_del_bg: hex_color(p.diff_del_bg),
             flash: hex_color(p.flash),
             flash_ramp: p.flash_ramp.map(hex_color),
             flash_update: hex_color(p.flash_update),
@@ -235,6 +245,8 @@ impl ThemeId {
 /// add `#516643` = `Rgb(81, 102, 67)`,
 /// update `#6d5942` = `Rgb(109, 89, 66)`,
 /// remove `#774152` = `Rgb(119, 65, 82)`.
+/// Diff add/del row backgrounds: add `#3f4d39` = `Rgb(63, 77, 57)`,
+/// del `#583443` = `Rgb(88, 52, 67)`.
 const TOKYO_NIGHT: Theme = Theme {
     id: ThemeId::TokyoNight,
     label: "Tokyo Night",
@@ -258,6 +270,8 @@ const TOKYO_NIGHT: Theme = Theme {
         cursor_bg: "#283457",
         cursor_bg_inactive: "#21273e",
         diff_hunk: "#7dcfff",
+        diff_add_bg: "#3f4d39",
+        diff_del_bg: "#583443",
         flash: "#516643",
         flash_ramp: ["#516643", "#3f4d39", "#2f3831", "#25292b"],
         flash_update: "#6d5942",
@@ -301,6 +315,8 @@ const MONOKAI: Theme = Theme {
         cursor_bg: "#3e3d32",
         cursor_bg_inactive: "#32322a",
         diff_hunk: "#66d9ef",
+        diff_add_bg: "#4b5c25",
+        diff_del_bg: "#63383f",
         flash: "#5c7627",
         flash_ramp: ["#5c7627", "#4b5c25", "#3b4624", "#313723"],
         flash_update: "#777344",
@@ -344,6 +360,8 @@ const DRACULA: Theme = Theme {
         cursor_bg: "#44475a",
         cursor_bg_inactive: "#363848",
         diff_hunk: "#8be9fd",
+        diff_add_bg: "#336449",
+        diff_del_bg: "#64363f",
         flash: "#398153",
         flash_ramp: ["#398153", "#336449", "#2e4b41", "#2b3b3c"],
         flash_update: "#7c815a",
@@ -387,6 +405,8 @@ const GRUVBOX_DARK: Theme = Theme {
         cursor_bg: "#3c3836",
         cursor_bg_inactive: "#32302f",
         diff_hunk: "#83a598",
+        diff_add_bg: "#505127",
+        diff_del_bg: "#63312b",
         flash: "#646627",
         flash_ramp: ["#646627", "#505127", "#3f4028", "#343428"],
         flash_update: "#80672b",
@@ -430,6 +450,8 @@ const CATPPUCCIN_MOCHA: Theme = Theme {
         cursor_bg: "#313244",
         cursor_bg_inactive: "#272839",
         diff_hunk: "#89dceb",
+        diff_add_bg: "#44554e",
+        diff_del_bg: "#5a3d50",
         flash: "#57715e",
         flash_ramp: ["#57715e", "#44554e", "#343e40", "#292e37"],
         flash_update: "#7a7064",
@@ -645,6 +667,8 @@ mod tests {
         assert_eq!(tokyo.flash, Color::Rgb(0x51, 0x66, 0x43));
         assert_eq!(tokyo.flash_update, Color::Rgb(0x6d, 0x59, 0x42));
         assert_eq!(tokyo.flash_remove, Color::Rgb(0x77, 0x41, 0x52));
+        assert_eq!(tokyo.diff_add_bg, Color::Rgb(0x3f, 0x4d, 0x39));
+        assert_eq!(tokyo.diff_del_bg, Color::Rgb(0x58, 0x34, 0x43));
     }
 
     fn srgb_lin(c: u8) -> f64 {
@@ -730,6 +754,25 @@ mod tests {
                 "{id:?} viewed must not reuse heading"
             );
             assert_ne!(pal.viewed, pal.dir, "{id:?} viewed must not reuse dir");
+            const ROW_BG_FLOOR: f64 = 3.0;
+            for (name, fg, bg) in [
+                ("added on diff_add_bg", pal.added, pal.diff_add_bg),
+                ("deleted on diff_del_bg", pal.deleted, pal.diff_del_bg),
+                ("repo on diff_add_bg", pal.repo, pal.diff_add_bg),
+                ("repo on diff_del_bg", pal.repo, pal.diff_del_bg),
+                ("muted on diff_add_bg", pal.muted, pal.diff_add_bg),
+                ("muted on diff_del_bg", pal.muted, pal.diff_del_bg),
+            ] {
+                let ratio = contrast_ratio(fg, bg);
+                assert!(
+                    ratio >= ROW_BG_FLOOR,
+                    "{id:?} {name} contrast {ratio:.2} < {ROW_BG_FLOOR}"
+                );
+            }
+            assert_ne!(
+                pal.diff_add_bg, pal.diff_del_bg,
+                "{id:?} add/del row backgrounds must differ"
+            );
         }
         let muteds: Vec<_> = THEME_IDS
             .iter()
