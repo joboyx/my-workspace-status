@@ -507,6 +507,22 @@ impl PtySession {
 
     /// Background of each cell in the first on-screen `needle`, top to bottom.
     pub fn first_needle_bgs(&self, needle: &str) -> Option<Vec<Option<(u8, u8, u8)>>> {
+        self.first_needle_colors(needle, CellColor::Bg)
+    }
+
+    /// Foreground of each cell in the first on-screen `needle`, top to bottom.
+    ///
+    /// File-diff syntax claims: token colours on one JSON span. `screen()` is
+    /// glyphs only, so this is the paint claim.
+    pub fn first_needle_fgs(&self, needle: &str) -> Option<Vec<Option<(u8, u8, u8)>>> {
+        self.first_needle_colors(needle, CellColor::Fg)
+    }
+
+    fn first_needle_colors(
+        &self,
+        needle: &str,
+        which: CellColor,
+    ) -> Option<Vec<Option<(u8, u8, u8)>>> {
         if needle.is_empty() {
             return None;
         }
@@ -533,13 +549,62 @@ impl PtySession {
             };
             let char_at = text[..byte_at].chars().count();
             let nchars = needle.chars().count();
-            let mut bgs = Vec::with_capacity(nchars);
+            let mut colors = Vec::with_capacity(nchars);
             for i in 0..nchars {
                 let col = *cols.get(char_at + i)?;
                 let cell = screen.cell(row, col)?;
-                bgs.push(rgb_of(cell.bgcolor()));
+                let color = match which {
+                    CellColor::Fg => cell.fgcolor(),
+                    CellColor::Bg => cell.bgcolor(),
+                };
+                colors.push(rgb_of(color));
             }
-            return Some(bgs);
+            return Some(colors);
+        }
+        None
+    }
+
+    /// Foreground of the first `glyph` on the same row as `needle`.
+    ///
+    /// Diff `+` / `-` sit left of the code span. A screen-wide RGB hit is
+    /// not enough: lane greens can match `added`.
+    pub fn first_glyph_on_needle_row_fg(
+        &self,
+        needle: &str,
+        glyph: char,
+    ) -> Option<Option<(u8, u8, u8)>> {
+        if needle.is_empty() {
+            return None;
+        }
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        for row in 0..self.rows {
+            let mut text = String::new();
+            let mut cols: Vec<u16> = Vec::new();
+            for col in 0..self.cols {
+                let Some(cell) = screen.cell(row, col) else {
+                    continue;
+                };
+                let contents = cell.contents();
+                if contents.is_empty() {
+                    continue;
+                }
+                for ch in contents.chars() {
+                    cols.push(col);
+                    text.push(ch);
+                }
+            }
+            if !text.contains(needle) {
+                continue;
+            }
+            for (i, ch) in text.chars().enumerate() {
+                if ch != glyph {
+                    continue;
+                }
+                let col = *cols.get(i)?;
+                let cell = screen.cell(row, col)?;
+                return Some(rgb_of(cell.fgcolor()));
+            }
         }
         None
     }
@@ -968,6 +1033,11 @@ pub(crate) fn write_update_check(path: &Path, last_check_unix: Option<u64>) {
     });
     let body = format!("{{\n  \"version\": 1,\n  \"lastCheckUnix\": {unix}\n}}\n");
     fs::write(path, body).unwrap();
+}
+
+enum CellColor {
+    Fg,
+    Bg,
 }
 
 fn color_is_rgb(color: vt100::Color, r: u8, g: u8, b: u8) -> bool {

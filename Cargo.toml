@@ -12,3 +12,22 @@ rust-version = "1.85"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# syntect's fancy-regex backend is very slow unoptimized. Keep debug/test
+# highlighting usable without switching to Oniguruma.
+[profile.dev.package.fancy-regex]
+opt-level = 3
+[profile.dev.package.regex-automata]
+opt-level = 3
+[profile.dev.package.syntect]
+opt-level = 3
+[profile.dev.package.two-face]
+opt-level = 3
+[profile.test.package.fancy-regex]
+opt-level = 3
+[profile.test.package.regex-automata]
+opt-level = 3
+[profile.test.package.syntect]
+opt-level = 3
+[profile.test.package.two-face]
+opt-level = 3
