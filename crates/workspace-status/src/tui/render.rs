@@ -1029,7 +1029,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                 del_bg: palette.diff_del_bg,
                 visible_start: skip,
                 visible_end: skip.saturating_add(line_h),
-                cache_id: diff_syntax_cache_id(state, split, rows.len()),
+                cache_id: diff_syntax_cache_id(state, split),
             },
             syntax_path,
             &rows,
@@ -1317,9 +1317,21 @@ fn diff_syntax_path(state: &AppState) -> &str {
     }
 }
 
-fn diff_syntax_cache_id(state: &AppState, split: bool, rows_len: usize) -> u64 {
-    let ptr = state.current_diff_content() as *const super::diff::DiffContent as u64;
-    ptr ^ ((u64::from(split) << 48) | (rows_len as u64))
+/// Identity for syntax-span reuse.
+///
+/// Hash the painted [`super::diff::DiffContent`] plus split layout. Do not
+/// use the `DiffContent` address: [`AppState::set_diff`] and
+/// [`AppState::apply_compare_diff`] replace text in place, so the pointer
+/// and row count can stay the same while the source changes.
+fn diff_syntax_cache_id(state: &AppState, split: bool) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    state
+        .current_diff_content()
+        .syntax_fingerprint()
+        .hash(&mut hasher);
+    split.hash(&mut hasher);
+    hasher.finish()
 }
 
 thread_local! {
@@ -2793,6 +2805,17 @@ mod tests {
         state
     }
 
+    fn json_named_lines(name: &str) -> Vec<String> {
+        vec![
+            "@@ -1,3 +1,4 @@".into(),
+            " {".into(),
+            r#"-  "ttlMs": 5000"#.into(),
+            r#"+  "ttlMs": 2000"#.into(),
+            format!(r#"+  "name": "{name}""#),
+            " }".into(),
+        ]
+    }
+
     fn json_syntax_diff_state() -> AppState {
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
@@ -2806,14 +2829,7 @@ mod tests {
         state.set_diff(
             "app".into(),
             "pack.json".into(),
-            super::super::diff::DiffContent::from_lines(vec![
-                "@@ -1,3 +1,4 @@".into(),
-                " {".into(),
-                r#"-  "ttlMs": 5000"#.into(),
-                r#"+  "ttlMs": 2000"#.into(),
-                r#"+  "name": "alpha-syntax""#.into(),
-                " }".into(),
-            ]),
+            super::super::diff::DiffContent::from_lines(json_named_lines("alpha-syntax")),
         );
         state
     }
@@ -2923,14 +2939,9 @@ mod tests {
                 path: "pack.json".into(),
                 old_path: None,
             }];
-            tab.content = super::super::diff::DiffContent::from_compare_lines(vec![
-                "@@ -1,3 +1,4 @@".into(),
-                " {".into(),
-                r#"-  "ttlMs": 5000"#.into(),
-                r#"+  "ttlMs": 2000"#.into(),
-                r#"+  "name": "alpha-syntax""#.into(),
-                " }".into(),
-            ]);
+            tab.content = super::super::diff::DiffContent::from_compare_lines(json_named_lines(
+                "alpha-syntax",
+            ));
         }
         state
     }
@@ -2968,6 +2979,120 @@ mod tests {
         assert!(
             add_fgs.len() >= 2,
             "compare-tab JSON must use the .json path, not parked markdown: {add_fgs:?}\n{text}"
+        );
+    }
+
+    fn assert_json_name_paints_fresh_syntax(
+        terminal: &Terminal<TestBackend>,
+        palette: crate::tui::theme::Palette,
+        name: &str,
+        stale: &str,
+    ) {
+        let buf = terminal.backend().buffer();
+        let text = buffer_text(terminal);
+        assert!(text.contains(name), "expected {name} after reload:\n{text}");
+        assert!(
+            !text.contains(stale),
+            "stale cached text {stale} must not remain:\n{text}"
+        );
+        let add_y = first_row_with(buf, name).expect("JSON name line");
+        let add_span = needle_cells(buf, add_y, &format!(r#""name": "{name}""#));
+        let add_fgs: std::collections::HashSet<_> = add_span.iter().map(|cell| cell.fg).collect();
+        assert!(
+            add_fgs.len() >= 2,
+            "replacement JSON must get new token colours, not a stale span list: {add_fgs:?}\n{text}"
+        );
+        let add_cells = needle_cells(buf, add_y, name);
+        assert!(
+            add_cells.iter().all(|cell| cell.bg == palette.diff_add_bg),
+            "same-size reload must keep diff_add_bg:\n{text}"
+        );
+        let plus_at = find_cell_col(buf, add_y, "+").expect("add sign");
+        let plus = &buf[(plus_at, add_y)];
+        assert_eq!(plus.fg, palette.added, "add sign stays added fg");
+        assert_eq!(plus.bg, palette.diff_add_bg, "add sign stays on add bg");
+    }
+
+    #[test]
+    fn same_size_watch_replacement_invalidates_syntax_cache() {
+        let mut state = json_syntax_diff_state();
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let first = buffer_text(&terminal);
+        assert!(first.contains("alpha-syntax"), "{first}");
+        let rows_before = state.current_diff_rows().len();
+        let ptr_before = std::ptr::from_ref(state.current_diff_content());
+        state.set_diff(
+            "app".into(),
+            "pack.json".into(),
+            super::super::diff::DiffContent::from_lines(json_named_lines("omega-syntax")),
+        );
+        assert_eq!(
+            std::ptr::from_ref(state.current_diff_content()),
+            ptr_before,
+            "set_diff keeps the DiffContent field address; cache must not key on the pointer"
+        );
+        assert_eq!(
+            state.current_diff_rows().len(),
+            rows_before,
+            "same-size replacement keeps the row count"
+        );
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_json_name_paints_fresh_syntax(
+            &terminal,
+            state.theme.palette(),
+            "omega-syntax",
+            "alpha-syntax",
+        );
+    }
+
+    #[test]
+    fn same_size_compare_replacement_invalidates_syntax_cache() {
+        let mut state = compare_json_over_stale_workspace_state();
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let first = buffer_text(&terminal);
+        assert!(first.contains("alpha-syntax"), "{first}");
+        let source = super::super::drill::CommitFileSource::Compare {
+            base_ref: "main".into(),
+            base_tip: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            merge_base: "cccccccccccccccccccccccccccccccccccccccc".into(),
+            head: "dddddddddddddddddddddddddddddddddddddddd".into(),
+        };
+        let (tab_id, gen) = {
+            let tab = state.tabs.active_compare_mut().unwrap();
+            tab.source = Some(source.clone());
+            (tab.id, tab.generation)
+        };
+        let rows_before = state.current_diff_rows().len();
+        let ptr_before = std::ptr::from_ref(state.current_diff_content());
+        state.apply_compare_diff(
+            tab_id,
+            gen,
+            &source,
+            "pack.json",
+            Ok(super::super::diff::DiffContent::from_compare_lines(
+                json_named_lines("omega-syntax"),
+            )),
+        );
+        assert_eq!(
+            std::ptr::from_ref(state.current_diff_content()),
+            ptr_before,
+            "apply_compare_diff keeps CompareTab.content address; cache must not key on the pointer"
+        );
+        assert_eq!(
+            state.current_diff_rows().len(),
+            rows_before,
+            "same-size compare replacement keeps the row count"
+        );
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_json_name_paints_fresh_syntax(
+            &terminal,
+            state.theme.palette(),
+            "omega-syntax",
+            "alpha-syntax",
         );
     }
 

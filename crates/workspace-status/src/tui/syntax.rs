@@ -198,6 +198,7 @@ pub(crate) struct DiffSyntaxKey {
     pub del_bg: Color,
     pub visible_start: usize,
     pub visible_end: usize,
+    /// Painted diff-text identity. Must change when unified text changes.
     pub cache_id: u64,
 }
 
@@ -884,6 +885,72 @@ mod tests {
         assert!(
             Arc::ptr_eq(&first, &second),
             "cache hit returns the same spans allocation"
+        );
+    }
+
+    #[test]
+    fn cached_highlight_misses_when_cache_id_changes_for_same_size_rows() {
+        let alpha = vec![
+            DiffRow::Hunk {
+                text: "@@ -1,2 +1,2 @@".into(),
+            },
+            line_row(DiffCellKind::Ctx, " {", 1),
+            line_row(DiffCellKind::Add, r#"  "name": "alpha-syntax""#, 2),
+        ];
+        let omega = vec![
+            DiffRow::Hunk {
+                text: "@@ -1,2 +1,2 @@".into(),
+            },
+            line_row(DiffCellKind::Ctx, " {", 1),
+            line_row(DiffCellKind::Add, r#"  "name": "omega-syntax""#, 2),
+        ];
+        assert_eq!(alpha.len(), omega.len());
+        let visible = 0..alpha.len();
+        let mut cache = None;
+        let first = cached_highlight_diff_rows(
+            &mut cache,
+            syntax_key(visible.clone(), 1),
+            "pack.json",
+            &alpha,
+            ThemeId::TokyoNight,
+            FALLBACK,
+            ADD_BG,
+            DEL_BG,
+            visible.clone(),
+        );
+        let second = cached_highlight_diff_rows(
+            &mut cache,
+            syntax_key(visible.clone(), 2),
+            "pack.json",
+            &omega,
+            ThemeId::TokyoNight,
+            FALLBACK,
+            ADD_BG,
+            DEL_BG,
+            visible,
+        );
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "a new cache_id must not reuse the previous span list"
+        );
+        let omega_text: String = second
+            .left(2)
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect();
+        assert!(
+            omega_text.contains("omega-syntax"),
+            "second paint must store the replacement text: {omega_text:?}"
+        );
+        assert!(
+            !omega_text.contains("alpha-syntax"),
+            "second paint must not keep the prior cached text: {omega_text:?}"
+        );
+        let omega_fgs: std::collections::HashSet<_> =
+            second.left(2).iter().map(|(_, color)| *color).collect();
+        assert!(
+            omega_fgs.len() >= 2,
+            "replacement JSON must still get token colours: {omega_fgs:?}"
         );
     }
 

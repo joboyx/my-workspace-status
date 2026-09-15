@@ -4,6 +4,8 @@
 //! Syntax highlighting lives in [`super::syntax`] and paint. Intra-line
 //! word diff stays out of scope.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use crate::git::{exec_git, git_diff_args};
@@ -76,7 +78,7 @@ struct Hunk {
 }
 
 /// Staged + unstaged unified text for one file.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct DiffContent {
     pub staged: String,
     pub unstaged: String,
@@ -116,6 +118,17 @@ impl DiffContent {
     #[allow(dead_code)]
     pub fn is_blank(&self) -> bool {
         self.staged.trim().is_empty() && self.unstaged.trim().is_empty()
+    }
+
+    /// Identity for TUI syntax-span reuse.
+    ///
+    /// Watch and compare reloads assign a new `DiffContent` value in place, so
+    /// the field address and row count can stay the same while the text
+    /// changes. Paint must key the span cache on this hash, not on a pointer.
+    pub(crate) fn syntax_fingerprint(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
     }
 }
 
@@ -867,6 +880,32 @@ index 1111111..2222222 100644
         assert!(!DiffContent::from_unified("@@ -1 +1 @@\n+a\n").is_blank());
         let from_vec = DiffContent::from_lines(vec!["@@ -1 +1 @@".into(), "+a".into()]);
         assert!(!from_vec.is_blank());
+    }
+
+    #[test]
+    fn syntax_fingerprint_changes_when_same_length_text_changes() {
+        let alpha = DiffContent::from_lines(vec![
+            "@@ -1,3 +1,4 @@".into(),
+            " {".into(),
+            r#"-  "ttlMs": 5000"#.into(),
+            r#"+  "ttlMs": 2000"#.into(),
+            r#"+  "name": "alpha-syntax""#.into(),
+            " }".into(),
+        ]);
+        let omega = DiffContent::from_lines(vec![
+            "@@ -1,3 +1,4 @@".into(),
+            " {".into(),
+            r#"-  "ttlMs": 5000"#.into(),
+            r#"+  "ttlMs": 2000"#.into(),
+            r#"+  "name": "omega-syntax""#.into(),
+            " }".into(),
+        ]);
+        assert_eq!(alpha.unstaged.len(), omega.unstaged.len());
+        assert_ne!(alpha.syntax_fingerprint(), omega.syntax_fingerprint());
+        assert_eq!(
+            alpha.syntax_fingerprint(),
+            alpha.clone().syntax_fingerprint()
+        );
     }
 
     #[test]
