@@ -2067,7 +2067,7 @@ impl AppState {
         }
     }
 
-    fn current_diff_content(&self) -> &DiffContent {
+    pub(crate) fn current_diff_content(&self) -> &DiffContent {
         if let Some(tab) = self.tabs.active_compare() {
             return &tab.content;
         }

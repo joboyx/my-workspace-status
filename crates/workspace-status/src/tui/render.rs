@@ -13,6 +13,7 @@ use workspace_status_graph::{
     GraphLabelPalette, GraphWidget, ASCII, UNICODE,
 };
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 
 use super::chrome::{
@@ -48,7 +49,9 @@ use super::split::{
     side_by_side_column_widths, MIN_PANE_COLS,
 };
 use super::state::{AppState, FocusPane, PendingConfirm};
-use super::syntax::{highlight_diff_rows, slice_styled_cols};
+use super::syntax::{
+    cached_highlight_diff_rows, slice_styled_cols, CachedDiffSyntax, DiffSyntaxKey,
+};
 use super::tabs::{no_committed_changes_vs, NO_BRANCHES_TO_COMPARE, NO_COMMITTED_CHANGES};
 use super::theme::{hex_color, Palette};
 use super::tree::{
@@ -1014,14 +1017,29 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let content_w = diff_row_content_width(line_width as usize) as u16;
     let content_len = rows.len();
     let syntax_path = diff_syntax_path(state);
-    let syntax = highlight_diff_rows(
-        syntax_path,
-        &rows,
-        state.theme,
-        palette.repo,
-        palette.diff_add_bg,
-        palette.diff_del_bg,
-    );
+    let syntax = DIFF_SYNTAX_CACHE.with(|slot| {
+        let mut cache = slot.borrow_mut();
+        cached_highlight_diff_rows(
+            &mut cache,
+            DiffSyntaxKey {
+                path: syntax_path.to_string(),
+                theme: state.theme,
+                fallback: palette.repo,
+                add_bg: palette.diff_add_bg,
+                del_bg: palette.diff_del_bg,
+                visible_start: skip,
+                visible_end: skip.saturating_add(line_h),
+                cache_id: diff_syntax_cache_id(state, split, rows.len()),
+            },
+            syntax_path,
+            &rows,
+            state.theme,
+            palette.repo,
+            palette.diff_add_bg,
+            palette.diff_del_bg,
+            skip..skip.saturating_add(line_h),
+        )
+    });
     let painted: Vec<Line> = rows
         .iter()
         .enumerate()
@@ -1290,10 +1308,22 @@ fn cell_row_bg(kind: DiffCellKind, palette: Palette) -> Option<Color> {
 }
 
 fn diff_syntax_path(state: &AppState) -> &str {
+    if let Some(tab) = state.tabs.active_compare() {
+        return tab.path.as_deref().unwrap_or("");
+    }
     match &state.drill {
         DrillView::Diff { path, .. } => path.as_str(),
         _ => state.diff_path.as_deref().unwrap_or(""),
     }
+}
+
+fn diff_syntax_cache_id(state: &AppState, split: bool, rows_len: usize) -> u64 {
+    let ptr = state.current_diff_content() as *const super::diff::DiffContent as u64;
+    ptr ^ ((u64::from(split) << 48) | (rows_len as u64))
+}
+
+thread_local! {
+    static DIFF_SYNTAX_CACHE: RefCell<Option<CachedDiffSyntax>> = const { RefCell::new(None) };
 }
 
 /// Comment-mark column plus right-aligned line number.
@@ -2867,6 +2897,77 @@ mod tests {
         assert!(
             add_cells.iter().any(|cell| cell.fg != palette.added),
             "syntax fg must not wash the add line with the added accent: {add_line}"
+        );
+    }
+
+    fn compare_json_over_stale_workspace_state() -> AppState {
+        let mut state = two_pane_diff_state();
+        state.open_commit_files(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![super::super::drill::CommitFile {
+                status: "M".into(),
+                path: "parked-drill.md".into(),
+                old_path: None,
+            }],
+        );
+        state.tabs.open_or_focus("app".into(), "main".into());
+        {
+            let tab = state.tabs.active_compare_mut().unwrap();
+            tab.loading = false;
+            tab.path = Some("pack.json".into());
+            tab.files = vec![super::super::drill::CommitFile {
+                status: "M".into(),
+                path: "pack.json".into(),
+                old_path: None,
+            }];
+            tab.content = super::super::diff::DiffContent::from_compare_lines(vec![
+                "@@ -1,3 +1,4 @@".into(),
+                " {".into(),
+                r#"-  "ttlMs": 5000"#.into(),
+                r#"+  "ttlMs": 2000"#.into(),
+                r#"+  "name": "alpha-syntax""#.into(),
+                " }".into(),
+            ]);
+        }
+        state
+    }
+
+    #[test]
+    fn compare_tab_syntax_path_uses_active_file_not_workspace() {
+        let state = compare_json_over_stale_workspace_state();
+        assert_eq!(state.diff_path.as_deref(), Some("README.md"));
+        assert!(matches!(state.drill, DrillView::Files { .. }));
+        let path = diff_syntax_path(&state);
+        assert_eq!(path, "pack.json");
+        let name = crate::tui::syntax::language_name(path, None);
+        assert!(
+            name.to_ascii_lowercase().contains("json"),
+            "compare path must select JSON, got {name}"
+        );
+        let parked = crate::tui::syntax::language_name("README.md", None);
+        assert!(
+            !parked.to_ascii_lowercase().contains("json"),
+            "stale workspace markdown must not select JSON, got {parked}"
+        );
+    }
+
+    #[test]
+    fn compare_tab_diff_paints_json_tokens_from_active_path() {
+        let mut state = compare_json_over_stale_workspace_state();
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let buf = terminal.backend().buffer();
+        let text = buffer_text(&terminal);
+        let add_y = first_row_with(buf, "alpha-syntax").expect("compare JSON add line");
+        let add_span = needle_cells(buf, add_y, r#""name": "alpha-syntax""#);
+        let add_fgs: std::collections::HashSet<_> = add_span.iter().map(|cell| cell.fg).collect();
+        assert!(
+            add_fgs.len() >= 2,
+            "compare-tab JSON must use the .json path, not parked markdown: {add_fgs:?}\n{text}"
         );
     }
 

@@ -33,9 +33,9 @@ Diff cells clip and pad by **display columns**, not Unicode scalar count. Clip u
 
 ## Highlighting
 
-Syntax highlighting uses `two-face` (syntect). Language comes from the file path (basename, then extension). An unknown path uses Plain Text and the theme `repo` foreground. Tokens set **foreground** only.
+Syntax highlighting uses `two-face` (syntect). Language comes from the file path (basename, then extension). A compare tab uses that tab's active file path, not a parked Workspace drill or `diff_path`. An unknown path uses Plain Text and the theme `repo` foreground. Tokens set **foreground** only.
 
-Add and del rows keep `palette.diffAddBg` / `palette.diffDelBg` on the gutter, sign, code, and pad. The `+` / `-` signs stay `added` / `deleted` (bold). Cursor, visual-line, and search overlays still replace that row background. A syntax colour that fails a contrast floor of 3.0 against the add/del background falls back to `repo`. Syntect parse state is kept across hunk lines (old-file vs new-file streams) so a JSON property line after `{` still gets token colours.
+Add and del rows keep `palette.diffAddBg` / `palette.diffDelBg` on the gutter, sign, code, and pad. The `+` / `-` signs stay `added` / `deleted` (bold). Cursor, visual-line, and search overlays still replace that row background. A syntax colour that fails a contrast floor of 3.0 against the add/del background falls back to `repo`. Syntect parse state is kept across lines inside one hunk (old-file vs new-file streams) so a JSON property line after `{` still gets token colours. A section label or hunk header starts a new pair of highlighters. Paint highlights the visible viewport. Lines above the viewport in the same hunk still feed parse state. Unchanged path, theme, and viewport reuse the last span list.
 
 Context lines use the same token foregrounds on the surface (no add/del tint). Meta lines stay muted. Line numbers use muted without DIM. Intra-line word diff is still out of scope.
 
