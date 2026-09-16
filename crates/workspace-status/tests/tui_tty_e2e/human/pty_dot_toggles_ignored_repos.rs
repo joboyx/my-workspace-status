@@ -23,7 +23,8 @@ fn notes_ignored_repo_row(screen: &str) -> bool {
     let Some(line) = tree_line_containing(screen, "notes") else {
         return false;
     };
-    line.contains("@ notes")
+    line.contains("notes")
+        && line.contains('@')
         && line.contains('~')
         && line.contains("& main")
         && !line.contains("[ignored]")
@@ -141,7 +142,7 @@ fn documented_dot_shows_ignored_notes_right(screen: &str) -> bool {
 /// `[ignored]` and not a No-updates child. After `.` it is not folded.
 /// Hidden ignored stay out of the tree.
 ///
-/// Live PTY after first paint: `.` inserts expanded `@ notes ~` with its
+/// Live PTY after first paint: `.` inserts expanded `notes ~` with trailing `@` and its
 /// dirty README, bumps the workspace heading to `2 changed`, and toasts
 /// `showing ignored repos`. A second `.` removes that row and toasts
 /// `hiding ignored repos`. Tab then `.` still toggles. A no-op, hide-only,

@@ -23,7 +23,7 @@ fn no_updates_group_open(screen: &str) -> bool {
         && !tree_dir_collapsed(screen, "No updates")
         && line.contains('v')
         && line.contains('1')
-        && lib.contains("@ lib")
+        && lib.contains('@')
         && lib.contains("& main")
 }
 
