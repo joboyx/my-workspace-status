@@ -74,7 +74,7 @@ fn family_tree_idle(screen: &str) -> bool {
         && no_wrong_remove_overlays(screen)
 }
 
-/// First paint: family `@ app` focused. Linked row is visible. `W` has not run.
+/// First paint: family `app` focused (trailing `@`). Linked row is visible. `W` has not run.
 fn idle_family_before_remove(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     family_tree_idle(screen)
@@ -146,9 +146,9 @@ fn documented_worktree_removed(screen: &str) -> bool {
 /// rows refuse with `Focus a linked worktree to remove`. Yes runs
 /// `remove_worktree` (`git worktree remove`).
 ///
-/// Live PTY after first paint (cursor already on family `@ app`): CSI-u
+/// Live PTY after first paint (cursor already on family `app`): CSI-u
 /// Shift+W refuses and does not open confirm or drop the linked checkout.
-/// `j` then `j` land on `L feature/linked-open`. CSI-u Shift+W then paints
+/// `j` then `j` land on `feature/linked-open` (trailing `L`). CSI-u Shift+W then paints
 /// `Remove worktree app/.worktrees/feat?` with open-vs-default, clean
 /// worktree, `y` remove / `n` cancel. `y` toasts `removed worktree
 /// app/.worktrees/feat` and drops that row. Git no longer lists the

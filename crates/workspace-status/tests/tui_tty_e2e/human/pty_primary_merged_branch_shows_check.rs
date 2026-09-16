@@ -30,7 +30,7 @@ fn primary_row_is_merged(screen: &str) -> bool {
     })
 }
 
-/// ASCII linked row whose unique commits landed: `L feature/linked-merged M`.
+/// ASCII linked row whose unique commits landed: `feature/linked-merged M` with trailing `L`.
 fn linked_merged_row_is_merged(screen: &str) -> bool {
     tree_line_containing(screen, LINKED_MERGED).is_some_and(|line| {
         line.contains('L')
@@ -39,7 +39,7 @@ fn linked_merged_row_is_merged(screen: &str) -> bool {
     })
 }
 
-/// ASCII linked row: `L feature/just-created o`.
+/// ASCII linked row: `feature/just-created o` with trailing `L`.
 fn just_created_row_is_open(screen: &str) -> bool {
     tree_line_containing(screen, JUST_CREATED).is_some_and(|line| {
         line.contains('L')
@@ -78,7 +78,7 @@ fn family_tree_idle(screen: &str) -> bool {
 /// worktree mark (`L`).
 ///
 /// Live PTY: first paint shows `& feature/primary-merged M`,
-/// `L feature/linked-merged M`, and `L feature/just-created o`. The primary
+/// `feature/linked-merged M` with trailing `L`, and `feature/just-created o` with trailing `L`. The primary
 /// row has no `o`. Idle tree, no overlays. A missing check on the primary
 /// row, an open mark on primary, a missing check on the linked merged row,
 /// overlay-only, or a no-op that never paints `M`/`o` cannot pass.

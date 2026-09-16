@@ -2668,11 +2668,16 @@ fn draw_comment_export(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus};
+    use crate::snapshot::{
+        build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
+    };
     use crate::tui::comments::{put_comment, CommentKey};
+    use crate::tui::icons::{icon_linked_worktree, icon_repo};
     use crate::tui::state::AppState;
+    use crate::tui::tree::{build_tree, flatten_with, visible_for_tree};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use std::collections::HashSet;
     use std::path::PathBuf;
     use workspace_status_graph::{graph_gutter_cap, Commit, GraphModel};
 
@@ -4123,6 +4128,163 @@ mod tests {
                 .any(|span| span.style.bg == Some(palette.flash)),
             "flash should paint background"
         );
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn paint_row(row: &VisibleRow, width: usize, col_offset: usize) -> String {
+        let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
+        line_text(&paint_tree_row(
+            row,
+            width,
+            false,
+            false,
+            None,
+            false,
+            search_bg_unused(),
+            true,
+            false,
+            false,
+            false,
+            palette,
+            col_offset,
+        ))
+    }
+
+    #[test]
+    fn narrow_repo_row_clips_name_and_keeps_kind_and_status_icons() {
+        const NAME: &str = "services/very-long-repo-name-that-must-clip";
+        const TAIL: &str = "must-clip";
+        let mut snap = repo(NAME, true);
+        snap.sync_status = SyncStatus::Ahead;
+        snap.sync_note = "ahead by 2".into();
+        let built = build_workspace_snapshot(&[snap], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let row = rows
+            .iter()
+            .find(|r| r.id == format!("repo:{NAME}"))
+            .expect("long repo");
+        assert!(
+            trailing_has(row, icon_repo(true)),
+            "repo glyph must sit in trailing, got {}",
+            row.trailing
+        );
+        assert!(
+            row.segments
+                .iter()
+                .all(|s| s.text.trim() != icon_repo(true)),
+            "repo glyph must leave the left run"
+        );
+
+        let text = paint_row(row, 28, 0);
+        let kind = text.find('@').expect("repo glyph on the narrow row");
+        let status = text.find('^').expect("ahead mark on the narrow row");
+        assert!(
+            !text.contains(TAIL),
+            "narrow pane may clip the name tail:\n{text}"
+        );
+        assert!(
+            text.contains("very-long") || text.contains("services"),
+            "clipped prefix should remain:\n{text}"
+        );
+        assert!(
+            kind < status,
+            "kind glyph sits with status on the right:\n{text}"
+        );
+        let panned = paint_row(row, 28, 18);
+        assert!(
+            panned.contains('@') && panned.contains('^'),
+            "horizontal pan must not drop trailing kind or status:\n{panned}"
+        );
+        assert!(
+            !panned.contains("very-long"),
+            "pan hides the name prefix while indicators stay:\n{panned}"
+        );
+    }
+
+    #[test]
+    fn narrow_linked_checkout_row_keeps_worktree_and_status_icons() {
+        let mut primary = repo("app", true);
+        primary.branch = "main".into();
+        let mut linked = repo("app/.worktrees/feat", true);
+        linked.checkout_kind = CheckoutKind::Linked;
+        linked.primary_repo = Some("app".into());
+        linked.branch = "feature/very-long-linked-branch-name".into();
+        linked.sync_status = SyncStatus::Ahead;
+        linked.sync_note = "ahead by 1".into();
+        linked.merged_into_default = Some(false);
+        let built = build_workspace_snapshot(&[primary, linked], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let row = rows
+            .iter()
+            .find(|r| r.id == "checkout:app/.worktrees/feat")
+            .expect("linked checkout");
+        assert!(
+            trailing_has(row, icon_linked_worktree(true)),
+            "worktree glyph must sit in trailing, got {}",
+            row.trailing
+        );
+        assert!(
+            row.segments
+                .iter()
+                .all(|s| s.text.trim() != icon_linked_worktree(true)),
+            "worktree glyph must leave the left run"
+        );
+
+        let text = paint_row(row, 26, 0);
+        assert!(
+            text.contains('L'),
+            "narrow pane must keep the worktree glyph:\n{text}"
+        );
+        assert!(
+            text.contains('^'),
+            "narrow pane must keep the status mark:\n{text}"
+        );
+        assert!(
+            !text.contains("branch-name"),
+            "narrow pane may clip the branch tail:\n{text}"
+        );
+    }
+
+    #[test]
+    fn narrow_file_row_keeps_status_badge_when_name_clips() {
+        let mut snap = repo("app", true);
+        snap.changes = vec![FileChange {
+            path: "src/very-long-file-name-that-must-clip.rs".into(),
+            staged_status: None,
+            unstaged_status: Some("M".into()),
+            untracked: false,
+            old_path: None,
+        }];
+        snap.has_unstaged = true;
+        let built = build_workspace_snapshot(&[snap], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let row = rows
+            .iter()
+            .find(|r| r.id.ends_with("very-long-file-name-that-must-clip.rs"))
+            .expect("long file");
+        let text = paint_row(row, 24, 0);
+        assert!(
+            !text.contains("must-clip"),
+            "narrow pane may clip the file name:\n{text}"
+        );
+        assert!(
+            text.trim_end().ends_with('M'),
+            "status badge stays on the right:\n{text}"
+        );
+        assert!(
+            !text.contains('@') && !text.contains('L'),
+            "file rows must not gain repo or worktree glyphs:\n{text}"
+        );
+    }
+
+    fn trailing_has(row: &VisibleRow, glyph: &str) -> bool {
+        row.trailing_segs.iter().any(|s| s.text.trim() == glyph)
     }
 
     fn search_bg_unused() -> Color {

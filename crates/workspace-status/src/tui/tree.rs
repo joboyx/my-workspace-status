@@ -120,11 +120,11 @@ pub struct VisibleRow {
     pub kind: NodeKind,
     /// Plain text of left + trailing — pane `/` search and tests.
     pub label: String,
-    /// Right-aligned status / sync / counts (no leading pad).
+    /// Right-aligned kind / status / sync / counts (no leading pad).
     pub trailing: String,
-    /// Left run used by paint (icon + name).
+    /// Left run used by paint (name, branch, file/folder glyphs).
     pub segments: Vec<TextSeg>,
-    /// Right run used by paint (badge / sync / counts).
+    /// Right run used by paint (repo/worktree kind, badge / sync / counts).
     pub trailing_segs: Vec<TextSeg>,
     pub repo: Option<String>,
     pub primary_repo: Option<String>,
@@ -837,6 +837,23 @@ pub fn show_clean_check(in_no_updates: bool) -> bool {
     in_no_updates
 }
 
+/// Pin a repo or linked-worktree glyph on the trailing run so a narrow
+/// pane can clip the name without dropping that kind mark. One space
+/// after the glyph, same tightness as the viewed eye before a badge.
+fn with_repo_kind_icon(mut trailing: Vec<TextSeg>, glyph: &str, role: SegRole) -> Vec<TextSeg> {
+    let mut marked = vec![icon_seg(glyph, role)];
+    marked.append(&mut trailing);
+    marked
+}
+
+fn repo_kind_role(ignored: bool) -> SegRole {
+    if ignored {
+        SegRole::Muted
+    } else {
+        SegRole::Heading
+    }
+}
+
 fn sync_trailing(chrome: &NodeChrome, in_no_updates: bool, ascii: bool) -> Vec<TextSeg> {
     let Some(status) = chrome.sync_status else {
         return Vec::new();
@@ -990,23 +1007,13 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
             .iter()
             .filter(|c| c.kind == NodeKind::Checkout)
             .count();
-        let mut segments = vec![
-            icon_seg(
-                icon_repo(ascii),
-                if node.ignored {
-                    SegRole::Muted
-                } else {
-                    SegRole::Heading
-                },
-            ),
-            TextSeg {
-                text: node.chrome.path.clone(),
-                role: name_role,
-                hex: None,
-                bold: true,
-                dim: false,
-            },
-        ];
+        let mut segments = vec![TextSeg {
+            text: node.chrome.path.clone(),
+            role: name_role,
+            hex: None,
+            bold: true,
+            dim: false,
+        }];
         if node.ignored {
             segments.push(text_seg(
                 format!(" {}", icon_ignored(ascii)),
@@ -1025,6 +1032,7 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
                 SegRole::Muted,
             ));
         }
+        trailing = with_repo_kind_icon(trailing, icon_repo(ascii), repo_kind_role(node.ignored));
         return NodeSegments { segments, trailing };
     }
 
@@ -1046,14 +1054,7 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
         icon_repo(ascii)
     };
 
-    let mut segments = vec![icon_seg(
-        repo_icon,
-        if node.ignored {
-            SegRole::Muted
-        } else {
-            SegRole::Heading
-        },
-    )];
+    let mut segments = Vec::new();
     if linked {
         segments.push(TextSeg {
             text: linked_short_name(&node.chrome.path, node.primary_repo.as_deref()),
@@ -1102,6 +1103,7 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
             SegRole::Muted,
         ));
     }
+    trailing = with_repo_kind_icon(trailing, repo_icon, repo_kind_role(node.ignored));
     NodeSegments { segments, trailing }
 }
 
@@ -1118,11 +1120,6 @@ fn checkout_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeS
     };
     // Nested primary uses the branch glyph, never the linked-worktree mark.
     let linked = node.chrome.checkout_kind == Some(CheckoutKind::Linked);
-    let row_icon = if linked {
-        icon_linked_worktree(ascii)
-    } else {
-        icon_branch(ascii)
-    };
     let main_label = if linked && is_detached_head_branch(&node.chrome.branch) {
         linked_short_name(&node.chrome.path, node.primary_repo.as_deref())
     } else {
@@ -1133,22 +1130,26 @@ fn checkout_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeS
     } else {
         format!("{main_label} {merge}")
     };
-    let segments = vec![
-        icon_seg(row_icon, SegRole::Heading),
-        TextSeg {
-            text: branch_text,
-            role: branch_role,
-            hex: None,
-            bold: true,
-            dim: false,
-        },
-    ];
+    let mut segments = Vec::new();
+    if !linked {
+        segments.push(icon_seg(icon_branch(ascii), SegRole::Heading));
+    }
+    segments.push(TextSeg {
+        text: branch_text,
+        role: branch_role,
+        hex: None,
+        bold: true,
+        dim: false,
+    });
     let mut trailing = sync_trailing(&node.chrome, in_no_updates, ascii);
     if node.chrome.change_count > 0 {
         trailing.push(text_seg(
             format!("  {}", node.chrome.change_count),
             SegRole::Muted,
         ));
+    }
+    if linked {
+        trailing = with_repo_kind_icon(trailing, icon_linked_worktree(ascii), SegRole::Heading);
     }
     NodeSegments { segments, trailing }
 }
@@ -1727,18 +1728,34 @@ mod tests {
             Some(icon_linked_worktree(true)),
             "primary checkout must not use the linked-worktree glyph"
         );
-        assert_eq!(
-            checkout.segments.first().map(|s| s.text.trim()),
-            Some(icon_linked_worktree(true)),
-            "linked extra keeps the worktree glyph"
+        assert!(
+            !left_has_glyph(checkout, icon_linked_worktree(true)),
+            "linked extra must not keep the worktree glyph on the left, got {:?}",
+            checkout.segments.first().map(|s| s.text.as_str())
         );
-        assert_eq!(
-            family.segments.first().map(|s| s.text.trim()),
-            Some(icon_repo(true)),
+        assert!(
+            trailing_starts_with_glyph(checkout, icon_linked_worktree(true)),
+            "linked extra keeps the worktree glyph in trailing, got {}",
+            checkout.trailing
+        );
+        assert!(
+            !left_has_glyph(family, icon_repo(true)),
+            "family must not keep the repo glyph on the left, got {:?}",
+            family.segments.first().map(|s| s.text.as_str())
+        );
+        assert!(
+            trailing_starts_with_glyph(family, icon_repo(true)),
+            "family repo glyph sits in trailing, got {}",
+            family.trailing
         );
         assert_eq!(
             primary_row.segments.first().map(|s| s.text.trim()),
             Some(icon_branch(true)),
+        );
+        assert!(
+            !trailing_starts_with_glyph(primary_row, icon_linked_worktree(true)),
+            "primary trailing must not gain the linked-worktree glyph, got {}",
+            primary_row.trailing
         );
         assert!(
             !primary_row.label.contains('o'),
@@ -1842,13 +1859,78 @@ mod tests {
         let tree = build_tree(&visible_for_tree(&built), true, "ws");
         let rows = flatten_with(&tree, &HashSet::new(), true);
         let app = rows.iter().find(|r| r.id == "repo:app").expect("repo:app");
-        assert_eq!(
-            app.segments.first().map(|s| s.text.trim()),
-            Some(icon_repo(true))
+        assert!(
+            trailing_starts_with_glyph(app, icon_repo(true)),
+            "flat primary repo glyph sits in trailing, got {}",
+            app.trailing
         );
-        assert_ne!(
-            app.segments.first().map(|s| s.text.trim()),
-            Some(icon_linked_worktree(true))
+        assert!(
+            !left_has_glyph(app, icon_repo(true)),
+            "flat primary must not keep the repo glyph on the left"
+        );
+        assert!(
+            !left_has_glyph(app, icon_linked_worktree(true))
+                && !trailing_starts_with_glyph(app, icon_linked_worktree(true)),
+            "flat primary must not use the linked-worktree glyph, got left {:?} trailing {}",
+            app.segments.first().map(|s| s.text.as_str()),
+            app.trailing
+        );
+    }
+
+    fn left_has_glyph(row: &VisibleRow, glyph: &str) -> bool {
+        row.segments.iter().any(|s| s.text.trim() == glyph)
+    }
+
+    fn trailing_starts_with_glyph(row: &VisibleRow, glyph: &str) -> bool {
+        row.trailing_segs
+            .first()
+            .is_some_and(|s| s.text.trim() == glyph)
+    }
+
+    #[test]
+    fn repo_kind_icon_stays_ahead_of_sync_in_trailing() {
+        let mut app = repo("app", true, false);
+        app.sync_status = SyncStatus::Ahead;
+        app.sync_note = "ahead by 2".into();
+        let built = build_workspace_snapshot(&[app], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let app = rows.iter().find(|r| r.id == "repo:app").expect("repo:app");
+        let trail: String = app.trailing_segs.iter().map(|s| s.text.as_str()).collect();
+        let kind = trail.find('@').expect("repo glyph");
+        let ahead = trail.find('^').expect("ahead mark");
+        assert!(
+            kind < ahead,
+            "kind glyph sits before status in trailing, got {trail}"
+        );
+        let segs = row_segments(app, true, false, true, false);
+        let marked: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
+        let comment = marked.find('"').expect("comment mark");
+        let kind = marked.find('@').expect("repo glyph after comment");
+        assert!(
+            comment < kind,
+            "comment mark stays ahead of the kind glyph, got {marked}"
+        );
+    }
+
+    #[test]
+    fn file_rows_keep_type_glyph_on_the_left() {
+        let built = build_workspace_snapshot(&[dirty_repo("app", &["README.md"])], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let file = rows
+            .iter()
+            .find(|r| r.id == "file:app:README.md")
+            .expect("file");
+        assert!(
+            !file.trailing.contains('@') && !file.trailing.contains('L'),
+            "file trailing stays a status badge, got {}",
+            file.trailing
+        );
+        assert_eq!(file.trailing, "M ");
+        assert!(
+            !file.segments.is_empty(),
+            "file type glyph stays on the left"
         );
     }
 

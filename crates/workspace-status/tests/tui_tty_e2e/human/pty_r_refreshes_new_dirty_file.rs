@@ -28,7 +28,7 @@ fn idle_watch_off_before_r(screen: &str) -> bool {
 fn documented_r_refreshed_app_dirty_file(screen: &str) -> bool {
     let left = left_tree(screen);
     let readme = tree_line_containing(screen, "README.md");
-    let app = tree_line_containing(screen, "@ app");
+    let app = tree_line_containing(screen, "app").filter(|line| line.contains('@'));
     launch_panes_left_tree_right_diff(screen)
         && left.contains("# workspace")
         && left.contains("2 changed · all current")
