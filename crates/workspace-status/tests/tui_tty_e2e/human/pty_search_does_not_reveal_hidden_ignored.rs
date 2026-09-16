@@ -21,8 +21,8 @@ fn search_prompt_has_query(screen: &str, query: &str) -> bool {
 
 /// Ignored `notes` is absent from the left tree and is not the cursor.
 ///
-/// Status / crumb `notes` must not count. `@ notes` with the ignored glyph
-/// is the shown-ignored row; that path stays on `.`.
+/// Status / crumb `notes` must not count. A shown-ignored `notes` row with
+/// trailing `@` and the ignored glyph is the `.` path.
 fn hidden_notes_stay_out(screen: &str) -> bool {
     tree_line_containing(screen, "notes").is_none()
         && !tree_has(screen, "notes")
