@@ -2,7 +2,7 @@ use crate::harness::{left_tree, PtySession};
 use crate::seed::ignored_primary_family_workspace;
 use crate::support::{
     crumb_row, no_wrong_overlays, panes_tree_focused_diff_unfocused, status_row, tree_dir_expanded,
-    tree_has, tree_line_containing, SETTLE_MS, WAIT,
+    tree_has, tree_line_containing, tree_line_has_leading_worktree_icon, SETTLE_MS, WAIT,
 };
 
 const LINKED_BRANCH: &str = "feature/linked-open";
@@ -16,7 +16,9 @@ fn linked_orphan_on_tree(screen: &str) -> bool {
     };
     let family = tree_line_containing(screen, "app");
     let family_is_parent = family.is_some_and(|row| {
-        row.contains('@') && row.contains("app") && (row.contains("2 wt") || tree_dir_expanded(screen, "app"))
+        row.contains('@')
+            && row.contains("app")
+            && (row.contains("2 wt") || tree_dir_expanded(screen, "app"))
     });
     (line.contains('L') || line.contains("app/.worktrees")) && !family_is_parent
 }
@@ -48,7 +50,8 @@ fn documented_launch_hides_ignored_family(screen: &str) -> bool {
         && !crumb.contains("hiding ignored repos")
 }
 
-/// `.` shows the family nested: `app` with trailing `@` + `L` on `feature/linked-open`, not an orphan.
+/// `.` shows the family nested: `app` with trailing `@` + leading `L` on
+/// `feature/linked-open`, not an orphan.
 fn documented_dot_shows_ignored_family(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let linked = tree_line_containing(screen, LINKED_BRANCH);
@@ -60,7 +63,7 @@ fn documented_dot_shows_ignored_family(screen: &str) -> bool {
         && tree_has(screen, LINKED_BRANCH)
         && tree_dir_expanded(screen, "app")
         && family.is_some_and(|line| line.contains('@') && line.contains("2 wt"))
-        && linked.is_some_and(|line| line.contains('L') && line.contains("linked-open"))
+        && linked.is_some_and(|line| tree_line_has_leading_worktree_icon(&line, LINKED_BRANCH))
         && !linked_orphan_on_tree(screen)
         && crumb.contains("showing ignored repos")
         && !crumb.contains("hiding ignored repos")
@@ -84,7 +87,8 @@ fn documented_dot_hides_ignored_family(screen: &str) -> bool {
 /// family (`2 wt`, `L` + branch), not a workspace-root `L` orphan.
 ///
 /// Live PTY after first paint: ignored `app` and `feature/linked-open` stay
-/// out. `.` inserts `app` with trailing `@` and `2 wt`, and nested `feature/linked-open` with trailing `L`.
+/// out. `.` inserts `app` with trailing `@` and `2 wt`, and nested
+/// `L feature/linked-open`.
 /// A second `.` removes both. A toast-only, `app`-only, or still-orphan
 /// frame cannot pass.
 #[test]

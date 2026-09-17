@@ -2,7 +2,7 @@ use crate::harness::PtySession;
 use crate::seed::worktree_workspace;
 use crate::support::{
     crumb_row, no_mouse_toggle_toast, tree_cursor_on, tree_has, tree_line_containing,
-    tree_pane_focused, WAIT,
+    tree_line_has_leading_worktree_icon, tree_pane_focused, WAIT,
 };
 
 const PRIMARY: &str = "feature/primary-open";
@@ -31,11 +31,10 @@ fn primary_row_omits_open_mark(screen: &str) -> bool {
     })
 }
 
-/// ASCII linked extra: `feature/linked-open o` with trailing `L`. Merged `M` is the bug.
+/// ASCII linked extra: `L feature/linked-open o`. Merged `M` is the bug.
 fn linked_row_keeps_open_mark(screen: &str) -> bool {
     tree_line_containing(screen, LINKED).is_some_and(|line| {
-        line.contains('L')
-            && line.contains(LINKED)
+        tree_line_has_leading_worktree_icon(&line, LINKED)
             && line.contains(&format!("{LINKED} o"))
             && !line.contains(&format!("{LINKED} M"))
     })
@@ -66,7 +65,7 @@ fn family_tree_idle(screen: &str) -> bool {
 /// keeps `L` plus `o`; merged `M` must not appear on these open rows.
 ///
 /// Live PTY: first paint shows `& feature/primary-open` (no `feature/primary-open o`)
-/// and `feature/linked-open o` with trailing `L`. The primary row has no `L`. Idle tree, no
+/// and `L feature/linked-open o`. The primary row has no `L`. Idle tree, no
 /// overlays. A no-op or a primary painted like a linked open row cannot pass.
 #[test]
 fn pty_primary_omits_open_vs_default_mark() {

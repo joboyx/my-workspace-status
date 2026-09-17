@@ -5,7 +5,8 @@ use crate::harness::PtySession;
 use crate::seed::{git_env, worktree_workspace};
 use crate::support::{
     crumb_row, no_mouse_toggle_toast, status_row, title_has_files, tree_cursor_on, tree_has,
-    tree_line_containing, tree_pane_focused, GIT_WAIT, SETTLE_MS, WAIT,
+    tree_line_containing, tree_line_has_leading_worktree_icon, tree_pane_focused, GIT_WAIT,
+    SETTLE_MS, WAIT,
 };
 
 const LINKED_PATH: &str = "app/.worktrees/feat";
@@ -59,7 +60,10 @@ fn family_and_linked_on_tree(screen: &str) -> bool {
         && tree_has(screen, PRIMARY_BRANCH)
         && tree_has(screen, LINKED_BRANCH)
         && tree_has(screen, "2 wt")
-        && linked.is_some_and(|line| line.contains('L') && line.contains("linked-open o"))
+        && linked.is_some_and(|line| {
+            tree_line_has_leading_worktree_icon(&line, LINKED_BRANCH)
+                && line.contains("linked-open o")
+        })
 }
 
 fn family_tree_idle(screen: &str) -> bool {
@@ -148,7 +152,7 @@ fn documented_worktree_removed(screen: &str) -> bool {
 ///
 /// Live PTY after first paint (cursor already on family `app`): CSI-u
 /// Shift+W refuses and does not open confirm or drop the linked checkout.
-/// `j` then `j` land on `feature/linked-open` (trailing `L`). CSI-u Shift+W then paints
+/// `j` then `j` land on `L feature/linked-open`. CSI-u Shift+W then paints
 /// `Remove worktree app/.worktrees/feat?` with open-vs-default, clean
 /// worktree, `y` remove / `n` cancel. `y` toasts `removed worktree
 /// app/.worktrees/feat` and drops that row. Git no longer lists the

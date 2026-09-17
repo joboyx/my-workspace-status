@@ -2,7 +2,7 @@ use crate::harness::PtySession;
 use crate::seed::primary_merged_workspace;
 use crate::support::{
     crumb_row, no_mouse_toggle_toast, tree_cursor_on, tree_has, tree_line_containing,
-    tree_pane_focused, WAIT,
+    tree_line_has_leading_worktree_icon, tree_pane_focused, WAIT,
 };
 
 const PRIMARY: &str = "feature/primary-merged";
@@ -30,19 +30,19 @@ fn primary_row_is_merged(screen: &str) -> bool {
     })
 }
 
-/// ASCII linked row whose unique commits landed: `feature/linked-merged M` with trailing `L`.
+/// ASCII linked row whose unique commits landed: `L feature/linked-merged M`.
 fn linked_merged_row_is_merged(screen: &str) -> bool {
     tree_line_containing(screen, LINKED_MERGED).is_some_and(|line| {
-        line.contains('L')
+        tree_line_has_leading_worktree_icon(&line, LINKED_MERGED)
             && line.contains(&format!("{LINKED_MERGED} M"))
             && !line.contains(&format!("{LINKED_MERGED} o"))
     })
 }
 
-/// ASCII linked row: `feature/just-created o` with trailing `L`.
+/// ASCII linked row: `L feature/just-created o`.
 fn just_created_row_is_open(screen: &str) -> bool {
     tree_line_containing(screen, JUST_CREATED).is_some_and(|line| {
-        line.contains('L')
+        tree_line_has_leading_worktree_icon(&line, JUST_CREATED)
             && line.contains(&format!("{JUST_CREATED} o"))
             && !line.contains(&format!("{JUST_CREATED} M"))
     })
@@ -78,7 +78,7 @@ fn family_tree_idle(screen: &str) -> bool {
 /// worktree mark (`L`).
 ///
 /// Live PTY: first paint shows `& feature/primary-merged M`,
-/// `feature/linked-merged M` with trailing `L`, and `feature/just-created o` with trailing `L`. The primary
+/// `L feature/linked-merged M`, and `L feature/just-created o`. The primary
 /// row has no `o`. Idle tree, no overlays. A missing check on the primary
 /// row, an open mark on primary, a missing check on the linked merged row,
 /// overlay-only, or a no-op that never paints `M`/`o` cannot pass.

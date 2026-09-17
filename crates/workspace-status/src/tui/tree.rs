@@ -120,11 +120,11 @@ pub struct VisibleRow {
     pub kind: NodeKind,
     /// Plain text of left + trailing — pane `/` search and tests.
     pub label: String,
-    /// Right-aligned kind / status / sync / counts (no leading pad).
+    /// Right-aligned repo kind / status / sync / counts (no leading pad).
     pub trailing: String,
-    /// Left run used by paint (name, branch, file/folder glyphs).
+    /// Left run used by paint (linked-worktree / branch / file/folder glyphs + name).
     pub segments: Vec<TextSeg>,
-    /// Right run used by paint (repo/worktree kind, badge / sync / counts).
+    /// Right run used by paint (repo kind, badge / sync / counts).
     pub trailing_segs: Vec<TextSeg>,
     pub repo: Option<String>,
     pub primary_repo: Option<String>,
@@ -837,9 +837,10 @@ pub fn show_clean_check(in_no_updates: bool) -> bool {
     in_no_updates
 }
 
-/// Pin a repo or linked-worktree glyph on the trailing run so a narrow
-/// pane can clip the name without dropping that kind mark. One space
-/// after the glyph, same tightness as the viewed eye before a badge.
+/// Pin a repo glyph on the trailing run so a narrow pane can clip the
+/// name without dropping that kind mark. Linked-worktree glyphs stay on
+/// the left, immediately before the name. One space after the glyph,
+/// same tightness as the viewed eye before a badge.
 fn with_repo_kind_icon(mut trailing: Vec<TextSeg>, glyph: &str, role: SegRole) -> Vec<TextSeg> {
     let mut marked = vec![icon_seg(glyph, role)];
     marked.append(&mut trailing);
@@ -1048,14 +1049,11 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
     };
     // Linked extras only. The primary checkout is a normal repo glyph.
     let linked = node.chrome.checkout_kind == Some(CheckoutKind::Linked);
-    let repo_icon = if linked {
-        icon_linked_worktree(ascii)
-    } else {
-        icon_repo(ascii)
-    };
+    let kind_role = repo_kind_role(node.ignored);
 
     let mut segments = Vec::new();
     if linked {
+        segments.push(icon_seg(icon_linked_worktree(ascii), kind_role));
         segments.push(TextSeg {
             text: linked_short_name(&node.chrome.path, node.primary_repo.as_deref()),
             role: name_role,
@@ -1103,7 +1101,9 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
             SegRole::Muted,
         ));
     }
-    trailing = with_repo_kind_icon(trailing, repo_icon, repo_kind_role(node.ignored));
+    if !linked {
+        trailing = with_repo_kind_icon(trailing, icon_repo(ascii), kind_role);
+    }
     NodeSegments { segments, trailing }
 }
 
@@ -1120,6 +1120,11 @@ fn checkout_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeS
     };
     // Nested primary uses the branch glyph, never the linked-worktree mark.
     let linked = node.chrome.checkout_kind == Some(CheckoutKind::Linked);
+    let row_icon = if linked {
+        icon_linked_worktree(ascii)
+    } else {
+        icon_branch(ascii)
+    };
     let main_label = if linked && is_detached_head_branch(&node.chrome.branch) {
         linked_short_name(&node.chrome.path, node.primary_repo.as_deref())
     } else {
@@ -1130,26 +1135,22 @@ fn checkout_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeS
     } else {
         format!("{main_label} {merge}")
     };
-    let mut segments = Vec::new();
-    if !linked {
-        segments.push(icon_seg(icon_branch(ascii), SegRole::Heading));
-    }
-    segments.push(TextSeg {
-        text: branch_text,
-        role: branch_role,
-        hex: None,
-        bold: true,
-        dim: false,
-    });
+    let segments = vec![
+        icon_seg(row_icon, SegRole::Heading),
+        TextSeg {
+            text: branch_text,
+            role: branch_role,
+            hex: None,
+            bold: true,
+            dim: false,
+        },
+    ];
     let mut trailing = sync_trailing(&node.chrome, in_no_updates, ascii);
     if node.chrome.change_count > 0 {
         trailing.push(text_seg(
             format!("  {}", node.chrome.change_count),
             SegRole::Muted,
         ));
-    }
-    if linked {
-        trailing = with_repo_kind_icon(trailing, icon_linked_worktree(ascii), SegRole::Heading);
     }
     NodeSegments { segments, trailing }
 }
@@ -1728,14 +1729,14 @@ mod tests {
             Some(icon_linked_worktree(true)),
             "primary checkout must not use the linked-worktree glyph"
         );
-        assert!(
-            !left_has_glyph(checkout, icon_linked_worktree(true)),
-            "linked extra must not keep the worktree glyph on the left, got {:?}",
-            checkout.segments.first().map(|s| s.text.as_str())
+        assert_eq!(
+            checkout.segments.first().map(|s| s.text.trim()),
+            Some(icon_linked_worktree(true)),
+            "linked extra keeps the worktree glyph on the left"
         );
         assert!(
-            trailing_starts_with_glyph(checkout, icon_linked_worktree(true)),
-            "linked extra keeps the worktree glyph in trailing, got {}",
+            !trailing_starts_with_glyph(checkout, icon_linked_worktree(true)),
+            "linked extra must not treat the worktree glyph as trailing, got {}",
             checkout.trailing
         );
         assert!(
@@ -1888,6 +1889,64 @@ mod tests {
     }
 
     #[test]
+    fn linked_worktree_kind_icon_stays_leading_while_trailing_indicators_align_right() {
+        let mut primary = dirty_repo("app", &["src/a.ts"]);
+        primary.branch = "main".into();
+        let mut linked = repo("app/.worktrees/feat", true, true);
+        linked.branch = "feature/login-page".into();
+        linked.sync_status = SyncStatus::Ahead;
+        linked.sync_note = "ahead by 1".into();
+        linked.merged_into_default = Some(false);
+        let built = build_workspace_snapshot(&[primary, linked], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let checkout = rows
+            .iter()
+            .find(|r| r.id == "checkout:app/.worktrees/feat")
+            .expect("linked checkout");
+        assert_eq!(
+            checkout.segments.first().map(|s| s.text.trim()),
+            Some(icon_linked_worktree(true)),
+            "worktree kind icon leads the name, got {:?}",
+            checkout.segments.first().map(|s| s.text.as_str())
+        );
+        assert!(
+            !left_has_glyph(checkout, icon_repo(true)),
+            "linked extra must not use the repo glyph"
+        );
+        assert!(
+            !trailing_starts_with_glyph(checkout, icon_linked_worktree(true))
+                && !checkout.trailing.contains(icon_linked_worktree(true)),
+            "worktree kind icon stays out of trailing, got {}",
+            checkout.trailing
+        );
+        assert!(
+            checkout.trailing.contains('^'),
+            "sync mark stays trailing, got {}",
+            checkout.trailing
+        );
+        let segs = row_segments(checkout, true, false, true, false);
+        let left: String = segs.segments.iter().map(|s| s.text.as_str()).collect();
+        let trail: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
+        let kind = left.find('L').expect("leading worktree glyph");
+        let name = left.find("feature/login-page").expect("worktree name");
+        let comment = trail.find('"').expect("comment mark");
+        let ahead = trail.find('^').expect("ahead mark");
+        assert!(
+            kind < name,
+            "kind icon sits immediately before the name, got {left}"
+        );
+        assert!(
+            !trail.contains('L'),
+            "comment and sync stay in trailing without the kind icon, got {trail}"
+        );
+        assert!(
+            comment < ahead,
+            "comment mark stays ahead of status in trailing, got {trail}"
+        );
+    }
+
+    #[test]
     fn repo_kind_icon_stays_ahead_of_sync_in_trailing() {
         let mut app = repo("app", true, false);
         app.sync_status = SyncStatus::Ahead;
@@ -1975,6 +2034,16 @@ mod tests {
         assert!(!row.chrome.is_family);
         assert!(row.label.contains("main"));
         assert!(!row.label.contains("wt "));
+        assert_eq!(
+            row.segments.first().map(|s| s.text.trim()),
+            Some(icon_linked_worktree(true)),
+            "linked-only repo keeps the worktree glyph on the left"
+        );
+        assert!(
+            !trailing_starts_with_glyph(row, icon_linked_worktree(true)),
+            "linked-only repo must not treat the worktree glyph as trailing, got {}",
+            row.trailing
+        );
     }
 
     #[test]

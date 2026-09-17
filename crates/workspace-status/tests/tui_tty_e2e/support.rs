@@ -19,6 +19,20 @@ pub fn tree_line_containing(screen: &str, needle: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// ASCII linked-worktree kind icon `L` immediately before `name`.
+///
+/// Trailing sync / counts stay to the right of the name. A trailing `L`
+/// after `name` fails.
+pub fn tree_line_has_leading_worktree_icon(line: &str, name: &str) -> bool {
+    let Some(icon) = line.find('L') else {
+        return false;
+    };
+    let Some(at) = line.find(name) else {
+        return false;
+    };
+    icon < at && !line[at + name.len()..].contains('L')
+}
+
 /// Cells after `README.md` on the left-tree file row (trailing chrome).
 pub fn after_readme_name(screen: &str) -> Option<String> {
     let line = tree_line_containing(screen, "README.md")?;
