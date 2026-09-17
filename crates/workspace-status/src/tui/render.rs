@@ -4206,7 +4206,7 @@ mod tests {
     }
 
     #[test]
-    fn narrow_linked_checkout_row_keeps_worktree_and_status_icons() {
+    fn narrow_linked_checkout_row_keeps_leading_worktree_and_trailing_status() {
         let mut primary = repo("app", true);
         primary.branch = "main".into();
         let mut linked = repo("app/.worktrees/feat", true);
@@ -4224,29 +4224,47 @@ mod tests {
             .find(|r| r.id == "checkout:app/.worktrees/feat")
             .expect("linked checkout");
         assert!(
-            trailing_has(row, icon_linked_worktree(true)),
-            "worktree glyph must sit in trailing, got {}",
+            left_has(row, icon_linked_worktree(true)),
+            "worktree glyph must lead the name, got {:?}",
+            row.segments.first().map(|s| s.text.as_str())
+        );
+        assert!(
+            !trailing_has(row, icon_linked_worktree(true)),
+            "worktree glyph must not sit in trailing, got {}",
             row.trailing
         );
         assert!(
-            row.segments
-                .iter()
-                .all(|s| s.text.trim() != icon_linked_worktree(true)),
-            "worktree glyph must leave the left run"
+            row.trailing.contains('^'),
+            "sync mark stays trailing, got {}",
+            row.trailing
         );
 
         let text = paint_row(row, 26, 0);
+        let kind = text.find('L').expect("worktree glyph on the narrow row");
+        let name = text
+            .find("feature")
+            .expect("clipped worktree name on the narrow row");
+        let status = text.find('^').expect("ahead mark on the narrow row");
         assert!(
-            text.contains('L'),
-            "narrow pane must keep the worktree glyph:\n{text}"
+            kind < name,
+            "worktree glyph stays leading before the name:\n{text}"
         );
         assert!(
-            text.contains('^'),
-            "narrow pane must keep the status mark:\n{text}"
+            kind < status,
+            "leading kind icon stays left of trailing status:\n{text}"
         );
         assert!(
             !text.contains("branch-name"),
             "narrow pane may clip the branch tail:\n{text}"
+        );
+        let panned = paint_row(row, 26, 18);
+        assert!(
+            panned.contains('^'),
+            "horizontal pan must not drop trailing status:\n{panned}"
+        );
+        assert!(
+            !panned.contains("very-long"),
+            "pan hides the name prefix while trailing status stays:\n{panned}"
         );
     }
 
@@ -4281,6 +4299,10 @@ mod tests {
             !text.contains('@') && !text.contains('L'),
             "file rows must not gain repo or worktree glyphs:\n{text}"
         );
+    }
+
+    fn left_has(row: &VisibleRow, glyph: &str) -> bool {
+        row.segments.iter().any(|s| s.text.trim() == glyph)
     }
 
     fn trailing_has(row: &VisibleRow, glyph: &str) -> bool {
