@@ -55,20 +55,20 @@ fn cursor_on_app(screen: &str) -> bool {
 }
 
 fn compare_vs_origin_main(screen: &str) -> bool {
-    screen.contains("app · vs origin/main")
+    screen.contains("app ↔ origin/main")
         && screen.contains("COMMITTED")
-        && screen.contains("· vs")
+        && screen.contains(" ↔ ")
         && screen.contains("alpha.txt")
 }
 
 fn workspace_only_without_compare(screen: &str) -> bool {
-    screen.contains("# workspace") && !screen.contains("· vs")
+    screen.contains("# workspace") && !screen.contains(" ↔ ")
 }
 
 fn missing_base_keeps_compare_tab(screen: &str) -> bool {
     screen.contains("Base ref not found: origin/main")
-        && screen.contains("app · vs")
-        && screen.contains("· vs")
+        && screen.contains("app ↔")
+        && screen.contains(" ↔ ")
         && !workspace_only_without_compare(screen)
 }
 
@@ -156,17 +156,17 @@ fn open_app_vs_default(tui: &mut PtySession) {
     open_vs_default(tui);
     tui.wait_pred(
         compare_vs_origin_main,
-        "Diff vs default paints app · vs origin/main, COMMITTED, and alpha.txt",
+        "Diff vs default paints app ↔ origin/main, COMMITTED, and alpha.txt",
         GIT_WAIT,
     );
 }
 
 /// Refresh after the compare base ref disappears keeps the compare tab.
 ///
-/// Diff vs default on `app` paints `app · vs origin/main` and the ahead
+/// Diff vs default on `app` paints `app ↔ origin/main` and the ahead
 /// files. Deleting `origin/main` then `r` paints `Base ref not found:
 /// origin/main`. The tab stays. Workspace-only (`# workspace` without
-/// `· vs`) fails. A no-op refresh that keeps the happy compare (no error)
+/// ` ↔ `) fails. A no-op refresh that keeps the happy compare (no error)
 /// fails.
 #[test]
 fn pty_compare_missing_base_after_refresh_keeps_tab() {
@@ -181,7 +181,7 @@ fn pty_compare_missing_base_after_refresh_keeps_tab() {
     tui.key('r');
     tui.wait_pred(
         missing_base_keeps_compare_tab,
-        "r after deleting origin/main paints Base ref not found and keeps app · vs (a no-op refresh that stays on the happy compare fails)",
+        "r after deleting origin/main paints Base ref not found and keeps app ↔ (a no-op refresh that stays on the happy compare fails)",
         GIT_WAIT,
     );
 }

@@ -20,12 +20,12 @@ fn pty_compare_bare_t_still_tree_flat() {
     tui.ctrl_letter('k');
     tui.keys("vs default");
     tui.enter();
-    tui.wait_contains("app · vs main", GIT_WAIT);
+    tui.wait_contains("app ↔ main", GIT_WAIT);
 
     tui.key('t');
     tui.wait_pred(
         |screen| {
-            screen.contains("app · vs main")
+            screen.contains("app ↔ main")
                 && (status_row(screen).contains("Flat paths")
                     || screen.contains("Flat paths"))
         },
@@ -33,5 +33,5 @@ fn pty_compare_bare_t_still_tree_flat() {
         WAIT,
     );
     tui.key('t');
-    tui.wait_contains("app · vs main", WAIT);
+    tui.wait_contains("app ↔ main", WAIT);
 }

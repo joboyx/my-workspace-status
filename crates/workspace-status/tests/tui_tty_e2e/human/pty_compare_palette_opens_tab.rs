@@ -35,7 +35,7 @@ fn pty_compare_palette_opens_tab() {
     tui.enter();
     tui.wait_pred(
         |screen| {
-            screen.contains("app · vs main")
+            screen.contains("app ↔ main")
                 && screen.contains("COMMITTED")
                 && screen.contains("alpha.txt")
                 && !screen.contains("UNSTAGED")

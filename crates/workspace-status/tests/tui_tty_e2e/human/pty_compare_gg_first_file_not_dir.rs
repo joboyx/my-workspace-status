@@ -39,7 +39,7 @@ fn seed_nested_compare_files(workspace: &std::path::Path) {
 }
 
 fn on_compare_origin_main(screen: &str) -> bool {
-    screen.contains("app · vs origin/main")
+    screen.contains("app ↔ origin/main")
         && screen.contains("COMMITTED")
         && tree_has(screen, "src")
         && tree_has(screen, "auth.ts")

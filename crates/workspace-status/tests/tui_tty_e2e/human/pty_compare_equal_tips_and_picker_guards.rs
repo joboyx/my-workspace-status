@@ -28,7 +28,7 @@ fn pty_compare_vs_default_equal_tips_hides_dirty() {
     tui.enter();
     tui.wait_pred(
         |screen| {
-            screen.contains("app · vs main")
+            screen.contains("app ↔ main")
                 && screen.contains("No committed changes")
                 && screen.contains("No committed changes vs main")
                 && !screen.contains("UNSTAGED")
@@ -69,7 +69,7 @@ fn pty_compare_picker_never_checkouts() {
     assert_eq!(head_branch(&workspace), branch);
     tui.esc();
     tui.wait_pred(
-        |screen| screen.contains("# workspace") && !screen.contains("app · vs"),
+        |screen| screen.contains("# workspace") && !screen.contains("app ↔"),
         "Esc closes the picker and stays on Workspace",
         WAIT,
     );

@@ -22,7 +22,7 @@ fn pty_compare_mouse_tab_click() {
     tui.ctrl_letter('k');
     tui.keys("vs default");
     tui.enter();
-    tui.wait_contains("app · vs origin/main", GIT_WAIT);
+    tui.wait_contains("app ↔ origin/main", GIT_WAIT);
 
     let screen = tui.screen();
     let (ws_col, ws_row) = tab_hit(&screen, "Workspace").expect("Workspace tab");
@@ -34,10 +34,10 @@ fn pty_compare_mouse_tab_click() {
     );
 
     let screen = tui.screen();
-    let (cmp_col, cmp_row) = tab_hit(&screen, "app · vs").expect("compare tab");
+    let (cmp_col, cmp_row) = tab_hit(&screen, "app ↔").expect("compare tab");
     tui.sgr_click(cmp_col, cmp_row);
     tui.wait_pred(
-        |screen| screen.contains("COMMITTED") && screen.contains("app · vs origin/main"),
+        |screen| screen.contains("COMMITTED") && screen.contains("app ↔ origin/main"),
         "click compare tab activates it",
         GIT_WAIT,
     );

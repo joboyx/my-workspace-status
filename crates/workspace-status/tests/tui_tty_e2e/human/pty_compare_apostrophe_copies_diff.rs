@@ -12,7 +12,7 @@ fn pty_compare_apostrophe_copies_diff() {
     tui.ctrl_letter('k');
     tui.keys("vs default");
     tui.enter();
-    tui.wait_contains("app · vs origin/main", GIT_WAIT);
+    tui.wait_contains("app ↔ origin/main", GIT_WAIT);
     tui.enter();
     tui.wait_pred(
         |screen| screen.contains("COMMITTED") && screen.contains("alpha.txt"),
