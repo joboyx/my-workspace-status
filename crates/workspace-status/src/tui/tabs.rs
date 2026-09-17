@@ -38,9 +38,17 @@ pub fn no_merge_base(base_ref: &str) -> String {
     format!("No merge base between {base_ref} and HEAD")
 }
 
-/// Tab strip label: `<checkout-leaf> · vs <base-ref>`.
+/// Bidirectional separator between checkout leaf and base ref (VS Code-style).
+pub const COMPARE_TAB_SEP: &str = " ↔ ";
+
+/// Tab strip label: `<checkout-leaf> ↔ <base-ref>`.
+///
+/// Left is the checkout leaf; right is the compare base ref. Order is fixed.
 pub fn compare_tab_label(checkout_path: &str, base_ref: &str) -> String {
-    format!("{} · vs {base_ref}", checkout_leaf(checkout_path))
+    format!(
+        "{}{COMPARE_TAB_SEP}{base_ref}",
+        checkout_leaf(checkout_path)
+    )
 }
 
 /// Last path component of a checkout path.
@@ -339,7 +347,7 @@ mod tests {
         assert!(tabs.is_workspace());
         tabs.prev();
         assert_eq!(tabs.active, 2);
-        assert_eq!(tabs.labels()[1], "app · vs a");
+        assert_eq!(tabs.labels()[1], "app ↔ a");
     }
 
     #[test]
@@ -354,6 +362,19 @@ mod tests {
         assert!(tabs.close_at(1));
         assert_eq!(tabs.active, 1);
         assert_eq!(tabs.compare.len(), 1);
-        assert_eq!(tabs.labels()[1], "app · vs b");
+        assert_eq!(tabs.labels()[1], "app ↔ b");
+    }
+
+    #[test]
+    fn compare_tab_label_uses_bidirectional_arrow_not_vs() {
+        let label = compare_tab_label("repos/app", "origin/main");
+        assert_eq!(label, "app ↔ origin/main");
+        assert!(!label.contains("vs"));
+        assert!(!label.contains('·'));
+        assert!(label.contains(COMPARE_TAB_SEP));
+        // Left = checkout leaf, right = base ref (ordering preserved).
+        let (left, right) = label.split_once(COMPARE_TAB_SEP).expect("sep");
+        assert_eq!(left, "app");
+        assert_eq!(right, "origin/main");
     }
 }

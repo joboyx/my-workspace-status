@@ -37,14 +37,14 @@ fn open_default_and_main(tui: &mut PtySession) {
     tui.keys("vs default");
     tui.wait_contains("Diff vs default", WAIT);
     tui.enter();
-    tui.wait_contains("app · vs origin/main", GIT_WAIT);
+    tui.wait_contains("app ↔ origin/main", GIT_WAIT);
     tui.ctrl_letter('k');
     tui.keys("vs branch");
     tui.enter();
     tui.wait_contains("Compare", WAIT);
     tui.keys("main");
     tui.enter();
-    tui.wait_contains("app · vs main", GIT_WAIT);
+    tui.wait_contains("app ↔ main", GIT_WAIT);
 }
 
 fn on_workspace(screen: &str) -> bool {

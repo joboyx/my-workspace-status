@@ -12,7 +12,7 @@ fn pty_compare_esc_closes_tab() {
     tui.ctrl_letter('k');
     tui.keys("vs default");
     tui.enter();
-    tui.wait_contains("app · vs origin/main", GIT_WAIT);
+    tui.wait_contains("app ↔ origin/main", GIT_WAIT);
     tui.enter();
     tui.wait_pred(
         |screen| screen.contains("COMMITTED") && screen.contains("alpha.txt"),
@@ -20,10 +20,10 @@ fn pty_compare_esc_closes_tab() {
         WAIT,
     );
     tui.esc();
-    tui.wait_contains("app · vs origin/main", WAIT);
+    tui.wait_contains("app ↔ origin/main", WAIT);
     tui.esc();
     tui.wait_pred(
-        |screen| screen.contains("# workspace") && !screen.contains("app · vs origin/main"),
+        |screen| screen.contains("# workspace") && !screen.contains("app ↔ origin/main"),
         "Esc on compare left closes that tab",
         WAIT,
     );

@@ -77,7 +77,7 @@ fn search_checkout(tui: &mut PtySession, name: &str) {
 }
 
 fn vs_count(screen: &str) -> usize {
-    screen.matches("· vs").count()
+    screen.matches(" ↔ ").count()
 }
 
 fn head_sha(workspace: &Path, name: &str) -> String {
@@ -121,7 +121,7 @@ fn pty_compare_ahead_behind_diverged_and_unrelated() {
     open_vs_default(&mut tui);
     tui.wait_pred(
         |screen| {
-            screen.contains("ahead · vs origin/main")
+            screen.contains("ahead ↔ origin/main")
                 && screen.contains("alpha.txt")
                 && !screen.contains("No merge base between")
                 && !screen.contains("Base ref not found")
@@ -135,7 +135,7 @@ fn pty_compare_ahead_behind_diverged_and_unrelated() {
     open_vs_default(&mut tui);
     tui.wait_pred(
         |screen| {
-            screen.contains("behind · vs main")
+            screen.contains("behind ↔ main")
                 && screen.contains("No committed changes")
                 && !screen.contains("alpha.txt")
                 && !screen.contains("beta.txt")
@@ -148,7 +148,7 @@ fn pty_compare_ahead_behind_diverged_and_unrelated() {
     search_checkout(&mut tui, DIVERGED);
     open_vs_default(&mut tui);
     tui.wait_pred(
-        |screen| screen.contains("diverged · vs main") && screen.contains("feature.txt"),
+        |screen| screen.contains("diverged ↔ main") && screen.contains("feature.txt"),
         "diverged vs main lists feature.txt",
         GIT_WAIT,
     );
@@ -163,7 +163,7 @@ fn pty_compare_ahead_behind_diverged_and_unrelated() {
     open_vs_default(&mut tui);
     tui.wait_pred(
         |screen| {
-            screen.contains("orphan · vs main")
+            screen.contains("orphan ↔ main")
                 && screen.contains("No merge base between main and HEAD")
         },
         "orphan vs main keeps the compare tab with No merge base between main and HEAD",
@@ -176,16 +176,16 @@ fn pty_compare_ahead_behind_diverged_and_unrelated() {
         "tab strip must keep Workspace:\n{strip}"
     );
     assert!(
-        strip.contains("ahead · vs origin/main")
-            && strip.contains("behind · vs main")
-            && strip.contains("diverged · vs main")
-            && strip.contains("orphan · vs main"),
+        strip.contains("ahead ↔ origin/main")
+            && strip.contains("behind ↔ main")
+            && strip.contains("diverged ↔ main")
+            && strip.contains("orphan ↔ main"),
         "tab strip must show all four compare labels:\n{strip}"
     );
     assert_eq!(
         vs_count(&strip),
         4,
-        "tab strip must have exactly four · vs labels:\n{strip}"
+        "tab strip must have exactly four ↔ labels:\n{strip}"
     );
 
     assert_eq!(

@@ -18,7 +18,7 @@ fn palette_closed(screen: &str) -> bool {
 }
 
 fn workspace_only(screen: &str) -> bool {
-    screen.contains("# workspace") && !screen.contains("· vs")
+    screen.contains("# workspace") && !screen.contains(" ↔ ")
 }
 
 fn family_visible(screen: &str) -> bool {
@@ -128,7 +128,7 @@ fn pty_compare_missing_default_and_unborn_disable_open() {
                 && screen.contains("Default branch not found")
                 && workspace_only(screen)
         },
-        "Enter keeps Default branch not found; no compare tab (no · vs)",
+        "Enter keeps Default branch not found; no compare tab (no ↔)",
         WAIT,
     );
     esc_closes_palette(&mut tui);
@@ -176,7 +176,7 @@ fn pty_compare_missing_default_and_unborn_disable_open() {
         |screen| {
             palette_open(screen) && screen.contains("HEAD has no commit") && workspace_only(screen)
         },
-        "Enter keeps HEAD has no commit; no compare tab (no · vs)",
+        "Enter keeps HEAD has no commit; no compare tab (no ↔)",
         WAIT,
     );
 }
@@ -257,7 +257,7 @@ fn pty_compare_workspace_and_family_are_not_targets() {
                 && screen.contains("Workspace tab cannot be closed")
                 && workspace_only(screen)
         },
-        "Enter keeps a single Workspace tab (no close, no · vs)",
+        "Enter keeps a single Workspace tab (no close, no ↔)",
         WAIT,
     );
 }

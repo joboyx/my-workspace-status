@@ -4,7 +4,7 @@ use crate::support::{GIT_WAIT, WAIT};
 
 fn tab_close_hit(screen: &str) -> Option<(u16, u16)> {
     for (row, line) in screen.lines().enumerate() {
-        if !line.contains("app · vs") {
+        if !line.contains("app ↔") {
             continue;
         }
         if let Some(at) = line.find("[x]") {
@@ -17,7 +17,7 @@ fn tab_close_hit(screen: &str) -> Option<(u16, u16)> {
 
 fn workspace_tab_has_close(screen: &str) -> bool {
     screen.lines().any(|line| {
-        line.contains("Workspace") && line.contains("[x]") && !line.contains("app · vs")
+        line.contains("Workspace") && line.contains("[x]") && !line.contains("app ↔")
     })
 }
 
@@ -31,7 +31,7 @@ fn pty_compare_mouse_tab_close() {
     tui.ctrl_letter('k');
     tui.keys("vs default");
     tui.enter();
-    tui.wait_contains("app · vs origin/main", GIT_WAIT);
+    tui.wait_contains("app ↔ origin/main", GIT_WAIT);
 
     let screen = tui.screen();
     assert!(
@@ -43,7 +43,7 @@ fn pty_compare_mouse_tab_close() {
     tui.wait_pred(
         |screen| {
             screen.contains("# workspace")
-                && !screen.contains("app · vs origin/main")
+                && !screen.contains("app ↔ origin/main")
                 && !screen.contains("COMMITTED")
         },
         "click [x] closes the compare tab",
