@@ -254,6 +254,8 @@ const HINT_ACTIONS: &[HintAction] = &[
         key: "o",
         label: "focus branches",
         kinds: &[
+            HintRowKind::Repo,
+            HintRowKind::Checkout,
             HintRowKind::GraphCommit,
             HintRowKind::GraphStash,
             HintRowKind::GraphUncommitted,
@@ -267,6 +269,8 @@ const HINT_ACTIONS: &[HintAction] = &[
         key: "O",
         label: "clear focus",
         kinds: &[
+            HintRowKind::Repo,
+            HintRowKind::Checkout,
             HintRowKind::GraphCommit,
             HintRowKind::GraphStash,
             HintRowKind::GraphUncommitted,
@@ -601,18 +605,7 @@ fn graph_action_visible(state: &AppState, action: &HintAction) -> bool {
             matches!(state.focused_graph_row(), Some(GraphRow::Commit { .. }))
         }
         HintActionId::GraphFocus => true,
-        HintActionId::GraphFocusClear => {
-            state
-                .graph_branch_focus
-                .as_ref()
-                .is_some_and(|(repo, names)| {
-                    !names.is_empty()
-                        && state
-                            .graph_identity
-                            .as_ref()
-                            .is_some_and(|(current, _)| current == repo)
-                })
-        }
+        HintActionId::GraphFocusClear => state.graph_focus_is_active(),
         HintActionId::StashApply | HintActionId::StashPop | HintActionId::StashDrop => {
             matches!(state.focused_graph_row(), Some(GraphRow::Stash(_)))
         }
@@ -699,6 +692,7 @@ fn scope_action_visible(
         HintActionId::Branch => {
             focused.is_some_and(|row| can_open_branch_picker(&state.snapshot, row))
         }
+        HintActionId::GraphFocusClear => state.graph_focus_is_active(),
         HintActionId::RemoveWorktree => focused.is_some_and(|row| can_remove_worktree(state, row)),
         HintActionId::StashMenu => {
             if depth >= 2 {
@@ -1259,6 +1253,47 @@ mod tests {
     fn format_hint_plain_joins_with_chip_gap() {
         assert_eq!(HINT_CHIP_GAP, 2);
         assert_eq!(format_hint_plain(&hint_of("s", "stage")), "s  stage");
+    }
+
+    #[test]
+    fn repo_hints_include_graph_focus_file_hints_do_not() {
+        let mut app = state();
+        let idx = app
+            .rows
+            .iter()
+            .position(|row| row.kind == NodeKind::Repo && row.repo.as_deref() == Some("app"))
+            .expect("app repo");
+        app.cursor = idx;
+        let keys: Vec<String> = action_hint_segments(&app)
+            .into_iter()
+            .map(|s| s.key)
+            .collect();
+        assert!(keys.contains(&"o".into()), "{keys:?}");
+        assert!(
+            !keys.contains(&"O".into()),
+            "clear-focus hint stays off until a focus is on: {keys:?}"
+        );
+
+        app.graph_branch_focus = Some(("app".into(), vec!["main".into()]));
+        let keys: Vec<String> = action_hint_segments(&app)
+            .into_iter()
+            .map(|s| s.key)
+            .collect();
+        assert!(keys.contains(&"o".into()), "{keys:?}");
+        assert!(keys.contains(&"O".into()), "{keys:?}");
+
+        let file = app
+            .rows
+            .iter()
+            .position(|row| row.kind == NodeKind::File)
+            .expect("file row");
+        app.cursor = file;
+        let keys: Vec<String> = action_hint_segments(&app)
+            .into_iter()
+            .map(|s| s.key)
+            .collect();
+        assert!(!keys.contains(&"o".into()), "{keys:?}");
+        assert!(!keys.contains(&"O".into()), "{keys:?}");
     }
 
     #[test]

@@ -3162,11 +3162,36 @@ impl AppState {
             .or_else(|| self.focused_graph_repo())
     }
 
-    fn begin_graph_focus_picker(&mut self) -> Effect {
-        if !self.graph_pane_focused() {
-            return Effect::None;
+    /// Checkout whose graph `o` should load.
+    ///
+    /// Graph list: the loaded graph (identity, else the tree row that owns
+    /// it). Tree: the highlighted repo or worktree, not a stale identity
+    /// from a previous row.
+    pub(crate) fn graph_focus_picker_repo(&self) -> Option<String> {
+        if self.graph_pane_focused() {
+            return self.graph_focus_repo();
         }
-        let Some(repo) = self.graph_focus_repo() else {
+        if self.list_focus_target() != ListFocusTarget::Tree {
+            return None;
+        }
+        match self.focused_row().map(|row| row.kind) {
+            Some(NodeKind::Repo | NodeKind::Checkout) => self.focused_graph_repo(),
+            _ => None,
+        }
+    }
+
+    /// True when the current row has an applied graph branch focus.
+    pub(crate) fn graph_focus_is_active(&self) -> bool {
+        let Some(repo) = self.graph_focus_picker_repo() else {
+            return false;
+        };
+        self.graph_branch_focus
+            .as_ref()
+            .is_some_and(|(focus_repo, names)| !names.is_empty() && focus_repo == &repo)
+    }
+
+    fn begin_graph_focus_picker(&mut self) -> Effect {
+        let Some(repo) = self.graph_focus_picker_repo() else {
             return Effect::None;
         };
         self.help_open = false;
@@ -5819,7 +5844,14 @@ mod tests {
         let mut app = state();
         focus_file(&mut app, "README.md");
         app.tabs.open_or_focus("app".into(), "main".into());
-        for action in [Action::Stage, Action::Revert, Action::Fetch, Action::Branch] {
+        for action in [
+            Action::Stage,
+            Action::Revert,
+            Action::Fetch,
+            Action::Branch,
+            Action::GraphFocusBranches,
+            Action::GraphFocusClear,
+        ] {
             assert_eq!(
                 app.palette_disabled_reason(&action).as_deref(),
                 Some(super::super::tabs::SWITCH_TO_WORKSPACE_TAB),
@@ -6813,6 +6845,108 @@ mod tests {
         assert_eq!(app.dispatch(Action::GraphCreateBranch), Effect::None);
         app.cursor = 0;
         assert_eq!(app.dispatch(Action::GraphCreateBranch), Effect::None);
+    }
+
+    #[test]
+    fn tree_o_prepares_graph_focus_on_repo_and_worktree() {
+        use crate::tui::graph_focus::GRAPH_FOCUS_NEED_CONTEXT;
+
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        assert!(matches!(
+            app.dispatch(Action::GraphFocusBranches),
+            Effect::PrepareGraphFocusPicker { repo } if repo == "app"
+        ));
+        assert_eq!(
+            app.palette_disabled_reason(&Action::GraphFocusBranches),
+            None
+        );
+        assert_eq!(
+            app.palette_disabled_reason(&Action::GraphFocusClear)
+                .as_deref(),
+            Some("no graph focus to clear")
+        );
+
+        app.graph_identity = Some(("lib".into(), "head-lib".into()));
+        assert!(
+            matches!(
+                app.dispatch(Action::GraphFocusBranches),
+                Effect::PrepareGraphFocusPicker { repo } if repo == "app"
+            ),
+            "tree o must use the highlighted repo, not a stale graph identity"
+        );
+
+        focus_file(&mut app, "README.md");
+        assert_eq!(app.dispatch(Action::GraphFocusBranches), Effect::None);
+        assert_eq!(
+            app.palette_disabled_reason(&Action::GraphFocusBranches)
+                .as_deref(),
+            Some(GRAPH_FOCUS_NEED_CONTEXT)
+        );
+
+        app.cursor = 0;
+        assert_eq!(app.dispatch(Action::GraphFocusBranches), Effect::None);
+        assert_eq!(
+            app.palette_disabled_reason(&Action::GraphFocusBranches)
+                .as_deref(),
+            Some(GRAPH_FOCUS_NEED_CONTEXT)
+        );
+
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_graph_commit(&mut app, &["main"]);
+        assert!(matches!(
+            app.dispatch(Action::GraphFocusBranches),
+            Effect::PrepareGraphFocusPicker { repo } if repo == "app"
+        ));
+        app.graph_branch_focus = Some(("app".into(), vec!["main".into()]));
+        app.graph_identity = None;
+        let keys: Vec<String> = crate::tui::chrome::action_hint_segments(&app)
+            .into_iter()
+            .map(|s| s.key)
+            .collect();
+        assert!(
+            keys.contains(&"O".into()),
+            "graph O hint must follow active focus, not identity: {keys:?}"
+        );
+
+        let snapshot = build_workspace_snapshot(
+            &[
+                repo("app", false),
+                RepoSnapshot {
+                    repo: "app/.worktrees/feat".into(),
+                    branch: "feature/x".into(),
+                    sync_status: SyncStatus::NoUpstream,
+                    sync_note: String::new(),
+                    head: String::new(),
+                    has_unstaged: false,
+                    has_staged: false,
+                    has_untracked: false,
+                    changes: Vec::new(),
+                    checkout_kind: CheckoutKind::Linked,
+                    primary_repo: Some("app".into()),
+                    merged_into_default: None,
+                    default_branch_override: None,
+                    default_tip_ref: None,
+                    local_branches: Vec::new(),
+                },
+            ],
+            &[],
+            false,
+            &[],
+        );
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let idx = app
+            .rows
+            .iter()
+            .position(|row| row.kind == NodeKind::Checkout)
+            .expect("linked worktree row");
+        app.cursor = idx;
+        let expected = app.rows[idx].repo.clone().expect("checkout path");
+        assert!(matches!(
+            app.dispatch(Action::GraphFocusBranches),
+            Effect::PrepareGraphFocusPicker { repo } if repo == expected
+        ));
     }
 
     #[test]

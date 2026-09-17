@@ -140,9 +140,13 @@ pub enum Action {
     GraphCheckout,
     GraphCreateBranch,
     GraphMerge,
-    /// Open the graph branch-focus overlay (`o`). Graph list only.
+    /// Open the graph branch-focus overlay (`o`).
+    ///
+    /// Graph list, or a highlighted repo / worktree row. Same overlay.
     GraphFocusBranches,
-    /// Restore `--all` history (`O`). Graph list only.
+    /// Restore `--all` history (`O`).
+    ///
+    /// Graph list, or a highlighted repo / worktree with an active focus.
     GraphFocusClear,
     GraphFocusMove(i32),
     GraphFocusChar(char),

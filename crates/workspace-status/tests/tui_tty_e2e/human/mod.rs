@@ -119,6 +119,7 @@ mod pty_t_and_i_toggle_view_modes;
 mod pty_tab_swaps_selection_cursor;
 mod pty_terminal_resize_relayouts;
 mod pty_tree_b_picker_enter_checkout;
+mod pty_tree_o_focuses_graph_branches;
 mod pty_tree_sgr_hscroll_pans_clipped_path;
 mod pty_tree_staged_changes_sections;
 mod pty_unfocused_pane_keeps_selection;

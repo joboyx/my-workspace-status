@@ -9,8 +9,9 @@ The crate itself does not run a terminal app.
 Interactive and headless callers share `GraphModel::visible_rows` and
 `format_row` / `format_sync`. Display differs. The widget paints a
 multi-lane gutter from the same model. The TUI may load a focused
-window (`git log <branches>` instead of `--all`) via graph `o`; the
-widget still paints whatever `visible_rows` the model holds.
+window (`git log <branches>` instead of `--all`) via `o` on the graph
+list or a highlighted repo / worktree. The widget still paints
+whatever `visible_rows` the model holds.
 
 ## Types
 

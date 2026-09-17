@@ -162,7 +162,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: "o O",
-                desc: "graph focus branches / clear",
+                desc: "focus branches / clear (graph · repo)",
             },
             HelpEntry {
                 keys: "PgUp PgDn",
@@ -600,6 +600,14 @@ mod tests {
                 .find(|e| e.keys == "t")
                 .map(|e| e.desc),
             Some("flat / tree · Staged split")
+        );
+        assert_eq!(
+            HELP_GROUPS[2]
+                .entries
+                .iter()
+                .find(|e| e.keys == "o O")
+                .map(|e| e.desc),
+            Some("focus branches / clear (graph · repo)")
         );
         assert!(help_match_indices("quit")
             .iter()

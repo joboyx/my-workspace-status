@@ -6,6 +6,7 @@ use super::super::action::{Action, Effect, ExternalDiffKind, PaletteOpenedBy};
 use super::super::branches::can_open_branch_picker;
 use super::super::command_palette::CommandPaletteState;
 use super::super::gates::{dispatch_is_noop, is_compare_mutation, ListFocusTarget};
+use super::super::graph_focus::GRAPH_FOCUS_NEED_CONTEXT;
 use super::super::ops::{collect_write_files, op_is_kind_noop, Op};
 use super::super::split::SplitDrag;
 use super::super::tabs::{
@@ -512,16 +513,16 @@ impl AppState {
                 }
             }
             Action::GraphFocusBranches => {
-                if self.graph_pane_focused() && self.graph_focus_repo().is_some() {
+                if self.graph_focus_picker_repo().is_some() {
                     None
                 } else {
-                    Some("focus the graph pane".into())
+                    Some(GRAPH_FOCUS_NEED_CONTEXT.into())
                 }
             }
             Action::GraphFocusClear => {
-                if !self.graph_pane_focused() {
-                    Some("focus the graph pane".into())
-                } else if self.graph_branch_focus.is_none() {
+                if self.graph_focus_picker_repo().is_none() {
+                    Some(GRAPH_FOCUS_NEED_CONTEXT.into())
+                } else if !self.graph_focus_is_active() {
                     Some("no graph focus to clear".into())
                 } else {
                     None
