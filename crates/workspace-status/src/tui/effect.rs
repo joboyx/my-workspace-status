@@ -35,6 +35,7 @@ use super::app::{
     discover_config, drop_undiscovered_checkouts, filter_repo_set, focused_repo_needs_pane,
     probe_compare_range, RightPaneLoad, RightPaneRequest, RightPaneTarget, TuiOpts,
 };
+use super::branches::is_valid_branch_name;
 use super::comments;
 use super::diff_tool::{
     prepare_rev_diff_paths, prepare_worktree_diff, resolve_diff_tool, PreparedDiff,
@@ -48,7 +49,6 @@ use super::graph_load::{
 use super::ops::{
     format_completed_op, format_mixed_running_op, format_running_op, op_targets, Op, RunningOp,
 };
-use super::branches::is_valid_branch_name;
 use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
 use super::stash::{resolve_stash_menu_key, StashMenuKeyResult, StashOpId};
 use super::state::{AppState, PendingConfirm};
@@ -1165,11 +1165,7 @@ impl Interpreter {
                 self.sched.note_user_done(UserTag::Prepare);
                 let accepted = self.sched.accept_prepare_branches_result(gen);
                 let current = if graph_focus {
-                    state
-                        .graph_identity
-                        .as_ref()
-                        .map(|(r, _)| r.clone())
-                        .or_else(|| state.focused_graph_repo())
+                    state.graph_focus_picker_repo()
                 } else {
                     state.focused_checkout_path()
                 };
@@ -3456,6 +3452,32 @@ mod tests {
             .graph_focus_picker
             .as_ref()
             .expect("matching graph-focus PrepareBranches must open picker");
+        assert_eq!(picker.repo, "app");
+    }
+
+    #[test]
+    fn tree_prepare_graph_focus_opens_when_identity_is_stale() {
+        let mut state = fixture_state();
+        state.graph = Some(mini_graph(&["aaa"]));
+        state.graph_identity = Some(("lib".into(), "head-lib".into()));
+        state.focus = FocusPane::Left;
+        focus_repo(&mut state, "app");
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_prepare_branches();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::PrepareBranches {
+                gen,
+                repo: "app".into(),
+                branches: vec![local_branch("main")],
+                graph_focus: true,
+            },
+        );
+        let picker = state
+            .graph_focus_picker
+            .as_ref()
+            .expect("tree graph-focus PrepareBranches must open for the highlighted repo");
         assert_eq!(picker.repo, "app");
     }
 

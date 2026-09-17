@@ -48,7 +48,7 @@ const HELP_VIEW_ROWS: &[(&str, &str)] = &[
     (".", "show / hide ignored repos"),
     ("T", "cycle theme"),
     ("Ctrl-o", "full-file · keep hunk in view"),
-    ("o O", "graph focus branches / clear"),
+    ("o O", "focus branches / clear (graph · repo)"),
     ("PgUp PgDn", "page focused pane"),
     ("Ctrl-u Ctrl-d", "page focused ±5"),
     ("m", "mouse · pane/split/graph"),

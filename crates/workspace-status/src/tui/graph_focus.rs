@@ -1,10 +1,14 @@
 //! Graph branch-focus overlay (`o` / `O`).
 //!
+//! Opens from the graph list or from a highlighted repo / worktree row.
 //! Lists local branches. Space marks a set; Enter applies visible marks, or
 //! the cursor row when none of the visible rows are marked. Marks hidden by
 //! the filter (including the current focus pre-marked on reopen) do not leak
 //! through. The graph then loads ancestors of those tips instead of `--all`.
 //! Unmarking every `[x]` then Enter, and `O`, restore the full graph.
+
+/// Palette / gate copy when `o` has no repo, worktree, or graph list.
+pub const GRAPH_FOCUS_NEED_CONTEXT: &str = "focus a repo, worktree, or the graph pane";
 
 use std::collections::BTreeSet;
 
