@@ -23,7 +23,11 @@ use crate::worktrees::{
 
 use super::graph_focus::focus_rev_for_branch;
 
-/// Identity used to keep graph scroll when the same row is still focused.
+/// Load key for one graph window (`repo` + `HEAD`).
+///
+/// Autoload and right-pane apply drop a result when this pair no longer
+/// matches. Graph list focus across a same-repo HEAD move is restored by
+/// stable row id in `AppState::set_graph`, not by this pair.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphIdentity {
     pub repo: String,
