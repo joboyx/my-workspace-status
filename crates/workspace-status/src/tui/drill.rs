@@ -125,10 +125,7 @@ mod tests {
             commit: Commit {
                 id: id.into(),
                 subject: "s".into(),
-                parents: Vec::new(),
-                refs: Vec::new(),
-                author_name: String::new(),
-                author_date_unix: 0,
+                ..Commit::default()
             },
             is_head: true,
             worktrees: Vec::new(),

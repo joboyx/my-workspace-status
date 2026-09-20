@@ -100,13 +100,39 @@ impl From<String> for GraphRef {
     }
 }
 
+/// Bytes kept from a git `%b` body. Longer bodies truncate with `…`.
+pub const COMMIT_BODY_MAX_BYTES: usize = 8 * 1024;
+
+/// Cap a git `%b` body. Trailing whitespace is dropped first.
+pub fn cap_commit_body(body: &str) -> String {
+    let body = body.trim_end();
+    if body.len() <= COMMIT_BODY_MAX_BYTES {
+        return body.to_string();
+    }
+    let mut out = String::new();
+    let ellipsis_len = '…'.len_utf8();
+    for ch in body.chars() {
+        let next = out.len() + ch.len_utf8();
+        if next + ellipsis_len > COMMIT_BODY_MAX_BYTES {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
 /// One commit in the loaded window.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Commit {
     /// Full commit id.
     pub id: String,
-    /// First-line subject.
+    /// First-line subject (`%s`). List rows stay on this line.
     pub subject: String,
+    /// Rest of the message (`%b`). Empty when git reported none.
+    ///
+    /// Capped at [`COMMIT_BODY_MAX_BYTES`].
+    pub body: String,
     /// Parent ids, first parent first.
     pub parents: Vec<String>,
     /// Branch or tag labels that point at this commit.
@@ -126,6 +152,10 @@ pub struct Stash {
     pub stash_ref: String,
     /// Stash subject.
     pub subject: String,
+    /// Rest of the stash message (`%b`). Empty for the usual WIP subject.
+    ///
+    /// Capped at [`COMMIT_BODY_MAX_BYTES`].
+    pub body: String,
     /// `git stash list` `%an` author name. Empty when unknown.
     pub author_name: String,
     /// `git stash list` `%at` author date (unix seconds). `0` when unknown.
@@ -284,5 +314,21 @@ impl GraphModel {
         }
 
         rows
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cap_commit_body, COMMIT_BODY_MAX_BYTES};
+
+    #[test]
+    fn cap_commit_body_keeps_short_and_truncates_huge() {
+        assert_eq!(cap_commit_body("  hi \n"), "  hi");
+        assert_eq!(cap_commit_body(""), "");
+        let huge = "x".repeat(COMMIT_BODY_MAX_BYTES + 80);
+        let capped = cap_commit_body(&huge);
+        assert!(capped.ends_with('…'), "{capped}");
+        assert!(capped.len() <= COMMIT_BODY_MAX_BYTES);
+        assert!(capped.chars().count() < huge.chars().count());
     }
 }

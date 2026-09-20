@@ -87,6 +87,8 @@ stay out of ops unless shown.
 `GraphWidget` uses a chrome budget (`graph_chrome_budget`): a
 2-line selection footer when height ≥ 3, then a 1-line sync header if
 space remains (footer wins when tight; no header when `sync` is unset).
+`M` (`commit_msg_expand`) grows that footer so it can wrap the full
+subject plus body (`selection_footer_parts`). List rows stay one line.
 `loading older…` takes one extra row while the next log page loads.
 
 Footer copy (`selection_detail_lines` / `selection_detail_parts`; do not invent
@@ -98,9 +100,10 @@ other strings):
   `worktree · not a commit` when HEAD has none
 - spacer: `…`, then `connector · not selectable`
 - stash: subject, then `stash@{n} ·` short hash `·` relative date (no
-  author)
+  author). Expanded: wrap subject plus body (usually empty), then meta
 - commit: subject, then ref chips `·` hash `·` author `·` date, or
-  `(no refs)` when there are no chips
+  `(no refs)` when there are no chips. Expanded: wrap subject plus body,
+  then the same meta line
 
 Footer paint reuses the commit-spacer chip runs (`LabelKind`: HEAD /
 default / local / remote / tag). `GraphWidget::label_palette` colours

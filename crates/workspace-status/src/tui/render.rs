@@ -9,8 +9,8 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 use workspace_status_graph::{
-    graph_chrome_budget, graph_col_max, graph_hscroll_visible, graph_vscroll_visible, paint_model,
-    GraphLabelPalette, GraphWidget, ASCII, UNICODE,
+    graph_col_max, graph_hscroll_visible, graph_vscroll_visible, paint_model, GraphLabelPalette,
+    GraphWidget, ASCII, UNICODE,
 };
 
 use std::cell::RefCell;
@@ -290,18 +290,11 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         let (start, _) = visible_window(state.painted_commit_file_rows().len(), cursor, list_h);
         state.layout.files_list_offset = start;
     } else if let super::drill::DrillView::Files { cursor, .. } = &state.drill {
-        let (title, subtitle) = state.commit_detail_meta();
-        let mut header_h = 0u16;
-        if !title.is_empty() {
-            header_h += 1;
-        }
-        if subtitle.as_ref().is_some_and(|s| !s.is_empty()) {
-            header_h += 1;
-        }
-        if header_h == 0 {
-            header_h = 1;
-        }
-        header_h = header_h.min(right_inner.height);
+        let header_h = state
+            .commit_detail_header_lines(right_inner.width as usize)
+            .len()
+            .max(1)
+            .min(right_inner.height as usize) as u16;
         state.layout.files_list_y = right_inner.y.saturating_add(header_h);
         let list_h = right_inner.height.saturating_sub(header_h) as usize;
         let painted_n = state.painted_commit_file_rows().len();
@@ -619,6 +612,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .resolved_comment_glyph(icon_comment_resolved(state.ascii))
         .cursor_style(pal.cursor, pal.cursor_bg)
         .cursor_inactive_style(pal.muted, pal.cursor_bg_inactive)
+        .commit_msg_expand(state.commit_msg_expand)
         .lane_colors(&lane_colors)
         .label_palette(GraphLabelPalette {
             subject: pal.repo,
@@ -683,14 +677,17 @@ fn graph_search_matches(state: &AppState) -> Vec<usize> {
 }
 
 fn record_graph_scrollbar(state: &mut AppState, area: Rect, col_offset: u16) {
-    let Some(model) = state.graph.as_ref() else {
+    if state.graph.is_none() {
         return;
-    };
+    }
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let chrome = graph_chrome_budget(area.height, state.graph_loading_older, model.sync.is_some());
+    let chrome = state.graph_chrome_in(area.height, area.width);
     let glyphs = if state.ascii { &ASCII } else { &UNICODE };
+    let Some(model) = state.graph.as_ref() else {
+        return;
+    };
     let content_len = paint_model(model, glyphs, None).len();
     state.layout.graph_content_len = content_len;
     let vscroll = graph_vscroll_visible(state.graph_scroll);
@@ -716,19 +713,7 @@ fn record_graph_scrollbar(state: &mut AppState, area: Rect, col_offset: u16) {
 }
 
 fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, cursor: usize) {
-    let (title, subtitle) = state.commit_detail_meta();
-    let mut header: Vec<String> = Vec::new();
-    if !title.is_empty() {
-        header.push(title);
-    }
-    if let Some(sub) = subtitle {
-        if !sub.is_empty() {
-            header.push(sub);
-        }
-    }
-    if header.is_empty() {
-        header.push(String::new());
-    }
+    let header = state.commit_detail_header_lines(area.width as usize);
     let header_h = header.len().min(area.height as usize);
     let palette = state.theme.palette();
     let header_lines: Vec<Line> = header
@@ -3478,10 +3463,10 @@ mod tests {
             commits: vec![Commit {
                 id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 subject: "seed graph".into(),
-                parents: Vec::new(),
                 refs: vec!["main".into()],
                 author_name: "Ada".into(),
                 author_date_unix: 1_700_000_000,
+                ..Commit::default()
             }],
             head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             uncommitted: Some(true),
@@ -3867,10 +3852,10 @@ mod tests {
             commits: vec![Commit {
                 id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 subject: "seed".into(),
-                parents: Vec::new(),
                 refs: vec!["main".into()],
                 author_name: "Ada".into(),
                 author_date_unix: 1_700_000_000,
+                ..Commit::default()
             }],
             head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             uncommitted: Some(true),

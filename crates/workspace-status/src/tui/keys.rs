@@ -762,6 +762,7 @@ fn normal_key(
         KeyCode::Char('w') | KeyCode::Char('W') => Action::RemoveWorktree,
         KeyCode::Char('i') => Action::ToggleDiffMode,
         KeyCode::Char('\\') => Action::ToggleDiffWrap,
+        KeyCode::Char('M') => Action::ToggleCommitMsgExpand,
         KeyCode::Char('m') => Action::ToggleMouse,
         KeyCode::Char(';') => Action::CommentStart,
         KeyCode::Char('V') => Action::DiffVisualStart,
@@ -1188,6 +1189,10 @@ mod tests {
             Action::ExternalDiff
         );
         assert_eq!(
+            event_to_action(&shift(KeyCode::Char('m')), normal(), false, false),
+            Action::ToggleCommitMsgExpand
+        );
+        assert_eq!(
             event_to_action(
                 &shift(KeyCode::Char('m')),
                 InputMode::SearchPrompt,
@@ -1267,6 +1272,10 @@ mod tests {
         assert_eq!(
             event_to_action_ex(&key(KeyCode::Char('m')), normal(), false, true, false, true),
             Action::GraphMerge
+        );
+        assert_eq!(
+            event_to_action_ex(&key(KeyCode::Char('M')), normal(), false, true, false, true),
+            Action::ToggleCommitMsgExpand
         );
         assert_eq!(
             event_to_action_ex(&key(KeyCode::Char('m')), normal(), false, true, true, false),
@@ -1463,6 +1472,14 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Char('\\')), normal(), false, false),
             Action::ToggleDiffWrap
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('M')), normal(), false, false),
+            Action::ToggleCommitMsgExpand
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('M')), normal(), true, true),
+            Action::ToggleCommitMsgExpand
         );
         assert_eq!(
             event_to_action(
