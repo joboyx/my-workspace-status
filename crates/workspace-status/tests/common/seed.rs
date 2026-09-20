@@ -215,6 +215,31 @@ pub fn seed_long_subject_repo(workspace: &Path, name: &str) {
     git(&repo, &["commit", "-q", "-m", &subject]);
 }
 
+/// Unique tail of a long commit subject used with [`COMMIT_MSG_BODY`].
+pub const COMMIT_MSG_SUBJ_TAIL: &str = "UNIQUE_MSG_SUBJ";
+/// Body line that appears only after `M` expands the commit message.
+pub const COMMIT_MSG_BODY: &str = "UNIQUE_MSG_BODY_LINE";
+
+/// Long subject plus a multiline body so `M` can reveal [`COMMIT_MSG_BODY`].
+///
+/// Do not `/` search the body token. Graph rows stay one line; the footer
+/// and commit-files header wrap when expanded.
+pub fn seed_multiline_message_repo(workspace: &Path, name: &str) {
+    let repo = workspace.join(name);
+    init_repo(&repo, "main");
+    fs::write(repo.join("README.md"), "# msg\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "root"]);
+    git(&repo, &["checkout", "-q", "-b", "feature/long-msg"]);
+    fs::write(repo.join("wip.txt"), "x\n").unwrap();
+    git(&repo, &["add", "wip.txt"]);
+    let subject = format!("{}{COMMIT_MSG_SUBJ_TAIL}", "n".repeat(80));
+    git(
+        &repo,
+        &["commit", "-q", "-m", &subject, "-m", COMMIT_MSG_BODY],
+    );
+}
+
 /// Long line plus many rows so a focused file-diff can pan and scroll.
 ///
 /// `tail` is usually `hscroll::DIFF_HSCROLL_TAIL`.
