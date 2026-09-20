@@ -90,7 +90,8 @@ pub enum InputMode {
     /// `;` comment overlay (type body, Shift+Enter newline, Enter save,
     /// Ctrl-R resolve).
     Comment,
-    /// `V` visual-line highlight on a focused file diff (`j`/`k` extend).
+    /// `V` visual-line highlight on a focused file diff (`j`/`k` extend,
+    /// `s`/`u` stage/unstage the range).
     DiffVisual,
     /// `y` markdown export overlay (Esc closes).
     CommentExport,
@@ -683,13 +684,16 @@ fn command_palette_key(key: KeyEvent) -> Action {
 /// Visual-line keys on a focused file diff.
 ///
 /// `j` / `k` / arrows move (and extend the range). `;` comments that
-/// range. `'` copies an entity reference for the highlighted span. Esc or a
+/// range. `s` / `u` stage / unstage the highlighted add/del lines.
+/// `'` copies an entity reference for the highlighted span. Esc or a
 /// second `V` leaves highlight without commenting.
 fn diff_visual_key(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Esc | KeyCode::Char('V') => Action::DiffVisualCancel,
         KeyCode::Char(';') => Action::CommentStart,
         KeyCode::Char('\'') => Action::CopyEntityReference,
+        KeyCode::Char('s') => Action::Stage,
+        KeyCode::Char('u') => Action::Unstage,
         KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::Move(1),
         KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::Move(-1),
         KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => Action::PanDiff(-1),
@@ -1338,7 +1342,11 @@ mod tests {
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('s')), InputMode::DiffVisual, true, true),
-            Action::None
+            Action::Stage
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('u')), InputMode::DiffVisual, true, true),
+            Action::Unstage
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('y')), normal(), false, false),

@@ -28,13 +28,15 @@ impl AppState {
             self.status = super::super::tabs::SWITCH_TO_WORKSPACE_TAB.into();
             return Effect::None;
         }
+        let visual_write = self.diff_visual_anchor.is_some()
+            && matches!(action, Action::Stage | Action::Unstage);
         let noop = dispatch_is_noop(
             &action,
             self.nav_depth(),
             self.focus == FocusPane::Right,
             self.list_focus_target(),
         );
-        if noop && !matches!(action, Action::FoldToggle) {
+        if noop && !matches!(action, Action::FoldToggle) && !visual_write {
             return Effect::None;
         }
         match action {

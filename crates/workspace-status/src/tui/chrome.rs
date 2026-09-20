@@ -543,6 +543,7 @@ pub fn extra_hint_segments() -> Vec<HintSegment> {
 pub fn visual_hint_segments() -> Vec<HintSegment> {
     vec![
         hint("j k", "extend range", false),
+        hint("s u", "stage / unstage range", false),
         hint(";", "comment range", false),
         hint("Esc", "cancel highlight", false),
     ]
@@ -1321,6 +1322,9 @@ mod tests {
                 "q".to_string()
             ]
         );
+        let visual: Vec<String> = visual_hint_segments().into_iter().map(|s| s.key).collect();
+        assert!(visual.contains(&"s u".into()), "{visual:?}");
+        assert!(visual.contains(&"j k".into()), "{visual:?}");
     }
 
     #[test]

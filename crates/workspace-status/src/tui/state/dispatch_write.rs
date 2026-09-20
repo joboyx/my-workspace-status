@@ -4,7 +4,7 @@ use super::super::action::{Action, Effect};
 use super::super::ops::Op;
 use super::super::split::SplitDrag;
 use super::super::stash::StashOpId;
-use super::{AppState, FileWrite, PendingConfirm};
+use super::{AppState, PendingConfirm};
 
 impl AppState {
     /// Apply a git-write [`Action`], including confirm and overlay keys.
@@ -14,8 +14,8 @@ impl AppState {
             Action::Pull => self.op_effect(Op::Pull),
             Action::DefaultBranch => self.op_effect(Op::DefaultBranch),
             Action::Refresh => self.refresh_effect(),
-            Action::Stage => self.file_write_effect(FileWrite::Stage),
-            Action::Unstage => self.file_write_effect(FileWrite::Unstage),
+            Action::Stage => self.stage_effect(),
+            Action::Unstage => self.unstage_effect(),
             Action::Revert => {
                 self.drag = SplitDrag::None;
                 self.begin_revert()
