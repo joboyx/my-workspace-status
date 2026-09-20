@@ -401,7 +401,7 @@ fn hit_graph_hscrollbar(layout: SplitLayout, col: u16, row: u16) -> Option<Split
 
 fn hit_diff_hscrollbar(layout: SplitLayout, col: u16, row: u16) -> Option<SplitHit> {
     let y = layout.diff_hscrollbar_y?;
-    if row != y || layout.diff_hscrollbar_width == 0 {
+    if row != y || layout.diff_hscrollbar_width == 0 || layout.diff_col_max == 0 {
         return None;
     }
     if col < layout.diff_hscrollbar_x {
@@ -411,14 +411,13 @@ fn hit_diff_hscrollbar(layout: SplitLayout, col: u16, row: u16) -> Option<SplitH
     if rel >= layout.diff_hscrollbar_width {
         return None;
     }
-    if let Some((thumb_off, thumb_len)) = workspace_status_graph::graph_scrollbar_thumb(
+    let (thumb_off, thumb_len) = workspace_status_graph::graph_scrollbar_thumb(
         (layout.diff_col_max as usize).saturating_add(1),
         layout.diff_col_offset,
         layout.diff_hscrollbar_width,
-    ) {
-        if rel >= thumb_off && rel < thumb_off.saturating_add(thumb_len) {
-            return Some(SplitHit::DiffHThumb);
-        }
+    )?;
+    if rel >= thumb_off && rel < thumb_off.saturating_add(thumb_len) {
+        return Some(SplitHit::DiffHThumb);
     }
     Some(SplitHit::DiffHTrack)
 }
@@ -923,6 +922,42 @@ mod tests {
         assert_eq!(
             hit_split(layout, layout.diff_hscrollbar_x.saturating_sub(1), 12),
             SplitHit::Other
+        );
+    }
+
+    #[test]
+    fn hit_test_diff_horizontal_scrollbar_absent_when_max_is_zero() {
+        let mut layout = diff_hsb_layout();
+        layout.diff_col_max = 0;
+        layout.diff_col_offset = 8;
+        assert_eq!(
+            hit_split(layout, layout.diff_hscrollbar_x, 12),
+            SplitHit::Other,
+            "no max must not classify the row as a track jump to origin"
+        );
+        layout.diff_col_max = 40;
+        layout.diff_hscrollbar_y = None;
+        assert_eq!(
+            hit_split(layout, layout.diff_hscrollbar_x, 12),
+            SplitHit::Other
+        );
+    }
+
+    #[test]
+    fn hit_test_diff_horizontal_thumb_at_nonzero_offset_is_not_left_track() {
+        let mut layout = diff_hsb_layout();
+        layout.diff_col_offset = 12;
+        let thumb = workspace_status_graph::graph_scrollbar_thumb(41, 12, 20).expect("thumb");
+        assert!(
+            thumb.0 > 0,
+            "origin-hidden offset must move the thumb off the left edge"
+        );
+        let thumb_col = layout.diff_hscrollbar_x + thumb.0;
+        assert_eq!(hit_split(layout, thumb_col, 12), SplitHit::DiffHThumb);
+        assert_eq!(
+            hit_split(layout, layout.diff_hscrollbar_x, 12),
+            SplitHit::DiffHTrack,
+            "left-edge track must stay a jump when the thumb has left origin"
         );
     }
 
