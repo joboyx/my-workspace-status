@@ -174,7 +174,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: "m",
-                desc: "mouse · pane/split/graph",
+                desc: "mouse · pane/split/bars",
             },
             HelpEntry {
                 keys: "; Ctrl-R",

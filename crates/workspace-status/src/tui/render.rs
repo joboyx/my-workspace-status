@@ -167,6 +167,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.diff_hscrollbar_y = None;
     state.layout.diff_hscrollbar_x = 0;
     state.layout.diff_hscrollbar_width = 0;
+    state.layout.diff_col_max = 0;
     let left_name = if left_is_files {
         "files"
     } else if left_is_graph {
@@ -1136,6 +1137,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         state.layout.diff_hscrollbar_y = Some(body.y.saturating_add(body.height.saturating_sub(1)));
         state.layout.diff_hscrollbar_x = area.x;
         state.layout.diff_hscrollbar_width = area.width.saturating_sub(v_cols).max(1);
+        state.layout.diff_col_max = col_max.min(u16::MAX as usize) as u16;
         let mut sb_state =
             ScrollbarState::new(col_max).position((state.diff_col_offset as usize).min(col_max));
         let sb_area = Rect {
