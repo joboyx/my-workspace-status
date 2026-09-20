@@ -12,7 +12,9 @@ use std::path::Path;
 use crate::git::{exec_git, git_diff_args};
 use crate::snapshot::FileChange;
 
-use super::split::DiffMode;
+use super::search::wrap_col_starts;
+use super::split::{side_by_side_column_widths, DiffMode};
+use super::tree::list_viewport_start;
 
 /// Stub huge / binary untracked files above ~1 MB.
 const HUGE_FILE_BYTES: u64 = 1_000_000;
@@ -871,11 +873,12 @@ pub fn diff_pane_mode_label(mode: DiffMode, effective: DiffMode) -> &'static str
     }
 }
 
-/// One-line `{path}  inline|split · full?` header (plus pan / scroll when set).
+/// One-line `{path}  inline|split · full? · wrap?` header (plus pan / scroll when set).
 pub fn diff_pane_header(
     path: &str,
     mode_label: &str,
     full: bool,
+    wrap: bool,
     pan: u16,
     start: usize,
     view_h: usize,
@@ -885,6 +888,9 @@ pub fn diff_pane_header(
     let mut extra = format!("  {mode_label}");
     if full {
         extra.push_str(" · full");
+    }
+    if wrap {
+        extra.push_str(" · wrap");
     }
     if pan > 0 {
         extra.push_str(&format!(" · pan {pan}"));
@@ -912,6 +918,93 @@ pub fn row_search_text(row: &DiffRow) -> String {
             out
         }
     }
+}
+
+/// Visual rows one logical [`DiffRow`] occupies when soft-wrap is on.
+///
+/// Split rows use the taller side. Continuation rows are extra visual
+/// lines of the same logical row (blank gutter / sign on those lines).
+pub fn diff_row_visual_height(
+    row: &DiffRow,
+    content_w: u16,
+    gutter_with_mark: usize,
+    split: bool,
+    split_fraction: f64,
+) -> usize {
+    let width = (content_w as usize).max(1);
+    match row {
+        DiffRow::Section(section) => {
+            let text = format!(" {} ", section_header(*section));
+            wrap_col_starts(&text, width).len().max(1)
+        }
+        DiffRow::Hunk { text } => wrap_col_starts(text, width).len().max(1),
+        DiffRow::Line { left, right } if split && right.is_some() => {
+            let cols = side_by_side_column_widths(content_w, split_fraction);
+            let left_h = wrap_col_starts(
+                &left.text,
+                cell_code_width(cols.left_width as usize, gutter_with_mark),
+            )
+            .len()
+            .max(1);
+            let right_h = wrap_col_starts(
+                &right.as_ref().unwrap().text,
+                cell_code_width(cols.right_width as usize, gutter_with_mark),
+            )
+            .len()
+            .max(1);
+            left_h.max(right_h)
+        }
+        DiffRow::Line { left, .. } => wrap_col_starts(
+            &left.text,
+            cell_code_width(width, gutter_with_mark),
+        )
+        .len()
+        .max(1),
+    }
+}
+
+/// Visual height of every logical row when wrap is on.
+pub fn diff_wrap_row_heights(
+    rows: &[DiffRow],
+    content_w: u16,
+    gutter_with_mark: usize,
+    split: bool,
+    split_fraction: f64,
+) -> Vec<usize> {
+    rows.iter()
+        .map(|row| {
+            diff_row_visual_height(row, content_w, gutter_with_mark, split, split_fraction)
+        })
+        .collect()
+}
+
+/// First logical row of a wrap viewport that keeps `cursor` visible.
+///
+/// Uses the same middle-bias as tree `list_viewport_start`, then snaps to a
+/// logical-row boundary so a wrap part is never the first painted line
+/// of a new viewport.
+pub fn wrap_viewport_start(heights: &[usize], cursor: usize, view_h: usize) -> usize {
+    if heights.is_empty() {
+        return 0;
+    }
+    let view_h = view_h.max(1);
+    let cursor = cursor.min(heights.len() - 1);
+    let prefix: usize = heights[..cursor]
+        .iter()
+        .copied()
+        .map(|h| h.max(1))
+        .sum();
+    let total: usize = heights.iter().copied().map(|h| h.max(1)).sum();
+    let visual_start = list_viewport_start(total, prefix, view_h);
+    let mut acc = 0usize;
+    for (i, h) in heights.iter().copied().enumerate() {
+        let h = h.max(1);
+        if visual_start < acc.saturating_add(h) {
+            return i;
+        }
+        acc = acc.saturating_add(h);
+    }
+    heights.len() - 1
 }
 
 /// Clamp vertical diff scroll so PageDown cannot grow past EOF.
@@ -1196,17 +1289,50 @@ index 1111111..2222222 100644
     #[test]
     fn header_includes_path_mode_and_optional_full() {
         assert_eq!(
-            diff_pane_header("app/README.md", "inline", false, 0, 0, 20, 5),
+            diff_pane_header("app/README.md", "inline", false, false, 0, 0, 20, 5),
             "app/README.md  inline"
         );
         assert_eq!(
-            diff_pane_header("src/lib.rs", "split", true, 3, 0, 10, 40),
+            diff_pane_header("src/lib.rs", "split", true, false, 3, 0, 10, 40),
             "src/lib.rs  split · full · pan 3  10/40"
+        );
+        assert_eq!(
+            diff_pane_header("app/x.rs", "inline", false, true, 0, 0, 20, 5),
+            "app/x.rs  inline · wrap"
         );
         assert_eq!(
             diff_pane_mode_label(DiffMode::SideBySide, DiffMode::Inline),
             "inline (too narrow)"
         );
+    }
+
+    #[test]
+    fn wrap_height_uses_display_columns_and_viewport_snaps() {
+        let long = DiffRow::Line {
+            left: DiffCell {
+                kind: DiffCellKind::Add,
+                text: "n".repeat(20),
+                line_no: Some(1),
+            },
+            right: None,
+        };
+        let height = diff_row_visual_height(&long, 24, 3, false, 0.5);
+        assert!(
+            height >= 2,
+            "20-col add must wrap in the code window: {height}"
+        );
+        let short = DiffRow::Line {
+            left: DiffCell {
+                kind: DiffCellKind::Add,
+                text: "ok".into(),
+                line_no: Some(1),
+            },
+            right: None,
+        };
+        assert_eq!(diff_row_visual_height(&short, 24, 3, false, 0.5), 1);
+        assert_eq!(wrap_viewport_start(&[1, 1, 1, 1], 2, 2), 1);
+        assert_eq!(wrap_viewport_start(&[3, 1, 1], 0, 2), 0);
+        assert_eq!(wrap_viewport_start(&[], 0, 10), 0);
     }
 
     #[test]

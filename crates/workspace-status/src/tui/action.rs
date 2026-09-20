@@ -61,6 +61,11 @@ pub enum Action {
     },
     Release,
     ToggleDiffMode,
+    /// Toggle soft word-wrap on file diffs (`\`).
+    ///
+    /// Session-only, like theme and mouse. Wrap uses display columns.
+    /// Horizontal pan is a no-op while wrap is on.
+    ToggleDiffWrap,
     /// Mouse wheel. Positive `delta` is down / right.
     ///
     /// Vertical (`horizontal: false`) moves the list cursor under the

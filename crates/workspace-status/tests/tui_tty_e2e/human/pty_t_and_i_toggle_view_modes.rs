@@ -28,6 +28,7 @@ fn help_lists_t_and_i(screen: &str) -> bool {
         && screen.lines().any(|line| {
             line.contains("i")
                 && line.contains("inline / split")
+                && line.contains("wrap")
                 && !line.contains("flat / tree")
                 && !line.contains("cycle theme")
         })

@@ -141,8 +141,8 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
         title: "VIEW",
         entries: &[
             HelpEntry {
-                keys: "i",
-                desc: "inline / split",
+                keys: "i \\",
+                desc: "inline / split · wrap",
             },
             HelpEntry {
                 keys: "t",
@@ -582,6 +582,8 @@ mod tests {
         assert!(view_keys.contains(&"Ctrl-u Ctrl-d"));
         assert!(view_keys.contains(&"."));
         assert!(view_keys.contains(&"T"));
+        assert!(view_keys.contains(&"i \\"));
+        assert!(!view_keys.contains(&"i"));
         assert!(view_keys.contains(&"Ctrl-o"));
         assert!(view_keys.contains(&"? Ctrl-k :"));
         assert!(!view_keys.contains(&"?"));

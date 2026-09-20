@@ -165,6 +165,9 @@ impl AppState {
 
     /// Max `diff_col_offset` for the painted file diff (0 if it fits).
     pub(crate) fn diff_pan_max(&self) -> usize {
+        if self.diff_wrap {
+            return 0;
+        }
         let rows = self.current_diff_rows();
         let gutter = gutter_width(&rows).saturating_add(comment_mark_cols(self.ascii));
         let v_cols = u16::from(self.diff_scroll > 0);
