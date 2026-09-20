@@ -63,10 +63,10 @@ use super::search::{
     focus_commit_file_search, focus_diff_search, focus_graph_search, focus_tree_search, SearchPane,
 };
 use super::split::{
-    clamp_tree_fraction, diff_split_fraction_from_col, effective_diff_mode, graph_col_from_col,
-    graph_col_from_delta, graph_scroll_from_delta, graph_scroll_from_row, hit_split,
-    is_side_by_side_split, tree_fraction_from_col, DiffMode, SplitDrag, SplitHit, SplitLayout,
-    DIFF_SPLIT_FRACTION, TREE_WIDTH_FRACTION,
+    clamp_tree_fraction, diff_col_from_col, diff_col_from_delta, diff_split_fraction_from_col,
+    effective_diff_mode, graph_col_from_col, graph_col_from_delta, graph_scroll_from_delta,
+    graph_scroll_from_row, hit_split, is_side_by_side_split, tree_fraction_from_col, DiffMode,
+    SplitDrag, SplitHit, SplitLayout, DIFF_SPLIT_FRACTION, TREE_WIDTH_FRACTION,
 };
 use super::stash::{
     checkout_path, resolve_stash_menu_key, row_is_hidden_ignored, stash_dirty_for_row,
@@ -153,6 +153,8 @@ pub struct LayoutHit {
     pub diff_hscrollbar_x: u16,
     /// Diff horizontal scrollbar track width.
     pub diff_hscrollbar_width: u16,
+    /// Max horizontal pan for the painted file diff.
+    pub diff_col_max: u16,
     /// Tab-strip row (always painted).
     pub tab_y: u16,
     /// Hit boxes `(x, width, tab_index)` for the painted strip.
@@ -194,6 +196,7 @@ impl Default for LayoutHit {
             diff_hscrollbar_y: None,
             diff_hscrollbar_x: 0,
             diff_hscrollbar_width: 0,
+            diff_col_max: 0,
             tab_y: 0,
             tab_hits: Vec::new(),
             tab_close_hits: Vec::new(),
@@ -1495,6 +1498,11 @@ impl AppState {
             } else {
                 self.right_col_offset
             },
+            diff_hscrollbar_y: self.layout.diff_hscrollbar_y,
+            diff_hscrollbar_x: self.layout.diff_hscrollbar_x,
+            diff_hscrollbar_width: self.layout.diff_hscrollbar_width,
+            diff_col_max: self.layout.diff_col_max,
+            diff_col_offset: self.diff_col_offset,
         }
     }
 
@@ -1565,6 +1573,26 @@ impl AppState {
                 let jumped = graph_col_from_col(self.split_layout(), col);
                 self.set_graph_col_offset(jumped);
                 self.drag = SplitDrag::GraphHScrollbar {
+                    origin_col: col,
+                    origin_offset: jumped,
+                };
+                self.last_click = None;
+                return Effect::None;
+            }
+            SplitHit::DiffHThumb => {
+                self.focus = FocusPane::Right;
+                self.drag = SplitDrag::DiffHScrollbar {
+                    origin_col: col,
+                    origin_offset: self.diff_col_offset,
+                };
+                self.last_click = None;
+                return Effect::None;
+            }
+            SplitHit::DiffHTrack => {
+                self.focus = FocusPane::Right;
+                let jumped = diff_col_from_col(self.split_layout(), col);
+                self.diff_col_offset = jumped;
+                self.drag = SplitDrag::DiffHScrollbar {
                     origin_col: col,
                     origin_offset: jumped,
                 };
@@ -1798,6 +1826,13 @@ impl AppState {
                 let next =
                     graph_col_from_delta(self.split_layout(), origin_col, origin_offset, col);
                 self.set_graph_col_offset(next);
+            }
+            SplitDrag::DiffHScrollbar {
+                origin_col,
+                origin_offset,
+            } => {
+                self.diff_col_offset =
+                    diff_col_from_delta(self.split_layout(), origin_col, origin_offset, col);
             }
             SplitDrag::None => {}
         }
@@ -8528,6 +8563,201 @@ mod tests {
         assert_eq!(app.drag, SplitDrag::None);
         app.dispatch(Action::PanDiff(-20));
         assert_eq!(app.right_col_offset, 0, "keyboard pan still clamps at 0");
+    }
+
+    fn arm_diff_hscrollbar(app: &mut AppState, col_max: u16) {
+        app.layout.term_cols = 160;
+        app.layout.pane_height = 22;
+        app.layout.outer_tree_width = 48;
+        app.layout.right_x = 48;
+        app.layout.right_y = 1;
+        app.layout.diff_pane_width = 110;
+        app.layout.diff_hscrollbar_y = Some(12);
+        app.layout.diff_hscrollbar_x = 50;
+        app.layout.diff_hscrollbar_width = 20;
+        app.layout.diff_col_max = col_max;
+        app.diff_col_offset = 0;
+        app.focus = FocusPane::Left;
+    }
+
+    fn long_line_diff() -> DiffContent {
+        DiffContent::from_unified(format!("@@ -0,0 +1,1 @@\n+{}", "x".repeat(80)))
+    }
+
+    #[test]
+    fn diff_horizontal_scrollbar_thumb_drag_updates_offset() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.set_diff("app".into(), "README.md".into(), long_line_diff());
+        arm_diff_hscrollbar(&mut app, 40);
+        let thumb = workspace_status_graph::graph_scrollbar_thumb(41, 0, 20).expect("thumb");
+        let thumb_col = 50 + thumb.0;
+        let start = app.diff_col_offset;
+        let cursor = app.diff_cursor;
+        assert_eq!(
+            app.dispatch(Action::Click {
+                col: thumb_col,
+                row: 12
+            }),
+            Effect::None
+        );
+        assert_eq!(
+            app.drag,
+            SplitDrag::DiffHScrollbar {
+                origin_col: thumb_col,
+                origin_offset: start
+            }
+        );
+        assert_eq!(app.diff_col_offset, start, "thumb grab must not jump");
+        assert_eq!(app.diff_cursor, cursor, "scrollbar must not move the cursor");
+        assert_eq!(app.focus, FocusPane::Right);
+        assert_eq!(
+            app.dispatch(Action::Drag {
+                col: thumb_col + 10,
+                row: 12
+            }),
+            Effect::None
+        );
+        assert!(
+            app.diff_col_offset > start,
+            "thumb drag should pan, got {}",
+            app.diff_col_offset
+        );
+        assert_eq!(app.diff_cursor, cursor);
+        assert_eq!(app.dispatch(Action::Release), Effect::None);
+        assert_eq!(app.drag, SplitDrag::None);
+        app.dispatch(Action::PanDiff(-80));
+        assert_eq!(app.diff_col_offset, 0, "keyboard pan still clamps at 0");
+    }
+
+    #[test]
+    fn diff_horizontal_scrollbar_thumb_grab_at_origin_hidden_offset_does_not_jump() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.set_diff("app".into(), "README.md".into(), long_line_diff());
+        arm_diff_hscrollbar(&mut app, 40);
+        app.diff_col_offset = 12;
+        let thumb = workspace_status_graph::graph_scrollbar_thumb(41, 12, 20).expect("thumb");
+        assert!(
+            thumb.0 > 0,
+            "origin-hidden offset must move the thumb off the left edge"
+        );
+        let thumb_col = 50 + thumb.0;
+        let start = app.diff_col_offset;
+        let cursor = app.diff_cursor;
+        assert_eq!(
+            app.dispatch(Action::Click {
+                col: thumb_col,
+                row: 12
+            }),
+            Effect::None
+        );
+        assert_eq!(
+            app.drag,
+            SplitDrag::DiffHScrollbar {
+                origin_col: thumb_col,
+                origin_offset: start
+            }
+        );
+        assert_eq!(
+            app.diff_col_offset, start,
+            "thumb grab must not jump from a non-zero pan"
+        );
+        assert_eq!(app.diff_cursor, cursor);
+        assert_eq!(app.focus, FocusPane::Right);
+        assert_eq!(
+            app.dispatch(Action::Drag {
+                col: thumb_col + 10,
+                row: 12
+            }),
+            Effect::None
+        );
+        assert!(
+            app.diff_col_offset > start,
+            "thumb drag should pan from {start}, got {}",
+            app.diff_col_offset
+        );
+        assert_eq!(app.diff_cursor, cursor);
+        assert_eq!(app.dispatch(Action::Release), Effect::None);
+        assert_eq!(app.drag, SplitDrag::None);
+    }
+
+    #[test]
+    fn diff_horizontal_scrollbar_left_track_click_at_nonzero_offset_jumps_to_origin() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.set_diff("app".into(), "README.md".into(), long_line_diff());
+        arm_diff_hscrollbar(&mut app, 40);
+        app.diff_col_offset = 12;
+        let thumb = workspace_status_graph::graph_scrollbar_thumb(41, 12, 20).expect("thumb");
+        assert!(thumb.0 > 0, "left edge must sit left of the thumb");
+        let cursor = app.diff_cursor;
+        assert_eq!(
+            app.dispatch(Action::Click { col: 50, row: 12 }),
+            Effect::None
+        );
+        assert_eq!(
+            app.diff_col_offset, 0,
+            "left-edge track click must jump to origin (and hide the bar)"
+        );
+        assert_eq!(
+            app.drag,
+            SplitDrag::DiffHScrollbar {
+                origin_col: 50,
+                origin_offset: 0
+            }
+        );
+        assert_eq!(app.diff_cursor, cursor);
+        assert_eq!(app.focus, FocusPane::Right);
+    }
+
+    #[test]
+    fn diff_horizontal_scrollbar_track_click_jumps_and_arms_drag() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.set_diff("app".into(), "README.md".into(), long_line_diff());
+        arm_diff_hscrollbar(&mut app, 40);
+        let thumb = workspace_status_graph::graph_scrollbar_thumb(41, 0, 20).expect("thumb");
+        let track_col = 50 + 19;
+        assert!(
+            track_col >= 50 + thumb.0 + thumb.1,
+            "fixture track col must sit right of the thumb"
+        );
+        let cursor = app.diff_cursor;
+        assert_eq!(
+            app.dispatch(Action::Click {
+                col: track_col,
+                row: 12
+            }),
+            Effect::None
+        );
+        assert!(
+            app.diff_col_offset > 0,
+            "track click should jump toward the click"
+        );
+        assert_eq!(
+            app.drag,
+            SplitDrag::DiffHScrollbar {
+                origin_col: track_col,
+                origin_offset: app.diff_col_offset
+            }
+        );
+        assert_eq!(app.diff_cursor, cursor);
+        assert_eq!(app.focus, FocusPane::Right);
+        assert_eq!(app.dispatch(Action::Release), Effect::None);
+        assert_eq!(app.drag, SplitDrag::None);
+    }
+
+    #[test]
+    fn click_on_diff_body_is_not_a_horizontal_scrollbar_drag() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.set_diff("app".into(), "README.md".into(), long_line_diff());
+        arm_diff_hscrollbar(&mut app, 40);
+        let effect = app.dispatch(Action::Click { col: 80, row: 4 });
+        assert_eq!(app.drag, SplitDrag::None);
+        assert_eq!(effect, Effect::None);
+        assert_eq!(app.focus, FocusPane::Right);
     }
 
     #[test]

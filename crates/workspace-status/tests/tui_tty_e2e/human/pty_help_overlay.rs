@@ -51,7 +51,7 @@ const HELP_VIEW_ROWS: &[(&str, &str)] = &[
     ("o O", "focus branches / clear (graph · repo)"),
     ("PgUp PgDn", "page focused pane"),
     ("Ctrl-u Ctrl-d", "page focused ±5"),
-    ("m", "mouse · pane/split/graph"),
+    ("m", "mouse · pane/split/bars"),
     ("; Ctrl-R", "comment focused row / line"),
     ("V", "highlight diff lines for ; / s / u"),
     ("y", "copy comments as markdown"),
