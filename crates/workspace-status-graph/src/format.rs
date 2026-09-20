@@ -850,6 +850,80 @@ pub fn format_commit_subject(commit: &Commit) -> String {
     commit.subject.clone()
 }
 
+/// Wrapped lines of an expanded commit message (not counting footer meta).
+pub const COMMIT_MSG_EXPAND_MAX_LINES: usize = 8;
+
+/// Subject plus body for expand chrome. Empty body keeps the subject only.
+pub fn format_commit_message(subject: &str, body: &str) -> String {
+    let body = body.trim_end();
+    if body.is_empty() {
+        subject.to_string()
+    } else if subject.is_empty() {
+        body.to_string()
+    } else {
+        format!("{subject}\n\n{body}")
+    }
+}
+
+/// Wrap `text` to `width` columns (char count, same as footer truncate).
+///
+/// Existing newlines stay. Overlong lines hard-break. Caps at `max_lines`.
+/// A leftover that does not fit ends the last line with `…`.
+pub fn wrap_commit_message(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+    let width = width.max(1);
+    let max_lines = max_lines.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let push = |lines: &mut Vec<String>, line: String, more: bool| -> bool {
+        if lines.len() + 1 < max_lines {
+            lines.push(line);
+            return false;
+        }
+        if more {
+            let mut last: String = line.chars().take(width.saturating_sub(1).max(1)).collect();
+            if last.chars().count() >= width && width > 0 {
+                last = last.chars().take(width.saturating_sub(1)).collect();
+            }
+            last.push('…');
+            if last.chars().count() > width {
+                last = last.chars().take(width).collect();
+            }
+            lines.push(last);
+        } else {
+            lines.push(line);
+        }
+        true
+    };
+    for (i, para) in text.split('\n').enumerate() {
+        if i > 0 && para.is_empty() {
+            if push(&mut lines, String::new(), false) {
+                return lines;
+            }
+            continue;
+        }
+        if para.is_empty() {
+            if push(&mut lines, String::new(), false) {
+                return lines;
+            }
+            continue;
+        }
+        let chars: Vec<char> = para.chars().collect();
+        let mut offset = 0;
+        while offset < chars.len() {
+            let end = (offset + width).min(chars.len());
+            let chunk: String = chars[offset..end].iter().collect();
+            offset = end;
+            let more = offset < chars.len();
+            if push(&mut lines, chunk, more) {
+                return lines;
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
 /// `[HEAD]` (detached only) + merged ref chips.
 ///
 /// On a commit with several refs, the checked-out branch chip is first,
@@ -1370,10 +1444,10 @@ mod tests {
             commit: Commit {
                 id: "aaa1111bbbb".into(),
                 subject: "add graph crate".into(),
-                parents: Vec::new(),
                 refs: vec!["main".into(), "origin/main".into()],
                 author_name: "Ada Lovelace".into(),
                 author_date_unix: 1_700_000_000 - 3600,
+                ..Commit::default()
             },
             is_head: true,
             worktrees: vec![Worktree {
@@ -1495,6 +1569,7 @@ mod tests {
             author_name: "Ada Lovelace".into(),
             author_date_unix: 1_700_000_000 - 86400,
             parent_id: Some("aaa1111".into()),
+            ..Stash::default()
         }
     }
 
@@ -2053,5 +2128,25 @@ mod tests {
             parts.iter().all(|p| p.kind != LabelKind::Overflow),
             "nothing else is hidden: {line} {parts:?}"
         );
+    }
+
+    #[test]
+    fn format_commit_message_joins_subject_and_body() {
+        assert_eq!(format_commit_message("fix login", ""), "fix login");
+        assert_eq!(format_commit_message("", "body only"), "body only");
+        assert_eq!(
+            format_commit_message("fix login", "details\n"),
+            "fix login\n\ndetails"
+        );
+    }
+
+    #[test]
+    fn wrap_commit_message_hard_breaks_and_preserves_blank_lines() {
+        let lines = wrap_commit_message("abcdefghij\n\nxyz", 4, 8);
+        assert_eq!(lines, vec!["abcd", "efgh", "ij", "", "xyz"]);
+        let capped = wrap_commit_message("abcdefghij", 4, 2);
+        assert_eq!(capped.len(), 2);
+        assert!(capped[1].ends_with('…'), "{capped:?}");
+        assert!(!capped.join("").contains("ij"), "{capped:?}");
     }
 }

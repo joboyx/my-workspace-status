@@ -119,6 +119,7 @@ impl AppState {
             }
             Action::ToggleDiffMode => self.toggle_diff_mode(),
             Action::ToggleDiffWrap => self.toggle_diff_wrap(),
+            Action::ToggleCommitMsgExpand => self.toggle_commit_msg_expand(),
             Action::ToggleMouse => {
                 self.mouse_enabled = !self.mouse_enabled;
                 self.status = if self.mouse_enabled {

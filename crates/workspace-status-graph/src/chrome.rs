@@ -4,8 +4,9 @@
 //! Footer ref chips are the same [`LabelPart`] runs as the commit spacer.
 
 use crate::format::{
-    commit_ref_chip_parts, format_relative_date, is_default_branch, parts_text, short_id,
-    trunc_label_parts, LabelKind, LabelPart,
+    commit_ref_chip_parts, format_commit_message, format_relative_date, is_default_branch,
+    parts_text, short_id, trunc_label_parts, wrap_commit_message, LabelKind, LabelPart,
+    COMMIT_MSG_EXPAND_MAX_LINES,
 };
 use crate::glyphs::GlyphSet;
 use crate::model::{GraphModel, GraphRow};
@@ -53,26 +54,45 @@ impl<'a> From<Option<&'a GraphRow>> for GraphFooterSelection<'a> {
 pub struct GraphChromeBudget {
     /// Paint the sync header.
     pub header: bool,
-    /// Paint the 2-line selection footer.
+    /// Paint the selection footer.
     pub footer: bool,
+    /// Footer rows (0 when [`Self::footer`] is false). Collapsed is 2.
+    pub footer_height: u16,
     /// Rows left for the commit list (at least 1).
     pub list_height: u16,
     /// Extra row for [`LOADING_OLDER`].
     pub older: bool,
 }
 
-/// Footer first, then header.
+/// Footer first, then header. Collapsed footer is 2 lines.
 pub fn graph_chrome_budget(
     height: u16,
     loading_older: bool,
     want_header: bool,
 ) -> GraphChromeBudget {
+    graph_chrome_budget_for(height, loading_older, want_header, 2)
+}
+
+/// Like [`graph_chrome_budget`] with a requested footer height.
+///
+/// `footer_lines` is the expanded (or collapsed) footer. The list keeps at
+/// least one row. A pane shorter than 3 rows still drops the footer.
+pub fn graph_chrome_budget_for(
+    height: u16,
+    loading_older: bool,
+    want_header: bool,
+    footer_lines: u16,
+) -> GraphChromeBudget {
     let older = loading_older;
     let mut avail = height.saturating_sub(u16::from(older)).max(1);
     let footer = avail >= 3;
-    if footer {
-        avail = avail.saturating_sub(2);
-    }
+    let footer_height = if footer {
+        let h = footer_lines.max(2).min(avail.saturating_sub(1));
+        avail = avail.saturating_sub(h);
+        h
+    } else {
+        0
+    };
     let header = want_header && avail >= 2;
     if header {
         avail = avail.saturating_sub(1);
@@ -80,6 +100,7 @@ pub fn graph_chrome_budget(
     GraphChromeBudget {
         header,
         footer,
+        footer_height,
         list_height: avail.max(1),
         older,
     }
@@ -196,6 +217,63 @@ pub fn selection_detail_parts(
     }
 }
 
+/// Selection-footer runs. Collapsed is the two truncated lines from
+/// [`selection_detail_parts`]. Expanded wraps subject plus body, then
+/// the same meta line. Graph list rows stay one line either way.
+pub fn selection_footer_parts(
+    model: &GraphModel,
+    selection: GraphFooterSelection<'_>,
+    glyphs: &GlyphSet,
+    width: usize,
+    now_unix: i64,
+    expand: bool,
+) -> Vec<Vec<LabelPart>> {
+    let [subject, meta] = selection_detail_parts(model, selection, glyphs, width, now_unix);
+    if !expand {
+        return vec![subject, meta];
+    }
+    let (message_subject, body) = match selection {
+        GraphFooterSelection::Row(GraphRow::Commit { commit, .. }) => {
+            (commit.subject.as_str(), commit.body.as_str())
+        }
+        GraphFooterSelection::Row(GraphRow::Stash(stash)) => {
+            (stash.subject.as_str(), stash.body.as_str())
+        }
+        _ => return vec![subject, meta],
+    };
+    let text = format_commit_message(message_subject, body);
+    let wrapped = wrap_commit_message(&text, width.max(1), COMMIT_MSG_EXPAND_MAX_LINES);
+    let mut lines: Vec<Vec<LabelPart>> = wrapped
+        .into_iter()
+        .map(|text| {
+            vec![LabelPart {
+                text,
+                kind: LabelKind::Subject,
+            }]
+        })
+        .collect();
+    if lines.is_empty() {
+        lines.push(subject);
+    }
+    lines.push(meta);
+    lines
+}
+
+/// Text lines for [`selection_footer_parts`].
+pub fn selection_footer_lines(
+    model: &GraphModel,
+    selection: GraphFooterSelection<'_>,
+    glyphs: &GlyphSet,
+    width: usize,
+    now_unix: i64,
+    expand: bool,
+) -> Vec<String> {
+    selection_footer_parts(model, selection, glyphs, width, now_unix, expand)
+        .iter()
+        .map(|parts| parts_text(parts))
+        .collect()
+}
+
 fn head_commit_ref_parts(model: &GraphModel, glyphs: &GlyphSet) -> Option<Vec<LabelPart>> {
     let id = model.head_id.as_deref()?;
     let commit = model.commits.iter().find(|c| c.id == id)?;
@@ -264,6 +342,7 @@ mod tests {
         let chrome = graph_chrome_budget(3, false, true);
         assert!(chrome.footer);
         assert!(!chrome.header);
+        assert_eq!(chrome.footer_height, 2);
         assert_eq!(chrome.list_height, 1);
     }
 
@@ -305,10 +384,10 @@ mod tests {
         let commit = Commit {
             id: "abcdefghhhh".into(),
             subject: "tip".into(),
-            parents: Vec::new(),
             refs: vec![GraphRef::local("main"), GraphRef::tag("v1")],
             author_name: "Ada".into(),
             author_date_unix: 1_700_000_000,
+            ..Commit::default()
         };
         let model = GraphModel {
             commits: vec![commit.clone()],
@@ -367,6 +446,7 @@ mod tests {
             author_name: "Ada".into(),
             author_date_unix: 1_700_000_000 - 120,
             parent_id: None,
+            ..Stash::default()
         };
         let model = GraphModel {
             stashes: vec![stash.clone()],
@@ -390,10 +470,10 @@ mod tests {
         let commit = Commit {
             id: "abcdefghhhh".into(),
             subject: "add footer".into(),
-            parents: Vec::new(),
             refs: vec!["main".into()],
             author_name: "Ada".into(),
             author_date_unix: 1_700_000_000 - 120,
+            ..Commit::default()
         };
         let model = GraphModel {
             commits: vec![commit.clone()],
@@ -520,5 +600,104 @@ mod tests {
             head_meta.iter().any(|p| p.kind == LabelKind::ChipHead),
             "uncommitted footer keeps HEAD mark: {head_meta:?}"
         );
+    }
+
+    #[test]
+    fn expanded_footer_wraps_long_subject_and_body() {
+        let tail = "TAILTOKEN";
+        let body = "UNIQUE_BODY_LINE";
+        let commit = Commit {
+            id: "abcdefghhhh".into(),
+            subject: format!("{}{tail}", "n".repeat(24)),
+            body: body.into(),
+            author_name: "Ada".into(),
+            author_date_unix: 1_700_000_000 - 120,
+            ..Commit::default()
+        };
+        let model = GraphModel {
+            commits: vec![commit.clone()],
+            uncommitted: Some(false),
+            ..GraphModel::default()
+        };
+        let row = GraphRow::Commit {
+            commit,
+            is_head: false,
+            worktrees: Vec::new(),
+        };
+        let width = 16;
+        let collapsed = selection_footer_lines(
+            &model,
+            GraphFooterSelection::Row(&row),
+            &UNICODE,
+            width,
+            1_700_000_000,
+            false,
+        );
+        assert_eq!(collapsed.len(), 2, "{collapsed:?}");
+        let collapsed_text = collapsed.join("\n");
+        assert!(
+            collapsed_text.contains('…') || !collapsed_text.contains(tail),
+            "collapsed subject clips: {collapsed_text}"
+        );
+        assert!(
+            !collapsed_text.contains(body),
+            "collapsed hides body: {collapsed_text}"
+        );
+        assert!(
+            !collapsed_text.contains(tail),
+            "collapsed hides subject tail: {collapsed_text}"
+        );
+
+        let expanded = selection_footer_lines(
+            &model,
+            GraphFooterSelection::Row(&row),
+            &UNICODE,
+            width,
+            1_700_000_000,
+            true,
+        );
+        assert!(expanded.len() > 2, "{expanded:?}");
+        let expanded_text = expanded.join("");
+        assert!(
+            expanded_text.contains(tail),
+            "expanded shows subject tail: {expanded:?}"
+        );
+        assert!(
+            expanded_text.contains(body),
+            "expanded shows body: {expanded:?}"
+        );
+
+        let chrome = graph_chrome_budget_for(16, false, true, expanded.len() as u16);
+        assert!(chrome.footer);
+        assert!(chrome.footer_height >= 3, "{chrome:?}");
+        assert!(chrome.list_height >= 1);
+    }
+
+    #[test]
+    fn expanded_stash_without_body_stays_two_lines_when_subject_fits() {
+        let stash = Stash {
+            id: "abcdefghhhh".into(),
+            stash_ref: "stash@{0}".into(),
+            subject: "WIP on main".into(),
+            body: String::new(),
+            author_name: "Ada".into(),
+            author_date_unix: 1_700_000_000 - 120,
+            parent_id: None,
+        };
+        let model = GraphModel {
+            stashes: vec![stash.clone()],
+            uncommitted: Some(false),
+            ..GraphModel::default()
+        };
+        let lines = selection_footer_lines(
+            &model,
+            GraphFooterSelection::Row(&GraphRow::Stash(stash)),
+            &UNICODE,
+            80,
+            1_700_000_000,
+            true,
+        );
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0], "WIP on main");
     }
 }

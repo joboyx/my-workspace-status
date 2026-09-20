@@ -375,9 +375,7 @@ mod tests {
             id: id.into(),
             subject: id.into(),
             parents: parents.iter().map(|p| (*p).to_string()).collect(),
-            refs: Vec::new(),
-            author_name: String::new(),
-            author_date_unix: 0,
+            ..Commit::default()
         }
     }
 

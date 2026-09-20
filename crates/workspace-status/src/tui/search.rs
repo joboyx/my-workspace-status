@@ -2,7 +2,7 @@
 //!
 //! Tree matches include folded rows. Focusing a tree match unfolds its
 //! ancestors so the row is visible. Hidden ignored repos stay out of tree
-//! search unless shown (`.` / `-a`). Graph search matches subject, author,
+//! search unless shown (`.` / `-a`). Graph search matches subject, body, author,
 //! painted (relative or local) or UTC time, branch and tag names, and sha. Commit-file search
 //! matches paths. Diff search matches painted line text.
 
@@ -127,7 +127,7 @@ pub fn focus_tree_search(
 
 /// Search text for one graph row.
 ///
-/// Commits match subject, author, painted relative date, painted local
+/// Commits match subject, body, author, painted relative date, painted local
 /// timestamp (`YYYY-MM-DD HH:MM`), UTC timestamp (`YYYY-MM-DD HH:MM`),
 /// branch and tag names, and full plus short sha.
 /// Stash and worktree rows use the same fields when the model has them.
@@ -151,6 +151,7 @@ fn graph_row_search_text_at(row: &GraphRow, now_unix: i64) -> String {
         GraphRow::Stash(stash) => {
             let mut parts = Vec::new();
             push_part(&mut parts, &stash.subject);
+            push_part(&mut parts, &stash.body);
             push_part(&mut parts, &stash.stash_ref);
             push_part(&mut parts, &stash.author_name);
             push_sha(&mut parts, &stash.id);
@@ -171,6 +172,7 @@ fn graph_row_search_text_at(row: &GraphRow, now_unix: i64) -> String {
         GraphRow::Commit { commit, .. } => {
             let mut parts = Vec::new();
             push_part(&mut parts, &commit.subject);
+            push_part(&mut parts, &commit.body);
             for graph_ref in &commit.refs {
                 push_part(&mut parts, &graph_ref.name);
             }
@@ -561,6 +563,7 @@ mod tests {
                 commit: Commit {
                     id: "aa11bb22cc33dd44ee55ff6677889900aabbccdd".into(),
                     subject: "fix login timeout".into(),
+                    body: "UNIQUE_SEARCH_BODY".into(),
                     parents: Vec::new(),
                     refs: vec![GraphRef::local("main"), GraphRef::tag("v9.9.9")],
                     author_name: "Ada SearchAuthor".into(),
@@ -573,16 +576,19 @@ mod tests {
                 commit: Commit {
                     id: "bb22cc33dd44ee55ff6677889900aabbccddeeff".into(),
                     subject: "docs".into(),
-                    parents: Vec::new(),
                     refs: vec![GraphRef::local("topic")],
-                    author_name: String::new(),
                     author_date_unix: 1_700_000_000,
+                    ..Commit::default()
                 },
                 is_head: false,
                 worktrees: Vec::new(),
             },
         ];
         assert_eq!(collect_graph_match_indices(&rows, "login"), vec![0]);
+        assert_eq!(
+            collect_graph_match_indices(&rows, "UNIQUE_SEARCH_BODY"),
+            vec![0]
+        );
         assert_eq!(collect_graph_match_indices(&rows, "topic"), vec![1]);
         assert_eq!(collect_graph_match_indices(&rows, "v9.9.9"), vec![0]);
         assert_eq!(collect_graph_match_indices(&rows, "SearchAuthor"), vec![0]);
@@ -610,6 +616,7 @@ mod tests {
             author_name: "UniqueAuthorXYZ".into(),
             author_date_unix: 1_700_000_000,
             parent_id: None,
+            ..Stash::default()
         })];
         assert_eq!(collect_graph_match_indices(&stash_rows, "wip"), vec![0]);
         assert_eq!(

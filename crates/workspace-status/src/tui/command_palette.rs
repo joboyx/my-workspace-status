@@ -220,6 +220,12 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ToggleDiffWrap,
     },
     PaletteCommand {
+        title: "Expand commit message",
+        keys: "M",
+        group: CommandGroup::View,
+        action: Action::ToggleCommitMsgExpand,
+    },
+    PaletteCommand {
         title: "Toggle mouse",
         keys: "m",
         group: CommandGroup::View,
@@ -534,6 +540,12 @@ mod tests {
                 "\\",
                 CommandGroup::View,
                 Action::ToggleDiffWrap,
+            ),
+            (
+                "Expand commit message",
+                "M",
+                CommandGroup::View,
+                Action::ToggleCommitMsgExpand,
             ),
             ("Toggle mouse", "m", CommandGroup::View, Action::ToggleMouse),
             (

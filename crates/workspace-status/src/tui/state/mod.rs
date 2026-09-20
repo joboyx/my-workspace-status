@@ -12,8 +12,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::style::Color;
 use workspace_status_graph::{
-    format_relative_date, graph_chrome_budget, paint_model, GraphChromeBudget, GraphModel,
-    GraphRow, PaintedLine, ASCII, UNICODE,
+    format_commit_message, format_relative_date, graph_chrome_budget_for, paint_model,
+    selection_footer_parts, wrap_commit_message, GraphChromeBudget, GraphFooterSelection,
+    GraphModel, GraphRow, PaintedLine, ASCII, UNICODE, COMMIT_MSG_EXPAND_MAX_LINES,
 };
 
 use crate::snapshot::{
@@ -385,6 +386,9 @@ pub struct AppState {
     pub diff_mode: DiffMode,
     /// Soft-wrap file-diff code. Session-only (no XDG store).
     pub diff_wrap: bool,
+    /// Expand commit / stash messages in the graph footer and commit-files
+    /// header. Session-only (no XDG store). Graph list rows stay one line.
+    pub commit_msg_expand: bool,
     pub drag: SplitDrag,
     pub theme: ThemeId,
     pub mouse_enabled: bool,
@@ -499,6 +503,7 @@ impl AppState {
             diff_split_fraction: DIFF_SPLIT_FRACTION,
             diff_mode: DiffMode::SideBySide,
             diff_wrap: false,
+            commit_msg_expand: false,
             drag: SplitDrag::None,
             theme: theme_from_env(),
             mouse_enabled: true,
@@ -768,11 +773,48 @@ impl AppState {
 
     /// Header / footer / list split for the graph pane.
     pub fn graph_chrome(&self) -> GraphChromeBudget {
-        graph_chrome_budget(
-            self.layout.tree_height.max(1),
+        self.graph_chrome_in(self.layout.tree_height.max(1), self.graph_pane_inner_width())
+    }
+
+    pub(crate) fn graph_chrome_in(&self, height: u16, width: u16) -> GraphChromeBudget {
+        graph_chrome_budget_for(
+            height,
             self.graph_loading_older,
             self.graph.as_ref().is_some_and(|g| g.sync.is_some()),
+            self.graph_footer_desired_lines(width as usize),
         )
+    }
+
+    fn graph_pane_inner_width(&self) -> u16 {
+        if self.drill.is_files() {
+            self.layout.tree_width.max(1)
+        } else {
+            self.layout
+                .term_cols
+                .saturating_sub(self.layout.right_x)
+                .max(1)
+        }
+    }
+
+    fn graph_footer_desired_lines(&self, width: usize) -> u16 {
+        if !self.commit_msg_expand {
+            return 2;
+        }
+        let Some(model) = self.graph.as_ref() else {
+            return 2;
+        };
+        let rows = model.visible_rows();
+        let selected = rows.get(self.graph_cursor);
+        let glyphs = if self.ascii { &ASCII } else { &UNICODE };
+        selection_footer_parts(
+            model,
+            GraphFooterSelection::from(selected),
+            glyphs,
+            width.max(1),
+            unix_now(),
+            true,
+        )
+        .len() as u16
     }
 
     pub fn commit_file_rows(&self) -> Vec<CommitFileRow> {
@@ -969,6 +1011,110 @@ impl AppState {
             }
         };
         (title, subtitle)
+    }
+
+    /// Title plus subtitle / wrapped message for the commit-files header.
+    ///
+    /// Collapsed is the dense one-line subtitle from [`Self::commit_detail_meta`].
+    /// Expanded wraps subject plus body under a meta line (sha / refs / author).
+    pub(crate) fn commit_detail_header_lines(&self, width: usize) -> Vec<String> {
+        let (title, subtitle) = self.commit_detail_meta();
+        let mut header = Vec::new();
+        if !title.is_empty() {
+            header.push(title);
+        }
+        if !self.commit_msg_expand {
+            if let Some(sub) = subtitle {
+                if !sub.is_empty() {
+                    header.push(sub);
+                }
+            }
+            if header.is_empty() {
+                header.push(String::new());
+            }
+            return header;
+        }
+        match self.expanded_commit_message() {
+            Some((meta, message)) => {
+                if !meta.is_empty() {
+                    header.push(meta);
+                }
+                header.extend(wrap_commit_message(
+                    &message,
+                    width.max(1),
+                    COMMIT_MSG_EXPAND_MAX_LINES,
+                ));
+            }
+            None => {
+                if let Some(sub) = subtitle {
+                    if !sub.is_empty() {
+                        header.push(sub);
+                    }
+                }
+            }
+        }
+        if header.is_empty() {
+            header.push(String::new());
+        }
+        header
+    }
+
+    fn expanded_commit_message(&self) -> Option<(String, String)> {
+        if self.tabs.active_compare().is_some() {
+            return None;
+        }
+        let source = match &self.drill {
+            DrillView::Files { source, .. } | DrillView::Diff { source, .. } => source,
+            DrillView::Graph => return None,
+        };
+        match source {
+            CommitFileSource::Commit { commit_id } => {
+                let commit = self
+                    .graph
+                    .as_ref()?
+                    .commits
+                    .iter()
+                    .find(|commit| commit.id == *commit_id)?;
+                let short = if commit_id.len() >= 7 {
+                    &commit_id[..7]
+                } else {
+                    commit_id.as_str()
+                };
+                let refs = commit
+                    .refs
+                    .iter()
+                    .map(|r| r.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut bits = vec![short.to_string()];
+                if !refs.is_empty() {
+                    bits.push(refs);
+                }
+                if !commit.author_name.is_empty() {
+                    bits.push(commit.author_name.clone());
+                }
+                if commit.author_date_unix != 0 {
+                    bits.push(format_relative_date(commit.author_date_unix, unix_now()));
+                }
+                Some((
+                    bits.join(" · "),
+                    format_commit_message(&commit.subject, &commit.body),
+                ))
+            }
+            CommitFileSource::Stash { stash_ref } => {
+                let stash = self
+                    .graph
+                    .as_ref()?
+                    .stashes
+                    .iter()
+                    .find(|stash| stash.stash_ref == *stash_ref)?;
+                Some((
+                    stash.stash_ref.clone(),
+                    format_commit_message(&stash.subject, &stash.body),
+                ))
+            }
+            CommitFileSource::Worktree | CommitFileSource::Compare { .. } => None,
+        }
     }
 
     fn restore_commit_file_cursor(&mut self, path: Option<&str>) {
@@ -1751,11 +1897,7 @@ impl AppState {
         let Some(model) = self.graph.as_ref() else {
             return Effect::None;
         };
-        let chrome = graph_chrome_budget(
-            self.layout.tree_height.max(1),
-            self.graph_loading_older,
-            model.sync.is_some(),
-        );
+        let chrome = self.graph_chrome();
         let mut offset = (row - y) as usize;
         if chrome.header {
             if offset == 0 {
@@ -1873,6 +2015,16 @@ impl AppState {
         } else {
             self.status = "wrap off".into();
         }
+        Effect::None
+    }
+
+    fn toggle_commit_msg_expand(&mut self) -> Effect {
+        self.commit_msg_expand = !self.commit_msg_expand;
+        self.status = if self.commit_msg_expand {
+            "msg on".into()
+        } else {
+            "msg off".into()
+        };
         Effect::None
     }
 
@@ -7057,10 +7209,8 @@ mod tests {
             commits: vec![Commit {
                 id: id.into(),
                 subject: "head".into(),
-                parents: Vec::new(),
                 refs,
-                author_name: String::new(),
-                author_date_unix: 0,
+                ..Commit::default()
             }],
             stashes: Vec::new(),
             worktrees: Vec::new(),
@@ -8001,10 +8151,7 @@ mod tests {
         Commit {
             id: id.into(),
             subject: subject.into(),
-            parents: Vec::new(),
-            refs: Vec::new(),
-            author_name: String::new(),
-            author_date_unix: 0,
+            ..Commit::default()
         }
     }
 
@@ -8651,6 +8798,102 @@ mod tests {
         assert!(app.diff_col_offset > 0, "clip+pan returns after wrap off");
     }
 
+    #[test]
+    fn m_toggles_commit_msg_expand_on_graph_footer_and_commit_detail() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        install_graph(&mut app, Vec::new());
+        let tail = "TAILTOKEN";
+        let body = "UNIQUE_DETAIL_BODY";
+        if let Some(model) = app.graph.as_mut() {
+            model.commits[0].subject = format!("{}{tail}", "n".repeat(40));
+            model.commits[0].body = body.into();
+            model.commits[0].author_name = "Ada".into();
+            model.commits[0].author_date_unix = unix_now() - 60;
+        }
+        app.focus = FocusPane::Right;
+        app.drill = DrillView::Graph;
+        assert!(!app.commit_msg_expand);
+        app.dispatch(Action::ToggleCommitMsgExpand);
+        assert!(app.commit_msg_expand);
+        assert_eq!(app.status, "msg on");
+
+        let glyphs = &workspace_status_graph::ASCII;
+        let model = app.graph.as_ref().expect("graph");
+        let row = model.visible_rows().into_iter().find(|r| {
+            matches!(r, GraphRow::Commit { .. })
+        }).expect("commit row");
+        let collapsed = workspace_status_graph::selection_footer_lines(
+            model,
+            workspace_status_graph::GraphFooterSelection::Row(&row),
+            glyphs,
+            16,
+            unix_now(),
+            false,
+        );
+        let collapsed_text = collapsed.join("\n");
+        assert!(
+            !collapsed_text.contains(body),
+            "collapsed footer hides body: {collapsed_text}"
+        );
+        assert!(
+            !collapsed_text.contains(tail),
+            "collapsed footer clips subject: {collapsed_text}"
+        );
+        let expanded = workspace_status_graph::selection_footer_lines(
+            model,
+            workspace_status_graph::GraphFooterSelection::Row(&row),
+            glyphs,
+            16,
+            unix_now(),
+            true,
+        );
+        let expanded_text = expanded.join("");
+        assert!(
+            expanded_text.contains(body),
+            "expanded footer shows body: {expanded:?}"
+        );
+        assert!(
+            expanded_text.contains(tail),
+            "expanded footer shows subject tail: {expanded:?}"
+        );
+
+        app.open_commit_files(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![CommitFile {
+                status: "A".into(),
+                path: "src/lib.rs".into(),
+                old_path: None,
+            }],
+        );
+        let collapsed_header = {
+            app.commit_msg_expand = false;
+            app.commit_detail_header_lines(16)
+        };
+        let collapsed_join = collapsed_header.join("\n");
+        assert!(
+            !collapsed_join.contains(body),
+            "collapsed header hides body: {collapsed_join}"
+        );
+        app.commit_msg_expand = true;
+        let expanded_header = app.commit_detail_header_lines(16);
+        let expanded_join = expanded_header.join("");
+        assert!(
+            expanded_join.contains(body),
+            "expanded header shows body: {expanded_header:?}"
+        );
+        assert!(
+            expanded_join.contains(tail),
+            "expanded header shows subject tail: {expanded_header:?}"
+        );
+        app.dispatch(Action::ToggleCommitMsgExpand);
+        assert!(!app.commit_msg_expand);
+        assert_eq!(app.status, "msg off");
+    }
+
     fn arm_graph_scrollbar(app: &mut AppState, content_len: usize) {
         app.layout.term_cols = 160;
         app.layout.pane_height = 22;
@@ -9032,10 +9275,9 @@ mod tests {
             commits: vec![Commit {
                 id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 subject: format!("subject-{}", "y".repeat(80)),
-                parents: Vec::new(),
-                refs: Vec::new(),
                 author_name: "Ada".into(),
                 author_date_unix: 1_700_000_000,
+                ..Commit::default()
             }],
             head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             uncommitted: None,
@@ -9805,10 +10047,9 @@ mod tests {
             commits: vec![Commit {
                 id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 subject: format!("subject-{}", "y".repeat(80)),
-                parents: Vec::new(),
-                refs: Vec::new(),
                 author_name: "Ada".into(),
                 author_date_unix: 1_700_000_000,
+                ..Commit::default()
             }],
             head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             uncommitted: None,
@@ -10371,9 +10612,7 @@ mod tests {
                     id,
                     subject: format!("commit {i}"),
                     parents,
-                    refs: Vec::new(),
-                    author_name: String::new(),
-                    author_date_unix: 0,
+                    ..Commit::default()
                 }
             })
             .collect();

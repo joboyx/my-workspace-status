@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget};
 
 use crate::chrome::{
-    graph_chrome_budget, selection_detail_parts, GraphFooterSelection, LOADING_OLDER,
+    graph_chrome_budget_for, selection_footer_parts, GraphFooterSelection, LOADING_OLDER,
 };
 use crate::format::{format_label, format_sync, slice_label_parts, LabelKind, LabelPart};
 use crate::glyphs::{ASCII, UNICODE};
@@ -68,10 +68,13 @@ pub struct GraphWidget<'a> {
     cursor_inactive_bg: Option<Color>,
     /// When true, paint focused `▌` / `cursorBg`. When false, paint the
     /// thinner unfocused marker and `cursorBgInactive`. [`Self::selected`]
-    /// still drives the 2-line selection footer.
+    /// still drives the selection footer.
     cursor_bar: bool,
     label_palette: Option<GraphLabelPalette>,
     col_offset: u16,
+    /// Wrap the selection-footer message (subject + body). List rows stay
+    /// one line. Session flag from the TUI (`M`).
+    commit_msg_expand: bool,
 }
 
 impl<'a> GraphWidget<'a> {
@@ -100,6 +103,7 @@ impl<'a> GraphWidget<'a> {
             cursor_bar: true,
             label_palette: None,
             col_offset: 0,
+            commit_msg_expand: false,
         }
     }
 
@@ -224,7 +228,7 @@ impl<'a> GraphWidget<'a> {
     }
 
     /// Colour commit subjects, meta, ref chips, the hidden-ref overflow chip,
-    /// and the matching chip runs on the 2-line selection footer.
+    /// and the matching chip runs on the selection footer.
     pub fn label_palette(mut self, palette: GraphLabelPalette) -> Self {
         self.label_palette = Some(palette);
         self
@@ -234,6 +238,15 @@ impl<'a> GraphWidget<'a> {
     /// pane; rows do not grow.
     pub fn col_offset(mut self, offset: u16) -> Self {
         self.col_offset = offset;
+        self
+    }
+
+    /// Expand the selection footer to the full commit / stash message.
+    ///
+    /// Graph list rows stay one line. Default is collapsed (truncated
+    /// subject + meta).
+    pub fn commit_msg_expand(mut self, expand: bool) -> Self {
+        self.commit_msg_expand = expand;
         self
     }
 }
@@ -329,8 +342,23 @@ impl Widget for GraphWidget<'_> {
         };
         let fallback = Color::Reset;
         let now = self.now_unix.unwrap_or_else(now_unix_secs);
-        let chrome =
-            graph_chrome_budget(area.height, self.loading_older, self.model.sync.is_some());
+        let rows = self.model.visible_rows();
+        let selected = self.selected.and_then(|i| rows.get(i));
+        let footer_sel = GraphFooterSelection::from(selected);
+        let footer_lines = selection_footer_parts(
+            self.model,
+            footer_sel,
+            glyphs,
+            area.width.max(1) as usize,
+            now,
+            self.commit_msg_expand,
+        );
+        let chrome = graph_chrome_budget_for(
+            area.height,
+            self.loading_older,
+            self.model.sync.is_some(),
+            footer_lines.len() as u16,
+        );
         let mut y = area.y;
         let list_bottom = area
             .y
@@ -472,34 +500,26 @@ impl Widget for GraphWidget<'_> {
             );
         }
         if chrome.footer {
-            footer_y = footer_y.saturating_sub(2);
-            let rows = self.model.visible_rows();
-            let selected = self.selected.and_then(|i| rows.get(i));
-            let [line1, line2] = selection_detail_parts(
-                self.model,
-                GraphFooterSelection::from(selected),
-                glyphs,
-                area.width as usize,
-                now,
-            );
-            put_parts_line(
-                buf,
-                area.x,
-                footer_y,
-                area.width,
-                &line1,
-                self.label_palette,
-                fallback,
-            );
-            put_parts_line(
-                buf,
-                area.x,
-                footer_y.saturating_add(1),
-                area.width,
-                &line2,
-                self.label_palette,
-                fallback,
-            );
+            let h = chrome.footer_height.max(1);
+            footer_y = footer_y.saturating_sub(h);
+            let mut lines = footer_lines;
+            let keep = h as usize;
+            if lines.len() > keep {
+                let meta = lines.pop().unwrap_or_default();
+                lines.truncate(keep.saturating_sub(1));
+                lines.push(meta);
+            }
+            for (i, line) in lines.iter().take(keep).enumerate() {
+                put_parts_line(
+                    buf,
+                    area.x,
+                    footer_y.saturating_add(i as u16),
+                    area.width,
+                    line,
+                    self.label_palette,
+                    fallback,
+                );
+            }
         }
     }
 }
@@ -741,9 +761,9 @@ mod tests {
             id: id.into(),
             subject: subject.into(),
             parents: parents.iter().map(|p| (*p).to_string()).collect(),
-            refs: Vec::new(),
             author_name: "Ada".into(),
             author_date_unix: NOW - 3600,
+            ..Commit::default()
         }
     }
 
@@ -769,6 +789,7 @@ mod tests {
                     refs: vec!["main".into()],
                     author_name: "Ada Lovelace".into(),
                     author_date_unix: NOW - 120,
+                    ..Commit::default()
                 },
                 commit(parent, "prior commit", &[]),
             ],
@@ -776,6 +797,7 @@ mod tests {
                 id: "ccc3333ccccccccccccccccccccccccccccccc".into(),
                 stash_ref: "stash@{0}".into(),
                 subject: "WIP on main".into(),
+                body: String::new(),
                 author_name: "Ada Lovelace".into(),
                 author_date_unix: NOW - 86400,
                 parent_id: Some(head.into()),
@@ -824,6 +846,17 @@ mod tests {
     }
 
     fn render_lines(model: &GraphModel, width: u16, height: u16, ascii: bool) -> Vec<String> {
+        render_lines_ex(model, width, height, ascii, None, false)
+    }
+
+    fn render_lines_ex(
+        model: &GraphModel,
+        width: u16,
+        height: u16,
+        ascii: bool,
+        selected: Option<usize>,
+        expand: bool,
+    ) -> Vec<String> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("test backend");
         terminal
@@ -831,6 +864,8 @@ mod tests {
                 GraphWidget::new(model)
                     .ascii(ascii)
                     .now_unix(NOW)
+                    .selected(selected)
+                    .commit_msg_expand(expand)
                     .render(frame.area(), frame.buffer_mut());
             })
             .expect("draw");
@@ -848,6 +883,44 @@ mod tests {
             })
             .filter(|line| !line.is_empty())
             .collect()
+    }
+
+    #[test]
+    fn expanded_footer_paints_body_collapsed_hides_it() {
+        let body = "UNIQUE_GRAPH_BODY";
+        let tail = "TAILTOKEN";
+        let commit = Commit {
+            id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            subject: format!("{}{tail}", "n".repeat(40)),
+            body: body.into(),
+            author_name: "Ada".into(),
+            author_date_unix: NOW - 120,
+            ..Commit::default()
+        };
+        let model = GraphModel {
+            commits: vec![commit],
+            uncommitted: None,
+            window: 1,
+            ..GraphModel::default()
+        };
+        let collapsed = render_lines_ex(&model, 28, 12, true, Some(0), false).join("\n");
+        assert!(
+            !collapsed.contains(body),
+            "collapsed footer hides body:\n{collapsed}"
+        );
+        assert!(
+            !collapsed.contains(tail),
+            "collapsed footer clips subject:\n{collapsed}"
+        );
+        let expanded = render_lines_ex(&model, 28, 12, true, Some(0), true).join("\n");
+        assert!(
+            expanded.contains(body),
+            "expanded footer shows body:\n{expanded}"
+        );
+        assert!(
+            expanded.contains(tail),
+            "expanded footer shows subject tail:\n{expanded}"
+        );
     }
 
     #[test]
@@ -1519,9 +1592,9 @@ mod tests {
                 id,
                 subject: format!("commit {i}"),
                 parents,
-                refs: Vec::new(),
                 author_name: "Ada".into(),
                 author_date_unix: NOW - 3600,
+                ..Commit::default()
             });
         }
         let head = commits[0].id.clone();
@@ -1586,9 +1659,9 @@ mod tests {
                 id,
                 subject: format!("commit {i}"),
                 parents,
-                refs: Vec::new(),
                 author_name: "Ada".into(),
                 author_date_unix: NOW - 3600,
+                ..Commit::default()
             });
         }
         let head = commits[0].id.clone();

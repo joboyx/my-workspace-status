@@ -101,6 +101,7 @@ impl AppState {
             | Action::Release
             | Action::ToggleDiffMode
             | Action::ToggleDiffWrap
+            | Action::ToggleCommitMsgExpand
             | Action::ToggleMouse
             | Action::SearchStart
             | Action::SearchChar(_)

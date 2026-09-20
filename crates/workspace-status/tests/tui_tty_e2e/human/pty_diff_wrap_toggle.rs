@@ -17,7 +17,7 @@ fn help_lists_wrap(screen: &str) -> bool {
     let compact = screen.split_whitespace().collect::<Vec<_>>().join(" ");
     screen.contains("VIEW")
         && compact.contains("i \\")
-        && compact.contains("inline / split · wrap")
+        && compact.contains("inline / split · wrap · msg")
         && screen.lines().any(|line| {
             line.contains('\\')
                 && line.contains("inline / split")

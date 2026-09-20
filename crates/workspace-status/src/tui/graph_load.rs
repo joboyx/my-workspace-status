@@ -1,7 +1,9 @@
 //! Load a [`workspace_status_graph::GraphModel`] from git + the snapshot.
 //!
 //! History command: `log --exclude=refs/stash --all
-//! --topo-order --date-order --skip --max-count`. Default window is 300.
+//! --topo-order --date-order --skip --max-count`. Pretty format is
+//! NUL-separated `%H %P %s %an %at %b` so a multiline body stays on the
+//! commit. Default window is 300.
 //! Graph `o` replaces `--all` with the selected local branch tips so the
 //! window is only their ancestors. Missing `stash^1` parents are fetched
 //! with `log --no-walk` and appended after the log prefix so autoload skip
@@ -12,7 +14,8 @@ use std::fs;
 use std::path::Path;
 
 use workspace_status_graph::{
-    Commit, GraphModel, GraphRef, Stash, SyncState, SyncStatus, Worktree, DEFAULT_GRAPH_WINDOW,
+    cap_commit_body, Commit, GraphModel, GraphRef, Stash, SyncState, SyncStatus, Worktree,
+    DEFAULT_GRAPH_WINDOW,
 };
 
 use crate::git::{exec_git, list_worktrees_porcelain};
@@ -255,7 +258,7 @@ fn load_commits(
             "--date-order",
             &skip_arg,
             &max_arg,
-            "--pretty=format:%H%x00%P%x00%s%x00%an%x00%at",
+            COMMIT_PRETTY,
         ]);
     } else {
         args.extend([
@@ -263,16 +266,12 @@ fn load_commits(
             "--date-order",
             &skip_arg,
             &max_arg,
-            "--pretty=format:%H%x00%P%x00%s%x00%an%x00%at",
+            COMMIT_PRETTY,
         ]);
         args.extend(revs.iter().map(String::as_str));
     }
     let raw = exec_git(&args, repo_dir);
-    let commits: Vec<Commit> = raw
-        .lines()
-        .filter(|l| !l.is_empty())
-        .filter_map(|line| parse_commit_line(line, refs))
-        .collect();
+    let commits = parse_commit_stream(&raw, refs);
     let truncated = limit > 0 && commits.len() == limit;
     (commits, truncated)
 }
@@ -319,45 +318,78 @@ fn load_commits_by_ids(
         "log".into(),
         "--no-walk".into(),
         "--ignore-missing".into(),
-        "--pretty=format:%H%x00%P%x00%s%x00%an%x00%at".into(),
+        COMMIT_PRETTY.into(),
     ];
     args.extend(unique);
     let refs_args: Vec<&str> = args.iter().map(String::as_str).collect();
     let raw = exec_git(&refs_args, repo_dir);
-    raw.lines()
-        .filter(|l| !l.is_empty())
-        .filter_map(|line| parse_commit_line(line, refs))
+    parse_commit_stream(&raw, refs)
+}
+
+/// `format:` (no extra LF between commits). Trailing `%x00` after `%b`
+/// so a multiline body does not glue onto the next hash.
+const COMMIT_PRETTY: &str = "--pretty=format:%H%x00%P%x00%s%x00%an%x00%at%x00%b%x00";
+const COMMIT_FIELDS: usize = 6;
+
+fn parse_commit_stream(raw: &str, refs: &[(String, GraphRef)]) -> Vec<Commit> {
+    nul_chunks(raw, COMMIT_FIELDS)
+        .into_iter()
+        .filter_map(|chunk| parse_commit_fields(&chunk, refs))
         .collect()
 }
 
 fn parse_commit_line(line: &str, refs: &[(String, GraphRef)]) -> Option<Commit> {
-    let mut parts = line.split('\0');
-    let id = parts.next()?.to_string();
+    parse_commit_stream(line, refs).into_iter().next()
+}
+
+fn parse_commit_fields(chunk: &[&str], refs: &[(String, GraphRef)]) -> Option<Commit> {
+    if chunk.len() < 5 {
+        return None;
+    }
+    let id = chunk[0];
     if id.is_empty() {
         return None;
     }
-    let parents = parts
-        .next()
-        .unwrap_or("")
+    let parents = chunk[1]
         .split_whitespace()
         .map(str::to_string)
         .collect();
-    let subject = parts.next().unwrap_or("").to_string();
-    let author_name = parts.next().unwrap_or("").to_string();
-    let author_date_unix = parts.next().unwrap_or("0").parse::<i64>().unwrap_or(0);
+    let subject = chunk[2].to_string();
+    let author_name = chunk[3].to_string();
+    let author_date_unix = chunk[4].parse::<i64>().unwrap_or(0);
+    let body = cap_commit_body(chunk.get(5).copied().unwrap_or(""));
     let commit_refs = refs
         .iter()
-        .filter(|(sha, _)| sha == &id)
+        .filter(|(sha, _)| sha == id)
         .map(|(_, graph_ref)| graph_ref.clone())
         .collect();
     Some(Commit {
-        id,
+        id: id.to_string(),
         subject,
+        body,
         parents,
         refs: commit_refs,
         author_name,
         author_date_unix,
     })
+}
+
+fn nul_chunks(raw: &str, fields: usize) -> Vec<Vec<&str>> {
+    if fields == 0 || raw.is_empty() {
+        return Vec::new();
+    }
+    let mut parts: Vec<&str> = raw.split('\0').collect();
+    while parts.last() == Some(&"") && !parts.is_empty() && parts.len() % fields != 0 {
+        parts.pop();
+    }
+    if parts.last() == Some(&"") && parts.len() % fields == 0 {
+        // trailing record delimiter after a complete last record
+    }
+    parts
+        .chunks(fields)
+        .filter(|chunk| !chunk.first().copied().unwrap_or("").is_empty())
+        .map(|chunk| chunk.to_vec())
+        .collect()
 }
 
 fn classify_ref(refname: &str, short: &str) -> Option<GraphRef> {
@@ -403,34 +435,48 @@ fn load_stashes(repo_dir: &Path) -> Vec<Stash> {
         &[
             "stash",
             "list",
-            "--format=%gd%x00%H%x00%P%x00%s%x00%at%x00%an",
+            "--format=%gd%x00%H%x00%P%x00%s%x00%at%x00%an%x00%b%x00",
         ],
         repo_dir,
     );
-    raw.lines()
-        .filter(|l| !l.is_empty())
-        .filter_map(parse_stash_line)
+    parse_stash_stream(&raw)
+}
+
+const STASH_FIELDS: usize = 7;
+
+fn parse_stash_stream(raw: &str) -> Vec<Stash> {
+    nul_chunks(raw, STASH_FIELDS)
+        .into_iter()
+        .filter_map(|chunk| parse_stash_fields(&chunk))
         .collect()
 }
 
 fn parse_stash_line(line: &str) -> Option<Stash> {
-    let mut parts = line.split('\0');
-    let stash_ref = parts.next()?.to_string();
-    let id = parts.next()?.to_string();
+    parse_stash_stream(line).into_iter().next()
+}
+
+fn parse_stash_fields(chunk: &[&str]) -> Option<Stash> {
+    if chunk.len() < 6 {
+        return None;
+    }
+    let stash_ref = chunk[0];
+    let id = chunk[1];
     if stash_ref.is_empty() || id.is_empty() {
         return None;
     }
-    let parent = parts
+    let parent = chunk[2]
+        .split_whitespace()
         .next()
-        .and_then(|p| p.split_whitespace().next())
         .map(str::to_string);
-    let subject = parts.next().unwrap_or("").to_string();
-    let author_date_unix = parts.next().unwrap_or("0").parse::<i64>().unwrap_or(0);
-    let author_name = parts.next().unwrap_or("").to_string();
+    let subject = chunk[3].to_string();
+    let author_date_unix = chunk[4].parse::<i64>().unwrap_or(0);
+    let author_name = chunk[5].to_string();
+    let body = cap_commit_body(chunk.get(6).copied().unwrap_or(""));
     Some(Stash {
-        id,
-        stash_ref,
+        id: id.to_string(),
+        stash_ref: stash_ref.to_string(),
         subject,
+        body,
         author_name,
         author_date_unix,
         parent_id: parent.filter(|s| !s.is_empty()),
@@ -612,8 +658,23 @@ mod tests {
         assert_eq!(commit.id, "abc123");
         assert_eq!(commit.parents, vec!["parent1", "parent2"]);
         assert_eq!(commit.subject, "fix login");
+        assert_eq!(commit.body, "");
         assert_eq!(commit.author_name, "Ada Lovelace");
         assert_eq!(commit.author_date_unix, 1_700_000_000);
+    }
+
+    #[test]
+    fn parse_commit_stream_splits_subject_and_multiline_body() {
+        let raw = "abc123\0parent1\0fix login\0Ada\x001700000000\0line one\n\nline two\0";
+        let commits = parse_commit_stream(raw, &[]);
+        assert_eq!(commits.len(), 1, "{commits:?}");
+        assert_eq!(commits[0].subject, "fix login");
+        assert_eq!(commits[0].body, "line one\n\nline two");
+        let empty_body = "def456\0p\0only subject\0Ada\x001\0\0";
+        let commits = parse_commit_stream(empty_body, &[]);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "only subject");
+        assert_eq!(commits[0].body, "");
     }
 
     #[test]
@@ -625,6 +686,7 @@ mod tests {
         assert_eq!(stash.id, "s1abcdef");
         assert_eq!(stash.parent_id.as_deref(), Some("parentsha"));
         assert_eq!(stash.subject, "WIP on main");
+        assert_eq!(stash.body, "");
         assert_eq!(stash.author_date_unix, 1_700_000_000);
         assert_eq!(stash.author_name, "Ada Lovelace");
     }
@@ -671,10 +733,7 @@ mod tests {
         Commit {
             id: id.into(),
             subject: id.into(),
-            parents: Vec::new(),
-            refs: Vec::new(),
-            author_name: String::new(),
-            author_date_unix: 0,
+            ..Commit::default()
         }
     }
 
@@ -831,6 +890,61 @@ mod live_git {
             false,
             &[],
         )
+    }
+
+    #[test]
+    fn load_parses_multiline_commit_body() {
+        let (root, repo) = temp_workspace();
+        init_repo(&repo);
+        fs::write(repo.join("a.txt"), "1\n").unwrap();
+        git(&repo, &["add", "a.txt"]);
+        git(
+            &repo,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "subject line",
+                "-m",
+                "body one\n\nbody two UNIQUE_LOAD_BODY",
+            ],
+        );
+        fs::write(repo.join("b.txt"), "2\n").unwrap();
+        git(&repo, &["add", "b.txt"]);
+        git(&repo, &["commit", "-q", "-m", "only subject"]);
+        let snapshot = snapshot_app();
+        let (model, _) = load_graph_model_window(
+            root.join("workspace").as_path(),
+            &snapshot,
+            "app",
+            false,
+            0,
+            50,
+            &[],
+        );
+        let with_body = model
+            .commits
+            .iter()
+            .find(|c| c.subject == "subject line")
+            .expect("subject");
+        assert!(
+            with_body.body.contains("body one"),
+            "body: {:?}",
+            with_body.body
+        );
+        assert!(
+            with_body.body.contains("body two UNIQUE_LOAD_BODY"),
+            "body: {:?}",
+            with_body.body
+        );
+        assert!(!with_body.body.contains("subject line"));
+        let only = model
+            .commits
+            .iter()
+            .find(|c| c.subject == "only subject")
+            .expect("only");
+        assert_eq!(only.body, "");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
