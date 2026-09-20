@@ -91,7 +91,7 @@ use super::viewed::{
 };
 use super::watch::{
     capture_removal_ghosts, checkout_flash_ids, commit_file_identity, commit_file_signatures,
-    flash_strength, flashable_row_kinds, graph_flash_decision, graph_flash_meta,
+    flash_strength, flashable_row_kinds, graph_flash_decision, graph_flash_meta, graph_row_id,
     graph_row_identity, graph_row_signatures, is_new_row_set, merge_ghost_rows, prune_flashes,
     prune_ghosts, tree_signatures, FlashKind, FlashStamp, GhostRow, GraphFlashDecision,
     GraphFlashMeta,
@@ -976,6 +976,25 @@ impl AppState {
         self.set_commit_file_cursor(commit_file_cursor_index(&rows, path));
     }
 
+    /// Same-source commit-file reload: keep `path`, else clamp to
+    /// `min(old_index, n-1)`.
+    fn restore_commit_file_cursor_retain(&mut self, path: &str, previous: usize) {
+        let rows = self.commit_file_rows();
+        if rows.is_empty() {
+            self.set_commit_file_cursor(0);
+            return;
+        }
+        if let Some(idx) = rows
+            .iter()
+            .position(|row| row.is_file() && row.path == path)
+            .or_else(|| rows.iter().position(|row| row.path == path))
+        {
+            self.set_commit_file_cursor(idx);
+            return;
+        }
+        self.set_commit_file_cursor(previous.min(rows.len() - 1));
+    }
+
     fn visible_tree(&self) -> TreeNode {
         let visible = visible_snapshot(&self.snapshot, self.show_ignored);
         build_tree(
@@ -989,17 +1008,7 @@ impl AppState {
         let focus_id = self.focused_row().map(|r| r.id.clone());
         self.tree = self.visible_tree();
         self.rows = flatten_with(&self.tree, &self.folds, self.ascii);
-        if self.rows.is_empty() {
-            self.cursor = 0;
-            return;
-        }
-        if let Some(id) = focus_id {
-            if let Some(idx) = self.rows.iter().position(|r| r.id == id) {
-                self.cursor = idx;
-                return;
-            }
-        }
-        self.cursor = self.cursor.min(self.rows.len() - 1);
+        self.restore_focus_after_tree_rebuild(focus_id);
     }
 
     fn toggle_tree_mode(&mut self) -> Effect {
@@ -1081,11 +1090,7 @@ impl AppState {
         self.apply_snapshot(snapshot);
         self.folds = folds;
         self.rebuild_rows();
-        if let Some(id) = focus_id {
-            if let Some(idx) = self.rows.iter().position(|r| r.id == id) {
-                self.cursor = idx;
-            }
-        }
+        self.restore_focus_after_tree_rebuild(focus_id);
         self.graph_scroll = graph_scroll;
         self.diff_scroll = diff_scroll;
         self.diff_cursor = diff_cursor;
@@ -1871,6 +1876,15 @@ impl AppState {
         Effect::None
     }
 
+    /// Replace the graph model for `repo` at `head`.
+    ///
+    /// Same-checkout reloads keep the focused row by
+    /// [`super::watch::graph_row_id`] (commit sha, stash ref, worktree
+    /// path, or uncommitted). A silent HEAD move that only prepends
+    /// commits therefore does not jump to the top. If that row is gone,
+    /// the cursor clamps to `min(old_index, n-1)` instead of forcing
+    /// row 0. Switching checkout (or the first load) resets cursor and
+    /// scroll to the top.
     pub fn set_graph(&mut self, model: GraphModel, repo: String, head: String) {
         let after = graph_row_signatures(&model, &repo);
         let next_meta = graph_flash_meta(&model, &repo);
@@ -1898,33 +1912,66 @@ impl AppState {
                 self.graph_flash_meta = Some(next_meta);
             }
         }
-        let identity = (repo, head);
-        if self.graph_identity.as_ref() != Some(&identity) {
-            self.graph_scroll = 0;
-            self.graph_cursor = 0;
+        let previous_repo = self.graph_identity.as_ref().map(|(repo, _)| repo.clone());
+        let previous_cursor = self.graph_cursor;
+        let previous_row_id = self.focused_graph_row().as_ref().map(graph_row_id);
+        let repo_changed = previous_repo.as_deref() != Some(repo.as_str());
+        if repo_changed {
             self.left_col_offset = 0;
             self.right_col_offset = 0;
             if !matches!(self.drill, DrillView::Files { .. } | DrillView::Diff { .. }) {
                 self.drill = DrillView::Graph;
             }
         }
-        self.graph_identity = Some(identity);
+        self.graph_identity = Some((repo.clone(), head));
         self.graph = Some(model);
-        let n = self
-            .graph
-            .as_ref()
-            .map(|g| g.visible_rows().len())
-            .unwrap_or(0);
-        if n == 0 {
-            self.graph_cursor = 0;
-        } else {
-            self.graph_cursor = self.graph_cursor.min(n - 1);
-        }
+        self.restore_graph_focus_after_load(
+            previous_repo.as_deref(),
+            &repo,
+            previous_row_id.as_deref(),
+            previous_cursor,
+        );
         if self.drill.is_graph() {
             self.diff_content = DiffContent::default();
             self.diff_repo = None;
             self.diff_path = None;
         }
+    }
+
+    /// Restore graph list focus after [`Self::set_graph`] replaces the model.
+    ///
+    /// Policy: same checkout → find the previous
+    /// [`super::watch::graph_row_id`]; if it is missing, clamp to
+    /// `min(old_index, n-1)` (nearest remaining neighbor, never a forced
+    /// jump to 0). Different checkout or an empty list → 0. Scroll
+    /// recenters on the retained row the same way as `j`/`k`.
+    fn restore_graph_focus_after_load(
+        &mut self,
+        previous_repo: Option<&str>,
+        repo: &str,
+        previous_row_id: Option<&str>,
+        previous_cursor: usize,
+    ) {
+        let rows = self
+            .graph
+            .as_ref()
+            .map(|graph| graph.visible_rows())
+            .unwrap_or_default();
+        let n = rows.len();
+        if n == 0 || previous_repo != Some(repo) {
+            self.graph_cursor = 0;
+            self.graph_scroll = 0;
+            return;
+        }
+        if let Some(id) = previous_row_id {
+            if let Some(idx) = rows.iter().position(|row| graph_row_id(row) == id) {
+                self.graph_cursor = idx;
+                self.sync_graph_scroll();
+                return;
+            }
+        }
+        self.graph_cursor = previous_cursor.min(n - 1);
+        self.sync_graph_scroll();
     }
 
     /// Store workspace-file diff content for the right pane.
@@ -2019,6 +2066,7 @@ impl AppState {
         } else {
             None
         };
+        let previous_cursor = self.commit_files_cursor();
         let before = self.commit_file_signatures.clone();
         let old_rows = if same_source {
             self.commit_file_rows()
@@ -2043,7 +2091,7 @@ impl AppState {
             self.focus = FocusPane::Right;
         }
         if let Some(path) = keep_path.as_deref() {
-            self.restore_commit_file_cursor(Some(path));
+            self.restore_commit_file_cursor_retain(path, previous_cursor);
         }
         let unfolded = match &self.drill {
             DrillView::Files { files, .. } => self.unfolded_commit_file_rows(files),
@@ -4235,13 +4283,17 @@ impl AppState {
     }
 
     /// Apply a compare range load. Cursor is a flattened row, not a `files` index.
+    ///
+    /// A still-present path keeps that file. A gone path clamps to
+    /// `min(old_index, n-1)`. A first load (no path yet) selects the
+    /// first file.
     pub(crate) fn apply_compare_range(
         &mut self,
         tab_id: u64,
         gen: u64,
         result: Result<super::app::CompareRangeLoad, String>,
     ) -> Option<Effect> {
-        let (source, keep, checkout) = {
+        let (source, keep, checkout, previous_cursor, had_path) = {
             let tab = self.tabs.get_id_mut(tab_id)?;
             if tab.generation != gen {
                 return None;
@@ -4262,12 +4314,20 @@ impl AppState {
             tab.source = Some(load.source.clone());
             tab.last_head = Some(load.head);
             tab.last_base_tip = Some(load.base_tip);
+            let previous_cursor = tab.file_cursor;
+            let had_path = tab.path.is_some();
             let keep = tab
                 .path
                 .clone()
                 .filter(|path| load.files.iter().any(|file| &file.path == path));
             tab.files = load.files;
-            (load.source, keep, tab.checkout_path.clone())
+            (
+                load.source,
+                keep,
+                tab.checkout_path.clone(),
+                previous_cursor,
+                had_path,
+            )
         };
         let active = self
             .tabs
@@ -4290,7 +4350,13 @@ impl AppState {
             self.tabs.get_id(tab_id)?.tree_mode
         };
         let rows = flatten_commit_files(&files, tree_mode, &folds, self.ascii);
-        let cursor = commit_file_cursor_index(&rows, keep.as_deref());
+        let cursor = if keep.is_some() {
+            commit_file_cursor_index(&rows, keep.as_deref())
+        } else if had_path && !rows.is_empty() {
+            previous_cursor.min(rows.len() - 1)
+        } else {
+            commit_file_cursor_index(&rows, None)
+        };
         let selected = rows.get(cursor).and_then(|row| {
             row.is_file().then(|| {
                 (
@@ -5588,6 +5654,57 @@ mod tests {
         assert_eq!(app.dispatch(Action::WatchTick), Effect::WatchRefresh);
     }
 
+    #[test]
+    fn watch_refresh_keeps_tree_focus_when_new_file_appears() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        let id = app.focused_row().unwrap().id.clone();
+        let mut snapshot = app.snapshot.clone();
+        snapshot.repos[0].changes.insert(
+            0,
+            FileChange {
+                path: "aaa-new.rs".into(),
+                staged_status: None,
+                unstaged_status: Some("A".into()),
+                untracked: true,
+                old_path: None,
+            },
+        );
+        let _ = app.apply_watch_snapshot(snapshot);
+        assert_eq!(app.focused_row().unwrap().id, id);
+        assert!(
+            app.rows.iter().any(|row| row.label.contains("aaa-new.rs")),
+            "new file must paint so this is a real insert-above, not a no-op"
+        );
+        assert!(!app.focused_row().unwrap().id.contains("aaa-new"));
+    }
+
+    #[test]
+    fn watch_refresh_walks_to_repo_when_focused_file_is_gone() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        let mut snapshot = app.snapshot.clone();
+        snapshot.repos[0].changes = vec![FileChange {
+            path: "src/lib.rs".into(),
+            staged_status: None,
+            unstaged_status: Some("M".into()),
+            untracked: false,
+            old_path: None,
+        }];
+        snapshot.repos[0].has_unstaged = true;
+        snapshot.repos[0].has_untracked = false;
+        let _ = app.apply_watch_snapshot(snapshot);
+        let focused = app.focused_row().expect("tree row");
+        assert_eq!(
+            focused.id, "repo:app",
+            "gone file should land on the repo ancestor, not jump to row 0: {focused:?}"
+        );
+        assert!(
+            app.cursor > 0,
+            "workspace root is row 0; ancestor restore must not force the top"
+        );
+    }
+
     fn mini_graph(ids: &[&str]) -> GraphModel {
         GraphModel {
             uncommitted: Some(false),
@@ -5709,6 +5826,100 @@ mod tests {
             "same-repo subject change should flash: {:?}",
             app.flashes.keys().collect::<Vec<_>>()
         );
+    }
+
+    fn graph_focus_id(app: &AppState) -> String {
+        graph_row_id(&app.focused_graph_row().expect("graph row"))
+    }
+
+    fn graph_row_index(app: &AppState, id: &str) -> usize {
+        app.graph
+            .as_ref()
+            .expect("graph")
+            .visible_rows()
+            .iter()
+            .position(|row| graph_row_id(row) == id)
+            .unwrap_or_else(|| panic!("missing graph row {id}"))
+    }
+
+    #[test]
+    fn set_graph_same_repo_new_head_keeps_focused_commit() {
+        let mut app = state();
+        app.layout.tree_height = 24;
+        app.set_graph(mini_graph(&["aaa", "bbb"]), "app".into(), "aaa".into());
+        let bbb = graph_row_index(&app, "commit:bbb");
+        assert!(bbb > 0, "bbb must not be the top row");
+        app.graph_cursor = bbb;
+        app.set_graph(
+            mini_graph(&["ccc", "aaa", "bbb"]),
+            "app".into(),
+            "ccc".into(),
+        );
+        assert_eq!(graph_focus_id(&app), "commit:bbb");
+        assert_eq!(app.graph_cursor, graph_row_index(&app, "commit:bbb"));
+        assert_ne!(
+            app.graph_cursor, 0,
+            "new HEAD must not jump focus to the top row"
+        );
+        assert_ne!(graph_focus_id(&app), "commit:ccc");
+    }
+
+    #[test]
+    fn set_graph_same_repo_missing_row_clamps_to_neighbor() {
+        let mut app = state();
+        app.layout.tree_height = 24;
+        app.set_graph(
+            mini_graph(&["aaa", "bbb", "ccc"]),
+            "app".into(),
+            "aaa".into(),
+        );
+        let bbb = graph_row_index(&app, "commit:bbb");
+        app.graph_cursor = bbb;
+        app.set_graph(mini_graph(&["aaa", "ccc"]), "app".into(), "aaa".into());
+        let n = app.graph.as_ref().unwrap().visible_rows().len();
+        assert_eq!(
+            app.graph_cursor,
+            bbb.min(n - 1),
+            "gone row must clamp to min(old, n-1), not jump to 0"
+        );
+        assert_ne!(app.graph_cursor, 0);
+        assert_eq!(graph_focus_id(&app), "commit:ccc");
+    }
+
+    #[test]
+    fn set_graph_repo_switch_resets_to_top() {
+        let mut app = state();
+        app.layout.tree_height = 24;
+        app.set_graph(mini_graph(&["aaa", "bbb"]), "app".into(), "aaa".into());
+        app.graph_cursor = graph_row_index(&app, "commit:bbb");
+        app.graph_scroll = 2;
+        app.set_graph(mini_graph(&["aaa", "bbb"]), "lib".into(), "aaa".into());
+        assert_eq!(app.graph_cursor, 0);
+        assert_eq!(app.graph_scroll, 0);
+    }
+
+    #[test]
+    fn apply_watch_snapshot_does_not_reset_graph_cursor() {
+        let mut app = state();
+        app.layout.tree_height = 24;
+        app.set_graph(mini_graph(&["aaa", "bbb"]), "app".into(), "aaa".into());
+        let bbb = graph_row_index(&app, "commit:bbb");
+        app.graph_cursor = bbb;
+        let mut snapshot = app.snapshot.clone();
+        snapshot.repos[0].changes.insert(
+            0,
+            FileChange {
+                path: "aaa-new.rs".into(),
+                staged_status: None,
+                unstaged_status: Some("A".into()),
+                untracked: true,
+                old_path: None,
+            },
+        );
+        let _ = app.apply_watch_snapshot(snapshot);
+        assert_eq!(graph_focus_id(&app), "commit:bbb");
+        assert_eq!(app.graph_cursor, bbb);
+        assert_ne!(app.graph_cursor, 0);
     }
 
     #[test]
@@ -5895,6 +6106,59 @@ mod tests {
             app.tabs.active_compare().unwrap().file_cursor,
             0,
             "MoveToStart must not use raw row 0 when that row is a directory"
+        );
+    }
+
+    #[test]
+    fn apply_compare_range_keeps_path_when_new_file_prepended() {
+        let mut app = state();
+        app.tabs.open_or_focus("app".into(), "main".into());
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        let _ = app.apply_compare_range(
+            tab_id,
+            gen,
+            Ok(compare_range_load(&["src/a.rs", "src/b.rs"])),
+        );
+        app.tabs.active_compare_mut().unwrap().path = Some("src/b.rs".into());
+        let _ = app.apply_compare_range(
+            tab_id,
+            gen,
+            Ok(compare_range_load(&["src/z.rs", "src/a.rs", "src/b.rs"])),
+        );
+        let row = app.focused_commit_file_row().expect("kept row");
+        assert_eq!(row.path, "src/b.rs");
+        assert!(row.is_file());
+        assert_ne!(
+            app.tabs.active_compare().unwrap().file_cursor,
+            0,
+            "prepended file must not jump the compare cursor to the top"
+        );
+    }
+
+    #[test]
+    fn apply_compare_range_gone_path_clamps_to_neighbor() {
+        let mut app = state();
+        app.tabs.open_or_focus("app".into(), "main".into());
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        let _ = app.apply_compare_range(
+            tab_id,
+            gen,
+            Ok(compare_range_load(&["a.rs", "b.rs", "c.rs"])),
+        );
+        {
+            let tab = app.tabs.active_compare_mut().unwrap();
+            tab.path = Some("b.rs".into());
+            tab.file_cursor = 1;
+        }
+        let _ = app.apply_compare_range(tab_id, gen, Ok(compare_range_load(&["a.rs", "c.rs"])));
+        let row = app.focused_commit_file_row().expect("clamped row");
+        assert_eq!(row.path, "c.rs");
+        assert_ne!(
+            app.tabs.active_compare().unwrap().file_cursor,
+            0,
+            "gone compare path must clamp, not jump to the first file"
         );
     }
 
@@ -9246,6 +9510,103 @@ mod tests {
         install_graph(&mut app, Vec::new());
         app.focus = FocusPane::Right;
         assert_eq!(app.dispatch(Action::ToggleFullContext), Effect::None);
+    }
+
+    #[test]
+    fn open_commit_files_reload_keeps_focused_path() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        app.open_commit_files("app".into(), sample_commit_source(), two_commit_files());
+        match app.dispatch(Action::Move(1)) {
+            Effect::LoadRightPane | Effect::None => {}
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(app.focused_commit_file_row().unwrap().path, "two.rs");
+        let mut files = two_commit_files();
+        files.insert(
+            0,
+            CommitFile {
+                status: "A".into(),
+                path: "zero.rs".into(),
+                old_path: None,
+            },
+        );
+        app.open_commit_files("app".into(), sample_commit_source(), files);
+        assert_eq!(app.focused_commit_file_row().unwrap().path, "two.rs");
+        assert_ne!(
+            app.commit_files_cursor(),
+            0,
+            "same-source reload must not jump to the first file"
+        );
+    }
+
+    #[test]
+    fn open_commit_files_gone_path_clamps_to_neighbor() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        app.open_commit_files(
+            "app".into(),
+            sample_commit_source(),
+            vec![
+                CommitFile {
+                    status: "M".into(),
+                    path: "a.rs".into(),
+                    old_path: None,
+                },
+                CommitFile {
+                    status: "M".into(),
+                    path: "b.rs".into(),
+                    old_path: None,
+                },
+                CommitFile {
+                    status: "M".into(),
+                    path: "c.rs".into(),
+                    old_path: None,
+                },
+            ],
+        );
+        match app.dispatch(Action::Move(1)) {
+            Effect::LoadRightPane | Effect::None => {}
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(app.focused_commit_file_row().unwrap().path, "b.rs");
+        app.open_commit_files(
+            "app".into(),
+            sample_commit_source(),
+            vec![
+                CommitFile {
+                    status: "M".into(),
+                    path: "a.rs".into(),
+                    old_path: None,
+                },
+                CommitFile {
+                    status: "M".into(),
+                    path: "c.rs".into(),
+                    old_path: None,
+                },
+            ],
+        );
+        assert_eq!(app.focused_commit_file_row().unwrap().path, "c.rs");
+        assert_ne!(
+            app.commit_files_cursor(),
+            0,
+            "gone commit-file path must clamp, not jump to the first file"
+        );
+    }
+
+    #[test]
+    fn set_diff_same_path_keeps_viewport() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.set_diff("app".into(), "README.md".into(), tall_panning_diff());
+        pan_and_scroll_focused_diff(&mut app);
+        let cursor = app.diff_cursor;
+        let scroll = app.diff_scroll;
+        let pan = app.diff_col_offset;
+        app.set_diff("app".into(), "README.md".into(), tall_panning_diff());
+        assert_eq!(app.diff_cursor, cursor);
+        assert_eq!(app.diff_scroll, scroll);
+        assert_eq!(app.diff_col_offset, pan);
     }
 
     #[test]
