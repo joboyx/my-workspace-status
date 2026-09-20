@@ -1,5 +1,6 @@
 //! Git subprocess helpers. Prefer `/usr/bin/git` so WSL does not pick git.exe.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -41,6 +42,27 @@ fn git_command(bin: &Path, args: &[&str], cwd: &Path) -> Command {
 
 fn run(args: &[&str], cwd: &Path) -> std::io::Result<std::process::Output> {
     git_command(git_binary(), args, cwd).output()
+}
+
+/// Run git with `stdin` piped. Used only by [`apply_cached_patch`].
+fn run_with_stdin(args: &[&str], cwd: &Path, stdin: &[u8]) -> std::io::Result<std::process::Output> {
+    let mut cmd = Command::new(git_binary());
+    cmd.args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("GIT_TERMINAL_PROMPT", "0");
+    let mut child = cmd.spawn()?;
+    let write_err = match child.stdin.take() {
+        Some(mut pipe) => pipe.write_all(stdin).err(),
+        None => None,
+    };
+    let out = child.wait_with_output()?;
+    if let Some(err) = write_err {
+        return Err(err);
+    }
+    Ok(out)
 }
 
 /// Run git and return trimmed stdout. Empty string on failure.
@@ -347,6 +369,27 @@ pub fn stage_file(cwd: &Path, file_path: &str) -> Result<(), String> {
 /// Unstage one path (`git restore --staged --`).
 pub fn unstage_file(cwd: &Path, file_path: &str) -> Result<(), String> {
     exec_git_checked(&["restore", "--staged", "--", file_path], cwd)
+}
+
+/// Apply a unified patch to the index (`git apply --cached`).
+///
+/// `reverse` is `git apply --reverse --cached` (unstage selected lines).
+/// Stdin carries the patch. Other git wrappers attach stdin to `/dev/null`.
+pub fn apply_cached_patch(cwd: &Path, patch: &str, reverse: bool) -> Result<(), String> {
+    if patch.trim().is_empty() {
+        return Err("empty patch".into());
+    }
+    let mut args: Vec<&str> =
+        vec!["apply", "--cached", "--unidiff-zero", "--whitespace=nowarn"];
+    if reverse {
+        args.push("--reverse");
+    }
+    args.push("-");
+    match run_with_stdin(&args, cwd, patch.as_bytes()) {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => Err(git_failure_message(&args, &out)),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 /// Discard worktree changes to a tracked path (`git restore --`).
@@ -1016,6 +1059,96 @@ mod tests {
         remove_untracked_file(&dir, "tmp-untracked.txt").unwrap();
         assert!(!dir.join("tmp-untracked.txt").exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_cached_patch_stages_and_unstages_one_hunk() {
+        let dir = std::env::temp_dir().join(format!(
+            "ws-git-apply-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        init_repo(&dir);
+        let body = "\
+keep-a
+keep-b
+keep-c
+ALPHA-OLD
+keep-d
+keep-e
+keep-f
+pad-1
+pad-2
+pad-3
+pad-4
+pad-5
+pad-6
+OMEGA-OLD
+keep-x
+keep-y
+keep-z
+";
+        fs::write(dir.join("regions.txt"), body).unwrap();
+        git(&dir, &["add", "regions.txt"]);
+        git(&dir, &["commit", "-q", "-m", "regions"]);
+        fs::write(
+            dir.join("regions.txt"),
+            body.replace("ALPHA-OLD", "ALPHA-NEW")
+                .replace("OMEGA-OLD", "OMEGA-NEW"),
+        )
+        .unwrap();
+        let diff = exec_git(&["diff", "--", "regions.txt"], &dir);
+        assert!(
+            diff.contains("ALPHA-NEW") && diff.contains("OMEGA-NEW"),
+            "{diff}"
+        );
+        let first_hunk = first_unified_hunk(&diff);
+        apply_cached_patch(&dir, &first_hunk, false).unwrap();
+        let cached = exec_git(&["diff", "--cached", "--", "regions.txt"], &dir);
+        let unstaged = exec_git(&["diff", "--", "regions.txt"], &dir);
+        assert!(
+            cached.contains("ALPHA-NEW") && !cached.contains("OMEGA-NEW"),
+            "{cached}"
+        );
+        assert!(
+            unstaged.contains("OMEGA-NEW") && !unstaged.contains("ALPHA-NEW"),
+            "{unstaged}"
+        );
+        apply_cached_patch(&dir, &first_hunk, true).unwrap();
+        assert_eq!(exec_git_status(&["diff", "--cached", "--quiet"], &dir), 0);
+        let unstaged = exec_git(&["diff", "--", "regions.txt"], &dir);
+        assert!(
+            unstaged.contains("ALPHA-NEW") && unstaged.contains("OMEGA-NEW"),
+            "{unstaged}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn first_unified_hunk(diff: &str) -> String {
+        let mut header = String::new();
+        let mut hunk = String::new();
+        let mut in_hunk = false;
+        for line in diff.lines() {
+            if line.starts_with("@@") {
+                if in_hunk {
+                    break;
+                }
+                in_hunk = true;
+                hunk.push_str(line);
+                hunk.push('\n');
+                continue;
+            }
+            if in_hunk {
+                hunk.push_str(line);
+                hunk.push('\n');
+            } else {
+                header.push_str(line);
+                header.push('\n');
+            }
+        }
+        format!("{header}{hunk}")
     }
 
     #[test]

@@ -53,7 +53,7 @@ const HELP_VIEW_ROWS: &[(&str, &str)] = &[
     ("Ctrl-u Ctrl-d", "page focused ±5"),
     ("m", "mouse · pane/split/graph"),
     ("; Ctrl-R", "comment focused row / line"),
-    ("V", "highlight diff lines for ; comment"),
+    ("V", "highlight diff lines for ; / s / u"),
     ("y", "copy comments as markdown"),
     ("'", "copy entity reference"),
     ("Esc", "back / unfocus · never quit"),

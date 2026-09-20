@@ -259,6 +259,16 @@ pub enum Effect {
         repo: String,
         paths: Vec<String>,
     },
+    /// Apply a unified patch to the index (`git apply --cached`).
+    ///
+    /// `reverse` is `git apply --reverse --cached`. Visual-line `s` / `u`
+    /// emit this. Whole-file `s` / `u` stay [`Self::Stage`] / [`Self::Unstage`].
+    ApplyCachedPatch {
+        repo: String,
+        path: String,
+        patch: String,
+        reverse: bool,
+    },
     Revert {
         repo: String,
         tracked: Vec<String>,

@@ -43,7 +43,8 @@ use super::commit_files::{
 };
 use super::ctrl_c_exit::{handle_ctrl_c, is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT};
 use super::diff::{
-    anchor_row_text, build_diff_rows, find_anchor_row, row_search_text, DiffContent, DiffRow,
+    anchor_row_text, build_diff_rows, build_partial_cached_patch, find_anchor_row, row_search_text,
+    DiffContent, DiffRow, PartialPatchKind,
 };
 use super::drill::{
     source_from_graph_row, stash_ref_from_graph_row, CommitFile, CommitFileSource, DrillView,
@@ -2338,6 +2339,74 @@ impl AppState {
             return None;
         }
         Some((row.repo.clone()?, row.file.clone()?))
+    }
+
+    fn stage_effect(&mut self) -> Effect {
+        if self.diff_visual_anchor.is_some() {
+            self.diff_visual_write_effect(FileWrite::Stage)
+        } else {
+            self.file_write_effect(FileWrite::Stage)
+        }
+    }
+
+    fn unstage_effect(&mut self) -> Effect {
+        if self.diff_visual_anchor.is_some() {
+            self.diff_visual_write_effect(FileWrite::Unstage)
+        } else {
+            self.file_write_effect(FileWrite::Unstage)
+        }
+    }
+
+    fn diff_visual_write_effect(&mut self, write: FileWrite) -> Effect {
+        let Some(anchor) = self.diff_visual_anchor else {
+            return self.file_write_effect(write);
+        };
+        let kind = match write {
+            FileWrite::Stage => PartialPatchKind::Stage,
+            FileWrite::Unstage => PartialPatchKind::Unstage,
+        };
+        let Some((repo, path)) = self.visual_write_target() else {
+            self.status = match write {
+                FileWrite::Stage => "cannot stage a committed diff".into(),
+                FileWrite::Unstage => "cannot unstage a committed diff".into(),
+            };
+            return Effect::None;
+        };
+        let mode = effective_diff_mode(self.diff_mode, self.layout.diff_pane_width);
+        let patch = match build_partial_cached_patch(
+            self.current_diff_content(),
+            mode,
+            anchor,
+            self.diff_cursor,
+            kind,
+            &path,
+        ) {
+            Ok(patch) => patch,
+            Err(err) => {
+                self.status = err;
+                return Effect::None;
+            }
+        };
+        let reverse = matches!(write, FileWrite::Unstage);
+        let verb = if reverse { "unstaged" } else { "staged" };
+        self.status = format!("{verb} range {path}");
+        self.clear_diff_visual();
+        Effect::ApplyCachedPatch {
+            repo,
+            path,
+            patch,
+            reverse,
+        }
+    }
+
+    fn visual_write_target(&self) -> Option<(String, String)> {
+        if self.is_compare_tab() {
+            return None;
+        }
+        match &self.drill {
+            DrillView::Diff { .. } => None,
+            _ => Some((self.diff_repo.clone()?, self.diff_path.clone()?)),
+        }
     }
 
     fn file_write_effect(&mut self, write: FileWrite) -> Effect {
@@ -10030,6 +10099,86 @@ mod tests {
             app.diff_visual_anchor.is_none(),
             "commit diff row list change must drop highlight"
         );
+    }
+
+    fn two_hunk_readme() -> DiffContent {
+        DiffContent::from_unified(
+            "\
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1,4 +1,4 @@
+ keep-a
+ keep-b
+-ALPHA-OLD
++ALPHA-NEW
+ keep-c
+@@ -20,4 +20,4 @@
+ keep-x
+ keep-y
+-OMEGA-OLD
++OMEGA-NEW
+ keep-z
+",
+        )
+    }
+
+    #[test]
+    fn visual_stage_emits_partial_patch_not_whole_file() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        let rows = app.current_diff_rows();
+        let first = rows
+            .iter()
+            .position(|r| matches!(r, DiffRow::Hunk { .. }))
+            .expect("hunk");
+        let second = rows
+            .iter()
+            .enumerate()
+            .skip(first + 1)
+            .find_map(|(i, r)| matches!(r, DiffRow::Hunk { .. }).then_some(i))
+            .expect("second");
+        app.diff_cursor = first;
+        app.dispatch(Action::DiffVisualStart);
+        app.diff_cursor = second - 1;
+        match app.dispatch(Action::Stage) {
+            Effect::ApplyCachedPatch {
+                repo,
+                path,
+                patch,
+                reverse,
+            } => {
+                assert_eq!(repo, "app");
+                assert_eq!(path, "README.md");
+                assert!(!reverse);
+                assert!(
+                    patch.contains("ALPHA-NEW") && !patch.contains("OMEGA-NEW"),
+                    "{patch}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(app.diff_visual_anchor.is_none());
+        assert!(app.status.contains("staged range"), "{}", app.status);
+    }
+
+    #[test]
+    fn visual_stage_fails_closed_on_context_only() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        let rows = app.current_diff_rows();
+        let ctx = rows
+            .iter()
+            .position(|r| matches!(r, DiffRow::Line { left, .. } if left.text == "keep-a"))
+            .expect("context");
+        app.diff_cursor = ctx;
+        app.dispatch(Action::DiffVisualStart);
+        assert_eq!(app.dispatch(Action::Stage), Effect::None);
+        assert!(
+            app.diff_visual_anchor.is_some(),
+            "fail-closed keeps highlight"
+        );
+        assert!(app.status.contains("nothing to stage"), "{}", app.status);
     }
 
     fn assert_copy_clipboard(effect: Effect, kind: &str, needle: &str, announce: bool) -> String {

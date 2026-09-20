@@ -5,6 +5,7 @@
 //! word diff stays out of scope.
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
@@ -20,7 +21,7 @@ const HUGE_FILE_BYTES: u64 = 1_000_000;
 pub const DIFF_RULE: char = '│';
 
 /// Staged / unstaged / untracked / committed section label.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DiffSection {
     Staged,
     Unstaged,
@@ -373,99 +374,146 @@ enum Side {
     New,
 }
 
-fn inline_rows(hunks: &[Hunk]) -> Vec<DiffRow> {
-    let mut out = Vec::new();
-    for hunk in hunks {
-        if !hunk.header.is_empty() {
-            out.push(DiffRow::Hunk {
-                text: hunk.header.clone(),
-            });
-        }
-        for line in &hunk.lines {
-            out.push(DiffRow::Line {
-                left: cell_from_line(line, Side::New),
-                right: None,
-            });
-        }
-    }
-    out
+/// Painted-row map back onto a parsed hunk line.
+#[derive(Clone, Debug)]
+enum RowBind {
+    Section(DiffSection),
+    Hunk {
+        section: DiffSection,
+        hunk: usize,
+    },
+    Line {
+        section: DiffSection,
+        hunk: usize,
+        parsed: Vec<usize>,
+    },
 }
 
-fn pair_hunk(hunk: &Hunk) -> Vec<DiffRow> {
+/// Index apply direction for a visual-line partial patch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartialPatchKind {
+    /// `git apply --cached` of unstaged add/del lines.
+    Stage,
+    /// `git apply --reverse --cached` of staged add/del lines.
+    Unstage,
+}
+
+fn pair_hunk(hunk: &Hunk) -> Vec<(DiffRow, Vec<usize>)> {
     let mut out = Vec::new();
     let lines = &hunk.lines;
     let mut i = 0;
     while i < lines.len() {
         let line = &lines[i];
         if line.kind == DiffCellKind::Meta {
-            out.push(DiffRow::Line {
-                left: cell_from_line(line, Side::Old),
-                right: None,
-            });
+            out.push((
+                DiffRow::Line {
+                    left: cell_from_line(line, Side::Old),
+                    right: None,
+                },
+                vec![i],
+            ));
             i += 1;
             continue;
         }
         if line.kind == DiffCellKind::Ctx {
-            out.push(DiffRow::Line {
-                left: cell_from_line(line, Side::Old),
-                right: Some(cell_from_line(line, Side::New)),
-            });
+            out.push((
+                DiffRow::Line {
+                    left: cell_from_line(line, Side::Old),
+                    right: Some(cell_from_line(line, Side::New)),
+                },
+                vec![i],
+            ));
             i += 1;
             continue;
         }
         let mut dels = Vec::new();
         let mut adds = Vec::new();
         while i < lines.len() && lines[i].kind == DiffCellKind::Del {
-            dels.push(&lines[i]);
+            dels.push(i);
             i += 1;
         }
         while i < lines.len() && lines[i].kind == DiffCellKind::Add {
-            adds.push(&lines[i]);
+            adds.push(i);
             i += 1;
         }
         let pair_count = dels.len().max(adds.len());
         for j in 0..pair_count {
-            out.push(DiffRow::Line {
-                left: dels
-                    .get(j)
-                    .map(|line| cell_from_line(line, Side::Old))
-                    .unwrap_or_else(empty_cell),
-                right: Some(
-                    adds.get(j)
-                        .map(|line| cell_from_line(line, Side::New))
-                        .unwrap_or_else(empty_cell),
-                ),
-            });
+            let mut parsed = Vec::new();
+            let left = if let Some(&idx) = dels.get(j) {
+                parsed.push(idx);
+                cell_from_line(&lines[idx], Side::Old)
+            } else {
+                empty_cell()
+            };
+            let right = if let Some(&idx) = adds.get(j) {
+                parsed.push(idx);
+                Some(cell_from_line(&lines[idx], Side::New))
+            } else {
+                Some(empty_cell())
+            };
+            out.push((DiffRow::Line { left, right }, parsed));
         }
     }
     out
 }
 
-fn side_by_side_rows(hunks: &[Hunk]) -> Vec<DiffRow> {
-    let mut out = Vec::new();
-    for hunk in hunks {
-        if !hunk.header.is_empty() {
-            out.push(DiffRow::Hunk {
+fn push_hunk_rows(
+    out: &mut Vec<(DiffRow, RowBind)>,
+    section: DiffSection,
+    hunk_idx: usize,
+    hunk: &Hunk,
+    mode: DiffMode,
+) {
+    if !hunk.header.is_empty() {
+        out.push((
+            DiffRow::Hunk {
                 text: hunk.header.clone(),
-            });
-        }
-        out.extend(pair_hunk(hunk));
+            },
+            RowBind::Hunk {
+                section,
+                hunk: hunk_idx,
+            },
+        ));
     }
-    out
+    if mode == DiffMode::SideBySide {
+        for (row, parsed) in pair_hunk(hunk) {
+            out.push((
+                row,
+                RowBind::Line {
+                    section,
+                    hunk: hunk_idx,
+                    parsed,
+                },
+            ));
+        }
+        return;
+    }
+    for (line_idx, line) in hunk.lines.iter().enumerate() {
+        out.push((
+            DiffRow::Line {
+                left: cell_from_line(line, Side::New),
+                right: None,
+            },
+            RowBind::Line {
+                section,
+                hunk: hunk_idx,
+                parsed: vec![line_idx],
+            },
+        ));
+    }
 }
 
-/// Rows for both diff sections. Empty sections are omitted.
-pub fn build_diff_rows(content: &DiffContent, mode: DiffMode) -> Vec<DiffRow> {
-    let render = if mode == DiffMode::SideBySide {
-        side_by_side_rows
-    } else {
-        inline_rows
-    };
+fn annotated_diff_rows(content: &DiffContent, mode: DiffMode) -> Vec<(DiffRow, RowBind)> {
     let mut out = Vec::new();
     let staged = parse_unified_diff(&content.staged);
     if !staged.is_empty() {
-        out.push(DiffRow::Section(DiffSection::Staged));
-        out.extend(render(&staged));
+        out.push((
+            DiffRow::Section(DiffSection::Staged),
+            RowBind::Section(DiffSection::Staged),
+        ));
+        for (idx, hunk) in staged.iter().enumerate() {
+            push_hunk_rows(&mut out, DiffSection::Staged, idx, hunk, mode);
+        }
     }
     let unstaged = parse_unified_diff(&content.unstaged);
     if !unstaged.is_empty() {
@@ -476,10 +524,300 @@ pub fn build_diff_rows(content: &DiffContent, mode: DiffMode) -> Vec<DiffRow> {
         } else {
             DiffSection::Unstaged
         };
-        out.push(DiffRow::Section(section));
-        out.extend(render(&unstaged));
+        out.push((DiffRow::Section(section), RowBind::Section(section)));
+        for (idx, hunk) in unstaged.iter().enumerate() {
+            push_hunk_rows(&mut out, section, idx, hunk, mode);
+        }
     }
     out
+}
+
+/// Rows for both diff sections. Empty sections are omitted.
+pub fn build_diff_rows(content: &DiffContent, mode: DiffMode) -> Vec<DiffRow> {
+    annotated_diff_rows(content, mode)
+        .into_iter()
+        .map(|(row, _)| row)
+        .collect()
+}
+
+/// Build a `git apply --cached` patch for painted rows `start..=end`.
+///
+/// Stage reads the unstaged (or NEW) section. Unstage reads STAGED.
+/// Context lines in the range stay as context. Unselected additions drop.
+/// Unselected deletions become context. Returns `Err` when the range cannot
+/// become a valid patch (fail closed — never a whole-file patch).
+pub fn build_partial_cached_patch(
+    content: &DiffContent,
+    mode: DiffMode,
+    start: usize,
+    end: usize,
+    kind: PartialPatchKind,
+    path: &str,
+) -> Result<String, String> {
+    if path.is_empty() {
+        return Err(partial_fail(kind));
+    }
+    if content.is_committed {
+        return Err(committed_fail(kind));
+    }
+    let annotated = annotated_diff_rows(content, mode);
+    if annotated.is_empty() {
+        return Err(nothing_fail(kind));
+    }
+    let lo = start.min(end);
+    let hi = start.max(end);
+    if lo >= annotated.len() {
+        return Err(nothing_fail(kind));
+    }
+    let hi = hi.min(annotated.len() - 1);
+
+    let mut sections = HashSet::new();
+    let mut whole_hunks: HashSet<(DiffSection, usize)> = HashSet::new();
+    let mut line_hits: HashMap<(DiffSection, usize), HashSet<usize>> = HashMap::new();
+    for bind in annotated[lo..=hi].iter().map(|(_, bind)| bind) {
+        match bind {
+            RowBind::Section(section) => {
+                sections.insert(*section);
+            }
+            RowBind::Hunk { section, hunk } => {
+                sections.insert(*section);
+                whole_hunks.insert((*section, *hunk));
+            }
+            RowBind::Line {
+                section,
+                hunk,
+                parsed,
+            } => {
+                sections.insert(*section);
+                line_hits
+                    .entry((*section, *hunk))
+                    .or_default()
+                    .extend(parsed.iter().copied());
+            }
+        }
+    }
+
+    let change_sections: HashSet<DiffSection> = sections
+        .into_iter()
+        .filter(|section| {
+            matches!(
+                section,
+                DiffSection::Staged | DiffSection::Unstaged | DiffSection::New
+            )
+        })
+        .collect();
+    if change_sections.contains(&DiffSection::Staged)
+        && (change_sections.contains(&DiffSection::Unstaged)
+            || change_sections.contains(&DiffSection::New))
+    {
+        return Err("highlight spans staged and unstaged".into());
+    }
+    if change_sections.contains(&DiffSection::Committed) {
+        return Err(committed_fail(kind));
+    }
+
+    let (want, raw, is_new) = match kind {
+        PartialPatchKind::Stage => {
+            if change_sections.contains(&DiffSection::Staged) && change_sections.len() == 1 {
+                return Err(nothing_fail(kind));
+            }
+            let section = if content.is_new {
+                DiffSection::New
+            } else {
+                DiffSection::Unstaged
+            };
+            if !change_sections.contains(&section) {
+                return Err(nothing_fail(kind));
+            }
+            (section, content.unstaged.as_str(), content.is_new)
+        }
+        PartialPatchKind::Unstage => {
+            if !change_sections.contains(&DiffSection::Staged) {
+                return Err(nothing_fail(kind));
+            }
+            (DiffSection::Staged, content.staged.as_str(), false)
+        }
+    };
+
+    if raw.trim().is_empty() {
+        return Err(nothing_fail(kind));
+    }
+    let header = patch_file_header(raw, path, is_new);
+    if header.contains("rename from") || header.contains("copy from") {
+        return Err(partial_fail(kind));
+    }
+    let hunks = parse_unified_diff(raw);
+    if hunks.iter().any(|hunk| hunk.header.is_empty()) {
+        return Err(binary_fail(kind));
+    }
+
+    let mut body = String::new();
+    for (idx, hunk) in hunks.iter().enumerate() {
+        let key = (want, idx);
+        let selected = if whole_hunks.contains(&key) {
+            None
+        } else {
+            line_hits.get(&key)
+        };
+        if selected.is_none() && !whole_hunks.contains(&key) {
+            continue;
+        }
+        match transform_hunk(hunk, selected) {
+            Ok(Some(text)) => body.push_str(&text),
+            Ok(None) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    if body.is_empty() {
+        return Err(nothing_fail(kind));
+    }
+    Ok(format!("{header}{body}"))
+}
+
+fn nothing_fail(kind: PartialPatchKind) -> String {
+    match kind {
+        PartialPatchKind::Stage => "nothing to stage in highlight".into(),
+        PartialPatchKind::Unstage => "nothing to unstage in highlight".into(),
+    }
+}
+
+fn committed_fail(kind: PartialPatchKind) -> String {
+    match kind {
+        PartialPatchKind::Stage => "cannot stage a committed diff".into(),
+        PartialPatchKind::Unstage => "cannot unstage a committed diff".into(),
+    }
+}
+
+fn binary_fail(kind: PartialPatchKind) -> String {
+    match kind {
+        PartialPatchKind::Stage => "cannot stage a binary highlight".into(),
+        PartialPatchKind::Unstage => "cannot unstage a binary highlight".into(),
+    }
+}
+
+fn partial_fail(kind: PartialPatchKind) -> String {
+    match kind {
+        PartialPatchKind::Stage => "cannot stage highlight".into(),
+        PartialPatchKind::Unstage => "cannot unstage highlight".into(),
+    }
+}
+
+fn patch_file_header(raw: &str, path: &str, is_new: bool) -> String {
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let mut header = String::new();
+    for line in normalized.lines() {
+        if line.starts_with("@@") || is_binary_marker(line) {
+            break;
+        }
+        if line.starts_with("diff --git")
+            || line.starts_with("index ")
+            || line.starts_with("new file mode")
+            || line.starts_with("deleted file mode")
+            || line.starts_with("old mode")
+            || line.starts_with("new mode")
+            || line.starts_with("similarity index")
+            || line.starts_with("rename from")
+            || line.starts_with("rename to")
+            || line.starts_with("copy from")
+            || line.starts_with("copy to")
+            || line.starts_with("--- ")
+            || line.starts_with("+++ ")
+        {
+            header.push_str(line);
+            header.push('\n');
+        }
+    }
+    if header.is_empty() {
+        if is_new {
+            format!(
+                "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n"
+            )
+        } else {
+            format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n")
+        }
+    } else {
+        header
+    }
+}
+
+fn hunk_header_suffix(header: &str) -> &str {
+    let rest = header.strip_prefix("@@").unwrap_or(header);
+    match rest.find("@@") {
+        Some(idx) => &rest[idx + 2..],
+        None => "",
+    }
+}
+
+fn transform_hunk(
+    hunk: &Hunk,
+    selected_lines: Option<&HashSet<usize>>,
+) -> Result<Option<String>, String> {
+    if hunk.header.is_empty() {
+        return Err("cannot stage a binary highlight".into());
+    }
+    let whole = selected_lines.is_none();
+    let mut body = String::new();
+    let mut old_count = 0u32;
+    let mut new_count = 0u32;
+    let mut has_change = false;
+    let mut emitted_last = false;
+    for (idx, line) in hunk.lines.iter().enumerate() {
+        let take = whole || selected_lines.is_some_and(|set| set.contains(&idx));
+        match line.kind {
+            DiffCellKind::Ctx => {
+                body.push(' ');
+                body.push_str(&line.text);
+                body.push('\n');
+                old_count = old_count.saturating_add(1);
+                new_count = new_count.saturating_add(1);
+                emitted_last = true;
+            }
+            DiffCellKind::Add => {
+                if take {
+                    body.push('+');
+                    body.push_str(&line.text);
+                    body.push('\n');
+                    new_count = new_count.saturating_add(1);
+                    has_change = true;
+                    emitted_last = true;
+                } else {
+                    emitted_last = false;
+                }
+            }
+            DiffCellKind::Del => {
+                if take {
+                    body.push('-');
+                    body.push_str(&line.text);
+                    body.push('\n');
+                    old_count = old_count.saturating_add(1);
+                    has_change = true;
+                    emitted_last = true;
+                } else {
+                    body.push(' ');
+                    body.push_str(&line.text);
+                    body.push('\n');
+                    old_count = old_count.saturating_add(1);
+                    new_count = new_count.saturating_add(1);
+                    emitted_last = true;
+                }
+            }
+            DiffCellKind::Meta => {
+                if emitted_last {
+                    body.push_str(&line.text);
+                    body.push('\n');
+                }
+            }
+            DiffCellKind::Empty => {}
+        }
+    }
+    if !has_change {
+        return Ok(None);
+    }
+    let (old_start, new_start) = hunk_starts(&hunk.header);
+    let suffix = hunk_header_suffix(&hunk.header);
+    Ok(Some(format!(
+        "@@ -{old_start},{old_count} +{new_start},{new_count} @@{suffix}\n{body}"
+    )))
 }
 
 /// Widest line number in the rows — sizes the gutter column. Floor is 2.
@@ -952,5 +1290,178 @@ index 1111111..2222222 100644
             scroll_to_keep_row(new_idx, 8, long.len()) > scroll_to_keep_row(old_idx, 8, long.len()),
             "stale hunk-only index would not keep the change in view"
         );
+    }
+
+    const TWO_HUNKS: &str = "\
+diff --git a/regions.txt b/regions.txt
+index 1111111..2222222 100644
+--- a/regions.txt
++++ b/regions.txt
+@@ -1,4 +1,4 @@
+ keep-a
+ keep-b
+-ALPHA-OLD
++ALPHA-NEW
+ keep-c
+@@ -20,4 +20,4 @@
+ keep-x
+ keep-y
+-OMEGA-OLD
++OMEGA-NEW
+ keep-z
+";
+
+    fn two_hunk_content() -> DiffContent {
+        DiffContent {
+            staged: String::new(),
+            unstaged: TWO_HUNKS.into(),
+            is_new: false,
+            is_committed: false,
+        }
+    }
+
+    fn first_hunk_row_span(mode: DiffMode) -> (usize, usize) {
+        let rows = build_diff_rows(&two_hunk_content(), mode);
+        let first = rows
+            .iter()
+            .position(|r| matches!(r, DiffRow::Hunk { .. }))
+            .expect("first hunk");
+        let second = rows
+            .iter()
+            .enumerate()
+            .skip(first + 1)
+            .find_map(|(i, r)| matches!(r, DiffRow::Hunk { .. }).then_some(i))
+            .expect("second hunk");
+        (first, second - 1)
+    }
+
+    #[test]
+    fn partial_patch_keeps_only_the_highlighted_hunk() {
+        let content = two_hunk_content();
+        let (start, end) = first_hunk_row_span(DiffMode::Inline);
+        let patch = build_partial_cached_patch(
+            &content,
+            DiffMode::Inline,
+            start,
+            end,
+            PartialPatchKind::Stage,
+            "regions.txt",
+        )
+        .expect("patch");
+        assert!(
+            patch.contains("ALPHA-NEW") && patch.contains("ALPHA-OLD"),
+            "{patch}"
+        );
+        assert!(
+            !patch.contains("OMEGA-NEW") && !patch.contains("OMEGA-OLD"),
+            "{patch}"
+        );
+        assert!(
+            patch.contains("diff --git a/regions.txt b/regions.txt"),
+            "{patch}"
+        );
+    }
+
+    #[test]
+    fn partial_patch_stages_one_add_line_inside_a_hunk() {
+        let content = DiffContent::from_unified(FIXTURE);
+        let rows = build_diff_rows(&content, DiffMode::Inline);
+        let line4 = rows
+            .iter()
+            .position(|r| matches!(r, DiffRow::Line { left, .. } if left.text == "line4"))
+            .expect("line4");
+        let patch = build_partial_cached_patch(
+            &content,
+            DiffMode::Inline,
+            line4,
+            line4,
+            PartialPatchKind::Stage,
+            "hello.ts",
+        )
+        .expect("patch");
+        assert!(patch.contains("+line4"), "{patch}");
+        assert!(!patch.contains("line2 changed"), "{patch}");
+        assert!(patch.contains(" line2\n"), "{patch}");
+    }
+
+    #[test]
+    fn partial_patch_fails_closed_on_context_only_and_committed() {
+        let content = two_hunk_content();
+        let rows = build_diff_rows(&content, DiffMode::Inline);
+        let ctx = rows
+            .iter()
+            .position(|r| matches!(r, DiffRow::Line { left, .. } if left.text == "keep-a"))
+            .expect("context");
+        let err = build_partial_cached_patch(
+            &content,
+            DiffMode::Inline,
+            ctx,
+            ctx,
+            PartialPatchKind::Stage,
+            "regions.txt",
+        )
+        .unwrap_err();
+        assert!(err.contains("nothing to stage"), "{err}");
+
+        let committed = DiffContent {
+            staged: String::new(),
+            unstaged: TWO_HUNKS.into(),
+            is_new: false,
+            is_committed: true,
+        };
+        let err = build_partial_cached_patch(
+            &committed,
+            DiffMode::Inline,
+            0,
+            3,
+            PartialPatchKind::Stage,
+            "regions.txt",
+        )
+        .unwrap_err();
+        assert!(err.contains("committed"), "{err}");
+    }
+
+    #[test]
+    fn partial_patch_unstages_from_the_staged_section() {
+        let content = DiffContent {
+            staged: TWO_HUNKS.into(),
+            unstaged: String::new(),
+            is_new: false,
+            is_committed: false,
+        };
+        let rows = build_diff_rows(&content, DiffMode::Inline);
+        let first = rows
+            .iter()
+            .position(|r| matches!(r, DiffRow::Hunk { .. }))
+            .expect("hunk");
+        let second = rows
+            .iter()
+            .enumerate()
+            .skip(first + 1)
+            .find_map(|(i, r)| matches!(r, DiffRow::Hunk { .. }).then_some(i))
+            .expect("second");
+        let patch = build_partial_cached_patch(
+            &content,
+            DiffMode::Inline,
+            first,
+            second - 1,
+            PartialPatchKind::Unstage,
+            "regions.txt",
+        )
+        .expect("patch");
+        assert!(
+            patch.contains("ALPHA-NEW") && !patch.contains("OMEGA-NEW"),
+            "{patch}"
+        );
+        let err = build_partial_cached_patch(
+            &content,
+            DiffMode::Inline,
+            first,
+            second - 1,
+            PartialPatchKind::Stage,
+            "regions.txt",
+        )
+        .unwrap_err();
+        assert!(err.contains("nothing to stage"), "{err}");
     }
 }

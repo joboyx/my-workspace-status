@@ -2,7 +2,7 @@
 
 Every git subprocess the tool runs. `<git>` is `git_binary()` (`WORKSPACE_STATUS_GIT`, else `/usr/bin/git` when it exists, else `git`).
 
-All wrappers in this file attach stdin to `/dev/null` and set `GIT_TERMINAL_PROMPT=0`. That keeps git from inheriting the TUI's raw-mode TTY (a credential prompt would otherwise deadlock: the parent waits on `output()`, the child waits on stdin). `merge_into_head` also sets `GIT_EDITOR=true` and `GIT_MERGE_AUTOEDIT=no`.
+Most wrappers in this file attach stdin to `/dev/null` and set `GIT_TERMINAL_PROMPT=0`. That keeps git from inheriting the TUI's raw-mode TTY (a credential prompt would otherwise deadlock: the parent waits on `output()`, the child waits on stdin). `apply_cached_patch` is the exception: it writes the unified patch to git's stdin (`git apply --cached` / `git apply --reverse --cached`). `merge_into_head` also sets `GIT_EDITOR=true` and `GIT_MERGE_AUTOEDIT=no`.
 
 ## `crates/workspace-status/src/git.rs`
 
@@ -27,7 +27,8 @@ All wrappers in this file attach stdin to `/dev/null` and set `GIT_TERMINAL_PROM
 | `push_quiet(cwd)` | `push --quiet`, or `push -u <remote> HEAD --quiet` when no/wrong upstream | `Result` | TUI `P`. No force, no auto-stash; first publish uses `-u`; diverged remotes may fail |
 | `FULL_DIFF_CONTEXT_LINES` | — | `999_999` | Large enough `-U` value to keep a typical source file in one hunk. |
 | `git_diff_args(base, path, context)` | inserts `-U<n>` and `-- <path>` | argv | Shared builder for worktree / cached / commit / stash diffs. |
-| `stage_file` / `unstage_file` | `add -- <path>` / `restore --staged -- <path>` | `Result` | TUI `s` / `u` |
+| `stage_file` / `unstage_file` | `add -- <path>` / `restore --staged -- <path>` | `Result` | TUI `s` / `u` whole file |
+| `apply_cached_patch` | `apply --cached --unidiff-zero --whitespace=nowarn [-R] -` with the patch on stdin | `Result` | DiffVisual `s` / `u` range. Empty patch is `Err`. |
 | `revert_tracked_file` / `remove_untracked_file` | `restore -- <path>` / `clean -f -- <path>` | `Result` | TUI `x`. **Destructive.** |
 | `list_worktrees_porcelain(cwd)` | `worktree list --porcelain` | stdout (or `""`) | Enumerate checkouts for linked-worktree discovery |
 | `is_ancestor(cwd, maybe_ancestor, tip)` | `merge-base --is-ancestor` | `Some(true/false)` / `None` | Merge-into-default probe |
@@ -100,7 +101,7 @@ git diff <base-sha>...<head-sha> -- <path>
 | `background_fetch_targets` | Snapshot paths for the TUI background fetch timer. Hidden ignored checkouts are omitted. When ignored repos are shown, every snapshot path is included, including linked worktrees. Manual `f` stays on `op_targets`. |
 | `refresh_target` | Workspace / No-updates → whole snapshot; otherwise the focused checkout path. |
 
-After `p` / `P` / `d` / `f`, the TUI refreshes the affected repos and stamps those `repo:<path>` and `checkout:<path>` ids into the flash map. TTY local writes (`s` / `u` / `x` / stash / checkout / create-branch / merge / remove-worktree) run on `spawn_blocking` in `tui/effect.rs`. Error paths still enqueue snapshot + pane so leftover keys cannot flush. Independent per-repo `f` / `p` / `P` (and `FetchTick`) share the per-gitdir remote queue. Cap is `FETCH_CONCURRENCY` (10).
+After `p` / `P` / `d` / `f`, the TUI refreshes the affected repos and stamps those `repo:<path>` and `checkout:<path>` ids into the flash map. TTY local writes (`s` / `u` / `x` / stash / checkout / create-branch / merge / remove-worktree, including DiffVisual range `git apply --cached`) run on `spawn_blocking` in `tui/effect.rs`. Error paths still enqueue snapshot + pane so leftover keys cannot flush. Independent per-repo `f` / `p` / `P` (and `FetchTick`) share the per-gitdir remote queue. Cap is `FETCH_CONCURRENCY` (10).
 
 ## Graph load (`tui/graph_load.rs`)
 
@@ -121,6 +122,8 @@ Manual `f` / `p` / `P` / `d` and the background fetch tick paint a trailing brea
 **Renames need both paths.** Staging only the new path leaves the deletion of the old path unstaged, and git then reports the pair as `D` + `A` rather than `R`. Writes apply to each path in order and stop at the first failure.
 
 **Bulk stage / unstage.** `s` / `u` use `collect_write_files`: a file row is itself; a dir walks descendants on that section side (every Changes dir id ends with `#unstaged`, including when collapse names differ from Staged); a Staged / Changes header walks every dirty file on that side of the checkout; a checkout (or flat repo) walks every dirty file — never mixes sibling checkouts under a family container. Workspace, group, and family-container rows yield an empty list. Stage keeps files with unstaged or untracked; unstage keeps staged. Empty after filtering: `Nothing to stage` / `Nothing to unstage`. Wrong focus: `Focus a file, dir, checkout, or repo to stage|unstage`.
+
+**Visual-line range stage / unstage.** While `V` highlight is on a focused worktree file diff, `s` / `u` do not whole-file stage. They build a unified patch from the highlighted add/del lines (a hunk header in the range selects that whole hunk) and run `apply_cached_patch`. Stage reads the UNSTAGED / NEW section (`git apply --cached`). Unstage reads STAGED (`git apply --reverse --cached`). Unselected additions drop. Unselected deletions become context. Fail closed (breadcrumb, no write) when the range is context-only, spans staged and unstaged, is a committed diff, is binary, or cannot become a valid patch. Success clears the highlight. Normal-mode `s` / `u` stay whole-file.
 
 **Focused refresh (`r`).** Reloads the whole workspace on the workspace row or No-updates group, and otherwise one checkout (`refresh_target` → `ReloadSnapshot` vs `ReloadRepo { repo }`).
 

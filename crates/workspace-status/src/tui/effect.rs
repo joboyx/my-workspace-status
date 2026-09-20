@@ -19,10 +19,10 @@ use workspace_status_graph::LOADING_OLDER;
 use crate::actions::switch_repo_to_default_branch;
 use crate::discovery::{discover_checkouts, process_repo, RepoCheckoutMeta};
 use crate::git::{
-    create_branch_at, create_branch_checkout, exec_git_checked, latest_stash_ref,
-    list_compare_picker_branches, list_local_branches, pull_quiet_detailed, push_quiet,
-    remove_untracked_file, remove_worktree, revert_tracked_file, stage_file, stash_apply,
-    stash_drop, stash_pop, stash_push, unstage_file,
+    apply_cached_patch, create_branch_at, create_branch_checkout, exec_git_checked,
+    latest_stash_ref, list_compare_picker_branches, list_local_branches, pull_quiet_detailed,
+    push_quiet, remove_untracked_file, remove_worktree, revert_tracked_file, stage_file,
+    stash_apply, stash_drop, stash_pop, stash_push, unstage_file,
 };
 use crate::parallel::env_fetch_concurrency;
 use crate::snapshot::RepoSnapshot;
@@ -613,6 +613,23 @@ impl Interpreter {
                             unstage_file(&dir, path)?;
                         }
                         Ok(format!("unstaged {last}"))
+                    }),
+                );
+            }
+            Effect::ApplyCachedPatch {
+                repo,
+                path,
+                patch,
+                reverse,
+            } => {
+                let dir = opts.cwd.join(&repo);
+                let verb = if reverse { "unstaged" } else { "staged" };
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        apply_cached_patch(&dir, &patch, reverse)?;
+                        Ok(format!("{verb} range {path}"))
                     }),
                 );
             }
@@ -1471,6 +1488,7 @@ impl Interpreter {
         let busy = match effect {
             Effect::Stage { repo, .. }
             | Effect::Unstage { repo, .. }
+            | Effect::ApplyCachedPatch { repo, .. }
             | Effect::Revert { repo, .. }
             | Effect::StashCreate { repo, .. }
             | Effect::StashApply { repo, .. }
