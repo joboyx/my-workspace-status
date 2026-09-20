@@ -43,9 +43,11 @@ use super::commit_files::{
 };
 use super::ctrl_c_exit::{handle_ctrl_c, is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT};
 use super::diff::{
-    anchor_row_text, build_diff_rows, build_partial_cached_patch, find_anchor_row, row_search_text,
+    anchor_row_text, build_diff_rows, build_partial_cached_patch, diff_row_content_width,
+    diff_wrap_row_heights, find_anchor_row, gutter_width, row_search_text, wrap_viewport_start,
     DiffContent, DiffRow, PartialPatchKind,
 };
+use super::icons::comment_mark_cols;
 use super::drill::{
     source_from_graph_row, stash_ref_from_graph_row, CommitFile, CommitFileSource, DrillView,
 };
@@ -63,8 +65,8 @@ use super::search::{
 use super::split::{
     clamp_tree_fraction, diff_split_fraction_from_col, effective_diff_mode, graph_col_from_col,
     graph_col_from_delta, graph_scroll_from_delta, graph_scroll_from_row, hit_split,
-    tree_fraction_from_col, DiffMode, SplitDrag, SplitHit, SplitLayout, DIFF_SPLIT_FRACTION,
-    TREE_WIDTH_FRACTION,
+    is_side_by_side_split, tree_fraction_from_col, DiffMode, SplitDrag, SplitHit, SplitLayout,
+    DIFF_SPLIT_FRACTION, TREE_WIDTH_FRACTION,
 };
 use super::stash::{
     checkout_path, resolve_stash_menu_key, row_is_hidden_ignored, stash_dirty_for_row,
@@ -378,6 +380,8 @@ pub struct AppState {
     pub tree_fraction: f64,
     pub diff_split_fraction: f64,
     pub diff_mode: DiffMode,
+    /// Soft-wrap file-diff code. Session-only (no XDG store).
+    pub diff_wrap: bool,
     pub drag: SplitDrag,
     pub theme: ThemeId,
     pub mouse_enabled: bool,
@@ -491,6 +495,7 @@ impl AppState {
             tree_fraction: TREE_WIDTH_FRACTION,
             diff_split_fraction: DIFF_SPLIT_FRACTION,
             diff_mode: DiffMode::SideBySide,
+            diff_wrap: false,
             drag: SplitDrag::None,
             theme: theme_from_env(),
             mouse_enabled: true,
@@ -1647,12 +1652,50 @@ impl AppState {
         if n == 0 {
             return;
         }
-        let idx = self.diff_scroll as usize + (row - body_y) as usize;
+        let visual_y = (row - body_y) as usize;
+        let idx = if self.diff_wrap {
+            let Some(idx) = self.diff_logical_index_at_visual(visual_y) else {
+                return;
+            };
+            idx
+        } else {
+            self.diff_scroll as usize + visual_y
+        };
         if idx >= n {
             return;
         }
         self.diff_cursor = idx;
         self.sync_diff_scroll();
+    }
+
+    fn diff_wrap_heights(&self) -> Vec<usize> {
+        let rows = self.current_diff_rows();
+        let v_cols = u16::from(self.diff_scroll > 0);
+        let pane_w = self.layout.diff_pane_width.saturating_sub(v_cols).max(1);
+        let content_w = diff_row_content_width(pane_w as usize) as u16;
+        let gutter = gutter_width(&rows).saturating_add(comment_mark_cols(self.ascii));
+        let split = is_side_by_side_split(self.diff_mode, pane_w);
+        diff_wrap_row_heights(
+            &rows,
+            content_w,
+            gutter,
+            split,
+            self.diff_split_fraction,
+        )
+    }
+
+    fn diff_logical_index_at_visual(&self, visual_y: usize) -> Option<usize> {
+        let heights = self.diff_wrap_heights();
+        let start = self.diff_scroll as usize;
+        let mut y = 0usize;
+        for (i, h) in heights.iter().copied().enumerate().skip(start) {
+            let h = h.max(1);
+            if visual_y < y.saturating_add(h) {
+                return Some(i);
+            }
+            y = y.saturating_add(h);
+        }
+        None
     }
 
     fn is_tree_chevron(&self, col: u16, depth: usize) -> bool {
@@ -1779,6 +1822,17 @@ impl AppState {
             DiffMode::Inline => "Diff: inline".into(),
         };
         self.drop_stale_diff_visual();
+        Effect::None
+    }
+
+    fn toggle_diff_wrap(&mut self) -> Effect {
+        self.diff_wrap = !self.diff_wrap;
+        if self.diff_wrap {
+            self.diff_col_offset = 0;
+            self.status = "wrap on".into();
+        } else {
+            self.status = "wrap off".into();
+        }
         Effect::None
     }
 
@@ -3654,6 +3708,12 @@ impl AppState {
             return;
         }
         self.diff_cursor = self.diff_cursor.min(n - 1);
+        if self.diff_wrap {
+            let heights = self.diff_wrap_heights();
+            self.diff_scroll =
+                wrap_viewport_start(&heights, self.diff_cursor, self.diff_body_height()) as u16;
+            return;
+        }
         let (start, _) = visible_window(n, self.diff_cursor, self.diff_body_height());
         self.diff_scroll = start as u16;
     }
@@ -8263,6 +8323,33 @@ mod tests {
         assert_eq!(app.diff_mode, DiffMode::Inline);
         app.dispatch(Action::ToggleDiffMode);
         assert_eq!(app.diff_mode, DiffMode::SideBySide);
+    }
+
+    #[test]
+    fn backslash_toggles_diff_wrap_and_clears_pan() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.focus = FocusPane::Right;
+        app.layout.diff_pane_width = 8;
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            DiffContent::from_unified(format!("@@ -0,0 +1,1 @@\n+{}", "x".repeat(40))),
+        );
+        app.dispatch(Action::PanDiff(4));
+        assert!(app.diff_col_offset > 0);
+        assert!(!app.diff_wrap);
+        app.dispatch(Action::ToggleDiffWrap);
+        assert!(app.diff_wrap);
+        assert_eq!(app.diff_col_offset, 0);
+        assert_eq!(app.status, "wrap on");
+        app.dispatch(Action::PanDiff(4));
+        assert_eq!(app.diff_col_offset, 0, "pan is a no-op while wrap is on");
+        app.dispatch(Action::ToggleDiffWrap);
+        assert!(!app.diff_wrap);
+        assert_eq!(app.status, "wrap off");
+        app.dispatch(Action::PanDiff(1));
+        assert!(app.diff_col_offset > 0, "clip+pan returns after wrap off");
     }
 
     fn arm_graph_scrollbar(app: &mut AppState, content_len: usize) {

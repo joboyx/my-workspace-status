@@ -214,6 +214,12 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ToggleDiffMode,
     },
     PaletteCommand {
+        title: "Wrap / unwrap",
+        keys: "\\",
+        group: CommandGroup::View,
+        action: Action::ToggleDiffWrap,
+    },
+    PaletteCommand {
         title: "Toggle mouse",
         keys: "m",
         group: CommandGroup::View,
@@ -522,6 +528,12 @@ mod tests {
                 "i",
                 CommandGroup::View,
                 Action::ToggleDiffMode,
+            ),
+            (
+                "Wrap / unwrap",
+                "\\",
+                CommandGroup::View,
+                Action::ToggleDiffWrap,
             ),
             ("Toggle mouse", "m", CommandGroup::View, Action::ToggleMouse),
             (

@@ -41,6 +41,7 @@ mod pty_d_switches_to_default_branch;
 mod pty_demo_head_chip_and_narrow_footer;
 mod pty_depth_2_new_commit_file_resets_diff_viewport;
 mod pty_diff_syntax_highlight_keeps_signs_and_row_bg;
+mod pty_diff_wrap_toggle;
 mod pty_divider_scrollbar_drag;
 mod pty_dot_hides_linked_of_ignored_primary;
 mod pty_dot_toggles_ignored_repos;

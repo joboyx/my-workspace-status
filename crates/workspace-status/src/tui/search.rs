@@ -348,6 +348,44 @@ pub fn slice_cols(text: &str, offset: usize, width: usize) -> String {
     out
 }
 
+/// Display-column starts of soft-wrap rows.
+///
+/// Always at least `[0]`. A glyph wider than `width` is skipped at the
+/// start of a row (same as [`slice_cols`] omitting it).
+pub fn wrap_col_starts(text: &str, width: usize) -> Vec<usize> {
+    let width = width.max(1);
+    let mut starts = vec![0];
+    let mut used = 0usize;
+    let mut col = 0usize;
+    for ch in text.chars() {
+        let mut buf = [0u8; 4];
+        let cw = visible_width(ch.encode_utf8(&mut buf));
+        if used > 0 && used.saturating_add(cw) > width {
+            starts.push(col);
+            used = 0;
+        }
+        if used == 0 && cw > width {
+            col = col.saturating_add(cw);
+            continue;
+        }
+        used = used.saturating_add(cw);
+        col = col.saturating_add(cw);
+    }
+    starts
+}
+
+/// Soft-wrap `text` into display-column chunks of `width`.
+///
+/// Empty input yields one empty chunk. Chunks join back to `text` when
+/// every glyph fits in `width`.
+pub fn wrap_cols(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    wrap_col_starts(text, width)
+        .into_iter()
+        .map(|off| slice_cols(text, off, width))
+        .collect()
+}
+
 /// Cursor bar + indent + chevron+space. Shared with tree / commit-file paint.
 pub fn list_prefix_cols(depth: usize) -> usize {
     1 + depth.saturating_mul(2) + 2
@@ -630,6 +668,12 @@ mod tests {
         assert_eq!(slice_cols("😀😀😀", 2, 2), "😀");
         assert_eq!(slice_cols("ab😀cd", 0, 4), "ab😀");
         assert_eq!(visible_width(&slice_cols("😀x", 0, 2)), 2);
+        assert_eq!(wrap_col_starts("", 4), vec![0]);
+        assert_eq!(wrap_cols("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        assert_eq!(wrap_cols("ab😀cd", 3), vec!["ab", "😀c", "d"]);
+        assert_eq!(wrap_cols("😀😀", 2), vec!["😀", "😀"]);
+        let joined: String = wrap_cols("hello world", 5).concat();
+        assert_eq!(joined, "hello world");
         assert_eq!(slice_visible("😀😀", 0, 1), "😀");
         assert_eq!(list_row_pan_max(20, 0, 0, 10), 13);
         assert_eq!(hunk_anchor(&lines, 1).as_deref(), Some("@@ hunk @@"));

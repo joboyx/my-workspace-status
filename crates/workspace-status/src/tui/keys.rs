@@ -761,6 +761,7 @@ fn normal_key(
         KeyCode::Char('O') => Action::GraphFocusClear,
         KeyCode::Char('w') | KeyCode::Char('W') => Action::RemoveWorktree,
         KeyCode::Char('i') => Action::ToggleDiffMode,
+        KeyCode::Char('\\') => Action::ToggleDiffWrap,
         KeyCode::Char('m') => Action::ToggleMouse,
         KeyCode::Char(';') => Action::CommentStart,
         KeyCode::Char('V') => Action::DiffVisualStart,
@@ -1454,6 +1455,14 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Char('i')), normal(), true, true),
             Action::ToggleDiffMode
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('\\')), normal(), true, true),
+            Action::ToggleDiffWrap
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('\\')), normal(), false, false),
+            Action::ToggleDiffWrap
         );
         assert_eq!(
             event_to_action(

@@ -70,9 +70,17 @@ Split rows (`left + RULE + right`) take column widths from `tui/split.rs`. Defau
 
 A focused file-diff row (section, hunk, or line) paints the same cursor bar as other lists. An unfocused file-diff still marks that row with the thinner inactive marker and `cursorBgInactive`. `j` / `k`, PageUp / PageDown, Ctrl-u / Ctrl-d, click, search, and vertical wheel move that row. The viewport keeps it near the vertical middle (`list_viewport_start`, same helper as the workspace tree). `gg` / `G` and Home / End jump to the first / last row.
 
+## Soft wrap
+
+`\` toggles soft word-wrap on any file-diff body that uses `draw_diff_pane` (workspace dirty files, compare tabs, commit / stash drills). The preference is session-only, like theme (`T`) and mouse (`m`): it lives on `AppState.diff_wrap` and is not written to disk. Status toasts `wrap on` / `wrap off`. The path header adds ` · wrap` while wrap is on.
+
+Wrap uses **display columns** (same Meslo `visible_width` rules as clip), not Unicode scalar count. Long lines wrap inside the code column. Line numbers, the comment mark, the gutter rule, and the `+` / `-` sign paint on the first visual row of a logical line. Continuation rows keep the same add/del background and a blank gutter / sign so the code column stays aligned. `j` / `k` still move by logical row. Side-by-side rows wrap each cell and take the taller side.
+
+While wrap is on, horizontal pan is a no-op: `h` / `l`, Shift+arrows, and mouse/trackpad hscroll do not change `diff_col_offset`, the header does not show `· pan N`, and the 1-row horizontal bar stays hidden. Turning wrap on resets pan to 0. Turning wrap off restores clip + pan.
+
 ## Horizontal pan
 
-Long diff lines are **not** word-wrapped. The cursor bar uses one column. Pan max uses the remaining content width so the last character stays reachable. `h` / `←` and `l` / `→` pan when the right pane shows a file diff (same keys pan a focused graph or commit-file list). Shift+Left / Shift+Right pan the focused pane, including the tree. Mouse horizontal wheel (and Shift+wheel) pans the pane under the pointer without moving the focused row. When a file diff has long lines, trackpad hscroll (SGR `66`/`67`, same `tui/tty.rs` decode as the live loop) over the left pane pans that diff rather than a short tree label. Offset resets to 0 when the painted file-diff identity changes. Header shows `· pan N` when offset > 0. A 1-row horizontal bar paints after the viewport leaves the left edge; a 1-column vertical bar paints after the list leaves the top. Rows stay clipped to the pane width.
+When wrap is off, long diff lines clip to the pane. The cursor bar uses one column. Pan max uses the remaining content width so the last character stays reachable. `h` / `←` and `l` / `→` pan when the right pane shows a file diff (same keys pan a focused graph or commit-file list). Shift+Left / Shift+Right pan the focused pane, including the tree. Mouse horizontal wheel (and Shift+wheel) pans the pane under the pointer without moving the focused row. When a file diff has long lines, trackpad hscroll (SGR `66`/`67`, same `tui/tty.rs` decode as the live loop) over the left pane pans that diff rather than a short tree label. Offset resets to 0 when the painted file-diff identity changes. Header shows `· pan N` when offset > 0. A 1-row horizontal bar paints after the viewport leaves the left edge; a 1-column vertical bar paints after the list leaves the top. Rows stay clipped to the pane width.
 
 ## Full-file view
 

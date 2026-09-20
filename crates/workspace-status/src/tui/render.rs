@@ -27,7 +27,8 @@ use super::comments::{
 };
 use super::diff::{
     cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, diff_row_content_width,
-    gutter_width, section_header, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
+    diff_wrap_row_heights, gutter_width, section_header, wrap_viewport_start, DiffCell,
+    DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
 };
 use super::drill::DrillView;
 use super::help::{
@@ -42,7 +43,7 @@ use super::icons::{
 };
 use super::search::{
     collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids, slice_cols,
-    SearchPane,
+    wrap_col_starts, wrap_cols, SearchPane,
 };
 use super::split::{
     diff_split_rule_x, effective_diff_mode, is_side_by_side_split, pane_widths,
@@ -944,11 +945,25 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if !rows.is_empty() {
         state.diff_cursor = state.diff_cursor.min(rows.len() - 1);
     }
-    let hscroll = graph_hscroll_visible(state.diff_col_offset);
+    let wrap = state.diff_wrap;
+    let hscroll = !wrap && graph_hscroll_visible(state.diff_col_offset);
     let h_rows = u16::from(hscroll);
     let list_h = area.height.saturating_sub(1).max(1);
     let line_h = list_h.saturating_sub(h_rows).max(1) as usize;
-    let (start, _) = visible_window(rows.len(), state.diff_cursor, line_h);
+    let gutter = gutter_width(&rows);
+    let gutter_with_mark = gutter.saturating_add(comment_mark_cols(state.ascii));
+    let start = if wrap {
+        let heights = diff_wrap_row_heights(
+            &rows,
+            diff_row_content_width(area.width as usize) as u16,
+            gutter_with_mark,
+            is_side_by_side_split(state.diff_mode, area.width),
+            state.diff_split_fraction,
+        );
+        wrap_viewport_start(&heights, state.diff_cursor, line_h)
+    } else {
+        visible_window(rows.len(), state.diff_cursor, line_h).0
+    };
     state.diff_scroll = start as u16;
     let skip = start;
     let vscroll = graph_vscroll_visible(state.diff_scroll);
@@ -958,7 +973,8 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         &path,
         mode_label,
         state.full_context_active(),
-        state.diff_col_offset,
+        wrap,
+        if wrap { 0 } else { state.diff_col_offset },
         skip,
         line_h,
         rows.len(),
@@ -1010,12 +1026,32 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         );
         return;
     }
-    let gutter = gutter_width(&rows);
     let split = is_side_by_side_split(state.diff_mode, area.width.saturating_sub(v_cols));
-    let off = state.diff_col_offset as usize;
+    let off = if wrap {
+        0
+    } else {
+        state.diff_col_offset as usize
+    };
     let line_width = area.width.saturating_sub(v_cols).max(1);
     let content_w = diff_row_content_width(line_width as usize) as u16;
     let content_len = rows.len();
+    let paint_heights = if wrap {
+        diff_wrap_row_heights(
+            &rows,
+            content_w,
+            gutter_with_mark,
+            split,
+            state.diff_split_fraction,
+        )
+    } else {
+        vec![1; rows.len()]
+    };
+    let mut logical_end = skip;
+    let mut vis = 0usize;
+    while logical_end < rows.len() && vis < line_h {
+        vis = vis.saturating_add(paint_heights.get(logical_end).copied().unwrap_or(1).max(1));
+        logical_end = logical_end.saturating_add(1);
+    }
     let syntax_path = diff_syntax_path(state);
     let syntax = DIFF_SYNTAX_CACHE.with(|slot| {
         let mut cache = slot.borrow_mut();
@@ -1028,7 +1064,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                 add_bg: palette.diff_add_bg,
                 del_bg: palette.diff_del_bg,
                 visible_start: skip,
-                visible_end: skip.saturating_add(line_h),
+                visible_end: logical_end,
                 cache_id: diff_syntax_cache_id(state, split),
             },
             syntax_path,
@@ -1037,31 +1073,35 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             palette.repo,
             palette.diff_add_bg,
             palette.diff_del_bg,
-            skip..skip.saturating_add(line_h),
+            skip..logical_end,
         )
     });
-    let painted: Vec<Line> = rows
-        .iter()
-        .enumerate()
-        .skip(skip)
-        .take(line_h)
-        .map(|(i, row)| {
-            paint_diff_row(
-                row,
-                content_w,
-                gutter,
-                split,
-                off,
-                state,
-                i == state.diff_cursor,
-                state.focus == FocusPane::Right,
-                state.diff_visual_contains(i),
-                state.search_hit == Some(i),
-                syntax.left(i),
-                syntax.right(i),
-            )
-        })
-        .collect();
+    let mut painted: Vec<Line> = Vec::new();
+    let mut i = skip;
+    while painted.len() < line_h && i < rows.len() {
+        let lines = paint_diff_row(
+            &rows[i],
+            content_w,
+            gutter,
+            split,
+            off,
+            wrap,
+            state,
+            i == state.diff_cursor,
+            state.focus == FocusPane::Right,
+            state.diff_visual_contains(i),
+            state.search_hit == Some(i),
+            syntax.left(i),
+            syntax.right(i),
+        );
+        for line in lines {
+            if painted.len() >= line_h {
+                break;
+            }
+            painted.push(line);
+        }
+        i = i.saturating_add(1);
+    }
     let lines_area = Rect {
         x: body.x,
         y: body.y,
@@ -1121,6 +1161,7 @@ fn paint_diff_row(
     gutter: usize,
     split: bool,
     col_offset: usize,
+    wrap: bool,
     state: &AppState,
     selected: bool,
     focused: bool,
@@ -1128,59 +1169,142 @@ fn paint_diff_row(
     search_hit: bool,
     left_syntax: &[(String, Color)],
     right_syntax: &[(String, Color)],
-) -> Line<'static> {
+) -> Vec<Line<'static>> {
     let palette = state.theme.palette();
-    let mut line = match row {
+    let parts: Vec<Line<'static>> = match row {
         DiffRow::Section(section) => {
             let color = section_style(*section, palette);
-            Line::from(Span::styled(
-                format!(" {} ", section_header(*section)),
-                color.add_modifier(Modifier::BOLD),
-            ))
+            let text = format!(" {} ", section_header(*section));
+            let chunks = if wrap {
+                wrap_cols(&text, width as usize)
+            } else {
+                vec![text]
+            };
+            chunks
+                .into_iter()
+                .map(|chunk| {
+                    Line::from(Span::styled(
+                        chunk,
+                        color.add_modifier(Modifier::BOLD),
+                    ))
+                })
+                .collect()
         }
-        DiffRow::Hunk { text } => Line::from(Span::styled(
-            slice_cols(text, 0, width as usize),
-            Style::default().fg(palette.diff_hunk),
-        )),
+        DiffRow::Hunk { text } => {
+            let chunks = if wrap {
+                wrap_cols(text, width as usize)
+            } else {
+                vec![slice_cols(text, 0, width as usize)]
+            };
+            chunks
+                .into_iter()
+                .map(|chunk| {
+                    Line::from(Span::styled(
+                        chunk,
+                        Style::default().fg(palette.diff_hunk),
+                    ))
+                })
+                .collect()
+        }
         DiffRow::Line { left, right } if split && right.is_some() => {
             let cols = side_by_side_column_widths(width, state.diff_split_fraction);
-            let mut spans = paint_cell_spans(
-                left,
-                cols.left_width,
-                gutter,
-                col_offset,
-                palette,
-                state,
-                state.ascii,
-                left_syntax,
-            );
-            spans.push(Span::styled(
-                DIFF_RULE.to_string(),
-                Style::default().fg(Color::DarkGray),
-            ));
-            spans.extend(paint_cell_spans(
-                right.as_ref().unwrap(),
-                cols.right_width,
-                gutter,
-                col_offset,
-                palette,
-                state,
-                state.ascii,
-                right_syntax,
-            ));
-            Line::from(spans)
+            let n = if wrap {
+                let mark = comment_mark_cols(state.ascii);
+                let gutter_with_mark = gutter.saturating_add(mark);
+                let left_h = wrap_col_starts(
+                    &left.text,
+                    cell_code_width(cols.left_width as usize, gutter_with_mark),
+                )
+                .len()
+                .max(1);
+                let right_h = wrap_col_starts(
+                    &right.as_ref().unwrap().text,
+                    cell_code_width(cols.right_width as usize, gutter_with_mark),
+                )
+                .len()
+                .max(1);
+                left_h.max(right_h)
+            } else {
+                1
+            };
+            (0..n)
+                .map(|part| {
+                    let mut spans = paint_cell_spans(
+                        left,
+                        cols.left_width,
+                        gutter,
+                        col_offset,
+                        wrap,
+                        part,
+                        palette,
+                        state,
+                        state.ascii,
+                        left_syntax,
+                    );
+                    spans.push(Span::styled(
+                        DIFF_RULE.to_string(),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                    spans.extend(paint_cell_spans(
+                        right.as_ref().unwrap(),
+                        cols.right_width,
+                        gutter,
+                        col_offset,
+                        wrap,
+                        part,
+                        palette,
+                        state,
+                        state.ascii,
+                        right_syntax,
+                    ));
+                    Line::from(spans)
+                })
+                .collect()
         }
-        DiffRow::Line { left, .. } => Line::from(paint_cell_spans(
-            left,
-            width,
-            gutter,
-            col_offset,
-            palette,
-            state,
-            state.ascii,
-            left_syntax,
-        )),
+        DiffRow::Line { left, .. } => {
+            let n = if wrap {
+                let mark = comment_mark_cols(state.ascii);
+                wrap_col_starts(
+                    &left.text,
+                    cell_code_width(width as usize, gutter.saturating_add(mark)),
+                )
+                .len()
+                .max(1)
+            } else {
+                1
+            };
+            (0..n)
+                .map(|part| {
+                    Line::from(paint_cell_spans(
+                        left,
+                        width,
+                        gutter,
+                        col_offset,
+                        wrap,
+                        part,
+                        palette,
+                        state,
+                        state.ascii,
+                        left_syntax,
+                    ))
+                })
+                .collect()
+        }
     };
+    parts
+        .into_iter()
+        .map(|line| finish_diff_line(line, selected, focused, visual, search_hit, palette))
+        .collect()
+}
+
+fn finish_diff_line(
+    mut line: Line<'static>,
+    selected: bool,
+    focused: bool,
+    visual: bool,
+    search_hit: bool,
+    palette: Palette,
+) -> Line<'static> {
     let bg = if selected && focused {
         Some(palette.cursor_bg)
     } else if selected {
@@ -1232,6 +1356,8 @@ fn paint_cell_spans(
     width: u16,
     gutter: usize,
     col_offset: usize,
+    wrap: bool,
+    wrap_part: usize,
     palette: Palette,
     state: &AppState,
     ascii: bool,
@@ -1240,9 +1366,23 @@ fn paint_cell_spans(
     let width = width as usize;
     let mark_w = comment_mark_cols(ascii);
     let code_w = cell_code_width(width, gutter.saturating_add(mark_w));
-    let comment = cell.line_no.and_then(|n| diff_cell_comment_state(state, n));
-    let line_no = format_line_gutter(cell.line_no, gutter, comment, ascii);
-    let sign = cell_sign(cell.kind);
+    let first = !wrap || wrap_part == 0;
+    let comment = if first {
+        cell.line_no.and_then(|n| diff_cell_comment_state(state, n))
+    } else {
+        None
+    };
+    let line_no = format_line_gutter(
+        if first { cell.line_no } else { None },
+        gutter,
+        comment,
+        ascii,
+    );
+    let sign = if first {
+        cell_sign(cell.kind)
+    } else {
+        ' '
+    };
     let accent = cell_accent(cell.kind, palette);
     let row_bg = cell_row_bg(cell.kind, palette);
     let gutter_style = with_row_bg(diff_gutter_style(palette), row_bg);
@@ -1252,7 +1392,19 @@ fn paint_cell_spans(
             .add_modifier(Modifier::BOLD),
         row_bg,
     );
-    let code_parts = paint_code_parts(cell, syntax, col_offset, code_w, palette);
+    let code_off = if wrap {
+        wrap_col_starts(&cell.text, code_w)
+            .get(wrap_part)
+            .copied()
+            .unwrap_or(usize::MAX)
+    } else {
+        col_offset
+    };
+    let code_parts = if wrap && code_off == usize::MAX {
+        Vec::new()
+    } else {
+        paint_code_parts(cell, syntax, code_off, code_w, palette)
+    };
     let used = visible_width(&line_no)
         + 4
         + code_parts

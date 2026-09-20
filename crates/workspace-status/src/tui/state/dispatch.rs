@@ -100,6 +100,7 @@ impl AppState {
             | Action::Drag { .. }
             | Action::Release
             | Action::ToggleDiffMode
+            | Action::ToggleDiffWrap
             | Action::ToggleMouse
             | Action::SearchStart
             | Action::SearchChar(_)
