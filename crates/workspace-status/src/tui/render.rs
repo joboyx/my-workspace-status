@@ -3506,6 +3506,51 @@ mod tests {
         state
     }
 
+    #[test]
+    fn commit_file_list_fills_pty_height_and_does_not_paint_hbar() {
+        let mut state = two_pane_graph_state();
+        let files = (0..40)
+            .map(|i| super::super::drill::CommitFile {
+                status: "A".into(),
+                path: format!("keepmid-{i:02}.txt"),
+                old_path: None,
+            })
+            .collect();
+        state.open_commit_files(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            files,
+        );
+        state.focus = FocusPane::Right;
+        let backend = TestBackend::new(140, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        let file_rows = text
+            .lines()
+            .filter(|line| line.contains("keepmid-") && line.contains(".txt"))
+            .count();
+        assert!(
+            file_rows >= 8,
+            "commit-file list should fill the pane, not a short strip ({file_rows}):\n{text}"
+        );
+        assert!(
+            text.contains("keepmid-00.txt") && text.contains("keepmid-07.txt"),
+            "row 0 window must include the first eight files:\n{text}"
+        );
+        assert!(
+            state.layout.diff_hscrollbar_y.is_none(),
+            "commit-file list must not paint a file-diff h-bar: y={:?}",
+            state.layout.diff_hscrollbar_y
+        );
+        assert_eq!(
+            state.layout.diff_col_max, 0,
+            "commit-file list must not arm a file-diff h-bar track"
+        );
+    }
+
     fn two_pane_commit_diff_state() -> AppState {
         let mut state = two_pane_files_state();
         state.open_commit_diff(
