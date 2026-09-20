@@ -2825,8 +2825,10 @@ mod tests {
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
+    use crate::tui::action::{Action, Effect};
     use crate::tui::comments::{put_comment, CommentKey};
     use crate::tui::icons::{icon_linked_worktree, icon_repo};
+    use crate::tui::split::SplitDrag;
     use crate::tui::state::AppState;
     use crate::tui::tree::{build_tree, flatten_with, visible_for_tree};
     use ratatui::backend::TestBackend;
@@ -2962,6 +2964,70 @@ mod tests {
             ]),
         );
         state
+    }
+
+    fn long_panning_diff_state(offset: u16) -> AppState {
+        let mut state = two_pane_diff_state();
+        let mut body = format!("@@ -0,0 +1,41 @@\n+{}UNIQUE_DIFF_TAIL\n", "n".repeat(80));
+        for i in 0..40 {
+            body.push_str(&format!("+line {i}\n"));
+        }
+        state.set_diff(
+            "app".into(),
+            "unique-diffline.rs".into(),
+            super::super::diff::DiffContent::from_unified(body),
+        );
+        state.diff_col_offset = offset;
+        state
+    }
+
+    #[test]
+    fn painted_file_diff_hscrollbar_thumb_cells_are_hit_as_thumb() {
+        let mut state = long_panning_diff_state(1);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let y = state
+            .layout
+            .diff_hscrollbar_y
+            .expect("h-bar row after a non-zero pan");
+        let x0 = state.layout.diff_hscrollbar_x;
+        let width = state.layout.diff_hscrollbar_width;
+        let thumbs: Vec<u16> = {
+            let buf = terminal.backend().buffer();
+            (x0..x0.saturating_add(width))
+                .filter(|&x| buf[(x, y)].symbol() == "█")
+                .collect()
+        };
+        assert!(
+            !thumbs.is_empty(),
+            "expected a painted █ on the h-bar row {y}:\n{}",
+            buffer_text(&terminal)
+        );
+        let start = state.diff_col_offset;
+        for x in thumbs {
+            assert_eq!(
+                state.dispatch(Action::Click { col: x, row: y }),
+                Effect::None
+            );
+            assert_eq!(
+                state.diff_col_offset, start,
+                "painted █ at ({x},{y}) must grab, not jump to origin:\n{}",
+                buffer_text(&terminal)
+            );
+            assert!(
+                matches!(
+                    state.drag,
+                    SplitDrag::DiffHScrollbar {
+                        origin_col,
+                        origin_offset
+                    } if origin_col == x && origin_offset == start
+                ),
+                "drag at ({x},{y}): {:?}",
+                state.drag
+            );
+            assert_eq!(state.dispatch(Action::Release), Effect::None);
+        }
     }
 
     fn json_named_lines(name: &str) -> Vec<String> {

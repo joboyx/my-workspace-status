@@ -8631,6 +8631,87 @@ mod tests {
     }
 
     #[test]
+    fn diff_horizontal_scrollbar_thumb_grab_at_origin_hidden_offset_does_not_jump() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.set_diff("app".into(), "README.md".into(), long_line_diff());
+        arm_diff_hscrollbar(&mut app, 40);
+        app.diff_col_offset = 12;
+        let thumb = workspace_status_graph::graph_scrollbar_thumb(41, 12, 20).expect("thumb");
+        assert!(
+            thumb.0 > 0,
+            "origin-hidden offset must move the thumb off the left edge"
+        );
+        let thumb_col = 50 + thumb.0;
+        let start = app.diff_col_offset;
+        let cursor = app.diff_cursor;
+        assert_eq!(
+            app.dispatch(Action::Click {
+                col: thumb_col,
+                row: 12
+            }),
+            Effect::None
+        );
+        assert_eq!(
+            app.drag,
+            SplitDrag::DiffHScrollbar {
+                origin_col: thumb_col,
+                origin_offset: start
+            }
+        );
+        assert_eq!(
+            app.diff_col_offset, start,
+            "thumb grab must not jump from a non-zero pan"
+        );
+        assert_eq!(app.diff_cursor, cursor);
+        assert_eq!(app.focus, FocusPane::Right);
+        assert_eq!(
+            app.dispatch(Action::Drag {
+                col: thumb_col + 10,
+                row: 12
+            }),
+            Effect::None
+        );
+        assert!(
+            app.diff_col_offset > start,
+            "thumb drag should pan from {start}, got {}",
+            app.diff_col_offset
+        );
+        assert_eq!(app.diff_cursor, cursor);
+        assert_eq!(app.dispatch(Action::Release), Effect::None);
+        assert_eq!(app.drag, SplitDrag::None);
+    }
+
+    #[test]
+    fn diff_horizontal_scrollbar_left_track_click_at_nonzero_offset_jumps_to_origin() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.set_diff("app".into(), "README.md".into(), long_line_diff());
+        arm_diff_hscrollbar(&mut app, 40);
+        app.diff_col_offset = 12;
+        let thumb = workspace_status_graph::graph_scrollbar_thumb(41, 12, 20).expect("thumb");
+        assert!(thumb.0 > 0, "left edge must sit left of the thumb");
+        let cursor = app.diff_cursor;
+        assert_eq!(
+            app.dispatch(Action::Click { col: 50, row: 12 }),
+            Effect::None
+        );
+        assert_eq!(
+            app.diff_col_offset, 0,
+            "left-edge track click must jump to origin (and hide the bar)"
+        );
+        assert_eq!(
+            app.drag,
+            SplitDrag::DiffHScrollbar {
+                origin_col: 50,
+                origin_offset: 0
+            }
+        );
+        assert_eq!(app.diff_cursor, cursor);
+        assert_eq!(app.focus, FocusPane::Right);
+    }
+
+    #[test]
     fn diff_horizontal_scrollbar_track_click_jumps_and_arms_drag() {
         let mut app = state();
         focus_file(&mut app, "README.md");
