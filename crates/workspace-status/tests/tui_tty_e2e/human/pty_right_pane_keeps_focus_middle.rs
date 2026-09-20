@@ -88,6 +88,20 @@ fn is_graph_list_row(line: &str) -> bool {
         || line.contains(" @ ")
 }
 
+/// True when the right pane painted a file-diff / graph style h-bar track.
+///
+/// Commit-file lists pan with keys and wheel only. They must not paint an
+/// h-bar (`docs/tui-rust.md`).
+fn files_pane_painted_hbar(screen: &str) -> bool {
+    right_pane(screen).lines().any(|line| {
+        let t: String = line
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '│')
+            .collect();
+        !t.is_empty() && t.chars().all(|c| matches!(c, '█' | '═' | '─' | '▄' | '▀'))
+    })
+}
+
 fn is_bottom_border(line: &str) -> bool {
     let t = line.trim();
     !t.is_empty()
@@ -136,13 +150,11 @@ fn list_body(screen: &str, kind: RightList) -> Vec<String> {
                 list.to_vec()
             }
         }
-        RightList::Files => {
-            let start = lines
-                .iter()
-                .position(|line| line.contains('\u{258C}') || line.contains(".txt"))
-                .unwrap_or(0);
-            lines[start..].to_vec()
-        }
+        // File rows only. Empty inner padding is not list-body height.
+        RightList::Files => lines
+            .into_iter()
+            .filter(|line| line.contains('\u{258C}') || line.contains(".txt"))
+            .collect(),
     }
 }
 
@@ -538,12 +550,15 @@ fn pty_right_pane_keeps_focus_middle() {
     tui.enter();
     tui.wait_pred(
         |screen| {
+            let right = right_pane(screen);
             panes_files_focused(screen)
                 && title_has_files(screen)
-                && right_pane(screen).contains("keepmid-00.txt")
-                && right_pane(screen).contains('\u{258C}')
+                && right.contains("keepmid-00.txt")
+                && right.contains("keepmid-15.txt")
+                && right.contains('\u{258C}')
+                && !files_pane_painted_hbar(screen)
         },
-        "Enter drills to commit files on row 0",
+        "Enter drills to commit files on row 0 with a filled list (keepmid-00..15, no h-bar)",
         GIT_WAIT,
     );
     assert_top_clamped(
