@@ -326,8 +326,10 @@ fn load_commits_by_ids(
     parse_commit_stream(&raw, refs)
 }
 
-/// `format:` (no extra LF between commits). Trailing `%x00` after `%b`
-/// so a multiline body does not glue onto the next hash.
+/// NUL-separated subject + body. Trailing `%x00` after `%b` keeps a
+/// multiline body from gluing onto the next hash. Real `git log` still
+/// inserts a LF between commits when `%b` is present (`\0\n` before the
+/// next `%H`); [`parse_commit_fields`] trims that off the id.
 const COMMIT_PRETTY: &str = "--pretty=format:%H%x00%P%x00%s%x00%an%x00%at%x00%b%x00";
 const COMMIT_FIELDS: usize = 6;
 
@@ -346,17 +348,20 @@ fn parse_commit_fields(chunk: &[&str], refs: &[(String, GraphRef)]) -> Option<Co
     if chunk.len() < 5 {
         return None;
     }
-    let id = chunk[0];
+    // `git log --pretty=format:…%b…` puts a LF between commits; the next
+    // record's `%H` then arrives as `\n<sha>` after NUL split.
+    let id = chunk[0].trim();
     if id.is_empty() {
         return None;
     }
     let parents = chunk[1]
+        .trim()
         .split_whitespace()
         .map(str::to_string)
         .collect();
     let subject = chunk[2].to_string();
     let author_name = chunk[3].to_string();
-    let author_date_unix = chunk[4].parse::<i64>().unwrap_or(0);
+    let author_date_unix = chunk[4].trim().parse::<i64>().unwrap_or(0);
     let body = cap_commit_body(chunk.get(5).copied().unwrap_or(""));
     let commit_refs = refs
         .iter()
@@ -387,7 +392,7 @@ fn nul_chunks(raw: &str, fields: usize) -> Vec<Vec<&str>> {
     }
     parts
         .chunks(fields)
-        .filter(|chunk| !chunk.first().copied().unwrap_or("").is_empty())
+        .filter(|chunk| !chunk.first().copied().unwrap_or("").trim().is_empty())
         .map(|chunk| chunk.to_vec())
         .collect()
 }
@@ -459,17 +464,19 @@ fn parse_stash_fields(chunk: &[&str]) -> Option<Stash> {
     if chunk.len() < 6 {
         return None;
     }
-    let stash_ref = chunk[0];
-    let id = chunk[1];
+    // Same inter-record LF as commit pretty (`\n` before the next `%gd`).
+    let stash_ref = chunk[0].trim();
+    let id = chunk[1].trim();
     if stash_ref.is_empty() || id.is_empty() {
         return None;
     }
     let parent = chunk[2]
+        .trim()
         .split_whitespace()
         .next()
         .map(str::to_string);
     let subject = chunk[3].to_string();
-    let author_date_unix = chunk[4].parse::<i64>().unwrap_or(0);
+    let author_date_unix = chunk[4].trim().parse::<i64>().unwrap_or(0);
     let author_name = chunk[5].to_string();
     let body = cap_commit_body(chunk.get(6).copied().unwrap_or(""));
     Some(Stash {
@@ -675,6 +682,32 @@ mod tests {
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].subject, "only subject");
         assert_eq!(commits[0].body, "");
+    }
+
+    #[test]
+    fn parse_commit_stream_trims_inter_commit_lf_so_refs_match() {
+        // Real `git log --pretty=format:…%b%x00` emits `\0\n` before the
+        // next hash. Without trim, ids are `\n<sha>` and ref chips miss.
+        let keep = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let main = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let raw = format!(
+            "{keep}\0\0keep-leaf-commit\0Ada\x001\0\0\n{main}\0{keep}\0main-leaf-commit\0Ada\x001\0\0"
+        );
+        let refs = vec![
+            (keep.to_string(), GraphRef::local("feature/keep")),
+            (main.to_string(), GraphRef::local("main")),
+        ];
+        let commits = parse_commit_stream(&raw, &refs);
+        assert_eq!(commits.len(), 2, "{commits:?}");
+        assert_eq!(commits[0].id, keep);
+        assert_eq!(commits[0].refs, vec![GraphRef::local("feature/keep")]);
+        assert_eq!(commits[1].id, main, "leading LF must not stick on id");
+        assert_eq!(
+            commits[1].refs,
+            vec![GraphRef::local("main")],
+            "ref chips must attach after LF trim: {commits:?}"
+        );
+        assert_eq!(commits[1].subject, "main-leaf-commit");
     }
 
     #[test]
@@ -972,6 +1005,26 @@ mod live_git {
             "other-branch tip must appear under --all, got {subjects:?}"
         );
         assert!(subjects.iter().any(|s| *s == "c2-main"), "{subjects:?}");
+        let feature = model
+            .commits
+            .iter()
+            .find(|c| c.subject == "c-feature")
+            .expect("c-feature commit");
+        let main_tip = model
+            .commits
+            .iter()
+            .find(|c| c.subject == "c2-main")
+            .expect("c2-main commit");
+        assert!(
+            feature.refs.iter().any(|r| r.name == "feature"),
+            "feature tip must keep its ref chip after %b load (no leading LF on id): {:?}",
+            feature.refs
+        );
+        assert!(
+            main_tip.refs.iter().any(|r| r.name == "main"),
+            "main tip must keep its ref chip after %b load: {:?}",
+            main_tip.refs
+        );
         assert!(!model.has_more);
         assert_eq!(model.skip, 0);
         assert_eq!(model.limit, 50);
