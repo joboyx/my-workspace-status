@@ -431,6 +431,54 @@ impl PtySession {
         self.parser.lock().unwrap().screen().contents()
     }
 
+    /// Glyph in one vt100 cell, or `None` when the cell is empty.
+    pub fn grid_cell_char(&self, row: u16, col: u16) -> Option<char> {
+        let parser = self.parser.lock().unwrap();
+        parser
+            .screen()
+            .cell(row, col)
+            .and_then(|cell| cell.contents().chars().next())
+    }
+
+    /// First `█` and last `█`/`═`/`─` on an h-bar row, from the vt100 cell grid.
+    ///
+    /// [`Self::screen`] concatenates glyphs and can skip empty/wide cells, so
+    /// `chars().enumerate()` may not match crossterm mouse columns. Thumb
+    /// drag must aim at the cell `hit_split` sees.
+    pub fn grid_hbar_span(&self) -> Option<(u16, u16, u16)> {
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        let end = self.rows.saturating_sub(2);
+        for y in (0..end).rev() {
+            let mut thumbs: Vec<u16> = Vec::new();
+            let mut last = None;
+            let mut has_track = false;
+            for x in 0..self.cols {
+                let ch = screen
+                    .cell(y, x)
+                    .and_then(|cell| cell.contents().chars().next())
+                    .unwrap_or('\0');
+                if ch == '█' {
+                    thumbs.push(x);
+                }
+                if matches!(ch, '█' | '═' | '─') {
+                    last = Some(x);
+                    if matches!(ch, '═' | '─') {
+                        has_track = true;
+                    }
+                }
+            }
+            if thumbs.is_empty() {
+                continue;
+            }
+            if !has_track && thumbs.len() < 2 {
+                continue;
+            }
+            return Some((y, thumbs[0], last?));
+        }
+        None
+    }
+
     /// Decoded OSC 52 clipboard texts from the PTY master, in arrival order.
     ///
     /// `vt100` strips OSC 52 from [`Self::screen`]. Copy claims must read

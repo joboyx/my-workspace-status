@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::common::hscroll::DIFF_HSCROLL_TAIL;
 use crate::harness::{
     left_tree, tree_cursor_bar_on_row, tree_row_containing, PtySession, SGR_WHEEL_RIGHT,
@@ -75,6 +77,21 @@ fn hbar_drag_panned(screen: &str) -> bool {
         && no_mouse_toggle_toast(screen)
 }
 
+/// Painted h-bar with the thumb off the left edge of the track.
+///
+/// A left-edge `█` sits on the same cell as a track jump to origin
+/// (`diff_col_from_col` at the track start). Grab must use a thumb cell
+/// that a 1-cell miss cannot map to offset 0.
+fn hbar_thumb_off_left_edge(screen: &str) -> bool {
+    hbar_painted_tail_clipped(screen)
+        && screen.lines().any(|line| {
+            let chars: Vec<char> = line.chars().collect();
+            chars
+                .windows(2)
+                .any(|w| matches!(w[0], '═' | '─') && w[1] == THUMB)
+        })
+}
+
 /// First thumb cell and last track cell (`█` / `═` / `─`) on the h-bar row.
 fn hbar_span(screen: &str) -> Option<(u16, u16, u16)> {
     let lines: Vec<&str> = screen.lines().collect();
@@ -120,10 +137,11 @@ fn sgr_release(tui: &mut PtySession, col: u16, row: u16) {
 /// `hit_split` / `SplitDrag::DiffHScrollbar` must change `diff_col_offset`.
 ///
 /// Live PTY (80×24 so the NEW line clips): `/unique-diffline` loads the
-/// file. Wheel until `█` paints with the tail still clipped. SGR press on
-/// the thumb must not jump. Motion-bit 32 drag to the track end must put
-/// `UNIQUE_DIFF_TAIL` on the right pane and focus the diff. A no-op,
-/// paint-only flicker, cursor jump, or tree pan cannot pass.
+/// file. Wheel until `█` paints off the left track edge with the tail
+/// still clipped. SGR press on that cell-grid thumb must not jump.
+/// Motion-bit 32 drag to the track end must put `UNIQUE_DIFF_TAIL` on the
+/// right pane and focus the diff. A no-op, paint-only flicker, cursor
+/// jump, or tree pan cannot pass.
 #[test]
 fn pty_diff_hscrollbar_thumb_drag() {
     let (_root, workspace) = daily_workspace();
@@ -144,24 +162,44 @@ fn pty_diff_hscrollbar_thumb_drag() {
     );
 
     tui.wait_pred_while(
-        hbar_painted_tail_clipped,
-        "small SGR 67 pan paints the file-diff h-bar without UNIQUE_DIFF_TAIL",
+        hbar_thumb_off_left_edge,
+        "SGR 67 pan paints the file-diff h-bar with █ right of ═/─ (tail still clipped)",
         WAIT,
         |tui| tui.sgr_mouse(SGR_WHEEL_RIGHT, NARROW_RIGHT_COL, row),
     );
-    let before = tui.screen();
-    let (bar_row, thumb_col, track_end) = hbar_span(&before)
-        .unwrap_or_else(|| panic!("file-diff h-bar █/═ after small pan:\n{before}"));
+    let start = Instant::now();
+    let (bar_row, thumb_col, track_end) = loop {
+        tui.wait_ms(SETTLE_MS);
+        let screen = tui.screen();
+        if let Some((bar_row, thumb_col, track_end)) = tui.grid_hbar_span() {
+            let left = tui.grid_cell_char(bar_row, thumb_col.saturating_sub(1));
+            if tui.grid_cell_char(bar_row, thumb_col) == Some(THUMB)
+                && matches!(left, Some('═' | '─'))
+                && track_end > thumb_col
+                && hbar_painted_tail_clipped(&screen)
+            {
+                break (bar_row, thumb_col, track_end);
+            }
+        }
+        if start.elapsed() >= WAIT {
+            panic!(
+                "file-diff h-bar █ must sit right of ═/─ on the vt100 grid:\n{screen}",
+                screen = tui.screen()
+            );
+        }
+        tui.sgr_mouse(SGR_WHEEL_RIGHT, NARROW_RIGHT_COL, row);
+    };
     assert!(
         track_end > thumb_col,
-        "h-bar track {thumb_col}..{track_end} is too short to drag:\n{before}"
+        "h-bar track {thumb_col}..{track_end} is too short to drag:\n{}",
+        tui.screen()
     );
 
     tui.sgr_mouse(0, thumb_col, bar_row);
     tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
         hbar_painted_tail_clipped,
-        "thumb grab must not jump (a track click would reveal UNIQUE_DIFF_TAIL)",
+        "thumb grab must not jump (a left-edge track click hides the bar at origin)",
         WAIT,
     );
 
