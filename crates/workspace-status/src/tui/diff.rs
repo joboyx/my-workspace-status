@@ -612,9 +612,6 @@ pub fn build_partial_cached_patch(
     {
         return Err("highlight spans staged and unstaged".into());
     }
-    if change_sections.contains(&DiffSection::Committed) {
-        return Err(committed_fail(kind));
-    }
 
     let (want, raw, is_new) = match kind {
         PartialPatchKind::Stage => {
@@ -1463,5 +1460,76 @@ index 1111111..2222222 100644
         )
         .unwrap_err();
         assert!(err.contains("nothing to stage"), "{err}");
+    }
+
+    const BINARY_STUB: &str = "Binary files a/x and b/x differ\n";
+
+    #[test]
+    fn partial_patch_fails_closed_on_binary() {
+        let unstaged = DiffContent::from_unified(BINARY_STUB);
+        let end = build_diff_rows(&unstaged, DiffMode::Inline)
+            .len()
+            .saturating_sub(1);
+        let err = build_partial_cached_patch(
+            &unstaged,
+            DiffMode::Inline,
+            0,
+            end,
+            PartialPatchKind::Stage,
+            "x.bin",
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot stage a binary highlight"), "{err}");
+
+        let staged = DiffContent {
+            staged: BINARY_STUB.into(),
+            unstaged: String::new(),
+            is_new: false,
+            is_committed: false,
+        };
+        let end = build_diff_rows(&staged, DiffMode::Inline)
+            .len()
+            .saturating_sub(1);
+        let err = build_partial_cached_patch(
+            &staged,
+            DiffMode::Inline,
+            0,
+            end,
+            PartialPatchKind::Unstage,
+            "x.bin",
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot unstage a binary highlight"), "{err}");
+    }
+
+    #[test]
+    fn partial_patch_fails_closed_on_mixed_sections() {
+        let content = DiffContent {
+            staged: TWO_HUNKS.into(),
+            unstaged: TWO_HUNKS.into(),
+            is_new: false,
+            is_committed: false,
+        };
+        let end = build_diff_rows(&content, DiffMode::Inline).len() - 1;
+        let err = build_partial_cached_patch(
+            &content,
+            DiffMode::Inline,
+            0,
+            end,
+            PartialPatchKind::Stage,
+            "regions.txt",
+        )
+        .unwrap_err();
+        assert!(err.contains("highlight spans staged and unstaged"), "{err}");
+        let err = build_partial_cached_patch(
+            &content,
+            DiffMode::Inline,
+            0,
+            end,
+            PartialPatchKind::Unstage,
+            "regions.txt",
+        )
+        .unwrap_err();
+        assert!(err.contains("highlight spans staged and unstaged"), "{err}");
     }
 }
