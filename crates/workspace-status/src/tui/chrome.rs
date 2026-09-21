@@ -4,6 +4,19 @@
 
 use std::time::Duration;
 
+/// Status text the comment-export overlay paints inside its own box.
+///
+/// Three call sites branch on this exact wording to decide whether the
+/// chrome reserves an extra status row, so producer and consumer share the
+/// constant rather than repeating the literal.
+pub const STATUS_COPIED: &str = "copied";
+
+/// Status text `p` sets when the focused checkout has nothing to pull.
+///
+/// `effect.rs` reads it back to decide whether a second `p` escalates to a
+/// fetch, so the wording is load-bearing, not cosmetic.
+pub const STATUS_NOTHING_TO_PULL: &str = "nothing behind to pull";
+
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use workspace_status_graph::GraphRow;
@@ -425,7 +438,7 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
         return prompt.overlay_rows();
     }
     if let Some(export) = state.comment_export.as_ref() {
-        let extra = u16::from(!state.status.is_empty() && state.status != "copied");
+        let extra = u16::from(!state.status.is_empty() && state.status != STATUS_COPIED);
         let body = export.markdown.lines().count() as u16;
         return (5u16.saturating_add(body).saturating_add(extra)).min(20);
     }
@@ -1446,7 +1459,7 @@ mod tests {
         app.create_branch = Some(CreateBranchState {
             repo: "app".into(),
             name: String::new(),
-            commit_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            commit_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
         });
         assert_eq!(overlay_status_rows(&app), 5);
         app.status = "create topic".into();
@@ -1481,7 +1494,7 @@ mod tests {
             "a second body line grows the box; status still does not"
         );
         app.comment = None;
-        app.status = "copied".into();
+        app.status = STATUS_COPIED.into();
         app.comment_export = Some(CommentExport {
             markdown: "# Comments\n\nNo comments.\n".into(),
         });

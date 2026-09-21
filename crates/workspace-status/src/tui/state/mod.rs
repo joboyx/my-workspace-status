@@ -7,7 +7,7 @@ mod dispatch_write;
 mod pan;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::style::Color;
@@ -28,8 +28,8 @@ use super::branches::{
     can_open_branch_picker, checkoutable_branch_names, is_valid_branch_name, merge_rev_for_commit,
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
 };
+use super::chrome::{STATUS_COPIED, STATUS_NOTHING_TO_PULL};
 use super::command_palette::CommandPaletteState;
-#[cfg(not(test))]
 #[cfg(not(test))]
 use super::comments::comment_store_path;
 use super::comments::{
@@ -1450,7 +1450,7 @@ impl AppState {
                     })
                     .collect();
                 if behind.is_empty() {
-                    self.status = "nothing behind to pull".into();
+                    self.status = STATUS_NOTHING_TO_PULL.into();
                     Effect::None
                 } else {
                     self.status = format_running_op(RunningOp::Pull, 0, behind.len());
@@ -3252,7 +3252,7 @@ impl AppState {
         self.comment_export = Some(CommentExport {
             markdown: markdown.clone(),
         });
-        self.status = "copied".into();
+        self.status = STATUS_COPIED.into();
         Effect::CopyClipboard {
             text: markdown,
             announce: false,
@@ -4743,8 +4743,8 @@ fn nearest_selectable_painted_index(painted: &[PaintedLine], from: usize) -> usi
     if painted[from].selectable {
         return from;
     }
-    for i in from + 1..painted.len() {
-        if painted[i].selectable {
+    for (i, row) in painted.iter().enumerate().skip(from + 1) {
+        if row.selectable {
             return i;
         }
     }
@@ -4786,11 +4786,11 @@ fn default_viewed_path() -> PathBuf {
     {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
-        return std::env::temp_dir().join(format!(
+        std::env::temp_dir().join(format!(
             "ws-viewed-test-{}-{}.json",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
-        ));
+        ))
     }
     #[cfg(not(test))]
     viewed_store_path()
@@ -4801,7 +4801,7 @@ fn persist_failed_status(kind: &str, err: impl std::fmt::Display) -> String {
     format!("{kind} save failed: {err}")
 }
 
-fn comment_path_for(viewed_path: &PathBuf) -> PathBuf {
+fn comment_path_for(viewed_path: &Path) -> PathBuf {
     if let Ok(override_path) = std::env::var("WS_STATUS_COMMENT_STORE") {
         let trimmed = override_path.trim();
         if !trimmed.is_empty() {
@@ -4810,7 +4810,7 @@ fn comment_path_for(viewed_path: &PathBuf) -> PathBuf {
     }
     #[cfg(test)]
     {
-        return viewed_path.with_file_name("comments.json");
+        viewed_path.with_file_name("comments.json")
     }
     #[cfg(not(test))]
     {
@@ -5080,7 +5080,7 @@ mod tests {
 
     fn sample_commit_source() -> CommitFileSource {
         CommitFileSource::Commit {
-            commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         }
     }
 
@@ -5134,7 +5134,7 @@ mod tests {
         app.open_commit_files(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             sample_commit_files(),
         );
@@ -5210,7 +5210,7 @@ mod tests {
         app.open_commit_files(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             sample_commit_files(),
         );
@@ -5219,7 +5219,7 @@ mod tests {
         app.open_commit_diff(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             sample_commit_files(),
             0,
@@ -5252,7 +5252,7 @@ mod tests {
         commit.open_commit_diff(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             sample_commit_files(),
             0,
@@ -6384,7 +6384,7 @@ mod tests {
         app.open_commit_files(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![
                 CommitFile {
@@ -6538,7 +6538,7 @@ mod tests {
         app.open_commit_files(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![
                 CommitFile {
@@ -6667,7 +6667,7 @@ mod tests {
         let mut app = state();
         focus_repo(&mut app, "app");
         app.focus = FocusPane::Right;
-        let commit_id = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let commit_id = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         app.open_commit_files(
             "app".into(),
             CommitFileSource::Commit {
@@ -6972,7 +6972,7 @@ mod tests {
             vec![Stash {
                 stash_ref: "stash@{0}".into(),
                 subject: "latest".into(),
-                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
                 ..Stash::default()
             }],
         );
@@ -7175,7 +7175,7 @@ mod tests {
     }
 
     fn install_graph_commit_refs(app: &mut AppState, refs: Vec<GraphRef>) {
-        let id = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let id = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let model = GraphModel {
             commits: vec![Commit {
                 id: id.into(),
@@ -7275,7 +7275,7 @@ mod tests {
             } => {
                 assert_eq!(repo, "app");
                 assert_eq!(name, "topic/x");
-                assert_eq!(commit_id, "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+                assert_eq!(commit_id, "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
             }
             other => panic!("{other:?}"),
         }
@@ -7336,7 +7336,7 @@ mod tests {
         assert_eq!(app.dispatch(Action::GraphMerge), Effect::None);
         match &app.confirm {
             Some(PendingConfirm::MergeIntoHead { rev, label, .. }) => {
-                assert_eq!(rev, "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+                assert_eq!(rev, "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
                 assert_eq!(label, "aaa1111");
             }
             other => panic!("{other:?}"),
@@ -7373,7 +7373,7 @@ mod tests {
             vec![Stash {
                 stash_ref: "stash@{0}".into(),
                 subject: "latest".into(),
-                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
                 ..Stash::default()
             }],
         );
@@ -7530,7 +7530,7 @@ mod tests {
             vec![Stash {
                 stash_ref: "stash@{0}".into(),
                 subject: "latest".into(),
-                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
                 ..Stash::default()
             }],
         );
@@ -7593,7 +7593,7 @@ mod tests {
             vec![Stash {
                 stash_ref: latest.clone(),
                 subject: "latest".into(),
-                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
                 ..Stash::default()
             }],
         );
@@ -7635,7 +7635,7 @@ mod tests {
             vec![Stash {
                 stash_ref: latest.clone(),
                 subject: "again".into(),
-                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
                 ..Stash::default()
             }],
         );
@@ -8100,12 +8100,12 @@ mod tests {
     fn install_graph(app: &mut AppState, stashes: Vec<Stash>) {
         let model = GraphModel {
             commits: vec![graph_commit(
-                "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "head",
             )],
             stashes,
             worktrees: Vec::new(),
-            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             sync: None,
             show_ignored: app.show_ignored,
             uncommitted: None,
@@ -8114,7 +8114,7 @@ mod tests {
         app.set_graph(
             model,
             "app".into(),
-            "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         );
         app.focus = FocusPane::Right;
         app.drill = DrillView::Graph;
@@ -8131,7 +8131,7 @@ mod tests {
                 assert_eq!(
                     source,
                     CommitFileSource::Commit {
-                        commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()
+                        commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()
                     }
                 );
             }
@@ -8140,7 +8140,7 @@ mod tests {
         app.open_commit_files(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![
                 CommitFile {
@@ -8173,7 +8173,7 @@ mod tests {
         app.open_commit_diff(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![CommitFile {
                 status: "A".into(),
@@ -8209,7 +8209,7 @@ mod tests {
         app.open_commit_files(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![CommitFile {
                 status: "M".into(),
@@ -8245,14 +8245,14 @@ mod tests {
         app.open_commit_files(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             files.clone(),
         );
         app.open_commit_diff(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             files,
             0,
@@ -8288,14 +8288,14 @@ mod tests {
         install_graph(&mut app, Vec::new());
         if let Some(model) = app.graph.as_mut() {
             model.commits.push(graph_commit(
-                "bbb2222cccccccccccccccccccccccccccccccccc",
+                "bbb2222ccccccccccccccccccccccccccccccccc",
                 "other",
             ));
         }
         app.open_commit_files(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![CommitFile {
                 status: "M".into(),
@@ -8332,7 +8332,7 @@ mod tests {
         app.open_commit_diff(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             files,
             0,
@@ -8405,13 +8405,13 @@ mod tests {
                 Stash {
                     stash_ref: "stash@{0}".into(),
                     subject: "latest".into(),
-                    parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                    parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
                     ..Stash::default()
                 },
                 Stash {
                     stash_ref: "stash@{1}".into(),
                     subject: "older".into(),
-                    parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                    parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
                     ..Stash::default()
                 },
             ],
@@ -8463,7 +8463,7 @@ mod tests {
             vec![Stash {
                 stash_ref: "stash@{1}".into(),
                 subject: "older".into(),
-                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
                 ..Stash::default()
             }],
         );
@@ -8507,7 +8507,7 @@ mod tests {
         Stash {
             stash_ref: stash_ref.into(),
             subject: subject.into(),
-            parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             ..Stash::default()
         }
     }
@@ -8610,16 +8610,17 @@ mod tests {
     }
 
     fn wide_split_layout() -> super::LayoutHit {
-        let mut layout = super::LayoutHit::default();
-        layout.term_cols = 160;
-        layout.pane_height = 22;
-        layout.outer_tree_width = 48;
-        layout.right_x = 48;
-        layout.diff_pane_width = 110;
-        layout.diff_content_x = 50;
         let left = side_by_side_column_widths(110, DIFF_SPLIT_FRACTION).left_width;
-        layout.diff_split_rule_x = Some(50 + left);
-        layout
+        super::LayoutHit {
+            term_cols: 160,
+            pane_height: 22,
+            outer_tree_width: 48,
+            right_x: 48,
+            diff_pane_width: 110,
+            diff_content_x: 50,
+            diff_split_rule_x: Some(50 + left),
+            ..super::LayoutHit::default()
+        }
     }
 
     #[test]
@@ -8805,7 +8806,7 @@ mod tests {
         app.open_commit_files(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![CommitFile {
                 status: "A".into(),
@@ -9220,20 +9221,20 @@ mod tests {
         focus_repo(&mut app, "app");
         let model = GraphModel {
             commits: vec![Commit {
-                id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 subject: format!("subject-{}", "y".repeat(80)),
                 author_name: "Ada".into(),
                 author_date_unix: 1_700_000_000,
                 ..Commit::default()
             }],
-            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             uncommitted: None,
             ..GraphModel::default()
         };
         app.set_graph(
             model,
             "app".into(),
-            "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         );
         app.focus = FocusPane::Left;
         app.drill = DrillView::Graph;
@@ -9415,7 +9416,7 @@ mod tests {
         app.open_commit_files(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![
                 CommitFile {
@@ -9475,12 +9476,12 @@ mod tests {
     fn install_two_graph_commits(app: &mut AppState) {
         let model = GraphModel {
             commits: vec![
-                graph_commit("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "alpha unique"),
-                graph_commit("ccc3333dddddddddddddddddddddddddddddd", "beta unique"),
+                graph_commit("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "alpha unique"),
+                graph_commit("ccc3333ddddddddddddddddddddddddddddddddd", "beta unique"),
             ],
             stashes: Vec::new(),
             worktrees: Vec::new(),
-            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             sync: None,
             show_ignored: app.show_ignored,
             uncommitted: None,
@@ -9489,7 +9490,7 @@ mod tests {
         app.set_graph(
             model,
             "app".into(),
-            "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         );
         app.focus = FocusPane::Right;
         app.drill = DrillView::Graph;
@@ -9522,7 +9523,7 @@ mod tests {
         hit.author_name = "Ada SearchAuthor".into();
         hit.author_date_unix = now - 90;
         hit.refs = vec![GraphRef::tag("v9.9.9"), GraphRef::local("topic-search")];
-        let miss = graph_commit("ccc3333dddddddddddddddddddddddddddddd", "beta unique");
+        let miss = graph_commit("ccc3333ddddddddddddddddddddddddddddddddd", "beta unique");
         let model = GraphModel {
             commits: vec![hit, miss],
             stashes: Vec::new(),
@@ -9559,7 +9560,7 @@ mod tests {
         app.open_commit_files(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![
                 CommitFile {
@@ -9992,20 +9993,20 @@ mod tests {
         focus_repo(&mut graph, "app");
         let model = GraphModel {
             commits: vec![Commit {
-                id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 subject: format!("subject-{}", "y".repeat(80)),
                 author_name: "Ada".into(),
                 author_date_unix: 1_700_000_000,
                 ..Commit::default()
             }],
-            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             uncommitted: None,
             ..GraphModel::default()
         };
         graph.set_graph(
             model,
             "app".into(),
-            "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         );
         graph.focus = FocusPane::Right;
         graph.drill = DrillView::Graph;
@@ -10130,7 +10131,7 @@ mod tests {
         commit.open_commit_diff(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![CommitFile {
                 status: "M".into(),
@@ -10149,7 +10150,7 @@ mod tests {
         commit.open_commit_files(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![CommitFile {
                 status: "M".into(),
@@ -10230,7 +10231,7 @@ mod tests {
         app.open_commit_files(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![CommitFile {
                 status: "A".into(),
@@ -10265,7 +10266,7 @@ mod tests {
         app.open_commit_files(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![CommitFile {
                 status: "A".into(),
@@ -10291,7 +10292,7 @@ mod tests {
         app.open_commit_diff(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![CommitFile {
                 status: "A".into(),
@@ -10847,7 +10848,7 @@ mod tests {
         assert!(prompt.label.contains("1-2"));
         app.comment = Some(CommentPrompt::new(prompt.key, String::new(), prompt.label));
         app.dispatch(Action::CommentSubmit);
-        assert!(app.comment_store.get(&range).is_none());
+        assert!(!app.comment_store.contains_key(&range));
         assert_eq!(app.status, "comment deleted");
     }
 
@@ -10975,7 +10976,7 @@ mod tests {
         app.open_commit_diff(
             "app".into(),
             CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             sample_commit_files(),
             0,
@@ -11275,10 +11276,10 @@ diff --git a/README.md b/README.md
         install_graph(
             &mut app,
             vec![Stash {
-                id: "deadbeef1234567890ab".into(),
+                id: "deadbeef1234567890abdeadbeef1234567890ab".into(),
                 stash_ref: "stash@{0}".into(),
                 subject: "WIP on main: first".into(),
-                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                parent_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
                 ..Stash::default()
             }],
         );
@@ -11288,7 +11289,10 @@ diff --git a/README.md b/README.md
         assert_eq!(app.status, "no comment target");
         let effect = app.dispatch(Action::CopyEntityReference);
         let text = assert_copy_clipboard(effect, "stash", "stash@{0}", true);
-        assert!(text.contains("deadbeef1234567890ab"), "{text}");
+        assert!(
+            text.contains("deadbeef1234567890abdeadbeef1234567890ab"),
+            "{text}"
+        );
         assert_ne!(app.status.as_str(), "copied");
         assert!(app.comment_export.is_none());
     }

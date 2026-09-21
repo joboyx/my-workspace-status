@@ -18,7 +18,7 @@ use std::collections::HashSet;
 
 use super::chrome::{
     breadcrumb_line, breadcrumb_rows, ctrl_c_prompt_line, ctrl_c_prompt_rows,
-    overlay_status_rows_for, status_line,
+    overlay_status_rows_for, status_line, STATUS_COPIED,
 };
 use super::comments::{
     comment_overlay_footer_save, commit_file_row_comments_resolved, commit_file_row_has_comment,
@@ -1169,12 +1169,7 @@ fn paint_diff_row(
             };
             chunks
                 .into_iter()
-                .map(|chunk| {
-                    Line::from(Span::styled(
-                        chunk,
-                        color.add_modifier(Modifier::BOLD),
-                    ))
-                })
+                .map(|chunk| Line::from(Span::styled(chunk, color.add_modifier(Modifier::BOLD))))
                 .collect()
         }
         DiffRow::Hunk { text } => {
@@ -1186,10 +1181,7 @@ fn paint_diff_row(
             chunks
                 .into_iter()
                 .map(|chunk| {
-                    Line::from(Span::styled(
-                        chunk,
-                        Style::default().fg(palette.diff_hunk),
-                    ))
+                    Line::from(Span::styled(chunk, Style::default().fg(palette.diff_hunk)))
                 })
                 .collect()
         }
@@ -1365,18 +1357,12 @@ fn paint_cell_spans(
         comment,
         ascii,
     );
-    let sign = if first {
-        cell_sign(cell.kind)
-    } else {
-        ' '
-    };
+    let sign = if first { cell_sign(cell.kind) } else { ' ' };
     let accent = cell_accent(cell.kind, palette);
     let row_bg = cell_row_bg(cell.kind, palette);
     let gutter_style = with_row_bg(diff_gutter_style(palette), row_bg);
     let sign_style = with_row_bg(
-        accent
-            .unwrap_or(Style::default())
-            .add_modifier(Modifier::BOLD),
+        accent.unwrap_or_default().add_modifier(Modifier::BOLD),
         row_bg,
     );
     let code_off = if wrap {
@@ -2785,7 +2771,7 @@ fn draw_comment_export(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(palette.repo),
         )));
     }
-    if !state.status.is_empty() && state.status != "copied" {
+    if !state.status.is_empty() && state.status != STATUS_COPIED {
         lines.push(Line::from(Span::styled(
             state.status.clone(),
             Style::default().fg(overlay_status_color(&state.status, palette)),
@@ -2996,7 +2982,8 @@ mod tests {
                 Effect::None
             );
             assert_eq!(
-                state.diff_col_offset, start,
+                state.diff_col_offset,
+                start,
                 "painted █ at ({x},{y}) must grab, not jump to origin:\n{}",
                 buffer_text(&terminal)
             );
@@ -3045,12 +3032,7 @@ mod tests {
     }
 
     fn first_row_with(buf: &ratatui::buffer::Buffer, needle: &str) -> Option<u16> {
-        for y in 0..buf.area().height {
-            if buf_line(buf, y).contains(needle) {
-                return Some(y);
-            }
-        }
-        None
+        (0..buf.area().height).find(|&y| buf_line(buf, y).contains(needle))
     }
 
     fn needle_cells<'a>(
@@ -3131,7 +3113,7 @@ mod tests {
         state.open_commit_files(
             "app".into(),
             super::super::drill::CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![super::super::drill::CommitFile {
                 status: "M".into(),
@@ -3461,14 +3443,14 @@ mod tests {
         state.cursor = repo_row;
         state.graph = Some(GraphModel {
             commits: vec![Commit {
-                id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 subject: "seed graph".into(),
                 refs: vec!["main".into()],
                 author_name: "Ada".into(),
                 author_date_unix: 1_700_000_000,
                 ..Commit::default()
             }],
-            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             uncommitted: Some(true),
             ..GraphModel::default()
         });
@@ -3480,7 +3462,7 @@ mod tests {
         state.open_commit_files(
             "app".into(),
             super::super::drill::CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![super::super::drill::CommitFile {
                 status: "M".into(),
@@ -3504,7 +3486,7 @@ mod tests {
         state.open_commit_files(
             "app".into(),
             super::super::drill::CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             files,
         );
@@ -3541,7 +3523,7 @@ mod tests {
         state.open_commit_diff(
             "app".into(),
             super::super::drill::CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![super::super::drill::CommitFile {
                 status: "M".into(),
@@ -3850,14 +3832,14 @@ mod tests {
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         state.graph = Some(GraphModel {
             commits: vec![Commit {
-                id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 subject: "seed".into(),
                 refs: vec!["main".into()],
                 author_name: "Ada".into(),
                 author_date_unix: 1_700_000_000,
                 ..Commit::default()
             }],
-            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             uncommitted: Some(true),
             ..GraphModel::default()
         });
@@ -3897,7 +3879,7 @@ mod tests {
         state.open_commit_files(
             "app".into(),
             super::super::drill::CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![
                 super::super::drill::CommitFile {
@@ -3949,7 +3931,7 @@ mod tests {
             &state.comment_store,
             CommentKey::CommitLine {
                 repo: "app".into(),
-                sha: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                sha: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 path: "README.md".into(),
                 line: 1,
                 end_line: 1,
@@ -3959,7 +3941,7 @@ mod tests {
         state.open_commit_files(
             "app".into(),
             super::super::drill::CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![
                 super::super::drill::CommitFile {
@@ -4631,7 +4613,7 @@ mod tests {
         state.open_commit_files(
             "app".into(),
             super::super::drill::CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![
                 super::super::drill::CommitFile {
@@ -4693,7 +4675,7 @@ mod tests {
         state.open_commit_files(
             "app".into(),
             super::super::drill::CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             },
             vec![super::super::drill::CommitFile {
                 status: "M".into(),
@@ -4902,7 +4884,7 @@ mod tests {
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         let source = super::super::drill::CommitFileSource::Commit {
-            commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         };
         state.begin_commit_files("app".into(), source.clone());
         let backend = TestBackend::new(100, 16);

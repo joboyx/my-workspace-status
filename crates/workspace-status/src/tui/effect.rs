@@ -36,6 +36,7 @@ use super::app::{
     probe_compare_range, RightPaneLoad, RightPaneRequest, RightPaneTarget, TuiOpts,
 };
 use super::branches::is_valid_branch_name;
+use super::chrome::{STATUS_COPIED, STATUS_NOTHING_TO_PULL};
 use super::comments;
 use super::diff_tool::{
     prepare_rev_diff_paths, prepare_worktree_diff, resolve_diff_tool, PreparedDiff,
@@ -549,7 +550,7 @@ impl Interpreter {
         match effect {
             Effect::Quit => {}
             Effect::None => {
-                if matches!(action, Action::Pull) && state.status == "nothing behind to pull" {
+                if matches!(action, Action::Pull) && state.status == STATUS_NOTHING_TO_PULL {
                     self.enqueue_pull_after_inflight_fetch(state);
                 }
             }
@@ -882,7 +883,7 @@ impl Interpreter {
                 let ok = comments::copy_to_clipboard(&text);
                 if announce {
                     state.status = if ok {
-                        "copied".into()
+                        STATUS_COPIED.into()
                     } else {
                         "copy failed".into()
                     };
@@ -2231,7 +2232,7 @@ mod tests {
 
     fn commit_source() -> CommitFileSource {
         CommitFileSource::Commit {
-            commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         }
     }
 
@@ -3918,7 +3919,7 @@ mod tests {
             &Action::Fetch,
         );
         assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
-        state.status = "nothing behind to pull".into();
+        state.status = STATUS_NOTHING_TO_PULL.into();
         schedule_effect(&mut interp, &mut state, Effect::None, &Action::Pull);
         assert_eq!(
             interp.pending_remotes(),
@@ -3962,7 +3963,7 @@ mod tests {
             &Action::Fetch,
         );
         assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
-        state.status = "nothing behind to pull".into();
+        state.status = STATUS_NOTHING_TO_PULL.into();
         schedule_effect(&mut interp, &mut state, Effect::None, &Action::Pull);
         assert_eq!(
             interp.pending_remotes(),
