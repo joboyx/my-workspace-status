@@ -20,8 +20,7 @@ fn syncbox_row_ahead_n(screen: &str, n: &str) -> bool {
 
 /// HEAD is the local ahead tip. Origin still sits on the seed.
 fn ahead_tip_is_head_not_origin(screen: &str, subject: &str) -> bool {
-    graph_subject_line(screen, subject)
-        .is_some_and(|line| line.contains(&format!("@  {subject}")))
+    graph_subject_line(screen, subject).is_some_and(|line| line.contains(&format!("@  {subject}")))
         && graph_subject_meta_line(screen, subject).is_some_and(|line| {
             line.contains("[+main]")
                 && !line.contains("[+=main]")

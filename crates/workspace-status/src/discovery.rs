@@ -58,15 +58,13 @@ fn find_main_checkout_rel(cwd: &Path, rel_path: &str) -> Option<String> {
     let cwd_abs = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     let mut abs = cwd.join(rel_path);
     loop {
-        if abs == cwd_abs || abs.starts_with(&cwd_abs) {
-            if is_main_worktree_checkout(&abs) {
-                let rel = abs
-                    .strip_prefix(&cwd_abs)
-                    .ok()?
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                return Some(rel);
-            }
+        if (abs == cwd_abs || abs.starts_with(&cwd_abs)) && is_main_worktree_checkout(&abs) {
+            let rel = abs
+                .strip_prefix(&cwd_abs)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
+            return Some(rel);
         }
         match abs.parent() {
             Some(parent) if parent != abs => abs = parent.to_path_buf(),

@@ -84,8 +84,8 @@ fn plan_parents(active: &[Option<String>], commit_lane: usize, parents: &[String
             continue;
         }
         let mut pl = None;
-        for i in (commit_lane + 1)..next.len() {
-            if next[i].is_none() {
+        for (i, lane) in next.iter().enumerate().skip(commit_lane + 1) {
+            if lane.is_none() {
                 pl = Some(i);
                 break;
             }

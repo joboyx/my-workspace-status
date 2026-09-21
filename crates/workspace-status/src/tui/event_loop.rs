@@ -261,17 +261,14 @@ pub async fn run(
                 }
             }
             Some(joined) = ctx.join.join_next(), if !join_empty => {
-                match joined {
-                    Ok((id, outcome)) => {
-                        ctx.interp.apply(ctx.state, ctx.opts, id, outcome);
-                        if let Some(launch) = ctx.interp.take_pending_diff_launch() {
-                            launch_diff(&mut ctx, launch);
-                        }
-                        if ctx.interp.take_dirty() {
-                            ctx.presenter.mark();
-                        }
+                if let Ok((id, outcome)) = joined {
+                    ctx.interp.apply(ctx.state, ctx.opts, id, outcome);
+                    if let Some(launch) = ctx.interp.take_pending_diff_launch() {
+                        launch_diff(&mut ctx, launch);
                     }
-                    Err(_) => {}
+                    if ctx.interp.take_dirty() {
+                        ctx.presenter.mark();
+                    }
                 }
             }
             _ = sleep_ms(watch_remain) => {

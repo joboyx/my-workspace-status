@@ -1044,8 +1044,8 @@ pub fn anchor_row_index(rows: &[DiffRow], scroll: usize, view_h: usize) -> usize
     }
     let start = scroll.min(rows.len() - 1);
     let end = (start + view_h.max(1)).min(rows.len());
-    for i in start..end {
-        if is_change_row(&rows[i]) {
+    for (i, row) in rows.iter().enumerate().take(end).skip(start) {
+        if is_change_row(row) {
             return i;
         }
     }

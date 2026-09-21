@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn merge_rev_prefers_local_then_origin_else_commit() {
         use workspace_status_graph::GraphRef;
-        let id = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let id = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         assert_eq!(
             merge_rev_for_commit(
                 id,

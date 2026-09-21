@@ -376,10 +376,11 @@ mod tests {
 
     #[test]
     fn format_commit_full_sha_and_short_12() {
-        let entity = EntityRef::commit("/tmp/app", None, "abcdef1234567890abcd");
+        let entity =
+            EntityRef::commit("/tmp/app", None, "abcdef1234567890abcdef1234567890abcdef12");
         assert_eq!(
             format_entity_reference(&entity),
-            "kind: commit\nrepo: /tmp/app\nsha: abcdef1234567890abcd\nshort: abcdef123456\n"
+            "kind: commit\nrepo: /tmp/app\nsha: abcdef1234567890abcdef1234567890abcdef12\nshort: abcdef123456\n"
         );
     }
 
@@ -398,12 +399,12 @@ mod tests {
             "/tmp/app",
             None,
             "stash@{0}",
-            "deadbeef1234567890ab",
+            "deadbeef1234567890abdeadbeef1234567890ab",
             "WIP on main: first",
         );
         assert_eq!(
             format_entity_reference(&entity),
-            "kind: stash\nrepo: /tmp/app\nref: stash@{0}\nsha: deadbeef1234567890ab\nshort: deadbeef1234\nsubject: WIP on main: first\n"
+            "kind: stash\nrepo: /tmp/app\nref: stash@{0}\nsha: deadbeef1234567890abdeadbeef1234567890ab\nshort: deadbeef1234\nsubject: WIP on main: first\n"
         );
     }
 
@@ -442,13 +443,13 @@ mod tests {
             10,
             20,
             DiffSource::Commit {
-                sha: "abcdef1234567890abcd".into(),
+                sha: "abcdef1234567890abcdef1234567890abcdef12".into(),
             },
             DiffSide::Old,
         );
         assert_eq!(
             format_entity_reference(&entity),
-            "kind: diff\nrepo: /tmp/app\npath: src/lib.rs\nlines: 10-20\nsource: commit abcdef1234567890abcd\nside: old\n"
+            "kind: diff\nrepo: /tmp/app\npath: src/lib.rs\nlines: 10-20\nsource: commit abcdef1234567890abcdef1234567890abcdef12\nside: old\n"
         );
     }
 

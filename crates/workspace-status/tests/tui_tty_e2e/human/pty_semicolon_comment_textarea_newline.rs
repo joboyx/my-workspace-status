@@ -130,7 +130,7 @@ fn pty_semicolon_comment_textarea_newline() {
     tui.wait_pred(
         |screen| {
             idle_status_occluded(screen)
-                && overlay_region(screen).contains(&format!("{LINE1}"))
+                && overlay_region(screen).contains(&LINE1.to_string())
                 && overlay_region(screen).contains("▏")
                 && !overlay_region(screen).contains(&format!("{LINE1}▏"))
                 && !overlay_region(screen).contains(&format!("{LINE1}{LINE2}"))

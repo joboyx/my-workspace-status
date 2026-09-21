@@ -34,8 +34,10 @@ pub(crate) fn persist_with_lock(
         }
     }
     let lock_path = sibling_suffix(file_path, ".lock");
+    // The lock file carries no bytes; keep whatever is there.
     let lock_file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)?;

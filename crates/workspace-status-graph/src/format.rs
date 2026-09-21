@@ -350,17 +350,12 @@ pub fn meta_column_widths_with_stashes<'a>(
     let mut author_width = 1usize;
     for commit in commits {
         date_width = date_width.max(format_relative_date(commit.author_date_unix, now_unix).len());
-        let name_len = commit
-            .author_name
-            .chars()
-            .count()
-            .max(1)
-            .min(AUTHOR_COL_MAX);
+        let name_len = commit.author_name.chars().count().clamp(1, AUTHOR_COL_MAX);
         author_width = author_width.max(name_len);
     }
     for stash in stashes {
         date_width = date_width.max(format_relative_date(stash.author_date_unix, now_unix).len());
-        let name_len = stash.author_name.chars().count().max(1).min(AUTHOR_COL_MAX);
+        let name_len = stash.author_name.chars().count().clamp(1, AUTHOR_COL_MAX);
         author_width = author_width.max(name_len);
     }
     (date_width, author_width.min(AUTHOR_COL_MAX))

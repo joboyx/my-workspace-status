@@ -239,10 +239,10 @@ impl TabStrip {
             return false;
         }
         self.compare.remove(cmp_i);
-        if self.active == index {
-            self.active = cmp_i;
-        } else if self.active > index {
-            self.active -= 1;
+        match self.active.cmp(&index) {
+            std::cmp::Ordering::Equal => self.active = cmp_i,
+            std::cmp::Ordering::Greater => self.active -= 1,
+            std::cmp::Ordering::Less => {}
         }
         true
     }

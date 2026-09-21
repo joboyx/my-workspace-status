@@ -505,7 +505,7 @@ fn largest_terminal_window(min_area: u64) -> Option<String> {
             }
         }
         let area = width.saturating_mul(height);
-        if area >= min_area && best.as_ref().map_or(true, |(_, a)| area > *a) {
+        if area >= min_area && best.as_ref().is_none_or(|(_, a)| area > *a) {
             best = Some((wid, area));
         }
     }

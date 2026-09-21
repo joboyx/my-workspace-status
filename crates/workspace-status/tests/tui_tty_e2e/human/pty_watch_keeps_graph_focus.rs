@@ -82,11 +82,7 @@ fn pty_watch_keeps_graph_focus() {
     );
 
     tui.tab();
-    tui.wait_pred(
-        graph_pane_focused,
-        "Tab focuses the graph pane",
-        WAIT,
-    );
+    tui.wait_pred(graph_pane_focused, "Tab focuses the graph pane", WAIT);
     tui.search(KEEP);
     tui.wait_pred(
         graph_focused_on_keep_commit,

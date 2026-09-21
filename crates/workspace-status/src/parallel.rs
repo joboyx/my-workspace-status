@@ -481,8 +481,7 @@ mod tests {
         assert!(results.iter().all(Result::is_ok), "fetch: {results:?}");
         assert_overlap(elapsed, max, "fetch");
 
-        let (elapsed, max, results) =
-            with_inflight(dirs.clone(), 4, |dir| pull_quiet_detailed(dir));
+        let (elapsed, max, results) = with_inflight(dirs.clone(), 4, pull_quiet_detailed);
         assert!(results.iter().all(|r| r.ok), "pull: {results:?}");
         assert_overlap(elapsed, max, "pull");
 
@@ -491,7 +490,7 @@ mod tests {
             git(dir, &["add", "README.md"]);
             git(dir, &["commit", "-q", "-m", "ahead"]);
         }
-        let (elapsed, max, results) = with_inflight(dirs, 4, |dir| push_quiet(dir));
+        let (elapsed, max, results) = with_inflight(dirs, 4, push_quiet);
         assert!(results.iter().all(Result::is_ok), "push: {results:?}");
         assert_overlap(elapsed, max, "push");
     }

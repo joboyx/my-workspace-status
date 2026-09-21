@@ -16,9 +16,9 @@ fn tab_close_hit(screen: &str) -> Option<(u16, u16)> {
 }
 
 fn workspace_tab_has_close(screen: &str) -> bool {
-    screen.lines().any(|line| {
-        line.contains("Workspace") && line.contains("[x]") && !line.contains("app ↔")
-    })
+    screen
+        .lines()
+        .any(|line| line.contains("Workspace") && line.contains("[x]") && !line.contains("app ↔"))
 }
 
 /// SGR click on compare `[x]` closes that tab. Workspace has no close hit.

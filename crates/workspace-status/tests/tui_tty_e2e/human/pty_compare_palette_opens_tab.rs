@@ -7,7 +7,10 @@ fn head_sha(workspace: &std::path::Path) -> String {
 }
 
 fn head_branch(workspace: &std::path::Path) -> String {
-    git_stdout(&workspace.join("app"), &["rev-parse", "--abbrev-ref", "HEAD"])
+    git_stdout(
+        &workspace.join("app"),
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+    )
 }
 
 /// Palette Diff vs branch opens a compare tab and leaves HEAD on feature.

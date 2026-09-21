@@ -37,9 +37,9 @@ fn pty_compare_apostrophe_copies_diff() {
     );
     tui.wait_clipboard_pred(
         |payloads| {
-            payloads.iter().any(|text| {
-                text.contains("kind: diff") && text.contains("path: alpha.txt")
-            })
+            payloads
+                .iter()
+                .any(|text| text.contains("kind: diff") && text.contains("path: alpha.txt"))
         },
         "OSC 52 payload is kind: diff plus path alpha.txt",
         WAIT,

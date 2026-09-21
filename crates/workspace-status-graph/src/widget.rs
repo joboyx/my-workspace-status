@@ -424,19 +424,23 @@ impl Widget for GraphWidget<'_> {
                 y,
                 area.width.saturating_sub(v_cols),
                 line,
-                selected,
-                self.cursor_bar,
-                search_match,
-                commented,
-                self.search_bg,
-                flash_bg,
-                self.cursor_fg,
-                self.cursor_bg,
-                self.cursor_inactive_fg,
-                self.cursor_inactive_bg,
-                lane_colors,
-                fallback,
-                self.label_palette,
+                RowFlags {
+                    selected,
+                    cursor_bar: self.cursor_bar,
+                    search_match,
+                    commented,
+                },
+                RowColors {
+                    search_bg: self.search_bg,
+                    flash_bg,
+                    cursor_fg: self.cursor_fg,
+                    cursor_bg: self.cursor_bg,
+                    cursor_inactive_fg: self.cursor_inactive_fg,
+                    cursor_inactive_bg: self.cursor_inactive_bg,
+                    lane_colors,
+                    fallback,
+                    palette: self.label_palette,
+                },
                 self.col_offset,
                 if resolved_comment {
                     self.resolved_comment_glyph
@@ -531,28 +535,58 @@ fn now_unix_secs() -> i64 {
         .unwrap_or(0)
 }
 
-fn put_painted_line(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    width: u16,
-    line: &PaintedLine,
+/// Per-row state for [`put_painted_line`].
+///
+/// These four were positional `bool`s in a row, so a transposed pair at the
+/// call site compiled and painted the wrong chrome.
+struct RowFlags {
     selected: bool,
     cursor_bar: bool,
     search_match: bool,
     commented: bool,
+}
+
+/// Colours [`put_painted_line`] paints a row with. All come from the widget.
+struct RowColors<'a> {
     search_bg: Option<Color>,
     flash_bg: Option<Color>,
     cursor_fg: Color,
     cursor_bg: Option<Color>,
     cursor_inactive_fg: Color,
     cursor_inactive_bg: Option<Color>,
-    lane_colors: &[Color],
+    lane_colors: &'a [Color],
     fallback: Color,
     palette: Option<GraphLabelPalette>,
+}
+
+fn put_painted_line(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    line: &PaintedLine,
+    flags: RowFlags,
+    colors: RowColors<'_>,
     col_offset: u16,
     comment_glyph: &str,
 ) {
+    let RowFlags {
+        selected,
+        cursor_bar,
+        search_match,
+        commented,
+    } = flags;
+    let RowColors {
+        search_bg,
+        flash_bg,
+        cursor_fg,
+        cursor_bg,
+        cursor_inactive_fg,
+        cursor_inactive_bg,
+        lane_colors,
+        fallback,
+        palette,
+    } = colors;
     if width == 0 {
         return;
     }
@@ -778,8 +812,8 @@ mod tests {
     }
 
     fn sample_model() -> GraphModel {
-        let head = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let parent = "bbb2222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let head = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let parent = "bbb2222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         GraphModel {
             commits: vec![
                 Commit {
@@ -794,7 +828,7 @@ mod tests {
                 commit(parent, "prior commit", &[]),
             ],
             stashes: vec![Stash {
-                id: "ccc3333ccccccccccccccccccccccccccccccc".into(),
+                id: "ccc3333ccccccccccccccccccccccccccccccccc".into(),
                 stash_ref: "stash@{0}".into(),
                 subject: "WIP on main".into(),
                 body: String::new(),
@@ -890,7 +924,7 @@ mod tests {
         let body = "UNIQUE_GRAPH_BODY";
         let tail = "TAILTOKEN";
         let commit = Commit {
-            id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             subject: format!("{}{tail}", "n".repeat(40)),
             body: body.into(),
             author_name: "Ada".into(),
@@ -1735,11 +1769,11 @@ mod tests {
         let subject = format!("{}{marker}", "n".repeat(60));
         let model = GraphModel {
             commits: vec![commit(
-                "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 &subject,
                 &[],
             )],
-            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             uncommitted: Some(false),
             window: 1,
             ..GraphModel::default()
@@ -2180,7 +2214,7 @@ mod tests {
             refs.push(GraphRef::tag(format!("v1.{i}.0")));
         }
         Commit {
-            id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             subject: "tag soup".into(),
             refs,
             author_name: "Ada Lovelace".into(),
@@ -2281,7 +2315,7 @@ mod tests {
     #[test]
     fn narrow_row_truncates_last_visible_chip_without_overflow_count() {
         let commit = Commit {
-            id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             subject: "topic".into(),
             refs: vec![
                 GraphRef::local("main"),
@@ -2425,7 +2459,7 @@ mod tests {
     #[test]
     fn footer_ref_chips_reuse_row_chip_palette() {
         let commit = Commit {
-            id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             subject: "palette footer".into(),
             refs: vec![
                 GraphRef::local("main"),
@@ -2439,7 +2473,7 @@ mod tests {
         };
         let model = GraphModel {
             commits: vec![commit],
-            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             sync: Some(SyncState {
                 branch: "main".into(),
                 status: SyncStatus::UpToDate,
@@ -2552,7 +2586,7 @@ mod tests {
     }
 
     fn merged_head_model() -> GraphModel {
-        let id = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let id = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         GraphModel {
             commits: vec![Commit {
                 id: id.into(),
@@ -2693,11 +2727,11 @@ mod tests {
         let subject = format!("{}{marker}", "n".repeat(60));
         let model = GraphModel {
             commits: vec![commit(
-                "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 &subject,
                 &[],
             )],
-            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            head_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
             uncommitted: Some(false),
             window: 1,
             ..GraphModel::default()

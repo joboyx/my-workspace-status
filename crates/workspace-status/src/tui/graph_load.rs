@@ -355,11 +355,7 @@ fn parse_commit_fields(chunk: &[&str], refs: &[(String, GraphRef)]) -> Option<Co
     if id.is_empty() {
         return None;
     }
-    let parents = chunk[1]
-        .trim()
-        .split_whitespace()
-        .map(str::to_string)
-        .collect();
+    let parents = chunk[1].split_whitespace().map(str::to_string).collect();
     let subject = chunk[2].to_string();
     let author_name = chunk[3].to_string();
     let author_date_unix = chunk[4].trim().parse::<i64>().unwrap_or(0);
@@ -472,11 +468,7 @@ fn parse_stash_fields(chunk: &[&str]) -> Option<Stash> {
     if stash_ref.is_empty() || id.is_empty() {
         return None;
     }
-    let parent = chunk[2]
-        .trim()
-        .split_whitespace()
-        .next()
-        .map(str::to_string);
+    let parent = chunk[2].split_whitespace().next().map(str::to_string);
     let subject = chunk[3].to_string();
     let author_date_unix = chunk[4].trim().parse::<i64>().unwrap_or(0);
     let author_name = chunk[5].to_string();
