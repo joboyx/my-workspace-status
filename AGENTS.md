@@ -70,6 +70,7 @@ Do **not** invent spur heuristics (`parent.lane + 1`, spine `◇─╯`, mid-rai
 | Diff parsing, layout, or syntax highlighting | `docs/diff-rendering.md` |
 | Any git command or operation semantics | `docs/git-operations.md` |
 | Environment variables, workspace config, keybindings, themes | `docs/configuration.md` |
+| Lint gate, allowed lints, or `src/testutil.rs` fixtures | this file (**Lint gate**) and root `Cargo.toml` |
 | TUI test layers (PTY / desktop `#[ignore]`) or `WS_STATUS_UPDATE_CHECK_STORE` | this file, `docs/tui-tty-e2e.md` (harness / run / encoding / desktop-session only — a new `pty_*` or desktop test does not edit that file), `docs/configuration.md` |
 | cargo-dist `dist generate` / Release git-cliff host steps | `docs/architecture.md` (**Distribution**) and `crates/workspace-status/tests/release_watch.rs` |
 | Output format of the plain report | `SAMPLE_OUTPUT.md` and `crates/workspace-status/tests/snapshot_contract.rs` |
@@ -77,6 +78,22 @@ Do **not** invent spur heuristics (`parent.lane + 1`, spine `◇─╯`, mid-rai
 | Desktop Xvfb / Openbox session | `scripts/with-desktop-session.sh` + `scripts/openbox.xml` + `docs/tui-tty-e2e.md` |
 
 A change is not complete while its documentation is stale.
+
+## Lint gate
+
+CI job `lint` runs `cargo fmt --all --check` and
+`cargo clippy --workspace --all-targets --locked -- -D warnings`. Run both
+before pushing; `cargo clippy --fix` handles most of what it reports.
+
+Two lints are allowed workspace-wide in the root `Cargo.toml`, each with the
+remaining sites named in a comment: `too_many_arguments` and
+`large_enum_variant`. They are tracked debt, not a standing exemption —
+delete the entry once its sites are done, and do not add new ones.
+
+Dead code is a build error under `-D warnings`. Test-only helpers belong
+behind `#[cfg(test)]` so they leave the shipped binary but keep their
+coverage; in-crate git fixtures live in `src/testutil.rs`, not in a
+per-module copy.
 
 ## Conventions
 
