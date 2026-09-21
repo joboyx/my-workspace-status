@@ -42,7 +42,7 @@ fn seed_repo(workspace: &Path, name: &str, branch: &str, dirty: bool) {
         .args(["init", "-q", "-b", branch])
         .current_dir(&repo)
         .status();
-    if init.map(|s| s.success()).unwrap_or(false) == false {
+    if !init.map(|s| s.success()).unwrap_or(false) {
         git(&repo, &["init", "-q"]);
         git(&repo, &["checkout", "-q", "-b", branch]);
     }

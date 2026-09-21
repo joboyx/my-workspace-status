@@ -819,6 +819,7 @@ mod tests {
 #[cfg(test)]
 mod live_git {
     use super::*;
+    use crate::testutil::{git, init_repo_empty};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
@@ -827,38 +828,6 @@ mod live_git {
     use workspace_status_graph::GraphRow;
 
     use crate::snapshot::{build_workspace_snapshot, CheckoutKind, RepoSnapshot, SyncStatus};
-
-    fn git_env() -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("GIT_AUTHOR_NAME", "workspace-status graph-load"),
-            (
-                "GIT_AUTHOR_EMAIL",
-                "workspace-status-graph-load@example.invalid",
-            ),
-            ("GIT_COMMITTER_NAME", "workspace-status graph-load"),
-            (
-                "GIT_COMMITTER_EMAIL",
-                "workspace-status-graph-load@example.invalid",
-            ),
-            ("GIT_CONFIG_GLOBAL", "/dev/null"),
-            ("GIT_CONFIG_NOSYSTEM", "1"),
-        ]
-    }
-
-    fn git(cwd: &Path, args: &[&str]) {
-        let mut cmd = Command::new("git");
-        cmd.args(args).current_dir(cwd);
-        for (k, v) in git_env() {
-            cmd.env(k, v);
-        }
-        cmd.stdout(Stdio::null()).stderr(Stdio::piped());
-        let out = cmd.output().expect("git runs");
-        assert!(
-            out.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
 
     fn temp_workspace() -> (PathBuf, PathBuf) {
         let root = std::env::temp_dir().join(format!(
@@ -872,26 +841,6 @@ mod live_git {
         let repo = workspace.join("app");
         fs::create_dir_all(&repo).unwrap();
         (root, repo)
-    }
-
-    fn init_repo(dir: &Path) {
-        let init = Command::new("git")
-            .args(["init", "-q", "-b", "main"])
-            .current_dir(dir)
-            .status();
-        if init.map(|s| s.success()).unwrap_or(false) == false {
-            git(dir, &["init", "-q"]);
-            git(dir, &["checkout", "-q", "-b", "main"]);
-        }
-        git(dir, &["config", "user.name", "workspace-status graph-load"]);
-        git(
-            dir,
-            &[
-                "config",
-                "user.email",
-                "workspace-status-graph-load@example.invalid",
-            ],
-        );
     }
 
     fn commit_file(dir: &Path, name: &str, contents: &str, message: &str) {
@@ -928,7 +877,7 @@ mod live_git {
     #[test]
     fn load_parses_multiline_commit_body() {
         let (root, repo) = temp_workspace();
-        init_repo(&repo);
+        init_repo_empty(&repo);
         fs::write(repo.join("a.txt"), "1\n").unwrap();
         git(&repo, &["add", "a.txt"]);
         git(
@@ -983,7 +932,7 @@ mod live_git {
     #[test]
     fn log_all_includes_other_branch_tips() {
         let (root, repo) = temp_workspace();
-        init_repo(&repo);
+        init_repo_empty(&repo);
         commit_file(&repo, "a.txt", "1\n", "c1");
         git(&repo, &["checkout", "-q", "-b", "feature"]);
         commit_file(&repo, "a.txt", "feat\n", "c-feature");
@@ -1044,7 +993,7 @@ mod live_git {
     #[test]
     fn focused_log_drops_unrelated_branch_tips() {
         let (root, repo) = temp_workspace();
-        init_repo(&repo);
+        init_repo_empty(&repo);
         commit_file(&repo, "a.txt", "1\n", "c1");
         git(&repo, &["checkout", "-q", "-b", "feature"]);
         commit_file(&repo, "a.txt", "feat\n", "c-feature");
@@ -1080,7 +1029,7 @@ mod live_git {
     #[test]
     fn clean_loaded_graph_starts_with_working_tree_row() {
         let (root, repo) = temp_workspace();
-        init_repo(&repo);
+        init_repo_empty(&repo);
         commit_file(&repo, "a.txt", "1\n", "c1");
         let snapshot = snapshot_app();
         let (model, _) = load_graph_model_window(
@@ -1107,7 +1056,7 @@ mod live_git {
     #[test]
     fn skip_limit_sets_has_more() {
         let (root, repo) = temp_workspace();
-        init_repo(&repo);
+        init_repo_empty(&repo);
         for i in 0..6 {
             commit_file(&repo, "a.txt", &format!("{i}\n"), &format!("c{i}"));
         }
@@ -1126,7 +1075,7 @@ mod live_git {
     #[test]
     fn stash_wip_is_excluded_from_log_window() {
         let (root, repo) = temp_workspace();
-        init_repo(&repo);
+        init_repo_empty(&repo);
         commit_file(&repo, "a.txt", "1\n", "c1");
         fs::write(repo.join("a.txt"), "dirty\n").unwrap();
         git(&repo, &["stash", "push", "-q", "-m", "wip-dirty"]);
@@ -1159,7 +1108,7 @@ mod live_git {
     #[test]
     fn fetches_missing_stash_parent_without_changing_has_more() {
         let (root, repo) = temp_workspace();
-        init_repo(&repo);
+        init_repo_empty(&repo);
         commit_file(&repo, "f.txt", "base\n", "old-parent");
         fs::write(repo.join("f.txt"), "base\nstash-me\n").unwrap();
         git(
@@ -1205,7 +1154,7 @@ mod live_git {
     #[test]
     fn graph_omits_worktree_mark_on_primary_keeps_linked_extra() {
         let (root, repo) = temp_workspace();
-        init_repo(&repo);
+        init_repo_empty(&repo);
         commit_file(&repo, "a.txt", "1\n", "c1");
         fs::create_dir_all(repo.join(".worktrees")).unwrap();
         git(

@@ -51,7 +51,7 @@ fn init_bare_remote(remote: &Path) {
         .args(["init", "-q", "--bare", "-b", "main"])
         .arg(remote)
         .status();
-    if init.map(|s| s.success()).unwrap_or(false) == false {
+    if !init.map(|s| s.success()).unwrap_or(false) {
         fs::create_dir_all(remote).unwrap();
         git(remote, &["init", "-q", "--bare"]);
     }

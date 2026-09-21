@@ -45,7 +45,11 @@ fn run(args: &[&str], cwd: &Path) -> std::io::Result<std::process::Output> {
 }
 
 /// Run git with `stdin` piped. Used only by [`apply_cached_patch`].
-fn run_with_stdin(args: &[&str], cwd: &Path, stdin: &[u8]) -> std::io::Result<std::process::Output> {
+fn run_with_stdin(
+    args: &[&str],
+    cwd: &Path,
+    stdin: &[u8],
+) -> std::io::Result<std::process::Output> {
     let mut cmd = Command::new(git_binary());
     cmd.args(args)
         .current_dir(cwd)
@@ -379,8 +383,7 @@ pub fn apply_cached_patch(cwd: &Path, patch: &str, reverse: bool) -> Result<(), 
     if patch.trim().is_empty() {
         return Err("empty patch".into());
     }
-    let mut args: Vec<&str> =
-        vec!["apply", "--cached", "--unidiff-zero", "--whitespace=nowarn"];
+    let mut args: Vec<&str> = vec!["apply", "--cached", "--unidiff-zero", "--whitespace=nowarn"];
     if reverse {
         args.push("--reverse");
     }
@@ -894,6 +897,7 @@ pub fn diff_stash_file_ctx(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{git, init_repo, init_repo_empty, unique_dir};
     use std::fs;
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -976,73 +980,10 @@ mod tests {
         );
     }
 
-    fn git_env() -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("GIT_AUTHOR_NAME", "workspace-status test"),
-            ("GIT_AUTHOR_EMAIL", "workspace-status-test@example.invalid"),
-            ("GIT_COMMITTER_NAME", "workspace-status test"),
-            (
-                "GIT_COMMITTER_EMAIL",
-                "workspace-status-test@example.invalid",
-            ),
-        ]
-    }
-
-    fn git(cwd: &Path, args: &[&str]) {
-        let mut cmd = Command::new(git_binary());
-        cmd.args(args).current_dir(cwd);
-        for (k, v) in git_env() {
-            cmd.env(k, v);
-        }
-        let status = cmd.status().expect("git");
-        assert!(status.success(), "git {args:?}");
-    }
-
-    fn init_repo(dir: &Path) {
-        fs::create_dir_all(dir).unwrap();
-        let init = Command::new(git_binary())
-            .args(["init", "-q", "-b", "main"])
-            .current_dir(dir)
-            .status();
-        if init.map(|s| s.success()).unwrap_or(false) == false {
-            git(dir, &["init", "-q"]);
-            git(dir, &["checkout", "-q", "-b", "main"]);
-        }
-        git(dir, &["config", "user.name", "workspace-status test"]);
-        git(
-            dir,
-            &[
-                "config",
-                "user.email",
-                "workspace-status-test@example.invalid",
-            ],
-        );
-        fs::write(dir.join("README.md"), "# seed\n").unwrap();
-        git(dir, &["add", "README.md"]);
-        git(dir, &["commit", "-q", "-m", "seed"]);
-    }
-
     #[test]
     fn stage_unstage_revert_on_fixture() {
-        let dir = std::env::temp_dir().join(format!(
-            "ws-git-ops-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        let init = Command::new(git_binary())
-            .args(["init", "-q", "-b", "main"])
-            .current_dir(&dir)
-            .status();
-        if init.map(|s| s.success()).unwrap_or(false) == false {
-            git(&dir, &["init", "-q"]);
-            git(&dir, &["checkout", "-q", "-b", "main"]);
-        }
-        fs::write(dir.join("README.md"), "# seed\n").unwrap();
-        git(&dir, &["add", "README.md"]);
-        git(&dir, &["commit", "-q", "-m", "seed"]);
+        let dir = unique_dir("ws-git-ops");
+        init_repo(&dir);
         fs::write(dir.join("README.md"), "# dirty\n").unwrap();
         assert!(repo_has_local_changes(&dir));
         assert_ne!(exec_git_status(&["diff", "--quiet"], &dir), 0);
@@ -1153,25 +1094,8 @@ keep-z
 
     #[test]
     fn stash_and_branch_on_fixture() {
-        let dir = std::env::temp_dir().join(format!(
-            "ws-git-stash-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        let init = Command::new(git_binary())
-            .args(["init", "-q", "-b", "main"])
-            .current_dir(&dir)
-            .status();
-        if init.map(|s| s.success()).unwrap_or(false) == false {
-            git(&dir, &["init", "-q"]);
-            git(&dir, &["checkout", "-q", "-b", "main"]);
-        }
-        fs::write(dir.join("README.md"), "# seed\n").unwrap();
-        git(&dir, &["add", "README.md"]);
-        git(&dir, &["commit", "-q", "-m", "seed"]);
+        let dir = unique_dir("ws-git-stash");
+        init_repo(&dir);
         fs::write(dir.join("README.md"), "# dirty\n").unwrap();
         stash_push(&dir, &[]).unwrap();
         assert_eq!(
@@ -1256,25 +1180,8 @@ keep-z
 
     #[test]
     fn fast_forward_to_remote_ref_ahead_and_missing_leave_head() {
-        let dir = std::env::temp_dir().join(format!(
-            "ws-git-ff-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        let init = Command::new(git_binary())
-            .args(["init", "-q", "-b", "main"])
-            .current_dir(&dir)
-            .status();
-        if init.map(|s| s.success()).unwrap_or(false) == false {
-            git(&dir, &["init", "-q"]);
-            git(&dir, &["checkout", "-q", "-b", "main"]);
-        }
-        fs::write(dir.join("README.md"), "# seed\n").unwrap();
-        git(&dir, &["add", "README.md"]);
-        git(&dir, &["commit", "-q", "-m", "seed"]);
+        let dir = unique_dir("ws-git-ff");
+        init_repo(&dir);
         let head = exec_git(&["rev-parse", "HEAD"], &dir);
         assert!(!fast_forward_to_remote_ref("origin/foo", &dir));
         assert_eq!(exec_git(&["rev-parse", "HEAD"], &dir), head);
@@ -1394,25 +1301,8 @@ keep-z
 
     #[test]
     fn remove_worktree_linked_fixture() {
-        let dir = std::env::temp_dir().join(format!(
-            "ws-git-wt-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        let init = Command::new(git_binary())
-            .args(["init", "-q", "-b", "main"])
-            .current_dir(&dir)
-            .status();
-        if init.map(|s| s.success()).unwrap_or(false) == false {
-            git(&dir, &["init", "-q"]);
-            git(&dir, &["checkout", "-q", "-b", "main"]);
-        }
-        fs::write(dir.join("README.md"), "# seed\n").unwrap();
-        git(&dir, &["add", "README.md"]);
-        git(&dir, &["commit", "-q", "-m", "seed"]);
+        let dir = unique_dir("ws-git-wt");
+        init_repo(&dir);
         let wt = dir.join(".worktrees").join("feat");
         fs::create_dir_all(dir.join(".worktrees")).unwrap();
         git(
@@ -1442,22 +1332,8 @@ keep-z
                 },
             ]
         );
-        let dir = std::env::temp_dir().join(format!(
-            "ws-git-commit-files-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        let init = Command::new(git_binary())
-            .args(["init", "-q", "-b", "main"])
-            .current_dir(&dir)
-            .status();
-        if init.map(|s| s.success()).unwrap_or(false) == false {
-            git(&dir, &["init", "-q"]);
-            git(&dir, &["checkout", "-q", "-b", "main"]);
-        }
+        let dir = unique_dir("ws-git-commit-files");
+        init_repo_empty(&dir);
         fs::write(dir.join("one.txt"), "one\n").unwrap();
         git(&dir, &["add", "one.txt"]);
         git(&dir, &["commit", "-q", "-m", "one"]);

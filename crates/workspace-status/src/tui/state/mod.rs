@@ -14,7 +14,7 @@ use ratatui::style::Color;
 use workspace_status_graph::{
     format_commit_message, format_relative_date, graph_chrome_budget_for, paint_model,
     selection_footer_parts, wrap_commit_message, GraphChromeBudget, GraphFooterSelection,
-    GraphModel, GraphRow, PaintedLine, ASCII, UNICODE, COMMIT_MSG_EXPAND_MAX_LINES,
+    GraphModel, GraphRow, PaintedLine, ASCII, COMMIT_MSG_EXPAND_MAX_LINES, UNICODE,
 };
 
 use crate::snapshot::{
@@ -48,13 +48,13 @@ use super::diff::{
     diff_wrap_row_heights, find_anchor_row, gutter_width, row_search_text, wrap_viewport_start,
     DiffContent, DiffRow, PartialPatchKind,
 };
-use super::icons::comment_mark_cols;
 use super::drill::{
     source_from_graph_row, stash_ref_from_graph_row, CommitFile, CommitFileSource, DrillView,
 };
 use super::fetch::background_fetch_targets;
 use super::gates::ListFocusTarget;
 use super::graph_focus::GraphFocusPickerState;
+use super::icons::comment_mark_cols;
 use super::keys::{expire_stale_g_chord_echo, GChordEchoState, InputMode, DOUBLE_TAP_MS};
 use super::ops::{
     collect_write_files, format_running_op, op_is_kind_noop, op_targets, push_targets,
@@ -773,7 +773,10 @@ impl AppState {
 
     /// Header / footer / list split for the graph pane.
     pub fn graph_chrome(&self) -> GraphChromeBudget {
-        self.graph_chrome_in(self.layout.tree_height.max(1), self.graph_pane_inner_width())
+        self.graph_chrome_in(
+            self.layout.tree_height.max(1),
+            self.graph_pane_inner_width(),
+        )
     }
 
     pub(crate) fn graph_chrome_in(&self, height: u16, width: u16) -> GraphChromeBudget {
@@ -1854,13 +1857,7 @@ impl AppState {
         let content_w = diff_row_content_width(pane_w as usize) as u16;
         let gutter = gutter_width(&rows).saturating_add(comment_mark_cols(self.ascii));
         let split = is_side_by_side_split(self.diff_mode, pane_w);
-        diff_wrap_row_heights(
-            &rows,
-            content_w,
-            gutter,
-            split,
-            self.diff_split_fraction,
-        )
+        diff_wrap_row_heights(&rows, content_w, gutter, split, self.diff_split_fraction)
     }
 
     fn diff_logical_index_at_visual(&self, visual_y: usize) -> Option<usize> {
@@ -4869,6 +4866,7 @@ mod tests {
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
+    use crate::testutil::init_repo;
     use crate::tui::split::{pane_widths, side_by_side_column_widths, DIFF_SPLIT_FRACTION};
     use crate::tui::watch::watch_interval_ms;
     use workspace_status_graph::{Commit, GraphModel, GraphRef, Stash};
@@ -6797,35 +6795,7 @@ mod tests {
         ));
         let workspace = root.join("workspace");
         let repo_dir = workspace.join("app");
-        fs::create_dir_all(&repo_dir).unwrap();
-        let env = [
-            ("GIT_AUTHOR_NAME", "workspace-status test"),
-            ("GIT_AUTHOR_EMAIL", "workspace-status-test@example.invalid"),
-            ("GIT_COMMITTER_NAME", "workspace-status test"),
-            (
-                "GIT_COMMITTER_EMAIL",
-                "workspace-status-test@example.invalid",
-            ),
-        ];
-        let git = |args: &[&str]| {
-            let mut cmd = Command::new("git");
-            cmd.args(args).current_dir(&repo_dir);
-            for (k, v) in env {
-                cmd.env(k, v);
-            }
-            assert!(cmd.status().unwrap().success(), "{args:?}");
-        };
-        let init = Command::new("git")
-            .args(["init", "-q", "-b", "main"])
-            .current_dir(&repo_dir)
-            .status();
-        if init.map(|s| s.success()).unwrap_or(false) == false {
-            git(&["init", "-q"]);
-            git(&["checkout", "-q", "-b", "main"]);
-        }
-        fs::write(repo_dir.join("README.md"), "# seed\n").unwrap();
-        git(&["add", "README.md"]);
-        git(&["commit", "-q", "-m", "seed"]);
+        init_repo(&repo_dir);
         fs::write(repo_dir.join("README.md"), "# dirty\n").unwrap();
 
         let config = WorkspaceStatusConfig::with_defaults();
@@ -7600,35 +7570,7 @@ mod tests {
         ));
         let workspace = root.join("workspace");
         let repo_dir = workspace.join("app");
-        fs::create_dir_all(&repo_dir).unwrap();
-        let env = [
-            ("GIT_AUTHOR_NAME", "workspace-status test"),
-            ("GIT_AUTHOR_EMAIL", "workspace-status-test@example.invalid"),
-            ("GIT_COMMITTER_NAME", "workspace-status test"),
-            (
-                "GIT_COMMITTER_EMAIL",
-                "workspace-status-test@example.invalid",
-            ),
-        ];
-        let git = |args: &[&str]| {
-            let mut cmd = Command::new("git");
-            cmd.args(args).current_dir(&repo_dir);
-            for (k, v) in env {
-                cmd.env(k, v);
-            }
-            assert!(cmd.status().unwrap().success(), "{args:?}");
-        };
-        let init = Command::new("git")
-            .args(["init", "-q", "-b", "main"])
-            .current_dir(&repo_dir)
-            .status();
-        if init.map(|s| s.success()).unwrap_or(false) == false {
-            git(&["init", "-q"]);
-            git(&["checkout", "-q", "-b", "main"]);
-        }
-        fs::write(repo_dir.join("README.md"), "# seed\n").unwrap();
-        git(&["add", "README.md"]);
-        git(&["commit", "-q", "-m", "seed"]);
+        init_repo(&repo_dir);
         fs::write(repo_dir.join("README.md"), "# dirty\n").unwrap();
 
         let config = WorkspaceStatusConfig::with_defaults();
@@ -8820,9 +8762,11 @@ mod tests {
 
         let glyphs = &workspace_status_graph::ASCII;
         let model = app.graph.as_ref().expect("graph");
-        let row = model.visible_rows().into_iter().find(|r| {
-            matches!(r, GraphRow::Commit { .. })
-        }).expect("commit row");
+        let row = model
+            .visible_rows()
+            .into_iter()
+            .find(|r| matches!(r, GraphRow::Commit { .. }))
+            .expect("commit row");
         let collapsed = workspace_status_graph::selection_footer_lines(
             model,
             workspace_status_graph::GraphFooterSelection::Row(&row),
@@ -9116,7 +9060,10 @@ mod tests {
             }
         );
         assert_eq!(app.diff_col_offset, start, "thumb grab must not jump");
-        assert_eq!(app.diff_cursor, cursor, "scrollbar must not move the cursor");
+        assert_eq!(
+            app.diff_cursor, cursor,
+            "scrollbar must not move the cursor"
+        );
         assert_eq!(app.focus, FocusPane::Right);
         assert_eq!(
             app.dispatch(Action::Drag {
@@ -11201,9 +11148,9 @@ diff --git a/README.md b/README.md
         let rows = app.current_diff_rows();
         let binary = rows
             .iter()
-            .position(|r| {
-                matches!(r, DiffRow::Line { left, .. } if left.text.contains("Binary files"))
-            })
+            .position(
+                |r| matches!(r, DiffRow::Line { left, .. } if left.text.contains("Binary files")),
+            )
             .expect("binary");
         app.diff_cursor = binary;
         app.dispatch(Action::DiffVisualStart);

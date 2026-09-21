@@ -15,6 +15,8 @@ pub mod helpers;
 pub(crate) mod parallel;
 pub mod render;
 pub mod snapshot;
+#[cfg(test)]
+pub(crate) mod testutil;
 pub mod tui;
 pub mod update;
 pub mod update_check;

@@ -999,6 +999,7 @@ mod tests {
     use super::*;
     use crate::config::WorkspaceStatusConfig;
     use crate::git::{exec_git, git_binary, list_local_branches, stage_file};
+    use crate::testutil::{git, init_repo};
     use crate::tui::action::{Action, Effect};
     use crate::tui::branches::DIRTY_WORKTREE_STATUS;
     use std::fs;
@@ -1006,43 +1007,6 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-    fn git_env() -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("GIT_AUTHOR_NAME", "workspace-status test"),
-            ("GIT_AUTHOR_EMAIL", "workspace-status-test@example.invalid"),
-            ("GIT_COMMITTER_NAME", "workspace-status test"),
-            (
-                "GIT_COMMITTER_EMAIL",
-                "workspace-status-test@example.invalid",
-            ),
-        ]
-    }
-
-    fn git(cwd: &Path, args: &[&str]) {
-        let mut cmd = Command::new(git_binary());
-        cmd.args(args).current_dir(cwd);
-        for (k, v) in git_env() {
-            cmd.env(k, v);
-        }
-        let status = cmd.status().expect("git");
-        assert!(status.success(), "git {args:?}");
-    }
-
-    fn init_repo(dir: &Path) {
-        fs::create_dir_all(dir).unwrap();
-        let init = Command::new(git_binary())
-            .args(["init", "-q", "-b", "main"])
-            .current_dir(dir)
-            .status();
-        if init.map(|s| s.success()).unwrap_or(false) == false {
-            git(dir, &["init", "-q"]);
-            git(dir, &["checkout", "-q", "-b", "main"]);
-        }
-        fs::write(dir.join("README.md"), "# seed\n").unwrap();
-        git(dir, &["add", "README.md"]);
-        git(dir, &["commit", "-q", "-m", "seed"]);
-    }
 
     fn dummy_repo(name: &str) -> crate::snapshot::RepoSnapshot {
         crate::snapshot::RepoSnapshot {

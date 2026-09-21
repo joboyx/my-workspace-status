@@ -211,38 +211,10 @@ mod tests {
 
     const SLOW_MS: u64 = 250;
 
-    fn git_env() -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("GIT_AUTHOR_NAME", "workspace-status test"),
-            ("GIT_AUTHOR_EMAIL", "workspace-status-test@example.invalid"),
-            ("GIT_COMMITTER_NAME", "workspace-status test"),
-            (
-                "GIT_COMMITTER_EMAIL",
-                "workspace-status-test@example.invalid",
-            ),
-            ("GIT_CONFIG_GLOBAL", "/dev/null"),
-            ("GIT_CONFIG_NOSYSTEM", "1"),
-        ]
-    }
-
-    fn git(cwd: &Path, args: &[&str]) {
-        let mut cmd = Command::new(git_binary());
-        cmd.args(args).current_dir(cwd);
-        for (k, v) in git_env() {
-            cmd.env(k, v);
-        }
-        let status = cmd.status().expect("git");
-        assert!(status.success(), "git {args:?}");
-    }
+    use crate::testutil::{git, git_env, init_repo_empty, unique_dir};
 
     fn unique_root(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "ws-parallel-{tag}-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+        unique_dir(&format!("ws-parallel-{tag}"))
     }
 
     fn write_exec(path: &Path, body: &str) {
@@ -293,25 +265,7 @@ mod tests {
                     .envs(git_env())
                     .status()
                     .unwrap();
-                fs::create_dir_all(&repo).unwrap();
-                let init = Command::new(git_binary())
-                    .args(["init", "-q", "-b", "main"])
-                    .current_dir(&repo)
-                    .envs(git_env())
-                    .status();
-                if init.map(|s| s.success()).unwrap_or(false) == false {
-                    git(&repo, &["init", "-q"]);
-                    git(&repo, &["checkout", "-q", "-b", "main"]);
-                }
-                git(&repo, &["config", "user.name", "workspace-status test"]);
-                git(
-                    &repo,
-                    &[
-                        "config",
-                        "user.email",
-                        "workspace-status-test@example.invalid",
-                    ],
-                );
+                init_repo_empty(&repo);
                 fs::write(repo.join("README.md"), format!("# {name}\n")).unwrap();
                 git(&repo, &["add", "README.md"]);
                 git(&repo, &["commit", "-q", "-m", "seed"]);

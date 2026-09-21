@@ -203,6 +203,7 @@ pub fn wait_and_cleanup(mut child: Child, prepared: PreparedDiff) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{git, init_repo};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -279,52 +280,6 @@ mod tests {
 
     fn lock_temps() -> std::sync::MutexGuard<'static, ()> {
         PREPARE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn git_env() -> [(&'static str, &'static str); 4] {
-        [
-            ("GIT_AUTHOR_NAME", "workspace-status test"),
-            ("GIT_AUTHOR_EMAIL", "workspace-status-test@example.invalid"),
-            ("GIT_COMMITTER_NAME", "workspace-status test"),
-            (
-                "GIT_COMMITTER_EMAIL",
-                "workspace-status-test@example.invalid",
-            ),
-        ]
-    }
-
-    fn git(cwd: &Path, args: &[&str]) {
-        let mut cmd = Command::new(crate::git::git_binary());
-        cmd.args(args).current_dir(cwd);
-        for (k, v) in git_env() {
-            cmd.env(k, v);
-        }
-        let status = cmd.status().expect("git");
-        assert!(status.success(), "git {args:?}");
-    }
-
-    fn init_repo(dir: &Path) {
-        fs::create_dir_all(dir).unwrap();
-        let init = Command::new(crate::git::git_binary())
-            .args(["init", "-q", "-b", "main"])
-            .current_dir(dir)
-            .status();
-        if init.map(|s| s.success()).unwrap_or(false) == false {
-            git(dir, &["init", "-q"]);
-            git(dir, &["checkout", "-q", "-b", "main"]);
-        }
-        git(dir, &["config", "user.name", "workspace-status test"]);
-        git(
-            dir,
-            &[
-                "config",
-                "user.email",
-                "workspace-status-test@example.invalid",
-            ],
-        );
-        fs::write(dir.join("README.md"), "# seed\n").unwrap();
-        git(dir, &["add", "README.md"]);
-        git(dir, &["commit", "-q", "-m", "seed"]);
     }
 
     fn unique_repo(prefix: &str) -> PathBuf {

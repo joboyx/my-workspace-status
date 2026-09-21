@@ -83,7 +83,7 @@ fn init_repo(repo: &Path, branch: &str) {
         .args(["init", "-q", "-b", branch])
         .current_dir(repo)
         .status();
-    if init.map(|s| s.success()).unwrap_or(false) == false {
+    if !init.map(|s| s.success()).unwrap_or(false) {
         git(repo, &["init", "-q"]);
         git(repo, &["checkout", "-q", "-b", branch]);
     }
@@ -497,7 +497,11 @@ pub fn seed_primary_merged_family(workspace: &Path) {
     git(&repo, &["add", ".gitignore"]);
     git(&repo, &["commit", "-q", "-m", "ignore linked worktree dir"]);
     git(&repo, &["checkout", "-q", "-b", "feature/linked-merged"]);
-    fs::write(repo.join("linked-merged.txt"), "linked unique then merged\n").unwrap();
+    fs::write(
+        repo.join("linked-merged.txt"),
+        "linked unique then merged\n",
+    )
+    .unwrap();
     git(&repo, &["add", "linked-merged.txt"]);
     git(&repo, &["commit", "-q", "-m", "linked merged unique"]);
     git(&repo, &["checkout", "-q", "main"]);
@@ -513,7 +517,11 @@ pub fn seed_primary_merged_family(workspace: &Path) {
         ],
     );
     git(&repo, &["checkout", "-q", "-b", "feature/primary-merged"]);
-    fs::write(repo.join("primary-merged.txt"), "primary unique then merged\n").unwrap();
+    fs::write(
+        repo.join("primary-merged.txt"),
+        "primary unique then merged\n",
+    )
+    .unwrap();
     git(&repo, &["add", "primary-merged.txt"]);
     git(&repo, &["commit", "-q", "-m", "primary merged unique"]);
     git(&repo, &["checkout", "-q", "main"]);
