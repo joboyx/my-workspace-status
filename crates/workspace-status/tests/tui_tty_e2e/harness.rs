@@ -253,17 +253,6 @@ impl PtySession {
         self.csi_u(codepoint, 2, 3);
     }
 
-    /// Type `text` as Shift+letter CSI-u for A–Z, raw bytes otherwise.
-    pub fn shift_keys(&mut self, text: &str) {
-        for c in text.chars() {
-            if c.is_ascii_alphabetic() {
-                self.shift_letter(c);
-            } else {
-                self.key(c);
-            }
-        }
-    }
-
     /// Unshifted letter press via CSI-u (kind 1). Traditional bytes stay
     /// [`Self::key`] for printable keys that do not need Repeat.
     pub fn letter_press(&mut self, letter: char) {
@@ -364,11 +353,6 @@ impl PtySession {
 
     pub fn tab(&mut self) {
         self.send_bytes(b"\t");
-    }
-
-    pub fn ctrl(&mut self, c: char) {
-        let b = (c.to_ascii_lowercase() as u8) & 0x1f;
-        self.send_bytes(&[b]);
     }
 
     /// Ctrl+letter via CSI-u (`CSI code ; 5 : 1 u` press, `: 3` release).
@@ -749,21 +733,6 @@ impl PtySession {
         );
     }
 
-    /// Wait for `needle` while `tick` runs each poll (live input, not idle).
-    pub fn wait_contains_while(
-        &mut self,
-        needle: &str,
-        timeout: Duration,
-        tick: impl FnMut(&mut Self),
-    ) {
-        self.wait_pred_while(
-            |screen| screen.contains(needle),
-            &format!("screen contains `{needle}`"),
-            timeout,
-            tick,
-        );
-    }
-
     /// Wait for `pred` while `tick` runs each poll (live input, not idle).
     ///
     /// A screen-delta / paint-changed tick is not enough. `pred` must be
@@ -787,14 +756,6 @@ impl PtySession {
             tick(self);
             thread::sleep(Duration::from_millis(20));
         }
-    }
-
-    pub fn wait_absent(&self, needle: &str, timeout: Duration) {
-        self.wait_pred(
-            |screen| !screen.contains(needle),
-            &format!("screen does not contain `{needle}`"),
-            timeout,
-        );
     }
 
     pub fn wait_contains_any(&self, needles: &[&str], timeout: Duration) {

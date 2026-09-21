@@ -340,6 +340,7 @@ fn parse_commit_stream(raw: &str, refs: &[(String, GraphRef)]) -> Vec<Commit> {
         .collect()
 }
 
+#[cfg(test)]
 fn parse_commit_line(line: &str, refs: &[(String, GraphRef)]) -> Option<Commit> {
     parse_commit_stream(line, refs).into_iter().next()
 }
@@ -456,6 +457,7 @@ fn parse_stash_stream(raw: &str) -> Vec<Stash> {
         .collect()
 }
 
+#[cfg(test)]
 fn parse_stash_line(line: &str) -> Option<Stash> {
     parse_stash_stream(line).into_iter().next()
 }
@@ -822,7 +824,6 @@ mod live_git {
     use crate::testutil::{git, init_repo_empty};
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Stdio};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use workspace_status_graph::GraphRow;

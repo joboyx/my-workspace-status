@@ -49,10 +49,6 @@ pub struct GChordEchoState {
     awaiting_release: bool,
 }
 
-/// Poll while a nav key may still be held, so terminal Repeat arrives at
-/// key-repeat cadence instead of the idle 200ms tick.
-pub const NAV_REPEAT_POLL_MS: u64 = 16;
-
 /// How the keymap reads the next key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputMode {
@@ -109,6 +105,7 @@ fn records_g_chord_press(mode: InputMode, key: &KeyEvent) -> bool {
             && matches!(key.code, KeyCode::Char('g')))
 }
 
+#[cfg(test)]
 /// Drop a typeless CSI-u echo of a `g`-chord key. Record the Press when
 /// it arms or consumes [`InputMode::GPending`].
 ///
@@ -2066,12 +2063,12 @@ mod tests {
     #[test]
     fn expire_does_not_clear_t_echo_after_next_tab() {
         let mut echo = GChordEchoState::default();
-        let mut pending = Some(Instant::now());
+        // Nothing reads `pending` before the expire call, so it starts clear.
+        let mut pending = None;
         let g = key(KeyCode::Char('g'));
         let t = key(KeyCode::Char('t'));
         assert!(!drop_protocol_dup_g_chord_press(&mut echo, normal(), &g));
         assert!(!drop_protocol_dup_g_chord_press(&mut echo, pending_g(), &t));
-        pending = None;
         expire_stale_g_chord_echo(&mut echo, &mut pending);
         assert!(
             drop_protocol_dup_g_chord_press(&mut echo, normal(), &t),

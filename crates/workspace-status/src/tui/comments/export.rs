@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 
 use super::store::{CommentKey, CommentStore};
 
+#[cfg(test)]
 /// Markdown marker for a resolved comment. Open comments have no tag.
 pub const RESOLVED_MARKDOWN_TAG: &str = "[resolved]";
 

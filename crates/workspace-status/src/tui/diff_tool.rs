@@ -142,6 +142,7 @@ pub fn prepare_worktree_diff(repo_abs: &Path, rel_path: &str) -> Result<Prepared
     }
 }
 
+#[cfg(test)]
 /// Commit/stash file: both sides are blob temps (`left_rev:path` / `right_rev:path`).
 ///
 /// Missing path at a rev becomes an empty temp (added on the right, or deleted on the right).

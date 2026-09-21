@@ -41,6 +41,7 @@ use super::diff_tool::{
     prepare_rev_diff_paths, prepare_worktree_diff, resolve_diff_tool, PreparedDiff,
 };
 use super::drill::{CommitFileSource, DrillView};
+#[cfg(test)]
 use super::event_pump::action_triggers_graph_autoload;
 use super::graph_load::{
     autoload_limit, autoload_skip, load_graph_model_window, merge_autoload, should_autoload,
@@ -1410,7 +1411,6 @@ impl Interpreter {
             .map(|checkout| gitdir_key(state, checkout))
             .collect();
         self.occupy_exclusive(&gitdirs);
-        let _ = self.sched.bump_write_gen();
         self.writes.push_back(WriteJob { gitdirs, work });
         self.sched.enqueue_user(UserTag::Write);
     }
@@ -2159,7 +2159,6 @@ mod tests {
     use crate::tui::drill::{CommitFile, CommitFileSource, DrillView};
     use crate::tui::graph_load::GraphIdentity;
     use crate::tui::state::{AppState, FocusPane};
-    use crate::tui::tree::NodeKind;
 
     use super::*;
 

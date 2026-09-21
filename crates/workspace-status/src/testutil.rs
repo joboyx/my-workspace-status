@@ -43,18 +43,6 @@ pub fn git(cwd: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} in {}", cwd.display());
 }
 
-/// Run `git` in `cwd` and return trimmed stdout. Panics on a non-zero exit.
-pub fn git_stdout(cwd: &Path, args: &[&str]) -> String {
-    let mut cmd = Command::new(git_binary());
-    cmd.args(args).current_dir(cwd);
-    for (k, v) in git_env() {
-        cmd.env(k, v);
-    }
-    let out = cmd.output().expect("git runs");
-    assert!(out.status.success(), "git {args:?} in {}", cwd.display());
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
-
 /// `git init -b main` in `dir`, creating it when missing.
 ///
 /// `git init -b` needs git 2.28 (2020). The checkout fallback keeps older

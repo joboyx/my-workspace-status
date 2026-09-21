@@ -30,13 +30,14 @@ use super::branches::{
 };
 use super::command_palette::CommandPaletteState;
 #[cfg(not(test))]
+#[cfg(not(test))]
 use super::comments::comment_store_path;
 use super::comments::{
     collect_live_set, comment_key_label, comments_in_focus_scope, covering_line_comment,
     diff_focus_side, export_markdown, format_entity_reference, gc_comments, load_comment_store,
-    put_comment, put_comment_entry, resolve_comment_target, resolve_entity_reference,
-    save_comment_store, viewport_line_number, viewport_line_range, CommentExport,
-    CommentExportList, CommentKey, CommentPrompt, CommentStore, DiffSide, EntityRef,
+    put_comment_entry, resolve_comment_target, resolve_entity_reference, save_comment_store,
+    viewport_line_number, viewport_line_range, CommentExport, CommentExportList, CommentKey,
+    CommentPrompt, CommentStore, DiffSide, EntityRef,
 };
 use super::commit_files::{
     ancestor_dir_ids, collect_foldable_subtree_ids as collect_commit_subtree_ids,
@@ -4858,6 +4859,7 @@ fn visible_snapshot(snapshot: &WorkspaceSnapshot, show_ignored: bool) -> Workspa
 
 #[cfg(test)]
 mod tests {
+    use super::super::comments::put_comment;
     use super::super::gates::ListFocusTarget;
     use super::super::keys::InputMode;
     use super::super::theme::{resolve_theme_id, ThemeId};
@@ -6783,7 +6785,6 @@ mod tests {
         use crate::git::{revert_tracked_file, stage_file, unstage_file};
         use crate::tui::collect_full_snapshot;
         use std::fs;
-        use std::process::Command;
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let root = std::env::temp_dir().join(format!(
@@ -7558,7 +7559,6 @@ mod tests {
         };
         use crate::tui::collect_full_snapshot;
         use std::fs;
-        use std::process::Command;
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let root = std::env::temp_dir().join(format!(

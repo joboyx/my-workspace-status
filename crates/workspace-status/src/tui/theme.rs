@@ -538,6 +538,7 @@ impl Palette {
         Some(ramp[idx])
     }
 
+    #[cfg(test)]
     /// Background for a decaying add flash. `None` when the flash has expired.
     pub fn flash_bg(self, strength: f32) -> Option<Color> {
         self.flash_bg_for(FlashKind::Add, strength)

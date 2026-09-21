@@ -634,7 +634,6 @@ mod tests {
             narrow > mid,
             "narrow terminals wrap more and take more rows"
         );
-        assert!(HELP_KEY_WIDTH >= 18);
         let at_140 = help_status_lines(140);
         assert!(
             at_140 <= 32,

@@ -5,7 +5,9 @@
 //! the same left-aligned window so vertical rails stay column-aligned when
 //! labels clip.
 
-use crate::topology::{pad_to_width, CellRole, GraphCell};
+#[cfg(test)]
+use crate::topology::CellRole;
+use crate::topology::{pad_to_width, GraphCell};
 
 /// Gutter may use at most this fraction of the graph list inner width.
 pub const GUTTER_MAX_FRACTION: f64 = 0.3;

@@ -14,22 +14,23 @@ mod reference;
 mod store;
 mod target;
 
-pub use export::{copy_to_clipboard, export_markdown, RESOLVED_MARKDOWN_TAG};
+pub use export::{copy_to_clipboard, export_markdown};
 pub use overlay::{
     comment_key_label, comment_overlay_footer_save, CommentExport, CommentPrompt,
     COMMENT_OVERLAY_FOOTER_EDIT,
 };
-pub use reference::{format_entity_reference, DiffSide, DiffSource, EntityRef};
+pub use reference::{format_entity_reference, DiffSide, EntityRef};
+#[cfg(not(test))]
+pub use store::comment_store_path;
+#[cfg(test)]
+pub use store::put_comment;
 pub use store::{
-    comment_store_path, comment_store_path_from_env, load_comment_store, put_comment,
-    put_comment_entry, repo_identity, save_comment_store, CommentEntry, CommentKey, CommentStore,
-    COMMENT_STORE_VERSION,
+    load_comment_store, put_comment_entry, save_comment_store, CommentKey, CommentStore,
 };
 pub use target::{
     collect_live_set, comments_in_focus_scope, commit_file_row_comments_resolved,
     commit_file_row_has_comment, covering_line_comment, diff_focus_side, diff_line_comment_state,
-    diff_line_has_comment, gc_comments, graph_row_comments_resolved, graph_row_has_comment,
-    resolve_comment_target, resolve_entity_reference, sole_non_default_branch,
-    tree_row_comments_resolved, tree_row_has_comment, viewport_line_number, viewport_line_range,
-    CommentExportList, CommentLiveSet,
+    gc_comments, graph_row_comments_resolved, graph_row_has_comment, resolve_comment_target,
+    resolve_entity_reference, tree_row_comments_resolved, tree_row_has_comment,
+    viewport_line_number, viewport_line_range, CommentExportList,
 };

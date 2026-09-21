@@ -296,14 +296,6 @@ impl DesktopSession {
         );
     }
 
-    pub fn wait_contains_any(&self, needles: &[&str], timeout: Duration) {
-        self.wait_pred(
-            |screen| needles.iter().any(|n| screen.contains(n)),
-            &format!("screen contains one of {needles:?}"),
-            timeout,
-        );
-    }
-
     pub fn wait_ms(&self, ms: u64) {
         thread::sleep(Duration::from_millis(ms));
     }

@@ -110,7 +110,6 @@ pub struct Scheduler {
     cap: usize,
     next_job_id: u64,
     next_collection_gen: u64,
-    next_write_gen: u64,
     next_pane_id: u64,
     collection: Option<CollectionState>,
     latched_watch: bool,
@@ -159,7 +158,6 @@ impl Scheduler {
             cap: cap.max(1),
             next_job_id: 1,
             next_collection_gen: 1,
-            next_write_gen: 1,
             next_pane_id: 1,
             collection: None,
             latched_watch: false,
@@ -187,30 +185,22 @@ impl Scheduler {
         }
     }
 
-    pub fn cap(&self) -> usize {
-        self.cap
-    }
-
+    #[cfg(test)]
     pub fn inflight_count(&self) -> usize {
         self.inflight.len()
     }
 
-    pub fn queued_user(&self) -> usize {
-        self.user_queue.len()
-    }
-
-    pub fn queued_status(&self) -> usize {
-        self.status_queue.len()
-    }
-
+    #[cfg(test)]
     pub fn collection_gen(&self) -> Option<u64> {
         self.collection.as_ref().map(|c| c.gen)
     }
 
+    #[cfg(test)]
     pub fn collection_active(&self) -> bool {
         self.collection.is_some()
     }
 
+    #[cfg(test)]
     pub fn latched_watch(&self) -> bool {
         self.latched_watch
     }
@@ -415,6 +405,7 @@ impl Scheduler {
         ok
     }
 
+    #[cfg(test)]
     pub fn latest_pane_id(&self) -> u64 {
         self.pane_latest
     }
@@ -496,16 +487,6 @@ impl Scheduler {
     /// True when `gen` is still the latest compare-picker request.
     pub fn accept_prepare_compare_result(&self, gen: u64) -> bool {
         gen == self.prepare_compare_latest
-    }
-
-    pub fn bump_write_gen(&mut self) -> u64 {
-        let gen = self.next_write_gen;
-        self.next_write_gen += 1;
-        gen
-    }
-
-    pub fn accept_write(&self, gen: u64) -> bool {
-        gen + 1 == self.next_write_gen
     }
 
     pub fn enqueue_user(&mut self, tag: UserTag) {
@@ -595,6 +576,7 @@ impl Scheduler {
         self.inflight.remove(&id);
     }
 
+    #[cfg(test)]
     /// Drain every ready spawn (for tests). Stops at the cap.
     pub fn spawn_ready(&mut self) -> Vec<SpawnRequest> {
         let mut out = Vec::new();

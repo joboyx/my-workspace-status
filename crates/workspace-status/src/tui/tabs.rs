@@ -219,6 +219,7 @@ impl TabStrip {
         OpenCompare::Created(id)
     }
 
+    #[cfg(test)]
     /// Close the active compare tab. Workspace is a no-op.
     ///
     /// Activates the tab immediately to the left.
@@ -246,6 +247,7 @@ impl TabStrip {
         true
     }
 
+    #[cfg(test)]
     /// Next tab, wrapping.
     pub fn next(&mut self) {
         if self.len() == 0 {
@@ -254,6 +256,7 @@ impl TabStrip {
         self.active = (self.active + 1) % self.len();
     }
 
+    #[cfg(test)]
     /// Previous tab, wrapping.
     pub fn prev(&mut self) {
         let len = self.len();
@@ -267,6 +270,7 @@ impl TabStrip {
         };
     }
 
+    #[cfg(test)]
     /// Absolute `g1`…`g9`. Missing index is a silent no-op. `1` is Workspace.
     pub fn jump(&mut self, n: u8) {
         if n == 0 {

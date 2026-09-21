@@ -7,7 +7,9 @@
 //! exclusive on one checkout (stage, commit, merge into HEAD) stay serial.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+#[cfg(test)]
+use std::sync::mpsc::TryRecvError;
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::vec::IntoIter;
@@ -59,6 +61,9 @@ where
 /// The live TTY fetch / pull / push path is the Scheduler JoinSet in `tui/effect.rs`.
 pub struct CappedBatch<U> {
     rx: Receiver<(usize, U)>,
+    /// Set by [`CappedBatch::cancel`]; workers read their own clone.
+    /// Nothing in the shipped binary cancels a batch today.
+    #[cfg_attr(not(test), allow(dead_code))]
     cancel: Arc<AtomicBool>,
     handles: Vec<JoinHandle<()>>,
     slots: Vec<Option<U>>,
@@ -114,6 +119,7 @@ impl<U: Send + 'static> CappedBatch<U> {
         }
     }
 
+    #[cfg(test)]
     /// Take one completion. Returns the new completed count (`1..=N`).
     ///
     /// Counts **finishes**, not starts. `None` means no completion is ready
@@ -133,11 +139,13 @@ impl<U: Send + 'static> CappedBatch<U> {
         }
     }
 
+    #[cfg(test)]
     /// True when every worker has exited (in-flight work included).
     pub fn is_finished(&self) -> bool {
         self.finished
     }
 
+    #[cfg(test)]
     /// Stop taking new items. In-flight `f` calls still run to completion.
     ///
     /// Workers that dequeue after this drop the item without calling `f`.
@@ -204,7 +212,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::AtomicUsize;
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant};
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;

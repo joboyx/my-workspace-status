@@ -579,6 +579,7 @@ pub(crate) fn apply_merge_compute(state: &mut AppState, label: &str, result: Mer
     }
 }
 
+#[cfg(test)]
 /// Run graph/tree checkout. Returns true when HEAD changed and the snapshot should reload.
 ///
 /// Origin out-of-sync confirm fires only for a selected `origin/…` name when a
@@ -596,6 +597,7 @@ pub(crate) fn run_checkout_branch(
     apply_checkout_compute(state, repo, result)
 }
 
+#[cfg(test)]
 /// Merge `rev` into HEAD of `repo`. Fast-forward when possible, otherwise a
 /// merge commit. Conflicts stay in the worktree (no abort, no continue).
 pub(crate) fn run_merge_into_head(

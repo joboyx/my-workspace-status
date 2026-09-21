@@ -28,8 +28,8 @@ impl AppState {
             self.status = super::super::tabs::SWITCH_TO_WORKSPACE_TAB.into();
             return Effect::None;
         }
-        let visual_write = self.diff_visual_anchor.is_some()
-            && matches!(action, Action::Stage | Action::Unstage);
+        let visual_write =
+            self.diff_visual_anchor.is_some() && matches!(action, Action::Stage | Action::Unstage);
         let noop = dispatch_is_noop(
             &action,
             self.nav_depth(),
@@ -94,7 +94,6 @@ impl AppState {
             | Action::ToggleReviewed
             | Action::FocusLeft
             | Action::FocusRight
-            | Action::ScrollDiff(_)
             | Action::ToggleFullContext
             | Action::Click { .. }
             | Action::Drag { .. }

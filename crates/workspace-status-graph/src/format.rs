@@ -1227,10 +1227,6 @@ fn chip_is_checkout(chip: &MergedRefChip, head_branch: Option<&str>, is_head: bo
     }
 }
 
-fn format_merged_chip(chip: &MergedRefChip, is_checkout: bool, glyphs: &GlyphSet) -> String {
-    parts_text(&merged_chip_parts(chip, is_checkout, glyphs, None))
-}
-
 fn merged_chip_parts(
     chip: &MergedRefChip,
     is_checkout: bool,

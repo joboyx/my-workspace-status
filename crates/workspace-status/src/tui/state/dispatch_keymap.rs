@@ -90,10 +90,6 @@ impl AppState {
                 self.focus = FocusPane::Right;
                 Effect::None
             }
-            Action::ScrollDiff(delta) => {
-                self.move_diff_cursor(delta);
-                Effect::None
-            }
             Action::ToggleFullContext => self.toggle_full_context(),
             Action::Click { col, row } => {
                 if !self.mouse_enabled {

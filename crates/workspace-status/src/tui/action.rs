@@ -42,8 +42,6 @@ pub enum Action {
     ToggleReviewed,
     FocusLeft,
     FocusRight,
-    /// Move the focused file-diff row. Live `j` / `k` emit [`Self::Move`].
-    ScrollDiff(i32),
     /// Horizontal pan on the focused pane (tree, graph, commit-files, or diff).
     ///
     /// Positive looks right. Rows stay clipped to the pane; this only

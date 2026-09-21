@@ -330,9 +330,9 @@ fn entity_diff_source(source: Option<&CommitFileSource>) -> DiffSource {
         Some(CommitFileSource::Stash { stash_ref }) => DiffSource::Stash {
             stash_ref: stash_ref.clone(),
         },
-        Some(CommitFileSource::Worktree)
-        | Some(CommitFileSource::Compare { .. })
-        | None => DiffSource::Worktree,
+        Some(CommitFileSource::Worktree) | Some(CommitFileSource::Compare { .. }) | None => {
+            DiffSource::Worktree
+        }
     }
 }
 
@@ -1222,19 +1222,6 @@ fn commit_file_key_on_row(
             _ => false,
         },
     }
-}
-
-/// True when this painted diff line number has a line comment.
-pub fn diff_line_has_comment(
-    store: &CommentStore,
-    repo: &str,
-    primary: Option<&str>,
-    branch: Option<&str>,
-    path: &str,
-    source: Option<&CommitFileSource>,
-    line: u32,
-) -> bool {
-    diff_line_comment_state(store, repo, primary, branch, path, source, line).is_some()
 }
 
 /// Resolve state for a painted diff line. `None` when no comment covers

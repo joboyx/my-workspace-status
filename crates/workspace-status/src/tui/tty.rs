@@ -37,10 +37,13 @@ use super::keys::KeyStrokeOrigin;
 /// are `66`/`67` without the motion bit.
 pub const MOUSE_ENABLE: &[u8] = b"\x1b[?1003l\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h";
 
+#[cfg(test)]
 /// xterm SGR button for wheel right (trackpad hscroll).
 pub(crate) const SGR_WHEEL_RIGHT: u8 = 67;
+#[cfg(test)]
 /// xterm SGR button for Shift+wheel down (common trackpad hscroll encoding).
 pub(crate) const SGR_SHIFT_WHEEL_DOWN: u8 = 69;
+#[cfg(test)]
 /// Wheel right with the 1003 motion bit (`67 | 32`). crossterm 0.28 drops this.
 pub(crate) const SGR_WHEEL_RIGHT_MOTION: u8 = 67 | 32;
 
@@ -738,6 +741,7 @@ pub(crate) fn parse_tty_chunk(bytes: &[u8]) -> Vec<(Event, KeyStrokeOrigin)> {
     buf.events.into_iter().collect()
 }
 
+#[cfg(test)]
 /// Encode one xterm SGR mouse report (`CSI < Cb ; Cx ; Cy M`).
 ///
 /// `col` / `row` are 0-based cells, matching crossterm. The sequence uses

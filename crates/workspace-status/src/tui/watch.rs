@@ -7,7 +7,9 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use workspace_status_graph::{GraphModel, GraphRow};
 
-use crate::snapshot::{WorkspaceRepoSnapshot, WorkspaceSnapshot};
+use crate::snapshot::WorkspaceRepoSnapshot;
+#[cfg(test)]
+use crate::snapshot::WorkspaceSnapshot;
 
 use super::commit_files::CommitFileRow;
 use super::drill::CommitFileSource;
@@ -54,6 +56,7 @@ pub fn watch_remain_ms(interval_started: Instant, now: Instant, interval_ms: u64
     interval_ms.saturating_sub(now.saturating_duration_since(interval_started).as_millis() as u64)
 }
 
+#[cfg(test)]
 /// True when a live-watch poll is due. `interval_ms == 0` never fires.
 pub fn watch_tick_due(interval_started: Instant, now: Instant, interval_ms: u64) -> bool {
     interval_ms > 0 && watch_remain_ms(interval_started, now, interval_ms) == 0
@@ -88,6 +91,7 @@ pub fn checkout_watch_identity(repo: &WorkspaceRepoSnapshot) -> String {
     )
 }
 
+#[cfg(test)]
 /// Checkout watch keys for a snapshot, keyed by repo path.
 pub fn checkout_watch_identities(snapshot: &WorkspaceSnapshot) -> BTreeMap<String, String> {
     snapshot
@@ -97,6 +101,7 @@ pub fn checkout_watch_identities(snapshot: &WorkspaceSnapshot) -> BTreeMap<Strin
         .collect()
 }
 
+#[cfg(test)]
 /// True when the right pane should reload after a watch apply.
 ///
 /// Tree signatures cover file mtime / status. Checkout identities cover
@@ -210,6 +215,7 @@ pub fn classify_flash(
     }
 }
 
+#[cfg(test)]
 /// Ids whose signature appeared or changed. Removals are included.
 /// The whole tree is not treated as one change.
 pub fn changed_row_ids(
@@ -251,6 +257,7 @@ pub fn flashable_row_kinds(
     out
 }
 
+#[cfg(test)]
 /// Ids that should flash for this signature diff.
 ///
 /// `include_adds` is false for graph autoload (older commits appended) so a
