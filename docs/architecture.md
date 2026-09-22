@@ -57,7 +57,7 @@ Porcelain v1 is pinned deliberately: v2 would change rename and XY handling and 
 
 All of them live in `crates/workspace-status/src/git.rs` and run as a subprocess. The binary prefers `/usr/bin/git` so WSL does not pick a Windows `git.exe`. Set `WORKSPACE_STATUS_GIT` to override.
 
-Every wrapper starts git with stdin `/dev/null` and `GIT_TERMINAL_PROMPT=0`. A credential or SSH prompt therefore fails fast instead of blocking the ratatui event loop (the parent would be stuck in `output()` while the child waited on the same TTY). Merge also sets `GIT_EDITOR=true` and `GIT_MERGE_AUTOEDIT=no`.
+Every wrapper starts git with stdin `/dev/null`, `GIT_TERMINAL_PROMPT=0`, and `GIT_OPTIONAL_LOCKS=0` (background `status` must not take `index.lock`; see [git-operations.md](./git-operations.md)). A credential or SSH prompt therefore fails fast instead of blocking the ratatui event loop (the parent would be stuck in `output()` while the child waited on the same TTY). Merge also sets `GIT_EDITOR=true` and `GIT_MERGE_AUTOEDIT=no`.
 
 `exec_git` swallows failures and returns `""`; `exec_git_status` returns the exit code. `exec_git_checked` is the wrapper that surfaces failure to the caller. Compare reads use `exec_git_stdout` so an empty list is success and a git failure is `Err`.
 
@@ -119,7 +119,7 @@ CLI flags live in `cli.rs`. `--workspace` / `-C` and `WS_STATUS_WORKSPACE` pin t
 
 `--fetch`, `--pull`, and `--default-branch` write progress to stderr when `--json` is set. `--json` wins when both `--json` and `--plain` are set. `-v` applies to `--plain` only.
 
-On a TTY (or `-i` / `--tui`) the binary opens the ratatui TUI. Tree chrome (status letters, Nerd glyphs, workspace wording, linked-checkout labels, sync marks) lives in `tui/icons.rs` (glyph registry), `tui/tree.rs` (`node_segments`), and `tui/render.rs` (right-aligned trailing for status and repo kind + cursor bar). Bottom chrome (mode pills, hint chips, breadcrumb) lives in `tui/chrome.rs`. In-flight fetch / pull / push / default-branch paint `Verb n/N…` on the breadcrumb trailing slot (`tui/ops.rs` `format_running_op`) and redraw as each repo **completes** (fetch / pull / push overlap under `FETCH_CONCURRENCY` on the per-gitdir queue). Mixed kinds use `format_mixed_running_op` (`Fetching 1 · Pulling 1…` / `Fetching 1/2 · queued 1`). Completion uses `format_completed_op` (`Fetched N repos`, with ` (N failed)` if any) so the slot never lists repo names. Commit-file lists reuse the same file chrome. See [tui-rust.md](./tui-rust.md).
+On a TTY (or `-i` / `--tui`) the binary opens the ratatui TUI. Tree chrome (status letters, Nerd glyphs, workspace wording, linked-checkout labels, sync marks) lives in `tui/icons.rs` (glyph registry), `tui/tree.rs` (`node_segments`), and `tui/render.rs` (right-aligned trailing for status and repo kind + cursor bar). Bottom chrome (mode pills, hint chips, breadcrumb) lives in `tui/chrome.rs`. In-flight fetch / pull / push / default-branch paint `Verb n/N…` on the breadcrumb trailing slot (`tui/ops.rs` `format_running_op`) and redraw as each repo **completes** (fetch / pull / push overlap under `FETCH_CONCURRENCY` on the per-gitdir queue). Mixed kinds use `format_mixed_running_op` (`Fetching 1 · Pulling 1…` / `Fetching 1/2 · queued 1`). Completion uses `format_completed_op` (`Fetched N repos`, with ` (N failed)` if any, then ` · <repo>: <reason>` for the first failure) so the slot never lists successful repos. Commit-file lists reuse the same file chrome. See [tui-rust.md](./tui-rust.md).
 
 ## Graph crate
 

@@ -250,12 +250,28 @@ pub fn format_mixed_running_op(
     String::new()
 }
 
+/// One repo's failure inside a workspace op wave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoError {
+    /// Workspace-relative checkout path.
+    pub repo: String,
+    /// Git's stderr (or a skip reason).
+    pub message: String,
+}
+
 /// Completion line for a finished workspace op: `Pulled 3 repos`.
 ///
 /// `ok + failed` is how many repos the op ran against. `failed > 0`
-/// appends ` (N failed)`. Repo names are never listed — a long
-/// workspace must not swamp the breadcrumb trailing slot.
-pub fn format_completed_op(kind: RunningOp, ok: usize, failed: usize) -> String {
+/// appends ` (N failed)`, then ` · <repo>: <reason>` for the first failure
+/// so the operator sees why without leaving the TUI. Counts come first, so a
+/// narrow breadcrumb clips the reason, not the counts. Successful repos are
+/// never listed — a long workspace must not swamp the trailing slot.
+pub fn format_completed_op(
+    kind: RunningOp,
+    ok: usize,
+    failed: usize,
+    first_error: Option<&RepoError>,
+) -> String {
     let verb = match kind {
         RunningOp::Fetch => "Fetched",
         RunningOp::Pull => "Pulled",
@@ -264,11 +280,27 @@ pub fn format_completed_op(kind: RunningOp, ok: usize, failed: usize) -> String 
     };
     let total = ok.saturating_add(failed);
     let noun = if total == 1 { "repo" } else { "repos" };
-    if failed > 0 {
-        format!("{verb} {total} {noun} ({failed} failed)")
-    } else {
-        format!("{verb} {total} {noun}")
+    if failed == 0 {
+        return format!("{verb} {total} {noun}");
     }
+    let counts = format!("{verb} {total} {noun} ({failed} failed)");
+    match first_error.map(|err| (err, git_error_reason(&err.message))) {
+        Some((err, reason)) if !reason.is_empty() => format!("{counts} · {}: {reason}", err.repo),
+        _ => counts,
+    }
+}
+
+/// Short, actionable reason for a git failure.
+///
+/// A held `index.lock` gets a plain hint instead of git's long absolute path:
+/// it is the one failure that looks like a network or conflict problem but is
+/// neither.
+fn git_error_reason(message: &str) -> String {
+    let line = crate::git::first_error_line(message);
+    if line.contains("index.lock") && line.contains("File exists") {
+        return "index.lock exists (another git is running, or a stale lock)".to_string();
+    }
+    line.to_string()
 }
 
 /// True when `p` / `d` / `f` must stay a silent no-op on this row kind.
@@ -1180,22 +1212,60 @@ mod tests {
 
     #[test]
     fn completed_op_summary_counts_repos_and_failures() {
-        assert_eq!(format_completed_op(RunningOp::Pull, 3, 0), "Pulled 3 repos");
+        assert_eq!(format_completed_op(RunningOp::Pull, 3, 0, None), "Pulled 3 repos");
         assert_eq!(
-            format_completed_op(RunningOp::Fetch, 3, 1),
+            format_completed_op(RunningOp::Fetch, 3, 1, None),
             "Fetched 4 repos (1 failed)"
         );
-        assert_eq!(format_completed_op(RunningOp::Push, 1, 0), "Pushed 1 repo");
+        assert_eq!(format_completed_op(RunningOp::Push, 1, 0, None), "Pushed 1 repo");
         assert_eq!(
-            format_completed_op(RunningOp::Push, 0, 2),
+            format_completed_op(RunningOp::Push, 0, 2, None),
             "Pushed 2 repos (2 failed)"
         );
         assert_eq!(
-            format_completed_op(RunningOp::DefaultBranch, 2, 1),
+            format_completed_op(RunningOp::DefaultBranch, 2, 1, None),
             "Switched 3 repos (1 failed)"
         );
-        let listed = format_completed_op(RunningOp::Fetch, 2, 0);
+        let listed = format_completed_op(RunningOp::Fetch, 2, 0, None);
         assert!(!listed.contains("notes"), "{listed}");
         assert!(!listed.contains("dotfiles"), "{listed}");
+    }
+
+    #[test]
+    fn completed_op_summary_names_first_failure_reason() {
+        let err = RepoError {
+            repo: "app".into(),
+            message: "fatal: couldn't find remote ref develop\nhint: check the remote".into(),
+        };
+        assert_eq!(
+            format_completed_op(RunningOp::Pull, 2, 1, Some(&err)),
+            "Pulled 3 repos (1 failed) · app: fatal: couldn't find remote ref develop"
+        );
+    }
+
+    #[test]
+    fn completed_op_summary_explains_held_index_lock() {
+        let err = RepoError {
+            repo: "app".into(),
+            message: "fatal: Unable to create '/w/app/.git/index.lock': File exists.\n\n\
+                      Another git process seems to be running in this repository"
+                .into(),
+        };
+        assert_eq!(
+            format_completed_op(RunningOp::DefaultBranch, 0, 1, Some(&err)),
+            "Switched 1 repo (1 failed) · app: index.lock exists (another git is running, or a stale lock)"
+        );
+    }
+
+    #[test]
+    fn completed_op_summary_ignores_empty_failure_message() {
+        let err = RepoError {
+            repo: "app".into(),
+            message: "  \n".into(),
+        };
+        assert_eq!(
+            format_completed_op(RunningOp::Fetch, 0, 1, Some(&err)),
+            "Fetched 1 repo (1 failed)"
+        );
     }
 }

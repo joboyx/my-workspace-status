@@ -28,7 +28,9 @@ pub fn git_binary() -> &'static Path {
 ///
 /// Stdin is `/dev/null` so a credential prompt cannot deadlock against the
 /// event loop. `GIT_TERMINAL_PROMPT=0` fails fast instead of waiting on a
-/// hidden prompt.
+/// hidden prompt. `GIT_OPTIONAL_LOCKS=0` stops background reads (`status`
+/// index refresh) from taking `index.lock`, so a watch tick cannot block a
+/// pull or checkout, and a killed run cannot leave a stale lock behind.
 fn git_command(bin: &Path, args: &[&str], cwd: &Path) -> Command {
     let mut cmd = Command::new(bin);
     cmd.args(args)
@@ -36,7 +38,8 @@ fn git_command(bin: &Path, args: &[&str], cwd: &Path) -> Command {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env("GIT_TERMINAL_PROMPT", "0");
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0");
     cmd
 }
 
@@ -52,7 +55,8 @@ fn run_with_stdin(args: &[&str], cwd: &Path, stdin: &[u8]) -> std::io::Result<st
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env("GIT_TERMINAL_PROMPT", "0");
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0");
     let mut child = cmd.spawn()?;
     let write_err = match child.stdin.take() {
         Some(mut pipe) => pipe.write_all(stdin).err(),
@@ -81,17 +85,26 @@ pub fn exec_git_status(args: &[&str], cwd: &Path) -> i32 {
     }
 }
 
-/// Run git. `Err` when the process exits non-zero or fails to start.
+/// Run git. `Err` carries git's stderr (or the exit code when stderr is empty)
+/// when the process exits non-zero, or the spawn error when it fails to start.
 pub fn exec_git_checked(args: &[&str], cwd: &Path) -> Result<(), String> {
     match run(args, cwd) {
         Ok(out) if out.status.success() => Ok(()),
-        Ok(out) => Err(format!(
-            "git {} exited with code {}",
-            args.first().copied().unwrap_or("git"),
-            out.status.code().unwrap_or(-1)
-        )),
+        Ok(out) => Err(git_failure_message(args, &out)),
         Err(err) => Err(err.to_string()),
     }
+}
+
+/// First non-empty line of a git error, for one-line status and report slots.
+///
+/// Git puts the actionable line first (`fatal: Unable to create
+/// '.../index.lock': File exists.`); hints follow on later lines.
+pub fn first_error_line(message: &str) -> &str {
+    message
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
 }
 
 /// Binary-safe blob bytes for `<rev>:<path>` (`git cat-file blob`). Missing path → `None`.
@@ -124,11 +137,25 @@ pub fn rev_parse_quiet(git_ref: &str, cwd: &Path) -> Option<String> {
 
 /// Checkout an existing branch, or create it tracking `origin/<branch>`.
 pub fn checkout_branch(branch: &str, cwd: &Path) -> bool {
-    if exec_git_status(&["checkout", branch, "--quiet"], cwd) == 0 {
-        return true;
-    }
+    checkout_branch_detailed(branch, cwd).is_ok()
+}
+
+/// Like [`checkout_branch`], but `Err` carries git's stderr.
+///
+/// When both attempts fail, the error is from the plain `checkout <branch>`
+/// unless that branch is missing locally, in which case the `-b` attempt's
+/// error is more useful.
+pub fn checkout_branch_detailed(branch: &str, cwd: &Path) -> Result<(), String> {
+    let first = match exec_git_checked(&["checkout", branch, "--quiet"], cwd) {
+        Ok(()) => return Ok(()),
+        Err(err) => err,
+    };
     let origin = format!("origin/{branch}");
-    exec_git_status(&["checkout", "-b", branch, &origin, "--quiet"], cwd) == 0
+    match exec_git_checked(&["checkout", "-b", branch, &origin, "--quiet"], cwd) {
+        Ok(()) => Ok(()),
+        Err(second) if first.contains("did not match any") => Err(second),
+        Err(_) => Err(first),
+    }
 }
 
 /// Fast-forward HEAD to an already-fetched remote-tracking ref (no fetch, no reset).
@@ -224,11 +251,13 @@ pub fn merge_into_head(rev: &str, cwd: &Path) -> MergeIntoHeadResult {
 
 const AUTO_STASH_MESSAGE: &str = "ws-status: auto-stash before pull";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PullQuietResult {
     pub ok: bool,
     pub stashed: bool,
     pub stash_pop_failed: bool,
+    /// Git's stderr from the step that failed. `None` when `ok`.
+    pub error: Option<String>,
 }
 
 /// `git pull --quiet`, stashing tracked local changes first when needed.
@@ -236,25 +265,32 @@ pub fn pull_quiet_detailed(cwd: &Path) -> PullQuietResult {
     let dirty = repo_has_local_changes(cwd);
     let mut stashed = false;
     if dirty {
-        if exec_git_status(&["stash", "push", "-m", AUTO_STASH_MESSAGE, "--quiet"], cwd) != 0 {
+        if let Err(err) =
+            exec_git_checked(&["stash", "push", "-m", AUTO_STASH_MESSAGE, "--quiet"], cwd)
+        {
             return PullQuietResult {
                 ok: false,
                 stashed: false,
                 stash_pop_failed: false,
+                error: Some(err),
             };
         }
         stashed = true;
     }
 
-    let pull_ok = exec_git_status(&["pull", "--quiet"], cwd) == 0;
-    let mut stash_pop_failed = false;
-    if stashed && exec_git_status(&["stash", "pop", "--quiet"], cwd) != 0 {
-        stash_pop_failed = true;
-    }
+    let pull = exec_git_checked(&["pull", "--quiet"], cwd);
+    let pop = if stashed {
+        exec_git_checked(&["stash", "pop", "--quiet"], cwd)
+    } else {
+        Ok(())
+    };
+    let stash_pop_failed = pop.is_err();
+    let error = pull.err().or(pop.err());
     PullQuietResult {
-        ok: pull_ok && !stash_pop_failed,
+        ok: error.is_none(),
         stashed,
         stash_pop_failed,
+        error,
     }
 }
 
@@ -916,7 +952,7 @@ mod tests {
         let script = dir.join("probe");
         fs::write(
             &script,
-            "#!/bin/sh\nif [ -t 0 ]; then echo TTY; exit 7; fi\nprintf 'prompt=%s\\n' \"${GIT_TERMINAL_PROMPT-}\"\n",
+            "#!/bin/sh\nif [ -t 0 ]; then echo TTY; exit 7; fi\nprintf 'prompt=%s locks=%s\\n' \"${GIT_TERMINAL_PROMPT-}\" \"${GIT_OPTIONAL_LOCKS-}\"\n",
         )
         .unwrap();
         #[cfg(unix)]
@@ -952,6 +988,10 @@ mod tests {
         assert!(
             stdout.contains("prompt=0"),
             "expected GIT_TERMINAL_PROMPT=0, got {stdout:?}"
+        );
+        assert!(
+            stdout.contains("locks=0"),
+            "expected GIT_OPTIONAL_LOCKS=0, got {stdout:?}"
         );
         assert!(
             !stdout.contains("TTY"),
@@ -1252,6 +1292,83 @@ keep-z
             "feature/behind"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Clone `upstream` into `<root>/clone`, then add one commit upstream so the
+    /// clone is behind by one after `fetch`.
+    fn behind_clone(root: &Path) -> std::path::PathBuf {
+        let upstream = root.join("upstream");
+        init_repo(&upstream);
+        let clone = root.join("clone");
+        git(
+            root,
+            &["clone", "-q", upstream.to_str().unwrap(), clone.to_str().unwrap()],
+        );
+        git(&clone, &["config", "user.name", "workspace-status test"]);
+        git(
+            &clone,
+            &["config", "user.email", "workspace-status-test@example.invalid"],
+        );
+        fs::write(upstream.join("next.txt"), "next\n").unwrap();
+        git(&upstream, &["add", "next.txt"]);
+        git(&upstream, &["commit", "-q", "-m", "next"]);
+        git(&clone, &["fetch", "-q"]);
+        clone
+    }
+
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn pull_quiet_detailed_reports_held_index_lock() {
+        let root = unique_temp_dir("ws-git-pull-lock");
+        let clone = behind_clone(&root);
+        fs::write(clone.join(".git/index.lock"), "").unwrap();
+
+        let result = pull_quiet_detailed(&clone);
+        assert!(!result.ok);
+        let err = result.error.expect("pull error");
+        assert!(first_error_line(&err).contains("index.lock"), "{err}");
+
+        fs::remove_file(clone.join(".git/index.lock")).unwrap();
+        let result = pull_quiet_detailed(&clone);
+        assert!(result.ok, "{:?}", result.error);
+        assert!(result.error.is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn checkout_branch_detailed_reports_git_error() {
+        let root = unique_temp_dir("ws-git-checkout-err");
+        let clone = behind_clone(&root);
+        git(&clone, &["checkout", "-q", "-b", "topic"]);
+
+        let err = checkout_branch_detailed("nope", &clone).expect_err("missing branch");
+        assert!(!first_error_line(&err).is_empty(), "{err}");
+        assert!(!err.contains("exited with code"), "stderr must win: {err}");
+
+        fs::write(clone.join(".git/index.lock"), "").unwrap();
+        let err = checkout_branch_detailed("main", &clone).expect_err("held lock");
+        assert!(err.contains("index.lock"), "{err}");
+        assert_eq!(exec_git(&["branch", "--show-current"], &clone), "topic");
+
+        fs::remove_file(clone.join(".git/index.lock")).unwrap();
+        checkout_branch_detailed("main", &clone).unwrap();
+        assert_eq!(exec_git(&["branch", "--show-current"], &clone), "main");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn first_error_line_skips_blank_lines() {
+        assert_eq!(first_error_line("\n  fatal: boom  \nhint: x"), "fatal: boom");
+        assert_eq!(first_error_line(""), "");
     }
 
     #[test]
