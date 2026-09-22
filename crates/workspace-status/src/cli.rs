@@ -260,16 +260,16 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
                 let Some(snapshot) = snapshots.iter().find(|s| s.repo == *repo) else {
                     continue;
                 };
-                let (ok, lines) = switch_repo_to_default_branch(
+                let outcome = switch_repo_to_default_branch(
                     repo,
                     &snapshot.branch,
                     &cwd,
                     snapshot.default_branch_override.as_deref(),
                 );
-                for line in lines {
-                    say(force_json, &line);
+                for line in &outcome.lines {
+                    say(force_json, line);
                 }
-                if ok {
+                if outcome.switched {
                     switched += 1;
                 }
             }

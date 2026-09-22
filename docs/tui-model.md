@@ -110,7 +110,7 @@ Independent checkouts run fetch / pull / push in parallel (`FETCH_CONCURRENCY` =
 
 An exclusive write on an occupied gitdir still dispatches. Then `schedule` refuses with breadcrumb `busy`. Confirm Yes, stash create/apply/pop, and create-branch submit keep the overlay in that case. Branch-picker create from a new name keeps the picker. Status is `busy`. A free gitdir may write while other repos fetch. If `p` lands during an inflight fetch on that gitdir, Pull still queues when dispatch set `nothing behind to pull`. Right-pane, compare, and drill `Effect::None` Pull do not follow.
 
-Mixed kinds paint `Fetching 1 · Pulling 1…` or `Fetching 1/2 · queued 1`. After those ops finish, `status` is a count (`Fetched N repos`, with ` (N failed)` if any) — never a list of names.
+Mixed kinds paint `Fetching 1 · Pulling 1…` or `Fetching 1/2 · queued 1`. After those ops finish, `status` is a count (`Fetched N repos`, with ` (N failed)` if any, then ` · <repo>: <reason>` for the first failure) — never a list of successful repos.
 
 Graph pane writes (`graphCheckout` / `graphCreateBranch` / `graphMerge` / stash apply / drop / pop) gate on graph-list focus (depth 0 right or depth 1 left). Graph `m` is `graphMerge` (always confirms). Graph `o` / `O` are view filters (focus branches / clear), not writes. They open from the graph list or a highlighted repo / worktree. Leftover branch/tag chips on a commit spacer: truncate the next name with `…` (keep brackets) when part of it fits; bold `[+N]` counts only chips fully hidden after that (omit `[+N]` when the last painted chip is merely truncated) so the row does not grow.
 

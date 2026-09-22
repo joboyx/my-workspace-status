@@ -2,7 +2,7 @@
 
 Every git subprocess the tool runs. `<git>` is `git_binary()` (`WORKSPACE_STATUS_GIT`, else `/usr/bin/git` when it exists, else `git`).
 
-Most wrappers in this file attach stdin to `/dev/null` and set `GIT_TERMINAL_PROMPT=0`. That keeps git from inheriting the TUI's raw-mode TTY (a credential prompt would otherwise deadlock: the parent waits on `output()`, the child waits on stdin). `apply_cached_patch` is the exception: it writes the unified patch to git's stdin (`git apply --cached` / `git apply --reverse --cached`). `merge_into_head` also sets `GIT_EDITOR=true` and `GIT_MERGE_AUTOEDIT=no`.
+Most wrappers in this file attach stdin to `/dev/null` and set `GIT_TERMINAL_PROMPT=0`. That keeps git from inheriting the TUI's raw-mode TTY (a credential prompt would otherwise deadlock: the parent waits on `output()`, the child waits on stdin). Every wrapper also sets `GIT_OPTIONAL_LOCKS=0`: the watch tick runs `git status` across the workspace, and without it each status takes `.git/index.lock` for its index refresh. That lock blocks a concurrent `p` / `d` / checkout, and a run killed mid-tick leaves a stale lock that fails every later write until someone deletes it. Required locks (pull, checkout, stage) are unaffected. `apply_cached_patch` is the exception: it writes the unified patch to git's stdin (`git apply --cached` / `git apply --reverse --cached`). `merge_into_head` also sets `GIT_EDITOR=true` and `GIT_MERGE_AUTOEDIT=no`.
 
 ## `crates/workspace-status/src/git.rs`
 
@@ -16,13 +16,15 @@ Most wrappers in this file attach stdin to `/dev/null` and set `GIT_TERMINAL_PRO
 | `diff_compare_file_ctx` | `diff <base>...<head> -- <path>` | `Result<lines>` | One compare path. Empty stdout is `(no diff)`. |
 | `list_compare_picker_branches` | `for-each-ref` on `refs/heads/` + `refs/remotes/origin/` | `Result<LocalBranch[]>` | Drops `origin/HEAD` and the current local. No checkout. |
 | `exec_git_status(args, cwd)` | `<git> <args>` | exit code, `-1` on throw | Generic write / predicate. |
-| `exec_git_checked(args, cwd)` | `<git> <args>` | `Result<(), String>` | Surfaces failure to the caller. |
+| `exec_git_checked(args, cwd)` | `<git> <args>` | `Result<(), String>` | Surfaces failure to the caller. `Err` is git's stderr, or `git <cmd> exited with code N` when stderr is empty. |
+| `first_error_line(message)` | — | `&str` | First non-empty line of a git error, for one-line status and report slots. |
 | `repo_has_local_changes(cwd)` | `diff --quiet`, then `diff --cached --quiet` | boolean | True when either exits non-zero. Untracked files are **not** counted. |
 | `rev_parse_quiet(ref, cwd)` | `rev-parse --verify --quiet <ref>` | SHA string, or `None` when missing | Graph checkout SHA compare (`refs/heads/<local>` vs `refs/remotes/origin/<local>`) |
 | `checkout_branch(branch, cwd)` | `checkout <branch> --quiet`, falling back to `checkout -b <branch> origin/<branch> --quiet` | boolean | Second form creates a local tracking branch when the branch only exists on the remote. |
+| `checkout_branch_detailed(branch, cwd)` | same as `checkout_branch` | `Result<(), String>` | `Err` is the plain checkout's stderr, or the `-b` attempt's when the branch is missing locally. Used by `-d` / TUI `d`. |
 | `fast_forward_to_remote_ref(remote_ref, cwd)` | `merge --ff-only --quiet` of `origin/foo` or `refs/remotes/origin/foo` (no fetch) | boolean | Graph confirm Yes: advance HEAD to the **selected** remote-tracking tip. Ahead/diverged/missing → false; HEAD unchanged. No reset. |
 | `list_local_branches(cwd)` | `for-each-ref` on `refs/heads/` | `LocalBranch[]` | Local branches only (no remotes). |
-| `pull_quiet_detailed(cwd)` | when dirty: `stash push -m …` → `pull --quiet` → `stash pop`; else `pull --quiet` | `PullQuietResult` | Auto-stash tracked local changes around pull; pop always runs after pull |
+| `pull_quiet_detailed(cwd)` | when dirty: `stash push -m …` → `pull --quiet` → `stash pop`; else `pull --quiet` | `PullQuietResult` | Auto-stash tracked local changes around pull; pop always runs after pull. `error` is the failing step's stderr. |
 | `pull_quiet(cwd)` | delegates to `pull_quiet_detailed` | boolean (`result.ok`) | |
 | `push_quiet(cwd)` | `push --quiet`, or `push -u <remote> HEAD --quiet` when no/wrong upstream | `Result` | TUI `P`. No force, no auto-stash; first publish uses `-u`; diverged remotes may fail |
 | `FULL_DIFF_CONTEXT_LINES` | — | `999_999` | Large enough `-U` value to keep a typical source file in one hunk. |
@@ -74,8 +76,8 @@ CLI `-p` / `-d` (progress strings go to the caller; `--json` sends them to stder
 
 | Function | Purpose |
 | --- | --- |
-| `pull_behind_repos` | `pull_quiet_detailed` per behind repo. Logs success / stash-pop conflict / failure. |
-| `switch_repo_to_default_branch` | Fetch, checkout default, pull when the remote tip differs. Skips dirty repos. |
+| `pull_behind_repos` | `pull_quiet_detailed` per behind repo. Logs success / stash-pop conflict / failure; a failure line carries git's first stderr line (`⚠️ Failed: fatal: …`). |
+| `switch_repo_to_default_branch` | Fetch, checkout default, pull when the remote tip differs. Skips dirty repos. Returns `DefaultBranchSwitch` (`switched`, `error`, report `lines`); the TUI `d` completion line shows `error`. |
 
 ## Compare reads (`tui/app.rs` `compute_compare_range` / `compute_compare_diff`)
 
@@ -115,7 +117,7 @@ Default window is 300 (`DEFAULT_GRAPH_WINDOW`). `--exclude=refs/stash` precedes 
 
 Hidden ignored checkouts stay out of `P` / `S` / `b` unless shown. Linked worktrees are included on `f` / `p` / `P` / `d` only when that row is focused. The background fetch timer (`background_fetch_targets` in `tui/fetch.rs`) includes every snapshot except hidden ignored — linked worktrees and shown ignored repos included. See [tui-rust.md](./tui-rust.md).
 
-Manual `f` / `p` / `P` / `d` and the background fetch tick paint a trailing breadcrumb counter (`Fetching n/N…`, `Pulling n/N…`, `Pushing n/N…`, `Switching n/N…`) and redraw as each repo completes (not as it starts). Fetch / pull / push of independent checkouts overlap under `FETCH_CONCURRENCY` (10) on the per-gitdir remote queue. Mixed kinds paint `Fetching 1 · Pulling 1…` or `Fetching 1/2 · queued 1`. When the op finishes, that slot is a count (`Fetched N repos`, `Pulled N repos`, `Pushed N repos`, `Switched N repos`), with ` (N failed)` if any failed — never a list of names. The hint row stays pills + keys. Graph autoload still uses `loading older…`. Those git children (and watch / full-snapshot reload) run on `spawn_blocking` so resize and quit still reach the event loop; overlay modes do not start the watch or fetch timers. Watch collect applies each checkout as it finishes. The follow-up right-pane reload (`git log` / file `diff` / commit files after fetch / pull / push / watch / left-pane movement at every depth) is another worker job. An unchanged watch snapshot (tree signatures **and** checkout `HEAD` / sync note / dirty set) skips it. The next watch tick is scheduled from the start of the interval.
+Manual `f` / `p` / `P` / `d` and the background fetch tick paint a trailing breadcrumb counter (`Fetching n/N…`, `Pulling n/N…`, `Pushing n/N…`, `Switching n/N…`) and redraw as each repo completes (not as it starts). Fetch / pull / push of independent checkouts overlap under `FETCH_CONCURRENCY` (10) on the per-gitdir remote queue. Mixed kinds paint `Fetching 1 · Pulling 1…` or `Fetching 1/2 · queued 1`. When the op finishes, that slot is a count (`Fetched N repos`, `Pulled N repos`, `Pushed N repos`, `Switched N repos`), with ` (N failed)` if any failed, then ` · <repo>: <reason>` for the first failure (git's first stderr line; a held `index.lock` reads `index.lock exists (another git is running, or a stale lock)`). Successful repos are never listed. The hint row stays pills + keys. Graph autoload still uses `loading older…`. Those git children (and watch / full-snapshot reload) run on `spawn_blocking` so resize and quit still reach the event loop; overlay modes do not start the watch or fetch timers. Watch collect applies each checkout as it finishes. The follow-up right-pane reload (`git log` / file `diff` / commit files after fetch / pull / push / watch / left-pane movement at every depth) is another worker job. An unchanged watch snapshot (tree signatures **and** checkout `HEAD` / sync note / dirty set) skips it. The next watch tick is scheduled from the start of the interval.
 
 ## Non-obvious semantics
 
@@ -182,7 +184,7 @@ If that gitdir already has a remote, an exclusive write still dispatches. Then `
 
 If `p` lands during an inflight fetch on that gitdir, dispatch may set `nothing behind to pull`. Unfetched tracking still looks in-sync. The queue then starts Pull after occupy release for those `op_targets` that have inflight or pending Fetch. Right-pane, compare, and drill `Effect::None` Pull do not follow.
 
-Progress is `Fetching n/N…` as each checkout finishes. Mixed kinds paint `Fetching 1 · Pulling 1…` or `Fetching 1/2 · queued 1`. After a kind finishes, the slot is `Fetched N repos` with `(N failed)` if any failed. The slot never lists repo names.
+Progress is `Fetching n/N…` as each checkout finishes. Mixed kinds paint `Fetching 1 · Pulling 1…` or `Fetching 1/2 · queued 1`. After a kind finishes, the slot is `Fetched N repos` with `(N failed)` if any failed, then ` · <repo>: <reason>` for the first failure. Successful repos are never listed.
 
 Quit drops remotes that have not started. In-flight git is unchanged.
 

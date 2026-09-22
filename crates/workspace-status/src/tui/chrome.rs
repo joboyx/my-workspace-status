@@ -1536,7 +1536,7 @@ mod tests {
     fn completed_op_summary_sits_on_breadcrumb_without_repo_names() {
         use super::super::ops::{format_completed_op, RunningOp};
         let mut app = state();
-        app.status = format_completed_op(RunningOp::Fetch, 3, 1);
+        app.status = format_completed_op(RunningOp::Fetch, 3, 1, None);
         let crumb = line_plain(&breadcrumb_line(&app, 80));
         assert!(
             crumb.contains("Fetched 4 repos (1 failed)"),

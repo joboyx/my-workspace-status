@@ -47,7 +47,8 @@ use super::graph_load::{
     GraphIdentity, ShouldAutoload,
 };
 use super::ops::{
-    format_completed_op, format_mixed_running_op, format_running_op, op_targets, Op, RunningOp,
+    format_completed_op, format_mixed_running_op, format_running_op, op_targets, Op, RepoError,
+    RunningOp,
 };
 use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
 use super::stash::{resolve_stash_menu_key, StashMenuKeyResult, StashOpId};
@@ -83,12 +84,15 @@ pub(crate) enum JobOutcome {
     },
     BulkRemote {
         kind: RunningOp,
-        ok: bool,
+        /// Git's stderr when the op failed. `None` on success.
+        error: Option<String>,
         /// Checkout path the worker ran in. Occupancy releases this gitdir.
         repo: String,
     },
     DefaultBranch {
-        ok: bool,
+        repo: String,
+        /// Git's stderr (or skip reason) when the switch failed. `None` on success.
+        error: Option<String>,
     },
     PrepareStash {
         gen: u64,
@@ -205,6 +209,8 @@ struct KindWave {
     ok: usize,
     failed: usize,
     repos: Vec<String>,
+    /// First failure in this wave, shown in the completion line.
+    first_error: Option<RepoError>,
 }
 
 impl KindWave {
@@ -213,6 +219,7 @@ impl KindWave {
             ok: 0,
             failed: 0,
             repos: Vec::new(),
+            first_error: None,
         }
     }
 
@@ -387,6 +394,7 @@ pub(crate) struct Interpreter {
     autoload: Option<(u64, GraphIdentity)>,
     default_ok: usize,
     default_failed: usize,
+    default_first_error: Option<RepoError>,
     default_total: usize,
     default_repos: Vec<String>,
     pending_edit: Option<(String, String)>,
@@ -420,6 +428,7 @@ impl Interpreter {
             autoload: None,
             default_ok: 0,
             default_failed: 0,
+            default_first_error: None,
             default_total: 0,
             default_repos: Vec::new(),
             pending_edit: None,
@@ -579,6 +588,7 @@ impl Interpreter {
                 self.default_total = repos.len();
                 self.default_ok = 0;
                 self.default_failed = 0;
+                self.default_first_error = None;
                 self.default_repos = repos.clone();
                 state.status = format_running_op(RunningOp::DefaultBranch, 0, repos.len());
                 self.mark();
@@ -1106,7 +1116,7 @@ impl Interpreter {
                 }
                 self.mark();
             }
-            JobOutcome::BulkRemote { kind, ok, repo } => {
+            JobOutcome::BulkRemote { kind, error, repo } => {
                 let gitdir = self
                     .remote
                     .occupy
@@ -1119,10 +1129,15 @@ impl Interpreter {
                     .unwrap_or_else(|| gitdir_key(state, &repo));
                 self.remote.occupy.remove(&gitdir);
                 if let Some(wave) = self.remote.wave_mut(kind) {
-                    if ok {
-                        wave.ok += 1;
-                    } else {
-                        wave.failed += 1;
+                    match error {
+                        None => wave.ok += 1,
+                        Some(message) => {
+                            wave.failed += 1;
+                            wave.first_error.get_or_insert(RepoError {
+                                repo: repo.clone(),
+                                message,
+                            });
+                        }
                     }
                     wave.note_repo(&repo);
                 }
@@ -1134,12 +1149,15 @@ impl Interpreter {
                 }
                 self.pump_remote_slots(state);
             }
-            JobOutcome::DefaultBranch { ok } => {
+            JobOutcome::DefaultBranch { repo, error } => {
                 self.sched.note_user_done(UserTag::DefaultBranch);
-                if ok {
-                    self.default_ok += 1;
-                } else {
-                    self.default_failed += 1;
+                match error {
+                    None => self.default_ok += 1,
+                    Some(message) => {
+                        self.default_failed += 1;
+                        self.default_first_error
+                            .get_or_insert(RepoError { repo, message });
+                    }
                 }
                 let done = self.default_ok + self.default_failed;
                 state.status =
@@ -1152,6 +1170,7 @@ impl Interpreter {
                         RunningOp::DefaultBranch,
                         self.default_ok,
                         self.default_failed,
+                        self.default_first_error.take().as_ref(),
                     );
                     self.default_repos.clear();
                     self.release_default_branch(state);
@@ -1675,9 +1694,10 @@ impl Interpreter {
         let repos = std::mem::take(&mut wave.repos);
         let ok_n = wave.ok;
         let failed_n = wave.failed;
+        let first_error = wave.first_error.take();
         *wave = KindWave::empty();
         state.stamp_checkout_flashes(&repos);
-        state.status = format_completed_op(kind, ok_n, failed_n);
+        state.status = format_completed_op(kind, ok_n, failed_n, first_error.as_ref());
         self.sched.on_reload_snapshot(state.focused_checkout_path());
         if !state.is_compare_tab() {
             self.pane_req = Some(RightPaneRequest::from_state(state));
@@ -1854,15 +1874,15 @@ impl Interpreter {
                 spawn(
                     id,
                     Box::new(move || {
-                        let ok = match kind {
-                            RunningOp::Fetch => {
-                                exec_git_checked(&["fetch", "--quiet"], &dir).is_ok()
+                        let error = match kind {
+                            RunningOp::Fetch => exec_git_checked(&["fetch", "--quiet"], &dir).err(),
+                            RunningOp::Pull => pull_quiet_detailed(&dir).error,
+                            RunningOp::Push => push_quiet(&dir).err(),
+                            RunningOp::DefaultBranch => {
+                                Some("default-branch is not a bulk remote op".to_string())
                             }
-                            RunningOp::Pull => pull_quiet_detailed(&dir).ok,
-                            RunningOp::Push => push_quiet(&dir).is_ok(),
-                            RunningOp::DefaultBranch => false,
                         };
-                        JobOutcome::BulkRemote { kind, ok, repo }
+                        JobOutcome::BulkRemote { kind, error, repo }
                     }),
                 );
             }
@@ -1882,7 +1902,7 @@ impl Interpreter {
                 spawn(
                     id,
                     Box::new(move || {
-                        let ok = match task {
+                        let error = match task {
                             Some((branch, override_name)) => {
                                 switch_repo_to_default_branch(
                                     &repo,
@@ -1890,11 +1910,11 @@ impl Interpreter {
                                     &cwd,
                                     override_name.as_deref(),
                                 )
-                                .0
+                                .error
                             }
-                            None => false,
+                            None => Some("repo is no longer in the snapshot".to_string()),
                         };
-                        JobOutcome::DefaultBranch { ok }
+                        JobOutcome::DefaultBranch { repo, error }
                     }),
                 );
             }
@@ -3896,7 +3916,7 @@ mod tests {
             first[0].0,
             JobOutcome::BulkRemote {
                 kind: RunningOp::Fetch,
-                ok: true,
+                error: None,
                 repo: "app".into(),
             },
         );
@@ -4124,7 +4144,7 @@ mod tests {
             first[0].0,
             JobOutcome::BulkRemote {
                 kind: RunningOp::Fetch,
-                ok: true,
+                error: None,
                 repo: "app".into(),
             },
         );
@@ -4522,7 +4542,7 @@ mod tests {
             first[0].0,
             JobOutcome::BulkRemote {
                 kind: RunningOp::Fetch,
-                ok: true,
+                error: None,
                 repo: "app".into(),
             },
         );
