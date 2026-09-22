@@ -200,10 +200,6 @@ mod tests {
             classify_busy_action(&Action::PanDiff(-1)),
             BusyAction::Handle
         );
-        assert_eq!(
-            classify_busy_action(&Action::ScrollDiff(1)),
-            BusyAction::Handle
-        );
         assert_eq!(classify_busy_action(&Action::FoldClose), BusyAction::Handle);
         assert_eq!(
             classify_busy_action(&Action::FocusRight),

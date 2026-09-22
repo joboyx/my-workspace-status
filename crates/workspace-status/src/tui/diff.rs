@@ -954,12 +954,11 @@ pub fn diff_row_visual_height(
             .max(1);
             left_h.max(right_h)
         }
-        DiffRow::Line { left, .. } => wrap_col_starts(
-            &left.text,
-            cell_code_width(width, gutter_with_mark),
-        )
-        .len()
-        .max(1),
+        DiffRow::Line { left, .. } => {
+            wrap_col_starts(&left.text, cell_code_width(width, gutter_with_mark))
+                .len()
+                .max(1)
+        }
     }
 }
 
@@ -972,9 +971,7 @@ pub fn diff_wrap_row_heights(
     split_fraction: f64,
 ) -> Vec<usize> {
     rows.iter()
-        .map(|row| {
-            diff_row_visual_height(row, content_w, gutter_with_mark, split, split_fraction)
-        })
+        .map(|row| diff_row_visual_height(row, content_w, gutter_with_mark, split, split_fraction))
         .collect()
 }
 
@@ -989,11 +986,7 @@ pub fn wrap_viewport_start(heights: &[usize], cursor: usize, view_h: usize) -> u
     }
     let view_h = view_h.max(1);
     let cursor = cursor.min(heights.len() - 1);
-    let prefix: usize = heights[..cursor]
-        .iter()
-        .copied()
-        .map(|h| h.max(1))
-        .sum();
+    let prefix: usize = heights[..cursor].iter().copied().map(|h| h.max(1)).sum();
     let total: usize = heights.iter().copied().map(|h| h.max(1)).sum();
     let visual_start = list_viewport_start(total, prefix, view_h);
     let mut acc = 0usize;
@@ -1007,12 +1000,7 @@ pub fn wrap_viewport_start(heights: &[usize], cursor: usize, view_h: usize) -> u
     heights.len() - 1
 }
 
-/// Clamp vertical diff scroll so PageDown cannot grow past EOF.
-pub fn clamp_diff_scroll(scroll: usize, row_count: usize, view_h: usize) -> usize {
-    let max_start = row_count.saturating_sub(view_h.max(1));
-    scroll.min(max_start)
-}
-
+#[cfg(test)]
 /// Scroll so `row_index` stays in the upper third of `view_h`.
 pub fn scroll_to_keep_row(row_index: usize, view_h: usize, row_count: usize) -> u16 {
     let view_h = view_h.max(1);
@@ -1056,8 +1044,8 @@ pub fn anchor_row_index(rows: &[DiffRow], scroll: usize, view_h: usize) -> usize
     }
     let start = scroll.min(rows.len() - 1);
     let end = (start + view_h.max(1)).min(rows.len());
-    for i in start..end {
-        if is_change_row(&rows[i]) {
+    for (i, row) in rows.iter().enumerate().take(end).skip(start) {
+        if is_change_row(row) {
             return i;
         }
     }

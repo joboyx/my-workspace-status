@@ -175,8 +175,7 @@ fn pty_emoji_diff_keeps_column_grid() {
 
     let screen = tui.screen();
     let right = right_pane(&screen);
-    let emoji_row =
-        pane_line_containing(&right, LEFT_MARK).expect("EMOJI_LEFT row after hold");
+    let emoji_row = pane_line_containing(&right, LEFT_MARK).expect("EMOJI_LEFT row after hold");
     assert!(
         emoji_row.contains(EMOJI),
         "left cell must keep the emoji glyph, not an ASCII placeholder:\n{right}"

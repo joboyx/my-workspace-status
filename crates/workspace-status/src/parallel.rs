@@ -7,7 +7,9 @@
 //! exclusive on one checkout (stage, commit, merge into HEAD) stay serial.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+#[cfg(test)]
+use std::sync::mpsc::TryRecvError;
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::vec::IntoIter;
@@ -59,6 +61,9 @@ where
 /// The live TTY fetch / pull / push path is the Scheduler JoinSet in `tui/effect.rs`.
 pub struct CappedBatch<U> {
     rx: Receiver<(usize, U)>,
+    /// Set by [`CappedBatch::cancel`]; workers read their own clone.
+    /// Nothing in the shipped binary cancels a batch today.
+    #[cfg_attr(not(test), allow(dead_code))]
     cancel: Arc<AtomicBool>,
     handles: Vec<JoinHandle<()>>,
     slots: Vec<Option<U>>,
@@ -114,6 +119,7 @@ impl<U: Send + 'static> CappedBatch<U> {
         }
     }
 
+    #[cfg(test)]
     /// Take one completion. Returns the new completed count (`1..=N`).
     ///
     /// Counts **finishes**, not starts. `None` means no completion is ready
@@ -133,11 +139,13 @@ impl<U: Send + 'static> CappedBatch<U> {
         }
     }
 
+    #[cfg(test)]
     /// True when every worker has exited (in-flight work included).
     pub fn is_finished(&self) -> bool {
         self.finished
     }
 
+    #[cfg(test)]
     /// Stop taking new items. In-flight `f` calls still run to completion.
     ///
     /// Workers that dequeue after this drop the item without calling `f`.
@@ -204,45 +212,17 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::AtomicUsize;
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant};
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     const SLOW_MS: u64 = 250;
 
-    fn git_env() -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("GIT_AUTHOR_NAME", "workspace-status test"),
-            ("GIT_AUTHOR_EMAIL", "workspace-status-test@example.invalid"),
-            ("GIT_COMMITTER_NAME", "workspace-status test"),
-            (
-                "GIT_COMMITTER_EMAIL",
-                "workspace-status-test@example.invalid",
-            ),
-            ("GIT_CONFIG_GLOBAL", "/dev/null"),
-            ("GIT_CONFIG_NOSYSTEM", "1"),
-        ]
-    }
-
-    fn git(cwd: &Path, args: &[&str]) {
-        let mut cmd = Command::new(git_binary());
-        cmd.args(args).current_dir(cwd);
-        for (k, v) in git_env() {
-            cmd.env(k, v);
-        }
-        let status = cmd.status().expect("git");
-        assert!(status.success(), "git {args:?}");
-    }
+    use crate::testutil::{git, git_env, init_repo_empty, unique_dir};
 
     fn unique_root(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "ws-parallel-{tag}-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+        unique_dir(&format!("ws-parallel-{tag}"))
     }
 
     fn write_exec(path: &Path, body: &str) {
@@ -293,25 +273,7 @@ mod tests {
                     .envs(git_env())
                     .status()
                     .unwrap();
-                fs::create_dir_all(&repo).unwrap();
-                let init = Command::new(git_binary())
-                    .args(["init", "-q", "-b", "main"])
-                    .current_dir(&repo)
-                    .envs(git_env())
-                    .status();
-                if init.map(|s| s.success()).unwrap_or(false) == false {
-                    git(&repo, &["init", "-q"]);
-                    git(&repo, &["checkout", "-q", "-b", "main"]);
-                }
-                git(&repo, &["config", "user.name", "workspace-status test"]);
-                git(
-                    &repo,
-                    &[
-                        "config",
-                        "user.email",
-                        "workspace-status-test@example.invalid",
-                    ],
-                );
+                init_repo_empty(&repo);
                 fs::write(repo.join("README.md"), format!("# {name}\n")).unwrap();
                 git(&repo, &["add", "README.md"]);
                 git(&repo, &["commit", "-q", "-m", "seed"]);
@@ -519,8 +481,7 @@ mod tests {
         assert!(results.iter().all(Result::is_ok), "fetch: {results:?}");
         assert_overlap(elapsed, max, "fetch");
 
-        let (elapsed, max, results) =
-            with_inflight(dirs.clone(), 4, |dir| pull_quiet_detailed(dir));
+        let (elapsed, max, results) = with_inflight(dirs.clone(), 4, pull_quiet_detailed);
         assert!(results.iter().all(|r| r.ok), "pull: {results:?}");
         assert_overlap(elapsed, max, "pull");
 
@@ -529,7 +490,7 @@ mod tests {
             git(dir, &["add", "README.md"]);
             git(dir, &["commit", "-q", "-m", "ahead"]);
         }
-        let (elapsed, max, results) = with_inflight(dirs, 4, |dir| push_quiet(dir));
+        let (elapsed, max, results) = with_inflight(dirs, 4, push_quiet);
         assert!(results.iter().all(Result::is_ok), "push: {results:?}");
         assert_overlap(elapsed, max, "push");
     }

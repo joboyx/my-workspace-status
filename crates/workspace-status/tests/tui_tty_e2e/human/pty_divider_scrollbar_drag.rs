@@ -110,15 +110,12 @@ fn scrollbar_track_span(screen: &str, thumb_col: u16) -> Option<(u16, u16)> {
     let mut top = None;
     let mut bottom = None;
     for (y, line) in screen.lines().enumerate() {
-        match line.chars().nth(thumb_col as usize) {
-            Some('║' | '█') => {
-                let y = y as u16;
-                if top.is_none() {
-                    top = Some(y);
-                }
-                bottom = Some(y);
+        if let Some('║' | '█') = line.chars().nth(thumb_col as usize) {
+            let y = y as u16;
+            if top.is_none() {
+                top = Some(y);
             }
-            _ => {}
+            bottom = Some(y);
         }
     }
     Some((top?, bottom?))
@@ -157,6 +154,7 @@ fn history_graph_at_bottom(screen: &str) -> bool {
 /// 2. Graph: `G` on overflowing `history` paints `█`. Drag from the last
 ///    `║`/`█` track cell to the first restores `count 29` and hides the
 ///    bar. Track click jumps. A mid-track `█` grab cannot reach the top.
+///
 /// A no-op, row-select, pane-steal, or chrome flicker cannot pass.
 #[test]
 fn pty_divider_scrollbar_drag() {

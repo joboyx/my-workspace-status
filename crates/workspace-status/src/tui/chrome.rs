@@ -4,6 +4,19 @@
 
 use std::time::Duration;
 
+/// Status text the comment-export overlay paints inside its own box.
+///
+/// Three call sites branch on this exact wording to decide whether the
+/// chrome reserves an extra status row, so producer and consumer share the
+/// constant rather than repeating the literal.
+pub const STATUS_COPIED: &str = "copied";
+
+/// Status text `p` sets when the focused checkout has nothing to pull.
+///
+/// `effect.rs` reads it back to decide whether a second `p` escalates to a
+/// fetch, so the wording is load-bearing, not cosmetic.
+pub const STATUS_NOTHING_TO_PULL: &str = "nothing behind to pull";
+
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use workspace_status_graph::GraphRow;
@@ -425,31 +438,42 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
         return prompt.overlay_rows();
     }
     if let Some(export) = state.comment_export.as_ref() {
-        let extra = u16::from(!state.status.is_empty() && state.status != "copied");
+        let extra = u16::from(!state.status.is_empty() && state.status != STATUS_COPIED);
         let body = export.markdown.lines().count() as u16;
         return (5u16.saturating_add(body).saturating_add(extra)).min(20);
     }
-    if let Some(picker) = state.branch_picker.as_ref() {
-        let n = picker.visible().len().max(1).min(12) as u16;
-        let extra = u16::from(!state.status.is_empty());
-        return (4u16.saturating_add(n).saturating_add(extra)).min(17);
-    }
-    if let Some(picker) = state.compare_picker.as_ref() {
-        let n = picker.visible().len().max(1).min(12) as u16;
-        let extra = u16::from(!state.status.is_empty());
-        return (4u16.saturating_add(n).saturating_add(extra)).min(17);
-    }
-    if let Some(picker) = state.graph_focus_picker.as_ref() {
-        let n = picker.visible().len().max(1).min(12) as u16;
-        let extra = u16::from(!state.status.is_empty());
-        return (4u16.saturating_add(n).saturating_add(extra)).min(17);
-    }
-    if let Some(palette) = state.command_palette.as_ref() {
-        let n = palette.paint_rows().len().max(1).min(12) as u16;
-        let extra = u16::from(!state.status.is_empty());
-        return (4u16.saturating_add(n).saturating_add(extra)).min(17);
+    // Branch / compare / graph-focus pickers and the command palette all
+    // paint the same list box, in this order.
+    let list_rows = state
+        .branch_picker
+        .as_ref()
+        .map(|picker| picker.visible().len())
+        .or_else(|| state.compare_picker.as_ref().map(|p| p.visible().len()))
+        .or_else(|| state.graph_focus_picker.as_ref().map(|p| p.visible().len()))
+        .or_else(|| state.command_palette.as_ref().map(|p| p.paint_rows().len()));
+    if let Some(visible) = list_rows {
+        return list_overlay_rows(state, visible);
     }
     1
+}
+
+/// Border, title, and footer rows a list overlay paints around its rows.
+const LIST_OVERLAY_CHROME_ROWS: u16 = 4;
+
+/// Rows a list overlay shows before it stops growing.
+const LIST_OVERLAY_MAX_ROWS: usize = 12;
+
+/// Hard cap on a list overlay, status line included.
+const LIST_OVERLAY_MAX_TOTAL_ROWS: u16 = 17;
+
+/// Rows a list overlay takes for `visible` entries, plus the status line.
+fn list_overlay_rows(state: &AppState, visible: usize) -> u16 {
+    let rows = visible.clamp(1, LIST_OVERLAY_MAX_ROWS) as u16;
+    let status = u16::from(!state.status.is_empty());
+    LIST_OVERLAY_CHROME_ROWS
+        .saturating_add(rows)
+        .saturating_add(status)
+        .min(LIST_OVERLAY_MAX_TOTAL_ROWS)
 }
 
 /// Plain-text join of chip key + gap + label (tests / width math).
@@ -1435,7 +1459,7 @@ mod tests {
         app.create_branch = Some(CreateBranchState {
             repo: "app".into(),
             name: String::new(),
-            commit_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            commit_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
         });
         assert_eq!(overlay_status_rows(&app), 5);
         app.status = "create topic".into();
@@ -1470,7 +1494,7 @@ mod tests {
             "a second body line grows the box; status still does not"
         );
         app.comment = None;
-        app.status = "copied".into();
+        app.status = STATUS_COPIED.into();
         app.comment_export = Some(CommentExport {
             markdown: "# Comments\n\nNo comments.\n".into(),
         });

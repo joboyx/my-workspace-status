@@ -2,6 +2,17 @@
 resolver = "2"
 members = ["crates/workspace-status-graph", "crates/workspace-status"]
 
+[workspace.lints.clippy]
+# Known debt, not a blanket exemption. Nine wide signatures remain:
+# `render.rs` (365, 398, 1145, 1333), `comments/target.rs` (199, 274),
+# `diff.rs` (877), `syntax.rs` (311), `graph/layout.rs` (205). Each wants
+# the params-struct treatment `graph/widget.rs::put_painted_line` got
+# (20 args -> 9). Drop this line once they are done.
+too_many_arguments = "allow"
+# `Effect` is at least 736 bytes because of its largest variant. Boxing it
+# touches every construction site, so it is its own change.
+large_enum_variant = "allow"
+
 [workspace.package]
 edition = "2021"
 license = "Apache-2.0"

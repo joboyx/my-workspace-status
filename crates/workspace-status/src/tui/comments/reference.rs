@@ -80,13 +80,6 @@ pub enum EntityRef {
         /// Full commit SHA.
         sha: String,
     },
-    /// Local branch.
-    Branch {
-        /// [`repo_identity`](super::store::repo_identity) for this checkout.
-        repo: String,
-        /// Branch name.
-        name: String,
-    },
     /// Graph stash row.
     Stash {
         /// [`repo_identity`](super::store::repo_identity) for this checkout.
@@ -169,14 +162,6 @@ impl EntityRef {
         }
     }
 
-    /// Branch row. `repo:` uses [`repo_identity`].
-    pub fn branch(checkout: &str, primary_repo: Option<&str>, name: impl Into<String>) -> Self {
-        Self::Branch {
-            repo: repo_identity(checkout, primary_repo),
-            name: name.into(),
-        }
-    }
-
     /// Stash row. `repo:` uses [`repo_identity`]. Empty `sha` / `subject` are omitted on format.
     pub fn stash(
         checkout: &str,
@@ -255,11 +240,6 @@ pub fn format_entity_reference(entity: &EntityRef) -> String {
             push_field(&mut out, "repo", repo);
             push_field(&mut out, "sha", sha);
             push_field(&mut out, "short", short_sha(sha));
-        }
-        EntityRef::Branch { repo, name } => {
-            out.push_str("kind: branch\n");
-            push_field(&mut out, "repo", repo);
-            push_field(&mut out, "ref", name);
         }
         EntityRef::Stash {
             repo,
@@ -396,10 +376,11 @@ mod tests {
 
     #[test]
     fn format_commit_full_sha_and_short_12() {
-        let entity = EntityRef::commit("/tmp/app", None, "abcdef1234567890abcd");
+        let entity =
+            EntityRef::commit("/tmp/app", None, "abcdef1234567890abcdef1234567890abcdef12");
         assert_eq!(
             format_entity_reference(&entity),
-            "kind: commit\nrepo: /tmp/app\nsha: abcdef1234567890abcd\nshort: abcdef123456\n"
+            "kind: commit\nrepo: /tmp/app\nsha: abcdef1234567890abcdef1234567890abcdef12\nshort: abcdef123456\n"
         );
     }
 
@@ -413,26 +394,17 @@ mod tests {
     }
 
     #[test]
-    fn format_branch() {
-        let entity = EntityRef::branch("/tmp/app", None, "main");
-        assert_eq!(
-            format_entity_reference(&entity),
-            "kind: branch\nrepo: /tmp/app\nref: main\n"
-        );
-    }
-
-    #[test]
     fn format_stash_with_sha_and_subject() {
         let entity = EntityRef::stash(
             "/tmp/app",
             None,
             "stash@{0}",
-            "deadbeef1234567890ab",
+            "deadbeef1234567890abdeadbeef1234567890ab",
             "WIP on main: first",
         );
         assert_eq!(
             format_entity_reference(&entity),
-            "kind: stash\nrepo: /tmp/app\nref: stash@{0}\nsha: deadbeef1234567890ab\nshort: deadbeef1234\nsubject: WIP on main: first\n"
+            "kind: stash\nrepo: /tmp/app\nref: stash@{0}\nsha: deadbeef1234567890abdeadbeef1234567890ab\nshort: deadbeef1234\nsubject: WIP on main: first\n"
         );
     }
 
@@ -471,13 +443,13 @@ mod tests {
             10,
             20,
             DiffSource::Commit {
-                sha: "abcdef1234567890abcd".into(),
+                sha: "abcdef1234567890abcdef1234567890abcdef12".into(),
             },
             DiffSide::Old,
         );
         assert_eq!(
             format_entity_reference(&entity),
-            "kind: diff\nrepo: /tmp/app\npath: src/lib.rs\nlines: 10-20\nsource: commit abcdef1234567890abcd\nside: old\n"
+            "kind: diff\nrepo: /tmp/app\npath: src/lib.rs\nlines: 10-20\nsource: commit abcdef1234567890abcdef1234567890abcdef12\nside: old\n"
         );
     }
 

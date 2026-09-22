@@ -138,51 +138,61 @@ impl CommentPrompt {
         self.textarea.input(input);
     }
 
+    #[cfg(test)]
     /// Insert `c` at the caret and advance.
     pub fn insert_char(&mut self, c: char) {
         self.textarea.insert_str(c.to_string());
     }
 
+    #[cfg(test)]
     /// Insert a newline at the caret.
     pub fn insert_newline(&mut self) {
         self.textarea.insert_newline();
     }
 
+    #[cfg(test)]
     /// Delete the scalar before the caret.
     pub fn backspace(&mut self) {
         self.textarea.delete_char();
     }
 
+    #[cfg(test)]
     /// Delete the scalar after the caret.
     pub fn delete_forward(&mut self) {
         self.textarea.delete_next_char();
     }
 
+    #[cfg(test)]
     /// Move the caret one scalar left.
     pub fn move_left(&mut self) {
         self.textarea.move_cursor(CursorMove::Back);
     }
 
+    #[cfg(test)]
     /// Move the caret one scalar right.
     pub fn move_right(&mut self) {
         self.textarea.move_cursor(CursorMove::Forward);
     }
 
+    #[cfg(test)]
     /// Move the caret to the start of the current line.
     pub fn move_home(&mut self) {
         self.textarea.move_cursor(CursorMove::Head);
     }
 
+    #[cfg(test)]
     /// Move the caret to the end of the current line.
     pub fn move_end(&mut self) {
         self.textarea.move_cursor(CursorMove::End);
     }
 
+    #[cfg(test)]
     /// Move the caret to the start of the previous word.
     pub fn move_word_back(&mut self) {
         self.textarea.move_cursor(CursorMove::WordBack);
     }
 
+    #[cfg(test)]
     /// Move the caret to the start of the next word.
     pub fn move_word_forward(&mut self) {
         self.textarea.move_cursor(CursorMove::WordForward);

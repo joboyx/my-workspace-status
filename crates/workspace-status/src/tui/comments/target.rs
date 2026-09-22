@@ -330,9 +330,9 @@ fn entity_diff_source(source: Option<&CommitFileSource>) -> DiffSource {
         Some(CommitFileSource::Stash { stash_ref }) => DiffSource::Stash {
             stash_ref: stash_ref.clone(),
         },
-        Some(CommitFileSource::Worktree)
-        | Some(CommitFileSource::Compare { .. })
-        | None => DiffSource::Worktree,
+        Some(CommitFileSource::Worktree) | Some(CommitFileSource::Compare { .. }) | None => {
+            DiffSource::Worktree
+        }
     }
 }
 
@@ -1224,19 +1224,6 @@ fn commit_file_key_on_row(
     }
 }
 
-/// True when this painted diff line number has a line comment.
-pub fn diff_line_has_comment(
-    store: &CommentStore,
-    repo: &str,
-    primary: Option<&str>,
-    branch: Option<&str>,
-    path: &str,
-    source: Option<&CommitFileSource>,
-    line: u32,
-) -> bool {
-    diff_line_comment_state(store, repo, primary, branch, path, source, line).is_some()
-}
-
 /// Resolve state for a painted diff line. `None` when no comment covers
 /// `line`. `Some(true)` when every covering comment is resolved.
 pub fn diff_line_comment_state(
@@ -1457,7 +1444,7 @@ mod tests {
         store = put_comment(&store, commit.clone(), "c");
         let live = collect_live_set(&snapshot, &store);
         let next = gc_comments(&store, &live);
-        assert!(next.get(&commit).is_some());
+        assert!(next.contains_key(&commit));
         assert_eq!(next.len(), 1);
     }
 
@@ -1526,8 +1513,8 @@ mod tests {
         store = put_comment(&store, line.clone(), "l");
         let live = collect_live_set(&snapshot, &store);
         let next = gc_comments(&store, &live);
-        assert!(next.get(&branch).is_none());
-        assert!(next.get(&line).is_none());
+        assert!(!next.contains_key(&branch));
+        assert!(!next.contains_key(&line));
         assert!(!live.branches.contains(&("app".into(), "doomed".into())));
     }
 
@@ -2457,7 +2444,7 @@ mod tests {
         );
         let commit = GraphRow::Commit {
             commit: Commit {
-                id: "abcdef1234567890abcd".into(),
+                id: "abcdef1234567890abcdef1234567890abcdef12".into(),
                 ..Commit::default()
             },
             is_head: true,
@@ -2481,12 +2468,12 @@ mod tests {
         ) {
             Some(EntityRef::Commit { repo, sha }) => {
                 assert_eq!(repo, "app");
-                assert_eq!(sha, "abcdef1234567890abcd");
+                assert_eq!(sha, "abcdef1234567890abcdef1234567890abcdef12");
             }
             other => panic!("{other:?}"),
         }
         let stash = GraphRow::Stash(workspace_status_graph::Stash {
-            id: "deadbeef1234567890ab".into(),
+            id: "deadbeef1234567890abdeadbeef1234567890ab".into(),
             stash_ref: "stash@{0}".into(),
             subject: "WIP".into(),
             ..workspace_status_graph::Stash::default()
@@ -2509,7 +2496,7 @@ mod tests {
         ) {
             Some(EntityRef::Stash { stash_ref, sha, .. }) => {
                 assert_eq!(stash_ref, "stash@{0}");
-                assert_eq!(sha, "deadbeef1234567890ab");
+                assert_eq!(sha, "deadbeef1234567890abdeadbeef1234567890ab");
             }
             other => panic!("{other:?}"),
         }

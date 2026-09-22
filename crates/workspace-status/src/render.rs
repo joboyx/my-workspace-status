@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::helpers::{
-    extract_ticket_id, format_branch_with_merge, format_checkout_repo_label, is_attention_sync_note,
-    sorted_unique, visible_width,
+    extract_ticket_id, format_branch_with_merge, format_checkout_repo_label,
+    is_attention_sync_note, sorted_unique, visible_width,
 };
 use crate::snapshot::{FileChange, RepoSnapshot, SummaryState, VerboseRow};
 
@@ -14,7 +14,8 @@ fn pad_visible(value: &str, width: usize) -> String {
 }
 
 fn badge_for_change(change: &FileChange) -> &'static str {
-    if change.unstaged_status.as_deref() == Some("U") || change.staged_status.as_deref() == Some("U")
+    if change.unstaged_status.as_deref() == Some("U")
+        || change.staged_status.as_deref() == Some("U")
     {
         return "⚠️U";
     }
@@ -64,7 +65,7 @@ fn add_tree_change(root: &mut FileTreeNode, change: &FileChange) {
     node.files.push(change.clone());
 }
 
-fn collapse_node<'a>(name: String, node: &'a FileTreeNode) -> (String, &'a FileTreeNode) {
+fn collapse_node(name: String, node: &FileTreeNode) -> (String, &FileTreeNode) {
     let mut collapsed_name = name;
     let mut collapsed_node = node;
     while collapsed_node.files.is_empty() && collapsed_node.dirs.len() == 1 {
@@ -85,17 +86,18 @@ fn render_tree_node(node: &FileTreeNode, prefix: &str) -> Vec<String> {
     let mut file_entries = node.files.clone();
     file_entries.sort_by(|a, b| a.path.cmp(&b.path));
 
-    let mut items: Vec<(String, Option<&FileTreeNode>)> = dir_entries
-        .into_iter()
-        .map(|(n, c)| (n, Some(c)))
-        .collect();
+    let mut items: Vec<(String, Option<&FileTreeNode>)> =
+        dir_entries.into_iter().map(|(n, c)| (n, Some(c))).collect();
     items.extend(file_entries.iter().map(|c| (file_display(c), None)));
 
     let mut lines = Vec::new();
     let last_i = items.len().saturating_sub(1);
     for (index, (label, child)) in items.iter().enumerate() {
         let last = index == last_i;
-        lines.push(format!("{prefix}{} {label}", if last { "└─" } else { "├─" }));
+        lines.push(format!(
+            "{prefix}{} {label}",
+            if last { "└─" } else { "├─" }
+        ));
         if let Some(child) = child {
             let next = format!("{prefix}{}", if last { "   " } else { "│  " });
             lines.extend(render_tree_node(child, &next));
@@ -243,7 +245,13 @@ fn append_linked_section(
 pub fn render_workspace_status(
     snapshots: &[RepoSnapshot],
     summary: &SummaryState,
-    verbose: &(Vec<VerboseRow>, Vec<VerboseRow>, Vec<VerboseRow>, usize, usize),
+    verbose: &(
+        Vec<VerboseRow>,
+        Vec<VerboseRow>,
+        Vec<VerboseRow>,
+        usize,
+        usize,
+    ),
     show_verbose: bool,
 ) -> Vec<String> {
     let mut lines = Vec::new();

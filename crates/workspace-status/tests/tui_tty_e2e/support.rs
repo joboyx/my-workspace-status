@@ -1050,3 +1050,16 @@ pub fn documented_stash_dropped(screen: &str) -> bool {
         && !crumb.contains("applied")
         && no_stash_wrong_ops(screen)
 }
+
+/// Make every later `git` call in this repo fail by truncating the index.
+///
+/// Fixtures used to `chmod 0o000` the index. Root ignores the mode bits,
+/// so the repo stayed healthy under `uid 0` and the status-failed
+/// assertions timed out in any root container (CI images, devcontainers,
+/// agent sandboxes). A short, invalid index header fails for every uid:
+/// `fatal: .git/index: index file smaller than expected`.
+pub fn corrupt_index(index: &Path) {
+    assert!(index.is_file(), "index must exist: {}", index.display());
+    fs::write(index, b"DIRC\0\0\0")
+        .unwrap_or_else(|err| panic!("corrupt {}: {err}", index.display()));
+}

@@ -122,10 +122,7 @@ fn add_file(root: &mut MutableDir, file: &CommitFile) {
     }
     let mut node = root;
     for dir in parts {
-        node = node
-            .dirs
-            .entry(dir.to_string())
-            .or_insert_with(MutableDir::default);
+        node = node.dirs.entry(dir.to_string()).or_default();
     }
     node.files.push(file.clone());
 }

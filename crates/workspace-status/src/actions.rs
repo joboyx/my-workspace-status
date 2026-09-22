@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use crate::git::{
-    checkout_branch, exec_git, exec_git_checked, get_default_branch, pull_quiet, pull_quiet_detailed,
-    repo_has_local_changes,
+    checkout_branch, exec_git, exec_git_checked, get_default_branch, pull_quiet,
+    pull_quiet_detailed, repo_has_local_changes,
 };
 
 pub fn pull_behind_repos(cwd: &Path, repos: &[String]) -> Vec<String> {
@@ -51,7 +51,9 @@ pub fn switch_repo_to_default_branch(
         let result = pull_quiet_detailed(&repo_dir);
         if result.ok {
             if result.stashed {
-                lines.push("    ✅ Pulled successfully (stashed local changes, reapplied)".to_string());
+                lines.push(
+                    "    ✅ Pulled successfully (stashed local changes, reapplied)".to_string(),
+                );
             } else {
                 lines.push("    ✅ Pulled successfully".to_string());
             }
@@ -84,7 +86,10 @@ pub fn switch_repo_to_default_branch(
     lines.push("    ✅ Switched successfully".to_string());
     lines.push("    Pulling latest...".to_string());
     let local = exec_git(&["rev-parse", "HEAD"], &repo_dir);
-    let remote = exec_git(&["rev-parse", &format!("origin/{default_branch}")], &repo_dir);
+    let remote = exec_git(
+        &["rev-parse", &format!("origin/{default_branch}")],
+        &repo_dir,
+    );
     if local != remote {
         if pull_quiet(&repo_dir) {
             lines.push("    ✅ Pulled successfully".to_string());

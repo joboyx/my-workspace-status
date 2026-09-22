@@ -349,7 +349,7 @@ pub fn wrap_help_description(text: &str, width: usize) -> Vec<String> {
     let words: Vec<&str> = if text.trim().is_empty() {
         Vec::new()
     } else {
-        text.trim().split_whitespace().collect()
+        text.split_whitespace().collect()
     };
     if words.is_empty() {
         return vec![String::new()];
@@ -634,7 +634,6 @@ mod tests {
             narrow > mid,
             "narrow terminals wrap more and take more rows"
         );
-        assert!(HELP_KEY_WIDTH >= 18);
         let at_140 = help_status_lines(140);
         assert!(
             at_140 <= 32,
@@ -646,7 +645,6 @@ mod tests {
     fn version_label_is_cargo_pkg_version() {
         assert_eq!(help_version_label(), format!("v{}", crate::APP_VERSION));
         assert_eq!(crate::APP_VERSION, env!("CARGO_PKG_VERSION"));
-        assert!(!crate::APP_VERSION.is_empty());
         for entry in help_entries() {
             assert!(
                 !entry.keys.contains(crate::APP_VERSION)

@@ -317,6 +317,7 @@ pub fn apply_pan(offset: u16, delta: i32, max_offset: usize) -> u16 {
     clamp_col_offset(offset as i32 + delta, max_offset)
 }
 
+#[cfg(test)]
 /// Slice `text` from `offset` for `width` Unicode scalars.
 ///
 /// Diff paint uses [`slice_cols`] (display columns). This helper keeps

@@ -48,6 +48,7 @@ fn syntect_theme_name(id: ThemeId) -> EmbeddedThemeName {
     }
 }
 
+#[cfg(test)]
 /// Sublime / two-face syntax name for `path`.
 ///
 /// `first_line` is a shebang / mode-line fallback when the path has no
@@ -131,6 +132,7 @@ fn syntax_from_extension<'a>(set: &'a SyntaxSet, ext: &str) -> Option<&'a Syntax
     }
 }
 
+#[cfg(test)]
 /// Foreground spans for one source line. Never sets a background colour.
 ///
 /// Low-contrast tokens against `row_bg` fall back to `fallback` so add/del
@@ -438,6 +440,7 @@ fn split_highlight_budget(line: &str) -> (&str, &str) {
     (&line[..end], &line[end..])
 }
 
+#[cfg(test)]
 fn highlight_range(
     path: &str,
     line: &str,

@@ -37,8 +37,13 @@ use super::tty::{poll_event, read_event_origin};
 use super::watch::{watch_interval_ms, watch_remain_ms, FLASH_TICK_MS};
 
 const INPUT_BATCH: usize = 8;
+
+/// Shortest gap between draws, so a burst of keys coalesces into one frame.
+///
+/// There is no matching maximum: a dirty presenter always redraws once this
+/// floor passes. A `DRAW_MAX_MS = 33` constant used to sit here, but both of
+/// its branches in `dirty_remain` returned `0`, so it never capped anything.
 const DRAW_MIN_MS: u64 = 16;
-const DRAW_MAX_MS: u64 = 33;
 
 enum InputCmd {
     Pause,
@@ -142,7 +147,8 @@ impl Presenter {
     fn new() -> Self {
         Self {
             dirty: true,
-            last_draw: Instant::now() - Duration::from_millis(DRAW_MAX_MS),
+            // Backdated past the floor so the first frame draws at once.
+            last_draw: Instant::now() - Duration::from_millis(DRAW_MIN_MS),
         }
     }
 
@@ -160,15 +166,10 @@ impl Presenter {
         self.dirty_remain()
     }
 
+    /// Milliseconds until the next draw is allowed; `0` once one is due.
     fn dirty_remain(&self) -> u64 {
         let elapsed = self.last_draw.elapsed().as_millis() as u64;
-        if elapsed >= DRAW_MAX_MS {
-            0
-        } else if elapsed >= DRAW_MIN_MS {
-            0
-        } else {
-            DRAW_MIN_MS.saturating_sub(elapsed)
-        }
+        DRAW_MIN_MS.saturating_sub(elapsed)
     }
 
     fn should_draw(&self) -> bool {
@@ -260,17 +261,14 @@ pub async fn run(
                 }
             }
             Some(joined) = ctx.join.join_next(), if !join_empty => {
-                match joined {
-                    Ok((id, outcome)) => {
-                        ctx.interp.apply(ctx.state, ctx.opts, id, outcome);
-                        if let Some(launch) = ctx.interp.take_pending_diff_launch() {
-                            launch_diff(&mut ctx, launch);
-                        }
-                        if ctx.interp.take_dirty() {
-                            ctx.presenter.mark();
-                        }
+                if let Ok((id, outcome)) = joined {
+                    ctx.interp.apply(ctx.state, ctx.opts, id, outcome);
+                    if let Some(launch) = ctx.interp.take_pending_diff_launch() {
+                        launch_diff(&mut ctx, launch);
                     }
-                    Err(_) => {}
+                    if ctx.interp.take_dirty() {
+                        ctx.presenter.mark();
+                    }
                 }
             }
             _ = sleep_ms(watch_remain) => {

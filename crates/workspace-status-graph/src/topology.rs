@@ -236,9 +236,9 @@ pub fn add_horizontal_bridge(
     let start = lo * CELL_W;
     let end = hi * CELL_W;
     ensure_topo_width(row, end + 1);
-    for col in (start + 1)..end {
+    for cell in row.iter_mut().take(end).skip(start + 1) {
         connect(
-            &mut row[col],
+            cell,
             false,
             false,
             true,

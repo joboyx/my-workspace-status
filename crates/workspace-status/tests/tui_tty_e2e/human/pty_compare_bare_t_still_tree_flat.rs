@@ -6,7 +6,11 @@ use crate::support::{status_row, GIT_WAIT, WAIT};
 
 fn seed_nested(workspace: &std::path::Path) {
     fs::create_dir_all(workspace.join("app").join("src")).unwrap();
-    fs::write(workspace.join("app").join("src").join("view.rs"), "fn view() {}\n").unwrap();
+    fs::write(
+        workspace.join("app").join("src").join("view.rs"),
+        "fn view() {}\n",
+    )
+    .unwrap();
 }
 
 /// Bare `t` still toggles tree/flat. It does not switch compare tabs.
@@ -26,8 +30,7 @@ fn pty_compare_bare_t_still_tree_flat() {
     tui.wait_pred(
         |screen| {
             screen.contains("app ↔ main")
-                && (status_row(screen).contains("Flat paths")
-                    || screen.contains("Flat paths"))
+                && (status_row(screen).contains("Flat paths") || screen.contains("Flat paths"))
         },
         "bare t stays on the compare tab and toggles flat/tree",
         WAIT,

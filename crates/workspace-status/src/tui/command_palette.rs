@@ -294,6 +294,7 @@ pub fn filter_commands(query: &str) -> Vec<&'static PaletteCommand> {
         .collect()
 }
 
+#[cfg(test)]
 /// Groups that still have a hit. Empty query keeps MOVE / GIT / VIEW.
 pub fn visible_groups(query: &str) -> Vec<CommandGroup> {
     let q = query.trim();

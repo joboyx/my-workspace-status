@@ -96,8 +96,7 @@ fn staged_range_toast(screen: &str) -> bool {
 }
 
 fn unstaged_range_toast(screen: &str) -> bool {
-    crumb_row(screen).contains("unstaged range")
-        && !screen.contains("VISUAL")
+    crumb_row(screen).contains("unstaged range") && !screen.contains("VISUAL")
 }
 
 fn git_diff(repo: &Path, cached: bool) -> String {

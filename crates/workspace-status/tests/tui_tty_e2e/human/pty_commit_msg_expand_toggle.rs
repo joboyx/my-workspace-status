@@ -98,11 +98,7 @@ fn pty_commit_msg_expand_toggle() {
     tui.wait_contains("README.md", WAIT);
 
     tui.key('?');
-    tui.wait_pred(
-        help_lists_expand,
-        "help VIEW lists i \\ M wrap · msg",
-        WAIT,
-    );
+    tui.wait_pred(help_lists_expand, "help VIEW lists i \\ M wrap · msg", WAIT);
     tui.esc();
     tui.wait_pred(
         |screen| {

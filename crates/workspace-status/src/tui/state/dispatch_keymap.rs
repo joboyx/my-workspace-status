@@ -90,10 +90,6 @@ impl AppState {
                 self.focus = FocusPane::Right;
                 Effect::None
             }
-            Action::ScrollDiff(delta) => {
-                self.move_diff_cursor(delta);
-                Effect::None
-            }
             Action::ToggleFullContext => self.toggle_full_context(),
             Action::Click { col, row } => {
                 if !self.mouse_enabled {
@@ -612,7 +608,7 @@ impl AppState {
                     return Some(FOCUS_A_CHECKOUT.into());
                 };
                 match self.checkout_head_and_default(&checkout) {
-                    Some((head, _)) if head.is_empty() => Some(HEAD_HAS_NO_COMMIT.into()),
+                    Some(("", _)) => Some(HEAD_HAS_NO_COMMIT.into()),
                     Some((_, None)) => Some(DEFAULT_BRANCH_NOT_FOUND.into()),
                     Some(_) => None,
                     None => Some(FOCUS_A_CHECKOUT.into()),
@@ -623,7 +619,7 @@ impl AppState {
                     return Some(FOCUS_A_CHECKOUT.into());
                 };
                 match self.checkout_head_and_default(&checkout) {
-                    Some((head, _)) if head.is_empty() => Some(HEAD_HAS_NO_COMMIT.into()),
+                    Some(("", _)) => Some(HEAD_HAS_NO_COMMIT.into()),
                     Some(_) => None,
                     None => Some(FOCUS_A_CHECKOUT.into()),
                 }

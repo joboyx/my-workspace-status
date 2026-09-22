@@ -42,13 +42,18 @@ pub fn parse_editor_argv(editor: &str) -> Vec<String> {
 }
 
 /// Config `editor`, then `$EDITOR`, then `$VISUAL`, then `vim`.
-pub fn resolve_editor(config_editor: Option<&str>, env_editor: Option<&str>, env_visual: Option<&str>) -> String {
-    for candidate in [config_editor, env_editor, env_visual] {
-        if let Some(raw) = candidate {
-            let trimmed = raw.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
-            }
+pub fn resolve_editor(
+    config_editor: Option<&str>,
+    env_editor: Option<&str>,
+    env_visual: Option<&str>,
+) -> String {
+    for raw in [config_editor, env_editor, env_visual]
+        .into_iter()
+        .flatten()
+    {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
         }
     }
     "vim".into()
@@ -97,7 +102,10 @@ mod tests {
 
     #[test]
     fn resolve_prefers_config_then_editor() {
-        assert_eq!(resolve_editor(Some("nvim"), Some("vim"), Some("vi")), "nvim");
+        assert_eq!(
+            resolve_editor(Some("nvim"), Some("vim"), Some("vi")),
+            "nvim"
+        );
         assert_eq!(resolve_editor(Some("  "), Some("vim"), None), "vim");
         assert_eq!(resolve_editor(None, None, None), "vim");
         assert_eq!(resolve_editor(None, None, Some("nano")), "nano");

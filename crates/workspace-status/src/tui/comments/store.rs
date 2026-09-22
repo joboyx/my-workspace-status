@@ -32,14 +32,7 @@ pub struct CommentEntry {
 }
 
 impl CommentEntry {
-    /// Open (unresolved) comment with `body`.
-    pub fn open(body: impl Into<String>) -> Self {
-        Self {
-            body: body.into(),
-            resolved: false,
-        }
-    }
-
+    #[cfg(test)]
     /// Body as `&str`.
     pub fn as_str(&self) -> &str {
         self.body.as_str()
@@ -112,6 +105,7 @@ pub fn repo_identity(repo: &str, primary_repo: Option<&str>) -> String {
     normalize_viewed_path(primary_repo.unwrap_or(repo))
 }
 
+#[cfg(test)]
 /// Upsert or delete. Empty / whitespace-only body deletes.
 ///
 /// A replace keeps the existing [`CommentEntry::resolved`] flag. New keys

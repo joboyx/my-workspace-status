@@ -8,9 +8,9 @@ use super::super::comments::{
     tree_row_has_comment,
 };
 use super::super::diff::{cell_code_width, diff_row_content_width, gutter_width, DiffRow};
+use super::super::gates::ListFocusTarget;
 use super::super::icons::comment_mark_cols;
 use super::super::search::{apply_pan, list_row_pan_max, max_col_offset};
-use super::super::gates::ListFocusTarget;
 use super::super::tree::{row_segments, with_comment_mark, NodeKind};
 use super::{AppState, FocusPane};
 use crate::helpers::visible_width;

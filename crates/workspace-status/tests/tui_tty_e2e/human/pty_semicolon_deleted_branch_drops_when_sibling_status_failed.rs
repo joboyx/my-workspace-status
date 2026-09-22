@@ -1,10 +1,9 @@
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::harness::PtySession;
 use crate::seed::{git, seed_primary_and_linked_family, unique_root};
-use crate::support::{tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT};
+use crate::support::{corrupt_index, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT};
 
 const BODY: &str = "sibling-failed-drop-e2e";
 const BRANCH: &str = "doomed";
@@ -53,10 +52,13 @@ fn linked_index(linked: &Path) -> PathBuf {
     gitdir.join("index")
 }
 
+/// Break `git status` for every uid by corrupting the index.
+///
+/// A `chmod 0o000` index does not fail for uid 0, so the root containers
+/// CI and devcontainers run under would see a healthy repo. A truncated
+/// index header fails the same way for any user.
 fn make_status_fail(index: &Path) {
-    let mut perms = fs::metadata(index).expect("index").permissions();
-    perms.set_mode(0o000);
-    fs::set_permissions(index, perms).expect("chmod index");
+    corrupt_index(index);
 }
 
 /// A status-failed linked checkout must not keep a branch the healthy

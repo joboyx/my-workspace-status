@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 
 use super::store::{CommentKey, CommentStore};
 
+#[cfg(test)]
 /// Markdown marker for a resolved comment. Open comments have no tag.
 pub const RESOLVED_MARKDOWN_TAG: &str = "[resolved]";
 
@@ -170,31 +171,29 @@ fn pipe_to(argv: &[&str], text: &str) -> bool {
     child.wait().map(|s| s.success()).unwrap_or(false) && ok
 }
 
+/// Standard base64 (RFC 4648, `+/` alphabet, `=` padded) for OSC 52.
+///
+/// Hand-rolled to keep the dependency list small; the payload is a comment
+/// export, so arbitrary UTF-8 bytes have to round-trip.
 fn base64_encode(data: &[u8]) -> String {
     const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    let mut i = 0;
-    while i < data.len() {
-        let b0 = data[i];
-        let b1 = data.get(i + 1).copied();
-        let b2 = data.get(i + 2).copied();
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied();
+        let b2 = chunk.get(2).copied();
         out.push(TABLE[(b0 >> 2) as usize] as char);
         out.push(TABLE[(((b0 & 0x03) << 4) | (b1.unwrap_or(0) >> 4)) as usize] as char);
-        if b1.is_some() {
-            out.push(
-                TABLE[(((b1.unwrap_or(0) & 0x0f) << 2) | (b2.unwrap_or(0) >> 6)) as usize] as char,
-            );
-        } else {
-            out.push('=');
+        match b1 {
+            Some(b1) => {
+                out.push(TABLE[(((b1 & 0x0f) << 2) | (b2.unwrap_or(0) >> 6)) as usize] as char)
+            }
+            None => out.push('='),
         }
-        if b2.is_some() {
-            out.push(TABLE[(b2.unwrap_or(0) & 0x3f) as usize] as char);
-        } else if b1.is_some() {
-            out.push('=');
-        } else {
-            out.push('=');
+        match b2 {
+            Some(b2) => out.push(TABLE[(b2 & 0x3f) as usize] as char),
+            None => out.push('='),
         }
-        i += 3;
     }
     out
 }
@@ -313,7 +312,25 @@ mod tests {
 
     #[test]
     fn base64_encode_known_vector() {
+        // RFC 4648 section 10 vectors: every padding case.
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
         assert_eq!(base64_encode(b"hi"), "aGk=");
         assert_eq!(base64_encode(b"hi!"), "aGkh");
+    }
+
+    #[test]
+    fn base64_encode_handles_multibyte_and_high_bytes() {
+        // Comments carry arbitrary UTF-8; `+` and `/` only appear for
+        // high bytes, so an ASCII-only vector set never exercises them.
+        assert_eq!(base64_encode("é".as_bytes()), "w6k=");
+        assert_eq!(base64_encode("🎉".as_bytes()), "8J+OiQ==");
+        assert_eq!(base64_encode(&[0xff, 0xef, 0xbe]), "/+++");
+        assert_eq!(base64_encode(&[0x00, 0x00, 0x00]), "AAAA");
     }
 }

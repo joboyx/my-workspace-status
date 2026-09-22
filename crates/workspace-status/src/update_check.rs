@@ -287,15 +287,14 @@ mod tests {
     use super::*;
 
     fn temp_store() -> PathBuf {
-        let path = env::temp_dir().join(format!(
+        env::temp_dir().join(format!(
             "ws-update-check-{}-{}.json",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        ));
-        path
+        ))
     }
 
     fn hooks(
