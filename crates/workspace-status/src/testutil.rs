@@ -47,6 +47,13 @@ pub fn git(cwd: &Path, args: &[&str]) {
 ///
 /// `git init -b` needs git 2.28 (2020). The checkout fallback keeps older
 /// hosts working; it is a no-op on any supported CI image.
+///
+/// Identity is written into the repo's own config, not left to [`git_env`].
+/// The env vars only reach commands this module spawns, and these fixtures
+/// exist to drive production code — `merge_into_head`, `stash_push`, and the
+/// rest spawn their own git with no such env. Without a repo-local identity
+/// they fail with `empty ident name` on any host that has no global
+/// `user.email`, which is every clean CI runner.
 pub fn init_repo_empty(dir: &Path) {
     fs::create_dir_all(dir).expect("create fixture dir");
     let mut cmd = Command::new(git_binary());
@@ -59,6 +66,15 @@ pub fn init_repo_empty(dir: &Path) {
         git(dir, &["init", "-q"]);
         git(dir, &["checkout", "-q", "-b", "main"]);
     }
+    git(dir, &["config", "user.name", "workspace-status test"]);
+    git(
+        dir,
+        &[
+            "config",
+            "user.email",
+            "workspace-status-test@example.invalid",
+        ],
+    );
 }
 
 /// [`init_repo_empty`] plus a committed `README.md` on `main`.
