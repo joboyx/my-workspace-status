@@ -3104,10 +3104,7 @@ impl AppState {
                 )
             }
             ListFocusTarget::CommitFiles => {
-                let compare_base = self
-                    .tabs
-                    .active_compare()
-                    .map(|tab| tab.base_ref.clone());
+                let compare_base = self.tabs.active_compare().map(|tab| tab.base_ref.clone());
                 let repo = if let Some(tab) = self.tabs.active_compare() {
                     Some(tab.checkout_path.as_str())
                 } else {

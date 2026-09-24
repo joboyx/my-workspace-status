@@ -543,8 +543,7 @@ mod tests {
 
     #[test]
     fn compare_file_names_the_base_branch() {
-        let entity =
-            EntityRef::file("/tmp/app", None, "README.md").with_compare_base(Some("main"));
+        let entity = EntityRef::file("/tmp/app", None, "README.md").with_compare_base(Some("main"));
         assert_eq!(
             format_entity_reference(&entity),
             "kind: file\nrepo: /tmp/app\npath: README.md\nbase: main\n"
