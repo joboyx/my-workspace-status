@@ -17,6 +17,13 @@ pub enum DiffSource {
         /// Stash ref (`stash@{n}`).
         stash_ref: String,
     },
+    /// A three-dot compare (`source: compare <base>...HEAD`).
+    Compare {
+        /// Tab base ref (branch name).
+        base_ref: String,
+        /// Checkout HEAD sha for this load. Empty omits the tip.
+        head: String,
+    },
 }
 
 /// Which side of a diff the focused rows belong to.
@@ -44,6 +51,8 @@ pub enum EntityRef {
         repo: String,
         /// Repo-relative path.
         path: String,
+        /// Compare-tab base ref when this row is on a diff-branch tab.
+        compare_base: Option<String>,
     },
     /// Directory row in the workspace tree.
     Dir {
@@ -51,6 +60,8 @@ pub enum EntityRef {
         repo: String,
         /// Repo-relative path.
         path: String,
+        /// Compare-tab base ref when this row is on a diff-branch tab.
+        compare_base: Option<String>,
     },
     /// Repo row (primary checkout).
     Repo {
@@ -119,6 +130,7 @@ impl EntityRef {
         Self::File {
             repo: repo_identity(checkout, primary_repo),
             path: path.into(),
+            compare_base: None,
         }
     }
 
@@ -127,6 +139,28 @@ impl EntityRef {
         Self::Dir {
             repo: repo_identity(checkout, primary_repo),
             path: path.into(),
+            compare_base: None,
+        }
+    }
+
+    /// Attach a compare-tab base ref to a file or dir copy. Other kinds stay as-is.
+    pub fn with_compare_base(self, base: Option<&str>) -> Self {
+        let Some(base) = base.map(str::trim).filter(|s| !s.is_empty()) else {
+            return self;
+        };
+        let base = base.to_string();
+        match self {
+            Self::File { repo, path, .. } => Self::File {
+                repo,
+                path,
+                compare_base: Some(base),
+            },
+            Self::Dir { repo, path, .. } => Self::Dir {
+                repo,
+                path,
+                compare_base: Some(base),
+            },
+            other => other,
         }
     }
 
@@ -210,15 +244,25 @@ pub fn format_entity_reference(entity: &EntityRef) -> String {
             out.push_str("kind: workspace\n");
             push_field(&mut out, "path", path);
         }
-        EntityRef::File { repo, path } => {
+        EntityRef::File {
+            repo,
+            path,
+            compare_base,
+        } => {
             out.push_str("kind: file\n");
             push_field(&mut out, "repo", repo);
             push_field(&mut out, "path", path);
+            push_compare_base(&mut out, compare_base.as_deref());
         }
-        EntityRef::Dir { repo, path } => {
+        EntityRef::Dir {
+            repo,
+            path,
+            compare_base,
+        } => {
             out.push_str("kind: dir\n");
             push_field(&mut out, "repo", repo);
             push_field(&mut out, "path", path);
+            push_compare_base(&mut out, compare_base.as_deref());
         }
         EntityRef::Repo { repo, path } => {
             out.push_str("kind: repo\n");
@@ -300,11 +344,24 @@ fn line_span(start: u32, end: u32) -> String {
     }
 }
 
+fn push_compare_base(out: &mut String, base: Option<&str>) {
+    if let Some(base) = base.filter(|s| !s.is_empty()) {
+        push_field(out, "base", base);
+    }
+}
+
 fn format_diff_source(source: &DiffSource) -> String {
     match source {
         DiffSource::Worktree => "worktree".to_string(),
         DiffSource::Commit { sha } => format!("commit {sha}"),
         DiffSource::Stash { stash_ref } => format!("stash {stash_ref}"),
+        DiffSource::Compare { base_ref, head } => {
+            if head.is_empty() {
+                format!("compare {base_ref}")
+            } else {
+                format!("compare {base_ref}...{head}")
+            }
+        }
     }
 }
 
@@ -480,6 +537,17 @@ mod tests {
         assert!(
             !out.contains("feature-wt"),
             "sibling checkout must not appear as repo: {out}"
+        );
+        assert!(!out.contains("base:"), "{out}");
+    }
+
+    #[test]
+    fn compare_file_names_the_base_branch() {
+        let entity =
+            EntityRef::file("/tmp/app", None, "README.md").with_compare_base(Some("main"));
+        assert_eq!(
+            format_entity_reference(&entity),
+            "kind: file\nrepo: /tmp/app\npath: README.md\nbase: main\n"
         );
     }
 

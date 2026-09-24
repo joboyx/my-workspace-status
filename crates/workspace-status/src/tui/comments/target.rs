@@ -330,9 +330,11 @@ fn entity_diff_source(source: Option<&CommitFileSource>) -> DiffSource {
         Some(CommitFileSource::Stash { stash_ref }) => DiffSource::Stash {
             stash_ref: stash_ref.clone(),
         },
-        Some(CommitFileSource::Worktree) | Some(CommitFileSource::Compare { .. }) | None => {
-            DiffSource::Worktree
-        }
+        Some(CommitFileSource::Worktree) | None => DiffSource::Worktree,
+        Some(CommitFileSource::Compare { base_ref, head, .. }) => DiffSource::Compare {
+            base_ref: base_ref.clone(),
+            head: head.clone(),
+        },
     }
 }
 
@@ -2346,7 +2348,7 @@ mod tests {
         );
         let file = file_row("src/lib.rs");
         match entity_from_tree(&snapshot, &file, None) {
-            EntityRef::File { repo, path } => {
+            EntityRef::File { repo, path, .. } => {
                 assert_eq!(repo, "app");
                 assert_eq!(path, "src/lib.rs");
             }
