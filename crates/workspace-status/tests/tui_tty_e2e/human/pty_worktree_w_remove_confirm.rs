@@ -145,10 +145,10 @@ fn documented_worktree_removed(screen: &str) -> bool {
 
 /// `W` on a linked worktree asks, then removes.
 ///
-/// Docs: Help GIT `W` = remove linked worktree. Keymap: `w` / `W` opens a
-/// boxed confirm (`y` / `n`, merge status, `--force` when dirty). Other
-/// rows refuse with `Focus a linked worktree to remove`. Yes runs
-/// `remove_worktree` (`git worktree remove`).
+/// Docs: Help GIT `W` = remove linked worktree. Keymap: `W` opens a
+/// boxed confirm (`y` / `n`, merge status, `--force` when dirty).
+/// Unshifted `w` does not. Other rows refuse with `Focus a linked
+/// worktree to remove`. Yes runs `remove_worktree` (`git worktree remove`).
 ///
 /// Live PTY after first paint (cursor already on family `app`): CSI-u
 /// Shift+W refuses and does not open confirm or drop the linked checkout.
@@ -212,6 +212,19 @@ fn pty_worktree_w_remove_confirm() {
         WAIT,
     );
     tui.wait_ms(SETTLE_MS);
+
+    tui.key('w');
+    tui.wait_ms(SETTLE_MS);
+    tui.wait_pred(
+        linked_ready_to_remove,
+        "lowercase w does not open remove confirm",
+        WAIT,
+    );
+    assert!(
+        linked_worktree_registered(&app),
+        "lowercase w must not run git worktree remove:\n{}",
+        git_worktree_porcelain(&app)
+    );
 
     tui.shift_letter('W');
     tui.wait_pred(
