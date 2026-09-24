@@ -756,7 +756,7 @@ fn normal_key(
         KeyCode::Char('b') => Action::Branch,
         KeyCode::Char('o') => Action::GraphFocusBranches,
         KeyCode::Char('O') => Action::GraphFocusClear,
-        KeyCode::Char('w') | KeyCode::Char('W') => Action::RemoveWorktree,
+        KeyCode::Char('W') => Action::RemoveWorktree,
         KeyCode::Char('i') => Action::ToggleDiffMode,
         KeyCode::Char('\\') => Action::ToggleDiffWrap,
         KeyCode::Char('M') => Action::ToggleCommitMsgExpand,
@@ -1107,11 +1107,22 @@ mod tests {
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('w')), normal(), false, false),
-            Action::RemoveWorktree
+            Action::None,
+            "unshifted w must not remove a worktree"
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('W')), normal(), false, false),
             Action::RemoveWorktree
+        );
+        assert_eq!(
+            event_to_action(
+                &Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::SHIFT)),
+                normal(),
+                false,
+                false
+            ),
+            Action::RemoveWorktree,
+            "CSI-u Shift+w folds to W"
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('p')), InputMode::StashMenu, false, false),
