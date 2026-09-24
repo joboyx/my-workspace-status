@@ -3104,6 +3104,7 @@ impl AppState {
                 )
             }
             ListFocusTarget::CommitFiles => {
+                let compare_base = self.tabs.active_compare().map(|tab| tab.base_ref.clone());
                 let repo = if let Some(tab) = self.tabs.active_compare() {
                     Some(tab.checkout_path.as_str())
                 } else {
@@ -3131,6 +3132,7 @@ impl AppState {
                     repo,
                     None,
                 )
+                .map(|entity| entity.with_compare_base(compare_base.as_deref()))
             }
         }
     }
@@ -6471,6 +6473,23 @@ mod tests {
     }
 
     #[test]
+    fn compare_left_apostrophe_names_base_branch() {
+        let mut app = state();
+        app.tabs.open_or_focus("app".into(), "main".into());
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        let _ = app.apply_compare_range(tab_id, gen, Ok(compare_range_load(&["README.md"])));
+        app.focus = FocusPane::Left;
+        assert_eq!(app.list_focus_target(), ListFocusTarget::CommitFiles);
+        let effect = app.dispatch(Action::CopyEntityReference);
+        let text = assert_copy_clipboard(effect, "file", "README.md", true);
+        assert!(
+            text.contains("base: main"),
+            "left-pane compare copy must name the branch: {text}"
+        );
+    }
+
+    #[test]
     fn compare_apostrophe_copies_diff_and_is_not_a_mutation() {
         let mut app = state();
         app.tabs.open_or_focus("app".into(), "main".into());
@@ -6495,6 +6514,11 @@ mod tests {
         let text = assert_copy_clipboard(effect, "diff", "README.md", true);
         assert!(text.contains("path: README.md"), "{text}");
         assert!(text.contains("lines:"), "{text}");
+        assert!(
+            text.contains("source: compare main...ccc"),
+            "compare diff copy must name the base branch: {text}"
+        );
+        assert!(!text.contains("source: worktree"), "{text}");
     }
 
     #[test]
