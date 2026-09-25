@@ -4,6 +4,8 @@ Every git subprocess the tool runs. `<git>` is `git_binary()` (`WORKSPACE_STATUS
 
 Most wrappers in this file attach stdin to `/dev/null` and set `GIT_TERMINAL_PROMPT=0`. That keeps git from inheriting the TUI's raw-mode TTY (a credential prompt would otherwise deadlock: the parent waits on `output()`, the child waits on stdin). `apply_cached_patch` is the exception: it writes the unified patch to git's stdin (`git apply --cached` / `git apply --reverse --cached`). `merge_into_head` also sets `GIT_EDITOR=true` and `GIT_MERGE_AUTOEDIT=no`.
 
+Every git subprocess also runs with `GIT_OPTIONAL_LOCKS=0` (set by `git::git_process`, the shared constructor `git_command` and `run_with_stdin` build on). `ws` polls every repo's status on a timer, and plain `git status` can take `.git/index.lock` to write a refreshed index; with several `ws` instances running, or a user/agent running `git add` / `commit` / `checkout` at the same time, that collides and fails with `Unable to create '.git/index.lock': File exists`. `GIT_OPTIONAL_LOCKS=0` tells git to skip that optional lock (see git-status(1), "BACKGROUND REFRESH"). It only affects optional locks — write commands still take the locks they need — so it is safe on every spawn, read or write.
+
 ## `crates/workspace-status/src/git.rs`
 
 | Function | Command | Returns | Purpose |
