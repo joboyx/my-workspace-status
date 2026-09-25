@@ -24,13 +24,28 @@ pub fn git_binary() -> &'static Path {
     })
 }
 
+/// Build a git subprocess for `bin`, with the env every `ws` git spawn needs.
+///
+/// `GIT_OPTIONAL_LOCKS=0` stops git from taking `.git/index.lock` for
+/// background refreshes (git-status(1), "BACKGROUND REFRESH"). `ws` polls
+/// every repo every few seconds; without this, a poll can collide with a
+/// concurrent `ws` instance or a manual `git add`/`commit`/`checkout` and
+/// fail with `Unable to create '.git/index.lock': File exists`. The flag
+/// only skips *optional* locks — write commands still take the locks they
+/// need, so it is safe on every spawn, read or write.
+pub(crate) fn git_process(bin: &Path) -> Command {
+    let mut cmd = Command::new(bin);
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    cmd
+}
+
 /// Build a git subprocess that cannot steal the TUI's TTY.
 ///
 /// Stdin is `/dev/null` so a credential prompt cannot deadlock against the
 /// event loop. `GIT_TERMINAL_PROMPT=0` fails fast instead of waiting on a
 /// hidden prompt.
 fn git_command(bin: &Path, args: &[&str], cwd: &Path) -> Command {
-    let mut cmd = Command::new(bin);
+    let mut cmd = git_process(bin);
     cmd.args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -50,7 +65,7 @@ fn run_with_stdin(
     cwd: &Path,
     stdin: &[u8],
 ) -> std::io::Result<std::process::Output> {
-    let mut cmd = Command::new(git_binary());
+    let mut cmd = git_process(git_binary());
     cmd.args(args)
         .current_dir(cwd)
         .stdin(Stdio::piped())
@@ -962,6 +977,39 @@ mod tests {
             "stdin must not be a TTY: {stdout:?}"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_process_disables_optional_locks() {
+        let cmd = git_process(git_binary());
+        assert_eq!(
+            cmd.get_envs()
+                .find(|(k, _)| *k == "GIT_OPTIONAL_LOCKS")
+                .and_then(|(_, v)| v),
+            Some(std::ffi::OsStr::new("0")),
+            "every ws git spawn must disable optional locks so a background poll cannot \
+             collide with a concurrent write on .git/index.lock"
+        );
+    }
+
+    #[test]
+    fn git_command_and_run_with_stdin_disable_optional_locks() {
+        let dir = std::env::temp_dir();
+        let has_no_locks_env = |cmd: &Command| {
+            cmd.get_envs()
+                .find(|(k, _)| *k == "GIT_OPTIONAL_LOCKS")
+                .and_then(|(_, v)| v)
+                == Some(std::ffi::OsStr::new("0"))
+        };
+        assert!(has_no_locks_env(&git_command(
+            git_binary(),
+            &["status"],
+            &dir
+        )));
+
+        let out = run_with_stdin(&["hash-object", "--stdin"], &dir, b"probe\n")
+            .expect("run_with_stdin spawns");
+        assert!(out.status.success(), "hash-object failed: {out:?}");
     }
 
     #[test]
