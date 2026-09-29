@@ -367,6 +367,7 @@ mod tests {
             "if let Err(err) = stage_file",
             "if let Err(err) = unstage_file",
             "apply_cached_patch(",
+            "apply_worktree_patch_reverse(",
             "if let Err(err) = revert_tracked_file",
             "if let Err(err) = remove_untracked_file",
             "match stash_push(",

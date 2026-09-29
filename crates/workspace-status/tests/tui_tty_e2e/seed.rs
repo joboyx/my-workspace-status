@@ -229,3 +229,60 @@ pub fn merge_mark_workspace() -> (PathBuf, PathBuf) {
     seed_merge_mark_family(&workspace);
     (root, workspace)
 }
+
+/// Changed line in the first hunk of [`two_hunk_regions_workspace`].
+pub const REGIONS_ALPHA: &str = "ALPHA-NEW";
+
+/// Changed line in the second hunk of [`two_hunk_regions_workspace`].
+pub const REGIONS_OMEGA: &str = "OMEGA-NEW";
+
+const REGIONS_COMMITTED: &str = "\
+keep-a
+keep-b
+keep-c
+ALPHA-OLD
+keep-d
+keep-e
+keep-f
+pad-1
+pad-2
+pad-3
+pad-4
+pad-5
+pad-6
+pad-7
+pad-8
+OMEGA-OLD
+keep-x
+keep-y
+keep-z
+";
+
+/// Repo `app` with `regions.txt` committed, then two separable unstaged
+/// hunks (ALPHA near the top, OMEGA near the bottom) for `V` range writes.
+pub fn two_hunk_regions_workspace(prefix: &str) -> (PathBuf, PathBuf) {
+    let (root, workspace) = new_workspace(prefix);
+    seed_repo(&workspace, "app", "main", false);
+    let repo = workspace.join("app");
+    fs::write(repo.join("regions.txt"), REGIONS_COMMITTED).unwrap();
+    git(&repo, &["add", "regions.txt"]);
+    git(&repo, &["commit", "-q", "-m", "regions"]);
+    fs::write(
+        repo.join("regions.txt"),
+        REGIONS_COMMITTED
+            .replace("ALPHA-OLD", REGIONS_ALPHA)
+            .replace("OMEGA-OLD", REGIONS_OMEGA),
+    )
+    .unwrap();
+    (root, workspace)
+}
+
+/// `git diff [--cached] -- regions.txt` in `repo` (the on-disk oracle).
+pub fn regions_diff(repo: &Path, cached: bool) -> String {
+    let mut args = vec!["diff"];
+    if cached {
+        args.push("--cached");
+    }
+    args.extend(["--", "regions.txt"]);
+    git_stdout(repo, &args)
+}

@@ -47,7 +47,7 @@ use super::commit_files::{
 };
 use super::ctrl_c_exit::{handle_ctrl_c, is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT};
 use super::diff::{
-    anchor_row_text, build_diff_rows, build_partial_cached_patch, diff_row_content_width,
+    anchor_row_text, build_diff_rows, build_partial_patch, diff_row_content_width,
     diff_wrap_row_heights, find_anchor_row, gutter_width, row_search_text, wrap_viewport_start,
     DiffContent, DiffRow, PartialPatchKind,
 };
@@ -262,6 +262,15 @@ pub enum PendingConfirm {
         targets: Vec<RevertTarget>,
         /// Focused-row path shown in the overlay.
         label: String,
+    },
+    /// DiffVisual `x`: discard the highlighted lines of one file.
+    ///
+    /// The patch is built before the confirm opens, so a refusal is
+    /// immediate and `y` applies exactly what the overlay named.
+    RevertRange {
+        repo: String,
+        path: String,
+        patch: String,
     },
     StashDrop {
         repo: String,
@@ -2798,20 +2807,8 @@ impl AppState {
             FileWrite::Stage => PartialPatchKind::Stage,
             FileWrite::Unstage => PartialPatchKind::Unstage,
         };
-        let Some((repo, path)) = self.visual_write_target() else {
-            self.status = self.visual_write_refuse_status(write);
-            return Effect::None;
-        };
-        let mode = effective_diff_mode(self.diff_mode, self.layout.diff_pane_width);
-        let patch = match build_partial_cached_patch(
-            self.current_diff_content(),
-            mode,
-            anchor,
-            self.diff_cursor,
-            kind,
-            &path,
-        ) {
-            Ok(patch) => patch,
+        let (repo, path, patch) = match self.visual_patch(anchor, kind) {
+            Ok(built) => built,
             Err(err) => {
                 self.status = err;
                 return Effect::None;
@@ -2827,6 +2824,27 @@ impl AppState {
             patch,
             reverse,
         }
+    }
+
+    /// Repo, path, and patch for the DiffVisual range, or the refusal text.
+    fn visual_patch(
+        &self,
+        anchor: usize,
+        kind: PartialPatchKind,
+    ) -> Result<(String, String, String), String> {
+        let Some((repo, path)) = self.visual_write_target() else {
+            return Err(self.visual_write_refuse_status(kind));
+        };
+        let mode = effective_diff_mode(self.diff_mode, self.layout.diff_pane_width);
+        let patch = build_partial_patch(
+            self.current_diff_content(),
+            mode,
+            anchor,
+            self.diff_cursor,
+            kind,
+            &path,
+        )?;
+        Ok((repo, path, patch))
     }
 
     /// Repo and path for a DiffVisual cached patch, or `None` to refuse.
@@ -2846,10 +2864,11 @@ impl AppState {
         }
     }
 
-    fn visual_write_refuse_status(&self, write: FileWrite) -> String {
-        let verb = match write {
-            FileWrite::Stage => "stage",
-            FileWrite::Unstage => "unstage",
+    fn visual_write_refuse_status(&self, kind: PartialPatchKind) -> String {
+        let verb = match kind {
+            PartialPatchKind::Stage => "stage",
+            PartialPatchKind::Unstage => "unstage",
+            PartialPatchKind::Revert => "revert",
         };
         let target = match &self.drill {
             DrillView::Diff {
@@ -2901,6 +2920,9 @@ impl AppState {
     }
 
     fn begin_revert(&mut self) -> Effect {
+        if let Some(anchor) = self.diff_visual_anchor {
+            return self.begin_revert_range(anchor);
+        }
         let scoped = collect_write_files(&self.snapshot, self.focused_row(), self.show_ignored);
         let selected: Vec<ScopedFile> = scoped
             .into_iter()
@@ -2953,6 +2975,21 @@ impl AppState {
         Effect::None
     }
 
+    /// DiffVisual `x`: build the reverse patch, then open its confirm.
+    ///
+    /// A refusal keeps the highlight and sets the status. Opening the
+    /// confirm clears the highlight.
+    fn begin_revert_range(&mut self, anchor: usize) -> Effect {
+        match self.visual_patch(anchor, PartialPatchKind::Revert) {
+            Ok((repo, path, patch)) => {
+                self.clear_diff_visual();
+                self.confirm = Some(PendingConfirm::RevertRange { repo, path, patch });
+            }
+            Err(err) => self.status = err,
+        }
+        Effect::None
+    }
+
     fn confirm_yes(&mut self, clean: bool) -> Effect {
         match self.confirm.take() {
             Some(PendingConfirm::Revert { targets, .. }) => {
@@ -2983,6 +3020,15 @@ impl AppState {
                     })
                     .collect();
                 single_or_batch(effects)
+            }
+            // The range confirm offers only y / n: `Y` keeps it open.
+            Some(pending @ PendingConfirm::RevertRange { .. }) if clean => {
+                self.confirm = Some(pending);
+                Effect::None
+            }
+            Some(PendingConfirm::RevertRange { repo, path, patch }) => {
+                self.status = format!("revert range {path}");
+                Effect::RevertPatch { repo, path, patch }
             }
             Some(PendingConfirm::StashDrop { repo, stash_ref }) => {
                 self.status = format!("drop {stash_ref}");
@@ -5037,6 +5083,7 @@ fn visible_snapshot(snapshot: &WorkspaceSnapshot, show_ignored: bool) -> Workspa
 
 #[cfg(test)]
 mod tests {
+    use super::super::command_palette::PALETTE_COMMANDS;
     use super::super::comments::put_comment;
     use super::super::gates::ListFocusTarget;
     use super::super::keys::InputMode;
@@ -5050,6 +5097,15 @@ mod tests {
     use crate::tui::split::{pane_widths, side_by_side_column_widths, DIFF_SPLIT_FRACTION};
     use crate::tui::watch::watch_interval_ms;
     use workspace_status_graph::{Commit, GraphModel, GraphRef, Stash};
+
+    /// Palette gate for the catalog row titled `title`.
+    fn palette_reason(app: &AppState, title: &str) -> Option<String> {
+        let command = PALETTE_COMMANDS
+            .iter()
+            .find(|command| command.title == title)
+            .unwrap_or_else(|| panic!("no palette row {title}"));
+        app.palette_disabled_reason(command)
+    }
 
     fn repo(name: &str, dirty: bool) -> RepoSnapshot {
         RepoSnapshot {
@@ -6336,7 +6392,7 @@ mod tests {
         assert_eq!(app.dispatch(Action::ExternalDiff), Effect::None);
         assert_eq!(app.status, "focus a file to diff");
         assert_eq!(
-            app.palette_disabled_reason(&Action::Edit).as_deref(),
+            palette_reason(&app, "Open in editor").as_deref(),
             Some("focus a file to edit")
         );
     }
@@ -6388,7 +6444,7 @@ mod tests {
         compare_tab_with_view_rs(&mut app);
         app.tabs.active_compare_mut().unwrap().file_cursor = 1;
         assert!(app.focused_commit_file_row().unwrap().is_file());
-        assert_eq!(app.palette_disabled_reason(&Action::ToggleReviewed), None);
+        assert_eq!(palette_reason(&app, "Mark reviewed"), None);
 
         assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
         assert_ne!(app.status, super::super::tabs::SWITCH_TO_WORKSPACE_TAB);
@@ -6418,8 +6474,7 @@ mod tests {
         app.tabs.active_compare_mut().unwrap().file_cursor = 0;
         assert!(!app.focused_commit_file_row().unwrap().is_file());
         assert_eq!(
-            app.palette_disabled_reason(&Action::ToggleReviewed)
-                .as_deref(),
+            palette_reason(&app, "Mark reviewed").as_deref(),
             Some(FOCUS_A_FILE_TO_MARK_REVIEWED)
         );
         assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
@@ -6703,25 +6758,24 @@ mod tests {
         let mut app = state();
         focus_file(&mut app, "README.md");
         app.tabs.open_or_focus("app".into(), "main".into());
-        for action in [
-            Action::Stage,
-            Action::Revert,
-            Action::Fetch,
-            Action::Branch,
-            Action::GraphFocusBranches,
-            Action::GraphFocusClear,
+        for title in [
+            "Stage",
+            "Revert",
+            "Fetch remotes",
+            "Branch picker",
+            "Graph focus branches",
+            "Clear graph focus",
         ] {
             assert_eq!(
-                app.palette_disabled_reason(&action).as_deref(),
+                palette_reason(&app, title).as_deref(),
                 Some(super::super::tabs::SWITCH_TO_WORKSPACE_TAB),
-                "{action:?}"
+                "{title}"
             );
         }
         assert_eq!(app.dispatch(Action::Stage), Effect::None);
         assert_eq!(app.status, super::super::tabs::SWITCH_TO_WORKSPACE_TAB);
         assert_eq!(
-            app.palette_disabled_reason(&Action::CopyEntityReference)
-                .as_deref(),
+            palette_reason(&app, "Copy entity reference").as_deref(),
             Some("no copy target")
         );
     }
@@ -6759,10 +6813,7 @@ mod tests {
         );
         app.focus = FocusPane::Right;
         assert_eq!(app.list_focus_target(), ListFocusTarget::None);
-        assert_eq!(
-            app.palette_disabled_reason(&Action::CopyEntityReference),
-            None
-        );
+        assert_eq!(palette_reason(&app, "Copy entity reference"), None);
         let effect = app.dispatch(Action::CopyEntityReference);
         assert_ne!(app.status, super::super::tabs::SWITCH_TO_WORKSPACE_TAB);
         let text = assert_copy_clipboard(effect, "diff", "README.md", true);
@@ -7771,13 +7822,9 @@ mod tests {
             app.dispatch(Action::GraphFocusBranches),
             Effect::PrepareGraphFocusPicker { repo } if repo == "app"
         ));
+        assert_eq!(palette_reason(&app, "Graph focus branches"), None);
         assert_eq!(
-            app.palette_disabled_reason(&Action::GraphFocusBranches),
-            None
-        );
-        assert_eq!(
-            app.palette_disabled_reason(&Action::GraphFocusClear)
-                .as_deref(),
+            palette_reason(&app, "Clear graph focus").as_deref(),
             Some("no graph focus to clear")
         );
 
@@ -7793,16 +7840,14 @@ mod tests {
         focus_file(&mut app, "README.md");
         assert_eq!(app.dispatch(Action::GraphFocusBranches), Effect::None);
         assert_eq!(
-            app.palette_disabled_reason(&Action::GraphFocusBranches)
-                .as_deref(),
+            palette_reason(&app, "Graph focus branches").as_deref(),
             Some(GRAPH_FOCUS_NEED_CONTEXT)
         );
 
         app.cursor = 0;
         assert_eq!(app.dispatch(Action::GraphFocusBranches), Effect::None);
         assert_eq!(
-            app.palette_disabled_reason(&Action::GraphFocusBranches)
-                .as_deref(),
+            palette_reason(&app, "Graph focus branches").as_deref(),
             Some(GRAPH_FOCUS_NEED_CONTEXT)
         );
 
@@ -11499,7 +11544,11 @@ diff --git a/README.md b/README.md
     }
 
     fn assert_visual_write_refused(app: &mut AppState, subject: &str) {
-        for (action, verb) in [(Action::Stage, "stage"), (Action::Unstage, "unstage")] {
+        for (action, verb) in [
+            (Action::Stage, "stage"),
+            (Action::Unstage, "unstage"),
+            (Action::Revert, "revert"),
+        ] {
             assert_eq!(app.dispatch(action), Effect::None);
             assert!(
                 app.diff_visual_anchor.is_some(),
@@ -11507,6 +11556,7 @@ diff --git a/README.md b/README.md
             );
             let want = format!("cannot {verb} {subject}");
             assert_eq!(app.status, want);
+            assert!(app.confirm.is_none(), "refusal opens no confirm");
         }
     }
 
@@ -11629,6 +11679,331 @@ diff --git a/README.md b/README.md
             "{}",
             app.status
         );
+    }
+
+    fn highlight_first_readme_hunk(app: &mut AppState) {
+        let rows = app.current_diff_rows();
+        let first = rows
+            .iter()
+            .position(|r| matches!(r, DiffRow::Hunk { .. }))
+            .expect("hunk");
+        let second = rows
+            .iter()
+            .enumerate()
+            .skip(first + 1)
+            .find_map(|(i, r)| matches!(r, DiffRow::Hunk { .. }).then_some(i))
+            .expect("second");
+        app.diff_cursor = first;
+        app.dispatch(Action::DiffVisualStart);
+        app.diff_cursor = second - 1;
+    }
+
+    #[test]
+    fn visual_revert_confirms_then_emits_revert_patch() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_first_readme_hunk(&mut app);
+        assert_eq!(
+            palette_reason(&app, "Revert highlighted lines"),
+            None,
+            "a buildable range keeps palette revert enabled"
+        );
+        assert_eq!(app.dispatch(Action::Revert), Effect::None);
+        assert!(
+            app.diff_visual_anchor.is_none(),
+            "opening the confirm clears highlight"
+        );
+        let Some(PendingConfirm::RevertRange { repo, path, patch }) = app.confirm.clone() else {
+            panic!("{:?}", app.confirm);
+        };
+        assert_eq!((repo.as_str(), path.as_str()), ("app", "README.md"));
+        assert!(
+            patch.contains("ALPHA-NEW") && !patch.contains("OMEGA-NEW"),
+            "{patch}"
+        );
+        assert_eq!(
+            app.dispatch(Action::ConfirmYes),
+            Effect::RevertPatch {
+                repo: "app".into(),
+                path: "README.md".into(),
+                patch,
+            }
+        );
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "revert range README.md");
+    }
+
+    #[test]
+    fn visual_revert_confirm_ignores_capital_y() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_first_readme_hunk(&mut app);
+        app.dispatch(Action::Revert);
+        let pending = app.confirm.clone();
+        assert!(matches!(pending, Some(PendingConfirm::RevertRange { .. })));
+        let status = app.status.clone();
+        assert_eq!(app.dispatch(Action::ConfirmYesClean), Effect::None);
+        assert_eq!(app.confirm, pending, "Y keeps the y / n confirm open");
+        assert_eq!(app.status, status);
+    }
+
+    #[test]
+    fn visual_revert_confirm_no_cancels() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_first_readme_hunk(&mut app);
+        app.dispatch(Action::Revert);
+        assert!(matches!(
+            app.confirm,
+            Some(PendingConfirm::RevertRange { .. })
+        ));
+        assert_eq!(app.dispatch(Action::ConfirmNo), Effect::None);
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "revert cancelled");
+    }
+
+    #[test]
+    fn visual_revert_fails_closed_on_context_only() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        let rows = app.current_diff_rows();
+        let ctx = rows
+            .iter()
+            .position(|r| matches!(r, DiffRow::Line { left, .. } if left.text == "keep-a"))
+            .expect("context");
+        app.diff_cursor = ctx;
+        app.dispatch(Action::DiffVisualStart);
+        assert_eq!(
+            palette_reason(&app, "Revert highlighted lines").as_deref(),
+            Some("nothing to revert in highlight")
+        );
+        assert_eq!(app.dispatch(Action::Revert), Effect::None);
+        assert!(app.confirm.is_none());
+        assert!(
+            app.diff_visual_anchor.is_some(),
+            "fail-closed keeps highlight"
+        );
+        assert_eq!(app.status, "nothing to revert in highlight");
+    }
+
+    /// Open the palette, filter to `title`, and put the cursor on that row.
+    fn palette_select(app: &mut AppState, title: &str) {
+        use super::super::action::PaletteOpenedBy;
+        if app.command_palette.is_none() {
+            app.dispatch(Action::ToggleCommandPalette(PaletteOpenedBy::Colon));
+        }
+        for c in title.chars() {
+            app.dispatch(Action::CommandPaletteChar(c));
+        }
+        let palette = app.command_palette.as_mut().expect("palette open");
+        let index = palette
+            .visible()
+            .iter()
+            .position(|command| command.title == title)
+            .unwrap_or_else(|| panic!("palette row {title}"));
+        palette.cursor = index;
+    }
+
+    #[test]
+    fn palette_opens_over_highlight_and_esc_keeps_the_range() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_first_readme_hunk(&mut app);
+        let anchor = app.diff_visual_anchor;
+        let cursor = app.diff_cursor;
+        assert_eq!(app.input_mode(), InputMode::DiffVisual);
+        app.dispatch(Action::ToggleCommandPalette(
+            super::super::action::PaletteOpenedBy::CtrlK,
+        ));
+        assert_eq!(app.input_mode(), InputMode::CommandPalette);
+        assert_eq!(app.diff_visual_anchor, anchor, "open keeps the anchor");
+        app.dispatch(Action::CommandPaletteCancel);
+        assert!(app.command_palette.is_none());
+        assert_eq!(app.diff_visual_anchor, anchor, "Esc keeps the anchor");
+        assert_eq!(app.diff_cursor, cursor);
+        assert_eq!(app.input_mode(), InputMode::DiffVisual);
+    }
+
+    /// Open the palette, type `filter`, and return the row under the cursor.
+    fn palette_cursor_title(app: &mut AppState, filter: &str) -> &'static str {
+        app.dispatch(Action::ToggleCommandPalette(
+            super::super::action::PaletteOpenedBy::CtrlK,
+        ));
+        for c in filter.chars() {
+            app.dispatch(Action::CommandPaletteChar(c));
+        }
+        let palette = app.command_palette.as_ref().expect("palette open");
+        palette.selected().expect("a visible row").title
+    }
+
+    #[test]
+    fn palette_cursor_lands_on_the_first_enabled_row() {
+        use super::super::command_palette::CommandGroup;
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        // Whole-file Revert runs from the file row, not the diff pane.
+        app.focus = FocusPane::Left;
+        let first = palette_cursor_title(&mut app, "");
+        let command = PALETTE_COMMANDS
+            .iter()
+            .find(|command| command.title == first)
+            .expect("catalog row");
+        assert_ne!(command.group, CommandGroup::Highlight, "{first}");
+        assert_eq!(app.palette_disabled_reason(command), None, "{first}");
+        app.command_palette = None;
+
+        assert_eq!(palette_cursor_title(&mut app, "revert"), "Revert");
+        // Backspace re-lands the cursor on the wider list too.
+        app.dispatch(Action::CommandPaletteBackspace);
+        let palette = app.command_palette.as_ref().expect("palette open");
+        assert_eq!(palette.selected().map(|c| c.title), Some("Revert"));
+        // j / k still reach the disabled HIGHLIGHT row.
+        app.dispatch(Action::CommandPaletteMove(-1));
+        let palette = app.command_palette.as_ref().expect("palette open");
+        assert_eq!(
+            palette.selected().map(|c| c.title),
+            Some("Revert highlighted lines")
+        );
+    }
+
+    #[test]
+    fn palette_cursor_in_highlight_lands_on_the_range_row() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_first_readme_hunk(&mut app);
+        assert_eq!(
+            palette_cursor_title(&mut app, "revert"),
+            "Revert highlighted lines"
+        );
+    }
+
+    #[test]
+    fn palette_whole_file_rows_wait_for_highlight_exit() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_first_readme_hunk(&mut app);
+        let anchor = app.diff_visual_anchor;
+        for title in [
+            "Fetch remotes",
+            "Stage",
+            "Revert",
+            "Inline / split",
+            // Help clears the highlight, and highlight mode has no `?` key.
+            "Keymap help",
+        ] {
+            assert_eq!(
+                palette_reason(&app, title).as_deref(),
+                Some("exit highlight first (Esc)"),
+                "{title}"
+            );
+        }
+        for title in ["Cycle theme", "Comment"] {
+            assert_eq!(palette_reason(&app, title), None, "{title}");
+        }
+        palette_select(&mut app, "Fetch remotes");
+        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
+        assert!(
+            app.command_palette.is_some(),
+            "a disabled row keeps the palette open"
+        );
+        assert_eq!(app.status, "exit highlight first (Esc)");
+        assert_eq!(app.diff_visual_anchor, anchor);
+    }
+
+    #[test]
+    fn palette_highlight_rows_need_a_highlight() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        for title in [
+            "Stage highlighted lines",
+            "Unstage highlighted lines",
+            "Revert highlighted lines",
+            "Exit highlight",
+        ] {
+            assert_eq!(
+                palette_reason(&app, title).as_deref(),
+                Some("highlight diff lines first (V)"),
+                "{title}"
+            );
+        }
+        assert_eq!(palette_reason(&app, "Keymap help"), None);
+        assert_eq!(
+            palette_reason(&app, "Stage").as_deref(),
+            Some("not available here")
+        );
+    }
+
+    #[test]
+    fn palette_range_row_refuses_after_a_reload_drops_the_range() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_first_readme_hunk(&mut app);
+        palette_select(&mut app, "Stage highlighted lines");
+        app.set_diff("app".into(), "README.md".into(), two_line_readme());
+        assert!(
+            app.diff_visual_anchor.is_none(),
+            "the reload drops the range"
+        );
+        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
+        assert!(
+            app.command_palette.is_some(),
+            "a disabled row keeps it open"
+        );
+        assert_eq!(app.status, "highlight diff lines first (V)");
+    }
+
+    #[test]
+    fn palette_esc_clears_the_disabled_row_reason() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_first_readme_hunk(&mut app);
+        palette_select(&mut app, "Fetch remotes");
+        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
+        assert_eq!(app.status, "exit highlight first (Esc)");
+        app.dispatch(Action::CommandPaletteCancel);
+        assert_eq!(app.input_mode(), InputMode::DiffVisual);
+        assert_eq!(app.status, "", "the reason does not linger in highlight");
+
+        // A status the palette did not set stays.
+        app.status = "staged range README.md".into();
+        palette_select(&mut app, "Fetch remotes");
+        app.dispatch(Action::CommandPaletteCancel);
+        assert_eq!(app.status, "staged range README.md");
+    }
+
+    #[test]
+    fn palette_exit_highlight_clears_the_range() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_first_readme_hunk(&mut app);
+        assert_eq!(palette_reason(&app, "Exit highlight"), None);
+        palette_select(&mut app, "Exit highlight");
+        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
+        assert!(app.command_palette.is_none());
+        assert!(app.diff_visual_anchor.is_none());
+    }
+
+    #[test]
+    fn palette_range_rows_use_the_range_patch_gate() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_first_readme_hunk(&mut app);
+        assert_eq!(palette_reason(&app, "Stage highlighted lines"), None);
+        assert_eq!(
+            palette_reason(&app, "Unstage highlighted lines").as_deref(),
+            Some("nothing to unstage in highlight")
+        );
+        palette_select(&mut app, "Stage highlighted lines");
+        match app.dispatch(Action::CommandPaletteSubmit) {
+            Effect::ApplyCachedPatch { patch, reverse, .. } => {
+                assert!(!reverse);
+                assert!(
+                    patch.contains("ALPHA-NEW") && !patch.contains("OMEGA-NEW"),
+                    "{patch}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     fn assert_copy_clipboard(effect: Effect, kind: &str, needle: &str, announce: bool) -> String {

@@ -59,7 +59,7 @@ fn run(args: &[&str], cwd: &Path) -> std::io::Result<std::process::Output> {
     git_command(git_binary(), args, cwd).output()
 }
 
-/// Run git with `stdin` piped. Used only by [`apply_cached_patch`].
+/// Run git with `stdin` piped. Used only by the `git apply` wrappers.
 fn run_with_stdin(
     args: &[&str],
     cwd: &Path,
@@ -395,17 +395,38 @@ pub fn unstage_file(cwd: &Path, file_path: &str) -> Result<(), String> {
 /// `reverse` is `git apply --reverse --cached` (unstage selected lines).
 /// Stdin carries the patch. Other git wrappers attach stdin to `/dev/null`.
 pub fn apply_cached_patch(cwd: &Path, patch: &str, reverse: bool) -> Result<(), String> {
-    if patch.trim().is_empty() {
-        return Err("empty patch".into());
-    }
     let mut args: Vec<&str> = vec!["apply", "--cached", "--unidiff-zero", "--whitespace=nowarn"];
     if reverse {
         args.push("--reverse");
     }
     args.push("-");
-    match run_with_stdin(&args, cwd, patch.as_bytes()) {
+    apply_patch_stdin(cwd, patch, &args)
+}
+
+/// Discard a unified patch from the worktree (`git apply --reverse`).
+///
+/// No `--cached`: the index stays untouched. Stdin carries the patch.
+pub fn apply_worktree_patch_reverse(cwd: &Path, patch: &str) -> Result<(), String> {
+    apply_patch_stdin(
+        cwd,
+        patch,
+        &[
+            "apply",
+            "--reverse",
+            "--unidiff-zero",
+            "--whitespace=nowarn",
+            "-",
+        ],
+    )
+}
+
+fn apply_patch_stdin(cwd: &Path, patch: &str, args: &[&str]) -> Result<(), String> {
+    if patch.trim().is_empty() {
+        return Err("empty patch".into());
+    }
+    match run_with_stdin(args, cwd, patch.as_bytes()) {
         Ok(out) if out.status.success() => Ok(()),
-        Ok(out) => Err(git_failure_message(&args, &out)),
+        Ok(out) => Err(git_failure_message(args, &out)),
         Err(err) => Err(err.to_string()),
     }
 }

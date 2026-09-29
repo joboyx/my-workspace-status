@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::harness::{left_tree, PtySession};
+use crate::seed::{REGIONS_ALPHA, REGIONS_OMEGA};
 
 pub const WAIT: Duration = Duration::from_secs(12);
 
@@ -1066,4 +1067,80 @@ pub fn corrupt_index(index: &Path) {
     assert!(index.is_file(), "index must exist: {}", index.display());
     fs::write(index, b"DIRC\0\0\0")
         .unwrap_or_else(|err| panic!("corrupt {}: {err}", index.display()));
+}
+
+/// Gap between visual-highlight keys so held-nav does not coalesce them.
+pub const VISUAL_KEY_GAP_MS: u64 = 50;
+
+/// Launch paint of [`crate::seed::two_hunk_regions_workspace`]: cursor on
+/// `regions.txt`, both hunks in the UNSTAGED diff.
+pub fn regions_first_paint(screen: &str) -> bool {
+    tree_cursor_on(screen, "regions.txt")
+        && tree_has(screen, "app")
+        && screen.contains("UNSTAGED")
+        && screen.contains(REGIONS_ALPHA)
+        && screen.contains(REGIONS_OMEGA)
+        && !screen.contains("VISUAL")
+        && !screen.contains("MOVE")
+}
+
+/// The regions.txt diff has focus, with no highlight and no overlay.
+pub fn regions_diff_focused(screen: &str) -> bool {
+    tree_has(screen, "regions.txt")
+        && !tree_cursor_on(screen, "regions.txt")
+        && panes_tree_unfocused_diff_focused(screen)
+        && screen.contains("UNSTAGED")
+        && screen.contains(REGIONS_ALPHA)
+        && !screen.contains("VISUAL")
+        && !screen.contains("MOVE")
+}
+
+/// `V` highlight is on the focused regions.txt diff (VISUAL hint row).
+pub fn regions_highlight_active(screen: &str) -> bool {
+    screen.contains("VISUAL")
+        && screen.contains("stage / unstage")
+        && screen.contains("revert")
+        && screen.contains("cancel highlight")
+        && panes_tree_unfocused_diff_focused(screen)
+        && tree_has(screen, "regions.txt")
+        && !tree_cursor_on(screen, "regions.txt")
+        && !screen.contains("MOVE")
+}
+
+/// Boxed `y` / `n` confirm of a highlighted-range revert.
+pub fn revert_range_confirm(screen: &str) -> bool {
+    screen.contains("Discard highlighted lines in regions.txt?")
+        && screen.contains("cancel")
+        && !screen.contains("VISUAL")
+        && !screen.contains("revert + delete untracked")
+}
+
+/// Launch on the two-hunk regions.txt diff, Tab to it, `V`, then plain
+/// `j` presses until the highlight covers the first hunk (ALPHA).
+pub fn open_regions_first_hunk_highlight(workspace: &Path) -> PtySession {
+    let mut tui = PtySession::open(workspace);
+    tui.wait_pred(
+        regions_first_paint,
+        "launch is the two-hunk dirty regions.txt file diff",
+        WAIT,
+    );
+    tui.tab();
+    tui.wait_pred(
+        regions_diff_focused,
+        "Tab focuses the two-hunk regions.txt diff",
+        WAIT,
+    );
+    tui.shift_letter('V');
+    tui.wait_pred(regions_highlight_active, "Shift+V paints VISUAL", WAIT);
+    tui.wait_ms(VISUAL_KEY_GAP_MS);
+    for _ in 0..6 {
+        tui.letter_press('j');
+        tui.wait_ms(VISUAL_KEY_GAP_MS);
+    }
+    tui.wait_pred(
+        |screen| regions_highlight_active(screen) && screen.contains(REGIONS_ALPHA),
+        "j extends VISUAL over the first hunk (ALPHA)",
+        WAIT,
+    );
+    tui
 }

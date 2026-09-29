@@ -4,7 +4,8 @@ use std::time::Instant;
 
 use super::super::action::{Action, Effect, ExternalDiffKind, PaletteOpenedBy};
 use super::super::branches::can_open_branch_picker;
-use super::super::command_palette::CommandPaletteState;
+use super::super::command_palette::{CommandPaletteState, CommandScope, PaletteCommand};
+use super::super::diff::PartialPatchKind;
 use super::super::gates::{dispatch_is_noop, is_compare_mutation, ListFocusTarget};
 use super::super::graph_focus::GRAPH_FOCUS_NEED_CONTEXT;
 use super::super::ops::{collect_write_files, op_is_kind_noop, Op};
@@ -348,17 +349,19 @@ impl AppState {
                 if let Some(palette) = self.command_palette.as_mut() {
                     palette.push_char(c);
                 }
+                self.land_palette_cursor();
                 Effect::None
             }
             Action::CommandPaletteBackspace => {
                 if let Some(palette) = self.command_palette.as_mut() {
                     palette.backspace();
                 }
+                self.land_palette_cursor();
                 Effect::None
             }
             Action::CommandPaletteSubmit => self.submit_command_palette(),
             Action::CommandPaletteCancel => {
-                self.command_palette = None;
+                self.close_command_palette();
                 Effect::None
             }
             Action::CompareVsDefault => self.compare_vs_default(),
@@ -401,14 +404,45 @@ impl AppState {
 
     fn toggle_command_palette(&mut self, opened_by: PaletteOpenedBy) -> Effect {
         if self.command_palette.is_some() {
-            self.command_palette = None;
+            self.close_command_palette();
         } else {
             self.cancel_mouse_drag();
             self.help_open = false;
             self.clear_help_search();
             self.command_palette = Some(CommandPaletteState::new(opened_by));
+            self.land_palette_cursor();
         }
         Effect::None
+    }
+
+    /// Close the palette with no run. A disabled-row reason that Enter put
+    /// on the status line goes too, so it does not linger after the close.
+    fn close_command_palette(&mut self) {
+        let shown = self
+            .command_palette
+            .take()
+            .and_then(|palette| palette.shown_reason);
+        if shown.is_some_and(|reason| reason == self.status) {
+            self.status.clear();
+        }
+    }
+
+    /// Put the palette cursor on the first enabled visible row (0 if none).
+    ///
+    /// Runs on open and on each filter change, so the HIGHLIGHT rows that
+    /// paint first do not take the cursor while they are disabled. `j` / `k`
+    /// still move over every row.
+    fn land_palette_cursor(&mut self) {
+        let Some(visible) = self.command_palette.as_ref().map(|p| p.visible()) else {
+            return;
+        };
+        let cursor = visible
+            .iter()
+            .position(|command| self.palette_disabled_reason(command).is_none())
+            .unwrap_or(0);
+        if let Some(palette) = self.command_palette.as_mut() {
+            palette.cursor = cursor;
+        }
     }
 
     fn submit_command_palette(&mut self) -> Effect {
@@ -419,7 +453,11 @@ impl AppState {
         else {
             return Effect::None;
         };
-        if self.palette_disabled_reason(&command.action).is_some() {
+        if let Some(reason) = self.palette_disabled_reason(command) {
+            self.status = reason.clone();
+            if let Some(palette) = self.command_palette.as_mut() {
+                palette.shown_reason = Some(reason);
+            }
             return Effect::None;
         }
         let action = command.action.clone();
@@ -427,10 +465,33 @@ impl AppState {
         self.dispatch(action)
     }
 
-    /// Why the highlighted command cannot run, or `None` if Enter should dispatch.
-    pub(crate) fn palette_disabled_reason(&self, action: &Action) -> Option<String> {
+    /// Why palette row `command` cannot run, or `None` if Enter should dispatch.
+    ///
+    /// Order: compare-tab mutation, then the row's highlight scope, then the
+    /// range patch (highlighted stage / unstage / revert), then the action gate.
+    pub(crate) fn palette_disabled_reason(&self, command: &PaletteCommand) -> Option<String> {
+        let action = &command.action;
         if self.is_compare_tab() && is_compare_mutation(action) {
             return Some(SWITCH_TO_WORKSPACE_TAB.into());
+        }
+        let highlighted = self.diff_visual_anchor.is_some();
+        match (command.scope, highlighted) {
+            (CommandScope::NoHighlight, true) => return Some("exit highlight first (Esc)".into()),
+            (CommandScope::Highlight, false) => {
+                return Some("highlight diff lines first (V)".into())
+            }
+            _ => {}
+        }
+        if let Some(anchor) = self.diff_visual_anchor {
+            let kind = match action {
+                Action::Stage => Some(PartialPatchKind::Stage),
+                Action::Unstage => Some(PartialPatchKind::Unstage),
+                Action::Revert => Some(PartialPatchKind::Revert),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                return self.visual_patch(anchor, kind).err();
+            }
         }
         if dispatch_is_noop(
             action,
