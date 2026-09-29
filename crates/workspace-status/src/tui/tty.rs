@@ -3,7 +3,8 @@
 //! The live event loop reads with [`poll_event`] / [`read_event`]. On Unix
 //! the reader tags each key as [`KeyStrokeOrigin::LegacyByte`] or
 //! [`KeyStrokeOrigin::Protocol`] from the bytes. It decodes SGR, X10, and
-//! rxvt 1015 mouse the same way crossterm 0.28 does. A lone ESC waits one
+//! rxvt 1015 mouse like crossterm 0.28, except wheel reports with the
+//! any-event motion bit, which decode as the plain wheel. A lone ESC waits one
 //! poll timeout with no further stdin before it becomes Escape, so a split
 //! CSI / CSI-u report is not an Escape plus leftover keys. A hangup or
 //! 0-byte read is a read error. [`decode_sgr_mouse`] matches crossterm's

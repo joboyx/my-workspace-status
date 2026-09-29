@@ -4164,10 +4164,7 @@ impl AppState {
 
     fn nav_esc(&mut self) -> Effect {
         if self.is_compare_tab() {
-            if self.focus == FocusPane::Right {
-                self.focus = FocusPane::Left;
-                return Effect::None;
-            }
+            self.focus = FocusPane::Left;
             return Effect::None;
         }
         if self.compare_picker_pending.take().is_some() {
