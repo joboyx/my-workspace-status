@@ -400,6 +400,10 @@ pub struct AppState {
     pub(crate) painted_frame: Buffer,
     pub theme: ThemeId,
     pub mouse_enabled: bool,
+    /// Last pointer cell `(col, row)` from any-event motion. `None` when
+    /// unknown or mouse capture is off. Paint derives the tab `[x]` hover
+    /// from it, so a stale layout never keeps a stale highlight.
+    pub pointer: Option<(u16, u16)>,
     pub(crate) z_pending_at: Option<Instant>,
     pub(crate) g_pending_at: Option<Instant>,
     /// Typeless CSI-u release-as-press for `g`-chord keys.
@@ -517,6 +521,7 @@ impl AppState {
             painted_frame: Buffer::default(),
             theme: theme_from_env(),
             mouse_enabled: true,
+            pointer: None,
             z_pending_at: None,
             g_pending_at: None,
             g_chord_echo: GChordEchoState::default(),
@@ -4242,6 +4247,24 @@ impl AppState {
         hit_tab_box(&self.layout.tab_close_hits, self.layout.tab_y, col, row)
     }
 
+    /// Tab index whose `[x]` sits under [`Self::pointer`] in the last paint.
+    pub fn hovered_tab_close(&self) -> Option<usize> {
+        let (col, row) = self.pointer?;
+        self.hit_tab_close(col, row)
+    }
+
+    /// Store the pointer from any-event motion.
+    ///
+    /// Returns `true` when the hovered tab `[x]` changed, so the live loop
+    /// redraws only then. Ignored while mouse capture is off. Chords,
+    /// status, and effects are untouched.
+    pub fn set_pointer(&mut self, pointer: Option<(u16, u16)>) -> bool {
+        let pointer = pointer.filter(|_| self.mouse_enabled);
+        let before = self.hovered_tab_close();
+        self.pointer = pointer;
+        self.hovered_tab_close() != before
+    }
+
     fn park_active_session(&mut self) {
         if let Some(tab) = self.tabs.active_compare_mut() {
             tab.focus_right = self.focus == FocusPane::Right;
@@ -6698,6 +6721,56 @@ mod tests {
         assert_eq!(app.status, WORKSPACE_TAB_CANNOT_CLOSE);
         assert_eq!(app.tabs.active, 1);
         assert_eq!(app.tabs.compare.len(), 1);
+    }
+
+    #[test]
+    fn pointer_move_reports_tab_close_hover_changes_and_keeps_chords() {
+        let mut app = state();
+        app.tabs.open_or_focus("app".into(), "main".into());
+        app.layout.tab_y = 0;
+        app.layout.tab_close_hits = vec![(28, 3, 1)];
+        assert!(!app.set_pointer(Some((5, 0))), "off [x]: no hover change");
+        assert_eq!(app.hovered_tab_close(), None);
+        assert!(app.set_pointer(Some((28, 0))), "onto [x]");
+        assert_eq!(app.hovered_tab_close(), Some(1));
+        assert!(!app.set_pointer(Some((30, 0))), "still on the same [x]");
+        assert!(app.set_pointer(Some((29, 1))), "row below leaves [x]");
+        assert!(!app.set_pointer(Some((2, 1))), "still off [x]");
+        assert!(app.set_pointer(Some((28, 0))));
+        assert!(app.set_pointer(Some((31, 0))), "past [x]");
+        assert!(app.set_pointer(Some((29, 0))));
+        assert!(app.set_pointer(None), "pointer cleared");
+
+        let armed = Instant::now();
+        app.z_pending_at = Some(armed);
+        app.g_pending_at = Some(armed);
+        app.status = "keep".into();
+        assert_eq!(
+            app.dispatch(Action::PointerMove { col: 29, row: 0 }),
+            Effect::None
+        );
+        assert_eq!(app.z_pending_at, Some(armed), "z chord stays armed");
+        assert_eq!(app.g_pending_at, Some(armed), "g chord stays armed");
+        assert_eq!(app.status, "keep");
+        assert_eq!(app.pointer, None, "dispatch does not store the pointer");
+    }
+
+    #[test]
+    fn toggle_mouse_clears_pointer_and_off_ignores_motion() {
+        let mut app = state();
+        app.tabs.open_or_focus("app".into(), "main".into());
+        app.layout.tab_y = 0;
+        app.layout.tab_close_hits = vec![(28, 3, 1)];
+        assert!(app.set_pointer(Some((29, 0))));
+        app.dispatch(Action::ToggleMouse);
+        assert!(!app.mouse_enabled);
+        assert_eq!(app.pointer, None);
+        assert_eq!(app.hovered_tab_close(), None);
+        assert!(!app.set_pointer(Some((29, 0))), "mouse off: no hover");
+        assert_eq!(app.pointer, None);
+        app.dispatch(Action::ToggleMouse);
+        assert!(app.set_pointer(Some((29, 0))));
+        assert_eq!(app.hovered_tab_close(), Some(1));
     }
 
     #[test]

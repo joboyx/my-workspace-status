@@ -336,6 +336,15 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
         return;
     }
     let action = map_event(ctx.state, &event);
+    if let Some(pointer) = pointer_motion(&event, &action) {
+        // Any-event motion (DECSET 1003) arrives on every cell the pointer
+        // crosses. Store it without dispatch: no chord reset, no status,
+        // no effect. Redraw only when the hovered tab `[x]` changes.
+        if ctx.state.set_pointer(pointer) {
+            ctx.presenter.mark();
+        }
+        return;
+    }
     if ctx.interp.busy_for_writes() {
         let palette_submit = if matches!(action, Action::CommandPaletteSubmit) {
             ctx.state
@@ -392,6 +401,28 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
         ctx.presenter.mark();
     }
     ctx.presenter.mark();
+}
+
+/// Pointer update for buttonless motion, or `None` for any other input.
+///
+/// [`Action::PointerMove`] stores the cell. Motion inside an overlay maps to
+/// [`Action::None`]; it clears the pointer so no `[x]` hover shows there.
+fn pointer_motion(event: &crossterm::event::Event, action: &Action) -> Option<Option<(u16, u16)>> {
+    match action {
+        Action::PointerMove { col, row } => Some(Some((*col, *row))),
+        Action::None
+            if matches!(
+                event,
+                crossterm::event::Event::Mouse(crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Moved,
+                    ..
+                })
+            ) =>
+        {
+            Some(None)
+        }
+        _ => None,
+    }
 }
 
 fn spawn_joinset(ctx: &mut LoopCtx<'_>) {
@@ -510,5 +541,40 @@ fn launch_diff(ctx: &mut LoopCtx<'_>, launch: DiffLaunch) {
                 ctx.presenter.mark();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    fn mouse(kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: 7,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn pointer_motion_stores_moves_and_clears_on_overlay_motion() {
+        let moved = mouse(MouseEventKind::Moved);
+        assert_eq!(
+            pointer_motion(&moved, &Action::PointerMove { col: 7, row: 0 }),
+            Some(Some((7, 0)))
+        );
+        assert_eq!(
+            pointer_motion(&moved, &Action::None),
+            Some(None),
+            "overlay motion clears the hover"
+        );
+        let click = mouse(MouseEventKind::Down(MouseButton::Left));
+        assert_eq!(pointer_motion(&click, &Action::None), None);
+        assert_eq!(
+            pointer_motion(&click, &Action::Click { col: 7, row: 0 }),
+            None
+        );
     }
 }

@@ -1,7 +1,7 @@
 use crate::common::hscroll::DIFF_HSCROLL_TAIL;
 use crate::harness::{
-    left_tree, tree_cursor_bar_on_row, tree_row_containing, PtySession, SGR_WHEEL_RIGHT,
-    SGR_WHEEL_RIGHT_MOTION,
+    left_tree, tree_cursor_bar_on_row, tree_row_containing, PtySession, SGR_WHEEL_LEFT,
+    SGR_WHEEL_RIGHT, SGR_WHEEL_RIGHT_MOTION,
 };
 use crate::seed::{daily_workspace, seed_long_diff_file};
 use crate::support::{
@@ -72,8 +72,8 @@ fn documented_right_pane_sgr_hscroll_panned(screen: &str) -> bool {
 /// Trackpad hscroll over the right pane pans a long file-diff.
 ///
 /// Docs / keymap: write xterm SGR wheel right (`CSI < 67`) into the live
-/// `event::read` loop. Motion-bit `CSI < 99` is dropped by crossterm 0.28
-/// and must not pan. Horizontal wheel pans the pane under the pointer
+/// `event::read` loop. Motion-bit `CSI < 99` (any-event tracking) must pan
+/// the same way; `CSI < 66` pans back. Horizontal wheel pans the pane under the pointer
 /// without moving the focused row. Keys `h` / `l` already pan a focused
 /// file-diff (`pty_h_l_pan_graph_or_file_diff`). This test is the
 /// mouse path over the **right** pane. Left-pane SGR over a long diff is
@@ -83,7 +83,7 @@ fn documented_right_pane_sgr_hscroll_panned(screen: &str) -> bool {
 /// file. Wheel over the right pane must put `UNIQUE_DIFF_TAIL` on the
 /// right pane, start the pan suffix, paint the h-bar, keep tree focus
 /// and the filename, and leave the status chip without the tail. A
-/// no-op, a motion-bit-only pan, a tree pan, a left-pane-only pan,
+/// no-op, a motion-bit (`CSI < 99`) no-op, a tree pan, a left-pane-only pan,
 /// vertical-only scroll, focus steal, or paint-only flicker is red.
 #[test]
 fn pty_right_pane_sgr_hscroll_pans_long_diff() {
@@ -107,12 +107,22 @@ fn pty_right_pane_sgr_hscroll_pans_long_diff() {
     for _ in 0..80 {
         tui.sgr_mouse(SGR_WHEEL_RIGHT_MOTION, NARROW_RIGHT_COL, row);
     }
-    tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
-        |screen| long_diff_clipped_tree_focus(screen) && tree_cursor_bar_on_row(screen, row),
-        "motion-bit CSI < 99 must not pan the long file-diff or the tree",
+        |screen| {
+            documented_right_pane_sgr_hscroll_panned(screen) && tree_cursor_bar_on_row(screen, row)
+        },
+        "motion-bit CSI < 99 pans the long file-diff like CSI < 67",
         WAIT,
     );
+    for _ in 0..80 {
+        tui.sgr_mouse(SGR_WHEEL_LEFT, NARROW_RIGHT_COL, row);
+    }
+    tui.wait_pred(
+        |screen| long_diff_clipped_tree_focus(screen) && tree_cursor_bar_on_row(screen, row),
+        "CSI < 66 pans the long file-diff back to the clipped start",
+        WAIT,
+    );
+    tui.wait_ms(SETTLE_MS);
 
     for _ in 0..80 {
         tui.sgr_mouse(SGR_WHEEL_RIGHT, NARROW_RIGHT_COL, row);

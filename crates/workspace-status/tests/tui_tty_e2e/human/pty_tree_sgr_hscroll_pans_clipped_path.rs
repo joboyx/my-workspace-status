@@ -2,7 +2,7 @@ use crate::common::hscroll::TREE_HSCROLL_TAIL;
 use crate::harness::{
     self, assert_tree_clipped_long_path, left_tree, status_has_tree_hscroll_tail,
     tree_cursor_bar_on_row, tree_is_panned_to_tail, tree_row_containing, PtySession,
-    SGR_WHEEL_RIGHT, SGR_WHEEL_RIGHT_MOTION,
+    SGR_WHEEL_LEFT, SGR_WHEEL_RIGHT, SGR_WHEEL_RIGHT_MOTION,
 };
 use crate::seed::{daily_workspace, seed_long_path_file};
 use crate::support::{tree_cursor_on, GIT_WAIT, SETTLE_MS, TREE_LABEL_COL, WAIT};
@@ -36,13 +36,13 @@ fn documented_tree_sgr_hscroll_panned(screen: &str, readme_row: u16) -> bool {
 /// Default mouse-on trackpad hscroll pans a clipped tree row.
 ///
 /// Docs / keymap: write xterm SGR wheel right (`CSI < 67`) into the live
-/// `event::read` loop. Motion-bit `CSI < 99` is dropped by crossterm 0.28
-/// and must not pan. Shared oracle (`common::hscroll`): clipped `very-long`
+/// `event::read` loop. Motion-bit `CSI < 99` (any-event tracking) must pan
+/// the same way; `CSI < 66` pans back. Shared oracle (`common::hscroll`): clipped `very-long`
 /// prefix on the **tree row**, then `TAIL99` after pan, prefix gone. A
 /// search chip that already contains `TAIL99` does not count. Do not `/`
 /// search the tail first. Wait for a clipped tree row on the same frame.
 /// Default mouse-on: this is not `pty_m_toggles_mouse_capture` and not
-/// file-diff SGR pan. A no-op, a motion-bit-only pan, or a pan of only the
+/// file-diff SGR pan. A no-op, a motion-bit no-op, or a pan of only the
 /// right pane / file-diff is red.
 #[test]
 fn pty_tree_sgr_hscroll_pans_clipped_path() {
@@ -88,12 +88,20 @@ fn pty_tree_sgr_hscroll_pans_clipped_path() {
     for _ in 0..40 {
         tui.sgr_mouse(SGR_WHEEL_RIGHT_MOTION, 6, row);
     }
-    tui.wait_ms(SETTLE_MS);
-    assert!(
-        tree_sgr_hscroll_clipped_readme_focus(&tui.screen(), readme_row),
-        "motion-bit CSI < 99 must not pan (crossterm 0.28 drops it):\n{}",
-        tui.screen()
+    tui.wait_pred(
+        |screen| documented_tree_sgr_hscroll_panned(screen, readme_row),
+        "motion-bit CSI < 99 pans the tree like CSI < 67",
+        WAIT,
     );
+    for _ in 0..40 {
+        tui.sgr_mouse(SGR_WHEEL_LEFT, 6, row);
+    }
+    tui.wait_pred(
+        |screen| tree_sgr_hscroll_clipped_readme_focus(screen, readme_row),
+        "CSI < 66 pans the tree back to the clipped prefix",
+        WAIT,
+    );
+    tui.wait_ms(SETTLE_MS);
 
     for _ in 0..40 {
         tui.sgr_mouse(SGR_WHEEL_RIGHT, 6, row);

@@ -2069,6 +2069,14 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     );
 }
 
+/// Columns ratatui paints for `text` (unicode-width, same as `Span::width`).
+///
+/// The tab strip hit boxes must match painted cells. `visible_width` counts
+/// `↔` as two columns; ratatui and terminals paint it as one.
+fn painted_width(text: &str) -> u16 {
+    u16::try_from(Span::raw(text).width()).unwrap_or(u16::MAX)
+}
+
 fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     state.layout.tab_y = area.y;
     state.layout.tab_hits.clear();
@@ -2085,7 +2093,7 @@ fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     for (index, label) in labels.iter().enumerate() {
         if index > 0 {
             let sep = "│";
-            let sep_w = visible_width(sep) as u16;
+            let sep_w = painted_width(sep);
             if x.saturating_add(sep_w) > end {
                 break;
             }
@@ -2101,31 +2109,45 @@ fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         } else {
             format!(" {label} ")
         };
-        let width = visible_width(&text) as u16;
+        let width = painted_width(&text);
         if x.saturating_add(width) > end {
             break;
         }
         state.layout.tab_hits.push((x, width, index));
-        if closable {
-            let prefix_w = visible_width(&format!(" {label} ")) as u16;
-            let close_w = visible_width("[x]") as u16;
-            state
-                .layout
-                .tab_close_hits
-                .push((x.saturating_add(prefix_w), close_w, index));
-        }
         let selected = index == active;
-        spans.push(Span::styled(
-            text,
-            if selected {
-                Style::default()
-                    .fg(palette.cursor)
-                    .bg(palette.cursor_bg)
+        let tab_style = if selected {
+            Style::default()
+                .fg(palette.cursor)
+                .bg(palette.cursor_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(palette.muted)
+        };
+        if closable {
+            let prefix = format!(" {label} ");
+            let close = "[x]";
+            let close_x = x.saturating_add(painted_width(&prefix));
+            let close_w = painted_width(close);
+            state.layout.tab_close_hits.push((close_x, close_w, index));
+            // Hover comes from this paint's box, never from a stored index.
+            let hovered = state.pointer.is_some_and(|(col, row)| {
+                row == area.y && col >= close_x && col < close_x.saturating_add(close_w)
+            });
+            let close_style = if hovered {
+                tab_style
+                    .fg(palette.tab_close_hover)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(palette.muted)
-            },
-        ));
+                tab_style
+                    .fg(palette.tab_close)
+                    .remove_modifier(Modifier::BOLD)
+            };
+            spans.push(Span::styled(prefix, tab_style));
+            spans.push(Span::styled(close, close_style));
+            spans.push(Span::styled(" ", tab_style));
+        } else {
+            spans.push(Span::styled(text, tab_style));
+        }
         x = x.saturating_add(width);
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -3830,6 +3852,137 @@ mod tests {
             "README.md",
             "UNSTAGED",
         );
+    }
+
+    #[test]
+    fn tab_strip_hit_boxes_match_painted_cells_after_arrow_labels() {
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.tabs.open_or_focus("app".into(), "main".into());
+        state.tabs.open_or_focus("app".into(), "develop".into());
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let tab_y = state.layout.tab_y;
+        let buf = terminal.backend().buffer();
+        let row: Vec<String> = (0..120u16)
+            .map(|cx| buf[(cx, tab_y)].symbol().to_string())
+            .collect();
+        let line = row.concat();
+        assert_eq!(line.matches('↔').count(), 2, "{line}");
+        let painted_close: Vec<u16> = (0..118u16)
+            .filter(|cx| row[*cx as usize..*cx as usize + 3].concat() == "[x]")
+            .collect();
+        assert_eq!(painted_close.len(), 2, "{line}");
+        let close_hits = state.layout.tab_close_hits.clone();
+        for (nth, (x, width, index)) in close_hits.iter().enumerate() {
+            assert_eq!(*index, nth + 1);
+            assert_eq!(
+                (*x, *width),
+                (painted_close[nth], 3),
+                "tab {index} [x] hit must cover the painted [x]: {line}"
+            );
+        }
+        let tab_hits = state.layout.tab_hits.clone();
+        assert_eq!(tab_hits.len(), 3);
+        let labels = state.tabs.labels();
+        for (x, width, index) in tab_hits {
+            assert_eq!(
+                row[x as usize], " ",
+                "tab {index} starts at its leading space"
+            );
+            let text: String = row[x as usize..(x + width) as usize].concat();
+            let want = if index == 0 {
+                format!(" {} ", labels[0])
+            } else {
+                format!(" {} [x] ", labels[index])
+            };
+            assert_eq!(text, want, "tab {index} hit box spans its painted text");
+            if index > 0 {
+                assert_eq!(
+                    row[x as usize - 1],
+                    "│",
+                    "separator sits left of tab {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tab_close_is_dim_until_hovered_on_active_and_inactive_tabs() {
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.tabs.open_or_focus("app".into(), "main".into());
+        state.tabs.open_or_focus("app".into(), "develop".into());
+        assert_eq!(state.tabs.active, 2);
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let hits = state.layout.tab_close_hits.clone();
+        let tab_y = state.layout.tab_y;
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        // Painted `[x]` columns, left to right.
+        let painted = |terminal: &Terminal<TestBackend>| {
+            let buf = terminal.backend().buffer();
+            let row: Vec<&str> = (0..120).map(|cx| buf[(cx, tab_y)].symbol()).collect();
+            (0..118u16)
+                .filter(|cx| row[*cx as usize..*cx as usize + 3].concat() == "[x]")
+                .collect::<Vec<_>>()
+        };
+        let close_cells = |terminal: &Terminal<TestBackend>, nth: usize| {
+            let x = painted(terminal)[nth];
+            let buf = terminal.backend().buffer();
+            (x..x + 3)
+                .map(|cx| buf[(cx, tab_y)].style())
+                .collect::<Vec<_>>()
+        };
+        let label_style = |terminal: &Terminal<TestBackend>, nth: usize| {
+            terminal.backend().buffer()[(painted(terminal)[nth] - 2, tab_y)].style()
+        };
+        let assert_idle = |styles: Vec<Style>, bg: Option<Color>| {
+            for style in styles {
+                assert_eq!(style.fg, Some(palette.tab_close), "{style:?}");
+                assert_eq!(style.bg.filter(|c| *c != Color::Reset), bg, "{style:?}");
+                assert!(!style.add_modifier.contains(Modifier::BOLD), "{style:?}");
+            }
+        };
+        let assert_hover = |styles: Vec<Style>, bg: Option<Color>| {
+            for style in styles {
+                assert_eq!(style.fg, Some(palette.tab_close_hover), "{style:?}");
+                assert_eq!(style.bg.filter(|c| *c != Color::Reset), bg, "{style:?}");
+                assert!(style.add_modifier.contains(Modifier::BOLD), "{style:?}");
+            }
+        };
+        let (inactive, active) = (hits[0], hits[1]);
+        assert_eq!((inactive.2, active.2), (1, 2));
+        assert_eq!(
+            painted(&terminal),
+            vec![inactive.0, active.0],
+            "hover boxes sit on the painted [x]"
+        );
+        assert_idle(close_cells(&terminal, 0), None);
+        assert_idle(close_cells(&terminal, 1), Some(palette.cursor_bg));
+        assert_eq!(label_style(&terminal, 0).fg, Some(palette.muted));
+        assert_eq!(label_style(&terminal, 1).fg, Some(palette.cursor));
+
+        state.pointer = Some((inactive.0, tab_y));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_eq!(state.layout.tab_close_hits, hits, "hit boxes stay put");
+        assert_eq!(state.hovered_tab_close(), Some(1));
+        assert_hover(close_cells(&terminal, 0), None);
+        assert_idle(close_cells(&terminal, 1), Some(palette.cursor_bg));
+        assert_eq!(label_style(&terminal, 0).fg, Some(palette.muted));
+
+        state.pointer = Some((active.0 + active.1 - 1, tab_y));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_eq!(state.hovered_tab_close(), Some(2));
+        assert_idle(close_cells(&terminal, 0), None);
+        assert_hover(close_cells(&terminal, 1), Some(palette.cursor_bg));
+        assert_eq!(label_style(&terminal, 1).fg, Some(palette.cursor));
+
+        state.pointer = Some((active.0 + active.1, tab_y));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_eq!(state.hovered_tab_close(), None);
+        assert_idle(close_cells(&terminal, 1), Some(palette.cursor_bg));
     }
 
     #[test]

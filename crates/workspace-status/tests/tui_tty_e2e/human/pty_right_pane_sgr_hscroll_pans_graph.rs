@@ -1,5 +1,7 @@
 use crate::common::hscroll::GRAPH_HSCROLL_VISIBLE;
-use crate::harness::{left_tree, PtySession, SGR_WHEEL_RIGHT, SGR_WHEEL_RIGHT_MOTION};
+use crate::harness::{
+    left_tree, PtySession, SGR_WHEEL_LEFT, SGR_WHEEL_RIGHT, SGR_WHEEL_RIGHT_MOTION,
+};
 use crate::seed::{daily_workspace, seed_long_subject_repo};
 use crate::support::{
     no_wrong_overlays, panes_tree_focused_graph_unfocused, right_pane, status_row, title_has_files,
@@ -60,15 +62,15 @@ fn documented_right_pane_graph_sgr_hscroll_panned(screen: &str) -> bool {
 /// Trackpad hscroll over the right pane pans a long graph subject.
 ///
 /// Docs / keymap: write xterm SGR wheel right (`CSI < 67`) into the live
-/// `event::read` loop. Motion-bit `CSI < 99` is dropped by crossterm 0.28
-/// and must not pan. Horizontal wheel pans the pane under the pointer
+/// `event::read` loop. Motion-bit `CSI < 99` (any-event tracking) must pan
+/// the same way; `CSI < 66` pans back. Horizontal wheel pans the pane under the pointer
 /// without moving the focused row or stealing keyboard focus. Keys
 /// `h` / `l` already pan a focused graph.
 ///
 /// Live PTY (80×28 so `UNIQUE_GRAP` clips): `/longsubj` loads the graph.
 /// Do not `/` search the tail. Wheel over the right pane must put
 /// `UNIQUE_GRAP` on the right pane, keep tree focus, and leave the
-/// status chip without the tail. A no-op, a motion-bit-only pan, a tree
+/// status chip without the tail. A no-op, a motion-bit no-op, a tree
 /// pan, vertical keep-middle, focus steal, or paint-only flicker is red.
 #[test]
 fn pty_right_pane_sgr_hscroll_pans_graph() {
@@ -85,12 +87,20 @@ fn pty_right_pane_sgr_hscroll_pans_graph() {
     for _ in 0..80 {
         tui.sgr_mouse(SGR_WHEEL_RIGHT_MOTION, NARROW_RIGHT_COL, GRAPH_BODY_ROW);
     }
-    tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
-        long_graph_clipped_tree_focus,
-        "motion-bit CSI < 99 must not pan the graph or the tree",
+        documented_right_pane_graph_sgr_hscroll_panned,
+        "motion-bit CSI < 99 pans the long graph subject like CSI < 67",
         WAIT,
     );
+    for _ in 0..80 {
+        tui.sgr_mouse(SGR_WHEEL_LEFT, NARROW_RIGHT_COL, GRAPH_BODY_ROW);
+    }
+    tui.wait_pred(
+        long_graph_clipped_tree_focus,
+        "CSI < 66 pans the graph back to the clipped start",
+        WAIT,
+    );
+    tui.wait_ms(SETTLE_MS);
 
     for _ in 0..80 {
         tui.sgr_mouse(SGR_WHEEL_RIGHT, NARROW_RIGHT_COL, GRAPH_BODY_ROW);

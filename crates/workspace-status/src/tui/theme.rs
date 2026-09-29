@@ -41,6 +41,11 @@ pub struct Palette {
     pub muted: Color,
     /// Unfocused pane border. Near-surface dark gray. Darker than [`Self::muted`].
     pub border_dim: Color,
+    /// Idle compare-tab close `[x]`. Gray darker than [`Self::muted`], still
+    /// readable on the surface and on [`Self::cursor_bg`] (active tab).
+    pub tab_close: Color,
+    /// Hovered compare-tab close `[x]`. The theme's brightest foreground.
+    pub tab_close_hover: Color,
     pub added: Color,
     pub modified: Color,
     pub deleted: Color,
@@ -84,6 +89,10 @@ pub struct ThemePalette {
     /// Unfocused pane border hex (`palette.borderDim` in docs). Near-surface
     /// dark gray. Darker than [`Self::muted`]. Not a readable-text token.
     pub border_dim: &'static str,
+    /// Idle compare-tab close `[x]` hex. Darker than [`Self::muted`].
+    pub tab_close: &'static str,
+    /// Hovered compare-tab close `[x]` hex. Brightest foreground.
+    pub tab_close_hover: &'static str,
     pub added: &'static str,
     pub modified: &'static str,
     pub deleted: &'static str,
@@ -201,6 +210,8 @@ impl ThemeId {
             file: hex_color(p.file),
             muted: hex_color(p.muted),
             border_dim: hex_color(p.border_dim),
+            tab_close: hex_color(p.tab_close),
+            tab_close_hover: hex_color(p.tab_close_hover),
             added: hex_color(p.added),
             modified: hex_color(p.modified),
             deleted: hex_color(p.deleted),
@@ -258,6 +269,8 @@ const TOKYO_NIGHT: Theme = Theme {
         file: "#a9b1d6",
         muted: "#9aa5ce",
         border_dim: "#3b4261",
+        tab_close: "#737aa2",
+        tab_close_hover: "#c0caf5",
         added: "#9ece6a",
         modified: "#e0af68",
         deleted: "#f7768e",
@@ -303,6 +316,8 @@ const MONOKAI: Theme = Theme {
         file: "#f8f8f2",
         muted: "#b8b39c",
         border_dim: "#49483e",
+        tab_close: "#8f8b76",
+        tab_close_hover: "#f8f8f2",
         added: "#a6e22e",
         modified: "#e6db74",
         deleted: "#ff6188",
@@ -348,6 +363,8 @@ const DRACULA: Theme = Theme {
         file: "#f8f8f2",
         muted: "#b4bce4",
         border_dim: "#44475a",
+        tab_close: "#7a84b0",
+        tab_close_hover: "#f8f8f2",
         added: "#50fa7b",
         modified: "#f1fa8c",
         deleted: "#ff5555",
@@ -393,6 +410,8 @@ const GRUVBOX_DARK: Theme = Theme {
         file: "#ebdbb2",
         muted: "#bdae93",
         border_dim: "#504945",
+        tab_close: "#928374",
+        tab_close_hover: "#ebdbb2",
         added: "#b8bb26",
         modified: "#fabd2f",
         deleted: "#fb4934",
@@ -438,6 +457,8 @@ const CATPPUCCIN_MOCHA: Theme = Theme {
         file: "#cdd6f4",
         muted: "#a6adc8",
         border_dim: "#45475a",
+        tab_close: "#7f849c",
+        tab_close_hover: "#cdd6f4",
         added: "#a6e3a1",
         modified: "#f9e2af",
         deleted: "#f38ba8",
@@ -816,6 +837,57 @@ mod tests {
             hexes.len(),
             "borderDim hexes must be unique across themes: {hexes:?}"
         );
+    }
+
+    /// Idle `[x]` must read dimmer than the `muted` tab label, yet stay
+    /// legible on the active tab. Floors: `muted`/`tab_close` contrast >= 1.5
+    /// (visibly darker), `tab_close` >= 2.5 on `cursor_bg` and >= 3.0 on the
+    /// surface. Hover is the brightest text: >= 7.0 on `cursor_bg`.
+    #[test]
+    fn tab_close_is_dimmer_than_muted_and_hover_is_bright() {
+        const DIMMER_THAN_MUTED: f64 = 1.5;
+        const ON_CURSOR_BG: f64 = 2.5;
+        const ON_SURFACE: f64 = 3.0;
+        const HOVER_ON_CURSOR_BG: f64 = 7.0;
+        for id in THEME_IDS {
+            let pal = id.palette();
+            let surface = hex_color(id.theme().surface);
+            let close_l = relative_luminance(pal.tab_close);
+            assert!(
+                close_l < relative_luminance(pal.muted),
+                "{id:?} tab_close must be darker than muted"
+            );
+            assert_ne!(pal.tab_close, pal.border_dim, "{id:?} tab_close");
+            assert_ne!(pal.tab_close, pal.cursor_bg, "{id:?} tab_close");
+            for (name, ratio, floor) in [
+                (
+                    "muted vs tab_close",
+                    contrast_ratio(pal.muted, pal.tab_close),
+                    DIMMER_THAN_MUTED,
+                ),
+                (
+                    "tab_close on cursor_bg",
+                    contrast_ratio(pal.tab_close, pal.cursor_bg),
+                    ON_CURSOR_BG,
+                ),
+                (
+                    "tab_close on surface",
+                    contrast_ratio(pal.tab_close, surface),
+                    ON_SURFACE,
+                ),
+                (
+                    "tab_close_hover on cursor_bg",
+                    contrast_ratio(pal.tab_close_hover, pal.cursor_bg),
+                    HOVER_ON_CURSOR_BG,
+                ),
+            ] {
+                assert!(ratio >= floor, "{id:?} {name} {ratio:.2} < {floor}");
+            }
+            assert!(
+                relative_luminance(pal.tab_close_hover) > relative_luminance(pal.muted),
+                "{id:?} tab_close_hover must be brighter than muted"
+            );
+        }
     }
 
     #[test]
