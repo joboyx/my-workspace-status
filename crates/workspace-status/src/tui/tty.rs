@@ -805,8 +805,10 @@ pub(crate) fn decode_sgr_mouse(seq: &[u8]) -> Option<Event> {
 ///
 /// Match arms are the live reader contract. A wheel button with the motion
 /// bit is the plain wheel, so wheel and trackpad hscroll keep working under
-/// any-event tracking (DECSET 1003). Motion with no button (`3 | 32`) is
-/// `Moved`.
+/// any-event tracking (DECSET 1003). The motion bit is normalized only for
+/// wheel buttons (bit 64 set, buttons 4..=7). Button drags (`Cb` 32..=63 with
+/// low bits 0..=2) keep `Drag`, and buttonless motion (low bits 3) keeps
+/// `Moved`, with or without Shift / Alt / Ctrl. Neither becomes a scroll.
 fn sgr_button_kind(cb: u8) -> Option<(MouseEventKind, KeyModifiers)> {
     let button_number = (cb & 0b0000_0011) | ((cb & 0b1100_0000) >> 4);
     let dragging = cb & 0b0010_0000 == 0b0010_0000;
@@ -979,6 +981,99 @@ mod tests {
                 "SGR {cb}"
             );
         }
+    }
+
+    /// Every `Cb` with the motion bit but not the wheel bit is a drag or
+    /// plain motion. Every `Cb` with the wheel and motion bits is a wheel.
+    /// Modifier bits (4 Shift, 8 Alt, 16 Ctrl) never change that split.
+    #[test]
+    fn modifier_drags_and_motion_never_scroll() {
+        fn mouse(kind: MouseEventKind, modifiers: KeyModifiers) -> Option<Event> {
+            Some(Event::Mouse(MouseEvent {
+                kind,
+                column: 8,
+                row: 4,
+                modifiers,
+            }))
+        }
+        fn mods(cb: u8) -> KeyModifiers {
+            let mut modifiers = KeyModifiers::empty();
+            if cb & 4 != 0 {
+                modifiers |= KeyModifiers::SHIFT;
+            }
+            if cb & 8 != 0 {
+                modifiers |= KeyModifiers::ALT;
+            }
+            if cb & 16 != 0 {
+                modifiers |= KeyModifiers::CONTROL;
+            }
+            modifiers
+        }
+        for cb in 32u8..=63 {
+            let kind = match cb & 3 {
+                0 => MouseEventKind::Drag(MouseButton::Left),
+                1 => MouseEventKind::Drag(MouseButton::Middle),
+                2 => MouseEventKind::Drag(MouseButton::Right),
+                _ => MouseEventKind::Moved,
+            };
+            assert_eq!(
+                decode_sgr_mouse(&sgr_mouse_report(cb, 8, 4)),
+                mouse(kind, mods(cb)),
+                "SGR {cb} is a drag or motion, never a scroll"
+            );
+        }
+        for cb in 96u8..=127 {
+            let kind = match cb & 3 {
+                0 => MouseEventKind::ScrollUp,
+                1 => MouseEventKind::ScrollDown,
+                2 => MouseEventKind::ScrollLeft,
+                _ => MouseEventKind::ScrollRight,
+            };
+            assert_eq!(
+                decode_sgr_mouse(&sgr_mouse_report(cb, 8, 4)),
+                mouse(kind, mods(cb)),
+                "SGR {cb} is a wheel with the motion bit"
+            );
+        }
+
+        // Spot checks with literal values, so the loops above cannot share a
+        // mistake with `mods`.
+        for (cb, kind, modifiers) in [
+            (
+                36,
+                MouseEventKind::Drag(MouseButton::Left),
+                KeyModifiers::SHIFT,
+            ),
+            (
+                40,
+                MouseEventKind::Drag(MouseButton::Left),
+                KeyModifiers::ALT,
+            ),
+            (
+                48,
+                MouseEventKind::Drag(MouseButton::Left),
+                KeyModifiers::CONTROL,
+            ),
+            (39, MouseEventKind::Moved, KeyModifiers::SHIFT),
+            (101, MouseEventKind::ScrollDown, KeyModifiers::SHIFT),
+        ] {
+            assert_eq!(
+                decode_sgr_mouse(&sgr_mouse_report(cb, 8, 4)),
+                mouse(kind, modifiers),
+                "SGR {cb}"
+            );
+        }
+
+        // X10 (ESC [ M, each byte + 32) and rxvt 1015 (Cb + 32) reach the
+        // same decoder after removing the offset.
+        let shift_drag = mouse(MouseEventKind::Drag(MouseButton::Left), KeyModifiers::SHIFT);
+        let x10 = [0x1b, b'[', b'M', 36 + 32, 9 + 32, 5 + 32];
+        let events = parse_tty_chunk(&x10);
+        assert_eq!(events.len(), 1, "X10 Shift+drag parses to one event");
+        assert_eq!(Some(events[0].0.clone()), shift_drag, "X10 Shift+drag");
+        let events = parse_tty_chunk(b"\x1b[68;9;5M");
+        assert_eq!(events.len(), 1, "1015 Shift+drag parses to one event");
+        assert_eq!(Some(events[0].0.clone()), shift_drag, "1015 Shift+drag");
     }
 
     fn key_code(event: &Event) -> KeyCode {

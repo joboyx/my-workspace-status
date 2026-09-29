@@ -51,7 +51,6 @@ pub fn is_compare_mutation(action: &Action) -> bool {
             | Action::StashMenuEnter
             | Action::CreateBranchStart
             | Action::CreateBranchSubmit
-            | Action::ToggleReviewed
             | Action::CommentStart
             | Action::CommentSubmit
             | Action::CommentToggleResolved
@@ -394,5 +393,10 @@ mod tests {
         assert!(!is_compare_mutation(&Action::CopyEntityReference));
         assert!(is_compare_mutation(&Action::Stage));
         assert!(is_compare_mutation(&Action::CommentStart));
+    }
+
+    #[test]
+    fn toggle_reviewed_is_not_a_compare_mutation() {
+        assert!(!is_compare_mutation(&Action::ToggleReviewed));
     }
 }

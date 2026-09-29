@@ -26,7 +26,7 @@ This is the glance I wanted instead. Left pane is the workspace tree (repos, wor
 
 ![Search](docs/images/04-search.png)
 
-**Reviewed** — Space on a dirty file. Eye `` sits before the status badge.
+**Reviewed** — Space on a dirty file, or on a file in a compare tab (session-only). Eye `` sits before the status badge.
 
 ![Reviewed mark](docs/images/07-reviewed.png)
 
