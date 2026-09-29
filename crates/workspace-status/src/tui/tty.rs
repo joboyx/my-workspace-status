@@ -33,7 +33,7 @@ use super::keys::KeyStrokeOrigin;
 /// button-event (1002), then any-event (1003) tracking, so any-event is the
 /// active mode. Then it sets rxvt 1015 and SGR (`1006h` last). Any-event
 /// tracking reports pointer motion with no button held. The tab strip uses
-/// it for the `[x]` hover. Under 1003 some terminals add the motion bit (32)
+/// it for the `[𝔁]` hover. Under 1003 some terminals add the motion bit (32)
 /// to wheel reports (`96`/`97` vertical, `98`/`99` horizontal). The Unix
 /// reader decodes those as the plain wheel. [`disable_mouse`] resets every
 /// mode, 1003 included.

@@ -2068,6 +2068,11 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     );
 }
 
+/// Compare-tab close control as painted and hit-tested: brackets around
+/// U+1D501 MATHEMATICAL BOLD SCRIPT SMALL X. Three display columns. Paint and
+/// hit boxes both derive their width from this constant.
+const TAB_CLOSE_GLYPH: &str = "[\u{1D501}]";
+
 /// Columns ratatui paints for `text` (unicode-width, same as `Span::width`).
 ///
 /// The tab strip hit boxes must match painted cells. `visible_width` counts
@@ -2104,7 +2109,7 @@ fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         }
         let closable = index > 0;
         let text = if closable {
-            format!(" {label} [x] ")
+            format!(" {label} {TAB_CLOSE_GLYPH} ")
         } else {
             format!(" {label} ")
         };
@@ -2124,7 +2129,7 @@ fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         };
         if closable {
             let prefix = format!(" {label} ");
-            let close = "[x]";
+            let close = TAB_CLOSE_GLYPH;
             let close_x = x.saturating_add(painted_width(&prefix));
             let close_w = painted_width(close);
             state.layout.tab_close_hits.push((close_x, close_w, index));
@@ -3881,6 +3886,11 @@ mod tests {
     }
 
     #[test]
+    fn tab_close_glyph_is_three_display_columns() {
+        assert_eq!(painted_width(TAB_CLOSE_GLYPH), 3);
+    }
+
+    #[test]
     fn tab_strip_hit_boxes_match_painted_cells_after_arrow_labels() {
         let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
@@ -3896,7 +3906,7 @@ mod tests {
         let line = row.concat();
         assert_eq!(line.matches('↔').count(), 2, "{line}");
         let painted_close: Vec<u16> = (0..118u16)
-            .filter(|cx| row[*cx as usize..*cx as usize + 3].concat() == "[x]")
+            .filter(|cx| row[*cx as usize..*cx as usize + 3].concat() == TAB_CLOSE_GLYPH)
             .collect();
         assert_eq!(painted_close.len(), 2, "{line}");
         let close_hits = state.layout.tab_close_hits.clone();
@@ -3905,7 +3915,7 @@ mod tests {
             assert_eq!(
                 (*x, *width),
                 (painted_close[nth], 3),
-                "tab {index} [x] hit must cover the painted [x]: {line}"
+                "tab {index} close hit must cover the painted close: {line}"
             );
         }
         let tab_hits = state.layout.tab_hits.clone();
@@ -3920,7 +3930,7 @@ mod tests {
             let want = if index == 0 {
                 format!(" {} ", labels[0])
             } else {
-                format!(" {} [x] ", labels[index])
+                format!(" {} {TAB_CLOSE_GLYPH} ", labels[index])
             };
             assert_eq!(text, want, "tab {index} hit box spans its painted text");
             if index > 0 {
@@ -3946,12 +3956,12 @@ mod tests {
         let hits = state.layout.tab_close_hits.clone();
         let tab_y = state.layout.tab_y;
         assert_eq!(hits.len(), 2, "{hits:?}");
-        // Painted `[x]` columns, left to right.
+        // Painted close-control columns, left to right.
         let painted = |terminal: &Terminal<TestBackend>| {
             let buf = terminal.backend().buffer();
             let row: Vec<&str> = (0..120).map(|cx| buf[(cx, tab_y)].symbol()).collect();
             (0..118u16)
-                .filter(|cx| row[*cx as usize..*cx as usize + 3].concat() == "[x]")
+                .filter(|cx| row[*cx as usize..*cx as usize + 3].concat() == TAB_CLOSE_GLYPH)
                 .collect::<Vec<_>>()
         };
         let close_cells = |terminal: &Terminal<TestBackend>, nth: usize| {
@@ -3983,7 +3993,7 @@ mod tests {
         assert_eq!(
             painted(&terminal),
             vec![inactive.0, active.0],
-            "hover boxes sit on the painted [x]"
+            "hover boxes sit on the painted close control"
         );
         assert_idle(close_cells(&terminal, 0), None);
         assert_idle(close_cells(&terminal, 1), Some(palette.cursor_bg));
