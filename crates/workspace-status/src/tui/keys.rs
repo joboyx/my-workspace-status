@@ -489,6 +489,7 @@ fn key_to_action(
             InputMode::Normal { .. }
             | InputMode::ZPending { .. }
             | InputMode::GPending { .. }
+            | InputMode::DiffVisual
             | InputMode::CommandPalette => {
                 return Action::ToggleCommandPalette(opened_by);
             }
@@ -683,7 +684,8 @@ fn command_palette_key(key: KeyEvent) -> Action {
 /// `j` / `k` / arrows move (and extend the range). `;` comments that
 /// range. `s` / `u` stage / unstage the highlighted add/del lines. `x`
 /// reverts them from the worktree (after a confirm). `'` copies an entity reference for the highlighted span. Esc or a
-/// second `V` leaves highlight without commenting.
+/// second `V` leaves highlight without commenting. `Ctrl-k` / `:` open the
+/// command palette before this map runs; the highlight stays.
 fn diff_visual_key(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Esc | KeyCode::Char('V') => Action::DiffVisualCancel,
@@ -2444,7 +2446,6 @@ mod tests {
             InputMode::CreateBranch,
             InputMode::StashMenu,
             InputMode::CommentExport,
-            InputMode::DiffVisual,
         ];
         for mode in overlays {
             let ctrl_k = event_to_action(&ctrl(KeyCode::Char('k')), mode, false, false);
@@ -2531,11 +2532,10 @@ mod tests {
     }
 
     #[test]
-    fn help_confirm_diff_visual_swallow_ctrl_k_and_colon() {
+    fn help_confirm_comment_export_swallow_ctrl_k_and_colon() {
         for mode in [
             InputMode::Help,
             InputMode::Confirm,
-            InputMode::DiffVisual,
             InputMode::CommentExport,
         ] {
             assert_eq!(
@@ -2558,6 +2558,19 @@ mod tests {
             ),
             Action::None,
             "search Ctrl-K stays unused (CONTROL is not a typed char)"
+        );
+    }
+
+    #[test]
+    fn diff_visual_opens_palette_on_ctrl_k_and_colon() {
+        use super::super::action::PaletteOpenedBy;
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('k')), InputMode::DiffVisual, true, true),
+            Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char(':')), InputMode::DiffVisual, true, true),
+            Action::ToggleCommandPalette(PaletteOpenedBy::Colon)
         );
     }
 

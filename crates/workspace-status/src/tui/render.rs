@@ -2575,7 +2575,7 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 }
                 super::command_palette::PalettePaintRow::Command { command, index } => {
                     let selected = index == palette.cursor;
-                    let reason = state.palette_disabled_reason(&command.action);
+                    let reason = state.palette_disabled_reason(command);
                     let disabled = reason.is_some();
                     let cursor = if selected { "❯ " } else { "  " };
                     let row_bg = if selected {
@@ -2640,7 +2640,7 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
     let reason = palette
         .selected()
-        .and_then(|command| state.palette_disabled_reason(&command.action));
+        .and_then(|command| state.palette_disabled_reason(command));
     let footer = match reason {
         Some(why) => format!("Enter run · Esc close · {why}"),
         None => "Enter run · Esc close".into(),

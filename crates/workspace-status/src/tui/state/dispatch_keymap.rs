@@ -4,7 +4,8 @@ use std::time::Instant;
 
 use super::super::action::{Action, Effect, ExternalDiffKind, PaletteOpenedBy};
 use super::super::branches::can_open_branch_picker;
-use super::super::command_palette::CommandPaletteState;
+use super::super::command_palette::{CommandPaletteState, CommandScope, PaletteCommand};
+use super::super::diff::PartialPatchKind;
 use super::super::gates::{dispatch_is_noop, is_compare_mutation, ListFocusTarget};
 use super::super::graph_focus::GRAPH_FOCUS_NEED_CONTEXT;
 use super::super::ops::{collect_write_files, op_is_kind_noop, Op};
@@ -419,7 +420,8 @@ impl AppState {
         else {
             return Effect::None;
         };
-        if self.palette_disabled_reason(&command.action).is_some() {
+        if let Some(reason) = self.palette_disabled_reason(command) {
+            self.status = reason;
             return Effect::None;
         }
         let action = command.action.clone();
@@ -427,15 +429,33 @@ impl AppState {
         self.dispatch(action)
     }
 
-    /// Why the highlighted command cannot run, or `None` if Enter should dispatch.
-    pub(crate) fn palette_disabled_reason(&self, action: &Action) -> Option<String> {
+    /// Why palette row `command` cannot run, or `None` if Enter should dispatch.
+    ///
+    /// Order: compare-tab mutation, then the row's highlight scope, then the
+    /// range patch (highlighted stage / unstage / revert), then the action gate.
+    pub(crate) fn palette_disabled_reason(&self, command: &PaletteCommand) -> Option<String> {
+        let action = &command.action;
         if self.is_compare_tab() && is_compare_mutation(action) {
             return Some(SWITCH_TO_WORKSPACE_TAB.into());
         }
-        if let (Action::Revert, Some(anchor)) = (action, self.diff_visual_anchor) {
-            return self
-                .visual_patch(anchor, super::super::diff::PartialPatchKind::Revert)
-                .err();
+        let highlighted = self.diff_visual_anchor.is_some();
+        match (command.scope, highlighted) {
+            (CommandScope::NoHighlight, true) => return Some("exit highlight first (Esc)".into()),
+            (CommandScope::Highlight, false) => {
+                return Some("highlight diff lines first (V)".into())
+            }
+            _ => {}
+        }
+        if let Some(anchor) = self.diff_visual_anchor {
+            let kind = match action {
+                Action::Stage => Some(PartialPatchKind::Stage),
+                Action::Unstage => Some(PartialPatchKind::Unstage),
+                Action::Revert => Some(PartialPatchKind::Revert),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                return self.visual_patch(anchor, kind).err();
+            }
         }
         if dispatch_is_noop(
             action,

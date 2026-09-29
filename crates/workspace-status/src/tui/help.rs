@@ -182,7 +182,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: "V",
-                desc: "highlight diff lines for ; / s / u / x",
+                desc: "highlight diff lines for ; / s / u / x / :",
             },
             HelpEntry {
                 keys: "y",
