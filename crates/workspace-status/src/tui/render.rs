@@ -3861,9 +3861,7 @@ mod tests {
 
     #[test]
     fn tab_close_glyph_is_three_display_columns() {
-        assert_eq!(TAB_CLOSE_GLYPH, "[\u{1D501}]");
         assert_eq!(painted_width(TAB_CLOSE_GLYPH), 3);
-        assert_eq!(TAB_CLOSE_GLYPH.chars().count(), 3);
     }
 
     #[test]

@@ -60,7 +60,7 @@ fn strip_row(screen: &str) -> Option<(u16, String)> {
         .map(|(row, line)| (row as u16, line.to_string()))
 }
 
-/// SGR click on the painted `x` of the second compare tab closes that tab.
+/// SGR click on the painted `𝔁` of the second compare tab closes that tab.
 ///
 /// Each label holds `↔`, which paints one column. The hit boxes must not
 /// drift right of the painted `[𝔁]` as labels accumulate.
