@@ -552,7 +552,8 @@ pub fn build_diff_rows(content: &DiffContent, mode: DiffMode) -> Vec<DiffRow> {
 /// unselected additions drop and unselected deletions become context.
 /// Unstage and Revert apply with `--reverse`, so the post-image must match
 /// the target: unselected additions become context and unselected deletions
-/// drop. Returns `Err` when the range cannot become a valid patch (fail
+/// drop. A `-` run and its `+` run interleave by pair, so a selected pair
+/// keeps its place. Returns `Err` when the range cannot become a valid patch (fail
 /// closed — never a whole-file patch).
 pub fn build_partial_cached_patch(
     content: &DiffContent,
@@ -786,6 +787,49 @@ struct PatchLine<'a> {
     no_eol: Option<&'a str>,
 }
 
+/// Hunk line index in pair order: each `-` run and the `+` run after it
+/// interleave by pair index (`-1 +1 -2 +2 …`, then the leftovers), and
+/// each `\ No newline at end of file` marker rides with its line.
+fn pair_ordered_lines(hunk: &Hunk) -> Vec<(usize, Option<&str>)> {
+    let mut items: Vec<(usize, Option<&str>)> = Vec::new();
+    for (idx, line) in hunk.lines.iter().enumerate() {
+        match line.kind {
+            DiffCellKind::Ctx | DiffCellKind::Add | DiffCellKind::Del => items.push((idx, None)),
+            DiffCellKind::Meta => {
+                if let Some(last) = items.last_mut() {
+                    last.1 = Some(&line.text);
+                }
+            }
+            DiffCellKind::Empty => {}
+        }
+    }
+    let kind = |item: &(usize, Option<&str>)| hunk.lines[item.0].kind;
+    let mut out = Vec::with_capacity(items.len());
+    let mut i = 0;
+    while i < items.len() {
+        if kind(&items[i]) == DiffCellKind::Ctx {
+            out.push(items[i]);
+            i += 1;
+            continue;
+        }
+        let dels_start = i;
+        while i < items.len() && kind(&items[i]) == DiffCellKind::Del {
+            i += 1;
+        }
+        let adds_start = i;
+        while i < items.len() && kind(&items[i]) == DiffCellKind::Add {
+            i += 1;
+        }
+        let dels = &items[dels_start..adds_start];
+        let adds = &items[adds_start..i];
+        for j in 0..dels.len().max(adds.len()) {
+            out.extend(dels.get(j).copied());
+            out.extend(adds.get(j).copied());
+        }
+    }
+    out
+}
+
 /// Keep the selected add/del lines of `hunk` and rewrite the rest.
 ///
 /// Forward (Stage, `git apply`): the pre-image must match the target, so
@@ -793,6 +837,10 @@ struct PatchLine<'a> {
 /// context. Reverse (Unstage / Revert, `git apply --reverse`): the
 /// post-image must match the target, so an unselected addition becomes
 /// context and an unselected deletion drops.
+///
+/// Lines go out in [`pair_ordered_lines`] order, so a selected pair lands
+/// where its deletion was: the side that must match the target keeps its
+/// original order, and the other side changes pair by pair.
 fn transform_hunk(
     hunk: &Hunk,
     selected_lines: Option<&HashSet<usize>>,
@@ -805,52 +853,31 @@ fn transform_hunk(
     let whole = selected_lines.is_none();
     let mut lines: Vec<PatchLine> = Vec::new();
     let mut has_change = false;
-    let mut emitted_last = false;
-    for (idx, line) in hunk.lines.iter().enumerate() {
+    for (idx, no_eol) in pair_ordered_lines(hunk) {
+        let line = &hunk.lines[idx];
         let take = whole || selected_lines.is_some_and(|set| set.contains(&idx));
-        match line.kind {
-            DiffCellKind::Ctx => {
-                lines.push(PatchLine {
-                    sign: ' ',
-                    text: &line.text,
-                    no_eol: None,
-                });
-                emitted_last = true;
-            }
-            DiffCellKind::Add | DiffCellKind::Del => {
-                let add = line.kind == DiffCellKind::Add;
-                // Forward keeps an unselected deletion as context; reverse
-                // keeps an unselected addition as context. The other one
-                // is not in the target file and drops.
-                let as_context = !take && add == reverse;
-                let sign = if take {
-                    has_change = true;
-                    if add {
-                        '+'
-                    } else {
-                        '-'
-                    }
+        let add = line.kind == DiffCellKind::Add;
+        let sign = match line.kind {
+            DiffCellKind::Ctx => ' ',
+            _ if take => {
+                has_change = true;
+                if add {
+                    '+'
                 } else {
-                    ' '
-                };
-                if take || as_context {
-                    lines.push(PatchLine {
-                        sign,
-                        text: &line.text,
-                        no_eol: None,
-                    });
-                }
-                emitted_last = take || as_context;
-            }
-            DiffCellKind::Meta => {
-                if emitted_last {
-                    if let Some(last) = lines.last_mut() {
-                        last.no_eol = Some(&line.text);
-                    }
+                    '-'
                 }
             }
-            DiffCellKind::Empty => {}
-        }
+            // Forward keeps an unselected deletion as context; reverse
+            // keeps an unselected addition as context. The other one is
+            // not in the target file and drops.
+            _ if add == reverse => ' ',
+            _ => continue,
+        };
+        lines.push(PatchLine {
+            sign,
+            text: &line.text,
+            no_eol,
+        });
     }
     if !has_change {
         return Ok(None);
@@ -1833,8 +1860,8 @@ index 1111111..2222222 100644
         .expect("stage patch");
         let hunk = &stage[stage.find("@@").expect("hunk")..];
         assert_eq!(
-            hunk, "@@ -1,4 +1,5 @@\n ctx-a\n old-1\n old-2\n+new-1\n ctx-b\n",
-            "stage keeps the forward transform"
+            hunk, "@@ -1,4 +1,5 @@\n ctx-a\n old-1\n+new-1\n old-2\n ctx-b\n",
+            "stage keeps the forward transform; new-1 lands in pair order"
         );
     }
 
@@ -2052,6 +2079,109 @@ keep-z
             assert_eq!(worktree(&dir), edited.replace("KEEP-B", "keep-b"));
             assert!(exec_git(&["diff", "--cached"], &dir).is_empty());
             let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// Change `keep-b` / `keep-c` (one run of two pairs), highlight one
+        /// row, apply `kind`, and return (index, worktree) for regions.txt.
+        fn pair_run_apply(
+            mode: DiffMode,
+            kind: PartialPatchKind,
+            left: &str,
+            right: Option<&str>,
+        ) -> (String, String) {
+            let dir = repo_with_regions("ws-diff-pair-run");
+            let edited = REGIONS
+                .replace("keep-b", "KEEP-B")
+                .replace("keep-c", "KEEP-C");
+            fs::write(dir.join("regions.txt"), &edited).unwrap();
+            let content = content(&dir);
+            let row = build_diff_rows(&content, mode)
+                .iter()
+                .position(|r| match r {
+                    DiffRow::Line { left: l, right: r } => {
+                        l.text == left
+                            && right.is_none_or(|want| r.as_ref().is_some_and(|r| r.text == want))
+                    }
+                    _ => false,
+                })
+                .unwrap_or_else(|| panic!("row {left} / {right:?}"));
+            let patch = build_partial_cached_patch(&content, mode, row, row, kind, "regions.txt")
+                .expect("patch");
+            match kind {
+                PartialPatchKind::Stage => apply_cached_patch(&dir, &patch, false),
+                PartialPatchKind::Unstage => apply_cached_patch(&dir, &patch, true),
+                PartialPatchKind::Revert => apply_worktree_patch_reverse(&dir, &patch),
+            }
+            .unwrap_or_else(|err| panic!("{kind:?} {left}: {err}\n{patch}"));
+            let index = blob_bytes(&dir, "", "regions.txt").expect("index blob");
+            let out = (String::from_utf8(index).unwrap(), worktree(&dir));
+            let _ = fs::remove_dir_all(&dir);
+            out
+        }
+
+        #[test]
+        fn one_pair_of_a_change_run_keeps_line_order() {
+            use DiffMode::{Inline, SideBySide};
+            use PartialPatchKind::{Revert, Stage};
+            let edited = REGIONS
+                .replace("keep-b", "KEEP-B")
+                .replace("keep-c", "KEEP-C");
+            let only_c = REGIONS.replace("keep-c", "KEEP-C");
+            let only_b = REGIONS.replace("keep-b", "KEEP-B");
+            let both_b = REGIONS.replace("keep-b\n", "keep-b\nKEEP-B\n");
+            let c_back = edited.replace("KEEP-B\n", "KEEP-B\nkeep-c\n");
+            // Split binds a pair to one row. Inline has no row for a whole
+            // pair, so it picks the one line whose place depends on the pair.
+            let cases = [
+                (
+                    SideBySide,
+                    Stage,
+                    "keep-c",
+                    Some("KEEP-C"),
+                    &only_c,
+                    &edited,
+                ),
+                (
+                    SideBySide,
+                    Stage,
+                    "keep-b",
+                    Some("KEEP-B"),
+                    &only_b,
+                    &edited,
+                ),
+                (
+                    SideBySide,
+                    Revert,
+                    "keep-c",
+                    Some("KEEP-C"),
+                    &REGIONS.to_string(),
+                    &only_b,
+                ),
+                (
+                    SideBySide,
+                    Revert,
+                    "keep-b",
+                    Some("KEEP-B"),
+                    &REGIONS.to_string(),
+                    &only_c,
+                ),
+                (Inline, Stage, "KEEP-B", None, &both_b, &edited),
+                (
+                    Inline,
+                    Revert,
+                    "keep-c",
+                    None,
+                    &REGIONS.to_string(),
+                    &c_back,
+                ),
+            ];
+            for (mode, kind, left, right, index, worktree) in cases {
+                assert_eq!(
+                    pair_run_apply(mode, kind, left, right),
+                    (index.clone(), worktree.clone()),
+                    "{mode:?} {kind:?} {left}"
+                );
+            }
         }
 
         const NO_EOL_BASE: &str = "a\nb\nlast";

@@ -11872,10 +11872,48 @@ diff --git a/README.md b/README.md
             );
         }
         assert_eq!(palette_reason(&app, "Keymap help"), None);
-        assert_ne!(
+        assert_eq!(
             palette_reason(&app, "Stage").as_deref(),
-            Some("exit highlight first (Esc)")
+            Some("not available here")
         );
+    }
+
+    #[test]
+    fn palette_range_row_refuses_after_a_reload_drops_the_range() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_first_readme_hunk(&mut app);
+        palette_select(&mut app, "Stage highlighted lines");
+        app.set_diff("app".into(), "README.md".into(), two_line_readme());
+        assert!(
+            app.diff_visual_anchor.is_none(),
+            "the reload drops the range"
+        );
+        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
+        assert!(
+            app.command_palette.is_some(),
+            "a disabled row keeps it open"
+        );
+        assert_eq!(app.status, "highlight diff lines first (V)");
+    }
+
+    #[test]
+    fn palette_esc_clears_the_disabled_row_reason() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_first_readme_hunk(&mut app);
+        palette_select(&mut app, "Fetch remotes");
+        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
+        assert_eq!(app.status, "exit highlight first (Esc)");
+        app.dispatch(Action::CommandPaletteCancel);
+        assert_eq!(app.input_mode(), InputMode::DiffVisual);
+        assert_eq!(app.status, "", "the reason does not linger in highlight");
+
+        // A status the palette did not set stays.
+        app.status = "staged range README.md".into();
+        palette_select(&mut app, "Fetch remotes");
+        app.dispatch(Action::CommandPaletteCancel);
+        assert_eq!(app.status, "staged range README.md");
     }
 
     #[test]

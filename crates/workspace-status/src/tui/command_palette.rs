@@ -412,6 +412,9 @@ pub struct CommandPaletteState {
     pub filter: String,
     /// Highlight index into [`Self::visible`].
     pub cursor: usize,
+    /// Disabled-row reason that Enter put on the status line. Closing the
+    /// palette clears the status while it still shows this text.
+    pub shown_reason: Option<String>,
 }
 
 impl CommandPaletteState {
@@ -422,6 +425,7 @@ impl CommandPaletteState {
             opened_by,
             filter: String::new(),
             cursor: 0,
+            shown_reason: None,
         }
     }
 

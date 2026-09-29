@@ -361,7 +361,7 @@ impl AppState {
             }
             Action::CommandPaletteSubmit => self.submit_command_palette(),
             Action::CommandPaletteCancel => {
-                self.command_palette = None;
+                self.close_command_palette();
                 Effect::None
             }
             Action::CompareVsDefault => self.compare_vs_default(),
@@ -404,7 +404,7 @@ impl AppState {
 
     fn toggle_command_palette(&mut self, opened_by: PaletteOpenedBy) -> Effect {
         if self.command_palette.is_some() {
-            self.command_palette = None;
+            self.close_command_palette();
         } else {
             self.cancel_mouse_drag();
             self.help_open = false;
@@ -413,6 +413,18 @@ impl AppState {
             self.land_palette_cursor();
         }
         Effect::None
+    }
+
+    /// Close the palette with no run. A disabled-row reason that Enter put
+    /// on the status line goes too, so it does not linger after the close.
+    fn close_command_palette(&mut self) {
+        let shown = self
+            .command_palette
+            .take()
+            .and_then(|palette| palette.shown_reason);
+        if shown.is_some_and(|reason| reason == self.status) {
+            self.status.clear();
+        }
     }
 
     /// Put the palette cursor on the first enabled visible row (0 if none).
@@ -442,7 +454,10 @@ impl AppState {
             return Effect::None;
         };
         if let Some(reason) = self.palette_disabled_reason(command) {
-            self.status = reason;
+            self.status = reason.clone();
+            if let Some(palette) = self.command_palette.as_mut() {
+                palette.shown_reason = Some(reason);
+            }
             return Effect::None;
         }
         let action = command.action.clone();
