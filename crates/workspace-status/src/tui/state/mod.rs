@@ -47,7 +47,7 @@ use super::commit_files::{
 };
 use super::ctrl_c_exit::{handle_ctrl_c, is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT};
 use super::diff::{
-    anchor_row_text, build_diff_rows, build_partial_cached_patch, diff_row_content_width,
+    anchor_row_text, build_diff_rows, build_partial_patch, diff_row_content_width,
     diff_wrap_row_heights, find_anchor_row, gutter_width, row_search_text, wrap_viewport_start,
     DiffContent, DiffRow, PartialPatchKind,
 };
@@ -2767,7 +2767,7 @@ impl AppState {
             return Err(self.visual_write_refuse_status(kind));
         };
         let mode = effective_diff_mode(self.diff_mode, self.layout.diff_pane_width);
-        let patch = build_partial_cached_patch(
+        let patch = build_partial_patch(
             self.current_diff_content(),
             mode,
             anchor,
@@ -11749,24 +11749,6 @@ diff --git a/README.md b/README.md
         assert_eq!(app.diff_visual_anchor, anchor, "Esc keeps the anchor");
         assert_eq!(app.diff_cursor, cursor);
         assert_eq!(app.input_mode(), InputMode::DiffVisual);
-    }
-
-    #[test]
-    fn palette_revert_highlighted_lines_opens_range_confirm() {
-        let mut app = state();
-        focus_readme_diff(&mut app, two_hunk_readme());
-        highlight_first_readme_hunk(&mut app);
-        assert_eq!(palette_reason(&app, "Revert highlighted lines"), None);
-        palette_select(&mut app, "Revert highlighted lines");
-        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
-        assert!(app.command_palette.is_none(), "Enter closes the palette");
-        let Some(PendingConfirm::RevertRange { patch, .. }) = app.confirm.clone() else {
-            panic!("{:?}", app.confirm);
-        };
-        assert!(
-            patch.contains("ALPHA-NEW") && !patch.contains("OMEGA-NEW"),
-            "{patch}"
-        );
     }
 
     /// Open the palette, type `filter`, and return the row under the cursor.

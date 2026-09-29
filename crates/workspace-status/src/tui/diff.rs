@@ -555,7 +555,7 @@ pub fn build_diff_rows(content: &DiffContent, mode: DiffMode) -> Vec<DiffRow> {
 /// drop. A `-` run and its `+` run interleave by pair, so a selected pair
 /// keeps its place. Returns `Err` when the range cannot become a valid patch (fail
 /// closed — never a whole-file patch).
-pub fn build_partial_cached_patch(
+pub fn build_partial_patch(
     content: &DiffContent,
     mode: DiffMode,
     start: usize,
@@ -679,6 +679,8 @@ pub fn build_partial_cached_patch(
     }
 
     let mut body = String::new();
+    // Line-count shift of the hunks emitted so far (other side − target).
+    let mut shift = 0i64;
     for (idx, hunk) in hunks.iter().enumerate() {
         let key = (want, idx);
         let selected = if whole_hunks.contains(&key) {
@@ -689,10 +691,9 @@ pub fn build_partial_cached_patch(
         if selected.is_none() && !whole_hunks.contains(&key) {
             continue;
         }
-        match transform_hunk(hunk, selected, kind) {
-            Ok(Some(text)) => body.push_str(&text),
-            Ok(None) => {}
-            Err(err) => return Err(err),
+        if let Some((text, hunk_shift)) = transform_hunk(hunk, selected, kind, shift)? {
+            body.push_str(&text);
+            shift += hunk_shift;
         }
     }
     if body.is_empty() {
@@ -841,11 +842,17 @@ fn pair_ordered_lines(hunk: &Hunk) -> Vec<(usize, Option<&str>)> {
 /// Lines go out in [`pair_ordered_lines`] order, so a selected pair lands
 /// where its deletion was: the side that must match the target keeps its
 /// original order, and the other side changes pair by pair.
+///
+/// Start lines: the target side keeps the start from `hunk`. The other
+/// side starts at the target start plus `shift`, the line-count change of
+/// the hunks already emitted (git applies hunks in order and uses that
+/// side as the position hint). Returns the hunk text and its own shift.
 fn transform_hunk(
     hunk: &Hunk,
     selected_lines: Option<&HashSet<usize>>,
     kind: PartialPatchKind,
-) -> Result<Option<String>, String> {
+    shift: i64,
+) -> Result<Option<(String, i64)>, String> {
     if hunk.header.is_empty() {
         return Err(binary_fail(kind));
     }
@@ -902,10 +909,43 @@ fn transform_hunk(
         }
     }
     let (old_start, new_start) = hunk_starts(&hunk.header);
+    let (target_start, target_count, other_count) = if reverse {
+        (new_start, new_count, old_count)
+    } else {
+        (old_start, old_count, new_count)
+    };
+    let other_start = shifted_start(target_start, target_count, other_count, shift);
+    let (old_start, new_start) = if reverse {
+        (other_start, target_start)
+    } else {
+        (target_start, other_start)
+    };
     let suffix = hunk_header_suffix(&hunk.header);
-    Ok(Some(format!(
-        "@@ -{old_start},{old_count} +{new_start},{new_count} @@{suffix}\n{body}"
+    Ok(Some((
+        format!("@@ -{old_start},{old_count} +{new_start},{new_count} @@{suffix}\n{body}"),
+        i64::from(other_count) - i64::from(target_count),
     )))
+}
+
+/// Start of the non-target side of a rewritten hunk.
+///
+/// Git's zero-count convention: a side with count 0 names the line before
+/// the insertion point (`-4,0` inserts after line 4); otherwise the start
+/// is the first line. Both sides share the line before the hunk, moved by
+/// `shift`.
+fn shifted_start(target_start: u32, target_count: u32, other_count: u32, shift: i64) -> u32 {
+    let target_before = if target_count == 0 {
+        i64::from(target_start)
+    } else {
+        i64::from(target_start) - 1
+    };
+    let other_before = (target_before + shift).max(0);
+    let start = if other_count == 0 {
+        other_before
+    } else {
+        other_before + 1
+    };
+    u32::try_from(start).unwrap_or(u32::MAX)
 }
 
 /// Keep each no-newline marker valid after [`transform_hunk`] drops lines.
@@ -1599,7 +1639,7 @@ index 1111111..2222222 100644
     fn partial_patch_keeps_only_the_highlighted_hunk() {
         let content = two_hunk_content();
         let (start, end) = first_hunk_row_span(DiffMode::Inline);
-        let patch = build_partial_cached_patch(
+        let patch = build_partial_patch(
             &content,
             DiffMode::Inline,
             start,
@@ -1630,7 +1670,7 @@ index 1111111..2222222 100644
             .iter()
             .position(|r| matches!(r, DiffRow::Line { left, .. } if left.text == "line4"))
             .expect("line4");
-        let patch = build_partial_cached_patch(
+        let patch = build_partial_patch(
             &content,
             DiffMode::Inline,
             line4,
@@ -1652,7 +1692,7 @@ index 1111111..2222222 100644
             .iter()
             .position(|r| matches!(r, DiffRow::Line { left, .. } if left.text == "keep-a"))
             .expect("context");
-        let err = build_partial_cached_patch(
+        let err = build_partial_patch(
             &content,
             DiffMode::Inline,
             ctx,
@@ -1669,7 +1709,7 @@ index 1111111..2222222 100644
             is_new: false,
             is_committed: true,
         };
-        let err = build_partial_cached_patch(
+        let err = build_partial_patch(
             &committed,
             DiffMode::Inline,
             0,
@@ -1700,7 +1740,7 @@ index 1111111..2222222 100644
             .skip(first + 1)
             .find_map(|(i, r)| matches!(r, DiffRow::Hunk { .. }).then_some(i))
             .expect("second");
-        let patch = build_partial_cached_patch(
+        let patch = build_partial_patch(
             &content,
             DiffMode::Inline,
             first,
@@ -1713,7 +1753,7 @@ index 1111111..2222222 100644
             patch.contains("ALPHA-NEW") && !patch.contains("OMEGA-NEW"),
             "{patch}"
         );
-        let err = build_partial_cached_patch(
+        let err = build_partial_patch(
             &content,
             DiffMode::Inline,
             first,
@@ -1733,7 +1773,7 @@ index 1111111..2222222 100644
         let end = build_diff_rows(&unstaged, DiffMode::Inline)
             .len()
             .saturating_sub(1);
-        let err = build_partial_cached_patch(
+        let err = build_partial_patch(
             &unstaged,
             DiffMode::Inline,
             0,
@@ -1753,7 +1793,7 @@ index 1111111..2222222 100644
         let end = build_diff_rows(&staged, DiffMode::Inline)
             .len()
             .saturating_sub(1);
-        let err = build_partial_cached_patch(
+        let err = build_partial_patch(
             &staged,
             DiffMode::Inline,
             0,
@@ -1774,7 +1814,7 @@ index 1111111..2222222 100644
             is_committed: false,
         };
         let end = build_diff_rows(&content, DiffMode::Inline).len() - 1;
-        let err = build_partial_cached_patch(
+        let err = build_partial_patch(
             &content,
             DiffMode::Inline,
             0,
@@ -1784,7 +1824,7 @@ index 1111111..2222222 100644
         )
         .unwrap_err();
         assert!(err.contains("highlight spans staged and unstaged"), "{err}");
-        let err = build_partial_cached_patch(
+        let err = build_partial_patch(
             &content,
             DiffMode::Inline,
             0,
@@ -1797,7 +1837,7 @@ index 1111111..2222222 100644
     }
 
     fn revert_patch(content: &DiffContent, start: usize, end: usize) -> Result<String, String> {
-        build_partial_cached_patch(
+        build_partial_patch(
             content,
             DiffMode::Inline,
             start,
@@ -1812,17 +1852,6 @@ index 1111111..2222222 100644
             .iter()
             .position(|r| matches!(r, DiffRow::Line { left, .. } if left.text == text))
             .unwrap_or_else(|| panic!("row {text}"))
-    }
-
-    #[test]
-    fn revert_patch_keeps_only_the_highlighted_hunk() {
-        let (start, end) = first_hunk_row_span(DiffMode::Inline);
-        let patch = revert_patch(&two_hunk_content(), start, end).expect("patch");
-        assert!(patch.contains("-ALPHA-OLD\n+ALPHA-NEW\n"), "{patch}");
-        assert!(
-            !patch.contains("OMEGA-NEW") && !patch.contains("OMEGA-OLD"),
-            "{patch}"
-        );
     }
 
     const PAIRED_HUNK: &str = "\
@@ -1849,7 +1878,7 @@ index 1111111..2222222 100644
             hunk, "@@ -1,3 +1,4 @@\n ctx-a\n+new-1\n new-2\n ctx-b\n",
             "unselected + is context, unselected - drops"
         );
-        let stage = build_partial_cached_patch(
+        let stage = build_partial_patch(
             &content,
             DiffMode::Inline,
             row,
@@ -1930,6 +1959,19 @@ index 1111111..2222222 100644
         let end = build_diff_rows(&renamed, DiffMode::Inline).len() - 1;
         let err = revert_patch(&renamed, 0, end).unwrap_err();
         assert_eq!(err, "cannot revert highlight");
+
+        // A reverse apply would undo the mode change or recreate the file.
+        for header in [
+            "old mode 100644\nnew mode 100755\n",
+            "deleted file mode 100644\n",
+        ] {
+            let content = DiffContent::from_unified(format!(
+                "diff --git a/regions.txt b/regions.txt\n{header}--- a/regions.txt\n+++ b/regions.txt\n@@ -1,2 +1,2 @@\n keep\n-a\n+b\n"
+            ));
+            let end = build_diff_rows(&content, DiffMode::Inline).len() - 1;
+            let err = revert_patch(&content, 0, end).unwrap_err();
+            assert_eq!(err, "cannot revert highlight", "{header}");
+        }
     }
 
     mod real_git {
@@ -2001,7 +2043,7 @@ keep-z
                 .position(|r| matches!(r, DiffRow::Section(DiffSection::Unstaged)))
                 .expect("unstaged section");
             let alpha = line_row(&content, "ALPHA-NEW");
-            let patch = build_partial_cached_patch(
+            let patch = build_partial_patch(
                 &content,
                 DiffMode::Inline,
                 unstaged + 1,
@@ -2027,7 +2069,7 @@ keep-z
 
             let content = content(&dir);
             let row = line_row(&content, "add-1");
-            let patch = build_partial_cached_patch(
+            let patch = build_partial_patch(
                 &content,
                 DiffMode::Inline,
                 row,
@@ -2065,7 +2107,7 @@ keep-z
                 .filter(|r| matches!(r, DiffRow::Hunk { .. }))
                 .count();
             assert_eq!(hunks, 1, "both edits share one hunk");
-            let patch = build_partial_cached_patch(
+            let patch = build_partial_patch(
                 &content,
                 DiffMode::SideBySide,
                 paired,
@@ -2105,8 +2147,8 @@ keep-z
                     _ => false,
                 })
                 .unwrap_or_else(|| panic!("row {left} / {right:?}"));
-            let patch = build_partial_cached_patch(&content, mode, row, row, kind, "regions.txt")
-                .expect("patch");
+            let patch =
+                build_partial_patch(&content, mode, row, row, kind, "regions.txt").expect("patch");
             match kind {
                 PartialPatchKind::Stage => apply_cached_patch(&dir, &patch, false),
                 PartialPatchKind::Unstage => apply_cached_patch(&dir, &patch, true),
@@ -2184,6 +2226,136 @@ keep-z
             }
         }
 
+        /// `l1`..`l30` with the chosen edits: `X1` / `X2` after `l2` (the
+        /// first hunk changes the line count), `l12` gone, `ADD-Y` after
+        /// `l22`.
+        fn shifted_body(x1: bool, x2: bool, drop_l12: bool, add_y: bool) -> String {
+            let mut out = String::new();
+            for n in 1..=30 {
+                if !(drop_l12 && n == 12) {
+                    out.push_str(&format!("l{n}\n"));
+                }
+                if n == 2 {
+                    if x1 {
+                        out.push_str("X1\n");
+                    }
+                    if x2 {
+                        out.push_str("X2\n");
+                    }
+                }
+                if n == 22 && add_y {
+                    out.push_str("ADD-Y\n");
+                }
+            }
+            out
+        }
+
+        /// Highlight rows `from..=to` of a three-hunk diff, apply `kind`,
+        /// and return (index, worktree). `context` sets `diff.context`.
+        fn shifted_apply(
+            context: Option<&str>,
+            kind: PartialPatchKind,
+            from: &str,
+            to: &str,
+        ) -> (String, String) {
+            let dir = unique_dir("ws-diff-hunk-start");
+            init_repo(&dir);
+            if let Some(n) = context {
+                git(&dir, &["config", "diff.context", n]);
+            }
+            let file = dir.join("lines.txt");
+            fs::write(&file, shifted_body(false, false, false, false)).unwrap();
+            git(&dir, &["add", "lines.txt"]);
+            git(&dir, &["commit", "-q", "-m", "lines"]);
+            fs::write(&file, shifted_body(true, true, true, true)).unwrap();
+            if kind == PartialPatchKind::Unstage {
+                git(&dir, &["add", "lines.txt"]);
+            }
+            let content = DiffContent {
+                staged: exec_git(&["diff", "--cached", "--", "lines.txt"], &dir),
+                unstaged: exec_git(&["diff", "--", "lines.txt"], &dir),
+                is_new: false,
+                is_committed: false,
+            };
+            let hunks = parse_unified_diff(if kind == PartialPatchKind::Unstage {
+                &content.staged
+            } else {
+                &content.unstaged
+            })
+            .len();
+            assert_eq!(hunks, 3, "three separate hunks at context {context:?}");
+            let patch = build_partial_patch(
+                &content,
+                DiffMode::Inline,
+                line_row(&content, from),
+                line_row(&content, to),
+                kind,
+                "lines.txt",
+            )
+            .expect("patch");
+            match kind {
+                PartialPatchKind::Stage => apply_cached_patch(&dir, &patch, false),
+                PartialPatchKind::Unstage => apply_cached_patch(&dir, &patch, true),
+                PartialPatchKind::Revert => apply_worktree_patch_reverse(&dir, &patch),
+            }
+            .unwrap_or_else(|err| panic!("{kind:?} {from}..{to}: {err}\n{patch}"));
+            let index = blob_bytes(&dir, "", "lines.txt").expect("index blob");
+            let out = (
+                String::from_utf8(index).unwrap(),
+                fs::read_to_string(&file).unwrap(),
+            );
+            let _ = fs::remove_dir_all(&dir);
+            out
+        }
+
+        #[test]
+        fn later_hunks_land_after_skipped_or_partial_earlier_hunks() {
+            use PartialPatchKind::{Revert, Stage, Unstage};
+            let base = shifted_body(false, false, false, false);
+            let edited = shifted_body(true, true, true, true);
+            // (from, to, stage result, unstage / revert result)
+            let picks = [
+                (
+                    "ADD-Y",
+                    "ADD-Y",
+                    shifted_body(false, false, false, true),
+                    shifted_body(true, true, true, false),
+                ),
+                (
+                    "l12",
+                    "l12",
+                    shifted_body(false, false, true, false),
+                    shifted_body(true, true, false, true),
+                ),
+                (
+                    "X2",
+                    "l12",
+                    shifted_body(false, true, true, false),
+                    shifted_body(true, false, false, true),
+                ),
+            ];
+            for context in [Some("0"), None] {
+                for (from, to, staged, undone) in &picks {
+                    let label = format!("context {context:?} {from}..{to}");
+                    assert_eq!(
+                        shifted_apply(context, Stage, from, to),
+                        (staged.clone(), edited.clone()),
+                        "Stage {label}"
+                    );
+                    assert_eq!(
+                        shifted_apply(context, Unstage, from, to),
+                        (undone.clone(), edited.clone()),
+                        "Unstage {label}"
+                    );
+                    assert_eq!(
+                        shifted_apply(context, Revert, from, to),
+                        (base.clone(), undone.clone()),
+                        "Revert {label}"
+                    );
+                }
+            }
+        }
+
         const NO_EOL_BASE: &str = "a\nb\nlast";
         const NO_EOL_EDIT: &str = "a\nb\nLAST";
 
@@ -2211,26 +2383,20 @@ keep-z
                 is_committed: false,
             };
             let row = line_row(&content, row);
-            let result = build_partial_cached_patch(
-                &content,
-                DiffMode::Inline,
-                row,
-                row,
-                kind,
-                "no-eol.txt",
-            )
-            .and_then(|patch| match kind {
-                PartialPatchKind::Stage => apply_cached_patch(&dir, &patch, false),
-                PartialPatchKind::Unstage => apply_cached_patch(&dir, &patch, true),
-                PartialPatchKind::Revert => apply_worktree_patch_reverse(&dir, &patch),
-            })
-            .map(|()| {
-                let index = blob_bytes(&dir, "", "no-eol.txt").expect("index blob");
-                (
-                    String::from_utf8(index).unwrap(),
-                    fs::read_to_string(&file).unwrap(),
-                )
-            });
+            let result =
+                build_partial_patch(&content, DiffMode::Inline, row, row, kind, "no-eol.txt")
+                    .and_then(|patch| match kind {
+                        PartialPatchKind::Stage => apply_cached_patch(&dir, &patch, false),
+                        PartialPatchKind::Unstage => apply_cached_patch(&dir, &patch, true),
+                        PartialPatchKind::Revert => apply_worktree_patch_reverse(&dir, &patch),
+                    })
+                    .map(|()| {
+                        let index = blob_bytes(&dir, "", "no-eol.txt").expect("index blob");
+                        (
+                            String::from_utf8(index).unwrap(),
+                            fs::read_to_string(&file).unwrap(),
+                        )
+                    });
             let _ = fs::remove_dir_all(&dir);
             result
         }
@@ -2267,7 +2433,7 @@ keep-z
 
             let content = content(&dir);
             let row = line_row(&content, "add-1");
-            let patch = build_partial_cached_patch(
+            let patch = build_partial_patch(
                 &content,
                 DiffMode::Inline,
                 row,

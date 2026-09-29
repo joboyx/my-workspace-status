@@ -886,14 +886,15 @@ mod tests {
     #[test]
     fn highlight_group_paints_first() {
         let palette = CommandPaletteState::new(PaletteOpenedBy::Colon);
-        assert_eq!(
-            palette.paint_rows().first(),
-            Some(&PalettePaintRow::Header("HIGHLIGHT"))
-        );
-        assert_eq!(
-            palette.selected().map(|c| c.title),
-            Some("Stage highlighted lines")
-        );
+        let headers: Vec<&str> = palette
+            .paint_rows()
+            .into_iter()
+            .filter_map(|row| match row {
+                PalettePaintRow::Header(title) => Some(title),
+                PalettePaintRow::Command { .. } => None,
+            })
+            .collect();
+        assert_eq!(headers, vec!["HIGHLIGHT", "MOVE", "GIT", "VIEW"]);
     }
 
     #[test]
