@@ -432,6 +432,11 @@ impl AppState {
         if self.is_compare_tab() && is_compare_mutation(action) {
             return Some(SWITCH_TO_WORKSPACE_TAB.into());
         }
+        if let (Action::Revert, Some(anchor)) = (action, self.diff_visual_anchor) {
+            return self
+                .visual_patch(anchor, super::super::diff::PartialPatchKind::Revert)
+                .err();
+        }
         if dispatch_is_noop(
             action,
             self.nav_depth(),

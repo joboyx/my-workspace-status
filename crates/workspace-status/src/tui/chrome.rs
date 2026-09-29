@@ -415,7 +415,8 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
     if let Some(pending) = state.confirm.as_ref() {
         return match pending {
             super::state::PendingConfirm::RemoveWorktree { .. } => 6,
-            super::state::PendingConfirm::StashDrop { .. } => 5,
+            super::state::PendingConfirm::StashDrop { .. }
+            | super::state::PendingConfirm::RevertRange { .. } => 5,
             super::state::PendingConfirm::Revert { .. }
             | super::state::PendingConfirm::CheckoutOutOfSync { .. }
             | super::state::PendingConfirm::MergeIntoHead { .. } => 7,
@@ -567,7 +568,8 @@ pub fn extra_hint_segments() -> Vec<HintSegment> {
 pub fn visual_hint_segments() -> Vec<HintSegment> {
     vec![
         hint("j k", "extend range", false),
-        hint("s u", "stage / unstage range", false),
+        hint("s u", "stage / unstage", false),
+        hint("x", "revert", true),
         hint(";", "comment range", false),
         hint("Esc", "cancel highlight", false),
     ]
@@ -1387,6 +1389,7 @@ mod tests {
         );
         let visual: Vec<String> = visual_hint_segments().into_iter().map(|s| s.key).collect();
         assert!(visual.contains(&"s u".into()), "{visual:?}");
+        assert!(visual.contains(&"x".into()), "{visual:?}");
         assert!(visual.contains(&"j k".into()), "{visual:?}");
     }
 
@@ -1466,6 +1469,12 @@ mod tests {
         app.confirm = Some(super::super::state::PendingConfirm::StashDrop {
             repo: "app".into(),
             stash_ref: "stash@{0}".into(),
+        });
+        assert_eq!(overlay_status_rows(&app), 5);
+        app.confirm = Some(super::super::state::PendingConfirm::RevertRange {
+            repo: "app".into(),
+            path: "README.md".into(),
+            patch: String::new(),
         });
         assert_eq!(overlay_status_rows(&app), 5);
         app.confirm = Some(super::super::state::PendingConfirm::RemoveWorktree {

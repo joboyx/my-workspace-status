@@ -391,13 +391,15 @@ enum RowBind {
     },
 }
 
-/// Index apply direction for a visual-line partial patch.
+/// Apply target and direction for a visual-line partial patch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PartialPatchKind {
     /// `git apply --cached` of unstaged add/del lines.
     Stage,
     /// `git apply --reverse --cached` of staged add/del lines.
     Unstage,
+    /// `git apply --reverse` of unstaged add/del lines (worktree only).
+    Revert,
 }
 
 fn pair_hunk(hunk: &Hunk) -> Vec<(DiffRow, Vec<usize>)> {
@@ -542,12 +544,16 @@ pub fn build_diff_rows(content: &DiffContent, mode: DiffMode) -> Vec<DiffRow> {
         .collect()
 }
 
-/// Build a `git apply --cached` patch for painted rows `start..=end`.
+/// Build a `git apply` patch for painted rows `start..=end`.
 ///
-/// Stage reads the unstaged (or NEW) section. Unstage reads STAGED.
-/// Context lines in the range stay as context. Unselected additions drop.
-/// Unselected deletions become context. Returns `Err` when the range cannot
-/// become a valid patch (fail closed — never a whole-file patch).
+/// Stage reads the unstaged (or NEW) section. Unstage reads STAGED. Revert
+/// reads UNSTAGED only (index to worktree) and refuses NEW files.
+/// Context lines in the range stay as context. Stage applies forward, so
+/// unselected additions drop and unselected deletions become context.
+/// Unstage and Revert apply with `--reverse`, so the post-image must match
+/// the target: unselected additions become context and unselected deletions
+/// drop. Returns `Err` when the range cannot become a valid patch (fail
+/// closed — never a whole-file patch).
 pub fn build_partial_cached_patch(
     content: &DiffContent,
     mode: DiffMode,
@@ -636,6 +642,15 @@ pub fn build_partial_cached_patch(
             }
             (DiffSection::Staged, content.staged.as_str(), false)
         }
+        PartialPatchKind::Revert => {
+            if content.is_new || change_sections.contains(&DiffSection::New) {
+                return Err("cannot revert lines of a new file".into());
+            }
+            if !change_sections.contains(&DiffSection::Unstaged) {
+                return Err(nothing_fail(kind));
+            }
+            (DiffSection::Unstaged, content.unstaged.as_str(), false)
+        }
     };
 
     if raw.trim().is_empty() {
@@ -643,6 +658,13 @@ pub fn build_partial_cached_patch(
     }
     let header = patch_file_header(raw, path, is_new);
     if header.contains("rename from") || header.contains("copy from") {
+        return Err(partial_fail(kind));
+    }
+    // A reverse worktree apply would also undo a mode change or recreate a
+    // deleted file. Line revert covers content only.
+    if kind == PartialPatchKind::Revert
+        && (header.contains("old mode") || header.contains("deleted file mode"))
+    {
         return Err(partial_fail(kind));
     }
     let hunks = parse_unified_diff(raw);
@@ -661,7 +683,7 @@ pub fn build_partial_cached_patch(
         if selected.is_none() && !whole_hunks.contains(&key) {
             continue;
         }
-        match transform_hunk(hunk, selected) {
+        match transform_hunk(hunk, selected, kind != PartialPatchKind::Stage) {
             Ok(Some(text)) => body.push_str(&text),
             Ok(None) => {}
             Err(err) => return Err(err),
@@ -677,6 +699,7 @@ fn nothing_fail(kind: PartialPatchKind) -> String {
     match kind {
         PartialPatchKind::Stage => "nothing to stage in highlight".into(),
         PartialPatchKind::Unstage => "nothing to unstage in highlight".into(),
+        PartialPatchKind::Revert => "nothing to revert in highlight".into(),
     }
 }
 
@@ -684,6 +707,7 @@ fn committed_fail(kind: PartialPatchKind) -> String {
     match kind {
         PartialPatchKind::Stage => "cannot stage a committed diff".into(),
         PartialPatchKind::Unstage => "cannot unstage a committed diff".into(),
+        PartialPatchKind::Revert => "cannot revert a committed diff".into(),
     }
 }
 
@@ -691,6 +715,7 @@ fn binary_fail(kind: PartialPatchKind) -> String {
     match kind {
         PartialPatchKind::Stage => "cannot stage a binary highlight".into(),
         PartialPatchKind::Unstage => "cannot unstage a binary highlight".into(),
+        PartialPatchKind::Revert => "cannot revert a binary highlight".into(),
     }
 }
 
@@ -698,6 +723,7 @@ fn partial_fail(kind: PartialPatchKind) -> String {
     match kind {
         PartialPatchKind::Stage => "cannot stage highlight".into(),
         PartialPatchKind::Unstage => "cannot unstage highlight".into(),
+        PartialPatchKind::Revert => "cannot revert highlight".into(),
     }
 }
 
@@ -747,9 +773,17 @@ fn hunk_header_suffix(header: &str) -> &str {
     }
 }
 
+/// Keep the selected add/del lines of `hunk` and rewrite the rest.
+///
+/// Forward (`reverse == false`, `git apply`): the pre-image must match the
+/// target, so an unselected addition drops and an unselected deletion
+/// becomes context. Reverse (`git apply --reverse`): the post-image must
+/// match the target, so an unselected addition becomes context and an
+/// unselected deletion drops.
 fn transform_hunk(
     hunk: &Hunk,
     selected_lines: Option<&HashSet<usize>>,
+    reverse: bool,
 ) -> Result<Option<String>, String> {
     if hunk.header.is_empty() {
         return Err("cannot stage a binary highlight".into());
@@ -771,34 +805,30 @@ fn transform_hunk(
                 new_count = new_count.saturating_add(1);
                 emitted_last = true;
             }
-            DiffCellKind::Add => {
+            DiffCellKind::Add | DiffCellKind::Del => {
+                let add = line.kind == DiffCellKind::Add;
+                // Forward keeps an unselected deletion as context; reverse
+                // keeps an unselected addition as context. The other one
+                // is not in the target file and drops.
+                let as_context = !take && add == reverse;
                 if take {
-                    body.push('+');
-                    body.push_str(&line.text);
-                    body.push('\n');
-                    new_count = new_count.saturating_add(1);
+                    body.push(if add { '+' } else { '-' });
+                    if add {
+                        new_count = new_count.saturating_add(1);
+                    } else {
+                        old_count = old_count.saturating_add(1);
+                    }
                     has_change = true;
-                    emitted_last = true;
-                } else {
-                    emitted_last = false;
-                }
-            }
-            DiffCellKind::Del => {
-                if take {
-                    body.push('-');
-                    body.push_str(&line.text);
-                    body.push('\n');
-                    old_count = old_count.saturating_add(1);
-                    has_change = true;
-                    emitted_last = true;
-                } else {
+                } else if as_context {
                     body.push(' ');
-                    body.push_str(&line.text);
-                    body.push('\n');
                     old_count = old_count.saturating_add(1);
                     new_count = new_count.saturating_add(1);
-                    emitted_last = true;
                 }
+                if take || as_context {
+                    body.push_str(&line.text);
+                    body.push('\n');
+                }
+                emitted_last = take || as_context;
             }
             DiffCellKind::Meta => {
                 if emitted_last {
@@ -1645,5 +1675,277 @@ index 1111111..2222222 100644
         )
         .unwrap_err();
         assert!(err.contains("highlight spans staged and unstaged"), "{err}");
+    }
+
+    fn revert_patch(content: &DiffContent, start: usize, end: usize) -> Result<String, String> {
+        build_partial_cached_patch(
+            content,
+            DiffMode::Inline,
+            start,
+            end,
+            PartialPatchKind::Revert,
+            "regions.txt",
+        )
+    }
+
+    fn line_row(content: &DiffContent, text: &str) -> usize {
+        build_diff_rows(content, DiffMode::Inline)
+            .iter()
+            .position(|r| matches!(r, DiffRow::Line { left, .. } if left.text == text))
+            .unwrap_or_else(|| panic!("row {text}"))
+    }
+
+    #[test]
+    fn revert_patch_keeps_only_the_highlighted_hunk() {
+        let (start, end) = first_hunk_row_span(DiffMode::Inline);
+        let patch = revert_patch(&two_hunk_content(), start, end).expect("patch");
+        assert!(patch.contains("-ALPHA-OLD\n+ALPHA-NEW\n"), "{patch}");
+        assert!(
+            !patch.contains("OMEGA-NEW") && !patch.contains("OMEGA-OLD"),
+            "{patch}"
+        );
+    }
+
+    const PAIRED_HUNK: &str = "\
+diff --git a/regions.txt b/regions.txt
+index 1111111..2222222 100644
+--- a/regions.txt
++++ b/regions.txt
+@@ -1,4 +1,4 @@
+ ctx-a
+-old-1
+-old-2
++new-1
++new-2
+ ctx-b
+";
+
+    #[test]
+    fn revert_patch_mirrors_the_stage_transform() {
+        let content = DiffContent::from_unified(PAIRED_HUNK);
+        let row = line_row(&content, "new-1");
+        let patch = revert_patch(&content, row, row).expect("patch");
+        let hunk = &patch[patch.find("@@").expect("hunk")..];
+        assert_eq!(
+            hunk, "@@ -1,3 +1,4 @@\n ctx-a\n+new-1\n new-2\n ctx-b\n",
+            "unselected + is context, unselected - drops"
+        );
+        let stage = build_partial_cached_patch(
+            &content,
+            DiffMode::Inline,
+            row,
+            row,
+            PartialPatchKind::Stage,
+            "regions.txt",
+        )
+        .expect("stage patch");
+        let hunk = &stage[stage.find("@@").expect("hunk")..];
+        assert_eq!(
+            hunk, "@@ -1,4 +1,5 @@\n ctx-a\n old-1\n old-2\n+new-1\n ctx-b\n",
+            "stage keeps the forward transform"
+        );
+    }
+
+    #[test]
+    fn revert_patch_fails_closed() {
+        let content = two_hunk_content();
+        let ctx = line_row(&content, "keep-a");
+        let err = revert_patch(&content, ctx, ctx).unwrap_err();
+        assert_eq!(err, "nothing to revert in highlight");
+
+        let committed = DiffContent {
+            is_committed: true,
+            ..two_hunk_content()
+        };
+        let err = revert_patch(&committed, 0, 3).unwrap_err();
+        assert_eq!(err, "cannot revert a committed diff");
+
+        let binary = DiffContent::from_unified(BINARY_STUB);
+        let end = build_diff_rows(&binary, DiffMode::Inline).len() - 1;
+        let err = revert_patch(&binary, 0, end).unwrap_err();
+        assert_eq!(err, "cannot revert a binary highlight");
+
+        let new_file = DiffContent {
+            staged: String::new(),
+            unstaged: synthesize_all_add_diff("one\ntwo\n"),
+            is_new: true,
+            is_committed: false,
+        };
+        let end = build_diff_rows(&new_file, DiffMode::Inline).len() - 1;
+        let err = revert_patch(&new_file, 0, end).unwrap_err();
+        assert_eq!(err, "cannot revert lines of a new file");
+
+        let staged_only = DiffContent {
+            staged: TWO_HUNKS.into(),
+            unstaged: String::new(),
+            is_new: false,
+            is_committed: false,
+        };
+        let end = build_diff_rows(&staged_only, DiffMode::Inline).len() - 1;
+        let err = revert_patch(&staged_only, 0, end).unwrap_err();
+        assert_eq!(err, "nothing to revert in highlight");
+
+        let mixed = DiffContent {
+            staged: TWO_HUNKS.into(),
+            unstaged: TWO_HUNKS.into(),
+            is_new: false,
+            is_committed: false,
+        };
+        let end = build_diff_rows(&mixed, DiffMode::Inline).len() - 1;
+        let err = revert_patch(&mixed, 0, end).unwrap_err();
+        assert_eq!(err, "highlight spans staged and unstaged");
+
+        let renamed = DiffContent::from_unified(
+            "diff --git a/old.txt b/regions.txt\nsimilarity index 90%\nrename from old.txt\nrename to regions.txt\n--- a/old.txt\n+++ b/regions.txt\n@@ -1,2 +1,2 @@\n keep\n-a\n+b\n",
+        );
+        let end = build_diff_rows(&renamed, DiffMode::Inline).len() - 1;
+        let err = revert_patch(&renamed, 0, end).unwrap_err();
+        assert_eq!(err, "cannot revert highlight");
+    }
+
+    mod real_git {
+        use std::fs;
+        use std::path::Path;
+
+        use super::*;
+        use crate::git::{apply_cached_patch, apply_worktree_patch_reverse};
+        use crate::testutil::{git, init_repo, unique_dir};
+
+        const REGIONS: &str = "\
+keep-a
+keep-b
+keep-c
+ALPHA-OLD
+keep-d
+keep-e
+keep-f
+pad-1
+pad-2
+pad-3
+pad-4
+pad-5
+pad-6
+OMEGA-OLD
+keep-x
+keep-y
+keep-z
+";
+
+        fn repo_with_regions(prefix: &str) -> std::path::PathBuf {
+            let dir = unique_dir(prefix);
+            init_repo(&dir);
+            fs::write(dir.join("regions.txt"), REGIONS).unwrap();
+            git(&dir, &["add", "regions.txt"]);
+            git(&dir, &["commit", "-q", "-m", "regions"]);
+            dir
+        }
+
+        fn content(dir: &Path) -> DiffContent {
+            DiffContent {
+                staged: exec_git(&["diff", "--cached", "--", "regions.txt"], dir),
+                unstaged: exec_git(&["diff", "--", "regions.txt"], dir),
+                is_new: false,
+                is_committed: false,
+            }
+        }
+
+        fn worktree(dir: &Path) -> String {
+            fs::read_to_string(dir.join("regions.txt")).unwrap()
+        }
+
+        #[test]
+        fn revert_range_restores_only_the_highlighted_hunk() {
+            let dir = repo_with_regions("ws-diff-revert-hunk");
+            let staged_body = REGIONS.replace("keep-x", "KEEP-X-STAGED");
+            fs::write(dir.join("regions.txt"), &staged_body).unwrap();
+            git(&dir, &["add", "regions.txt"]);
+            let edited = staged_body
+                .replace("ALPHA-OLD", "ALPHA-NEW")
+                .replace("OMEGA-OLD", "OMEGA-NEW");
+            fs::write(dir.join("regions.txt"), &edited).unwrap();
+            let cached_before = exec_git(&["diff", "--cached"], &dir);
+
+            let content = content(&dir);
+            let rows = build_diff_rows(&content, DiffMode::Inline);
+            let unstaged = rows
+                .iter()
+                .position(|r| matches!(r, DiffRow::Section(DiffSection::Unstaged)))
+                .expect("unstaged section");
+            let alpha = line_row(&content, "ALPHA-NEW");
+            let patch = build_partial_cached_patch(
+                &content,
+                DiffMode::Inline,
+                unstaged + 1,
+                alpha,
+                PartialPatchKind::Revert,
+                "regions.txt",
+            )
+            .expect("patch");
+            apply_worktree_patch_reverse(&dir, &patch).expect("revert");
+
+            assert_eq!(worktree(&dir), edited.replace("ALPHA-NEW", "ALPHA-OLD"));
+            assert_eq!(exec_git(&["diff", "--cached"], &dir), cached_before);
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn revert_range_drops_one_added_line_and_keeps_its_neighbour() {
+            let dir = repo_with_regions("ws-diff-revert-line");
+            let edited = REGIONS
+                .replace("keep-b\n", "keep-b\nadd-1\nadd-2\n")
+                .replace("keep-c", "KEEP-C-NEW");
+            fs::write(dir.join("regions.txt"), &edited).unwrap();
+
+            let content = content(&dir);
+            let row = line_row(&content, "add-1");
+            let patch = build_partial_cached_patch(
+                &content,
+                DiffMode::Inline,
+                row,
+                row,
+                PartialPatchKind::Revert,
+                "regions.txt",
+            )
+            .expect("patch");
+            apply_worktree_patch_reverse(&dir, &patch).expect("revert");
+
+            assert_eq!(worktree(&dir), edited.replace("add-1\n", ""));
+            assert!(exec_git(&["diff", "--cached"], &dir).is_empty());
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn unstage_range_keeps_an_adjacent_staged_addition() {
+            let dir = repo_with_regions("ws-diff-unstage-line");
+            let edited = REGIONS.replace("keep-b\n", "keep-b\nadd-1\nadd-2\n");
+            fs::write(dir.join("regions.txt"), &edited).unwrap();
+            git(&dir, &["add", "regions.txt"]);
+
+            let content = content(&dir);
+            let row = line_row(&content, "add-1");
+            let patch = build_partial_cached_patch(
+                &content,
+                DiffMode::Inline,
+                row,
+                row,
+                PartialPatchKind::Unstage,
+                "regions.txt",
+            )
+            .expect("patch");
+            apply_cached_patch(&dir, &patch, true).expect("unstage one line");
+
+            let cached = exec_git(&["diff", "--cached"], &dir);
+            let unstaged = exec_git(&["diff"], &dir);
+            assert!(
+                cached.contains("+add-2") && !cached.contains("add-1"),
+                "{cached}"
+            );
+            assert!(
+                unstaged.contains("+add-1") && !unstaged.contains("+add-2"),
+                "{unstaged}"
+            );
+            assert_eq!(worktree(&dir), edited);
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 }

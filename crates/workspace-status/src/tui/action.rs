@@ -288,6 +288,15 @@ pub enum Effect {
         patch: String,
         reverse: bool,
     },
+    /// Discard a unified patch from the worktree (`git apply --reverse`).
+    ///
+    /// Visual-line `x` emits this after its confirm. The index stays
+    /// untouched. Whole-file `x` stays [`Self::Revert`].
+    RevertPatch {
+        repo: String,
+        path: String,
+        patch: String,
+    },
     Revert {
         repo: String,
         tracked: Vec<String>,

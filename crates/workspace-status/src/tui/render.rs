@@ -1877,6 +1877,22 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ];
             (accent, lines)
         }
+        PendingConfirm::RevertRange { path, .. } => {
+            let accent = palette.modified;
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        "Discard ",
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("highlighted lines in ", Style::default().fg(palette.muted)),
+                    Span::styled(path.clone(), Style::default().fg(palette.file)),
+                    Span::styled("?", Style::default().fg(accent)),
+                ]),
+                confirm_action_row("y", "revert", None, accent, palette.muted, surface),
+            ];
+            (accent, lines)
+        }
         PendingConfirm::StashDrop { stash_ref, .. } => {
             let accent = palette.deleted;
             let lines = vec![
@@ -4274,6 +4290,20 @@ mod tests {
         assert!(text.contains("revert + delete untracked"), "{text}");
         assert!(!text.contains("? y/n"), "{text}");
         assert!(!text.contains("revert README.md? y/n"), "{text}");
+
+        state.confirm = Some(PendingConfirm::RevertRange {
+            repo: "app".into(),
+            path: "README.md".into(),
+            patch: String::new(),
+        });
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("Discard highlighted lines in README.md?"),
+            "{text}"
+        );
+        assert!(text.contains("revert"), "{text}");
+        assert!(!text.contains("revert + delete untracked"), "{text}");
 
         state.confirm = Some(PendingConfirm::StashDrop {
             repo: "app".into(),

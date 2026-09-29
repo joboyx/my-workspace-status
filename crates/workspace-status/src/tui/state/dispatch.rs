@@ -29,8 +29,8 @@ impl AppState {
             self.status = super::super::tabs::SWITCH_TO_WORKSPACE_TAB.into();
             return Effect::None;
         }
-        let visual_write =
-            self.diff_visual_anchor.is_some() && matches!(action, Action::Stage | Action::Unstage);
+        let visual_write = self.diff_visual_anchor.is_some()
+            && matches!(action, Action::Stage | Action::Unstage | Action::Revert);
         let noop = dispatch_is_noop(
             &action,
             self.nav_depth(),

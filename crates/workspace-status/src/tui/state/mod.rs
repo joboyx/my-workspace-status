@@ -247,6 +247,15 @@ pub enum PendingConfirm {
         /// Focused-row path shown in the overlay.
         label: String,
     },
+    /// DiffVisual `x`: discard the highlighted lines of one file.
+    ///
+    /// The patch is built before the confirm opens, so a refusal is
+    /// immediate and `y` applies exactly what the overlay named.
+    RevertRange {
+        repo: String,
+        path: String,
+        patch: String,
+    },
     StashDrop {
         repo: String,
         stash_ref: String,
@@ -2729,20 +2738,8 @@ impl AppState {
             FileWrite::Stage => PartialPatchKind::Stage,
             FileWrite::Unstage => PartialPatchKind::Unstage,
         };
-        let Some((repo, path)) = self.visual_write_target() else {
-            self.status = self.visual_write_refuse_status(write);
-            return Effect::None;
-        };
-        let mode = effective_diff_mode(self.diff_mode, self.layout.diff_pane_width);
-        let patch = match build_partial_cached_patch(
-            self.current_diff_content(),
-            mode,
-            anchor,
-            self.diff_cursor,
-            kind,
-            &path,
-        ) {
-            Ok(patch) => patch,
+        let (repo, path, patch) = match self.visual_patch(anchor, kind) {
+            Ok(built) => built,
             Err(err) => {
                 self.status = err;
                 return Effect::None;
@@ -2758,6 +2755,27 @@ impl AppState {
             patch,
             reverse,
         }
+    }
+
+    /// Repo, path, and patch for the DiffVisual range, or the refusal text.
+    fn visual_patch(
+        &self,
+        anchor: usize,
+        kind: PartialPatchKind,
+    ) -> Result<(String, String, String), String> {
+        let Some((repo, path)) = self.visual_write_target() else {
+            return Err(self.visual_write_refuse_status(kind));
+        };
+        let mode = effective_diff_mode(self.diff_mode, self.layout.diff_pane_width);
+        let patch = build_partial_cached_patch(
+            self.current_diff_content(),
+            mode,
+            anchor,
+            self.diff_cursor,
+            kind,
+            &path,
+        )?;
+        Ok((repo, path, patch))
     }
 
     /// Repo and path for a DiffVisual cached patch, or `None` to refuse.
@@ -2777,10 +2795,11 @@ impl AppState {
         }
     }
 
-    fn visual_write_refuse_status(&self, write: FileWrite) -> String {
-        let verb = match write {
-            FileWrite::Stage => "stage",
-            FileWrite::Unstage => "unstage",
+    fn visual_write_refuse_status(&self, kind: PartialPatchKind) -> String {
+        let verb = match kind {
+            PartialPatchKind::Stage => "stage",
+            PartialPatchKind::Unstage => "unstage",
+            PartialPatchKind::Revert => "revert",
         };
         let target = match &self.drill {
             DrillView::Diff {
@@ -2832,6 +2851,9 @@ impl AppState {
     }
 
     fn begin_revert(&mut self) -> Effect {
+        if let Some(anchor) = self.diff_visual_anchor {
+            return self.begin_revert_range(anchor);
+        }
         let scoped = collect_write_files(&self.snapshot, self.focused_row(), self.show_ignored);
         let selected: Vec<ScopedFile> = scoped
             .into_iter()
@@ -2884,6 +2906,21 @@ impl AppState {
         Effect::None
     }
 
+    /// DiffVisual `x`: build the reverse patch, then open its confirm.
+    ///
+    /// A refusal keeps the highlight and sets the status. Opening the
+    /// confirm clears the highlight.
+    fn begin_revert_range(&mut self, anchor: usize) -> Effect {
+        match self.visual_patch(anchor, PartialPatchKind::Revert) {
+            Ok((repo, path, patch)) => {
+                self.clear_diff_visual();
+                self.confirm = Some(PendingConfirm::RevertRange { repo, path, patch });
+            }
+            Err(err) => self.status = err,
+        }
+        Effect::None
+    }
+
     fn confirm_yes(&mut self, clean: bool) -> Effect {
         match self.confirm.take() {
             Some(PendingConfirm::Revert { targets, .. }) => {
@@ -2914,6 +2951,10 @@ impl AppState {
                     })
                     .collect();
                 single_or_batch(effects)
+            }
+            Some(PendingConfirm::RevertRange { repo, path, patch }) => {
+                self.status = format!("revert range {path}");
+                Effect::RevertPatch { repo, path, patch }
             }
             Some(PendingConfirm::StashDrop { repo, stash_ref }) => {
                 self.status = format!("drop {stash_ref}");
@@ -11426,7 +11467,11 @@ diff --git a/README.md b/README.md
     }
 
     fn assert_visual_write_refused(app: &mut AppState, subject: &str) {
-        for (action, verb) in [(Action::Stage, "stage"), (Action::Unstage, "unstage")] {
+        for (action, verb) in [
+            (Action::Stage, "stage"),
+            (Action::Unstage, "unstage"),
+            (Action::Revert, "revert"),
+        ] {
             assert_eq!(app.dispatch(action), Effect::None);
             assert!(
                 app.diff_visual_anchor.is_some(),
@@ -11434,6 +11479,7 @@ diff --git a/README.md b/README.md
             );
             let want = format!("cannot {verb} {subject}");
             assert_eq!(app.status, want);
+            assert!(app.confirm.is_none(), "refusal opens no confirm");
         }
     }
 
@@ -11556,6 +11602,97 @@ diff --git a/README.md b/README.md
             "{}",
             app.status
         );
+    }
+
+    fn highlight_first_readme_hunk(app: &mut AppState) {
+        let rows = app.current_diff_rows();
+        let first = rows
+            .iter()
+            .position(|r| matches!(r, DiffRow::Hunk { .. }))
+            .expect("hunk");
+        let second = rows
+            .iter()
+            .enumerate()
+            .skip(first + 1)
+            .find_map(|(i, r)| matches!(r, DiffRow::Hunk { .. }).then_some(i))
+            .expect("second");
+        app.diff_cursor = first;
+        app.dispatch(Action::DiffVisualStart);
+        app.diff_cursor = second - 1;
+    }
+
+    #[test]
+    fn visual_revert_confirms_then_emits_revert_patch() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_first_readme_hunk(&mut app);
+        assert_eq!(
+            app.palette_disabled_reason(&Action::Revert),
+            None,
+            "a buildable range keeps palette revert enabled"
+        );
+        assert_eq!(app.dispatch(Action::Revert), Effect::None);
+        assert!(
+            app.diff_visual_anchor.is_none(),
+            "opening the confirm clears highlight"
+        );
+        let Some(PendingConfirm::RevertRange { repo, path, patch }) = app.confirm.clone() else {
+            panic!("{:?}", app.confirm);
+        };
+        assert_eq!((repo.as_str(), path.as_str()), ("app", "README.md"));
+        assert!(
+            patch.contains("ALPHA-NEW") && !patch.contains("OMEGA-NEW"),
+            "{patch}"
+        );
+        assert_eq!(
+            app.dispatch(Action::ConfirmYes),
+            Effect::RevertPatch {
+                repo: "app".into(),
+                path: "README.md".into(),
+                patch,
+            }
+        );
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "revert range README.md");
+    }
+
+    #[test]
+    fn visual_revert_confirm_no_cancels() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_first_readme_hunk(&mut app);
+        app.dispatch(Action::Revert);
+        assert!(matches!(
+            app.confirm,
+            Some(PendingConfirm::RevertRange { .. })
+        ));
+        assert_eq!(app.dispatch(Action::ConfirmNo), Effect::None);
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "revert cancelled");
+    }
+
+    #[test]
+    fn visual_revert_fails_closed_on_context_only() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        let rows = app.current_diff_rows();
+        let ctx = rows
+            .iter()
+            .position(|r| matches!(r, DiffRow::Line { left, .. } if left.text == "keep-a"))
+            .expect("context");
+        app.diff_cursor = ctx;
+        app.dispatch(Action::DiffVisualStart);
+        assert_eq!(
+            app.palette_disabled_reason(&Action::Revert).as_deref(),
+            Some("nothing to revert in highlight")
+        );
+        assert_eq!(app.dispatch(Action::Revert), Effect::None);
+        assert!(app.confirm.is_none());
+        assert!(
+            app.diff_visual_anchor.is_some(),
+            "fail-closed keeps highlight"
+        );
+        assert_eq!(app.status, "nothing to revert in highlight");
     }
 
     fn assert_copy_clipboard(effect: Effect, kind: &str, needle: &str, announce: bool) -> String {

@@ -19,10 +19,10 @@ use workspace_status_graph::LOADING_OLDER;
 use crate::actions::switch_repo_to_default_branch;
 use crate::discovery::{discover_checkouts, process_repo, RepoCheckoutMeta};
 use crate::git::{
-    apply_cached_patch, create_branch_at, create_branch_checkout, exec_git_checked,
-    latest_stash_ref, list_compare_picker_branches, list_local_branches, pull_quiet_detailed,
-    push_quiet, remove_untracked_file, remove_worktree, revert_tracked_file, stage_file,
-    stash_apply, stash_drop, stash_pop, stash_push, unstage_file,
+    apply_cached_patch, apply_worktree_patch_reverse, create_branch_at, create_branch_checkout,
+    exec_git_checked, latest_stash_ref, list_compare_picker_branches, list_local_branches,
+    pull_quiet_detailed, push_quiet, remove_untracked_file, remove_worktree, revert_tracked_file,
+    stage_file, stash_apply, stash_drop, stash_pop, stash_push, unstage_file,
 };
 use crate::parallel::env_fetch_concurrency;
 use crate::snapshot::RepoSnapshot;
@@ -318,7 +318,8 @@ fn overlay_write_checkouts(state: &AppState, action: &Action) -> Vec<String> {
             Some(PendingConfirm::Revert { targets, .. }) => {
                 targets.iter().map(|t| t.repo.clone()).collect()
             }
-            Some(PendingConfirm::StashDrop { repo, .. })
+            Some(PendingConfirm::RevertRange { repo, .. })
+            | Some(PendingConfirm::StashDrop { repo, .. })
             | Some(PendingConfirm::CheckoutOutOfSync { repo, .. })
             | Some(PendingConfirm::MergeIntoHead { repo, .. }) => vec![repo.clone()],
             Some(PendingConfirm::RemoveWorktree { primary, path, .. }) => {
@@ -632,6 +633,17 @@ impl Interpreter {
                     Box::new(move || {
                         apply_cached_patch(&dir, &patch, reverse)?;
                         Ok(format!("{verb} range {path}"))
+                    }),
+                );
+            }
+            Effect::RevertPatch { repo, path, patch } => {
+                let dir = opts.cwd.join(&repo);
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        apply_worktree_patch_reverse(&dir, &patch)?;
+                        Ok(format!("reverted range {path}"))
                     }),
                 );
             }
@@ -1490,6 +1502,7 @@ impl Interpreter {
             Effect::Stage { repo, .. }
             | Effect::Unstage { repo, .. }
             | Effect::ApplyCachedPatch { repo, .. }
+            | Effect::RevertPatch { repo, .. }
             | Effect::Revert { repo, .. }
             | Effect::StashCreate { repo, .. }
             | Effect::StashApply { repo, .. }
