@@ -12,7 +12,7 @@ fn tab_hit(screen: &str, needle: &str) -> Option<(u16, u16)> {
     None
 }
 
-/// SGR click on the tab strip switches tabs. Close is `[x]` on compare only.
+/// SGR click on the tab strip switches tabs. Close is `[𝔁]` on compare only.
 #[test]
 fn pty_compare_mouse_tab_click() {
     let (_root, workspace) = compare_ahead_workspace();

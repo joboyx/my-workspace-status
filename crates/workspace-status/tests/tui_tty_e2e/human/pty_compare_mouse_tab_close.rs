@@ -1,13 +1,13 @@
 use crate::harness::PtySession;
 use crate::seed::compare_ahead_workspace;
-use crate::support::{GIT_WAIT, WAIT};
+use crate::support::{GIT_WAIT, TAB_CLOSE, WAIT};
 
 fn tab_close_hit(screen: &str) -> Option<(u16, u16)> {
     for (row, line) in screen.lines().enumerate() {
         if !line.contains("app ↔") {
             continue;
         }
-        if let Some(at) = line.find("[x]") {
+        if let Some(at) = line.find(TAB_CLOSE) {
             let col = line[..at].chars().count() as u16 + 1;
             return Some((col, row as u16));
         }
@@ -16,12 +16,12 @@ fn tab_close_hit(screen: &str) -> Option<(u16, u16)> {
 }
 
 fn workspace_tab_has_close(screen: &str) -> bool {
-    screen
-        .lines()
-        .any(|line| line.contains("Workspace") && line.contains("[x]") && !line.contains("app ↔"))
+    screen.lines().any(|line| {
+        line.contains("Workspace") && line.contains(TAB_CLOSE) && !line.contains("app ↔")
+    })
 }
 
-/// SGR click on compare `[x]` closes that tab. Workspace has no close hit.
+/// SGR click on compare `[𝔁]` closes that tab. Workspace has no close hit.
 #[test]
 fn pty_compare_mouse_tab_close() {
     let (_root, workspace) = compare_ahead_workspace();
@@ -38,7 +38,7 @@ fn pty_compare_mouse_tab_close() {
         !workspace_tab_has_close(&screen),
         "Workspace must not paint a close control:\n{screen}"
     );
-    let (col, row) = tab_close_hit(&screen).expect("compare [x]");
+    let (col, row) = tab_close_hit(&screen).expect("compare close control");
     tui.sgr_click(col, row);
     tui.wait_pred(
         |screen| {
@@ -46,7 +46,7 @@ fn pty_compare_mouse_tab_close() {
                 && !screen.contains("app ↔ origin/main")
                 && !screen.contains("COMMITTED")
         },
-        "click [x] closes the compare tab",
+        "click [𝔁] closes the compare tab",
         WAIT,
     );
 }
@@ -60,10 +60,10 @@ fn strip_row(screen: &str) -> Option<(u16, String)> {
         .map(|(row, line)| (row as u16, line.to_string()))
 }
 
-/// SGR click on the painted `x` of the second compare tab closes that tab.
+/// SGR click on the painted `𝔁` of the second compare tab closes that tab.
 ///
 /// Each label holds `↔`, which paints one column. The hit boxes must not
-/// drift right of the painted `[x]` as labels accumulate.
+/// drift right of the painted `[𝔁]` as labels accumulate.
 #[test]
 fn pty_compare_mouse_second_tab_close() {
     let (_root, workspace) = compare_ahead_workspace();
@@ -84,15 +84,15 @@ fn pty_compare_mouse_second_tab_close() {
     tui.wait_pred(
         |screen| {
             strip_row(screen).is_some_and(|(_, line)| {
-                line.contains("app ↔ main") && line.matches("[x]").count() == 2
+                line.contains("app ↔ main") && line.matches(TAB_CLOSE).count() == 2
             })
         },
-        "two compare tabs, each with [x]",
+        "two compare tabs, each with [𝔁]",
         GIT_WAIT,
     );
 
     let (row, line) = strip_row(&tui.screen()).expect("tab strip");
-    let second = line.rfind("[x]").expect("second [x]");
+    let second = line.rfind(TAB_CLOSE).expect("second [𝔁]");
     assert!(line[..second].contains("app ↔ main"), "{line}");
     let col = line[..second].chars().count() as u16 + 1;
     tui.sgr_click(col, row);
@@ -101,7 +101,7 @@ fn pty_compare_mouse_second_tab_close() {
             strip_row(screen).is_some_and(|(_, line)| {
                 line.contains("app ↔ origin/main")
                     && !line.contains("app ↔ main")
-                    && line.matches("[x]").count() == 1
+                    && line.matches(TAB_CLOSE).count() == 1
             })
         },
         "click on the painted x of the second tab closes that tab only",
