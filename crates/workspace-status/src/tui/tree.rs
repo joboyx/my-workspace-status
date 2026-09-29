@@ -1262,25 +1262,31 @@ pub fn row_segments(
     commented: bool,
     resolved: bool,
 ) -> NodeSegments {
-    let mut trailing = with_comment_mark(row.trailing_segs.clone(), ascii, commented, resolved);
-    if viewed && row.kind == NodeKind::File {
-        let mut marked = vec![
-            TextSeg {
-                text: icon_viewed(ascii).to_string(),
-                role: SegRole::Viewed,
-                hex: None,
-                bold: true,
-                dim: false,
-            },
-            text_seg(" ", SegRole::Muted),
-        ];
-        marked.append(&mut trailing);
-        trailing = marked;
-    }
+    let trailing = with_comment_mark(row.trailing_segs.clone(), ascii, commented, resolved);
     NodeSegments {
         segments: row.segments.clone(),
-        trailing,
+        trailing: with_viewed_mark(trailing, ascii, viewed && row.kind == NodeKind::File),
     }
+}
+
+/// Prepend the viewed eye (`icon_viewed`, bold [`SegRole::Viewed`]) to
+/// `trailing` when `viewed`. Workspace tree and compare file rows share it.
+pub fn with_viewed_mark(mut trailing: Vec<TextSeg>, ascii: bool, viewed: bool) -> Vec<TextSeg> {
+    if !viewed {
+        return trailing;
+    }
+    let mut marked = vec![
+        TextSeg {
+            text: icon_viewed(ascii).to_string(),
+            role: SegRole::Viewed,
+            hex: None,
+            bold: true,
+            dim: false,
+        },
+        text_seg(" ", SegRole::Muted),
+    ];
+    marked.append(&mut trailing);
+    marked
 }
 
 /// Visible snapshot used for the tree: hidden ignored stay out, including

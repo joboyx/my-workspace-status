@@ -29,7 +29,7 @@ const HELP_GIT_ROWS: &[(&str, &str)] = &[
     ("u", "unstage scope"),
     ("x", "revert (y/Y)"),
     ("e E", "open in editor · open in diff tool"),
-    ("space", "mark dirty file reviewed (eye)"),
+    ("space", "mark file reviewed (eye)"),
     ("f", "fetch remotes"),
     ("p", "pull behind"),
     ("P", "push ahead/diverged/new"),

@@ -574,7 +574,13 @@ impl AppState {
                 }
             }
             Action::ToggleReviewed => {
-                if self.nav_depth() >= 1 {
+                if self.is_compare_tab() {
+                    if self.focused_commit_edit_path().is_some() {
+                        None
+                    } else {
+                        Some(super::FOCUS_A_FILE_TO_MARK_REVIEWED.into())
+                    }
+                } else if self.nav_depth() >= 1 {
                     Some("not available here".into())
                 } else if self
                     .focused_row()
@@ -582,7 +588,7 @@ impl AppState {
                 {
                     None
                 } else {
-                    Some("focus a file to mark reviewed".into())
+                    Some(super::FOCUS_A_FILE_TO_MARK_REVIEWED.into())
                 }
             }
             Action::CopyEntityReference => {

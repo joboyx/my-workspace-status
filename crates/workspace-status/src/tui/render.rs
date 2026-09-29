@@ -56,8 +56,8 @@ use super::syntax::{
 use super::tabs::{no_committed_changes_vs, NO_BRANCHES_TO_COMPARE, NO_COMMITTED_CHANGES};
 use super::theme::{hex_color, Palette};
 use super::tree::{
-    row_segments, visible_window, with_comment_mark, NodeKind, NodeSegments, SegRole, TextSeg,
-    VisibleRow,
+    row_segments, visible_window, with_comment_mark, with_viewed_mark, NodeKind, NodeSegments,
+    SegRole, TextSeg, VisibleRow,
 };
 use crate::helpers::visible_width;
 
@@ -855,11 +855,10 @@ fn draw_commit_file_list(
                 });
             let segs = NodeSegments {
                 segments: row.segments.clone(),
-                trailing: with_comment_mark(
-                    row.trailing_segs.clone(),
+                trailing: with_viewed_mark(
+                    with_comment_mark(row.trailing_segs.clone(), state.ascii, commented, resolved),
                     state.ascii,
-                    commented,
-                    resolved,
+                    state.compare_file_reviewed(row),
                 ),
             };
             let search_match = searching_files
@@ -3143,6 +3142,33 @@ mod tests {
             ));
         }
         state
+    }
+
+    #[test]
+    fn compare_space_paints_viewed_eye_on_file_row() {
+        let mut state = compare_json_over_stale_workspace_state();
+        state.ascii = false;
+        state.focus = FocusPane::Left;
+        state.tabs.active_compare_mut().unwrap().source =
+            Some(super::super::drill::CommitFileSource::Compare {
+                base_ref: "main".into(),
+                base_tip: "bbb".into(),
+                merge_base: "ccc".into(),
+                head: "ddd".into(),
+            });
+        let eye = super::super::icons::icon_viewed(false);
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert!(!buffer_text(&terminal).contains(eye));
+        state.dispatch(crate::tui::action::Action::ToggleReviewed);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let painted = buffer_text(&terminal);
+        let row = painted
+            .lines()
+            .find(|line| line.contains("pack.json") && line.contains(eye))
+            .unwrap_or_else(|| panic!("eye on pack.json row:\n{painted}"));
+        assert!(row.find(eye) > row.find("pack.json"), "{row}");
     }
 
     #[test]

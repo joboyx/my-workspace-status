@@ -734,6 +734,9 @@ fn scope_action_visible(
                     })
             }
         }
+        HintActionId::ToggleViewed if state.is_compare_tab() => {
+            state.focused_commit_edit_path().is_some()
+        }
         HintActionId::ToggleViewed => {
             depth == 0
                 && focused.is_some_and(|row| {
@@ -1319,6 +1322,42 @@ mod tests {
             .collect();
         assert!(!keys.contains(&"o".into()), "{keys:?}");
         assert!(!keys.contains(&"O".into()), "{keys:?}");
+    }
+
+    #[test]
+    fn compare_space_hint_follows_file_focus() {
+        use crate::tui::drill::{CommitFile, CommitFileSource};
+        let mut app = state();
+        app.tabs.open_or_focus("app".into(), "main".into());
+        app.focus = FocusPane::Left;
+        {
+            let tab = app.tabs.active_compare_mut().unwrap();
+            tab.source = Some(CommitFileSource::Compare {
+                base_ref: "main".into(),
+                base_tip: "bbb".into(),
+                merge_base: "aaa".into(),
+                head: "ccc".into(),
+            });
+            tab.files = vec![CommitFile {
+                status: "M".into(),
+                path: "src/a.rs".into(),
+                old_path: None,
+            }];
+        }
+        let keys = |app: &AppState| -> Vec<String> {
+            action_hint_segments(app)
+                .into_iter()
+                .map(|s| s.key)
+                .collect()
+        };
+        app.tabs.active_compare_mut().unwrap().file_cursor = 0;
+        assert!(!keys(&app).contains(&"space".into()), "dir row");
+        app.tabs.active_compare_mut().unwrap().file_cursor = 1;
+        assert!(keys(&app).contains(&"space".into()), "file row");
+        app.focus = FocusPane::Right;
+        assert!(!keys(&app).contains(&"space".into()), "no open diff");
+        app.tabs.active_compare_mut().unwrap().path = Some("src/a.rs".into());
+        assert!(keys(&app).contains(&"space".into()), "open diff");
     }
 
     #[test]

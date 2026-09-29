@@ -103,6 +103,9 @@ use super::watch::{
 };
 use crate::git::FULL_DIFF_CONTEXT_LINES;
 
+/// Space / palette copy when the focus is not a file row.
+const FOCUS_A_FILE_TO_MARK_REVIEWED: &str = "focus a file to mark reviewed";
+
 /// Which pane has keyboard focus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FocusPane {
@@ -874,6 +877,15 @@ impl AppState {
         self.focused_commit_file_row().map(|row| row.kind)
     }
 
+    /// True when `row` is a compare-tab file row marked reviewed.
+    pub(crate) fn compare_file_reviewed(&self, row: &CommitFileRow) -> bool {
+        row.is_file()
+            && self
+                .tabs
+                .active_compare()
+                .is_some_and(|tab| tab.is_reviewed(&row.path))
+    }
+
     fn focused_compare_old_path(&self) -> Option<String> {
         let tab = self.tabs.active_compare()?;
         let path = tab.path.as_deref()?;
@@ -883,7 +895,7 @@ impl AppState {
             .and_then(|file| file.old_path.clone())
     }
 
-    fn focused_commit_edit_path(&self) -> Option<(String, String)> {
+    pub(crate) fn focused_commit_edit_path(&self) -> Option<(String, String)> {
         if let Some(tab) = self.tabs.active_compare() {
             let _ = tab.source.as_ref()?;
             if self.commit_files_list_focused() {
@@ -2938,6 +2950,9 @@ impl AppState {
     }
 
     fn toggle_reviewed(&mut self) -> Effect {
+        if self.is_compare_tab() {
+            return self.toggle_compare_reviewed();
+        }
         if self.nav_depth() >= 1 {
             return Effect::None;
         }
@@ -2973,6 +2988,18 @@ impl AppState {
             self.status = persist_failed_status("viewed", err);
         }
         self.reviewed = viewed_row_ids(&self.snapshot, &self.viewed_store, &self.cwd);
+        Effect::None
+    }
+
+    /// Space on a compare tab: session-only mark on the focused committed file.
+    fn toggle_compare_reviewed(&mut self) -> Effect {
+        let Some((_, path)) = self.focused_commit_edit_path() else {
+            self.status = FOCUS_A_FILE_TO_MARK_REVIEWED.into();
+            return Effect::None;
+        };
+        if let Some(tab) = self.tabs.active_compare_mut() {
+            tab.toggle_reviewed(&path);
+        }
         Effect::None
     }
 
@@ -6246,6 +6273,84 @@ mod tests {
         assert_eq!(app.dispatch(Action::Edit), Effect::None);
         assert_eq!(app.status, "focus a file to edit");
         assert_eq!(app.dispatch(Action::ExternalDiff), Effect::None);
+    }
+
+    fn compare_tab_with_view_rs(app: &mut AppState) {
+        app.tabs.open_or_focus("app".into(), "main".into());
+        app.focus = FocusPane::Left;
+        let tab = app.tabs.active_compare_mut().unwrap();
+        tab.source = Some(compare_source());
+        tab.files = vec![CommitFile {
+            status: "A".into(),
+            path: "src/view.rs".into(),
+            old_path: None,
+        }];
+    }
+
+    #[test]
+    fn compare_space_marks_focused_file_not_workspace() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        let readme = app.focused_row().unwrap().id.clone();
+        app.reviewed.insert(readme.clone());
+        app.viewed_store
+            .insert("app\0README.md".into(), "fingerprint".into());
+        let workspace_store = app.viewed_store.clone();
+        compare_tab_with_view_rs(&mut app);
+        app.tabs.active_compare_mut().unwrap().file_cursor = 1;
+        assert!(app.focused_commit_file_row().unwrap().is_file());
+        assert_eq!(app.palette_disabled_reason(&Action::ToggleReviewed), None);
+
+        assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
+        assert_ne!(app.status, super::super::tabs::SWITCH_TO_WORKSPACE_TAB);
+        assert!(app
+            .tabs
+            .active_compare()
+            .unwrap()
+            .is_reviewed("src/view.rs"));
+        let row = app.focused_commit_file_row().unwrap();
+        assert!(app.compare_file_reviewed(&row));
+        assert!(app.reviewed.contains(&readme), "workspace mark untouched");
+        assert_eq!(app.viewed_store, workspace_store, "no viewed store write");
+
+        assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
+        assert!(!app
+            .tabs
+            .active_compare()
+            .unwrap()
+            .is_reviewed("src/view.rs"));
+    }
+
+    #[test]
+    fn compare_space_on_dir_row_names_file_focus() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        compare_tab_with_view_rs(&mut app);
+        app.tabs.active_compare_mut().unwrap().file_cursor = 0;
+        assert!(!app.focused_commit_file_row().unwrap().is_file());
+        assert_eq!(
+            app.palette_disabled_reason(&Action::ToggleReviewed)
+                .as_deref(),
+            Some(FOCUS_A_FILE_TO_MARK_REVIEWED)
+        );
+        assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
+        assert_eq!(app.status, FOCUS_A_FILE_TO_MARK_REVIEWED);
+        assert!(app.tabs.active_compare().unwrap().reviewed.is_empty());
+    }
+
+    #[test]
+    fn compare_space_on_right_diff_marks_open_file() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        compare_tab_with_view_rs(&mut app);
+        app.tabs.active_compare_mut().unwrap().path = Some("src/view.rs".into());
+        app.focus = FocusPane::Right;
+        assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
+        assert!(app
+            .tabs
+            .active_compare()
+            .unwrap()
+            .is_reviewed("src/view.rs"));
     }
 
     #[test]
