@@ -11,7 +11,7 @@ use super::super::diff::{cell_code_width, diff_row_content_width, gutter_width, 
 use super::super::gates::ListFocusTarget;
 use super::super::icons::comment_mark_cols;
 use super::super::search::{apply_pan, list_row_pan_max, max_col_offset};
-use super::super::tree::{row_segments, with_comment_mark, NodeKind};
+use super::super::tree::{row_segments, with_comment_mark, with_viewed_mark, NodeKind};
 use super::{AppState, FocusPane};
 use crate::helpers::visible_width;
 
@@ -133,8 +133,11 @@ impl AppState {
                             snap.map(|r| r.branch.as_str()),
                         )
                     });
-                let trailing =
-                    with_comment_mark(row.trailing_segs.clone(), self.ascii, commented, resolved);
+                let trailing = with_viewed_mark(
+                    with_comment_mark(row.trailing_segs.clone(), self.ascii, commented, resolved),
+                    self.ascii,
+                    self.compare_file_reviewed(row),
+                );
                 let label: usize = row.segments.iter().map(|s| visible_width(&s.text)).sum();
                 let trailing_w: usize = trailing.iter().map(|s| visible_width(&s.text)).sum();
                 list_row_pan_max(label, row.depth, trailing_w, width)

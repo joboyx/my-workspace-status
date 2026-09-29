@@ -2,7 +2,7 @@
 //!
 //! Compare identity is `(checkout_path, base_ref)`. Tabs are session-only.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::diff::DiffContent;
@@ -97,6 +97,11 @@ pub struct CompareTab {
     pub loading: bool,
     /// Latest `LoadCompareDiff` request for this tab.
     pub diff_req: u64,
+    /// Session-only reviewed marks: path → range key at mark time.
+    ///
+    /// A mark paints only while that key matches the loaded range. Stale
+    /// entries stay hidden, not removed.
+    pub reviewed: HashMap<String, String>,
 }
 
 impl CompareTab {
@@ -127,6 +132,7 @@ impl CompareTab {
             last_base_tip: None,
             loading: true,
             diff_req: 0,
+            reviewed: HashMap::new(),
         }
     }
 
@@ -145,6 +151,43 @@ impl CompareTab {
     /// Diff pane header range (`<base-ref>...HEAD`).
     pub fn range_header(&self) -> String {
         format!("{}...HEAD", self.base_ref)
+    }
+
+    /// Range key of the loaded list when `path` is in it, else `None`.
+    ///
+    /// Merge base + HEAD. A new HEAD or merge base changes it, so a mark
+    /// stops painting. A base tip that moves without a new merge base keeps it.
+    fn reviewed_range(&self, path: &str) -> Option<String> {
+        let Some(CommitFileSource::Compare {
+            merge_base, head, ..
+        }) = self.source.as_ref()
+        else {
+            return None;
+        };
+        self.files
+            .iter()
+            .any(|file| file.path == path)
+            .then(|| format!("{merge_base}\0{head}"))
+    }
+
+    /// True when `path` is marked reviewed for the loaded range.
+    pub fn is_reviewed(&self, path: &str) -> bool {
+        let Some(marked) = self.reviewed.get(path) else {
+            return false;
+        };
+        self.reviewed_range(path).as_ref() == Some(marked)
+    }
+
+    /// Toggle the reviewed mark on `path`. No-op when `path` is not listed.
+    pub fn toggle_reviewed(&mut self, path: &str) {
+        let Some(now) = self.reviewed_range(path) else {
+            return;
+        };
+        if self.reviewed.get(path) == Some(&now) {
+            self.reviewed.remove(path);
+        } else {
+            self.reviewed.insert(path.to_string(), now);
+        }
     }
 }
 
@@ -380,5 +423,49 @@ mod tests {
         let (left, right) = label.split_once(COMPARE_TAB_SEP).expect("sep");
         assert_eq!(left, "app");
         assert_eq!(right, "origin/main");
+    }
+
+    fn loaded_tab(merge_base: &str, head: &str, base_tip: &str) -> CompareTab {
+        let mut tab = CompareTab::new(1, "app".into(), "main".into());
+        tab.source = Some(CommitFileSource::Compare {
+            base_ref: "main".into(),
+            base_tip: base_tip.into(),
+            merge_base: merge_base.into(),
+            head: head.into(),
+        });
+        tab.files = vec![CommitFile {
+            status: "M".into(),
+            path: "src/a.rs".into(),
+            old_path: None,
+        }];
+        tab
+    }
+
+    #[test]
+    fn reviewed_toggles_on_listed_file_only() {
+        let mut tab = loaded_tab("aaa", "ccc", "bbb");
+        tab.toggle_reviewed("src/missing.rs");
+        assert!(tab.reviewed.is_empty());
+        tab.toggle_reviewed("src/a.rs");
+        assert!(tab.is_reviewed("src/a.rs"));
+        tab.toggle_reviewed("src/a.rs");
+        assert!(!tab.is_reviewed("src/a.rs"));
+    }
+
+    #[test]
+    fn reviewed_survives_base_tip_move_but_not_new_head() {
+        let mut tab = loaded_tab("aaa", "ccc", "bbb");
+        tab.toggle_reviewed("src/a.rs");
+        let marks = tab.reviewed.clone();
+
+        let mut moved_tip = loaded_tab("aaa", "ccc", "bbb2");
+        moved_tip.reviewed = marks.clone();
+        assert!(moved_tip.is_reviewed("src/a.rs"));
+
+        let mut new_head = loaded_tab("aaa", "ddd", "bbb");
+        new_head.reviewed = marks;
+        assert!(!new_head.is_reviewed("src/a.rs"));
+        new_head.toggle_reviewed("src/a.rs");
+        assert!(new_head.is_reviewed("src/a.rs"), "stale mark re-marks");
     }
 }

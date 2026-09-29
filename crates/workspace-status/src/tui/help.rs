@@ -93,7 +93,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: "space",
-                desc: "mark dirty file reviewed (eye)",
+                desc: "mark file reviewed (eye)",
             },
             HelpEntry {
                 keys: "f",
