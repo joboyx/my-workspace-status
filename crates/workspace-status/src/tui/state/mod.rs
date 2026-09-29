@@ -10,6 +10,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use ratatui::style::Color;
 use workspace_status_graph::{
     format_commit_message, format_relative_date, graph_chrome_budget_for, paint_model,
@@ -64,6 +66,7 @@ use super::ops::{
 use super::search::{
     focus_commit_file_search, focus_diff_search, focus_graph_search, focus_tree_search, SearchPane,
 };
+use super::selection::TextSelection;
 use super::split::{
     clamp_tree_fraction, diff_col_from_col, diff_col_from_delta, diff_split_fraction_from_col,
     effective_diff_mode, graph_col_from_col, graph_col_from_delta, graph_scroll_from_delta,
@@ -391,6 +394,10 @@ pub struct AppState {
     /// header. Session-only (no XDG store). Graph list rows stay one line.
     pub commit_msg_expand: bool,
     pub drag: SplitDrag,
+    /// Mouse text selection armed by a press in a pane body.
+    pub text_selection: Option<TextSelection>,
+    /// Last painted frame before the selection highlight. Release copies from it.
+    pub(crate) painted_frame: Buffer,
     pub theme: ThemeId,
     pub mouse_enabled: bool,
     pub(crate) z_pending_at: Option<Instant>,
@@ -506,6 +513,8 @@ impl AppState {
             diff_wrap: false,
             commit_msg_expand: false,
             drag: SplitDrag::None,
+            text_selection: None,
+            painted_frame: Buffer::default(),
             theme: theme_from_env(),
             mouse_enabled: true,
             z_pending_at: None,
@@ -1675,6 +1684,7 @@ impl AppState {
     }
 
     fn click(&mut self, col: u16, row: u16) -> Effect {
+        self.text_selection = None;
         if let Some(index) = self.hit_tab_close(col, row) {
             return self.close_compare_at(index);
         }
@@ -1754,7 +1764,7 @@ impl AppState {
                 self.last_click = None;
                 return Effect::None;
             }
-            SplitHit::Other => {}
+            SplitHit::Other => self.arm_text_selection(col, row),
         }
         let now = Instant::now();
         let is_double = self.last_click.as_ref().is_some_and(|(c, r, at)| {
@@ -1979,9 +1989,59 @@ impl AppState {
                 self.diff_col_offset =
                     diff_col_from_delta(self.split_layout(), origin_col, origin_offset, col);
             }
-            SplitDrag::None => {}
+            SplitDrag::None => {
+                if let Some(selection) = self.text_selection.as_mut() {
+                    selection.extend_to(col, row);
+                }
+            }
         }
         Effect::None
+    }
+
+    /// Arm a text selection when the press lands in the tree or right pane body.
+    fn arm_text_selection(&mut self, col: u16, row: u16) {
+        let layout = &self.layout;
+        let left = Rect::new(
+            layout.tree_x,
+            layout.tree_y,
+            layout.tree_width,
+            layout.tree_height,
+        );
+        let right = Rect::new(
+            layout.diff_content_x,
+            layout.right_y,
+            layout.diff_pane_width,
+            layout.diff_pane_height,
+        );
+        self.text_selection =
+            TextSelection::arm(left, col, row).or_else(|| TextSelection::arm(right, col, row));
+    }
+
+    /// End a text selection on mouse release.
+    ///
+    /// A drag that selected visible text copies it and announces the copy.
+    /// A plain click or a blank selection copies nothing.
+    pub(crate) fn finish_text_selection(&mut self) -> Effect {
+        let Some(selection) = self.text_selection.take() else {
+            return Effect::None;
+        };
+        if !selection.is_active() {
+            return Effect::None;
+        }
+        let text = selection.text(&self.painted_frame);
+        if text.trim().is_empty() {
+            return Effect::None;
+        }
+        Effect::CopyClipboard {
+            text,
+            announce: true,
+        }
+    }
+
+    /// Drop any split / scrollbar drag and any text selection.
+    pub(crate) fn cancel_mouse_drag(&mut self) {
+        self.drag = SplitDrag::None;
+        self.text_selection = None;
     }
 
     fn focus_graph_pane(&mut self) {
@@ -3184,7 +3244,7 @@ impl AppState {
             self.status = "no highlight target".into();
             return Effect::None;
         }
-        self.drag = SplitDrag::None;
+        self.cancel_mouse_drag();
         self.help_open = false;
         self.comment_export = None;
         self.diff_visual_anchor = Some(self.diff_cursor);
@@ -3202,7 +3262,7 @@ impl AppState {
     }
 
     fn begin_comment(&mut self) -> Effect {
-        self.drag = SplitDrag::None;
+        self.cancel_mouse_drag();
         self.help_open = false;
         self.comment_export = None;
         let Some(key) = self.current_comment_target() else {
@@ -3246,7 +3306,7 @@ impl AppState {
     }
 
     fn export_comments(&mut self) -> Effect {
-        self.drag = SplitDrag::None;
+        self.cancel_mouse_drag();
         self.help_open = false;
         self.comment = None;
         self.reconcile_comment_store();
@@ -8726,6 +8786,65 @@ mod tests {
         assert_eq!(app.drag, SplitDrag::None);
         assert_eq!(effect, Effect::LoadRightPane);
         assert_eq!(app.cursor, app.layout.list_offset);
+    }
+
+    #[test]
+    fn pane_divider_drag_does_not_select_or_copy() {
+        let mut app = state();
+        app.layout = wide_split_layout();
+        app.dispatch(Action::Click { col: 47, row: 5 });
+        assert_eq!(app.drag, SplitDrag::Pane);
+        assert!(app.text_selection.is_none());
+        app.dispatch(Action::Drag { col: 70, row: 8 });
+        assert!(app.text_selection.is_none());
+        assert_eq!(app.dispatch(Action::Release), Effect::None);
+    }
+
+    #[test]
+    fn tree_press_arms_selection_and_drag_clamps_to_tree_pane() {
+        let mut app = state();
+        app.layout = wide_split_layout();
+        let row = app.layout.tree_y;
+        app.dispatch(Action::Click { col: 10, row });
+        let armed = app.text_selection.expect("press in tree arms a selection");
+        assert!(!armed.is_active());
+        app.dispatch(Action::Drag { col: 100, row: 6 });
+        let dragged = app.text_selection.expect("drag keeps the selection");
+        assert!(dragged.is_active());
+        assert_eq!(
+            dragged.head,
+            (app.layout.tree_x + app.layout.tree_width - 1, 6),
+            "drag past the divider clamps to the tree pane"
+        );
+    }
+
+    #[test]
+    fn plain_click_release_copies_nothing() {
+        let mut app = state();
+        app.layout = wide_split_layout();
+        let row = app.layout.tree_y;
+        app.dispatch(Action::Click { col: 10, row });
+        assert_eq!(app.dispatch(Action::Release), Effect::None);
+        assert!(app.text_selection.is_none());
+    }
+
+    #[test]
+    fn help_and_mouse_toggle_clear_text_selection() {
+        let mut app = state();
+        app.layout = wide_split_layout();
+        let row = app.layout.tree_y;
+        app.dispatch(Action::Click { col: 10, row });
+        app.dispatch(Action::Drag { col: 20, row: 4 });
+        app.dispatch(Action::ToggleHelp);
+        assert!(app.text_selection.is_none());
+        app.dispatch(Action::ToggleHelp);
+        app.dispatch(Action::Click { col: 10, row });
+        app.dispatch(Action::Drag { col: 20, row: 4 });
+        app.dispatch(Action::ToggleMouse);
+        assert!(app.text_selection.is_none());
+        assert!(!app.mouse_enabled);
+        app.dispatch(Action::Click { col: 10, row });
+        assert!(app.text_selection.is_none(), "mouse off ignores presses");
     }
 
     #[test]
