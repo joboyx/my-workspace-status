@@ -4163,7 +4163,7 @@ impl AppState {
                 self.focus = FocusPane::Left;
                 return Effect::None;
             }
-            return self.close_compare_tab();
+            return Effect::None;
         }
         if self.compare_picker_pending.take().is_some() {
             return Effect::None;
@@ -6736,6 +6736,20 @@ mod tests {
         assert!(app.compare_probe_effects().is_empty());
         app.tabs.active_compare_mut().unwrap().loading = false;
         assert_eq!(app.compare_probe_effects().len(), 1);
+    }
+
+    #[test]
+    fn nav_esc_on_compare_left_keeps_the_tab() {
+        let mut app = state();
+        app.tabs.open_or_focus("app".into(), "main".into());
+        assert!(app.is_compare_tab());
+        app.focus = FocusPane::Right;
+        assert_eq!(app.dispatch(Action::NavEsc), Effect::None);
+        assert_eq!(app.focus, FocusPane::Left);
+        assert_eq!(app.dispatch(Action::NavEsc), Effect::None);
+        assert!(app.is_compare_tab());
+        assert_eq!(app.tabs.compare.len(), 1);
+        assert_eq!(app.tabs.active, 1);
     }
 
     #[test]

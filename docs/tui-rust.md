@@ -14,7 +14,7 @@ To rebuild those frames, run `./scripts/capture-demo-stills.sh` (see [demo.md](.
 | `Ctrl-C` twice | Quit. First press paints `Press Ctrl+C again to exit`; second within ~2s exits. Overlay pickers show that copy inline |
 | `q` | Quit immediately (Rust extra) |
 | `?` | Help overlay (short list, not a wall of text) |
-| `Ctrl-k` / `:` | Command palette (named commands). Same overlay from Normal and pending `z` / `g`. Type to filter; `j`/`k` move; Enter runs (closes first, then dispatches). Esc closes with no run. Compare open/close is palette-only: Diff vs default, Diff vs branch…, Close compare tab (empty key chips). Other overlays never open the palette. Text prompts still type `:`. `?` / `/` / `p` / `P` stay. Not Ctrl-P |
+| `Ctrl-k` / `:` | Command palette (named commands). Same overlay from Normal and pending `z` / `g`. Type to filter; `j`/`k` move; Enter runs (closes first, then dispatches). Esc closes with no run. Compare open/close is palette-only: Diff vs default, Diff vs branch…, Close tab (empty key chips). Other overlays never open the palette. Text prompts still type `:`. `?` / `/` / `p` / `P` stay. Not Ctrl-P |
 | `j` / `k` or arrows | Move the focused list or file-diff row. Hold repeats (terminal key-repeat). After a drill, the right pane follows the left row (graph → commit files, commit-file → diff). The viewport keeps the focused row near the vertical middle |
 | `z` | Toggle fold on this row |
 | `zz` | First `z` toggles this row immediately and arms a 400ms pending. Second `z` in the window applies that same fold to foldable descendants (no extra toggle of this row). A late second `z` is a new single toggle |
@@ -38,7 +38,7 @@ To rebuild those frames, run `./scripts/capture-demo-stills.sh` (see [demo.md](.
 | `P` | Push the focused visible repo or checkout when it is ahead, diverged, or has no upstream. In-sync is a no-op |
 | `S` | Stash menu. Left-pane only (right-focused graph is a silent no-op). Tree dirty file or repo is create-only (`s`). Graph commit or uncommitted (left-focused, e.g. commit drill) offers apply / pop of the latest stash; drop needs a focused stash row (`a` / `p` / `D`) |
 | `Enter` | Left: focus right (same stack). Right: drill down and stay on the right (graph → commit files → commit diff). No-op at the depth-2 leaf. Compare left → right. Compare right is a no-op |
-| `Esc` | Right: move focus to the left pane (same depth). Left: pop one depth and stay on the left (no-op at depth 0). Compare right → left. Compare left closes that tab. Esc never quits. Visual-line highlight (`V`) cancels first |
+| `Esc` | Right: move focus to the left pane (same depth). Left: pop one depth and stay on the left (no-op at depth 0). Compare right → left. Compare left does nothing (the tab stays; close it with the `[x]` click or palette Close tab). Esc never quits. Visual-line highlight (`V`) cancels first |
 | `a` / `p` / `D` | Apply / pop / drop the focused graph stash row. Drop asks `y` / `n` |
 | `b` | Tree: local branch picker (list, filter, checkout, `C` create at HEAD). Graph commit: checkout refs on that commit (one name checks out, several open a name picker). Dirty tree refuses (`Dirty worktree — commit or stash first`). Origin out-of-sync confirm only for a selected `origin/…` name |
 | `c` | Graph commit: create a branch at that commit (`git branch -- name commitId`). No checkout. No-op when a graph commit is not focused |

@@ -237,20 +237,17 @@ fn pty_compare_workspace_and_family_are_not_targets() {
     );
     esc_closes_palette(&mut tui);
 
-    open_ctrl_k_filter(&mut tui, "close compare", "Close compare tab");
+    open_ctrl_k_filter(&mut tui, "close tab", "Close tab");
     tui.wait_pred(
         |screen| {
             palette_open(screen)
-                && screen.contains("Close compare tab")
+                && screen.contains("Close tab")
                 && screen.contains("Workspace tab cannot be closed")
         },
-        "Close compare tab on Workspace shows Workspace tab cannot be closed",
+        "Close tab on Workspace shows Workspace tab cannot be closed",
         WAIT,
     );
-    enter_keeps_palette_open(
-        &mut tui,
-        "Enter on dimmed Close compare tab keeps the palette",
-    );
+    enter_keeps_palette_open(&mut tui, "Enter on dimmed Close tab keeps the palette");
     tui.wait_pred(
         |screen| {
             palette_open(screen)
