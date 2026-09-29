@@ -54,7 +54,7 @@ is on (default). `cursorBg` paints when the row is not flashing
 (`GraphWidget::cursor_style`). When the graph pane is unfocused the TUI
 sets `cursor_bar` false and paints the thinner `▏` marker plus
 `cursorBgInactive` (`GraphWidget::cursor_inactive_style`).
-[`GraphWidget::selected`] still drives the 2-line selection footer. `GraphWidget::commented_rows` marks selectable
+[`GraphWidget::selected`] still drives the selection footer. `GraphWidget::commented_rows` marks selectable
 visible-row indexes that have an object comment or a file-line
 comment for that row. Commented rows paint `ICON_COMMENT` (`"` /
 nf-fa-comment) after the gutter. `GraphWidget::resolved_comment_rows`
@@ -84,8 +84,8 @@ stay out of ops unless shown.
 
 ## Paint
 
-`GraphWidget` uses a chrome budget (`graph_chrome_budget`): a
-2-line selection footer when height ≥ 3, then a 1-line sync header if
+`GraphWidget` uses a chrome budget (`graph_chrome_budget_for`): a
+selection footer when height ≥ 3 (2 lines collapsed), then a 1-line sync header if
 space remains (footer wins when tight; no header when `sync` is unset).
 The footer wraps the full subject plus body by default
 (`commit_msg_expand`, `selection_footer_parts`); `M` collapses it to the

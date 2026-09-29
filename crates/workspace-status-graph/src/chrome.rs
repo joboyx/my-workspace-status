@@ -242,7 +242,7 @@ pub fn selection_detail_parts(
 /// Selection-footer runs. Collapsed is the two truncated lines from
 /// [`selection_detail_parts`]. Expanded wraps the whole subject plus body
 /// one column short of `width` (that column holds the footer scrollbar),
-/// then the same meta line. Nothing is dropped: the widget scrolls a
+/// then the same meta line. There is no line cap: the widget scrolls a
 /// message taller than the footer. Graph list rows stay one line either way.
 pub fn selection_footer_parts(
     model: &GraphModel,

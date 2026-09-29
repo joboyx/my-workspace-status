@@ -827,14 +827,14 @@ impl AppState {
         )
     }
 
+    /// Painted graph width: the left pane's inner width in a files drill,
+    /// else the right pane's inner width (borders excluded, same `Rect` the
+    /// widget paints into), so footer wrap and list height match the paint.
     fn graph_pane_inner_width(&self) -> u16 {
         if self.drill.is_files() {
             self.layout.tree_width.max(1)
         } else {
-            self.layout
-                .term_cols
-                .saturating_sub(self.layout.right_x)
-                .max(1)
+            self.layout.diff_pane_width.max(1)
         }
     }
 
@@ -865,7 +865,7 @@ impl AppState {
     }
 
     fn graph_selected_row_identity(&self) -> Option<String> {
-        let repo = self.focused_graph_repo()?;
+        let repo = self.graph_focus_repo()?;
         let rows = self.graph.as_ref()?.visible_rows();
         rows.get(self.graph_cursor)
             .map(|row| graph_row_identity(&repo, row))
@@ -900,8 +900,9 @@ impl AppState {
         let Some(id) = self.graph_selected_row_identity() else {
             return false;
         };
-        let max = layout.graph_footer_scroll_max as i64;
-        let next = (self.graph_footer_msg_scroll() as i64 + i64::from(delta)).clamp(0, max);
+        let max = layout.graph_footer_scroll_max;
+        let current = self.graph_footer_msg_scroll().min(max) as i64;
+        let next = (current + i64::from(delta)).clamp(0, max as i64);
         self.commit_msg_scroll = Some((id, next as usize));
         true
     }

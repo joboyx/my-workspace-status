@@ -3536,6 +3536,31 @@ mod tests {
     }
 
     #[test]
+    fn right_graph_chrome_wraps_the_footer_at_the_painted_width() {
+        let mut state = two_pane_graph_state();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let inner = state.layout.diff_pane_width as usize;
+        assert!(inner > 10);
+        // Exactly the inner width: the widget wraps at inner - 1, so the
+        // subject takes 2 rows. The outer pane width would fit it in 1.
+        let subject = format!("{}Z", "s".repeat(inner - 1));
+        if let Some(model) = state.graph.as_mut() {
+            model.commits[0].subject = subject;
+            model.commits[0].body = "b1\nb2".into();
+        }
+        state.graph_cursor = 1;
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        // subject (2) + blank + b1 + b2 + meta
+        assert_eq!(state.graph_chrome().footer_height, 6);
+        let text = buffer_text(&terminal);
+        assert!(
+            text.lines().any(|line| line.contains("│Z")),
+            "subject tail wraps to its own footer row:\n{text}"
+        );
+    }
+
+    #[test]
     fn graph_footer_shows_long_message_by_default_and_wheel_scrolls_it() {
         let mut state = two_pane_graph_state();
         let body = (0..30)
