@@ -347,18 +347,6 @@ fn pty_workspace_palette_revert_opens_boxed_confirm() {
     wait_readme_cursor(&mut tui);
 
     open_ctrl_k_filter(&mut tui, "revert", "Revert");
-    // `revert` also lists the HIGHLIGHT row "Revert highlighted lines" first.
-    tui.key('j');
-    tui.wait_pred(
-        |screen| {
-            palette_open(screen)
-                && screen
-                    .lines()
-                    .any(|line| line.contains("❯ Revert") && !line.contains("highlighted"))
-        },
-        "j moves the palette cursor from Revert highlighted lines to Revert",
-        WAIT,
-    );
     tui.enter();
     tui.wait_pred(
         |screen| {

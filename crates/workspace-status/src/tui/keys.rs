@@ -683,9 +683,10 @@ fn command_palette_key(key: KeyEvent) -> Action {
 ///
 /// `j` / `k` / arrows move (and extend the range). `;` comments that
 /// range. `s` / `u` stage / unstage the highlighted add/del lines. `x`
-/// reverts them from the worktree (after a confirm). `'` copies an entity reference for the highlighted span. Esc or a
-/// second `V` leaves highlight without commenting. `Ctrl-k` / `:` open the
-/// command palette before this map runs; the highlight stays.
+/// reverts them from the worktree (after a confirm). `'` copies an entity
+/// reference for the highlighted span. Esc or a second `V` leaves
+/// highlight without commenting. `Ctrl-k` / `:` open the command palette
+/// before this map runs; the highlight stays.
 fn diff_visual_key(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Esc | KeyCode::Char('V') => Action::DiffVisualCancel,

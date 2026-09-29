@@ -349,12 +349,14 @@ impl AppState {
                 if let Some(palette) = self.command_palette.as_mut() {
                     palette.push_char(c);
                 }
+                self.land_palette_cursor();
                 Effect::None
             }
             Action::CommandPaletteBackspace => {
                 if let Some(palette) = self.command_palette.as_mut() {
                     palette.backspace();
                 }
+                self.land_palette_cursor();
                 Effect::None
             }
             Action::CommandPaletteSubmit => self.submit_command_palette(),
@@ -408,8 +410,27 @@ impl AppState {
             self.help_open = false;
             self.clear_help_search();
             self.command_palette = Some(CommandPaletteState::new(opened_by));
+            self.land_palette_cursor();
         }
         Effect::None
+    }
+
+    /// Put the palette cursor on the first enabled visible row (0 if none).
+    ///
+    /// Runs on open and on each filter change, so the HIGHLIGHT rows that
+    /// paint first do not take the cursor while they are disabled. `j` / `k`
+    /// still move over every row.
+    fn land_palette_cursor(&mut self) {
+        let Some(visible) = self.command_palette.as_ref().map(|p| p.visible()) else {
+            return;
+        };
+        let cursor = visible
+            .iter()
+            .position(|command| self.palette_disabled_reason(command).is_none())
+            .unwrap_or(0);
+        if let Some(palette) = self.command_palette.as_mut() {
+            palette.cursor = cursor;
+        }
     }
 
     fn submit_command_palette(&mut self) -> Effect {

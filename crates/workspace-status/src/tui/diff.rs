@@ -660,6 +660,11 @@ pub fn build_partial_cached_patch(
     if header.contains("rename from") || header.contains("copy from") {
         return Err(partial_fail(kind));
     }
+    // An intent-to-add file (`git add -N`) is not `is_new`, but its unstaged
+    // diff is a new-file patch: a reverse apply of a whole hunk deletes it.
+    if kind == PartialPatchKind::Revert && header.contains("new file mode") {
+        return Err("cannot revert lines of a new file".into());
+    }
     // A reverse worktree apply would also undo a mode change or recreate a
     // deleted file. Line revert covers content only.
     if kind == PartialPatchKind::Revert
@@ -683,7 +688,7 @@ pub fn build_partial_cached_patch(
         if selected.is_none() && !whole_hunks.contains(&key) {
             continue;
         }
-        match transform_hunk(hunk, selected, kind != PartialPatchKind::Stage) {
+        match transform_hunk(hunk, selected, kind) {
             Ok(Some(text)) => body.push_str(&text),
             Ok(None) => {}
             Err(err) => return Err(err),
@@ -773,36 +778,43 @@ fn hunk_header_suffix(header: &str) -> &str {
     }
 }
 
+/// One body line of a rewritten hunk: sign, text, and the
+/// `\ No newline at end of file` marker that follows it, if any.
+struct PatchLine<'a> {
+    sign: char,
+    text: &'a str,
+    no_eol: Option<&'a str>,
+}
+
 /// Keep the selected add/del lines of `hunk` and rewrite the rest.
 ///
-/// Forward (`reverse == false`, `git apply`): the pre-image must match the
-/// target, so an unselected addition drops and an unselected deletion
-/// becomes context. Reverse (`git apply --reverse`): the post-image must
-/// match the target, so an unselected addition becomes context and an
-/// unselected deletion drops.
+/// Forward (Stage, `git apply`): the pre-image must match the target, so
+/// an unselected addition drops and an unselected deletion becomes
+/// context. Reverse (Unstage / Revert, `git apply --reverse`): the
+/// post-image must match the target, so an unselected addition becomes
+/// context and an unselected deletion drops.
 fn transform_hunk(
     hunk: &Hunk,
     selected_lines: Option<&HashSet<usize>>,
-    reverse: bool,
+    kind: PartialPatchKind,
 ) -> Result<Option<String>, String> {
     if hunk.header.is_empty() {
-        return Err("cannot stage a binary highlight".into());
+        return Err(binary_fail(kind));
     }
+    let reverse = kind != PartialPatchKind::Stage;
     let whole = selected_lines.is_none();
-    let mut body = String::new();
-    let mut old_count = 0u32;
-    let mut new_count = 0u32;
+    let mut lines: Vec<PatchLine> = Vec::new();
     let mut has_change = false;
     let mut emitted_last = false;
     for (idx, line) in hunk.lines.iter().enumerate() {
         let take = whole || selected_lines.is_some_and(|set| set.contains(&idx));
         match line.kind {
             DiffCellKind::Ctx => {
-                body.push(' ');
-                body.push_str(&line.text);
-                body.push('\n');
-                old_count = old_count.saturating_add(1);
-                new_count = new_count.saturating_add(1);
+                lines.push(PatchLine {
+                    sign: ' ',
+                    text: &line.text,
+                    no_eol: None,
+                });
                 emitted_last = true;
             }
             DiffCellKind::Add | DiffCellKind::Del => {
@@ -811,29 +823,30 @@ fn transform_hunk(
                 // keeps an unselected addition as context. The other one
                 // is not in the target file and drops.
                 let as_context = !take && add == reverse;
-                if take {
-                    body.push(if add { '+' } else { '-' });
-                    if add {
-                        new_count = new_count.saturating_add(1);
-                    } else {
-                        old_count = old_count.saturating_add(1);
-                    }
+                let sign = if take {
                     has_change = true;
-                } else if as_context {
-                    body.push(' ');
-                    old_count = old_count.saturating_add(1);
-                    new_count = new_count.saturating_add(1);
-                }
+                    if add {
+                        '+'
+                    } else {
+                        '-'
+                    }
+                } else {
+                    ' '
+                };
                 if take || as_context {
-                    body.push_str(&line.text);
-                    body.push('\n');
+                    lines.push(PatchLine {
+                        sign,
+                        text: &line.text,
+                        no_eol: None,
+                    });
                 }
                 emitted_last = take || as_context;
             }
             DiffCellKind::Meta => {
                 if emitted_last {
-                    body.push_str(&line.text);
-                    body.push('\n');
+                    if let Some(last) = lines.last_mut() {
+                        last.no_eol = Some(&line.text);
+                    }
                 }
             }
             DiffCellKind::Empty => {}
@@ -842,11 +855,90 @@ fn transform_hunk(
     if !has_change {
         return Ok(None);
     }
+    let lines = place_no_eol_markers(lines, reverse).ok_or_else(|| partial_fail(kind))?;
+    let mut body = String::new();
+    let mut old_count = 0u32;
+    let mut new_count = 0u32;
+    for line in &lines {
+        if line.sign != '+' {
+            old_count = old_count.saturating_add(1);
+        }
+        if line.sign != '-' {
+            new_count = new_count.saturating_add(1);
+        }
+        body.push(line.sign);
+        body.push_str(line.text);
+        body.push('\n');
+        if let Some(marker) = line.no_eol {
+            body.push_str(marker);
+            body.push('\n');
+        }
+    }
     let (old_start, new_start) = hunk_starts(&hunk.header);
     let suffix = hunk_header_suffix(&hunk.header);
     Ok(Some(format!(
         "@@ -{old_start},{old_count} +{new_start},{new_count} @@{suffix}\n{body}"
     )))
+}
+
+/// Keep each no-newline marker valid after [`transform_hunk`] drops lines.
+///
+/// A marker may only follow the last line of its side (old: ` ` and `-`;
+/// new: ` ` and `+`), or git joins that line with the next one. The side
+/// that must match the target (old forward, new reverse) keeps every line,
+/// so its marker line stays last. On the other side:
+///
+/// - a `-` / `+` line that is no longer last loses its marker (it now ends
+///   with a newline, because a line follows it);
+/// - a context line that is last only on the target side splits into a `-`
+///   line and a `+` line, so each side gets its own ending.
+///
+/// `None` when a marker line is not last on the target side (fail closed).
+fn place_no_eol_markers(lines: Vec<PatchLine>, reverse: bool) -> Option<Vec<PatchLine>> {
+    let last_old = lines.iter().rposition(|line| line.sign != '+');
+    let last_new = lines.iter().rposition(|line| line.sign != '-');
+    let mut out = Vec::with_capacity(lines.len() + 1);
+    for (idx, line) in lines.into_iter().enumerate() {
+        let Some(marker) = line.no_eol else {
+            out.push(line);
+            continue;
+        };
+        let old_last = last_old == Some(idx);
+        let new_last = last_new == Some(idx);
+        let (target_last, other_last) = if reverse {
+            (new_last, old_last)
+        } else {
+            (old_last, new_last)
+        };
+        match line.sign {
+            ' ' if target_last && other_last => out.push(line),
+            ' ' if target_last => {
+                out.push(PatchLine {
+                    sign: '-',
+                    text: line.text,
+                    no_eol: (!reverse).then_some(marker),
+                });
+                out.push(PatchLine {
+                    sign: '+',
+                    text: line.text,
+                    no_eol: reverse.then_some(marker),
+                });
+            }
+            ' ' => return None,
+            sign => {
+                let on_target = (sign == '+') == reverse;
+                let last = if sign == '+' { new_last } else { old_last };
+                if on_target && !last {
+                    return None;
+                }
+                out.push(PatchLine {
+                    no_eol: last.then_some(marker),
+                    ..line
+                });
+            }
+        }
+    }
+    Some(out)
 }
 
 /// Widest line number in the rows — sizes the gutter column. Floor is 2.
@@ -1775,6 +1867,16 @@ index 1111111..2222222 100644
         let err = revert_patch(&new_file, 0, end).unwrap_err();
         assert_eq!(err, "cannot revert lines of a new file");
 
+        // `git add -N`: tracked, so not `is_new`, but the unstaged diff is
+        // a new-file patch.
+        let intent_to_add = DiffContent::from_unified(
+            "diff --git a/regions.txt b/regions.txt\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/regions.txt\n@@ -0,0 +1,2 @@\n+one\n+two\n",
+        );
+        assert!(!intent_to_add.is_new);
+        let end = build_diff_rows(&intent_to_add, DiffMode::Inline).len() - 1;
+        let err = revert_patch(&intent_to_add, 0, end).unwrap_err();
+        assert_eq!(err, "cannot revert lines of a new file");
+
         let staged_only = DiffContent {
             staged: TWO_HUNKS.into(),
             unstaged: String::new(),
@@ -1808,7 +1910,7 @@ index 1111111..2222222 100644
         use std::path::Path;
 
         use super::*;
-        use crate::git::{apply_cached_patch, apply_worktree_patch_reverse};
+        use crate::git::{apply_cached_patch, apply_worktree_patch_reverse, blob_bytes};
         use crate::testutil::{git, init_repo, unique_dir};
 
         const REGIONS: &str = "\
@@ -1912,6 +2014,118 @@ keep-z
             assert_eq!(worktree(&dir), edited.replace("add-1\n", ""));
             assert!(exec_git(&["diff", "--cached"], &dir).is_empty());
             let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn split_mode_revert_of_one_paired_row_keeps_the_other_edits() {
+            let dir = repo_with_regions("ws-diff-revert-split");
+            let edited = REGIONS
+                .replace("keep-b", "KEEP-B")
+                .replace("keep-d", "KEEP-D");
+            fs::write(dir.join("regions.txt"), &edited).unwrap();
+
+            let content = content(&dir);
+            let rows = build_diff_rows(&content, DiffMode::SideBySide);
+            let paired = rows
+                .iter()
+                .position(|r| {
+                    matches!(r, DiffRow::Line { left, right: Some(right) }
+                        if left.text == "keep-b" && right.text == "KEEP-B")
+                })
+                .expect("paired keep-b / KEEP-B row");
+            let hunks = rows
+                .iter()
+                .filter(|r| matches!(r, DiffRow::Hunk { .. }))
+                .count();
+            assert_eq!(hunks, 1, "both edits share one hunk");
+            let patch = build_partial_cached_patch(
+                &content,
+                DiffMode::SideBySide,
+                paired,
+                paired,
+                PartialPatchKind::Revert,
+                "regions.txt",
+            )
+            .expect("patch");
+            apply_worktree_patch_reverse(&dir, &patch).expect("revert");
+
+            assert_eq!(worktree(&dir), edited.replace("KEEP-B", "keep-b"));
+            assert!(exec_git(&["diff", "--cached"], &dir).is_empty());
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        const NO_EOL_BASE: &str = "a\nb\nlast";
+        const NO_EOL_EDIT: &str = "a\nb\nLAST";
+
+        /// Highlight one row of a last-line change in a file with no
+        /// trailing newline, apply `kind`, and return (index, worktree).
+        fn no_eol_apply(
+            prefix: &str,
+            kind: PartialPatchKind,
+            row: &str,
+        ) -> Result<(String, String), String> {
+            let dir = unique_dir(prefix);
+            init_repo(&dir);
+            let file = dir.join("no-eol.txt");
+            fs::write(&file, NO_EOL_BASE).unwrap();
+            git(&dir, &["add", "no-eol.txt"]);
+            git(&dir, &["commit", "-q", "-m", "no eol"]);
+            fs::write(&file, NO_EOL_EDIT).unwrap();
+            if kind == PartialPatchKind::Unstage {
+                git(&dir, &["add", "no-eol.txt"]);
+            }
+            let content = DiffContent {
+                staged: exec_git(&["diff", "--cached", "--", "no-eol.txt"], &dir),
+                unstaged: exec_git(&["diff", "--", "no-eol.txt"], &dir),
+                is_new: false,
+                is_committed: false,
+            };
+            let row = line_row(&content, row);
+            let result = build_partial_cached_patch(
+                &content,
+                DiffMode::Inline,
+                row,
+                row,
+                kind,
+                "no-eol.txt",
+            )
+            .and_then(|patch| match kind {
+                PartialPatchKind::Stage => apply_cached_patch(&dir, &patch, false),
+                PartialPatchKind::Unstage => apply_cached_patch(&dir, &patch, true),
+                PartialPatchKind::Revert => apply_worktree_patch_reverse(&dir, &patch),
+            })
+            .map(|()| {
+                let index = blob_bytes(&dir, "", "no-eol.txt").expect("index blob");
+                (
+                    String::from_utf8(index).unwrap(),
+                    fs::read_to_string(&file).unwrap(),
+                )
+            });
+            let _ = fs::remove_dir_all(&dir);
+            result
+        }
+
+        #[test]
+        fn no_eol_last_line_moves_one_side_without_joining_lines() {
+            use PartialPatchKind::{Revert, Stage, Unstage};
+            let restored = "a\nb\nlast\nLAST";
+            let cases: [(PartialPatchKind, &str, &str, &str); 6] = [
+                (Stage, "last", "a\nb\n", NO_EOL_EDIT),
+                (Stage, "LAST", restored, NO_EOL_EDIT),
+                (Unstage, "last", restored, NO_EOL_EDIT),
+                (Unstage, "LAST", "a\nb\n", NO_EOL_EDIT),
+                (Revert, "last", NO_EOL_BASE, restored),
+                (Revert, "LAST", NO_EOL_BASE, "a\nb\n"),
+            ];
+            for (kind, row, index, worktree) in cases {
+                let got = no_eol_apply("ws-diff-no-eol", kind, row)
+                    .unwrap_or_else(|err| panic!("{kind:?} {row}: {err}"));
+                assert_eq!(
+                    got,
+                    (index.to_string(), worktree.to_string()),
+                    "{kind:?} {row}"
+                );
+            }
         }
 
         #[test]

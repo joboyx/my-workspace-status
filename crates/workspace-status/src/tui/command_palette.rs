@@ -263,7 +263,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "?",
         group: CommandGroup::View,
         action: Action::ToggleHelp,
-        scope: CommandScope::Any,
+        scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
         title: "Cycle theme",
@@ -415,7 +415,8 @@ pub struct CommandPaletteState {
 }
 
 impl CommandPaletteState {
-    /// Empty filter, first row highlighted.
+    /// Empty filter, cursor on row 0. `AppState` then moves it to the first
+    /// enabled row.
     pub fn new(opened_by: PaletteOpenedBy) -> Self {
         Self {
             opened_by,
@@ -723,7 +724,7 @@ mod tests {
                 "?",
                 CommandGroup::View,
                 Action::ToggleHelp,
-                CommandScope::Any,
+                CommandScope::NoHighlight,
             ),
             (
                 "Cycle theme",

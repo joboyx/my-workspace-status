@@ -2952,6 +2952,11 @@ impl AppState {
                     .collect();
                 single_or_batch(effects)
             }
+            // The range confirm offers only y / n: `Y` keeps it open.
+            Some(pending @ PendingConfirm::RevertRange { .. }) if clean => {
+                self.confirm = Some(pending);
+                Effect::None
+            }
             Some(PendingConfirm::RevertRange { repo, path, patch }) => {
                 self.status = format!("revert range {path}");
                 Effect::RevertPatch { repo, path, patch }
@@ -11656,6 +11661,20 @@ diff --git a/README.md b/README.md
     }
 
     #[test]
+    fn visual_revert_confirm_ignores_capital_y() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_first_readme_hunk(&mut app);
+        app.dispatch(Action::Revert);
+        let pending = app.confirm.clone();
+        assert!(matches!(pending, Some(PendingConfirm::RevertRange { .. })));
+        let status = app.status.clone();
+        assert_eq!(app.dispatch(Action::ConfirmYesClean), Effect::None);
+        assert_eq!(app.confirm, pending, "Y keeps the y / n confirm open");
+        assert_eq!(app.status, status);
+    }
+
+    #[test]
     fn visual_revert_confirm_no_cancels() {
         let mut app = state();
         focus_readme_diff(&mut app, two_hunk_readme());
@@ -11750,20 +11769,80 @@ diff --git a/README.md b/README.md
         );
     }
 
+    /// Open the palette, type `filter`, and return the row under the cursor.
+    fn palette_cursor_title(app: &mut AppState, filter: &str) -> &'static str {
+        app.dispatch(Action::ToggleCommandPalette(
+            super::super::action::PaletteOpenedBy::CtrlK,
+        ));
+        for c in filter.chars() {
+            app.dispatch(Action::CommandPaletteChar(c));
+        }
+        let palette = app.command_palette.as_ref().expect("palette open");
+        palette.selected().expect("a visible row").title
+    }
+
+    #[test]
+    fn palette_cursor_lands_on_the_first_enabled_row() {
+        use super::super::command_palette::CommandGroup;
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        // Whole-file Revert runs from the file row, not the diff pane.
+        app.focus = FocusPane::Left;
+        let first = palette_cursor_title(&mut app, "");
+        let command = PALETTE_COMMANDS
+            .iter()
+            .find(|command| command.title == first)
+            .expect("catalog row");
+        assert_ne!(command.group, CommandGroup::Highlight, "{first}");
+        assert_eq!(app.palette_disabled_reason(command), None, "{first}");
+        app.command_palette = None;
+
+        assert_eq!(palette_cursor_title(&mut app, "revert"), "Revert");
+        // Backspace re-lands the cursor on the wider list too.
+        app.dispatch(Action::CommandPaletteBackspace);
+        let palette = app.command_palette.as_ref().expect("palette open");
+        assert_eq!(palette.selected().map(|c| c.title), Some("Revert"));
+        // j / k still reach the disabled HIGHLIGHT row.
+        app.dispatch(Action::CommandPaletteMove(-1));
+        let palette = app.command_palette.as_ref().expect("palette open");
+        assert_eq!(
+            palette.selected().map(|c| c.title),
+            Some("Revert highlighted lines")
+        );
+    }
+
+    #[test]
+    fn palette_cursor_in_highlight_lands_on_the_range_row() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_first_readme_hunk(&mut app);
+        assert_eq!(
+            palette_cursor_title(&mut app, "revert"),
+            "Revert highlighted lines"
+        );
+    }
+
     #[test]
     fn palette_whole_file_rows_wait_for_highlight_exit() {
         let mut app = state();
         focus_readme_diff(&mut app, two_hunk_readme());
         highlight_first_readme_hunk(&mut app);
         let anchor = app.diff_visual_anchor;
-        for title in ["Fetch remotes", "Stage", "Revert", "Inline / split"] {
+        for title in [
+            "Fetch remotes",
+            "Stage",
+            "Revert",
+            "Inline / split",
+            // Help clears the highlight, and highlight mode has no `?` key.
+            "Keymap help",
+        ] {
             assert_eq!(
                 palette_reason(&app, title).as_deref(),
                 Some("exit highlight first (Esc)"),
                 "{title}"
             );
         }
-        for title in ["Keymap help", "Cycle theme", "Comment"] {
+        for title in ["Cycle theme", "Comment"] {
             assert_eq!(palette_reason(&app, title), None, "{title}");
         }
         palette_select(&mut app, "Fetch remotes");
