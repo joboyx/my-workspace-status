@@ -418,6 +418,17 @@ impl PtySession {
         self.parser.lock().unwrap().screen().contents()
     }
 
+    /// Mouse tracking state the terminal side holds after replaying the
+    /// child's DECSET / DECRST output: protocol mode and report encoding.
+    pub fn mouse_tracking(&self) -> (vt100::MouseProtocolMode, vt100::MouseProtocolEncoding) {
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        (
+            screen.mouse_protocol_mode(),
+            screen.mouse_protocol_encoding(),
+        )
+    }
+
     /// Glyph in one vt100 cell, or `None` when the cell is empty.
     pub fn grid_cell_char(&self, row: u16, col: u16) -> Option<char> {
         let parser = self.parser.lock().unwrap();

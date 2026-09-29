@@ -80,6 +80,7 @@ mod pty_launch_paints_tree_diff_and_chrome;
 mod pty_left_pane_move_after_drill_updates_right;
 mod pty_left_pane_sgr_hscroll_pans_long_diff;
 mod pty_m_toggles_mouse_capture;
+mod pty_m_toggles_terminal_mouse_tracking;
 mod pty_merge_mark_default_tip_is_open;
 mod pty_multi_lane_graph_paints_merge_and_stash_spur;
 mod pty_n_and_n_pane_next_prev;
