@@ -8,6 +8,10 @@ use crate::harness::{left_tree, PtySession};
 
 pub const WAIT: Duration = Duration::from_secs(12);
 
+/// Compare-tab close control as painted: brackets around U+1D501 (mathematical
+/// bold script small x). One terminal cell per char.
+pub const TAB_CLOSE: &str = "[\u{1D501}]";
+
 pub const GIT_WAIT: Duration = Duration::from_secs(20);
 
 pub const SETTLE_MS: u64 = 200;

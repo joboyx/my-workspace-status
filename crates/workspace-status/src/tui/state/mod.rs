@@ -164,7 +164,7 @@ pub struct LayoutHit {
     pub tab_y: u16,
     /// Hit boxes `(x, width, tab_index)` for the painted strip.
     pub tab_hits: Vec<(u16, u16, usize)>,
-    /// Close `[x]` hit boxes for compare tabs. Workspace never has one.
+    /// Close `[𝔁]` hit boxes for compare tabs. Workspace never has one.
     pub tab_close_hits: Vec<(u16, u16, usize)>,
 }
 
@@ -401,7 +401,7 @@ pub struct AppState {
     pub theme: ThemeId,
     pub mouse_enabled: bool,
     /// Last pointer cell `(col, row)` from any-event motion. `None` when
-    /// unknown or mouse capture is off. Paint derives the tab `[x]` hover
+    /// unknown or mouse capture is off. Paint derives the tab `[𝔁]` hover
     /// from it, so a stale layout never keeps a stale highlight.
     pub pointer: Option<(u16, u16)>,
     pub(crate) z_pending_at: Option<Instant>,
@@ -4244,7 +4244,7 @@ impl AppState {
         hit_tab_box(&self.layout.tab_close_hits, self.layout.tab_y, col, row)
     }
 
-    /// Tab index whose `[x]` sits under [`Self::pointer`] in the last paint.
+    /// Tab index whose `[𝔁]` sits under [`Self::pointer`] in the last paint.
     pub fn hovered_tab_close(&self) -> Option<usize> {
         let (col, row) = self.pointer?;
         self.hit_tab_close(col, row)
@@ -4252,7 +4252,7 @@ impl AppState {
 
     /// Store the pointer from any-event motion.
     ///
-    /// Returns `true` when the hovered tab `[x]` changed, so the live loop
+    /// Returns `true` when the hovered tab `[𝔁]` changed, so the live loop
     /// redraws only then. Ignored while mouse capture is off. Chords,
     /// status, and effects are untouched.
     pub fn set_pointer(&mut self, pointer: Option<(u16, u16)>) -> bool {
@@ -6726,15 +6726,15 @@ mod tests {
         app.tabs.open_or_focus("app".into(), "main".into());
         app.layout.tab_y = 0;
         app.layout.tab_close_hits = vec![(28, 3, 1)];
-        assert!(!app.set_pointer(Some((5, 0))), "off [x]: no hover change");
+        assert!(!app.set_pointer(Some((5, 0))), "off close: no hover change");
         assert_eq!(app.hovered_tab_close(), None);
-        assert!(app.set_pointer(Some((28, 0))), "onto [x]");
+        assert!(app.set_pointer(Some((28, 0))), "onto close");
         assert_eq!(app.hovered_tab_close(), Some(1));
-        assert!(!app.set_pointer(Some((30, 0))), "still on the same [x]");
-        assert!(app.set_pointer(Some((29, 1))), "row below leaves [x]");
-        assert!(!app.set_pointer(Some((2, 1))), "still off [x]");
+        assert!(!app.set_pointer(Some((30, 0))), "still on the same close");
+        assert!(app.set_pointer(Some((29, 1))), "row below leaves close");
+        assert!(!app.set_pointer(Some((2, 1))), "still off close");
         assert!(app.set_pointer(Some((28, 0))));
-        assert!(app.set_pointer(Some((31, 0))), "past [x]");
+        assert!(app.set_pointer(Some((31, 0))), "past close");
         assert!(app.set_pointer(Some((29, 0))));
         assert!(app.set_pointer(None), "pointer cleared");
 
