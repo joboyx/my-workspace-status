@@ -7,14 +7,16 @@ use crate::support::{
     graph_cursor_on, graph_pane_focused, panes_files_focused, panes_graph_focused_files_unfocused,
     panes_tree_focused_diff_unfocused, panes_tree_focused_graph_unfocused,
     panes_tree_unfocused_diff_focused, right_pane, title_has_files, tree_cursor_on, tree_has,
-    GIT_WAIT, RIGHT_PANE_COL, SETTLE_MS, WAIT,
+    GIT_WAIT, RIGHT_PANE_COL, WAIT,
 };
 
 /// Wheel up (`ScrollUp`, `Cb` 64). Wheel down is [`SGR_WHEEL_DOWN`] (65).
 const SGR_WHEEL_UP: u8 = 64;
 
-/// Wheel down + 1003 motion bit (`65 | 32`). crossterm 0.28 drops this.
+/// Wheel down + any-event (1003) motion bit (`65 | 32`). Scrolls like `65`.
 const SGR_WHEEL_DOWN_MOTION: u8 = 65 | 32;
+/// Wheel up + any-event (1003) motion bit (`64 | 32`). Scrolls like `64`.
+const SGR_WHEEL_UP_MOTION: u8 = 64 | 32;
 
 /// Kitty CSI-u Up / Down. Crossterm 0.28 `event::read` yields Char U+E008 / U+E009.
 const KITTY_UP: u32 = 57352;
@@ -352,7 +354,8 @@ fn move_stays_middle(tui: &mut PtySession, kind: RightList, send: fn(&mut PtySes
 /// recentres the focused row (`list_viewport_start`); graph commits,
 /// file-diff rows, and the commit-file list use the same viewport rule.
 /// Vertical wheel over the right pane moves that focused row. Motion-bit
-/// `CSI < 97` must not move. This is not hscroll.
+/// `CSI < 97` / `CSI < 96` (any-event tracking) move it the same way.
+/// This is not hscroll.
 ///
 /// Y is the cursor-bar line inside the list body (not the whole right pane).
 /// After the focused row is past the midpoint, Y must equal `body_h / 2`.
@@ -484,11 +487,23 @@ fn pty_right_pane_keeps_focus_middle() {
     for _ in 0..8 {
         tui.sgr_mouse(SGR_WHEEL_DOWN_MOTION, RIGHT_PANE_COL, 8);
     }
-    tui.wait_ms(SETTLE_MS);
-    assert!(
-        graph_cursor_on(&tui.screen(), "working tree"),
-        "motion-bit CSI < 97 must not move the graph cursor:\n{}",
-        tui.screen()
+    tui.wait_pred(
+        |screen| graph_pane_focused(screen) && !graph_cursor_on(screen, "working tree"),
+        "motion-bit CSI < 97 moves the graph cursor like CSI < 65",
+        WAIT,
+    );
+    for _ in 0..8 {
+        tui.sgr_mouse(SGR_WHEEL_UP_MOTION, RIGHT_PANE_COL, 8);
+    }
+    tui.wait_pred(
+        |screen| graph_pane_focused(screen) && graph_cursor_on(screen, "working tree"),
+        "motion-bit CSI < 96 moves the graph cursor back like CSI < 64",
+        WAIT,
+    );
+    assert_top_clamped(
+        &tui.screen(),
+        RightList::Graph,
+        "motion-bit wheel back to row 0 clamps to the top of the list body",
     );
     drive_to_middle(
         &mut tui,

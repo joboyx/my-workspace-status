@@ -3,12 +3,13 @@
 //! The live event loop reads with [`poll_event`] / [`read_event`]. On Unix
 //! the reader tags each key as [`KeyStrokeOrigin::LegacyByte`] or
 //! [`KeyStrokeOrigin::Protocol`] from the bytes. It decodes SGR, X10, and
-//! rxvt 1015 mouse the same way crossterm 0.28 does. A lone ESC waits one
+//! rxvt 1015 mouse like crossterm 0.28, except wheel reports with the
+//! any-event motion bit, which decode as the plain wheel. A lone ESC waits one
 //! poll timeout with no further stdin before it becomes Escape, so a split
 //! CSI / CSI-u report is not an Escape plus leftover keys. A hangup or
 //! 0-byte read is a read error. [`decode_sgr_mouse`] matches crossterm's
-//! `parse_cb` / `parse_csi_sgr_mouse`, including reports the live reader
-//! drops. A kinder clone would go green while a real TTY no-ops.
+//! `parse_cb` / `parse_csi_sgr_mouse` with one change: a wheel report with
+//! the any-event motion bit decodes as the plain wheel.
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
@@ -27,15 +28,16 @@ use super::keys::KeyStrokeOrigin;
 
 /// ANSI written to enable mouse capture.
 ///
-/// xterm mouse *protocol* modes 1000 / 1002 / 1003 are mutually exclusive.
-/// Crossterm's `EnableMouseCapture` sets all three (`1000h` `1002h` `1003h`);
-/// the last SET wins (any-event). Resetting only `1003` can then leave
-/// tracking off, so clicks, drag, and wheel die. This sequence resets 1003
-/// first, then enables click + button-event tracking, rxvt 1015, and SGR
-/// (`1006h` last). It never sets `1003h`. The Unix reader still decodes
-/// X10 and 1015 when a terminal speaks those instead of SGR. Wheel reports
-/// are `66`/`67` without the motion bit.
-pub const MOUSE_ENABLE: &[u8] = b"\x1b[?1003l\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h";
+/// xterm mouse *protocol* modes 1000 / 1002 / 1003 are mutually exclusive
+/// on some terminals; the last SET wins. This sequence sets click (1000),
+/// button-event (1002), then any-event (1003) tracking, so any-event is the
+/// active mode. Then it sets rxvt 1015 and SGR (`1006h` last). Any-event
+/// tracking reports pointer motion with no button held. The tab strip uses
+/// it for the `[x]` hover. Under 1003 some terminals add the motion bit (32)
+/// to wheel reports (`96`/`97` vertical, `98`/`99` horizontal). The Unix
+/// reader decodes those as the plain wheel. [`disable_mouse`] resets every
+/// mode, 1003 included.
+pub const MOUSE_ENABLE: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h";
 
 #[cfg(test)]
 /// xterm SGR button for wheel right (trackpad hscroll).
@@ -44,8 +46,11 @@ pub(crate) const SGR_WHEEL_RIGHT: u8 = 67;
 /// xterm SGR button for Shift+wheel down (common trackpad hscroll encoding).
 pub(crate) const SGR_SHIFT_WHEEL_DOWN: u8 = 69;
 #[cfg(test)]
-/// Wheel right with the 1003 motion bit (`67 | 32`). crossterm 0.28 drops this.
+/// Wheel right with the 1003 motion bit (`67 | 32`). Decodes as wheel right.
 pub(crate) const SGR_WHEEL_RIGHT_MOTION: u8 = 67 | 32;
+#[cfg(test)]
+/// Pointer motion with no button held (`3 | 32`). Any-event tracking only.
+pub(crate) const SGR_POINTER_MOVE: u8 = 3 | 32;
 
 /// Enable mouse capture for the live TTY. See [`MOUSE_ENABLE`].
 pub fn enable_mouse(out: &mut impl Write) -> io::Result<()> {
@@ -757,12 +762,12 @@ pub(crate) fn sgr_mouse_report(button: u8, col: u16, row: u16) -> Vec<u8> {
 
 /// Decode one xterm SGR mouse report the way the live reader does.
 ///
-/// This is a byte-accurate clone of crossterm 0.28 `parse_csi_sgr_mouse` /
-/// `parse_cb`. Wheel left/right are buttons 6/7 (`Cb` 66/67). Shift+wheel is
-/// the vertical wheel plus bit 2 (`Cb` 68/69). Bit 5 is motion; crossterm
-/// 0.28 returns a parse error for wheel reports that include it (`98`/`99`),
-/// and the live `event::read` loop drops those bytes. Unknown reports are
-/// `None` so callers no-op the same way.
+/// This follows crossterm 0.28 `parse_csi_sgr_mouse` / `parse_cb`. Wheel
+/// left/right are buttons 6/7 (`Cb` 66/67). Shift+wheel is the vertical
+/// wheel plus bit 2 (`Cb` 68/69). Bit 5 is motion. Under any-event tracking
+/// some terminals set it on wheel reports (`96`..`99`); those decode as the
+/// plain wheel. crossterm 0.28 would report `Moved` or a parse error there.
+/// Unknown reports are `None` so callers no-op.
 pub(crate) fn decode_sgr_mouse(seq: &[u8]) -> Option<Event> {
     if seq.len() < 8 || !seq.starts_with(&[0x1b, b'[', b'<']) {
         return None;
@@ -796,10 +801,14 @@ pub(crate) fn decode_sgr_mouse(seq: &[u8]) -> Option<Event> {
     }))
 }
 
-/// Decode the SGR `Cb` field the way crossterm 0.28 `parse_cb` does.
+/// Decode the SGR `Cb` field like crossterm 0.28 `parse_cb`.
 ///
-/// Match arms are the live reader contract. Do not accept motion+wheel
-/// (`(6, true)` / `(7, true)`): that is kinder than `event::read`.
+/// Match arms are the live reader contract. A wheel button with the motion
+/// bit is the plain wheel, so wheel and trackpad hscroll keep working under
+/// any-event tracking (DECSET 1003). The motion bit is normalized only for
+/// wheel buttons (bit 64 set, buttons 4..=7). Button drags (`Cb` 32..=63 with
+/// low bits 0..=2) keep `Drag`, and buttonless motion (low bits 3) keeps
+/// `Moved`, with or without Shift / Alt / Ctrl. Neither becomes a scroll.
 fn sgr_button_kind(cb: u8) -> Option<(MouseEventKind, KeyModifiers)> {
     let button_number = (cb & 0b0000_0011) | ((cb & 0b1100_0000) >> 4);
     let dragging = cb & 0b0010_0000 == 0b0010_0000;
@@ -811,11 +820,11 @@ fn sgr_button_kind(cb: u8) -> Option<(MouseEventKind, KeyModifiers)> {
         (1, true) => MouseEventKind::Drag(MouseButton::Middle),
         (2, true) => MouseEventKind::Drag(MouseButton::Right),
         (3, false) => MouseEventKind::Up(MouseButton::Left),
-        (3, true) | (4, true) | (5, true) => MouseEventKind::Moved,
-        (4, false) => MouseEventKind::ScrollUp,
-        (5, false) => MouseEventKind::ScrollDown,
-        (6, false) => MouseEventKind::ScrollLeft,
-        (7, false) => MouseEventKind::ScrollRight,
+        (3, true) => MouseEventKind::Moved,
+        (4, _) => MouseEventKind::ScrollUp,
+        (5, _) => MouseEventKind::ScrollDown,
+        (6, _) => MouseEventKind::ScrollLeft,
+        (7, _) => MouseEventKind::ScrollRight,
         _ => return None,
     };
     let mut modifiers = KeyModifiers::empty();
@@ -834,33 +843,30 @@ fn sgr_button_kind(cb: u8) -> Option<(MouseEventKind, KeyModifiers)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::EnableMouseCapture;
-    use crossterm::Command;
 
     #[test]
-    fn mouse_enable_never_sets_any_event_tracking() {
-        let mut crossterm_enable = String::new();
-        EnableMouseCapture
-            .write_ansi(&mut crossterm_enable)
-            .unwrap();
-        assert!(
-            crossterm_enable.contains("1003h"),
-            "crossterm EnableMouseCapture still sets DECSET 1003: {crossterm_enable:?}"
-        );
+    fn mouse_enable_sets_any_event_tracking_before_sgr() {
         let ours = std::str::from_utf8(MOUSE_ENABLE).unwrap();
+        for mode in ["1000h", "1002h", "1003h", "1015h", "1006h"] {
+            assert!(ours.contains(mode), "missing {mode}: {ours:?}");
+        }
+        assert!(!ours.contains("1003l"), "must not reset 1003: {ours:?}");
+        let at = |mode: &str| ours.find(mode).unwrap();
         assert!(
-            !ours.contains("1003h"),
-            "live enable must not set any-event tracking: {ours:?}"
+            at("1000h") < at("1003h") && at("1002h") < at("1003h"),
+            "any-event must be the last protocol mode set: {ours:?}"
         );
-        assert!(ours.contains("1003l"));
-        assert!(ours.contains("1000h"));
-        assert!(ours.contains("1002h"));
-        assert!(ours.contains("1015h"));
-        assert!(ours.contains("1006h"));
         assert!(
-            ours.find("1003l").unwrap() < ours.find("1002h").unwrap(),
-            "reset 1003 before enabling 1002 so exclusive-level terminals keep tracking: {ours:?}"
+            ours.ends_with("\x1b[?1006h"),
+            "SGR must stay last: {ours:?}"
         );
+
+        let mut disable = Vec::new();
+        disable_mouse(&mut disable).unwrap();
+        let disable = String::from_utf8(disable).unwrap();
+        for mode in ["1000l", "1002l", "1003l", "1015l", "1006l"] {
+            assert!(disable.contains(mode), "disable misses {mode}: {disable:?}");
+        }
     }
 
     #[test]
@@ -905,10 +911,169 @@ mod tests {
                 modifiers: KeyModifiers::SHIFT,
             })
         );
-        assert!(
-            decode_sgr_mouse(&sgr_mouse_report(SGR_WHEEL_RIGHT_MOTION, 8, 4)).is_none(),
-            "crossterm 0.28 event::read drops SGR 99 (wheel right + motion); e2e must not pan on it"
+    }
+
+    #[test]
+    fn motion_bit_wheel_decodes_as_plain_wheel() {
+        let cases = [
+            (96, MouseEventKind::ScrollUp, KeyModifiers::NONE),
+            (97, MouseEventKind::ScrollDown, KeyModifiers::NONE),
+            (98, MouseEventKind::ScrollLeft, KeyModifiers::NONE),
+            (
+                SGR_WHEEL_RIGHT_MOTION,
+                MouseEventKind::ScrollRight,
+                KeyModifiers::NONE,
+            ),
+            (
+                SGR_SHIFT_WHEEL_DOWN | 32,
+                MouseEventKind::ScrollDown,
+                KeyModifiers::SHIFT,
+            ),
+            (99 | 16, MouseEventKind::ScrollRight, KeyModifiers::CONTROL),
+        ];
+        for (cb, kind, modifiers) in cases {
+            let want = Event::Mouse(MouseEvent {
+                kind,
+                column: 8,
+                row: 4,
+                modifiers,
+            });
+            assert_eq!(
+                decode_sgr_mouse(&sgr_mouse_report(cb, 8, 4)),
+                Some(want.clone()),
+                "SGR {cb}"
+            );
+            assert_eq!(
+                decode_sgr_mouse(&sgr_mouse_report(cb & !32, 8, 4)),
+                Some(want),
+                "SGR {cb} must match its plain wheel"
+            );
+        }
+        let rxvt = parse_tty_chunk(b"\x1b[131;9;5M");
+        assert_eq!(
+            rxvt[0].0,
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollRight,
+                column: 8,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            }),
+            "1015 wheel right + motion (99 + 32)"
         );
+    }
+
+    #[test]
+    fn buttonless_motion_decodes_as_moved() {
+        for (cb, modifiers) in [
+            (SGR_POINTER_MOVE, KeyModifiers::NONE),
+            (SGR_POINTER_MOVE | 4, KeyModifiers::SHIFT),
+            (SGR_POINTER_MOVE | 8, KeyModifiers::ALT),
+            (SGR_POINTER_MOVE | 16, KeyModifiers::CONTROL),
+        ] {
+            assert_eq!(
+                decode_sgr_mouse(&sgr_mouse_report(cb, 8, 4)),
+                Some(Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    column: 8,
+                    row: 4,
+                    modifiers,
+                })),
+                "SGR {cb}"
+            );
+        }
+    }
+
+    /// Every `Cb` with the motion bit but not the wheel bit is a drag or
+    /// plain motion. Every `Cb` with the wheel and motion bits is a wheel.
+    /// Modifier bits (4 Shift, 8 Alt, 16 Ctrl) never change that split.
+    #[test]
+    fn modifier_drags_and_motion_never_scroll() {
+        fn mouse(kind: MouseEventKind, modifiers: KeyModifiers) -> Option<Event> {
+            Some(Event::Mouse(MouseEvent {
+                kind,
+                column: 8,
+                row: 4,
+                modifiers,
+            }))
+        }
+        fn mods(cb: u8) -> KeyModifiers {
+            let mut modifiers = KeyModifiers::empty();
+            if cb & 4 != 0 {
+                modifiers |= KeyModifiers::SHIFT;
+            }
+            if cb & 8 != 0 {
+                modifiers |= KeyModifiers::ALT;
+            }
+            if cb & 16 != 0 {
+                modifiers |= KeyModifiers::CONTROL;
+            }
+            modifiers
+        }
+        for cb in 32u8..=63 {
+            let kind = match cb & 3 {
+                0 => MouseEventKind::Drag(MouseButton::Left),
+                1 => MouseEventKind::Drag(MouseButton::Middle),
+                2 => MouseEventKind::Drag(MouseButton::Right),
+                _ => MouseEventKind::Moved,
+            };
+            assert_eq!(
+                decode_sgr_mouse(&sgr_mouse_report(cb, 8, 4)),
+                mouse(kind, mods(cb)),
+                "SGR {cb} is a drag or motion, never a scroll"
+            );
+        }
+        for cb in 96u8..=127 {
+            let kind = match cb & 3 {
+                0 => MouseEventKind::ScrollUp,
+                1 => MouseEventKind::ScrollDown,
+                2 => MouseEventKind::ScrollLeft,
+                _ => MouseEventKind::ScrollRight,
+            };
+            assert_eq!(
+                decode_sgr_mouse(&sgr_mouse_report(cb, 8, 4)),
+                mouse(kind, mods(cb)),
+                "SGR {cb} is a wheel with the motion bit"
+            );
+        }
+
+        // Spot checks with literal values, so the loops above cannot share a
+        // mistake with `mods`.
+        for (cb, kind, modifiers) in [
+            (
+                36,
+                MouseEventKind::Drag(MouseButton::Left),
+                KeyModifiers::SHIFT,
+            ),
+            (
+                40,
+                MouseEventKind::Drag(MouseButton::Left),
+                KeyModifiers::ALT,
+            ),
+            (
+                48,
+                MouseEventKind::Drag(MouseButton::Left),
+                KeyModifiers::CONTROL,
+            ),
+            (39, MouseEventKind::Moved, KeyModifiers::SHIFT),
+            (101, MouseEventKind::ScrollDown, KeyModifiers::SHIFT),
+        ] {
+            assert_eq!(
+                decode_sgr_mouse(&sgr_mouse_report(cb, 8, 4)),
+                mouse(kind, modifiers),
+                "SGR {cb}"
+            );
+        }
+
+        // X10 (ESC [ M, each byte + 32) and rxvt 1015 (Cb + 32) reach the
+        // same decoder after removing the offset.
+        let shift_drag = mouse(MouseEventKind::Drag(MouseButton::Left), KeyModifiers::SHIFT);
+        let x10 = [0x1b, b'[', b'M', 36 + 32, 9 + 32, 5 + 32];
+        let events = parse_tty_chunk(&x10);
+        assert_eq!(events.len(), 1, "X10 Shift+drag parses to one event");
+        assert_eq!(Some(events[0].0.clone()), shift_drag, "X10 Shift+drag");
+        let events = parse_tty_chunk(b"\x1b[68;9;5M");
+        assert_eq!(events.len(), 1, "1015 Shift+drag parses to one event");
+        assert_eq!(Some(events[0].0.clone()), shift_drag, "1015 Shift+drag");
     }
 
     fn key_code(event: &Event) -> KeyCode {

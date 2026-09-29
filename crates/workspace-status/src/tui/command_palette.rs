@@ -172,7 +172,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::CompareVsBranch,
     },
     PaletteCommand {
-        title: "Close compare tab",
+        title: "Close tab",
         keys: "",
         group: CommandGroup::Git,
         action: Action::CloseCompareTab,
@@ -504,12 +504,7 @@ mod tests {
                 CommandGroup::Git,
                 Action::CompareVsBranch,
             ),
-            (
-                "Close compare tab",
-                "",
-                CommandGroup::Git,
-                Action::CloseCompareTab,
-            ),
+            ("Close tab", "", CommandGroup::Git, Action::CloseCompareTab),
             (
                 "Mark reviewed",
                 "space",
@@ -611,6 +606,11 @@ mod tests {
             .iter()
             .filter(|c| c.group == CommandGroup::Move)
             .all(|c| command_matches(c, "move")));
+    }
+
+    #[test]
+    fn close_tab_query_lists_the_close_row() {
+        assert_eq!(titles("close tab"), vec!["Close tab"]);
     }
 
     #[test]

@@ -24,9 +24,12 @@ pub const ROWS: u16 = 32;
 
 /// xterm SGR button for wheel down (`ScrollDown`, `Cb` 65).
 pub const SGR_WHEEL_DOWN: u8 = 65;
+/// xterm SGR button for wheel left (trackpad hscroll back).
+pub const SGR_WHEEL_LEFT: u8 = 66;
 /// xterm SGR button for wheel right (trackpad hscroll).
 pub const SGR_WHEEL_RIGHT: u8 = 67;
-/// Wheel right with the 1003 motion bit (`67 | 32`). crossterm 0.28 drops this.
+/// Wheel right with the any-event (1003) motion bit (`67 | 32`). Some
+/// terminals send it under any-event tracking. It must pan like `67`.
 pub const SGR_WHEEL_RIGHT_MOTION: u8 = 67 | 32;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(12);
@@ -413,6 +416,17 @@ impl PtySession {
 
     pub fn screen(&self) -> String {
         self.parser.lock().unwrap().screen().contents()
+    }
+
+    /// Mouse tracking state the terminal side holds after replaying the
+    /// child's DECSET / DECRST output: protocol mode and report encoding.
+    pub fn mouse_tracking(&self) -> (vt100::MouseProtocolMode, vt100::MouseProtocolEncoding) {
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        (
+            screen.mouse_protocol_mode(),
+            screen.mouse_protocol_encoding(),
+        )
     }
 
     /// Glyph in one vt100 cell, or `None` when the cell is empty.

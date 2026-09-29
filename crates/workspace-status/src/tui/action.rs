@@ -53,6 +53,16 @@ pub enum Action {
         col: u16,
         row: u16,
     },
+    /// Pointer motion with no button held (any-event tracking, DECSET 1003).
+    ///
+    /// The live loop handles it before busy gating and dispatch: it stores
+    /// the pointer and redraws only when the hovered tab `[x]` changes.
+    /// [`super::state::AppState::dispatch`] treats it as a no-op that keeps
+    /// `g` / `z` chords armed.
+    PointerMove {
+        col: u16,
+        row: u16,
+    },
     Drag {
         col: u16,
         row: u16,

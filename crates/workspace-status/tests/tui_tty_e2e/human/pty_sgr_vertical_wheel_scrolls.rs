@@ -4,7 +4,7 @@ use crate::support::{
     seed_tree_page_files, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, TREE_LABEL_COL, WAIT,
 };
 
-/// Wheel down + 1003 motion bit (`65 | 32`). crossterm 0.28 drops this.
+/// Wheel down + any-event (1003) motion bit (`65 | 32`). Scrolls like `65`.
 const SGR_WHEEL_DOWN_MOTION: u8 = 65 | 32;
 
 /// Launch: README focused, page-29 clipped off the tree viewport.
@@ -49,14 +49,15 @@ fn documented_tree_sgr_vertical_wheel_scrolled(screen: &str) -> bool {
 ///
 /// Docs / keymap: write xterm SGR wheel down (`CSI < 65`) into the live
 /// `event::read` loop. Wheel over a list moves that list's cursor (±1)
-/// and the viewport follows. Motion-bit `CSI < 97` (`65 | 32`) is dropped
-/// by crossterm 0.28 and must not scroll. This is not hscroll (`66`/`67`)
+/// and the viewport follows. Motion-bit `CSI < 97` (`65 | 32`, any-event
+/// tracking) scrolls the same way. This is not hscroll (`66`/`67`)
 /// and not `pty_m_toggles_mouse_capture` (one-notch cursor while mouse
 /// toggles).
 ///
 /// Daily seed plus 30 `page-NN.txt` files so the focused tree cannot fit.
-/// Launch keeps README in view and clips `page-29`. Thirty wheel-down
-/// reports land on `page-29.txt`: README leaves, page-29 appears, the
+/// Launch keeps README in view and clips `page-29`. Fifteen motion-bit
+/// reports land on `page-14.txt`; fifteen plain ones then land on
+/// `page-29.txt`: README leaves, page-29 appears, the
 /// right pane loads `page-29-body`. A no-op stays on README. `j` would
 /// hit page-00. PageDown would hit page-25. `G` would hit No updates.
 /// Horizontal pan, focus steal to the right pane, or chrome-only flicker
@@ -76,17 +77,17 @@ fn pty_sgr_vertical_wheel_scrolls() {
     let readme_row = tree_row_containing(&tui.screen(), "README.md")
         .unwrap_or_else(|| panic!("README row at launch:\n{}", tui.screen()));
 
-    for _ in 0..30 {
+    for _ in 0..15 {
         tui.sgr_mouse(SGR_WHEEL_DOWN_MOTION, TREE_LABEL_COL, readme_row);
     }
-    tui.wait_ms(SETTLE_MS);
-    assert!(
-        tree_overflow_before_scroll(&tui.screen()),
-        "motion-bit CSI < 97 must not scroll (crossterm 0.28 drops it):\n{}",
-        tui.screen()
+    tui.wait_pred(
+        |screen| tree_cursor_on(screen, "page-14.txt"),
+        "fifteen motion-bit CSI < 97 reports move the tree cursor fifteen rows",
+        GIT_WAIT,
     );
+    tui.wait_ms(SETTLE_MS);
 
-    for _ in 0..30 {
+    for _ in 0..15 {
         tui.sgr_mouse(SGR_WHEEL_DOWN, TREE_LABEL_COL, readme_row);
     }
     tui.wait_pred(

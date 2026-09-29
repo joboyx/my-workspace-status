@@ -119,6 +119,7 @@ impl AppState {
             Action::ToggleMouse => {
                 self.cancel_mouse_drag();
                 self.mouse_enabled = !self.mouse_enabled;
+                self.pointer = None;
                 self.status = if self.mouse_enabled {
                     "Mouse on".into()
                 } else {

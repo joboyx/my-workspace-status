@@ -422,7 +422,7 @@ mod tests {
             );
             assert!(
                 !src.contains("EnableMouseCapture"),
-                "{name} must call enable_mouse(); EnableMouseCapture sets exclusive 1003"
+                "{name} must call enable_mouse(); EnableMouseCapture skips the shared sequence"
             );
         }
         assert!(

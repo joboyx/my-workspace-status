@@ -826,6 +826,10 @@ fn mouse_to_action(mouse: MouseEvent) -> Action {
             row: mouse.row,
         },
         MouseEventKind::Up(MouseButton::Left) => Action::Release,
+        MouseEventKind::Moved => Action::PointerMove {
+            col: mouse.column,
+            row: mouse.row,
+        },
         MouseEventKind::ScrollDown => wheel_action(mouse, 1, false),
         MouseEventKind::ScrollUp => wheel_action(mouse, -1, false),
         MouseEventKind::ScrollLeft => wheel_action(mouse, -1, true),
@@ -1618,9 +1622,42 @@ mod tests {
                 horizontal: true,
             }
         );
-        assert!(
-            decode_sgr_mouse(&sgr_mouse_report(SGR_WHEEL_RIGHT_MOTION, 8, 4)).is_none(),
-            "live event::read drops SGR 99; keymap must not see a kinder decode"
+        let right_motion =
+            decode_sgr_mouse(&sgr_mouse_report(SGR_WHEEL_RIGHT_MOTION, 8, 4)).unwrap();
+        assert_eq!(
+            event_to_action(&right_motion, normal(), false, false),
+            Action::ScrollWheel {
+                col: 8,
+                row: 4,
+                delta: 1,
+                horizontal: true,
+            },
+            "SGR 99 (wheel right + any-event motion bit) pans like 67"
+        );
+        let down_motion = decode_sgr_mouse(&sgr_mouse_report(65 | 32, 8, 4)).unwrap();
+        assert_eq!(
+            event_to_action(&down_motion, normal(), false, false),
+            Action::ScrollWheel {
+                col: 8,
+                row: 4,
+                delta: 1,
+                horizontal: false,
+            },
+            "SGR 97 (wheel down + motion bit) scrolls like 65"
+        );
+    }
+
+    #[test]
+    fn buttonless_motion_maps_to_pointer_move_outside_overlays() {
+        use crate::tui::tty::{decode_sgr_mouse, sgr_mouse_report, SGR_POINTER_MOVE};
+        let moved = decode_sgr_mouse(&sgr_mouse_report(SGR_POINTER_MOVE, 30, 0)).unwrap();
+        assert_eq!(
+            event_to_action(&moved, normal(), false, false),
+            Action::PointerMove { col: 30, row: 0 }
+        );
+        assert_eq!(
+            event_to_action(&moved, InputMode::CommandPalette, false, false),
+            Action::None
         );
     }
 

@@ -11,13 +11,14 @@ use super::{AppState, FocusPane};
 impl AppState {
     /// Apply `action` and return the [`Effect`] the event loop should run.
     pub fn dispatch(&mut self, action: Action) -> Effect {
-        if !matches!(action, Action::FoldToggle) {
+        if !matches!(action, Action::FoldToggle | Action::PointerMove { .. }) {
             self.z_pending_at = None;
         }
         if !matches!(
             action,
             Action::ArmGChord
                 | Action::None
+                | Action::PointerMove { .. }
                 | Action::WatchTick
                 | Action::FetchTick
                 | Action::Release
@@ -40,6 +41,8 @@ impl AppState {
             return Effect::None;
         }
         match action {
+            // The live loop stores the pointer before dispatch.
+            Action::PointerMove { .. } => Effect::None,
             action @ (Action::PanDiff(_) | Action::ScrollWheel { .. }) => {
                 self.dispatch_hscroll(action)
             }
