@@ -220,7 +220,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ToggleDiffWrap,
     },
     PaletteCommand {
-        title: "Expand commit message",
+        title: "Collapse / expand commit message",
         keys: "M",
         group: CommandGroup::View,
         action: Action::ToggleCommitMsgExpand,
@@ -538,7 +538,7 @@ mod tests {
                 Action::ToggleDiffWrap,
             ),
             (
-                "Expand commit message",
+                "Collapse / expand commit message",
                 "M",
                 CommandGroup::View,
                 Action::ToggleCommitMsgExpand,

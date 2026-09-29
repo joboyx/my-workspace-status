@@ -13,7 +13,7 @@ pub use super::common::seed::{
     seed_compare_unborn, seed_long_diff_file, seed_long_path_file, seed_long_subject_repo,
     seed_many_commit_files, seed_merge_mark_family, seed_multiline_message_repo,
     seed_primary_and_linked_family, seed_repo, seed_tall_graph, seed_two_tall_commit_files,
-    staged_and_changes_workspace, unique_root, COMMIT_MSG_BODY,
+    staged_and_changes_workspace, unique_root, COMMIT_MSG_BODY, COMMIT_MSG_BODY_TAIL,
 };
 
 use super::common::seed::{

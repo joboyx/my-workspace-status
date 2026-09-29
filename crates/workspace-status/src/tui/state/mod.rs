@@ -149,6 +149,17 @@ pub struct LayoutHit {
     pub graph_hscrollbar_width: u16,
     /// Max horizontal pan for the painted graph.
     pub graph_col_max: u16,
+    /// 0-based first row of the graph selection footer when its expanded
+    /// message is taller than the footer (wheel there scrolls the message).
+    pub graph_footer_y: Option<u16>,
+    /// 0-based first column of that footer.
+    pub graph_footer_x: u16,
+    /// Footer width.
+    pub graph_footer_width: u16,
+    /// Footer height, meta row included.
+    pub graph_footer_height: u16,
+    /// Max message scroll for the painted footer.
+    pub graph_footer_scroll_max: usize,
     /// 0-based diff scrollbar column when a file diff is painted.
     pub diff_scrollbar_x: Option<u16>,
     /// 0-based first row of the diff scrollbar track (body, not header).
@@ -198,6 +209,11 @@ impl Default for LayoutHit {
             graph_hscrollbar_x: 0,
             graph_hscrollbar_width: 0,
             graph_col_max: 0,
+            graph_footer_y: None,
+            graph_footer_x: 0,
+            graph_footer_width: 0,
+            graph_footer_height: 0,
+            graph_footer_scroll_max: 0,
             diff_scrollbar_x: None,
             diff_scrollbar_y: 0,
             diff_scrollbar_height: 0,
@@ -394,8 +410,12 @@ pub struct AppState {
     /// Soft-wrap file-diff code. Session-only (no XDG store).
     pub diff_wrap: bool,
     /// Expand commit / stash messages in the graph footer and commit-files
-    /// header. Session-only (no XDG store). Graph list rows stay one line.
+    /// header. On by default; `M` collapses for this session (no XDG store).
+    /// Graph list rows stay one line.
     pub commit_msg_expand: bool,
+    /// Scroll of an expanded message taller than the graph footer, keyed by
+    /// the graph row identity it belongs to. Any other selection reads `0`.
+    commit_msg_scroll: Option<(String, usize)>,
     pub drag: SplitDrag,
     /// Mouse text selection armed by a press in a pane body.
     pub text_selection: Option<TextSelection>,
@@ -518,7 +538,8 @@ impl AppState {
             diff_split_fraction: DIFF_SPLIT_FRACTION,
             diff_mode: DiffMode::SideBySide,
             diff_wrap: false,
-            commit_msg_expand: false,
+            commit_msg_expand: true,
+            commit_msg_scroll: None,
             drag: SplitDrag::None,
             text_selection: None,
             painted_frame: Buffer::default(),
@@ -806,18 +827,23 @@ impl AppState {
         )
     }
 
+    /// Painted graph width: the left pane's inner width in a files drill,
+    /// else the right pane's inner width (borders excluded, same `Rect` the
+    /// widget paints into), so footer wrap and list height match the paint.
     fn graph_pane_inner_width(&self) -> u16 {
         if self.drill.is_files() {
             self.layout.tree_width.max(1)
         } else {
-            self.layout
-                .term_cols
-                .saturating_sub(self.layout.right_x)
-                .max(1)
+            self.layout.diff_pane_width.max(1)
         }
     }
 
     fn graph_footer_desired_lines(&self, width: usize) -> u16 {
+        self.graph_footer_line_count(width).min(u16::MAX as usize) as u16
+    }
+
+    /// Painted selection-footer lines at `width`, before the footer budget.
+    pub(crate) fn graph_footer_line_count(&self, width: usize) -> usize {
         if !self.commit_msg_expand {
             return 2;
         }
@@ -835,7 +861,50 @@ impl AppState {
             unix_now(),
             true,
         )
-        .len() as u16
+        .len()
+    }
+
+    fn graph_selected_row_identity(&self) -> Option<String> {
+        let repo = self.graph_focus_repo()?;
+        let rows = self.graph.as_ref()?.visible_rows();
+        rows.get(self.graph_cursor)
+            .map(|row| graph_row_identity(&repo, row))
+    }
+
+    /// First painted footer message line for the selected graph row.
+    pub(crate) fn graph_footer_msg_scroll(&self) -> usize {
+        match (&self.commit_msg_scroll, self.graph_selected_row_identity()) {
+            (Some((id, offset)), Some(current)) if *id == current => *offset,
+            _ => 0,
+        }
+    }
+
+    /// Wheel over an overflowing graph footer scrolls its message.
+    ///
+    /// Returns false when `(col, row)` is not on that footer, so the wheel
+    /// moves the list as usual.
+    pub(crate) fn scroll_graph_footer_msg(&mut self, col: u16, row: u16, delta: i32) -> bool {
+        let layout = &self.layout;
+        let Some(top) = layout.graph_footer_y else {
+            return false;
+        };
+        let on_footer = (top..top.saturating_add(layout.graph_footer_height)).contains(&row)
+            && (layout.graph_footer_x
+                ..layout
+                    .graph_footer_x
+                    .saturating_add(layout.graph_footer_width))
+                .contains(&col);
+        if !on_footer {
+            return false;
+        }
+        let Some(id) = self.graph_selected_row_identity() else {
+            return false;
+        };
+        let max = layout.graph_footer_scroll_max;
+        let current = self.graph_footer_msg_scroll().min(max) as i64;
+        let next = (current + i64::from(delta)).clamp(0, max as i64);
+        self.commit_msg_scroll = Some((id, next as usize));
+        true
     }
 
     pub fn commit_file_rows(&self) -> Vec<CommitFileRow> {
@@ -9075,6 +9144,7 @@ mod tests {
 
     #[test]
     fn m_toggles_commit_msg_expand_on_graph_footer_and_commit_detail() {
+        // Default on; `M` collapses, a second `M` expands again.
         let mut app = state();
         focus_repo(&mut app, "app");
         install_graph(&mut app, Vec::new());
@@ -9088,7 +9158,10 @@ mod tests {
         }
         app.focus = FocusPane::Right;
         app.drill = DrillView::Graph;
+        assert!(app.commit_msg_expand, "expanded by default");
+        app.dispatch(Action::ToggleCommitMsgExpand);
         assert!(!app.commit_msg_expand);
+        assert_eq!(app.status, "msg off");
         app.dispatch(Action::ToggleCommitMsgExpand);
         assert!(app.commit_msg_expand);
         assert_eq!(app.status, "msg on");

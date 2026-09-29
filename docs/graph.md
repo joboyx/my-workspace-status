@@ -54,7 +54,7 @@ is on (default). `cursorBg` paints when the row is not flashing
 (`GraphWidget::cursor_style`). When the graph pane is unfocused the TUI
 sets `cursor_bar` false and paints the thinner `▏` marker plus
 `cursorBgInactive` (`GraphWidget::cursor_inactive_style`).
-[`GraphWidget::selected`] still drives the 2-line selection footer. `GraphWidget::commented_rows` marks selectable
+[`GraphWidget::selected`] still drives the selection footer. `GraphWidget::commented_rows` marks selectable
 visible-row indexes that have an object comment or a file-line
 comment for that row. Commented rows paint `ICON_COMMENT` (`"` /
 nf-fa-comment) after the gutter. `GraphWidget::resolved_comment_rows`
@@ -84,11 +84,16 @@ stay out of ops unless shown.
 
 ## Paint
 
-`GraphWidget` uses a chrome budget (`graph_chrome_budget`): a
-2-line selection footer when height ≥ 3, then a 1-line sync header if
+`GraphWidget` uses a chrome budget (`graph_chrome_budget_for`): a
+selection footer when height ≥ 3 (2 lines collapsed), then a 1-line sync header if
 space remains (footer wins when tight; no header when `sync` is unset).
-`M` (`commit_msg_expand`) grows that footer so it can wrap the full
-subject plus body (`selection_footer_parts`). List rows stay one line.
+The footer wraps the full subject plus body by default
+(`commit_msg_expand`, `selection_footer_parts`); `M` collapses it to the
+two clipped lines. The expanded footer shows at most
+`COMMIT_MSG_EXPAND_MAX_LINES` message rows plus the meta row, and at most
+half the pane. A taller message scrolls: `commit_msg_scroll` sets the first
+message row, the meta row stays pinned, and a 1-column scrollbar marks the
+position (`footer_message_scroll_max`). List rows stay one line.
 `loading older…` takes one extra row while the next log page loads.
 
 Footer copy (`selection_detail_lines` / `selection_detail_parts`; do not invent

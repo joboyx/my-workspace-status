@@ -197,7 +197,7 @@ impl AppState {
             }
             Action::ScrollWheel {
                 col,
-                row: _,
+                row,
                 delta,
                 horizontal,
             } => {
@@ -206,6 +206,9 @@ impl AppState {
                 }
                 if horizontal {
                     self.mouse_pan(col, delta);
+                    return Effect::None;
+                }
+                if self.scroll_graph_footer_msg(col, row, delta) {
                     return Effect::None;
                 }
                 if col >= self.layout.right_x {
