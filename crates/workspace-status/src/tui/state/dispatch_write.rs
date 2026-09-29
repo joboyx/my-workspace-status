@@ -2,7 +2,6 @@
 
 use super::super::action::{Action, Effect};
 use super::super::ops::Op;
-use super::super::split::SplitDrag;
 use super::super::stash::StashOpId;
 use super::{AppState, PendingConfirm};
 
@@ -17,7 +16,7 @@ impl AppState {
             Action::Stage => self.stage_effect(),
             Action::Unstage => self.unstage_effect(),
             Action::Revert => {
-                self.drag = SplitDrag::None;
+                self.cancel_mouse_drag();
                 self.begin_revert()
             }
             Action::ConfirmYes => self.confirm_yes(false),
@@ -35,19 +34,19 @@ impl AppState {
                 Effect::None
             }
             Action::RemoveWorktree => {
-                self.drag = SplitDrag::None;
+                self.cancel_mouse_drag();
                 self.begin_remove_worktree()
             }
             Action::Push => self.push_effect(),
             Action::StashMenu => {
-                self.drag = SplitDrag::None;
+                self.cancel_mouse_drag();
                 self.begin_stash_menu()
             }
             Action::StashMenuChar(c) => self.stash_menu_key(Some(c), false, false),
             Action::StashMenuEnter => self.stash_menu_key(None, true, false),
             Action::StashMenuCancel => self.stash_menu_key(None, false, true),
             Action::Branch => {
-                self.drag = SplitDrag::None;
+                self.cancel_mouse_drag();
                 self.begin_branch_picker()
             }
             Action::BranchMove(delta) => {
@@ -81,7 +80,7 @@ impl AppState {
                 Effect::None
             }
             Action::CreateBranchStart => {
-                self.drag = SplitDrag::None;
+                self.cancel_mouse_drag();
                 self.begin_create_branch()
             }
             Action::CreateBranchChar(c) => {
@@ -108,15 +107,15 @@ impl AppState {
             Action::GraphStashPop => self.graph_stash_op(StashOpId::Pop),
             Action::GraphStashDrop => self.graph_stash_op(StashOpId::Drop),
             Action::GraphCheckout => {
-                self.drag = SplitDrag::None;
+                self.cancel_mouse_drag();
                 self.begin_graph_checkout()
             }
             Action::GraphCreateBranch => {
-                self.drag = SplitDrag::None;
+                self.cancel_mouse_drag();
                 self.begin_graph_create_branch()
             }
             Action::GraphMerge => {
-                self.drag = SplitDrag::None;
+                self.cancel_mouse_drag();
                 self.begin_graph_merge()
             }
             _ => Effect::None,

@@ -30,6 +30,7 @@ pub(crate) mod persist;
 mod render;
 mod scheduler;
 pub(crate) mod search;
+mod selection;
 mod split;
 mod stash;
 mod state;

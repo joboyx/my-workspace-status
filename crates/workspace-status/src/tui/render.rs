@@ -301,6 +301,13 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         let (start, _) = visible_window(painted_n, *cursor, list_h);
         state.layout.files_list_offset = start;
     }
+
+    // Keep the frame as painted so a mouse release copies what is on screen,
+    // then reverse the selected cells on top of it.
+    state.painted_frame = frame.buffer_mut().clone();
+    if let Some(selection) = state.text_selection.as_ref() {
+        selection.highlight(frame.buffer_mut());
+    }
 }
 
 fn pane_border(focused: bool, palette: Palette) -> Style {
@@ -5004,5 +5011,150 @@ mod tests {
                 "{id:?} line numbers must not DIM"
             );
         }
+    }
+    fn draw_state(terminal: &mut Terminal<TestBackend>, state: &mut AppState) {
+        terminal.draw(|frame| draw(frame, state)).unwrap();
+    }
+
+    /// Press, drag, and release with a paint after each event (the live loop).
+    fn drag_select(
+        terminal: &mut Terminal<TestBackend>,
+        state: &mut AppState,
+        from: (u16, u16),
+        to: (u16, u16),
+    ) -> Effect {
+        draw_state(terminal, state);
+        state.dispatch(Action::Click {
+            col: from.0,
+            row: from.1,
+        });
+        draw_state(terminal, state);
+        state.dispatch(Action::Drag {
+            col: to.0,
+            row: to.1,
+        });
+        draw_state(terminal, state);
+        state.dispatch(Action::Release)
+    }
+
+    /// Trimmed text of `rows` inside the `x0..x0 + width` column band.
+    fn band_text(terminal: &Terminal<TestBackend>, x0: u16, width: u16, rows: Vec<u16>) -> String {
+        let buf = terminal.backend().buffer();
+        rows.into_iter()
+            .map(|y| {
+                (x0..x0 + width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn reversed_cells(terminal: &Terminal<TestBackend>) -> HashSet<(u16, u16)> {
+        let buf = terminal.backend().buffer();
+        let area = buf.area;
+        (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[(x, y)].modifier.contains(Modifier::REVERSED))
+            .collect()
+    }
+
+    #[test]
+    fn drag_in_tree_copies_tree_text_only() {
+        let mut state = two_pane_diff_state();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let (x, y) = (state.layout.tree_x, state.layout.tree_y);
+        let width = state.layout.tree_width;
+        let effect = drag_select(&mut terminal, &mut state, (x, y), (110, y + 2));
+        let Effect::CopyClipboard { text, announce } = effect else {
+            panic!("expected CopyClipboard, got {effect:?}");
+        };
+        assert!(announce, "drag copy announces");
+        let expected = band_text(&terminal, x, width, vec![y, y + 1, y + 2]);
+        assert_eq!(text, expected, "{}", buffer_text(&terminal));
+        assert!(text.contains("README.md"), "{text}");
+        assert!(!text.contains('│'), "no border glyphs: {text}");
+        assert!(!text.contains("new line"), "no right-pane text: {text}");
+        assert!(!text.contains("UNSTAGED"), "no right-pane text: {text}");
+        assert!(state.text_selection.is_none(), "release ends the selection");
+    }
+
+    #[test]
+    fn drag_in_right_pane_clamps_at_its_left_edge() {
+        let mut state = two_pane_diff_state();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let x = state.layout.diff_content_x;
+        let y = state.layout.right_y;
+        let width = state.layout.diff_pane_width;
+        let last = x + width - 1;
+        let effect = drag_select(&mut terminal, &mut state, (last, y + 3), (0, y));
+        let Effect::CopyClipboard { text, announce } = effect else {
+            panic!("expected CopyClipboard, got {effect:?}");
+        };
+        assert!(announce);
+        let expected = band_text(&terminal, x, width, vec![y, y + 1, y + 2, y + 3]);
+        assert_eq!(text, expected, "{}", buffer_text(&terminal));
+        assert!(
+            text.starts_with("app/README.md"),
+            "clamped to the right pane's first column, not the tree: {text}"
+        );
+    }
+
+    #[test]
+    fn plain_click_and_release_does_not_copy() {
+        let mut state = two_pane_diff_state();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let baseline = reversed_cells(&terminal);
+        let (x, y) = (state.layout.tree_x + 2, state.layout.tree_y);
+        let effect = drag_select(&mut terminal, &mut state, (x, y), (x, y));
+        assert_eq!(effect, Effect::None);
+        assert!(state.text_selection.is_none());
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(reversed_cells(&terminal), baseline);
+    }
+
+    #[test]
+    fn selection_paints_reversed_on_selected_cells_only() {
+        let mut state = two_pane_diff_state();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let baseline = reversed_cells(&terminal);
+        let (x, y) = (state.layout.tree_x, state.layout.tree_y);
+        let right = x + state.layout.tree_width - 1;
+        state.dispatch(Action::Click { col: x + 3, row: y });
+        state.dispatch(Action::Drag {
+            col: x + 1,
+            row: y + 1,
+        });
+        draw_state(&mut terminal, &mut state);
+        let painted: HashSet<(u16, u16)> = reversed_cells(&terminal)
+            .difference(&baseline)
+            .copied()
+            .collect();
+        let expected: HashSet<(u16, u16)> = (x + 3..=right)
+            .map(|c| (c, y))
+            .chain((x..=x + 1).map(|c| (c, y + 1)))
+            .collect();
+        assert_eq!(painted, expected);
+    }
+
+    #[test]
+    fn mouse_off_drag_neither_selects_nor_copies() {
+        let mut state = two_pane_diff_state();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        state.dispatch(Action::ToggleMouse);
+        assert!(!state.mouse_enabled);
+        let (x, y) = (state.layout.tree_x, state.layout.tree_y);
+        let baseline = reversed_cells(&terminal);
+        let effect = drag_select(&mut terminal, &mut state, (x, y), (x + 5, y + 2));
+        assert_eq!(effect, Effect::None);
+        assert!(state.text_selection.is_none());
+        assert_eq!(reversed_cells(&terminal), baseline);
     }
 }

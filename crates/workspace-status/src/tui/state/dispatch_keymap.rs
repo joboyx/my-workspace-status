@@ -30,7 +30,7 @@ impl AppState {
             Action::Quit => Effect::Quit,
             Action::CtrlC => self.ctrl_c(Instant::now()),
             Action::ToggleHelp => {
-                self.drag = SplitDrag::None;
+                self.cancel_mouse_drag();
                 self.help_open = !self.help_open;
                 self.clear_help_search();
                 if self.help_open {
@@ -110,13 +110,14 @@ impl AppState {
                     Effect::None
                 } else {
                     self.drag = SplitDrag::None;
-                    Effect::None
+                    self.finish_text_selection()
                 }
             }
             Action::ToggleDiffMode => self.toggle_diff_mode(),
             Action::ToggleDiffWrap => self.toggle_diff_wrap(),
             Action::ToggleCommitMsgExpand => self.toggle_commit_msg_expand(),
             Action::ToggleMouse => {
+                self.cancel_mouse_drag();
                 self.mouse_enabled = !self.mouse_enabled;
                 self.status = if self.mouse_enabled {
                     "Mouse on".into()
@@ -126,7 +127,7 @@ impl AppState {
                 Effect::None
             }
             Action::SearchStart => {
-                self.drag = SplitDrag::None;
+                self.cancel_mouse_drag();
                 self.clear_diff_visual();
                 if self.help_open {
                     self.help_search_query = Some(String::new());
@@ -261,7 +262,7 @@ impl AppState {
             }
             Action::FetchTick => self.fetch_tick_effect(),
             Action::GraphFocusBranches => {
-                self.drag = SplitDrag::None;
+                self.cancel_mouse_drag();
                 self.begin_graph_focus_picker()
             }
             Action::GraphFocusClear => self.clear_graph_branch_focus(),
@@ -331,6 +332,7 @@ impl AppState {
                 Effect::None
             }
             Action::Resize { cols, rows: _ } => {
+                self.text_selection = None;
                 self.apply_terminal_size(cols);
                 Effect::None
             }
@@ -400,7 +402,7 @@ impl AppState {
         if self.command_palette.is_some() {
             self.command_palette = None;
         } else {
-            self.drag = SplitDrag::None;
+            self.cancel_mouse_drag();
             self.help_open = false;
             self.clear_help_search();
             self.command_palette = Some(CommandPaletteState::new(opened_by));
