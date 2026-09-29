@@ -1,5 +1,7 @@
-use crate::harness::{left_tree, PtySession};
-use crate::seed::{daily_workspace, seed_multiline_message_repo, COMMIT_MSG_BODY};
+use crate::harness::{left_tree, PtySession, SGR_WHEEL_DOWN};
+use crate::seed::{
+    daily_workspace, seed_multiline_message_repo, COMMIT_MSG_BODY, COMMIT_MSG_BODY_TAIL,
+};
 use crate::support::{
     crumb_row, graph_cursor_on, no_wrong_overlays, panes_files_focused,
     panes_tree_focused_graph_unfocused, panes_tree_unfocused_graph_focused, right_pane, status_row,
@@ -8,6 +10,8 @@ use crate::support::{
 };
 
 const REPO: &str = "longmsg";
+/// xterm SGR button for wheel up (`ScrollUp`, `Cb` 64).
+const SGR_WHEEL_UP: u8 = 64;
 
 fn help_lists_expand(screen: &str) -> bool {
     let compact = screen.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -33,17 +37,54 @@ fn long_msg_graph_focused(screen: &str) -> bool {
     panes_tree_unfocused_graph_focused(screen)
         && tree_inactive_selection_on(screen, REPO)
         && right_pane(screen).contains("nnnn")
-        && !right_pane(screen).contains(COMMIT_MSG_BODY)
         && crumb_row(screen).contains("workspace › [longmsg]")
         && status_row(screen).contains("drill")
         && no_wrong_overlays(screen)
 }
 
-fn long_msg_commit_selected(screen: &str) -> bool {
-    long_msg_graph_focused(screen)
+fn graph_msg_collapsed(screen: &str) -> bool {
+    long_msg_commit_selected_expanded(screen)
+        && !right_pane(screen).contains(COMMIT_MSG_BODY)
+        && crumb_row(screen).contains("msg off")
+}
+
+/// Expanded with no key press: body on the footer, no `msg on/off` toast.
+fn graph_msg_default_expanded(screen: &str) -> bool {
+    long_msg_commit_selected_expanded(screen)
+        && right_pane(screen).contains(COMMIT_MSG_BODY)
+        && !right_pane(screen).contains(COMMIT_MSG_BODY_TAIL)
+        && !crumb_row(screen).contains("msg on")
+        && !crumb_row(screen).contains("msg off")
+}
+
+/// Graph focused on the long-message commit (footer may show the body).
+fn long_msg_commit_selected_expanded(screen: &str) -> bool {
+    panes_tree_unfocused_graph_focused(screen)
+        && tree_inactive_selection_on(screen, REPO)
         && graph_cursor_on(screen, "nnnn")
-        && !graph_cursor_on(screen, "working tree")
-        && !graph_cursor_on(screen, "root")
+        && !left_tree(screen).contains(COMMIT_MSG_BODY)
+        && !title_has_files(screen)
+        && no_wrong_overlays(screen)
+}
+
+/// Wheel scrolled the footer to the end: tail in, first body line out, and
+/// the list cursor did not move.
+fn graph_msg_scrolled_to_tail(screen: &str) -> bool {
+    long_msg_commit_selected_expanded(screen)
+        && right_pane(screen).contains(COMMIT_MSG_BODY_TAIL)
+        && !right_pane(screen).contains(COMMIT_MSG_BODY)
+}
+
+/// Screen cell `(col, row)` of the first `needle` on the graph footer.
+fn footer_cell(screen: &str, needle: &str) -> (u16, u16) {
+    screen
+        .lines()
+        .enumerate()
+        .find_map(|(row, line)| {
+            let at = line.find(needle)?;
+            Some((line[..at].chars().count() as u16, row as u16))
+        })
+        .unwrap_or_else(|| panic!("{needle} on screen:\n{screen}"))
 }
 
 fn graph_msg_expanded(screen: &str) -> bool {
@@ -80,16 +121,19 @@ fn files_msg_collapsed(screen: &str) -> bool {
         && no_wrong_overlays(screen)
 }
 
-/// `M` expands the selected commit message on the graph footer and the
-/// commit-files header. Collapse restores the dense clip.
+/// The selected commit message is multiline by default on the graph footer
+/// and the commit-files header. The wheel scrolls a message taller than the
+/// footer. `M` collapses to the dense clip and expands again.
 ///
-/// Docs + help VIEW: `M` is expand commit message. Graph list rows stay
-/// one line. Default clip hides `UNIQUE_MSG_BODY_LINE`. Expand paints that
-/// body and toasts `msg on`. Enter keeps expand on the files header. A
-/// second `M` hides the body again.
+/// Docs + help VIEW: `M` is the commit-message toggle. Graph list rows stay
+/// one line. With no key, `j` onto the commit paints `UNIQUE_MSG_BODY_LINE`
+/// but not `UNIQUE_MSG_BODY_TAIL`. Wheel down over the footer brings the
+/// tail in without moving the list cursor; wheel up goes back. `M` hides the
+/// body (`msg off`), `M` again shows it (`msg on`). Enter keeps expand on
+/// the files header, where `M` toggles it the same way.
 ///
-/// Live PTY (80×28 so the subject clips). A no-op, a graph-row wrap, or a
-/// header-only toast cannot pass.
+/// Live PTY (80×28 so the subject clips). A collapsed default, a wheel that
+/// moves the list, a graph-row wrap, or a toast-only toggle cannot pass.
 #[test]
 fn pty_commit_msg_expand_toggle() {
     let (_root, workspace) = daily_workspace();
@@ -126,20 +170,37 @@ fn pty_commit_msg_expand_toggle() {
     );
     tui.key('j');
     tui.wait_pred(
-        long_msg_commit_selected,
-        "j selects the long-subject tip (not working tree)",
+        graph_msg_default_expanded,
+        "j onto the long-message tip shows the body with no key press",
         WAIT,
     );
-    assert!(
-        !graph_msg_expanded(&tui.screen()),
-        "clipped graph must not satisfy the expanded claim:\n{}",
-        tui.screen()
+
+    let (col, row) = footer_cell(&tui.screen(), COMMIT_MSG_BODY);
+    for _ in 0..30 {
+        tui.sgr_mouse(SGR_WHEEL_DOWN, col, row);
+    }
+    tui.wait_pred(
+        graph_msg_scrolled_to_tail,
+        "wheel over the footer scrolls the message to its tail",
+        WAIT,
     );
+    let (col, row) = footer_cell(&tui.screen(), COMMIT_MSG_BODY_TAIL);
+    for _ in 0..30 {
+        tui.sgr_mouse(SGR_WHEEL_UP, col, row);
+    }
+    tui.wait_pred(
+        graph_msg_default_expanded,
+        "wheel up scrolls the footer back to the first body line",
+        WAIT,
+    );
+
+    tui.key('M');
+    tui.wait_pred(graph_msg_collapsed, "M collapses the graph footer", WAIT);
 
     tui.key('M');
     tui.wait_pred(
         graph_msg_expanded,
-        "M wraps the body onto the graph selection footer",
+        "second M wraps the body onto the graph selection footer again",
         WAIT,
     );
     tui.wait_ms(SETTLE_MS);

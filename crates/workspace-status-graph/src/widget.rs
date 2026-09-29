@@ -7,7 +7,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget};
 
 use crate::chrome::{
-    graph_chrome_budget_for, selection_footer_parts, GraphFooterSelection, LOADING_OLDER,
+    footer_message_scroll_max, graph_chrome_budget_for, selection_footer_parts,
+    GraphFooterSelection, LOADING_OLDER,
 };
 use crate::format::{format_label, format_sync, slice_label_parts, LabelKind, LabelPart};
 use crate::glyphs::{ASCII, UNICODE};
@@ -75,6 +76,9 @@ pub struct GraphWidget<'a> {
     /// Wrap the selection-footer message (subject + body). List rows stay
     /// one line. Session flag from the TUI (`M`).
     commit_msg_expand: bool,
+    /// First painted message line when an expanded message is taller than
+    /// the footer. Clamped at paint.
+    commit_msg_scroll: usize,
 }
 
 impl<'a> GraphWidget<'a> {
@@ -104,6 +108,7 @@ impl<'a> GraphWidget<'a> {
             label_palette: None,
             col_offset: 0,
             commit_msg_expand: false,
+            commit_msg_scroll: 0,
         }
     }
 
@@ -247,6 +252,16 @@ impl<'a> GraphWidget<'a> {
     /// subject + meta).
     pub fn commit_msg_expand(mut self, expand: bool) -> Self {
         self.commit_msg_expand = expand;
+        self
+    }
+
+    /// Scroll an expanded footer message that does not fit the footer.
+    ///
+    /// `offset` is the first painted message line. The meta line stays
+    /// pinned and a scrollbar marks the position. Clamped to
+    /// [`footer_message_scroll_max`]. Default is `0`.
+    pub fn commit_msg_scroll(mut self, offset: usize) -> Self {
+        self.commit_msg_scroll = offset;
         self
     }
 }
@@ -508,10 +523,15 @@ impl Widget for GraphWidget<'_> {
             footer_y = footer_y.saturating_sub(h);
             let mut lines = footer_lines;
             let keep = h as usize;
+            let scroll_max = footer_message_scroll_max(lines.len(), h);
+            let mut message_bar = None;
             if lines.len() > keep {
                 let meta = lines.pop().unwrap_or_default();
-                lines.truncate(keep.saturating_sub(1));
+                let offset = self.commit_msg_scroll.min(scroll_max);
+                let rows = keep.saturating_sub(1);
+                lines = lines.into_iter().skip(offset).take(rows).collect();
                 lines.push(meta);
+                message_bar = Some((offset, rows));
             }
             for (i, line) in lines.iter().take(keep).enumerate() {
                 put_parts_line(
@@ -522,6 +542,25 @@ impl Widget for GraphWidget<'_> {
                     line,
                     self.label_palette,
                     fallback,
+                );
+            }
+            if let Some((offset, rows)) = message_bar.filter(|(_, rows)| *rows > 0) {
+                let mut sb_state = ScrollbarState::new(scroll_max + 1)
+                    .position(offset)
+                    .viewport_content_length(rows);
+                let sb_area = Rect {
+                    x: area.x.saturating_add(area.width.saturating_sub(1)),
+                    y: footer_y,
+                    width: 1,
+                    height: rows as u16,
+                };
+                StatefulWidget::render(
+                    Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                        .begin_symbol(None)
+                        .end_symbol(None),
+                    sb_area,
+                    buf,
+                    &mut sb_state,
                 );
             }
         }
@@ -891,6 +930,18 @@ mod tests {
         selected: Option<usize>,
         expand: bool,
     ) -> Vec<String> {
+        render_lines_scrolled(model, width, height, ascii, selected, expand, 0)
+    }
+
+    fn render_lines_scrolled(
+        model: &GraphModel,
+        width: u16,
+        height: u16,
+        ascii: bool,
+        selected: Option<usize>,
+        expand: bool,
+        msg_scroll: usize,
+    ) -> Vec<String> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("test backend");
         terminal
@@ -900,6 +951,7 @@ mod tests {
                     .now_unix(NOW)
                     .selected(selected)
                     .commit_msg_expand(expand)
+                    .commit_msg_scroll(msg_scroll)
                     .render(frame.area(), frame.buffer_mut());
             })
             .expect("draw");
@@ -917,6 +969,48 @@ mod tests {
             })
             .filter(|line| !line.is_empty())
             .collect()
+    }
+
+    #[test]
+    fn expanded_footer_scrolls_a_message_taller_than_the_footer() {
+        let body = (0..30)
+            .map(|i| format!("L{i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let commit = Commit {
+            id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            subject: "subject".into(),
+            body,
+            author_name: "Ada".into(),
+            author_date_unix: NOW - 120,
+            ..Commit::default()
+        };
+        let model = GraphModel {
+            commits: vec![commit],
+            uncommitted: None,
+            window: 1,
+            ..GraphModel::default()
+        };
+        let top = render_lines_scrolled(&model, 28, 20, true, Some(0), true, 0);
+        let footer = &top[top.len() - 9..];
+        assert!(footer[0].starts_with("subject"), "{top:#?}");
+        assert!(footer[7].starts_with("L05"), "{top:#?}");
+        assert!(footer[8].contains("aaa1111"), "meta pinned: {top:#?}");
+        assert!(!top.join("\n").contains("L06"), "{top:#?}");
+        assert!(
+            footer[0].ends_with('█'),
+            "scrollbar thumb at the top: {top:#?}"
+        );
+
+        let bottom = render_lines_scrolled(&model, 28, 20, true, Some(0), true, 999);
+        let footer = &bottom[bottom.len() - 9..];
+        assert!(footer[0].starts_with("L22"), "clamped to max: {bottom:#?}");
+        assert!(footer[7].starts_with("L29"), "{bottom:#?}");
+        assert!(footer[8].contains("aaa1111"), "meta pinned: {bottom:#?}");
+        assert!(
+            footer[7].ends_with('█'),
+            "scrollbar thumb at the bottom: {bottom:#?}"
+        );
     }
 
     #[test]

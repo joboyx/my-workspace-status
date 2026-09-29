@@ -58,7 +58,7 @@ To rebuild those frames, run `./scripts/capture-demo-stills.sh` (see [demo.md](.
 | drag | Resize the tree / right pane split, or the in-diff side-by-side RULE. Drag a graph scrollbar thumb or a file-diff horizontal thumb to scroll / pan; click the track to jump. Drag inside a pane body to select its text; release copies it |
 | `i` | Toggle inline / split on a file diff. Split falls back to inline below 100 columns |
 | `\` | Toggle soft word-wrap on a file diff. Session-only (no pref file). Continuation rows use a blank gutter and sign. Horizontal pan is a no-op while wrap is on |
-| `M` | Toggle expand of the selected commit / stash message. Session-only. Graph list rows stay one line. The graph selection footer and the commit-files header wrap subject plus body. Status is `msg on` / `msg off`. Graph `m` stays merge / mouse |
+| `M` | Collapse / expand the selected commit / stash message. Expanded is the default; the toggle is session-only. Graph list rows stay one line. Expanded, the graph selection footer and the commit-files header wrap subject plus body. A message taller than the graph footer scrolls with the mouse wheel over the footer (the list cursor stays put). Status is `msg on` / `msg off`. Graph `m` stays merge / mouse |
 | `T` | Cycle the built-in colour theme. Wraps. Seed from `WS_STATUS_THEME`; the cycle stays in this session (there is no theme file). Graph gutter lanes use that theme's lane colours |
 
 `-a` starts with ignored repos shown. `-f` starts a fetch after the first paint. First TUI paint does not wait on a git network fetch. A GitHub Release check may run **before** the TUI mounts (at most every 6 hours; `--plain` / `--json` / `--update` skip it).

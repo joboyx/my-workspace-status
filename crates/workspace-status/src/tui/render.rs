@@ -9,8 +9,8 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 use workspace_status_graph::{
-    graph_col_max, graph_hscroll_visible, graph_vscroll_visible, paint_model, GraphLabelPalette,
-    GraphWidget, ASCII, UNICODE,
+    footer_message_scroll_max, graph_col_max, graph_hscroll_visible, graph_vscroll_visible,
+    paint_model, GraphLabelPalette, GraphWidget, ASCII, UNICODE,
 };
 
 use std::cell::RefCell;
@@ -161,6 +161,8 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.graph_hscrollbar_x = 0;
     state.layout.graph_hscrollbar_width = 0;
     state.layout.graph_col_max = 0;
+    state.layout.graph_footer_y = None;
+    state.layout.graph_footer_scroll_max = 0;
     state.layout.diff_scrollbar_x = None;
     state.layout.diff_scrollbar_y = 0;
     state.layout.diff_scrollbar_height = 0;
@@ -620,6 +622,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .cursor_style(pal.cursor, pal.cursor_bg)
         .cursor_inactive_style(pal.muted, pal.cursor_bg_inactive)
         .commit_msg_expand(state.commit_msg_expand)
+        .commit_msg_scroll(state.graph_footer_msg_scroll())
         .lane_colors(&lane_colors)
         .label_palette(GraphLabelPalette {
             subject: pal.repo,
@@ -701,6 +704,21 @@ fn record_graph_scrollbar(state: &mut AppState, area: Rect, col_offset: u16) {
     let hscroll = graph_hscroll_visible(col_offset);
     let list_top = area.y.saturating_add(u16::from(chrome.header));
     let list_height = chrome.list_height;
+    let footer_scroll_max = footer_message_scroll_max(
+        state.graph_footer_line_count(area.width as usize),
+        chrome.footer_height,
+    );
+    if chrome.footer && footer_scroll_max > 0 {
+        let bottom = area
+            .y
+            .saturating_add(area.height)
+            .saturating_sub(u16::from(chrome.older));
+        state.layout.graph_footer_y = Some(bottom.saturating_sub(chrome.footer_height));
+        state.layout.graph_footer_x = area.x;
+        state.layout.graph_footer_width = area.width;
+        state.layout.graph_footer_height = chrome.footer_height;
+        state.layout.graph_footer_scroll_max = footer_scroll_max;
+    }
     if vscroll && list_height > 0 {
         state.layout.graph_scrollbar_x = Some(area.x.saturating_add(area.width.saturating_sub(1)));
         state.layout.graph_scrollbar_y = list_top;
@@ -3515,6 +3533,82 @@ mod tests {
             ..GraphModel::default()
         });
         state
+    }
+
+    #[test]
+    fn graph_footer_shows_long_message_by_default_and_wheel_scrolls_it() {
+        let mut state = two_pane_graph_state();
+        let body = (0..30)
+            .map(|i| format!("BODYLINE{i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(model) = state.graph.as_mut() {
+            model.commits[0].body = body;
+        }
+        state.graph_cursor = 1;
+        assert!(state.commit_msg_expand, "multiline is the default");
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("BODYLINE00"),
+            "body shows with no key:\n{text}"
+        );
+        assert!(
+            !text.contains("BODYLINE29"),
+            "tail is below the fold:\n{text}"
+        );
+        let footer_y = state
+            .layout
+            .graph_footer_y
+            .expect("overflowing footer records its hit box");
+        let col = state.layout.graph_footer_x + 4;
+        let max = state.layout.graph_footer_scroll_max;
+        assert!(max > 0);
+
+        for _ in 0..max + 5 {
+            state.dispatch(Action::ScrollWheel {
+                col,
+                row: footer_y,
+                delta: 1,
+                horizontal: false,
+            });
+        }
+        assert_eq!(state.graph_cursor, 1, "footer wheel must not move the list");
+        assert_eq!(state.graph_footer_msg_scroll(), max, "clamped at the end");
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("BODYLINE29"),
+            "wheel reveals the tail:\n{text}"
+        );
+        assert!(!text.contains("BODYLINE00"), "{text}");
+        assert!(text.contains("aaa1111"), "meta line stays pinned:\n{text}");
+
+        state.dispatch(Action::ScrollWheel {
+            col,
+            row: footer_y,
+            delta: -1,
+            horizontal: false,
+        });
+        assert_eq!(
+            state.graph_footer_msg_scroll(),
+            max - 1,
+            "wheel up scrolls back"
+        );
+
+        state.graph_cursor = 0;
+        assert_eq!(
+            state.graph_footer_msg_scroll(),
+            0,
+            "another row starts at the top"
+        );
+        state.graph_cursor = 1;
+        assert_eq!(
+            state.graph_footer_msg_scroll(),
+            max - 1,
+            "same row keeps its scroll"
+        );
     }
 
     fn two_pane_files_state() -> AppState {

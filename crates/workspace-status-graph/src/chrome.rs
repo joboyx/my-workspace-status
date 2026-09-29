@@ -64,6 +64,24 @@ pub struct GraphChromeBudget {
     pub older: bool,
 }
 
+/// Tallest selection footer: the expanded message rows plus the meta row.
+const FOOTER_MAX_LINES: u16 = COMMIT_MSG_EXPAND_MAX_LINES as u16 + 1;
+
+/// Max message scroll for a selection footer of `line_count` lines painted
+/// in `footer_height` rows.
+///
+/// The last line (meta) stays pinned under the message viewport. `0` when
+/// every line fits.
+pub fn footer_message_scroll_max(line_count: usize, footer_height: u16) -> usize {
+    let rows = footer_height as usize;
+    if line_count <= rows {
+        return 0;
+    }
+    line_count
+        .saturating_sub(1)
+        .saturating_sub(rows.saturating_sub(1))
+}
+
 /// Footer first, then header. Collapsed footer is 2 lines.
 pub fn graph_chrome_budget(
     height: u16,
@@ -75,8 +93,11 @@ pub fn graph_chrome_budget(
 
 /// Like [`graph_chrome_budget`] with a requested footer height.
 ///
-/// `footer_lines` is the expanded (or collapsed) footer. The list keeps at
-/// least one row. A pane shorter than 3 rows still drops the footer.
+/// `footer_lines` is the painted footer line count (expanded or collapsed).
+/// The footer gets at most [`COMMIT_MSG_EXPAND_MAX_LINES`] message rows plus
+/// the meta row, and at most half the pane (never under 2). The rest of an
+/// expanded message scrolls ([`footer_message_scroll_max`]). The list keeps
+/// at least one row. A pane shorter than 3 rows still drops the footer.
 pub fn graph_chrome_budget_for(
     height: u16,
     loading_older: bool,
@@ -87,7 +108,8 @@ pub fn graph_chrome_budget_for(
     let mut avail = height.saturating_sub(u16::from(older)).max(1);
     let footer = avail >= 3;
     let footer_height = if footer {
-        let h = footer_lines.max(2).min(avail.saturating_sub(1));
+        let cap = (avail / 2).clamp(2, FOOTER_MAX_LINES);
+        let h = footer_lines.clamp(2, cap).min(avail.saturating_sub(1));
         avail = avail.saturating_sub(h);
         h
     } else {
@@ -218,8 +240,10 @@ pub fn selection_detail_parts(
 }
 
 /// Selection-footer runs. Collapsed is the two truncated lines from
-/// [`selection_detail_parts`]. Expanded wraps subject plus body, then
-/// the same meta line. Graph list rows stay one line either way.
+/// [`selection_detail_parts`]. Expanded wraps the whole subject plus body
+/// one column short of `width` (that column holds the footer scrollbar),
+/// then the same meta line. Nothing is dropped: the widget scrolls a
+/// message taller than the footer. Graph list rows stay one line either way.
 pub fn selection_footer_parts(
     model: &GraphModel,
     selection: GraphFooterSelection<'_>,
@@ -242,7 +266,7 @@ pub fn selection_footer_parts(
         _ => return vec![subject, meta],
     };
     let text = format_commit_message(message_subject, body);
-    let wrapped = wrap_commit_message(&text, width.max(1), COMMIT_MSG_EXPAND_MAX_LINES);
+    let wrapped = wrap_commit_message(&text, width.saturating_sub(1).max(1), usize::MAX);
     let mut lines: Vec<Vec<LabelPart>> = wrapped
         .into_iter()
         .map(|text| {
@@ -352,6 +376,69 @@ mod tests {
         assert!(chrome.header);
         assert!(chrome.footer);
         assert_eq!(chrome.list_height, 13);
+    }
+
+    #[test]
+    fn budget_caps_expanded_footer_at_max_lines_and_half_the_pane() {
+        let tall = graph_chrome_budget_for(40, false, false, 50);
+        assert_eq!(tall.footer_height, FOOTER_MAX_LINES);
+        assert_eq!(tall.list_height, 40 - FOOTER_MAX_LINES);
+        let short = graph_chrome_budget_for(10, false, false, 50);
+        assert_eq!(short.footer_height, 5, "half the pane");
+        assert_eq!(short.list_height, 5);
+        let tiny = graph_chrome_budget_for(3, false, false, 50);
+        assert_eq!(tiny.footer_height, 2);
+        assert_eq!(tiny.list_height, 1);
+        let fits = graph_chrome_budget_for(40, false, false, 4);
+        assert_eq!(fits.footer_height, 4, "a short message is not padded");
+    }
+
+    #[test]
+    fn footer_message_scroll_max_keeps_meta_pinned() {
+        assert_eq!(footer_message_scroll_max(2, 2), 0);
+        assert_eq!(footer_message_scroll_max(9, 9), 0);
+        // 11 message lines + meta in 5 rows: 4 message rows, 7 hidden.
+        assert_eq!(footer_message_scroll_max(12, 5), 7);
+        assert_eq!(footer_message_scroll_max(3, 2), 1);
+    }
+
+    #[test]
+    fn expanded_footer_keeps_every_message_line() {
+        let body = (0..20)
+            .map(|i| format!("body line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let commit = Commit {
+            id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            subject: "subject".into(),
+            body,
+            ..Commit::default()
+        };
+        let model = GraphModel {
+            commits: vec![commit.clone()],
+            ..GraphModel::default()
+        };
+        let row = GraphRow::Commit {
+            commit,
+            is_head: false,
+            worktrees: Vec::new(),
+        };
+        let lines = selection_footer_lines(
+            &model,
+            GraphFooterSelection::Row(&row),
+            &UNICODE,
+            40,
+            0,
+            true,
+        );
+        // subject, blank, 20 body lines, meta
+        assert_eq!(lines.len(), 23, "{lines:?}");
+        assert_eq!(lines[21], "body line 19");
+        assert!(lines.iter().all(|l| !l.ends_with('…')), "{lines:?}");
+        assert!(
+            lines[..22].iter().all(|l| l.chars().count() <= 39),
+            "message wraps one column short for the scrollbar: {lines:?}"
+        );
     }
 
     #[test]
