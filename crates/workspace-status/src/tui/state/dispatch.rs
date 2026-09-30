@@ -6,9 +6,58 @@
 
 use super::super::action::{Action, Effect};
 use super::super::gates::dispatch_is_noop;
+use super::super::tabs::{CANNOT_STAGE_COMPARE, CANNOT_UNSTAGE_COMPARE, SWITCH_TO_WORKSPACE_TAB};
 use super::{AppState, FocusPane};
 
 impl AppState {
+    /// Why the active compare tab refuses `action`, or `None` when it may run.
+    ///
+    /// The one compare gate. [`Self::dispatch`] puts the reason on the status
+    /// line and the command palette paints it on the row, so a key press and
+    /// a palette row always give the same copy. The Workspace tab refuses
+    /// nothing here.
+    pub(crate) fn compare_refusal(&self, action: &Action) -> Option<String> {
+        if !self.is_compare_tab() {
+            return None;
+        }
+        let reason = match action {
+            // A compare diff is commits only: there is no index side to write.
+            Action::Stage => CANNOT_STAGE_COMPARE,
+            Action::Unstage => CANNOT_UNSTAGE_COMPARE,
+            // Remote, branch, stash, graph, and worktree writes stay on Workspace.
+            Action::Fetch
+            | Action::Pull
+            | Action::Push
+            | Action::DefaultBranch
+            | Action::Branch
+            | Action::BranchSubmit
+            | Action::CreateBranchStart
+            | Action::CreateBranchSubmit
+            | Action::RemoveWorktree
+            | Action::GraphCheckout
+            | Action::GraphCreateBranch
+            | Action::GraphMerge
+            | Action::GraphStashApply
+            | Action::GraphStashPop
+            | Action::GraphStashDrop
+            | Action::GraphFocusBranches
+            | Action::GraphFocusClear
+            | Action::GraphFocusSubmit
+            | Action::StashMenu
+            | Action::StashMenuEnter => SWITCH_TO_WORKSPACE_TAB,
+            // Revert and comments have no compare target yet.
+            Action::Revert
+            | Action::ConfirmYes
+            | Action::ConfirmYesClean
+            | Action::CommentStart
+            | Action::CommentSubmit
+            | Action::CommentToggleResolved
+            | Action::ExportComments => SWITCH_TO_WORKSPACE_TAB,
+            _ => return None,
+        };
+        Some(reason.into())
+    }
+
     /// Apply `action` and return the [`Effect`] the event loop should run.
     pub fn dispatch(&mut self, action: Action) -> Effect {
         if !matches!(action, Action::FoldToggle | Action::PointerMove { .. }) {
@@ -25,8 +74,8 @@ impl AppState {
         ) {
             self.g_pending_at = None;
         }
-        if self.is_compare_tab() && super::super::gates::is_compare_mutation(&action) {
-            self.status = super::super::tabs::SWITCH_TO_WORKSPACE_TAB.into();
+        if let Some(reason) = self.compare_refusal(&action) {
+            self.status = reason;
             return Effect::None;
         }
         let visual_write = self.diff_visual_anchor.is_some()

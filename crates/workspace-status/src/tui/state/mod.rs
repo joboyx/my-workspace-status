@@ -4498,10 +4498,20 @@ impl AppState {
             return Effect::None;
         }
         self.abandon_compare_picker();
+        self.clear_tab_transients();
         self.park_active_session();
         self.tabs.active = index;
         self.apply_active_session();
         Effect::None
+    }
+
+    /// Drop the visual-line highlight and any pending confirm.
+    ///
+    /// Both belong to the tab that opened them. A tab switch or close must
+    /// not carry a range or a `y` confirm over to another tab's diff.
+    fn clear_tab_transients(&mut self) {
+        self.clear_diff_visual();
+        self.confirm = None;
     }
 
     fn activate_relative_tab(&mut self, delta: i32) -> Effect {
@@ -4562,8 +4572,13 @@ impl AppState {
     }
 
     fn open_compare_tab(&mut self, checkout: String, base_ref: String) -> Effect {
+        let before = self.tabs.active;
         self.park_active_session();
-        match self.tabs.open_or_focus(checkout.clone(), base_ref.clone()) {
+        let opened = self.tabs.open_or_focus(checkout.clone(), base_ref.clone());
+        if self.tabs.active != before {
+            self.clear_tab_transients();
+        }
+        match opened {
             OpenCompare::Focused => {
                 self.apply_active_session();
                 Effect::None
@@ -4634,6 +4649,7 @@ impl AppState {
         if !self.tabs.close_at(index) {
             return Effect::None;
         }
+        self.clear_tab_transients();
         if closing_active {
             self.apply_active_session();
         }
@@ -6832,30 +6848,258 @@ mod tests {
     }
 
     #[test]
-    fn palette_compare_mutations_use_switch_copy() {
+    fn palette_compare_refusals_match_key_press() {
+        use super::super::tabs::{
+            CANNOT_STAGE_COMPARE, CANNOT_UNSTAGE_COMPARE, SWITCH_TO_WORKSPACE_TAB,
+        };
         let mut app = state();
         focus_file(&mut app, "README.md");
         app.tabs.open_or_focus("app".into(), "main".into());
-        for title in [
-            "Stage",
-            "Revert",
-            "Fetch remotes",
-            "Branch picker",
-            "Graph focus branches",
-            "Clear graph focus",
+        for (title, reason) in [
+            ("Stage", CANNOT_STAGE_COMPARE),
+            ("Unstage", CANNOT_UNSTAGE_COMPARE),
+            ("Revert", SWITCH_TO_WORKSPACE_TAB),
+            ("Fetch remotes", SWITCH_TO_WORKSPACE_TAB),
+            ("Stash menu", SWITCH_TO_WORKSPACE_TAB),
+            ("Branch picker", SWITCH_TO_WORKSPACE_TAB),
+            ("Graph focus branches", SWITCH_TO_WORKSPACE_TAB),
+            ("Clear graph focus", SWITCH_TO_WORKSPACE_TAB),
         ] {
             assert_eq!(
                 palette_reason(&app, title).as_deref(),
-                Some(super::super::tabs::SWITCH_TO_WORKSPACE_TAB),
+                Some(reason),
                 "{title}"
             );
         }
-        assert_eq!(app.dispatch(Action::Stage), Effect::None);
-        assert_eq!(app.status, super::super::tabs::SWITCH_TO_WORKSPACE_TAB);
+        for (action, reason) in [
+            (Action::Stage, CANNOT_STAGE_COMPARE),
+            (Action::Unstage, CANNOT_UNSTAGE_COMPARE),
+            (Action::Fetch, SWITCH_TO_WORKSPACE_TAB),
+            (Action::StashMenu, SWITCH_TO_WORKSPACE_TAB),
+        ] {
+            app.status.clear();
+            assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
+            assert_eq!(app.status, reason, "{action:?}");
+        }
         assert_eq!(
             palette_reason(&app, "Copy entity reference").as_deref(),
             Some("no copy target")
         );
+    }
+
+    #[test]
+    fn compare_refusal_blocks_git_writes_and_allows_highlight() {
+        use super::super::tabs::{
+            CANNOT_STAGE_COMPARE, CANNOT_UNSTAGE_COMPARE, SWITCH_TO_WORKSPACE_TAB,
+        };
+        let switch = [
+            Action::Fetch,
+            Action::Pull,
+            Action::Push,
+            Action::DefaultBranch,
+            Action::Branch,
+            Action::BranchSubmit,
+            Action::CreateBranchStart,
+            Action::CreateBranchSubmit,
+            Action::RemoveWorktree,
+            Action::GraphCheckout,
+            Action::GraphCreateBranch,
+            Action::GraphMerge,
+            Action::GraphStashApply,
+            Action::GraphStashPop,
+            Action::GraphStashDrop,
+            Action::GraphFocusBranches,
+            Action::GraphFocusClear,
+            Action::GraphFocusSubmit,
+            Action::StashMenu,
+            Action::StashMenuEnter,
+            // Not yet open on a compare tab.
+            Action::Revert,
+            Action::ConfirmYes,
+            Action::ConfirmYesClean,
+            Action::CommentStart,
+            Action::CommentSubmit,
+            Action::CommentToggleResolved,
+            Action::ExportComments,
+        ];
+        let allowed = [
+            Action::DiffVisualStart,
+            Action::DiffVisualCancel,
+            Action::CopyEntityReference,
+            Action::ToggleReviewed,
+            Action::ToggleFullContext,
+            Action::Edit,
+            Action::ExternalDiff,
+            Action::Move(1),
+            Action::ConfirmNo,
+            Action::CloseCompareTab,
+        ];
+
+        let mut app = state();
+        for action in switch.iter().chain(&allowed) {
+            assert_eq!(app.compare_refusal(action), None, "workspace: {action:?}");
+        }
+        assert_eq!(app.compare_refusal(&Action::Stage), None);
+
+        app.tabs.open_or_focus("app".into(), "main".into());
+        for action in &switch {
+            assert_eq!(
+                app.compare_refusal(action).as_deref(),
+                Some(SWITCH_TO_WORKSPACE_TAB),
+                "{action:?}"
+            );
+        }
+        assert_eq!(
+            app.compare_refusal(&Action::Stage).as_deref(),
+            Some(CANNOT_STAGE_COMPARE)
+        );
+        assert_eq!(
+            app.compare_refusal(&Action::Unstage).as_deref(),
+            Some(CANNOT_UNSTAGE_COMPARE)
+        );
+        for action in &allowed {
+            assert_eq!(app.compare_refusal(action), None, "compare: {action:?}");
+        }
+    }
+
+    /// Compare tab on `README.md` with two added lines (new 2 and 3), diff focused.
+    fn compare_tab_with_added_lines(app: &mut AppState) {
+        app.tabs.open_or_focus("app".into(), "main".into());
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        let _ = app.apply_compare_range(tab_id, gen, Ok(compare_range_load(&["README.md"])));
+        let lines = ["@@ -1,2 +1,4 @@", " # app", "+new", "+more", " keep"];
+        app.apply_compare_diff(
+            tab_id,
+            gen,
+            &compare_source(),
+            "README.md",
+            Ok(DiffContent::from_compare_lines(
+                lines.iter().map(|line| line.to_string()).collect(),
+            )),
+        );
+        app.focus = FocusPane::Right;
+        let (row, _) = numbered_diff_rows(app)
+            .into_iter()
+            .find(|(_, line)| *line == 2)
+            .expect("new line 2");
+        app.diff_cursor = row;
+    }
+
+    #[test]
+    fn compare_v_highlights_extends_and_cancels() {
+        let mut app = state();
+        compare_tab_with_added_lines(&mut app);
+        let anchor = app.diff_cursor;
+        assert_eq!(palette_reason(&app, "Highlight diff lines"), None);
+        assert_eq!(app.dispatch(Action::DiffVisualStart), Effect::None);
+        assert_eq!(app.diff_visual_anchor, Some(anchor));
+        assert!(app.status.is_empty(), "{}", app.status);
+        app.dispatch(Action::Move(1));
+        assert!(app.diff_visual_contains(anchor));
+        assert!(app.diff_visual_contains(anchor + 1));
+        app.dispatch(Action::DiffVisualCancel);
+        assert_eq!(app.diff_visual_anchor, None);
+        assert!(!app.diff_visual_contains(anchor));
+    }
+
+    #[test]
+    fn compare_highlight_apostrophe_copies_range() {
+        let mut app = state();
+        compare_tab_with_added_lines(&mut app);
+        app.dispatch(Action::DiffVisualStart);
+        app.dispatch(Action::Move(1));
+        let effect = app.dispatch(Action::CopyEntityReference);
+        let text = assert_copy_clipboard(effect, "diff", "path: README.md", true);
+        assert!(text.contains("lines: 2-3"), "{text}");
+        assert!(text.contains("source: compare main...ccc"), "{text}");
+    }
+
+    #[test]
+    fn compare_highlight_palette_uses_compare_reasons() {
+        use super::super::tabs::{
+            CANNOT_STAGE_COMPARE, CANNOT_UNSTAGE_COMPARE, SWITCH_TO_WORKSPACE_TAB,
+        };
+        let mut app = state();
+        compare_tab_with_added_lines(&mut app);
+        app.dispatch(Action::DiffVisualStart);
+        app.dispatch(Action::Move(1));
+        assert_eq!(
+            palette_reason(&app, "Stage highlighted lines").as_deref(),
+            Some(CANNOT_STAGE_COMPARE)
+        );
+        assert_eq!(
+            palette_reason(&app, "Unstage highlighted lines").as_deref(),
+            Some(CANNOT_UNSTAGE_COMPARE)
+        );
+        assert_eq!(
+            palette_reason(&app, "Revert highlighted lines").as_deref(),
+            Some(SWITCH_TO_WORKSPACE_TAB)
+        );
+        assert_eq!(palette_reason(&app, "Exit highlight"), None);
+        assert_eq!(palette_reason(&app, "Copy entity reference"), None);
+
+        let anchor = app.diff_visual_anchor;
+        for (action, reason) in [
+            (Action::Stage, CANNOT_STAGE_COMPARE),
+            (Action::Unstage, CANNOT_UNSTAGE_COMPARE),
+        ] {
+            assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
+            assert_eq!(app.status, reason, "{action:?}");
+            assert_eq!(app.diff_visual_anchor, anchor, "{action:?} keeps the range");
+        }
+    }
+
+    #[test]
+    fn tab_switch_and_close_drop_highlight_and_confirm() {
+        let stash_drop = || PendingConfirm::StashDrop {
+            repo: "app".into(),
+            stash_ref: "stash@{0}".into(),
+        };
+        let mut app = state();
+        compare_tab_with_added_lines(&mut app);
+        app.dispatch(Action::DiffVisualStart);
+        app.confirm = Some(stash_drop());
+        app.dispatch(Action::JumpToTab(1));
+        assert!(!app.is_compare_tab());
+        assert_eq!(app.diff_visual_anchor, None);
+        assert_eq!(app.diff_visual_rows, None);
+        assert_eq!(app.confirm, None);
+
+        app.confirm = Some(stash_drop());
+        app.dispatch(Action::JumpToTab(2));
+        assert!(app.is_compare_tab());
+        assert_eq!(app.confirm, None, "a Workspace confirm must not follow");
+
+        app.focus = FocusPane::Right;
+        app.dispatch(Action::DiffVisualStart);
+        assert!(app.diff_visual_anchor.is_some());
+        app.confirm = Some(stash_drop());
+        app.dispatch(Action::CloseCompareTab);
+        assert!(!app.is_compare_tab());
+        assert_eq!(app.diff_visual_anchor, None);
+        assert_eq!(app.confirm, None);
+
+        // Mouse: a tab click and a `[✗]` click take the same path.
+        compare_tab_with_added_lines(&mut app);
+        app.layout.tab_y = 0;
+        app.layout.tab_hits = vec![(0, 12, 0), (13, 20, 1)];
+        app.layout.tab_close_hits = vec![(28, 3, 1)];
+        app.dispatch(Action::DiffVisualStart);
+        app.confirm = Some(stash_drop());
+        app.dispatch(Action::Click { col: 2, row: 0 });
+        assert!(!app.is_compare_tab());
+        assert_eq!(app.diff_visual_anchor, None);
+        assert_eq!(app.confirm, None);
+        app.dispatch(Action::Click { col: 14, row: 0 });
+        assert!(app.is_compare_tab());
+        app.focus = FocusPane::Right;
+        app.dispatch(Action::DiffVisualStart);
+        app.confirm = Some(stash_drop());
+        app.dispatch(Action::Click { col: 29, row: 0 });
+        assert!(!app.is_compare_tab());
+        assert_eq!(app.diff_visual_anchor, None);
+        assert_eq!(app.confirm, None);
     }
 
     #[test]

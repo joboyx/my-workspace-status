@@ -18,6 +18,10 @@ pub const DEFAULT_BRANCH_NOT_FOUND: &str = "Default branch not found";
 pub const WORKSPACE_TAB_CANNOT_CLOSE: &str = "Workspace tab cannot be closed";
 /// Mutation disable copy on a compare tab.
 pub const SWITCH_TO_WORKSPACE_TAB: &str = "Switch to Workspace tab";
+/// Stage disable copy on a compare tab (whole file or highlighted lines).
+pub const CANNOT_STAGE_COMPARE: &str = "cannot stage a compare diff";
+/// Unstage disable copy on a compare tab (whole file or highlighted lines).
+pub const CANNOT_UNSTAGE_COMPARE: &str = "cannot unstage a compare diff";
 /// Empty compare file list.
 pub const NO_COMMITTED_CHANGES: &str = "No committed changes";
 /// Empty compare picker.

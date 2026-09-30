@@ -19,7 +19,7 @@ build_diff_rows({staged, unstaged, mode, is_new}) ──► DiffRow[]
         ▼
 render.rs paints section headers, line-number gutter, and cells
 
-A compare tab uses `DiffContent::from_compare_lines`. The single section label is `COMMITTED`, not staged or unstaged. Header text is `<base-ref>...HEAD`.
+A compare tab uses `DiffContent::from_compare_lines`. The single section label is `COMMITTED`, not staged or unstaged. Header text is `<base-ref>...HEAD`. `V` visual highlight paints on the compare diff the same way as on a Workspace file diff.
 ```
 
 `parse_unified_diff` skips file-level headers (`diff --git`, `index`, `---`, `+++`) until the first `@@`, tracks 1-based `old_no` / `new_no` per line, turns `\ No newline at end of file` into a `meta` line, and turns a `Binary files … differ` line into a single meta hunk with no header. Empty input returns no hunks, which is how "no diff" is detected upstream.

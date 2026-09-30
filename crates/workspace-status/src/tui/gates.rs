@@ -24,43 +24,6 @@ pub fn is_tree_write_blocked(action: &Action, depth: u8) -> bool {
     depth >= 1 && is_tree_write_action(action)
 }
 
-/// Git writes and graph/comment mutations that compare tabs refuse.
-pub fn is_compare_mutation(action: &Action) -> bool {
-    matches!(
-        action,
-        Action::Stage
-            | Action::Unstage
-            | Action::Revert
-            | Action::Fetch
-            | Action::Pull
-            | Action::Push
-            | Action::DefaultBranch
-            | Action::Branch
-            | Action::BranchSubmit
-            | Action::RemoveWorktree
-            | Action::GraphCheckout
-            | Action::GraphCreateBranch
-            | Action::GraphMerge
-            | Action::GraphStashApply
-            | Action::GraphStashPop
-            | Action::GraphStashDrop
-            | Action::GraphFocusBranches
-            | Action::GraphFocusClear
-            | Action::GraphFocusSubmit
-            | Action::StashMenu
-            | Action::StashMenuEnter
-            | Action::CreateBranchStart
-            | Action::CreateBranchSubmit
-            | Action::CommentStart
-            | Action::CommentSubmit
-            | Action::CommentToggleResolved
-            | Action::ExportComments
-            | Action::DiffVisualStart
-            | Action::ConfirmYes
-            | Action::ConfirmYesClean
-    )
-}
-
 fn is_tree_write_action(action: &Action) -> bool {
     matches!(
         action,
@@ -386,17 +349,5 @@ mod tests {
             true,
             ListFocusTarget::Graph
         ));
-    }
-
-    #[test]
-    fn copy_entity_reference_is_not_a_compare_mutation() {
-        assert!(!is_compare_mutation(&Action::CopyEntityReference));
-        assert!(is_compare_mutation(&Action::Stage));
-        assert!(is_compare_mutation(&Action::CommentStart));
-    }
-
-    #[test]
-    fn toggle_reviewed_is_not_a_compare_mutation() {
-        assert!(!is_compare_mutation(&Action::ToggleReviewed));
     }
 }
