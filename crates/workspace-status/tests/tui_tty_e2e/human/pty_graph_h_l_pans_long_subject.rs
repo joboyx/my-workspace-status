@@ -135,7 +135,7 @@ fn csi_u_letter(tui: &mut PtySession, letter: char) {
 /// byte is a different path. The file-diff PTY test does not cover this.
 /// A no-op, a tree fold, a file-diff, or a chrome-only suffix cannot pass.
 ///
-/// MYWS-005.
+/// Real-input PTY layer; runs under `cargo test --workspace`.
 #[test]
 fn pty_graph_h_l_pans_long_subject() {
     let (_root, workspace) = daily_workspace();
