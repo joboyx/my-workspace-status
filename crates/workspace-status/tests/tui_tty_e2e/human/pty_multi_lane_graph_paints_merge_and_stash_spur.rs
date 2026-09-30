@@ -88,7 +88,7 @@ fn merger_multi_lane_painted(screen: &str) -> bool {
 /// `stash@{0}`. Files drill, README file-diff, or a stash overlay cannot
 /// pass. Does not apply or pop.
 ///
-/// MYWS-005.
+/// Real-input PTY layer; runs under `cargo test --workspace`.
 #[test]
 fn pty_multi_lane_graph_paints_merge_and_stash_spur() {
     let (_root, workspace) = daily_workspace();

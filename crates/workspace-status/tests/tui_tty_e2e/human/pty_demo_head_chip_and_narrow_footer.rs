@@ -191,7 +191,7 @@ fn land_demo_merger_graph() -> PtySession {
 /// split `[+]` / `[=]` marks cannot pass. Launch file-diff must not
 /// already satisfy the claim.
 ///
-/// MYWS-005.
+/// Real-input PTY layer; runs under `cargo test --workspace`.
 #[test]
 fn pty_demo_merged_head_chip_matches_footer_on_painted_row() {
     let tui = land_demo_merger_graph();
@@ -216,7 +216,7 @@ fn pty_demo_merged_head_chip_matches_footer_on_painted_row() {
 /// refs to `[+N]`. `l` pans the graph and leaves the full ref in the
 /// footer.
 ///
-/// MYWS-005.
+/// Real-input PTY layer; runs under `cargo test --workspace`.
 #[test]
 fn pty_demo_narrow_graph_truncates_chip_name_footer_keeps_full_ref() {
     let mut tui = land_demo_merger_graph();
