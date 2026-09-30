@@ -3130,6 +3130,20 @@ impl AppState {
         }
     }
 
+    /// Why highlighted `x` would refuse, or `None` when it would open the
+    /// range confirm.
+    ///
+    /// The same checks, in the same order, as the palette row "Revert
+    /// highlighted lines": the compare gate, then the range patch. The
+    /// VISUAL hint row uses it so it never offers an `x` that refuses.
+    pub(crate) fn highlight_revert_refusal(&self) -> Option<String> {
+        let Some(anchor) = self.diff_visual_anchor else {
+            return Some("highlight diff lines first (V)".into());
+        };
+        self.compare_refusal(&super::action::Action::Revert)
+            .or_else(|| self.visual_patch(anchor, PartialPatchKind::Revert).err())
+    }
+
     /// Compare-tab `x`: open the range or whole-file revert confirm.
     ///
     /// A refusal sets the status and keeps any highlight. Opening the
@@ -7647,6 +7661,42 @@ mod tests {
         let hints = keys(&app);
         assert!(!hints.contains(&"x".to_string()), "dirty file: {hints:?}");
         assert!(hints.contains(&";".to_string()), "{hints:?}");
+
+        // Clean file at HEAD, but a new file: the range patch refuses, so
+        // the hint row must not offer `x` either (same as the palette row).
+        let mut app = compare_regions_app();
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        app.tabs.active_compare_mut().unwrap().path = Some("summary.txt".into());
+        let lines = [
+            "diff --git a/summary.txt b/summary.txt",
+            "new file mode 100644",
+            "index 0000000..3333333",
+            "--- /dev/null",
+            "+++ b/summary.txt",
+            "@@ -0,0 +1 @@",
+            "+summary",
+        ];
+        app.apply_compare_diff(
+            tab_id,
+            gen,
+            &compare_source(),
+            "summary.txt",
+            Ok(DiffContent::from_compare_lines(
+                lines.iter().map(|l| l.to_string()).collect(),
+            )),
+        );
+        app.diff_cursor = 1;
+        app.dispatch(Action::DiffVisualStart);
+        app.dispatch(Action::Move(1));
+        assert_eq!(app.compare_refusal(&Action::Revert), None, "target is ok");
+        assert_eq!(
+            palette_reason(&app, "Revert highlighted lines").as_deref(),
+            Some("cannot revert lines of a new file")
+        );
+        let hints = keys(&app);
+        assert!(!hints.contains(&"x".to_string()), "new file: {hints:?}");
+        assert!(!hints.contains(&"s u".to_string()), "{hints:?}");
     }
 
     #[test]

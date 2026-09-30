@@ -24,7 +24,6 @@ use workspace_status_graph::GraphRow;
 use crate::helpers::{is_default_branch, visible_width};
 use crate::snapshot::{CheckoutKind, SyncStatus};
 
-use super::action::Action;
 use super::branches::{can_open_branch_picker, checkoutable_branch_names};
 use super::commit_files::CommitFileRowKind;
 use super::ctrl_c_exit::{is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT};
@@ -573,13 +572,14 @@ pub fn extra_hint_segments() -> Vec<HintSegment> {
 /// Hints while `V` visual-line highlight is on a focused file diff.
 ///
 /// A compare tab has no stage / unstage, and shows `x` only while the
-/// highlighted lines may revert to the merge base.
+/// highlighted lines may revert to the merge base: the same test as the
+/// palette row "Revert highlighted lines" (`highlight_revert_refusal`).
 pub fn visual_hint_segments(state: &AppState) -> Vec<HintSegment> {
     let mut hints = vec![hint("j k", "extend range", false)];
     if !state.is_compare_tab() {
         hints.push(hint("s u", "stage / unstage", false));
         hints.push(hint("x", "revert", true));
-    } else if state.compare_refusal(&Action::Revert).is_none() {
+    } else if state.highlight_revert_refusal().is_none() {
         hints.push(hint("x", "revert to merge base", true));
     }
     hints.push(hint(";", "comment range", false));
