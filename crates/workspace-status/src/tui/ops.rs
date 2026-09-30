@@ -173,12 +173,60 @@ pub fn snapshot_pushable(snap: &WorkspaceRepoSnapshot) -> bool {
     )
 }
 
-/// `Y` always deletes untracked. Plain `y` deletes only a sole untracked file.
-pub fn should_delete_untracked(untracked_flags: &[bool], clean: bool) -> bool {
-    if clean {
-        return true;
+/// Tracked / untracked mix of a whole-file revert confirm (`x`).
+///
+/// It decides which confirm keys the box offers and what each one does.
+/// Render and `confirm_yes` both read it, so a key the box does not show
+/// does nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RevertScope {
+    /// Only tracked files: `y` reverts them.
+    TrackedOnly,
+    /// Tracked and untracked files: `y` keeps untracked, `Y` deletes them.
+    Mixed,
+    /// One untracked file and nothing tracked: `y` deletes it.
+    SingleUntracked,
+    /// Two or more untracked files and nothing tracked: `Y` deletes them.
+    UntrackedOnly,
+}
+
+impl RevertScope {
+    /// Scope for `tracked` / `untracked` file counts. An empty scope is
+    /// [`RevertScope::TrackedOnly`].
+    pub fn of(tracked: usize, untracked: usize) -> Self {
+        match (tracked, untracked) {
+            (_, 0) => Self::TrackedOnly,
+            (0, 1) => Self::SingleUntracked,
+            (0, _) => Self::UntrackedOnly,
+            _ => Self::Mixed,
+        }
     }
-    untracked_flags.len() == 1 && untracked_flags[0]
+
+    /// Count lines the confirm box shows: tracked and untracked for
+    /// [`RevertScope::Mixed`], one line otherwise.
+    pub fn count_lines(self) -> u16 {
+        if self == Self::Mixed {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// What confirm key `y` (`clean == false`) or `Y` (`clean == true`) does.
+    ///
+    /// `None` means the confirm does not offer that key. `Some(true)`
+    /// deletes untracked files; `Some(false)` keeps them.
+    pub fn key_deletes_untracked(self, clean: bool) -> Option<bool> {
+        match (self, clean) {
+            (Self::TrackedOnly, false) | (Self::Mixed, false) => Some(false),
+            (Self::Mixed, true) | (Self::SingleUntracked, false) | (Self::UntrackedOnly, true) => {
+                Some(true)
+            }
+            (Self::TrackedOnly, true)
+            | (Self::SingleUntracked, true)
+            | (Self::UntrackedOnly, false) => None,
+        }
+    }
 }
 
 /// Workspace ops that must skip hidden ignored repos and unfocused worktrees.
@@ -719,10 +767,27 @@ mod tests {
     }
 
     #[test]
-    fn y_deletes_only_sole_untracked() {
-        assert!(!should_delete_untracked(&[false, true], false));
-        assert!(should_delete_untracked(&[true], false));
-        assert!(should_delete_untracked(&[false, true], true));
+    fn revert_scope_offers_only_keys_that_apply() {
+        assert_eq!(RevertScope::of(0, 0), RevertScope::TrackedOnly);
+        assert_eq!(RevertScope::of(2, 0), RevertScope::TrackedOnly);
+        assert_eq!(RevertScope::of(1, 1), RevertScope::Mixed);
+        assert_eq!(RevertScope::of(0, 1), RevertScope::SingleUntracked);
+        assert_eq!(RevertScope::of(0, 3), RevertScope::UntrackedOnly);
+
+        let keys = |scope: RevertScope| {
+            (
+                scope.key_deletes_untracked(false),
+                scope.key_deletes_untracked(true),
+            )
+        };
+        assert_eq!(keys(RevertScope::TrackedOnly), (Some(false), None));
+        assert_eq!(keys(RevertScope::Mixed), (Some(false), Some(true)));
+        assert_eq!(keys(RevertScope::SingleUntracked), (Some(true), None));
+        assert_eq!(keys(RevertScope::UntrackedOnly), (None, Some(true)));
+        assert_eq!(RevertScope::Mixed.count_lines(), 2);
+        assert_eq!(RevertScope::TrackedOnly.count_lines(), 1);
+        assert_eq!(RevertScope::SingleUntracked.count_lines(), 1);
+        assert_eq!(RevertScope::UntrackedOnly.count_lines(), 1);
     }
 
     fn dir_row(repo: &str, dir: &str) -> VisibleRow {

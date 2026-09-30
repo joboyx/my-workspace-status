@@ -34,7 +34,7 @@ use super::keys::DOUBLE_TAP_MS;
 use super::ops::{collect_write_files, op_targets, push_targets, Op};
 use super::split::DiffMode;
 use super::stash::{stash_ops_for_context, StashOpsContext};
-use super::state::{AppState, FocusPane};
+use super::state::{revert_scope, AppState, FocusPane};
 use super::theme::{hex_color, Palette, Pill, Pills};
 use super::tree::NodeKind;
 
@@ -417,8 +417,11 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
             super::state::PendingConfirm::RemoveWorktree { .. } => 6,
             super::state::PendingConfirm::StashDrop { .. }
             | super::state::PendingConfirm::RevertRange { .. } => 5,
-            super::state::PendingConfirm::Revert { .. }
-            | super::state::PendingConfirm::CheckoutOutOfSync { .. }
+            // One row per count line: mixed is 7, the others 6.
+            super::state::PendingConfirm::Revert { targets, .. } => {
+                5 + revert_scope(targets).count_lines()
+            }
+            super::state::PendingConfirm::CheckoutOutOfSync { .. }
             | super::state::PendingConfirm::MergeIntoHead { .. } => 7,
         };
     }
@@ -1460,12 +1463,30 @@ mod tests {
     #[test]
     fn confirm_overlay_uses_row_budget() {
         let mut app = state();
+        let target = |path: &str, untracked: bool| super::super::state::RevertTarget {
+            repo: "app".into(),
+            path: path.into(),
+            untracked,
+            old_path: None,
+        };
+        // Tracked-only scope paints one count line.
         app.confirm = Some(super::super::state::PendingConfirm::Revert {
-            targets: Vec::new(),
+            targets: vec![target("README.md", false)],
             label: "README.md".into(),
         });
-        assert_eq!(overlay_status_rows(&app), 7);
+        assert_eq!(overlay_status_rows(&app), 6);
         assert_eq!(breadcrumb_rows(&app), 1);
+        // Mixed scope paints tracked and untracked count lines.
+        app.confirm = Some(super::super::state::PendingConfirm::Revert {
+            targets: vec![target("README.md", false), target("new.txt", true)],
+            label: "app".into(),
+        });
+        assert_eq!(overlay_status_rows(&app), 7);
+        app.confirm = Some(super::super::state::PendingConfirm::Revert {
+            targets: vec![target("a.txt", true), target("b.txt", true)],
+            label: "app".into(),
+        });
+        assert_eq!(overlay_status_rows(&app), 6);
         app.confirm = Some(super::super::state::PendingConfirm::StashDrop {
             repo: "app".into(),
             stash_ref: "stash@{0}".into(),

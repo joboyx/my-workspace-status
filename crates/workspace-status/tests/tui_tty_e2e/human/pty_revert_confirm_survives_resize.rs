@@ -32,15 +32,16 @@ fn dirty_readme_still_focused(screen: &str) -> bool {
         && pane_unstaged_readme(screen)
 }
 
-/// Boxed `x` confirm: counted revert, `y`/`Y`/`n`. File is still dirty.
+/// Boxed `x` confirm on a tracked-only file: counted revert, `y`/`n`
+/// only. No untracked line and no `Y` chip. File is still dirty.
 fn documented_revert_confirm_armed(screen: &str) -> bool {
     dirty_readme_still_focused(screen)
         && screen.contains("Revert README.md?")
         && screen.contains("1 tracked file")
         && screen.contains("discarded")
-        && screen.contains("0 untracked files")
-        && screen.contains("kept")
-        && screen.contains("revert + delete untracked")
+        && !screen.contains("untracked")
+        && !screen.contains("revert + delete untracked")
+        && screen.contains("revert")
         && screen.contains("cancel")
         && !screen.contains("revert cancelled")
         && no_y_revert_path(screen)
@@ -84,8 +85,8 @@ fn cursor_moved_off_readme(screen: &str) -> bool {
 /// then `n` still cancels.
 ///
 /// Help GIT `x` is revert (`y`/`Y`). Configuration: `x` confirms with
-/// counts (`y` tracked only, `Y` also deletes untracked); `n` / Esc
-/// cancel. Keymap: `x` is `Action::Revert` (opens `PendingConfirm::Revert`);
+/// counts and offers only the keys that apply (tracked-only: `y` / `n`);
+/// `n` / Esc cancel. Keymap: `x` is `Action::Revert` (opens `PendingConfirm::Revert`);
 /// confirm `n` is `Action::ConfirmNo` (`revert cancelled`, no write).
 /// Resize does not dismiss the overlay. Movement keys are swallowed
 /// while it is open.
@@ -111,7 +112,7 @@ fn pty_revert_confirm_survives_resize() {
     tui.key('x');
     tui.wait_pred(
         documented_revert_confirm_armed,
-        "x arms Revert README.md? with y/Y/n; file stays dirty",
+        "x arms Revert README.md? with y/n only; file stays dirty",
         WAIT,
     );
     tui.wait_ms(SETTLE_MS);
@@ -129,7 +130,7 @@ fn pty_revert_confirm_survives_resize() {
     tui.resize(100, 24);
     tui.wait_pred(
         documented_revert_confirm_armed_on_short_grid,
-        "100x24 resize keeps Revert README.md? y/Y/n on a shorter grid",
+        "100x24 resize keeps Revert README.md? y/n on a shorter grid",
         WAIT,
     );
     tui.wait_ms(SETTLE_MS);

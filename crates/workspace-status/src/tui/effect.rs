@@ -53,7 +53,7 @@ use super::ops::{
 };
 use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
 use super::stash::{resolve_stash_menu_key, StashMenuKeyResult, StashOpId};
-use super::state::{AppState, PendingConfirm};
+use super::state::{revert_scope, AppState, PendingConfirm};
 
 /// Blocking work that produces one [`JobOutcome`].
 pub(crate) type JobWork = Box<dyn FnOnce() -> JobOutcome + Send>;
@@ -316,7 +316,14 @@ fn overlay_write_checkouts(state: &AppState, action: &Action) -> Vec<String> {
     match action {
         Action::ConfirmYes | Action::ConfirmYesClean => match state.confirm.as_ref() {
             Some(PendingConfirm::Revert { targets, .. }) => {
-                targets.iter().map(|t| t.repo.clone()).collect()
+                // A key the box does not offer writes nothing, so it is never busy.
+                let clean = matches!(action, Action::ConfirmYesClean);
+                let offered = revert_scope(targets).key_deletes_untracked(clean).is_some();
+                if offered {
+                    targets.iter().map(|t| t.repo.clone()).collect()
+                } else {
+                    Vec::new()
+                }
             }
             Some(PendingConfirm::RevertRange { repo, .. })
             | Some(PendingConfirm::StashDrop { repo, .. })
@@ -4222,8 +4229,22 @@ mod tests {
         assert_eq!(state.status, "busy");
         assert_eq!(interp.write_jobs_queued(), 0);
 
+        // Tracked-only scope does not offer `Y`, so it never reports busy.
+        state.status = "confirm revert app?".into();
+        assert!(!interp.keep_overlay_if_gitdir_busy(&mut state, &Action::ConfirmYesClean));
+        assert_eq!(state.status, "confirm revert app?");
+
+        if let Some(PendingConfirm::Revert { targets, .. }) = state.confirm.as_mut() {
+            targets.push(RevertTarget {
+                repo: "app".into(),
+                path: "scratch.txt".into(),
+                untracked: true,
+                old_path: None,
+            });
+        }
         assert!(interp.keep_overlay_if_gitdir_busy(&mut state, &Action::ConfirmYesClean));
         assert!(state.confirm.is_some());
+        assert_eq!(state.status, "busy");
 
         state.confirm = Some(PendingConfirm::Revert {
             targets: vec![RevertTarget {
