@@ -1144,3 +1144,75 @@ pub fn open_regions_first_hunk_highlight(workspace: &Path) -> PtySession {
     );
     tui
 }
+
+/// Type a command-palette filter with a gap after nav letters.
+///
+/// A same-letter `h`/`j`/`k`/`l` burst is dropped by the held-nav backlog,
+/// so `keys("vs default")` can lose the `l`.
+pub fn type_palette_filter(tui: &mut PtySession, query: &str) {
+    for c in query.chars() {
+        tui.key(c);
+        if matches!(c, 'h' | 'H' | 'j' | 'J' | 'k' | 'K' | 'l' | 'L') {
+            tui.wait_ms(VISUAL_KEY_GAP_MS);
+        }
+    }
+}
+
+/// The compare tab shows the regions.txt diff with the diff pane focused.
+pub fn compare_regions_diff_focused(screen: &str) -> bool {
+    screen.contains("app ↔ origin/main")
+        && screen.contains("COMMITTED")
+        && screen.contains(REGIONS_ALPHA)
+        && screen.contains(REGIONS_OMEGA)
+        && panes_files_unfocused_diff_focused(screen)
+        && !screen.contains("Enter run")
+}
+
+/// Open `app ↔ origin/main` by real input on
+/// `seed::compare_regions_workspace` and focus the regions.txt diff.
+///
+/// `/app`, `Ctrl-k`, "vs default", Enter opens the tab on regions.txt (the
+/// first file). A second Enter focuses the compare diff.
+pub fn open_compare_regions_diff(workspace: &Path) -> PtySession {
+    let mut tui = PtySession::open(workspace);
+    tui.wait_contains("app", WAIT);
+    tui.search("app");
+    open_compare_regions_in(&mut tui);
+    tui
+}
+
+/// Open `app ↔ origin/main` in a running session and focus its
+/// regions.txt diff, as [`open_compare_regions_diff`] does at launch.
+///
+/// The Workspace tree must hold focus on a row of `app` (the repo row or
+/// one of its files): "Diff vs default" compares the focused checkout.
+pub fn open_compare_regions_in(tui: &mut PtySession) {
+    tui.ctrl_letter('k');
+    tui.wait_pred(
+        |screen| screen.contains("Enter run"),
+        "Ctrl-k opens the command palette",
+        WAIT,
+    );
+    type_palette_filter(tui, "vs default");
+    tui.wait_pred(
+        |screen| screen.contains("Diff vs default") && screen.contains("vs default"),
+        "palette filter lands on Diff vs default",
+        WAIT,
+    );
+    tui.enter();
+    tui.wait_pred(
+        |screen| {
+            screen.contains("app ↔ origin/main")
+                && screen.contains("regions.txt")
+                && screen.contains(REGIONS_ALPHA)
+        },
+        "Diff vs default opens the compare tab on regions.txt",
+        GIT_WAIT,
+    );
+    tui.enter();
+    tui.wait_pred(
+        compare_regions_diff_focused,
+        "Enter focuses the compare regions.txt diff",
+        WAIT,
+    );
+}

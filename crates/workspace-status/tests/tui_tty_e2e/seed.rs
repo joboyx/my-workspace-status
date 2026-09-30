@@ -277,6 +277,45 @@ pub fn two_hunk_regions_workspace(prefix: &str) -> (PathBuf, PathBuf) {
     (root, workspace)
 }
 
+/// File that [`compare_regions_workspace`] adds on the feature branch.
+///
+/// It sorts after `regions.txt`, so the compare tab opens on the regions diff.
+pub const COMPARE_ADDED_FILE: &str = "summary.txt";
+
+/// Repo `app` on `feature/regions`, one commit ahead of `origin/main`.
+///
+/// `main` commits `regions.txt` ([`REGIONS_COMMITTED`]). The feature commit
+/// changes ALPHA and OMEGA (two separated hunks) and adds
+/// [`COMPARE_ADDED_FILE`]. The worktree is clean. Diff vs default compares
+/// against `origin/main`.
+pub fn compare_regions_workspace() -> (PathBuf, PathBuf) {
+    let (root, workspace) = new_workspace("ws-tui-tty-compare-regions");
+    seed_repo(&workspace, "app", "main", false);
+    let repo = workspace.join("app");
+    fs::write(repo.join("regions.txt"), REGIONS_COMMITTED).unwrap();
+    git(&repo, &["add", "regions.txt"]);
+    git(&repo, &["commit", "-q", "-m", "regions"]);
+    let origin = workspace.join("app.origin.git");
+    git(
+        &workspace,
+        &["clone", "-q", "--bare", "app", "app.origin.git"],
+    );
+    git(&repo, &["remote", "add", "origin", &git_path_arg(&origin)]);
+    git(&repo, &["fetch", "-q", "origin"]);
+    git(&repo, &["checkout", "-q", "-b", "feature/regions"]);
+    fs::write(
+        repo.join("regions.txt"),
+        REGIONS_COMMITTED
+            .replace("ALPHA-OLD", REGIONS_ALPHA)
+            .replace("OMEGA-OLD", REGIONS_OMEGA),
+    )
+    .unwrap();
+    fs::write(repo.join(COMPARE_ADDED_FILE), "summary-body\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "regions feature"]);
+    (root, workspace)
+}
+
 /// `git diff [--cached] -- regions.txt` in `repo` (the on-disk oracle).
 pub fn regions_diff(repo: &Path, cached: bool) -> String {
     let mut args = vec!["diff"];

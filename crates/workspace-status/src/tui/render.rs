@@ -22,8 +22,8 @@ use super::chrome::{
 };
 use super::comments::{
     comment_overlay_footer_save, commit_file_row_comments_resolved, commit_file_row_has_comment,
-    diff_line_comment_state, graph_row_comments_resolved, graph_row_has_comment,
-    tree_row_comments_resolved, tree_row_has_comment, CommentPrompt, COMMENT_OVERLAY_FOOTER_EDIT,
+    graph_row_comments_resolved, graph_row_has_comment, tree_row_comments_resolved,
+    tree_row_has_comment, CommentPrompt, COMMENT_OVERLAY_FOOTER_EDIT,
 };
 use super::diff::{
     cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, diff_row_content_width,
@@ -33,7 +33,7 @@ use super::diff::{
 use super::drill::DrillView;
 use super::help::{
     help_chip_gap_spaces, help_column_width, help_entry_matches, help_entry_visual_lines,
-    help_idle_footer_lines, help_inner_width, help_version_label, HELP_GROUPS,
+    help_groups, help_idle_footer_lines, help_inner_width, help_version_label,
     HELP_SEARCH_ESC_HINT,
 };
 use super::icons::{
@@ -50,7 +50,7 @@ use super::split::{
     diff_split_rule_x, effective_diff_mode, is_side_by_side_split, pane_widths,
     side_by_side_column_widths, MIN_PANE_COLS,
 };
-use super::state::{revert_scope, AppState, FocusPane, PendingConfirm};
+use super::state::{revert_scope, AppState, CompareRevertTarget, FocusPane, PendingConfirm};
 use super::syntax::{
     cached_highlight_diff_rows, slice_styled_cols, CachedDiffSyntax, DiffSyntaxKey,
 };
@@ -911,12 +911,7 @@ fn commit_file_comment_scope(
     Option<&str>,
     &super::drill::CommitFileSource,
 )> {
-    let (repo, source) = match &state.drill {
-        DrillView::Files { repo, source, .. } | DrillView::Diff { repo, source, .. } => {
-            (repo.as_str(), source)
-        }
-        DrillView::Graph => return None,
-    };
+    let (repo, source) = state.commit_drill_source()?;
     let snap = state.snapshot.repos.iter().find(|r| r.repo == repo);
     Some((
         repo,
@@ -1372,7 +1367,7 @@ fn paint_cell_spans(
     let code_w = cell_code_width(width, gutter.saturating_add(mark_w));
     let first = !wrap || wrap_part == 0;
     let comment = if first {
-        cell.line_no.and_then(|n| diff_cell_comment_state(state, n))
+        cell.line_no.and_then(|n| state.diff_line_comment(n))
     } else {
         None
     };
@@ -1524,31 +1519,6 @@ fn diff_gutter_style(palette: Palette) -> Style {
     Style::default().fg(palette.muted)
 }
 
-fn diff_cell_comment_state(state: &AppState, line: u32) -> Option<bool> {
-    let (repo, path) = match &state.drill {
-        DrillView::Diff { repo, path, .. } => (Some(repo.as_str()), Some(path.as_str())),
-        _ => (state.diff_repo.as_deref(), state.diff_path.as_deref()),
-    };
-    let repo = repo?;
-    let path = path?;
-    let source = match &state.drill {
-        DrillView::Diff { source, .. } => Some(source),
-        _ => None,
-    };
-    let snap = state.snapshot.repos.iter().find(|r| r.repo == repo);
-    let primary = snap.and_then(|r| r.primary_repo.as_deref());
-    let branch = snap.map(|r| r.branch.as_str());
-    diff_line_comment_state(
-        &state.comment_store,
-        repo,
-        primary,
-        branch,
-        path,
-        source,
-        line,
-    )
-}
-
 fn cell_accent(kind: DiffCellKind, palette: Palette) -> Option<Style> {
     match kind {
         DiffCellKind::Add => Some(Style::default().fg(palette.added)),
@@ -1562,6 +1532,7 @@ fn help_group_chrome(title: &str, ascii: bool, palette: Palette) -> (&'static st
     match title {
         "MOVE" => (icon_move(ascii), palette.cursor),
         "GIT" => (icon_branch(ascii), palette.added),
+        "COMPARE" => (icon_branch(ascii), palette.repo),
         _ => (icon_diff(ascii), palette.modified),
     }
 }
@@ -1701,7 +1672,9 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let palette = state.theme.palette();
     let pills = state.theme.pills();
     let surface = overlay_surface(state);
-    let max_rows = HELP_GROUPS
+    // A compare tab swaps GIT for the COMPARE column; same row budget.
+    let groups = help_groups(state.is_compare_tab());
+    let max_rows = groups
         .iter()
         .map(|group| group.entries.len())
         .max()
@@ -1713,7 +1686,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let col_w = help_column_width(term_width);
 
     let mut title_spans = Vec::new();
-    for group in HELP_GROUPS {
+    for group in groups {
         let (icon, color) = help_group_chrome(group.title, state.ascii, palette);
         title_spans.extend(clamp_spans(
             vec![Span::styled(
@@ -1726,7 +1699,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     lines.push(Line::from(title_spans));
 
     for row in 0..max_rows {
-        let cells: Vec<Vec<super::help::HelpVisualLine>> = HELP_GROUPS
+        let cells: Vec<Vec<super::help::HelpVisualLine>> = groups
             .iter()
             .map(|group| match group.entries.get(row) {
                 Some(entry) => help_entry_visual_lines(entry.desc, col_w, entry.keys),
@@ -1740,7 +1713,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         let height = cells.iter().map(|cell| cell.len()).max().unwrap_or(1);
         for vis_row in 0..height {
             let mut spans = Vec::new();
-            for (group_idx, group) in HELP_GROUPS.iter().enumerate() {
+            for (group_idx, group) in groups.iter().enumerate() {
                 let (_, color) = help_group_chrome(group.title, state.ascii, palette);
                 let entry = group.entries.get(row);
                 let hit = searching
@@ -1847,6 +1820,34 @@ fn confirm_action_row(
     Line::from(spans)
 }
 
+/// Detail row of a compare revert confirm that changes content only.
+const COMPARE_REVERT_WORKTREE_ONLY: &str =
+    "  worktree only · the change shows on the Workspace tab";
+
+/// `Revert <what><path> to the <base_ref> merge base?`
+fn compare_revert_title(
+    what: &str,
+    target: &CompareRevertTarget,
+    accent: Color,
+    muted: Color,
+    file: Color,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        "Revert ",
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+    )];
+    if !what.is_empty() {
+        spans.push(Span::styled(what.to_string(), Style::default().fg(muted)));
+    }
+    spans.extend([
+        Span::styled(target.path.clone(), Style::default().fg(file)),
+        Span::styled(" to the ", Style::default().fg(muted)),
+        Span::styled(target.base_ref.clone(), Style::default().fg(file)),
+        Span::styled(" merge base?", Style::default().fg(accent)),
+    ]);
+    Line::from(spans)
+}
+
 fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let Some(pending) = state.confirm.as_ref() else {
         return;
@@ -1930,6 +1931,55 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     Span::styled("?", Style::default().fg(accent)),
                 ]),
                 confirm_action_row("y", "revert", None, accent, palette.muted, surface),
+            ];
+            (accent, lines)
+        }
+        PendingConfirm::CompareRevertRange { target, .. } => {
+            let accent = palette.modified;
+            let lines = vec![
+                compare_revert_title(
+                    "highlighted lines in ",
+                    target,
+                    accent,
+                    palette.muted,
+                    palette.file,
+                ),
+                Line::from(Span::styled(
+                    COMPARE_REVERT_WORKTREE_ONLY,
+                    Style::default().fg(palette.muted),
+                )),
+                confirm_action_row("y", "revert", None, accent, palette.muted, surface),
+            ];
+            (accent, lines)
+        }
+        PendingConfirm::CompareRevertFile { target } => {
+            let deletes = target.status == "A";
+            let accent = if deletes {
+                palette.deleted
+            } else {
+                palette.modified
+            };
+            let path = &target.path;
+            let fate = match (target.status.as_str(), target.old_path.as_deref()) {
+                ("A", _) => format!("  added on HEAD → {path} will be deleted"),
+                ("D", _) => format!("  deleted on HEAD → {path} will be restored"),
+                ("R", Some(old)) => {
+                    format!("  renamed on HEAD → {path} will be deleted, {old} restored")
+                }
+                _ => COMPARE_REVERT_WORKTREE_ONLY.to_string(),
+            };
+            let fate_color = if deletes { accent } else { palette.muted };
+            let lines = vec![
+                compare_revert_title("", target, accent, palette.muted, palette.file),
+                Line::from(Span::styled(fate, Style::default().fg(fate_color))),
+                confirm_action_row(
+                    "y",
+                    if deletes { "delete" } else { "revert" },
+                    None,
+                    accent,
+                    palette.muted,
+                    surface,
+                ),
             ];
             (accent, lines)
         }
@@ -4572,6 +4622,90 @@ mod tests {
         assert!(text.contains("fast-forward"), "{text}");
         assert!(text.contains("merge commit"), "{text}");
         assert!(!text.contains("? y/n"), "{text}");
+    }
+
+    #[test]
+    fn compare_revert_confirms_name_the_merge_base_and_deletions() {
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let target = |path: &str, status: &str, old_path: Option<&str>| CompareRevertTarget {
+            repo: "app".into(),
+            path: path.into(),
+            old_path: old_path.map(str::to_string),
+            status: status.into(),
+            base_ref: "origin/main".into(),
+            merge_base: "aaa".into(),
+            head: "ccc".into(),
+        };
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut paint = |state: &mut AppState, confirm: PendingConfirm| {
+            state.confirm = Some(confirm);
+            terminal.draw(|frame| draw(frame, state)).unwrap();
+            buffer_text(&terminal)
+        };
+
+        let text = paint(
+            &mut state,
+            PendingConfirm::CompareRevertRange {
+                target: target("regions.txt", "M", None),
+                patch: String::new(),
+            },
+        );
+        assert!(
+            text.contains("Revert highlighted lines in regions.txt to the origin/main merge base?"),
+            "{text}"
+        );
+        assert!(text.contains("worktree only"), "{text}");
+        assert!(text.contains("revert"), "{text}");
+        assert!(!text.contains("delete"), "{text}");
+
+        let text = paint(
+            &mut state,
+            PendingConfirm::CompareRevertFile {
+                target: target("regions.txt", "M", None),
+            },
+        );
+        assert!(
+            text.contains("Revert regions.txt to the origin/main merge base?"),
+            "{text}"
+        );
+        assert!(text.contains("worktree only"), "{text}");
+
+        let text = paint(
+            &mut state,
+            PendingConfirm::CompareRevertFile {
+                target: target("summary.txt", "A", None),
+            },
+        );
+        assert!(
+            text.contains("Revert summary.txt to the origin/main merge base?"),
+            "{text}"
+        );
+        assert!(
+            text.contains("added on HEAD → summary.txt will be deleted"),
+            "{text}"
+        );
+        assert!(text.contains("delete"), "{text}");
+
+        let text = paint(
+            &mut state,
+            PendingConfirm::CompareRevertFile {
+                target: target("gone.txt", "D", None),
+            },
+        );
+        assert!(text.contains("gone.txt will be restored"), "{text}");
+
+        let text = paint(
+            &mut state,
+            PendingConfirm::CompareRevertFile {
+                target: target("new.txt", "R", Some("old.txt")),
+            },
+        );
+        assert!(
+            text.contains("new.txt will be deleted, old.txt restored"),
+            "{text}"
+        );
     }
 
     #[test]

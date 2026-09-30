@@ -38,7 +38,7 @@ fn pty_compare_vs_default_equal_tips_hides_dirty() {
     );
     assert_eq!(head_sha(&workspace), before);
     tui.key('s');
-    tui.wait_contains("Switch to Workspace tab", WAIT);
+    tui.wait_contains("cannot stage a compare diff", WAIT);
     assert_eq!(head_sha(&workspace), before);
 }
 

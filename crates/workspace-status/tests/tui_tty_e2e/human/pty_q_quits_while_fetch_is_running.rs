@@ -31,10 +31,12 @@ fn pty_q_quits_while_fetch_is_running() {
 
     tui.key('f');
     wait_slow_git_started(&slow, || tui.screen(), WAIT);
-    assert!(
-        crumb_row(&tui.screen()).contains("Fetching") || tui.screen().contains("Fetching"),
-        "q must be pressed during occupy; screen:\n{}",
-        tui.screen()
+    // The wrapper starts before the occupy paint lands: wait for the paint.
+    // "Fetching" shows only while the slow fetch holds the occupy.
+    tui.wait_pred(
+        |screen| crumb_row(screen).contains("Fetching") || screen.contains("Fetching"),
+        "q must be pressed during occupy: Fetching paints",
+        WAIT,
     );
 
     tui.key('q');

@@ -24,9 +24,10 @@ impl AppState {
             Action::ConfirmNo => {
                 if let Some(pending) = self.confirm.take() {
                     self.status = match pending {
-                        PendingConfirm::Revert { .. } | PendingConfirm::RevertRange { .. } => {
-                            "revert cancelled".into()
-                        }
+                        PendingConfirm::Revert { .. }
+                        | PendingConfirm::RevertRange { .. }
+                        | PendingConfirm::CompareRevertRange { .. }
+                        | PendingConfirm::CompareRevertFile { .. } => "revert cancelled".into(),
                         PendingConfirm::StashDrop { .. } => "drop cancelled".into(),
                         PendingConfirm::CheckoutOutOfSync { .. } => "checkout cancelled".into(),
                         PendingConfirm::RemoveWorktree { .. } => "remove worktree cancelled".into(),

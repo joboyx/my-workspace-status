@@ -350,6 +350,16 @@ const TREE_WRITE_BLOCKED: &[HintActionId] = &[
     HintActionId::RemoveWorktree,
 ];
 
+/// Hint actions a compare tab can run. Stage / unstage and the remote,
+/// branch, stash, graph, and worktree actions stay on the Workspace tab
+/// (`AppState::compare_refusal`), so the hint row never offers them there.
+const COMPARE_HINT_ACTIONS: &[HintActionId] = &[
+    HintActionId::Revert,
+    HintActionId::Edit,
+    HintActionId::ToggleViewed,
+    HintActionId::FullFile,
+];
+
 const GRAPH_HINT_KINDS: &[HintRowKind] = &[
     HintRowKind::GraphCommit,
     HintRowKind::GraphStash,
@@ -422,7 +432,9 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
                 5 + revert_scope(targets).count_lines()
             }
             super::state::PendingConfirm::CheckoutOutOfSync { .. }
-            | super::state::PendingConfirm::MergeIntoHead { .. } => 7,
+            | super::state::PendingConfirm::MergeIntoHead { .. }
+            | super::state::PendingConfirm::CompareRevertRange { .. }
+            | super::state::PendingConfirm::CompareRevertFile { .. } => 7,
         };
     }
     if let Some(ops) = state.stash_menu.as_ref() {
@@ -568,14 +580,21 @@ pub fn extra_hint_segments() -> Vec<HintSegment> {
 }
 
 /// Hints while `V` visual-line highlight is on a focused file diff.
-pub fn visual_hint_segments() -> Vec<HintSegment> {
-    vec![
-        hint("j k", "extend range", false),
-        hint("s u", "stage / unstage", false),
-        hint("x", "revert", true),
-        hint(";", "comment range", false),
-        hint("Esc", "cancel highlight", false),
-    ]
+///
+/// A compare tab has no stage / unstage, and shows `x` only while the
+/// highlighted lines may revert to the merge base: the same test as the
+/// palette row "Revert highlighted lines" (`highlight_revert_refusal`).
+pub fn visual_hint_segments(state: &AppState) -> Vec<HintSegment> {
+    let mut hints = vec![hint("j k", "extend range", false)];
+    if !state.is_compare_tab() {
+        hints.push(hint("s u", "stage / unstage", false));
+        hints.push(hint("x", "revert", true));
+    } else if state.highlight_revert_refusal().is_none() {
+        hints.push(hint("x", "revert to merge base", true));
+    }
+    hints.push(hint(";", "comment range", false));
+    hints.push(hint("Esc", "cancel highlight", false));
+    hints
 }
 
 fn hint(key: &str, label: &str, destructive: bool) -> HintSegment {
@@ -591,13 +610,20 @@ fn is_graph_kind(kind: HintRowKind) -> bool {
 }
 
 /// Hints for every action valid on `kind` at the given nav dims.
+///
+/// A compare tab reads the compare tab, not the parked Workspace tree row:
+/// only [`COMPARE_HINT_ACTIONS`], with `x` shown while it may revert the
+/// focused compare file to the merge base.
 pub fn action_hint_segments(state: &AppState) -> Vec<HintSegment> {
     let kind = hint_row_kind(state);
     let depth = nav_depth(state);
     let focus = state.focus;
-    let hide_tree_writes = depth >= 1 || focus == FocusPane::Right;
+    let compare = state.is_compare_tab();
+    // Compare `x` also runs from the focused diff, so it is not hidden there.
+    let hide_tree_writes = !compare && (depth >= 1 || focus == FocusPane::Right);
     HINT_ACTIONS
         .iter()
+        .filter(|action| !compare || COMPARE_HINT_ACTIONS.contains(&action.id))
         .filter(|action| action.kinds.contains(&kind))
         .filter(|action| match action.depths {
             Some(depths) => depths.contains(&depth),
@@ -616,6 +642,8 @@ pub fn action_hint_segments(state: &AppState) -> Vec<HintSegment> {
         .map(|action| {
             let label = if action.id == HintActionId::RemoveWorktree {
                 remove_worktree_hint_label(state)
+            } else if compare && action.id == HintActionId::Revert {
+                "revert to merge base".into()
             } else {
                 action.label.to_string()
             };
@@ -691,6 +719,9 @@ fn scope_action_visible(
         HintActionId::Unstage => collect_write_files(&state.snapshot, focused, state.show_ignored)
             .iter()
             .any(|file| file.change.staged_status.is_some()),
+        HintActionId::Revert if state.is_compare_tab() => {
+            state.compare_file_revert_refusal().is_none()
+        }
         HintActionId::Revert => collect_write_files(&state.snapshot, focused, state.show_ignored)
             .iter()
             .any(|file| file.change.unstaged_status.is_some() || file.change.untracked),
@@ -1116,7 +1147,7 @@ fn idle_status_line(
         used += search_query.len() + 3;
     }
     let mut hints = if visual {
-        visual_hint_segments()
+        visual_hint_segments(state)
     } else {
         nav_chrome_hint_segments(nav_depth(state), state.focus)
     };
@@ -1390,7 +1421,10 @@ mod tests {
                 "q".to_string()
             ]
         );
-        let visual: Vec<String> = visual_hint_segments().into_iter().map(|s| s.key).collect();
+        let visual: Vec<String> = visual_hint_segments(&app)
+            .into_iter()
+            .map(|s| s.key)
+            .collect();
         assert!(visual.contains(&"s u".into()), "{visual:?}");
         assert!(visual.contains(&"x".into()), "{visual:?}");
         assert!(visual.contains(&"j k".into()), "{visual:?}");

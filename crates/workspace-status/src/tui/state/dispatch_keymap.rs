@@ -6,13 +6,12 @@ use super::super::action::{Action, Effect, ExternalDiffKind, PaletteOpenedBy};
 use super::super::branches::can_open_branch_picker;
 use super::super::command_palette::{CommandPaletteState, CommandScope, PaletteCommand};
 use super::super::diff::PartialPatchKind;
-use super::super::gates::{dispatch_is_noop, is_compare_mutation, ListFocusTarget};
+use super::super::gates::{dispatch_is_noop, ListFocusTarget};
 use super::super::graph_focus::GRAPH_FOCUS_NEED_CONTEXT;
 use super::super::ops::{collect_write_files, op_is_kind_noop, Op};
 use super::super::split::SplitDrag;
 use super::super::tabs::{
-    DEFAULT_BRANCH_NOT_FOUND, FOCUS_A_CHECKOUT, HEAD_HAS_NO_COMMIT, SWITCH_TO_WORKSPACE_TAB,
-    WORKSPACE_TAB_CANNOT_CLOSE,
+    DEFAULT_BRANCH_NOT_FOUND, FOCUS_A_CHECKOUT, HEAD_HAS_NO_COMMIT, WORKSPACE_TAB_CANNOT_CLOSE,
 };
 use super::super::tree::NodeKind;
 use super::{AppState, FileWrite, FocusPane, FoldOp};
@@ -467,12 +466,13 @@ impl AppState {
 
     /// Why palette row `command` cannot run, or `None` if Enter should dispatch.
     ///
-    /// Order: compare-tab mutation, then the row's highlight scope, then the
-    /// range patch (highlighted stage / unstage / revert), then the action gate.
+    /// Order: compare-tab refusal ([`Self::compare_refusal`]), then the row's
+    /// highlight scope, then the range patch (highlighted stage / unstage /
+    /// revert), then the action gate.
     pub(crate) fn palette_disabled_reason(&self, command: &PaletteCommand) -> Option<String> {
         let action = &command.action;
-        if self.is_compare_tab() && is_compare_mutation(action) {
-            return Some(SWITCH_TO_WORKSPACE_TAB.into());
+        if let Some(reason) = self.compare_refusal(action) {
+            return Some(reason);
         }
         let highlighted = self.diff_visual_anchor.is_some();
         match (command.scope, highlighted) {
@@ -498,10 +498,14 @@ impl AppState {
             self.nav_depth(),
             self.focus == FocusPane::Right,
             self.list_focus_target(),
-        ) {
+        ) && !self.compare_revert_runs(action)
+        {
             return Some("not available here".into());
         }
         match action {
+            // Same check as compare `x` with no highlight: the compare
+            // gate, then the file status (M / A / D / R only).
+            Action::Revert if self.is_compare_tab() => self.compare_file_revert_refusal(),
             Action::Pull | Action::DefaultBranch | Action::Fetch => {
                 let op = if matches!(action, Action::Pull) {
                     Op::Pull

@@ -436,6 +436,82 @@ pub fn revert_tracked_file(cwd: &Path, file_path: &str) -> Result<(), String> {
     exec_git_checked(&["restore", "--", file_path], cwd)
 }
 
+/// Refuse a compare-tab write unless the checkout still is the compare head.
+///
+/// `Err` when `HEAD` is not `head`, or when `git status` lists any of
+/// `paths` (staged, unstaged, untracked, or ignored). A compare tab writes
+/// the worktree only while it equals `head` for those paths, so this runs
+/// on the write worker right before the write: the TUI snapshot can be a
+/// watch tick old.
+pub fn ensure_compare_head_clean(cwd: &Path, head: &str, paths: &[&str]) -> Result<(), String> {
+    match rev_parse_commit(cwd, "HEAD")? {
+        Some(now) if now == head => {}
+        _ => return Err("revert aborted: HEAD moved".into()),
+    }
+    let mut args = vec![
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignored",
+        "--",
+    ];
+    args.extend_from_slice(paths);
+    let out = exec_git_stdout(&args, cwd)?;
+    if out.trim().is_empty() {
+        Ok(())
+    } else {
+        let path = paths.first().copied().unwrap_or_default();
+        Err(format!("revert aborted: {path} has uncommitted changes"))
+    }
+}
+
+/// Restore `paths` in the worktree from `rev`
+/// (`git restore --source=<rev> --worktree --`).
+///
+/// The index stays untouched. A tracked path that `rev` does not have is
+/// removed from the worktree; a path only `rev` has is written.
+pub fn restore_worktree_from(cwd: &Path, rev: &str, paths: &[&str]) -> Result<(), String> {
+    let source = format!("--source={rev}");
+    let mut args = vec!["restore", source.as_str(), "--worktree", "--"];
+    args.extend_from_slice(paths);
+    exec_git_stdout(&args, cwd).map(|_| ())
+}
+
+/// Paths a compare whole-file revert touches: `old_path` (renames) first.
+pub fn compare_revert_paths<'a>(path: &'a str, old_path: Option<&'a str>) -> Vec<&'a str> {
+    match old_path {
+        Some(old) if old != path => vec![old, path],
+        _ => vec![path],
+    }
+}
+
+/// Compare `x` on a file: restore it in the worktree from `merge_base`.
+///
+/// Checks [`ensure_compare_head_clean`] first. Status `M` restores the
+/// content, `A` deletes the file, `D` writes it back, and `R` writes
+/// `old_path` back and deletes `path`. The index stays untouched.
+pub fn revert_compare_file(
+    cwd: &Path,
+    merge_base: &str,
+    head: &str,
+    path: &str,
+    old_path: Option<&str>,
+) -> Result<(), String> {
+    let paths = compare_revert_paths(path, old_path);
+    ensure_compare_head_clean(cwd, head, &paths)?;
+    restore_worktree_from(cwd, merge_base, &paths)
+}
+
+/// Compare `x` on highlighted lines: `git apply --reverse` of `patch`.
+///
+/// Checks [`ensure_compare_head_clean`] for `path` first. The patch is a
+/// slice of the committed `merge_base...head` diff, so its post-image is
+/// the head blob, which the check proves is the worktree file.
+pub fn revert_compare_patch(cwd: &Path, head: &str, path: &str, patch: &str) -> Result<(), String> {
+    ensure_compare_head_clean(cwd, head, &[path])?;
+    apply_worktree_patch_reverse(cwd, patch)
+}
+
 /// Delete an untracked path (`git clean -f --`). Destructive.
 pub fn remove_untracked_file(cwd: &Path, file_path: &str) -> Result<(), String> {
     exec_git_checked(&["clean", "-f", "--", file_path], cwd)
@@ -1530,6 +1606,131 @@ keep-z
         );
         assert!(rev_parse_commit(&dir, "no-such-ref").unwrap().is_none());
         assert!(exec_git_stdout(&["this-is-not-a-git-command"], &dir).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `main` has `m.txt`, `d.txt`, `old.txt`; `feature` (checked out)
+    /// modifies `m.txt`, deletes `d.txt`, renames `old.txt` → `new.txt`,
+    /// and adds `added.txt`. Returns (dir, merge base, head).
+    fn compare_revert_fixture() -> (std::path::PathBuf, String, String) {
+        let dir = unique_dir("ws-git-compare-revert");
+        init_repo(&dir);
+        fs::write(dir.join("m.txt"), "m-base\n").unwrap();
+        fs::write(dir.join("d.txt"), "d-base\n").unwrap();
+        fs::write(dir.join("old.txt"), "r1\nr2\nr3\nr4\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "base"]);
+        let merge_base = exec_git(&["rev-parse", "HEAD"], &dir);
+        git(&dir, &["checkout", "-q", "-b", "feature"]);
+        fs::write(dir.join("m.txt"), "m-head\n").unwrap();
+        fs::write(dir.join("added.txt"), "added\n").unwrap();
+        git(&dir, &["rm", "-q", "d.txt"]);
+        git(&dir, &["mv", "old.txt", "new.txt"]);
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "feature"]);
+        let head = exec_git(&["rev-parse", "HEAD"], &dir);
+        (dir, merge_base, head)
+    }
+
+    fn index_is_head(dir: &Path) -> bool {
+        exec_git_status(&["diff", "--cached", "--quiet"], dir) == 0
+    }
+
+    #[test]
+    fn revert_compare_file_restores_each_status_from_merge_base() {
+        let (dir, mb, head) = compare_revert_fixture();
+        let listed = list_compare_name_status(&dir, &mb, &head).unwrap();
+        let status = |path: &str| {
+            listed
+                .iter()
+                .find(|row| row.path == path)
+                .map(|row| row.status.clone())
+        };
+        assert_eq!(status("m.txt").as_deref(), Some("M"));
+        assert_eq!(status("added.txt").as_deref(), Some("A"));
+        assert_eq!(status("d.txt").as_deref(), Some("D"));
+        assert_eq!(status("new.txt").as_deref(), Some("R"));
+
+        // M: content back to the merge base.
+        revert_compare_file(&dir, &mb, &head, "m.txt", None).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("m.txt")).unwrap(), "m-base\n");
+        // A: the file is not in the merge base, so it is deleted.
+        revert_compare_file(&dir, &mb, &head, "added.txt", None).unwrap();
+        assert!(!dir.join("added.txt").exists());
+        // D: the file is written back.
+        revert_compare_file(&dir, &mb, &head, "d.txt", None).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("d.txt")).unwrap(), "d-base\n");
+        // R: old path written back, new path deleted.
+        revert_compare_file(&dir, &mb, &head, "new.txt", Some("old.txt")).unwrap();
+        assert!(!dir.join("new.txt").exists());
+        assert_eq!(
+            fs::read_to_string(dir.join("old.txt")).unwrap(),
+            "r1\nr2\nr3\nr4\n"
+        );
+
+        assert!(
+            index_is_head(&dir),
+            "compare revert must not touch the index"
+        );
+        assert_eq!(exec_git(&["rev-parse", "HEAD"], &dir), head);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn revert_compare_file_aborts_when_head_moved_or_path_dirty() {
+        let (dir, mb, head) = compare_revert_fixture();
+
+        // Unstaged edit.
+        fs::write(dir.join("m.txt"), "local edit\n").unwrap();
+        let err = revert_compare_file(&dir, &mb, &head, "m.txt", None).unwrap_err();
+        assert!(err.contains("m.txt has uncommitted changes"), "{err}");
+        assert_eq!(
+            fs::read_to_string(dir.join("m.txt")).unwrap(),
+            "local edit\n"
+        );
+        revert_tracked_file(&dir, "m.txt").unwrap();
+
+        // Staged-only edit.
+        fs::write(dir.join("m.txt"), "staged edit\n").unwrap();
+        stage_file(&dir, "m.txt").unwrap();
+        fs::write(dir.join("m.txt"), "m-head\n").unwrap();
+        let err = revert_compare_file(&dir, &mb, &head, "m.txt", None).unwrap_err();
+        assert!(err.contains("uncommitted"), "{err}");
+        unstage_file(&dir, "m.txt").unwrap();
+
+        // Untracked file at a rename's old path would be overwritten.
+        fs::write(dir.join("old.txt"), "mine\n").unwrap();
+        let err = revert_compare_file(&dir, &mb, &head, "new.txt", Some("old.txt")).unwrap_err();
+        assert!(err.contains("uncommitted"), "{err}");
+        assert_eq!(fs::read_to_string(dir.join("old.txt")).unwrap(), "mine\n");
+        assert!(dir.join("new.txt").exists());
+        fs::remove_file(dir.join("old.txt")).unwrap();
+
+        // HEAD moved since the compare loaded.
+        fs::write(dir.join("other.txt"), "x\n").unwrap();
+        git(&dir, &["add", "other.txt"]);
+        git(&dir, &["commit", "-q", "-m", "moved"]);
+        let err = revert_compare_file(&dir, &mb, &head, "m.txt", None).unwrap_err();
+        assert!(err.contains("HEAD moved"), "{err}");
+        assert_eq!(fs::read_to_string(dir.join("m.txt")).unwrap(), "m-head\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn revert_compare_patch_checks_before_apply() {
+        let (dir, mb, head) = compare_revert_fixture();
+        let patch = diff_compare_file_ctx(&dir, &mb, &head, "m.txt", None, None)
+            .unwrap()
+            .join("\n")
+            + "\n";
+        fs::write(dir.join("m.txt"), "dirty\n").unwrap();
+        let err = revert_compare_patch(&dir, &head, "m.txt", &patch).unwrap_err();
+        assert!(err.contains("uncommitted"), "{err}");
+        assert_eq!(fs::read_to_string(dir.join("m.txt")).unwrap(), "dirty\n");
+        revert_tracked_file(&dir, "m.txt").unwrap();
+        revert_compare_patch(&dir, &head, "m.txt", &patch).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("m.txt")).unwrap(), "m-base\n");
+        assert!(index_is_head(&dir));
         let _ = fs::remove_dir_all(&dir);
     }
 
