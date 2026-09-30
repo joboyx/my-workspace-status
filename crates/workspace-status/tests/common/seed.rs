@@ -225,8 +225,8 @@ pub const COMMIT_MSG_BODY_TAIL: &str = "UNIQUE_MSG_BODY_TAIL";
 /// Long subject plus a body taller than the graph footer: [`COMMIT_MSG_BODY`],
 /// filler lines, then [`COMMIT_MSG_BODY_TAIL`].
 ///
-/// Do not `/` search the body tokens. Graph rows stay one line; the footer
-/// and commit-files header wrap when expanded.
+/// Do not `/` search the body tokens. Graph rows stay one line; the graph footer
+/// and commit-files footer wrap when expanded.
 pub fn seed_multiline_message_repo(workspace: &Path, name: &str) {
     let repo = workspace.join(name);
     init_repo(&repo, "main");
