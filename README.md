@@ -38,7 +38,7 @@ This is the glance I wanted instead. Left pane is the workspace tree (repos, wor
 
 ![Show ignored](docs/images/07-show-ignored.gif)
 
-**Help** — `?` opens MOVE / GIT / VIEW.
+**Help** — `?` opens MOVE / GIT / VIEW. On a compare tab, a COMPARE column replaces GIT: the keys that work on the compare diff and the ones that need the Workspace tab.
 
 ![Help overlay](docs/images/08-help.gif)
 
