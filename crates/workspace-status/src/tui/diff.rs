@@ -1092,7 +1092,10 @@ pub fn diff_pane_mode_label(mode: DiffMode, effective: DiffMode) -> &'static str
     }
 }
 
-/// One-line `{path}  inline|split · full? · wrap?` header (plus pan / scroll when set).
+/// `{path}  inline|split · full? · wrap?` header text (plus pan / scroll when set).
+///
+/// The pane wraps the path part over [`diff_pane_header_rows`] rows; the
+/// extras follow it on its last row.
 pub fn diff_pane_header(
     path: &str,
     mode_label: &str,
@@ -1119,6 +1122,23 @@ pub fn diff_pane_header(
         extra.push_str(&format!("  {shown}/{row_count}"));
     }
     format!("{title}{extra}")
+}
+
+/// Rows the file-diff path header takes in a pane of `width` × `height`.
+///
+/// The title (`path`, or `Diff` when empty) wraps by display columns at
+/// `width`. The count is capped at half of `height` (floor, at least 1)
+/// so the diff body always keeps rows. A zero width or a pane of one row
+/// or less gives 1. The muted extras and the scroll position do not
+/// count, so the body does not move while it scrolls or pans.
+pub fn diff_pane_header_rows(path: &str, width: u16, height: u16) -> u16 {
+    if width == 0 || height <= 1 {
+        return 1;
+    }
+    let title = if path.is_empty() { "Diff" } else { path };
+    let rows = wrap_col_starts(title, width as usize).len();
+    let cap = (height / 2).max(1);
+    (rows.min(cap as usize) as u16).max(1)
 }
 
 /// Search text for one painted row (code / hunk / section, not raw git).
@@ -1491,6 +1511,46 @@ index 1111111..2222222 100644
             DiffMode::Inline,
         );
         assert_eq!(gutter_width(&big), 4);
+    }
+
+    #[test]
+    fn header_rows_fit_on_one_row_for_a_short_path() {
+        assert_eq!(diff_pane_header_rows("app/README.md", 40, 20), 1);
+        assert_eq!(
+            diff_pane_header_rows("", 40, 20),
+            1,
+            "empty path shows `Diff`"
+        );
+        assert_eq!(diff_pane_header_rows("abcd", 4, 20), 1, "exact fit");
+    }
+
+    #[test]
+    fn header_rows_wrap_a_long_path_by_display_columns() {
+        assert_eq!(diff_pane_header_rows("abcde", 4, 20), 2);
+        assert_eq!(diff_pane_header_rows(&"x".repeat(25), 10, 20), 3);
+        // Four wide glyphs are eight columns: two rows at width 4, not one.
+        assert_eq!(diff_pane_header_rows("日本語字", 4, 20), 2);
+        assert_eq!(
+            diff_pane_header_rows("日本語字", 5, 20),
+            2,
+            "a wide glyph never splits"
+        );
+    }
+
+    #[test]
+    fn header_rows_cap_at_half_the_pane_height() {
+        let path = "x".repeat(100);
+        assert_eq!(diff_pane_header_rows(&path, 10, 12), 6);
+        assert_eq!(diff_pane_header_rows(&path, 10, 7), 3, "floor of half");
+        assert_eq!(diff_pane_header_rows(&path, 10, 3), 1);
+    }
+
+    #[test]
+    fn header_rows_are_one_on_a_tiny_or_zero_width_pane() {
+        let path = "x".repeat(100);
+        assert_eq!(diff_pane_header_rows(&path, 10, 1), 1);
+        assert_eq!(diff_pane_header_rows(&path, 10, 0), 1);
+        assert_eq!(diff_pane_header_rows(&path, 0, 20), 1);
     }
 
     #[test]

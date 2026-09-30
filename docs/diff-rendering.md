@@ -66,6 +66,10 @@ Scroll position is reset only when the painted file-diff identity changes, so a 
 
 Split rows (`left + RULE + right`) take column widths from `tui/split.rs`. Default fraction is 0.5. Mouse drag on the RULE (± 1 columns, same band as the tree/diff pane divider) updates a session-only split fraction; it is **not** written to disk, so the next launch resets to 50/50. Drag is armed only while the effective mode is side-by-side (`width ≥ NARROW_SXS`). `i` still toggles inline / split.
 
+## Path header
+
+The path header sits above the diff body in `draw_diff_pane`. A path wider than the pane wraps over several rows by display columns and can break anywhere. `diff_pane_header_rows` sets the row count: the rows the path needs, at most half the pane height (at least 1). A path cut by that cap is clipped on its last row. The muted extras (`inline|split`, ` · full`, ` · wrap`, ` · pan N`, `shown/total`) follow the path on its last row and clip at the pane edge. The row count does not depend on the extras or the scroll position, so the body does not move while it scrolls or pans. Paint, click, PageUp / PageDown, and the viewport use the same count.
+
 ## Focused row
 
 A focused file-diff row (section, hunk, or line) paints the same cursor bar as other lists. An unfocused file-diff still marks that row with the thinner inactive marker and `cursorBgInactive`. `j` / `k`, PageUp / PageDown, Ctrl-u / Ctrl-d, click, search, and vertical wheel move that row. The viewport keeps it near the vertical middle (`list_viewport_start`, same helper as the workspace tree). `gg` / `G` and Home / End jump to the first / last row.

@@ -26,9 +26,9 @@ use super::comments::{
     tree_row_has_comment, CommentPrompt, COMMENT_OVERLAY_FOOTER_EDIT,
 };
 use super::diff::{
-    cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, diff_row_content_width,
-    diff_wrap_row_heights, gutter_width, section_header, wrap_viewport_start, DiffCell,
-    DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
+    cell_code_width, cell_sign, diff_pane_header, diff_pane_header_rows, diff_pane_mode_label,
+    diff_row_content_width, diff_wrap_row_heights, gutter_width, section_header,
+    wrap_viewport_start, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
 };
 use super::drill::DrillView;
 use super::help::{
@@ -974,7 +974,8 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let wrap = state.diff_wrap;
     let hscroll = !wrap && graph_hscroll_visible(state.diff_col_offset);
     let h_rows = u16::from(hscroll);
-    let list_h = area.height.saturating_sub(1).max(1);
+    let header_h = diff_pane_header_rows(&path, area.width, area.height);
+    let list_h = area.height.saturating_sub(header_h).max(1);
     let line_h = list_h.saturating_sub(h_rows).max(1) as usize;
     let gutter = gutter_width(&rows);
     let gutter_with_mark = gutter.saturating_add(comment_mark_cols(state.ascii));
@@ -1011,28 +1012,33 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         path.as_str()
     };
     let extra = header.strip_prefix(title).unwrap_or("").to_string();
-    let header_line = Line::from(vec![
-        Span::styled(
-            title.to_string(),
-            Style::default()
-                .fg(palette.heading)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(extra, Style::default().fg(palette.muted)),
-    ]);
+    let heading = Style::default()
+        .fg(palette.heading)
+        .add_modifier(Modifier::BOLD);
+    // Break the title anywhere by display columns so the row count
+    // matches `diff_pane_header_rows`; the extras follow on the last row.
+    let mut header_lines: Vec<Line> = wrap_cols(title, area.width as usize)
+        .into_iter()
+        .take(header_h as usize)
+        .map(|chunk| Line::from(Span::styled(chunk, heading)))
+        .collect();
+    if let Some(last) = header_lines.last_mut() {
+        last.spans
+            .push(Span::styled(extra, Style::default().fg(palette.muted)));
+    }
     let header_area = Rect {
         x: area.x,
         y: area.y,
         width: area.width,
-        height: 1,
+        height: header_h.min(area.height),
     };
-    frame.render_widget(Paragraph::new(header_line), header_area);
-    if area.height <= 1 {
+    frame.render_widget(Paragraph::new(header_lines), header_area);
+    if area.height <= header_h {
         return;
     }
     let body = Rect {
         x: area.x,
-        y: area.y.saturating_add(1),
+        y: area.y.saturating_add(header_h),
         width: area.width,
         height: list_h,
     };
@@ -3109,6 +3115,61 @@ mod tests {
         );
         state.diff_col_offset = offset;
         state
+    }
+
+    /// Text of one right-pane row, `width` cells from `x`.
+    fn row_cells(terminal: &Terminal<TestBackend>, x: u16, y: u16, width: u16) -> String {
+        let buf = terminal.backend().buffer();
+        (x..x + width).map(|col| buf[(col, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn long_diff_path_header_wraps_and_the_body_starts_below_it() {
+        let mut state = two_pane_diff_state();
+        let path = format!("{}/leaf-file-TAIL.rs", "nested-folder".repeat(6));
+        state.set_diff(
+            "app".into(),
+            path.clone(),
+            super::super::diff::DiffContent::from_lines(vec![
+                "@@ -1,1 +1,1 @@".into(),
+                "-old line".into(),
+                "+new line".into(),
+            ]),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let (x, y, width) = (
+            state.layout.diff_content_x,
+            state.layout.right_y,
+            state.layout.diff_pane_width,
+        );
+        let title = format!("app/{path}");
+        let header_h = diff_pane_header_rows(&title, width, state.layout.diff_pane_height);
+        assert!(header_h > 1, "fixture path must wrap at width {width}");
+        let header: String = (y..y + header_h)
+            .map(|row| row_cells(&terminal, x, row, width))
+            .collect();
+        assert!(
+            header.starts_with(&title),
+            "header rows must hold the full path `{title}`:\n{}",
+            buffer_text(&terminal)
+        );
+        let buf = terminal.backend().buffer();
+        for row in y..y + header_h {
+            assert!(
+                buf[(x, row)].modifier.contains(Modifier::BOLD),
+                "header row {row} is a bold heading"
+            );
+        }
+        let first = super::super::diff::row_search_text(
+            &state.current_diff_rows()[state.diff_scroll as usize],
+        );
+        let body = row_cells(&terminal, x, y + header_h, width);
+        assert!(
+            body.contains(&first),
+            "first diff row `{first}` paints right below the header, got `{body}`:\n{}",
+            buffer_text(&terminal)
+        );
     }
 
     #[test]

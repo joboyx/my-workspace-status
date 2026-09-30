@@ -47,9 +47,9 @@ use super::commit_files::{
 };
 use super::ctrl_c_exit::{handle_ctrl_c, is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT};
 use super::diff::{
-    anchor_row_text, build_diff_rows, build_partial_patch, diff_row_content_width,
-    diff_wrap_row_heights, find_anchor_row, gutter_width, row_search_text, wrap_viewport_start,
-    DiffContent, DiffRow, PartialPatchKind,
+    anchor_row_text, build_diff_rows, build_partial_patch, diff_pane_header_rows,
+    diff_row_content_width, diff_wrap_row_heights, find_anchor_row, gutter_width, row_search_text,
+    wrap_viewport_start, DiffContent, DiffRow, PartialPatchKind,
 };
 use super::drill::{
     source_from_graph_row, stash_ref_from_graph_row, CommitFile, CommitFileSource, DrillView,
@@ -1852,11 +1852,20 @@ impl AppState {
         self.restore_commit_file_cursor(Some(&row.path));
     }
 
+    /// Rows the diff pane path header takes (same count the paint uses).
+    fn diff_header_rows(&self) -> u16 {
+        diff_pane_header_rows(
+            &self.diff_header_path(),
+            self.layout.diff_pane_width,
+            self.layout.diff_pane_height,
+        )
+    }
+
     fn diff_body_height(&self) -> usize {
         let h_bar = u16::from(self.diff_col_offset > 0);
         self.layout
             .diff_pane_height
-            .saturating_sub(1 + h_bar)
+            .saturating_sub(self.diff_header_rows() + h_bar)
             .max(1) as usize
     }
 
@@ -2055,7 +2064,7 @@ impl AppState {
 
     /// Select the file-diff row under `row` and keep it near the middle.
     fn click_diff(&mut self, row: u16) {
-        let body_y = self.layout.right_y.saturating_add(1);
+        let body_y = self.layout.right_y.saturating_add(self.diff_header_rows());
         if row < body_y {
             return;
         }
@@ -5678,7 +5687,8 @@ mod tests {
 
     fn pan_and_scroll_focused_diff(app: &mut AppState) {
         app.focus = FocusPane::Right;
-        app.layout.diff_pane_width = 8;
+        // Wide enough for a one-row `app/<path>` header, narrow enough to pan.
+        app.layout.diff_pane_width = 16;
         app.layout.diff_pane_height = 8;
         let steps = (app.diff_body_height() / 2 + 8) as i32;
         app.dispatch(Action::Move(steps));
@@ -11170,6 +11180,62 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Right);
         assert_eq!(app.dispatch(Action::Release), Effect::None);
         assert_eq!(app.drag, SplitDrag::None);
+    }
+
+    /// Repo-relative path that wraps to three header rows at width 20.
+    const LONG_DIFF_PATH: &str = "src/deeply/nested/folder/module/file.rs";
+
+    /// File diff of 40 added lines under `path`, in a 20×20 right pane.
+    fn tall_diff_in_narrow_pane(path: &str) -> AppState {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        let mut lines = vec!["@@ -1,1 +1,40 @@".into()];
+        lines.extend((0..40).map(|i| format!("+line {i}")));
+        app.set_diff("app".into(), path.into(), DiffContent::from_lines(lines));
+        app.layout.term_cols = 160;
+        app.layout.pane_height = 22;
+        app.layout.outer_tree_width = 48;
+        app.layout.right_x = 48;
+        app.layout.right_y = 1;
+        app.layout.diff_pane_width = 20;
+        app.layout.diff_pane_height = 20;
+        app
+    }
+
+    #[test]
+    fn diff_body_height_shrinks_by_the_wrapped_header_rows() {
+        let short = tall_diff_in_narrow_pane("README.md");
+        assert_eq!(short.diff_header_rows(), 1);
+        assert_eq!(short.diff_body_height(), 19);
+        let long = tall_diff_in_narrow_pane(LONG_DIFF_PATH);
+        assert_eq!(long.diff_header_rows(), 3, "{}", long.diff_header_path());
+        assert_eq!(long.diff_body_height(), 17);
+    }
+
+    #[test]
+    fn click_below_a_wrapped_diff_header_selects_the_first_body_row() {
+        let mut app = tall_diff_in_narrow_pane(LONG_DIFF_PATH);
+        app.focus = FocusPane::Right;
+        app.dispatch(Action::Move(30));
+        let scroll = app.diff_scroll as usize;
+        assert!(scroll > 0, "fixture must scroll the diff");
+        let header = app.diff_header_rows();
+        assert_eq!(header, 3);
+
+        let cursor = app.diff_cursor;
+        let header_row = app.layout.right_y + header - 1;
+        app.dispatch(Action::Click {
+            col: 100,
+            row: header_row,
+        });
+        assert_eq!(app.diff_cursor, cursor, "a header row selects nothing");
+
+        let body_row = app.layout.right_y + header;
+        app.dispatch(Action::Click {
+            col: 100,
+            row: body_row,
+        });
+        assert_eq!(app.diff_cursor, scroll, "first body row is `diff_scroll`");
     }
 
     #[test]
