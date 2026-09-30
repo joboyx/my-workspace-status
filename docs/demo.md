@@ -8,7 +8,7 @@ Refresh the README/demo GIFs from the repo root:
 
 That script seeds, installs MesloLGS NF and ffmpeg if needed, starts Xvfb and Openbox through `scripts/with-desktop-session.sh`, and types the hardcoded keys below. ffmpeg `x11grab` records only the terminal window at 10 fps. The script then encodes each clip to `docs/images/NN-name.gif` (`palettegen` / `paletteuse`, loops forever, no downscale). Do not invent a fixture or a second capture pipeline.
 
-The script rejects a clip and keeps the old GIF when the last frame is gray or too small, when no frame differs from the first (the keys did nothing), when two clips are identical, or when a GIF is over 4 MB.
+The script rejects a clip and keeps the old GIF when the last frame is gray or too small, when no frame differs from the first (the keys did nothing), or when a GIF is over 4 MB.
 
 ## Seed
 

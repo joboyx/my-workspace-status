@@ -42,7 +42,6 @@ WID=""
 WS_PID=""
 REC_PID=""
 REC_RAW=""
-declare -A CLIP_HASHES=()
 
 # Clip pacing (seconds) and limits. Text stays at native size: no downscale.
 CLIP_FPS=10
@@ -142,6 +141,7 @@ EOF
 cleanup() {
   if [[ -n "${REC_PID:-}" ]] && kill -0 "$REC_PID" 2>/dev/null; then
     kill -TERM "$REC_PID" 2>/dev/null || true
+    wait "$REC_PID" 2>/dev/null || true
   fi
   if [[ -n "${TERM_PID:-}" ]] && kill -0 "$TERM_PID" 2>/dev/null; then
     kill "$TERM_PID" 2>/dev/null || true
@@ -369,6 +369,7 @@ clip_start() {
 clip_stop() {
   hold "$END_HOLD"
   [[ -n "${REC_PID:-}" ]] || die "clip_stop without a recording"
+  kill -0 "$REC_PID" 2>/dev/null || die "ffmpeg exited before $REC_RAW was complete"
   # SIGTERM lets ffmpeg flush and close the mkv.
   kill -TERM "$REC_PID" 2>/dev/null || true
   wait "$REC_PID" 2>/dev/null || true
@@ -385,31 +386,30 @@ encode_gif() {
     || die "GIF encode failed for $raw"
 }
 
-# Save the first and last frame of a GIF as PNG. Prints "FRAMES SECONDS".
+# Save the last frame of a GIF as PNG. Prints "FRAMES SECONDS".
 # Exit 4 when no frame differs from the first (the keys did nothing). A clip
-# may end where it started (s then u), so first == last alone is not a fail.
+# may end where it started (u then s), so first == last alone is not a fail.
 clip_frames() {
   python3 - "$@" <<'PY'
 import sys
 from PIL import Image, ImageSequence
-gif, first_png, last_png = sys.argv[1:4]
+gif, last_png = sys.argv[1:3]
 im = Image.open(gif)
 frames = 0
 ms = 0
-first = last = None
+first_bytes = None
+last = None
 changed = False
 for frame in ImageSequence.Iterator(im):
     frames += 1
     ms += frame.info.get("duration", 0)
     rgb = frame.convert("RGB")
-    if first is None:
-        first = rgb.copy()
-        first_bytes = first.tobytes()
+    if first_bytes is None:
+        first_bytes = rgb.tobytes()
     elif not changed and rgb.tobytes() != first_bytes:
         changed = True
     last = rgb
 last = last.copy()
-first.save(first_png)
 last.save(last_png)
 print(frames, f"{ms / 1000:.1f}")
 if not changed:
@@ -454,13 +454,16 @@ clip_commit() {
   local name="$1"
   local staged="$STAGE_DIR/${name}.gif"
   local final="$OUT_DIR/${name}.gif"
-  local first="$STAGE_DIR/${name}-first.png"
   local last="$STAGE_DIR/${name}-last.png"
-  local info bytes digest other
+  local info bytes rc
   clip_stop
   encode_gif "$REC_RAW" "$staged"
-  if ! info="$(clip_frames "$staged" "$first" "$last")"; then
+  rc=0
+  info="$(clip_frames "$staged" "$last")" || rc=$?
+  if ((rc == 4)); then
     die "rejecting $final: every frame matches the first (keys did nothing). Existing clip left in place."
+  elif ((rc != 0)); then
+    die "rejecting $final: frame check failed (exit $rc). Existing clip left in place."
   fi
   if ! not_gray "$last"; then
     die "rejecting $final (gray/tiny last frame). Existing clip left in place."
@@ -469,13 +472,6 @@ clip_commit() {
   if ((bytes > MAX_GIF_BYTES)); then
     die "rejecting $final: $((bytes / 1024)) KiB is over $((MAX_GIF_BYTES / 1024)) KiB. Shorten the clip."
   fi
-  digest="$(md5sum "$staged" | awk '{print $1}')"
-  for other in "${!CLIP_HASHES[@]}"; do
-    if [[ "${CLIP_HASHES[$other]}" == "$digest" ]]; then
-      die "rejecting $final: identical clip to $other (keys/window grab failed). Existing clip left in place."
-    fi
-  done
-  CLIP_HASHES["${name}.gif"]="$digest"
   mkdir -p "$OUT_DIR"
   cp -f "$staged" "$final"
   echo "ok $final ($((bytes / 1024)) KiB, frames/seconds: $info)"

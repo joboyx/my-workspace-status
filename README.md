@@ -30,7 +30,7 @@ This is the glance I wanted instead. Left pane is the workspace tree (repos, wor
 
 ![Reviewed mark](docs/images/05-reviewed.gif)
 
-**Stash** — `S` on a dirty repo creates a stash. On a graph stash, `D` asks `y` / `n` in a boxed overlay.
+**Stash** — `S` on a dirty repo opens the stash menu. On a graph stash, `D` asks `y` / `n` in a boxed overlay.
 
 ![Stash](docs/images/06-stash.gif)
 
