@@ -9,9 +9,9 @@ use crate::seed::{REGIONS_ALPHA, REGIONS_OMEGA};
 
 pub const WAIT: Duration = Duration::from_secs(12);
 
-/// Compare-tab close control as painted: brackets around U+1D501 (mathematical
-/// bold script small x). One terminal cell per char.
-pub const TAB_CLOSE: &str = "[\u{1D501}]";
+/// Compare-tab close control as painted: brackets around U+2717 (ballot x).
+/// One terminal cell per char.
+pub const TAB_CLOSE: &str = "[\u{2717}]";
 
 pub const GIT_WAIT: Duration = Duration::from_secs(20);
 

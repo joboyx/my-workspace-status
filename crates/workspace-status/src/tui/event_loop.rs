@@ -339,7 +339,7 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
     if let Some(pointer) = pointer_motion(&event, &action) {
         // Any-event motion (DECSET 1003) arrives on every cell the pointer
         // crosses. Store it without dispatch: no chord reset, no status,
-        // no effect. Redraw only when the hovered tab `[𝔁]` changes.
+        // no effect. Redraw only when the hovered tab `[✗]` changes.
         if ctx.state.set_pointer(pointer) {
             ctx.presenter.mark();
         }
@@ -406,7 +406,7 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
 /// Pointer update for buttonless motion, or `None` for any other input.
 ///
 /// [`Action::PointerMove`] stores the cell. Motion inside an overlay maps to
-/// [`Action::None`]; it clears the pointer so no `[𝔁]` hover shows there.
+/// [`Action::None`]; it clears the pointer so no `[✗]` hover shows there.
 fn pointer_motion(event: &crossterm::event::Event, action: &Action) -> Option<Option<(u16, u16)>> {
     match action {
         Action::PointerMove { col, row } => Some(Some((*col, *row))),

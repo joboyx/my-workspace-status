@@ -6,12 +6,12 @@ use crate::support::{GIT_WAIT, TAB_CLOSE, WAIT};
 
 /// SGR pointer motion with no button held (`3 | 32`, any-event tracking).
 const SGR_POINTER_MOVE: u8 = 3 | 32;
-/// Tokyo Night `tab_close` (`#787878`): idle `[𝔁]`, dark gray dimmer than `muted`.
+/// Tokyo Night `tab_close` (`#787878`): idle `[✗]`, dark gray dimmer than `muted`.
 const IDLE_FG: (u8, u8, u8) = (0x78, 0x78, 0x78);
-/// Tokyo Night `tab_close_hover` (`#ffffff`): hovered `[𝔁]`, white.
-const HOVER_FG: (u8, u8, u8) = (0xff, 0xff, 0xff);
+/// Tokyo Night `tab_close_hover` (`#f7768e`, the theme's `deleted`): hovered `[✗]`, red.
+const HOVER_FG: (u8, u8, u8) = (0xf7, 0x76, 0x8e);
 
-/// 0-based cell of the glyph in the compare tab `[𝔁]`.
+/// 0-based cell of the glyph in the compare tab `[✗]`.
 fn tab_close_x(screen: &str) -> Option<(u16, u16)> {
     for (row, line) in screen.lines().enumerate() {
         if !line.contains("app ↔") {
@@ -36,14 +36,14 @@ fn wait_close_fg(tui: &PtySession, want: (u8, u8, u8), what: &str) {
             return;
         }
         if Instant::now() >= deadline {
-            panic!("{what}: [𝔁] fgs {fgs:?}, want {want:?}\n{}", tui.screen());
+            panic!("{what}: [✗] fgs {fgs:?}, want {want:?}\n{}", tui.screen());
         }
         std::thread::sleep(Duration::from_millis(25));
     }
 }
 
-/// Buttonless SGR motion over the compare `[𝔁]` whitens it; motion off
-/// the `[𝔁]` dims it again. Motion never closes or switches the tab.
+/// Buttonless SGR motion over the compare `[✗]` paints it red; motion off
+/// the `[✗]` dims it again. Motion never closes or switches the tab.
 #[test]
 fn pty_compare_mouse_tab_close_hover() {
     let (_root, workspace) = compare_ahead_workspace();
@@ -54,14 +54,14 @@ fn pty_compare_mouse_tab_close_hover() {
     tui.keys("vs default");
     tui.enter();
     tui.wait_contains("app ↔ origin/main", GIT_WAIT);
-    wait_close_fg(&tui, IDLE_FG, "idle [𝔁] paints tab_close");
+    wait_close_fg(&tui, IDLE_FG, "idle [✗] paints tab_close");
 
     let (col, row) = tab_close_x(&tui.screen()).expect("compare close control");
     tui.sgr_mouse(SGR_POINTER_MOVE, col, row);
-    wait_close_fg(&tui, HOVER_FG, "motion over [𝔁] paints tab_close_hover");
+    wait_close_fg(&tui, HOVER_FG, "motion over [✗] paints tab_close_hover");
 
     tui.sgr_mouse(SGR_POINTER_MOVE, 2, row);
-    wait_close_fg(&tui, IDLE_FG, "motion off [𝔁] restores tab_close");
+    wait_close_fg(&tui, IDLE_FG, "motion off [✗] restores tab_close");
     assert!(
         tui.screen().contains("app ↔ origin/main"),
         "motion must not close the compare tab:\n{}",
