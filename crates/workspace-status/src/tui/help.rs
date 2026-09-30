@@ -280,7 +280,7 @@ pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
             desc: "Workspace tab only",
         },
         HelpEntry {
-            keys: "b m C W",
+            keys: "b C W",
             desc: "Workspace tab only",
         },
         HelpEntry {
@@ -290,6 +290,10 @@ pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
         HelpEntry {
             keys: "o O",
             desc: "Workspace tab only",
+        },
+        HelpEntry {
+            keys: "r",
+            desc: "refresh now",
         },
     ],
 };
@@ -769,12 +773,15 @@ mod tests {
             "close tab",
             "s u",
             "f p P d",
-            "b m C W",
+            "b C W",
             "S a p D",
             "o O",
+            "r refresh now",
         ] {
             assert!(text.contains(needle), "{needle} missing: {text}");
         }
+        // `m` toggles mouse on a compare tab (no graph commit to merge).
+        assert!(!text.contains("b m C W"), "{text}");
     }
 
     #[test]

@@ -7807,6 +7807,29 @@ mod tests {
     }
 
     #[test]
+    fn compare_palette_revert_row_checks_the_file_status_like_x() {
+        let mut app = compare_regions_app();
+        assert_eq!(palette_reason(&app, "Revert"), None);
+        assert_eq!(app.compare_file_revert_refusal(), None);
+
+        // A type change: `x`, the hint row, and the palette row all refuse.
+        app.tabs.active_compare_mut().unwrap().files[0].status = "T".into();
+        let reason = "cannot revert a T change";
+        assert_eq!(app.compare_refusal(&Action::Revert), None, "gate passes");
+        assert_eq!(app.compare_file_revert_refusal().as_deref(), Some(reason));
+        assert_eq!(palette_reason(&app, "Revert").as_deref(), Some(reason));
+        let hints: Vec<String> = super::super::chrome::action_hint_segments(&app)
+            .into_iter()
+            .map(|hint| hint.key)
+            .collect();
+        assert!(!hints.contains(&"x".to_string()), "{hints:?}");
+        app.status.clear();
+        assert_eq!(app.dispatch(Action::Revert), Effect::None);
+        assert_eq!(app.status, reason);
+        assert_eq!(app.confirm, None);
+    }
+
+    #[test]
     fn compare_idle_hints_read_the_compare_tab_not_the_parked_tree() {
         let keys = |app: &AppState| -> Vec<(String, String)> {
             super::super::chrome::action_hint_segments(app)
@@ -7869,7 +7892,7 @@ mod tests {
         );
         assert!(has(&hints, "e") && has(&hints, "ctrl+o"), "{hints:?}");
 
-        // File list: the focused compare file decides, and a dir row has no `x`.
+        // File list: the focused compare file decides.
         app.focus = FocusPane::Left;
         let rows = app.commit_file_rows();
         let file = rows.iter().position(|row| row.path == "new.txt").unwrap();

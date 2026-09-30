@@ -503,8 +503,9 @@ impl AppState {
             return Some("not available here".into());
         }
         match action {
-            // `compare_refusal` above already gave the compare reason.
-            Action::Revert if self.is_compare_tab() => None,
+            // Same check as compare `x` with no highlight: the compare
+            // gate, then the file status (M / A / D / R only).
+            Action::Revert if self.is_compare_tab() => self.compare_file_revert_refusal(),
             Action::Pull | Action::DefaultBranch | Action::Fetch => {
                 let op = if matches!(action, Action::Pull) {
                     Op::Pull
