@@ -33,7 +33,7 @@ use super::diff::{
 use super::drill::DrillView;
 use super::help::{
     help_chip_gap_spaces, help_column_width, help_entry_matches, help_entry_visual_lines,
-    help_idle_footer_lines, help_inner_width, help_version_label, HELP_GROUPS,
+    help_groups, help_idle_footer_lines, help_inner_width, help_version_label,
     HELP_SEARCH_ESC_HINT,
 };
 use super::icons::{
@@ -1532,6 +1532,7 @@ fn help_group_chrome(title: &str, ascii: bool, palette: Palette) -> (&'static st
     match title {
         "MOVE" => (icon_move(ascii), palette.cursor),
         "GIT" => (icon_branch(ascii), palette.added),
+        "COMPARE" => (icon_branch(ascii), palette.repo),
         _ => (icon_diff(ascii), palette.modified),
     }
 }
@@ -1671,7 +1672,9 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let palette = state.theme.palette();
     let pills = state.theme.pills();
     let surface = overlay_surface(state);
-    let max_rows = HELP_GROUPS
+    // A compare tab swaps GIT for the COMPARE column; same row budget.
+    let groups = help_groups(state.is_compare_tab());
+    let max_rows = groups
         .iter()
         .map(|group| group.entries.len())
         .max()
@@ -1683,7 +1686,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let col_w = help_column_width(term_width);
 
     let mut title_spans = Vec::new();
-    for group in HELP_GROUPS {
+    for group in groups {
         let (icon, color) = help_group_chrome(group.title, state.ascii, palette);
         title_spans.extend(clamp_spans(
             vec![Span::styled(
@@ -1696,7 +1699,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     lines.push(Line::from(title_spans));
 
     for row in 0..max_rows {
-        let cells: Vec<Vec<super::help::HelpVisualLine>> = HELP_GROUPS
+        let cells: Vec<Vec<super::help::HelpVisualLine>> = groups
             .iter()
             .map(|group| match group.entries.get(row) {
                 Some(entry) => help_entry_visual_lines(entry.desc, col_w, entry.keys),
@@ -1710,7 +1713,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         let height = cells.iter().map(|cell| cell.len()).max().unwrap_or(1);
         for vis_row in 0..height {
             let mut spans = Vec::new();
-            for (group_idx, group) in HELP_GROUPS.iter().enumerate() {
+            for (group_idx, group) in groups.iter().enumerate() {
                 let (_, color) = help_group_chrome(group.title, state.ascii, palette);
                 let entry = group.entries.get(row);
                 let hit = searching

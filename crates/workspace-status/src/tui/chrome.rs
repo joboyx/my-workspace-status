@@ -350,6 +350,16 @@ const TREE_WRITE_BLOCKED: &[HintActionId] = &[
     HintActionId::RemoveWorktree,
 ];
 
+/// Hint actions a compare tab can run. Stage / unstage and the remote,
+/// branch, stash, graph, and worktree actions stay on the Workspace tab
+/// (`AppState::compare_refusal`), so the hint row never offers them there.
+const COMPARE_HINT_ACTIONS: &[HintActionId] = &[
+    HintActionId::Revert,
+    HintActionId::Edit,
+    HintActionId::ToggleViewed,
+    HintActionId::FullFile,
+];
+
 const GRAPH_HINT_KINDS: &[HintRowKind] = &[
     HintRowKind::GraphCommit,
     HintRowKind::GraphStash,
@@ -600,13 +610,20 @@ fn is_graph_kind(kind: HintRowKind) -> bool {
 }
 
 /// Hints for every action valid on `kind` at the given nav dims.
+///
+/// A compare tab reads the compare tab, not the parked Workspace tree row:
+/// only [`COMPARE_HINT_ACTIONS`], with `x` shown while it may revert the
+/// focused compare file to the merge base.
 pub fn action_hint_segments(state: &AppState) -> Vec<HintSegment> {
     let kind = hint_row_kind(state);
     let depth = nav_depth(state);
     let focus = state.focus;
-    let hide_tree_writes = depth >= 1 || focus == FocusPane::Right;
+    let compare = state.is_compare_tab();
+    // Compare `x` also runs from the focused diff, so it is not hidden there.
+    let hide_tree_writes = !compare && (depth >= 1 || focus == FocusPane::Right);
     HINT_ACTIONS
         .iter()
+        .filter(|action| !compare || COMPARE_HINT_ACTIONS.contains(&action.id))
         .filter(|action| action.kinds.contains(&kind))
         .filter(|action| match action.depths {
             Some(depths) => depths.contains(&depth),
@@ -625,6 +642,8 @@ pub fn action_hint_segments(state: &AppState) -> Vec<HintSegment> {
         .map(|action| {
             let label = if action.id == HintActionId::RemoveWorktree {
                 remove_worktree_hint_label(state)
+            } else if compare && action.id == HintActionId::Revert {
+                "revert to merge base".into()
             } else {
                 action.label.to_string()
             };
@@ -700,6 +719,9 @@ fn scope_action_visible(
         HintActionId::Unstage => collect_write_files(&state.snapshot, focused, state.show_ignored)
             .iter()
             .any(|file| file.change.staged_status.is_some()),
+        HintActionId::Revert if state.is_compare_tab() => {
+            state.compare_file_revert_refusal().is_none()
+        }
         HintActionId::Revert => collect_write_files(&state.snapshot, focused, state.show_ignored)
             .iter()
             .any(|file| file.change.unstaged_status.is_some() || file.change.untracked),

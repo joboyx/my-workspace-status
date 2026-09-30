@@ -3,6 +3,9 @@
 //! Three columns match `HELP_GROUPS` (MOVE / GIT / VIEW). Extra keys
 //! (`q`, Tab, picker `C`, stash `a p D`, Home/End) stay in those groups.
 //! The footer shows [`crate::APP_VERSION`] in the lower-right.
+//! On a compare tab [`help_groups`] swaps GIT for [`HELP_COMPARE_GROUP`]
+//! (what acts on the compare diff and what needs the Workspace tab), so the
+//! overlay keeps the same row budget.
 
 /// One help row: key chips plus a short description.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,6 +222,90 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
         ],
     },
 ];
+
+/// Compare-tab column that takes the place of GIT while a compare tab is active.
+///
+/// Lists the keys that act on the compare diff, when `x` may write, and the
+/// git actions that stay on the Workspace tab. Must not paint taller than
+/// GIT at any width (`compare_column_keeps_the_row_budget`).
+pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
+    title: "COMPARE",
+    entries: &[
+        HelpEntry {
+            keys: "V",
+            desc: "highlight for ; x ' :",
+        },
+        HelpEntry {
+            keys: "; Ctrl-R",
+            desc: "comment · resolve",
+        },
+        HelpEntry {
+            keys: "y",
+            desc: "copy comments",
+        },
+        HelpEntry {
+            keys: "'",
+            desc: "copy reference",
+        },
+        HelpEntry {
+            keys: "x",
+            desc: "revert to merge base",
+        },
+        HelpEntry {
+            keys: "x",
+            desc: "only if head checked out, file clean",
+        },
+        HelpEntry {
+            keys: "Ctrl-o",
+            desc: "full-file",
+        },
+        HelpEntry {
+            keys: "space",
+            desc: "mark reviewed",
+        },
+        HelpEntry {
+            keys: "e E",
+            desc: "editor · diff tool",
+        },
+        HelpEntry {
+            keys: "[x]",
+            desc: "close tab (or palette)",
+        },
+        HelpEntry {
+            keys: "s u",
+            desc: "Workspace tab only",
+        },
+        HelpEntry {
+            keys: "f p P d",
+            desc: "Workspace tab only",
+        },
+        HelpEntry {
+            keys: "b m C W",
+            desc: "Workspace tab only",
+        },
+        HelpEntry {
+            keys: "S a p D",
+            desc: "Workspace tab only",
+        },
+        HelpEntry {
+            keys: "o O",
+            desc: "Workspace tab only",
+        },
+    ],
+};
+
+/// Help columns on a compare tab: MOVE, [`HELP_COMPARE_GROUP`], VIEW.
+pub const HELP_COMPARE_GROUPS: &[HelpGroup] = &[HELP_GROUPS[0], HELP_COMPARE_GROUP, HELP_GROUPS[2]];
+
+/// Help columns for the active tab: [`HELP_COMPARE_GROUPS`] on a compare
+/// tab, else [`HELP_GROUPS`].
+pub fn help_groups(compare: bool) -> &'static [HelpGroup] {
+    if compare {
+        HELP_COMPARE_GROUPS
+    } else {
+        HELP_GROUPS
+    }
+}
 
 /// Idle help footer must mention overlay-local `/` search.
 pub const HELP_IDLE_FOOTER_SNIPPET: &str = "/ search help";
@@ -639,6 +726,55 @@ mod tests {
             at_140 <= 32,
             "140×32 PTY must still paint Ctrl-C Ctrl-C: {at_140}"
         );
+    }
+
+    #[test]
+    fn compare_column_keeps_the_row_budget() {
+        assert_eq!(HELP_COMPARE_GROUPS.len(), HELP_COLUMN_COUNT);
+        assert_eq!(help_groups(false), HELP_GROUPS);
+        assert_eq!(help_groups(true)[1].title, "COMPARE");
+        assert_eq!(help_groups(true)[0], HELP_GROUPS[0]);
+        assert_eq!(help_groups(true)[2], HELP_GROUPS[2]);
+        let footer = help_idle_footer();
+        let taller: Vec<(usize, usize, usize)> = (60..=320)
+            .map(|width| {
+                (
+                    width,
+                    help_overlay_height(HELP_COMPARE_GROUPS, width, &footer),
+                    help_overlay_height(HELP_GROUPS, width, &footer),
+                )
+            })
+            .filter(|(_, compare, workspace)| compare > workspace)
+            .collect();
+        assert!(
+            taller.is_empty(),
+            "compare help is taller (cols, compare, workspace): {taller:?}"
+        );
+        let text: String = HELP_COMPARE_GROUP
+            .entries
+            .iter()
+            .map(|e| help_entry_label(e.keys, e.desc))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for needle in [
+            "V ",
+            "; Ctrl-R",
+            "y ",
+            "' ",
+            "x ",
+            "merge base",
+            "Ctrl-o",
+            "space",
+            "e E",
+            "close tab",
+            "s u",
+            "f p P d",
+            "b m C W",
+            "S a p D",
+            "o O",
+        ] {
+            assert!(text.contains(needle), "{needle} missing: {text}");
+        }
     }
 
     #[test]

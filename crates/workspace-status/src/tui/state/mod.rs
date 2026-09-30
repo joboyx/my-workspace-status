@@ -3144,6 +3144,19 @@ impl AppState {
             .or_else(|| self.visual_patch(anchor, PartialPatchKind::Revert).err())
     }
 
+    /// Why `x` with no highlight would refuse on a compare tab, or `None`
+    /// when it would open the whole-file confirm.
+    ///
+    /// The same checks, in the same order, as [`Self::begin_compare_revert`]
+    /// without a highlight: the compare gate, then the change kind. The idle
+    /// hint row uses it so it never offers an `x` that refuses.
+    pub(crate) fn compare_file_revert_refusal(&self) -> Option<String> {
+        match self.compare_revert_target() {
+            Ok(target) => compare_file_revert_kind_refusal(&target.status),
+            Err(err) => Some(err),
+        }
+    }
+
     /// Compare-tab `x`: open the range or whole-file revert confirm.
     ///
     /// A refusal sets the status and keeps any highlight. Opening the
@@ -3166,8 +3179,8 @@ impl AppState {
             }
             return Effect::None;
         }
-        if !matches!(target.status.as_str(), "M" | "A" | "D" | "R") {
-            self.status = format!("cannot revert a {} change", target.status);
+        if let Some(err) = compare_file_revert_kind_refusal(&target.status) {
+            self.status = err;
             return Effect::None;
         }
         self.confirm = Some(PendingConfirm::CompareRevertFile { target });
@@ -5196,6 +5209,12 @@ fn is_stageable(change: &FileChange) -> bool {
 
 fn is_unstageable(change: &FileChange) -> bool {
     change.staged_status.is_some()
+}
+
+/// Why a compare whole-file `x` refuses a `name-status` kind, or `None` for
+/// the kinds it restores (modified, added, deleted, renamed).
+fn compare_file_revert_kind_refusal(status: &str) -> Option<String> {
+    (!matches!(status, "M" | "A" | "D" | "R")).then(|| format!("cannot revert a {status} change"))
 }
 
 fn is_revertible(change: &FileChange) -> bool {
@@ -7785,6 +7804,80 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    #[test]
+    fn compare_idle_hints_read_the_compare_tab_not_the_parked_tree() {
+        let keys = |app: &AppState| -> Vec<(String, String)> {
+            super::super::chrome::action_hint_segments(app)
+                .into_iter()
+                .map(|hint| (hint.key, hint.label))
+                .collect()
+        };
+        let has = |hints: &[(String, String)], key: &str| hints.iter().any(|(k, _)| k == key);
+        let mut app = compare_regions_app();
+
+        // Park a dirty Workspace file row: Workspace offers s / u / x there.
+        app.dispatch(Action::JumpToTab(1));
+        set_app_change(&mut app, "regions.txt", None);
+        app.snapshot
+            .repos
+            .iter_mut()
+            .find(|row| row.repo == "app")
+            .unwrap()
+            .changes[0]
+            .unstaged_status = Some("M".into());
+        app.rebuild_rows();
+        app.focus = FocusPane::Left;
+        app.cursor = app
+            .rows
+            .iter()
+            .position(|row| {
+                row.kind == NodeKind::File
+                    && row.repo.as_deref() == Some("app")
+                    && row
+                        .file
+                        .as_ref()
+                        .is_some_and(|f| f.unstaged_status.is_some())
+            })
+            .expect("app unstaged file row");
+        let hints = keys(&app);
+        for key in ["s", "x", "f"] {
+            assert!(has(&hints, key), "Workspace {key}: {hints:?}");
+        }
+
+        // The compare tab ignores that parked row.
+        app.dispatch(Action::JumpToTab(2));
+        app.focus = FocusPane::Right;
+        let hints = keys(&app);
+        for key in ["s", "u", "f", "S"] {
+            assert!(!has(&hints, key), "compare {key}: {hints:?}");
+        }
+        // regions.txt is dirty in the worktree: compare `x` refuses.
+        assert!(app.compare_file_revert_refusal().is_some());
+        assert!(!has(&hints, "x"), "dirty file: {hints:?}");
+
+        // Clean file at the compare head: `x` reverts to the merge base.
+        for row in app.snapshot.repos.iter_mut().filter(|r| r.repo == "app") {
+            row.changes.clear();
+        }
+        assert_eq!(app.compare_file_revert_refusal(), None);
+        let hints = keys(&app);
+        assert!(
+            hints.contains(&("x".into(), "revert to merge base".into())),
+            "{hints:?}"
+        );
+        assert!(has(&hints, "e") && has(&hints, "ctrl+o"), "{hints:?}");
+
+        // File list: the focused compare file decides, and a dir row has no `x`.
+        app.focus = FocusPane::Left;
+        let rows = app.commit_file_rows();
+        let file = rows.iter().position(|row| row.path == "new.txt").unwrap();
+        app.tabs.active_compare_mut().unwrap().file_cursor = file;
+        assert!(has(&keys(&app), "x"), "clean rename");
+        set_app_change(&mut app, "old.txt", None);
+        assert!(!has(&keys(&app), "x"), "rename source is dirty");
+        assert!(!has(&keys(&app), "s"));
     }
 
     #[test]
