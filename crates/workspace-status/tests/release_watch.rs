@@ -1,7 +1,7 @@
 //! CI watch for cargo-dist generate and TTY update-check isolation.
 //!
 //! `dist generate` rewrites `.github/workflows/release.yml` and drops the
-//! host-job git-cliff steps plus `workflow_dispatch`. A TTY stills or e2e
+//! host-job git-cliff steps plus `workflow_dispatch`. A TTY demo-clip or e2e
 //! launch without `WS_STATUS_UPDATE_CHECK_STORE` writes
 //! `$XDG_STATE_HOME/my-workspace-status/update-check.json` (the operator
 //! last-check file) and can block mount on the GitHub Release prompt.

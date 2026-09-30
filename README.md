@@ -10,43 +10,39 @@ This is the glance I wanted instead. Left pane is the workspace tree (repos, wor
 
 ## Screenshots
 
-**File diff** — dirty `auth.ts` and its unified diff.
+**Tree + diff** — `j` / `k` through dirty files. The right pane follows the cursor: diff on a file, graph on a folder.
 
-![Tree and file diff](docs/images/01-file-diff.png)
+![Tree and file diff](docs/images/01-tree-diff.gif)
 
-**Git graph** — commits, joins, and the stash diamond `◇`.
+**Git graph** — merge joins and the stash diamond `◇`. Enter a commit to list its files.
 
-![Git graph](docs/images/02-git-graph.png)
+![Git graph](docs/images/02-git-graph.gif)
 
-**Commit files** — Enter a commit; the files that landed in it.
+**Stage** — `u` unstages the focused file, `s` stages it again.
 
-![Commit files](docs/images/09-commit-files.png)
+![Stage and unstage](docs/images/03-stage-unstage.gif)
 
-**Search** — `/auth` Enter. Matches highlight; rows stay visible.
+**Search** — `/auth` Enter arms the query. `n` steps to the next match.
 
-![Search](docs/images/04-search.png)
+![Search](docs/images/04-search.gif)
 
 **Reviewed** — Space on a dirty file, or on a file in a compare tab (session-only). Eye `` sits before the status badge.
 
-![Reviewed mark](docs/images/07-reviewed.png)
+![Reviewed mark](docs/images/05-reviewed.gif)
 
-**Stash** — `S` on a dirty repo. Create from the tree.
+**Stash** — `S` on a dirty repo creates a stash. On a graph stash, `D` asks `y` / `n` in a boxed overlay.
 
-![Stash menu](docs/images/06-stash-menu.png)
+![Stash](docs/images/06-stash.gif)
 
-**Ignored** — `.` brings `notes` into the tree (`ignoredRepos`).
+**Ignored** — `.` shows or hides `notes` (`ignoredRepos`).
 
-![Show ignored](docs/images/08-show-ignored.png)
-
-**Confirm** — drop a stash (`D`). `y` / `n` in a boxed overlay.
-
-![Boxed confirm](docs/images/05-confirm.png)
+![Show ignored](docs/images/07-show-ignored.gif)
 
 **Help** — `?` opens MOVE / GIT / VIEW.
 
-![Help overlay](docs/images/03-help.png)
+![Help overlay](docs/images/08-help.gif)
 
-Rebuild these frames with `./scripts/capture-demo-stills.sh` (see [docs/demo.md](./docs/demo.md)).
+Rebuild these clips with `./scripts/capture-demo-stills.sh` (see [docs/demo.md](./docs/demo.md)).
 
 ## Install
 
@@ -215,7 +211,7 @@ That isolation is deliberate. Refactors should be able to change implementation 
 | [docs/graph.md](./docs/graph.md) | Ratatui workspace-status-graph widget contract |
 | [docs/diff-rendering.md](./docs/diff-rendering.md) | Diff pipeline and syntax highlighting |
 | [docs/git-operations.md](./docs/git-operations.md) | Git commands, operation semantics, safety rules |
-| [docs/demo.md](./docs/demo.md) | Demo workspace and screenshot frames |
+| [docs/demo.md](./docs/demo.md) | Demo workspace and screenshot clips |
 | [docs/tui-rust.md](./docs/tui-rust.md) | Ratatui TUI keys, layout, and chrome |
 | [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md) | Real-TTY TUI e2e (PTY in CI, desktop TTY job: xfce keys + xterm XTEST wheel) |
 | [docs/configuration.md](./docs/configuration.md) | Environment variables, workspace config, keymap |

@@ -21,7 +21,7 @@ Desktop local run (Linux, `DISPLAY`, packages in [docs/tui-tty-e2e.md](./docs/tu
 cargo test --test tui_tty_e2e -- --ignored --nocapture --test-threads=1
 ```
 
-Screenshot stills stay in `scripts/capture-demo-stills.sh`. That script is not a TUI e2e harness.
+Demo GIF clips stay in `scripts/capture-demo-stills.sh`. That script is not a TUI e2e harness.
 
 Harness, how-to-run, encoding, and desktop-session notes live in [docs/tui-tty-e2e.md](./docs/tui-tty-e2e.md). Update that file when those change. Adding a `pty_*` or desktop test does not.
 
@@ -74,7 +74,7 @@ Do **not** invent spur heuristics (`parent.lane + 1`, spine `◇─╯`, mid-rai
 | TUI test layers (PTY / desktop `#[ignore]`) or `WS_STATUS_UPDATE_CHECK_STORE` | this file, `docs/tui-tty-e2e.md` (harness / run / encoding / desktop-session only — a new `pty_*` or desktop test does not edit that file), `docs/configuration.md` |
 | cargo-dist `dist generate` / Release git-cliff host steps | `docs/architecture.md` (**Distribution**) and `crates/workspace-status/tests/release_watch.rs` |
 | Output format of the plain report | `SAMPLE_OUTPUT.md` and `crates/workspace-status/tests/snapshot_contract.rs` |
-| Demo workspace seed or screenshot frames | `docs/demo.md` + `scripts/seed-demo-workspace.sh` + `scripts/capture-demo-stills.sh` |
+| Demo workspace seed or screenshot clips | `docs/demo.md` + `scripts/seed-demo-workspace.sh` + `scripts/capture-demo-stills.sh` |
 | Desktop Xvfb / Openbox session | `scripts/with-desktop-session.sh` + `scripts/openbox.xml` + `docs/tui-tty-e2e.md` |
 
 A change is not complete while its documentation is stale.
@@ -101,10 +101,10 @@ per-module copy.
 - Exported Rust items need rustdoc (`///` or `//!`).
 - The plain-text report is a user-facing contract — changing it means updating `SAMPLE_OUTPUT.md` and the snapshot e2e suite.
 - TTY event loop: do not run git or other blocking I/O on the draw/event thread. The live path is `tui/event_loop.rs` (current-thread Tokio, dedicated input thread, `spawn_blocking` on a `JoinSet`) through `tui/effect.rs`. Fetch / pull / push enqueue on a per-gitdir remote queue (`RemoteQueue`) under `env_fetch_concurrency()`. Exclusive writes stay serial. While an exclusive write or default-branch job is in flight, nav / pane switch / cancel / remotes stay live (`BusyAction::Handle`); keys that would start another exclusive write are drained (`Ignore`). An exclusive write on a gitdir that already has a remote dispatches, then `schedule` refuses with breadcrumb `busy`. `E` blob/temp prepare is `UserTag::DiffPrepare` on that pool; `blob_bytes` must not run on the loop thread. Guard: `tty_event_loop_must_not_call_sync_pane_git` in `tui/event_pump.rs`.
-- After `dist generate`, restore `workflow_dispatch` and host git-cliff on `release.yml`. TTY stills and e2e must set `WS_STATUS_UPDATE_CHECK_STORE`. Guard: `tty_spawn_paths_isolate_update_check_store` in `tests/release_watch.rs`.
-- This repository is public. Do not commit private workspace paths, personal hostnames, unpublished ticket keys, customer/project names from private work, chat transcripts, screenshots of private work, tokens, or credentials. Use `scripts/seed-demo-workspace.sh` for examples and stills.
+- After `dist generate`, restore `workflow_dispatch` and host git-cliff on `release.yml`. TTY demo clips and e2e must set `WS_STATUS_UPDATE_CHECK_STORE`. Guard: `tty_spawn_paths_isolate_update_check_store` in `tests/release_watch.rs`.
+- This repository is public. Do not commit private workspace paths, personal hostnames, unpublished ticket keys, customer/project names from private work, chat transcripts, screenshots of private work, tokens, or credentials. Use `scripts/seed-demo-workspace.sh` for examples and demo clips.
 
 ## Demo / screenshots
 
-Refresh README/demo stills with `./scripts/capture-demo-stills.sh`.
+Refresh the README/demo GIF clips with `./scripts/capture-demo-stills.sh` (ffmpeg records the terminal window; see `docs/demo.md`).
 Do not invent a fixture. Do not invent a new capture pipeline. Do not drive the TUI by hand.

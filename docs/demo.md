@@ -1,12 +1,14 @@
 # Demo workspace
 
-Seed one workspace, then capture the stills below.
+Seed one workspace, then record the animated GIF clips below.
 
-Refresh README/demo PNGs from the repo root:
+Refresh the README/demo GIFs from the repo root:
 
     ./scripts/capture-demo-stills.sh
 
-That script seeds, installs MesloLGS NF if needed, starts Xvfb and Openbox through `scripts/with-desktop-session.sh`, and types the hardcoded keys below. Do not invent a fixture or a second capture pipeline.
+That script seeds, installs MesloLGS NF and ffmpeg if needed, starts Xvfb and Openbox through `scripts/with-desktop-session.sh`, and types the hardcoded keys below. ffmpeg `x11grab` records only the terminal window at 10 fps. The script then encodes each clip to `docs/images/NN-name.gif` (`palettegen` / `paletteuse`, loops forever, no downscale). Do not invent a fixture or a second capture pipeline.
+
+The script rejects a clip and keeps the old GIF when the last frame is gray or too small, when no frame differs from the first (the keys did nothing), when two clips are identical, or when a GIF is over 4 MB.
 
 ## Seed
 
@@ -29,14 +31,14 @@ Both go away when DEST is wiped.
 
 - Theme: default Tokyo Night. Do not press `T`.
 - Font: `MesloLGS NF` 13 (romkatv/powerlevel10k-media). Do not set `WS_STATUS_GLYPHS=ascii` when that font is present. Set it only if the font is missing. Do not use MesloLGM Nerd Font Mono — it letter-spaces in xfce4-terminal (VTE sizes cells off the widest Nerd glyph).
-- Graph dates: operator local timezone (relative through 3 hours, then `YYYY-MM-DD HH:MM`). Seed timestamps are Asia/Manila (UTC+8). `capture-demo-stills.sh` sets `TZ=Asia/Manila` so stills match that clock.
+- Graph dates: operator local timezone (relative through 3 hours, then `YYYY-MM-DD HH:MM`). Seed timestamps are Asia/Manila (UTC+8). `capture-demo-stills.sh` sets `TZ=Asia/Manila` so clips match that clock.
 - Some hosts export `NO_COLOR=1`, which paints the first frame gray. Unset `NO_COLOR` and `FORCE_COLOR` before launch.
-- Terminal: at least 140x40. Side-by-side diff needs 100 or more columns. Stay in the default inline diff for stills.
+- Terminal: at least 140x40. Side-by-side diff needs 100 or more columns. Stay in the default inline diff for clips.
 - Watch and background fetch stay off so frames do not flicker.
 - Re-run the seed script after any write (`s` / `u` / `x`, stash apply/pop/drop, checkout, reviewed mark).
 - Reviewed marks live in `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (fallback `~/.local/state/my-workspace-status/viewed-files.json`). Delete that file if a `` / `*` survives a reseed. Comments live in `$XDG_STATE_HOME/my-workspace-status/comments.json`. `capture-demo-stills.sh` points `WS_STATUS_VIEWED_STORE`, `WS_STATUS_COMMENT_STORE`, and `WS_STATUS_UPDATE_CHECK_STORE` at `tmp/demo-stills-stage/state` so it does not write those operator files.
 
-Each shot starts from a fresh launch unless noted. The first cursor is `app` → `src/auth.ts` (unstaged `M`) with the file diff on the right.
+Each clip starts from a fresh launch. The first cursor is `app` → Staged → `src/session.ts` (`S`) with its diff on the right. Recording starts after the first paint. The script holds about 1 s before the first key, about 1 s after each step, and about 2 s at the end.
 
 ## Workspace
 
@@ -48,76 +50,61 @@ Each shot starts from a fresh launch unless noted. The first cursor is `app` →
 | `notes` | Dirty and listed in `ignoredRepos`. Hidden until `.` or `-a`. |
 | `merger` | `feature/reconciliation` with a merge commit, a stash, and a linked worktree at `merger/.worktrees/recon` on the same branch. |
 
-## 01 — tree + file diff
+## 01 — tree + live diff
 
-Focus stays on `src/auth.ts`. The right pane is the unified diff (refresh window `5m` → `2m`, plus `withRefreshedExpiry`).
+Keys: `j` `j` `j` `j` `k`.
 
-Keys: none. Fresh launch leaves the cursor on `auth.ts`.
+Show: the cursor walks from `session.ts` over the `Changes` and `src` folders to `auth.ts` and `login.ts`, then back to `auth.ts`. The right pane follows: diff on a file, graph on a folder. The clip ends on the `auth.ts` diff (refresh window `5m` → `2m`, plus `withRefreshedExpiry`).
 
-Show: dirty `app` files (`M` / `A` / staged `session.ts`), linked `feat-login`, `services/api`, folded No updates, and the auth diff.
+## 02 — git graph + commit files
 
-## 02 — git graph
+Keys: `/` `merger` Enter, Tab, `j` `j`, Enter.
 
-Focus `merger` so the right pane is the graph: merge elbows, stash `◇`, HEAD `⊙`.
+Show: `merger` graph with the `merge billing into main` join, `stash@{0}` diamond + short spur, and `feature/reconciliation` HEAD. Tab focuses the graph, `j` passes the stash onto `Start reconciliation job`, and Enter opens its file list (`reconcile.ts`).
 
-Keys: `/` `merger` Enter. Do not press `k` after.
+## 03 — unstage / stage
 
-Show: `merge billing into main` join, `stash@{0}` diamond + short spur, `feature/reconciliation` HEAD.
+Keys: `u`, pause, `s`.
 
-## 03 — help
-
-Keys: `?`
-
-Show: the short key overlay, not a wall of text. Tree + pane still visible behind it.
+Show: `session.ts` leaves Staged and shows as unstaged `M`, then goes back to Staged `S`. Row flashes mark each move. Real git writes: the script reseeds after this clip.
 
 ## 04 — search
 
-Keys: `/` `auth` Enter.
+Keys: `/` `auth` (typed), Enter, `n`.
 
-Show: armed `/auth`, match highlight on `auth.ts`. Rows stay visible.
+Show: matches highlight while the query is typed. Enter arms `/auth` on the `feature/auth-refresh` row. `n` steps to `auth.ts` and its diff. Rows stay visible.
 
-## 05 — boxed confirm
+## 05 — reviewed marks
 
-Focus `merger`, move the graph cursor onto `stash@{0}`, then drop.
+Keys: `j` `j` `j` before recording (cursor on `auth.ts`), then Space, `j`, Space.
 
-Keys: `/` `merger` Enter, Tab, `j` onto the stash diamond, `D`. Do not press `y`.
+Show: viewed glyph `` / `*` (`ICON_VIEWED`) on `auth.ts`, then on `login.ts`, before the status badge. Not the clean `` / `.`. The script clears the viewed store after this clip.
 
-Show: rounded boxed overlay `Drop stash@{0}?` with `y` drop / `n` cancel.
+## 06 — stash
 
-## 06 — stash menu
+Tree `S` on dirty `app` is create-only (`s` stash). Apply / pop / drop needs a graph-focused stash, then `S` (or `a` / `p` / `D`).
 
-Tree `S` on dirty `app` is create-only (`s` stash). Full apply / pop / drop needs a graph-focused stash, then `S` (or `a` / `p` / `D`).
+Keys: `S`, Esc, `/` `merger` Enter, Tab, `j` onto the stash diamond, `D`, `n`. Never press `y`.
 
-Keys (create-only still): `S` on dirty `app` (fresh launch is already on `auth.ts` under `app`).
+Show: `Stash app` overlay (`s` create, Esc cancel), then the rounded boxed `Drop stash@{0}?` confirm with `y` drop / `n` cancel, then `drop cancelled`.
 
-Show: `Stash app` overlay, `s` create, Esc cancel. Do not confirm.
+## 07 — show ignored
 
-## 07 — reviewed mark
+Keys: `.`, pause, `.`.
 
-Focus `src/auth.ts`.
+Show: ignored dirty `notes` (`inbox.md`) enters the tree, then hides again.
 
-Keys: Space.
+## 08 — help
 
-Show: viewed glyph `` / `*` (`ICON_VIEWED`) on that dirty file, trailing before the status badge. Not the clean `` / `.`.
+Keys: `?`, hold, Esc.
 
-## 08 — show ignored
+Show: the short MOVE / GIT / VIEW key overlay over the tree and pane, then back to the tree.
 
-Keys: `.`
-
-Show: ignored dirty `notes` (`inbox.md`) entering the tree. Press `.` again only if you need the hidden-state contrast. The still is the revealed tree.
-
-## 09 — commit-files drill
-
-Focus `merger`, move the graph cursor onto a commit (the merge or `Start reconciliation job`), then drill.
-
-Keys: `/` `merger` Enter, Tab, `j` to a commit, Enter.
-
-Show: commit file list in the right pane. Do not Enter again into a file diff unless you want a second crop. The named still is the file list.
-
-## Skip as stills
+## Skip as clips
 
 - Fetch / pull / push in-flight (`f`, `p`, `P`)
-- Completing a confirm with `y` (shot 05 shows the overlay; do not press `y`)
-- Create-branch prompt (`b` then `C`) — not a README still
+- Completing a confirm with `y` (clip 06 shows the overlay and cancels with `n`)
+- Create-branch prompt (`b` then `C`) — not a README clip
 - Theme cycle (`T`) — stay on Tokyo Night
 - Watch poll (already disabled)
+- `V` line-range stage — the PTY e2e proves it on a separate two-hunk fixture, not on this seed

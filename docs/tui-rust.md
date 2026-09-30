@@ -4,8 +4,8 @@
 
 A non-TTY run without those flags still prints `--plain`. Agents must pass `--plain` or `--json`.
 
-Screenshots of the daily views live in the [root README](../README.md#screenshots).
-To rebuild those frames, run `./scripts/capture-demo-stills.sh` (see [demo.md](./demo.md)).
+Animated GIF clips of the daily views live in the [root README](../README.md#screenshots).
+To rebuild those clips, run `./scripts/capture-demo-stills.sh` (see [demo.md](./demo.md)).
 
 ## Daily keys
 
