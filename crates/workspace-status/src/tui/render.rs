@@ -2125,9 +2125,9 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 }
 
 /// Compare-tab close control as painted and hit-tested: brackets around
-/// U+1D501 MATHEMATICAL BOLD SCRIPT SMALL X. Three display columns. Paint and
-/// hit boxes both derive their width from this constant.
-const TAB_CLOSE_GLYPH: &str = "[\u{1D501}]";
+/// U+2717 BALLOT X. Three display columns. Paint and hit boxes both derive
+/// their width from this constant.
+const TAB_CLOSE_GLYPH: &str = "[\u{2717}]";
 
 /// Columns ratatui paints for `text` (unicode-width, same as `Span::width`).
 ///

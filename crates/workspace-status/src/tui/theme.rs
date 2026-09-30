@@ -41,11 +41,11 @@ pub struct Palette {
     pub muted: Color,
     /// Unfocused pane border. Near-surface dark gray. Darker than [`Self::muted`].
     pub border_dim: Color,
-    /// Idle compare-tab close `[𝔁]`. Neutral dark gray, darker than
+    /// Idle compare-tab close `[✗]`. Neutral dark gray, darker than
     /// [`Self::muted`], still readable on the surface and on
     /// [`Self::cursor_bg`] (active tab).
     pub tab_close: Color,
-    /// Hovered compare-tab close `[𝔁]`. White.
+    /// Hovered compare-tab close `[✗]`. Red, the theme's [`Self::deleted`].
     pub tab_close_hover: Color,
     pub added: Color,
     pub modified: Color,
@@ -90,10 +90,10 @@ pub struct ThemePalette {
     /// Unfocused pane border hex (`palette.borderDim` in docs). Near-surface
     /// dark gray. Darker than [`Self::muted`]. Not a readable-text token.
     pub border_dim: &'static str,
-    /// Idle compare-tab close `[𝔁]` hex. Neutral dark gray, darker than
+    /// Idle compare-tab close `[✗]` hex. Neutral dark gray, darker than
     /// [`Self::muted`].
     pub tab_close: &'static str,
-    /// Hovered compare-tab close `[𝔁]` hex. White (`#ffffff`).
+    /// Hovered compare-tab close `[✗]` hex. Red, the theme's `deleted` hex.
     pub tab_close_hover: &'static str,
     pub added: &'static str,
     pub modified: &'static str,
@@ -272,7 +272,7 @@ const TOKYO_NIGHT: Theme = Theme {
         muted: "#9aa5ce",
         border_dim: "#3b4261",
         tab_close: "#787878",
-        tab_close_hover: "#ffffff",
+        tab_close_hover: "#f7768e",
         added: "#9ece6a",
         modified: "#e0af68",
         deleted: "#f7768e",
@@ -319,7 +319,7 @@ const MONOKAI: Theme = Theme {
         muted: "#b8b39c",
         border_dim: "#49483e",
         tab_close: "#808080",
-        tab_close_hover: "#ffffff",
+        tab_close_hover: "#ff6188",
         added: "#a6e22e",
         modified: "#e6db74",
         deleted: "#ff6188",
@@ -366,7 +366,7 @@ const DRACULA: Theme = Theme {
         muted: "#b4bce4",
         border_dim: "#44475a",
         tab_close: "#888888",
-        tab_close_hover: "#ffffff",
+        tab_close_hover: "#ff5555",
         added: "#50fa7b",
         modified: "#f1fa8c",
         deleted: "#ff5555",
@@ -413,7 +413,7 @@ const GRUVBOX_DARK: Theme = Theme {
         muted: "#bdae93",
         border_dim: "#504945",
         tab_close: "#787878",
-        tab_close_hover: "#ffffff",
+        tab_close_hover: "#fb4934",
         added: "#b8bb26",
         modified: "#fabd2f",
         deleted: "#fb4934",
@@ -460,7 +460,7 @@ const CATPPUCCIN_MOCHA: Theme = Theme {
         muted: "#a6adc8",
         border_dim: "#45475a",
         tab_close: "#707070",
-        tab_close_hover: "#ffffff",
+        tab_close_hover: "#f38ba8",
         added: "#a6e3a1",
         modified: "#f9e2af",
         deleted: "#f38ba8",
@@ -841,17 +841,17 @@ mod tests {
         );
     }
 
-    /// Idle `[𝔁]` is a neutral dark gray (R=G=B) that reads dimmer than the
+    /// Idle `[✗]` is a neutral dark gray (R=G=B) that reads dimmer than the
     /// `muted` tab label, yet stays legible on the active tab. Floors:
     /// `muted`/`tab_close` contrast >= 1.5 (visibly darker), `tab_close` >= 2.5
-    /// on `cursor_bg` and >= 3.0 on the surface. Hover is white on every
-    /// (dark) theme: >= 7.0 on `cursor_bg`.
+    /// on `cursor_bg` and >= 3.0 on the surface. Hover is the theme's `deleted`
+    /// red on every (dark) theme: >= 2.5 on `cursor_bg`.
     #[test]
-    fn tab_close_is_dimmer_than_muted_and_hover_is_bright() {
+    fn tab_close_is_dimmer_than_muted_and_hover_is_red() {
         const DIMMER_THAN_MUTED: f64 = 1.5;
         const ON_CURSOR_BG: f64 = 2.5;
         const ON_SURFACE: f64 = 3.0;
-        const HOVER_ON_CURSOR_BG: f64 = 7.0;
+        const HOVER_ON_CURSOR_BG: f64 = 2.5;
         for id in THEME_IDS {
             let pal = id.palette();
             let surface = hex_color(id.theme().surface);
@@ -861,9 +861,8 @@ mod tests {
                 "{id:?} tab_close must be darker than muted"
             );
             assert_eq!(
-                pal.tab_close_hover,
-                Color::Rgb(255, 255, 255),
-                "{id:?} tab_close_hover must be white"
+                pal.tab_close_hover, pal.deleted,
+                "{id:?} tab_close_hover must be the deleted red"
             );
             let Color::Rgb(r, g, b) = pal.tab_close else {
                 panic!("{id:?} tab_close must be rgb");
@@ -896,8 +895,8 @@ mod tests {
                 assert!(ratio >= floor, "{id:?} {name} {ratio:.2} < {floor}");
             }
             assert!(
-                relative_luminance(pal.tab_close_hover) > relative_luminance(pal.muted),
-                "{id:?} tab_close_hover must be brighter than muted"
+                relative_luminance(pal.tab_close_hover) > relative_luminance(pal.tab_close),
+                "{id:?} tab_close_hover must be brighter than tab_close"
             );
         }
     }

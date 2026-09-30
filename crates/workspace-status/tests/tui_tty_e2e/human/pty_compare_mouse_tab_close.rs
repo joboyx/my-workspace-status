@@ -21,7 +21,7 @@ fn workspace_tab_has_close(screen: &str) -> bool {
     })
 }
 
-/// SGR click on compare `[𝔁]` closes that tab. Workspace has no close hit.
+/// SGR click on compare `[✗]` closes that tab. Workspace has no close hit.
 #[test]
 fn pty_compare_mouse_tab_close() {
     let (_root, workspace) = compare_ahead_workspace();
@@ -46,7 +46,7 @@ fn pty_compare_mouse_tab_close() {
                 && !screen.contains("app ↔ origin/main")
                 && !screen.contains("COMMITTED")
         },
-        "click [𝔁] closes the compare tab",
+        "click [✗] closes the compare tab",
         WAIT,
     );
 }
@@ -60,10 +60,10 @@ fn strip_row(screen: &str) -> Option<(u16, String)> {
         .map(|(row, line)| (row as u16, line.to_string()))
 }
 
-/// SGR click on the painted `𝔁` of the second compare tab closes that tab.
+/// SGR click on the painted `✗` of the second compare tab closes that tab.
 ///
 /// Each label holds `↔`, which paints one column. The hit boxes must not
-/// drift right of the painted `[𝔁]` as labels accumulate.
+/// drift right of the painted `[✗]` as labels accumulate.
 #[test]
 fn pty_compare_mouse_second_tab_close() {
     let (_root, workspace) = compare_ahead_workspace();
@@ -87,12 +87,12 @@ fn pty_compare_mouse_second_tab_close() {
                 line.contains("app ↔ main") && line.matches(TAB_CLOSE).count() == 2
             })
         },
-        "two compare tabs, each with [𝔁]",
+        "two compare tabs, each with [✗]",
         GIT_WAIT,
     );
 
     let (row, line) = strip_row(&tui.screen()).expect("tab strip");
-    let second = line.rfind(TAB_CLOSE).expect("second [𝔁]");
+    let second = line.rfind(TAB_CLOSE).expect("second [✗]");
     assert!(line[..second].contains("app ↔ main"), "{line}");
     let col = line[..second].chars().count() as u16 + 1;
     tui.sgr_click(col, row);
