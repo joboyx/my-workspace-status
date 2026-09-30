@@ -45,14 +45,10 @@ impl AppState {
             | Action::GraphFocusSubmit
             | Action::StashMenu
             | Action::StashMenuEnter => SWITCH_TO_WORKSPACE_TAB,
-            // Revert and comments have no compare target yet.
-            Action::Revert
-            | Action::ConfirmYes
-            | Action::ConfirmYesClean
-            | Action::CommentStart
-            | Action::CommentSubmit
-            | Action::CommentToggleResolved
-            | Action::ExportComments => SWITCH_TO_WORKSPACE_TAB,
+            // Revert has no compare target yet.
+            Action::Revert | Action::ConfirmYes | Action::ConfirmYesClean => {
+                SWITCH_TO_WORKSPACE_TAB
+            }
             _ => return None,
         };
         Some(reason.into())

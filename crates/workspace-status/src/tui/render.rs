@@ -22,8 +22,8 @@ use super::chrome::{
 };
 use super::comments::{
     comment_overlay_footer_save, commit_file_row_comments_resolved, commit_file_row_has_comment,
-    diff_line_comment_state, graph_row_comments_resolved, graph_row_has_comment,
-    tree_row_comments_resolved, tree_row_has_comment, CommentPrompt, COMMENT_OVERLAY_FOOTER_EDIT,
+    graph_row_comments_resolved, graph_row_has_comment, tree_row_comments_resolved,
+    tree_row_has_comment, CommentPrompt, COMMENT_OVERLAY_FOOTER_EDIT,
 };
 use super::diff::{
     cell_code_width, cell_sign, diff_pane_header, diff_pane_mode_label, diff_row_content_width,
@@ -911,12 +911,7 @@ fn commit_file_comment_scope(
     Option<&str>,
     &super::drill::CommitFileSource,
 )> {
-    let (repo, source) = match &state.drill {
-        DrillView::Files { repo, source, .. } | DrillView::Diff { repo, source, .. } => {
-            (repo.as_str(), source)
-        }
-        DrillView::Graph => return None,
-    };
+    let (repo, source) = state.commit_drill_source()?;
     let snap = state.snapshot.repos.iter().find(|r| r.repo == repo);
     Some((
         repo,
@@ -1372,7 +1367,7 @@ fn paint_cell_spans(
     let code_w = cell_code_width(width, gutter.saturating_add(mark_w));
     let first = !wrap || wrap_part == 0;
     let comment = if first {
-        cell.line_no.and_then(|n| diff_cell_comment_state(state, n))
+        cell.line_no.and_then(|n| state.diff_line_comment(n))
     } else {
         None
     };
@@ -1522,31 +1517,6 @@ fn format_line_gutter(
 /// the numbers out.
 fn diff_gutter_style(palette: Palette) -> Style {
     Style::default().fg(palette.muted)
-}
-
-fn diff_cell_comment_state(state: &AppState, line: u32) -> Option<bool> {
-    let (repo, path) = match &state.drill {
-        DrillView::Diff { repo, path, .. } => (Some(repo.as_str()), Some(path.as_str())),
-        _ => (state.diff_repo.as_deref(), state.diff_path.as_deref()),
-    };
-    let repo = repo?;
-    let path = path?;
-    let source = match &state.drill {
-        DrillView::Diff { source, .. } => Some(source),
-        _ => None,
-    };
-    let snap = state.snapshot.repos.iter().find(|r| r.repo == repo);
-    let primary = snap.and_then(|r| r.primary_repo.as_deref());
-    let branch = snap.map(|r| r.branch.as_str());
-    diff_line_comment_state(
-        &state.comment_store,
-        repo,
-        primary,
-        branch,
-        path,
-        source,
-        line,
-    )
 }
 
 fn cell_accent(kind: DiffCellKind, palette: Palette) -> Option<Style> {

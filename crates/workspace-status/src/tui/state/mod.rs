@@ -36,10 +36,10 @@ use super::command_palette::CommandPaletteState;
 use super::comments::comment_store_path;
 use super::comments::{
     collect_live_set, comment_key_label, comments_in_focus_scope, covering_line_comment,
-    diff_focus_side, export_markdown, format_entity_reference, gc_comments, load_comment_store,
-    put_comment_entry, resolve_comment_target, resolve_entity_reference, save_comment_store,
-    viewport_line_number, viewport_line_range, CommentExport, CommentExportList, CommentKey,
-    CommentPrompt, CommentStore, DiffSide, EntityRef,
+    diff_focus_side, diff_line_comment_state, export_markdown, format_entity_reference,
+    gc_comments, load_comment_store, put_comment_entry, resolve_comment_target,
+    resolve_entity_reference, save_comment_store, viewport_line_number, viewport_line_range,
+    CommentExport, CommentExportList, CommentKey, CommentPrompt, CommentStore, DiffSide, EntityRef,
 };
 use super::commit_files::{
     ancestor_dir_ids, collect_foldable_subtree_ids as collect_commit_subtree_ids,
@@ -743,6 +743,63 @@ impl AppState {
             DrillView::Files { files, .. } | DrillView::Diff { files, .. } => Some(files),
             DrillView::Graph => None,
         }
+    }
+
+    /// Checkout and source behind the commit-file list, if one is shown.
+    ///
+    /// A compare tab answers from its own checkout and range, never the
+    /// parked Workspace drill. `None` while the compare range is loading.
+    pub(crate) fn commit_drill_source(&self) -> Option<(&str, &CommitFileSource)> {
+        if let Some(tab) = self.tabs.active_compare() {
+            return Some((tab.checkout_path.as_str(), tab.source.as_ref()?));
+        }
+        match &self.drill {
+            DrillView::Files { repo, source, .. } | DrillView::Diff { repo, source, .. } => {
+                Some((repo.as_str(), source))
+            }
+            DrillView::Graph => None,
+        }
+    }
+
+    /// Checkout, file path, and source of the diff in the right pane.
+    ///
+    /// A compare tab answers from its own checkout, open file, and range,
+    /// never the parked Workspace diff; `None` until both are loaded. A
+    /// Workspace tree file diff has source `None` (the worktree).
+    pub(crate) fn open_diff_target(&self) -> Option<(&str, &str, Option<&CommitFileSource>)> {
+        if let Some(tab) = self.tabs.active_compare() {
+            let source = tab.source.as_ref()?;
+            return Some((
+                tab.checkout_path.as_str(),
+                tab.path.as_deref()?,
+                Some(source),
+            ));
+        }
+        match &self.drill {
+            DrillView::Diff {
+                repo, path, source, ..
+            } => Some((repo.as_str(), path.as_str(), Some(source))),
+            _ => Some((self.diff_repo.as_deref()?, self.diff_path.as_deref()?, None)),
+        }
+    }
+
+    /// Comment state of diff `line` in the right pane: `None` when no line
+    /// comment covers it, `Some(true)` when every covering one is resolved.
+    ///
+    /// Only comments keyed to [`Self::open_diff_target`] count, so a compare
+    /// diff never paints Workspace worktree comments.
+    pub(crate) fn diff_line_comment(&self, line: u32) -> Option<bool> {
+        let (repo, path, source) = self.open_diff_target()?;
+        let snap = self.snapshot.repos.iter().find(|r| r.repo == repo);
+        diff_line_comment_state(
+            &self.comment_store,
+            repo,
+            snap.and_then(|r| r.primary_repo.as_deref()),
+            snap.map(|r| r.branch.as_str()),
+            path,
+            source,
+            line,
+        )
     }
 
     fn files_list_origin_x(&self) -> u16 {
@@ -3169,16 +3226,7 @@ impl AppState {
     fn current_comment_target(&self) -> Option<CommentKey> {
         match self.list_focus_target() {
             ListFocusTarget::None => {
-                let source = match &self.drill {
-                    DrillView::Diff { source, .. } => Some(source),
-                    _ => None,
-                };
-                let (repo, path) = match &self.drill {
-                    DrillView::Diff { repo, path, .. } => {
-                        (Some(repo.as_str()), Some(path.as_str()))
-                    }
-                    _ => (self.diff_repo.as_deref(), self.diff_path.as_deref()),
-                };
+                let (repo, path, source) = self.open_diff_target()?;
                 let rows = self.current_diff_rows();
                 let visual = self.diff_visual_anchor.is_some();
                 let (line, end_line) = if let Some(anchor) = self.diff_visual_anchor {
@@ -3193,8 +3241,8 @@ impl AppState {
                     None,
                     None,
                     true,
-                    repo,
-                    path,
+                    Some(repo),
+                    Some(path),
                     source,
                     Some(line),
                     Some(end_line),
@@ -3240,20 +3288,7 @@ impl AppState {
     fn current_entity_reference(&self) -> Option<EntityRef> {
         match self.list_focus_target() {
             ListFocusTarget::None => {
-                let (repo, path, source) = if let Some(tab) = self.tabs.active_compare() {
-                    (
-                        Some(tab.checkout_path.as_str()),
-                        tab.path.as_deref(),
-                        tab.source.as_ref(),
-                    )
-                } else {
-                    match &self.drill {
-                        DrillView::Diff {
-                            repo, path, source, ..
-                        } => (Some(repo.as_str()), Some(path.as_str()), Some(source)),
-                        _ => (self.diff_repo.as_deref(), self.diff_path.as_deref(), None),
-                    }
-                };
+                let (repo, path, source) = self.open_diff_target()?;
                 let rows = self.current_diff_rows();
                 let (start, end) = if let Some(anchor) = self.diff_visual_anchor {
                     (anchor, self.diff_cursor)
@@ -3272,8 +3307,8 @@ impl AppState {
                     None,
                     None,
                     true,
-                    repo,
-                    path,
+                    Some(repo),
+                    Some(path),
                     source,
                     Some(line),
                     Some(end_line),
@@ -3492,34 +3527,29 @@ impl AppState {
                 repo: graph_repo.as_deref(),
                 row: graph_row.as_ref(),
             },
-            ListFocusTarget::CommitFiles => match (&self.drill, commit_file.as_ref()) {
-                (
-                    DrillView::Files { repo, source, .. } | DrillView::Diff { repo, source, .. },
-                    Some(row),
-                ) => CommentExportList::CommitFiles {
-                    repo: repo.as_str(),
-                    source,
-                    path: row.path.as_str(),
-                    is_dir: row.is_dir(),
-                },
-                _ => CommentExportList::Tree {
-                    row: self.focused_row(),
-                },
-            },
-            ListFocusTarget::None => {
-                let (repo, path, source) = match &self.drill {
-                    DrillView::Diff {
-                        repo, path, source, ..
-                    } => (Some(repo.as_str()), Some(path.as_str()), Some(source)),
-                    _ => (self.diff_repo.as_deref(), self.diff_path.as_deref(), None),
-                };
-                match (repo, path) {
-                    (Some(repo), Some(path)) => CommentExportList::Diff { repo, path, source },
+            ListFocusTarget::CommitFiles => {
+                match (self.commit_drill_source(), commit_file.as_ref()) {
+                    (Some((repo, source)), Some(row)) => CommentExportList::CommitFiles {
+                        repo,
+                        source,
+                        path: row.path.as_str(),
+                        is_dir: row.is_dir(),
+                    },
+                    // A compare tab never falls back to the parked Workspace row.
+                    _ if self.is_compare_tab() => return CommentStore::new(),
                     _ => CommentExportList::Tree {
                         row: self.focused_row(),
                     },
                 }
             }
+            ListFocusTarget::None => match self.open_diff_target() {
+                Some((repo, path, source)) => CommentExportList::Diff { repo, path, source },
+                // A compare tab never falls back to the parked Workspace row.
+                None if self.is_compare_tab() => return CommentStore::new(),
+                None => CommentExportList::Tree {
+                    row: self.focused_row(),
+                },
+            },
         };
         comments_in_focus_scope(&self.comment_store, &self.snapshot, &self.tree, list)
     }
@@ -6885,6 +6915,12 @@ mod tests {
             palette_reason(&app, "Copy entity reference").as_deref(),
             Some("no copy target")
         );
+        assert_eq!(
+            palette_reason(&app, "Comment").as_deref(),
+            Some("no comment target"),
+            "Comment is open on compare; this tab has no loaded file yet"
+        );
+        assert_eq!(palette_reason(&app, "Copy comments"), None);
     }
 
     #[test]
@@ -6917,12 +6953,12 @@ mod tests {
             Action::Revert,
             Action::ConfirmYes,
             Action::ConfirmYesClean,
+        ];
+        let allowed = [
             Action::CommentStart,
             Action::CommentSubmit,
             Action::CommentToggleResolved,
             Action::ExportComments,
-        ];
-        let allowed = [
             Action::DiffVisualStart,
             Action::DiffVisualCancel,
             Action::CopyEntityReference,
@@ -7146,6 +7182,204 @@ mod tests {
             "compare diff copy must name the base branch: {text}"
         );
         assert!(!text.contains("source: worktree"), "{text}");
+    }
+
+    /// Commit-line key a compare diff of `README.md` stores (head `ccc`).
+    fn compare_line_key(line: u32, end_line: u32) -> CommentKey {
+        CommentKey::CommitLine {
+            repo: "app".into(),
+            sha: "ccc".into(),
+            path: "README.md".into(),
+            line,
+            end_line,
+        }
+    }
+
+    fn type_comment(app: &mut AppState, body: &str) {
+        for c in body.chars() {
+            app.dispatch(Action::CommentInput(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(c),
+                crossterm::event::KeyModifiers::NONE,
+            )));
+        }
+    }
+
+    #[test]
+    fn compare_semicolon_keys_line_comment_to_compare_head() {
+        let mut app = state();
+        // The unit-test store file is shared; start from an empty store.
+        app.comment_store = CommentStore::new();
+        compare_tab_with_added_lines(&mut app);
+        assert_eq!(palette_reason(&app, "Comment"), None);
+        app.dispatch(Action::CommentStart);
+        let prompt = app.comment.as_ref().expect("compare comment overlay");
+        assert_eq!(prompt.key, compare_line_key(2, 2));
+        assert!(prompt.label.contains("commit ccc"), "{}", prompt.label);
+        type_comment(&mut app, "cmp");
+        app.dispatch(Action::CommentSubmit);
+        assert_eq!(app.status, "comment saved");
+        assert_eq!(
+            app.comment_store
+                .get(&compare_line_key(2, 2))
+                .map(|e| e.body.as_str()),
+            Some("cmp")
+        );
+        assert_eq!(app.diff_line_comment(2), Some(false));
+        assert_eq!(app.diff_line_comment(3), None);
+
+        // The file row on the compare list marks it too.
+        let (repo, source) = app.commit_drill_source().expect("compare list source");
+        assert_eq!(repo, "app");
+        assert_eq!(source, &compare_source());
+        assert!(crate::tui::comments::commit_file_row_has_comment(
+            &app.comment_store,
+            repo,
+            None,
+            source,
+            "README.md",
+            Some("main"),
+        ));
+
+        // Ctrl-R in the overlay flips resolved, and the mark follows.
+        app.dispatch(Action::CommentStart);
+        assert_eq!(
+            app.comment.as_ref().map(|p| p.key.clone()),
+            Some(compare_line_key(2, 2))
+        );
+        app.dispatch(Action::CommentToggleResolved);
+        assert!(app.comment.as_ref().is_some_and(|p| p.resolved));
+        app.dispatch(Action::CommentSubmit);
+        assert!(app
+            .comment_store
+            .get(&compare_line_key(2, 2))
+            .is_some_and(|e| e.resolved));
+        assert_eq!(app.diff_line_comment(2), Some(true));
+    }
+
+    #[test]
+    fn compare_highlight_semicolon_keys_range_to_compare_head() {
+        let mut app = state();
+        // The unit-test store file is shared; start from an empty store.
+        app.comment_store = CommentStore::new();
+        compare_tab_with_added_lines(&mut app);
+        app.dispatch(Action::DiffVisualStart);
+        let (row, _) = numbered_diff_rows(&app)
+            .into_iter()
+            .find(|(_, line)| *line == 3)
+            .expect("new line 3");
+        app.diff_cursor = row;
+        app.dispatch(Action::CommentStart);
+        let prompt = app.comment.as_ref().expect("range overlay");
+        assert_eq!(prompt.key, compare_line_key(2, 3));
+        assert_eq!(app.diff_visual_anchor, None, "; leaves highlight");
+    }
+
+    #[test]
+    fn compare_export_copies_compare_scope_only() {
+        let mut app = state();
+        // The unit-test store file is shared; start from an empty store.
+        app.comment_store = CommentStore::new();
+        focus_readme_diff(&mut app, two_line_readme());
+        let worktree = CommentKey::WorktreeLine {
+            repo: "app".into(),
+            branch: "main".into(),
+            path: "README.md".into(),
+            line: 2,
+            end_line: 2,
+        };
+        let other_commit = CommentKey::CommitLine {
+            repo: "app".into(),
+            sha: "ddd".into(),
+            path: "README.md".into(),
+            line: 2,
+            end_line: 2,
+        };
+        app.comment_store = put_comment(&app.comment_store, worktree, "workspace-note");
+        app.comment_store = put_comment(&app.comment_store, other_commit, "other-commit-note");
+        app.comment_store = put_comment(&app.comment_store, compare_line_key(3, 3), "compare-note");
+        compare_tab_with_added_lines(&mut app);
+
+        for focus in [FocusPane::Right, FocusPane::Left] {
+            app.focus = focus;
+            assert_eq!(palette_reason(&app, "Copy comments"), None);
+            let text = match app.dispatch(Action::ExportComments) {
+                Effect::CopyClipboard { text, .. } => text,
+                other => panic!("{focus:?}: expected CopyClipboard, got {other:?}"),
+            };
+            assert!(text.contains("compare-note"), "{focus:?}: {text}");
+            assert!(text.contains("commit `ccc`"), "{focus:?}: {text}");
+            assert!(text.contains("`README.md`:3"), "{focus:?}: {text}");
+            assert!(!text.contains("workspace-note"), "{focus:?}: {text}");
+            assert!(!text.contains("other-commit-note"), "{focus:?}: {text}");
+            app.dispatch(Action::ExportCommentsCancel);
+        }
+    }
+
+    /// Regression: a Workspace worktree comment on the same checkout, path,
+    /// and line number must not paint on a compare diff or its file row.
+    #[test]
+    fn compare_diff_does_not_paint_workspace_worktree_comments() {
+        let mut app = state();
+        // The unit-test store file is shared; start from an empty store.
+        app.comment_store = CommentStore::new();
+        focus_readme_diff(&mut app, two_line_readme());
+        let worktree = CommentKey::WorktreeLine {
+            repo: "app".into(),
+            branch: "main".into(),
+            path: "README.md".into(),
+            line: 2,
+            end_line: 2,
+        };
+        app.comment_store = put_comment(&app.comment_store, worktree, "workspace-note");
+        assert_eq!(app.diff_line_comment(2), Some(false), "Workspace paints it");
+
+        compare_tab_with_added_lines(&mut app);
+        assert_eq!(app.diff_line_comment(2), None, "compare must not paint it");
+        let (repo, source) = app.commit_drill_source().expect("compare list source");
+        assert!(!crate::tui::comments::commit_file_row_has_comment(
+            &app.comment_store,
+            repo,
+            None,
+            source,
+            "README.md",
+            Some("main"),
+        ));
+
+        app.dispatch(Action::JumpToTab(1));
+        assert!(!app.is_compare_tab());
+        assert_eq!(
+            app.diff_line_comment(2),
+            Some(false),
+            "Workspace still does"
+        );
+    }
+
+    #[test]
+    fn compare_tab_without_range_has_no_comment_scope() {
+        let mut app = state();
+        // The unit-test store file is shared; start from an empty store.
+        app.comment_store = CommentStore::new();
+        focus_readme_diff(&mut app, two_line_readme());
+        let worktree = CommentKey::WorktreeLine {
+            repo: "app".into(),
+            branch: "main".into(),
+            path: "README.md".into(),
+            line: 2,
+            end_line: 2,
+        };
+        app.comment_store = put_comment(&app.comment_store, worktree, "workspace-note");
+        app.tabs.open_or_focus("app".into(), "main".into());
+        app.focus = FocusPane::Right;
+        assert_eq!(app.open_diff_target(), None);
+        assert_eq!(app.commit_drill_source(), None);
+        assert_eq!(app.dispatch(Action::CommentStart), Effect::None);
+        assert_eq!(app.status, "no comment target");
+        match app.dispatch(Action::ExportComments) {
+            Effect::CopyClipboard { text, .. } => {
+                assert!(!text.contains("workspace-note"), "{text}")
+            }
+            other => panic!("expected CopyClipboard, got {other:?}"),
+        }
     }
 
     #[test]

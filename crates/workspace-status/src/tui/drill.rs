@@ -27,6 +27,22 @@ pub enum CommitFileSource {
     },
 }
 
+impl CommitFileSource {
+    /// Commit that this source's diff line numbers point into, if any.
+    ///
+    /// A commit diff uses that commit. A compare diff uses its `head`: the
+    /// new side of `base...HEAD` is the head commit's blob, so compare line
+    /// comments share the commit-line key with a commit drill of `head`.
+    /// Stash and worktree sources have no single commit.
+    pub fn line_commit(&self) -> Option<&str> {
+        match self {
+            Self::Commit { commit_id } => Some(commit_id),
+            Self::Compare { head, .. } => Some(head),
+            Self::Stash { .. } | Self::Worktree => None,
+        }
+    }
+}
+
 /// One file in a commit / stash / worktree list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitFile {

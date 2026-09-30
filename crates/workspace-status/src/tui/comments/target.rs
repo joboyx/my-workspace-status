@@ -493,14 +493,6 @@ fn resolve_diff_target(
     let snap = snapshot.repos.iter().find(|r| r.repo == repo_path);
     let identity = repo_identity(repo_path, snap.and_then(|r| r.primary_repo.as_deref()));
     match diff_source {
-        Some(CommitFileSource::Commit { commit_id }) => Some(CommentKey::CommitLine {
-            repo: identity,
-            sha: commit_id.clone(),
-            path: normalize_viewed_path(path),
-            line,
-            end_line,
-        }),
-        Some(CommitFileSource::Stash { .. }) | Some(CommitFileSource::Compare { .. }) => None,
         Some(CommitFileSource::Worktree) | None => {
             let branch = snap?.branch.clone();
             Some(CommentKey::WorktreeLine {
@@ -511,6 +503,14 @@ fn resolve_diff_target(
                 end_line,
             })
         }
+        // Commit and compare diffs key to the commit the lines belong to.
+        Some(source) => Some(CommentKey::CommitLine {
+            repo: identity,
+            sha: source.line_commit()?.to_string(),
+            path: normalize_viewed_path(path),
+            line,
+            end_line,
+        }),
     }
 }
 
@@ -929,19 +929,21 @@ fn source_path_scope(
     let identity = repo_identity(repo, snap.and_then(|r| r.primary_repo.as_deref()));
     let path = normalize_viewed_path(path);
     match source {
-        CommitFileSource::Commit { commit_id } => ExportScope::Commit {
-            identity,
-            sha: commit_id.clone(),
-            path: Some(path),
-            prefix,
-        },
         CommitFileSource::Worktree => ExportScope::WorktreePath {
             identity,
             branch: snap.map(|r| r.branch.clone()).unwrap_or_default(),
             path,
             prefix,
         },
-        CommitFileSource::Stash { .. } | CommitFileSource::Compare { .. } => ExportScope::Empty,
+        source => match source.line_commit() {
+            Some(sha) => ExportScope::Commit {
+                identity,
+                sha: sha.to_string(),
+                path: Some(path),
+                prefix,
+            },
+            None => ExportScope::Empty,
+        },
     }
 }
 
@@ -1163,7 +1165,8 @@ fn graph_key_on_row(
 
 /// True when this commit-file row has a line comment.
 ///
-/// Directory rows never mark. Stash sources never mark.
+/// Directory rows never mark. Stash sources never mark. A compare source
+/// marks line comments keyed to its head commit.
 pub fn commit_file_row_has_comment(
     store: &CommentStore,
     repo: &str,
@@ -1204,16 +1207,6 @@ fn commit_file_key_on_row(
     let identity = repo_identity(repo, primary);
     let path = normalize_viewed_path(path);
     match source {
-        CommitFileSource::Commit { commit_id } => matches!(
-            key,
-            CommentKey::CommitLine {
-                repo,
-                sha,
-                path: p,
-                ..
-            } if repo == &identity && sha == commit_id && p == &path
-        ),
-        CommitFileSource::Stash { .. } | CommitFileSource::Compare { .. } => false,
         CommitFileSource::Worktree => match key {
             CommentKey::WorktreeLine {
                 repo,
@@ -1223,6 +1216,16 @@ fn commit_file_key_on_row(
             } => branch.is_some_and(|b| repo == &identity && key_branch == b && p == &path),
             _ => false,
         },
+        // Commit and compare rows mark their commit's line comments.
+        source => matches!(
+            key,
+            CommentKey::CommitLine {
+                repo,
+                sha,
+                path: p,
+                ..
+            } if repo == &identity && Some(sha.as_str()) == source.line_commit() && p == &path
+        ),
     }
 }
 
@@ -1254,16 +1257,6 @@ fn diff_line_key_covers(
     let identity = repo_identity(repo, primary);
     let path = normalize_viewed_path(path);
     match source {
-        Some(CommitFileSource::Commit { commit_id }) => matches!(
-            key,
-            CommentKey::CommitLine {
-                repo,
-                sha,
-                path: p,
-                ..
-            } if repo == &identity && sha == commit_id && p == &path && key.covers_line(line)
-        ),
-        Some(CommitFileSource::Stash { .. }) | Some(CommitFileSource::Compare { .. }) => false,
         Some(CommitFileSource::Worktree) | None => match key {
             CommentKey::WorktreeLine {
                 repo,
@@ -1276,6 +1269,19 @@ fn diff_line_key_covers(
             }
             _ => false,
         },
+        // Commit and compare diffs paint their commit's line comments.
+        Some(source) => matches!(
+            key,
+            CommentKey::CommitLine {
+                repo,
+                sha,
+                path: p,
+                ..
+            } if repo == &identity
+                && Some(sha.as_str()) == source.line_commit()
+                && p == &path
+                && key.covers_line(line)
+        ),
     }
 }
 

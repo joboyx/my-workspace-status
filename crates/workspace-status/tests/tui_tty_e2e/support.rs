@@ -1177,13 +1177,23 @@ pub fn open_compare_regions_diff(workspace: &Path) -> PtySession {
     let mut tui = PtySession::open(workspace);
     tui.wait_contains("app", WAIT);
     tui.search("app");
+    open_compare_regions_in(&mut tui);
+    tui
+}
+
+/// Open `app ↔ origin/main` in a running session and focus its
+/// regions.txt diff, as [`open_compare_regions_diff`] does at launch.
+///
+/// The Workspace tree must hold focus on a row of `app` (the repo row or
+/// one of its files): "Diff vs default" compares the focused checkout.
+pub fn open_compare_regions_in(tui: &mut PtySession) {
     tui.ctrl_letter('k');
     tui.wait_pred(
         |screen| screen.contains("Enter run"),
         "Ctrl-k opens the command palette",
         WAIT,
     );
-    type_palette_filter(&mut tui, "vs default");
+    type_palette_filter(tui, "vs default");
     tui.wait_pred(
         |screen| screen.contains("Diff vs default") && screen.contains("vs default"),
         "palette filter lands on Diff vs default",
@@ -1205,5 +1215,4 @@ pub fn open_compare_regions_diff(workspace: &Path) -> PtySession {
         "Enter focuses the compare regions.txt diff",
         WAIT,
     );
-    tui
 }
