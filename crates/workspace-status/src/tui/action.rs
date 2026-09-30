@@ -77,7 +77,7 @@ pub enum Action {
     /// Toggle expand of the selected commit / stash message (`M`).
     ///
     /// Session-only, like wrap and theme. Graph list rows stay one line.
-    /// The graph selection footer and the commit-files header wrap the
+    /// The graph selection footer and the commit-files footer wrap the
     /// full subject plus body when this is on.
     ToggleCommitMsgExpand,
     /// Mouse wheel. Positive `delta` is down / right.

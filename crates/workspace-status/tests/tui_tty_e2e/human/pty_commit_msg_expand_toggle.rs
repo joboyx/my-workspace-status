@@ -122,7 +122,7 @@ fn files_msg_collapsed(screen: &str) -> bool {
 }
 
 /// The selected commit message is multiline by default on the graph footer
-/// and the commit-files header. The wheel scrolls a message taller than the
+/// and the commit-files footer. The wheel scrolls a message taller than the
 /// footer. `M` collapses to the dense clip and expands again.
 ///
 /// Docs + help VIEW: `M` is the commit-message toggle. Graph list rows stay
@@ -130,7 +130,7 @@ fn files_msg_collapsed(screen: &str) -> bool {
 /// but not `UNIQUE_MSG_BODY_TAIL`. Wheel down over the footer brings the
 /// tail in without moving the list cursor; wheel up goes back. `M` hides the
 /// body (`msg off`), `M` again shows it (`msg on`). Enter keeps expand on
-/// the files header, where `M` toggles it the same way.
+/// the files footer, where `M` toggles it the same way.
 ///
 /// Live PTY (80×28 so the subject clips). A collapsed default, a wheel that
 /// moves the list, a graph-row wrap, or a toast-only toggle cannot pass.
@@ -213,14 +213,14 @@ fn pty_commit_msg_expand_toggle() {
     tui.enter();
     tui.wait_pred(
         files_msg_expanded,
-        "Enter keeps the expanded message on the commit-files header",
+        "Enter keeps the expanded message on the commit-files footer",
         WAIT,
     );
 
     tui.key('M');
     tui.wait_pred(
         files_msg_collapsed,
-        "second M hides the body on the commit-files header",
+        "second M hides the body on the commit-files footer",
         WAIT,
     );
     tui.wait_ms(SETTLE_MS);
@@ -233,7 +233,7 @@ fn pty_commit_msg_expand_toggle() {
     tui.key('M');
     tui.wait_pred(
         files_msg_expanded,
-        "third M shows the body on the commit-files header again",
+        "third M shows the body on the commit-files footer again",
         WAIT,
     );
 }

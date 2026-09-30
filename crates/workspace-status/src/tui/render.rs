@@ -283,23 +283,26 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     if state.is_compare_tab() {
         let cursor = state.commit_files_cursor();
         state.layout.files_list_y = tree_inner.y;
+        state.layout.files_list_height = tree_inner.height;
         let list_h = tree_inner.height as usize;
         let (start, _) = visible_window(state.painted_commit_file_rows().len(), cursor, list_h);
         state.layout.files_list_offset = start;
     } else if let super::drill::DrillView::Diff { file_cursor, .. } = &state.drill {
         let cursor = *file_cursor;
         state.layout.files_list_y = tree_inner.y;
+        state.layout.files_list_height = tree_inner.height;
         let list_h = tree_inner.height as usize;
         let (start, _) = visible_window(state.painted_commit_file_rows().len(), cursor, list_h);
         state.layout.files_list_offset = start;
     } else if let super::drill::DrillView::Files { cursor, .. } = &state.drill {
-        let header_h = state
-            .commit_detail_header_lines(right_inner.width as usize)
-            .len()
-            .max(1)
-            .min(right_inner.height as usize) as u16;
-        state.layout.files_list_y = right_inner.y.saturating_add(header_h);
-        let list_h = right_inner.height.saturating_sub(header_h) as usize;
+        let footer_len = state
+            .commit_detail_footer_lines(right_inner.width as usize)
+            .len();
+        let footer_h = commit_detail_footer_height(footer_len, right_inner.height);
+        let list_h = right_inner.height.saturating_sub(footer_h);
+        state.layout.files_list_y = right_inner.y;
+        state.layout.files_list_height = list_h;
+        let list_h = list_h as usize;
         let painted_n = state.painted_commit_file_rows().len();
         let (start, _) = visible_window(painted_n, *cursor, list_h);
         state.layout.files_list_offset = start;
@@ -738,13 +741,49 @@ fn record_graph_scrollbar(state: &mut AppState, area: Rect, col_offset: u16) {
     }
 }
 
+/// Rows the commit-message footer takes at the bottom of a commit-files pane
+/// `pane_h` rows tall, for a footer of `footer_len` lines.
+///
+/// The file list keeps at least one row whenever the pane has two or more,
+/// so a short terminal never hides the list for the message. Draw and
+/// layout both size the footer here so the list rows and click mapping
+/// agree.
+fn commit_detail_footer_height(footer_len: usize, pane_h: u16) -> u16 {
+    let footer_len = footer_len.min(u16::MAX as usize) as u16;
+    let max = if pane_h >= 2 { pane_h - 1 } else { pane_h };
+    footer_len.min(max)
+}
+
+/// Commit files at depth 1: the file list on top, the selected commit's
+/// title, meta, and message pinned to the bottom rows as a footer (like the
+/// graph selection footer at depth 0).
 fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, cursor: usize) {
-    let header = state.commit_detail_header_lines(area.width as usize);
-    let header_h = header.len().min(area.height as usize);
+    let footer = state.commit_detail_footer_lines(area.width as usize);
+    let footer_h = commit_detail_footer_height(footer.len(), area.height);
+    let list_h = area.height.saturating_sub(footer_h);
+    if list_h > 0 {
+        let list_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: list_h,
+        };
+        draw_commit_file_list(
+            frame,
+            list_area,
+            state,
+            cursor,
+            state.right_col_offset as usize,
+        );
+    }
+    if footer_h == 0 {
+        return;
+    }
     let palette = state.theme.palette();
-    let header_lines: Vec<Line> = header
+    // Clip keeps the first lines: title, meta, then message lines.
+    let footer_lines: Vec<Line> = footer
         .iter()
-        .take(header_h)
+        .take(footer_h as usize)
         .enumerate()
         .map(|(i, line)| {
             let style = if i == 0 {
@@ -755,32 +794,13 @@ fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, c
             Line::from(Span::styled(line.clone(), style))
         })
         .collect();
-    let header_area = Rect {
+    let footer_area = Rect {
         x: area.x,
-        y: area.y,
+        y: area.y.saturating_add(list_h),
         width: area.width,
-        height: header_h as u16,
+        height: footer_h,
     };
-    frame.render_widget(Paragraph::new(header_lines), header_area);
-
-    let list_y = area.y.saturating_add(header_h as u16);
-    let list_h = area.height.saturating_sub(header_h as u16);
-    if list_h == 0 {
-        return;
-    }
-    let list_area = Rect {
-        x: area.x,
-        y: list_y,
-        width: area.width,
-        height: list_h,
-    };
-    draw_commit_file_list(
-        frame,
-        list_area,
-        state,
-        cursor,
-        state.right_col_offset as usize,
-    );
+    frame.render_widget(Paragraph::new(footer_lines), footer_area);
 }
 
 fn draw_commit_file_list(

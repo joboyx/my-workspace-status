@@ -133,6 +133,10 @@ pub struct LayoutHit {
     pub diff_split_rule_x: Option<u16>,
     pub right_y: u16,
     pub files_list_y: u16,
+    /// Painted commit-file list height in rows. Screen rows from
+    /// `files_list_y + files_list_height` down (such as the commit-message
+    /// footer) are not file rows.
+    pub files_list_height: u16,
     pub files_list_offset: usize,
     /// 0-based graph scrollbar column when a graph list is painted.
     pub graph_scrollbar_x: Option<u16>,
@@ -201,6 +205,7 @@ impl Default for LayoutHit {
             diff_split_rule_x: None,
             right_y: 1,
             files_list_y: 3,
+            files_list_height: 20,
             files_list_offset: 0,
             graph_scrollbar_x: None,
             graph_scrollbar_y: 0,
@@ -1240,33 +1245,35 @@ impl AppState {
         (title, subtitle)
     }
 
-    /// Title plus subtitle / wrapped message for the commit-files header.
+    /// Title plus subtitle / wrapped message for the commit-files footer.
     ///
-    /// Collapsed is the dense one-line subtitle from [`Self::commit_detail_meta`].
-    /// Expanded wraps subject plus body under a meta line (sha / refs / author).
-    pub(crate) fn commit_detail_header_lines(&self, width: usize) -> Vec<String> {
+    /// The footer sits at the bottom of the commit-files pane, under the
+    /// file list. Collapsed is the dense one-line subtitle from
+    /// [`Self::commit_detail_meta`]. Expanded wraps subject plus body under a
+    /// meta line (sha / refs / author). Never empty.
+    pub(crate) fn commit_detail_footer_lines(&self, width: usize) -> Vec<String> {
         let (title, subtitle) = self.commit_detail_meta();
-        let mut header = Vec::new();
+        let mut footer = Vec::new();
         if !title.is_empty() {
-            header.push(title);
+            footer.push(title);
         }
         if !self.commit_msg_expand {
             if let Some(sub) = subtitle {
                 if !sub.is_empty() {
-                    header.push(sub);
+                    footer.push(sub);
                 }
             }
-            if header.is_empty() {
-                header.push(String::new());
+            if footer.is_empty() {
+                footer.push(String::new());
             }
-            return header;
+            return footer;
         }
         match self.expanded_commit_message() {
             Some((meta, message)) => {
                 if !meta.is_empty() {
-                    header.push(meta);
+                    footer.push(meta);
                 }
-                header.extend(wrap_commit_message(
+                footer.extend(wrap_commit_message(
                     &message,
                     width.max(1),
                     COMMIT_MSG_EXPAND_MAX_LINES,
@@ -1275,15 +1282,15 @@ impl AppState {
             None => {
                 if let Some(sub) = subtitle {
                     if !sub.is_empty() {
-                        header.push(sub);
+                        footer.push(sub);
                     }
                 }
             }
         }
-        if header.is_empty() {
-            header.push(String::new());
+        if footer.is_empty() {
+            footer.push(String::new());
         }
-        header
+        footer
     }
 
     fn expanded_commit_message(&self) -> Option<(String, String)> {
@@ -2147,7 +2154,11 @@ impl AppState {
     }
 
     fn click_commit_files(&mut self, col: u16, row: u16, is_double: bool) -> Effect {
-        if row < self.layout.files_list_y {
+        let list_end = self
+            .layout
+            .files_list_y
+            .saturating_add(self.layout.files_list_height);
+        if row < self.layout.files_list_y || row >= list_end {
             return Effect::None;
         }
         let idx = self.layout.files_list_offset + (row - self.layout.files_list_y) as usize;
@@ -10159,6 +10170,55 @@ mod tests {
     }
 
     #[test]
+    fn click_on_commit_files_footer_does_not_select_a_hidden_file() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        install_graph(&mut app, Vec::new());
+        let files = ["a.txt", "b.txt", "c.txt", "d.txt"]
+            .into_iter()
+            .map(|path| CommitFile {
+                status: "M".into(),
+                path: path.into(),
+                old_path: None,
+            })
+            .collect();
+        app.open_commit_files(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            files,
+        );
+        assert_eq!(app.commit_file_rows().len(), 4);
+        app.layout = wide_split_layout();
+        // Two list rows scrolled by one (b.txt, c.txt); the footer is under
+        // them, where a scrolled-off d.txt would otherwise map.
+        app.layout.files_list_y = 2;
+        app.layout.files_list_height = 2;
+        app.layout.files_list_offset = 1;
+        app.set_commit_file_cursor(1);
+        app.focus = FocusPane::Right;
+        let col = app.layout.right_x + 10;
+
+        let footer_row = app.layout.files_list_y + app.layout.files_list_height;
+        assert_eq!(
+            app.dispatch(Action::Click {
+                col,
+                row: footer_row
+            }),
+            Effect::None
+        );
+        assert_eq!(app.commit_files_cursor(), 1);
+        app.dispatch(Action::Release);
+
+        app.dispatch(Action::Click {
+            col,
+            row: app.layout.files_list_y + 1,
+        });
+        assert_eq!(app.commit_files_cursor(), 2, "list rows still map");
+    }
+
+    #[test]
     fn fold_on_depth_2_left_folds_commit_files() {
         let mut app = state();
         focus_repo(&mut app, "app");
@@ -10723,25 +10783,25 @@ mod tests {
                 old_path: None,
             }],
         );
-        let collapsed_header = {
+        let collapsed_files_footer = {
             app.commit_msg_expand = false;
-            app.commit_detail_header_lines(16)
+            app.commit_detail_footer_lines(16)
         };
-        let collapsed_join = collapsed_header.join("\n");
+        let collapsed_join = collapsed_files_footer.join("\n");
         assert!(
             !collapsed_join.contains(body),
-            "collapsed header hides body: {collapsed_join}"
+            "collapsed files footer hides body: {collapsed_join}"
         );
         app.commit_msg_expand = true;
-        let expanded_header = app.commit_detail_header_lines(16);
-        let expanded_join = expanded_header.join("");
+        let expanded_files_footer = app.commit_detail_footer_lines(16);
+        let expanded_join = expanded_files_footer.join("");
         assert!(
             expanded_join.contains(body),
-            "expanded header shows body: {expanded_header:?}"
+            "expanded files footer shows body: {expanded_files_footer:?}"
         );
         assert!(
             expanded_join.contains(tail),
-            "expanded header shows subject tail: {expanded_header:?}"
+            "expanded files footer shows subject tail: {expanded_files_footer:?}"
         );
         app.dispatch(Action::ToggleCommitMsgExpand);
         assert!(!app.commit_msg_expand);

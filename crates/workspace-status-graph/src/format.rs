@@ -847,7 +847,7 @@ pub fn format_commit_subject(commit: &Commit) -> String {
 
 /// Visible lines of an expanded commit message (not counting footer meta).
 ///
-/// The graph footer scrolls past this. The commit-files header ends the
+/// The graph footer scrolls past this. The commit-files footer ends the
 /// last visible line with `…`.
 pub const COMMIT_MSG_EXPAND_MAX_LINES: usize = 8;
 
