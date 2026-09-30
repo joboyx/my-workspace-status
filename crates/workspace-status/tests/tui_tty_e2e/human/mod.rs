@@ -24,6 +24,7 @@ mod pty_compare_ahead_behind_diverged_unrelated;
 mod pty_compare_apostrophe_copies_diff;
 mod pty_compare_bare_t_still_tree_flat;
 mod pty_compare_comments;
+mod pty_compare_context_and_drag;
 mod pty_compare_equal_tips_and_picker_guards;
 mod pty_compare_esc_keeps_tab;
 mod pty_compare_gg_first_file_not_dir;

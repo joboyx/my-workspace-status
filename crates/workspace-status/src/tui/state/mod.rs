@@ -5081,27 +5081,40 @@ impl AppState {
                     tab.path = Some(path.to_string());
                     tab.content = content;
                     tab.content_for = Some((source.clone(), path.to_string()));
-                    tab.checkout_path.clone()
+                    Some(tab.checkout_path.clone())
                 }
                 Err(err) => {
                     tab.error = Some(err);
                     tab.content = DiffContent::default();
                     tab.content_for = None;
-                    return;
+                    None
                 }
             }
         };
-        if self
+        let is_active = self
             .tabs
             .active_compare()
-            .is_some_and(|live| live.id == tab_id)
-        {
-            self.adopt_diff_view(DiffViewId::Commit {
-                repo: checkout,
-                source: source.clone(),
-                path: path.to_string(),
-            });
+            .is_some_and(|live| live.id == tab_id);
+        if !is_active {
+            return;
         }
+        let Some(checkout) = checkout else {
+            // A failed load must not carry a Ctrl-O anchor into the next diff.
+            self.pending_hunk_anchor = None;
+            return;
+        };
+        self.adopt_diff_view(DiffViewId::Commit {
+            repo: checkout,
+            source: source.clone(),
+            path: path.to_string(),
+        });
+        // Same viewport sync as `set_diff` / `open_commit_diff`: a reload
+        // (Ctrl-O, watch refresh) keeps the cursor in range and on its hunk.
+        let n = self.current_diff_rows().len();
+        self.diff_cursor = self.diff_cursor.min(n.saturating_sub(1));
+        self.apply_pending_hunk_anchor();
+        self.sync_diff_scroll();
+        self.drop_stale_diff_visual();
     }
 
     pub(crate) fn apply_compare_probe(
@@ -7278,6 +7291,137 @@ mod tests {
             .find(|(_, line)| *line == 2)
             .expect("new line 2");
         app.diff_cursor = row;
+    }
+
+    /// Compare diff of `regions.txt` with two separated hunks (ALPHA, OMEGA).
+    /// `full` adds the unchanged lines between them, as Ctrl-O's `-U` does.
+    fn compare_regions_content(full: bool) -> DiffContent {
+        let mut body = String::from("@@ -1,4 +1,4 @@\n head-0\n-ALPHA-OLD\n+ALPHA-NEW\n tail-0\n");
+        if full {
+            for i in 0..20 {
+                body.push_str(&format!(" mid-{i:02}\n"));
+            }
+            body.push_str(" head-1\n-OMEGA-OLD\n+OMEGA-NEW\n tail-1\n");
+        } else {
+            body.push_str("@@ -25,3 +25,3 @@\n head-1\n-OMEGA-OLD\n+OMEGA-NEW\n tail-1\n");
+        }
+        DiffContent::from_unified(body)
+    }
+
+    /// Open a compare tab on `regions.txt` with the right pane focused.
+    fn compare_tab_on_regions(app: &mut AppState) -> (u64, u64) {
+        app.tabs.open_or_focus("app".into(), "main".into());
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        let _ = app.apply_compare_range(tab_id, gen, Ok(compare_range_load(&["regions.txt"])));
+        app.apply_compare_diff(
+            tab_id,
+            gen,
+            &compare_source(),
+            "regions.txt",
+            Ok(compare_regions_content(false)),
+        );
+        app.focus = FocusPane::Right;
+        app.layout.diff_pane_height = 8;
+        (tab_id, gen)
+    }
+
+    fn cursor_row_text(app: &AppState) -> String {
+        row_search_text(&app.current_diff_rows()[app.diff_cursor])
+    }
+
+    #[test]
+    fn compare_ctrl_o_reload_keeps_cursor_on_its_hunk() {
+        let mut app = state();
+        let (tab_id, gen) = compare_tab_on_regions(&mut app);
+        let omega = app
+            .current_diff_rows()
+            .iter()
+            .position(|row| row_search_text(row).contains("OMEGA-NEW"))
+            .expect("second hunk change row");
+        app.diff_cursor = omega;
+        let hunk_only_cursor = app.diff_cursor;
+        for full in [true, false] {
+            match app.dispatch(Action::ToggleFullContext) {
+                Effect::LoadCompareDiff {
+                    tab_id: id, path, ..
+                } => {
+                    assert_eq!(id, tab_id);
+                    assert_eq!(path, "regions.txt");
+                }
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(app.full_context_active(), full);
+            app.apply_compare_diff(
+                tab_id,
+                gen,
+                &compare_source(),
+                "regions.txt",
+                Ok(compare_regions_content(full)),
+            );
+            assert!(
+                cursor_row_text(&app).contains("OMEGA-NEW"),
+                "full={full}: cursor left the hunk: {}",
+                cursor_row_text(&app)
+            );
+            assert_eq!(app.pending_hunk_anchor, None, "anchor consumed");
+            let start = app.diff_scroll as usize;
+            assert!(
+                (start..start + 8).contains(&app.diff_cursor),
+                "full={full}: cursor {} out of view at scroll {start}",
+                app.diff_cursor
+            );
+            if full {
+                assert!(
+                    app.diff_cursor > hunk_only_cursor,
+                    "full file moves the row down"
+                );
+            } else {
+                assert_eq!(app.diff_cursor, hunk_only_cursor);
+            }
+        }
+    }
+
+    #[test]
+    fn compare_diff_reload_clamps_cursor_and_drops_stale_state() {
+        let mut app = state();
+        let (tab_id, gen) = compare_tab_on_regions(&mut app);
+        // A shorter reload (watch refresh) clamps a cursor past the end.
+        app.diff_cursor = 999;
+        app.apply_compare_diff(
+            tab_id,
+            gen,
+            &compare_source(),
+            "regions.txt",
+            Ok(compare_regions_content(false)),
+        );
+        assert_eq!(app.diff_cursor, app.current_diff_rows().len() - 1);
+        // A highlight whose rows changed is dropped.
+        app.diff_cursor = 1;
+        app.dispatch(Action::DiffVisualStart);
+        assert!(app.diff_visual_anchor.is_some());
+        app.apply_compare_diff(
+            tab_id,
+            gen,
+            &compare_source(),
+            "regions.txt",
+            Ok(compare_regions_content(true)),
+        );
+        assert_eq!(app.diff_visual_anchor, None, "stale highlight dropped");
+        // A failed Ctrl-O load does not leak its anchor into the next diff.
+        assert!(matches!(
+            app.dispatch(Action::ToggleFullContext),
+            Effect::LoadCompareDiff { .. }
+        ));
+        assert!(app.pending_hunk_anchor.is_some());
+        app.apply_compare_diff(
+            tab_id,
+            gen,
+            &compare_source(),
+            "regions.txt",
+            Err("boom".into()),
+        );
+        assert_eq!(app.pending_hunk_anchor, None);
     }
 
     #[test]
