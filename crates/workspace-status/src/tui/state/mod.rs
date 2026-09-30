@@ -79,8 +79,9 @@ use super::stash::{
     StashOpsContext,
 };
 use super::tabs::{
-    OpenCompare, TabStrip, DEFAULT_BRANCH_NOT_FOUND, FOCUS_A_CHECKOUT, HEAD_HAS_NO_COMMIT,
-    WORKSPACE_TAB_CANNOT_CLOSE,
+    compare_file_dirty, OpenCompare, TabStrip, COMPARE_FOCUS_A_FILE, COMPARE_HEAD_MOVED,
+    COMPARE_STILL_LOADING, DEFAULT_BRANCH_NOT_FOUND, FOCUS_A_CHECKOUT, HEAD_HAS_NO_COMMIT,
+    SWITCH_TO_WORKSPACE_TAB, WORKSPACE_TAB_CANNOT_CLOSE,
 };
 use super::theme::{cycle_theme_id, theme_from_env, ThemeId};
 use super::tree::{
@@ -294,6 +295,52 @@ pub enum PendingConfirm {
         label: String,
         into: String,
     },
+    /// Compare-tab highlight `x`: put the merge-base lines back for the
+    /// highlighted rows of the committed compare diff (worktree only).
+    ///
+    /// The patch is built before the confirm opens from loaded content.
+    CompareRevertRange {
+        target: CompareRevertTarget,
+        patch: String,
+    },
+    /// Compare-tab `x` on a file: restore it in the worktree from the
+    /// merge base. Status `A` deletes it; `R` also restores `old_path`.
+    CompareRevertFile {
+        target: CompareRevertTarget,
+    },
+}
+
+impl PendingConfirm {
+    /// True for the confirms a compare tab opens (and may accept).
+    pub fn is_compare_owned(&self) -> bool {
+        matches!(
+            self,
+            Self::CompareRevertRange { .. } | Self::CompareRevertFile { .. }
+        )
+    }
+}
+
+/// One compare-tab file that `x` may revert to the merge base.
+///
+/// Built only after [`AppState::compare_revert_target`] proves the compare
+/// head is the checked-out working tree for the file. The write worker
+/// checks `head` and cleanliness again right before it writes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompareRevertTarget {
+    /// Checkout path (snapshot `repo`).
+    pub repo: String,
+    /// File path on the head side.
+    pub path: String,
+    /// Merge-base path of a rename.
+    pub old_path: Option<String>,
+    /// One-letter `name-status` of `path` in the compare range.
+    pub status: String,
+    /// Compare base ref, for confirm copy.
+    pub base_ref: String,
+    /// Revert target commit (the compare merge base, not the base tip).
+    pub merge_base: String,
+    /// Compare head. The checkout's HEAD must still be this commit.
+    pub head: String,
 }
 
 /// One path in a pending revert confirm.
@@ -303,6 +350,15 @@ pub struct RevertTarget {
     pub path: String,
     pub untracked: bool,
     pub old_path: Option<String>,
+}
+
+/// Checkout of a compare-owned confirm.
+fn compare_repo(pending: &PendingConfirm) -> Option<&str> {
+    match pending {
+        PendingConfirm::CompareRevertRange { target, .. }
+        | PendingConfirm::CompareRevertFile { target } => Some(target.repo.as_str()),
+        _ => None,
+    }
 }
 
 /// Tracked / untracked mix of a whole-file revert confirm's targets.
@@ -2890,13 +2946,26 @@ impl AppState {
     }
 
     /// Repo, path, and patch for the DiffVisual range, or the refusal text.
+    ///
+    /// On a compare tab only Revert builds a patch: it becomes
+    /// [`PartialPatchKind::RevertCommitted`] on the loaded compare diff, and
+    /// only when [`Self::compare_revert_target`] allows the write.
     fn visual_patch(
         &self,
         anchor: usize,
         kind: PartialPatchKind,
     ) -> Result<(String, String, String), String> {
-        let Some((repo, path)) = self.visual_write_target() else {
-            return Err(self.visual_write_refuse_status(kind));
+        let (repo, path, kind) = if self.is_compare_tab() {
+            if kind != PartialPatchKind::Revert {
+                return Err(self.visual_write_refuse_status(kind));
+            }
+            let target = self.compare_revert_target()?;
+            (target.repo, target.path, PartialPatchKind::RevertCommitted)
+        } else {
+            let Some((repo, path)) = self.visual_write_target() else {
+                return Err(self.visual_write_refuse_status(kind));
+            };
+            (repo, path, kind)
         };
         let mode = effective_diff_mode(self.diff_mode, self.layout.diff_pane_width);
         let patch = build_partial_patch(
@@ -2910,7 +2979,9 @@ impl AppState {
         Ok((repo, path, patch))
     }
 
-    /// Repo and path for a DiffVisual cached patch, or `None` to refuse.
+    /// Repo and path for a Workspace DiffVisual cached patch, or `None`
+    /// to refuse. A compare tab answers from
+    /// [`Self::compare_revert_target`] instead (see [`Self::visual_patch`]).
     ///
     /// Every `DrillView::Diff` returns `None` (commit, stash, and worktree
     /// drills). That is the only write stop for those views:
@@ -2931,7 +3002,7 @@ impl AppState {
         let verb = match kind {
             PartialPatchKind::Stage => "stage",
             PartialPatchKind::Unstage => "unstage",
-            PartialPatchKind::Revert => "revert",
+            PartialPatchKind::Revert | PartialPatchKind::RevertCommitted => "revert",
         };
         let target = match &self.drill {
             DrillView::Diff {
@@ -2982,7 +3053,117 @@ impl AppState {
         single_or_batch(effects)
     }
 
+    /// The compare-tab file that `x` would revert, or why it may not.
+    ///
+    /// With a `V` highlight, or with the diff focused, the target is the
+    /// open diff, and only once its content is loaded for the current
+    /// range and path. On the file list it is the focused file row.
+    /// [`Self::compare_head_is_worktree`] must then hold for the file.
+    pub(crate) fn compare_revert_target(&self) -> Result<CompareRevertTarget, String> {
+        let Some(tab) = self.tabs.active_compare() else {
+            return Err(SWITCH_TO_WORKSPACE_TAB.into());
+        };
+        if tab.loading {
+            return Err(COMPARE_STILL_LOADING.into());
+        }
+        let Some(CommitFileSource::Compare {
+            base_ref,
+            merge_base,
+            head,
+            ..
+        }) = tab.source.as_ref()
+        else {
+            return Err(COMPARE_STILL_LOADING.into());
+        };
+        let path = if self.diff_visual_anchor.is_some() || !self.commit_files_list_focused() {
+            tab.loaded_diff_path()
+                .ok_or(COMPARE_STILL_LOADING)?
+                .to_string()
+        } else {
+            match self.focused_commit_file_row() {
+                Some(row) if row.is_file() => row.path,
+                _ => return Err(COMPARE_FOCUS_A_FILE.into()),
+            }
+        };
+        let Some(file) = tab.files.iter().find(|file| file.path == path) else {
+            return Err(COMPARE_STILL_LOADING.into());
+        };
+        let target = CompareRevertTarget {
+            repo: tab.checkout_path.clone(),
+            path,
+            old_path: file.old_path.clone(),
+            status: file.status.clone(),
+            base_ref: base_ref.clone(),
+            merge_base: merge_base.clone(),
+            head: head.clone(),
+        };
+        self.compare_head_is_worktree(&target)?;
+        Ok(target)
+    }
+
+    /// `Ok` when the compare head is the checked-out working tree for
+    /// `target`: the checkout's HEAD is still `target.head`, and neither
+    /// `path` nor a rename's `old_path` has a change against HEAD.
+    ///
+    /// Reads the snapshot, which can be a watch tick old. The write worker
+    /// checks both again with git right before it writes.
+    fn compare_head_is_worktree(&self, target: &CompareRevertTarget) -> Result<(), String> {
+        let Some(snap) = self
+            .snapshot
+            .repos
+            .iter()
+            .find(|row| row.repo == target.repo)
+        else {
+            return Err(COMPARE_HEAD_MOVED.into());
+        };
+        if snap.head != target.head {
+            return Err(COMPARE_HEAD_MOVED.into());
+        }
+        let paths = [Some(target.path.as_str()), target.old_path.as_deref()];
+        let touches = |path: &str| paths.contains(&Some(path));
+        let dirty = snap.changes.iter().find(|change| {
+            touches(&change.path) || change.old_path.as_deref().is_some_and(touches)
+        });
+        match dirty {
+            Some(change) => Err(compare_file_dirty(&change.path)),
+            None => Ok(()),
+        }
+    }
+
+    /// Compare-tab `x`: open the range or whole-file revert confirm.
+    ///
+    /// A refusal sets the status and keeps any highlight. Opening the
+    /// confirm clears the highlight.
+    fn begin_compare_revert(&mut self) -> Effect {
+        let target = match self.compare_revert_target() {
+            Ok(target) => target,
+            Err(err) => {
+                self.status = err;
+                return Effect::None;
+            }
+        };
+        if let Some(anchor) = self.diff_visual_anchor {
+            match self.visual_patch(anchor, PartialPatchKind::Revert) {
+                Ok((_, _, patch)) => {
+                    self.clear_diff_visual();
+                    self.confirm = Some(PendingConfirm::CompareRevertRange { target, patch });
+                }
+                Err(err) => self.status = err,
+            }
+            return Effect::None;
+        }
+        if !matches!(target.status.as_str(), "M" | "A" | "D" | "R") {
+            self.status = format!("cannot revert a {} change", target.status);
+            return Effect::None;
+        }
+        self.confirm = Some(PendingConfirm::CompareRevertFile { target });
+        Effect::None
+    }
+
     fn begin_revert(&mut self) -> Effect {
+        if self.is_compare_tab() {
+            return self.begin_compare_revert();
+        }
         if let Some(anchor) = self.diff_visual_anchor {
             return self.begin_revert_range(anchor);
         }
@@ -3133,6 +3314,41 @@ impl AppState {
             }) => {
                 self.status = format!("merge {label}");
                 Effect::MergeIntoHead { repo, rev, label }
+            }
+            // Compare confirms offer only y / n: `Y` keeps them open.
+            Some(pending) if pending.is_compare_owned() && clean => {
+                self.confirm = Some(pending);
+                Effect::None
+            }
+            // A compare confirm runs only on the compare tab of its checkout.
+            Some(pending)
+                if pending.is_compare_owned()
+                    && self.tabs.active_compare().is_none_or(|tab| {
+                        Some(tab.checkout_path.as_str()) != compare_repo(&pending)
+                    }) =>
+            {
+                self.status = "revert cancelled".into();
+                Effect::None
+            }
+            Some(PendingConfirm::CompareRevertRange { target, patch }) => {
+                self.status = format!("revert range {} to merge base", target.path);
+                Effect::CompareRevertPatch {
+                    repo: target.repo,
+                    path: target.path,
+                    head: target.head,
+                    patch,
+                }
+            }
+            Some(PendingConfirm::CompareRevertFile { target }) => {
+                self.status = format!("revert {} to merge base", target.path);
+                Effect::CompareRevertFile {
+                    repo: target.repo,
+                    path: target.path,
+                    old_path: target.old_path,
+                    deletes: target.status == "A",
+                    merge_base: target.merge_base,
+                    head: target.head,
+                }
             }
             None => Effect::None,
         }
@@ -4738,6 +4954,7 @@ impl AppState {
                     tab.source = None;
                     tab.path = None;
                     tab.content = DiffContent::default();
+                    tab.content_for = None;
                     return None;
                 }
                 Ok(load) => load,
@@ -4821,6 +5038,7 @@ impl AppState {
             None => {
                 tab.path = None;
                 tab.content = DiffContent::default();
+                tab.content_for = None;
                 None
             }
         }
@@ -4848,11 +5066,13 @@ impl AppState {
                 Ok(content) => {
                     tab.path = Some(path.to_string());
                     tab.content = content;
+                    tab.content_for = Some((source.clone(), path.to_string()));
                     tab.checkout_path.clone()
                 }
                 Err(err) => {
                     tab.error = Some(err);
                     tab.content = DiffContent::default();
+                    tab.content_for = None;
                     return;
                 }
             }
@@ -6888,7 +7108,7 @@ mod tests {
         for (title, reason) in [
             ("Stage", CANNOT_STAGE_COMPARE),
             ("Unstage", CANNOT_UNSTAGE_COMPARE),
-            ("Revert", SWITCH_TO_WORKSPACE_TAB),
+            ("Revert", COMPARE_STILL_LOADING),
             ("Fetch remotes", SWITCH_TO_WORKSPACE_TAB),
             ("Stash menu", SWITCH_TO_WORKSPACE_TAB),
             ("Branch picker", SWITCH_TO_WORKSPACE_TAB),
@@ -6904,6 +7124,7 @@ mod tests {
         for (action, reason) in [
             (Action::Stage, CANNOT_STAGE_COMPARE),
             (Action::Unstage, CANNOT_UNSTAGE_COMPARE),
+            (Action::Revert, COMPARE_STILL_LOADING),
             (Action::Fetch, SWITCH_TO_WORKSPACE_TAB),
             (Action::StashMenu, SWITCH_TO_WORKSPACE_TAB),
         ] {
@@ -6949,8 +7170,7 @@ mod tests {
             Action::GraphFocusSubmit,
             Action::StashMenu,
             Action::StashMenuEnter,
-            // Not yet open on a compare tab.
-            Action::Revert,
+            // No compare-owned confirm is open.
             Action::ConfirmYes,
             Action::ConfirmYesClean,
         ];
@@ -6995,6 +7215,30 @@ mod tests {
         );
         for action in &allowed {
             assert_eq!(app.compare_refusal(action), None, "compare: {action:?}");
+        }
+        // Revert answers from the head-is-worktree condition.
+        assert_eq!(
+            app.compare_refusal(&Action::Revert).as_deref(),
+            Some(COMPARE_STILL_LOADING)
+        );
+        // A Workspace confirm never runs on a compare tab; a compare one does.
+        app.confirm = Some(PendingConfirm::RevertRange {
+            repo: "app".into(),
+            path: "README.md".into(),
+            patch: "p".into(),
+        });
+        for action in [Action::ConfirmYes, Action::ConfirmYesClean] {
+            assert_eq!(
+                app.compare_refusal(&action).as_deref(),
+                Some(SWITCH_TO_WORKSPACE_TAB),
+                "{action:?}"
+            );
+        }
+        app.confirm = Some(PendingConfirm::CompareRevertFile {
+            target: compare_revert_target_fixture("README.md", "M"),
+        });
+        for action in [Action::ConfirmYes, Action::ConfirmYesClean] {
+            assert_eq!(app.compare_refusal(&action), None, "{action:?}");
         }
     }
 
@@ -7053,9 +7297,7 @@ mod tests {
 
     #[test]
     fn compare_highlight_palette_uses_compare_reasons() {
-        use super::super::tabs::{
-            CANNOT_STAGE_COMPARE, CANNOT_UNSTAGE_COMPARE, SWITCH_TO_WORKSPACE_TAB,
-        };
+        use super::super::tabs::{CANNOT_STAGE_COMPARE, CANNOT_UNSTAGE_COMPARE};
         let mut app = state();
         compare_tab_with_added_lines(&mut app);
         app.dispatch(Action::DiffVisualStart);
@@ -7068,9 +7310,10 @@ mod tests {
             palette_reason(&app, "Unstage highlighted lines").as_deref(),
             Some(CANNOT_UNSTAGE_COMPARE)
         );
+        // The fixture snapshot's HEAD is not the compare head.
         assert_eq!(
             palette_reason(&app, "Revert highlighted lines").as_deref(),
-            Some(SWITCH_TO_WORKSPACE_TAB)
+            Some(COMPARE_HEAD_MOVED)
         );
         assert_eq!(palette_reason(&app, "Exit highlight"), None);
         assert_eq!(palette_reason(&app, "Copy entity reference"), None);
@@ -7084,6 +7327,356 @@ mod tests {
             assert_eq!(app.status, reason, "{action:?}");
             assert_eq!(app.diff_visual_anchor, anchor, "{action:?} keeps the range");
         }
+    }
+
+    fn compare_revert_target_fixture(path: &str, status: &str) -> CompareRevertTarget {
+        CompareRevertTarget {
+            repo: "app".into(),
+            path: path.into(),
+            old_path: None,
+            status: status.into(),
+            base_ref: "main".into(),
+            merge_base: "aaa".into(),
+            head: "ccc".into(),
+        }
+    }
+
+    /// Committed compare diff of `regions.txt`: ALPHA (hunk 1) and OMEGA
+    /// (hunk 2) change between the merge base and the head.
+    const COMPARE_REGIONS_DIFF: &[&str] = &[
+        "diff --git a/regions.txt b/regions.txt",
+        "index 1111111..2222222 100644",
+        "--- a/regions.txt",
+        "+++ b/regions.txt",
+        "@@ -1,4 +1,4 @@",
+        " keep-a",
+        " keep-b",
+        " keep-c",
+        "-ALPHA-OLD",
+        "+ALPHA-NEW",
+        "@@ -12,3 +12,3 @@",
+        " pad-5",
+        "-OMEGA-OLD",
+        "+OMEGA-NEW",
+    ];
+
+    /// Compare tab `app ↔ main` (merge base `aaa`, head `ccc`) listing
+    /// `regions.txt` (M), `summary.txt` (A) and `new.txt` (R from
+    /// `old.txt`), with the regions.txt diff loaded and focused. The
+    /// snapshot's `app` HEAD is `ccc` and its worktree is clean.
+    fn compare_regions_app() -> AppState {
+        let mut app = state();
+        for row in app
+            .snapshot
+            .repos
+            .iter_mut()
+            .filter(|row| row.repo == "app")
+        {
+            row.head = "ccc".into();
+            row.changes.clear();
+        }
+        app.tabs.open_or_focus("app".into(), "main".into());
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        let mut load = compare_range_load(&["regions.txt", "summary.txt", "new.txt"]);
+        load.files[1].status = "A".into();
+        load.files[2].status = "R".into();
+        load.files[2].old_path = Some("old.txt".into());
+        let _ = app.apply_compare_range(tab_id, gen, Ok(load));
+        app.apply_compare_diff(
+            tab_id,
+            gen,
+            &compare_source(),
+            "regions.txt",
+            Ok(DiffContent::from_compare_lines(
+                COMPARE_REGIONS_DIFF.iter().map(|l| l.to_string()).collect(),
+            )),
+        );
+        app.focus = FocusPane::Right;
+        app
+    }
+
+    fn diff_row_of(app: &AppState, text: &str) -> usize {
+        app.current_diff_rows()
+            .iter()
+            .position(|row| {
+                matches!(row, DiffRow::Line { left, right }
+                    if left.text == text || right.as_ref().is_some_and(|r| r.text == text))
+            })
+            .unwrap_or_else(|| panic!("row {text}"))
+    }
+
+    fn set_app_change(app: &mut AppState, path: &str, old_path: Option<&str>) {
+        let row = app
+            .snapshot
+            .repos
+            .iter_mut()
+            .find(|row| row.repo == "app")
+            .unwrap();
+        row.changes = vec![FileChange {
+            path: path.into(),
+            staged_status: Some("M".into()),
+            unstaged_status: None,
+            untracked: false,
+            old_path: old_path.map(str::to_string),
+        }];
+    }
+
+    #[test]
+    fn compare_revert_target_requires_loaded_head_and_clean_file() {
+        let mut app = compare_regions_app();
+        let target = app.compare_revert_target().expect("clean and at HEAD");
+        assert_eq!(target.path, "regions.txt");
+        assert_eq!(target.merge_base, "aaa");
+        assert_eq!(target.head, "ccc");
+        assert_eq!(app.compare_refusal(&Action::Revert), None);
+        assert_eq!(palette_reason(&app, "Revert"), None);
+
+        // Range still loading.
+        app.tabs.active_compare_mut().unwrap().loading = true;
+        assert_eq!(
+            app.compare_revert_target().unwrap_err(),
+            COMPARE_STILL_LOADING
+        );
+        app.tabs.active_compare_mut().unwrap().loading = false;
+
+        // A diff load for another path is queued: content is still regions.txt.
+        app.tabs.active_compare_mut().unwrap().path = Some("summary.txt".into());
+        assert_eq!(
+            app.compare_revert_target().unwrap_err(),
+            COMPARE_STILL_LOADING
+        );
+        assert_eq!(
+            palette_reason(&app, "Revert").as_deref(),
+            Some(COMPARE_STILL_LOADING)
+        );
+        app.tabs.active_compare_mut().unwrap().path = Some("regions.txt".into());
+
+        // HEAD moved and the tab has not reloaded yet.
+        app.snapshot.repos.iter_mut().for_each(|row| {
+            if row.repo == "app" {
+                row.head = "ddd".into();
+            }
+        });
+        assert_eq!(app.compare_revert_target().unwrap_err(), COMPARE_HEAD_MOVED);
+        app.snapshot.repos.iter_mut().for_each(|row| {
+            if row.repo == "app" {
+                row.head = "ccc".into();
+            }
+        });
+
+        // Staged change to the file.
+        set_app_change(&mut app, "regions.txt", None);
+        assert_eq!(
+            app.compare_revert_target().unwrap_err(),
+            "regions.txt has uncommitted changes"
+        );
+        assert_eq!(
+            palette_reason(&app, "Revert").as_deref(),
+            Some("regions.txt has uncommitted changes")
+        );
+        app.status.clear();
+        assert_eq!(app.dispatch(Action::Revert), Effect::None);
+        assert_eq!(app.status, "regions.txt has uncommitted changes");
+        assert_eq!(app.confirm, None);
+
+        // A rename's merge-base path counts too (left file row).
+        set_app_change(&mut app, "old.txt", None);
+        assert!(app.compare_revert_target().is_ok(), "regions.txt is clean");
+        app.focus = FocusPane::Left;
+        app.tabs.active_compare_mut().unwrap().file_cursor = app
+            .commit_file_rows()
+            .iter()
+            .position(|row| row.path == "new.txt")
+            .unwrap();
+        assert_eq!(
+            app.compare_revert_target().unwrap_err(),
+            "old.txt has uncommitted changes"
+        );
+
+        // Workspace tab: the compare gate never refuses.
+        app.dispatch(Action::JumpToTab(1));
+        assert_eq!(app.compare_refusal(&Action::Revert), None);
+    }
+
+    #[test]
+    fn compare_x_highlight_reverts_range_to_merge_base_after_y() {
+        let mut app = compare_regions_app();
+        app.diff_cursor = 1; // first @@ row
+        app.dispatch(Action::DiffVisualStart);
+        let alpha = diff_row_of(&app, "ALPHA-NEW");
+        while app.diff_cursor < alpha {
+            app.dispatch(Action::Move(1));
+        }
+        assert_eq!(palette_reason(&app, "Revert highlighted lines"), None);
+        assert_eq!(app.dispatch(Action::Revert), Effect::None);
+        assert_eq!(app.diff_visual_anchor, None, "the confirm clears VISUAL");
+        let Some(PendingConfirm::CompareRevertRange { target, patch }) = app.confirm.clone() else {
+            panic!("range confirm: {:?} / {}", app.confirm, app.status);
+        };
+        assert_eq!(target.path, "regions.txt");
+        assert!(patch.contains("-ALPHA-OLD\n+ALPHA-NEW\n"), "{patch}");
+        assert!(!patch.contains("OMEGA"), "{patch}");
+
+        // `Y` is not offered: the confirm stays open and nothing runs.
+        assert_eq!(app.dispatch(Action::ConfirmYesClean), Effect::None);
+        assert!(app.confirm.is_some());
+        assert_eq!(
+            app.dispatch(Action::ConfirmYes),
+            Effect::CompareRevertPatch {
+                repo: "app".into(),
+                path: "regions.txt".into(),
+                head: "ccc".into(),
+                patch,
+            }
+        );
+        assert_eq!(app.confirm, None);
+    }
+
+    #[test]
+    fn compare_x_highlight_keeps_new_file_refusal() {
+        let mut app = compare_regions_app();
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        app.tabs.active_compare_mut().unwrap().path = Some("summary.txt".into());
+        let lines = [
+            "diff --git a/summary.txt b/summary.txt",
+            "new file mode 100644",
+            "index 0000000..3333333",
+            "--- /dev/null",
+            "+++ b/summary.txt",
+            "@@ -0,0 +1 @@",
+            "+summary",
+        ];
+        app.apply_compare_diff(
+            tab_id,
+            gen,
+            &compare_source(),
+            "summary.txt",
+            Ok(DiffContent::from_compare_lines(
+                lines.iter().map(|l| l.to_string()).collect(),
+            )),
+        );
+        app.diff_cursor = 1;
+        app.dispatch(Action::DiffVisualStart);
+        app.dispatch(Action::Move(1));
+        assert_eq!(
+            palette_reason(&app, "Revert highlighted lines").as_deref(),
+            Some("cannot revert lines of a new file")
+        );
+        app.dispatch(Action::Revert);
+        assert_eq!(app.status, "cannot revert lines of a new file");
+        assert_eq!(app.confirm, None);
+        assert!(app.diff_visual_anchor.is_some(), "a refusal keeps VISUAL");
+    }
+
+    #[test]
+    fn compare_x_file_confirms_then_restores_from_merge_base() {
+        // Diff focused, no highlight: the open file (M).
+        let mut app = compare_regions_app();
+        assert_eq!(app.dispatch(Action::Revert), Effect::None);
+        assert_eq!(
+            app.confirm,
+            Some(PendingConfirm::CompareRevertFile {
+                target: compare_revert_target_fixture("regions.txt", "M"),
+            })
+        );
+        app.dispatch(Action::ConfirmNo);
+        assert_eq!(app.confirm, None);
+        assert_eq!(app.status, "revert cancelled");
+        app.dispatch(Action::Revert);
+        assert_eq!(
+            app.dispatch(Action::ConfirmYes),
+            Effect::CompareRevertFile {
+                repo: "app".into(),
+                path: "regions.txt".into(),
+                old_path: None,
+                deletes: false,
+                merge_base: "aaa".into(),
+                head: "ccc".into(),
+            }
+        );
+
+        // File list: the added file deletes; the rename carries its old path.
+        app.focus = FocusPane::Left;
+        for (path, old_path, deletes) in [
+            ("summary.txt", None, true),
+            ("new.txt", Some("old.txt"), false),
+        ] {
+            app.tabs.active_compare_mut().unwrap().file_cursor = app
+                .commit_file_rows()
+                .iter()
+                .position(|row| row.path == path)
+                .unwrap();
+            app.dispatch(Action::Revert);
+            assert!(
+                matches!(app.confirm, Some(PendingConfirm::CompareRevertFile { .. })),
+                "{path}: {}",
+                app.status
+            );
+            assert_eq!(
+                app.dispatch(Action::ConfirmYes),
+                Effect::CompareRevertFile {
+                    repo: "app".into(),
+                    path: path.into(),
+                    old_path: old_path.map(str::to_string),
+                    deletes,
+                    merge_base: "aaa".into(),
+                    head: "ccc".into(),
+                },
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn compare_visual_hints_drop_stage_and_follow_revert() {
+        let keys = |app: &AppState| -> Vec<String> {
+            super::super::chrome::visual_hint_segments(app)
+                .into_iter()
+                .map(|hint| hint.key)
+                .collect()
+        };
+        let mut app = compare_regions_app();
+        app.diff_cursor = 1;
+        app.dispatch(Action::DiffVisualStart);
+        let hints = keys(&app);
+        assert!(!hints.contains(&"s u".to_string()), "{hints:?}");
+        assert!(hints.contains(&"x".to_string()), "{hints:?}");
+        set_app_change(&mut app, "regions.txt", None);
+        let hints = keys(&app);
+        assert!(!hints.contains(&"x".to_string()), "dirty file: {hints:?}");
+        assert!(hints.contains(&";".to_string()), "{hints:?}");
+    }
+
+    #[test]
+    fn compare_confirms_never_cross_tabs() {
+        let mut app = compare_regions_app();
+        // A Workspace confirm left on a compare tab does not run.
+        let workspace_confirm = PendingConfirm::RevertRange {
+            repo: "app".into(),
+            path: "README.md".into(),
+            patch: "p".into(),
+        };
+        app.confirm = Some(workspace_confirm.clone());
+        assert_eq!(app.dispatch(Action::ConfirmYes), Effect::None);
+        assert_eq!(app.status, SWITCH_TO_WORKSPACE_TAB);
+        assert_eq!(app.confirm, Some(workspace_confirm));
+
+        // Switching tabs drops a compare confirm.
+        app.confirm = None;
+        app.dispatch(Action::Revert);
+        assert!(app.confirm.is_some());
+        app.dispatch(Action::JumpToTab(1));
+        assert_eq!(app.confirm, None);
+
+        // A compare confirm forced onto Workspace is cancelled, not run.
+        app.confirm = Some(PendingConfirm::CompareRevertFile {
+            target: compare_revert_target_fixture("regions.txt", "M"),
+        });
+        assert_eq!(app.dispatch(Action::ConfirmYes), Effect::None);
+        assert_eq!(app.status, "revert cancelled");
+        assert_eq!(app.confirm, None);
     }
 
     #[test]

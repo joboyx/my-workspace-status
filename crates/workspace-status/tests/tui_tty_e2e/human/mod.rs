@@ -34,6 +34,7 @@ mod pty_compare_mouse_tab_close;
 mod pty_compare_mouse_tab_close_hover;
 mod pty_compare_palette_disable_guards;
 mod pty_compare_palette_opens_tab;
+mod pty_compare_revert;
 mod pty_compare_survives_watch;
 mod pty_compare_v_highlight;
 mod pty_ctrl_c_prompts_before_quit;

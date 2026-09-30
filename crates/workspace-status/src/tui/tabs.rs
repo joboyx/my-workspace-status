@@ -22,6 +22,18 @@ pub const SWITCH_TO_WORKSPACE_TAB: &str = "Switch to Workspace tab";
 pub const CANNOT_STAGE_COMPARE: &str = "cannot stage a compare diff";
 /// Unstage disable copy on a compare tab (whole file or highlighted lines).
 pub const CANNOT_UNSTAGE_COMPARE: &str = "cannot unstage a compare diff";
+/// Compare `x` refusal while the range or the open diff is still loading.
+pub const COMPARE_STILL_LOADING: &str = "compare diff still loading";
+/// Compare `x` refusal when the checkout HEAD is not the loaded compare head.
+pub const COMPARE_HEAD_MOVED: &str = "compare is stale: HEAD moved";
+/// Compare `x` refusal on a directory row or an empty list.
+pub const COMPARE_FOCUS_A_FILE: &str = "focus a file to revert";
+
+/// Compare `x` refusal when `path` differs from HEAD in the worktree or index.
+pub fn compare_file_dirty(path: &str) -> String {
+    format!("{path} has uncommitted changes")
+}
+
 /// Empty compare file list.
 pub const NO_COMMITTED_CHANGES: &str = "No committed changes";
 /// Empty compare picker.
@@ -82,6 +94,11 @@ pub struct CompareTab {
     pub file_cursor: usize,
     pub path: Option<String>,
     pub content: DiffContent,
+    /// Range and path that [`Self::content`] was loaded for.
+    ///
+    /// [`Self::path`] moves when a diff load is queued, before the content
+    /// arrives, so a write that reads `content` must check this matches.
+    pub content_for: Option<(CommitFileSource, String)>,
     /// Left file list when false; right diff when true.
     pub focus_right: bool,
     pub folds: HashSet<String>,
@@ -120,6 +137,7 @@ impl CompareTab {
             file_cursor: 0,
             path: None,
             content: DiffContent::default(),
+            content_for: None,
             focus_right: false,
             folds: HashSet::new(),
             tree_mode: true,
@@ -155,6 +173,17 @@ impl CompareTab {
     /// Diff pane header range (`<base-ref>...HEAD`).
     pub fn range_header(&self) -> String {
         format!("{}...HEAD", self.base_ref)
+    }
+
+    /// Path of the open diff when [`Self::content`] is loaded for the
+    /// current range and [`Self::path`], else `None` (still loading).
+    pub fn loaded_diff_path(&self) -> Option<&str> {
+        if self.loading {
+            return None;
+        }
+        let (source, path) = self.content_for.as_ref()?;
+        (self.source.as_ref() == Some(source) && self.path.as_deref() == Some(path.as_str()))
+            .then_some(path.as_str())
     }
 
     /// Range key of the loaded list when `path` is in it, else `None`.

@@ -498,10 +498,13 @@ impl AppState {
             self.nav_depth(),
             self.focus == FocusPane::Right,
             self.list_focus_target(),
-        ) {
+        ) && !self.compare_revert_runs(action)
+        {
             return Some("not available here".into());
         }
         match action {
+            // `compare_refusal` above already gave the compare reason.
+            Action::Revert if self.is_compare_tab() => None,
             Action::Pull | Action::DefaultBranch | Action::Fetch => {
                 let op = if matches!(action, Action::Pull) {
                     Op::Pull

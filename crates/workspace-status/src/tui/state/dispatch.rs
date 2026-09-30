@@ -45,13 +45,29 @@ impl AppState {
             | Action::GraphFocusSubmit
             | Action::StashMenu
             | Action::StashMenuEnter => SWITCH_TO_WORKSPACE_TAB,
-            // Revert has no compare target yet.
-            Action::Revert | Action::ConfirmYes | Action::ConfirmYesClean => {
+            // `x` writes the worktree only while the compare head is the
+            // checked-out working tree for the file.
+            Action::Revert => return self.compare_revert_target().err(),
+            // Only a confirm the compare tab opened may run here.
+            Action::ConfirmYes | Action::ConfirmYesClean => {
+                if self
+                    .confirm
+                    .as_ref()
+                    .is_some_and(|pending| pending.is_compare_owned())
+                {
+                    return None;
+                }
                 SWITCH_TO_WORKSPACE_TAB
             }
             _ => return None,
         };
         Some(reason.into())
+    }
+
+    /// True when `action` is a compare-tab `x`, which the right-pane
+    /// no-op gate must let through: it reverts the open diff's file.
+    pub(crate) fn compare_revert_runs(&self, action: &Action) -> bool {
+        self.is_compare_tab() && matches!(action, Action::Revert)
     }
 
     /// Apply `action` and return the [`Effect`] the event loop should run.
@@ -76,6 +92,8 @@ impl AppState {
         }
         let visual_write = self.diff_visual_anchor.is_some()
             && matches!(action, Action::Stage | Action::Unstage | Action::Revert);
+        // Compare `x` also runs from the focused diff (the open file).
+        let visual_write = visual_write || self.compare_revert_runs(&action);
         let noop = dispatch_is_noop(
             &action,
             self.nav_depth(),

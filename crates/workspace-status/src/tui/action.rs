@@ -302,6 +302,30 @@ pub enum Effect {
         tracked: Vec<String>,
         untracked: Vec<String>,
     },
+    /// Compare-tab highlight `x`: `git apply --reverse` of a slice of the
+    /// committed compare diff onto the worktree (index untouched).
+    ///
+    /// The worker first checks that HEAD is still `head` and `path` is
+    /// clean, and aborts with a status message otherwise.
+    CompareRevertPatch {
+        repo: String,
+        path: String,
+        head: String,
+        patch: String,
+    },
+    /// Compare-tab `x` on a file: restore it in the worktree from
+    /// `merge_base` (`git restore --source=<merge_base> --worktree`).
+    ///
+    /// `deletes` is true for a file added on the head side. The worker
+    /// checks HEAD and cleanliness first, as [`Self::CompareRevertPatch`].
+    CompareRevertFile {
+        repo: String,
+        path: String,
+        old_path: Option<String>,
+        deletes: bool,
+        merge_base: String,
+        head: String,
+    },
     EditFile {
         repo: String,
         path: String,

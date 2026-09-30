@@ -199,9 +199,10 @@ fn pty_compare_v_apostrophe_copies_range_reference() {
 
 /// Palette and `s` / `u` while lines are highlighted on a compare diff.
 ///
-/// Ctrl-k shows the HIGHLIGHT rows. The cursor lands on Exit highlight (the
-/// first enabled row): Stage / Unstage / Revert highlighted lines are
-/// disabled. Stage and Unstage name the compare reason. `s` and `u` in the
+/// Ctrl-k shows the HIGHLIGHT rows. Stage / Unstage highlighted lines are
+/// disabled and name the compare reason. On this clean checkout at the
+/// compare head, Revert highlighted lines (to the merge base) is the first
+/// enabled row, so the cursor lands there. `s` and `u` in the
 /// highlight give the same reason and leave the index untouched.
 #[test]
 fn pty_compare_highlight_palette_refuses_stage_and_unstage() {
@@ -225,9 +226,10 @@ fn pty_compare_highlight_palette_refuses_stage_and_unstage() {
                 && screen.contains("Stage highlighted lines")
                 && screen.contains("Unstage highlighted lines")
                 && screen.contains("Revert highlighted lines")
-                && screen.contains("❯ Exit highlight")
+                && screen.contains("❯ Revert highlighted lines")
+                && screen.contains("Exit highlight")
         },
-        "Ctrl-k shows the HIGHLIGHT rows with the cursor on Exit highlight",
+        "Ctrl-k shows the HIGHLIGHT rows with the cursor on Revert highlighted lines",
         WAIT,
     );
     type_palette_filter(&mut tui, "stage highlighted");

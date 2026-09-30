@@ -21,8 +21,9 @@ use crate::discovery::{discover_checkouts, process_repo, RepoCheckoutMeta};
 use crate::git::{
     apply_cached_patch, apply_worktree_patch_reverse, create_branch_at, create_branch_checkout,
     exec_git_checked, latest_stash_ref, list_compare_picker_branches, list_local_branches,
-    pull_quiet_detailed, push_quiet, remove_untracked_file, remove_worktree, revert_tracked_file,
-    stage_file, stash_apply, stash_drop, stash_pop, stash_push, unstage_file,
+    pull_quiet_detailed, push_quiet, remove_untracked_file, remove_worktree, revert_compare_file,
+    revert_compare_patch, revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop,
+    stash_push, unstage_file,
 };
 use crate::parallel::env_fetch_concurrency;
 use crate::snapshot::RepoSnapshot;
@@ -331,6 +332,17 @@ fn overlay_write_checkouts(state: &AppState, action: &Action) -> Vec<String> {
             | Some(PendingConfirm::MergeIntoHead { repo, .. }) => vec![repo.clone()],
             Some(PendingConfirm::RemoveWorktree { primary, path, .. }) => {
                 vec![primary.clone(), path.clone()]
+            }
+            // `Y` keeps a compare confirm open, so it writes nothing.
+            Some(
+                PendingConfirm::CompareRevertRange { target, .. }
+                | PendingConfirm::CompareRevertFile { target },
+            ) => {
+                if matches!(action, Action::ConfirmYesClean) {
+                    Vec::new()
+                } else {
+                    vec![target.repo.clone()]
+                }
             }
             None => Vec::new(),
         },
@@ -683,6 +695,47 @@ impl Interpreter {
                         for path in &untracked {
                             remove_untracked_file(&dir, path)?;
                         }
+                        Ok(ok_status)
+                    }),
+                );
+            }
+            Effect::CompareRevertPatch {
+                repo,
+                path,
+                head,
+                patch,
+            } => {
+                let dir = opts.cwd.join(&repo);
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        revert_compare_patch(&dir, &head, &path, &patch)?;
+                        Ok(format!(
+                            "reverted range {path} to merge base (see Workspace tab)"
+                        ))
+                    }),
+                );
+            }
+            Effect::CompareRevertFile {
+                repo,
+                path,
+                old_path,
+                deletes,
+                merge_base,
+                head,
+            } => {
+                let dir = opts.cwd.join(&repo);
+                let ok_status = if deletes {
+                    format!("deleted {path} (not in merge base; see Workspace tab)")
+                } else {
+                    format!("reverted {path} to merge base (see Workspace tab)")
+                };
+                self.enqueue_write(
+                    state,
+                    &[&repo],
+                    Box::new(move || {
+                        revert_compare_file(&dir, &merge_base, &head, &path, old_path.as_deref())?;
                         Ok(ok_status)
                     }),
                 );
@@ -1511,6 +1564,8 @@ impl Interpreter {
             | Effect::ApplyCachedPatch { repo, .. }
             | Effect::RevertPatch { repo, .. }
             | Effect::Revert { repo, .. }
+            | Effect::CompareRevertPatch { repo, .. }
+            | Effect::CompareRevertFile { repo, .. }
             | Effect::StashCreate { repo, .. }
             | Effect::StashApply { repo, .. }
             | Effect::StashPop { repo, .. }

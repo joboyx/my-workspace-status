@@ -24,6 +24,7 @@ use workspace_status_graph::GraphRow;
 use crate::helpers::{is_default_branch, visible_width};
 use crate::snapshot::{CheckoutKind, SyncStatus};
 
+use super::action::Action;
 use super::branches::{can_open_branch_picker, checkoutable_branch_names};
 use super::commit_files::CommitFileRowKind;
 use super::ctrl_c_exit::{is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT};
@@ -422,7 +423,9 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
                 5 + revert_scope(targets).count_lines()
             }
             super::state::PendingConfirm::CheckoutOutOfSync { .. }
-            | super::state::PendingConfirm::MergeIntoHead { .. } => 7,
+            | super::state::PendingConfirm::MergeIntoHead { .. }
+            | super::state::PendingConfirm::CompareRevertRange { .. }
+            | super::state::PendingConfirm::CompareRevertFile { .. } => 7,
         };
     }
     if let Some(ops) = state.stash_menu.as_ref() {
@@ -568,14 +571,20 @@ pub fn extra_hint_segments() -> Vec<HintSegment> {
 }
 
 /// Hints while `V` visual-line highlight is on a focused file diff.
-pub fn visual_hint_segments() -> Vec<HintSegment> {
-    vec![
-        hint("j k", "extend range", false),
-        hint("s u", "stage / unstage", false),
-        hint("x", "revert", true),
-        hint(";", "comment range", false),
-        hint("Esc", "cancel highlight", false),
-    ]
+///
+/// A compare tab has no stage / unstage, and shows `x` only while the
+/// highlighted lines may revert to the merge base.
+pub fn visual_hint_segments(state: &AppState) -> Vec<HintSegment> {
+    let mut hints = vec![hint("j k", "extend range", false)];
+    if !state.is_compare_tab() {
+        hints.push(hint("s u", "stage / unstage", false));
+        hints.push(hint("x", "revert", true));
+    } else if state.compare_refusal(&Action::Revert).is_none() {
+        hints.push(hint("x", "revert to merge base", true));
+    }
+    hints.push(hint(";", "comment range", false));
+    hints.push(hint("Esc", "cancel highlight", false));
+    hints
 }
 
 fn hint(key: &str, label: &str, destructive: bool) -> HintSegment {
@@ -1116,7 +1125,7 @@ fn idle_status_line(
         used += search_query.len() + 3;
     }
     let mut hints = if visual {
-        visual_hint_segments()
+        visual_hint_segments(state)
     } else {
         nav_chrome_hint_segments(nav_depth(state), state.focus)
     };
@@ -1390,7 +1399,10 @@ mod tests {
                 "q".to_string()
             ]
         );
-        let visual: Vec<String> = visual_hint_segments().into_iter().map(|s| s.key).collect();
+        let visual: Vec<String> = visual_hint_segments(&app)
+            .into_iter()
+            .map(|s| s.key)
+            .collect();
         assert!(visual.contains(&"s u".into()), "{visual:?}");
         assert!(visual.contains(&"x".into()), "{visual:?}");
         assert!(visual.contains(&"j k".into()), "{visual:?}");

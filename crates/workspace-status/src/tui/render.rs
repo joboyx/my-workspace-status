@@ -50,7 +50,7 @@ use super::split::{
     diff_split_rule_x, effective_diff_mode, is_side_by_side_split, pane_widths,
     side_by_side_column_widths, MIN_PANE_COLS,
 };
-use super::state::{revert_scope, AppState, FocusPane, PendingConfirm};
+use super::state::{revert_scope, AppState, CompareRevertTarget, FocusPane, PendingConfirm};
 use super::syntax::{
     cached_highlight_diff_rows, slice_styled_cols, CachedDiffSyntax, DiffSyntaxKey,
 };
@@ -1817,6 +1817,34 @@ fn confirm_action_row(
     Line::from(spans)
 }
 
+/// Detail row of a compare revert confirm that changes content only.
+const COMPARE_REVERT_WORKTREE_ONLY: &str =
+    "  worktree only · the change shows on the Workspace tab";
+
+/// `Revert <what><path> to the <base_ref> merge base?`
+fn compare_revert_title(
+    what: &str,
+    target: &CompareRevertTarget,
+    accent: Color,
+    muted: Color,
+    file: Color,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        "Revert ",
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+    )];
+    if !what.is_empty() {
+        spans.push(Span::styled(what.to_string(), Style::default().fg(muted)));
+    }
+    spans.extend([
+        Span::styled(target.path.clone(), Style::default().fg(file)),
+        Span::styled(" to the ", Style::default().fg(muted)),
+        Span::styled(target.base_ref.clone(), Style::default().fg(file)),
+        Span::styled(" merge base?", Style::default().fg(accent)),
+    ]);
+    Line::from(spans)
+}
+
 fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let Some(pending) = state.confirm.as_ref() else {
         return;
@@ -1900,6 +1928,55 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     Span::styled("?", Style::default().fg(accent)),
                 ]),
                 confirm_action_row("y", "revert", None, accent, palette.muted, surface),
+            ];
+            (accent, lines)
+        }
+        PendingConfirm::CompareRevertRange { target, .. } => {
+            let accent = palette.modified;
+            let lines = vec![
+                compare_revert_title(
+                    "highlighted lines in ",
+                    target,
+                    accent,
+                    palette.muted,
+                    palette.file,
+                ),
+                Line::from(Span::styled(
+                    COMPARE_REVERT_WORKTREE_ONLY,
+                    Style::default().fg(palette.muted),
+                )),
+                confirm_action_row("y", "revert", None, accent, palette.muted, surface),
+            ];
+            (accent, lines)
+        }
+        PendingConfirm::CompareRevertFile { target } => {
+            let deletes = target.status == "A";
+            let accent = if deletes {
+                palette.deleted
+            } else {
+                palette.modified
+            };
+            let path = &target.path;
+            let fate = match (target.status.as_str(), target.old_path.as_deref()) {
+                ("A", _) => format!("  added on HEAD → {path} will be deleted"),
+                ("D", _) => format!("  deleted on HEAD → {path} will be restored"),
+                ("R", Some(old)) => {
+                    format!("  renamed on HEAD → {path} will be deleted, {old} restored")
+                }
+                _ => COMPARE_REVERT_WORKTREE_ONLY.to_string(),
+            };
+            let fate_color = if deletes { accent } else { palette.muted };
+            let lines = vec![
+                compare_revert_title("", target, accent, palette.muted, palette.file),
+                Line::from(Span::styled(fate, Style::default().fg(fate_color))),
+                confirm_action_row(
+                    "y",
+                    if deletes { "delete" } else { "revert" },
+                    None,
+                    accent,
+                    palette.muted,
+                    surface,
+                ),
             ];
             (accent, lines)
         }
@@ -4542,6 +4619,90 @@ mod tests {
         assert!(text.contains("fast-forward"), "{text}");
         assert!(text.contains("merge commit"), "{text}");
         assert!(!text.contains("? y/n"), "{text}");
+    }
+
+    #[test]
+    fn compare_revert_confirms_name_the_merge_base_and_deletions() {
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let target = |path: &str, status: &str, old_path: Option<&str>| CompareRevertTarget {
+            repo: "app".into(),
+            path: path.into(),
+            old_path: old_path.map(str::to_string),
+            status: status.into(),
+            base_ref: "origin/main".into(),
+            merge_base: "aaa".into(),
+            head: "ccc".into(),
+        };
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut paint = |state: &mut AppState, confirm: PendingConfirm| {
+            state.confirm = Some(confirm);
+            terminal.draw(|frame| draw(frame, state)).unwrap();
+            buffer_text(&terminal)
+        };
+
+        let text = paint(
+            &mut state,
+            PendingConfirm::CompareRevertRange {
+                target: target("regions.txt", "M", None),
+                patch: String::new(),
+            },
+        );
+        assert!(
+            text.contains("Revert highlighted lines in regions.txt to the origin/main merge base?"),
+            "{text}"
+        );
+        assert!(text.contains("worktree only"), "{text}");
+        assert!(text.contains("revert"), "{text}");
+        assert!(!text.contains("delete"), "{text}");
+
+        let text = paint(
+            &mut state,
+            PendingConfirm::CompareRevertFile {
+                target: target("regions.txt", "M", None),
+            },
+        );
+        assert!(
+            text.contains("Revert regions.txt to the origin/main merge base?"),
+            "{text}"
+        );
+        assert!(text.contains("worktree only"), "{text}");
+
+        let text = paint(
+            &mut state,
+            PendingConfirm::CompareRevertFile {
+                target: target("summary.txt", "A", None),
+            },
+        );
+        assert!(
+            text.contains("Revert summary.txt to the origin/main merge base?"),
+            "{text}"
+        );
+        assert!(
+            text.contains("added on HEAD → summary.txt will be deleted"),
+            "{text}"
+        );
+        assert!(text.contains("delete"), "{text}");
+
+        let text = paint(
+            &mut state,
+            PendingConfirm::CompareRevertFile {
+                target: target("gone.txt", "D", None),
+            },
+        );
+        assert!(text.contains("gone.txt will be restored"), "{text}");
+
+        let text = paint(
+            &mut state,
+            PendingConfirm::CompareRevertFile {
+                target: target("new.txt", "R", Some("old.txt")),
+            },
+        );
+        assert!(
+            text.contains("new.txt will be deleted, old.txt restored"),
+            "{text}"
+        );
     }
 
     #[test]

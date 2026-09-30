@@ -400,6 +400,11 @@ pub enum PartialPatchKind {
     Unstage,
     /// `git apply --reverse` of unstaged add/del lines (worktree only).
     Revert,
+    /// `git apply --reverse` of COMMITTED (compare tab) add/del lines onto
+    /// the worktree. The caller proves the worktree file is the compare
+    /// head blob, so the post-image matches it and the reverse apply puts
+    /// the merge-base lines back.
+    RevertCommitted,
 }
 
 fn pair_hunk(hunk: &Hunk) -> Vec<(DiffRow, Vec<usize>)> {
@@ -548,6 +553,8 @@ pub fn build_diff_rows(content: &DiffContent, mode: DiffMode) -> Vec<DiffRow> {
 ///
 /// Stage reads the unstaged (or NEW) section. Unstage reads STAGED. Revert
 /// reads UNSTAGED only (index to worktree) and refuses NEW files.
+/// RevertCommitted reads COMMITTED only (a compare diff) with Revert's
+/// rules; every other kind refuses a COMMITTED diff.
 /// Context lines in the range stay as context. Stage applies forward, so
 /// unselected additions drop and unselected deletions become context.
 /// Unstage and Revert apply with `--reverse`, so the post-image must match
@@ -566,8 +573,12 @@ pub fn build_partial_patch(
     if path.is_empty() {
         return Err(partial_fail(kind));
     }
-    if content.is_committed {
-        return Err(committed_fail(kind));
+    if content.is_committed != (kind == PartialPatchKind::RevertCommitted) {
+        return Err(if content.is_committed {
+            committed_fail(kind)
+        } else {
+            partial_fail(kind)
+        });
     }
     let annotated = annotated_diff_rows(content, mode);
     if annotated.is_empty() {
@@ -611,7 +622,10 @@ pub fn build_partial_patch(
         .filter(|section| {
             matches!(
                 section,
-                DiffSection::Staged | DiffSection::Unstaged | DiffSection::New
+                DiffSection::Staged
+                    | DiffSection::Unstaged
+                    | DiffSection::New
+                    | DiffSection::Committed
             )
         })
         .collect();
@@ -652,6 +666,12 @@ pub fn build_partial_patch(
             }
             (DiffSection::Unstaged, content.unstaged.as_str(), false)
         }
+        PartialPatchKind::RevertCommitted => {
+            if !change_sections.contains(&DiffSection::Committed) {
+                return Err(nothing_fail(kind));
+            }
+            (DiffSection::Committed, content.unstaged.as_str(), false)
+        }
     };
 
     if raw.trim().is_empty() {
@@ -663,14 +683,16 @@ pub fn build_partial_patch(
     }
     // An intent-to-add file (`git add -N`) is not `is_new`, but its unstaged
     // diff is a new-file patch: a reverse apply of a whole hunk deletes it.
-    if kind == PartialPatchKind::Revert && header.contains("new file mode") {
+    let revert = matches!(
+        kind,
+        PartialPatchKind::Revert | PartialPatchKind::RevertCommitted
+    );
+    if revert && header.contains("new file mode") {
         return Err("cannot revert lines of a new file".into());
     }
     // A reverse worktree apply would also undo a mode change or recreate a
     // deleted file. Line revert covers content only.
-    if kind == PartialPatchKind::Revert
-        && (header.contains("old mode") || header.contains("deleted file mode"))
-    {
+    if revert && (header.contains("old mode") || header.contains("deleted file mode")) {
         return Err(partial_fail(kind));
     }
     let hunks = parse_unified_diff(raw);
@@ -706,7 +728,9 @@ fn nothing_fail(kind: PartialPatchKind) -> String {
     match kind {
         PartialPatchKind::Stage => "nothing to stage in highlight".into(),
         PartialPatchKind::Unstage => "nothing to unstage in highlight".into(),
-        PartialPatchKind::Revert => "nothing to revert in highlight".into(),
+        PartialPatchKind::Revert | PartialPatchKind::RevertCommitted => {
+            "nothing to revert in highlight".into()
+        }
     }
 }
 
@@ -714,7 +738,9 @@ fn committed_fail(kind: PartialPatchKind) -> String {
     match kind {
         PartialPatchKind::Stage => "cannot stage a committed diff".into(),
         PartialPatchKind::Unstage => "cannot unstage a committed diff".into(),
-        PartialPatchKind::Revert => "cannot revert a committed diff".into(),
+        PartialPatchKind::Revert | PartialPatchKind::RevertCommitted => {
+            "cannot revert a committed diff".into()
+        }
     }
 }
 
@@ -722,7 +748,9 @@ fn binary_fail(kind: PartialPatchKind) -> String {
     match kind {
         PartialPatchKind::Stage => "cannot stage a binary highlight".into(),
         PartialPatchKind::Unstage => "cannot unstage a binary highlight".into(),
-        PartialPatchKind::Revert => "cannot revert a binary highlight".into(),
+        PartialPatchKind::Revert | PartialPatchKind::RevertCommitted => {
+            "cannot revert a binary highlight".into()
+        }
     }
 }
 
@@ -730,7 +758,9 @@ fn partial_fail(kind: PartialPatchKind) -> String {
     match kind {
         PartialPatchKind::Stage => "cannot stage highlight".into(),
         PartialPatchKind::Unstage => "cannot unstage highlight".into(),
-        PartialPatchKind::Revert => "cannot revert highlight".into(),
+        PartialPatchKind::Revert | PartialPatchKind::RevertCommitted => {
+            "cannot revert highlight".into()
+        }
     }
 }
 
@@ -2024,6 +2054,88 @@ keep-z
             fs::read_to_string(dir.join("regions.txt")).unwrap()
         }
 
+        /// `main` commits [`REGIONS`]; `feature` commits ALPHA-NEW and
+        /// OMEGA-NEW and a new `summary.txt`, and is checked out clean.
+        /// Returns the dir and the compare content for `path`.
+        fn committed_compare(prefix: &str, path: &str) -> (std::path::PathBuf, DiffContent) {
+            let dir = repo_with_regions(prefix);
+            git(&dir, &["checkout", "-q", "-b", "feature"]);
+            let edited = REGIONS
+                .replace("ALPHA-OLD", "ALPHA-NEW")
+                .replace("OMEGA-OLD", "OMEGA-NEW");
+            fs::write(dir.join("regions.txt"), edited).unwrap();
+            fs::write(dir.join("summary.txt"), "summary\n").unwrap();
+            git(&dir, &["add", "."]);
+            git(&dir, &["commit", "-q", "-m", "feature"]);
+            let lines = crate::git::diff_compare_file_ctx(&dir, "main", "HEAD", path, None, None)
+                .expect("compare diff");
+            (dir, DiffContent::from_compare_lines(lines))
+        }
+
+        #[test]
+        fn revert_committed_restores_one_compare_hunk_to_the_merge_base() {
+            let (dir, content) = committed_compare("ws-diff-revert-committed", "regions.txt");
+            let rows = build_diff_rows(&content, DiffMode::Inline);
+            assert!(matches!(rows[0], DiffRow::Section(DiffSection::Committed)));
+            let alpha = line_row(&content, "ALPHA-NEW");
+            let patch = build_partial_patch(
+                &content,
+                DiffMode::Inline,
+                1,
+                alpha,
+                PartialPatchKind::RevertCommitted,
+                "regions.txt",
+            )
+            .expect("patch");
+            apply_worktree_patch_reverse(&dir, &patch).expect("revert");
+
+            assert_eq!(worktree(&dir), REGIONS.replace("OMEGA-OLD", "OMEGA-NEW"));
+            assert!(exec_git(&["diff", "--cached"], &dir).is_empty());
+
+            // Plain Revert still refuses a committed diff.
+            let err = build_partial_patch(
+                &content,
+                DiffMode::Inline,
+                1,
+                alpha,
+                PartialPatchKind::Revert,
+                "regions.txt",
+            )
+            .unwrap_err();
+            assert_eq!(err, "cannot revert a committed diff");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn revert_committed_refuses_new_files_and_worktree_diffs() {
+            let (dir, added) = committed_compare("ws-diff-revert-committed-new", "summary.txt");
+            let end = build_diff_rows(&added, DiffMode::Inline).len() - 1;
+            let err = build_partial_patch(
+                &added,
+                DiffMode::Inline,
+                0,
+                end,
+                PartialPatchKind::RevertCommitted,
+                "summary.txt",
+            )
+            .unwrap_err();
+            assert_eq!(err, "cannot revert lines of a new file");
+
+            fs::write(dir.join("regions.txt"), "dirty\n").unwrap();
+            let worktree_diff = content(&dir);
+            let err = build_partial_patch(
+                &worktree_diff,
+                DiffMode::Inline,
+                0,
+                3,
+                PartialPatchKind::RevertCommitted,
+                "regions.txt",
+            )
+            .unwrap_err();
+            assert_eq!(err, "cannot revert highlight");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
         #[test]
         fn revert_range_restores_only_the_highlighted_hunk() {
             let dir = repo_with_regions("ws-diff-revert-hunk");
@@ -2152,7 +2264,9 @@ keep-z
             match kind {
                 PartialPatchKind::Stage => apply_cached_patch(&dir, &patch, false),
                 PartialPatchKind::Unstage => apply_cached_patch(&dir, &patch, true),
-                PartialPatchKind::Revert => apply_worktree_patch_reverse(&dir, &patch),
+                PartialPatchKind::Revert | PartialPatchKind::RevertCommitted => {
+                    apply_worktree_patch_reverse(&dir, &patch)
+                }
             }
             .unwrap_or_else(|err| panic!("{kind:?} {left}: {err}\n{patch}"));
             let index = blob_bytes(&dir, "", "regions.txt").expect("index blob");
@@ -2296,7 +2410,9 @@ keep-z
             match kind {
                 PartialPatchKind::Stage => apply_cached_patch(&dir, &patch, false),
                 PartialPatchKind::Unstage => apply_cached_patch(&dir, &patch, true),
-                PartialPatchKind::Revert => apply_worktree_patch_reverse(&dir, &patch),
+                PartialPatchKind::Revert | PartialPatchKind::RevertCommitted => {
+                    apply_worktree_patch_reverse(&dir, &patch)
+                }
             }
             .unwrap_or_else(|err| panic!("{kind:?} {from}..{to}: {err}\n{patch}"));
             let index = blob_bytes(&dir, "", "lines.txt").expect("index blob");
@@ -2388,7 +2504,9 @@ keep-z
                     .and_then(|patch| match kind {
                         PartialPatchKind::Stage => apply_cached_patch(&dir, &patch, false),
                         PartialPatchKind::Unstage => apply_cached_patch(&dir, &patch, true),
-                        PartialPatchKind::Revert => apply_worktree_patch_reverse(&dir, &patch),
+                        PartialPatchKind::Revert | PartialPatchKind::RevertCommitted => {
+                            apply_worktree_patch_reverse(&dir, &patch)
+                        }
                     })
                     .map(|()| {
                         let index = blob_bytes(&dir, "", "no-eol.txt").expect("index blob");
