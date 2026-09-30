@@ -61,12 +61,35 @@ fn graph_msg_at_bottom(screen: &str) -> bool {
         && no_wrong_overlays(screen)
 }
 
-/// Depth 1: the file list comes first, then subject, meta, and body.
+/// The last painted right-pane body row is the pane's last inner row (just
+/// above the bottom border `┘`), and it belongs to the message: at or below
+/// the meta line, never the file row.
+///
+/// A blank row inside the message is fine; blank rows under it are not.
+fn msg_pinned_to_pane_bottom(screen: &str, file: usize, meta: usize) -> bool {
+    let Some(border) = right_row(screen, |cells| cells.contains('\u{2518}')) else {
+        return false;
+    };
+    let lines: Vec<&str> = screen.lines().collect();
+    let painted = (pane_body_start(lines.len())..border).rev().find(|&row| {
+        !right_of_split(lines[row])
+            .trim_matches(|c: char| c == '\u{2502}' || c.is_whitespace())
+            .is_empty()
+    });
+    painted.is_some_and(|row| row + 1 == border && row >= meta && row > file)
+}
+
+/// Depth 1: the file list comes first, then subject, meta, and body, with
+/// the message block pinned to the pane bottom.
 ///
 /// `need_body` is false when the pane is too short for the body to fit
-/// under the list; the meta line must still sit under the file row.
+/// under the list; the meta line must still sit under the file row, and the
+/// last painted row must still be the pane's last inner row.
 fn files_msg_at_bottom(screen: &str, need_body: bool) -> bool {
     let Some(file) = right_row_of(screen, FILE) else {
+        return false;
+    };
+    let Some(meta) = meta_row(screen) else {
         return false;
     };
     let body = right_row_of(screen, COMMIT_MSG_BODY);
@@ -74,7 +97,8 @@ fn files_msg_at_bottom(screen: &str, need_body: bool) -> bool {
         cells.contains(SUBJECT) && !cells.contains(FILE)
     });
     title_has_files(screen)
-        && below(file, meta_row(screen))
+        && meta > file
+        && msg_pinned_to_pane_bottom(screen, file, meta)
         && subject.is_none_or(|row| row > file)
         && body.is_none_or(|row| row > file)
         && (!need_body || body.is_some())
@@ -114,15 +138,17 @@ fn diff_without_msg_above(screen: &str) -> bool {
 ///
 /// Depth 0 (graph): body under the selected `nnnn` row. Depth 1 (Enter,
 /// commit files): the `wip.txt` row comes first, then subject, meta line,
-/// and body, both expanded and collapsed (`M`), and on short 80×16 and
+/// and body, pinned to the pane bottom (its last painted row is the pane's
+/// last inner row), both expanded and collapsed (`M`), and on short 80×16 and
 /// 80×14 terminals where the file row must stay visible. Depth 2 (Enter, file
 /// diff): the right pane is the diff; it carries no commit message, and none
 /// may appear above the hunk. Esc walks back to depth 1 and depth 0 with the
 /// message still at the bottom.
 ///
-/// Live PTY 80×28. A header painted above the file list, a short terminal
-/// that drops the file row for the message, or a message above the depth 2
-/// diff cannot pass.
+/// Live PTY 80×28. A header painted above the file list, a message painted
+/// directly under the list with blank rows below it, a short terminal that
+/// drops the file row for the message, or a message above the depth 2 diff
+/// cannot pass.
 #[test]
 fn pty_commit_msg_bottom_every_depth() {
     let (_root, workspace) = daily_workspace();
