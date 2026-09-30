@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Capture README/demo TUI stills from the official seed workspace.
+# Capture README/demo TUI clips from the official seed workspace.
 #
 # Usage (repo root):
 #   ./scripts/capture-demo-stills.sh [DEST]
 #
 # DEST is passed to scripts/seed-demo-workspace.sh (default: tmp/demo-workspace).
-# PNG outputs land in docs/images/. Key sequences are hardcoded below — do not
-# drive the TUI by hand and do not invent a second pipeline.
+# Animated GIF outputs land in docs/images/. Each clip records the terminal
+# window with ffmpeg x11grab while the hardcoded keys below play, then encodes
+# a GIF (palettegen/paletteuse). Do not drive the TUI by hand and do not invent
+# a second pipeline.
 #
 # Self-contained for a Cursor Cloud Agent Linux VM: installs MesloLGS NF,
-# xvfb, xfce4-terminal, and grab tools when missing. Fails loudly instead of
-# writing ASCII/gray frames over good stills. Xvfb + dbus + Openbox come from
+# xvfb, xfce4-terminal, xdotool, and ffmpeg when missing. Fails loudly instead
+# of writing ASCII/gray/static clips over good ones. Xvfb + dbus + Openbox come from
 # scripts/with-desktop-session.sh (same session helper as desktop TTY e2e).
 #
 # Isolates XDG_STATE_HOME, WS_STATUS_UPDATE_CHECK_STORE,
@@ -38,18 +40,27 @@ LAUNCHER="$STAGE_DIR/run-tui.sh"
 TERM_PID=""
 WID=""
 WS_PID=""
-declare -A STILL_HASHES=()
+REC_PID=""
+REC_RAW=""
 
-# Hardcoded stills. Keys match docs/demo.md. Do not add extra k/n.
-# 01 fresh launch (cursor on auth.ts)
-# 02 / merger Enter
-# 03 ?
-# 04 / auth Enter
-# 05 / merger Enter, Tab, j onto stash, D
-# 06 S on dirty app
-# 07 Space on auth.ts (reseed after)
-# 08 .
-# 09 / merger Enter, Tab, j to a commit, Enter
+# Clip pacing (seconds) and limits. Text stays at native size: no downscale.
+CLIP_FPS=10
+START_HOLD=1.2
+KEY_GAP=0.45
+STEP_HOLD=0.9
+END_HOLD=1.8
+TYPE_DELAY_MS=140
+MAX_GIF_BYTES=$((4 * 1024 * 1024))
+
+# Hardcoded clips. Keys match docs/demo.md. Each clip is a fresh launch.
+# 01 j j j j k (walk app rows from session.ts, end on auth.ts)
+# 02 / merger Enter, Tab, j j, Enter (graph, then commit files)
+# 03 u, s on session.ts (reseed after)
+# 04 / auth Enter, n
+# 05 j j j unrecorded, then Space, j, Space (clear viewed store after)
+# 06 S, Esc, / merger Enter, Tab, j onto stash, D, n
+# 07 . .
+# 08 ?, Esc
 
 die() {
   echo "capture-demo-stills: $*" >&2
@@ -116,7 +127,7 @@ export XDG_STATE_HOME=$(printf '%q' "$STATE_DIR")
 export WS_STATUS_UPDATE_CHECK_STORE=$(printf '%q' "$UPDATE_STORE")
 export WS_STATUS_VIEWED_STORE=$(printf '%q' "$VIEWED_STORE")
 export WS_STATUS_COMMENT_STORE=$(printf '%q' "$COMMENT_STORE")
-# Seed timestamps are Asia/Manila; pin TZ so stills match that clock.
+# Seed timestamps are Asia/Manila; pin TZ so clips match that clock.
 export TZ=Asia/Manila
 export TERM=xterm-256color
 export COLORTERM=truecolor
@@ -128,6 +139,10 @@ EOF
 }
 
 cleanup() {
+  if [[ -n "${REC_PID:-}" ]] && kill -0 "$REC_PID" 2>/dev/null; then
+    kill -TERM "$REC_PID" 2>/dev/null || true
+    wait "$REC_PID" 2>/dev/null || true
+  fi
   if [[ -n "${TERM_PID:-}" ]] && kill -0 "$TERM_PID" 2>/dev/null; then
     kill "$TERM_PID" 2>/dev/null || true
   fi
@@ -186,10 +201,10 @@ window_for_tui() {
 require_tty() {
   local pid="${1:-}"
   local tty
-  [[ -n "$pid" ]] || die "workspace-status did not start (no TTY/font). Not writing stills."
+  [[ -n "$pid" ]] || die "workspace-status did not start (no TTY/font). Not writing clips."
   tty="$(readlink -f "/proc/$pid/fd/0" 2>/dev/null || true)"
   if [[ ! "$tty" =~ /dev/pts/ ]]; then
-    die "workspace-status stdin is not a pty ($tty). Not writing ASCII/gray stills."
+    die "workspace-status stdin is not a pty ($tty). Not writing ASCII/gray clips."
   fi
 }
 
@@ -232,7 +247,7 @@ launch_tui() {
   sleep 0.35
   unset NO_COLOR FORCE_COLOR WS_STATUS_GLYPHS CLICOLOR_FORCE WS_STATUS_WORKSPACE
   if [[ -n "${WS_STATUS_GLYPHS:-}" ]]; then
-    die "WS_STATUS_GLYPHS is set; refusing ASCII stills while MesloLGS NF is installed."
+    die "WS_STATUS_GLYPHS is set; refusing ASCII clips while MesloLGS NF is installed."
   fi
   setsid xfce4-terminal --disable-server \
     --display="$DISPLAY" \
@@ -260,7 +275,7 @@ launch_tui() {
     window_alive "$WID" && break
     sleep 0.1
   done
-  window_alive "$WID" || die "TUI window never appeared for pid=$WS_PID (class=$(xdotool search --class xfce4-terminal 2>/dev/null | tr '\n' ' ')). Not writing stills."
+  window_alive "$WID" || die "TUI window never appeared for pid=$WS_PID (class=$(xdotool search --class xfce4-terminal 2>/dev/null | tr '\n' ' ')). Not writing clips."
   echo "capture-demo-stills: wid=$WID" >&2
   local rows=0 cols=0
   for i in $(seq 1 30); do
@@ -271,7 +286,7 @@ launch_tui() {
     sleep 0.1
   done
   if [[ "${cols:-0}" -lt 140 || "${rows:-0}" -lt 40 ]]; then
-    die "TTY is ${cols:-?}x${rows:-?} (need at least 140x40). Not writing stills."
+    die "TTY is ${cols:-?}x${rows:-?} (need at least 140x40). Not writing clips."
   fi
   echo "capture-demo-stills: tty=${cols}x${rows} pid=$WS_PID" >&2
   sleep 1.1
@@ -293,54 +308,113 @@ refresh_wid() {
   window_alive "$WID" || die "TUI window gone (tui pid=${WS_PID:-empty} still=$(kill -0 "${WS_PID:-0}" 2>/dev/null && echo yes || echo no))"
 }
 
-# Args: xdotool key names, or type:TEXT
+# Args: xdotool key names, or type:TEXT. Paced so a viewer can follow each
+# key in the clip; STEP_HOLD after the step lets the frame settle on screen.
 send() {
   local tok
   refresh_wid
   xdotool windowfocus --sync "$WID" >/dev/null 2>&1 || true
   for tok in "$@"; do
     if [[ "$tok" == type:* ]]; then
-      sleep 0.12
-      xdotool type --window "$WID" --delay 50 "${tok#type:}" \
+      xdotool type --window "$WID" --delay "$TYPE_DELAY_MS" "${tok#type:}" \
         || die "xdotool type failed (wid=$WID tok=$tok)"
     else
-      xdotool key --window "$WID" --delay 80 "$tok" \
+      xdotool key --window "$WID" "$tok" \
         || die "xdotool key failed (wid=$WID tok=$tok)"
     fi
-    sleep 0.18
+    sleep "$KEY_GAP"
   done
-  sleep 0.45
+  sleep "$STEP_HOLD"
 }
 
-grab() {
-  local dest="$1"
-  local try info ax ay w h
+hold() {
+  sleep "$1"
+}
+
+# Record the terminal window only (absolute geometry from xwininfo), never
+# the whole desktop. Lossless mkv first; the GIF is encoded after stop.
+clip_start() {
+  local name="$1"
+  local info ax ay w h
+  REC_RAW="$STAGE_DIR/${name}.mkv"
+  rm -f "$REC_RAW"
   refresh_wid
   xdotool windowfocus --sync "$WID" >/dev/null 2>&1 || true
   xdotool windowactivate --sync "$WID" >/dev/null 2>&1 || true
   sleep 0.2
-  rm -f "$dest"
-  have import || die "need ImageMagick import to grab the terminal window"
-  for try in $(seq 1 12); do
-    if import -display "$DISPLAY" -window "$WID" "$dest" 2>/dev/null && [[ -s "$dest" ]]; then
-      return 0
-    fi
-    rm -f "$dest"
+  for _ in $(seq 1 12); do
     info="$(xwininfo -id "$WID" 2>/dev/null || true)"
     ax="$(awk -F: '/Absolute upper-left X/ {gsub(/ /,"",$2); print $2}' <<<"$info")"
     ay="$(awk -F: '/Absolute upper-left Y/ {gsub(/ /,"",$2); print $2}' <<<"$info")"
     w="$(awk '/^  Width:/ {print $2}' <<<"$info")"
     h="$(awk '/^  Height:/ {print $2}' <<<"$info")"
     if [[ -n "$ax" && -n "$ay" && -n "$w" && -n "$h" && "$w" -ge 800 && "$h" -ge 400 ]]; then
-      if import -display "$DISPLAY" -window root -crop "${w}x${h}+${ax}+${ay}" +repage "$dest" 2>/dev/null \
-        && [[ -s "$dest" ]]; then
-        return 0
-      fi
+      break
     fi
+    w=""
     sleep 0.25
     refresh_wid
   done
-  die "failed to grab terminal $WID into $dest (not writing a desktop-wide still)"
+  [[ -n "$w" ]] || die "no terminal geometry for $WID (not recording the desktop)"
+  ffmpeg -hide_banner -loglevel error -nostdin -y \
+    -f x11grab -draw_mouse 0 -framerate "$CLIP_FPS" \
+    -video_size "${w}x${h}" -i "${DISPLAY}+${ax},${ay}" \
+    -c:v ffv1 "$REC_RAW" &
+  REC_PID=$!
+  sleep 0.3
+  kill -0 "$REC_PID" 2>/dev/null || die "ffmpeg x11grab did not start for $name"
+  hold "$START_HOLD"
+}
+
+clip_stop() {
+  hold "$END_HOLD"
+  [[ -n "${REC_PID:-}" ]] || die "clip_stop without a recording"
+  kill -0 "$REC_PID" 2>/dev/null || die "ffmpeg exited before $REC_RAW was complete"
+  # SIGTERM lets ffmpeg flush and close the mkv.
+  kill -TERM "$REC_PID" 2>/dev/null || true
+  wait "$REC_PID" 2>/dev/null || true
+  REC_PID=""
+  [[ -s "$REC_RAW" ]] || die "ffmpeg wrote no frames to $REC_RAW"
+}
+
+encode_gif() {
+  local raw="$1"
+  local gif="$2"
+  ffmpeg -hide_banner -loglevel error -nostdin -y -i "$raw" \
+    -vf "fps=${CLIP_FPS},split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle" \
+    -loop 0 "$gif" \
+    || die "GIF encode failed for $raw"
+}
+
+# Save the last frame of a GIF as PNG. Prints "FRAMES SECONDS".
+# Exit 4 when no frame differs from the first (the keys did nothing). A clip
+# may end where it started (u then s), so first == last alone is not a fail.
+clip_frames() {
+  python3 - "$@" <<'PY'
+import sys
+from PIL import Image, ImageSequence
+gif, last_png = sys.argv[1:3]
+im = Image.open(gif)
+frames = 0
+ms = 0
+first_bytes = None
+last = None
+changed = False
+for frame in ImageSequence.Iterator(im):
+    frames += 1
+    ms += frame.info.get("duration", 0)
+    rgb = frame.convert("RGB")
+    if first_bytes is None:
+        first_bytes = rgb.tobytes()
+    elif not changed and rgb.tobytes() != first_bytes:
+        changed = True
+    last = rgb
+last = last.copy()
+last.save(last_png)
+print(frames, f"{ms / 1000:.1f}")
+if not changed:
+    sys.exit(4)
+PY
 }
 
 not_gray() {
@@ -374,24 +448,33 @@ if chan_spread < 4 and var < 80:
 PY
 }
 
-commit_still() {
-  local staged="$1"
-  local final="$2"
-  local name digest other
-  name="$(basename "$final")"
-  if ! not_gray "$staged"; then
-    die "rejecting $final (gray/tiny). Existing still left in place if any."
+# Stop the recording, encode the GIF under STAGE_DIR, gate it, then copy it
+# to docs/images. A rejected clip leaves the existing GIF in place.
+clip_commit() {
+  local name="$1"
+  local staged="$STAGE_DIR/${name}.gif"
+  local final="$OUT_DIR/${name}.gif"
+  local last="$STAGE_DIR/${name}-last.png"
+  local info bytes rc
+  clip_stop
+  encode_gif "$REC_RAW" "$staged"
+  rc=0
+  info="$(clip_frames "$staged" "$last")" || rc=$?
+  if ((rc == 4)); then
+    die "rejecting $final: every frame matches the first (keys did nothing). Existing clip left in place."
+  elif ((rc != 0)); then
+    die "rejecting $final: frame check failed (exit $rc). Existing clip left in place."
   fi
-  digest="$(md5sum "$staged" | awk '{print $1}')"
-  for other in "${!STILL_HASHES[@]}"; do
-    if [[ "${STILL_HASHES[$other]}" == "$digest" ]]; then
-      die "rejecting $final: identical pixmap to $other (keys/window grab failed). Existing still left in place."
-    fi
-  done
-  STILL_HASHES["$name"]="$digest"
-  mkdir -p "$(dirname "$final")"
+  if ! not_gray "$last"; then
+    die "rejecting $final (gray/tiny last frame). Existing clip left in place."
+  fi
+  bytes="$(stat -c %s "$staged")"
+  if ((bytes > MAX_GIF_BYTES)); then
+    die "rejecting $final: $((bytes / 1024)) KiB is over $((MAX_GIF_BYTES / 1024)) KiB. Shorten the clip."
+  fi
+  mkdir -p "$OUT_DIR"
   cp -f "$staged" "$final"
-  echo "ok $final ($digest)"
+  echo "ok $final ($((bytes / 1024)) KiB, frames/seconds: $info)"
 }
 
 seed() {
@@ -406,7 +489,7 @@ export NO_AT_BRIDGE=1
 export GTK_A11Y=none
 export TZ=Asia/Manila
 
-apt_install xvfb xfce4-terminal xdotool imagemagick python3-pil x11-apps x11-utils x11-xserver-utils curl fontconfig dbus-x11 openbox
+apt_install xvfb xfce4-terminal xdotool ffmpeg python3-pil x11-apps x11-utils x11-xserver-utils curl fontconfig dbus-x11 openbox
 install_font
 ensure_bin
 rm -rf "$STAGE_DIR"
@@ -415,51 +498,80 @@ write_helpers
 ws_desktop_session_start --display "${WS_STATUS_STILLS_DISPLAY:-99}"
 seed
 
+# 01 tree + live diff: walk the app rows from session.ts, end on auth.ts.
 launch_tui
-grab "$STAGE_DIR/01-file-diff.png"
-commit_still "$STAGE_DIR/01-file-diff.png" "$OUT_DIR/01-file-diff.png"
+clip_start 01-tree-diff
+send j
+send j
+send j
+send j
+send k
+clip_commit 01-tree-diff
 
+# 02 git graph: pass the stash, then drill into a commit.
 launch_tui
+clip_start 02-git-graph
 send slash type:merger Return
-grab "$STAGE_DIR/02-git-graph.png"
-commit_still "$STAGE_DIR/02-git-graph.png" "$OUT_DIR/02-git-graph.png"
+send Tab
+send j
+send j
+send Return
+clip_commit 02-git-graph
 
+# 03 unstage / stage session.ts (real git writes).
 launch_tui
-send shift+slash
-grab "$STAGE_DIR/03-help.png"
-commit_still "$STAGE_DIR/03-help.png" "$OUT_DIR/03-help.png"
-
-launch_tui
-send slash type:auth Return
-grab "$STAGE_DIR/04-search.png"
-commit_still "$STAGE_DIR/04-search.png" "$OUT_DIR/04-search.png"
-
-launch_tui
-send slash type:merger Return Tab j shift+d
-grab "$STAGE_DIR/05-confirm.png"
-commit_still "$STAGE_DIR/05-confirm.png" "$OUT_DIR/05-confirm.png"
-
-launch_tui
-send shift+s
-grab "$STAGE_DIR/06-stash-menu.png"
-commit_still "$STAGE_DIR/06-stash-menu.png" "$OUT_DIR/06-stash-menu.png"
-
-launch_tui
-send space
-grab "$STAGE_DIR/07-reviewed.png"
-commit_still "$STAGE_DIR/07-reviewed.png" "$OUT_DIR/07-reviewed.png"
-
+clip_start 03-stage-unstage
+send u
+hold 0.6
+send s
+clip_commit 03-stage-unstage
 seed
 
+# 04 search: type the query, arm it, step to the next match.
 launch_tui
-send period
-grab "$STAGE_DIR/08-show-ignored.png"
-commit_still "$STAGE_DIR/08-show-ignored.png" "$OUT_DIR/08-show-ignored.png"
+clip_start 04-search
+send slash type:auth
+send Return
+send n
+clip_commit 04-search
 
+# 05 reviewed marks: move to auth.ts before recording, then mark two files.
 launch_tui
-send slash type:merger Return Tab j j Return
-grab "$STAGE_DIR/09-commit-files.png"
-commit_still "$STAGE_DIR/09-commit-files.png" "$OUT_DIR/09-commit-files.png"
+send j j j
+clip_start 05-reviewed
+send space
+send j
+send space
+clip_commit 05-reviewed
+clear_viewed
+
+# 06 stash: create-only menu from the tree, then the graph drop confirm.
+launch_tui
+clip_start 06-stash
+send shift+s
+send Escape
+send slash type:merger Return
+send Tab
+send j
+send shift+d
+send n
+clip_commit 06-stash
+
+# 07 show / hide ignored repos.
+launch_tui
+clip_start 07-show-ignored
+send period
+hold 0.6
+send period
+clip_commit 07-show-ignored
+
+# 08 help overlay.
+launch_tui
+clip_start 08-help
+send shift+slash
+hold 1.2
+send Escape
+clip_commit 08-help
 
 stop_tui
-echo "capture-demo-stills: wrote stills under $OUT_DIR"
+echo "capture-demo-stills: wrote clips under $OUT_DIR"

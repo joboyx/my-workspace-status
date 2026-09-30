@@ -2,7 +2,7 @@
 //!
 //! Spawns the `workspace-status` binary on a PTY so the live loop's
 //! `event::read` sees keys and xterm SGR mouse bytes. This is not
-//! screenshot capture (`scripts/capture-demo-stills.sh`).
+//! demo GIF capture (`scripts/capture-demo-stills.sh`).
 //!
 //! Unix only (PTY). Windows `cargo test --workspace` compiles this crate
 //! with no tests.

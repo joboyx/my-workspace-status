@@ -1,6 +1,6 @@
 # Real-TTY TUI e2e
 
-This is the human TUI e2e. Screenshot stills stay in `scripts/capture-demo-stills.sh`. This harness is not that capture script.
+This is the human TUI e2e. Demo GIF clips stay in `scripts/capture-demo-stills.sh`. This harness is not that capture script.
 
 It drives the real `workspace-status` binary the way a person does: a PTY (and, on Linux, a real terminal emulator). Assertions read the painted screen. It does not construct crossterm `Event` values in memory.
 
@@ -43,7 +43,7 @@ Packages (Debian/Ubuntu): `xvfb xfce4-terminal xterm xdotool dbus-x11 openbox`. 
 
 - ASCII glyphs (`WS_STATUS_GLYPHS=ascii`) so CI does not depend on a Nerd Font. This is a test setting, not a product default. The spawn drops parent `NO_COLOR` / `FORCE_COLOR` so colour claims can paint.
 - Watch and background fetch off by default (`WS_STATUS_WATCH_MS=0`, `WS_STATUS_FETCH_MS=0`). Per-test env overrides (`PtySession::open_with_env`) re-enable watch for the live-input / streamed-collect cases.
-- Isolated `XDG_STATE_HOME` plus a fresh `WS_STATUS_UPDATE_CHECK_STORE` so the GitHub Release prompt does not block mount and the operator XDG file is not written. CI: `crates/workspace-status/tests/release_watch.rs` (`tty_spawn_paths_isolate_update_check_store`). Screenshot stills (`scripts/capture-demo-stills.sh`) use the same isolation.
+- Isolated `XDG_STATE_HOME` plus a fresh `WS_STATUS_UPDATE_CHECK_STORE` so the GitHub Release prompt does not block mount and the operator XDG file is not written. CI: `crates/workspace-status/tests/release_watch.rs` (`tty_spawn_paths_isolate_update_check_store`). Demo GIF capture (`scripts/capture-demo-stills.sh`) uses the same isolation.
 - `open_with_env` overrides for `WS_STATUS_COMMENT_STORE` / `WS_STATUS_VIEWED_STORE` win over `.e2e-state` defaults. Tests that omit those keys still use `.e2e-state/comments.json` and `.e2e-state/viewed-files.json`.
 - Parent `WS_STATUS_WORKSPACE` is dropped so the fixture cwd is the workspace root. CI: `tty_spawn_paths_isolate_workspace_env`.
 - The PTY harness can decode OSC 52 clipboard payloads from the master byte stream (`PtySession::clipboard_payloads` / `last_clipboard`). `vt100` strips OSC 52 from the painted screen, so copy claims must read the raw bytes (`ESC ] 52 ; c ; <base64> BEL` or ST). Adding a `pty_*` test still does not require other edits to this file.

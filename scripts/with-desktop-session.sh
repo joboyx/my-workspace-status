@@ -7,7 +7,7 @@
 #
 # This script starts a display session. It does not launch xfce4-terminal or
 # xterm, and it does not grab screenshots. Terminal spawn stays in the e2e
-# harness. Demo stills stay in capture-demo-stills.sh.
+# harness. Demo GIF clips stay in capture-demo-stills.sh.
 #
 # Usage (exec):
 #   ./scripts/with-desktop-session.sh [--display N | --auto] -- command [args...]
