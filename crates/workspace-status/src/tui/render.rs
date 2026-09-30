@@ -41,6 +41,7 @@ use super::icons::{
     icon_merged_into_default, icon_move, icon_open_vs_default, truncate_visible, CURSOR_BAR,
     CURSOR_BAR_INACTIVE, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
 };
+use super::ops::RevertScope;
 use super::search::{
     collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids, slice_cols,
     wrap_col_starts, wrap_cols, SearchPane,
@@ -49,7 +50,7 @@ use super::split::{
     diff_split_rule_x, effective_diff_mode, is_side_by_side_split, pane_widths,
     side_by_side_column_widths, MIN_PANE_COLS,
 };
-use super::state::{AppState, FocusPane, PendingConfirm};
+use super::state::{revert_scope, AppState, FocusPane, PendingConfirm};
 use super::syntax::{
     cached_highlight_diff_rows, slice_styled_cols, CachedDiffSyntax, DiffSyntaxKey,
 };
@@ -1854,45 +1855,66 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let surface = overlay_surface(state);
     let (accent, lines) = match pending {
         PendingConfirm::Revert { targets, label } => {
-            let tracked = targets.iter().filter(|t| !t.untracked).count();
             let untracked = targets.iter().filter(|t| t.untracked).count();
-            let single_untracked = tracked == 0 && untracked == 1;
-            let accent = if single_untracked {
+            let tracked = targets.len() - untracked;
+            let scope = revert_scope(targets);
+            let deletes_only = matches!(
+                scope,
+                RevertScope::SingleUntracked | RevertScope::UntrackedOnly
+            );
+            let accent = if deletes_only {
                 palette.deleted
             } else {
                 palette.modified
             };
-            let fate = if single_untracked { "deleted" } else { "kept" };
-            let lines = vec![
-                Line::from(vec![
-                    Span::styled(
-                        "Revert ",
-                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(label.clone(), Style::default().fg(palette.file)),
-                    Span::styled("?", Style::default().fg(accent)),
-                ]),
-                Line::from(Span::styled(
+            let mut lines = vec![Line::from(vec![
+                Span::styled(
+                    "Revert ",
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(label.clone(), Style::default().fg(palette.file)),
+                Span::styled("?", Style::default().fg(accent)),
+            ])];
+            if tracked > 0 || untracked == 0 {
+                lines.push(Line::from(Span::styled(
                     format!("  {tracked} tracked {} → discarded", files_word(tracked)),
                     Style::default().fg(palette.muted),
-                )),
-                Line::from(Span::styled(
+                )));
+            }
+            if untracked > 0 {
+                let fate = if deletes_only { "deleted" } else { "kept" };
+                lines.push(Line::from(Span::styled(
                     format!("  {untracked} untracked {} → {fate}", files_word(untracked)),
-                    Style::default().fg(if single_untracked {
-                        accent
-                    } else {
-                        palette.muted
-                    }),
-                )),
-                confirm_action_row(
-                    "y",
-                    "revert",
-                    Some(("Y", palette.deleted, "revert + delete untracked")),
-                    accent,
-                    palette.muted,
-                    surface,
-                ),
-            ];
+                    Style::default().fg(if deletes_only { accent } else { palette.muted }),
+                )));
+            }
+            // Chips come from the same scope rule `confirm_yes` applies.
+            let chip_label = |clean: bool| match (scope, clean) {
+                (RevertScope::SingleUntracked, _) => "delete",
+                (RevertScope::UntrackedOnly, _) => "delete untracked",
+                (RevertScope::Mixed, true) => "revert + delete untracked",
+                _ => "revert",
+            };
+            let chips: Vec<(&str, &str)> = [("y", false), ("Y", true)]
+                .into_iter()
+                .filter_map(|(key, clean)| {
+                    scope
+                        .key_deletes_untracked(clean)
+                        .map(|_| (key, chip_label(clean)))
+                })
+                .collect();
+            let (key, key_label) = chips[0];
+            let extra = chips
+                .get(1)
+                .map(|&(key, key_label)| (key, palette.deleted, key_label));
+            lines.push(confirm_action_row(
+                key,
+                key_label,
+                extra,
+                accent,
+                palette.muted,
+                surface,
+            ));
             (accent, lines)
         }
         PendingConfirm::RevertRange { path, .. } => {
@@ -4383,6 +4405,71 @@ mod tests {
         assert!(text.contains("Esc clears search"), "{text}");
         assert!(!text.contains("n/N wrap"), "{text}");
         assert_help_version_lower_right(&text);
+    }
+
+    /// Draw a whole-file revert confirm over `(path, untracked)` targets and
+    /// return the screen text plus its chip row (the line with `cancel`).
+    fn draw_revert_confirm(targets: &[(&str, bool)]) -> (String, String) {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.confirm = Some(PendingConfirm::Revert {
+            label: targets[0].0.into(),
+            targets: targets
+                .iter()
+                .map(|&(path, untracked)| crate::tui::state::RevertTarget {
+                    repo: "app".into(),
+                    path: path.into(),
+                    untracked,
+                    old_path: None,
+                })
+                .collect(),
+        });
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        let chips = text
+            .lines()
+            .find(|line| line.contains("cancel"))
+            .unwrap_or_default()
+            .to_string();
+        (text, chips)
+    }
+
+    #[test]
+    fn revert_confirm_offers_only_keys_for_scope() {
+        // Tracked only: no untracked line, no `Y` chip.
+        let (text, chips) = draw_revert_confirm(&[("README.md", false)]);
+        assert!(text.contains("Revert README.md?"), "{text}");
+        assert!(text.contains("1 tracked file → discarded"), "{text}");
+        assert!(!text.contains("untracked"), "{text}");
+        assert!(chips.contains(" y  revert"), "{chips}");
+        assert!(!chips.contains(" Y "), "{chips}");
+        assert!(chips.contains(" n  cancel"), "{chips}");
+
+        // One untracked file: `y` deletes it, no tracked line, no `Y` chip.
+        let (text, chips) = draw_revert_confirm(&[("scratch.txt", true)]);
+        assert!(text.contains("1 untracked file → deleted"), "{text}");
+        assert!(!text.contains(" tracked file"), "{text}");
+        assert!(!text.contains("discarded"), "{text}");
+        assert!(chips.contains(" y  delete"), "{chips}");
+        assert!(!chips.contains(" Y "), "{chips}");
+        assert!(!chips.contains("revert"), "{chips}");
+
+        // Many untracked files: only `Y` deletes them.
+        let (text, chips) = draw_revert_confirm(&[("a.txt", true), ("b.txt", true)]);
+        assert!(text.contains("2 untracked files → deleted"), "{text}");
+        assert!(!text.contains("discarded"), "{text}");
+        assert!(chips.contains(" Y  delete untracked"), "{chips}");
+        assert!(!chips.contains(" y "), "{chips}");
+        assert!(!chips.contains("revert"), "{chips}");
+
+        // Mixed: both keys, untracked kept by `y`.
+        let (text, chips) = draw_revert_confirm(&[("README.md", false), ("tmp.log", true)]);
+        assert!(text.contains("1 tracked file → discarded"), "{text}");
+        assert!(text.contains("1 untracked file → kept"), "{text}");
+        assert!(chips.contains(" y  revert"), "{chips}");
+        assert!(chips.contains(" Y  revert + delete untracked"), "{chips}");
     }
 
     #[test]

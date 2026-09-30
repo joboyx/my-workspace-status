@@ -132,7 +132,7 @@ Manual `f` / `p` / `P` / `d` and the background fetch tick paint a trailing brea
 
 **Focused refresh (`r`).** Reloads the whole workspace on the workspace row or No-updates group, and otherwise one checkout (`refresh_target` → `ReloadSnapshot` vs `ReloadRepo { repo }`).
 
-**Bulk revert with counted confirm.** `x` uses the same `collect_write_files` scope (section headers and dirs stay side-filtered), keeping unstaged or untracked (staged-only skipped). Confirm shows counts; `y`/`Enter` runs `git restore` on tracked targets and **keeps** untracked; `Y` also deletes each untracked via `remove_untracked_file` (per-file `clean -f`, not `clean -fd`). Exception: a single untracked target still deletes on both `y` and `Y`. Empty after filter: `Nothing to discard` (or `Nothing to discard (staged only)` on a staged-only file).
+**Bulk revert with counted confirm.** `x` uses the same `collect_write_files` scope (section headers and dirs stay side-filtered), keeping unstaged or untracked (staged-only skipped). Confirm shows counts and only the keys that apply. `y`/`Enter` runs `git restore` on tracked targets and **keeps** untracked; with untracked targets present, `Y` also deletes each untracked via `remove_untracked_file` (per-file `clean -f`, not `clean -fd`). Tracked only: no `Y`. One untracked target and nothing tracked: `y` deletes it, no `Y`. Several untracked and nothing tracked: only `Y` (deletes them). A key the box does not show does nothing. Empty after filter: `Nothing to discard` (or `Nothing to discard (staged only)` on a staged-only file).
 
 **Remove linked worktree (`W`).** Linked `Checkout` rows only. Confirm shows branch, `merged into default` / `NOT merged into default`, and `--force` when dirty. Same-commit as the default tip is `NOT merged into default` (just created). On Unix, bind-mount aliases remap via inode so gitdir back-pointers match. On Windows, worktree identity is canonical path plus size and mtime (no inode / bind-mount remap).
 
@@ -163,9 +163,9 @@ Manual `f` / `p` / `P` / `d` and the background fetch tick paint a trailing brea
 | Operation | Confirmation | Recoverable |
 | --- | --- | --- |
 | `s` stage / `u` unstage | none | yes — trivially reversible |
-| `x` revert, tracked (`y`) | `y`/`Y`/`n` prompt | only via git's object store if the change was ever committed or stashed |
+| `x` revert, tracked (`y`) | `y`/`n` prompt, plus `Y` when untracked is in scope | only via git's object store if the change was ever committed or stashed |
 | `x` revert + delete untracked (`Y`) | same prompt | **no** for deleted untracked |
-| `x` single untracked (`y` or `Y`) | same prompt | **no** — the file is deleted |
+| `x` single untracked (`y`) | `y`/`n` prompt | **no** — the file is deleted |
 | `-p` / `--pull` | none | yes — but can fail on conflicts |
 | `-d` / `--default-branch` | none | yes — dirty repos are skipped, so no work is lost |
 | `b` checkout (local / origin) | none when in sync; `y`/`n` when local exists and origin tips differ | yes — dirty worktrees refuse before checkout; confirm Yes is checkout then `fast_forward_to_remote_ref` of the selected `origin/*` (no reset) |

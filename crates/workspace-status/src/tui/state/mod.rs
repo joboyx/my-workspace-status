@@ -61,7 +61,7 @@ use super::icons::comment_mark_cols;
 use super::keys::{expire_stale_g_chord_echo, GChordEchoState, InputMode, DOUBLE_TAP_MS};
 use super::ops::{
     collect_write_files, format_running_op, op_is_kind_noop, op_targets, push_targets,
-    refresh_target, should_delete_untracked, Op, RunningOp, ScopedFile,
+    refresh_target, Op, RevertScope, RunningOp, ScopedFile,
 };
 use super::search::{
     focus_commit_file_search, focus_diff_search, focus_graph_search, focus_tree_search, SearchPane,
@@ -303,6 +303,12 @@ pub struct RevertTarget {
     pub path: String,
     pub untracked: bool,
     pub old_path: Option<String>,
+}
+
+/// Tracked / untracked mix of a whole-file revert confirm's targets.
+pub(crate) fn revert_scope(targets: &[RevertTarget]) -> RevertScope {
+    let untracked = targets.iter().filter(|t| t.untracked).count();
+    RevertScope::of(targets.len() - untracked, untracked)
 }
 
 /// File-diff that owns `diff_cursor`, `diff_scroll`, and `diff_col_offset`.
@@ -2992,12 +2998,16 @@ impl AppState {
 
     fn confirm_yes(&mut self, clean: bool) -> Effect {
         match self.confirm.take() {
-            Some(PendingConfirm::Revert { targets, .. }) => {
+            Some(PendingConfirm::Revert { targets, label }) => {
                 if targets.is_empty() {
                     return Effect::None;
                 }
-                let flags: Vec<bool> = targets.iter().map(|t| t.untracked).collect();
-                let delete_untracked = should_delete_untracked(&flags, clean);
+                // A key the box does not show keeps the confirm open.
+                let Some(delete_untracked) = revert_scope(&targets).key_deletes_untracked(clean)
+                else {
+                    self.confirm = Some(PendingConfirm::Revert { targets, label });
+                    return Effect::None;
+                };
                 let groups = group_revert_targets(&targets, delete_untracked);
                 let tracked_n: usize = groups.iter().map(|(_, tracked, _)| tracked.len()).sum();
                 let untracked_n: usize =
@@ -3008,6 +3018,8 @@ impl AppState {
                     } else {
                         format!("revert {}", groups[0].1[0])
                     }
+                } else if tracked_n == 0 {
+                    format!("delete {untracked_n} untracked")
                 } else {
                     format!("revert {tracked_n} tracked, {untracked_n} untracked")
                 };
@@ -5814,6 +5826,72 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn revert_key_not_offered_keeps_confirm_open() {
+        // Tracked-only scope: `Y` is not offered.
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        assert_eq!(app.dispatch(Action::Revert), Effect::None);
+        let status = app.status.clone();
+        assert_eq!(app.dispatch(Action::ConfirmYesClean), Effect::None);
+        assert!(app.confirm.is_some(), "`Y` must keep the confirm open");
+        assert_eq!(app.status, status);
+        match app.dispatch(Action::ConfirmYes) {
+            Effect::Revert {
+                tracked, untracked, ..
+            } => {
+                assert_eq!(tracked, vec!["README.md"]);
+                assert!(untracked.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(app.confirm.is_none());
+
+        let untracked_confirm = |paths: &[&str]| PendingConfirm::Revert {
+            targets: paths
+                .iter()
+                .map(|path| RevertTarget {
+                    repo: "app".into(),
+                    path: (*path).into(),
+                    untracked: true,
+                    old_path: None,
+                })
+                .collect(),
+            label: paths[0].into(),
+        };
+
+        // One untracked file: `y` deletes it, `Y` is not offered.
+        app.confirm = Some(untracked_confirm(&["new.txt"]));
+        assert_eq!(app.dispatch(Action::ConfirmYesClean), Effect::None);
+        assert!(app.confirm.is_some());
+        match app.dispatch(Action::ConfirmYes) {
+            Effect::Revert {
+                tracked, untracked, ..
+            } => {
+                assert!(tracked.is_empty());
+                assert_eq!(untracked, vec!["new.txt"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(app.status, "delete new.txt");
+
+        // Many untracked files: `y` is not offered, `Y` deletes them all.
+        app.confirm = Some(untracked_confirm(&["a.txt", "b.txt"]));
+        assert_eq!(app.dispatch(Action::ConfirmYes), Effect::None);
+        assert!(app.confirm.is_some(), "`y` must keep the confirm open");
+        match app.dispatch(Action::ConfirmYesClean) {
+            Effect::Revert {
+                tracked, untracked, ..
+            } => {
+                assert!(tracked.is_empty());
+                assert_eq!(untracked, vec!["a.txt", "b.txt"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "delete 2 untracked");
     }
 
     #[test]

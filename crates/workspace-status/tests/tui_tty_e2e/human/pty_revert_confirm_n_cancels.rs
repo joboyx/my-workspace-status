@@ -32,15 +32,16 @@ fn dirty_readme_still_focused(screen: &str) -> bool {
         && pane_unstaged_readme(screen)
 }
 
-/// Boxed `x` confirm: counted revert, `y`/`Y`/`n`. File is still dirty.
+/// Boxed `x` confirm on a tracked-only file: counted revert, `y`/`n`
+/// only. No untracked line and no `Y` chip. File is still dirty.
 fn documented_revert_confirm_armed(screen: &str) -> bool {
     dirty_readme_still_focused(screen)
         && screen.contains("Revert README.md?")
         && screen.contains("1 tracked file")
         && screen.contains("discarded")
-        && screen.contains("0 untracked files")
-        && screen.contains("kept")
-        && screen.contains("revert + delete untracked")
+        && !screen.contains("untracked")
+        && !screen.contains("revert + delete untracked")
+        && screen.contains("revert")
         && screen.contains("cancel")
         && !screen.contains("revert cancelled")
         && no_y_revert_path(screen)
@@ -68,10 +69,12 @@ fn documented_revert_n_cancelled(screen: &str) -> bool {
 /// `x` arms revert confirm; `n` cancels and does not revert.
 ///
 /// Docs: Help GIT `x` is revert (`y`/`Y`). Configuration: `x` confirms
-/// with counts (`y` tracked only, `Y` also deletes untracked); `n` / Esc
-/// cancel. Keymap: `x` is `Action::Revert` (opens `PendingConfirm::Revert`);
-/// confirm `n` is `Action::ConfirmNo` (`revert cancelled`, no write).
-/// `y`/`Enter` would `git restore` tracked files (`reverted …`).
+/// with counts and offers only the keys that apply to the scope. A
+/// tracked-only file shows the tracked line and `y` / `n`, with no
+/// untracked line and no `Y`. Keymap: `x` is `Action::Revert` (opens
+/// `PendingConfirm::Revert`); confirm `n` is `Action::ConfirmNo`
+/// (`revert cancelled`, no write). `y`/`Enter` would `git restore`
+/// tracked files (`reverted …`).
 ///
 /// After first paint the cursor is already on the dirty README. Do not
 /// `/` search (`n` would be next-match if confirm never armed). A no-op,
@@ -92,7 +95,7 @@ fn pty_revert_confirm_n_cancels() {
     tui.key('x');
     tui.wait_pred(
         documented_revert_confirm_armed,
-        "x arms Revert README.md? with y/Y/n; file stays dirty",
+        "x arms Revert README.md? with y/n only; file stays dirty",
         WAIT,
     );
     tui.wait_ms(SETTLE_MS);
