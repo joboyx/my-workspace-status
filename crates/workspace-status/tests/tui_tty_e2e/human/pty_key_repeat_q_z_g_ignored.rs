@@ -46,7 +46,7 @@ fn on_app_expanded(screen: &str) -> bool {
         && screen.contains("seed app")
         && !screen.contains("UNSTAGED")
         && !screen.contains("z…")
-        && !screen.contains("Press Ctrl+C again to exit")
+        && !screen.contains("Press Ctrl-c again to exit")
         && crumb.contains("workspace › app")
         && !crumb.contains("[app]")
         && left_tree_not_drilled(screen)
@@ -148,5 +148,5 @@ fn pty_key_repeat_q_z_g_ignored() {
     );
 
     tui.key('q');
-    tui.wait_exit_without("Press Ctrl+C again to exit", WAIT);
+    tui.wait_exit_without("Press Ctrl-c again to exit", WAIT);
 }

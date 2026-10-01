@@ -43,7 +43,7 @@ fn help_after_tree_file_c(screen: &str) -> bool {
     screen.contains("MOVE")
         && screen.contains("GIT")
         && screen.contains("VIEW")
-        && screen.contains("graph branch at commit")
+        && screen.contains("create branch at graph")
         && screen.contains("graph merge into HEAD")
         && !screen.contains("Create branch")
         && !screen.contains("commit message")
@@ -54,7 +54,7 @@ fn help_after_tree_file_c(screen: &str) -> bool {
 ///
 /// Docs: `c` creates a branch on a focused graph commit (name overlay,
 /// ref only, no checkout). It is a no-op on a tree, file, or workspace
-/// row. Help GIT lists `c` ("graph branch at commit"); `c` is not a
+/// row. Help GIT lists `c` ("create branch at graph commit"); `c` is not a
 /// commit key. Keymap shows `c` / "create branch" only on a
 /// graph commit.
 ///

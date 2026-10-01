@@ -8,16 +8,50 @@ fn help_header_has(screen: &str, middle: &str) -> bool {
         .any(|line| line.contains("MOVE") && line.contains(middle) && line.contains("VIEW"))
 }
 
+/// Painted COMPARE column, whitespace-compacted so wrapped rows rejoin.
+///
+/// The column runs from its title icon (`{icon}  COMPARE`) to the VIEW
+/// icon on the header row; help columns are not even.
+fn compare_column(screen: &str) -> String {
+    let lines: Vec<&str> = screen.lines().collect();
+    let Some(start) = lines
+        .iter()
+        .position(|line| line.contains("COMPARE") && line.contains("VIEW"))
+    else {
+        return String::new();
+    };
+    let header: Vec<char> = lines[start].chars().collect();
+    let title_at = |title: &str| -> Option<usize> {
+        let title: Vec<char> = title.chars().collect();
+        header
+            .windows(title.len())
+            .position(|window| window == title.as_slice())
+            .map(|at| at.saturating_sub(3))
+    };
+    let (Some(from), Some(to)) = (title_at("COMPARE"), title_at("VIEW")) else {
+        return String::new();
+    };
+    let mut column = String::new();
+    for line in &lines[start..] {
+        if line.contains("/ search help") {
+            break;
+        }
+        let chars: Vec<char> = line.chars().collect();
+        column.extend(chars[from.min(chars.len())..to.min(chars.len())].iter());
+        column.push(' ');
+    }
+    column.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// The compare help: COMPARE replaces GIT, with the `x` condition and the
 /// Workspace-only keys, and no Workspace git rows.
 fn compare_help_open(screen: &str) -> bool {
+    let column = compare_column(screen);
     help_header_has(screen, "COMPARE")
         && !help_header_has(screen, "GIT")
-        && screen.contains("revert to merge base")
-        && screen.contains("only if head checked out,")
-        && screen.contains("file clean")
-        && screen.contains("Workspace tab only")
-        && screen.contains("close tab (or palette)")
+        && column.contains("x revert to merge base (only if head checked out, file clean)")
+        && column.contains("Workspace tab only")
+        && column.contains("[✗] close tab (or palette)")
         && screen.contains("/ search help")
         && !screen.contains("stage scope")
         && !screen.contains("fetch remotes")

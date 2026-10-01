@@ -8360,7 +8360,7 @@ mod tests {
             hints.contains(&("x".into(), "revert to merge base".into())),
             "{hints:?}"
         );
-        assert!(has(&hints, "e") && has(&hints, "ctrl+o"), "{hints:?}");
+        assert!(has(&hints, "e") && has(&hints, "Ctrl-o"), "{hints:?}");
 
         // File list: the focused compare file decides.
         app.focus = FocusPane::Left;

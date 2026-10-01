@@ -267,7 +267,7 @@ const HINT_ACTIONS: &[HintAction] = &[
     },
     HintAction {
         id: HintActionId::FullFile,
-        key: "ctrl+o",
+        key: "Ctrl-o",
         label: "full file",
         kinds: &[HintRowKind::File],
         destructive: false,
@@ -459,7 +459,7 @@ pub fn overlay_status_rows(state: &AppState) -> u16 {
 /// Overlay row budget at `term_cols` so wrap math can follow a resize.
 pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
     if state.help_open {
-        return help_status_lines(term_cols);
+        return help_status_lines(term_cols, state.is_compare_tab());
     }
     if let Some(pending) = state.confirm.as_ref() {
         return match pending {
@@ -597,13 +597,13 @@ pub fn fit_hint_segments(segments: &[HintSegment], available: usize) -> Vec<Hint
 pub fn nav_chrome_hint_segments(depth: u8, focus: FocusPane) -> Vec<HintSegment> {
     let mut out = Vec::new();
     if focus == FocusPane::Left {
-        out.push(hint("⏎", "focus right", false));
+        out.push(hint("Enter", "focus right", false));
         if depth > 0 {
             out.push(hint("Esc", "back", false));
         }
     } else {
         if depth < 2 {
-            out.push(hint("⏎", "drill", false));
+            out.push(hint("Enter", "drill", false));
         }
         out.push(hint("Esc", "back", false));
     }
@@ -1305,7 +1305,7 @@ mod tests {
     #[test]
     fn fit_appends_ellipsis_instead_of_dropping_core_hints_for_extras() {
         let core = vec![
-            hint_of("⏎", "focus right"),
+            hint_of("Enter", "focus right"),
             hint_of("s", "stage"),
             hint_of("x", "revert"),
         ];
@@ -1313,7 +1313,7 @@ mod tests {
         all.extend(extra_hint_segments());
         let fitted = fit_hint_segments(&all, hints_width(&core) + 4);
         let keys: Vec<&str> = fitted.iter().map(|s| s.key.as_str()).collect();
-        assert!(keys.contains(&"⏎"), "{keys:?}");
+        assert!(keys.contains(&"Enter"), "{keys:?}");
         assert!(keys.contains(&"s"), "{keys:?}");
         assert!(keys.contains(&HINT_ELLIPSIS), "{keys:?}");
         assert!(
@@ -1326,11 +1326,11 @@ mod tests {
     fn nav_chrome_pills_and_hints() {
         assert_eq!(
             nav_chrome_hint_segments(0, FocusPane::Left),
-            vec![hint_of("⏎", "focus right")]
+            vec![hint_of("Enter", "focus right")]
         );
         assert_eq!(
             nav_chrome_hint_segments(0, FocusPane::Right),
-            vec![hint_of("⏎", "drill"), hint_of("Esc", "back")]
+            vec![hint_of("Enter", "drill"), hint_of("Esc", "back")]
         );
         assert_eq!(
             nav_chrome_hint_segments(2, FocusPane::Right),
@@ -1338,7 +1338,7 @@ mod tests {
         );
         assert_eq!(
             nav_chrome_hint_segments(1, FocusPane::Left),
-            vec![hint_of("⏎", "focus right"), hint_of("Esc", "back")]
+            vec![hint_of("Enter", "focus right"), hint_of("Esc", "back")]
         );
     }
 
@@ -1500,19 +1500,19 @@ mod tests {
         app.status = CTRL_C_EXIT_PROMPT.into();
         let crumb = line_plain(&breadcrumb_line(&app, 80));
         assert!(
-            !crumb.contains("Ctrl+C"),
+            !crumb.contains("Ctrl-c"),
             "quit prompt must not sit in the breadcrumb toast: {crumb:?}"
         );
         assert_eq!(ctrl_c_prompt_rows(&app), 1);
         assert_eq!(bottom_chrome_rows(&app), 3);
         let prompt = line_plain(&ctrl_c_prompt_line(&app, 80));
         assert!(
-            prompt.contains("Ctrl+C again"),
+            prompt.contains("Ctrl-c again"),
             "pinned row should show the quit prompt: {prompt:?}"
         );
         let status = line_plain(&status_line(&app, 80));
         assert!(
-            !status.contains("Ctrl+C again"),
+            !status.contains("Ctrl-c again"),
             "status line keeps pills/hints: {status:?}"
         );
         app.stash_menu = Some(Vec::new());
@@ -1667,7 +1667,7 @@ mod tests {
         let rows = overlay_status_rows(&app);
         assert!(rows >= 5, "prompt + list + footer: {rows}");
         assert!(rows <= 17, "capped like the branch picker: {rows}");
-        app.status = "Press Ctrl+C again to exit".into();
+        app.status = "Press Ctrl-c again to exit".into();
         assert_eq!(
             ctrl_c_prompt_rows(&app),
             0,

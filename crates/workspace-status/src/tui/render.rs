@@ -32,14 +32,14 @@ use super::diff::{
 };
 use super::drill::DrillView;
 use super::help::{
-    help_chip_gap_spaces, help_column_width, help_entry_matches, help_entry_visual_lines,
-    help_groups, help_idle_footer_lines, help_inner_width, help_version_label,
-    HELP_SEARCH_ESC_HINT,
+    help_chip_gap_spaces, help_column_content_width, help_column_widths, help_entry_matches,
+    help_entry_visual_lines, help_groups, help_idle_footer_lines, help_inner_width, help_key_width,
+    help_version_label, HELP_SEARCH_ESC_HINT,
 };
 use super::icons::{
     comment_mark_cols, icon_branch, icon_comment, icon_comment_resolved, icon_diff,
-    icon_merged_into_default, icon_move, icon_open_vs_default, truncate_visible, CURSOR_BAR,
-    CURSOR_BAR_INACTIVE, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
+    icon_merged_into_default, icon_move, icon_open_vs_default, CURSOR_BAR, CURSOR_BAR_INACTIVE,
+    FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
 };
 use super::ops::RevertScope;
 use super::search::{
@@ -1563,23 +1563,33 @@ fn help_group_chrome(title: &str, ascii: bool, palette: Palette) -> (&'static st
     }
 }
 
+/// Cut or pad `spans` to exactly `width` painted columns.
+///
+/// Counts columns the way ratatui paints them (`Span::width`), so a help
+/// cell with `←→` or `✗` ends where the next column starts.
 fn clamp_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
     let mut out = Vec::new();
     let mut used = 0usize;
     for span in spans {
-        let w = visible_width(&span.content);
         if used >= width {
             break;
         }
+        let w = span.width();
         if used + w <= width {
             used += w;
             out.push(span);
             continue;
         }
-        let take = width - used;
-        let cut = truncate_visible(&span.content, take);
+        let mut cut = String::new();
+        for ch in span.content.chars() {
+            let cw = Span::raw(ch.to_string()).width();
+            if used + cw > width {
+                break;
+            }
+            used += cw;
+            cut.push(ch);
+        }
         out.push(Span::styled(cut, span.style));
-        used = width;
         break;
     }
     if used < width {
@@ -1598,32 +1608,33 @@ fn with_bg(spans: Vec<Span<'static>>, bg: Option<Color>) -> Vec<Span<'static>> {
         .collect()
 }
 
-fn help_chip_spans(keys: &str, color: Color, surface: Color) -> Vec<Span<'static>> {
+fn help_chip_spans(
+    keys: &str,
+    key_width: usize,
+    color: Color,
+    surface: Color,
+) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for chip in keys.split(' ').filter(|part| !part.is_empty()) {
         spans.push(key_chip(chip, color, surface));
         spans.push(Span::raw(" "));
     }
-    spans.push(Span::raw(" ".repeat(help_chip_gap_spaces(keys))));
+    spans.push(Span::raw(" ".repeat(help_chip_gap_spaces(keys, key_width))));
     spans
 }
 
+/// One painted line of a help entry, padded to `width` (the column text area).
 fn help_visual_cell_spans(
-    entry: Option<&super::help::HelpEntry>,
-    line: Option<&super::help::HelpVisualLine>,
+    entry: &super::help::HelpEntry,
+    vis: &super::help::HelpVisualLine,
+    key_width: usize,
     color: Color,
     surface: Color,
     muted: Color,
     width: usize,
 ) -> Vec<Span<'static>> {
-    let Some(vis) = line else {
-        return clamp_spans(vec![Span::raw("")], width);
-    };
     if vis.chips {
-        let Some(entry) = entry else {
-            return clamp_spans(vec![Span::raw("")], width);
-        };
-        let mut spans = help_chip_spans(entry.keys, color, surface);
+        let mut spans = help_chip_spans(entry.keys, key_width, color, surface);
         if !vis.text.is_empty() {
             spans.push(Span::styled(vis.text.clone(), Style::default().fg(muted)));
         }
@@ -1698,21 +1709,16 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let palette = state.theme.palette();
     let pills = state.theme.pills();
     let surface = overlay_surface(state);
-    // A compare tab swaps GIT for the COMPARE column; same row budget.
+    // A compare tab swaps GIT for the COMPARE column.
     let groups = help_groups(state.is_compare_tab());
-    let max_rows = groups
-        .iter()
-        .map(|group| group.entries.len())
-        .max()
-        .unwrap_or(0);
     let mut lines: Vec<Line> = Vec::new();
 
     let term_width = area.width as usize;
     let inner = help_inner_width(term_width).max(1);
-    let col_w = help_column_width(term_width);
+    let widths = help_column_widths(groups, inner);
 
     let mut title_spans = Vec::new();
-    for group in groups {
+    for (group, &col_w) in groups.iter().zip(&widths) {
         let (icon, color) = help_group_chrome(group.title, state.ascii, palette);
         title_spans.extend(clamp_spans(
             vec![Span::styled(
@@ -1724,41 +1730,50 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
     lines.push(Line::from(title_spans));
 
-    for row in 0..max_rows {
-        let cells: Vec<Vec<super::help::HelpVisualLine>> = groups
-            .iter()
-            .map(|group| match group.entries.get(row) {
-                Some(entry) => help_entry_visual_lines(entry.desc, col_w, entry.keys),
-                None => vec![super::help::HelpVisualLine {
-                    chips: false,
-                    indent: 0,
-                    text: String::new(),
-                }],
-            })
-            .collect();
-        let height = cells.iter().map(|cell| cell.len()).max().unwrap_or(1);
-        for vis_row in 0..height {
-            let mut spans = Vec::new();
-            for (group_idx, group) in groups.iter().enumerate() {
-                let (_, color) = help_group_chrome(group.title, state.ascii, palette);
-                let entry = group.entries.get(row);
-                let hit = searching
-                    && entry.is_some_and(|item| help_entry_matches(item.keys, item.desc, query));
+    // Each column stacks its own entries; a wrapped entry never pads the
+    // other columns. The gutter stays outside the search highlight.
+    let columns: Vec<Vec<Vec<Span<'static>>>> = groups
+        .iter()
+        .zip(&widths)
+        .map(|(group, &col_w)| {
+            let (_, color) = help_group_chrome(group.title, state.ascii, palette);
+            let content = help_column_content_width(col_w);
+            let key_width = help_key_width(group);
+            let gutter = col_w.saturating_sub(content);
+            let mut rows = Vec::new();
+            for entry in group.entries {
+                let hit = searching && help_entry_matches(entry.keys, entry.desc, query);
                 let bg = hit.then_some(pills.filter.bg);
-                spans.extend(with_bg(
-                    help_visual_cell_spans(
-                        entry,
-                        cells[group_idx].get(vis_row),
-                        color,
-                        surface,
-                        palette.muted,
-                        col_w,
-                    ),
-                    bg,
-                ));
+                for vis in help_entry_visual_lines(entry.desc, content, key_width) {
+                    let mut spans = with_bg(
+                        help_visual_cell_spans(
+                            entry,
+                            &vis,
+                            key_width,
+                            color,
+                            surface,
+                            palette.muted,
+                            content,
+                        ),
+                        bg,
+                    );
+                    spans.push(Span::raw(" ".repeat(gutter)));
+                    rows.push(spans);
+                }
             }
-            lines.push(Line::from(spans));
+            rows
+        })
+        .collect();
+    let body_rows = columns.iter().map(Vec::len).max().unwrap_or(0);
+    for row in 0..body_rows {
+        let mut spans = Vec::new();
+        for (column, &col_w) in columns.iter().zip(&widths) {
+            match column.get(row) {
+                Some(cell) => spans.extend(cell.iter().cloned()),
+                None => spans.push(Span::raw(" ".repeat(col_w))),
+            }
         }
+        lines.push(Line::from(spans));
     }
 
     let footer = if searching {
@@ -2246,7 +2261,7 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 /// Compare-tab close control as painted and hit-tested: brackets around
 /// U+2717 BALLOT X. Three display columns. Paint and hit boxes both derive
 /// their width from this constant.
-const TAB_CLOSE_GLYPH: &str = "[\u{2717}]";
+pub(super) const TAB_CLOSE_GLYPH: &str = "[\u{2717}]";
 
 /// Columns ratatui paints for `text` (unicode-width, same as `Span::width`).
 ///
@@ -5025,6 +5040,60 @@ mod tests {
         assert_help_version_lower_right(&text);
     }
 
+    /// At 140×40 the help leaves the panes real rows (row-aligned columns
+    /// left 5), and no column's text runs into the next column.
+    #[test]
+    fn help_columns_keep_a_gutter_and_the_panes_rows() {
+        use super::super::help::{help_column_widths, HELP_GROUPS};
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.help_open = true;
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        let lines: Vec<&str> = text.lines().collect();
+        let header = lines
+            .iter()
+            .position(|line| line.contains("MOVE") && line.contains("GIT") && line.contains("VIEW"))
+            .unwrap_or_else(|| panic!("help header:\n{text}"));
+        let footer = lines
+            .iter()
+            .position(|line| line.contains("/ search help"))
+            .unwrap_or_else(|| panic!("help footer:\n{text}"));
+        let overlay_rows = footer + 2 - (header - 1);
+        assert!(
+            overlay_rows <= 24,
+            "help takes {overlay_rows} rows:\n{text}"
+        );
+        assert!(
+            state.layout.tree_height >= 10,
+            "panes keep {} rows:\n{text}",
+            state.layout.tree_height
+        );
+        assert!(text.contains("quit (press twice)"), "{text}");
+        assert!(text.contains("apply/pop/drop"), "{text}");
+
+        // Border + padding put the first column at x = 2.
+        let widths = help_column_widths(HELP_GROUPS, 136);
+        let mut starts = vec![2usize];
+        for width in &widths[..widths.len() - 1] {
+            starts.push(starts.last().unwrap() + width);
+        }
+        let buf = terminal.backend().buffer();
+        for y in header + 1..footer {
+            for &start in &starts[1..] {
+                for x in start - 2..start {
+                    assert_eq!(
+                        buf[(x as u16, y as u16)].symbol(),
+                        " ",
+                        "gutter at x={x} y={y}:\n{}",
+                        lines[y]
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn help_search_highlights_without_hiding_rows() {
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
@@ -5398,7 +5467,7 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("Comment"), "{text}");
         assert!(text.contains("hello▏"), "{text}");
-        assert!(text.contains("Ctrl-R resolve"), "{text}");
+        assert!(text.contains("Ctrl-r resolve"), "{text}");
         assert!(!text.contains("Comment · resolved"), "{text}");
         assert!(!text.contains("▏hello"), "{text}");
         assert_eq!(
@@ -5417,10 +5486,10 @@ mod tests {
         );
 
         assert!(
-            text.contains("Shift+Enter newline") && text.contains("Ctrl-Left/Right word"),
+            text.contains("Shift-Enter newline") && text.contains("Ctrl-Left/Right word"),
             "overlay must advertise textarea keys:\n{text}"
         );
-        assert!(text.contains("Ctrl-R resolve"), "{text}");
+        assert!(text.contains("Ctrl-r resolve"), "{text}");
         assert!(!text.contains("Comment · resolved"), "{text}");
 
         if let Some(prompt) = state.comment.as_mut() {
@@ -5437,8 +5506,8 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let resolved = buffer_text(&terminal);
         assert!(resolved.contains("Comment · resolved"), "{resolved}");
-        assert!(resolved.contains("Ctrl-R unresolve"), "{resolved}");
-        assert!(!resolved.contains("Ctrl-R resolve ·"), "{resolved}");
+        assert!(resolved.contains("Ctrl-r unresolve"), "{resolved}");
+        assert!(!resolved.contains("Ctrl-r resolve ·"), "{resolved}");
         assert!(
             resolved.contains("▏hello"),
             "resolve toggle must keep the caret:\n{resolved}"
@@ -5458,7 +5527,7 @@ mod tests {
             "multiline overlay must still occlude idle chips:\n{multi}"
         );
         assert!(
-            multi.contains("Comment · resolved") && multi.contains("Ctrl-R unresolve"),
+            multi.contains("Comment · resolved") && multi.contains("Ctrl-r unresolve"),
             "multiline overlay must keep resolve chrome:\n{multi}"
         );
     }

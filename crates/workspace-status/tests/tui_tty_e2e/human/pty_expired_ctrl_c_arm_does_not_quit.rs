@@ -3,7 +3,7 @@ use crate::seed::daily_workspace;
 use crate::support::{screen_line_from_end, tree_has, GIT_WAIT, WAIT};
 
 /// Pinned chrome copy after the first Ctrl+C (`tui/ctrl_c_exit.rs`).
-const CTRL_C_EXIT_PROMPT: &str = "Press Ctrl+C again to exit";
+const CTRL_C_EXIT_PROMPT: &str = "Press Ctrl-c again to exit";
 
 /// Confirm-exit window from `tui/ctrl_c_exit.rs` (`CTRL_C_EXIT_MS`).
 const CTRL_C_EXIT_MS: u64 = 2000;
@@ -22,7 +22,7 @@ fn idle_tree_before_ctrl_c(screen: &str) -> bool {
         && status.contains("? help")
         && status.contains("focus right")
         && crumb.trim() == "workspace"
-        && !crumb.contains("Ctrl+C")
+        && !crumb.contains("Ctrl-c")
         && !status.contains(CTRL_C_EXIT_PROMPT)
         && !screen.contains(CTRL_C_EXIT_PROMPT)
         && !screen.contains("MOVE")
@@ -38,7 +38,7 @@ fn first_ctrl_c_pinned_prompt(screen: &str) -> bool {
     let crumb = screen_line_from_end(screen, 2);
     prompt.trim() == CTRL_C_EXIT_PROMPT
         && crumb.trim() == "workspace"
-        && !crumb.contains("Ctrl+C")
+        && !crumb.contains("Ctrl-c")
         && status.contains(" tree")
         && status.contains("? help")
         && status.contains("focus right")

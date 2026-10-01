@@ -8,7 +8,7 @@ fn idle_tui_ready_for_fetch(screen: &str) -> bool {
         && tree_has(screen, "No updates")
         && screen.contains(" tree")
         && screen.contains("? help")
-        && !screen.contains("Press Ctrl+C again to exit")
+        && !screen.contains("Press Ctrl-c again to exit")
         && !screen.contains("MOVE")
 }
 
@@ -40,5 +40,5 @@ fn pty_q_quits_while_fetch_is_running() {
     );
 
     tui.key('q');
-    tui.wait_exit_without("Press Ctrl+C again to exit", WAIT);
+    tui.wait_exit_without("Press Ctrl-c again to exit", WAIT);
 }

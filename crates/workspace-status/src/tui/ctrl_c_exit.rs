@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 pub const CTRL_C_EXIT_MS: u64 = 2000;
 
 /// Status / overlay copy shown after the first Ctrl-C.
-pub const CTRL_C_EXIT_PROMPT: &str = "Press Ctrl+C again to exit";
+pub const CTRL_C_EXIT_PROMPT: &str = "Press Ctrl-c again to exit";
 
 /// Copy shown after `q` while a git write runs. Same window as Ctrl-C.
 pub const QUIT_WHILE_BUSY_PROMPT: &str = "git write running · press q again to exit";
@@ -88,7 +88,7 @@ mod tests {
         assert!(
             CTRL_C_EXIT_PROMPT
                 .to_ascii_lowercase()
-                .contains("ctrl+c again"),
+                .contains("ctrl-c again"),
             "{CTRL_C_EXIT_PROMPT}"
         );
         assert!(is_ctrl_c_exit_prompt(CTRL_C_EXIT_PROMPT));

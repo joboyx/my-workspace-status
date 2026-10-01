@@ -21,7 +21,8 @@ fn help_lists_hl_pan(screen: &str) -> bool {
     let compact = screen.split_whitespace().collect::<Vec<_>>().join(" ");
     screen.contains("MOVE")
         && compact.contains("h l")
-        && compact.contains("fold · pan lists/diff")
+        && compact.contains("fold · pan")
+        && compact.contains("lists/diff")
         && compact.contains("toggle fold")
 }
 
@@ -180,7 +181,7 @@ fn pty_h_l_pan_graph_or_file_diff() {
     tui.wait_pred(
         |screen| {
             !screen.contains("MOVE")
-                && !screen.contains("pan lists/diff")
+                && !screen.contains("lists/diff")
                 && screen.contains("README.md")
                 && screen.contains("? help")
         },

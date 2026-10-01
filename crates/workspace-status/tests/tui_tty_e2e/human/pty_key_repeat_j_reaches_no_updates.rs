@@ -142,7 +142,7 @@ fn pty_key_repeat_j_reaches_no_updates() {
             screen.contains("MOVE")
                 && help_lists_j_k_down_up(screen)
                 && screen.contains("gg   G")
-                && screen.contains("top / bottom of focused")
+                && screen.contains("top / bottom of")
                 && screen.contains("PgUp   PgDn")
                 && screen.contains("page focused pane")
         },

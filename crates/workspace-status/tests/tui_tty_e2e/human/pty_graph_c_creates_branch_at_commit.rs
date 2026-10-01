@@ -138,7 +138,7 @@ fn documented_graph_create_branch_at(screen: &str, overlay_hash: &str) -> bool {
 
 /// Graph `c` creates a local ref at the focused commit (no checkout).
 ///
-/// Docs: Help GIT `c` is graph branch at commit. Keymap: graph-focused `c`
+/// Docs: Help GIT `c` is create branch at graph commit (no checkout). Keymap: graph-focused `c`
 /// on a commit is `Action::GraphCreateBranch`. Overlay is the name prompt
 /// with `Create branch at <short>` and `Enter create at <short> (no checkout) · Esc cancel`.
 /// Enter runs `create_branch_at` (`git branch -- name commitId`). HEAD

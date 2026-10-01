@@ -6,7 +6,7 @@ use crate::support::{tree_cursor_on, tree_has, GIT_WAIT, WAIT};
 fn help_lists_slash_search_focused_pane(screen: &str) -> bool {
     let compact = screen.split_whitespace().collect::<Vec<_>>().join(" ");
     compact.contains("MOVE")
-        && compact.contains("/ search focused pane")
+        && compact.contains("/ search focused")
         && compact.contains("(Enter")
         && compact.contains("arms)")
         && compact.contains("/ search help")

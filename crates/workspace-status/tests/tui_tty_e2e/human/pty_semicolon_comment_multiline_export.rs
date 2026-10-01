@@ -25,7 +25,7 @@ fn comment_overlay(screen: &str) -> bool {
         && screen.contains("body:")
         && screen.contains("Enter save")
         && screen.contains("empty deletes")
-        && screen.contains("Shift+Enter newline")
+        && screen.contains("Shift-Enter newline")
         && !screen.contains("MOVE")
         && !screen.contains("# Comments")
 }
@@ -46,13 +46,13 @@ fn export_overlay(screen: &str) -> bool {
 fn overlay_resolved(screen: &str) -> bool {
     comment_overlay(screen)
         && screen.contains("Comment · resolved")
-        && screen.contains("Ctrl-R unresolve")
-        && !screen.contains("Ctrl-R resolve ·")
+        && screen.contains("Ctrl-r unresolve")
+        && !screen.contains("Ctrl-r resolve ·")
 }
 
 fn overlay_open(screen: &str) -> bool {
     comment_overlay(screen)
-        && screen.contains("Ctrl-R resolve")
+        && screen.contains("Ctrl-r resolve")
         && !screen.contains("Comment · resolved")
 }
 

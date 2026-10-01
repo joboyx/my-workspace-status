@@ -161,7 +161,7 @@ fn pty_compare_semicolon_comments_line_resolves_and_exports() {
         |screen| {
             comment_overlay(screen)
                 && screen.contains(LINE_BODY)
-                && screen.contains("Ctrl-R resolve")
+                && screen.contains("Ctrl-r resolve")
                 && !screen.contains("Comment · resolved")
         },
         "; on keep-a reopens the saved comment",

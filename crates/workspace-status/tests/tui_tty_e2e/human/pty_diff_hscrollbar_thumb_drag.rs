@@ -132,7 +132,7 @@ fn sgr_release(tui: &mut PtySession, col: u16, row: u16) {
 
 /// Drag the painted file-diff horizontal scrollbar. Not wheel, not keys.
 ///
-/// Help VIEW: `m` = mouse · split/bar/drag copy. File-diff paints
+/// Help VIEW: `m` = mouse on/off (graph commit: merge). File-diff paints
 /// `ScrollbarOrientation::HorizontalBottom` after pan leaves column 0.
 /// `hit_split` / `SplitDrag::DiffHScrollbar` must change `diff_col_offset`.
 ///

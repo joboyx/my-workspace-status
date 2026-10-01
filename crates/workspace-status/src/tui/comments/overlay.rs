@@ -11,16 +11,16 @@ use super::store::CommentKey;
 /// First footer row: save / delete / Ctrl-R resolve or unresolve / cancel.
 pub fn comment_overlay_footer_save(resolved: bool) -> String {
     let hint = if resolved {
-        "Ctrl-R unresolve"
+        "Ctrl-r unresolve"
     } else {
-        "Ctrl-R resolve"
+        "Ctrl-r resolve"
     };
     format!("Enter save · empty deletes · {hint} · Esc cancel")
 }
 
 /// Second footer row: advertised textarea keys. Leftover PTY asserts these.
 pub const COMMENT_OVERLAY_FOOTER_EDIT: &str =
-    "Shift+Enter newline · Ctrl-A/E line · Ctrl-Left/Right word";
+    "Shift-Enter newline · Ctrl-a/e line · Ctrl-Left/Right word";
 
 /// Border (2) + title + target + two footer rows. Body lines add to this.
 pub const COMMENT_OVERLAY_CHROME_ROWS: u16 = 6;
@@ -419,7 +419,7 @@ mod tests {
         assert!(prompt.resolved);
         assert_eq!(prompt.body(), "hello");
         assert_eq!(prompt.cursor(), (0, 5));
-        assert!(comment_overlay_footer_save(true).contains("Ctrl-R unresolve"));
-        assert!(comment_overlay_footer_save(false).contains("Ctrl-R resolve"));
+        assert!(comment_overlay_footer_save(true).contains("Ctrl-r unresolve"));
+        assert!(comment_overlay_footer_save(false).contains("Ctrl-r resolve"));
     }
 }

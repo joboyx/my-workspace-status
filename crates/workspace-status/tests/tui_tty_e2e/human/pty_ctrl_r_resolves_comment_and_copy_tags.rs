@@ -50,13 +50,13 @@ fn right_diff_focused(screen: &str) -> bool {
 fn overlay_resolved(screen: &str) -> bool {
     comment_overlay(screen)
         && screen.contains("Comment · resolved")
-        && screen.contains("Ctrl-R unresolve")
-        && !screen.contains("Ctrl-R resolve ·")
+        && screen.contains("Ctrl-r unresolve")
+        && !screen.contains("Ctrl-r resolve ·")
 }
 
 fn overlay_open(screen: &str) -> bool {
     comment_overlay(screen)
-        && screen.contains("Ctrl-R resolve")
+        && screen.contains("Ctrl-r resolve")
         && !screen.contains("Comment · resolved")
 }
 

@@ -32,8 +32,8 @@ fn help_lists_shift_arrows_tree_pan(screen: &str) -> bool {
     let compact = screen.split_whitespace().collect::<Vec<_>>().join(" ");
     compact.contains("h l")
         && compact.contains("fold")
-        && compact.contains("pan lists/diff")
-        && compact.contains("Shift+")
+        && compact.contains("lists/diff")
+        && compact.contains("Shift-←→")
         && compact.contains("tree")
 }
 
@@ -120,7 +120,7 @@ fn pty_shift_left_right_tree_pan() {
     tui.wait_pred(
         |screen| {
             !screen.contains("MOVE")
-                && !screen.contains("pan lists/diff")
+                && !screen.contains("lists/diff")
                 && screen.contains("README.md")
                 && screen.contains("? help")
         },
