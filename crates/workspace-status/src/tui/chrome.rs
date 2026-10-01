@@ -31,6 +31,31 @@ pub fn export_shows_status(status: &str) -> bool {
 /// fetch, so the wording is load-bearing, not cosmetic.
 pub const STATUS_NOTHING_TO_PULL: &str = "nothing behind to pull";
 
+/// Status text `p` sets when nothing is behind but a target has diverged.
+///
+/// `diverged` must not be empty. [`is_idle_pull_status`] reads it back.
+pub fn diverged_pull_status(diverged: &[String]) -> String {
+    match diverged {
+        [repo] => format!("{repo} has diverged — pull it from a terminal"),
+        [repo, rest @ ..] => format!(
+            "{repo} (+{} more) diverged — pull from a terminal",
+            rest.len()
+        ),
+        [] => STATUS_NOTHING_TO_PULL.to_string(),
+    }
+}
+
+/// True when `status` is what `p` sets when it found nothing to pull:
+/// [`STATUS_NOTHING_TO_PULL`] or a [`diverged_pull_status`] line.
+///
+/// `effect.rs` then queues a pull behind an inflight fetch, so this check
+/// and that copy must agree.
+pub fn is_idle_pull_status(status: &str) -> bool {
+    status == STATUS_NOTHING_TO_PULL
+        || status.ends_with(" has diverged — pull it from a terminal")
+        || status.ends_with(" diverged — pull from a terminal")
+}
+
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use workspace_status_graph::GraphRow;

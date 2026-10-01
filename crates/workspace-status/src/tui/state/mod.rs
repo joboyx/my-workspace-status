@@ -30,7 +30,7 @@ use super::branches::{
     can_open_branch_picker, checkoutable_branch_names, is_valid_branch_name, merge_rev_for_commit,
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
 };
-use super::chrome::{status_uses_status_text, STATUS_NOTHING_TO_PULL, STATUS_NO_COMMENTS};
+use super::chrome::{diverged_pull_status, status_uses_status_text, STATUS_NO_COMMENTS};
 use super::command_palette::CommandPaletteState;
 #[cfg(not(test))]
 use super::comments::comment_store_path;
@@ -79,8 +79,7 @@ use super::split::{
 };
 use super::stash::{
     checkout_path, resolve_stash_menu_key, row_is_hidden_ignored, stash_dirty_for_row,
-    stash_menu_status, stash_ops_for_context, StashMenuKeyResult, StashOp, StashOpId,
-    StashOpsContext,
+    stash_ops_for_context, StashMenuKeyResult, StashOp, StashOpId, StashOpsContext,
 };
 use super::status::StatusMessage;
 use super::tabs::{
@@ -1758,16 +1757,7 @@ impl AppState {
                 let behind = with_sync(crate::snapshot::SyncStatus::Behind);
                 let diverged = with_sync(crate::snapshot::SyncStatus::Diverged);
                 if behind.is_empty() {
-                    self.status = match diverged.as_slice() {
-                        [] => StatusMessage::warn(STATUS_NOTHING_TO_PULL),
-                        [repo] => StatusMessage::warn(format!(
-                            "{repo} has diverged — pull it from a terminal"
-                        )),
-                        [repo, rest @ ..] => StatusMessage::warn(format!(
-                            "{repo} (+{} more) diverged — pull from a terminal",
-                            rest.len()
-                        )),
-                    };
+                    self.status = StatusMessage::warn(diverged_pull_status(&diverged));
                     Effect::None
                 } else {
                     self.status = StatusMessage::progress(format_running_op(
@@ -4059,7 +4049,8 @@ impl AppState {
             self.status = StatusMessage::warn("nothing to stash");
             return;
         }
-        self.status = stash_menu_status(&ops).into();
+        // The box lists each op with its key; a chip summary would repeat it.
+        self.status.clear();
         self.stash_repo = Some(repo);
         self.stash_menu = Some(ops);
     }
@@ -9181,6 +9172,11 @@ mod tests {
         assert_eq!(
             ops.iter().map(|op| op.id).collect::<Vec<_>>(),
             vec![StashOpId::Apply, StashOpId::Pop]
+        );
+        assert!(
+            app.status.is_empty(),
+            "the box lists the keys; no status line repeats them: {:?}",
+            app.status
         );
         assert!(ops
             .iter()

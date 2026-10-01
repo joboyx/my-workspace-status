@@ -92,20 +92,6 @@ pub fn stash_ops_for_context(ctx: &StashOpsContext) -> Vec<StashOp> {
     ops
 }
 
-/// Status-line chips for the open overlay (`stash  s create  a apply …`).
-pub fn stash_menu_status(ops: &[StashOp]) -> String {
-    let mut parts = vec!["stash"];
-    for op in ops {
-        parts.push(match op.id {
-            StashOpId::Create => "s create",
-            StashOpId::Apply => "a apply",
-            StashOpId::Pop => "p pop",
-            StashOpId::Drop => "D drop",
-        });
-    }
-    parts.join("  ")
-}
-
 /// Map overlay input to cancel / run / ignore. Enter runs the first listed op.
 ///
 /// Drop is labelled `D` like the graph key; `d` runs it too.
@@ -336,14 +322,11 @@ mod tests {
     }
 
     #[test]
-    fn menu_status_lists_present_ops() {
-        assert_eq!(stash_menu_status(&[]), "stash");
+    fn menu_lists_present_ops_with_their_keys() {
+        let keys = |ops: Vec<StashOp>| ops.iter().map(|op| op.key).collect::<String>();
         let ops = stash_ops_for_context(&ctx(true, None, Some("stash@{0}")));
-        assert_eq!(stash_menu_status(&ops), "stash  s create  a apply  p pop");
+        assert_eq!(keys(ops), "sap");
         let drop_ops = stash_ops_for_context(&ctx(false, Some("stash@{1}"), None));
-        assert_eq!(
-            stash_menu_status(&drop_ops),
-            "stash  a apply  p pop  D drop"
-        );
+        assert_eq!(keys(drop_ops), "apD");
     }
 }

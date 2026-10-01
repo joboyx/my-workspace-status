@@ -906,11 +906,14 @@ pub fn app_stash_on_graph(screen: &str) -> bool {
         && !screen.contains("WIP on graph")
 }
 
-/// Graph stash row hints. Status chips, not overlay `a apply`.
+/// Graph stash row hints on the status row, not the overlay op rows.
 pub fn has_graph_stash_hints(screen: &str) -> bool {
     let status = status_row(screen);
     status.contains("apply stash") && status.contains("drop stash") && status.contains("pop stash")
 }
+
+/// Stash overlay create row: ` s ` key chip, then the `stash` label.
+const STASH_CREATE_OP_ROW: &str = " s  stash";
 
 /// CSI-u Shift+S opened the create-only overlay on the dirty README.
 pub fn stash_create_overlay_open(screen: &str) -> bool {
@@ -920,11 +923,11 @@ pub fn stash_create_overlay_open(screen: &str) -> bool {
         && readme_unstaged_badge(screen)
         && pane_unstaged_readme(screen)
         && screen.contains("Stash app")
-        && screen.contains("s create")
+        && screen.contains(STASH_CREATE_OP_ROW)
         && screen.contains("Esc cancel")
-        && !screen.contains("a apply")
-        && !screen.contains("p pop")
-        && !screen.contains("d drop")
+        && !screen.contains("apply stash")
+        && !screen.contains("pop stash")
+        && !screen.contains("drop stash")
         && !screen.contains("SEARCH")
         && !screen.contains("MOVE")
         && !screen.contains("WIP on main")
@@ -942,7 +945,7 @@ pub fn documented_stash_created(screen: &str) -> bool {
         && tree_has(screen, "0 changed")
         && crumb.contains("Stashed 1 file")
         && !screen.contains("Stash app")
-        && !screen.contains("s create")
+        && !screen.contains(STASH_CREATE_OP_ROW)
         && !screen.contains("UNSTAGED")
         && !screen.contains("WIP on main")
         && !crumb.contains("staged")

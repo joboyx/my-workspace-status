@@ -23,7 +23,7 @@ use crate::git::{
     exec_git_checked, latest_stash_ref, list_compare_picker_branches, list_local_branches,
     pull_quiet_detailed, push_quiet, remove_untracked_file, remove_worktree, revert_compare_file,
     revert_compare_patch, revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop,
-    stash_push, unstage_file,
+    stash_push, unstage_file, COMPARE_REVERT_ABORTED,
 };
 use crate::parallel::env_fetch_concurrency;
 use crate::snapshot::RepoSnapshot;
@@ -37,7 +37,7 @@ use super::app::{
     probe_compare_range, RightPaneLoad, RightPaneRequest, RightPaneTarget, TuiOpts,
 };
 use super::branches::is_valid_branch_name;
-use super::chrome::{STATUS_COPIED, STATUS_COPY_FAILED, STATUS_NOTHING_TO_PULL};
+use super::chrome::{is_idle_pull_status, STATUS_COPIED, STATUS_COPY_FAILED};
 use super::comments;
 use super::diff_tool::{
     prepare_rev_diff_paths, prepare_worktree_diff, resolve_diff_tool, PreparedDiff,
@@ -119,7 +119,6 @@ pub(crate) enum JobOutcome {
         gen: u64,
         page: workspace_status_graph::GraphModel,
         identity: GraphIdentity,
-        prev_status: StatusMessage,
     },
     CommitFiles {
         gen: u64,
@@ -290,6 +289,18 @@ fn completed_op_status(kind: RunningOp, tally: &OpTally) -> StatusMessage {
     }
 }
 
+/// Final status of an exclusive write named `op`.
+///
+/// A compare-tab refusal ([`COMPARE_REVERT_ABORTED`]) keeps its own copy as
+/// a warn: git did not fail, the write never ran.
+fn write_status(op: &str, result: Result<String, String>) -> StatusMessage {
+    match result {
+        Ok(text) => StatusMessage::ok(text),
+        Err(err) if err.starts_with(COMPARE_REVERT_ABORTED) => StatusMessage::warn(err),
+        Err(err) => StatusMessage::error(format!("{op} failed: {err}")),
+    }
+}
+
 /// Bulk pull result for one repo.
 fn pull_result(dir: &std::path::Path) -> RepoOpResult {
     let pulled = pull_quiet_detailed(dir);
@@ -455,8 +466,11 @@ pub(crate) struct Interpreter {
     compare_range: VecDeque<CompareRangeJob>,
     compare_diff: VecDeque<CompareDiffJob>,
     compare_probe: VecDeque<CompareProbeJob>,
-    /// Queued autoload: generation, graph target, and the status it replaced.
-    autoload: Option<(u64, GraphIdentity, StatusMessage)>,
+    /// Queued autoload: generation and graph target.
+    autoload: Option<(u64, GraphIdentity)>,
+    /// The status `loading older…` replaced. Kept here, not on the job, so
+    /// a cancelled or stale autoload still puts it back.
+    older_prev: Option<StatusMessage>,
     default_tally: OpTally,
     default_total: usize,
     default_repos: Vec<String>,
@@ -491,6 +505,7 @@ impl Interpreter {
             compare_diff: VecDeque::new(),
             compare_probe: VecDeque::new(),
             autoload: None,
+            older_prev: None,
             default_tally: OpTally::default(),
             default_total: 0,
             default_repos: Vec::new(),
@@ -627,7 +642,7 @@ impl Interpreter {
         match effect {
             Effect::Quit => {}
             Effect::None => {
-                if matches!(action, Action::Pull) && state.status == STATUS_NOTHING_TO_PULL {
+                if matches!(action, Action::Pull) && is_idle_pull_status(&state.status) {
                     self.enqueue_pull_after_inflight_fetch(state);
                 }
             }
@@ -1079,22 +1094,30 @@ impl Interpreter {
         state.graph_loading_older = true;
         let gen = self.sched.request_autoload();
         // Keep the slot's previous message so completion can put it back.
-        let prev_status = if state.status == LOADING_OLDER {
-            StatusMessage::default()
-        } else {
-            state.status.clone()
-        };
+        // A slot that still says `loading older…` (a cancelled load not yet
+        // back) keeps the message saved before it.
+        if state.status != LOADING_OLDER {
+            self.older_prev = Some(state.status.clone());
+        }
         self.autoload = Some((
             gen,
             GraphIdentity {
                 repo: repo.clone(),
                 head: head.clone(),
             },
-            prev_status,
         ));
         state.status = StatusMessage::progress(LOADING_OLDER);
         self.sched.enqueue_user(UserTag::Autoload);
         self.mark();
+    }
+
+    /// Put back the status `loading older…` replaced, if the slot still
+    /// says `loading older…`. Called whenever no autoload is left to finish.
+    fn restore_older_prev(&mut self, state: &mut AppState) {
+        let prev = self.older_prev.take().unwrap_or_default();
+        if state.status == LOADING_OLDER {
+            state.status = prev;
+        }
     }
 
     /// Spawn every job the Scheduler will issue under the cap.
@@ -1251,8 +1274,11 @@ impl Interpreter {
                     let current = RightPaneRequest::from_state(state).target();
                     if accepted && target == current {
                         if matches!(&load, RightPaneLoad::Graph { .. }) {
+                            // A new graph cancels any older-page load.
                             let _ = self.sched.request_autoload();
+                            self.autoload = None;
                             state.graph_loading_older = false;
+                            self.restore_older_prev(state);
                         }
                         apply_right_pane_load(state, load);
                         self.mark();
@@ -1385,7 +1411,6 @@ impl Interpreter {
                 gen,
                 page,
                 identity,
-                prev_status,
             } => {
                 self.sched.note_user_done(UserTag::Autoload);
                 let accepted = self.sched.accept_autoload_result(gen);
@@ -1401,9 +1426,11 @@ impl Interpreter {
                 }
                 if accepted {
                     state.graph_loading_older = false;
-                    if state.status == LOADING_OLDER {
-                        state.status = prev_status;
-                    }
+                    self.restore_older_prev(state);
+                    self.mark();
+                } else if !state.graph_loading_older {
+                    // Stale, and no newer autoload is running.
+                    self.restore_older_prev(state);
                     self.mark();
                 }
             }
@@ -1693,9 +1720,11 @@ impl Interpreter {
     /// Queue pull when `p` lands during an inflight/pending fetch on that gitdir.
     ///
     /// Dispatch keeps idle in-sync `p` as [`Effect::None`] and status
-    /// `nothing behind to pull`. An unfetched tracking checkout still looks
-    /// in-sync, so that path would drop `p` while fetch occupies the gitdir.
-    /// Other None Pull paths (right pane, compare tab, drill) must not follow.
+    /// `nothing behind to pull` (or a diverged line). An unfetched tracking
+    /// checkout still looks in-sync, so that path would drop `p` while fetch
+    /// occupies the gitdir. Other None Pull paths (right pane, compare tab,
+    /// drill) must not follow. Diverged targets stay out: `p` never pulls
+    /// them.
     fn enqueue_pull_after_inflight_fetch(&mut self, state: &mut AppState) {
         let targets = op_targets(
             &state.snapshot,
@@ -1705,6 +1734,11 @@ impl Interpreter {
         );
         let follow: Vec<String> = targets
             .into_iter()
+            .filter(|checkout| {
+                !state.snapshot.repos.iter().any(|r| {
+                    r.repo == *checkout && r.sync_status == crate::snapshot::SyncStatus::Diverged
+                })
+            })
             .filter(|checkout| self.fetch_live_for(state, checkout))
             .collect();
         if follow.is_empty() {
@@ -2008,12 +2042,8 @@ impl Interpreter {
                     let op = job.op;
                     spawn(
                         id,
-                        Box::new(move || {
-                            let status = match (job.work)() {
-                                Ok(s) => StatusMessage::ok(s),
-                                Err(err) => StatusMessage::error(format!("{op} failed: {err}")),
-                            };
-                            JobOutcome::Write { status }
+                        Box::new(move || JobOutcome::Write {
+                            status: write_status(op, (job.work)()),
                         }),
                     );
                     return;
@@ -2283,17 +2313,16 @@ impl Interpreter {
                 self.sched.note_job_finished(id);
             }
             UserTag::Autoload => {
-                let Some((gen, identity, prev_status)) = self.autoload.take() else {
+                let Some((gen, identity)) = self.autoload.take() else {
+                    // A graph pane load cancelled it and already reset the
+                    // slot. A newer autoload may be running: leave it alone.
                     self.sched.note_job_finished(id);
-                    state.graph_loading_older = false;
                     return;
                 };
                 let Some(model) = state.graph.as_ref() else {
                     self.sched.note_job_finished(id);
                     state.graph_loading_older = false;
-                    if state.status == LOADING_OLDER {
-                        state.status = prev_status;
-                    }
+                    self.restore_older_prev(state);
                     return;
                 };
                 let skip = autoload_skip(model);
@@ -2319,7 +2348,6 @@ impl Interpreter {
                             gen,
                             page,
                             identity,
-                            prev_status,
                         }
                     }),
                 );
@@ -2360,6 +2388,7 @@ mod tests {
     use crate::tui::state::{AppState, FocusPane};
 
     use super::*;
+    use crate::tui::chrome::{diverged_pull_status, STATUS_NOTHING_TO_PULL};
     use crate::tui::status::StatusKind;
 
     fn repo(name: &str, dirty: bool) -> RepoSnapshot {
@@ -3319,7 +3348,6 @@ mod tests {
                     repo: "lib".into(),
                     head: "head-lib".into(),
                 },
-                prev_status: StatusMessage::default(),
             },
         );
         assert_eq!(
@@ -3359,7 +3387,6 @@ mod tests {
                     repo: "app".into(),
                     head: "head-app".into(),
                 },
-                prev_status: StatusMessage::default(),
             },
         );
         assert_eq!(
@@ -3762,6 +3789,73 @@ mod tests {
         );
     }
 
+    fn apply_pane_graph(interp: &mut Interpreter, state: &mut AppState) {
+        let pane_id = interp.sched.request_pane();
+        let target = RightPaneRequest::from_state(state).target();
+        apply(
+            interp,
+            state,
+            JobOutcome::RightPane {
+                req_id: pane_id,
+                target,
+                load: RightPaneLoad::Graph {
+                    model: mini_graph(&["bbb"]),
+                    identity: GraphIdentity {
+                        repo: "app".into(),
+                        head: "head-app".into(),
+                    },
+                    files: None,
+                },
+            },
+        );
+    }
+
+    #[test]
+    fn pane_graph_over_a_running_autoload_puts_the_status_back() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::new();
+        state.status = StatusMessage::warn("push failed");
+        queue_autoload(&mut state, &mut interp);
+        assert_eq!(state.status, LOADING_OLDER);
+        let tui_opts = opts(&state);
+        let mut batch = Vec::new();
+        interp.spawn_ready(&mut state, &tui_opts, &mut |id, work| {
+            batch.push((id, work()));
+        });
+        let (id, stale) = batch
+            .into_iter()
+            .find(|(_, outcome)| matches!(outcome, JobOutcome::Autoload { .. }))
+            .expect("spawned Autoload");
+
+        apply_pane_graph(&mut interp, &mut state);
+        assert_eq!(state.status, "push failed");
+        apply_id(&mut interp, &mut state, id, stale);
+        assert!(!state.graph_loading_older);
+        assert_eq!(state.status, "push failed");
+        assert_eq!(state.status.kind(), StatusKind::Warn);
+    }
+
+    #[test]
+    fn pane_graph_over_a_queued_autoload_puts_the_status_back() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::new();
+        state.status = StatusMessage::warn("push failed");
+        queue_autoload(&mut state, &mut interp);
+        apply_pane_graph(&mut interp, &mut state);
+        assert_eq!(state.status, "push failed");
+        // The cancelled autoload tag still drains without a job.
+        let tui_opts = opts(&state);
+        let mut autoloads = 0;
+        interp.spawn_ready(&mut state, &tui_opts, &mut |_, work| {
+            if matches!(work(), JobOutcome::Autoload { .. }) {
+                autoloads += 1;
+            }
+        });
+        assert_eq!(autoloads, 0);
+        assert!(!state.graph_loading_older);
+        assert_eq!(state.status, "push failed");
+    }
+
     #[test]
     fn stale_autoload_gen_does_not_merge_when_identity_still_matches() {
         let mut state = fixture_state();
@@ -3780,7 +3874,6 @@ mod tests {
                     repo: "app".into(),
                     head: "head-app".into(),
                 },
-                prev_status: StatusMessage::default(),
             },
         );
         assert_eq!(
@@ -3840,7 +3933,6 @@ mod tests {
                     repo: "app".into(),
                     head: "head-app".into(),
                 },
-                prev_status: StatusMessage::default(),
             },
         );
         assert_eq!(
@@ -4193,6 +4285,60 @@ mod tests {
         );
         assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
         assert_eq!(capture_jobs(&mut interp, &mut state).len(), 0);
+    }
+
+    #[test]
+    fn workspace_pull_during_fetch_with_a_diverged_repo_still_pulls_the_rest() {
+        let mut app = repo("app", false);
+        app.sync_status = SyncStatus::Diverged;
+        app.sync_note = "ahead 1, behind 1".into();
+        let mut lib = repo("lib", false);
+        lib.sync_status = SyncStatus::UpToDate;
+        let snapshot = build_workspace_snapshot(&[app, lib], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.cursor = 0;
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into(), "lib".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 2);
+
+        // `lib` is not fetched yet, so it still looks in sync. The diverged
+        // `app` stays out of the follow-up pull.
+        let effect = state.dispatch(Action::Pull);
+        assert_eq!(effect, Effect::None);
+        assert_eq!(state.status, diverged_pull_status(&["app".into()]));
+        schedule_effect(&mut interp, &mut state, effect, &Action::Pull);
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Pull, "lib".into())]
+        );
+    }
+
+    #[test]
+    fn compare_refusal_is_a_warn_without_the_failed_prefix() {
+        let refused = write_status("revert", Err("revert aborted: HEAD moved".into()));
+        assert_eq!(refused, "revert aborted: HEAD moved");
+        assert_eq!(refused.kind(), StatusKind::Warn);
+        let failed = write_status("revert", Err("patch failed: a.txt:1".into()));
+        assert_eq!(failed, "revert failed: patch failed: a.txt:1");
+        assert_eq!(failed.kind(), StatusKind::Error);
+    }
+
+    #[test]
+    fn idle_pull_status_matches_the_dispatch_copy() {
+        assert!(is_idle_pull_status(STATUS_NOTHING_TO_PULL));
+        assert!(is_idle_pull_status(&diverged_pull_status(&["app".into()])));
+        assert!(is_idle_pull_status(&diverged_pull_status(&[
+            "app".into(),
+            "lib".into()
+        ])));
+        assert!(!is_idle_pull_status("Fetching 0/1…"));
     }
 
     #[test]

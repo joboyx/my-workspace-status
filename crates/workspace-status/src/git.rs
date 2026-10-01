@@ -107,7 +107,7 @@ pub fn exec_git_status(args: &[&str], cwd: &Path) -> i32 {
 pub fn exec_git_checked(args: &[&str], cwd: &Path) -> Result<(), String> {
     match run(args, cwd) {
         Ok(out) if out.status.success() => Ok(()),
-        Ok(out) => Err(git_reason_line(&out).unwrap_or_else(|| exit_code_message(args, &out))),
+        Ok(out) => Err(git_failure_message(args, &out)),
         Err(err) => Err(err.to_string()),
     }
 }
@@ -486,6 +486,11 @@ pub fn revert_tracked_file(cwd: &Path, file_path: &str) -> Result<(), String> {
     exec_git_checked(&["restore", "--", file_path], cwd)
 }
 
+/// Start of every [`ensure_compare_head_clean`] refusal.
+///
+/// The TUI shows a refusal as-is (warn), not as a failed git write.
+pub const COMPARE_REVERT_ABORTED: &str = "revert aborted: ";
+
 /// Refuse a compare-tab write unless the checkout still is the compare head.
 ///
 /// `Err` when `HEAD` is not `head`, or when `git status` lists any of
@@ -496,7 +501,7 @@ pub fn revert_tracked_file(cwd: &Path, file_path: &str) -> Result<(), String> {
 pub fn ensure_compare_head_clean(cwd: &Path, head: &str, paths: &[&str]) -> Result<(), String> {
     match rev_parse_commit(cwd, "HEAD")? {
         Some(now) if now == head => {}
-        _ => return Err("revert aborted: HEAD moved".into()),
+        _ => return Err(format!("{COMPARE_REVERT_ABORTED}HEAD moved")),
     }
     let mut args = vec![
         "status",
@@ -511,7 +516,9 @@ pub fn ensure_compare_head_clean(cwd: &Path, head: &str, paths: &[&str]) -> Resu
         Ok(())
     } else {
         let path = paths.first().copied().unwrap_or_default();
-        Err(format!("revert aborted: {path} has uncommitted changes"))
+        Err(format!(
+            "{COMPARE_REVERT_ABORTED}{path} has uncommitted changes"
+        ))
     }
 }
 
@@ -868,16 +875,9 @@ fn exec_git_owned(args: &[String], cwd: &Path) -> String {
     exec_git(&refs, cwd)
 }
 
+/// Git's reason line ([`git_reason_line`]), or `git <sub> exited with code N`.
 fn git_failure_message(args: &[&str], out: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    if !stderr.is_empty() {
-        return stderr;
-    }
-    format!(
-        "git {} exited with code {}",
-        args.first().copied().unwrap_or("git"),
-        out.status.code().unwrap_or(-1)
-    )
+    git_reason_line(out).unwrap_or_else(|| exit_code_message(args, out))
 }
 
 /// Run git and return stdout. Failure is `Err`, never an empty success.
@@ -1811,6 +1811,18 @@ keep-z
         git(&dir, &["commit", "-qam", "conflicting"]);
         let err = stash_apply(&dir, "stash@{0}").unwrap_err();
         assert!(err.starts_with("CONFLICT"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_patch_apply_reports_one_reason_line() {
+        let dir = unique_dir("ws-git-patch-reason");
+        init_repo(&dir);
+        // git prints two `error:` lines for a patch that does not apply.
+        let patch = "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n\
+                     @@ -1 +1 @@\n-# other\n+# new\n";
+        let err = apply_cached_patch(&dir, patch, false).unwrap_err();
+        assert_eq!(err, "patch failed: README.md:1");
         let _ = fs::remove_dir_all(&dir);
     }
 
