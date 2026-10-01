@@ -1,6 +1,6 @@
 [package]
 name = "workspace-status"
-version = "0.1.224"
+version = "0.1.225"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
