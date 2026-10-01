@@ -2213,6 +2213,83 @@ fn painted_width(text: &str) -> u16 {
     u16::try_from(Span::raw(text).width()).unwrap_or(u16::MAX)
 }
 
+/// Separator painted before every tab whose index is above 0.
+const TAB_SEPARATOR: &str = "│";
+
+/// Overflow marker for `hidden` tabs left of the painted window.
+fn tab_left_marker(hidden: usize) -> String {
+    format!("\u{2039}{hidden}")
+}
+
+/// Overflow marker for `hidden` tabs right of the painted window.
+fn tab_right_marker(hidden: usize) -> String {
+    format!("{hidden}\u{203a}")
+}
+
+/// Tabs `start..end` that the strip paints this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TabWindow {
+    start: usize,
+    end: usize,
+}
+
+/// Pick the painted tab window.
+///
+/// `costs[i]` is tab `i`'s painted width with its separator. When every tab
+/// fits, the window is all tabs. Else it keeps `stored` as the start while
+/// `active` still fits, scrolls the minimum to bring `active` in, and then
+/// pulls the start back left while that hides no tab painted now. Marker
+/// columns are reserved before tabs are fitted. An `active` tab wider than
+/// the space is still in the window; the caller clips it.
+fn tab_window(costs: &[u16], width: u16, stored: usize, active: usize) -> TabWindow {
+    let len = costs.len();
+    let total: u32 = costs.iter().map(|cost| u32::from(*cost)).sum();
+    if len == 0 || total <= u32::from(width) {
+        return TabWindow { start: 0, end: len };
+    }
+    let active = active.min(len - 1);
+    // One past the last tab that fits from `start`, markers reserved.
+    let fit_end = |start: usize| {
+        let mut used = if start > 0 {
+            u32::from(painted_width(&tab_left_marker(start)))
+        } else {
+            0
+        };
+        let mut end = start;
+        while end < len {
+            let next = end + 1;
+            let right = if next < len {
+                u32::from(painted_width(&tab_right_marker(len - next)))
+            } else {
+                0
+            };
+            if used + u32::from(costs[end]) + right > u32::from(width) {
+                break;
+            }
+            used += u32::from(costs[end]);
+            end = next;
+        }
+        end
+    };
+    let mut start = stored.min(active);
+    while start < active && fit_end(start) <= active {
+        start += 1;
+    }
+    let mut end = fit_end(start);
+    while start > 0 {
+        let wider = fit_end(start - 1);
+        if wider <= active || wider < end {
+            break;
+        }
+        start -= 1;
+        end = wider;
+    }
+    TabWindow {
+        start,
+        end: end.max(active + 1),
+    }
+}
+
 fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     state.layout.tab_y = area.y;
     state.layout.tab_hits.clear();
@@ -2223,33 +2300,70 @@ fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let palette = state.theme.palette();
     let labels = state.tabs.labels();
     let active = state.tabs.active;
+    let texts: Vec<String> = labels
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            if index > 0 {
+                format!(" {label} {TAB_CLOSE_GLYPH} ")
+            } else {
+                format!(" {label} ")
+            }
+        })
+        .collect();
+    let sep_w = painted_width(TAB_SEPARATOR);
+    let costs: Vec<u16> = texts
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let sep = if index > 0 { sep_w } else { 0 };
+            painted_width(text).saturating_add(sep)
+        })
+        .collect();
+    let window = tab_window(&costs, area.width, state.layout.tab_scroll, active);
+    state.layout.tab_scroll = window.start;
+    let muted = Style::default().fg(palette.muted);
     let mut spans = Vec::new();
     let mut x = area.x;
-    let end = area.x.saturating_add(area.width);
-    for (index, label) in labels.iter().enumerate() {
+    // Tabs paint left of `limit`; the right marker, if any, owns the rest.
+    let mut limit = area.x.saturating_add(area.width);
+    if window.start > 0 {
+        let marker = tab_left_marker(window.start);
+        let width = painted_width(&marker).min(area.width);
+        state.layout.tab_hits.push((x, width, window.start - 1));
+        spans.push(Span::styled(marker, muted));
+        x = x.saturating_add(width);
+    }
+    if window.end < labels.len() {
+        let marker = tab_right_marker(labels.len() - window.end);
+        let width = painted_width(&marker).min(limit.saturating_sub(x));
+        limit = limit.saturating_sub(width);
+        if width > 0 {
+            state.layout.tab_hits.push((limit, width, window.end));
+            frame.render_widget(
+                Paragraph::new(Span::styled(marker, muted)),
+                Rect {
+                    x: limit,
+                    width,
+                    ..area
+                },
+            );
+        }
+    }
+    for index in window.start..window.end {
         if index > 0 {
-            let sep = "│";
-            let sep_w = painted_width(sep);
-            if x.saturating_add(sep_w) > end {
-                break;
-            }
-            spans.push(Span::styled(
-                sep.to_string(),
-                Style::default().fg(palette.muted),
-            ));
+            spans.push(Span::styled(TAB_SEPARATOR, muted));
             x = x.saturating_add(sep_w);
         }
-        let closable = index > 0;
-        let text = if closable {
-            format!(" {label} {TAB_CLOSE_GLYPH} ")
-        } else {
-            format!(" {label} ")
-        };
-        let width = painted_width(&text);
-        if x.saturating_add(width) > end {
-            break;
+        let label = &labels[index];
+        let text = &texts[index];
+        let width = painted_width(text);
+        // Only an active tab wider than the space clips; hit boxes stop at
+        // the last painted cell.
+        let visible = width.min(limit.saturating_sub(x));
+        if visible > 0 {
+            state.layout.tab_hits.push((x, visible, index));
         }
-        state.layout.tab_hits.push((x, width, index));
         let selected = index == active;
         let tab_style = if selected {
             Style::default()
@@ -2259,16 +2373,21 @@ fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         } else {
             Style::default().fg(palette.muted)
         };
-        if closable {
+        if index > 0 {
             let prefix = format!(" {label} ");
             let close = TAB_CLOSE_GLYPH;
             let close_x = x.saturating_add(painted_width(&prefix));
             let close_w = painted_width(close);
-            state.layout.tab_close_hits.push((close_x, close_w, index));
+            let close_painted = close_x.saturating_add(close_w) <= limit;
+            if close_painted {
+                state.layout.tab_close_hits.push((close_x, close_w, index));
+            }
             // Hover comes from this paint's box, never from a stored index.
-            let hovered = state.pointer.is_some_and(|(col, row)| {
-                row == area.y && col >= close_x && col < close_x.saturating_add(close_w)
-            });
+            // A clipped close has no box, so it never paints hovered.
+            let hovered = close_painted
+                && state.pointer.is_some_and(|(col, row)| {
+                    row == area.y && col >= close_x && col < close_x.saturating_add(close_w)
+                });
             let close_style = if hovered {
                 tab_style
                     .fg(palette.tab_close_hover)
@@ -2282,11 +2401,17 @@ fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             spans.push(Span::styled(close, close_style));
             spans.push(Span::styled(" ", tab_style));
         } else {
-            spans.push(Span::styled(text, tab_style));
+            spans.push(Span::styled(text.clone(), tab_style));
         }
         x = x.saturating_add(width);
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect {
+            width: limit.saturating_sub(area.x),
+            ..area
+        },
+    );
 }
 
 fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -4307,6 +4432,258 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         assert_eq!(state.hovered_tab_close(), None);
         assert_idle(close_cells(&terminal, 1), Some(palette.cursor_bg));
+    }
+
+    /// Workspace plus five compare tabs `alpha` … `echo` against `main`.
+    /// The last opened (`echo`) is active.
+    fn five_compare_tabs() -> AppState {
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        for checkout in ["alpha", "bravo", "charlie", "delta", "echo"] {
+            state.tabs.open_or_focus(checkout.into(), "main".into());
+        }
+        assert_eq!(state.tabs.active, 5);
+        state
+    }
+
+    /// Paint and return the tab row, one string per cell.
+    fn paint_tab_row(terminal: &mut Terminal<TestBackend>, state: &mut AppState) -> Vec<String> {
+        terminal.draw(|frame| draw(frame, state)).unwrap();
+        let cols = terminal.backend().buffer().area.width;
+        let buf = terminal.backend().buffer();
+        (0..cols)
+            .map(|cx| buf[(cx, state.layout.tab_y)].symbol().to_string())
+            .collect()
+    }
+
+    /// Every tab, `[✗]`, and marker hit box covers exactly its painted
+    /// cells, and every painted `[✗]` has a close hit box.
+    fn assert_tab_hits_match_paint(state: &AppState, row: &[String]) {
+        let line = row.concat();
+        let labels = state.tabs.labels();
+        let painted: Vec<usize> = state
+            .layout
+            .tab_hits
+            .iter()
+            .map(|(_, _, index)| *index)
+            .filter(|index| row_has_tab(&line, &labels, *index))
+            .collect();
+        let first = *painted.iter().min().unwrap();
+        let end = *painted.iter().max().unwrap() + 1;
+        for (x, width, index) in state.layout.tab_hits.clone() {
+            let text: String = row[x as usize..(x + width) as usize].concat();
+            if text.starts_with('\u{2039}') {
+                assert_eq!(text, tab_left_marker(first), "{line}");
+                assert_eq!(x, 0, "left marker is leftmost: {line}");
+                assert_eq!(index, first - 1, "left marker targets nearest hidden");
+            } else if text.ends_with('\u{203a}') {
+                assert_eq!(text, tab_right_marker(labels.len() - end), "{line}");
+                assert_eq!(
+                    x + width,
+                    row.len() as u16,
+                    "right marker is right-aligned: {line}"
+                );
+                assert_eq!(index, end, "right marker targets nearest hidden");
+            } else {
+                let want = if index == 0 {
+                    format!(" {} ", labels[0])
+                } else {
+                    format!(" {} {TAB_CLOSE_GLYPH} ", labels[index])
+                };
+                assert_eq!(text, want, "tab {index} hit box spans its text: {line}");
+                if index > 0 {
+                    assert_eq!(row[x as usize - 1], "│", "separator left of {index}");
+                }
+            }
+        }
+        let painted_close: Vec<u16> = (0..row.len().saturating_sub(2) as u16)
+            .filter(|cx| row[*cx as usize..*cx as usize + 3].concat() == TAB_CLOSE_GLYPH)
+            .collect();
+        let close_x: Vec<u16> = state
+            .layout
+            .tab_close_hits
+            .iter()
+            .map(|(x, width, _)| {
+                assert_eq!(*width, 3);
+                *x
+            })
+            .collect();
+        assert_eq!(
+            close_x, painted_close,
+            "close hits sit on painted [✗]: {line}"
+        );
+    }
+
+    fn row_has_tab(line: &str, labels: &[String], index: usize) -> bool {
+        let text = if index == 0 {
+            format!(" {} ", labels[0])
+        } else {
+            format!(" {} {TAB_CLOSE_GLYPH} ", labels[index])
+        };
+        line.contains(&text)
+    }
+
+    #[test]
+    fn narrow_tab_strip_paints_active_tab_and_left_marker() {
+        let mut state = five_compare_tabs();
+        let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
+        let row = paint_tab_row(&mut terminal, &mut state);
+        let line = row.concat();
+        assert_eq!(
+            line, "\u{2039}4│ delta ↔ main [✗] │ echo ↔ main [✗]  ",
+            "active echo stays painted"
+        );
+        assert_eq!(state.layout.tab_scroll, 4);
+        assert_tab_hits_match_paint(&state, &row);
+        assert!(state.layout.tab_hits.contains(&(0, 2, 3)));
+        assert_eq!(state.layout.tab_hits.len(), 3);
+        assert_eq!(state.layout.tab_close_hits.len(), 2);
+    }
+
+    #[test]
+    fn narrow_tab_strip_window_follows_the_active_tab() {
+        let mut state = five_compare_tabs();
+        let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
+        paint_tab_row(&mut terminal, &mut state);
+        assert_eq!(state.layout.tab_scroll, 4);
+
+        // `g5`: delta is already painted, so the window does not move.
+        state.dispatch(Action::JumpToTab(5));
+        assert_eq!(state.tabs.active, 4);
+        let row = paint_tab_row(&mut terminal, &mut state);
+        assert_eq!(state.layout.tab_scroll, 4);
+        assert_eq!(
+            row.concat(),
+            "\u{2039}4│ delta ↔ main [✗] │ echo ↔ main [✗]  "
+        );
+        assert_tab_hits_match_paint(&state, &row);
+
+        // `g2`: alpha is off the left edge; the window scrolls to it.
+        state.dispatch(Action::JumpToTab(2));
+        assert_eq!(state.tabs.active, 1);
+        let row = paint_tab_row(&mut terminal, &mut state);
+        let line = row.concat();
+        assert_eq!(
+            line, " Workspace │ alpha ↔ main [✗]         4\u{203a}",
+            "alpha painted, right marker counts the hidden tabs"
+        );
+        assert_eq!(state.layout.tab_scroll, 0);
+        assert!(!line.contains('\u{2039}'), "{line}");
+        assert_tab_hits_match_paint(&state, &row);
+        assert!(state.layout.tab_hits.contains(&(38, 2, 2)));
+
+        // `gT` to Workspace: inside the window, start stays.
+        state.dispatch(Action::PreviousTab);
+        assert_eq!(state.tabs.active, 0);
+        let row = paint_tab_row(&mut terminal, &mut state);
+        assert_eq!(state.layout.tab_scroll, 0);
+        assert_eq!(row.concat(), line);
+    }
+
+    #[test]
+    fn tab_strip_marker_click_focuses_the_nearest_hidden_tab() {
+        let mut state = five_compare_tabs();
+        let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
+        paint_tab_row(&mut terminal, &mut state);
+        let tab_y = state.layout.tab_y;
+
+        state.dispatch(Action::Click { col: 0, row: tab_y });
+        assert_eq!(state.tabs.active, 3, "left marker focuses charlie");
+        let row = paint_tab_row(&mut terminal, &mut state);
+        let line = row.concat();
+        assert_eq!(
+            line, "\u{2039}3│ charlie ↔ main [✗]                2\u{203a}",
+            "window scrolls exactly one tab"
+        );
+        assert_tab_hits_match_paint(&state, &row);
+
+        state.dispatch(Action::Click {
+            col: 39,
+            row: tab_y,
+        });
+        assert_eq!(state.tabs.active, 4, "right marker focuses delta");
+        let row = paint_tab_row(&mut terminal, &mut state);
+        assert!(row.concat().contains(" delta ↔ main [✗] "), "{row:?}");
+        assert_tab_hits_match_paint(&state, &row);
+    }
+
+    #[test]
+    fn wide_tab_strip_paints_every_tab_without_markers() {
+        let mut state = five_compare_tabs();
+        state.layout.tab_scroll = 3;
+        let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+        let row = paint_tab_row(&mut terminal, &mut state);
+        let line = row.concat();
+        assert!(
+            !line.contains('\u{2039}') && !line.contains('\u{203a}'),
+            "{line}"
+        );
+        assert_eq!(line.matches('↔').count(), 5, "{line}");
+        assert_eq!(state.layout.tab_hits.len(), 6);
+        assert_eq!(state.layout.tab_scroll, 0, "all fit resets the window");
+        assert_tab_hits_match_paint(&state, &row);
+    }
+
+    #[test]
+    fn tab_strip_clips_an_active_tab_wider_than_the_space() {
+        let mut state = five_compare_tabs();
+        let mut terminal = Terminal::new(TestBackend::new(16, 24)).unwrap();
+        let row = paint_tab_row(&mut terminal, &mut state);
+        let line = row.concat();
+        assert_eq!(line, "\u{2039}5│ echo ↔ main ");
+        assert_eq!(state.layout.tab_hits, vec![(0, 2, 4), (3, 13, 5)]);
+        assert!(
+            state.layout.tab_close_hits.is_empty(),
+            "a clipped [✗] has no close hit"
+        );
+    }
+
+    #[test]
+    fn tab_strip_clipped_close_never_paints_hovered() {
+        let mut state = five_compare_tabs();
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(17, 24)).unwrap();
+        let row = paint_tab_row(&mut terminal, &mut state);
+        let tab_y = state.layout.tab_y;
+        assert_eq!(row[16], "[", "only the first cell of [✗] is painted");
+        assert!(state.layout.tab_close_hits.is_empty());
+
+        state.pointer = Some((16, tab_y));
+        paint_tab_row(&mut terminal, &mut state);
+        let style = terminal.backend().buffer()[(16, tab_y)].style();
+        assert_eq!(style.fg, Some(palette.tab_close), "{style:?}");
+        assert!(!style.add_modifier.contains(Modifier::BOLD), "{style:?}");
+    }
+
+    #[test]
+    fn tab_strip_records_no_zero_width_hit_box() {
+        for width in [2u16, 3] {
+            let mut state = five_compare_tabs();
+            state.tabs.active = 2;
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            paint_tab_row(&mut terminal, &mut state);
+            assert!(
+                state.layout.tab_hits.iter().all(|(_, w, _)| *w > 0),
+                "width {width}: {:?}",
+                state.layout.tab_hits
+            );
+        }
+    }
+
+    #[test]
+    fn tab_window_keeps_start_until_active_leaves_it() {
+        // Workspace 11, then four tabs of 10 with their separators.
+        let costs = [11, 10, 10, 10, 10];
+        // All fit: start resets.
+        assert_eq!(tab_window(&costs, 51, 3, 4), TabWindow { start: 0, end: 5 });
+        // Active 4 off the right edge: minimum scroll, left marker `‹3`.
+        assert_eq!(tab_window(&costs, 25, 0, 4), TabWindow { start: 3, end: 5 });
+        // Active inside a stored window: no move.
+        assert_eq!(tab_window(&costs, 25, 3, 3), TabWindow { start: 3, end: 5 });
+        // Active left of the window: start follows it.
+        assert_eq!(tab_window(&costs, 25, 3, 2).start, 2);
+        // Wider than the space: still the active tab alone.
+        assert_eq!(tab_window(&costs, 5, 0, 2), TabWindow { start: 2, end: 3 });
     }
 
     #[test]

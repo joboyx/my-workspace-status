@@ -182,9 +182,14 @@ pub struct LayoutHit {
     /// Tab-strip row (always painted).
     pub tab_y: u16,
     /// Hit boxes `(x, width, tab_index)` for the painted strip.
+    ///
+    /// An overflow marker (`‹N` / `N›`) maps to its nearest hidden tab.
     pub tab_hits: Vec<(u16, u16, usize)>,
     /// Close `[✗]` hit boxes for compare tabs. Workspace never has one.
     pub tab_close_hits: Vec<(u16, u16, usize)>,
+    /// First tab the strip painted. Kept across paints so the window only
+    /// scrolls when the active tab would leave it. `0` when every tab fits.
+    pub tab_scroll: usize,
 }
 
 impl Default for LayoutHit {
@@ -230,6 +235,7 @@ impl Default for LayoutHit {
             tab_y: 0,
             tab_hits: Vec::new(),
             tab_close_hits: Vec::new(),
+            tab_scroll: 0,
         }
     }
 }
