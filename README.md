@@ -42,7 +42,31 @@ This is the glance I wanted instead. Left pane is the workspace tree (repos, wor
 
 ![Help overlay](docs/images/08-help.gif)
 
-Rebuild these clips with `./scripts/capture-demo-stills.sh` (see [docs/demo.md](./docs/demo.md)).
+**Command palette** — Ctrl-k, then type a name or an alias (`compare`, `checkout`). Every letter types; disabled rows say why.
+
+![Command palette](docs/images/09-palette.gif)
+
+**Branch picker** — `b` on a checkout filters local branches. A new name shows an explicit `+ create branch <name>` row.
+
+![Branch picker](docs/images/10-branch-picker.gif)
+
+**Confirm** — `x` asks in a box with `y` / `n` / `Esc`. Enter does not confirm.
+
+![Revert confirm](docs/images/11-confirm.gif)
+
+**Blocked keys** — a key that cannot run here says why (`focus the tree (Tab) to stage`, `no match`).
+
+![Blocked key](docs/images/12-blocked-key.gif)
+
+**Resize** — `<` / `>` move the tree / diff split. At 100 diff columns the diff turns side-by-side.
+
+![Pane resize and split diff](docs/images/13-split-resize.gif)
+
+**Search position** — the armed chip shows the match position, the count, and the pane (`/auth 2/2 · tree`).
+
+![Search position](docs/images/14-search-count.gif)
+
+Rebuild these clips and their PNG stills (`docs/images/stills/`) with `./scripts/capture-demo-stills.sh` (see [docs/demo.md](./docs/demo.md)).
 
 ## Install
 

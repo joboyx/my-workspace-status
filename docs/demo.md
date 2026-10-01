@@ -8,7 +8,11 @@ Refresh the README/demo GIFs from the repo root:
 
 That script seeds, installs MesloLGS NF and ffmpeg if needed, starts Xvfb and Openbox through `scripts/with-desktop-session.sh`, and types the hardcoded keys below. ffmpeg `x11grab` records only the terminal window at 10 fps. The script then encodes each clip to `docs/images/NN-name.gif` (`palettegen` / `paletteuse`, loops forever, no downscale). Do not invent a fixture or a second capture pipeline.
 
-The script rejects a clip and keeps the old GIF when the last frame is gray or too small, when no frame differs from the first (the keys did nothing), or when a GIF is over 4 MB.
+Each clip also writes PNG stills from the same recording to `docs/images/stills/`: `NN-name.png` is the last frame, and `NN-name-mid.png` is the frame where the clip calls `mark_mid` (the **Mid still** line below). Stills are lossless-optimized when `optipng` is installed.
+
+The script rejects a clip and keeps the old GIF and stills when the last or mid frame is gray or too small, when no frame differs from the first (the keys did nothing), or when a GIF is over 4 MB.
+
+The script runs Xvfb on `:99`. Set `WS_STATUS_STILLS_DISPLAY` to another number when `:99` is busy. It stops only the `xfce4-terminal` it started on that display.
 
 ## Seed
 
@@ -33,7 +37,7 @@ Both go away when DEST is wiped.
 - Font: `MesloLGS NF` 13 (romkatv/powerlevel10k-media). Do not set `WS_STATUS_GLYPHS=ascii` when that font is present. Set it only if the font is missing. Do not use MesloLGM Nerd Font Mono — it letter-spaces in xfce4-terminal (VTE sizes cells off the widest Nerd glyph).
 - Graph dates: operator local timezone (relative through 3 hours, then `YYYY-MM-DD HH:MM`). Seed timestamps are Asia/Manila (UTC+8). `capture-demo-stills.sh` sets `TZ=Asia/Manila` so clips match that clock.
 - Some hosts export `NO_COLOR=1`, which paints the first frame gray. Unset `NO_COLOR` and `FORCE_COLOR` before launch.
-- Terminal: at least 140x40. Side-by-side diff needs 100 or more columns. Stay in the default inline diff for clips.
+- Terminal: at least 140x40. The default diff mode is split, but split needs a diff pane of 100 or more columns, so at 140 columns the diff paints `inline (too narrow)`. Only clip 13 widens the pane with `<`. Do not press `i`.
 - Watch and background fetch stay off so frames do not flicker.
 - Re-run the seed script after any write (`s` / `u` / `x`, stash apply/pop/drop, checkout, reviewed mark).
 - Reviewed marks live in `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` (fallback `~/.local/state/my-workspace-status/viewed-files.json`). Delete that file if a `` / `*` survives a reseed. Comments live in `$XDG_STATE_HOME/my-workspace-status/comments.json`. `capture-demo-stills.sh` points `WS_STATUS_VIEWED_STORE`, `WS_STATUS_COMMENT_STORE`, and `WS_STATUS_UPDATE_CHECK_STORE` at `tmp/demo-stills-stage/state` so it does not write those operator files.
@@ -68,11 +72,13 @@ Keys: `u`, pause, `s`.
 
 Show: `session.ts` leaves Staged and shows as unstaged `M`, then goes back to Staged `S`. Row flashes mark each move. Real git writes: the script reseeds after this clip.
 
+Mid still: after `u` (`unstaged src/session.ts`).
+
 ## 04 — search
 
 Keys: `/` `auth` (typed), Enter, `n`.
 
-Show: matches highlight while the query is typed. Enter arms `/auth` on the `feature/auth-refresh` row. `n` steps to `auth.ts` and its diff. Rows stay visible.
+Show: matches highlight while the query is typed. Enter arms `/auth` on the `feature/auth-refresh` row. `n` steps to `auth.ts` and its diff (chip `/auth 2/2 · tree`). Rows stay visible.
 
 ## 05 — reviewed marks
 
@@ -86,25 +92,79 @@ Tree `S` on dirty `app` is create-only (`s` stash). Apply / pop / drop needs a g
 
 Keys: `S`, Esc, `/` `merger` Enter, Tab, `j` onto the stash diamond, `D`, `n`. Never press `y`.
 
-Show: `Stash app` overlay (`s` create, Esc cancel), then the rounded boxed `Drop stash@{0}?` confirm with `y` drop / `n` cancel, then `drop cancelled`.
+Show: `Stash app` overlay (`s` stash, `Esc` cancel), then the boxed `Drop stash@{0}?` confirm with `y` drop / `n` `Esc` cancel, then `drop cancelled`.
+
+Mid still: the drop confirm.
 
 ## 07 — show ignored
 
 Keys: `.`, pause, `.`.
 
-Show: ignored dirty `notes` (`inbox.md`) enters the tree, then hides again.
+Show: ignored dirty `notes` (`inbox.md`) enters the tree (`showing ignored repos`), then hides again.
+
+Mid still: `notes` shown.
 
 ## 08 — help
 
 Keys: `?`, hold, Esc.
 
-Show: the short MOVE / GIT / VIEW key overlay over the tree and pane, then back to the tree.
+Show: the MOVE / GIT / VIEW key overlay (each column flows on its own, version in the footer) over the tree and pane, then back to the tree.
+
+Mid still: the help overlay.
+
+## 09 — command palette
+
+Keys: Ctrl-k, `compare` (typed), Backspace ×7, `checkout` (typed), Esc.
+
+Show: the palette. The alias `compare` finds Diff vs default / Diff vs branch… / Close tab (with its disabled reason). `checkout` types its `c` and `k` (letters no longer move the cursor) and finds Branch picker / Checkout commit refs with their disabled reasons. Esc closes with no run.
+
+Mid still: the `compare` alias match.
+
+## 10 — branch picker
+
+Keys: `k` `k` `k` before recording (cursor on the `app` checkout row `feature/auth-refresh`), then `b`, `login` (typed), Backspace ×5, `fix/banner` (typed), Esc.
+
+Show: the `Branch app` picker. `login` filters to `feature/login-page` plus a `+ create branch login` row. `fix/banner` matches nothing and leaves only `+ create branch fix/banner`. Esc closes with `branch cancelled`: nothing is created or checked out.
+
+Mid still: the `+ create branch fix/banner` row.
+
+## 11 — confirm
+
+Keys: `j` `j` `j` before recording (cursor on `auth.ts`), then `x`, Enter, `n`. Never press `y`.
+
+Show: the boxed `Revert src/auth.ts?` confirm (`1 tracked file → discarded`, chips `y` revert / `n` `Esc` cancel). Enter does not confirm: the status says `press y to confirm · n or Esc to cancel`. `n` closes with `revert cancelled`.
+
+Mid still: the confirm after Enter.
+
+## 12 — blocked keys say why
+
+Keys: Tab, `s`, Tab, `/` `zzz` (typed), Enter, Esc.
+
+Show: `s` with the diff pane focused stages nothing and says `focus the tree (Tab) to stage`. Back on the tree, `/zzz` Enter says `no match` with the chip `/zzz -/0 · tree`. Esc says `search cleared`.
+
+Mid still: `focus the tree (Tab) to stage`.
+
+## 13 — pane resize and split diff
+
+Keys: `<` `<` `<`, `>`.
+
+Show: each `<` narrows the tree pane by 5%. At the third press the diff pane reaches 100 columns, the header turns from `inline (too narrow)` to `split`, and the pill from `split→inline` to `split`. `>` widens the tree once and the diff goes back to inline.
+
+Mid still: the split diff.
+
+## 14 — search position
+
+Keys: `/` `auth` (typed), Enter, `n`, `n`.
+
+Show: the armed chip `/auth 1/2 · tree` (position, count, bound pane), then `2/2` on `auth.ts`, then `search wrapped` back to `1/2`.
+
+Mid still: `/auth 2/2` on `auth.ts`.
 
 ## Skip as clips
 
 - Fetch / pull / push in-flight (`f`, `p`, `P`)
-- Completing a confirm with `y` (clip 06 shows the overlay and cancels with `n`)
-- Create-branch prompt (`b` then `C`) — not a README clip
+- Completing a confirm with `y` (clips 06 and 11 show the overlay and cancel with `n`)
+- Creating a branch (Enter on the `+ create branch` row, or graph `c`) — clip 10 shows the row and closes with Esc
 - Theme cycle (`T`) — stay on Tokyo Night
 - Watch poll (already disabled)
 - `V` line-range stage — the PTY e2e proves it on a separate two-hunk fixture, not on this seed

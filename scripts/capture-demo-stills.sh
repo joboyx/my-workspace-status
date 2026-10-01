@@ -7,8 +7,14 @@
 # DEST is passed to scripts/seed-demo-workspace.sh (default: tmp/demo-workspace).
 # Animated GIF outputs land in docs/images/. Each clip records the terminal
 # window with ffmpeg x11grab while the hardcoded keys below play, then encodes
-# a GIF (palettegen/paletteuse). Do not drive the TUI by hand and do not invent
-# a second pipeline.
+# a GIF (palettegen/paletteuse). PNG stills from the same recording land in
+# docs/images/stills/: NN-name.png is the last frame, NN-name-mid.png the frame
+# a clip marks with mark_mid. Do not drive the TUI by hand and do not invent a
+# second pipeline.
+#
+# WS_STATUS_STILLS_DISPLAY picks the Xvfb display (default 99). Only the
+# xfce4-terminal started on that display is stopped, so another capture on a
+# different display keeps its terminal.
 #
 # Self-contained for a Cursor Cloud Agent Linux VM: installs MesloLGS NF,
 # xvfb, xfce4-terminal, xdotool, and ffmpeg when missing. Fails loudly instead
@@ -29,6 +35,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/with-desktop-session.sh"
 DEST="${1:-"$REPO_ROOT/tmp/demo-workspace"}"
 OUT_DIR="$REPO_ROOT/docs/images"
+STILLS_DIR="$OUT_DIR/stills"
 STAGE_DIR="$REPO_ROOT/tmp/demo-stills-stage"
 STATE_DIR="$STAGE_DIR/state"
 UPDATE_STORE="$STATE_DIR/update-check.json"
@@ -42,6 +49,8 @@ WID=""
 WS_PID=""
 REC_PID=""
 REC_RAW=""
+CLIP_T0=""
+CLIP_MID=""
 
 # Clip pacing (seconds) and limits. Text stays at native size: no downscale.
 CLIP_FPS=10
@@ -61,6 +70,12 @@ MAX_GIF_BYTES=$((4 * 1024 * 1024))
 # 06 S, Esc, / merger Enter, Tab, j onto stash, D, n
 # 07 . .
 # 08 ?, Esc
+# 09 Ctrl-k, compare, Backspace x7, checkout, Esc
+# 10 k k k unrecorded (app checkout row), then b, login, Backspace x5, fix/banner, Esc
+# 11 j j j unrecorded (auth.ts), then x, Enter, n
+# 12 Tab, s, Tab, / zzz Enter, Esc
+# 13 < < < (diff pane reaches split), >
+# 14 / auth Enter, n, n
 
 die() {
   echo "capture-demo-stills: $*" >&2
@@ -138,6 +153,20 @@ EOF
   chmod +x "$LAUNCHER"
 }
 
+# xfce4-terminal processes launch_tui started on this run's DISPLAY. A bare
+# `pkill -x xfce4-terminal` would also stop a capture on another display.
+own_terminal_pattern() {
+  printf 'xfce4-terminal --disable-server --display=%s ' "${DISPLAY:-none}"
+}
+
+own_terminal_running() {
+  pgrep -f -- "$(own_terminal_pattern)" >/dev/null 2>&1
+}
+
+kill_own_terminals() {
+  pkill "${1:--TERM}" -f -- "$(own_terminal_pattern)" >/dev/null 2>&1 || true
+}
+
 cleanup() {
   if [[ -n "${REC_PID:-}" ]] && kill -0 "$REC_PID" 2>/dev/null; then
     kill -TERM "$REC_PID" 2>/dev/null || true
@@ -146,7 +175,7 @@ cleanup() {
   if [[ -n "${TERM_PID:-}" ]] && kill -0 "$TERM_PID" 2>/dev/null; then
     kill "$TERM_PID" 2>/dev/null || true
   fi
-  pkill -x xfce4-terminal >/dev/null 2>&1 || true
+  kill_own_terminals
   pkill -f "$BIN" >/dev/null 2>&1 || true
   if declare -F ws_desktop_session_stop >/dev/null; then
     ws_desktop_session_stop
@@ -222,7 +251,7 @@ stop_tui() {
     kill "$TERM_PID" 2>/dev/null || true
   fi
   pkill -f "$BIN" >/dev/null 2>&1 || true
-  pkill -x xfce4-terminal >/dev/null 2>&1 || true
+  kill_own_terminals
   WID=""
   TERM_PID=""
   WS_PID=""
@@ -230,13 +259,13 @@ stop_tui() {
   for i in $(seq 1 40); do
     if [[ -z "$(window_id)" ]] \
       && [[ -z "$(tui_pid)" ]] \
-      && ! pgrep -x xfce4-terminal >/dev/null 2>&1; then
+      && ! own_terminal_running; then
       sleep 0.35
       return 0
     fi
     sleep 0.1
   done
-  pkill -9 -x xfce4-terminal >/dev/null 2>&1 || true
+  kill_own_terminals -KILL
   pkill -9 -f "$BIN" >/dev/null 2>&1 || true
   sleep 0.35
 }
@@ -356,6 +385,8 @@ clip_start() {
     refresh_wid
   done
   [[ -n "$w" ]] || die "no terminal geometry for $WID (not recording the desktop)"
+  CLIP_T0="$(date +%s.%N)"
+  CLIP_MID=""
   ffmpeg -hide_banner -loglevel error -nostdin -y \
     -f x11grab -draw_mouse 0 -framerate "$CLIP_FPS" \
     -video_size "${w}x${h}" -i "${DISPLAY}+${ax},${ay}" \
@@ -364,6 +395,14 @@ clip_start() {
   sleep 0.3
   kill -0 "$REC_PID" 2>/dev/null || die "ffmpeg x11grab did not start for $name"
   hold "$START_HOLD"
+}
+
+# Mark the frame the last step settled on as this clip's mid still. Call it
+# right after a send: the offset lands half a STEP_HOLD before now, inside the
+# settled window and clear of ffmpeg's start-up delay.
+mark_mid() {
+  CLIP_MID="$(awk -v now="$(date +%s.%N)" -v t0="$CLIP_T0" -v hold="$STEP_HOLD" \
+    'BEGIN { printf "%.2f", now - t0 - hold / 2 }')"
 }
 
 clip_stop() {
@@ -410,7 +449,7 @@ for frame in ImageSequence.Iterator(im):
         changed = True
     last = rgb
 last = last.copy()
-last.save(last_png)
+last.save(last_png, optimize=True)
 print(frames, f"{ms / 1000:.1f}")
 if not changed:
     sys.exit(4)
@@ -448,13 +487,31 @@ if chan_spread < 4 and var < 80:
 PY
 }
 
-# Stop the recording, encode the GIF under STAGE_DIR, gate it, then copy it
-# to docs/images. A rejected clip leaves the existing GIF in place.
+# Frame at SECONDS of a recording, as PNG (full colour, not the GIF palette).
+extract_frame() {
+  local raw="$1" seconds="$2" png="$3"
+  ffmpeg -hide_banner -loglevel error -nostdin -y -ss "$seconds" -i "$raw" \
+    -frames:v 1 "$png" \
+    || die "frame extract failed for $raw at ${seconds}s"
+  [[ -s "$png" ]] || die "no frame at ${seconds}s in $raw"
+}
+
+# Lossless PNG optimize when the host has optipng. Not required.
+optimize_png() {
+  if have optipng; then
+    optipng -quiet -o2 "$1" >/dev/null 2>&1 || true
+  fi
+}
+
+# Stop the recording, encode the GIF under STAGE_DIR, gate it and its stills,
+# then copy the GIF to docs/images and the stills to docs/images/stills. A
+# rejected clip leaves the existing GIF and stills in place.
 clip_commit() {
   local name="$1"
   local staged="$STAGE_DIR/${name}.gif"
   local final="$OUT_DIR/${name}.gif"
   local last="$STAGE_DIR/${name}-last.png"
+  local mid="$STAGE_DIR/${name}-mid.png"
   local info bytes rc
   clip_stop
   encode_gif "$REC_RAW" "$staged"
@@ -468,13 +525,27 @@ clip_commit() {
   if ! not_gray "$last"; then
     die "rejecting $final (gray/tiny last frame). Existing clip left in place."
   fi
+  if [[ -n "$CLIP_MID" ]]; then
+    extract_frame "$REC_RAW" "$CLIP_MID" "$mid"
+    if ! not_gray "$mid"; then
+      die "rejecting $final (gray/tiny mid frame at ${CLIP_MID}s). Existing clip left in place."
+    fi
+  fi
   bytes="$(stat -c %s "$staged")"
   if ((bytes > MAX_GIF_BYTES)); then
     die "rejecting $final: $((bytes / 1024)) KiB is over $((MAX_GIF_BYTES / 1024)) KiB. Shorten the clip."
   fi
-  mkdir -p "$OUT_DIR"
+  mkdir -p "$OUT_DIR" "$STILLS_DIR"
   cp -f "$staged" "$final"
+  cp -f "$last" "$STILLS_DIR/${name}.png"
+  optimize_png "$STILLS_DIR/${name}.png"
   echo "ok $final ($((bytes / 1024)) KiB, frames/seconds: $info)"
+  echo "ok $STILLS_DIR/${name}.png (last frame)"
+  if [[ -n "$CLIP_MID" ]]; then
+    cp -f "$mid" "$STILLS_DIR/${name}-mid.png"
+    optimize_png "$STILLS_DIR/${name}-mid.png"
+    echo "ok $STILLS_DIR/${name}-mid.png (${CLIP_MID}s)"
+  fi
 }
 
 seed() {
@@ -522,6 +593,7 @@ clip_commit 02-git-graph
 launch_tui
 clip_start 03-stage-unstage
 send u
+mark_mid
 hold 0.6
 send s
 clip_commit 03-stage-unstage
@@ -554,6 +626,7 @@ send slash type:merger Return
 send Tab
 send j
 send shift+d
+mark_mid
 send n
 clip_commit 06-stash
 
@@ -561,6 +634,7 @@ clip_commit 06-stash
 launch_tui
 clip_start 07-show-ignored
 send period
+mark_mid
 hold 0.6
 send period
 clip_commit 07-show-ignored
@@ -570,8 +644,75 @@ launch_tui
 clip_start 08-help
 send shift+slash
 hold 1.2
+mark_mid
 send Escape
 clip_commit 08-help
+
+# 09 command palette: an alias match, then letters that used to move the cursor.
+launch_tui
+clip_start 09-palette
+send ctrl+k
+send type:compare
+mark_mid
+send BackSpace BackSpace BackSpace BackSpace BackSpace BackSpace BackSpace
+send type:checkout
+send Escape
+clip_commit 09-palette
+
+# 10 branch picker on the app checkout: filter, then the explicit create row.
+# Esc closes it; nothing is created or checked out.
+launch_tui
+send k k k
+clip_start 10-branch-picker
+send b
+send type:login
+send BackSpace BackSpace BackSpace BackSpace BackSpace
+send type:fix/banner
+mark_mid
+send Escape
+clip_commit 10-branch-picker
+
+# 11 revert confirm on auth.ts: Enter does not confirm, n cancels. Never y.
+launch_tui
+send j j j
+clip_start 11-confirm
+send x
+send Return
+mark_mid
+send n
+clip_commit 11-confirm
+
+# 12 keys that do nothing say why: s from the diff pane, a search with no match.
+launch_tui
+clip_start 12-blocked-key
+send Tab
+send s
+mark_mid
+send Tab
+send slash type:zzz
+send Return
+send Escape
+clip_commit 12-blocked-key
+
+# 13 keyboard pane resize: the diff pane reaches 100 columns and turns split.
+launch_tui
+clip_start 13-split-resize
+send "type:<"
+send "type:<"
+send "type:<"
+mark_mid
+send "type:>"
+clip_commit 13-split-resize
+
+# 14 search position chip: /auth 1/2, 2/2, then wrap to 1/2.
+launch_tui
+clip_start 14-search-count
+send slash type:auth
+send Return
+send n
+mark_mid
+send n
+clip_commit 14-search-count
 
 stop_tui
 echo "capture-demo-stills: wrote clips under $OUT_DIR"
