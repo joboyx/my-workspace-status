@@ -231,7 +231,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
 ///
 /// Lists the keys that act on the compare diff, when `x` may write, and the
 /// git actions that stay on the Workspace tab. The tab-close chip is the
-/// tab bar glyph (`compare_close_chip_is_the_tab_glyph`).
+/// tab bar glyph.
 pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
     title: "COMPARE",
     entries: &[
@@ -268,7 +268,7 @@ pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
             desc: "editor · diff tool",
         },
         HelpEntry {
-            keys: "[✗]",
+            keys: super::render::TAB_CLOSE_GLYPH,
             desc: "close tab (or palette)",
         },
         HelpEntry {
@@ -422,22 +422,43 @@ pub fn help_chip_gap_spaces(keys: &str, key_width: usize) -> usize {
     1.max(key_width.saturating_sub(help_chip_used_width(keys)))
 }
 
-/// Chip pad vs description wrap width for a column.
-pub fn help_desc_layout(column_width: usize, chip_pad: usize) -> HelpDescLayout {
-    let col = column_width.max(1);
-    let remaining = col.saturating_sub(chip_pad);
-    if remaining >= 1 {
+/// Narrowest description wrap beside the key chips. A narrower column puts
+/// the chips on their own line and wraps the description at the full text
+/// width, so a description never wraps one or two columns wide.
+pub const HELP_MIN_DESC_WIDTH: usize = 12;
+
+/// Where `description` goes in a column whose text area is `content_width`
+/// wide and whose key chips take `key_width`.
+///
+/// Beside the chips needs [`HELP_MIN_DESC_WIDTH`] columns and wins only
+/// when it paints no more rows than chips on their own line. Rows per entry
+/// therefore never grow as the column widens, which
+/// [`help_column_widths`] relies on.
+pub fn help_desc_layout(
+    description: &str,
+    content_width: usize,
+    key_width: usize,
+) -> HelpDescLayout {
+    let col = content_width.max(1);
+    let below = HelpDescLayout {
+        indent: 0,
+        width: col,
+        desc_on_first_line: false,
+    };
+    let beside_width = col.saturating_sub(key_width);
+    if beside_width < HELP_MIN_DESC_WIDTH {
+        return below;
+    }
+    let beside_rows = wrap_help_description(description, beside_width).len();
+    let below_rows = 1 + wrap_help_description(description, col).len();
+    if beside_rows <= below_rows {
         HelpDescLayout {
-            indent: chip_pad,
-            width: remaining,
+            indent: key_width,
+            width: beside_width,
             desc_on_first_line: true,
         }
     } else {
-        HelpDescLayout {
-            indent: 0,
-            width: col,
-            desc_on_first_line: false,
-        }
+        below
     }
 }
 
@@ -541,7 +562,7 @@ pub fn help_entry_visual_lines(
     content_width: usize,
     key_width: usize,
 ) -> Vec<HelpVisualLine> {
-    let layout = help_desc_layout(content_width, key_width);
+    let layout = help_desc_layout(description, content_width, key_width);
     let wrapped = wrap_help_description(description, layout.width);
     if !layout.desc_on_first_line {
         let mut out = vec![HelpVisualLine {
@@ -592,7 +613,9 @@ pub fn help_column_line_count(group: &HelpGroup, column_width: usize) -> usize {
 }
 
 /// Narrowest width in `floor..=cap` at which `group` paints in `rows` or
-/// fewer, or `None` when even `cap` needs more.
+/// fewer, or `None` when even `cap` needs more. Binary search is sound
+/// because a column's rows never grow as it widens (see
+/// [`help_desc_layout`]).
 fn help_min_column_width(
     group: &HelpGroup,
     floor: usize,
@@ -614,21 +637,24 @@ fn help_min_column_width(
     Some(lo)
 }
 
+/// Narrowest width of a help column: its chips (at least
+/// [`HELP_MIN_DESC_WIDTH`] text columns) plus the gutter.
+fn help_column_floor(group: &HelpGroup) -> usize {
+    help_key_width(group).max(HELP_MIN_DESC_WIDTH) + HELP_COLUMN_GUTTER
+}
+
 /// Column widths for `groups` inside `inner_width`.
 ///
 /// Columns flow on their own, so the overlay is as tall as its tallest
 /// column. The widths are the most even split that keeps that column as
 /// short as possible: a column with long rows (VIEW) takes width from a
-/// short one (MOVE). Each column keeps room for its chips, the gutter, and
-/// one text column; when the terminal is too narrow for that the split is
-/// even.
+/// short one (MOVE). Each column keeps room for its chips and the gutter
+/// ([`help_column_floor`]); when the terminal is too narrow for that the
+/// split is even.
 pub fn help_column_widths(groups: &[HelpGroup], inner_width: usize) -> Vec<usize> {
     let count = groups.len().max(1);
     let even = vec![(inner_width / count).max(1); groups.len()];
-    let floors: Vec<usize> = groups
-        .iter()
-        .map(|group| help_key_width(group) + HELP_COLUMN_GUTTER + 1)
-        .collect();
+    let floors: Vec<usize> = groups.iter().map(help_column_floor).collect();
     let floor_sum: usize = floors.iter().sum();
     if groups.is_empty() || floor_sum > inner_width {
         return even;
@@ -643,11 +669,9 @@ pub fn help_column_widths(groups: &[HelpGroup], inner_width: usize) -> Vec<usize
             .collect::<Option<Vec<usize>>>()?;
         (widths.iter().sum::<usize>() <= inner_width).then_some(widths)
     };
+    // Every column at its floor always fits, so `hi` is a valid bound.
     let mut lo = groups.iter().map(|g| g.entries.len()).max().unwrap_or(0);
-    let mut hi = help_body_line_count(groups, &even);
-    if fit(hi).is_none() {
-        return even;
-    }
+    let mut hi = help_body_line_count(groups, &floors);
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
         if fit(mid).is_some() {
@@ -855,7 +879,8 @@ mod tests {
         let at_140 = help_status_lines(140, false);
         assert!(
             at_140 <= 24,
-            "140×40 keeps the panes ≥ 13 rows; 140×32 PTY still paints them: {at_140}"
+            "at 140×40 the tree keeps ≥ 13 rows \
+             (render `help_columns_keep_a_gutter_and_the_panes_rows`): {at_140}"
         );
     }
 
@@ -915,11 +940,85 @@ mod tests {
         assert_eq!(help_key_width(&HELP_GROUPS[2]), 20);
     }
 
+    /// A column too narrow for [`HELP_MIN_DESC_WIDTH`] beside the chips
+    /// puts the chips on their own line and wraps at the full text width.
+    #[test]
+    fn narrow_column_puts_chips_on_their_own_line() {
+        let desc = "toggle fold (instant; no-op on graph/diff)";
+        let key_width = 14;
+        let narrow = help_desc_layout(desc, key_width + HELP_MIN_DESC_WIDTH - 1, key_width);
+        assert!(!narrow.desc_on_first_line, "{narrow:?}");
+        assert_eq!(narrow.width, key_width + HELP_MIN_DESC_WIDTH - 1);
+        assert_eq!(narrow.indent, 0);
+        let lines = help_entry_visual_lines(desc, 25, key_width);
+        assert!(lines[0].chips && lines[0].text.is_empty(), "{lines:?}");
+        assert!(lines[1..].iter().all(|l| !l.chips && l.indent == 0));
+        let wide = help_desc_layout(desc, 80, key_width);
+        assert!(wide.desc_on_first_line, "{wide:?}");
+        assert_eq!((wide.indent, wide.width), (key_width, 80 - key_width));
+        // Short text sits beside the chips once the minimum fits.
+        let short = help_desc_layout("quit", key_width + HELP_MIN_DESC_WIDTH, key_width);
+        assert!(short.desc_on_first_line, "{short:?}");
+    }
+
+    /// A column never paints more rows when it gets wider, so the width
+    /// search in [`help_column_widths`] can bisect.
+    #[test]
+    fn column_rows_never_grow_with_width() {
+        for group in HELP_GROUPS
+            .iter()
+            .chain(std::iter::once(&HELP_COMPARE_GROUP))
+        {
+            let mut prev = usize::MAX;
+            for width in help_column_floor(group)..=240 {
+                let rows = help_column_line_count(group, width);
+                assert!(rows <= prev, "{} at {width}: {rows} > {prev}", group.title);
+                prev = rows;
+            }
+        }
+    }
+
+    /// Narrow terminals paint no taller than the row-aligned layout did
+    /// (equal thirds, rows aligned across columns), and no description
+    /// wraps narrower than [`HELP_MIN_DESC_WIDTH`].
+    #[test]
+    fn narrow_terminals_stay_under_the_row_aligned_height() {
+        // (terminal cols, compare tab, row-aligned body rows as measured).
+        for (term, compare, row_aligned) in [
+            (60usize, false, 60usize),
+            (64, true, 251),
+            (80, false, 86),
+            (100, false, 47),
+            (140, false, 28),
+        ] {
+            let groups = help_groups(compare);
+            let widths = help_column_widths(groups, help_inner_width(term));
+            let body = help_body_line_count(groups, &widths);
+            assert!(
+                body <= row_aligned,
+                "{term} cols: {body} rows > {row_aligned} ({widths:?})"
+            );
+            for (group, &width) in groups.iter().zip(&widths) {
+                let content = help_column_content_width(width);
+                let key_width = help_key_width(group);
+                for entry in group.entries {
+                    let layout = help_desc_layout(entry.desc, content, key_width);
+                    assert!(
+                        layout.width >= HELP_MIN_DESC_WIDTH,
+                        "{term} cols {} {}: {layout:?}",
+                        group.title,
+                        entry.keys
+                    );
+                }
+            }
+        }
+    }
+
     /// Wrapped text stays inside the column text area, so the gutter keeps
     /// two blank columns before the next column.
     #[test]
     fn descriptions_leave_the_gutter_blank() {
-        for term in [80usize, 100, 120, 140, 200] {
+        for term in [60usize, 64, 80, 100, 120, 140, 200] {
             let inner = help_inner_width(term);
             for compare in [false, true] {
                 let groups = help_groups(compare);
@@ -944,25 +1043,17 @@ mod tests {
         }
     }
 
-    /// The row budget follows the columns that paint: a compare tab
-    /// reserves the COMPARE overlay height, the Workspace tab the GIT one.
+    /// A compare tab paints MOVE / COMPARE / VIEW; COMPARE lists what acts
+    /// on the compare diff and what needs the Workspace tab. The row budget
+    /// is checked against the paint in `render.rs`
+    /// (`compare_help_paints_its_reserved_rows`).
     #[test]
-    fn compare_column_reserves_its_own_rows() {
+    fn compare_column_lists_compare_keys() {
         assert_eq!(HELP_COMPARE_GROUPS.len(), HELP_COLUMN_COUNT);
         assert_eq!(help_groups(false), HELP_GROUPS);
         assert_eq!(help_groups(true)[1].title, "COMPARE");
         assert_eq!(help_groups(true)[0], HELP_GROUPS[0]);
         assert_eq!(help_groups(true)[2], HELP_GROUPS[2]);
-        let footer = help_idle_footer();
-        for width in 60..=320u16 {
-            for compare in [false, true] {
-                assert_eq!(
-                    usize::from(help_status_lines(width, compare)),
-                    help_overlay_height(help_groups(compare), usize::from(width), &footer),
-                    "{width} cols, compare {compare}"
-                );
-            }
-        }
         let text: String = HELP_COMPARE_GROUP
             .entries
             .iter()
@@ -997,16 +1088,6 @@ mod tests {
             .filter(|e| e.keys.split(' ').any(|k| k == "x"))
             .count();
         assert_eq!(x_rows, 1, "one `x` chip: {text}");
-    }
-
-    #[test]
-    fn compare_close_chip_is_the_tab_glyph() {
-        let close = HELP_COMPARE_GROUP
-            .entries
-            .iter()
-            .find(|e| e.desc.starts_with("close tab"))
-            .expect("close row");
-        assert_eq!(close.keys, super::super::render::TAB_CLOSE_GLYPH);
     }
 
     #[test]

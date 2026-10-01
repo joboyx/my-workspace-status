@@ -48,7 +48,7 @@ fn first_ctrl_c_pinned_prompt(screen: &str) -> bool {
 
 /// First Ctrl+C keeps the process and pins the quit prompt.
 ///
-/// Docs + VIEW: `Ctrl-C Ctrl-C` / `quit (press twice)`. First press is not
+/// Docs + VIEW: `Ctrl-c Ctrl-c` / `quit (press twice)`. First press is not
 /// `q` and not the second Ctrl+C. Help overlay lists the row
 /// (`pty_help_overlay`). This claim is idle-tree chrome after one press.
 ///
@@ -58,7 +58,7 @@ fn first_ctrl_c_pinned_prompt(screen: &str) -> bool {
 /// paint both encodings painted the same pinned row.
 ///
 /// Documented result: process stays. Pinned chrome row between the
-/// breadcrumb and the status pills shows `Press Ctrl+C again to exit`.
+/// breadcrumb and the status pills shows `Press Ctrl-c again to exit`.
 /// Tree and pills stay. Fail if the process exits, if the copy is missing
 /// or only a breadcrumb toast, if the status line is replaced, or if
 /// nothing happens. Teardown sends `q` (second Ctrl+C is not claimed).
@@ -78,7 +78,7 @@ fn pty_ctrl_c_prompts_before_quit() {
     tui.ctrl_letter('c');
     tui.wait_pred(
         first_ctrl_c_pinned_prompt,
-        "first CSI-u Ctrl+C pins Press Ctrl+C again to exit between breadcrumb and status",
+        "first CSI-u Ctrl-c pins Press Ctrl-c again to exit between breadcrumb and status",
         WAIT,
     );
     tui.assert_running("after first Ctrl+C (must not quit)");

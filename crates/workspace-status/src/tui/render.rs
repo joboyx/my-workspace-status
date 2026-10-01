@@ -8,6 +8,7 @@ use ratatui::widgets::{
     ScrollbarState, StatefulWidget, Widget, Wrap,
 };
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 use workspace_status_graph::{
     footer_message_scroll_max, graph_col_max, graph_hscroll_visible, graph_vscroll_visible,
     paint_model, GraphLabelPalette, GraphWidget, ASCII, UNICODE,
@@ -1581,8 +1582,9 @@ fn clamp_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
             continue;
         }
         let mut cut = String::new();
+        let mut buf = [0u8; 4];
         for ch in span.content.chars() {
-            let cw = Span::raw(ch.to_string()).width();
+            let cw = UnicodeWidthStr::width(&*ch.encode_utf8(&mut buf));
             if used + cw > width {
                 break;
             }
@@ -5040,8 +5042,10 @@ mod tests {
         assert_help_version_lower_right(&text);
     }
 
-    /// At 140×40 the help leaves the panes real rows (row-aligned columns
-    /// left 5), and no column's text runs into the next column.
+    /// At 140×40 the help takes at most 24 rows and the tree keeps 13
+    /// (row-aligned columns left 5), and no column's text runs into the
+    /// next column. `overlay_height_grows_when_columns_narrow` holds the
+    /// same 24-row bound.
     #[test]
     fn help_columns_keep_a_gutter_and_the_panes_rows() {
         use super::super::help::{help_column_widths, HELP_GROUPS};
@@ -5066,7 +5070,7 @@ mod tests {
             "help takes {overlay_rows} rows:\n{text}"
         );
         assert!(
-            state.layout.tree_height >= 10,
+            state.layout.tree_height >= 13,
             "panes keep {} rows:\n{text}",
             state.layout.tree_height
         );
@@ -5074,7 +5078,7 @@ mod tests {
         assert!(text.contains("apply/pop/drop"), "{text}");
 
         // Border + padding put the first column at x = 2.
-        let widths = help_column_widths(HELP_GROUPS, 136);
+        let widths = help_column_widths(HELP_GROUPS, help_inner_width(140));
         let mut starts = vec![2usize];
         for width in &widths[..widths.len() - 1] {
             starts.push(starts.last().unwrap() + width);
@@ -5090,6 +5094,56 @@ mod tests {
                         lines[y]
                     );
                 }
+            }
+        }
+    }
+
+    /// On a compare tab the overlay paints exactly the rows
+    /// `help_status_lines(cols, true)` reserves: the box, title row, the
+    /// tallest COMPARE / MOVE / VIEW column, and the footer, with the last
+    /// entry of each column on screen.
+    #[test]
+    fn compare_help_paints_its_reserved_rows() {
+        use super::super::help::{help_body_line_count, help_status_lines, HELP_COMPARE_GROUPS};
+        for cols in [64u16, 100, 140] {
+            let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+            state.tabs.open_or_focus("alpha".into(), "main".into());
+            assert!(state.is_compare_tab());
+            state.help_open = true;
+            let mut terminal = Terminal::new(TestBackend::new(cols, 120)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let text = buffer_text(&terminal);
+            let lines: Vec<&str> = text.lines().collect();
+            let header = lines
+                .iter()
+                .position(|l| l.contains("MOVE") && l.contains("COMPARE") && l.contains("VIEW"))
+                .unwrap_or_else(|| panic!("{cols} cols, compare help header:\n{text}"));
+            let top = header - 1;
+            assert!(lines[top].starts_with('╭'), "{cols} cols:\n{text}");
+            let bottom = (header..lines.len())
+                .find(|&y| lines[y].starts_with('╰'))
+                .unwrap_or_else(|| panic!("{cols} cols, help bottom border:\n{text}"));
+            let reserved = usize::from(help_status_lines(cols, true));
+            assert_eq!(bottom + 1 - top, reserved, "{cols} cols:\n{text}");
+            let inner = help_inner_width(usize::from(cols));
+            let body = help_body_line_count(
+                HELP_COMPARE_GROUPS,
+                &help_column_widths(HELP_COMPARE_GROUPS, inner),
+            );
+            let footer_rows = help_idle_footer_lines(inner).len();
+            assert_eq!(
+                bottom - header - 1,
+                body + footer_rows,
+                "{cols} cols:\n{text}"
+            );
+            let last_body = lines[header + body];
+            assert!(
+                !last_body.trim_matches(|c| c == '│' || c == ' ').is_empty(),
+                "{cols} cols: last body row is blank:\n{text}"
+            );
+            for needle in ["refresh now", "(1=Workspace)", "(press twice)"] {
+                assert!(text.contains(needle), "{cols} cols {needle}:\n{text}");
             }
         }
     }

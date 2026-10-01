@@ -51,7 +51,7 @@ fn first_ctrl_c_pinned_prompt(screen: &str) -> bool {
 
 /// Expired Ctrl+C arm does not quit; a late press re-arms.
 ///
-/// Docs + VIEW: `Ctrl-C Ctrl-C` / `quit (press twice)`. The first-press
+/// Docs + VIEW: `Ctrl-c Ctrl-c` / `quit (press twice)`. The first-press
 /// test (`pty_ctrl_c_prompts_before_quit`) owns the first-press arm.
 /// Second press within the window is `pty_ctrl_c_second_quit`. This claim
 /// is live-loop expiry: after the window the pinned prompt clears, the
@@ -66,7 +66,7 @@ fn first_ctrl_c_pinned_prompt(screen: &str) -> bool {
 /// waits past `CTRL_C_EXIT_MS` (2000) with no keys. It does not inject
 /// expiry or a key Release.
 ///
-/// Documented result: first press pins `Press Ctrl+C again to exit` and
+/// Documented result: first press pins `Press Ctrl-c again to exit` and
 /// keeps the process. After the window, idle chrome returns (breadcrumb
 /// `workspace` on the penultimate row, no pinned prompt). Late Ctrl+C
 /// pins the prompt again and keeps the process. Fail if the first press
@@ -90,7 +90,7 @@ fn pty_expired_ctrl_c_arm_does_not_quit() {
     tui.ctrl_letter('c');
     tui.wait_pred(
         first_ctrl_c_pinned_prompt,
-        "first CSI-u Ctrl+C pins Press Ctrl+C again to exit between breadcrumb and status",
+        "first CSI-u Ctrl-c pins Press Ctrl-c again to exit between breadcrumb and status",
         WAIT,
     );
     tui.assert_running("after first Ctrl+C (must not quit)");
@@ -106,7 +106,7 @@ fn pty_expired_ctrl_c_arm_does_not_quit() {
     tui.ctrl_letter('c');
     tui.wait_pred(
         first_ctrl_c_pinned_prompt,
-        "late CSI-u Ctrl+C re-arms Press Ctrl+C again to exit; must not quit",
+        "late CSI-u Ctrl-c re-arms Press Ctrl-c again to exit; must not quit",
         WAIT,
     );
     tui.assert_running("after late Ctrl+C (must re-arm, not quit)");
