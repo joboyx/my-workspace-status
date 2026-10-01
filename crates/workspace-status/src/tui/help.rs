@@ -316,9 +316,11 @@ pub const HELP_IDLE_FOOTER_SNIPPET: &str = "/ search help";
 /// Active help-search footer Esc hint.
 pub const HELP_SEARCH_ESC_HINT: &str = "Esc clears search";
 
-/// Lower-right help overlay label. Digits are [`crate::APP_VERSION`].
+/// Lower-right help overlay label: [`crate::version_label`].
+///
+/// Digits are [`crate::APP_VERSION`]; a dev build adds `-dev (sha)`.
 pub fn help_version_label() -> String {
-    format!("v{}", crate::APP_VERSION)
+    crate::version_label()
 }
 
 /// Flattened help rows in column order (MOVE, then GIT, then VIEW).
@@ -786,7 +788,8 @@ mod tests {
 
     #[test]
     fn version_label_is_cargo_pkg_version() {
-        assert_eq!(help_version_label(), format!("v{}", crate::APP_VERSION));
+        assert_eq!(help_version_label(), crate::version_label());
+        assert!(help_version_label().starts_with(&format!("v{}", crate::APP_VERSION)));
         assert_eq!(crate::APP_VERSION, env!("CARGO_PKG_VERSION"));
         for entry in help_entries() {
             assert!(

@@ -18,10 +18,19 @@ use crate::snapshot::{
 use crate::update::run_self_update;
 use crate::update_check::{offer_startup_update, StartupUpdateOffer};
 use clap::Parser;
+use std::sync::LazyLock;
+
+/// `--version` text: [`crate::version_label`] without the leading `v`.
+static CLI_VERSION: LazyLock<String> = LazyLock::new(|| cli_version_for(&crate::version_label()));
+
+fn cli_version_for(label: &str) -> String {
+    label.strip_prefix('v').unwrap_or(label).to_string()
+}
 
 #[derive(Parser, Debug)]
 #[command(
     name = "workspace-status",
+    version = CLI_VERSION.as_str(),
     about = "Workspace git status. TUI on a TTY. --plain / --json for agents.",
     long_about = "Display git repository status across repos in the workspace.\n\n\
 On a TTY, this binary opens a ratatui TUI unless you pass --plain, --json,\n\
@@ -321,6 +330,20 @@ mod tests {
 
     fn canonical(path: &Path) -> PathBuf {
         path.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn cli_version_matches_version_label() {
+        use clap::CommandFactory;
+        assert_eq!(cli_version_for("v0.1.224"), "0.1.224");
+        assert_eq!(
+            cli_version_for("v0.1.224-dev (abc1234)"),
+            "0.1.224-dev (abc1234)"
+        );
+        assert_eq!(
+            Cli::command().get_version(),
+            Some(cli_version_for(&crate::version_label()).as_str())
+        );
     }
 
     #[test]

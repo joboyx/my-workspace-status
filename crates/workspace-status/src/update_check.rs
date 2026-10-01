@@ -6,6 +6,8 @@
 //! [`CHECK_INTERVAL`]. The fetch is `curl` GET of GitHub Releases `latest`
 //! (4s timeout; missing `curl` is a quiet failure). `--update` reuses
 //! the same `curl` helper for the Releases list; it does not call this prompt.
+//! A dev build ([`crate::DEV_BUILD`]) never runs this check: it must not
+//! offer to replace itself with a published release.
 
 use std::env;
 use std::fs;
@@ -87,8 +89,21 @@ pub(crate) struct UpdateCheckHooks<F, P> {
     pub prompt_yes: P,
 }
 
+/// True when this build may run the TUI-startup release check.
+///
+/// `dev_build` is [`crate::DEV_BUILD`]. A dev build returns false.
+pub(crate) fn startup_check_enabled(dev_build: Option<&str>) -> bool {
+    dev_build.is_none()
+}
+
 /// TUI-startup check using the real clock, store, GitHub fetch, and stdin.
+///
+/// A dev build returns [`StartupUpdateOffer::Continue`] without a fetch or a
+/// store write.
 pub fn offer_startup_update() -> StartupUpdateOffer {
+    if !startup_check_enabled(crate::DEV_BUILD) {
+        return StartupUpdateOffer::Continue;
+    }
     offer_startup_update_with(UpdateCheckHooks {
         stdin_is_tty: io::stdin().is_terminal(),
         stdout_is_tty: io::stdout().is_terminal(),
@@ -528,6 +543,13 @@ mod tests {
         ));
         assert_eq!(offer, StartupUpdateOffer::RunUpdater);
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn dev_build_skips_startup_check() {
+        assert!(startup_check_enabled(None));
+        assert!(!startup_check_enabled(Some("abc1234")));
+        assert!(!startup_check_enabled(Some("abc1234-dirty")));
     }
 
     #[test]

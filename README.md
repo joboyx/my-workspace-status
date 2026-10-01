@@ -81,6 +81,14 @@ From a local clone:
 
     cargo install --path crates/workspace-status --locked
 
+### Dev build (side by side)
+
+Install this checkout next to the released `ws` without touching it:
+
+    ./scripts/install-dev.sh
+
+That builds into `target/dev-install` and installs `ws-dev`, `workspace-status-dev`, and `workspace-status-update-dev` into `~/.local/bin` (`WS_DEV_BIN_DIR` overrides). `ws-dev --version` shows the git sha. `ws-dev --update` rebuilds and reinstalls this checkout. Dev builds skip the release update prompt. `./scripts/install-dev.sh --uninstall` removes only the `-dev` names.
+
 ## Agents
 
 On a TTY, `ws` without `--plain` or `--json` opens the TUI and waits for keys. That hang is the TUI, not a crash. Agents must pass `--plain` or `--json` on every run. Do not rely on a non-TTY stdin.
