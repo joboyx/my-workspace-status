@@ -1,7 +1,8 @@
 //! Focus / depth / kind gates for tree writes.
 //!
 //! `dispatch` refuses workspace-tree writes when ViewStack depth ≥ 1 or when
-//! the right pane is focused, unless the allow-list matches.
+//! the right pane is focused, unless the allow-list matches. The refusal
+//! puts [`dispatch_noop_reason`] on the status line as a warn.
 
 use super::action::Action;
 
@@ -132,7 +133,9 @@ pub fn right_pane_left_list_allowed(target: ListFocusTarget, action: &Action) ->
     graph_move || graph_write || commit_nav || diff_move || diff_file_write
 }
 
-/// True when `dispatch` should swallow `action` as a silent no-op.
+/// True when `dispatch` should swallow `action` as a no-op.
+///
+/// [`dispatch_noop_reason`] gives the status copy that says why.
 pub fn dispatch_is_noop(
     action: &Action,
     depth: u8,
@@ -144,6 +147,35 @@ pub fn dispatch_is_noop(
     }
     focus_right && is_left_list_action(action) && !right_pane_left_list_allowed(target, action)
 }
+
+/// Why [`dispatch_is_noop`] swallows `action`, for the status line and the palette.
+///
+/// `None` when the action runs, and for list moves and folds, so a held
+/// nav key cannot repaint a refusal on every repeat.
+pub fn dispatch_noop_reason(
+    action: &Action,
+    depth: u8,
+    focus_right: bool,
+    target: ListFocusTarget,
+) -> Option<&'static str> {
+    if !dispatch_is_noop(action, depth, focus_right, target)
+        || is_move_action(action)
+        || is_fold_action(action)
+    {
+        return None;
+    }
+    Some(match action {
+        Action::ToggleReviewed => FOCUS_A_FILE_TO_MARK_REVIEWED,
+        Action::Edit => "focus a file to edit",
+        Action::ExternalDiff => "focus a file to diff",
+        Action::ToggleFullContext => "focus a file diff",
+        _ if depth >= 1 => "tree key · Esc back to the tree",
+        _ => "tree key · Tab to the tree",
+    })
+}
+
+/// Space / palette copy when the focus is not a file row.
+pub const FOCUS_A_FILE_TO_MARK_REVIEWED: &str = "focus a file to mark reviewed";
 
 #[cfg(test)]
 mod tests {

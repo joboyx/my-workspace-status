@@ -6,15 +6,16 @@ use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{documented_launch_first_paint, SETTLE_MS, WAIT};
 
-use workspace_status::update_check::UPDATE_PROMPT;
+use workspace_status::update_check::UPDATE_PROMPT_SUFFIX;
 
 /// Startup prompt on the primary screen. TUI chrome must not be up yet.
 ///
-/// Docs: a newer GitHub Release prints `UPDATE_PROMPT` before the TUI
+/// Docs: a newer GitHub Release prints the versioned update prompt before the TUI
 /// mounts. A skipped check, a quiet failure, or an already-mounted TUI
 /// cannot pass. `y` would print `Updating ` and run the sidecar.
 fn startup_update_prompt_blocking(screen: &str) -> bool {
-    screen.contains(UPDATE_PROMPT)
+    screen.contains("→ 99.0.0 available. Update? [y/N]")
+        && screen.contains(UPDATE_PROMPT_SUFFIX)
         && !documented_launch_first_paint(screen)
         && !screen.contains("? help")
         && !screen.contains(" tree")
@@ -29,7 +30,7 @@ fn startup_update_prompt_blocking(screen: &str) -> bool {
 /// or if the `y` path ran (notes / sidecar).
 fn declined_update_opened_tui(screen: &str) -> bool {
     documented_launch_first_paint(screen)
-        && !screen.contains(UPDATE_PROMPT)
+        && !screen.contains(UPDATE_PROMPT_SUFFIX)
         && !screen.contains("Updating ")
         && !screen.contains("SIDECAR_RAN")
         && !screen.contains("failed to run workspace-status-update")
@@ -49,8 +50,8 @@ fn curl_log_is_latest_only(log: &str) -> bool {
 /// Startup GitHub Release prompt on a TTY. `n` declines and opens the TUI.
 ///
 /// Docs: CLI long_about, architecture, tui-rust. A TTY launch with a
-/// newer published release asks `new version available, update? [y/n]`
-/// on the primary screen before the TUI. `y` runs `--update` (notes,
+/// newer published release asks `workspace-status <current> → 99.0.0
+/// available. Update? [y/N]` on the primary screen before the TUI. `y` runs `--update` (notes,
 /// then `workspace-status-update`). `n` / `no` open the TUI. Offline /
 /// current / missing curl stay quiet and never print the prompt.
 ///
@@ -109,7 +110,7 @@ fn pty_update_prompt_n_opens_tui() {
 
     tui.wait_pred(
         startup_update_prompt_blocking,
-        "newer release prints UPDATE_PROMPT on the primary screen; TUI not mounted",
+        "newer release prints the versioned update prompt on the primary screen; TUI not mounted",
         WAIT,
     );
     tui.assert_running("blocked on update prompt (must not skip or auto-mount)");

@@ -6,8 +6,8 @@ use crate::harness::PtySession;
 use crate::seed::{daily_workspace, focus_workspace, git_env};
 use crate::support::{
     crumb_row, documented_launch_first_paint, focusbox_graph_left_full, has_fetch_hint,
-    not_files_search_or_stash, status_row, title_has_files, tree_cursor_on, tree_has,
-    tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
+    launch_status_chrome, not_files_search_or_stash, status_row, title_has_files, tree_cursor_on,
+    tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 fn git_stdout(repo: &Path, args: &[&str]) -> String {
@@ -189,9 +189,20 @@ fn documented_d_skips_dirty_keep(screen: &str) -> bool {
         && no_wrong_d_overlays(screen)
 }
 
-/// File-row `d` on daily README. Silent. `app` stays on `main`. `merger` stays off default.
-fn documented_d_file_row_silent(screen: &str) -> bool {
+/// Daily first paint before `d`: cursor on the dirty README, no toast.
+fn daily_first_paint_on_readme(screen: &str) -> bool {
     documented_launch_first_paint(screen)
+        && tree_has(screen, "feature/graph")
+        && tree_cursor_on(screen, "README.md")
+}
+
+/// File-row `d` on daily README. Says why on the breadcrumb and switches
+/// nothing. `app` stays on `main`. `merger` stays off default.
+fn documented_d_file_row_says_why(screen: &str) -> bool {
+    let crumb = crumb_row(screen);
+    crumb.trim_start().starts_with("workspace")
+        && crumb.contains("focus a repo or checkout to switch to default")
+        && launch_status_chrome(screen)
         && !crumb_row(screen).contains("Switched")
         && !crumb_row(screen).contains("no non-default")
         && !crumb_row(screen).contains("failed")
@@ -205,7 +216,7 @@ fn documented_d_file_row_silent(screen: &str) -> bool {
 /// "default branch" on workspace, repo, and checkout rows. Configuration:
 /// focused checkout (or primaries on workspace / family) off default;
 /// already-default is a no-op and does not pull; dirty trees skip via
-/// `repo_has_local_changes`; file and dir rows are a silent no-op.
+/// `repo_has_local_changes`; file and dir rows do nothing and say why.
 ///
 /// Live PTY after first paint (cursor already on `focusbox`,
 /// `feature/keep`): raw `d` ran `git checkout` of `main`. Git HEAD is
@@ -217,7 +228,8 @@ fn documented_d_file_row_silent(screen: &str) -> bool {
 ///
 /// Dirty `keep.txt` with the repo focused: `d` toasts `Switched 1 repo
 /// (1 failed)` and HEAD stays `feature/keep`. File-row `d` on daily
-/// README is silent: `app` stays `main`, `merger` stays `feature/graph`.
+/// README says `focus a repo or checkout to switch to default`: `app`
+/// stays `main`, `merger` stays `feature/graph`.
 /// `/` search, a toast-only tick, or still-on-keep cannot pass.
 #[test]
 fn pty_d_switches_to_default_branch() {
@@ -318,21 +330,21 @@ fn pty_d_switches_to_default_branch() {
     assert_eq!(head_branch(&merger), "feature/graph");
     let mut file_tui = PtySession::open(&workspace_file);
     file_tui.wait_pred(
-        documented_d_file_row_silent,
+        daily_first_paint_on_readme,
         "daily first paint: cursor on dirty README (`d` has not run)",
         WAIT,
     );
 
     file_tui.key('d');
     file_tui.wait_pred(
-        documented_d_file_row_silent,
-        "file-row d is silent: README file-diff, merger still feature/graph",
+        documented_d_file_row_says_why,
+        "file-row d says focus a repo or checkout; merger still feature/graph",
         WAIT,
     );
     file_tui.wait_ms(SETTLE_MS);
     file_tui.wait_pred(
-        documented_d_file_row_silent,
-        "file-row silence holds (not a workspace switch of merger or a toast)",
+        documented_d_file_row_says_why,
+        "file-row refusal holds (not a workspace switch of merger)",
         WAIT,
     );
     assert_eq!(head_branch(&app), "main", "{}", file_tui.screen());

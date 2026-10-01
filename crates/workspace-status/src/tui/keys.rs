@@ -101,8 +101,10 @@ fn same_g_chord_key(last: Option<(KeyCode, KeyModifiers)>, key: &KeyEvent) -> bo
 
 fn records_g_chord_press(mode: InputMode, key: &KeyEvent) -> bool {
     matches!(mode, InputMode::GPending { .. })
-        || (matches!(mode, InputMode::Normal { .. } | InputMode::ZPending { .. })
-            && matches!(key.code, KeyCode::Char('g')))
+        || (matches!(
+            mode,
+            InputMode::Normal { .. } | InputMode::ZPending { .. } | InputMode::DiffVisual
+        ) && matches!(key.code, KeyCode::Char('g')))
 }
 
 #[cfg(test)]
@@ -681,14 +683,34 @@ fn command_palette_key(key: KeyEvent) -> Action {
 
 /// Visual-line keys on a focused file diff.
 ///
-/// `j` / `k` / arrows move (and extend the range). `;` comments that
+/// `j` / `k` / arrows, `gg` / `G` / Home / End, PgUp / PgDn, and Ctrl-u /
+/// Ctrl-d move the head (and extend or shrink the range). `;` comments that
 /// range. `s` / `u` stage / unstage the highlighted add/del lines. `x`
 /// reverts them from the worktree (after a confirm). `'` copies an entity
-/// reference for the highlighted span. Esc or a second `V` leaves
-/// highlight without commenting. `Ctrl-k` / `:` open the command palette
-/// before this map runs; the highlight stays.
+/// reference for the highlighted span. `?`, `q`, `T`, and `m` act as in
+/// normal mode. Esc or a second `V` leaves highlight without commenting.
+/// Any other key is [`Action::DiffVisualUnmapped`] so the status can say
+/// how to leave. `Ctrl-k` / `:` open the command palette before this map
+/// runs; the highlight stays.
 fn diff_visual_key(key: KeyEvent) -> Action {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return match key.code {
+            KeyCode::Char('u') => Action::Move(-5),
+            KeyCode::Char('d') => Action::Move(5),
+            KeyCode::Char(_) => Action::DiffVisualUnmapped,
+            _ => Action::None,
+        };
+    }
     match key.code {
+        KeyCode::Char('?') => Action::ToggleHelp,
+        KeyCode::Char('q') => Action::Quit,
+        KeyCode::Char('T') => Action::CycleTheme,
+        KeyCode::Char('m') => Action::ToggleMouse,
+        KeyCode::Char('g') => Action::ArmGChord,
+        KeyCode::Char('G') | KeyCode::End => Action::MoveToEnd,
+        KeyCode::Home => Action::MoveToStart,
+        KeyCode::PageUp => Action::PageMove(-1),
+        KeyCode::PageDown => Action::PageMove(1),
         KeyCode::Esc | KeyCode::Char('V') => Action::DiffVisualCancel,
         KeyCode::Char(';') => Action::CommentStart,
         KeyCode::Char('\'') => Action::CopyEntityReference,
@@ -699,13 +721,21 @@ fn diff_visual_key(key: KeyEvent) -> Action {
         KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::Move(-1),
         KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => Action::PanDiff(-1),
         KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Right => Action::PanDiff(1),
+        KeyCode::Char(_)
+        | KeyCode::Enter
+        | KeyCode::Tab
+        | KeyCode::BackTab
+        | KeyCode::Backspace
+        | KeyCode::Delete
+        | KeyCode::Insert
+        | KeyCode::F(_) => Action::DiffVisualUnmapped,
         _ => Action::None,
     }
 }
 
 fn normal_key(
     key: KeyEvent,
-    search_active: bool,
+    _search_active: bool,
     _right_is_diff: bool,
     focus_right: bool,
     graph_stash_focused: bool,
@@ -769,8 +799,9 @@ fn normal_key(
         KeyCode::Char('V') => Action::DiffVisualStart,
         KeyCode::Char('y') => Action::ExportComments,
         KeyCode::Char('\'') => Action::CopyEntityReference,
-        KeyCode::Char('n') if search_active => Action::SearchNext,
-        KeyCode::Char('N') if search_active => Action::SearchPrev,
+        // With no armed search these still dispatch so the status can say why.
+        KeyCode::Char('n') => Action::SearchNext,
+        KeyCode::Char('N') => Action::SearchPrev,
         KeyCode::Tab => {
             if focus_right {
                 Action::FocusLeft
@@ -992,9 +1023,10 @@ mod tests {
             event_to_action(&shift(KeyCode::Char('e')), normal(), false, false),
             Action::ExternalDiff
         );
+        // Unarmed `n` still dispatches so the status can say "no search".
         assert_eq!(
             event_to_action(&key(KeyCode::Char('n')), normal(), false, false),
-            Action::None
+            Action::SearchNext
         );
         let armed = InputMode::Normal {
             search_active: true,
@@ -1667,6 +1699,78 @@ mod tests {
             event_to_action(&moved, InputMode::CommandPalette, false, false),
             Action::None
         );
+    }
+
+    #[test]
+    fn highlight_keeps_global_keys_and_moves_the_head() {
+        let visual = InputMode::DiffVisual;
+        for (event, want) in [
+            (key(KeyCode::Char('?')), Action::ToggleHelp),
+            (key(KeyCode::Char('q')), Action::Quit),
+            (key(KeyCode::Char('T')), Action::CycleTheme),
+            (key(KeyCode::Char('m')), Action::ToggleMouse),
+            (key(KeyCode::Char('g')), Action::ArmGChord),
+            (key(KeyCode::Char('G')), Action::MoveToEnd),
+            (key(KeyCode::Home), Action::MoveToStart),
+            (key(KeyCode::End), Action::MoveToEnd),
+            (key(KeyCode::PageUp), Action::PageMove(-1)),
+            (key(KeyCode::PageDown), Action::PageMove(1)),
+            (ctrl(KeyCode::Char('u')), Action::Move(-5)),
+            (ctrl(KeyCode::Char('d')), Action::Move(5)),
+            (key(KeyCode::Char('j')), Action::Move(1)),
+            (key(KeyCode::Esc), Action::DiffVisualCancel),
+        ] {
+            assert_eq!(
+                event_to_action(&event, visual, true, true),
+                want,
+                "{event:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn highlight_unmapped_keys_say_how_to_leave() {
+        let visual = InputMode::DiffVisual;
+        for event in [
+            key(KeyCode::Char('f')),
+            key(KeyCode::Char('z')),
+            key(KeyCode::Enter),
+            key(KeyCode::Tab),
+            ctrl(KeyCode::Char('o')),
+        ] {
+            assert_eq!(
+                event_to_action(&event, visual, true, true),
+                Action::DiffVisualUnmapped,
+                "{event:?}"
+            );
+        }
+        // A held unmapped key does not repeat the warning.
+        assert_eq!(
+            event_to_action(
+                &key_kind(KeyCode::Char('f'), KeyEventKind::Repeat),
+                visual,
+                true,
+                true
+            ),
+            Action::None
+        );
+    }
+
+    #[test]
+    fn highlight_g_press_records_the_chord_echo() {
+        let mut echo = GChordEchoState::default();
+        let g = key(KeyCode::Char('g'));
+        assert!(!drop_protocol_dup_g_chord_press(
+            &mut echo,
+            InputMode::DiffVisual,
+            &g
+        ));
+        // The CSI-u echo of that same tap is dropped, not a second `g`.
+        assert!(drop_protocol_dup_g_chord_press(
+            &mut echo,
+            InputMode::DiffVisual,
+            &g
+        ));
     }
 
     fn ctrl(code: KeyCode) -> Event {

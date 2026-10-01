@@ -2131,19 +2131,6 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     );
 }
 
-fn overlay_status_color(status: &str, palette: Palette) -> Color {
-    let lower = status.to_ascii_lowercase();
-    if lower.contains("failed")
-        || lower.contains("error")
-        || lower.contains("invalid")
-        || lower.contains("dirty")
-    {
-        palette.deleted
-    } else {
-        palette.muted
-    }
-}
-
 fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let Some(ops) = state.stash_menu.as_ref() else {
         return;
@@ -2183,8 +2170,8 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
     if !state.status.is_empty() {
         lines.push(Line::from(Span::styled(
-            state.status.clone(),
-            Style::default().fg(overlay_status_color(&state.status, palette)),
+            state.status.to_string(),
+            Style::default().fg(state.status.kind().color(palette)),
         )));
     }
     lines.push(Line::from(Span::styled(
@@ -2498,8 +2485,8 @@ fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
     if !state.status.is_empty() {
         lines.push(Line::from(Span::styled(
-            state.status.clone(),
-            Style::default().fg(overlay_status_color(&state.status, palette)),
+            state.status.to_string(),
+            Style::default().fg(state.status.kind().color(palette)),
         )));
     }
     lines.push(Line::from(Span::styled(
@@ -2628,8 +2615,8 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
     if !state.status.is_empty() {
         lines.push(Line::from(Span::styled(
-            state.status.clone(),
-            Style::default().fg(overlay_status_color(&state.status, palette)),
+            state.status.to_string(),
+            Style::default().fg(state.status.kind().color(palette)),
         )));
     }
     let footer = if graph && !show_filter {
@@ -2740,8 +2727,8 @@ fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
     }
     if !state.status.is_empty() {
         lines.push(Line::from(Span::styled(
-            state.status.clone(),
-            Style::default().fg(overlay_status_color(&state.status, palette)),
+            state.status.to_string(),
+            Style::default().fg(state.status.kind().color(palette)),
         )));
     }
     lines.push(Line::from(Span::styled(
@@ -2880,8 +2867,8 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
     if !state.status.is_empty() {
         lines.push(Line::from(Span::styled(
-            state.status.clone(),
-            Style::default().fg(overlay_status_color(&state.status, palette_theme)),
+            state.status.to_string(),
+            Style::default().fg(state.status.kind().color(palette_theme)),
         )));
     }
     let reason = palette
@@ -2940,8 +2927,8 @@ fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     ];
     if !state.status.is_empty() {
         lines.push(Line::from(Span::styled(
-            state.status.clone(),
-            Style::default().fg(overlay_status_color(&state.status, palette)),
+            state.status.to_string(),
+            Style::default().fg(state.status.kind().color(palette)),
         )));
     }
     lines.push(Line::from(Span::styled(
@@ -3063,8 +3050,8 @@ fn draw_comment_export(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
     if !state.status.is_empty() && state.status != STATUS_COPIED {
         lines.push(Line::from(Span::styled(
-            state.status.clone(),
-            Style::default().fg(overlay_status_color(&state.status, palette)),
+            state.status.to_string(),
+            Style::default().fg(state.status.kind().color(palette)),
         )));
     }
     lines.push(Line::from(Span::styled(

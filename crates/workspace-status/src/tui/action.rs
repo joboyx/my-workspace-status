@@ -138,6 +138,8 @@ pub enum Action {
     DiffVisualStart,
     /// Leave visual-line highlight without commenting (Esc).
     DiffVisualCancel,
+    /// A key with no meaning during visual-line highlight. Says Esc exits.
+    DiffVisualUnmapped,
     /// Feed one key to the comment textarea (`tui-textarea` map).
     ///
     /// Shift+Enter is a newline. Unmodified Enter is [`Self::CommentSubmit`].

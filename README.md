@@ -55,7 +55,7 @@ curl -LsSf https://github.com/joboyx/my-workspace-status/releases/latest/downloa
 export PATH="$HOME/.local/bin:$PATH" && hash -r
 ```
 
-Update that install with `ws --update` (same as `workspace-status --update`). That prints GitHub Release notes for versions newer than the installed binary, then runs `workspace-status-update`. The installer also places that sidecar next to the binaries. On a TTY, `ws` also checks GitHub Releases at most every 6 hours and asks `new version available, update? [y/n]` before the TUI if a newer release exists. `--plain` and `--json` skip that check.
+Update that install with `ws --update` (same as `workspace-status --update`). That prints GitHub Release notes for versions newer than the installed binary, then runs `workspace-status-update`. The installer also places that sidecar next to the binaries. On a TTY, `ws` also checks GitHub Releases at most every 6 hours and asks `workspace-status <current> → <latest> available. Update? [y/N]` before the TUI if a newer release exists (blank Enter is no). `--plain` and `--json` skip that check; `WS_STATUS_UPDATE_CHECK=0` turns it off.
 
 Windows:
 

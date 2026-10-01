@@ -6,10 +6,13 @@ use super::super::action::{Action, Effect, ExternalDiffKind, PaletteOpenedBy};
 use super::super::branches::can_open_branch_picker;
 use super::super::command_palette::{CommandPaletteState, CommandScope, PaletteCommand};
 use super::super::diff::PartialPatchKind;
-use super::super::gates::{dispatch_is_noop, ListFocusTarget};
+use super::super::gates::{
+    dispatch_is_noop, dispatch_noop_reason, ListFocusTarget, FOCUS_A_FILE_TO_MARK_REVIEWED,
+};
 use super::super::graph_focus::GRAPH_FOCUS_NEED_CONTEXT;
-use super::super::ops::{collect_write_files, op_is_kind_noop, Op};
+use super::super::ops::{collect_write_files, op_is_kind_noop, op_kind_noop_reason, Op};
 use super::super::split::SplitDrag;
+use super::super::status::StatusMessage;
 use super::super::tabs::{
     DEFAULT_BRANCH_NOT_FOUND, FOCUS_A_CHECKOUT, HEAD_HAS_NO_COMMIT, WORKSPACE_TAB_CANNOT_CLOSE,
 };
@@ -21,6 +24,15 @@ impl AppState {
     pub(crate) fn dispatch_keymap(&mut self, action: Action, fold_noop: bool) -> Effect {
         match action {
             Action::FoldToggle => {
+                // Graph and file-diff rows do not fold: say so instead of
+                // arming a `zz` that cannot do anything.
+                if !matches!(
+                    self.list_focus_target(),
+                    ListFocusTarget::Tree | ListFocusTarget::CommitFiles
+                ) {
+                    self.status = StatusMessage::warn(super::Z_FOLDS_TREE_ROWS);
+                    return Effect::None;
+                }
                 if !fold_noop {
                     self.fold_op(FoldOp::Toggle);
                 }
@@ -57,6 +69,11 @@ impl AppState {
                 Effect::None
             }
             Action::ArmGChord => {
+                // Highlight has no GPending mode: its second `g` lands here.
+                if self.diff_visual_anchor.is_some() && self.chord_pending(self.g_pending_at) {
+                    self.g_pending_at = None;
+                    return self.move_focused_edge(false);
+                }
                 self.g_pending_at = Some(Instant::now());
                 Effect::None
             }
@@ -200,55 +217,54 @@ impl AppState {
                     Effect::None
                 }
             }
-            Action::SearchNext => {
+            Action::SearchNext | Action::SearchPrev => {
                 if self.search_active && !self.search_query.trim().is_empty() {
-                    self.apply_search(1)
+                    let step = if matches!(action, Action::SearchNext) {
+                        1
+                    } else {
+                        -1
+                    };
+                    self.apply_search(step)
                 } else {
-                    Effect::None
-                }
-            }
-            Action::SearchPrev => {
-                if self.search_active && !self.search_query.trim().is_empty() {
-                    self.apply_search(-1)
-                } else {
+                    self.status = StatusMessage::warn(super::NO_SEARCH_ARMED);
                     Effect::None
                 }
             }
             Action::Edit => {
                 if let Some((repo, path)) = self.focused_commit_edit_path() {
-                    self.status = format!("edit {path}");
+                    self.status = StatusMessage::progress(format!("opening {path}…"));
                     Effect::EditFile { repo, path }
                 } else if self.is_compare_tab() {
-                    self.status = "focus a file to edit".into();
+                    self.status = StatusMessage::warn("focus a file to edit");
                     Effect::None
                 } else if let Some((repo, change)) = self.focused_file_if_shown() {
-                    self.status = format!("edit {}", change.path);
+                    self.status = StatusMessage::progress(format!("opening {}…", change.path));
                     Effect::EditFile {
                         repo,
                         path: change.path,
                     }
                 } else {
-                    self.status = "focus a dirty file to edit".into();
+                    self.status = StatusMessage::warn("focus a dirty file to edit");
                     Effect::None
                 }
             }
             Action::ExternalDiff => {
                 if let Some((repo, path)) = self.focused_commit_edit_path() {
                     let kind = self.external_diff_kind();
-                    self.status = format!("diff {path}");
+                    self.status = StatusMessage::progress(format!("opening diff {path}…"));
                     Effect::ExternalDiff { repo, path, kind }
                 } else if self.is_compare_tab() {
-                    self.status = "focus a file to diff".into();
+                    self.status = StatusMessage::warn("focus a file to diff");
                     Effect::None
                 } else if let Some((repo, change)) = self.focused_file_if_shown() {
-                    self.status = format!("diff {}", change.path);
+                    self.status = StatusMessage::progress(format!("opening diff {}…", change.path));
                     Effect::ExternalDiff {
                         repo,
                         path: change.path,
                         kind: ExternalDiffKind::Worktree,
                     }
                 } else {
-                    self.status = "focus a file to diff".into();
+                    self.status = StatusMessage::warn("focus a file to diff");
                     Effect::None
                 }
             }
@@ -278,7 +294,7 @@ impl AppState {
                     let mut filter = picker.filter.clone();
                     filter.push(c);
                     picker.set_filter(filter);
-                    self.status = format!("focus /{}", picker.filter);
+                    self.status = format!("focus /{}", picker.filter).into();
                 }
                 Effect::None
             }
@@ -287,7 +303,7 @@ impl AppState {
                     let mut filter = picker.filter.clone();
                     filter.pop();
                     picker.set_filter(filter);
-                    self.status = format!("focus /{}", picker.filter);
+                    self.status = format!("focus /{}", picker.filter).into();
                 }
                 Effect::None
             }
@@ -306,6 +322,12 @@ impl AppState {
             Action::CycleTheme => self.cycle_theme(),
             Action::DiffVisualStart => self.begin_diff_visual(),
             Action::DiffVisualCancel => self.cancel_diff_visual(),
+            Action::DiffVisualUnmapped => {
+                if self.diff_visual_anchor.is_some() {
+                    self.status = StatusMessage::warn(super::ESC_EXITS_HIGHLIGHT);
+                }
+                Effect::None
+            }
             Action::CommentStart => self.begin_comment(),
             Action::CommentInput(key) => {
                 if let Some(prompt) = self.comment.as_mut() {
@@ -421,7 +443,7 @@ impl AppState {
             .command_palette
             .take()
             .and_then(|palette| palette.shown_reason);
-        if shown.is_some_and(|reason| reason == self.status) {
+        if shown.is_some_and(|reason| self.status == reason) {
             self.status.clear();
         }
     }
@@ -453,7 +475,7 @@ impl AppState {
             return Effect::None;
         };
         if let Some(reason) = self.palette_disabled_reason(command) {
-            self.status = reason.clone();
+            self.status = StatusMessage::warn(reason.clone());
             if let Some(palette) = self.command_palette.as_mut() {
                 palette.shown_reason = Some(reason);
             }
@@ -500,7 +522,13 @@ impl AppState {
             self.list_focus_target(),
         ) && !self.compare_revert_runs(action)
         {
-            return Some("not available here".into());
+            let reason = dispatch_noop_reason(
+                action,
+                self.nav_depth(),
+                self.focus == FocusPane::Right,
+                self.list_focus_target(),
+            );
+            return Some(reason.unwrap_or("not available here").into());
         }
         match action {
             // Same check as compare `x` with no highlight: the compare
@@ -516,7 +544,7 @@ impl AppState {
                 };
                 self.focused_row()
                     .filter(|row| op_is_kind_noop(row.kind, op))
-                    .map(|_| "workspace / repo / checkout only".into())
+                    .map(|_| op_kind_noop_reason(op).into())
             }
             Action::Push => match self.focused_row().map(|row| row.kind) {
                 Some(NodeKind::Repo | NodeKind::Checkout) => None,
@@ -644,17 +672,17 @@ impl AppState {
                     if self.focused_commit_edit_path().is_some() {
                         None
                     } else {
-                        Some(super::FOCUS_A_FILE_TO_MARK_REVIEWED.into())
+                        Some(FOCUS_A_FILE_TO_MARK_REVIEWED.into())
                     }
                 } else if self.nav_depth() >= 1 {
-                    Some("not available here".into())
+                    Some(FOCUS_A_FILE_TO_MARK_REVIEWED.into())
                 } else if self
                     .focused_row()
                     .is_some_and(|row| row.kind == super::super::tree::NodeKind::File)
                 {
                     None
                 } else {
-                    Some(super::FOCUS_A_FILE_TO_MARK_REVIEWED.into())
+                    Some(FOCUS_A_FILE_TO_MARK_REVIEWED.into())
                 }
             }
             Action::CopyEntityReference => {

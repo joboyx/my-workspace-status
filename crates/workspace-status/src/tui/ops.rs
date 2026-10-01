@@ -319,7 +319,7 @@ pub fn format_completed_op(kind: RunningOp, ok: usize, failed: usize) -> String 
     }
 }
 
-/// True when `p` / `d` / `f` must stay a silent no-op on this row kind.
+/// True when `p` / `d` / `f` must not run on this row kind ([`op_kind_noop_reason`] says why).
 ///
 /// Pull / default-branch are workspace / repo / checkout only.
 /// Fetch stays scoped on file, dir, and section rows.
@@ -331,6 +331,15 @@ pub fn op_is_kind_noop(kind: NodeKind, op: Op) -> bool {
             NodeKind::File | NodeKind::Dir | NodeKind::Section | NodeKind::Group
         ),
         Op::Fetch => matches!(kind, NodeKind::Group),
+    }
+}
+
+/// Status copy when [`op_is_kind_noop`] refuses `op` on the focused row.
+pub fn op_kind_noop_reason(op: Op) -> &'static str {
+    match op {
+        Op::Pull => "focus a repo or checkout to pull",
+        Op::DefaultBranch => "focus a repo or checkout to switch to default",
+        Op::Fetch => "focus a repo or checkout to fetch",
     }
 }
 

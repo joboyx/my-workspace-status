@@ -7,7 +7,8 @@
 //! (4s timeout; missing `curl` is a quiet failure). `--update` reuses
 //! the same `curl` helper for the Releases list; it does not call this prompt.
 //! A dev build ([`crate::DEV_BUILD`]) never runs this check: it must not
-//! offer to replace itself with a published release.
+//! offer to replace itself with a published release. `WS_STATUS_UPDATE_CHECK=0`
+//! turns the check off.
 
 use std::env;
 use std::fs;
@@ -21,8 +22,13 @@ use serde::{Deserialize, Serialize};
 /// How long a last-check timestamp stays fresh.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
-/// Prompt printed on the primary screen before the TUI mounts.
-pub const UPDATE_PROMPT: &str = "new version available, update? [y/n] ";
+/// End of the prompt printed on the primary screen before the TUI mounts.
+///
+/// The full line is [`update_prompt`]. A blank answer means no.
+pub const UPDATE_PROMPT_SUFFIX: &str = "available. Update? [y/N] ";
+
+/// Env var that turns the startup check off when set to `0`, `false`, or `off`.
+pub const UPDATE_CHECK_ENV: &str = "WS_STATUS_UPDATE_CHECK";
 
 const STORE_VERSION: u32 = 1;
 const STORE_FILE_NAME: &str = "update-check.json";
@@ -86,22 +92,37 @@ pub(crate) struct UpdateCheckHooks<F, P> {
     pub current_version: &'static str,
     pub store_path: PathBuf,
     pub fetch_latest: F,
+    /// Ask the user. Gets the full prompt line; returns the answer.
     pub prompt_yes: P,
 }
 
-/// True when this build may run the TUI-startup release check.
+/// True when this build and environment may run the TUI-startup check.
 ///
-/// `dev_build` is [`crate::DEV_BUILD`]. A dev build returns false.
-pub(crate) fn startup_check_enabled(dev_build: Option<&str>) -> bool {
-    dev_build.is_none()
+/// `dev_build` is [`crate::DEV_BUILD`]; a dev build returns false.
+/// `env_value` is [`UPDATE_CHECK_ENV`]; `0`, `false`, or `off` return false.
+pub(crate) fn startup_check_enabled(dev_build: Option<&str>, env_value: Option<&str>) -> bool {
+    let disabled = env_value.is_some_and(|raw| {
+        matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off"
+        )
+    });
+    dev_build.is_none() && !disabled
+}
+
+/// Startup prompt: `workspace-status 0.1.19 → 0.1.20 available. Update? [y/N] `.
+pub fn update_prompt(current: &str, latest_tag: &str) -> String {
+    let latest = latest_tag.trim().trim_start_matches(['v', 'V']);
+    format!("workspace-status {current} → {latest} {UPDATE_PROMPT_SUFFIX}")
 }
 
 /// TUI-startup check using the real clock, store, GitHub fetch, and stdin.
 ///
-/// A dev build returns [`StartupUpdateOffer::Continue`] without a fetch or a
-/// store write.
+/// A dev build, or [`UPDATE_CHECK_ENV`] set to `0`, returns
+/// [`StartupUpdateOffer::Continue`] without a fetch or a store write.
 pub fn offer_startup_update() -> StartupUpdateOffer {
-    if !startup_check_enabled(crate::DEV_BUILD) {
+    let env_value = env::var(UPDATE_CHECK_ENV).ok();
+    if !startup_check_enabled(crate::DEV_BUILD, env_value.as_deref()) {
         return StartupUpdateOffer::Continue;
     }
     offer_startup_update_with(UpdateCheckHooks {
@@ -119,7 +140,7 @@ pub fn offer_startup_update() -> StartupUpdateOffer {
 pub(crate) fn offer_startup_update_with<F, P>(hooks: UpdateCheckHooks<F, P>) -> StartupUpdateOffer
 where
     F: FnOnce() -> Result<String, String>,
-    P: FnOnce() -> bool,
+    P: FnOnce(&str) -> bool,
 {
     if !hooks.stdin_is_tty || !hooks.stdout_is_tty {
         return StartupUpdateOffer::Continue;
@@ -136,7 +157,7 @@ where
     if !is_newer_release(hooks.current_version, &latest) {
         return StartupUpdateOffer::Continue;
     }
-    if (hooks.prompt_yes)() {
+    if (hooks.prompt_yes)(&update_prompt(hooks.current_version, &latest)) {
         StartupUpdateOffer::RunUpdater
     } else {
         StartupUpdateOffer::Continue
@@ -175,11 +196,11 @@ pub fn parse_release_tag_name(body: &str) -> Option<String> {
     }
 }
 
-/// `y` / `yes` → true, `n` / `no` → false, anything else → keep asking.
+/// `y` / `yes` → true, `n` / `no` / blank → false, anything else → keep asking.
 pub fn interpret_yes_no(line: &str) -> Option<bool> {
     match line.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => Some(true),
-        "n" | "no" => Some(false),
+        "n" | "no" | "" => Some(false),
         _ => None,
     }
 }
@@ -279,10 +300,10 @@ fn fetch_latest_release_tag() -> Result<String, String> {
     parse_release_tag_name(&body).ok_or_else(|| "missing tag_name".into())
 }
 
-fn prompt_yes_no() -> bool {
+fn prompt_yes_no(prompt: &str) -> bool {
     let mut stdout = io::stdout();
     loop {
-        if write!(stdout, "{UPDATE_PROMPT}").is_err() || stdout.flush().is_err() {
+        if write!(stdout, "{prompt}").is_err() || stdout.flush().is_err() {
             return false;
         }
         let mut line = String::new();
@@ -317,7 +338,7 @@ mod tests {
         last_age: Option<Duration>,
         fetch: fn() -> Result<String, String>,
         yes: bool,
-    ) -> UpdateCheckHooks<impl FnOnce() -> Result<String, String>, impl FnOnce() -> bool> {
+    ) -> UpdateCheckHooks<impl FnOnce() -> Result<String, String>, impl FnOnce(&str) -> bool> {
         let now = SystemTime::now();
         if let Some(age) = last_age {
             save_last_check(&store, now - age);
@@ -329,7 +350,7 @@ mod tests {
             current_version: "0.1.19",
             store_path: store,
             fetch_latest: fetch,
-            prompt_yes: move || yes,
+            prompt_yes: move |_: &str| yes,
         }
     }
 
@@ -390,7 +411,8 @@ mod tests {
         assert_eq!(interpret_yes_no(" Yes\n"), Some(true));
         assert_eq!(interpret_yes_no("N"), Some(false));
         assert_eq!(interpret_yes_no("no"), Some(false));
-        assert_eq!(interpret_yes_no(""), None);
+        assert_eq!(interpret_yes_no(""), Some(false));
+        assert_eq!(interpret_yes_no("\n"), Some(false));
         assert_eq!(interpret_yes_no("maybe"), None);
     }
 
@@ -443,7 +465,7 @@ mod tests {
                 called.set(true);
                 fetch_newer()
             },
-            prompt_yes: || true,
+            prompt_yes: |_: &str| true,
         });
         assert_eq!(offer, StartupUpdateOffer::Continue);
         assert!(!called.get());
@@ -465,7 +487,7 @@ mod tests {
                 called.set(true);
                 fetch_newer()
             },
-            prompt_yes: || true,
+            prompt_yes: |_: &str| true,
         });
         assert_eq!(offer, StartupUpdateOffer::Continue);
         assert!(!called.get());
@@ -489,7 +511,7 @@ mod tests {
                 called.set(true);
                 fetch_newer()
             },
-            prompt_yes: || true,
+            prompt_yes: |_: &str| true,
         });
         assert_eq!(offer, StartupUpdateOffer::Continue);
         assert!(!called.get());
@@ -547,13 +569,51 @@ mod tests {
 
     #[test]
     fn dev_build_skips_startup_check() {
-        assert!(startup_check_enabled(None));
-        assert!(!startup_check_enabled(Some("abc1234")));
-        assert!(!startup_check_enabled(Some("abc1234-dirty")));
+        assert!(startup_check_enabled(None, None));
+        assert!(!startup_check_enabled(Some("abc1234"), None));
+        assert!(!startup_check_enabled(Some("abc1234-dirty"), None));
     }
 
     #[test]
-    fn prompt_copy_matches_the_user_facing_line() {
-        assert_eq!(UPDATE_PROMPT, "new version available, update? [y/n] ");
+    fn env_zero_turns_the_startup_check_off() {
+        for off in ["0", "false", "OFF", " 0\n"] {
+            assert!(!startup_check_enabled(None, Some(off)), "{off:?}");
+        }
+        for on in ["1", "", "yes"] {
+            assert!(startup_check_enabled(None, Some(on)), "{on:?}");
+        }
+    }
+
+    #[test]
+    fn prompt_names_both_versions_and_defaults_to_no() {
+        assert_eq!(
+            update_prompt("0.1.19", "v0.1.20"),
+            "workspace-status 0.1.19 → 0.1.20 available. Update? [y/N] "
+        );
+        assert!(update_prompt("0.1.19", "0.1.20").ends_with(UPDATE_PROMPT_SUFFIX));
+    }
+
+    #[test]
+    fn prompt_hook_gets_the_versioned_line() {
+        let path = temp_store();
+        let seen = std::cell::RefCell::new(String::new());
+        let offer = offer_startup_update_with(UpdateCheckHooks {
+            stdin_is_tty: true,
+            stdout_is_tty: true,
+            now: SystemTime::now(),
+            current_version: "0.1.19",
+            store_path: path.clone(),
+            fetch_latest: fetch_newer,
+            prompt_yes: |prompt: &str| {
+                *seen.borrow_mut() = prompt.to_string();
+                false
+            },
+        });
+        assert_eq!(offer, StartupUpdateOffer::Continue);
+        assert_eq!(
+            seen.borrow().as_str(),
+            "workspace-status 0.1.19 → 0.1.20 available. Update? [y/N] "
+        );
+        let _ = fs::remove_file(&path);
     }
 }

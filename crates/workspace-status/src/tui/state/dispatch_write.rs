@@ -63,7 +63,7 @@ impl AppState {
                     let mut filter = picker.filter.clone();
                     filter.push(c);
                     picker.set_filter(filter);
-                    self.status = format!("branch /{}", picker.filter);
+                    self.status = format!("branch /{}", picker.filter).into();
                 }
                 Effect::None
             }
@@ -72,7 +72,7 @@ impl AppState {
                     let mut filter = picker.filter.clone();
                     filter.pop();
                     picker.set_filter(filter);
-                    self.status = format!("branch /{}", picker.filter);
+                    self.status = format!("branch /{}", picker.filter).into();
                 }
                 Effect::None
             }
@@ -89,14 +89,14 @@ impl AppState {
             Action::CreateBranchChar(c) => {
                 if let Some(create) = self.create_branch.as_mut() {
                     create.name.push(c);
-                    self.status = format!("create {}", create.name);
+                    self.status = format!("create {}", create.name).into();
                 }
                 Effect::None
             }
             Action::CreateBranchBackspace => {
                 if let Some(create) = self.create_branch.as_mut() {
                     create.name.pop();
-                    self.status = format!("create {}", create.name);
+                    self.status = format!("create {}", create.name).into();
                 }
                 Effect::None
             }

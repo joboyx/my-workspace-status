@@ -5,7 +5,8 @@
 //! and git writes in [`super::dispatch_write`].
 
 use super::super::action::{Action, Effect};
-use super::super::gates::dispatch_is_noop;
+use super::super::gates::{dispatch_is_noop, dispatch_noop_reason};
+use super::super::status::StatusMessage;
 use super::super::tabs::{CANNOT_STAGE_COMPARE, CANNOT_UNSTAGE_COMPARE, SWITCH_TO_WORKSPACE_TAB};
 use super::{AppState, FocusPane};
 
@@ -87,7 +88,7 @@ impl AppState {
             self.g_pending_at = None;
         }
         if let Some(reason) = self.compare_refusal(&action) {
-            self.status = reason;
+            self.status = StatusMessage::warn(reason);
             return Effect::None;
         }
         let visual_write = self.diff_visual_anchor.is_some()
@@ -101,6 +102,14 @@ impl AppState {
             self.list_focus_target(),
         );
         if noop && !matches!(action, Action::FoldToggle) && !visual_write {
+            if let Some(reason) = dispatch_noop_reason(
+                &action,
+                self.nav_depth(),
+                self.focus == FocusPane::Right,
+                self.list_focus_target(),
+            ) {
+                self.status = StatusMessage::warn(reason);
+            }
             return Effect::None;
         }
         match action {
@@ -190,6 +199,7 @@ impl AppState {
             | Action::CycleTheme
             | Action::DiffVisualStart
             | Action::DiffVisualCancel
+            | Action::DiffVisualUnmapped
             | Action::CommentStart
             | Action::CommentInput(_)
             | Action::CommentSubmit

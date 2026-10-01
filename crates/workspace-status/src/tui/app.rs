@@ -48,6 +48,7 @@ use super::graph_load::{
 use super::keys::KeyStrokeOrigin;
 use super::keys::{event_to_action_with, is_held_nav_backlog};
 use super::state::AppState;
+use super::status::StatusMessage;
 use super::tabs::{base_ref_not_found, no_merge_base, HEAD_HAS_NO_COMMIT};
 use super::tty::{disable_mouse, enable_mouse, poll_event, read_event, read_event_origin};
 #[cfg(test)]
@@ -508,7 +509,7 @@ pub(crate) fn apply_checkout_compute(
 ) -> bool {
     match result {
         CheckoutCompute::Dirty => {
-            state.status = DIRTY_WORKTREE_STATUS.into();
+            state.status = StatusMessage::warn(DIRTY_WORKTREE_STATUS);
             false
         }
         CheckoutCompute::Failed {
@@ -518,7 +519,7 @@ pub(crate) fn apply_checkout_compute(
             if clear_picker {
                 state.branch_picker = None;
             }
-            state.status = status;
+            state.status = StatusMessage::error(status);
             false
         }
         CheckoutCompute::Confirm {
@@ -531,7 +532,7 @@ pub(crate) fn apply_checkout_compute(
         }
         CheckoutCompute::Done { status } => {
             state.branch_picker = None;
-            state.status = status;
+            state.status = StatusMessage::ok(status);
             true
         }
     }
@@ -553,7 +554,7 @@ pub(crate) fn compute_merge(dir: &Path, rev: &str) -> MergeCompute {
 pub(crate) fn apply_merge_compute(state: &mut AppState, label: &str, result: MergeCompute) -> bool {
     match result {
         MergeCompute::Dirty => {
-            state.status = DIRTY_WORKTREE_STATUS.into();
+            state.status = StatusMessage::warn(DIRTY_WORKTREE_STATUS);
             false
         }
         MergeCompute::AlreadyUpToDate => {
@@ -561,19 +562,19 @@ pub(crate) fn apply_merge_compute(state: &mut AppState, label: &str, result: Mer
             false
         }
         MergeCompute::FastForward => {
-            state.status = format!("Fast-forwarded to {label}");
+            state.status = StatusMessage::ok(format!("Fast-forwarded to {label}"));
             true
         }
         MergeCompute::MergeCommit => {
-            state.status = format!("Merged {label}");
+            state.status = StatusMessage::ok(format!("Merged {label}"));
             true
         }
         MergeCompute::Conflict => {
-            state.status = "Merge conflict — resolve in the worktree".into();
+            state.status = StatusMessage::warn("Merge conflict — resolve in the worktree");
             true
         }
         MergeCompute::Failed(err) => {
-            state.status = format!("merge failed: {err}");
+            state.status = StatusMessage::error(format!("merge failed: {err}"));
             false
         }
     }

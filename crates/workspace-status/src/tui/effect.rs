@@ -55,6 +55,7 @@ use super::ops::{
 use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
 use super::stash::{resolve_stash_menu_key, StashMenuKeyResult, StashOpId};
 use super::state::{revert_scope, AppState, PendingConfirm};
+use super::status::StatusMessage;
 
 /// Blocking work that produces one [`JobOutcome`].
 pub(crate) type JobWork = Box<dyn FnOnce() -> JobOutcome + Send>;
@@ -82,7 +83,7 @@ pub(crate) enum JobOutcome {
         load: super::app::RightPaneLoad,
     },
     Write {
-        status: String,
+        status: StatusMessage,
     },
     BulkRemote {
         kind: RunningOp,
@@ -116,7 +117,7 @@ pub(crate) enum JobOutcome {
         gen: u64,
         page: workspace_status_graph::GraphModel,
         identity: GraphIdentity,
-        prev_status: String,
+        prev_status: StatusMessage,
     },
     CommitFiles {
         gen: u64,
@@ -208,6 +209,9 @@ struct KindWave {
     ok: usize,
     failed: usize,
     repos: Vec<String>,
+    /// A key (not only the background fetch tick) started this wave.
+    /// Background-only waves leave the status slot alone unless a repo fails.
+    foreground: bool,
 }
 
 impl KindWave {
@@ -216,6 +220,7 @@ impl KindWave {
             ok: 0,
             failed: 0,
             repos: Vec::new(),
+            foreground: false,
         }
     }
 
@@ -272,7 +277,19 @@ impl RemoteQueue {
     }
 }
 
+/// Final status of a finished bulk op: ok when nothing failed, else error.
+fn completed_op_status(kind: RunningOp, ok: usize, failed: usize) -> StatusMessage {
+    let text = format_completed_op(kind, ok, failed);
+    if failed == 0 {
+        StatusMessage::ok(text)
+    } else {
+        StatusMessage::error(text)
+    }
+}
+
 struct WriteJob {
+    /// Short name for `busy: <op> running`.
+    op: &'static str,
     gitdirs: Vec<String>,
     work: Box<dyn FnOnce() -> Result<String, String> + Send>,
 }
@@ -416,6 +433,8 @@ pub(crate) struct Interpreter {
     diff_prepare: Option<DiffPrepareJob>,
     pending_diff_launch: Option<DiffLaunch>,
     exclusive_inflight: HashMap<u64, Vec<String>>,
+    /// Name of the exclusive write or default-branch job on a worker.
+    running_write: Option<&'static str>,
     dirty: bool,
 }
 
@@ -449,6 +468,7 @@ impl Interpreter {
             diff_prepare: None,
             pending_diff_launch: None,
             exclusive_inflight: HashMap::new(),
+            running_write: None,
             dirty: false,
         }
     }
@@ -458,6 +478,12 @@ impl Interpreter {
     /// Remote fetch / pull / push use the per-gitdir queue and do not set this.
     pub(crate) fn busy_for_writes(&self) -> bool {
         self.sched.busy_for_writes()
+    }
+
+    /// Name of the running exclusive write (`stage`, `checkout`, …), if one
+    /// is on a worker. `None` while the job is still queued.
+    pub(crate) fn running_write_op(&self) -> Option<&'static str> {
+        self.running_write
     }
 
     #[cfg(test)]
@@ -594,15 +620,22 @@ impl Interpreter {
                     self.sched.request_pane();
                 }
             }
-            Effect::Fetch { repos } => self.start_bulk(state, RunningOp::Fetch, repos),
-            Effect::Pull { repos } => self.start_bulk(state, RunningOp::Pull, repos),
-            Effect::Push { repos } => self.start_bulk(state, RunningOp::Push, repos),
+            Effect::Fetch { repos } => {
+                let foreground = !matches!(action, Action::FetchTick);
+                self.start_bulk(state, RunningOp::Fetch, repos, foreground)
+            }
+            Effect::Pull { repos } => self.start_bulk(state, RunningOp::Pull, repos, true),
+            Effect::Push { repos } => self.start_bulk(state, RunningOp::Push, repos, true),
             Effect::DefaultBranch { repos } => {
                 self.default_total = repos.len();
                 self.default_ok = 0;
                 self.default_failed = 0;
                 self.default_repos = repos.clone();
-                state.status = format_running_op(RunningOp::DefaultBranch, 0, repos.len());
+                state.status = StatusMessage::progress(format_running_op(
+                    RunningOp::DefaultBranch,
+                    0,
+                    repos.len(),
+                ));
                 self.mark();
                 self.occupy_default_branch(state, &repos);
                 self.default_queue = repos.into();
@@ -615,6 +648,7 @@ impl Interpreter {
                 let last = paths.last().cloned().unwrap_or_default();
                 self.enqueue_write(
                     state,
+                    "stage",
                     &[&repo],
                     Box::new(move || {
                         for path in &paths {
@@ -629,6 +663,7 @@ impl Interpreter {
                 let last = paths.last().cloned().unwrap_or_default();
                 self.enqueue_write(
                     state,
+                    "unstage",
                     &[&repo],
                     Box::new(move || {
                         for path in &paths {
@@ -648,6 +683,7 @@ impl Interpreter {
                 let verb = if reverse { "unstaged" } else { "staged" };
                 self.enqueue_write(
                     state,
+                    if reverse { "unstage" } else { "stage" },
                     &[&repo],
                     Box::new(move || {
                         apply_cached_patch(&dir, &patch, reverse)?;
@@ -659,6 +695,7 @@ impl Interpreter {
                 let dir = opts.cwd.join(&repo);
                 self.enqueue_write(
                     state,
+                    "revert",
                     &[&repo],
                     Box::new(move || {
                         apply_worktree_patch_reverse(&dir, &patch)?;
@@ -687,6 +724,7 @@ impl Interpreter {
                 };
                 self.enqueue_write(
                     state,
+                    "revert",
                     &[&repo],
                     Box::new(move || {
                         for path in &tracked {
@@ -708,6 +746,7 @@ impl Interpreter {
                 let dir = opts.cwd.join(&repo);
                 self.enqueue_write(
                     state,
+                    "revert",
                     &[&repo],
                     Box::new(move || {
                         revert_compare_patch(&dir, &head, &path, &patch)?;
@@ -733,6 +772,7 @@ impl Interpreter {
                 };
                 self.enqueue_write(
                     state,
+                    "revert",
                     &[&repo],
                     Box::new(move || {
                         revert_compare_file(&dir, &merge_base, &head, &path, old_path.as_deref())?;
@@ -759,6 +799,7 @@ impl Interpreter {
                 };
                 self.enqueue_write(
                     state,
+                    "stash",
                     &[&repo],
                     Box::new(move || stash_push(&dir, &paths).map(|_| ok_status)),
                 );
@@ -768,6 +809,7 @@ impl Interpreter {
                 let label = stash_ref.clone();
                 self.enqueue_write(
                     state,
+                    "stash apply",
                     &[&repo],
                     Box::new(move || {
                         stash_apply(&dir, &stash_ref).map(|_| format!("applied {label}"))
@@ -779,6 +821,7 @@ impl Interpreter {
                 let label = stash_ref.clone();
                 self.enqueue_write(
                     state,
+                    "stash pop",
                     &[&repo],
                     Box::new(move || {
                         stash_pop(&dir, &stash_ref).map(|_| format!("popped {label}"))
@@ -790,6 +833,7 @@ impl Interpreter {
                 let label = stash_ref.clone();
                 self.enqueue_write(
                     state,
+                    "stash drop",
                     &[&repo],
                     Box::new(move || {
                         stash_drop(&dir, &stash_ref).map(|_| format!("dropped {label}"))
@@ -826,6 +870,7 @@ impl Interpreter {
                 let label = name.clone();
                 self.enqueue_write(
                     state,
+                    "create branch",
                     &[&repo],
                     Box::new(move || {
                         create_branch_checkout(&dir, &name).map(|_| format!("created {label}"))
@@ -842,6 +887,7 @@ impl Interpreter {
                 let short = commit_id.get(..7).unwrap_or(&commit_id).to_string();
                 self.enqueue_write(
                     state,
+                    "create branch",
                     &[&repo],
                     Box::new(move || {
                         create_branch_at(&dir, &name, &commit_id)
@@ -865,6 +911,7 @@ impl Interpreter {
                 let label = path.clone();
                 self.enqueue_write(
                     state,
+                    "worktree remove",
                     &[&primary, &path],
                     Box::new(move || {
                         remove_worktree(&primary_dir, &path_dir, force)
@@ -955,9 +1002,9 @@ impl Interpreter {
                 let ok = comments::copy_to_clipboard(&text);
                 if announce {
                     state.status = if ok {
-                        STATUS_COPIED.into()
+                        StatusMessage::ok(STATUS_COPIED)
                     } else {
-                        "copy failed".into()
+                        StatusMessage::error("copy failed")
                     };
                 }
                 self.mark();
@@ -999,7 +1046,7 @@ impl Interpreter {
                 head: head.clone(),
             },
         ));
-        state.status = LOADING_OLDER.to_string();
+        state.status = StatusMessage::progress(LOADING_OLDER);
         self.sched.enqueue_user(UserTag::Autoload);
         self.mark();
     }
@@ -1216,13 +1263,16 @@ impl Interpreter {
                     self.default_failed += 1;
                 }
                 let done = self.default_ok + self.default_failed;
-                state.status =
-                    format_running_op(RunningOp::DefaultBranch, done, self.default_total);
+                state.status = StatusMessage::progress(format_running_op(
+                    RunningOp::DefaultBranch,
+                    done,
+                    self.default_total,
+                ));
                 if !self.default_queue.is_empty() {
                     self.sched.enqueue_user(UserTag::DefaultBranch);
                 } else {
                     state.stamp_checkout_flashes(&self.default_repos);
-                    state.status = format_completed_op(
+                    state.status = completed_op_status(
                         RunningOp::DefaultBranch,
                         self.default_ok,
                         self.default_failed,
@@ -1435,7 +1485,7 @@ impl Interpreter {
                         Ok(branches) => state.open_compare_picker(repo, branches),
                         Err(err) => {
                             state.abandon_compare_picker();
-                            state.status = err;
+                            state.status = StatusMessage::error(err);
                         }
                     }
                     self.mark();
@@ -1476,6 +1526,7 @@ impl Interpreter {
     fn enqueue_write(
         &mut self,
         state: &AppState,
+        op: &'static str,
         checkouts: &[&str],
         work: Box<dyn FnOnce() -> Result<String, String> + Send>,
     ) {
@@ -1484,7 +1535,7 @@ impl Interpreter {
             .map(|checkout| gitdir_key(state, checkout))
             .collect();
         self.occupy_exclusive(&gitdirs);
-        self.writes.push_back(WriteJob { gitdirs, work });
+        self.writes.push_back(WriteJob { op, gitdirs, work });
         self.sched.enqueue_user(UserTag::Write);
     }
 
@@ -1507,6 +1558,7 @@ impl Interpreter {
     }
 
     fn release_exclusive(&mut self, state: &mut AppState, id: u64) {
+        self.running_write = None;
         if let Some(gitdirs) = self.exclusive_inflight.remove(&id) {
             for gitdir in gitdirs {
                 if matches!(
@@ -1521,6 +1573,7 @@ impl Interpreter {
     }
 
     fn release_default_branch(&mut self, state: &mut AppState) {
+        self.running_write = None;
         self.remote
             .occupy
             .retain(|_, occ| !matches!(occ, OccupyReason::DefaultBranch));
@@ -1528,7 +1581,7 @@ impl Interpreter {
     }
 
     fn refuse_busy(&mut self, state: &mut AppState) {
-        state.status = "busy".to_string();
+        state.status = StatusMessage::warn("busy");
         self.mark();
     }
 
@@ -1550,7 +1603,7 @@ impl Interpreter {
             .iter()
             .any(|checkout| self.remote_gitdir_busy(state, checkout))
         {
-            state.status = "busy".to_string();
+            state.status = StatusMessage::warn("busy");
             true
         } else {
             false
@@ -1620,12 +1673,25 @@ impl Interpreter {
         if follow.is_empty() {
             return;
         }
-        self.start_bulk(state, RunningOp::Pull, follow);
+        self.start_bulk(state, RunningOp::Pull, follow, true);
     }
 
-    fn start_bulk(&mut self, state: &mut AppState, kind: RunningOp, repos: Vec<String>) {
+    /// Queue `repos` for `kind`. `foreground` is false only for the
+    /// background fetch tick, which paints nothing unless a repo fails.
+    fn start_bulk(
+        &mut self,
+        state: &mut AppState,
+        kind: RunningOp,
+        repos: Vec<String>,
+        foreground: bool,
+    ) {
         if repos.is_empty() {
             return;
+        }
+        if foreground {
+            if let Some(wave) = self.remote.wave_mut(kind) {
+                wave.foreground = true;
+            }
         }
         let mut flushed = false;
         for checkout in repos {
@@ -1751,9 +1817,12 @@ impl Interpreter {
         let repos = std::mem::take(&mut wave.repos);
         let ok_n = wave.ok;
         let failed_n = wave.failed;
+        let quiet = !wave.foreground && failed_n == 0;
         *wave = KindWave::empty();
         state.stamp_checkout_flashes(&repos);
-        state.status = format_completed_op(kind, ok_n, failed_n);
+        if !quiet {
+            state.status = completed_op_status(kind, ok_n, failed_n);
+        }
         self.sched.on_reload_snapshot(state.focused_checkout_path());
         if !state.is_compare_tab() {
             self.pane_req = Some(RightPaneRequest::from_state(state));
@@ -1800,10 +1869,14 @@ impl Interpreter {
                 .iter()
                 .filter(|job| job.kind == kind)
                 .count();
-            let done = self.remote.wave(kind).map(|wave| wave.done()).unwrap_or(0);
-            if inflight + pending == 0 {
+            let Some(wave) = self.remote.wave(kind) else {
+                continue;
+            };
+            // The background fetch tick runs without a progress line.
+            if inflight + pending == 0 || !wave.foreground {
                 continue;
             }
+            let done = wave.done();
             progress.push((kind, done, inflight, pending));
         }
         if progress.is_empty() {
@@ -1815,7 +1888,8 @@ impl Interpreter {
             .map(|(kind, _, inflight, _)| (*kind, *inflight))
             .collect();
         if inflight_parts.len() >= 2 {
-            state.status = format_mixed_running_op(&inflight_parts, 0, None);
+            state.status =
+                StatusMessage::progress(format_mixed_running_op(&inflight_parts, 0, None));
             return;
         }
         if inflight_parts.len() == 1 {
@@ -1831,16 +1905,17 @@ impl Interpreter {
                 .filter(|(kind, ..)| *kind != run)
                 .map(|(_, _, _, pending)| *pending)
                 .sum();
-            if other_queued > 0 {
-                state.status = format_mixed_running_op(&[], other_queued, Some((run, done, total)));
+            state.status = StatusMessage::progress(if other_queued > 0 {
+                format_mixed_running_op(&[], other_queued, Some((run, done, total)))
             } else {
-                state.status = format_running_op(run, done, total);
-            }
+                format_running_op(run, done, total)
+            });
             return;
         }
         if progress.len() == 1 {
             let (kind, done, inflight, pending) = progress[0];
-            state.status = format_running_op(kind, done, done + inflight + pending);
+            state.status =
+                StatusMessage::progress(format_running_op(kind, done, done + inflight + pending));
             return;
         }
         let (kind, done, inflight, pending) = progress[0];
@@ -1848,8 +1923,11 @@ impl Interpreter {
             .iter()
             .map(|(_, _, _, pending)| *pending)
             .sum();
-        state.status =
-            format_mixed_running_op(&[], other, Some((kind, done, done + inflight + pending)));
+        state.status = StatusMessage::progress(format_mixed_running_op(
+            &[],
+            other,
+            Some((kind, done, done + inflight + pending)),
+        ));
     }
 
     fn spawn_user(
@@ -1864,6 +1942,7 @@ impl Interpreter {
             UserTag::Write => {
                 if let Some((repo, name, ff, gitdir)) = self.checkout.take() {
                     self.exclusive_inflight.insert(id, vec![gitdir]);
+                    self.running_write = Some("checkout");
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
@@ -1876,6 +1955,7 @@ impl Interpreter {
                 }
                 if let Some((repo, rev, label, gitdir)) = self.merge.take() {
                     self.exclusive_inflight.insert(id, vec![gitdir]);
+                    self.running_write = Some("merge");
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
@@ -1888,12 +1968,13 @@ impl Interpreter {
                 }
                 if let Some(job) = self.writes.pop_front() {
                     self.exclusive_inflight.insert(id, job.gitdirs);
+                    self.running_write = Some(job.op);
                     spawn(
                         id,
                         Box::new(move || {
                             let status = match (job.work)() {
-                                Ok(s) => s,
-                                Err(err) => err,
+                                Ok(s) => StatusMessage::ok(s),
+                                Err(err) => StatusMessage::error(err),
                             };
                             JobOutcome::Write { status }
                         }),
@@ -1948,6 +2029,7 @@ impl Interpreter {
                     self.sched.note_user_done(UserTag::DefaultBranch);
                     return;
                 };
+                self.running_write = Some("default-branch switch");
                 let task = state
                     .snapshot
                     .repos
@@ -2237,6 +2319,7 @@ mod tests {
     use crate::tui::state::{AppState, FocusPane};
 
     use super::*;
+    use crate::tui::status::StatusKind;
 
     fn repo(name: &str, dirty: bool) -> RepoSnapshot {
         RepoSnapshot {
@@ -3172,7 +3255,7 @@ mod tests {
                     repo: "lib".into(),
                     head: "head-lib".into(),
                 },
-                prev_status: String::new(),
+                prev_status: StatusMessage::default(),
             },
         );
         assert_eq!(
@@ -3212,7 +3295,7 @@ mod tests {
                     repo: "app".into(),
                     head: "head-app".into(),
                 },
-                prev_status: String::new(),
+                prev_status: StatusMessage::default(),
             },
         );
         assert_eq!(
@@ -3633,7 +3716,7 @@ mod tests {
                     repo: "app".into(),
                     head: "head-app".into(),
                 },
-                prev_status: String::new(),
+                prev_status: StatusMessage::default(),
             },
         );
         assert_eq!(
@@ -3693,7 +3776,7 @@ mod tests {
                     repo: "app".into(),
                     head: "head-app".into(),
                 },
-                prev_status: String::new(),
+                prev_status: StatusMessage::default(),
             },
         );
         assert_eq!(
@@ -4544,13 +4627,127 @@ mod tests {
             &mut state,
             spawned[0].0,
             JobOutcome::Write {
-                status: "staged README.md".into(),
+                status: StatusMessage::ok("staged README.md"),
             },
         );
         let _after = capture_jobs(&mut interp, &mut state);
         assert!(interp.pending_remotes().is_empty());
         assert!(interp.occupied_gitdirs().contains(&"app".to_string()));
         assert!(interp.occupied_gitdirs().contains(&"notes".to_string()));
+    }
+
+    #[test]
+    fn background_fetch_keeps_an_unread_error_on_success() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        state.status = StatusMessage::error("push failed");
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::FetchTick,
+        );
+        assert_eq!(state.status, "push failed", "no progress line");
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 1);
+        apply_id(
+            &mut interp,
+            &mut state,
+            jobs[0].0,
+            JobOutcome::BulkRemote {
+                kind: RunningOp::Fetch,
+                ok: true,
+                repo: "app".into(),
+            },
+        );
+        assert_eq!(state.status, "push failed", "no completion line");
+        assert_eq!(state.status.kind(), StatusKind::Error);
+    }
+
+    #[test]
+    fn background_fetch_failure_writes_an_error() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::FetchTick,
+        );
+        let jobs = capture_jobs(&mut interp, &mut state);
+        apply_id(
+            &mut interp,
+            &mut state,
+            jobs[0].0,
+            JobOutcome::BulkRemote {
+                kind: RunningOp::Fetch,
+                ok: false,
+                repo: "app".into(),
+            },
+        );
+        assert_eq!(state.status, "Fetched 1 repo (1 failed)");
+        assert_eq!(state.status.kind(), StatusKind::Error);
+    }
+
+    #[test]
+    fn manual_fetch_paints_progress_then_ok() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(state.status.kind(), StatusKind::Progress);
+        assert!(state.status.starts_with("Fetching"), "{}", state.status);
+        let jobs = capture_jobs(&mut interp, &mut state);
+        apply_id(
+            &mut interp,
+            &mut state,
+            jobs[0].0,
+            JobOutcome::BulkRemote {
+                kind: RunningOp::Fetch,
+                ok: true,
+                repo: "app".into(),
+            },
+        );
+        assert_eq!(state.status, "Fetched 1 repo");
+        assert_eq!(state.status.kind(), StatusKind::Ok);
+    }
+
+    #[test]
+    fn running_write_names_the_op_until_it_finishes() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Stage {
+                repo: "app".into(),
+                paths: vec!["README.md".into()],
+            },
+            &Action::Stage,
+        );
+        assert_eq!(interp.running_write_op(), None, "queued, not running");
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(interp.running_write_op(), Some("stage"));
+        apply_id(
+            &mut interp,
+            &mut state,
+            jobs[0].0,
+            JobOutcome::Write {
+                status: StatusMessage::error("git add exited with code 1"),
+            },
+        );
+        assert_eq!(interp.running_write_op(), None);
+        assert_eq!(state.status.kind(), StatusKind::Error);
     }
 
     #[test]

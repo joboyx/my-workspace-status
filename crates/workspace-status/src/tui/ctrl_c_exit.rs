@@ -11,6 +11,9 @@ pub const CTRL_C_EXIT_MS: u64 = 2000;
 /// Status / overlay copy shown after the first Ctrl-C.
 pub const CTRL_C_EXIT_PROMPT: &str = "Press Ctrl+C again to exit";
 
+/// Copy shown after `q` while a git write runs. Same window as Ctrl-C.
+pub const QUIT_WHILE_BUSY_PROMPT: &str = "git write running · press q again to exit";
+
 /// Result of one Ctrl-C press against the armed window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CtrlCExitResult {
@@ -38,9 +41,9 @@ pub fn handle_ctrl_c(armed_until: Option<Instant>, now: Instant) -> CtrlCExitRes
     }
 }
 
-/// True when `status` is the ephemeral quit prompt (never a breadcrumb toast).
+/// True when `status` is an ephemeral quit prompt (never a breadcrumb toast).
 pub fn is_ctrl_c_exit_prompt(status: &str) -> bool {
-    status == CTRL_C_EXIT_PROMPT
+    status == CTRL_C_EXIT_PROMPT || status == QUIT_WHILE_BUSY_PROMPT
 }
 
 #[cfg(test)]
@@ -89,6 +92,7 @@ mod tests {
             "{CTRL_C_EXIT_PROMPT}"
         );
         assert!(is_ctrl_c_exit_prompt(CTRL_C_EXIT_PROMPT));
+        assert!(is_ctrl_c_exit_prompt(QUIT_WHILE_BUSY_PROMPT));
         assert!(!is_ctrl_c_exit_prompt("refreshed workspace"));
     }
 }

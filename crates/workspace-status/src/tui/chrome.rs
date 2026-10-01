@@ -26,7 +26,7 @@ use crate::snapshot::{CheckoutKind, SyncStatus};
 
 use super::branches::{can_open_branch_picker, checkoutable_branch_names};
 use super::commit_files::CommitFileRowKind;
-use super::ctrl_c_exit::{is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT};
+use super::ctrl_c_exit::is_ctrl_c_exit_prompt;
 use super::drill::{CommitFileSource, DrillView};
 use super::help::help_status_lines;
 use super::icons::truncate_visible;
@@ -405,7 +405,7 @@ pub fn ctrl_c_prompt_pinned(state: &AppState) -> bool {
 pub fn ctrl_c_prompt_line(state: &AppState, width: u16) -> Line<'static> {
     let palette = state.theme.palette();
     Line::from(Span::styled(
-        truncate_visible(CTRL_C_EXIT_PROMPT, width as usize),
+        truncate_visible(&state.status, width as usize),
         Style::default()
             .fg(palette.modified)
             .add_modifier(Modifier::BOLD),
@@ -987,7 +987,10 @@ fn allocate_chrome_row(total_width: usize, op_status_len: usize) -> (usize, usiz
     (breadcrumb_max, op_status_max)
 }
 
-fn status_uses_status_text(state: &AppState) -> bool {
+/// True when an open overlay paints `status` as its own prompt / filter text.
+///
+/// The breadcrumb slot stays empty then, and the status does not expire.
+pub(crate) fn status_uses_status_text(state: &AppState) -> bool {
     state.search_mode
         || state.stash_menu.is_some()
         || state.branch_picker.is_some()
@@ -1004,11 +1007,6 @@ fn breadcrumb_op_status(state: &AppState) -> String {
         return String::new();
     }
     state.status.trim().to_string()
-}
-
-fn is_op_status_error(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.contains("failed") || lower.contains("error")
 }
 
 /// Breadcrumb row: path on the left, optional toast / running-op status
@@ -1064,14 +1062,9 @@ pub fn breadcrumb_line(state: &AppState, width: u16) -> Line<'static> {
         if used < width {
             spans.push(Span::raw(" "));
         }
-        let op_color = if is_op_status_error(&op) {
-            palette.deleted
-        } else {
-            palette.muted
-        };
         spans.push(Span::styled(
             truncate_visible(&op, op_max),
-            Style::default().fg(op_color),
+            Style::default().fg(state.status.kind().color(palette)),
         ));
     }
     Line::from(spans)
@@ -1092,7 +1085,7 @@ pub fn status_line(state: &AppState, width: u16) -> Line<'static> {
     {
         return Line::from(Span::styled(
             truncate_visible(&state.status, width as usize),
-            Style::default().fg(palette.muted),
+            Style::default().fg(state.status.kind().color(palette)),
         ));
     }
     if state.search_mode {
@@ -1226,7 +1219,9 @@ fn pill_span(label: &str, pill: Pill) -> Span<'static> {
 mod tests {
     use super::*;
     use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus};
+    use crate::tui::ctrl_c_exit::CTRL_C_EXIT_PROMPT;
     use crate::tui::state::AppState;
+    use crate::tui::status::StatusMessage;
     use std::path::PathBuf;
 
     fn hint_of(key: &str, label: &str) -> HintSegment {
@@ -1629,7 +1624,7 @@ mod tests {
     fn running_op_progress_sits_on_breadcrumb_not_status_hints() {
         use super::super::ops::{format_running_op, RunningOp};
         let mut app = state();
-        app.status = format_running_op(RunningOp::Pull, 1, 2);
+        app.status = StatusMessage::progress(format_running_op(RunningOp::Pull, 1, 2));
         let crumb = line_plain(&breadcrumb_line(&app, 80));
         assert!(
             crumb.contains("Pulling 1/2…"),
@@ -1651,7 +1646,7 @@ mod tests {
     fn breadcrumb_truncates_path_before_running_op() {
         use super::super::ops::{format_running_op, RunningOp};
         let mut app = state();
-        app.status = format_running_op(RunningOp::Fetch, 2, 18);
+        app.status = StatusMessage::progress(format_running_op(RunningOp::Fetch, 2, 18));
         let crumb = line_plain(&breadcrumb_line(&app, 20));
         assert!(
             crumb.contains("Fetching") || crumb.contains("2/18"),
@@ -1663,7 +1658,7 @@ mod tests {
     fn completed_op_summary_sits_on_breadcrumb_without_repo_names() {
         use super::super::ops::{format_completed_op, RunningOp};
         let mut app = state();
-        app.status = format_completed_op(RunningOp::Fetch, 3, 1);
+        app.status = StatusMessage::error(format_completed_op(RunningOp::Fetch, 3, 1));
         let crumb = line_plain(&breadcrumb_line(&app, 80));
         assert!(
             crumb.contains("Fetched 4 repos (1 failed)"),
@@ -1678,5 +1673,28 @@ mod tests {
             !status.contains("Fetched"),
             "status line keeps pills/hints: {status:?}"
         );
+    }
+
+    #[test]
+    fn breadcrumb_status_color_follows_kind() {
+        let mut app = state();
+        let palette = app.theme.palette();
+        for (status, want) in [
+            (StatusMessage::info("showing ignored repos"), palette.muted),
+            (StatusMessage::progress("Fetching 1/2…"), palette.muted),
+            (StatusMessage::ok("Fetched 2 repos"), palette.added),
+            (StatusMessage::warn("nothing to push"), palette.modified),
+            (StatusMessage::error("push failed"), palette.deleted),
+        ] {
+            let text = status.to_string();
+            app.status = status;
+            let line = breadcrumb_line(&app, 100);
+            let span = line
+                .spans
+                .iter()
+                .find(|span| span.content.contains(&text))
+                .unwrap_or_else(|| panic!("{text} not painted: {line:?}"));
+            assert_eq!(span.style.fg, Some(want), "{text}");
+        }
     }
 }

@@ -34,6 +34,7 @@ mod selection;
 mod split;
 mod stash;
 mod state;
+mod status;
 pub(crate) mod syntax;
 mod tabs;
 mod theme;

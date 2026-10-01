@@ -30,7 +30,7 @@ use super::branches::{
     can_open_branch_picker, checkoutable_branch_names, is_valid_branch_name, merge_rev_for_commit,
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
 };
-use super::chrome::{STATUS_COPIED, STATUS_NOTHING_TO_PULL};
+use super::chrome::{status_uses_status_text, STATUS_COPIED, STATUS_NOTHING_TO_PULL};
 use super::command_palette::CommandPaletteState;
 #[cfg(not(test))]
 use super::comments::comment_store_path;
@@ -45,7 +45,9 @@ use super::commit_files::{
     ancestor_dir_ids, collect_foldable_subtree_ids as collect_commit_subtree_ids,
     commit_file_cursor_index, flatten_commit_files, CommitFileRow,
 };
-use super::ctrl_c_exit::{handle_ctrl_c, is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT};
+use super::ctrl_c_exit::{
+    handle_ctrl_c, is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT, QUIT_WHILE_BUSY_PROMPT,
+};
 use super::diff::{
     anchor_row_text, build_diff_rows, build_partial_patch, diff_pane_header_rows,
     diff_row_content_width, diff_wrap_row_heights, find_anchor_row, gutter_width, row_search_text,
@@ -55,13 +57,13 @@ use super::drill::{
     source_from_graph_row, stash_ref_from_graph_row, CommitFile, CommitFileSource, DrillView,
 };
 use super::fetch::background_fetch_targets;
-use super::gates::ListFocusTarget;
+use super::gates::{ListFocusTarget, FOCUS_A_FILE_TO_MARK_REVIEWED};
 use super::graph_focus::GraphFocusPickerState;
 use super::icons::comment_mark_cols;
 use super::keys::{expire_stale_g_chord_echo, GChordEchoState, InputMode, DOUBLE_TAP_MS};
 use super::ops::{
-    collect_write_files, format_running_op, op_is_kind_noop, op_targets, push_targets,
-    refresh_target, Op, RevertScope, RunningOp, ScopedFile,
+    collect_write_files, format_running_op, op_is_kind_noop, op_kind_noop_reason, op_targets,
+    push_targets, refresh_target, Op, RevertScope, RunningOp, ScopedFile,
 };
 use super::search::{
     focus_commit_file_search, focus_diff_search, focus_graph_search, focus_tree_search, SearchPane,
@@ -78,6 +80,7 @@ use super::stash::{
     stash_menu_status, stash_ops_for_context, StashMenuKeyResult, StashOp, StashOpId,
     StashOpsContext,
 };
+use super::status::StatusMessage;
 use super::tabs::{
     compare_file_dirty, OpenCompare, TabStrip, COMPARE_FOCUS_A_FILE, COMPARE_HEAD_MOVED,
     COMPARE_STILL_LOADING, DEFAULT_BRANCH_NOT_FOUND, FOCUS_A_CHECKOUT, HEAD_HAS_NO_COMMIT,
@@ -104,8 +107,17 @@ use super::watch::{
 };
 use crate::git::FULL_DIFF_CONTEXT_LINES;
 
-/// Space / palette copy when the focus is not a file row.
-const FOCUS_A_FILE_TO_MARK_REVIEWED: &str = "focus a file to mark reviewed";
+/// Status for a key drained while a git write runs and the job has no name.
+pub(crate) const BUSY_WRITE_RUNNING: &str = "busy: a git write is running";
+
+/// `n` / `N` with no armed search.
+pub(crate) const NO_SEARCH_ARMED: &str = "no search — press / first";
+
+/// `z` where nothing folds (graph list, file diff).
+pub(crate) const Z_FOLDS_TREE_ROWS: &str = "z folds tree rows";
+
+/// Unmapped key during `V` highlight.
+pub(crate) const ESC_EXITS_HIGHLIGHT: &str = "Esc exits highlight";
 
 /// Which pane has keyboard focus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -414,7 +426,8 @@ pub struct AppState {
     pub help_open: bool,
     pub help_search_query: Option<String>,
     pub focus: FocusPane,
-    pub status: String,
+    /// Breadcrumb trailing slot / overlay status row ([`StatusMessage`]).
+    pub status: StatusMessage,
     pub graph: Option<GraphModel>,
     pub graph_identity: Option<(String, String)>,
     pub graph_scroll: u16,
@@ -562,7 +575,7 @@ impl AppState {
             help_open: false,
             help_search_query: None,
             focus: FocusPane::Left,
-            status: String::new(),
+            status: StatusMessage::default(),
             graph: None,
             graph_identity: None,
             graph_scroll: 0,
@@ -1506,7 +1519,7 @@ impl AppState {
             return Effect::Quit;
         }
         if result.prompt {
-            self.status = CTRL_C_EXIT_PROMPT.into();
+            self.status = StatusMessage::warn(CTRL_C_EXIT_PROMPT);
         }
         Effect::None
     }
@@ -1532,6 +1545,48 @@ impl AppState {
     pub fn ctrl_c_remaining_ms(&self, now: Instant) -> Option<u64> {
         let until = self.ctrl_c_armed_until?;
         Some(until.saturating_duration_since(now).as_millis() as u64)
+    }
+
+    /// `q` while an exclusive write or default-branch switch runs.
+    ///
+    /// Same chord as Ctrl-C: the first press arms the window and shows
+    /// [`QUIT_WHILE_BUSY_PROMPT`]; a second `q` or Ctrl-C inside it quits.
+    pub fn quit_while_busy(&mut self, now: Instant) -> Effect {
+        let result = handle_ctrl_c(self.ctrl_c_armed_until, now);
+        self.ctrl_c_armed_until = result.armed_until;
+        if result.quit {
+            return Effect::Quit;
+        }
+        self.status = StatusMessage::warn(QUIT_WHILE_BUSY_PROMPT);
+        Effect::None
+    }
+
+    /// Put `busy: <op> running` on the status slot for a key that a running
+    /// git write drained. `op` is `None` when the running job has no name.
+    pub fn note_busy_drop(&mut self, op: Option<&str>) {
+        let text = match op {
+            Some(op) => format!("busy: {op} running"),
+            None => BUSY_WRITE_RUNNING.to_string(),
+        };
+        self.status = StatusMessage::warn(text);
+    }
+
+    /// Milliseconds until an info / ok status clears. Starts its clock the
+    /// first time it is visible. `None` while an overlay paints `status`
+    /// as its own text, or when the message does not expire.
+    pub fn status_expiry_ms(&mut self, now: Instant) -> Option<u64> {
+        if status_uses_status_text(self) {
+            return None;
+        }
+        self.status.expiry_ms(now)
+    }
+
+    /// Clear an expired info / ok status. True when the slot changed.
+    pub fn expire_status(&mut self, now: Instant) -> bool {
+        if status_uses_status_text(self) {
+            return false;
+        }
+        self.status.expire(now)
     }
 
     fn prune_flash_state(&mut self, now: Instant) {
@@ -1655,7 +1710,7 @@ impl AppState {
 
     fn cycle_theme(&mut self) -> Effect {
         self.theme = cycle_theme_id(self.theme);
-        self.status = format!("theme: {}", self.theme.label());
+        self.status = format!("theme: {}", self.theme.label()).into();
         Effect::None
     }
 
@@ -1664,16 +1719,18 @@ impl AppState {
             .focused_row()
             .is_some_and(|row| op_is_kind_noop(row.kind, op))
         {
+            self.status = StatusMessage::warn(op_kind_noop_reason(op));
             return Effect::None;
         }
         let targets = op_targets(&self.snapshot, self.focused_row(), self.show_ignored, op);
         if targets.is_empty() {
-            self.status = "no visible repos for that op".into();
+            self.status = StatusMessage::warn("no visible repos for that op");
             return Effect::None;
         }
         match op {
             Op::Fetch => {
-                self.status = format_running_op(RunningOp::Fetch, 0, targets.len());
+                self.status =
+                    StatusMessage::progress(format_running_op(RunningOp::Fetch, 0, targets.len()));
                 Effect::Fetch { repos: targets }
             }
             Op::Pull => {
@@ -1686,10 +1743,14 @@ impl AppState {
                     })
                     .collect();
                 if behind.is_empty() {
-                    self.status = STATUS_NOTHING_TO_PULL.into();
+                    self.status = StatusMessage::warn(STATUS_NOTHING_TO_PULL);
                     Effect::None
                 } else {
-                    self.status = format_running_op(RunningOp::Pull, 0, behind.len());
+                    self.status = StatusMessage::progress(format_running_op(
+                        RunningOp::Pull,
+                        0,
+                        behind.len(),
+                    ));
                     Effect::Pull { repos: behind }
                 }
             }
@@ -1707,10 +1768,14 @@ impl AppState {
                     })
                     .collect::<Vec<_>>();
                 if repos.is_empty() {
-                    self.status = "no non-default branches to switch".into();
+                    self.status = StatusMessage::warn("no non-default branches to switch");
                     Effect::None
                 } else {
-                    self.status = format_running_op(RunningOp::DefaultBranch, 0, repos.len());
+                    self.status = StatusMessage::progress(format_running_op(
+                        RunningOp::DefaultBranch,
+                        0,
+                        repos.len(),
+                    ));
                     Effect::DefaultBranch { repos }
                 }
             }
@@ -2528,7 +2593,7 @@ impl AppState {
             self.right_col_offset = 0;
         }
         self.commit_files_loading = false;
-        self.status = format!("files {}", files.len());
+        self.status = format!("files {}", files.len()).into();
         let cursor = DrillView::files_cursor(&files, 0);
         let retain_focus = !self.drill.is_graph();
         self.drill = DrillView::Files {
@@ -2588,7 +2653,7 @@ impl AppState {
         if entering {
             self.left_col_offset = 0;
         }
-        self.status = format!("diff {path}");
+        self.status = format!("diff {path}").into();
         self.drill = DrillView::Diff {
             repo,
             source,
@@ -2698,7 +2763,7 @@ impl AppState {
             // Armed query is a `/query` chip on the idle bar, not `n next N prev`.
             self.status.clear();
         } else {
-            self.status = "no match".into();
+            self.status = StatusMessage::warn("no match");
         }
     }
 
@@ -2955,13 +3020,13 @@ impl AppState {
         let (repo, path, patch) = match self.visual_patch(anchor, kind) {
             Ok(built) => built,
             Err(err) => {
-                self.status = err;
+                self.status = StatusMessage::warn(err);
                 return Effect::None;
             }
         };
         let reverse = matches!(write, FileWrite::Unstage);
-        let verb = if reverse { "unstaged" } else { "staged" };
-        self.status = format!("{verb} range {path}");
+        let verb = if reverse { "unstaging" } else { "staging" };
+        self.status = StatusMessage::progress(format!("{verb} range {path}…"));
         self.clear_diff_visual();
         Effect::ApplyCachedPatch {
             repo,
@@ -3055,20 +3120,20 @@ impl AppState {
             .collect();
         if selected.is_empty() {
             let kind = self.focused_row().map(|row| row.kind);
-            self.status = empty_write_status(kind, write);
+            self.status = StatusMessage::warn(empty_write_status(kind, write));
             return Effect::None;
         }
         let groups = group_write_paths(&selected);
         let total: usize = groups.iter().map(|(_, paths)| paths.len()).sum();
         let verb = match write {
-            FileWrite::Stage => "stage",
-            FileWrite::Unstage => "unstage",
+            FileWrite::Stage => "staging",
+            FileWrite::Unstage => "unstaging",
         };
-        self.status = if total == 1 {
-            format!("{verb} {}", groups[0].1[0])
+        self.status = StatusMessage::progress(if total == 1 {
+            format!("{verb} {}…", groups[0].1[0])
         } else {
-            format!("{verb} {total} files")
-        };
+            format!("{verb} {total} files…")
+        });
         let effects: Vec<Effect> = groups
             .into_iter()
             .map(|(repo, paths)| match write {
@@ -3191,7 +3256,7 @@ impl AppState {
         let target = match self.compare_revert_target() {
             Ok(target) => target,
             Err(err) => {
-                self.status = err;
+                self.status = StatusMessage::warn(err);
                 return Effect::None;
             }
         };
@@ -3201,12 +3266,12 @@ impl AppState {
                     self.clear_diff_visual();
                     self.confirm = Some(PendingConfirm::CompareRevertRange { target, patch });
                 }
-                Err(err) => self.status = err,
+                Err(err) => self.status = StatusMessage::warn(err),
             }
             return Effect::None;
         }
         if let Some(err) = compare_file_revert_kind_refusal(&target.status) {
-            self.status = err;
+            self.status = StatusMessage::warn(err);
             return Effect::None;
         }
         self.confirm = Some(PendingConfirm::CompareRevertFile { target });
@@ -3231,8 +3296,8 @@ impl AppState {
                     && change.unstaged_status.is_none()
                     && !change.untracked
             });
-            self.status = if staged_only {
-                "nothing to discard (staged only)".into()
+            self.status = StatusMessage::warn(if staged_only {
+                "nothing to discard (staged only)"
             } else if matches!(
                 self.focused_row().map(|row| row.kind),
                 Some(
@@ -3243,10 +3308,10 @@ impl AppState {
                         | NodeKind::Section
                 )
             ) {
-                "nothing to discard".into()
+                "nothing to discard"
             } else {
-                "focus a file, dir, checkout, or repo to revert".into()
-            };
+                "focus a file, dir, checkout, or repo to revert"
+            });
             return Effect::None;
         }
         let targets: Vec<RevertTarget> = selected
@@ -3282,7 +3347,7 @@ impl AppState {
                 self.clear_diff_visual();
                 self.confirm = Some(PendingConfirm::RevertRange { repo, path, patch });
             }
-            Err(err) => self.status = err,
+            Err(err) => self.status = StatusMessage::warn(err),
         }
         Effect::None
     }
@@ -3303,17 +3368,17 @@ impl AppState {
                 let tracked_n: usize = groups.iter().map(|(_, tracked, _)| tracked.len()).sum();
                 let untracked_n: usize =
                     groups.iter().map(|(_, _, untracked)| untracked.len()).sum();
-                self.status = if tracked_n + untracked_n == 1 {
+                self.status = StatusMessage::progress(if tracked_n + untracked_n == 1 {
                     if untracked_n == 1 {
-                        format!("delete {}", groups[0].2[0])
+                        format!("deleting {}…", groups[0].2[0])
                     } else {
-                        format!("revert {}", groups[0].1[0])
+                        format!("reverting {}…", groups[0].1[0])
                     }
                 } else if tracked_n == 0 {
-                    format!("delete {untracked_n} untracked")
+                    format!("deleting {untracked_n} untracked…")
                 } else {
-                    format!("revert {tracked_n} tracked, {untracked_n} untracked")
-                };
+                    format!("reverting {tracked_n} tracked, {untracked_n} untracked…")
+                });
                 let effects: Vec<Effect> = groups
                     .into_iter()
                     .map(|(repo, tracked, untracked)| Effect::Revert {
@@ -3330,11 +3395,11 @@ impl AppState {
                 Effect::None
             }
             Some(PendingConfirm::RevertRange { repo, path, patch }) => {
-                self.status = format!("revert range {path}");
+                self.status = StatusMessage::progress(format!("reverting range {path}…"));
                 Effect::RevertPatch { repo, path, patch }
             }
             Some(PendingConfirm::StashDrop { repo, stash_ref }) => {
-                self.status = format!("drop {stash_ref}");
+                self.status = StatusMessage::progress(format!("dropping {stash_ref}…"));
                 Effect::StashDrop { repo, stash_ref }
             }
             Some(PendingConfirm::CheckoutOutOfSync {
@@ -3342,7 +3407,9 @@ impl AppState {
                 branch,
                 remote_ref,
             }) => {
-                self.status = format!("checkout {branch} then fast-forward {remote_ref}");
+                self.status = StatusMessage::progress(format!(
+                    "checking out {branch}, then fast-forwarding to {remote_ref}…"
+                ));
                 Effect::CheckoutBranch {
                     repo,
                     selected_name: branch,
@@ -3355,7 +3422,7 @@ impl AppState {
                 force,
                 ..
             }) => {
-                self.status = format!("remove worktree {path}");
+                self.status = StatusMessage::progress(format!("removing worktree {path}…"));
                 Effect::RemoveWorktree {
                     primary,
                     path,
@@ -3365,7 +3432,7 @@ impl AppState {
             Some(PendingConfirm::MergeIntoHead {
                 repo, rev, label, ..
             }) => {
-                self.status = format!("merge {label}");
+                self.status = StatusMessage::progress(format!("merging {label}…"));
                 Effect::MergeIntoHead { repo, rev, label }
             }
             // Compare confirms offer only y / n: `Y` keeps them open.
@@ -3384,7 +3451,10 @@ impl AppState {
                 Effect::None
             }
             Some(PendingConfirm::CompareRevertRange { target, patch }) => {
-                self.status = format!("revert range {} to merge base", target.path);
+                self.status = StatusMessage::progress(format!(
+                    "reverting range {} to merge base…",
+                    target.path
+                ));
                 Effect::CompareRevertPatch {
                     repo: target.repo,
                     path: target.path,
@@ -3393,7 +3463,8 @@ impl AppState {
                 }
             }
             Some(PendingConfirm::CompareRevertFile { target }) => {
-                self.status = format!("revert {} to merge base", target.path);
+                self.status =
+                    StatusMessage::progress(format!("reverting {} to merge base…", target.path));
                 Effect::CompareRevertFile {
                     repo: target.repo,
                     path: target.path,
@@ -3411,15 +3482,14 @@ impl AppState {
         if self.is_compare_tab() {
             return self.toggle_compare_reviewed();
         }
-        if self.nav_depth() >= 1 {
-            return Effect::None;
-        }
-        let Some(row) = self.focused_row().cloned() else {
+        let Some(row) = self
+            .focused_row()
+            .filter(|row| self.nav_depth() == 0 && row.kind == NodeKind::File)
+            .cloned()
+        else {
+            self.status = StatusMessage::warn(FOCUS_A_FILE_TO_MARK_REVIEWED);
             return Effect::None;
         };
-        if row.kind != NodeKind::File {
-            return Effect::None;
-        }
         let Some(repo) = row.repo.as_deref() else {
             return Effect::None;
         };
@@ -3443,7 +3513,7 @@ impl AppState {
             &self.viewed_path,
             &workspace_store_id(&self.cwd),
         ) {
-            self.status = persist_failed_status("viewed", err);
+            self.status = StatusMessage::error(persist_failed_status("viewed", err));
         }
         self.reviewed = viewed_row_ids(&self.snapshot, &self.viewed_store, &self.cwd);
         Effect::None
@@ -3452,7 +3522,7 @@ impl AppState {
     /// Space on a compare tab: session-only mark on the focused committed file.
     fn toggle_compare_reviewed(&mut self) -> Effect {
         let Some((_, path)) = self.focused_commit_edit_path() else {
-            self.status = FOCUS_A_FILE_TO_MARK_REVIEWED.into();
+            self.status = StatusMessage::warn(FOCUS_A_FILE_TO_MARK_REVIEWED);
             return Effect::None;
         };
         if let Some(tab) = self.tabs.active_compare_mut() {
@@ -3471,7 +3541,7 @@ impl AppState {
                 &self.viewed_path,
                 &workspace_store_id(&self.cwd),
             ) {
-                self.status = persist_failed_status("viewed", err);
+                self.status = StatusMessage::error(persist_failed_status("viewed", err));
             }
         }
         self.reviewed = viewed_row_ids(&self.snapshot, &self.viewed_store, &self.cwd);
@@ -3487,7 +3557,7 @@ impl AppState {
                 &self.comment_path,
                 &workspace_store_id(&self.cwd),
             ) {
-                self.status = persist_failed_status("comment", err);
+                self.status = StatusMessage::error(persist_failed_status("comment", err));
             }
         }
     }
@@ -3662,7 +3732,7 @@ impl AppState {
 
     fn copy_entity_reference(&mut self) -> Effect {
         let Some(entity) = self.current_entity_reference() else {
-            self.status = "no copy target".into();
+            self.status = StatusMessage::warn("no copy target");
             return Effect::None;
         };
         let text = format_entity_reference(&entity);
@@ -3704,7 +3774,7 @@ impl AppState {
             return Effect::None;
         }
         if self.current_diff_rows().is_empty() {
-            self.status = "no highlight target".into();
+            self.status = StatusMessage::warn("no highlight target");
             return Effect::None;
         }
         self.cancel_mouse_drag();
@@ -3729,7 +3799,7 @@ impl AppState {
         self.help_open = false;
         self.comment_export = None;
         let Some(key) = self.current_comment_target() else {
-            self.status = "no comment target".into();
+            self.status = StatusMessage::warn("no comment target");
             return Effect::None;
         };
         self.clear_diff_visual();
@@ -3755,14 +3825,14 @@ impl AppState {
             &workspace_store_id(&self.cwd),
         ) {
             Ok(()) => {
-                self.status = if empty {
-                    "comment deleted".into()
+                self.status = StatusMessage::ok(if empty {
+                    "comment deleted"
                 } else {
-                    "comment saved".into()
-                };
+                    "comment saved"
+                });
             }
             Err(err) => {
-                self.status = persist_failed_status("comment", err);
+                self.status = StatusMessage::error(persist_failed_status("comment", err));
             }
         }
         Effect::None
@@ -3777,7 +3847,7 @@ impl AppState {
         self.comment_export = Some(CommentExport {
             markdown: markdown.clone(),
         });
-        self.status = STATUS_COPIED.into();
+        self.status = StatusMessage::ok(STATUS_COPIED);
         Effect::CopyClipboard {
             text: markdown,
             announce: false,
@@ -3824,7 +3894,7 @@ impl AppState {
     }
 
     fn refuse_remove_worktree(&mut self) -> Effect {
-        self.status = "Focus a linked worktree to remove".into();
+        self.status = StatusMessage::warn("Focus a linked worktree to remove");
         Effect::None
     }
 
@@ -3869,7 +3939,7 @@ impl AppState {
         if targets.is_empty() {
             return Effect::None;
         }
-        self.status = format_running_op(RunningOp::Fetch, 0, targets.len());
+        // The background tick paints nothing unless a repo fails.
         Effect::Fetch { repos: targets }
     }
 
@@ -3884,10 +3954,10 @@ impl AppState {
     fn push_effect(&mut self) -> Effect {
         let targets = push_targets(&self.snapshot, self.focused_row(), self.show_ignored);
         if targets.is_empty() {
-            self.status = "nothing to push".into();
+            self.status = StatusMessage::warn("nothing to push");
             return Effect::None;
         }
-        self.status = format_running_op(RunningOp::Push, 0, targets.len());
+        self.status = StatusMessage::progress(format_running_op(RunningOp::Push, 0, targets.len()));
         Effect::Push { repos: targets }
     }
 
@@ -3896,7 +3966,7 @@ impl AppState {
             return Effect::None;
         }
         let Some(repo) = self.focused_checkout_if_shown() else {
-            self.status = "focus a visible repo to stash".into();
+            self.status = StatusMessage::warn("focus a visible repo to stash");
             return Effect::None;
         };
         self.help_open = false;
@@ -3934,10 +4004,10 @@ impl AppState {
         if ops.is_empty() {
             self.stash_menu = None;
             self.stash_repo = None;
-            self.status = "nothing to stash".into();
+            self.status = StatusMessage::warn("nothing to stash");
             return;
         }
-        self.status = stash_menu_status(&ops);
+        self.status = stash_menu_status(&ops).into();
         self.stash_repo = Some(repo);
         self.stash_menu = Some(ops);
     }
@@ -3976,14 +4046,14 @@ impl AppState {
                 let stash_ref = op.stash_ref.unwrap_or_else(|| "stash@{0}".into());
                 self.stash_menu = None;
                 self.stash_repo = None;
-                self.status = format!("apply {stash_ref}");
+                self.status = StatusMessage::progress(format!("applying {stash_ref}…"));
                 Effect::StashApply { repo, stash_ref }
             }
             StashOpId::Pop => {
                 let stash_ref = op.stash_ref.unwrap_or_else(|| "stash@{0}".into());
                 self.stash_menu = None;
                 self.stash_repo = None;
-                self.status = format!("pop {stash_ref}");
+                self.status = StatusMessage::progress(format!("popping {stash_ref}…"));
                 Effect::StashPop { repo, stash_ref }
             }
             StashOpId::Drop => {
@@ -4000,19 +4070,19 @@ impl AppState {
 
     fn begin_branch_picker(&mut self) -> Effect {
         let Some(row) = self.focused_row() else {
-            self.status = "focus a repo to pick a branch".into();
+            self.status = StatusMessage::warn("focus a repo to pick a branch");
             return Effect::None;
         };
         if row_is_hidden_ignored(row, self.show_ignored) {
-            self.status = "focus a visible repo to pick a branch".into();
+            self.status = StatusMessage::warn("focus a visible repo to pick a branch");
             return Effect::None;
         }
         if !can_open_branch_picker(&self.snapshot, row) {
-            self.status = "focus a checkout to pick a branch".into();
+            self.status = StatusMessage::warn("focus a checkout to pick a branch");
             return Effect::None;
         }
         let Some(repo) = checkout_path(row) else {
-            self.status = "focus a checkout to pick a branch".into();
+            self.status = StatusMessage::warn("focus a checkout to pick a branch");
             return Effect::None;
         };
         self.help_open = false;
@@ -4022,7 +4092,7 @@ impl AppState {
     /// Fill the branch picker after git lists local branches.
     pub fn open_branch_picker(&mut self, repo: String, branches: Vec<crate::git::LocalBranch>) {
         if branches.is_empty() {
-            self.status = "no local branches".into();
+            self.status = StatusMessage::warn("no local branches");
             self.branch_picker = None;
             return;
         }
@@ -4104,7 +4174,7 @@ impl AppState {
         branches: Vec<crate::git::LocalBranch>,
     ) {
         if branches.is_empty() {
-            self.status = "no local branches".into();
+            self.status = StatusMessage::warn("no local branches");
             self.graph_focus_picker = None;
             return;
         }
@@ -4129,7 +4199,7 @@ impl AppState {
         };
         let repo = picker.repo.clone();
         let Some(names) = picker.apply_names() else {
-            self.status = "no matching branches".into();
+            self.status = StatusMessage::warn("no matching branches");
             return Effect::None;
         };
         self.graph_focus_picker = None;
@@ -4160,7 +4230,7 @@ impl AppState {
         } else {
             let label = names.join(", ");
             self.graph_branch_focus = Some((repo, names));
-            self.status = format!("graph focus: {label}");
+            self.status = format!("graph focus: {label}").into();
         }
         Effect::LoadRightPane
     }
@@ -4174,20 +4244,20 @@ impl AppState {
         if let Some(selected) = picker.selected().cloned() {
             if selected.current {
                 self.branch_picker = None;
-                self.status = format!("Already on {}", selected.name);
+                self.status = format!("Already on {}", selected.name).into();
                 return Effect::None;
             }
             return self.checkout_or_confirm(repo, selected.name);
         }
         if is_valid_branch_name(&filter) {
             self.branch_picker = None;
-            self.status = format!("create {filter}");
+            self.status = StatusMessage::progress(format!("creating {filter}…"));
             return Effect::CreateBranch {
                 repo,
                 name: filter.trim().to_string(),
             };
         }
-        self.status = "no matching branches".into();
+        self.status = StatusMessage::warn("no matching branches");
         Effect::None
     }
 
@@ -4195,7 +4265,7 @@ impl AppState {
     /// (`plan_graph_checkout`) from the selected name, not from local vs origin
     /// of every checkout.
     pub fn checkout_or_confirm(&mut self, repo: String, selected_name: String) -> Effect {
-        self.status = format!("checkout {selected_name}");
+        self.status = StatusMessage::progress(format!("checking out {selected_name}…"));
         Effect::CheckoutBranch {
             repo,
             selected_name,
@@ -4224,7 +4294,7 @@ impl AppState {
 
     fn begin_create_branch(&mut self) -> Effect {
         let Some(picker) = self.branch_picker.as_ref() else {
-            self.status = "open the branch picker first".into();
+            self.status = StatusMessage::warn("open the branch picker first");
             return Effect::None;
         };
         let repo = picker.repo.clone();
@@ -4243,12 +4313,12 @@ impl AppState {
             return Effect::None;
         };
         if !is_valid_branch_name(&create.name) {
-            self.status = "invalid branch name".into();
+            self.status = StatusMessage::warn("invalid branch name");
             self.create_branch = Some(create);
             return Effect::None;
         }
         self.branch_picker = None;
-        self.status = format!("create {}", create.name.trim());
+        self.status = StatusMessage::progress(format!("creating {}…", create.name.trim()));
         if let Some(commit_id) = create.commit_id {
             Effect::CreateBranchAt {
                 repo: create.repo,
@@ -4268,7 +4338,7 @@ impl AppState {
             return Effect::None;
         }
         if self.hidden_ignored_focus() {
-            self.status = "focus a visible repo to checkout".into();
+            self.status = StatusMessage::warn("focus a visible repo to checkout");
             return Effect::None;
         }
         let Some(repo) = self.focused_graph_repo() else {
@@ -4282,7 +4352,7 @@ impl AppState {
             return Effect::None;
         }
         if self.graph_repo_is_dirty(&repo) {
-            self.status = DIRTY_WORKTREE_STATUS.into();
+            self.status = StatusMessage::warn(DIRTY_WORKTREE_STATUS);
             return Effect::None;
         }
         self.help_open = false;
@@ -4303,7 +4373,7 @@ impl AppState {
             return Effect::None;
         }
         if self.hidden_ignored_focus() {
-            self.status = "focus a visible repo to create a branch".into();
+            self.status = StatusMessage::warn("focus a visible repo to create a branch");
             return Effect::None;
         }
         let Some(repo) = self.focused_graph_repo() else {
@@ -4328,7 +4398,7 @@ impl AppState {
             return Effect::None;
         }
         if self.hidden_ignored_focus() {
-            self.status = "focus a visible repo to merge".into();
+            self.status = StatusMessage::warn("focus a visible repo to merge");
             return Effect::None;
         }
         let Some(repo) = self.focused_graph_repo() else {
@@ -4338,7 +4408,7 @@ impl AppState {
             return Effect::None;
         };
         if self.graph_repo_is_dirty(&repo) {
-            self.status = DIRTY_WORKTREE_STATUS.into();
+            self.status = StatusMessage::warn(DIRTY_WORKTREE_STATUS);
             return Effect::None;
         }
         let (rev, label) = merge_rev_for_commit(&commit.id, &commit.refs);
@@ -4567,7 +4637,7 @@ impl AppState {
             return Effect::None;
         }
         if self.hidden_ignored_focus() {
-            self.status = "hidden ignored stay out of drill".into();
+            self.status = StatusMessage::warn("hidden ignored stay out of drill");
             return Effect::None;
         }
         if self.focus == FocusPane::Left {
@@ -4577,15 +4647,15 @@ impl AppState {
         match &self.drill {
             DrillView::Graph => {
                 let Some(repo) = self.focused_graph_repo() else {
-                    self.status = "focus a repo commit to drill".into();
+                    self.status = StatusMessage::warn("focus a repo commit to drill");
                     return Effect::None;
                 };
                 let Some(row) = self.focused_graph_row() else {
-                    self.status = "focus a graph commit to drill".into();
+                    self.status = StatusMessage::warn("focus a graph commit to drill");
                     return Effect::None;
                 };
                 let Some(source) = source_from_graph_row(&row) else {
-                    self.status = "focus a graph commit to drill".into();
+                    self.status = StatusMessage::warn("focus a graph commit to drill");
                     return Effect::None;
                 };
                 Effect::LoadCommitFiles { repo, source }
@@ -4598,7 +4668,7 @@ impl AppState {
             } => {
                 let rows = self.commit_file_rows();
                 let Some(row) = rows.get(*cursor) else {
-                    self.status = "no files in this commit".into();
+                    self.status = StatusMessage::warn("no files in this commit");
                     return Effect::None;
                 };
                 if row.is_dir() {
@@ -4662,20 +4732,20 @@ impl AppState {
             return Effect::None;
         }
         let Some(stash_ref) = self.focused_graph_stash_ref() else {
-            self.status = "focus a graph stash row".into();
+            self.status = StatusMessage::warn("focus a graph stash row");
             return Effect::None;
         };
         let Some(repo) = self.focused_graph_repo() else {
-            self.status = "focus a visible repo to stash".into();
+            self.status = StatusMessage::warn("focus a visible repo to stash");
             return Effect::None;
         };
         match id {
             StashOpId::Apply => {
-                self.status = format!("apply {stash_ref}");
+                self.status = StatusMessage::progress(format!("applying {stash_ref}…"));
                 Effect::StashApply { repo, stash_ref }
             }
             StashOpId::Pop => {
-                self.status = format!("pop {stash_ref}");
+                self.status = StatusMessage::progress(format!("popping {stash_ref}…"));
                 Effect::StashPop { repo, stash_ref }
             }
             StashOpId::Drop => {
@@ -4897,19 +4967,19 @@ impl AppState {
 
     pub(crate) fn compare_vs_default(&mut self) -> Effect {
         let Some(checkout) = self.compare_target_checkout() else {
-            self.status = FOCUS_A_CHECKOUT.into();
+            self.status = StatusMessage::warn(FOCUS_A_CHECKOUT);
             return Effect::None;
         };
         let Some((head, default_tip)) = self.checkout_head_and_default(&checkout) else {
-            self.status = FOCUS_A_CHECKOUT.into();
+            self.status = StatusMessage::warn(FOCUS_A_CHECKOUT);
             return Effect::None;
         };
         if head.is_empty() {
-            self.status = HEAD_HAS_NO_COMMIT.into();
+            self.status = StatusMessage::warn(HEAD_HAS_NO_COMMIT);
             return Effect::None;
         }
         let Some(base_ref) = default_tip.map(str::to_string) else {
-            self.status = DEFAULT_BRANCH_NOT_FOUND.into();
+            self.status = StatusMessage::warn(DEFAULT_BRANCH_NOT_FOUND);
             return Effect::None;
         };
         self.open_compare_tab(checkout, base_ref)
@@ -4917,14 +4987,14 @@ impl AppState {
 
     pub(crate) fn compare_vs_branch(&mut self) -> Effect {
         let Some(checkout) = self.compare_target_checkout() else {
-            self.status = FOCUS_A_CHECKOUT.into();
+            self.status = StatusMessage::warn(FOCUS_A_CHECKOUT);
             return Effect::None;
         };
         if self
             .checkout_head_and_default(&checkout)
             .is_some_and(|(head, _)| head.is_empty())
         {
-            self.status = HEAD_HAS_NO_COMMIT.into();
+            self.status = StatusMessage::warn(HEAD_HAS_NO_COMMIT);
             return Effect::None;
         }
         self.compare_picker_pending = Some(checkout.clone());
@@ -4937,7 +5007,7 @@ impl AppState {
 
     fn close_compare_at(&mut self, index: usize) -> Effect {
         if index == 0 {
-            self.status = WORKSPACE_TAB_CANNOT_CLOSE.into();
+            self.status = StatusMessage::warn(WORKSPACE_TAB_CANNOT_CLOSE);
             return Effect::None;
         }
         let closing_active = index == self.tabs.active;
@@ -4975,7 +5045,7 @@ impl AppState {
             return Effect::None;
         };
         let Some(name) = picker.selected().map(|branch| branch.name.clone()) else {
-            self.status = super::tabs::NO_BRANCHES_TO_COMPARE.into();
+            self.status = StatusMessage::warn(super::tabs::NO_BRANCHES_TO_COMPARE);
             return Effect::None;
         };
         let repo = picker.repo.clone();
@@ -5445,6 +5515,7 @@ mod tests {
     };
     use crate::testutil::init_repo;
     use crate::tui::split::{pane_widths, side_by_side_column_widths, DIFF_SPLIT_FRACTION};
+    use crate::tui::status::StatusKind;
     use crate::tui::watch::watch_interval_ms;
     use workspace_status_graph::{Commit, GraphModel, GraphRef, Stash};
 
@@ -5711,7 +5782,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_writes_noop_when_depth_at_least_one_and_right_focused() {
+    fn tree_writes_say_why_when_depth_at_least_one_and_right_focused() {
         let mut app = state();
         focus_file(&mut app, "README.md");
         let cursor = app.cursor;
@@ -5725,7 +5796,6 @@ mod tests {
         );
         assert_eq!(app.focus, FocusPane::Right);
         assert!(app.in_commit_drill());
-        let status = app.status.clone();
         for action in [
             Action::Stage,
             Action::Unstage,
@@ -5744,7 +5814,11 @@ mod tests {
                 "{action:?} must not move the tree cursor"
             );
             assert!(app.confirm.is_none(), "{action:?}");
-            assert_eq!(app.status, status, "{action:?} must stay silent");
+            assert_eq!(
+                app.status, "tree key · Esc back to the tree",
+                "{action:?} must say why"
+            );
+            assert_eq!(app.status.kind(), StatusKind::Warn, "{action:?}");
         }
         match app.dispatch(Action::Edit) {
             Effect::EditFile { path, .. } => assert_eq!(path, "README.md"),
@@ -5752,31 +5826,32 @@ mod tests {
         }
         assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
         assert!(!app.reviewed.contains(&id));
+        assert_eq!(app.status, FOCUS_A_FILE_TO_MARK_REVIEWED);
     }
 
     #[test]
-    fn pull_and_default_on_file_or_dir_are_silent_fetch_stays() {
+    fn pull_and_default_on_file_or_dir_say_why_fetch_stays() {
         let mut snap = tree_repo();
         snap.branch = "feature/x".into();
         snap.sync_status = SyncStatus::Behind;
         let snapshot = build_workspace_snapshot(&[snap], &[], false, &[]);
         let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         focus_id(&mut app, "file:app:README.md");
-        let status = app.status.clone();
         assert_eq!(app.dispatch(Action::Pull), Effect::None);
-        assert_eq!(app.status, status);
+        assert_eq!(app.status, "focus a repo or checkout to pull");
+        assert_eq!(app.status.kind(), StatusKind::Warn);
         assert_eq!(app.dispatch(Action::DefaultBranch), Effect::None);
-        assert_eq!(app.status, status);
+        assert_eq!(app.status, "focus a repo or checkout to switch to default");
         match app.dispatch(Action::Fetch) {
             Effect::Fetch { repos } => assert_eq!(repos, vec!["app"]),
             other => panic!("{other:?}"),
         }
         focus_id(&mut app, "dir:app:src");
-        let status = app.status.clone();
         assert_eq!(app.dispatch(Action::Pull), Effect::None);
-        assert_eq!(app.status, status);
+        assert_eq!(app.status, "focus a repo or checkout to pull");
+        assert_eq!(app.status.kind(), StatusKind::Warn);
         assert_eq!(app.dispatch(Action::DefaultBranch), Effect::None);
-        assert_eq!(app.status, status);
+        assert_eq!(app.status, "focus a repo or checkout to switch to default");
         match app.dispatch(Action::Fetch) {
             Effect::Fetch { repos } => assert_eq!(repos, vec!["app"]),
             other => panic!("{other:?}"),
@@ -6214,7 +6289,8 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        assert_eq!(app.status, "delete new.txt");
+        assert_eq!(app.status, "deleting new.txt…");
+        assert_eq!(app.status.kind(), StatusKind::Progress);
 
         // Many untracked files: `y` is not offered, `Y` deletes them all.
         app.confirm = Some(untracked_confirm(&["a.txt", "b.txt"]));
@@ -6230,7 +6306,7 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(app.confirm.is_none());
-        assert_eq!(app.status, "delete 2 untracked");
+        assert_eq!(app.status, "deleting 2 untracked…");
     }
 
     #[test]
@@ -6298,6 +6374,106 @@ mod tests {
     fn q_still_quits_immediately() {
         let mut app = state();
         assert_eq!(app.dispatch(Action::Quit), Effect::Quit);
+    }
+
+    #[test]
+    fn q_while_busy_arms_the_press_again_prompt() {
+        let mut app = state();
+        let t0 = Instant::now();
+        assert_eq!(app.quit_while_busy(t0), Effect::None);
+        assert_eq!(app.status, QUIT_WHILE_BUSY_PROMPT);
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+        assert_eq!(
+            app.quit_while_busy(t0 + Duration::from_millis(100)),
+            Effect::Quit
+        );
+
+        // `q` then Ctrl-C inside the window also quits.
+        let mut app = state();
+        assert_eq!(app.quit_while_busy(Instant::now()), Effect::None);
+        assert_eq!(app.dispatch(Action::CtrlC), Effect::Quit);
+
+        // An expired arm is a fresh prompt, and the prompt clears with it.
+        let mut app = state();
+        assert_eq!(app.quit_while_busy(t0), Effect::None);
+        let until = app.ctrl_c_armed_until.expect("armed");
+        assert!(app.expire_ctrl_c_prompt(until));
+        assert!(app.status.is_empty());
+        assert_eq!(app.quit_while_busy(until), Effect::None);
+    }
+
+    #[test]
+    fn busy_drop_names_the_running_op() {
+        let mut app = state();
+        app.note_busy_drop(Some("revert"));
+        assert_eq!(app.status, "busy: revert running");
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+        app.note_busy_drop(None);
+        assert_eq!(app.status, BUSY_WRITE_RUNNING);
+    }
+
+    #[test]
+    fn info_status_expires_but_not_under_an_overlay() {
+        let mut app = state();
+        let t0 = Instant::now();
+        let ttl = Duration::from_millis(crate::tui::status::STATUS_TTL_MS);
+        assert_eq!(
+            app.dispatch(Action::ToggleShowIgnored),
+            Effect::LoadRightPane
+        );
+        assert_eq!(app.status.kind(), StatusKind::Info);
+        assert_eq!(
+            app.status_expiry_ms(t0),
+            Some(crate::tui::status::STATUS_TTL_MS)
+        );
+        assert!(!app.expire_status(t0 + ttl - Duration::from_millis(1)));
+        assert!(app.expire_status(t0 + ttl));
+        assert!(app.status.is_empty());
+
+        // Search typing echoes into `status`: no expiry while it is open.
+        assert_eq!(app.dispatch(Action::SearchStart), Effect::None);
+        app.status = "/".into();
+        assert_eq!(app.status_expiry_ms(t0), None);
+        assert!(!app.expire_status(t0 + ttl * 10));
+        assert_eq!(app.status, "/");
+
+        // Warnings stay until replaced.
+        let mut app = state();
+        app.status = StatusMessage::warn("nothing to push");
+        assert_eq!(app.status_expiry_ms(t0), None);
+        assert!(!app.expire_status(t0 + ttl * 10));
+    }
+
+    #[test]
+    fn n_without_an_armed_search_says_so() {
+        let mut app = state();
+        let cursor = app.cursor;
+        assert_eq!(app.dispatch(Action::SearchNext), Effect::None);
+        assert_eq!(app.status, NO_SEARCH_ARMED);
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+        app.status.clear();
+        assert_eq!(app.dispatch(Action::SearchPrev), Effect::None);
+        assert_eq!(app.status, NO_SEARCH_ARMED);
+        assert_eq!(app.cursor, cursor);
+    }
+
+    #[test]
+    fn z_on_a_file_diff_says_tree_rows_and_arms_nothing() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        assert_eq!(app.dispatch(Action::FoldToggle), Effect::None);
+        assert_eq!(app.status, Z_FOLDS_TREE_ROWS);
+        assert!(app.z_pending_at.is_none(), "no fake z… pending");
+        assert!(!matches!(app.input_mode(), InputMode::ZPending { .. }));
+    }
+
+    #[test]
+    fn space_on_a_non_file_row_says_focus_a_file() {
+        let mut app = state();
+        app.cursor = 0;
+        assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
+        assert_eq!(app.status, FOCUS_A_FILE_TO_MARK_REVIEWED);
+        assert_eq!(app.status.kind(), StatusKind::Warn);
     }
 
     fn focus_file(app: &mut AppState, needle: &str) {
@@ -6743,7 +6919,8 @@ mod tests {
         assert_eq!(app.focused_row().unwrap().id, id);
         assert_eq!(app.folds, folds);
         assert_eq!(app.diff_scroll, 7);
-        assert_eq!(app.status, "edit README.md");
+        assert_eq!(app.status, "opening README.md…");
+        assert_eq!(app.status.kind(), StatusKind::Progress);
         app.cursor = 0;
         assert_eq!(app.dispatch(Action::Edit), Effect::None);
     }
@@ -6767,7 +6944,8 @@ mod tests {
                 path: "README.md".into(),
             }
         );
-        assert_eq!(app.status, "edit README.md");
+        assert_eq!(app.status, "opening README.md…");
+        assert_eq!(app.status.kind(), StatusKind::Progress);
         app.cursor = 0;
         assert_eq!(app.dispatch(Action::ExternalDiff), Effect::None);
         assert_eq!(app.status, "focus a file to diff");
@@ -9707,7 +9885,8 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        assert_eq!(app.status, "Fetching 0/2…");
+        // The background tick leaves the status slot alone.
+        assert_eq!(app.status, "");
         assert_eq!(app.dispatch(Action::WatchTick), Effect::WatchRefresh);
         assert_eq!(watch_interval_ms(Some("0")), 0);
         assert_ne!(
@@ -10473,9 +10652,8 @@ mod tests {
         install_graph(&mut app, vec![graph_stash("stash@{0}", "latest")]);
         focus_graph_row(&mut app, |r| matches!(r, GraphRow::Commit { .. }));
         assert_eq!(app.focus, FocusPane::Right);
-        let status = app.status.clone();
         assert_eq!(app.dispatch(Action::StashMenu), Effect::None);
-        assert_eq!(app.status, status);
+        assert_eq!(app.status, "tree key · Tab to the tree");
     }
 
     #[test]
@@ -12864,6 +13042,42 @@ mod tests {
     }
 
     #[test]
+    fn highlight_gg_and_g_move_the_head_and_keep_the_anchor() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        let last = app.current_diff_rows().len() - 1;
+        app.dispatch(Action::Move(2));
+        assert_eq!(app.dispatch(Action::DiffVisualStart), Effect::None);
+        let anchor = app.diff_visual_anchor.expect("highlight");
+        assert_eq!(app.dispatch(Action::MoveToEnd), Effect::None);
+        assert_eq!(app.diff_cursor, last);
+        assert_eq!(app.diff_visual_anchor, Some(anchor));
+        assert!(app.diff_visual_contains(last));
+        // `gg`: the first `g` arms, the second moves to the top.
+        assert_eq!(app.dispatch(Action::ArmGChord), Effect::None);
+        assert_eq!(app.diff_cursor, last);
+        assert_eq!(app.dispatch(Action::ArmGChord), Effect::None);
+        assert_eq!(app.diff_cursor, 0);
+        assert_eq!(app.diff_visual_anchor, Some(anchor));
+        assert!(app.g_pending_at.is_none());
+        assert_eq!(app.input_mode(), InputMode::DiffVisual);
+    }
+
+    #[test]
+    fn highlight_unmapped_key_says_esc_exits() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        assert_eq!(app.dispatch(Action::DiffVisualStart), Effect::None);
+        assert_eq!(app.dispatch(Action::DiffVisualUnmapped), Effect::None);
+        assert_eq!(app.status, ESC_EXITS_HIGHLIGHT);
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+        assert!(app.diff_visual_anchor.is_some(), "highlight stays");
+        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
+        assert!(app.diff_visual_anchor.is_some(), "T keeps the highlight");
+        assert_eq!(app.dispatch(Action::Quit), Effect::Quit);
+    }
+
+    #[test]
     fn semicolon_without_visual_opens_covering_range() {
         let mut app = state();
         focus_readme_diff(&mut app, two_line_readme());
@@ -13088,7 +13302,7 @@ diff --git a/README.md b/README.md
             other => panic!("{other:?}"),
         }
         assert!(app.diff_visual_anchor.is_none());
-        assert!(app.status.contains("staged range"), "{}", app.status);
+        assert_eq!(app.status, "staging range README.md…");
     }
 
     #[test]
@@ -13321,7 +13535,7 @@ diff --git a/README.md b/README.md
             }
         );
         assert!(app.confirm.is_none());
-        assert_eq!(app.status, "revert range README.md");
+        assert_eq!(app.status, "reverting range README.md…");
     }
 
     #[test]
@@ -13520,7 +13734,7 @@ diff --git a/README.md b/README.md
         assert_eq!(palette_reason(&app, "Keymap help"), None);
         assert_eq!(
             palette_reason(&app, "Stage").as_deref(),
-            Some("not available here")
+            Some("tree key · Tab to the tree")
         );
     }
 
@@ -13628,8 +13842,7 @@ diff --git a/README.md b/README.md
         let text = assert_copy_clipboard(effect, "file", "README.md", true);
         assert!(text.contains("path: README.md"), "{text}");
         assert_ne!(
-            app.status.as_str(),
-            "copied",
+            &*app.status, "copied",
             "dispatch must not flash copied before the copy"
         );
         assert!(app.comment_export.is_none());
@@ -13664,7 +13877,7 @@ diff --git a/README.md b/README.md
             text.contains("deadbeef1234567890abdeadbeef1234567890ab"),
             "{text}"
         );
-        assert_ne!(app.status.as_str(), "copied");
+        assert_ne!(&*app.status, "copied");
         assert!(app.comment_export.is_none());
     }
 
@@ -13683,7 +13896,7 @@ diff --git a/README.md b/README.md
         let text = assert_copy_clipboard(effect, "diff", "README.md", true);
         assert!(text.contains("path: README.md"), "{text}");
         assert!(text.contains("lines: 2"), "{text}");
-        assert_ne!(app.status.as_str(), "copied");
+        assert_ne!(&*app.status, "copied");
         assert!(app.comment_export.is_none());
     }
 
@@ -13712,8 +13925,7 @@ diff --git a/README.md b/README.md
             other => panic!("expected CopyClipboard, got {other:?}"),
         }
         assert_ne!(
-            app.status.as_str(),
-            "copied",
+            &*app.status, "copied",
             "entity copy leaves status to the interpreter"
         );
         assert!(app.comment_export.is_none());
