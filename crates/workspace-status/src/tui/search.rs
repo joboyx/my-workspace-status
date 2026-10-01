@@ -25,6 +25,18 @@ pub enum SearchPane {
     Diff,
 }
 
+impl SearchPane {
+    /// Title of the pane the search is bound to, as its box paints it.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Tree => "tree",
+            Self::Graph => "graph",
+            Self::CommitFiles => "files",
+            Self::Diff => "diff",
+        }
+    }
+}
+
 /// Case-insensitive substring matches on `label`. Empty query → no hits.
 pub fn match_indices(labels: &[&str], query: &str) -> Vec<usize> {
     let q = query.trim().to_lowercase();

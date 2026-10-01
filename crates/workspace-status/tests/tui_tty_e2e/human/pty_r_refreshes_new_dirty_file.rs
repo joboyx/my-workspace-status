@@ -3,7 +3,7 @@ use std::fs;
 use crate::harness::{left_tree, PtySession};
 use crate::seed::daily_workspace;
 use crate::support::{
-    documented_launch_first_paint, launch_breadcrumb_workspace_only,
+    documented_launch_first_paint, launch_breadcrumb_workspace_app,
     launch_panes_left_tree_right_diff, launch_status_chrome, no_wrong_overlays, title_has_files,
     tree_cursor_on, tree_has, tree_line_containing, GIT_WAIT, SETTLE_MS, WAIT,
 };
@@ -53,10 +53,9 @@ fn documented_r_refreshed_app_dirty_file(screen: &str) -> bool {
         && screen.contains("UNSTAGED")
         && screen.contains("+dirty")
         && screen.contains("@@ -1 +1,2 @@")
-        && launch_breadcrumb_workspace_only(screen)
+        && launch_breadcrumb_workspace_app(screen)
         && launch_status_chrome(screen)
         && !screen.contains("[workspace]")
-        && !screen.contains("workspace ›")
         && !screen.contains("WIP on graph")
         && !screen.contains("Working tree")
         && !screen.contains("focus a repo for the graph")

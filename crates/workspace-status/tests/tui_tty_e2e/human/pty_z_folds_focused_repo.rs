@@ -20,7 +20,7 @@ fn z_file_row_leaves_tree_open(screen: &str) -> bool {
         && tree_dir_expanded(screen, "workspace")
         && tree_dir_collapsed(screen, "No updates")
         && !tree_has(screen, "lib")
-        && crumb_row(screen).trim() == "workspace"
+        && crumb_row(screen).trim() == "workspace › app"
         && !screen.contains("SEARCH")
         && !screen.contains("MOVE")
         && !screen.contains("Stash ")
@@ -71,7 +71,7 @@ fn documented_z_folds_focused_repo(screen: &str) -> bool {
         && crumb.contains("workspace › app")
         && !crumb.contains("[app]")
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && !screen.contains("SEARCH")
         && !screen.contains("MOVE")
         && !screen.contains("Stash ")

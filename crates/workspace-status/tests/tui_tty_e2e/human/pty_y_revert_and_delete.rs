@@ -145,7 +145,7 @@ fn documented_y_reverted_and_deleted(screen: &str) -> bool {
         && !readme_unstaged_badge(screen)
         && !pane_unstaged_readme(screen)
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && no_wrong_revert_overlays(screen)
 }
 

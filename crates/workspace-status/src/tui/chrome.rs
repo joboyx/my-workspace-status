@@ -82,8 +82,8 @@ use super::tree::NodeKind;
 pub const HINT_CHIP_GAP: usize = 2;
 /// Gap rendered between two hints.
 const HINT_SEPARATOR: &str = "  ";
-/// Marker appended when hints were dropped to fit the terminal width.
-const HINT_ELLIPSIS: &str = "…";
+/// Muted marker painted where hints were dropped to fit the terminal width.
+pub const HINT_ELLIPSIS: &str = "…";
 /// Status-bar copy while `/` search is in typing mode.
 pub const SEARCH_TYPING_HINT: &str = "Enter arms query · Esc clears · n/N after Enter";
 const BREADCRUMB_SEP: &str = " › ";
@@ -555,60 +555,115 @@ fn hint_segment_columns(segment: &HintSegment) -> usize {
     segment.key.chars().count() + 2 + HINT_CHIP_GAP + segment.label.chars().count()
 }
 
-fn hints_width(kept: &[HintSegment]) -> usize {
-    let cols: usize = kept.iter().map(hint_segment_columns).sum();
-    cols + kept.len().saturating_sub(1) * HINT_SEPARATOR.len()
+/// One painted piece of the hint row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HintPiece {
+    /// Key chip plus label.
+    Hint(HintSegment),
+    /// Muted [`HINT_ELLIPSIS`] where hints were dropped.
+    More,
 }
 
-/// Longest prefix of `segments` that fits in `available` columns.
+fn piece_columns(piece: &HintPiece) -> usize {
+    match piece {
+        HintPiece::Hint(segment) => hint_segment_columns(segment),
+        HintPiece::More => HINT_ELLIPSIS.chars().count(),
+    }
+}
+
+fn pieces_width(pieces: &[HintPiece]) -> usize {
+    let cols: usize = pieces.iter().map(piece_columns).sum();
+    cols + pieces.len().saturating_sub(1) * HINT_SEPARATOR.len()
+}
+
+/// Fit `segments`, then `pinned`, into `available` columns.
 ///
-/// Over-long lists cut rather than wrap. A `…` chip marks truncation.
-pub fn fit_hint_segments(segments: &[HintSegment], available: usize) -> Vec<HintSegment> {
+/// Over-long lists cut rather than wrap. `segments` keep their longest
+/// prefix that fits, a muted `…` marks the cut, and `pinned` (`q quit`)
+/// paints after it, so the way out never truncates away.
+pub fn fit_hint_segments(
+    segments: &[HintSegment],
+    pinned: &[HintSegment],
+    available: usize,
+) -> Vec<HintPiece> {
+    let hints = |list: &[HintSegment]| -> Vec<HintPiece> {
+        list.iter().cloned().map(HintPiece::Hint).collect()
+    };
+    let all: Vec<HintPiece> = hints(segments).into_iter().chain(hints(pinned)).collect();
+    if pieces_width(&all) <= available {
+        return all;
+    }
+    let tail: Vec<HintPiece> = std::iter::once(HintPiece::More)
+        .chain(hints(pinned))
+        .collect();
+    if pieces_width(&tail) > available {
+        let pinned = hints(pinned);
+        return if pieces_width(&pinned) <= available {
+            pinned
+        } else {
+            Vec::new()
+        };
+    }
     let mut kept = Vec::new();
     for segment in segments {
         let mut next = kept.clone();
-        next.push(segment.clone());
-        if hints_width(&next) > available {
+        next.push(HintPiece::Hint(segment.clone()));
+        let with_tail: Vec<HintPiece> = next.iter().chain(tail.iter()).cloned().collect();
+        if pieces_width(&with_tail) > available {
             break;
         }
-        kept.push(segment.clone());
+        kept = next;
     }
-    if kept.len() == segments.len() {
-        return kept;
+    kept.extend(tail);
+    kept
+}
+
+/// Enter / Esc hints, each labelled by what the key does now.
+///
+/// `Enter drill` shows only when Enter opens the next depth
+/// ([`AppState::nav_enter_drills`]). Esc reads `clear` while a
+/// search is armed, `← <pane>` when it moves focus left, `↑ <depth>` when
+/// it pops a depth, and is absent when it does nothing.
+pub fn nav_chrome_hint_segments(state: &AppState) -> Vec<HintSegment> {
+    let mut out = Vec::new();
+    let compare = state.is_compare_tab();
+    if state.focus == FocusPane::Left {
+        if compare || !state.hidden_ignored_focus() {
+            out.push(hint("Enter", "focus right", false));
+        }
+    } else if state.nav_enter_drills() {
+        out.push(hint("Enter", "drill", false));
     }
-    let ellipsis = HintSegment {
-        key: HINT_ELLIPSIS.into(),
-        label: String::new(),
-        destructive: false,
-    };
-    while !kept.is_empty()
-        && hints_width(&[kept.as_slice(), &[ellipsis.clone()]].concat()) > available
-    {
-        kept.pop();
+    if let Some(label) = esc_hint_label(state) {
+        out.push(hint("Esc", &label, false));
     }
-    if kept.is_empty() {
-        Vec::new()
-    } else {
-        kept.push(ellipsis);
-        kept
+    out
+}
+
+/// What Esc does from here, or `None` when it does nothing.
+fn esc_hint_label(state: &AppState) -> Option<String> {
+    if state.search_active {
+        return Some("clear".into());
+    }
+    if state.focus == FocusPane::Right {
+        return Some(format!("← {}", state.left_pane_title()));
+    }
+    if state.is_compare_tab() {
+        return None;
+    }
+    match state.drill {
+        DrillView::Diff { .. } => Some("↑ files".into()),
+        DrillView::Files { .. } => Some("↑ graph".into()),
+        DrillView::Graph => None,
     }
 }
 
-/// Enter/Esc chrome hints (not registry actions).
-pub fn nav_chrome_hint_segments(depth: u8, focus: FocusPane) -> Vec<HintSegment> {
-    let mut out = Vec::new();
-    if focus == FocusPane::Left {
-        out.push(hint("Enter", "focus right", false));
-        if depth > 0 {
-            out.push(hint("Esc", "back", false));
-        }
-    } else {
-        if depth < 2 {
-            out.push(hint("Enter", "drill", false));
-        }
-        out.push(hint("Esc", "back", false));
+/// `n N  next / prev` chip while a search is armed. Esc comes from the nav hints.
+pub fn search_hint_segments(state: &AppState) -> Vec<HintSegment> {
+    if !state.search_is_armed() {
+        return Vec::new();
     }
-    out
+    vec![hint("n N", "next / prev", false)]
 }
 
 /// Extra chips. Appended after core hints so they truncate first.
@@ -617,8 +672,12 @@ pub fn extra_hint_segments() -> Vec<HintSegment> {
         hint(";", "comment", false),
         hint("y", "copy comments", false),
         hint("Tab", "other pane", false),
-        hint("q", "quit", false),
     ]
+}
+
+/// Chips that survive truncation, painted last ([`fit_hint_segments`]).
+pub fn pinned_hint_segments() -> Vec<HintSegment> {
+    vec![hint("q", "quit", false)]
 }
 
 /// Hints while `V` visual-line highlight is on a focused file diff.
@@ -627,7 +686,11 @@ pub fn extra_hint_segments() -> Vec<HintSegment> {
 /// highlighted lines may revert to the merge base: the same test as the
 /// palette row "Revert highlighted lines" (`highlight_revert_refusal`).
 pub fn visual_hint_segments(state: &AppState) -> Vec<HintSegment> {
-    let mut hints = vec![hint("j k", "extend range", false)];
+    // The way out first: a full row cuts the tail, not Esc.
+    let mut hints = vec![
+        hint("Esc", "cancel highlight", false),
+        hint("j k", "extend range", false),
+    ];
     if !state.is_compare_tab() {
         hints.push(hint("s u", "stage / unstage", false));
         hints.push(hint("x", "revert", true));
@@ -635,7 +698,6 @@ pub fn visual_hint_segments(state: &AppState) -> Vec<HintSegment> {
         hints.push(hint("x", "revert to merge base", true));
     }
     hints.push(hint(";", "comment range", false));
-    hints.push(hint("Esc", "cancel highlight", false));
     hints
 }
 
@@ -914,10 +976,8 @@ pub fn breadcrumb_segments(state: &AppState) -> Vec<String> {
     let mut seen_commit: Option<String> = None;
 
     if nav_depth(state) == 0 {
-        if !state.right_is_diff() {
-            if let Some(repo) = focused_repo_basename(state) {
-                out.push(repo);
-            }
+        if let Some(repo) = focused_repo_basename(state) {
+            out.push(repo);
         }
         return out;
     }
@@ -1142,6 +1202,33 @@ fn search_typing_line(state: &AppState, palette: Palette, filter: Pill) -> Line<
     ])
 }
 
+/// Diff pill text: the layout the diff paints in, `split→inline` when
+/// split is preferred but the pane is too narrow for it.
+pub fn diff_pill_label(preferred: DiffMode, painted: DiffMode) -> &'static str {
+    match (preferred, painted) {
+        (DiffMode::SideBySide, DiffMode::Inline) => "split→inline",
+        (_, DiffMode::Inline) => "inline",
+        (_, DiffMode::SideBySide) => "split",
+    }
+}
+
+/// Armed-search pill: `/query 3/7 · graph` (match position, count, and the
+/// pane `n` / `N` step). `-/7` when the cursor sits off a match.
+pub fn search_pill_label(state: &AppState) -> Option<String> {
+    if !state.search_is_armed() {
+        return None;
+    }
+    let query = state.search_query.trim();
+    let pane = state.search_target.title();
+    Some(match state.search_match_position() {
+        Some((pos, total)) => {
+            let pos = pos.map_or_else(|| "-".to_string(), |p| p.to_string());
+            format!("/{query} {pos}/{total} · {pane}")
+        }
+        None => format!("/{query} · {pane}"),
+    })
+}
+
 fn idle_status_line(
     state: &AppState,
     palette: Palette,
@@ -1155,42 +1242,19 @@ fn idle_status_line(
         state.tree_mode
     };
     let mode_label = if tree_mode { "tree" } else { "flat" };
-    let diff_label = match state.diff_mode {
-        DiffMode::Inline => "inline",
-        DiffMode::SideBySide => "split",
-    };
-    let search_query = if state.search_active {
-        state.search_query.trim().to_string()
-    } else {
-        String::new()
-    };
     let message = if z_pending(state) { "z…" } else { "? help" };
     let visual = state.diff_visual_anchor.is_some();
-    let mut used =
-        mode_label.len() + 2 + diff_label.len() + 2 + 1 + message.len() + HINT_SEPARATOR.len();
-    if visual {
-        used += "VISUAL".len() + 2;
-    }
-    if !search_query.is_empty() {
-        used += search_query.len() + 3;
-    }
-    let mut hints = if visual {
-        visual_hint_segments(state)
-    } else {
-        nav_chrome_hint_segments(nav_depth(state), state.focus)
-    };
-    if !visual {
-        hints.extend(action_hint_segments(state));
-        hints.extend(extra_hint_segments());
-    }
-    let fitted = fit_hint_segments(&hints, (width as usize).saturating_sub(used));
 
-    let mut spans = vec![
-        pill_span(mode_label, pills.mode),
-        pill_span(diff_label, pills.diff),
-    ];
-    if !search_query.is_empty() {
-        spans.push(pill_span(&format!("/{search_query}"), pills.filter));
+    let mut spans = vec![pill_span(mode_label, pills.mode)];
+    // The diff pill is the layout the open diff paints in; no diff, no pill.
+    if state.right_is_diff() {
+        spans.push(pill_span(
+            diff_pill_label(state.diff_mode, state.diff_layout()),
+            pills.diff,
+        ));
+    }
+    if let Some(label) = search_pill_label(state) {
+        spans.push(pill_span(&label, pills.filter));
     }
     if visual {
         spans.push(pill_span("VISUAL", pills.filter));
@@ -1199,12 +1263,45 @@ fn idle_status_line(
         format!(" {message}"),
         Style::default().fg(palette.file),
     ));
+    let used = spans
+        .iter()
+        .map(|span| visible_width(&span.content))
+        .sum::<usize>()
+        + HINT_SEPARATOR.len();
+
+    let hints = if visual {
+        visual_hint_segments(state)
+    } else {
+        // Search chips follow the row's actions: the pill already says a
+        // search is armed, so on a full row the actions keep their room.
+        let mut hints = nav_chrome_hint_segments(state);
+        hints.extend(action_hint_segments(state));
+        hints.extend(search_hint_segments(state));
+        hints.extend(extra_hint_segments());
+        hints
+    };
+    let fitted = fit_hint_segments(
+        &hints,
+        &pinned_hint_segments(),
+        (width as usize).saturating_sub(used),
+    );
+
     if !fitted.is_empty() {
         spans.push(Span::raw(HINT_SEPARATOR));
-        for (i, segment) in fitted.iter().enumerate() {
+        for (i, piece) in fitted.iter().enumerate() {
             if i > 0 {
                 spans.push(Span::raw(HINT_SEPARATOR));
             }
+            let segment = match piece {
+                HintPiece::Hint(segment) => segment,
+                HintPiece::More => {
+                    spans.push(Span::styled(
+                        HINT_ELLIPSIS,
+                        Style::default().fg(palette.muted),
+                    ));
+                    continue;
+                }
+            };
             let chip_bg = if segment.destructive {
                 palette.deleted
             } else {
@@ -1303,8 +1400,18 @@ mod tests {
         AppState::new(PathBuf::from("/tmp/workspace"), snapshot, true)
     }
 
+    fn piece_keys(pieces: &[HintPiece]) -> Vec<String> {
+        pieces
+            .iter()
+            .map(|piece| match piece {
+                HintPiece::Hint(segment) => segment.key.clone(),
+                HintPiece::More => HINT_ELLIPSIS.to_string(),
+            })
+            .collect()
+    }
+
     #[test]
-    fn fit_appends_ellipsis_instead_of_dropping_core_hints_for_extras() {
+    fn fit_cuts_extras_first_and_keeps_quit_after_a_muted_ellipsis() {
         let core = vec![
             hint_of("Enter", "focus right"),
             hint_of("s", "stage"),
@@ -1312,35 +1419,146 @@ mod tests {
         ];
         let mut all = core.clone();
         all.extend(extra_hint_segments());
-        let fitted = fit_hint_segments(&all, hints_width(&core) + 4);
-        let keys: Vec<&str> = fitted.iter().map(|s| s.key.as_str()).collect();
-        assert!(keys.contains(&"Enter"), "{keys:?}");
-        assert!(keys.contains(&"s"), "{keys:?}");
-        assert!(keys.contains(&HINT_ELLIPSIS), "{keys:?}");
-        assert!(
-            !keys.contains(&"q"),
-            "extras must truncate before core hints"
+        let pinned = pinned_hint_segments();
+        let core_pieces: Vec<HintPiece> = core.iter().cloned().map(HintPiece::Hint).collect();
+        let tail = [HintPiece::More, HintPiece::Hint(hint_of("q", "quit"))];
+        let width = pieces_width(&[core_pieces.as_slice(), &tail].concat());
+        let keys = piece_keys(&fit_hint_segments(&all, &pinned, width));
+        assert_eq!(keys, vec!["Enter", "s", "x", HINT_ELLIPSIS, "q"]);
+        // Everything fits: no ellipsis, quit last.
+        let keys = piece_keys(&fit_hint_segments(&all, &pinned, 400));
+        assert_eq!(keys.last().map(String::as_str), Some("q"));
+        assert!(!keys.contains(&HINT_ELLIPSIS.to_string()), "{keys:?}");
+        // Too narrow for anything but quit.
+        let keys = piece_keys(&fit_hint_segments(&all, &pinned, 9));
+        assert_eq!(keys, vec!["q"]);
+        assert!(fit_hint_segments(&all, &pinned, 8).is_empty());
+    }
+
+    #[test]
+    fn status_row_keeps_help_and_quit_at_140_and_80_cols() {
+        let mut app = state();
+        let idx = app
+            .rows
+            .iter()
+            .position(|row| row.kind == NodeKind::File)
+            .expect("file row");
+        app.cursor = idx;
+        for width in [140u16, 80] {
+            let line = status_line(&app, width);
+            let text = line_plain(&line);
+            assert!(text.contains("? help"), "{width}: {text}");
+            assert!(text.trim_end().ends_with(" q   quit"), "{width}: {text}");
+            assert!(visible_width(&text) <= width as usize, "{width}: {text}");
+            // The ellipsis is muted text, never a key chip.
+            for span in &line.spans {
+                if span.content.contains(HINT_ELLIPSIS) {
+                    assert_eq!(span.content.as_ref(), HINT_ELLIPSIS, "{width}");
+                    assert_eq!(span.style.bg, None, "{width}");
+                    assert_eq!(span.style.fg, Some(app.theme.palette().muted));
+                }
+            }
+        }
+        let narrow = line_plain(&status_line(&app, 80));
+        assert!(narrow.contains(HINT_ELLIPSIS), "{narrow}");
+    }
+
+    fn nav_keys(app: &AppState) -> Vec<(String, String)> {
+        nav_chrome_hint_segments(app)
+            .into_iter()
+            .map(|s| (s.key, s.label))
+            .collect()
+    }
+
+    fn pair(key: &str, label: &str) -> (String, String) {
+        (key.to_string(), label.to_string())
+    }
+
+    #[test]
+    fn nav_hints_say_what_enter_and_esc_do() {
+        let mut app = state();
+        let repo = app
+            .rows
+            .iter()
+            .position(|row| row.kind == NodeKind::Repo && row.repo.as_deref() == Some("app"))
+            .expect("app repo");
+        app.cursor = repo;
+        assert_eq!(nav_keys(&app), vec![pair("Enter", "focus right")]);
+        // Right-focused graph with no commit loaded: Enter cannot drill.
+        app.focus = FocusPane::Right;
+        assert_eq!(nav_keys(&app), vec![pair("Esc", "← tree")]);
+        // A depth-0 file diff never drills.
+        let file = app
+            .rows
+            .iter()
+            .position(|row| row.kind == NodeKind::File)
+            .expect("file row");
+        app.cursor = file;
+        assert!(app.right_is_diff());
+        assert_eq!(nav_keys(&app), vec![pair("Esc", "← tree")]);
+        // An armed search: Esc clears it first.
+        app.search_active = true;
+        app.search_query = "READ".into();
+        assert_eq!(nav_keys(&app), vec![pair("Esc", "clear")]);
+    }
+
+    #[test]
+    fn nav_hints_name_the_depth_esc_pops_to() {
+        use crate::tui::drill::{CommitFile, CommitFileSource, DrillView};
+        let mut app = state();
+        let files = vec![CommitFile {
+            status: "M".into(),
+            path: "src/a.rs".into(),
+            old_path: None,
+        }];
+        let source = CommitFileSource::Commit {
+            commit_id: "abc1234".into(),
+        };
+        app.drill = DrillView::Files {
+            repo: "app".into(),
+            source: source.clone(),
+            files: files.clone(),
+            cursor: 0,
+        };
+        app.focus = FocusPane::Left;
+        assert_eq!(
+            nav_keys(&app),
+            vec![pair("Enter", "focus right"), pair("Esc", "↑ graph")]
+        );
+        app.focus = FocusPane::Right;
+        // Cursor 0 is the `src` directory row: Enter folds, it does not drill.
+        assert_eq!(nav_keys(&app), vec![pair("Esc", "← graph")]);
+        if let DrillView::Files { cursor, .. } = &mut app.drill {
+            *cursor = 1;
+        }
+        assert_eq!(
+            nav_keys(&app),
+            vec![pair("Enter", "drill"), pair("Esc", "← graph")]
+        );
+        app.drill = DrillView::Diff {
+            repo: "app".into(),
+            source,
+            files,
+            file_cursor: 1,
+            path: "src/a.rs".into(),
+            content: Default::default(),
+        };
+        assert_eq!(nav_keys(&app), vec![pair("Esc", "← files")]);
+        app.focus = FocusPane::Left;
+        assert_eq!(
+            nav_keys(&app),
+            vec![pair("Enter", "focus right"), pair("Esc", "↑ files")]
         );
     }
 
     #[test]
-    fn nav_chrome_pills_and_hints() {
-        assert_eq!(
-            nav_chrome_hint_segments(0, FocusPane::Left),
-            vec![hint_of("Enter", "focus right")]
-        );
-        assert_eq!(
-            nav_chrome_hint_segments(0, FocusPane::Right),
-            vec![hint_of("Enter", "drill"), hint_of("Esc", "back")]
-        );
-        assert_eq!(
-            nav_chrome_hint_segments(2, FocusPane::Right),
-            vec![hint_of("Esc", "back")]
-        );
-        assert_eq!(
-            nav_chrome_hint_segments(1, FocusPane::Left),
-            vec![hint_of("Enter", "focus right"), hint_of("Esc", "back")]
-        );
+    fn compare_right_pane_shows_no_drill_hint() {
+        let mut app = state();
+        app.tabs.open_or_focus("app".into(), "main".into());
+        app.focus = FocusPane::Right;
+        assert_eq!(nav_keys(&app), vec![pair("Esc", "← files")]);
+        app.focus = FocusPane::Left;
+        assert_eq!(nav_keys(&app), vec![pair("Enter", "focus right")]);
     }
 
     #[test]
@@ -1444,13 +1662,9 @@ mod tests {
         let extras: Vec<String> = extra_hint_segments().into_iter().map(|s| s.key).collect();
         assert_eq!(
             extras,
-            vec![
-                ";".to_string(),
-                "y".to_string(),
-                "Tab".to_string(),
-                "q".to_string()
-            ]
+            vec![";".to_string(), "y".to_string(), "Tab".to_string()]
         );
+        assert_eq!(pinned_hint_segments(), vec![hint_of("q", "quit")]);
         let visual: Vec<String> = visual_hint_segments(&app)
             .into_iter()
             .map(|s| s.key)
@@ -1458,6 +1672,105 @@ mod tests {
         assert!(visual.contains(&"s u".into()), "{visual:?}");
         assert!(visual.contains(&"x".into()), "{visual:?}");
         assert!(visual.contains(&"j k".into()), "{visual:?}");
+    }
+
+    #[test]
+    fn diff_pill_shows_the_painted_layout_only_with_a_diff() {
+        assert_eq!(
+            diff_pill_label(DiffMode::SideBySide, DiffMode::SideBySide),
+            "split"
+        );
+        assert_eq!(
+            diff_pill_label(DiffMode::SideBySide, DiffMode::Inline),
+            "split→inline"
+        );
+        assert_eq!(
+            diff_pill_label(DiffMode::Inline, DiffMode::Inline),
+            "inline"
+        );
+        let mut app = state();
+        let repo = app
+            .rows
+            .iter()
+            .position(|row| row.kind == NodeKind::Repo && row.repo.as_deref() == Some("app"))
+            .expect("app repo");
+        app.cursor = repo;
+        let text = line_plain(&status_line(&app, 200));
+        assert!(
+            !text.contains("split") && !text.contains("inline"),
+            "{text}"
+        );
+        let file = app
+            .rows
+            .iter()
+            .position(|row| row.kind == NodeKind::File)
+            .expect("file row");
+        app.cursor = file;
+        app.layout.diff_pane_width = 80;
+        let text = line_plain(&status_line(&app, 200));
+        assert!(text.contains(" split→inline "), "{text}");
+        app.layout.diff_pane_width = 140;
+        let text = line_plain(&status_line(&app, 200));
+        assert!(text.contains(" split ") && !text.contains("→"), "{text}");
+        app.diff_mode = DiffMode::Inline;
+        let text = line_plain(&status_line(&app, 200));
+        assert!(text.contains(" inline "), "{text}");
+    }
+
+    #[test]
+    fn armed_search_shows_position_pane_and_step_chips() {
+        let mut app = state();
+        app.search_active = true;
+        app.search_query = "README".into();
+        app.search_target = crate::tui::search::SearchPane::Tree;
+        let first = app
+            .rows
+            .iter()
+            .position(|row| row.label.contains("README"))
+            .expect("README row");
+        app.cursor = first;
+        let label = search_pill_label(&app).expect("armed");
+        assert_eq!(label, "/README 1/1 · tree");
+        app.cursor = 0;
+        assert_eq!(
+            search_pill_label(&app).as_deref(),
+            Some("/README -/1 · tree")
+        );
+        let keys: Vec<(String, String)> = nav_chrome_hint_segments(&app)
+            .into_iter()
+            .chain(search_hint_segments(&app))
+            .map(|s| (s.key, s.label))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                pair("Enter", "focus right"),
+                pair("Esc", "clear"),
+                pair("n N", "next / prev"),
+            ]
+        );
+        let text = line_plain(&status_line(&app, 200));
+        assert!(text.contains("/README -/1 · tree"), "{text}");
+        app.search_active = false;
+        assert!(search_pill_label(&app).is_none());
+        assert!(search_hint_segments(&app).is_empty());
+    }
+
+    #[test]
+    fn breadcrumb_keeps_the_repo_on_a_file_row() {
+        let mut app = state();
+        let file = app
+            .rows
+            .iter()
+            .position(|row| row.kind == NodeKind::File)
+            .expect("file row");
+        app.cursor = file;
+        assert!(app.right_is_diff());
+        let repo = app.rows[file].repo.clone().expect("repo");
+        assert_eq!(
+            breadcrumb_segments(&app),
+            vec!["workspace".to_string(), repo]
+        );
     }
 
     #[test]

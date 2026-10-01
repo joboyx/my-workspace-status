@@ -173,6 +173,8 @@ impl AppState {
             | Action::Click { .. }
             | Action::Drag { .. }
             | Action::Release
+            | Action::BackClick
+            | Action::ResizeTree(_)
             | Action::ToggleDiffMode
             | Action::ToggleDiffWrap
             | Action::ToggleCommitMsgExpand

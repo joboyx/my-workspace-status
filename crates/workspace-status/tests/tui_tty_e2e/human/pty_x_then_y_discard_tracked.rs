@@ -158,7 +158,7 @@ fn documented_y_discarded_tracked_kept_untracked(screen: &str) -> bool {
         && !screen.contains("+dirty")
         && screen.contains("uncommitted changes")
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && status.contains("? help")
         && status.contains("focus right")
         && has_stage_hint(screen)

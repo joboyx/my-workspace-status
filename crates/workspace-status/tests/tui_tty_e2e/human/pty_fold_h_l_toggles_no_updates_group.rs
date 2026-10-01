@@ -26,9 +26,8 @@ fn fold_hl_no_wrong_chrome(screen: &str) -> bool {
     no_wrong_overlays(screen)
         && !screen.contains("z…")
         && !screen.contains("[workspace]")
-        && crumb_row(screen).trim() == "workspace"
+        && matches!(crumb_row(screen).trim(), "workspace" | "workspace › app")
         && status_row(screen).contains(" tree")
-        && status_row(screen).contains(" split")
         && status_row(screen).contains("focus right")
 }
 

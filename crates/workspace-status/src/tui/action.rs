@@ -68,6 +68,16 @@ pub enum Action {
         row: u16,
     },
     Release,
+    /// Right mouse button press: one step back, the same as Esc.
+    ///
+    /// Only Normal mode, pending chords, and visual-line highlight map it.
+    /// Overlays drop it. Ignored while mouse capture is off.
+    BackClick,
+    /// Move the tree / right split by this many 5% steps (`<` / `>`).
+    ///
+    /// Negative narrows the tree. Session-only, like a divider drag, and
+    /// clamped the same way.
+    ResizeTree(i32),
     ToggleDiffMode,
     /// Toggle soft word-wrap on file diffs (`\`).
     ///

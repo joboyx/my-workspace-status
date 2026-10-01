@@ -136,7 +136,7 @@ fn idle_focusbox_on_keep(screen: &str) -> bool {
         && has_default_branch_hint(screen)
         && has_fetch_hint(screen)
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && !crumb_row(screen).contains("Switched")
         && !crumb_row(screen).contains("no non-default")
         && not_files_search_or_stash(screen)
@@ -157,7 +157,7 @@ fn switched_checkout_paint(screen: &str) -> bool {
         && !has_default_branch_hint(screen)
         && has_fetch_hint(screen)
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && status.contains("focus right")
         && not_files_search_or_stash(screen)
         && no_wrong_d_overlays(screen)
@@ -185,7 +185,7 @@ fn documented_d_skips_dirty_keep(screen: &str) -> bool {
         && crumb_dirty_skip(screen)
         && has_default_branch_hint(screen)
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && no_wrong_d_overlays(screen)
 }
 

@@ -67,7 +67,7 @@ fn launch_tree_diff_chrome(screen: &str) -> bool {
         && screen.contains("app/README.md")
         && status_row(screen).contains("focus right")
         && !status_row(screen).contains("drill")
-        && crumb_row(screen).trim() == "workspace"
+        && crumb_row(screen).trim() == "workspace › app"
         && no_wrong_overlays(screen)
         && no_mouse_toggle_toast(screen)
 }

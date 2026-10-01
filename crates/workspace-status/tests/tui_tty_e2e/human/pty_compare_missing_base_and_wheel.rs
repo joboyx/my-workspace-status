@@ -112,7 +112,7 @@ fn compare_diff_pane_focused(screen: &str) -> bool {
         && (panes_tree_unfocused_diff_focused(screen)
             || status.contains("drill")
             || status.contains("Esc")
-            || status.contains("back"))
+            || status.contains("← files"))
 }
 
 fn right_cursor_line(screen: &str) -> Option<String> {

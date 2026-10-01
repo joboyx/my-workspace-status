@@ -379,6 +379,22 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
+        title: "Narrow tree",
+        keys: "<",
+        group: CommandGroup::View,
+        action: Action::ResizeTree(-1),
+        aliases: &["widen diff", "pane width", "resize", "shrink"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Widen tree",
+        keys: ">",
+        group: CommandGroup::View,
+        action: Action::ResizeTree(1),
+        aliases: &["narrow diff", "pane width", "resize", "grow"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
         title: "Wrap / unwrap",
         keys: "\\",
         group: CommandGroup::View,
@@ -905,6 +921,20 @@ mod tests {
                 "i",
                 CommandGroup::View,
                 Action::ToggleDiffMode,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Narrow tree",
+                "<",
+                CommandGroup::View,
+                Action::ResizeTree(-1),
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Widen tree",
+                ">",
+                CommandGroup::View,
+                Action::ResizeTree(1),
                 CommandScope::NoHighlight,
             ),
             (

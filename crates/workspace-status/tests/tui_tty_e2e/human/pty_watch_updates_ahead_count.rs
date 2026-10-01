@@ -55,7 +55,7 @@ fn idle_ahead_two(screen: &str) -> bool {
         && !screen.contains("SEARCH")
         && !screen.contains("MOVE")
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && crumb_row(screen).trim() == "workspace › syncbox"
         && screen.contains("? help")
 }

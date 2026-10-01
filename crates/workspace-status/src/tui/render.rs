@@ -48,8 +48,7 @@ use super::search::{
     wrap_col_starts, wrap_cols, SearchPane,
 };
 use super::split::{
-    diff_split_rule_x, effective_diff_mode, is_side_by_side_split, pane_widths,
-    side_by_side_column_widths, MIN_PANE_COLS,
+    diff_split_rule_x, pane_widths, side_by_side_column_widths, DiffMode, MIN_PANE_COLS,
 };
 use super::state::{revert_scope, AppState, CompareRevertTarget, FocusPane, PendingConfirm};
 use super::syntax::{
@@ -172,13 +171,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.diff_hscrollbar_x = 0;
     state.layout.diff_hscrollbar_width = 0;
     state.layout.diff_col_max = 0;
-    let left_name = if left_is_files {
-        "files"
-    } else if left_is_graph {
-        "graph"
-    } else {
-        "tree"
-    };
+    let left_name = state.left_pane_title();
     let palette = state.theme.palette();
     let title_style = Style::default().fg(palette.heading);
     let left_title = pane_title(left_name);
@@ -273,7 +266,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.diff_pane_height = right_inner.height;
     state.layout.diff_content_x = right_inner.x;
     state.layout.diff_split_rule_x =
-        if state.right_is_diff() && is_side_by_side_split(state.diff_mode, right_inner.width) {
+        if state.right_is_diff() && state.diff_layout() == DiffMode::SideBySide {
             let split = side_by_side_column_widths(right_inner.width, state.diff_split_fraction);
             Some(diff_split_rule_x(panes[0].width, split.left_width).saturating_sub(1))
         } else {
@@ -967,7 +960,10 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     state.drop_stale_diff_visual();
     let palette = state.theme.palette();
     let path = state.diff_header_path();
-    let effective = effective_diff_mode(state.diff_mode, area.width);
+    // One split decision for row build, header, and paint (`diff_pane_mode`
+    // reserves the scrollbar column whether or not the bar shows).
+    let effective = state.diff_layout();
+    let split = effective == DiffMode::SideBySide;
     let rows = state.current_diff_rows();
     if !rows.is_empty() {
         state.diff_cursor = state.diff_cursor.min(rows.len() - 1);
@@ -985,7 +981,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             &rows,
             diff_row_content_width(area.width as usize) as u16,
             gutter_with_mark,
-            is_side_by_side_split(state.diff_mode, area.width),
+            split,
             state.diff_split_fraction,
         );
         wrap_viewport_start(&heights, state.diff_cursor, line_h)
@@ -1059,7 +1055,6 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         );
         return;
     }
-    let split = is_side_by_side_split(state.diff_mode, area.width.saturating_sub(v_cols));
     let off = if wrap {
         0
     } else {
@@ -3501,6 +3496,48 @@ mod tests {
             format!(r#"+  "name": "{name}""#),
             " }".into(),
         ]
+    }
+
+    /// A 100-column right pane with the vertical bar showing paints 99
+    /// columns. Split needs 100, so rows are built and painted inline and
+    /// the added line still paints (it used to be built split and dropped).
+    #[test]
+    fn boundary_width_with_scrollbar_paints_added_lines() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let file = state
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::File)
+            .expect("file row");
+        state.cursor = file;
+        let mut unified = String::from("@@ -1,60 +1,60 @@\n");
+        for i in 0..60 {
+            if i == 35 {
+                unified.push_str("-old-line-gone\n+new-line-added\n");
+            } else {
+                unified.push_str(&format!(" ctx{i}\n"));
+            }
+        }
+        state.set_diff(
+            "app".into(),
+            "README.md".into(),
+            super::super::diff::DiffContent::from_unified(unified),
+        );
+        state.focus = FocusPane::Right;
+        state.diff_cursor = 40;
+        let mut terminal = Terminal::new(TestBackend::new(170, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_eq!(state.layout.diff_pane_width, 100);
+        assert!(state.diff_scroll > 0, "the vertical bar shows");
+        assert_eq!(state.diff_layout(), DiffMode::Inline);
+        let text = buffer_text(&terminal);
+        assert!(text.contains("inline (too narrow)"), "{text}");
+        assert!(text.contains("new-line-added"), "{text}");
+        assert!(text.contains("old-line-gone"), "{text}");
+        let status = text.lines().last().unwrap_or_default();
+        assert!(status.contains("split→inline"), "{status}");
     }
 
     fn json_syntax_diff_state() -> AppState {

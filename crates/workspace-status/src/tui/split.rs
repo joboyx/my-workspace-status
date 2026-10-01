@@ -15,8 +15,15 @@ pub const MIN_PANE_COLS: u16 = 20;
 /// Right-pane horizontal padding (one column each side).
 pub const DIFF_PAD_X: u16 = 2;
 
-/// Below this right-pane content width, side-by-side falls back to inline.
+/// Below this painted diff width ([`diff_paint_width`]), side-by-side falls back to inline.
 pub const NARROW_SXS: u16 = 100;
+
+/// Right-pane columns a file diff keeps for its vertical scrollbar when it
+/// picks split or inline, whether or not the bar shows.
+pub const DIFF_VSCROLL_COLS: u16 = 1;
+
+/// Tree / right split step for `<` / `>` (fraction of the terminal width).
+pub const TREE_FRACTION_STEP: f64 = 0.05;
 
 /// Minimum width of either side-by-side column when the pane is wide enough.
 pub const MIN_DIFF_COL: u16 = 16;
@@ -183,17 +190,21 @@ pub fn tree_fraction_from_col(term_cols: u16, col: u16) -> f64 {
 /// Clamp a tree-width fraction so both panes stay ≥ [`MIN_PANE_COLS`].
 pub fn clamp_tree_fraction(term_cols: u16, fraction: f64) -> f64 {
     let cols = term_cols.max(1);
+    tree_fraction_from_width(cols, fraction_cols(cols, fraction))
+}
+
+/// Whole columns for `fraction` of `cols`. The epsilon keeps a width that
+/// went through [`tree_fraction_from_width`] on the same column (`w / c * c`
+/// can land a hair under `w` in floating point).
+fn fraction_cols(cols: u16, fraction: f64) -> u16 {
     let raw = finite_or(fraction, TREE_WIDTH_FRACTION);
-    let desired = (f64::from(cols) * raw).floor().max(0.0) as u16;
-    tree_fraction_from_width(cols, desired)
+    (f64::from(cols) * raw + 1e-9).floor().max(0.0) as u16
 }
 
 /// Outer tree width, inner content width, and right-pane content width.
 pub fn pane_widths(term_cols: u16, fraction: f64) -> PaneWidths {
     let cols = term_cols.max(1);
-    let raw = finite_or(fraction, TREE_WIDTH_FRACTION);
-    let desired = (f64::from(cols) * raw).floor().max(0.0) as u16;
-    let tree_width = clamp_tree_width(cols, desired);
+    let tree_width = clamp_tree_width(cols, fraction_cols(cols, fraction));
     let tree_inner_width = tree_width.saturating_sub(3).max(8);
     let diff_width = cols
         .saturating_sub(tree_width)
@@ -218,6 +229,32 @@ pub fn effective_diff_mode(mode: DiffMode, pane_width: u16) -> DiffMode {
     } else {
         DiffMode::Inline
     }
+}
+
+/// Widest row a file diff paints in a `pane_width`-column right pane: the
+/// pane less [`DIFF_VSCROLL_COLS`]. The split / inline choice reads this.
+pub fn diff_paint_width(pane_width: u16) -> u16 {
+    pane_width.saturating_sub(DIFF_VSCROLL_COLS).max(1)
+}
+
+/// Layout a file diff in a `pane_width`-column right pane uses.
+///
+/// The one split decision. Row build, the header label, the status pill,
+/// and paint all read it, so rows built split are never painted inline.
+pub fn diff_pane_mode(mode: DiffMode, pane_width: u16) -> DiffMode {
+    effective_diff_mode(mode, diff_paint_width(pane_width))
+}
+
+/// Tree fraction after `steps` keyboard steps of [`TREE_FRACTION_STEP`].
+///
+/// Moves the outer tree width by whole columns from its current width, so
+/// a step never rounds back to the same column, then clamps like a drag.
+pub fn step_tree_fraction(term_cols: u16, fraction: f64, steps: i32) -> f64 {
+    let cols = term_cols.max(1);
+    let current = pane_widths(cols, fraction).tree_width;
+    let step = (f64::from(cols) * TREE_FRACTION_STEP).round().max(1.0) as i32;
+    let target = (i32::from(current) + steps * step).clamp(0, i32::from(u16::MAX)) as u16;
+    tree_fraction_from_width(cols, target)
 }
 
 /// 1-based terminal column of the first right-pane content cell.
@@ -629,6 +666,60 @@ mod tests {
             effective_diff_mode(DiffMode::SideBySide, NARROW_SXS),
             DiffMode::SideBySide
         );
+    }
+
+    #[test]
+    fn diff_pane_mode_reserves_the_scrollbar_column() {
+        // A 100-column pane paints 99 columns once the bar is reserved.
+        assert_eq!(diff_paint_width(NARROW_SXS), NARROW_SXS - 1);
+        assert_eq!(
+            diff_pane_mode(DiffMode::SideBySide, NARROW_SXS),
+            DiffMode::Inline
+        );
+        assert_eq!(
+            diff_pane_mode(DiffMode::SideBySide, NARROW_SXS + DIFF_VSCROLL_COLS),
+            DiffMode::SideBySide
+        );
+        assert_eq!(diff_pane_mode(DiffMode::Inline, 200), DiffMode::Inline);
+    }
+
+    #[test]
+    fn step_tree_fraction_moves_five_percent_and_clamps() {
+        let cols = 140;
+        let start = pane_widths(cols, TREE_WIDTH_FRACTION).tree_width;
+        assert_eq!(start, 56);
+        let wider = step_tree_fraction(cols, TREE_WIDTH_FRACTION, 1);
+        assert_eq!(pane_widths(cols, wider).tree_width, 63);
+        let narrower = step_tree_fraction(cols, TREE_WIDTH_FRACTION, -1);
+        assert_eq!(pane_widths(cols, narrower).tree_width, 49);
+        // Every column count round-trips, so a step never stalls.
+        for cols in [80u16, 99, 140, 157, 200] {
+            let mut fraction = TREE_WIDTH_FRACTION;
+            for _ in 0..40 {
+                fraction = step_tree_fraction(cols, fraction, 1);
+            }
+            let widths = pane_widths(cols, fraction);
+            assert_eq!(widths.tree_width, cols - MIN_PANE_COLS - DIFF_PAD_X);
+            assert!(widths.diff_width >= MIN_PANE_COLS);
+            for _ in 0..40 {
+                fraction = step_tree_fraction(cols, fraction, -1);
+            }
+            assert_eq!(pane_widths(cols, fraction).tree_width, MIN_PANE_COLS);
+        }
+    }
+
+    #[test]
+    fn tree_width_round_trips_for_every_column() {
+        for cols in 1u16..400 {
+            for width in MIN_PANE_COLS..cols.saturating_sub(MIN_PANE_COLS + DIFF_PAD_X) {
+                let fraction = tree_fraction_from_width(cols, width);
+                assert_eq!(
+                    pane_widths(cols, fraction).tree_width,
+                    width,
+                    "{cols} {width}"
+                );
+            }
+        }
     }
 
     fn wide_layout(rule: Option<u16>) -> SplitLayout {

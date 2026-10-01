@@ -90,7 +90,7 @@ fn documented_graph_stash_pop(screen: &str) -> bool {
         && !status.contains("drop stash")
         && status.contains("drill")
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && no_wrong_stash_pop_overlays(screen)
 }
 

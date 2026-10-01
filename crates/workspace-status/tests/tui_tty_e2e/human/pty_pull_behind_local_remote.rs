@@ -73,7 +73,7 @@ fn idle_behind_syncbox(screen: &str) -> bool {
         && has_fetch_hint(screen)
         && has_pull_hint(screen)
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && crumb_row(screen).trim() == "workspace › syncbox"
         && no_wrong_pull_overlays(screen)
 }
@@ -98,7 +98,7 @@ fn documented_p_pulled(screen: &str) -> bool {
         && has_fetch_hint(screen)
         && !has_pull_hint(screen)
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && !screen.contains("Fetched")
         && !screen.contains("Pushed")
         && no_wrong_pull_overlays(screen)

@@ -133,6 +133,18 @@ impl AppState {
                     self.finish_text_selection()
                 }
             }
+            Action::BackClick => {
+                if !self.mouse_enabled {
+                    return Effect::None;
+                }
+                self.cancel_mouse_drag();
+                if self.diff_visual_anchor.is_some() {
+                    self.dispatch(Action::DiffVisualCancel)
+                } else {
+                    self.dispatch(Action::NavEsc)
+                }
+            }
+            Action::ResizeTree(steps) => self.step_tree_width(steps),
             Action::ToggleDiffMode => self.toggle_diff_mode(),
             Action::ToggleDiffWrap => self.toggle_diff_wrap(),
             Action::ToggleCommitMsgExpand => self.toggle_commit_msg_expand(),
@@ -159,6 +171,7 @@ impl AppState {
                     self.search_query.clear();
                     self.search_hit = None;
                     self.search_target = self.current_search_pane();
+                    self.save_search_origin();
                     self.status = "/".into();
                     Effect::None
                 }
@@ -194,6 +207,7 @@ impl AppState {
                     Effect::None
                 } else {
                     self.search_mode = false;
+                    self.search_origin = None;
                     if self.search_query.trim().is_empty() {
                         self.search_active = false;
                         self.search_query.clear();
@@ -212,12 +226,14 @@ impl AppState {
                     self.status = "help search cleared".into();
                     Effect::None
                 } else {
+                    // Typing moved the cursor match by match: put it back.
                     self.search_mode = false;
                     self.search_active = false;
                     self.search_query.clear();
                     self.search_hit = None;
+                    let effect = self.restore_search_origin();
                     self.status = "search cancelled".into();
-                    Effect::None
+                    effect
                 }
             }
             Action::SearchNext | Action::SearchPrev => {
@@ -495,10 +511,8 @@ impl AppState {
         self.command_palette = None;
         if action == Action::FoldToggleSubtree {
             // Fold subtree is `zz`: toggle this row, then match its
-            // descendants. Both fold actions return `Effect::None`. Drop the
-            // `z` chord the toggle armed so the next key `z` is a new toggle.
+            // descendants. Both fold actions return `Effect::None`.
             self.dispatch(Action::FoldToggle);
-            self.z_pending_at = None;
         }
         self.dispatch(action)
     }

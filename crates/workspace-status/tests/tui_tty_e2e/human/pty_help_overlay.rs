@@ -44,6 +44,7 @@ const HELP_GIT_ROWS: &[(&str, &str)] = &[
 
 const HELP_VIEW_ROWS: &[(&str, &str)] = &[
     ("i \\ M", "inline / split · wrap · msg"),
+    ("< >", "narrow / widen the tree pane"),
     ("t", "flat / tree · Staged split"),
     (".", "show / hide ignored repos"),
     ("T", "cycle theme"),
@@ -52,11 +53,11 @@ const HELP_VIEW_ROWS: &[(&str, &str)] = &[
     ("PgUp PgDn", "page focused pane"),
     ("Ctrl-u Ctrl-d", "page focused ±5"),
     ("m", "mouse on/off (graph commit: merge)"),
-    (";", "comment row / line (Ctrl-r resolves inside the box)"),
+    (";", "comment row/line · Ctrl-r resolves in box"),
     ("V", "highlight diff lines for ; / s / u / x / :"),
     ("y", "copy comments as markdown"),
     ("'", "copy entity reference"),
-    ("Esc", "back / unfocus · never quit"),
+    ("Esc rclick", "back / unfocus · never quit"),
     ("Enter dblclick", "focus right / drill"),
     ("? Ctrl-k :", "help · command palette"),
     ("Tab", "other pane"),

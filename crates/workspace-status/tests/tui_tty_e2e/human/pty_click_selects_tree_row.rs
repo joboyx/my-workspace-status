@@ -34,7 +34,7 @@ fn click_selects_merger_row(screen: &str) -> bool {
         && crumb_row(screen).contains("workspace › merger")
         && status_row(screen).contains("focus right")
         && status_row(screen).contains(" tree")
-        && status_row(screen).contains(" split")
+        && !status_row(screen).contains(" split")
         && no_wrong_overlays(screen)
         && no_mouse_toggle_toast(screen)
 }

@@ -59,7 +59,7 @@ fn graph_focused_diverged_before_merge(screen: &str) -> bool {
         && !crumb.contains("Fast-forwarded")
         && status.contains("drill")
         && status.contains("Esc")
-        && status.contains("back")
+        && (status.contains("← tree") || status.contains("Esc   clear"))
         && !screen.contains("Merge branch")
         && no_merge_confirm(screen)
         && no_wrong_merge_overlays(screen)
@@ -122,7 +122,7 @@ fn documented_graph_merge_commit(screen: &str) -> bool {
         && !title_has_files(screen)
         && status.contains("drill")
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
 }
 
 /// Graph `m` merges the focused commit into HEAD.

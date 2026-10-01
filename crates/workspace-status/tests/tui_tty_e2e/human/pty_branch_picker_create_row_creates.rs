@@ -101,7 +101,7 @@ fn documented_picker_create_checkout(screen: &str) -> bool {
         && (screen.contains("working tree clean") || screen.contains("Working tree clean"))
         && status.contains("focus right")
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && !status.contains("create branch")
         && no_wrong_create_overlays(screen)
 }

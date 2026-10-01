@@ -49,7 +49,7 @@ fn long_graph_clipped_graph_focus(screen: &str) -> bool {
         && crumb.contains("workspace › [longsubj]")
         && status.contains("drill")
         && status.contains("Esc")
-        && status.contains("back")
+        && (status.contains("← tree") || status.contains("Esc   clear"))
         && !status.contains("focus right")
 }
 
@@ -73,7 +73,7 @@ fn documented_hl_panned_graph(screen: &str) -> bool {
         && crumb.contains("workspace › [longsubj]")
         && status.contains("drill")
         && status.contains("Esc")
-        && status.contains("back")
+        && (status.contains("← tree") || status.contains("Esc   clear"))
         && !status.contains("focus right")
         && no_wrong_overlays(screen)
 }

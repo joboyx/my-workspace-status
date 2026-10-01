@@ -47,7 +47,7 @@ fn file_diff_focused(screen: &str) -> bool {
         && !tree_cursor_on(screen, "README.md")
         && screen.contains("NEW")
         && screen.contains(NEEDLE)
-        && screen.contains("[workspace]")
+        && screen.contains("workspace › [app]")
         && !comment_overlay(screen)
 }
 

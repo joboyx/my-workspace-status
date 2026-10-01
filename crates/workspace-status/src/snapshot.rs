@@ -84,7 +84,9 @@ pub struct RepoSnapshot {
     pub default_branch_override: Option<String>,
     /// Cached `origin/<default>` then `<default>` tip. Palette only; omitted from `--json`.
     pub default_tip_ref: Option<String>,
-    /// Local `refs/heads` names. TUI comment GC. Omitted from `--json`.
+    /// Local `refs/heads` names. TUI comment GC, and the graph checkout
+    /// picker's taken-name check (its create row never offers a name that
+    /// exists). Omitted from `--json`.
     pub local_branches: Vec<String>,
 }
 
@@ -110,7 +112,8 @@ pub struct WorkspaceRepoSnapshot {
     /// Cached `origin/<default>` then `<default>` tip. Palette only; omitted from `--json`.
     #[serde(skip)]
     pub default_tip_ref: Option<String>,
-    /// Local `refs/heads` names. TUI comment GC. Omitted from `--json`.
+    /// Local `refs/heads` names. TUI comment GC, and the graph checkout
+    /// picker's taken-name check. Omitted from `--json`.
     #[serde(skip)]
     pub local_branches: Vec<String>,
     pub has_unstaged: bool,

@@ -43,7 +43,7 @@ fn right_diff_focused(screen: &str) -> bool {
     tree_has(screen, "README.md")
         && !tree_cursor_on(screen, "README.md")
         && pane_unstaged_readme(screen)
-        && screen.contains("[workspace]")
+        && screen.contains("workspace › [app]")
         && !comment_overlay(screen)
 }
 

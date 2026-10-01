@@ -68,14 +68,17 @@ use super::ops::{
     push_targets, refresh_target, Op, RevertScope, RunningOp, ScopedFile,
 };
 use super::search::{
-    focus_commit_file_search, focus_diff_search, focus_graph_search, focus_tree_search, SearchPane,
+    collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids,
+    focus_commit_file_search, focus_diff_search, focus_graph_search, focus_tree_search,
+    match_diff_line_indices, SearchPane,
 };
 use super::selection::TextSelection;
 use super::split::{
-    clamp_tree_fraction, diff_col_from_col, diff_col_from_delta, diff_split_fraction_from_col,
-    effective_diff_mode, graph_col_from_col, graph_col_from_delta, graph_scroll_from_delta,
-    graph_scroll_from_row, hit_split, is_side_by_side_split, tree_fraction_from_col, DiffMode,
-    SplitDrag, SplitHit, SplitLayout, DIFF_SPLIT_FRACTION, TREE_WIDTH_FRACTION,
+    clamp_tree_fraction, diff_col_from_col, diff_col_from_delta, diff_paint_width, diff_pane_mode,
+    diff_split_fraction_from_col, graph_col_from_col, graph_col_from_delta,
+    graph_scroll_from_delta, graph_scroll_from_row, hit_split, pane_widths, step_tree_fraction,
+    tree_fraction_from_col, DiffMode, SplitDrag, SplitHit, SplitLayout, DIFF_SPLIT_FRACTION,
+    NARROW_SXS, TREE_WIDTH_FRACTION,
 };
 use super::stash::{
     checkout_path, resolve_stash_menu_key, row_is_hidden_ignored, stash_dirty_for_row,
@@ -113,6 +116,9 @@ pub(crate) const BUSY_WRITE_RUNNING: &str = "busy: a git write is running";
 
 /// `n` / `N` with no armed search.
 pub(crate) const NO_SEARCH_ARMED: &str = "no search — press / first";
+
+/// `n` / `N` stepped past the last (or first) match and started over.
+pub(crate) const SEARCH_WRAPPED: &str = "search wrapped";
 
 /// `z` where nothing folds (graph list, file diff).
 pub(crate) const Z_FOLDS_TREE_ROWS: &str = "z folds tree rows";
@@ -260,6 +266,21 @@ fn hit_tab_box(hits: &[(u16, u16, usize)], tab_y: u16, col: u16, row: u16) -> Op
     hits.iter()
         .find(|(x, width, _)| col >= *x && col < x.saturating_add(*width))
         .map(|(_, _, index)| *index)
+}
+
+/// Cursor, scroll, and folds saved when `/` opens. Esc while typing
+/// restores the bound pane from it, so an incremental search that moved
+/// the cursor leaves no trace.
+#[derive(Clone, Debug)]
+struct SearchOrigin {
+    tree_row: Option<String>,
+    folds: HashSet<String>,
+    graph_cursor: usize,
+    graph_scroll: u16,
+    commit_file_cursor: usize,
+    commit_file_folds: HashSet<String>,
+    diff_cursor: usize,
+    diff_scroll: u16,
 }
 
 /// Workspace chrome parked while a compare tab is active.
@@ -490,6 +511,8 @@ pub struct AppState {
     pub search_target: SearchPane,
     /// Current matching diff line, when the bound pane is a diff.
     pub search_hit: Option<usize>,
+    /// Where the bound pane stood when `/` opened. Cleared on Enter / Esc.
+    search_origin: Option<SearchOrigin>,
     pub diff_col_offset: u16,
     /// Horizontal pan of the left list (workspace tree or drill graph/files).
     pub left_col_offset: u16,
@@ -627,6 +650,7 @@ impl AppState {
             search_query: String::new(),
             search_target: SearchPane::Tree,
             search_hit: None,
+            search_origin: None,
             diff_col_offset: 0,
             left_col_offset: 0,
             right_col_offset: 0,
@@ -2208,7 +2232,7 @@ impl AppState {
         let pane_w = self.layout.diff_pane_width.saturating_sub(v_cols).max(1);
         let content_w = diff_row_content_width(pane_w as usize) as u16;
         let gutter = gutter_width(&rows).saturating_add(comment_mark_cols(self.ascii));
-        let split = is_side_by_side_split(self.diff_mode, pane_w);
+        let split = self.diff_layout() == DiffMode::SideBySide;
         diff_wrap_row_heights(&rows, content_w, gutter, split, self.diff_split_fraction)
     }
 
@@ -2402,11 +2426,33 @@ impl AppState {
             DiffMode::SideBySide => DiffMode::Inline,
             DiffMode::Inline => DiffMode::SideBySide,
         };
-        self.status = match self.diff_mode {
-            DiffMode::SideBySide => "Diff: split".into(),
-            DiffMode::Inline => "Diff: inline".into(),
-        };
+        self.status = self.diff_mode_status().into();
         self.drop_stale_diff_visual();
+        Effect::None
+    }
+
+    /// Status after `i`: the preferred mode, or what split needs when the
+    /// right pane is too narrow to paint it.
+    fn diff_mode_status(&self) -> String {
+        match (self.diff_mode, self.diff_layout()) {
+            (DiffMode::SideBySide, DiffMode::Inline) => format!(
+                "split needs a ≥{NARROW_SXS}-col diff pane (now {}) — widen it with < or drag",
+                diff_paint_width(self.layout.diff_pane_width)
+            ),
+            (DiffMode::SideBySide, DiffMode::SideBySide) => "Diff: split".into(),
+            (DiffMode::Inline, _) => "Diff: inline".into(),
+        }
+    }
+
+    /// Move the tree / right split by `steps` of 5% (`<` / `>`). Session-only, like a drag.
+    fn step_tree_width(&mut self, steps: i32) -> Effect {
+        let cols = self.layout.term_cols.max(1);
+        let before = pane_widths(cols, self.tree_fraction).tree_width;
+        self.tree_fraction = step_tree_fraction(cols, self.tree_fraction, steps);
+        if pane_widths(cols, self.tree_fraction).tree_width == before {
+            let edge = if steps < 0 { "narrowest" } else { "widest" };
+            self.status = StatusMessage::warn(format!("tree pane is at its {edge}"));
+        }
         Effect::None
     }
 
@@ -2796,8 +2842,14 @@ impl AppState {
 
     /// Numbered rows for the current layout (inline vs split).
     pub fn current_diff_rows(&self) -> Vec<DiffRow> {
-        let mode = effective_diff_mode(self.diff_mode, self.layout.diff_pane_width);
-        build_diff_rows(self.current_diff_content(), mode)
+        build_diff_rows(self.current_diff_content(), self.diff_layout())
+    }
+
+    /// Layout the file diff paints in: [`diff_pane_mode`] of the preferred
+    /// mode and the last painted right-pane width. Row build, header,
+    /// status pill, and paint all read this one decision.
+    pub fn diff_layout(&self) -> DiffMode {
+        diff_pane_mode(self.diff_mode, self.layout.diff_pane_width)
     }
 
     fn set_search_status(&mut self, hit: bool) {
@@ -2812,6 +2864,115 @@ impl AppState {
     }
 
     fn apply_search(&mut self, dir: i32) -> Effect {
+        let before = if dir == 0 {
+            None
+        } else {
+            self.search_match_position().and_then(|(pos, _)| pos)
+        };
+        let effect = self.apply_search_step(dir);
+        let after = before.and_then(|_| self.search_match_position().and_then(|(pos, _)| pos));
+        if let (Some(before), Some(after)) = (before, after) {
+            if (dir > 0 && after <= before) || (dir < 0 && after >= before) {
+                self.status = StatusMessage::info(SEARCH_WRAPPED);
+            }
+        }
+        effect
+    }
+
+    /// 1-based match position of the bound pane's cursor (`None` when the
+    /// cursor is off a match) and the match count, for the `/q 3/7` pill.
+    ///
+    /// `None` with no query. Reads the same "current" each pane's `n` / `N`
+    /// steps from: tree row, graph cursor, commit file, diff search hit.
+    pub fn search_match_position(&self) -> Option<(Option<usize>, usize)> {
+        let query = self.search_query.trim();
+        if query.is_empty() {
+            return None;
+        }
+        let (current, hits): (Option<usize>, Vec<usize>) = match self.search_target {
+            SearchPane::Tree => {
+                let ids = collect_match_ids(&self.tree, query);
+                let current = self.focused_row().map(|row| row.id.as_str());
+                let pos = current.and_then(|id| ids.iter().position(|hit| hit == id));
+                return Some((pos.map(|p| p + 1), ids.len()));
+            }
+            SearchPane::Graph => {
+                let rows = self.graph.as_ref()?.visible_rows();
+                (
+                    Some(self.graph_cursor),
+                    collect_graph_match_indices(&rows, query),
+                )
+            }
+            SearchPane::CommitFiles => {
+                let files = self.commit_drill_files()?;
+                let current = self
+                    .focused_commit_file_row()
+                    .and_then(|row| files.iter().position(|file| file.path == row.path));
+                (current, collect_commit_file_match_indices(files, query))
+            }
+            SearchPane::Diff => {
+                let texts: Vec<String> = self
+                    .current_diff_rows()
+                    .iter()
+                    .map(row_search_text)
+                    .collect();
+                (self.search_hit, match_diff_line_indices(&texts, query))
+            }
+        };
+        let pos = current.and_then(|cur| hits.iter().position(|hit| *hit == cur));
+        Some((pos.map(|p| p + 1), hits.len()))
+    }
+
+    /// Save the bound pane's cursor, scroll, and folds as `/` opens.
+    fn save_search_origin(&mut self) {
+        self.search_origin = Some(SearchOrigin {
+            tree_row: self.focused_row().map(|row| row.id.clone()),
+            folds: self.folds.clone(),
+            graph_cursor: self.graph_cursor,
+            graph_scroll: self.graph_scroll,
+            commit_file_cursor: self.commit_files_cursor(),
+            commit_file_folds: self.commit_file_folds.clone(),
+            diff_cursor: self.diff_cursor,
+            diff_scroll: self.diff_scroll,
+        });
+    }
+
+    /// Put the bound pane back where `/` found it (Esc while typing).
+    pub(crate) fn restore_search_origin(&mut self) -> Effect {
+        let Some(origin) = self.search_origin.take() else {
+            return Effect::None;
+        };
+        match self.search_target {
+            SearchPane::Tree => {
+                self.folds = origin.folds;
+                self.rebuild_rows();
+                if let Some(idx) = origin
+                    .tree_row
+                    .and_then(|id| self.rows.iter().position(|row| row.id == id))
+                {
+                    self.cursor = idx;
+                }
+                Effect::LoadRightPane
+            }
+            SearchPane::Graph => {
+                self.graph_cursor = origin.graph_cursor;
+                self.graph_scroll = origin.graph_scroll;
+                self.follow_graph_files()
+            }
+            SearchPane::CommitFiles => {
+                self.commit_file_folds = origin.commit_file_folds;
+                self.set_commit_file_cursor(origin.commit_file_cursor);
+                self.maybe_load_focused_commit_diff()
+            }
+            SearchPane::Diff => {
+                self.diff_cursor = origin.diff_cursor;
+                self.diff_scroll = origin.diff_scroll;
+                Effect::None
+            }
+        }
+    }
+
+    fn apply_search_step(&mut self, dir: i32) -> Effect {
         match self.search_target {
             SearchPane::Tree => {
                 self.apply_tree_search(dir);
@@ -3102,10 +3263,9 @@ impl AppState {
             };
             (repo, path, kind)
         };
-        let mode = effective_diff_mode(self.diff_mode, self.layout.diff_pane_width);
         let patch = build_partial_patch(
             self.current_diff_content(),
-            mode,
+            self.diff_layout(),
             anchor,
             self.diff_cursor,
             kind,
@@ -4538,7 +4698,8 @@ impl AppState {
             .is_some_and(|row| row.has_unstaged || row.has_staged)
     }
 
-    fn hidden_ignored_focus(&self) -> bool {
+    /// True when the focused tree row belongs to an ignored repo that `.` hides.
+    pub(crate) fn hidden_ignored_focus(&self) -> bool {
         self.focused_row()
             .is_some_and(|row| row_is_hidden_ignored(row, self.show_ignored))
     }
@@ -4726,6 +4887,42 @@ impl AppState {
         }
     }
 
+    /// True when Enter on the right pane opens the next depth: a graph
+    /// commit or stash opens its files, a commit-file row opens its diff.
+    ///
+    /// Same checks as [`Self::nav_enter`] without the status copy. The
+    /// `Enter drill` hint shows only when this holds.
+    pub(crate) fn nav_enter_drills(&self) -> bool {
+        if self.is_compare_tab() || self.focus != FocusPane::Right || self.hidden_ignored_focus() {
+            return false;
+        }
+        match &self.drill {
+            DrillView::Graph => {
+                self.focused_graph_repo().is_some()
+                    && self
+                        .focused_graph_row()
+                        .is_some_and(|row| source_from_graph_row(&row).is_some())
+            }
+            DrillView::Files { cursor, .. } => self
+                .commit_file_rows()
+                .get(*cursor)
+                .is_some_and(|row| !row.is_dir()),
+            DrillView::Diff { .. } => false,
+        }
+    }
+
+    /// Title of the left pane: `tree`, `graph` (commit-files drill), or
+    /// `files` (commit diff drill and compare tabs).
+    pub fn left_pane_title(&self) -> &'static str {
+        if self.drill.is_diff() || self.is_compare_tab() {
+            "files"
+        } else if self.drill.is_files() {
+            "graph"
+        } else {
+            "tree"
+        }
+    }
+
     fn nav_enter(&mut self) -> Effect {
         if self.is_compare_tab() {
             if self.focus == FocusPane::Left {
@@ -4812,12 +5009,10 @@ impl AppState {
                     files,
                     cursor,
                 };
-                self.status = "files".into();
                 Effect::DropCommitDiff
             }
             DrillView::Files { .. } => {
                 self.drill = DrillView::Graph;
-                self.status = "graph".into();
                 Effect::LoadRightPane
             }
             DrillView::Graph => Effect::None,
@@ -5612,7 +5807,9 @@ mod tests {
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
     use crate::testutil::init_repo;
-    use crate::tui::split::{pane_widths, side_by_side_column_widths, DIFF_SPLIT_FRACTION};
+    use crate::tui::split::{
+        pane_widths, side_by_side_column_widths, DIFF_SPLIT_FRACTION, MIN_PANE_COLS,
+    };
     use crate::tui::status::StatusKind;
     use crate::tui::watch::watch_interval_ms;
     use workspace_status_graph::{Commit, GraphModel, GraphRef, Stash};
@@ -11280,6 +11477,160 @@ mod tests {
         assert_eq!(app.diff_mode, DiffMode::Inline);
         app.dispatch(Action::ToggleDiffMode);
         assert_eq!(app.diff_mode, DiffMode::SideBySide);
+    }
+
+    #[test]
+    fn i_says_what_width_split_needs_when_the_pane_is_too_narrow() {
+        let mut app = state();
+        app.layout.diff_pane_width = 82;
+        app.diff_mode = DiffMode::Inline;
+        app.dispatch(Action::ToggleDiffMode);
+        assert_eq!(app.diff_mode, DiffMode::SideBySide);
+        assert_eq!(
+            app.status,
+            "split needs a ≥100-col diff pane (now 81) — widen it with < or drag"
+        );
+        app.dispatch(Action::ToggleDiffMode);
+        assert_eq!(app.status, "Diff: inline");
+        app.layout.diff_pane_width = 120;
+        app.dispatch(Action::ToggleDiffMode);
+        assert_eq!(app.status, "Diff: split");
+    }
+
+    #[test]
+    fn angle_brackets_move_the_tree_split_by_five_percent_and_clamp() {
+        let mut app = state();
+        app.layout.term_cols = 140;
+        let width = |app: &AppState| pane_widths(140, app.tree_fraction).tree_width;
+        assert_eq!(width(&app), 56);
+        assert_eq!(app.dispatch(Action::ResizeTree(1)), Effect::None);
+        assert_eq!(width(&app), 63);
+        app.dispatch(Action::ResizeTree(-1));
+        app.dispatch(Action::ResizeTree(-1));
+        assert_eq!(width(&app), 49);
+        for _ in 0..20 {
+            app.dispatch(Action::ResizeTree(-1));
+        }
+        assert_eq!(width(&app), MIN_PANE_COLS);
+        assert_eq!(app.status, "tree pane is at its narrowest");
+        for _ in 0..30 {
+            app.dispatch(Action::ResizeTree(1));
+        }
+        assert_eq!(
+            pane_widths(140, app.tree_fraction).diff_width,
+            MIN_PANE_COLS
+        );
+        assert_eq!(app.status, "tree pane is at its widest");
+    }
+
+    #[test]
+    fn right_click_steps_back_like_esc_and_respects_mouse_off() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        app.focus = FocusPane::Right;
+        app.dispatch(Action::BackClick);
+        assert_eq!(app.focus, FocusPane::Left);
+        app.focus = FocusPane::Right;
+        app.mouse_enabled = false;
+        app.dispatch(Action::BackClick);
+        assert_eq!(app.focus, FocusPane::Right, "mouse off ignores it");
+        app.mouse_enabled = true;
+        app.search_active = true;
+        app.search_query = "app".into();
+        app.dispatch(Action::BackClick);
+        assert!(!app.search_active, "an armed search clears first, like Esc");
+        assert_eq!(app.focus, FocusPane::Right);
+    }
+
+    fn needle_diff(app: &mut AppState) {
+        focus_file(app, "README.md");
+        let mut unified = String::from("@@ -1,9 +1,9 @@\n");
+        for i in 0..9 {
+            if i % 3 == 1 {
+                unified.push_str(&format!(" needle {i}\n"));
+            } else {
+                unified.push_str(&format!(" hay {i}\n"));
+            }
+        }
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            DiffContent::from_unified(unified),
+        );
+        app.focus = FocusPane::Right;
+    }
+
+    #[test]
+    fn diff_search_counts_matches_and_says_when_it_wraps() {
+        let mut app = state();
+        needle_diff(&mut app);
+        app.dispatch(Action::SearchStart);
+        for c in "needle".chars() {
+            app.dispatch(Action::SearchChar(c));
+        }
+        app.dispatch(Action::SearchSubmit);
+        assert_eq!(app.search_match_position(), Some((Some(1), 3)));
+        app.dispatch(Action::SearchNext);
+        assert_eq!(app.search_match_position(), Some((Some(2), 3)));
+        assert!(app.status.is_empty(), "{}", &*app.status);
+        app.dispatch(Action::SearchNext);
+        app.dispatch(Action::SearchNext);
+        assert_eq!(app.search_match_position(), Some((Some(1), 3)));
+        assert_eq!(app.status, SEARCH_WRAPPED);
+        assert_eq!(app.status.kind(), StatusKind::Info);
+        app.dispatch(Action::SearchPrev);
+        assert_eq!(app.search_match_position(), Some((Some(3), 3)));
+        assert_eq!(app.status, SEARCH_WRAPPED);
+    }
+
+    #[test]
+    fn esc_while_typing_puts_the_diff_cursor_back() {
+        let mut app = state();
+        needle_diff(&mut app);
+        app.diff_cursor = 0;
+        app.dispatch(Action::SearchStart);
+        for c in "needle".chars() {
+            app.dispatch(Action::SearchChar(c));
+        }
+        assert_ne!(app.diff_cursor, 0, "typing jumps to the first match");
+        app.dispatch(Action::SearchCancel);
+        assert_eq!(app.diff_cursor, 0);
+        assert!(!app.search_active && !app.search_mode);
+    }
+
+    #[test]
+    fn esc_while_typing_puts_the_tree_cursor_and_folds_back() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        let row = app.focused_row().map(|r| r.id.clone());
+        let folds = app.folds.clone();
+        app.dispatch(Action::SearchStart);
+        for c in "lib".chars() {
+            app.dispatch(Action::SearchChar(c));
+        }
+        assert_ne!(app.focused_row().map(|r| r.id.clone()), row);
+        assert_eq!(app.dispatch(Action::SearchCancel), Effect::LoadRightPane);
+        assert_eq!(app.focused_row().map(|r| r.id.clone()), row);
+        assert_eq!(app.folds, folds);
+    }
+
+    #[test]
+    fn esc_up_a_depth_leaves_no_toast() {
+        let mut app = graph_state(false);
+        install_graph_commit(&mut app, &["main"]);
+        app.drill = DrillView::Files {
+            repo: "app".into(),
+            source: CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            files: Vec::new(),
+            cursor: 0,
+        };
+        app.focus = FocusPane::Left;
+        app.status.clear();
+        assert_eq!(app.dispatch(Action::NavEsc), Effect::LoadRightPane);
+        assert!(app.drill.is_graph());
+        assert!(app.status.is_empty(), "{}", &*app.status);
     }
 
     #[test]

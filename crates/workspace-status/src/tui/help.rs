@@ -152,6 +152,10 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "inline / split · wrap · msg",
             },
             HelpEntry {
+                keys: "< >",
+                desc: "narrow / widen the tree pane",
+            },
+            HelpEntry {
                 keys: "t",
                 desc: "flat / tree · Staged split",
             },
@@ -185,7 +189,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: ";",
-                desc: "comment row / line (Ctrl-r resolves inside the box)",
+                desc: "comment row/line · Ctrl-r resolves in box",
             },
             HelpEntry {
                 keys: "V",
@@ -200,7 +204,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "copy entity reference",
             },
             HelpEntry {
-                keys: "Esc",
+                keys: "Esc rclick",
                 desc: "back / unfocus · never quit",
             },
             HelpEntry {
@@ -804,7 +808,8 @@ mod tests {
         assert!(view_keys.contains(&"y"));
         assert!(view_keys.contains(&"'"));
         assert!(!view_keys.contains(&"y '"));
-        assert!(view_keys.contains(&"Esc"));
+        assert!(view_keys.contains(&"Esc rclick"));
+        assert!(view_keys.contains(&"< >"));
         assert_eq!(
             HELP_GROUPS[2]
                 .entries

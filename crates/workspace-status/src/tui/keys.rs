@@ -813,6 +813,8 @@ fn normal_key(
         KeyCode::Char('O') => Action::GraphFocusClear,
         KeyCode::Char('W') => Action::RemoveWorktree,
         KeyCode::Char('i') => Action::ToggleDiffMode,
+        KeyCode::Char('<') => Action::ResizeTree(-1),
+        KeyCode::Char('>') => Action::ResizeTree(1),
         KeyCode::Char('\\') => Action::ToggleDiffWrap,
         KeyCode::Char('M') => Action::ToggleCommitMsgExpand,
         KeyCode::Char('m') => Action::ToggleMouse,
@@ -882,6 +884,7 @@ fn mouse_to_action(mouse: MouseEvent) -> Action {
             row: mouse.row,
         },
         MouseEventKind::Up(MouseButton::Left) => Action::Release,
+        MouseEventKind::Down(MouseButton::Right) => Action::BackClick,
         MouseEventKind::Moved => Action::PointerMove {
             col: mouse.column,
             row: mouse.row,
@@ -943,6 +946,58 @@ mod tests {
             event_to_action(&Event::Resize(60, 18), InputMode::Confirm, true, true),
             Action::Resize { cols: 60, rows: 18 }
         );
+    }
+
+    #[test]
+    fn angle_brackets_resize_the_tree_in_normal_mode_only() {
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('<')), normal(), false, false),
+            Action::ResizeTree(-1)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('>')), normal(), true, true),
+            Action::ResizeTree(1)
+        );
+        assert_eq!(
+            event_to_action(
+                &key(KeyCode::Char('>')),
+                InputMode::SearchPrompt,
+                false,
+                false
+            ),
+            Action::SearchChar('>')
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('<')), InputMode::Help, false, false),
+            Action::None
+        );
+    }
+
+    #[test]
+    fn right_click_is_back_outside_overlays() {
+        let right = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(
+            event_to_action(&right, normal(), false, true),
+            Action::BackClick
+        );
+        assert_eq!(
+            event_to_action(&right, InputMode::DiffVisual, true, true),
+            Action::BackClick
+        );
+        for mode in [
+            InputMode::Help,
+            InputMode::Confirm,
+            InputMode::BranchPicker,
+            InputMode::CommandPalette,
+            InputMode::SearchPrompt,
+        ] {
+            assert_eq!(event_to_action(&right, mode, false, true), Action::None);
+        }
     }
 
     #[test]

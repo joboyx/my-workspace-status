@@ -21,7 +21,7 @@ fn idle_tree_before_ctrl_c(screen: &str) -> bool {
         && status.contains(" tree")
         && status.contains("? help")
         && status.contains("focus right")
-        && crumb.trim() == "workspace"
+        && crumb.trim() == "workspace › app"
         && !crumb.contains("Ctrl-c")
         && !status.contains(CTRL_C_EXIT_PROMPT)
         && !screen.contains(CTRL_C_EXIT_PROMPT)
@@ -37,7 +37,7 @@ fn first_ctrl_c_pinned_prompt(screen: &str) -> bool {
     let prompt = screen_line_from_end(screen, 1);
     let crumb = screen_line_from_end(screen, 2);
     prompt.trim() == CTRL_C_EXIT_PROMPT
-        && crumb.trim() == "workspace"
+        && crumb.trim() == "workspace › app"
         && !crumb.contains("Ctrl-c")
         && status.contains(" tree")
         && status.contains("? help")

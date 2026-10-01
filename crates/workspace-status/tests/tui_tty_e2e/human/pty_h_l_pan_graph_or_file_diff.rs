@@ -2,7 +2,7 @@ use crate::common::hscroll::DIFF_HSCROLL_TAIL;
 use crate::harness::{left_tree, PtySession};
 use crate::seed::{daily_workspace, seed_long_diff_file};
 use crate::support::{
-    crumb_row, launch_breadcrumb_workspace_only, no_updates_group_folded, no_wrong_overlays,
+    crumb_row, launch_breadcrumb_workspace_app, no_updates_group_folded, no_wrong_overlays,
     panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused, right_pane, status_row,
     title_has_files, tree_cursor_on, tree_dir_expanded, tree_has, SETTLE_MS, WAIT,
 };
@@ -78,20 +78,20 @@ fn panned_new_diff(screen: &str) -> bool {
 
 fn idle_chrome_left(screen: &str) -> bool {
     let status = status_row(screen);
-    launch_breadcrumb_workspace_only(screen)
+    launch_breadcrumb_workspace_app(screen)
         && status.contains("focus right")
         && !status.contains("drill")
-        && !status.contains("Esc")
+        && !status.contains("← tree")
         && no_wrong_overlays(screen)
 }
 
 fn idle_chrome_right(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);
-    crumb.trim() == "[workspace]"
-        && status.contains("drill")
+    crumb.trim() == "workspace › [app]"
+        && !status.contains("drill")
         && status.contains("Esc")
-        && status.contains("back")
+        && (status.contains("← tree") || status.contains("Esc   clear"))
         && !status.contains("focus right")
         && no_wrong_overlays(screen)
 }

@@ -64,7 +64,7 @@ fn right_diff_focused(screen: &str) -> bool {
         && !tree_cursor_on(screen, "README.md")
         && pane_unstaged_readme(screen)
         && panes_tree_unfocused_diff_focused(screen)
-        && screen.contains("[workspace]")
+        && screen.contains("workspace › [app]")
         && !comment_overlay(screen)
         && !screen.contains("VISUAL")
 }
@@ -82,7 +82,7 @@ fn right_diff_focused_allow_visual(screen: &str) -> bool {
         && !tree_cursor_on(screen, "README.md")
         && pane_unstaged_readme(screen)
         && panes_tree_unfocused_diff_focused(screen)
-        && screen.contains("[workspace]")
+        && screen.contains("workspace › [app]")
         && !comment_overlay(screen)
 }
 

@@ -169,7 +169,7 @@ fn documented_tree_picker_enter_checkout(screen: &str) -> bool {
         && has_fetch_hint(screen)
         && status.contains("focus right")
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && !status.contains("create branch")
         && no_wrong_picker_overlays(screen)
 }
@@ -186,7 +186,7 @@ fn idle_focusbox_picker_closed(screen: &str) -> bool {
         && !crumb_row(screen).contains("Checked out")
         && !crumb_row(screen).contains("created ")
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && status.contains("branch")
         && has_fetch_hint(screen)
         && no_wrong_picker_overlays(screen)

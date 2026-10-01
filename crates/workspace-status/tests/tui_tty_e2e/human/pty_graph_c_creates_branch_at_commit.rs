@@ -66,7 +66,7 @@ fn graph_focused_diverged_before_create(screen: &str) -> bool {
         && !crumb.contains(&format!("created {BRANCH}"))
         && status.contains("drill")
         && status.contains("Esc")
-        && status.contains("back")
+        && (status.contains("← tree") || status.contains("Esc   clear"))
         && overlay_at_hash(screen).is_none()
         && !screen.contains("Create branch")
         && !screen.contains("Enter create")
@@ -131,7 +131,7 @@ fn documented_graph_create_branch_at(screen: &str, overlay_hash: &str) -> bool {
         && tree_has(screen, "focusbox")
         && status.contains("drill")
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && status.contains("create branch")
         && no_wrong_create_overlays(screen)
 }

@@ -38,7 +38,6 @@ fn chevron_no_wrong_chrome(screen: &str) -> bool {
         && !screen.contains("wip.txt")
         && !screen.contains("WIP on graph")
         && status_row(screen).contains(" tree")
-        && status_row(screen).contains(" split")
         && status_row(screen).contains("focus right")
         && status_row(screen).contains("other pane")
 }
@@ -107,7 +106,7 @@ fn chevron_folds_app_repo(screen: &str) -> bool {
         && !crumb.contains("[app]")
         && status.contains("focus right")
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && no_wrong_overlays(screen)
         && no_mouse_toggle_toast(screen)
         && !screen.contains("[workspace]")

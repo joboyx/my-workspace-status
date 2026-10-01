@@ -42,7 +42,7 @@ fn idle_unfetched_workspace(screen: &str) -> bool {
         && has_fetch_hint(screen)
         && !has_pull_hint(screen)
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && crumb_row(screen).trim() == "workspace"
         && no_wrong_fetch_overlays(screen)
 }
@@ -62,7 +62,7 @@ fn documented_workspace_fetch_behind(screen: &str) -> bool {
         && has_fetch_hint(screen)
         && has_pull_hint(screen)
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && !screen.contains("Pulled")
         && !screen.contains("Pushed")
         && no_wrong_fetch_overlays(screen)
@@ -85,7 +85,7 @@ fn documented_fetch_graph_behind(screen: &str) -> bool {
         && has_fetch_hint(screen)
         && has_pull_hint(screen)
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && !screen.contains("Pulled")
         && !screen.contains("Pushed")
         && no_wrong_fetch_overlays(screen)
