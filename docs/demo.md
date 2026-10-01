@@ -8,9 +8,9 @@ Refresh the README/demo GIFs from the repo root:
 
 That script seeds, installs MesloLGS NF and ffmpeg if needed, starts Xvfb and Openbox through `scripts/with-desktop-session.sh`, and types the hardcoded keys below. ffmpeg `x11grab` records only the terminal window at 10 fps. The script then encodes each clip to `docs/images/NN-name.gif` (`palettegen` / `paletteuse`, loops forever, no downscale). Do not invent a fixture or a second capture pipeline.
 
-Each clip also writes PNG stills from the same recording to `docs/images/stills/`: `NN-name.png` is the last frame, and `NN-name-mid.png` is the frame where the clip calls `mark_mid` (the **Mid still** line below). Stills are lossless-optimized when `optipng` is installed.
+Each clip also takes full-colour PNG stills from the same recording (not from the GIF palette): `NN-name.png` is the last frame, and `NN-name-mid.png` is the middle of the settled hold after the step where the clip calls `mark_mid` (the **Mid still** line below). The mid offset subtracts ffmpeg's start-up delay. Stills are lossless-optimized when `optipng` is installed.
 
-The script rejects a clip and keeps the old GIF and stills when the last or mid frame is gray or too small, when no frame differs from the first (the keys did nothing), or when a GIF is over 4 MB.
+The script rejects a clip and keeps the old GIF when the last or mid frame is gray or too small, when no frame differs from the first (the keys did nothing), or when a GIF is over 4 MB. A rejected clip stops the run. Stills go to `tmp/demo-stills-stage/stills` first and replace `docs/images/stills/` as one set only when every clip passes.
 
 The script runs Xvfb on `:99`. Set `WS_STATUS_STILLS_DISPLAY` to another number when `:99` is busy. It stops only the `xfce4-terminal` it started on that display.
 

@@ -54,7 +54,7 @@ This is the glance I wanted instead. Left pane is the workspace tree (repos, wor
 
 ![Revert confirm](docs/images/11-confirm.gif)
 
-**Blocked keys** — a key that cannot run here says why (`focus the tree (Tab) to stage`, `no match`).
+**Blocked keys** — a key that cannot run here says why (`focus the tree (Tab) to stage`).
 
 ![Blocked key](docs/images/12-blocked-key.gif)
 
