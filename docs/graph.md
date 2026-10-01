@@ -106,13 +106,16 @@ other strings):
 - spacer: `…`, then `connector · not selectable`
 - stash: subject, then `stash@{n} ·` short hash `·` relative date (no
   author). Expanded: wrap subject plus body (usually empty), then meta
-- commit: subject, then ref chips `·` hash `·` author `·` date, or
-  `(no refs)` when there are no chips. Expanded: wrap subject plus body,
+- commit: subject, then ref chips (or `(no refs)` when there are no
+  chips) `·` hash `·` parents `·` author `·` date. Parents use short ids
+  in git order: `parent <id>` for one, `parents <id> <id>` for a merge
+  (first parent first), `root commit` for none. A parent outside the
+  loaded window still shows its id. Expanded: wrap subject plus body,
   then the same meta line
 
 Footer paint reuses the commit-spacer chip runs (`LabelKind`: HEAD /
 default / local / remote / tag). `GraphWidget::label_palette` colours
-those the same as the row chips. Hash, date, and author stay `meta`.
+those the same as the row chips. Hash, parents, date, and author stay `meta`.
 Do not flatten the footer to one colour.
 
 Then one gutter plus label per visible row. Commit and stash rows also

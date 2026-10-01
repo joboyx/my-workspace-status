@@ -73,6 +73,7 @@ mod pty_graph_comment_indicator;
 mod pty_graph_drill_enter_esc;
 mod pty_graph_drill_esc_walk_commit_files_diff;
 mod pty_graph_focus_unmark_enter_clears;
+mod pty_graph_footer_shows_commit_parents;
 mod pty_graph_h_l_pans_long_subject;
 mod pty_graph_hscrollbar_thumb_drag;
 mod pty_graph_merge_creates_commit;

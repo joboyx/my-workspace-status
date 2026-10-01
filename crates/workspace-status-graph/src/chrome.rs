@@ -26,6 +26,9 @@ pub const FOOTER_CONNECTOR_NOT_SELECTABLE: &str = "connector · not selectable";
 /// Commit footer when the commit has no ref chips.
 pub const FOOTER_NO_REFS: &str = "(no refs)";
 
+/// Commit footer parents group when the commit has no parents.
+pub const FOOTER_ROOT_COMMIT: &str = "root commit";
+
 /// Spacer footer subject.
 pub const FOOTER_SPACER_SUBJECT: &str = "…";
 
@@ -142,7 +145,8 @@ pub fn selection_detail_lines(
 
 /// Styled selection-footer runs. Chip kinds match the commit spacer so
 /// [`crate::GraphWidget::label_palette`] can reuse row colours (HEAD /
-/// default / local / remote / tag). Hash, date, and author stay [`LabelKind::Meta`].
+/// default / local / remote / tag). Hash, parents, date, and author stay
+/// [`LabelKind::Meta`]. Commit meta order: chips · hash · parents · author · date.
 pub fn selection_detail_parts(
     model: &GraphModel,
     selection: GraphFooterSelection<'_>,
@@ -222,6 +226,7 @@ pub fn selection_detail_parts(
                 groups.push(chips);
             }
             groups.push(vec![meta_part(short_id(&commit.id).to_string())]);
+            groups.push(vec![meta_part(parents_text(&commit.parents))]);
             if !commit.author_name.is_empty() {
                 groups.push(vec![meta_part(commit.author_name.clone())]);
             }
@@ -327,6 +332,17 @@ fn subject_parts(text: &str, width: usize) -> Vec<LabelPart> {
 
 fn meta_parts(text: &str, width: usize) -> Vec<LabelPart> {
     trunc_label_parts(&[meta_part(text.to_string())], width)
+}
+
+/// Commit footer parents group: `parent <id>`, `parents <id> <id> …`
+/// (git parent order), or [`FOOTER_ROOT_COMMIT`].
+fn parents_text(parents: &[String]) -> String {
+    let ids = parents.iter().map(|id| short_id(id)).collect::<Vec<_>>();
+    match ids.as_slice() {
+        [] => FOOTER_ROOT_COMMIT.to_string(),
+        [one] => format!("parent {one}"),
+        _ => format!("parents {}", ids.join(" ")),
+    }
 }
 
 fn meta_part(text: String) -> LabelPart {
@@ -584,6 +600,106 @@ mod tests {
         assert!(meta.contains("abcdefg"), "{meta}");
         assert!(meta.contains("Ada"), "{meta}");
         assert!(meta.contains("2m") || meta.contains("just now"), "{meta}");
+    }
+
+    /// Meta line of a focused commit with `parents`, collapsed and expanded.
+    fn commit_meta_with_parents(parents: &[&str]) -> (String, String) {
+        let commit = Commit {
+            id: "abcdefghhhh".into(),
+            subject: "subject".into(),
+            body: "body".into(),
+            parents: parents.iter().map(|p| p.to_string()).collect(),
+            author_name: "Ada".into(),
+            author_date_unix: 1_700_000_000 - 120,
+            ..Commit::default()
+        };
+        let model = GraphModel {
+            commits: vec![commit.clone()],
+            uncommitted: Some(false),
+            ..GraphModel::default()
+        };
+        let row = GraphRow::Commit {
+            commit,
+            is_head: false,
+            worktrees: Vec::new(),
+        };
+        let lines = |expand| {
+            selection_footer_lines(
+                &model,
+                GraphFooterSelection::Row(&row),
+                &UNICODE,
+                120,
+                1_700_000_000,
+                expand,
+            )
+        };
+        let collapsed = lines(false);
+        let expanded = lines(true);
+        assert_eq!(collapsed.len(), 2, "{collapsed:?}");
+        assert!(expanded.len() > 2, "{expanded:?}");
+        (
+            collapsed.last().unwrap().clone(),
+            expanded.last().unwrap().clone(),
+        )
+    }
+
+    #[test]
+    fn footer_commit_shows_one_parent_after_hash() {
+        let (collapsed, expanded) =
+            commit_meta_with_parents(&["1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
+        assert_eq!(collapsed, "(no refs) · abcdefg · parent 1111111 · Ada · 2m");
+        assert_eq!(expanded, collapsed, "expanded footer keeps the same meta");
+    }
+
+    #[test]
+    fn footer_merge_commit_lists_parents_in_git_order() {
+        let (collapsed, expanded) = commit_meta_with_parents(&[
+            "2222222aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "1111111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "3333333ccccccccccccccccccccccccccccccccc",
+        ]);
+        assert_eq!(
+            collapsed, "(no refs) · abcdefg · parents 2222222 1111111 3333333 · Ada · 2m",
+            "first parent first, every parent listed"
+        );
+        assert_eq!(expanded, collapsed, "expanded footer keeps the same meta");
+    }
+
+    #[test]
+    fn footer_root_commit_shows_root_marker() {
+        let (collapsed, expanded) = commit_meta_with_parents(&[]);
+        assert_eq!(
+            collapsed,
+            format!("(no refs) · abcdefg · {FOOTER_ROOT_COMMIT} · Ada · 2m")
+        );
+        assert_eq!(expanded, collapsed, "expanded footer keeps the same meta");
+    }
+
+    #[test]
+    fn footer_parents_group_is_meta_kind() {
+        let commit = Commit {
+            id: "abcdefghhhh".into(),
+            subject: "merge".into(),
+            parents: vec!["2222222aaaa".into(), "1111111bbbb".into()],
+            ..Commit::default()
+        };
+        let model = GraphModel {
+            commits: vec![commit.clone()],
+            ..GraphModel::default()
+        };
+        let row = GraphRow::Commit {
+            commit,
+            is_head: false,
+            worktrees: Vec::new(),
+        };
+        let [_, meta] =
+            selection_detail_parts(&model, GraphFooterSelection::Row(&row), &UNICODE, 80, 0);
+        let group = meta
+            .iter()
+            .find(|p| p.text.starts_with("parents "))
+            .unwrap_or_else(|| panic!("parents group: {meta:?}"));
+        assert_eq!(group.text, "parents 2222222 1111111");
+        assert_eq!(group.kind, LabelKind::Meta);
     }
 
     #[test]
