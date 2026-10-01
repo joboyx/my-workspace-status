@@ -4355,10 +4355,10 @@ impl AppState {
                 }
             };
         }
-        // No branch matches and no create row: say why (a bad new name
-        // hides the create row).
+        // No branch matches and no create row: say why (a bad or existing
+        // name hides the create row).
         let query = picker.filter.trim();
-        self.status = StatusMessage::warn(match branch_name_error(query) {
+        self.status = StatusMessage::warn(match picker.create_refusal() {
             _ if query.is_empty() => "no matching branches".to_string(),
             Some(reason) if picker.creates => format!("no branch matches {query} · {reason}"),
             _ => format!("no branch matches {query}"),
@@ -4445,10 +4445,21 @@ impl AppState {
         if names.len() == 1 {
             return self.checkout_or_confirm(repo, names[0].clone());
         }
+        // Every local branch, not only those on this commit, so the create
+        // row never offers a name that exists elsewhere. Snapshot data: no
+        // git on the loop thread.
+        let taken = self
+            .snapshot
+            .repos
+            .iter()
+            .find(|row| row.repo == repo)
+            .map(|row| row.local_branches.clone())
+            .unwrap_or_default();
         self.branch_picker = Some(BranchPickerState::from_names(
             repo,
             names,
             Some(commit.id.clone()),
+            taken,
         ));
         self.status.clear();
         Effect::None
@@ -5948,20 +5959,20 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Right);
         assert!(app.in_commit_drill());
         for (action, why) in [
-            (Action::Stage, "focus the tree (Esc) to stage"),
-            (Action::Unstage, "focus the tree (Esc) to unstage"),
-            (Action::Revert, "focus the tree (Esc) to revert"),
-            (Action::Fetch, "focus the tree (Esc) to fetch"),
-            (Action::Pull, "focus the tree (Esc) to pull"),
-            (Action::Push, "focus the tree (Esc) to push"),
+            (Action::Stage, "Esc back to the tree to stage"),
+            (Action::Unstage, "Esc back to the tree to unstage"),
+            (Action::Revert, "Esc back to the tree to revert"),
+            (Action::Fetch, "Esc back to the tree to fetch"),
+            (Action::Pull, "Esc back to the tree to pull"),
+            (Action::Push, "Esc back to the tree to push"),
             (
                 Action::DefaultBranch,
-                "focus the tree (Esc) to switch to the default branch",
+                "Esc back to the tree to switch to the default branch",
             ),
-            (Action::Branch, "focus the tree (Esc) to pick a branch"),
+            (Action::Branch, "Esc back to the tree to pick a branch"),
             (
                 Action::RemoveWorktree,
-                "focus the tree (Esc) to remove a worktree",
+                "Esc back to the tree to remove a worktree",
             ),
             (Action::StashMenu, "focus the left pane (Tab) to stash"),
         ] {
@@ -9645,6 +9656,29 @@ mod tests {
             app.dispatch(Action::BranchSubmit),
             Effect::CheckoutBranch { selected_name, .. } if selected_name == "main"
         ));
+    }
+
+    #[test]
+    fn graph_checkout_picker_hides_create_for_a_local_branch_on_another_commit() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        for repo in app.snapshot.repos.iter_mut().filter(|r| r.repo == "app") {
+            repo.local_branches = vec!["main".into(), "topic".into(), "elsewhere".into()];
+        }
+        install_graph_commit(&mut app, &["topic", "main"]);
+        app.dispatch(Action::GraphCheckout);
+        for c in "elsewhere".chars() {
+            app.dispatch(Action::BranchChar(c));
+        }
+        let picker = app.branch_picker.as_ref().expect("picker");
+        assert_eq!(picker.create_name(), None);
+        assert_eq!(picker.row_count(), 0);
+        assert_eq!(app.dispatch(Action::BranchSubmit), Effect::None);
+        assert!(app.branch_picker.is_some(), "nothing to run keeps it open");
+        assert_eq!(
+            app.status,
+            "no branch matches elsewhere · branch elsewhere already exists"
+        );
     }
 
     #[test]
@@ -14172,6 +14206,28 @@ diff --git a/README.md b/README.md
         assert_eq!(app.focus, FocusPane::Left, "Tab goes back from the right");
         palette_select(&mut app, "Quit");
         assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::Quit);
+    }
+
+    #[test]
+    fn palette_fold_subtree_folds_an_open_parent_and_its_children_like_zz() {
+        let mut app = tree_app();
+        focus_id(&mut app, "repo:app");
+        assert!(!app.folds.contains("repo:app"));
+        palette_select(&mut app, "Fold subtree");
+        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
+        assert!(app.command_palette.is_none());
+        assert!(app.folds.contains("repo:app"), "the focused parent folds");
+        assert!(app.folds.contains("dir:app:src"), "its children fold too");
+        assert!(
+            app.z_pending_at.is_none(),
+            "no `z` chord stays armed after the palette run"
+        );
+
+        palette_select(&mut app, "Fold subtree");
+        app.dispatch(Action::CommandPaletteSubmit);
+        assert!(!app.folds.contains("repo:app"), "a second run opens it");
+        assert!(!app.folds.contains("dir:app:src"));
+        assert!(app.rows.iter().any(|r| r.id == "file:app:src/lib.rs"));
     }
 
     #[test]

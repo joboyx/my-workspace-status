@@ -47,9 +47,9 @@ const BRANCH_NAME_BAD_CHARS: &[char] = &['~', '^', ':', '?', '*', '[', '\\'];
 ///
 /// Follows the `git check-ref-format --branch` rules so the create prompt can
 /// refuse locally, before git runs: empty, whitespace, a leading `-` or `/`,
-/// `..`, `@{`, `//`, a lone `@`, any of `~ ^ : ? * [ \`, control characters,
-/// a trailing `/` or `.`, and a `/`-separated part that starts with `.` or
-/// ends with `.lock`.
+/// `..`, `@{`, `//`, a lone `@` or `HEAD`, any of `~ ^ : ? * [ \`, control
+/// characters, a trailing `/` or `.`, and a `/`-separated part that starts
+/// with `.` or ends with `.lock`.
 pub fn branch_name_error(name: &str) -> Option<String> {
     let t = name.trim();
     let reason = if t.is_empty() {
@@ -62,8 +62,8 @@ pub fn branch_name_error(name: &str) -> Option<String> {
         format!("a branch name cannot contain {c}")
     } else if t.starts_with('-') {
         "a branch name cannot start with -".to_string()
-    } else if t == "@" {
-        "a branch name cannot be @".to_string()
+    } else if t == "@" || t == "HEAD" {
+        format!("a branch name cannot be {t}")
     } else if let Some(seq) = ["..", "@{", "//"].into_iter().find(|seq| t.contains(seq)) {
         format!("a branch name cannot contain {seq}")
     } else if t.starts_with('/') {
@@ -78,12 +78,6 @@ pub fn branch_name_error(name: &str) -> Option<String> {
         return None;
     };
     Some(reason)
-}
-
-/// True when [`branch_name_error`] finds nothing wrong with `name`.
-#[cfg(test)]
-pub fn is_valid_branch_name(name: &str) -> bool {
-    branch_name_error(name).is_none()
 }
 
 /// True iff `name` is an origin remote-tracking ref (`origin/...`).
@@ -234,6 +228,10 @@ pub struct BranchPickerState {
     /// True when a typed name that matches no branch exactly offers a
     /// `+ create branch <name>` row.
     pub creates: bool,
+    /// Local branch names outside [`Self::branches`] that already exist, so
+    /// the create row must not offer them (graph picker: every local branch
+    /// of the repo, from the snapshot).
+    pub taken: Vec<String>,
 }
 
 impl BranchPickerState {
@@ -246,6 +244,7 @@ impl BranchPickerState {
             cursor: 0,
             commit_id: None,
             creates: false,
+            taken: Vec::new(),
         }
     }
 
@@ -258,8 +257,14 @@ impl BranchPickerState {
     }
 
     /// Graph `b` picker: only the names on the focused commit. Its create
-    /// row makes the branch at that commit without a checkout.
-    pub fn from_names(repo: String, names: Vec<String>, commit_id: Option<String>) -> Self {
+    /// row makes the branch at that commit without a checkout. `taken` is
+    /// every local branch of the repo, so the row never offers one of them.
+    pub fn from_names(
+        repo: String,
+        names: Vec<String>,
+        commit_id: Option<String>,
+        taken: Vec<String>,
+    ) -> Self {
         let branches = names
             .into_iter()
             .map(|name| LocalBranch {
@@ -270,6 +275,7 @@ impl BranchPickerState {
             .collect();
         let mut state = Self::checkout(repo, branches);
         state.commit_id = commit_id;
+        state.taken = taken;
         state
     }
 
@@ -286,19 +292,29 @@ impl BranchPickerState {
 
     /// Name the create row offers, or `None` when the row is hidden.
     ///
-    /// Shown when this picker creates, the trimmed filter is non-empty,
-    /// it is a valid branch name ([`branch_name_error`]), and no listed
-    /// name equals it exactly.
+    /// Shown when this picker creates, the trimmed filter is non-empty, and
+    /// [`Self::create_refusal`] finds nothing wrong with it.
     pub fn create_name(&self) -> Option<&str> {
         let name = self.filter.trim();
-        if !self.creates
-            || name.is_empty()
-            || branch_name_error(name).is_some()
-            || self.branches.iter().any(|branch| branch.name == name)
-        {
+        if !self.creates || name.is_empty() || self.create_refusal().is_some() {
             return None;
         }
         Some(name)
+    }
+
+    /// Why the typed name gets no create row, or `None` when it may.
+    ///
+    /// A name git would refuse gives [`branch_name_error`]; a name equal to
+    /// a listed or [`Self::taken`] branch gives `branch <name> already
+    /// exists`.
+    pub fn create_refusal(&self) -> Option<String> {
+        let name = self.filter.trim();
+        if let Some(reason) = branch_name_error(name) {
+            return Some(reason);
+        }
+        let exists = self.branches.iter().any(|branch| branch.name == name)
+            || self.taken.iter().any(|taken| taken == name);
+        exists.then(|| format!("branch {name} already exists"))
     }
 
     /// Visible branches plus the create row when it shows.
@@ -381,10 +397,10 @@ mod tests {
 
     #[test]
     fn branch_name_rules() {
-        assert!(is_valid_branch_name("feature/x"));
-        assert!(!is_valid_branch_name(""));
-        assert!(!is_valid_branch_name("has space"));
-        assert!(!is_valid_branch_name("-bad"));
+        assert!(branch_name_error("feature/x").is_none());
+        assert!(branch_name_error("").is_some());
+        assert!(branch_name_error("has space").is_some());
+        assert!(branch_name_error("-bad").is_some());
     }
 
     #[test]
@@ -402,6 +418,8 @@ mod tests {
             ("bell\u{7}", Some("no control characters in a branch name")),
             ("-bad", Some("a branch name cannot start with -")),
             ("@", Some("a branch name cannot be @")),
+            ("HEAD", Some("a branch name cannot be HEAD")),
+            ("head", None),
             ("a..b", Some("a branch name cannot contain ..")),
             ("a@{b", Some("a branch name cannot contain @{")),
             ("a//b", Some("a branch name cannot contain //")),
@@ -431,7 +449,11 @@ mod tests {
         ];
         for (name, want) in cases {
             assert_eq!(branch_name_error(name).as_deref(), *want, "{name:?}");
-            assert_eq!(is_valid_branch_name(name), want.is_none(), "{name:?}");
+            assert_eq!(
+                branch_name_error(name).is_none(),
+                want.is_none(),
+                "{name:?}"
+            );
         }
     }
 
@@ -579,6 +601,30 @@ mod tests {
         picker.set_filter("  topic  ".into());
         assert_eq!(picker.create_name(), Some("topic"));
         assert!(picker.on_create_row(), "the only row");
+    }
+
+    #[test]
+    fn graph_picker_create_row_hides_any_existing_local_branch() {
+        let mut picker = BranchPickerState::from_names(
+            "app".into(),
+            vec!["topic".into(), "origin/topic".into()],
+            Some("aaa1111".into()),
+            vec!["main".into(), "topic".into(), "elsewhere".into()],
+        );
+        picker.set_filter("elsewhere".into());
+        assert_eq!(
+            picker.create_name(),
+            None,
+            "a local branch on another commit"
+        );
+        assert_eq!(
+            picker.create_refusal().as_deref(),
+            Some("branch elsewhere already exists")
+        );
+        assert_eq!(picker.row_count(), 0);
+        picker.set_filter("fresh".into());
+        assert_eq!(picker.create_name(), Some("fresh"));
+        assert_eq!(picker.create_refusal(), None);
     }
 
     #[test]

@@ -87,7 +87,7 @@ Install this checkout next to the released `ws` without touching it:
 
     ./scripts/install-dev.sh
 
-That builds into `target/dev-install` and installs `ws-dev`, `workspace-status-dev`, and `workspace-status-update-dev` into `~/.local/bin` (`WS_DEV_BIN_DIR` overrides). `ws-dev --version` shows the git sha. `ws-dev --update` rebuilds and reinstalls this checkout. Dev builds skip the release update prompt. `./scripts/install-dev.sh --uninstall` removes only the `-dev` names.
+That builds into `target/dev-install` and installs `ws-dev`, `workspace-status-dev`, and `workspace-status-update-dev` into `~/.local/bin` (`WS_DEV_BIN_DIR` overrides). `ws-dev --version` shows the git sha. `ws-dev --update` rebuilds and reinstalls this checkout: the update shim points at it, so moving or deleting the checkout breaks `ws-dev --update` (run the script again from the new place). Dev builds skip the release update prompt. `./scripts/install-dev.sh --uninstall` removes only the `-dev` names.
 
 ## Agents
 

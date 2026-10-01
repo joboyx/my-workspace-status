@@ -493,6 +493,13 @@ impl AppState {
             ref action => action.clone(),
         };
         self.command_palette = None;
+        if action == Action::FoldToggleSubtree {
+            // Fold subtree is `zz`: toggle this row, then match its
+            // descendants. Both fold actions return `Effect::None`. Drop the
+            // `z` chord the toggle armed so the next key `z` is a new toggle.
+            self.dispatch(Action::FoldToggle);
+            self.z_pending_at = None;
+        }
         self.dispatch(action)
     }
 

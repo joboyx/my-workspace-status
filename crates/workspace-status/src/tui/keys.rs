@@ -428,10 +428,8 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
             _ => false,
         },
         InputMode::CommandPalette => match key.code {
-            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => false,
             _ if list_overlay_move(key).is_some() => true,
             KeyCode::Backspace => true,
-            KeyCode::Char(':') | KeyCode::Enter | KeyCode::Esc => false,
             KeyCode::Char(_) => typing,
             _ => false,
         },
@@ -494,11 +492,11 @@ fn key_to_action(
             InputMode::Normal { .. }
             | InputMode::ZPending { .. }
             | InputMode::GPending { .. }
-            | InputMode::DiffVisual
-            | InputMode::CommandPalette => {
+            | InputMode::DiffVisual => {
                 return Action::ToggleCommandPalette(opened_by);
             }
-            InputMode::SearchPrompt
+            InputMode::CommandPalette
+            | InputMode::SearchPrompt
             | InputMode::HelpSearch
             | InputMode::Comment
             | InputMode::CreateBranch
@@ -677,8 +675,8 @@ fn palette_open_key(key: KeyEvent) -> Option<PaletteOpenedBy> {
 /// Cursor step for a list overlay key (palette and every picker), if any.
 ///
 /// Up / Down, Ctrl-n / Ctrl-p, and Ctrl-j / Ctrl-k move. Letters never move,
-/// so every printable character types into the filter. In the palette
-/// Ctrl-k and `:` still close it (they opened it) before this map runs.
+/// so every printable character types into the filter. The palette follows
+/// the same rule: Ctrl-k moves up, `:` types, and only Esc closes it.
 fn list_overlay_move(key: KeyEvent) -> Option<i32> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
@@ -2596,6 +2594,7 @@ mod tests {
             InputMode::CreateBranch,
             InputMode::StashMenu,
             InputMode::CommentExport,
+            InputMode::CommandPalette,
         ];
         for mode in overlays {
             let ctrl_k = event_to_action(&ctrl(KeyCode::Char('k')), mode, false, false);
@@ -2725,8 +2724,7 @@ mod tests {
     }
 
     #[test]
-    fn command_palette_keys_move_filter_submit_cancel_and_toggle() {
-        use super::super::action::PaletteOpenedBy;
+    fn command_palette_keys_move_filter_submit_and_only_esc_cancels() {
         assert_eq!(
             event_to_action(&key(KeyCode::Char('j')), palette(), false, false),
             Action::CommandPaletteChar('j')
@@ -2765,16 +2763,18 @@ mod tests {
         );
         assert_eq!(
             event_to_action(&ctrl(KeyCode::Char('k')), palette(), false, false),
-            Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK)
+            Action::CommandPaletteMove(-1),
+            "Ctrl-k moves up like every picker; it does not close"
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char(':')), palette(), false, false),
-            Action::ToggleCommandPalette(PaletteOpenedBy::Colon)
+            Action::CommandPaletteChar(':'),
+            "`:` types into the filter; it does not close"
         );
     }
 
     #[test]
-    fn command_palette_repeat_types_but_not_enter_or_open_keys() {
+    fn command_palette_repeat_types_and_moves_but_not_enter_or_esc() {
         use super::super::action::PaletteOpenedBy;
         assert_eq!(
             event_to_action(
@@ -2828,7 +2828,7 @@ mod tests {
                 false,
                 false
             ),
-            Action::None
+            Action::CommandPaletteChar(':')
         );
         assert_eq!(
             event_to_action(
@@ -2841,7 +2841,7 @@ mod tests {
                 false,
                 false
             ),
-            Action::None
+            Action::CommandPaletteMove(-1)
         );
         assert_ne!(
             event_to_action(
@@ -2900,15 +2900,7 @@ mod tests {
                 );
             }
             let ctrl_k = event_to_action(&ctrl(KeyCode::Char('k')), mode, false, false);
-            if mode == InputMode::CommandPalette {
-                assert_eq!(
-                    ctrl_k,
-                    Action::ToggleCommandPalette(super::super::action::PaletteOpenedBy::CtrlK),
-                    "Ctrl-k still closes the palette it opened"
-                );
-            } else {
-                assert_eq!(ctrl_k, moved(mode, -1), "{mode:?} Ctrl-k");
-            }
+            assert_eq!(ctrl_k, moved(mode, -1), "{mode:?} Ctrl-k");
             assert_eq!(
                 event_to_action(
                     &Event::Key(KeyEvent::new_with_kind(

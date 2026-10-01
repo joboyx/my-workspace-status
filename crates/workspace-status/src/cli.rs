@@ -45,7 +45,8 @@ and a newer published release exists, the process asks whether to update\n\
 before the TUI mounts. --plain, --json, and --update skip that check.\n\n\
 --update prints GitHub Release notes for versions newer than this install,\n\
 then runs the cargo-dist updater (workspace-status-update) and exits.\n\
-That run does not open the TUI or apply repo filters."
+That run does not open the TUI or apply repo filters. A dev build\n\
+(scripts/install-dev.sh) instead rebuilds and reinstalls its checkout."
 )]
 struct Cli {
     /// Include ignored repos (`showIgnored`).

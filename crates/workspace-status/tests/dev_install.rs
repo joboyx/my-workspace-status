@@ -76,6 +76,27 @@ fn install_dev_only_names_dev_targets() {
         INSTALL_DEV_SH.contains("!= *-dev"),
         "install-dev.sh must refuse non -dev names"
     );
+    // Install and remove destinations come only from DEV_NAMES, so the
+    // guard above covers every path the script writes.
+    let writes: Vec<&str> = INSTALL_DEV_SH
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains("install -m") || line.starts_with("rm -f"))
+        .filter(|line| *line != "rm -f -- \"$shim_tmp\"")
+        .collect();
+    assert!(!writes.is_empty());
+    for line in writes {
+        assert!(
+            line.ends_with("\"$bin_dir/$name\" ;;") || line.ends_with("\"${bin_dir:?}/$name\""),
+            "install-dev.sh writes a path not built from DEV_NAMES: {line}"
+        );
+    }
+}
+
+#[test]
+fn install_dev_update_shim_keeps_bin_and_target_dirs() {
+    assert!(INSTALL_DEV_SH.contains("export WS_DEV_BIN_DIR=\\${WS_DEV_BIN_DIR:-"));
+    assert!(INSTALL_DEV_SH.contains("export WS_DEV_TARGET_DIR=\\${WS_DEV_TARGET_DIR:-"));
 }
 
 #[test]

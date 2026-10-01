@@ -153,7 +153,8 @@ pub fn dispatch_is_noop(
 /// `None` when the action runs, and for list moves and folds, so a held
 /// nav key cannot repaint a refusal on every repeat. Tree writes name the
 /// key that gets back to the tree and what they would do there
-/// (`focus the tree (Tab) to stage`).
+/// (`focus the tree (Tab) to stage`, or `Esc back to the tree to pull` from
+/// a drill, where it may take more than one Esc).
 pub fn dispatch_noop_reason(
     action: &Action,
     depth: u8,
@@ -166,8 +167,6 @@ pub fn dispatch_noop_reason(
     {
         return None;
     }
-    // Esc pops a drill back to the tree; at depth 0 Tab switches panes.
-    let back = if depth >= 1 { "Esc" } else { "Tab" };
     let reason = match action {
         Action::ToggleReviewed if depth >= 1 => REVIEWED_MARKS_ARE_FOR_TREE_FILES,
         Action::ToggleReviewed => FOCUS_A_FILE_TO_MARK_REVIEWED,
@@ -183,19 +182,25 @@ pub fn dispatch_noop_reason(
         Action::StashMenu if depth >= 2 => STASH_NEEDS_TREE_OR_GRAPH,
         // `S` runs from either left list (tree or a drill's graph).
         Action::StashMenu => "focus the left pane (Tab) to stash",
+        // Only tree writes are left: every other gated action has its own
+        // arm above (pinned by `every_noop_has_a_reason`).
         _ => {
-            return Some(format!(
-                "focus the tree ({back}) to {}",
-                tree_key_verb(action)
-            ))
+            let verb = tree_key_verb(action)?;
+            // Esc pops a drill (one depth per press); at depth 0 Tab
+            // switches panes.
+            return Some(if depth >= 1 {
+                format!("Esc back to the tree to {verb}")
+            } else {
+                format!("focus the tree (Tab) to {verb}")
+            });
         }
     };
     Some(reason.into())
 }
 
-/// What a refused tree key would do, for [`dispatch_noop_reason`].
-fn tree_key_verb(action: &Action) -> &'static str {
-    match action {
+/// What a refused tree write would do, for [`dispatch_noop_reason`].
+fn tree_key_verb(action: &Action) -> Option<&'static str> {
+    Some(match action {
         Action::Stage => "stage",
         Action::Unstage => "unstage",
         Action::Revert => "revert",
@@ -205,8 +210,8 @@ fn tree_key_verb(action: &Action) -> &'static str {
         Action::DefaultBranch => "switch to the default branch",
         Action::Branch => "pick a branch",
         Action::RemoveWorktree => "remove a worktree",
-        _ => "use this key",
-    }
+        _ => return None,
+    })
 }
 
 /// `S` (and the palette row) in a file-diff drill, where no list stashes.
@@ -237,7 +242,7 @@ mod tests {
         );
         assert_eq!(
             dispatch_noop_reason(&Action::Pull, 1, false, ListFocusTarget::Graph).as_deref(),
-            Some("focus the tree (Esc) to pull")
+            Some("Esc back to the tree to pull")
         );
         assert_eq!(
             dispatch_noop_reason(&Action::Branch, 0, true, ListFocusTarget::Graph).as_deref(),
@@ -276,6 +281,53 @@ mod tests {
             None,
             "a tree key on the tree runs"
         );
+    }
+
+    #[test]
+    fn every_noop_has_a_reason() {
+        let actions = [
+            Action::Stage,
+            Action::Unstage,
+            Action::Revert,
+            Action::Edit,
+            Action::ExternalDiff,
+            Action::ToggleReviewed,
+            Action::ToggleFullContext,
+            Action::Branch,
+            Action::RemoveWorktree,
+            Action::GraphCheckout,
+            Action::GraphCreateBranch,
+            Action::GraphMerge,
+            Action::GraphStashApply,
+            Action::GraphStashDrop,
+            Action::GraphStashPop,
+            Action::StashMenu,
+            Action::Fetch,
+            Action::Pull,
+            Action::Push,
+            Action::DefaultBranch,
+        ];
+        let targets = [
+            ListFocusTarget::Tree,
+            ListFocusTarget::Graph,
+            ListFocusTarget::CommitFiles,
+            ListFocusTarget::None,
+        ];
+        for action in &actions {
+            assert!(is_left_list_action(action), "{action:?}");
+            for depth in 0..=2 {
+                for focus_right in [false, true] {
+                    for target in targets {
+                        if dispatch_is_noop(action, depth, focus_right, target) {
+                            assert!(
+                                dispatch_noop_reason(action, depth, focus_right, target).is_some(),
+                                "{action:?} depth {depth} right {focus_right} {target:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

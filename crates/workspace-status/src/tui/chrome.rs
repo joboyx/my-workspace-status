@@ -33,7 +33,8 @@ pub const STATUS_NOTHING_TO_PULL: &str = "nothing behind to pull";
 
 /// Status text `p` sets when nothing is behind but a target has diverged.
 ///
-/// `diverged` must not be empty. [`is_idle_pull_status`] reads it back.
+/// An empty `diverged` gives [`STATUS_NOTHING_TO_PULL`].
+/// [`is_idle_pull_status`] reads either copy back.
 pub fn diverged_pull_status(diverged: &[String]) -> String {
     match diverged {
         [repo] => format!("{repo} has diverged — pull it from a terminal"),
@@ -1527,7 +1528,7 @@ mod tests {
     fn overlay_status_paints_in_the_box_not_the_status_row() {
         let mut app = state();
         app.stash_menu = Some(Vec::new());
-        app.status = "stash  s create  a apply".into();
+        app.status = "stash  s stash  a apply".into();
         assert_eq!(line_plain(&status_line(&app, 80)).trim(), "");
         app.stash_menu = None;
         app.comment_export = Some(crate::tui::comments::CommentExport {

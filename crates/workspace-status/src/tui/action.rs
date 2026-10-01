@@ -181,8 +181,9 @@ pub enum Action {
     /// Open or close the command palette (`Ctrl-k` or `:`).
     ///
     /// Stores [`PaletteOpenedBy`] on open so the prompt prefix matches the
-    /// key that opened it. A second open key while the palette is up closes
-    /// it with no run.
+    /// key that opened it. The keymap sends it only while the palette is
+    /// closed (inside it Ctrl-k moves and `:` types); a dispatch while it is
+    /// up closes it with no run.
     ToggleCommandPalette(PaletteOpenedBy),
     /// Move the command-palette highlight (`j` / `k` / arrows).
     CommandPaletteMove(i32),

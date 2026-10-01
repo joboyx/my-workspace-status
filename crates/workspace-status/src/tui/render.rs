@@ -6523,6 +6523,7 @@ mod tests {
             "app".into(),
             vec!["main".into()],
             Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            vec!["main".into()],
         );
         graph.set_filter("new".into());
         state.branch_picker = Some(graph);
