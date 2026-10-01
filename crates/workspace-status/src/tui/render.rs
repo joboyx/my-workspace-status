@@ -2338,15 +2338,17 @@ fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         let marker = tab_right_marker(labels.len() - window.end);
         let width = painted_width(&marker).min(limit.saturating_sub(x));
         limit = limit.saturating_sub(width);
-        state.layout.tab_hits.push((limit, width, window.end));
-        frame.render_widget(
-            Paragraph::new(Span::styled(marker, muted)),
-            Rect {
-                x: limit,
-                width,
-                ..area
-            },
-        );
+        if width > 0 {
+            state.layout.tab_hits.push((limit, width, window.end));
+            frame.render_widget(
+                Paragraph::new(Span::styled(marker, muted)),
+                Rect {
+                    x: limit,
+                    width,
+                    ..area
+                },
+            );
+        }
     }
     for index in window.start..window.end {
         if index > 0 {
@@ -2376,13 +2378,16 @@ fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             let close = TAB_CLOSE_GLYPH;
             let close_x = x.saturating_add(painted_width(&prefix));
             let close_w = painted_width(close);
-            if close_x.saturating_add(close_w) <= limit {
+            let close_painted = close_x.saturating_add(close_w) <= limit;
+            if close_painted {
                 state.layout.tab_close_hits.push((close_x, close_w, index));
             }
             // Hover comes from this paint's box, never from a stored index.
-            let hovered = state.pointer.is_some_and(|(col, row)| {
-                row == area.y && col >= close_x && col < close_x.saturating_add(close_w)
-            });
+            // A clipped close has no box, so it never paints hovered.
+            let hovered = close_painted
+                && state.pointer.is_some_and(|(col, row)| {
+                    row == area.y && col >= close_x && col < close_x.saturating_add(close_w)
+                });
             let close_style = if hovered {
                 tab_style
                     .fg(palette.tab_close_hover)
@@ -4631,6 +4636,38 @@ mod tests {
             state.layout.tab_close_hits.is_empty(),
             "a clipped [✗] has no close hit"
         );
+    }
+
+    #[test]
+    fn tab_strip_clipped_close_never_paints_hovered() {
+        let mut state = five_compare_tabs();
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(17, 24)).unwrap();
+        let row = paint_tab_row(&mut terminal, &mut state);
+        let tab_y = state.layout.tab_y;
+        assert_eq!(row[16], "[", "only the first cell of [✗] is painted");
+        assert!(state.layout.tab_close_hits.is_empty());
+
+        state.pointer = Some((16, tab_y));
+        paint_tab_row(&mut terminal, &mut state);
+        let style = terminal.backend().buffer()[(16, tab_y)].style();
+        assert_eq!(style.fg, Some(palette.tab_close), "{style:?}");
+        assert!(!style.add_modifier.contains(Modifier::BOLD), "{style:?}");
+    }
+
+    #[test]
+    fn tab_strip_records_no_zero_width_hit_box() {
+        for width in [2u16, 3] {
+            let mut state = five_compare_tabs();
+            state.tabs.active = 2;
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            paint_tab_row(&mut terminal, &mut state);
+            assert!(
+                state.layout.tab_hits.iter().all(|(_, w, _)| *w > 0),
+                "width {width}: {:?}",
+                state.layout.tab_hits
+            );
+        }
     }
 
     #[test]
