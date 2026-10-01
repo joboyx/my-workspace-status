@@ -74,8 +74,7 @@ fn no_picker_or_wrong_overlays(screen: &str) -> bool {
         && !screen.contains("Checkout at")
         && !screen.contains("Branch ")
         && !screen.contains("Enter checkout")
-        && !screen.contains("C create")
-        && !screen.contains("Enter confirm")
+        && !screen.contains("Enter create")
         && !screen.contains("fast-forward if possible")
         && !screen.contains("Merge main into")
         && !screen.contains("SEARCH")
@@ -138,7 +137,7 @@ fn graph_focused_diverged_before_checkout(screen: &str) -> bool {
         && !crumb.contains("Already on")
         && status.contains("drill")
         && status.contains("Esc")
-        && status.contains("back")
+        && (status.contains("← tree") || status.contains("Esc   clear"))
         && no_picker_or_wrong_overlays(screen)
 }
 
@@ -179,9 +178,9 @@ fn documented_graph_b_checkout(screen: &str) -> bool {
         && (screen.contains("working tree clean") || screen.contains("Working tree clean"))
         && status.contains("drill")
         && status.contains("Esc")
-        && status.contains("back")
+        && (status.contains("← tree") || status.contains("Esc   clear"))
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && no_picker_or_wrong_overlays(screen)
 }
 

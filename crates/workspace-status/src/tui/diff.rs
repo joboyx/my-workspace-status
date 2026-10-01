@@ -9,15 +9,23 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-use crate::git::{exec_git, git_diff_args};
+use crate::git::{exec_git_stdout, git_diff_args};
 use crate::snapshot::FileChange;
 
 use super::search::wrap_col_starts;
 use super::split::{side_by_side_column_widths, DiffMode};
 use super::tree::list_viewport_start;
 
-/// Stub huge / binary untracked files above ~1 MB.
+/// Untracked files above ~1 MB are not previewed: binary ones get the
+/// binary stub, text ones the too-large stub.
 const HUGE_FILE_BYTES: u64 = 1_000_000;
+
+/// Leading bytes scanned for a NUL to call a huge untracked file binary
+/// (git's own heuristic window).
+const BINARY_SNIFF_BYTES: u64 = 8000;
+
+/// Start of the stub line for an untracked text file over [`HUGE_FILE_BYTES`].
+const TOO_LARGE_PREFIX: &str = "too large to preview (";
 
 /// Gutter rule between line numbers and the sign.
 pub const DIFF_RULE: char = '│';
@@ -62,6 +70,12 @@ pub enum DiffRow {
         left: DiffCell,
         right: Option<DiffCell>,
     },
+    /// `git diff` failed for one side while the other loaded: the
+    /// [`diff_failed_text`] line, so the missing section does not read as
+    /// "no changes".
+    Error {
+        text: String,
+    },
 }
 
 /// Parsed unified-diff line.
@@ -89,6 +103,9 @@ pub struct DiffContent {
     pub is_new: bool,
     /// Label the unstaged section `COMMITTED` (compare tabs).
     pub is_committed: bool,
+    /// Git's reason when `git diff` failed, so the pane does not read as
+    /// an empty diff.
+    pub error: Option<String>,
 }
 
 impl DiffContent {
@@ -99,6 +116,7 @@ impl DiffContent {
             unstaged: text.into(),
             is_new: false,
             is_committed: false,
+            error: None,
         }
     }
 
@@ -109,6 +127,7 @@ impl DiffContent {
             unstaged: lines.join("\n"),
             is_new: false,
             is_committed: true,
+            error: None,
         }
     }
 
@@ -149,22 +168,34 @@ pub fn load_file_diff(
     }
     let mut staged = String::new();
     let mut unstaged = String::new();
+    let mut error = None;
     if change.staged_status.is_some() {
         let args = git_diff_args(&["diff", "--cached"], &change.path, context);
-        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        staged = exec_git(&refs, &repo_dir);
+        match git_diff_text(&args, &repo_dir) {
+            Ok(text) => staged = text,
+            Err(reason) => error = Some(reason),
+        }
     }
     if change.unstaged_status.is_some() {
         let args = git_diff_args(&["diff"], &change.path, context);
-        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        unstaged = exec_git(&refs, &repo_dir);
+        match git_diff_text(&args, &repo_dir) {
+            Ok(text) => unstaged = text,
+            Err(reason) => error = error.or(Some(reason)),
+        }
     }
     DiffContent {
         staged,
         unstaged,
         is_new: false,
         is_committed: false,
+        error,
     }
+}
+
+/// `git diff` stdout, trimmed like [`exec_git`]. `Err` is git's reason line.
+pub(crate) fn git_diff_text(args: &[String], dir: &Path) -> Result<String, String> {
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    exec_git_stdout(&refs, dir).map(|text| text.trim().to_string())
 }
 
 fn untracked_content(repo_dir: &Path, path: &str) -> DiffContent {
@@ -175,6 +206,7 @@ fn untracked_content(repo_dir: &Path, path: &str) -> DiffContent {
         unstaged,
         is_new,
         is_committed: false,
+        error: None,
     }
 }
 
@@ -187,7 +219,11 @@ fn read_untracked_as_diff(abs: &Path, rel_path: &str) -> String {
         return String::new();
     }
     if meta.len() > HUGE_FILE_BYTES {
-        return binary_stub(rel_path);
+        return if head_has_nul(abs) {
+            binary_stub(rel_path)
+        } else {
+            too_large_stub(meta.len())
+        };
     }
     let Ok(buf) = std::fs::read(abs) else {
         return String::new();
@@ -201,6 +237,29 @@ fn read_untracked_as_diff(abs: &Path, rel_path: &str) -> String {
 
 fn binary_stub(rel_path: &str) -> String {
     format!("Binary files /dev/null and b/{rel_path} differ\n")
+}
+
+/// Stub for an untracked text file over [`HUGE_FILE_BYTES`] (`N.N MB`).
+fn too_large_stub(len: u64) -> String {
+    format!("{TOO_LARGE_PREFIX}{:.1} MB)\n", len as f64 / 1_000_000.0)
+}
+
+/// True when the first [`BINARY_SNIFF_BYTES`] of `abs` hold a NUL. An
+/// unreadable file counts as binary.
+fn head_has_nul(abs: &Path) -> bool {
+    use std::io::Read;
+    let Ok(file) = std::fs::File::open(abs) else {
+        return true;
+    };
+    let mut head = Vec::new();
+    if file
+        .take(BINARY_SNIFF_BYTES)
+        .read_to_end(&mut head)
+        .is_err()
+    {
+        return true;
+    }
+    head.contains(&0)
 }
 
 /// Build a unified all-add diff from file text (no file headers).
@@ -324,8 +383,11 @@ fn parse_unified_diff(text: &str) -> Vec<Hunk> {
     hunks
 }
 
+/// A whole-file stub line (binary, or untracked too large to preview)
+/// that stands for the file's hunks.
 fn is_binary_marker(line: &str) -> bool {
-    line.starts_with("Binary files ") && line.ends_with(" differ")
+    (line.starts_with("Binary files ") && line.ends_with(" differ"))
+        || (line.starts_with(TOO_LARGE_PREFIX) && line.ends_with(" MB)"))
 }
 
 /// `@@ -OLD[,n] +NEW[,n] @@` → start line numbers. Garbage headers yield `(0, 0)`.
@@ -389,6 +451,8 @@ enum RowBind {
         hunk: usize,
         parsed: Vec<usize>,
     },
+    /// [`DiffRow::Error`]: no patch lines.
+    Error,
 }
 
 /// Apply target and direction for a visual-line partial patch.
@@ -538,7 +602,22 @@ fn annotated_diff_rows(content: &DiffContent, mode: DiffMode) -> Vec<(DiffRow, R
             push_hunk_rows(&mut out, section, idx, hunk, mode);
         }
     }
+    // With no rows at all the pane paints the failure as its empty text.
+    if let (Some(reason), false) = (content.error.as_deref(), out.is_empty()) {
+        out.push((
+            DiffRow::Error {
+                text: diff_failed_text(reason),
+            },
+            RowBind::Error,
+        ));
+    }
     out
+}
+
+/// Diff-pane text for a failed `git diff`: git's `reason` after a fixed
+/// prefix.
+pub fn diff_failed_text(reason: &str) -> String {
+    format!("git diff failed: {reason}")
 }
 
 /// Rows for both diff sections. Empty sections are omitted.
@@ -614,6 +693,7 @@ pub fn build_partial_patch(
                     .or_default()
                     .extend(parsed.iter().copied());
             }
+            RowBind::Error => {}
         }
     }
 
@@ -1145,7 +1225,7 @@ pub fn diff_pane_header_rows(path: &str, width: u16, height: u16) -> u16 {
 pub fn row_search_text(row: &DiffRow) -> String {
     match row {
         DiffRow::Section(section) => section_header(*section).to_string(),
-        DiffRow::Hunk { text } => text.clone(),
+        DiffRow::Hunk { text } | DiffRow::Error { text } => text.clone(),
         DiffRow::Line { left, right } => {
             let mut out = left.text.clone();
             if let Some(right) = right {
@@ -1176,7 +1256,9 @@ pub fn diff_row_visual_height(
             let text = format!(" {} ", section_header(*section));
             wrap_col_starts(&text, width).len().max(1)
         }
-        DiffRow::Hunk { text } => wrap_col_starts(text, width).len().max(1),
+        DiffRow::Hunk { text } | DiffRow::Error { text } => {
+            wrap_col_starts(text, width).len().max(1)
+        }
         DiffRow::Line { left, right } if split && right.is_some() => {
             let cols = side_by_side_column_widths(content_w, split_fraction);
             let left_h = wrap_col_starts(
@@ -1311,6 +1393,7 @@ fn is_change_row(row: &DiffRow) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::exec_git;
 
     const FIXTURE: &str = "\
 diff --git a/hello.ts b/hello.ts
@@ -1353,6 +1436,46 @@ index 1111111..2222222 100644
         assert_eq!(hunks[0].lines[0].new_no, Some(0));
     }
 
+    /// A staged diff that loaded beside a failed unstaged `git diff` ends
+    /// with the failure line; with no rows the pane's empty text says it.
+    #[test]
+    fn partial_diff_failure_appends_an_error_row() {
+        let content = DiffContent {
+            staged: FIXTURE.into(),
+            unstaged: String::new(),
+            is_new: false,
+            is_committed: false,
+            error: Some("fatal: bad object".into()),
+        };
+        let rows = build_diff_rows(&content, DiffMode::Inline);
+        assert_eq!(rows[0], DiffRow::Section(DiffSection::Staged));
+        let last = rows.last().expect("rows");
+        assert_eq!(
+            *last,
+            DiffRow::Error {
+                text: "git diff failed: fatal: bad object".into()
+            }
+        );
+        assert_eq!(row_search_text(last), "git diff failed: fatal: bad object");
+        let error_row = rows.len() - 1;
+        assert_eq!(
+            build_partial_patch(
+                &content,
+                DiffMode::Inline,
+                error_row,
+                error_row,
+                PartialPatchKind::Unstage,
+                "README.md",
+            ),
+            Err("nothing to unstage in highlight".into())
+        );
+        let failed_only = DiffContent {
+            error: Some("fatal: bad object".into()),
+            ..DiffContent::default()
+        };
+        assert!(build_diff_rows(&failed_only, DiffMode::Inline).is_empty());
+    }
+
     #[test]
     fn build_diff_rows_emits_section_per_nonempty_slot() {
         let staged = build_diff_rows(
@@ -1361,6 +1484,7 @@ index 1111111..2222222 100644
                 unstaged: String::new(),
                 is_new: false,
                 is_committed: false,
+                error: None,
             },
             DiffMode::Inline,
         );
@@ -1375,6 +1499,7 @@ index 1111111..2222222 100644
                 unstaged: FIXTURE.into(),
                 is_new: false,
                 is_committed: false,
+                error: None,
             },
             DiffMode::Inline,
         );
@@ -1390,6 +1515,54 @@ index 1111111..2222222 100644
     }
 
     #[test]
+    fn huge_untracked_text_says_too_large_and_binary_keeps_its_stub() {
+        let dir = crate::testutil::unique_dir("ws-huge-untracked");
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = "x".repeat(1_200_000);
+        std::fs::write(dir.join("big.txt"), &text).unwrap();
+        let mut binary = vec![b'a'; 1_200_000];
+        binary[10] = 0;
+        std::fs::write(dir.join("big.bin"), &binary).unwrap();
+
+        let big_text = untracked_content(&dir, "big.txt");
+        assert_eq!(big_text.unstaged, "too large to preview (1.2 MB)\n");
+        let rows = build_diff_rows(&big_text, DiffMode::Inline);
+        assert!(
+            rows.iter().any(|row| matches!(
+                row,
+                DiffRow::Line { left, .. }
+                    if left.kind == DiffCellKind::Meta && left.text.contains("too large")
+            )),
+            "{rows:?}"
+        );
+        let big_bin = untracked_content(&dir, "big.bin");
+        assert!(big_bin.unstaged.starts_with("Binary files"), "{big_bin:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_git_diff_keeps_the_reason() {
+        let root = crate::testutil::unique_dir("ws-diff-fails");
+        let repo = root.join("app");
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::testutil::init_repo(&repo);
+        std::fs::write(repo.join("README.md"), "# changed\n").unwrap();
+        std::fs::write(repo.join(".git").join("index"), b"not an index").unwrap();
+        let change = FileChange {
+            path: "README.md".into(),
+            staged_status: None,
+            unstaged_status: Some("M".into()),
+            untracked: false,
+            old_path: None,
+        };
+        let content = load_file_diff(&root, "app", &change, None);
+        assert!(content.unstaged.is_empty(), "{content:?}");
+        let reason = content.error.expect("git diff failure reason");
+        assert!(!reason.is_empty() && !reason.contains('\n'), "{reason}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn untracked_section_is_new() {
         let rows = build_diff_rows(
             &DiffContent {
@@ -1397,6 +1570,7 @@ index 1111111..2222222 100644
                 unstaged: FIXTURE.into(),
                 is_new: true,
                 is_committed: false,
+                error: None,
             },
             DiffMode::Inline,
         );
@@ -1411,6 +1585,7 @@ index 1111111..2222222 100644
                 unstaged: String::new(),
                 is_new: false,
                 is_committed: false,
+                error: None,
             },
             DiffMode::Inline,
         );
@@ -1432,6 +1607,7 @@ index 1111111..2222222 100644
                 unstaged: String::new(),
                 is_new: false,
                 is_committed: false,
+                error: None,
             },
             DiffMode::SideBySide,
         );
@@ -1502,6 +1678,7 @@ index 1111111..2222222 100644
                 unstaged: String::new(),
                 is_new: false,
                 is_committed: false,
+                error: None,
             },
             DiffMode::Inline,
         );
@@ -1707,6 +1884,7 @@ index 1111111..2222222 100644
             unstaged: TWO_HUNKS.into(),
             is_new: false,
             is_committed: false,
+            error: None,
         }
     }
 
@@ -1798,6 +1976,7 @@ index 1111111..2222222 100644
             unstaged: TWO_HUNKS.into(),
             is_new: false,
             is_committed: true,
+            error: None,
         };
         let err = build_partial_patch(
             &committed,
@@ -1818,6 +1997,7 @@ index 1111111..2222222 100644
             unstaged: String::new(),
             is_new: false,
             is_committed: false,
+            error: None,
         };
         let rows = build_diff_rows(&content, DiffMode::Inline);
         let first = rows
@@ -1879,6 +2059,7 @@ index 1111111..2222222 100644
             unstaged: String::new(),
             is_new: false,
             is_committed: false,
+            error: None,
         };
         let end = build_diff_rows(&staged, DiffMode::Inline)
             .len()
@@ -1902,6 +2083,7 @@ index 1111111..2222222 100644
             unstaged: TWO_HUNKS.into(),
             is_new: false,
             is_committed: false,
+            error: None,
         };
         let end = build_diff_rows(&content, DiffMode::Inline).len() - 1;
         let err = build_partial_patch(
@@ -1993,6 +2175,7 @@ index 1111111..2222222 100644
 
         let committed = DiffContent {
             is_committed: true,
+            error: None,
             ..two_hunk_content()
         };
         let err = revert_patch(&committed, 0, 3).unwrap_err();
@@ -2008,6 +2191,7 @@ index 1111111..2222222 100644
             unstaged: synthesize_all_add_diff("one\ntwo\n"),
             is_new: true,
             is_committed: false,
+            error: None,
         };
         let end = build_diff_rows(&new_file, DiffMode::Inline).len() - 1;
         let err = revert_patch(&new_file, 0, end).unwrap_err();
@@ -2028,6 +2212,7 @@ index 1111111..2222222 100644
             unstaged: String::new(),
             is_new: false,
             is_committed: false,
+            error: None,
         };
         let end = build_diff_rows(&staged_only, DiffMode::Inline).len() - 1;
         let err = revert_patch(&staged_only, 0, end).unwrap_err();
@@ -2038,6 +2223,7 @@ index 1111111..2222222 100644
             unstaged: TWO_HUNKS.into(),
             is_new: false,
             is_committed: false,
+            error: None,
         };
         let end = build_diff_rows(&mixed, DiffMode::Inline).len() - 1;
         let err = revert_patch(&mixed, 0, end).unwrap_err();
@@ -2107,6 +2293,7 @@ keep-z
                 unstaged: exec_git(&["diff", "--", "regions.txt"], dir),
                 is_new: false,
                 is_committed: false,
+                error: None,
             }
         }
 
@@ -2450,6 +2637,7 @@ keep-z
                 unstaged: exec_git(&["diff", "--", "lines.txt"], &dir),
                 is_new: false,
                 is_committed: false,
+                error: None,
             };
             let hunks = parse_unified_diff(if kind == PartialPatchKind::Unstage {
                 &content.staged
@@ -2557,6 +2745,7 @@ keep-z
                 unstaged: exec_git(&["diff", "--", "no-eol.txt"], &dir),
                 is_new: false,
                 is_committed: false,
+                error: None,
             };
             let row = line_row(&content, row);
             let result =

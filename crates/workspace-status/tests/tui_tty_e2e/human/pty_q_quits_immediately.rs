@@ -13,7 +13,7 @@ fn idle_tui_ready_for_q(screen: &str) -> bool {
         && screen.contains("? help")
         && screen.contains("UNSTAGED")
         && screen.contains("+dirty")
-        && !screen.contains("Press Ctrl+C again to exit")
+        && !screen.contains("Press Ctrl-c again to exit")
         && !screen.contains("MOVE")
 }
 
@@ -34,5 +34,5 @@ fn pty_q_quits_immediately() {
     );
 
     tui.key('q');
-    tui.wait_exit_without("Press Ctrl+C again to exit", WAIT);
+    tui.wait_exit_without("Press Ctrl-c again to exit", WAIT);
 }

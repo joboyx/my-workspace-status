@@ -4,6 +4,10 @@
 //! newer than [`crate::APP_VERSION`]. Notes are the git-cliff changelog that
 //! the Release workflow prepends to cargo-dist's installer copy. A failed
 //! fetch stays quiet and still runs the sidecar.
+//!
+//! A dev build ([`crate::DEV_BUILD`] set by `scripts/install-dev.sh`) skips
+//! the notes and execs `workspace-status-update-dev` instead. That shim
+//! rebuilds and reinstalls the source checkout.
 
 use std::cmp::Ordering;
 use std::env;
@@ -33,34 +37,50 @@ struct GithubReleaseNotes {
     prerelease: bool,
 }
 
-/// File name of the cargo-dist updater next to `ws` / `workspace-status`.
-pub(crate) fn updater_file_name() -> &'static str {
-    if cfg!(windows) {
-        "workspace-status-update.exe"
+/// Updater command name on PATH: the cargo-dist sidecar for a release build,
+/// the `scripts/install-dev.sh` shim for a dev build.
+pub(crate) fn updater_name(dev_build: bool) -> &'static str {
+    if dev_build {
+        "workspace-status-update-dev"
     } else {
         "workspace-status-update"
     }
 }
 
-fn sibling_updater(current_exe: &Path) -> Option<PathBuf> {
-    let path = current_exe.parent()?.join(updater_file_name());
+/// File name of the updater next to `ws` / `workspace-status` (or the `-dev`
+/// pair when `dev_build`).
+pub(crate) fn updater_file_name(dev_build: bool) -> String {
+    let name = updater_name(dev_build);
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    }
+}
+
+fn sibling_updater(current_exe: &Path, dev_build: bool) -> Option<PathBuf> {
+    let path = current_exe.parent()?.join(updater_file_name(dev_build));
     path.is_file().then_some(path)
 }
 
-fn updater_command(current_exe: &Path) -> Command {
-    if let Some(path) = sibling_updater(current_exe) {
+fn updater_command(current_exe: &Path, dev_build: bool) -> Command {
+    if let Some(path) = sibling_updater(current_exe, dev_build) {
         Command::new(path)
     } else {
-        Command::new("workspace-status-update")
+        Command::new(updater_name(dev_build))
     }
 }
 
 /// Print newer GitHub Release notes, then exec `workspace-status-update`.
 ///
+/// A dev build skips the notes and execs `workspace-status-update-dev`.
 /// On Unix this replaces the process. If exec fails, or on Windows after the
 /// sidecar returns, the caller receives an [`ExitCode`].
 pub(crate) fn run_self_update() -> ExitCode {
-    print_changes_since_installed();
+    let dev_build = crate::DEV_BUILD.is_some();
+    if !dev_build {
+        print_changes_since_installed();
+    }
     let exe = match env::current_exe() {
         Ok(p) => p,
         Err(err) => {
@@ -68,8 +88,8 @@ pub(crate) fn run_self_update() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let mut cmd = updater_command(&exe);
-    exec_updater(&mut cmd)
+    let mut cmd = updater_command(&exe, dev_build);
+    exec_updater(&mut cmd, updater_name(dev_build))
 }
 
 fn print_changes_since_installed() {
@@ -148,15 +168,15 @@ fn format_update_changelog(current: &str, releases: &[GithubReleaseNotes]) -> Op
 }
 
 #[cfg(unix)]
-fn exec_updater(cmd: &mut Command) -> ExitCode {
+fn exec_updater(cmd: &mut Command, name: &str) -> ExitCode {
     use std::os::unix::process::CommandExt;
     let err = cmd.exec();
-    eprintln!("failed to run workspace-status-update: {err}");
+    eprintln!("failed to run {name}: {err}");
     ExitCode::from(1)
 }
 
 #[cfg(not(unix))]
-fn exec_updater(cmd: &mut Command) -> ExitCode {
+fn exec_updater(cmd: &mut Command, name: &str) -> ExitCode {
     match cmd.status() {
         Ok(status) => status
             .code()
@@ -164,7 +184,7 @@ fn exec_updater(cmd: &mut Command) -> ExitCode {
             .map(ExitCode::from)
             .unwrap_or(ExitCode::from(1)),
         Err(err) => {
-            eprintln!("failed to run workspace-status-update: {err}");
+            eprintln!("failed to run {name}: {err}");
             ExitCode::from(1)
         }
     }
@@ -202,9 +222,12 @@ mod tests {
         let dir = temp_dir();
         let exe = dir.join("ws");
         fs::write(&exe, b"").unwrap();
-        let sidecar = dir.join(updater_file_name());
+        let sidecar = dir.join(updater_file_name(false));
         fs::write(&sidecar, b"").unwrap();
-        assert_eq!(sibling_updater(&exe).as_deref(), Some(sidecar.as_path()));
+        assert_eq!(
+            sibling_updater(&exe, false).as_deref(),
+            Some(sidecar.as_path())
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -213,7 +236,35 @@ mod tests {
         let dir = temp_dir();
         let exe = dir.join("ws");
         fs::write(&exe, b"").unwrap();
-        assert_eq!(sibling_updater(&exe), None);
+        assert_eq!(sibling_updater(&exe, false), None);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dev_build_picks_dev_updater_name() {
+        assert_eq!(updater_name(false), "workspace-status-update");
+        assert_eq!(updater_name(true), "workspace-status-update-dev");
+        let ext = if cfg!(windows) { ".exe" } else { "" };
+        assert_eq!(
+            updater_file_name(false),
+            format!("workspace-status-update{ext}")
+        );
+        assert_eq!(
+            updater_file_name(true),
+            format!("workspace-status-update-dev{ext}")
+        );
+    }
+
+    #[test]
+    fn dev_sibling_updater_ignores_release_sidecar() {
+        let dir = temp_dir();
+        let exe = dir.join("ws-dev");
+        fs::write(&exe, b"").unwrap();
+        fs::write(dir.join(updater_file_name(false)), b"").unwrap();
+        assert_eq!(sibling_updater(&exe, true), None);
+        let dev = dir.join(updater_file_name(true));
+        fs::write(&dev, b"").unwrap();
+        assert_eq!(sibling_updater(&exe, true).as_deref(), Some(dev.as_path()));
         let _ = fs::remove_dir_all(dir);
     }
 

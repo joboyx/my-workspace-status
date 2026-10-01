@@ -3,6 +3,7 @@
 use super::super::action::{Action, Effect};
 use super::super::ops::Op;
 use super::super::stash::StashOpId;
+use super::super::status::StatusMessage;
 use super::{AppState, PendingConfirm};
 
 impl AppState {
@@ -32,7 +33,17 @@ impl AppState {
                         PendingConfirm::CheckoutOutOfSync { .. } => "checkout cancelled".into(),
                         PendingConfirm::RemoveWorktree { .. } => "remove worktree cancelled".into(),
                         PendingConfirm::MergeIntoHead { .. } => "merge cancelled".into(),
+                        PendingConfirm::SwitchToDefault { .. } => "switch cancelled".into(),
                     };
+                }
+                Effect::None
+            }
+            Action::ConfirmEnter => {
+                if let Some(pending) = self.confirm.as_ref() {
+                    self.status = StatusMessage::info(format!(
+                        "press {} to confirm · n or Esc to cancel",
+                        pending.accept_key()
+                    ));
                 }
                 Effect::None
             }
@@ -63,7 +74,8 @@ impl AppState {
                     let mut filter = picker.filter.clone();
                     filter.push(c);
                     picker.set_filter(filter);
-                    self.status = format!("branch /{}", picker.filter);
+                    // The picker title paints the filter; keep it off the status rows.
+                    self.status.clear();
                 }
                 Effect::None
             }
@@ -72,7 +84,8 @@ impl AppState {
                     let mut filter = picker.filter.clone();
                     filter.pop();
                     picker.set_filter(filter);
-                    self.status = format!("branch /{}", picker.filter);
+                    // The picker title paints the filter; keep it off the status rows.
+                    self.status.clear();
                 }
                 Effect::None
             }
@@ -82,21 +95,17 @@ impl AppState {
                 self.status = "branch cancelled".into();
                 Effect::None
             }
-            Action::CreateBranchStart => {
-                self.cancel_mouse_drag();
-                self.begin_create_branch()
-            }
             Action::CreateBranchChar(c) => {
                 if let Some(create) = self.create_branch.as_mut() {
                     create.name.push(c);
-                    self.status = format!("create {}", create.name);
+                    self.status = format!("create {}", create.name).into();
                 }
                 Effect::None
             }
             Action::CreateBranchBackspace => {
                 if let Some(create) = self.create_branch.as_mut() {
                     create.name.pop();
-                    self.status = format!("create {}", create.name);
+                    self.status = format!("create {}", create.name).into();
                 }
                 Effect::None
             }

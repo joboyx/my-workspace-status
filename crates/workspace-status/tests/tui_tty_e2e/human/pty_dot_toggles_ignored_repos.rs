@@ -66,7 +66,7 @@ fn documented_dot_shows_ignored_notes(screen: &str) -> bool {
         && crumb.contains("showing ignored repos")
         && !crumb.contains("hiding ignored repos")
         && !crumb.contains("[workspace]")
-        && !crumb.contains('›')
+        && crumb.contains("workspace › app")
         && status.contains("focus right")
         && status.contains(" tree")
         && status.contains(" split")
@@ -89,7 +89,7 @@ fn documented_dot_hides_ignored_notes(screen: &str) -> bool {
         && crumb.contains("hiding ignored repos")
         && !crumb.contains("showing ignored repos")
         && !crumb.contains("[workspace]")
-        && !crumb.contains('›')
+        && crumb.contains("workspace › app")
         && status.contains("focus right")
         && status.contains(" tree")
         && status.contains(" split")
@@ -107,10 +107,10 @@ fn right_focused_notes_still_hidden(screen: &str) -> bool {
         && !tree_has(screen, "notes")
         && tree_readme_rows(screen) == 1
         && heading.contains("1 changed · all current")
-        && crumb.contains("[workspace]")
-        && status.contains("drill")
+        && crumb.contains("workspace › [app]")
+        && !status.contains("drill")
         && status.contains("Esc")
-        && status.contains("back")
+        && status.contains("← tree")
         && !status.contains("focus right")
 }
 
@@ -125,12 +125,12 @@ fn documented_dot_shows_ignored_notes_right(screen: &str) -> bool {
         && tree_readme_rows(screen) == 2
         && heading.contains("2 changed · all current")
         && !heading.contains("1 changed")
-        && crumb.contains("[workspace]")
+        && crumb.contains("workspace › [app]")
         && crumb.contains("showing ignored repos")
         && !crumb.contains("hiding ignored repos")
-        && status.contains("drill")
+        && !status.contains("drill")
         && status.contains("Esc")
-        && status.contains("back")
+        && status.contains("← tree")
         && !status.contains("focus right")
 }
 

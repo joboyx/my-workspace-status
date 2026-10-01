@@ -12,12 +12,14 @@ fn pane_search_prompt(screen: &str) -> bool {
         && screen.contains("n/N after Enter")
 }
 
+/// Help columns wrap at their own widths: keep each phrase short enough
+/// to stay on one painted row (`search focused`, not `search focused pane`).
 fn help_overlay_open(screen: &str) -> bool {
     screen.contains("MOVE")
         && screen.contains("GIT")
         && screen.contains("VIEW")
         && screen.contains("stage scope")
-        && screen.contains("search focused pane")
+        && screen.contains("search focused")
         && screen.contains("press twice")
         && screen.contains("never quit")
         && screen.contains("next / prev match")

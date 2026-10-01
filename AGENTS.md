@@ -27,7 +27,7 @@ Harness, how-to-run, encoding, and desktop-session notes live in [docs/tui-tty-e
 
 ### `WS_STATUS_UPDATE_CHECK_STORE`
 
-A TTY `ws` / `workspace-status` launch may ask `new version available, update? [y/n]` before the TUI mounts. `--plain`, `--json`, and `--update` skip that check. The check runs at most every 6 hours. Last-check time lives in `$XDG_STATE_HOME/my-workspace-status/update-check.json`. `WS_STATUS_UPDATE_CHECK_STORE` overrides that path.
+A TTY `ws` / `workspace-status` launch may ask `workspace-status <current> → <latest> available. Update? [y/N]` before the TUI mounts. `--plain`, `--json`, `--update`, and `WS_STATUS_UPDATE_CHECK=0` skip that check. The check runs at most every 6 hours. Last-check time lives in `$XDG_STATE_HOME/my-workspace-status/update-check.json`. `WS_STATUS_UPDATE_CHECK_STORE` overrides that path.
 
 PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` spawn a real TTY binary. Point `WS_STATUS_UPDATE_CHECK_STORE` at a temp file with a fresh `lastCheckUnix`. That keeps the prompt from blocking mount and avoids writing the operator XDG file. Tests that drive `--plain` / `--json` / `--update` should also point the store at a temp path. Those modes must not create the file.
 

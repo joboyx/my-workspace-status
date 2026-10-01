@@ -2,9 +2,9 @@ use crate::common::hscroll::DIFF_HSCROLL_TAIL;
 use crate::harness::{left_tree, PtySession};
 use crate::seed::{daily_workspace, seed_long_diff_file};
 use crate::support::{
-    crumb_row, launch_breadcrumb_workspace_only, no_updates_group_folded, no_wrong_overlays,
-    panes_tree_focused_diff_unfocused, right_pane, status_row, title_has_files, tree_cursor_on,
-    tree_dir_expanded, tree_has, SETTLE_MS, WAIT,
+    crumb_row, launch_breadcrumb_workspace_app, no_updates_group_folded, no_wrong_overlays,
+    panes_tree_focused_diff_unfocused, right_pane, right_vbar_at_top, status_row, title_has_files,
+    tree_cursor_on, tree_dir_expanded, tree_has, SETTLE_MS, WAIT,
 };
 
 const FILE: &str = "unique-diffline.rs";
@@ -51,7 +51,9 @@ fn clipped_new_diff(screen: &str) -> bool {
         && right.contains("inline (too narrow)")
         && !right.contains("inline (too narrow) ·")
         && !right.contains(DIFF_HSCROLL_TAIL)
-        && !right.contains('█')
+        // The vertical bar shows at the origin; the h-bar waits for a pan.
+        && right_vbar_at_top(screen)
+        && !right.contains('═')
         && !right.contains("app/README.md")
         && !right.contains("UNSTAGED")
         && !screen.contains("WIP on graph")
@@ -70,7 +72,9 @@ fn wrapped_new_diff(screen: &str) -> bool {
         && right.contains(DIFF_HSCROLL_TAIL)
         && right.contains("inline (too narrow) · wrap")
         && !right.contains("· pan")
-        && !right.contains('█')
+        // Wrap hides the h-bar; the vertical bar still marks the overflow.
+        && right_vbar_at_top(screen)
+        && !right.contains('═')
         && !right.contains("app/README.md")
         && !right.contains("UNSTAGED")
         && !title_has_files(screen)
@@ -78,7 +82,7 @@ fn wrapped_new_diff(screen: &str) -> bool {
 }
 
 fn idle_chrome_left(screen: &str) -> bool {
-    launch_breadcrumb_workspace_only(screen)
+    launch_breadcrumb_workspace_app(screen)
         && status_row(screen).contains("focus right")
         && !status_row(screen).contains("drill")
         && no_wrong_overlays(screen)

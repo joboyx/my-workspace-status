@@ -1,7 +1,8 @@
 //! Focus / depth / kind gates for tree writes.
 //!
 //! `dispatch` refuses workspace-tree writes when ViewStack depth ≥ 1 or when
-//! the right pane is focused, unless the allow-list matches.
+//! the right pane is focused, unless the allow-list matches. The refusal
+//! puts [`dispatch_noop_reason`] on the status line as a warn.
 
 use super::action::Action;
 
@@ -132,7 +133,9 @@ pub fn right_pane_left_list_allowed(target: ListFocusTarget, action: &Action) ->
     graph_move || graph_write || commit_nav || diff_move || diff_file_write
 }
 
-/// True when `dispatch` should swallow `action` as a silent no-op.
+/// True when `dispatch` should swallow `action` as a no-op.
+///
+/// [`dispatch_noop_reason`] gives the status copy that says why.
 pub fn dispatch_is_noop(
     action: &Action,
     depth: u8,
@@ -145,9 +148,187 @@ pub fn dispatch_is_noop(
     focus_right && is_left_list_action(action) && !right_pane_left_list_allowed(target, action)
 }
 
+/// Why [`dispatch_is_noop`] swallows `action`, for the status line and the palette.
+///
+/// `None` when the action runs, and for list moves and folds, so a held
+/// nav key cannot repaint a refusal on every repeat. Tree writes name the
+/// key that gets back to the tree and what they would do there
+/// (`focus the tree (Tab) to stage`, or `Esc back to the tree to pull` from
+/// a drill, where it may take more than one Esc).
+pub fn dispatch_noop_reason(
+    action: &Action,
+    depth: u8,
+    focus_right: bool,
+    target: ListFocusTarget,
+) -> Option<String> {
+    if !dispatch_is_noop(action, depth, focus_right, target)
+        || is_move_action(action)
+        || is_fold_action(action)
+    {
+        return None;
+    }
+    let reason = match action {
+        Action::ToggleReviewed if depth >= 1 => REVIEWED_MARKS_ARE_FOR_TREE_FILES,
+        Action::ToggleReviewed => FOCUS_A_FILE_TO_MARK_REVIEWED,
+        Action::Edit => "focus a file to edit",
+        Action::ExternalDiff => "focus a file to diff",
+        Action::ToggleFullContext => "focus a file diff",
+        Action::GraphCheckout | Action::GraphCreateBranch | Action::GraphMerge => {
+            FOCUS_A_GRAPH_COMMIT
+        }
+        Action::GraphStashApply | Action::GraphStashPop | Action::GraphStashDrop => {
+            FOCUS_A_GRAPH_STASH
+        }
+        Action::StashMenu if depth >= 2 => STASH_NEEDS_TREE_OR_GRAPH,
+        // `S` runs from either left list (tree or a drill's graph).
+        Action::StashMenu => "focus the left pane (Tab) to stash",
+        // Only tree writes are left: every other gated action has its own
+        // arm above (pinned by `every_noop_has_a_reason`).
+        _ => {
+            let verb = tree_key_verb(action)?;
+            // Esc pops a drill (one depth per press); at depth 0 Tab
+            // switches panes.
+            return Some(if depth >= 1 {
+                format!("Esc back to the tree to {verb}")
+            } else {
+                format!("focus the tree (Tab) to {verb}")
+            });
+        }
+    };
+    Some(reason.into())
+}
+
+/// What a refused tree write would do, for [`dispatch_noop_reason`].
+fn tree_key_verb(action: &Action) -> Option<&'static str> {
+    Some(match action {
+        Action::Stage => "stage",
+        Action::Unstage => "unstage",
+        Action::Revert => "revert",
+        Action::Fetch => "fetch",
+        Action::Pull => "pull",
+        Action::Push => "push",
+        Action::DefaultBranch => "switch to the default branch",
+        Action::Branch => "pick a branch",
+        Action::RemoveWorktree => "remove a worktree",
+        _ => return None,
+    })
+}
+
+/// `S` (and the palette row) in a file-diff drill, where no list stashes.
+pub const STASH_NEEDS_TREE_OR_GRAPH: &str = "focus the tree or graph (Esc) to stash";
+
+/// Graph `b` / `c` / `m` (and their palette rows) off a graph commit row.
+pub const FOCUS_A_GRAPH_COMMIT: &str = "focus a graph commit";
+
+/// Graph `a` / `p` / `D` (and their palette rows) off a graph stash row.
+pub const FOCUS_A_GRAPH_STASH: &str = "focus a graph stash row";
+
+/// Space / palette copy when the focus is not a file row.
+pub const FOCUS_A_FILE_TO_MARK_REVIEWED: &str = "focus a file to mark reviewed";
+
+/// Space / palette copy in a commit drill: marks live on workspace-tree files.
+pub const REVIEWED_MARKS_ARE_FOR_TREE_FILES: &str =
+    "reviewed marks are for workspace-tree files · Esc back to the tree";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn noop_reasons_name_the_way_back_and_the_action() {
+        assert_eq!(
+            dispatch_noop_reason(&Action::Stage, 0, true, ListFocusTarget::Graph).as_deref(),
+            Some("focus the tree (Tab) to stage")
+        );
+        assert_eq!(
+            dispatch_noop_reason(&Action::Pull, 1, false, ListFocusTarget::Graph).as_deref(),
+            Some("Esc back to the tree to pull")
+        );
+        assert_eq!(
+            dispatch_noop_reason(&Action::Branch, 0, true, ListFocusTarget::Graph).as_deref(),
+            Some("focus the tree (Tab) to pick a branch")
+        );
+        assert_eq!(
+            dispatch_noop_reason(&Action::StashMenu, 1, true, ListFocusTarget::CommitFiles)
+                .as_deref(),
+            Some("focus the left pane (Tab) to stash")
+        );
+        assert_eq!(
+            dispatch_noop_reason(
+                &Action::GraphCheckout,
+                1,
+                true,
+                ListFocusTarget::CommitFiles
+            )
+            .as_deref(),
+            Some(FOCUS_A_GRAPH_COMMIT)
+        );
+        assert_eq!(
+            dispatch_noop_reason(&Action::StashMenu, 2, true, ListFocusTarget::None).as_deref(),
+            Some(STASH_NEEDS_TREE_OR_GRAPH)
+        );
+        assert_eq!(
+            dispatch_noop_reason(&Action::GraphStashPop, 0, true, ListFocusTarget::None).as_deref(),
+            Some(FOCUS_A_GRAPH_STASH)
+        );
+        assert_eq!(
+            dispatch_noop_reason(&Action::Move(1), 0, true, ListFocusTarget::Graph),
+            None,
+            "held nav keys never repaint a refusal"
+        );
+        assert_eq!(
+            dispatch_noop_reason(&Action::Stage, 0, false, ListFocusTarget::Tree),
+            None,
+            "a tree key on the tree runs"
+        );
+    }
+
+    #[test]
+    fn every_noop_has_a_reason() {
+        let actions = [
+            Action::Stage,
+            Action::Unstage,
+            Action::Revert,
+            Action::Edit,
+            Action::ExternalDiff,
+            Action::ToggleReviewed,
+            Action::ToggleFullContext,
+            Action::Branch,
+            Action::RemoveWorktree,
+            Action::GraphCheckout,
+            Action::GraphCreateBranch,
+            Action::GraphMerge,
+            Action::GraphStashApply,
+            Action::GraphStashDrop,
+            Action::GraphStashPop,
+            Action::StashMenu,
+            Action::Fetch,
+            Action::Pull,
+            Action::Push,
+            Action::DefaultBranch,
+        ];
+        let targets = [
+            ListFocusTarget::Tree,
+            ListFocusTarget::Graph,
+            ListFocusTarget::CommitFiles,
+            ListFocusTarget::None,
+        ];
+        for action in &actions {
+            assert!(is_left_list_action(action), "{action:?}");
+            for depth in 0..=2 {
+                for focus_right in [false, true] {
+                    for target in targets {
+                        if dispatch_is_noop(action, depth, focus_right, target) {
+                            assert!(
+                                dispatch_noop_reason(action, depth, focus_right, target).is_some(),
+                                "{action:?} depth {depth} right {focus_right} {target:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn tree_writes_blocked_at_depth_one_and_two() {

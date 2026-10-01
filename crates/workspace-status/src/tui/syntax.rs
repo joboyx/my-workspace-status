@@ -301,7 +301,7 @@ pub(crate) fn highlight_diff_rows(
                     }
                 }
             }
-            DiffRow::Section(_) | DiffRow::Hunk { .. } => i += 1,
+            DiffRow::Section(_) | DiffRow::Hunk { .. } | DiffRow::Error { .. } => i += 1,
         }
     }
     DiffSyntaxSpans { left, right }

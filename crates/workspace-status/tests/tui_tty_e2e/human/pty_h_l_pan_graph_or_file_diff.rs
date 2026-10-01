@@ -2,9 +2,10 @@ use crate::common::hscroll::DIFF_HSCROLL_TAIL;
 use crate::harness::{left_tree, PtySession};
 use crate::seed::{daily_workspace, seed_long_diff_file};
 use crate::support::{
-    crumb_row, launch_breadcrumb_workspace_only, no_updates_group_folded, no_wrong_overlays,
-    panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused, right_pane, status_row,
-    title_has_files, tree_cursor_on, tree_dir_expanded, tree_has, SETTLE_MS, WAIT,
+    crumb_row, launch_breadcrumb_workspace_app, no_updates_group_folded, no_wrong_overlays,
+    panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused, right_pane,
+    right_vbar_at_top, status_row, title_has_files, tree_cursor_on, tree_dir_expanded, tree_has,
+    SETTLE_MS, WAIT,
 };
 
 const FILE: &str = "unique-diffline.rs";
@@ -21,7 +22,8 @@ fn help_lists_hl_pan(screen: &str) -> bool {
     let compact = screen.split_whitespace().collect::<Vec<_>>().join(" ");
     screen.contains("MOVE")
         && compact.contains("h l")
-        && compact.contains("fold · pan lists/diff")
+        && compact.contains("fold · pan")
+        && compact.contains("lists/diff")
         && compact.contains("toggle fold")
 }
 
@@ -50,7 +52,9 @@ fn clipped_new_diff(screen: &str) -> bool {
         && right.contains("inline (too narrow)")
         && !right.contains("inline (too narrow) ·")
         && !right.contains(DIFF_HSCROLL_TAIL)
-        && !right.contains('█')
+        // The vertical bar shows at the origin; the h-bar waits for a pan.
+        && right_vbar_at_top(screen)
+        && !right.contains('═')
         && !right.contains("app/README.md")
         && !right.contains("UNSTAGED")
         && !screen.contains("WIP on graph")
@@ -77,20 +81,20 @@ fn panned_new_diff(screen: &str) -> bool {
 
 fn idle_chrome_left(screen: &str) -> bool {
     let status = status_row(screen);
-    launch_breadcrumb_workspace_only(screen)
+    launch_breadcrumb_workspace_app(screen)
         && status.contains("focus right")
         && !status.contains("drill")
-        && !status.contains("Esc")
+        && !status.contains("← tree")
         && no_wrong_overlays(screen)
 }
 
 fn idle_chrome_right(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);
-    crumb.trim() == "[workspace]"
-        && status.contains("drill")
+    crumb.trim() == "workspace › [app]"
+        && !status.contains("drill")
         && status.contains("Esc")
-        && status.contains("back")
+        && (status.contains("← tree") || status.contains("Esc   clear"))
         && !status.contains("focus right")
         && no_wrong_overlays(screen)
 }
@@ -180,7 +184,7 @@ fn pty_h_l_pan_graph_or_file_diff() {
     tui.wait_pred(
         |screen| {
             !screen.contains("MOVE")
-                && !screen.contains("pan lists/diff")
+                && !screen.contains("lists/diff")
                 && screen.contains("README.md")
                 && screen.contains("? help")
         },

@@ -39,12 +39,11 @@ fn enter_focuses_readme_diff(screen: &str) -> bool {
         && screen.contains("+dirty")
         && screen.contains("@@ -1 +1,2 @@")
         && screen.contains("app/README.md  inline (too narrow)")
-        && crumb.trim() == "[workspace]"
-        && !crumb.contains('›')
+        && crumb.trim() == "workspace › [app]"
         && !crumb.contains("[merger]")
-        && status.contains("drill")
+        && !status.contains("drill")
         && status.contains("Esc")
-        && status.contains("back")
+        && status.contains("← tree")
         && status.contains(" tree")
         && status.contains(" split")
         && !status.contains("focus right")
@@ -62,8 +61,8 @@ fn enter_focuses_readme_diff(screen: &str) -> bool {
 /// `Enter dblclick` as `focus right / drill`. Right Enter drills graph to
 /// commit files. Launch is the README file-diff with left tree focused.
 ///
-/// Live PTY after first paint: CSI-u Enter brackets `[workspace]`,
-/// and swaps `focus right` for `drill` / Esc back. `j` does
+/// Live PTY after first paint: CSI-u Enter brackets `[app]`,
+/// and swaps `focus right` for `Esc ← tree` (a file diff cannot drill). `j` does
 /// not move the tree cursor. Esc unfocuses. A no-op, a graph drill, a
 /// files drill, a crumb-only paint, Tab, `/`, or a flicker cannot pass.
 #[test]

@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use crate::common::hscroll::GRAPH_HSCROLL_VISIBLE;
 use crate::harness::{left_tree, PtySession, SGR_WHEEL_RIGHT};
 use crate::seed::{daily_workspace, seed_long_subject_repo};
@@ -95,6 +97,44 @@ fn hbar_span(screen: &str) -> Option<(u16, u16, u16)> {
     None
 }
 
+/// Wheel right one notch at a time until `hbar_painted_tail_clipped`.
+///
+/// Returns the settled screen. A second wheel must not be in flight when
+/// the caller reads the thumb: it moves the thumb after `hbar_span` reads
+/// it, and the press on the old thumb cell becomes a track click. So each
+/// notch waits for its own frame, and the screen must hold for
+/// `SETTLE_MS` before it counts. A notch that paints nothing within
+/// `NOTCH_WAIT` is treated as dropped and sent again.
+fn wheel_until_hbar(tui: &mut PtySession) -> String {
+    const NOTCH_WAIT: Duration = Duration::from_secs(3);
+    let start = Instant::now();
+    loop {
+        let sent_on = tui.screen();
+        tui.sgr_mouse(SGR_WHEEL_RIGHT, NARROW_RIGHT_COL, GRAPH_BODY_ROW);
+        let notch = Instant::now();
+        while tui.screen() == sent_on && notch.elapsed() < NOTCH_WAIT {
+            tui.wait_ms(25);
+        }
+        let mut screen = tui.screen();
+        loop {
+            tui.wait_ms(SETTLE_MS);
+            let next = tui.screen();
+            if next == screen || start.elapsed() >= WAIT {
+                break;
+            }
+            screen = next;
+        }
+        if hbar_painted_tail_clipped(&screen) {
+            return screen;
+        }
+        if start.elapsed() >= WAIT {
+            panic!(
+                "timeout waiting for small SGR 67 pan paints the graph h-bar without UNIQUE_GRAP:\n{screen}"
+            );
+        }
+    }
+}
+
 fn sgr_release(tui: &mut PtySession, col: u16, row: u16) {
     let seq = format!(
         "\x1b[<0;{};{}m",
@@ -127,13 +167,7 @@ fn pty_graph_hscrollbar_thumb_drag() {
         WAIT,
     );
 
-    tui.wait_pred_while(
-        hbar_painted_tail_clipped,
-        "small SGR 67 pan paints the graph h-bar without UNIQUE_GRAP",
-        WAIT,
-        |tui| tui.sgr_mouse(SGR_WHEEL_RIGHT, NARROW_RIGHT_COL, GRAPH_BODY_ROW),
-    );
-    let before = tui.screen();
+    let before = wheel_until_hbar(&mut tui);
     let (bar_row, thumb_col, track_end) =
         hbar_span(&before).unwrap_or_else(|| panic!("graph h-bar █/═ after small pan:\n{before}"));
     assert!(

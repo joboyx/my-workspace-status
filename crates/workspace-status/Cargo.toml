@@ -26,6 +26,9 @@ tokio = { version = "1.47.1", features = ["rt", "macros", "sync", "time"] }
 workspace-status-graph = { path = "../workspace-status-graph" }
 sha2 = "0.10.8"
 tui-textarea = "0.7"
+# Same release ratatui 0.29 measures spans with, so a help cell cut counts
+# columns the way it paints.
+unicode-width = "0.2.0"
 fs4 = "0.13"
 # 0.4.5 stays on rustc 1.85. 0.5 needs a newer compiler. Cargo.lock pins
 # plist 1.7.4 and time 0.3.36 so syntect 5.3 does not pull 1.88-only crates.
@@ -37,6 +40,7 @@ libc = "0.2"
 [dev-dependencies]
 portable-pty = "0.8"
 vt100 = "0.15"
+workspace-status-graph = { path = "../workspace-status-graph", features = ["paint-probe"] }
 
 [lints]
 workspace = true

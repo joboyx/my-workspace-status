@@ -49,7 +49,7 @@ fn readme_reverted(screen: &str) -> bool {
 /// Shift+Y on a tracked-only revert confirm does nothing; `y` then reverts.
 ///
 /// Configuration: `x` confirms with counts and offers only the keys that
-/// apply. A tracked-only scope shows `y revert` and `n cancel`; a key the
+/// apply. A tracked-only scope shows `y revert` and `n Esc cancel`; a key the
 /// box does not show keeps it open. Keymap: `Y` is `Action::ConfirmYesClean`,
 /// `y` is `Action::ConfirmYes`. Live TUI reads Shift+Y as CSI-u.
 ///

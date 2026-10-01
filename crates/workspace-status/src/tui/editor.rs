@@ -1,4 +1,4 @@
-//! Resolve `$EDITOR` / config.editor and build the spawn argv.
+//! Resolve config.editor / `$VISUAL` / `$EDITOR` and build the spawn argv.
 
 use std::path::Path;
 
@@ -41,13 +41,13 @@ pub fn parse_editor_argv(editor: &str) -> Vec<String> {
     tokens
 }
 
-/// Config `editor`, then `$EDITOR`, then `$VISUAL`, then `vim`.
+/// Config `editor`, then `$VISUAL`, then `$EDITOR`, then `vim` (git's order).
 pub fn resolve_editor(
     config_editor: Option<&str>,
-    env_editor: Option<&str>,
     env_visual: Option<&str>,
+    env_editor: Option<&str>,
 ) -> String {
-    for raw in [config_editor, env_editor, env_visual]
+    for raw in [config_editor, env_visual, env_editor]
         .into_iter()
         .flatten()
     {
@@ -101,14 +101,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_prefers_config_then_editor() {
+    fn resolve_prefers_config_then_visual_then_editor() {
         assert_eq!(
-            resolve_editor(Some("nvim"), Some("vim"), Some("vi")),
+            resolve_editor(Some("nvim"), Some("code --wait"), Some("vi")),
             "nvim"
         );
-        assert_eq!(resolve_editor(Some("  "), Some("vim"), None), "vim");
+        assert_eq!(
+            resolve_editor(Some("  "), Some("code --wait"), Some("vi")),
+            "code --wait"
+        );
+        assert_eq!(resolve_editor(None, Some(" "), Some("nano")), "nano");
         assert_eq!(resolve_editor(None, None, None), "vim");
-        assert_eq!(resolve_editor(None, None, Some("nano")), "nano");
     }
 
     #[test]

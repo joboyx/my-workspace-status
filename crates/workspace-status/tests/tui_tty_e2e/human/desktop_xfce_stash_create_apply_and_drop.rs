@@ -15,7 +15,7 @@ use crate::support::{
 /// Configuration: tree dirty file is create-only (`s`). Graph stash row
 /// `a` applies and keeps the entry. `D` asks `y`/`n`. After first paint
 /// the cursor is already on dirty README. xfce Shift+S (keyboard
-/// enhancement CSI-u) then overlay `s` must paint `Stash app` / `s create`
+/// enhancement CSI-u) then overlay `s` must paint `Stash app` / ` s  stash`
 /// and stash that file (`Stashed 1 file`). `l`/`j`/Tab/`j` focuses app's
 /// `stash@{0}`. Graph `a` restores README (`applied stash@{0}`) and keeps
 /// the stash. Shift+D then `y` drops it (`dropped stash@{0}`); README

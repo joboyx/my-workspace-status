@@ -33,6 +33,7 @@ use super::fetch::fetch_interval_ms;
 use super::keys::{drop_g_chord_echo, held_nav_key, KeyStrokeOrigin};
 use super::render::draw;
 use super::state::AppState;
+use super::status::StatusMessage;
 use super::tty::{poll_event, read_event_origin};
 use super::watch::{watch_interval_ms, watch_remain_ms, FLASH_TICK_MS};
 
@@ -246,6 +247,7 @@ pub async fn run(
                     .saturating_sub(ctx.last_fetch.elapsed().as_millis() as u64)
             };
         let ctrl_remain = ctx.state.ctrl_c_remaining_ms(now).unwrap_or(u64::MAX);
+        let status_remain = ctx.state.status_expiry_ms(now).unwrap_or(u64::MAX);
         let present_remain = ctx.presenter.remain_ms(ctx.state.has_active_flashes());
         let join_empty = ctx.join.is_empty();
 
@@ -293,6 +295,11 @@ pub async fn run(
             }
             _ = sleep_ms(ctrl_remain) => {
                 if ctx.state.expire_ctrl_c_prompt(Instant::now()) {
+                    ctx.presenter.mark();
+                }
+            }
+            _ = sleep_ms(status_remain) => {
+                if ctx.state.expire_status(Instant::now()) {
                     ctx.presenter.mark();
                 }
             }
@@ -356,7 +363,11 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
         };
         match classify_busy_dispatch(&action, palette_submit) {
             BusyAction::Quit => {
-                ctx.quit = true;
+                // `q` mid-write arms the same press-again window as Ctrl-C.
+                if matches!(ctx.state.quit_while_busy(Instant::now()), Effect::Quit) {
+                    ctx.quit = true;
+                }
+                ctx.presenter.mark();
                 return;
             }
             BusyAction::Resize { cols, rows } => {
@@ -365,7 +376,11 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
                 ctx.presenter.mark();
                 return;
             }
-            BusyAction::Ignore => return,
+            BusyAction::Ignore => {
+                ctx.state.note_busy_drop(ctx.interp.running_write_op());
+                ctx.presenter.mark();
+                return;
+            }
             BusyAction::Handle => {}
         }
     }
@@ -441,20 +456,23 @@ fn spawn_joinset(ctx: &mut LoopCtx<'_>) {
 fn schedule_edit(ctx: &mut LoopCtx<'_>, repo: String, path: String) {
     let editor = resolve_editor(
         ctx.opts.config.editor.as_deref(),
-        std::env::var("EDITOR").ok().as_deref(),
         std::env::var("VISUAL").ok().as_deref(),
+        std::env::var("EDITOR").ok().as_deref(),
     );
     let abs = ctx.opts.cwd.join(&repo).join(&path);
     let (cmd, args) = editor_command(&editor, &abs.to_string_lossy(), None);
     if is_detached_editor(&editor) {
-        let _ = Command::new(&cmd)
+        let spawned = Command::new(&cmd)
             .args(&args)
             .current_dir(ctx.opts.cwd.join(&repo))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn();
-        ctx.state.status = format!("opened {path}");
+        ctx.state.status = match spawned {
+            Ok(_) => StatusMessage::ok(format!("opened {path}")),
+            Err(err) => StatusMessage::error(format!("edit failed: {cmd}: {err}")),
+        };
         ctx.presenter.mark();
         return;
     }
@@ -464,11 +482,11 @@ fn schedule_edit(ctx: &mut LoopCtx<'_>, repo: String, path: String) {
     ctx.input.resume();
     match result {
         Err(err) => {
-            ctx.state.status = format!("edit failed: {err}");
+            ctx.state.status = StatusMessage::error(format!("edit failed: {err}"));
             ctx.presenter.mark();
         }
         Ok(()) => {
-            ctx.state.status = format!("edited {path}");
+            ctx.state.status = StatusMessage::ok(format!("edited {path}"));
             ctx.interp.after_edit(ctx.state, repo);
             if ctx.interp.take_dirty() {
                 ctx.presenter.mark();
@@ -489,7 +507,7 @@ fn launch_diff(ctx: &mut LoopCtx<'_>, launch: DiffLaunch) {
     let prepared = match prepared {
         Ok(prepared) => prepared,
         Err(err) => {
-            ctx.state.status = format!("diff failed: {err}");
+            ctx.state.status = StatusMessage::error(format!("diff failed: {err}"));
             ctx.presenter.mark();
             return;
         }
@@ -510,11 +528,11 @@ fn launch_diff(ctx: &mut LoopCtx<'_>, launch: DiffLaunch) {
                 std::thread::spawn(move || {
                     wait_and_cleanup(child, prepared);
                 });
-                ctx.state.status = format!("opened diff {path}");
+                ctx.state.status = StatusMessage::ok(format!("opened diff {path}"));
             }
             Err(err) => {
                 cleanup_prepared(&prepared);
-                ctx.state.status = format!("diff failed: {err}");
+                ctx.state.status = StatusMessage::error(format!("diff failed: {err}"));
             }
         }
         ctx.presenter.mark();
@@ -527,11 +545,11 @@ fn launch_diff(ctx: &mut LoopCtx<'_>, launch: DiffLaunch) {
     cleanup_prepared(&prepared);
     match result {
         Err(err) => {
-            ctx.state.status = format!("diff failed: {err}");
+            ctx.state.status = StatusMessage::error(format!("diff failed: {err}"));
             ctx.presenter.mark();
         }
         Ok(()) => {
-            ctx.state.status = format!("diffed {path}");
+            ctx.state.status = StatusMessage::ok(format!("diffed {path}"));
             if matches!(kind, ExternalDiffKind::Worktree) {
                 ctx.interp.after_edit(ctx.state, repo);
                 if ctx.interp.take_dirty() {

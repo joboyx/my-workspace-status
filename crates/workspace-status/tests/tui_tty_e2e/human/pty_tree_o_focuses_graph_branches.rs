@@ -15,13 +15,12 @@ fn tree_graph_focus_overlay_open(screen: &str) -> bool {
         && screen.contains("* feature/keep")
         && screen.contains("topic/noise")
         && screen.contains("Enter apply")
-        && screen.contains("O clear")
+        && screen.contains("Ctrl-o clear")
         && screen.contains("Esc cancel")
         && screen.contains("workspace › focusbox")
         && !screen.contains("workspace › [focusbox]")
         && !screen.contains("graph focus:")
         && !screen.contains("Enter checkout")
-        && !screen.contains("C create")
         && not_files_search_or_stash(screen)
 }
 

@@ -8,17 +8,18 @@ use ratatui::widgets::{
     ScrollbarState, StatefulWidget, Widget, Wrap,
 };
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 use workspace_status_graph::{
     footer_message_scroll_max, graph_col_max, graph_hscroll_visible, graph_vscroll_visible,
-    paint_model, GraphLabelPalette, GraphWidget, ASCII, UNICODE,
+    painted_line_count, short_id, GraphLabelPalette, GraphWidget,
 };
 
 use std::cell::RefCell;
 use std::collections::HashSet;
 
 use super::chrome::{
-    breadcrumb_line, breadcrumb_rows, ctrl_c_prompt_line, ctrl_c_prompt_rows,
-    overlay_status_rows_for, status_line, STATUS_COPIED,
+    breadcrumb_line, breadcrumb_rows, ctrl_c_prompt_line, ctrl_c_prompt_rows, export_shows_status,
+    overlay_status_rows_for, status_line,
 };
 use super::comments::{
     comment_overlay_footer_save, commit_file_row_comments_resolved, commit_file_row_has_comment,
@@ -26,20 +27,20 @@ use super::comments::{
     tree_row_has_comment, CommentPrompt, COMMENT_OVERLAY_FOOTER_EDIT,
 };
 use super::diff::{
-    cell_code_width, cell_sign, diff_pane_header, diff_pane_header_rows, diff_pane_mode_label,
-    diff_row_content_width, diff_wrap_row_heights, gutter_width, section_header,
-    wrap_viewport_start, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
+    cell_code_width, cell_sign, diff_failed_text, diff_pane_header, diff_pane_header_rows,
+    diff_pane_mode_label, diff_row_content_width, diff_wrap_row_heights, gutter_width,
+    section_header, wrap_viewport_start, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
 };
 use super::drill::DrillView;
 use super::help::{
-    help_chip_gap_spaces, help_column_width, help_entry_matches, help_entry_visual_lines,
-    help_groups, help_idle_footer_lines, help_inner_width, help_version_label,
-    HELP_SEARCH_ESC_HINT,
+    help_chip_gap_spaces, help_column_content_width, help_column_widths, help_entry_matches,
+    help_entry_visual_lines, help_groups, help_idle_footer_lines, help_inner_width, help_key_width,
+    help_version_label, HELP_SEARCH_ESC_HINT,
 };
 use super::icons::{
     comment_mark_cols, icon_branch, icon_comment, icon_comment_resolved, icon_diff,
-    icon_merged_into_default, icon_move, icon_open_vs_default, truncate_visible, CURSOR_BAR,
-    CURSOR_BAR_INACTIVE, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
+    icon_merged_into_default, icon_move, icon_open_vs_default, CURSOR_BAR, CURSOR_BAR_INACTIVE,
+    FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
 };
 use super::ops::RevertScope;
 use super::search::{
@@ -47,23 +48,31 @@ use super::search::{
     wrap_col_starts, wrap_cols, SearchPane,
 };
 use super::split::{
-    diff_split_rule_x, effective_diff_mode, is_side_by_side_split, pane_widths,
-    side_by_side_column_widths, MIN_PANE_COLS,
+    diff_paint_width, diff_split_rule_x, pane_widths, side_by_side_column_widths, DiffMode,
+    MIN_PANE_COLS, MIN_TERM_COLS, MIN_TERM_ROWS,
 };
 use super::state::{revert_scope, AppState, CompareRevertTarget, FocusPane, PendingConfirm};
 use super::syntax::{
     cached_highlight_diff_rows, slice_styled_cols, CachedDiffSyntax, DiffSyntaxKey,
 };
-use super::tabs::{no_committed_changes_vs, NO_BRANCHES_TO_COMPARE, NO_COMMITTED_CHANGES};
-use super::theme::{hex_color, Palette};
+use super::tabs::{compare_picker_empty, no_committed_changes_vs, NO_COMMITTED_CHANGES};
+use super::theme::{hex_color, Palette, Pill};
 use super::tree::{
-    row_segments, visible_window, with_comment_mark, with_viewed_mark, NodeKind, NodeSegments,
-    SegRole, TextSeg, VisibleRow,
+    row_segments, visible_window, with_comment_mark, with_viewed_mark, workspace_trailing_fit,
+    NodeKind, NodeSegments, SegRole, TextSeg, VisibleRow,
 };
-use crate::helpers::visible_width;
+use crate::helpers::{is_detached_head_branch, visible_width};
 
 /// Empty tree / empty commit-file list.
 const NO_MATCHING_ROWS: &str = "No matching rows";
+/// Right pane while the focused repo's graph loads.
+const LOADING_GRAPH: &str = "loading graph…";
+/// Empty commit-file list for a commit, after its files loaded.
+const NO_FILES_IN_COMMIT: &str = "no files in this commit";
+/// Empty commit-file list for a stash, after its files loaded.
+const NO_FILES_IN_STASH: &str = "no files in this stash";
+/// Empty commit-file list for the uncommitted row, after its files loaded.
+const NO_FILES_IN_WORKTREE: &str = "no uncommitted changes";
 /// Commit-file list while git is still listing.
 const LOADING_FILES: &str = "loading files…";
 
@@ -116,6 +125,11 @@ fn selection_marker(selected: bool, focused: bool) -> &'static str {
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.prune_expired_flashes();
     let area = frame.area();
+    state.too_small = area.width < MIN_TERM_COLS || area.height < MIN_TERM_ROWS;
+    if state.too_small {
+        draw_too_small(frame, area, state.theme.palette());
+        return;
+    }
     let overlay_h = overlay_status_rows_for(state, area.width);
     let crumb_h = breadcrumb_rows(state);
     let prompt_h = ctrl_c_prompt_rows(state);
@@ -171,13 +185,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.diff_hscrollbar_x = 0;
     state.layout.diff_hscrollbar_width = 0;
     state.layout.diff_col_max = 0;
-    let left_name = if left_is_files {
-        "files"
-    } else if left_is_graph {
-        "graph"
-    } else {
-        "tree"
-    };
+    let left_name = state.left_pane_title();
     let palette = state.theme.palette();
     let title_style = Style::default().fg(palette.heading);
     let left_title = pane_title(left_name);
@@ -272,7 +280,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.diff_pane_height = right_inner.height;
     state.layout.diff_content_x = right_inner.x;
     state.layout.diff_split_rule_x =
-        if state.right_is_diff() && is_side_by_side_split(state.diff_mode, right_inner.width) {
+        if state.right_is_diff() && state.diff_layout() == DiffMode::SideBySide {
             let split = side_by_side_column_widths(right_inner.width, state.diff_split_fraction);
             Some(diff_split_rule_x(panes[0].width, split.left_width).saturating_sub(1))
         } else {
@@ -324,6 +332,33 @@ fn pane_border(focused: bool, palette: Palette) -> Style {
     }
 }
 
+/// Resize notice in place of the panes when the terminal is below
+/// [`MIN_TERM_COLS`] × [`MIN_TERM_ROWS`]. Keys still dispatch (`q` quits).
+fn draw_too_small(frame: &mut Frame<'_>, area: Rect, palette: Palette) {
+    let text = too_small_notice(area.width, area.height);
+    let lines = wrap_cols(&text, area.width.max(1) as usize);
+    let top = area.height.saturating_sub(lines.len() as u16) / 2;
+    let body = Rect {
+        x: area.x,
+        y: area.y.saturating_add(top),
+        width: area.width,
+        height: area.height.saturating_sub(top),
+    };
+    let lines: Vec<Line> = lines
+        .into_iter()
+        .map(|line| Line::from(Span::styled(line, Style::default().fg(palette.modified))))
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center),
+        body,
+    );
+}
+
+/// `terminal too small (W×H — need ≥ 46×12)`.
+fn too_small_notice(cols: u16, rows: u16) -> String {
+    format!("terminal too small ({cols}×{rows} — need ≥ {MIN_TERM_COLS}×{MIN_TERM_ROWS})")
+}
+
 fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -342,7 +377,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         .unwrap_or(0);
     let (start, _) = visible_window(painted.len(), painted_cursor, height);
     state.layout.list_offset = start;
-    let search_bg = state.theme.pills().filter.bg;
+    let search = state.theme.pills().filter;
     let match_ids: HashSet<String> = if state.search_target == SearchPane::Tree {
         collect_match_ids(&state.tree, &state.search_query)
             .into_iter()
@@ -363,7 +398,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             state.focus == FocusPane::Left,
             state.flash_color(&row.id),
             match_ids.contains(&row.id),
-            search_bg,
+            search,
             state.ascii,
             viewed,
             commented,
@@ -382,7 +417,7 @@ fn paint_tree_row(
     focused: bool,
     flash: Option<Color>,
     search_match: bool,
-    search_bg: Color,
+    search: Pill,
     ascii: bool,
     viewed: bool,
     commented: bool,
@@ -390,7 +425,25 @@ fn paint_tree_row(
     palette: Palette,
     col_offset: usize,
 ) -> Line<'static> {
-    let segs = row_segments(row, ascii, viewed, commented, resolved);
+    let segs_width =
+        |segs: &[TextSeg]| -> usize { segs.iter().map(|s| visible_width(&s.text)).sum() };
+    let mut segs = row_segments(row, ascii, viewed, commented, resolved);
+    if row.kind == NodeKind::Workspace {
+        // The summary gives way before the name. Same prefix as
+        // `paint_segmented_row` (edge, indent, chevron); comment marks
+        // stay ahead of the summary.
+        let prefix_width = 1 + 2 * row.depth + 2;
+        let name_width = segs_width(&row.segments).saturating_sub(col_offset);
+        let marks = segs.trailing.len().saturating_sub(row.trailing_segs.len());
+        let marks_width = segs_width(&segs.trailing[..marks]);
+        let room = width
+            .saturating_sub(prefix_width)
+            .saturating_sub(name_width)
+            .saturating_sub(marks_width);
+        segs.trailing.truncate(marks);
+        segs.trailing
+            .extend(workspace_trailing_fit(&row.chrome, room));
+    }
     paint_segmented_row(
         row.depth,
         row.foldable,
@@ -401,7 +454,7 @@ fn paint_tree_row(
         focused,
         flash,
         search_match,
-        search_bg,
+        search,
         ascii,
         palette,
         col_offset,
@@ -418,12 +471,15 @@ fn paint_segmented_row(
     focused: bool,
     flash: Option<Color>,
     search_match: bool,
-    search_bg: Color,
+    search: Pill,
     ascii: bool,
     palette: Palette,
     col_offset: usize,
 ) -> Line<'static> {
-    let bg = row_match_bg(selected, focused, search_match, flash, palette, search_bg);
+    let bg = row_match_bg(selected, focused, search_match, flash, palette, search.bg);
+    // A search-match row paints its text in the filter foreground: the
+    // filter background can equal a segment colour (branch names).
+    let match_fg = (flash.is_none() && !selected && search_match).then_some(search.fg);
     let trailing_text: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
     let trailing_width = visible_width(&trailing_text);
     let pad = usize::from(trailing_width > 0);
@@ -472,6 +528,11 @@ fn paint_segmented_row(
         .sum();
     if used < width {
         spans.push(styled_span(&" ".repeat(width - used), Style::default(), bg));
+    }
+    if let Some(fg) = match_fg {
+        for span in &mut spans {
+            span.style = span.style.fg(fg).remove_modifier(Modifier::DIM);
+        }
     }
     Line::from(spans)
 }
@@ -585,10 +646,14 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if state.graph.is_some() {
         return;
     }
-    frame.render_widget(
-        Paragraph::new("focus a repo for the graph, or a file for its diff"),
-        area,
-    );
+    // A focused repo always has a graph load in flight until the graph
+    // lands (a file diff clears the graph it replaced).
+    let copy = if state.focused_graph_repo().is_some() {
+        LOADING_GRAPH
+    } else {
+        "focus a repo for the graph, or a file for its diff"
+    };
+    frame.render_widget(Paragraph::new(copy), area);
 }
 
 fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offset: u16) {
@@ -617,7 +682,11 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .scroll(state.graph_scroll)
         .col_offset(col_offset)
         .loading_older(state.graph_loading_older)
-        .search_matches(&matches, state.theme.pills().filter.bg)
+        .search_matches(
+            &matches,
+            state.theme.pills().filter.bg,
+            state.theme.pills().filter.fg,
+        )
         .flash_rows(&flash_rows)
         .commented_rows(&commented_rows)
         .resolved_comment_rows(&resolved_comment_rows)
@@ -698,13 +767,13 @@ fn record_graph_scrollbar(state: &mut AppState, area: Rect, col_offset: u16) {
         return;
     }
     let chrome = state.graph_chrome_in(area.height, area.width);
-    let glyphs = if state.ascii { &ASCII } else { &UNICODE };
     let Some(model) = state.graph.as_ref() else {
         return;
     };
-    let content_len = paint_model(model, glyphs, None).len();
+    // The widget already painted this frame; count without a second paint.
+    let content_len = painted_line_count(model);
     state.layout.graph_content_len = content_len;
-    let vscroll = graph_vscroll_visible(state.graph_scroll);
+    let vscroll = graph_vscroll_visible(content_len, chrome.list_height, state.graph_scroll);
     let hscroll = graph_hscroll_visible(col_offset);
     let list_top = area.y.saturating_add(u16::from(chrome.header));
     let list_height = chrome.list_height;
@@ -835,10 +904,16 @@ fn draw_commit_file_list(
             frame.render_widget(Paragraph::new(muted_copy(copy, palette)), area);
             return;
         }
+        // Commit-file lists have no row filter: empty after the load means
+        // the source has no files.
         let copy = if state.commit_files_loading {
             LOADING_FILES
         } else {
-            NO_MATCHING_ROWS
+            match state.commit_drill_source().map(|(_, source)| source) {
+                Some(super::drill::CommitFileSource::Stash { .. }) => NO_FILES_IN_STASH,
+                Some(super::drill::CommitFileSource::Worktree) => NO_FILES_IN_WORKTREE,
+                _ => NO_FILES_IN_COMMIT,
+            }
         };
         frame.render_widget(Paragraph::new(muted_copy(copy, palette)), area);
         return;
@@ -855,7 +930,7 @@ fn draw_commit_file_list(
         .unwrap_or(0);
     let (start, _) = visible_window(rows.len(), painted_cursor, height);
     state.layout.files_list_offset = start;
-    let search_bg = state.theme.pills().filter.bg;
+    let search = state.theme.pills().filter;
     let searching_files =
         state.search_target == SearchPane::CommitFiles && !state.search_query.trim().is_empty();
     let match_paths = commit_file_search_match_paths(state);
@@ -913,7 +988,7 @@ fn draw_commit_file_list(
                 files_focused,
                 state.commit_file_flash_color(&row.id),
                 search_match,
-                search_bg,
+                search,
                 state.ascii,
                 palette,
                 col_offset,
@@ -966,34 +1041,45 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     state.drop_stale_diff_visual();
     let palette = state.theme.palette();
     let path = state.diff_header_path();
-    let effective = effective_diff_mode(state.diff_mode, area.width);
+    // One split decision for row build, header, and paint (`diff_pane_mode`
+    // reserves the scrollbar column whether or not the bar shows).
+    let effective = state.diff_layout();
+    let split = effective == DiffMode::SideBySide;
     let rows = state.current_diff_rows();
     if !rows.is_empty() {
         state.diff_cursor = state.diff_cursor.min(rows.len() - 1);
     }
     let wrap = state.diff_wrap;
-    let hscroll = !wrap && graph_hscroll_visible(state.diff_col_offset);
+    let hscroll = state.diff_hscroll_shown();
     let h_rows = u16::from(hscroll);
+    // Rows always leave the scrollbar column, whether or not the bar shows,
+    // so widths (split, wrap, pan) never change with the bar.
+    let line_width = diff_paint_width(area.width);
     let header_h = diff_pane_header_rows(&path, area.width, area.height);
     let list_h = area.height.saturating_sub(header_h).max(1);
     let line_h = list_h.saturating_sub(h_rows).max(1) as usize;
     let gutter = gutter_width(&rows);
     let gutter_with_mark = gutter.saturating_add(comment_mark_cols(state.ascii));
-    let start = if wrap {
+    // Viewport start and the visual rows the whole diff paints.
+    let (start, content_rows) = if wrap {
         let heights = diff_wrap_row_heights(
             &rows,
-            diff_row_content_width(area.width as usize) as u16,
+            diff_row_content_width(line_width as usize) as u16,
             gutter_with_mark,
-            is_side_by_side_split(state.diff_mode, area.width),
+            split,
             state.diff_split_fraction,
         );
-        wrap_viewport_start(&heights, state.diff_cursor, line_h)
+        let start = wrap_viewport_start(&heights, state.diff_cursor, line_h);
+        (start, heights.iter().map(|h| (*h).max(1)).sum::<usize>())
     } else {
-        visible_window(rows.len(), state.diff_cursor, line_h).0
+        (
+            visible_window(rows.len(), state.diff_cursor, line_h).0,
+            rows.len(),
+        )
     };
     state.diff_scroll = start as u16;
     let skip = start;
-    let vscroll = graph_vscroll_visible(state.diff_scroll);
+    let vscroll = graph_vscroll_visible(content_rows, line_h as u16, state.diff_scroll);
     let v_cols = u16::from(vscroll);
     let mode_label = diff_pane_mode_label(state.diff_mode, effective);
     let header = diff_pane_header(
@@ -1043,28 +1129,30 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         height: list_h,
     };
     if rows.is_empty() {
+        let mut color = palette.muted;
         let msg = if let Some(tab) = state.tabs.active_compare() {
             tab.error
                 .clone()
                 .unwrap_or_else(|| no_committed_changes_vs(&tab.base_ref))
         } else if path.is_empty() {
             "select a dirty file".to_string()
+        } else if let Some(err) = state.current_diff_content().error.as_deref() {
+            color = palette.deleted;
+            diff_failed_text(err)
         } else {
             "(no diff)".to_string()
         };
         frame.render_widget(
-            Paragraph::new(Span::styled(msg, Style::default().fg(palette.muted))),
+            Paragraph::new(Span::styled(msg, Style::default().fg(color))),
             body,
         );
         return;
     }
-    let split = is_side_by_side_split(state.diff_mode, area.width.saturating_sub(v_cols));
     let off = if wrap {
         0
     } else {
         state.diff_col_offset as usize
     };
-    let line_width = area.width.saturating_sub(v_cols).max(1);
     let content_w = diff_row_content_width(line_width as usize) as u16;
     let content_len = rows.len();
     let paint_heights = if wrap {
@@ -1108,9 +1196,21 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             skip..logical_end,
         )
     });
+    // Armed diff search marks every matching row; the cursor bar sits on
+    // the current hit.
+    let search_hits: HashSet<usize> = if state.search_target == SearchPane::Diff {
+        state
+            .diff_search_hits(&state.search_query)
+            .into_iter()
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let search = state.theme.pills().filter;
     let mut painted: Vec<Line> = Vec::new();
     let mut i = skip;
     while painted.len() < line_h && i < rows.len() {
+        let search_match = search_hits.contains(&i);
         let lines = paint_diff_row(
             &rows[i],
             content_w,
@@ -1122,7 +1222,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             i == state.diff_cursor,
             state.focus == FocusPane::Right,
             state.diff_visual_contains(i),
-            state.search_hit == Some(i),
+            search_match.then_some(search),
             syntax.left(i),
             syntax.right(i),
         );
@@ -1163,8 +1263,12 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             &mut sb_state,
         );
     }
-    let col_max = state.diff_pan_max();
-    if hscroll && col_max > 0 && body.height > 0 && area.width > 0 {
+    let col_max = if hscroll {
+        state.diff_pan_max_for(&rows)
+    } else {
+        0
+    };
+    if col_max > 0 && body.height > 0 && area.width > 0 {
         state.layout.diff_hscrollbar_y = Some(body.y.saturating_add(body.height.saturating_sub(1)));
         state.layout.diff_hscrollbar_x = area.x;
         state.layout.diff_hscrollbar_width = area.width.saturating_sub(v_cols).max(1);
@@ -1199,7 +1303,7 @@ fn paint_diff_row(
     selected: bool,
     focused: bool,
     visual: bool,
-    search_hit: bool,
+    search: Option<Pill>,
     left_syntax: &[(String, Color)],
     right_syntax: &[(String, Color)],
 ) -> Vec<Line<'static>> {
@@ -1229,6 +1333,17 @@ fn paint_diff_row(
                 .map(|chunk| {
                     Line::from(Span::styled(chunk, Style::default().fg(palette.diff_hunk)))
                 })
+                .collect()
+        }
+        DiffRow::Error { text } => {
+            let chunks = if wrap {
+                wrap_cols(text, width as usize)
+            } else {
+                vec![slice_cols(text, 0, width as usize)]
+            };
+            chunks
+                .into_iter()
+                .map(|chunk| Line::from(Span::styled(chunk, Style::default().fg(palette.deleted))))
                 .collect()
         }
         DiffRow::Line { left, right } if split && right.is_some() => {
@@ -1318,7 +1433,7 @@ fn paint_diff_row(
     };
     parts
         .into_iter()
-        .map(|line| finish_diff_line(line, selected, focused, visual, search_hit, palette))
+        .map(|line| finish_diff_line(line, selected, focused, visual, search, palette))
         .collect()
 }
 
@@ -1327,26 +1442,30 @@ fn finish_diff_line(
     selected: bool,
     focused: bool,
     visual: bool,
-    search_hit: bool,
+    search: Option<Pill>,
     palette: Palette,
 ) -> Line<'static> {
+    // A search match off the cursor paints the filter pill; its foreground
+    // replaces syntax colours so the text stays readable on that background.
+    let match_pill = search.filter(|_| !selected && !visual);
     let bg = if selected && focused {
         Some(palette.cursor_bg)
     } else if selected {
         Some(palette.cursor_bg_inactive)
     } else if visual {
         Some(palette.cursor_bg)
-    } else if search_hit {
-        Some(palette.flash)
     } else {
-        None
+        match_pill.map(|pill| pill.bg)
     };
     if let Some(bg) = bg {
         line.spans = line
             .spans
             .into_iter()
             .map(|span| {
-                let style = span.style.bg(bg);
+                let mut style = span.style.bg(bg);
+                if let Some(pill) = match_pill {
+                    style = style.fg(pill.fg);
+                }
                 Span::styled(span.content.to_string(), style)
             })
             .collect();
@@ -1563,23 +1682,34 @@ fn help_group_chrome(title: &str, ascii: bool, palette: Palette) -> (&'static st
     }
 }
 
+/// Cut or pad `spans` to exactly `width` painted columns.
+///
+/// Counts columns the way ratatui paints them (`Span::width`), so a help
+/// cell with `←→` or `✗` ends where the next column starts.
 fn clamp_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
     let mut out = Vec::new();
     let mut used = 0usize;
     for span in spans {
-        let w = visible_width(&span.content);
         if used >= width {
             break;
         }
+        let w = span.width();
         if used + w <= width {
             used += w;
             out.push(span);
             continue;
         }
-        let take = width - used;
-        let cut = truncate_visible(&span.content, take);
+        let mut cut = String::new();
+        let mut buf = [0u8; 4];
+        for ch in span.content.chars() {
+            let cw = UnicodeWidthStr::width(&*ch.encode_utf8(&mut buf));
+            if used + cw > width {
+                break;
+            }
+            used += cw;
+            cut.push(ch);
+        }
         out.push(Span::styled(cut, span.style));
-        used = width;
         break;
     }
     if used < width {
@@ -1598,32 +1728,33 @@ fn with_bg(spans: Vec<Span<'static>>, bg: Option<Color>) -> Vec<Span<'static>> {
         .collect()
 }
 
-fn help_chip_spans(keys: &str, color: Color, surface: Color) -> Vec<Span<'static>> {
+fn help_chip_spans(
+    keys: &str,
+    key_width: usize,
+    color: Color,
+    surface: Color,
+) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for chip in keys.split(' ').filter(|part| !part.is_empty()) {
         spans.push(key_chip(chip, color, surface));
         spans.push(Span::raw(" "));
     }
-    spans.push(Span::raw(" ".repeat(help_chip_gap_spaces(keys))));
+    spans.push(Span::raw(" ".repeat(help_chip_gap_spaces(keys, key_width))));
     spans
 }
 
+/// One painted line of a help entry, padded to `width` (the column text area).
 fn help_visual_cell_spans(
-    entry: Option<&super::help::HelpEntry>,
-    line: Option<&super::help::HelpVisualLine>,
+    entry: &super::help::HelpEntry,
+    vis: &super::help::HelpVisualLine,
+    key_width: usize,
     color: Color,
     surface: Color,
     muted: Color,
     width: usize,
 ) -> Vec<Span<'static>> {
-    let Some(vis) = line else {
-        return clamp_spans(vec![Span::raw("")], width);
-    };
     if vis.chips {
-        let Some(entry) = entry else {
-            return clamp_spans(vec![Span::raw("")], width);
-        };
-        let mut spans = help_chip_spans(entry.keys, color, surface);
+        let mut spans = help_chip_spans(entry.keys, key_width, color, surface);
         if !vis.text.is_empty() {
             spans.push(Span::styled(vis.text.clone(), Style::default().fg(muted)));
         }
@@ -1698,21 +1829,16 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let palette = state.theme.palette();
     let pills = state.theme.pills();
     let surface = overlay_surface(state);
-    // A compare tab swaps GIT for the COMPARE column; same row budget.
+    // A compare tab swaps GIT for the COMPARE column.
     let groups = help_groups(state.is_compare_tab());
-    let max_rows = groups
-        .iter()
-        .map(|group| group.entries.len())
-        .max()
-        .unwrap_or(0);
     let mut lines: Vec<Line> = Vec::new();
 
     let term_width = area.width as usize;
     let inner = help_inner_width(term_width).max(1);
-    let col_w = help_column_width(term_width);
+    let widths = help_column_widths(groups, inner);
 
     let mut title_spans = Vec::new();
-    for group in groups {
+    for (group, &col_w) in groups.iter().zip(&widths) {
         let (icon, color) = help_group_chrome(group.title, state.ascii, palette);
         title_spans.extend(clamp_spans(
             vec![Span::styled(
@@ -1724,41 +1850,50 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
     lines.push(Line::from(title_spans));
 
-    for row in 0..max_rows {
-        let cells: Vec<Vec<super::help::HelpVisualLine>> = groups
-            .iter()
-            .map(|group| match group.entries.get(row) {
-                Some(entry) => help_entry_visual_lines(entry.desc, col_w, entry.keys),
-                None => vec![super::help::HelpVisualLine {
-                    chips: false,
-                    indent: 0,
-                    text: String::new(),
-                }],
-            })
-            .collect();
-        let height = cells.iter().map(|cell| cell.len()).max().unwrap_or(1);
-        for vis_row in 0..height {
-            let mut spans = Vec::new();
-            for (group_idx, group) in groups.iter().enumerate() {
-                let (_, color) = help_group_chrome(group.title, state.ascii, palette);
-                let entry = group.entries.get(row);
-                let hit = searching
-                    && entry.is_some_and(|item| help_entry_matches(item.keys, item.desc, query));
+    // Each column stacks its own entries; a wrapped entry never pads the
+    // other columns. The gutter stays outside the search highlight.
+    let columns: Vec<Vec<Vec<Span<'static>>>> = groups
+        .iter()
+        .zip(&widths)
+        .map(|(group, &col_w)| {
+            let (_, color) = help_group_chrome(group.title, state.ascii, palette);
+            let content = help_column_content_width(col_w);
+            let key_width = help_key_width(group);
+            let gutter = col_w.saturating_sub(content);
+            let mut rows = Vec::new();
+            for entry in group.entries {
+                let hit = searching && help_entry_matches(entry.keys, entry.desc, query);
                 let bg = hit.then_some(pills.filter.bg);
-                spans.extend(with_bg(
-                    help_visual_cell_spans(
-                        entry,
-                        cells[group_idx].get(vis_row),
-                        color,
-                        surface,
-                        palette.muted,
-                        col_w,
-                    ),
-                    bg,
-                ));
+                for vis in help_entry_visual_lines(entry.desc, content, key_width) {
+                    let mut spans = with_bg(
+                        help_visual_cell_spans(
+                            entry,
+                            &vis,
+                            key_width,
+                            color,
+                            surface,
+                            palette.muted,
+                            content,
+                        ),
+                        bg,
+                    );
+                    spans.push(Span::raw(" ".repeat(gutter)));
+                    rows.push(spans);
+                }
             }
-            lines.push(Line::from(spans));
+            rows
+        })
+        .collect();
+    let body_rows = columns.iter().map(Vec::len).max().unwrap_or(0);
+    for row in 0..body_rows {
+        let mut spans = Vec::new();
+        for (column, &col_w) in columns.iter().zip(&widths) {
+            match column.get(row) {
+                Some(cell) => spans.extend(cell.iter().cloned()),
+                None => spans.push(Span::raw(" ".repeat(col_w))),
+            }
         }
+        lines.push(Line::from(spans));
     }
 
     let footer = if searching {
@@ -1841,7 +1976,10 @@ fn confirm_action_row(
             Style::default().fg(muted),
         ));
     }
+    // Enter does not confirm, so the row lists every key that answers.
     spans.push(key_chip("n", muted, surface));
+    spans.push(Span::raw(" "));
+    spans.push(key_chip("Esc", muted, surface));
     spans.push(Span::styled(" cancel", Style::default().fg(muted)));
     Line::from(spans)
 }
@@ -2029,6 +2167,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             force,
             branch,
             merged_into_default,
+            changed,
             ..
         } => {
             let accent = palette.deleted;
@@ -2043,57 +2182,109 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 ),
                 None => "merge status unknown".into(),
             };
+            // A detached worktree has no branch to keep or report.
+            let detached = is_detached_head_branch(branch);
+            let kept = if detached {
+                String::new()
+            } else {
+                format!(" · branch {branch} is kept")
+            };
             let dirty_line = if *force {
                 Line::from(Span::styled(
-                    "  dirty worktree — will use --force",
+                    format!(
+                        "  {changed} changed {} will be deleted permanently{kept}",
+                        files_word(*changed)
+                    ),
                     Style::default().fg(accent),
                 ))
             } else {
                 Line::from(Span::styled(
-                    "  clean worktree",
+                    format!("  clean worktree{kept}"),
                     Style::default().fg(palette.muted),
                 ))
             };
-            let lines = vec![
-                Line::from(vec![
-                    Span::styled(
-                        "Remove worktree ",
-                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(path.clone(), Style::default().fg(palette.file)),
-                    Span::styled("?", Style::default().fg(accent)),
-                ]),
-                Line::from(Span::styled(
+            let mut lines = vec![Line::from(vec![
+                Span::styled(
+                    "Remove worktree ",
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(path.clone(), Style::default().fg(palette.file)),
+                Span::styled("?", Style::default().fg(accent)),
+            ])];
+            if !detached {
+                lines.push(Line::from(Span::styled(
                     format!("  branch {branch} — {merge_text}"),
                     Style::default().fg(palette.muted),
-                )),
-                dirty_line,
-                confirm_action_row("y", "remove", None, accent, palette.muted, surface),
-            ];
+                )));
+            }
+            lines.push(dirty_line);
+            lines.push(confirm_action_row(
+                "y",
+                "remove",
+                None,
+                accent,
+                palette.muted,
+                surface,
+            ));
             (accent, lines)
         }
         PendingConfirm::CheckoutOutOfSync {
-            branch, remote_ref, ..
+            branch,
+            remote_ref,
+            ahead_behind,
+            ..
         } => {
+            let accent = palette.modified;
+            // `y` fast-forwards to the remote-tracking ref already fetched; it never fetches.
+            let mut lines = vec![Line::from(vec![
+                Span::styled(
+                    "Check out ",
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(branch.clone(), Style::default().fg(palette.file)),
+                Span::styled(" and fast-forward to ", Style::default().fg(palette.muted)),
+                Span::styled(remote_ref.clone(), Style::default().fg(palette.file)),
+                Span::styled(" (no fetch)?", Style::default().fg(accent)),
+            ])];
+            if let Some((ahead, behind)) = ahead_behind {
+                let mut detail = format!("  local is {ahead} ahead, {behind} behind {remote_ref}");
+                if *ahead > 0 {
+                    detail.push_str(" · cannot fast-forward");
+                }
+                lines.push(Line::from(Span::styled(
+                    detail,
+                    Style::default().fg(palette.muted),
+                )));
+            }
+            lines.push(confirm_action_row(
+                "y",
+                "check out + fast-forward",
+                None,
+                accent,
+                palette.muted,
+                surface,
+            ));
+            (accent, lines)
+        }
+        PendingConfirm::SwitchToDefault { repos } => {
             let accent = palette.modified;
             let lines = vec![
                 Line::from(vec![
-                    Span::styled(branch.clone(), Style::default().fg(palette.file)),
-                    Span::styled(" is not in sync with ", Style::default().fg(palette.muted)),
-                    Span::styled(remote_ref.clone(), Style::default().fg(palette.file)),
+                    Span::styled(
+                        "Switch ",
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{} repos", repos.len()),
+                        Style::default().fg(palette.file),
+                    ),
+                    Span::styled(" to their default branch?", Style::default().fg(accent)),
                 ]),
                 Line::from(Span::styled(
-                    "Checkout local then pull?",
-                    Style::default().fg(accent),
+                    "  dirty repos are skipped",
+                    Style::default().fg(palette.muted),
                 )),
-                confirm_action_row(
-                    "y",
-                    "checkout then pull",
-                    None,
-                    accent,
-                    palette.muted,
-                    surface,
-                ),
+                confirm_action_row("y", "switch", None, accent, palette.muted, surface),
             ];
             (accent, lines)
         }
@@ -2129,19 +2320,6 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             .wrap(Wrap { trim: false }),
         area,
     );
-}
-
-fn overlay_status_color(status: &str, palette: Palette) -> Color {
-    let lower = status.to_ascii_lowercase();
-    if lower.contains("failed")
-        || lower.contains("error")
-        || lower.contains("invalid")
-        || lower.contains("dirty")
-    {
-        palette.deleted
-    } else {
-        palette.muted
-    }
 }
 
 fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -2183,8 +2361,8 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
     if !state.status.is_empty() {
         lines.push(Line::from(Span::styled(
-            state.status.clone(),
-            Style::default().fg(overlay_status_color(&state.status, palette)),
+            state.status.to_string(),
+            Style::default().fg(state.status.kind().color(palette)),
         )));
     }
     lines.push(Line::from(Span::styled(
@@ -2203,7 +2381,7 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 /// Compare-tab close control as painted and hit-tested: brackets around
 /// U+2717 BALLOT X. Three display columns. Paint and hit boxes both derive
 /// their width from this constant.
-const TAB_CLOSE_GLYPH: &str = "[\u{2717}]";
+pub(super) const TAB_CLOSE_GLYPH: &str = "[\u{2717}]";
 
 /// Columns ratatui paints for `text` (unicode-width, same as `Span::width`).
 ///
@@ -2460,7 +2638,7 @@ fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let mut lines = vec![Line::from(title)];
     if window.is_empty() {
         lines.push(Line::from(Span::styled(
-            format!("  {NO_BRANCHES_TO_COMPARE}"),
+            format!("  {}", compare_picker_empty(picker)),
             Style::default().fg(palette.muted),
         )));
     } else {
@@ -2498,12 +2676,12 @@ fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
     if !state.status.is_empty() {
         lines.push(Line::from(Span::styled(
-            state.status.clone(),
-            Style::default().fg(overlay_status_color(&state.status, palette)),
+            state.status.to_string(),
+            Style::default().fg(state.status.kind().color(palette)),
         )));
     }
     lines.push(Line::from(Span::styled(
-        "j/k move · type to filter · Enter compare · Esc close",
+        "↑↓ move · type to filter · Enter compare · Esc close",
         Style::default().fg(palette.muted),
     )));
     frame.render_widget(Clear, area);
@@ -2525,25 +2703,25 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let palette = state.theme.palette();
     let accent = palette.branch_feature;
     let visible = picker.visible();
+    let create = picker.create_name();
+    let rows = picker.row_count();
     let max_rows = 12usize;
-    let start = if visible.len() <= max_rows {
+    let start = if rows <= max_rows {
         0
     } else {
         picker
             .cursor
             .saturating_sub(max_rows / 2)
-            .min(visible.len() - max_rows)
+            .min(rows - max_rows)
     };
-    let window = if visible.is_empty() {
-        Vec::new()
-    } else {
-        visible
-            .iter()
-            .skip(start)
-            .take(max_rows)
-            .copied()
-            .collect::<Vec<_>>()
-    };
+    let window = visible
+        .iter()
+        .skip(start)
+        .take(max_rows)
+        .copied()
+        .collect::<Vec<_>>();
+    // The create row sits after the last branch, inside the same window.
+    let create_painted = create.is_some() && visible.len() < start + max_rows;
     let filter = if picker.filter.is_empty() {
         "…"
     } else {
@@ -2556,7 +2734,7 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         let short = picker
             .commit_id
             .as_deref()
-            .map(|id| id.get(..7).unwrap_or(id).to_string())
+            .map(|id| short_id(id).to_string())
             .unwrap_or_default();
         title.push(Span::styled(
             "Checkout ",
@@ -2585,7 +2763,7 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         ));
     }
     let mut lines = vec![Line::from(title)];
-    if window.is_empty() {
+    if window.is_empty() && !create_painted {
         lines.push(Line::from(Span::styled(
             "  No matching branches",
             Style::default().fg(palette.muted),
@@ -2625,19 +2803,35 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 ),
             ]));
         }
+        if let Some(name) = create.filter(|_| create_painted) {
+            lines.push(branch_create_row(
+                name,
+                picker.commit_id.as_deref(),
+                picker.on_create_row(),
+                palette,
+                accent,
+            ));
+        }
     }
     if !state.status.is_empty() {
         lines.push(Line::from(Span::styled(
-            state.status.clone(),
-            Style::default().fg(overlay_status_color(&state.status, palette)),
+            state.status.to_string(),
+            Style::default().fg(state.status.kind().color(palette)),
         )));
     }
+    // Enter names what it does on the cursor row: the create row makes a
+    // branch (tree: and checks it out; graph: at the commit, no checkout).
+    let enter = match (picker.on_create_row(), picker.commit_id.as_deref()) {
+        (true, Some(id)) => format!("Enter create at {}", short_id(id)),
+        (true, None) => "Enter create and check out".to_string(),
+        (false, _) => "Enter checkout".to_string(),
+    };
     let footer = if graph && !show_filter {
-        "j/k move · Enter checkout · C create · Esc cancel"
+        format!("↑↓ move · type a name to create · {enter} · Esc cancel")
     } else if graph {
-        "j/k move · type to filter · Enter checkout · C create · Esc cancel"
+        format!("↑↓ move · type to filter · {enter} · Esc cancel")
     } else {
-        "j/k move · type to filter · Enter checkout · C create · Esc close"
+        format!("↑↓ move · type to filter · {enter} · Esc close")
     };
     lines.push(Line::from(Span::styled(
         footer,
@@ -2650,6 +2844,53 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+/// `+ create branch <name>` (graph picker: `… at <short>`) after the
+/// branch rows. Accent on the cursor, muted otherwise.
+fn branch_create_row(
+    name: &str,
+    commit_id: Option<&str>,
+    selected: bool,
+    palette: Palette,
+    accent: Color,
+) -> Line<'static> {
+    let row_bg = if selected {
+        palette.cursor_bg
+    } else {
+        Color::Reset
+    };
+    let label_fg = if selected { accent } else { palette.muted };
+    let mut spans = vec![
+        Span::styled(
+            if selected { "❯ " } else { "  " }.to_string(),
+            Style::default()
+                .fg(if selected {
+                    palette.cursor
+                } else {
+                    palette.muted
+                })
+                .bg(row_bg),
+        ),
+        Span::styled(
+            "  + create branch ".to_string(),
+            Style::default().fg(label_fg).bg(row_bg),
+        ),
+        Span::styled(
+            name.to_string(),
+            Style::default()
+                .fg(label_fg)
+                .bg(row_bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if let Some(id) = commit_id {
+        spans.push(Span::styled(
+            format!(" at {}", short_id(id)),
+            Style::default().fg(label_fg).bg(row_bg),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -2740,12 +2981,12 @@ fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
     }
     if !state.status.is_empty() {
         lines.push(Line::from(Span::styled(
-            state.status.clone(),
-            Style::default().fg(overlay_status_color(&state.status, palette)),
+            state.status.to_string(),
+            Style::default().fg(state.status.kind().color(palette)),
         )));
     }
     lines.push(Line::from(Span::styled(
-        "j/k move · type to filter · space toggle · Enter apply · O clear · Esc cancel",
+        "↑↓ move · type to filter · space toggle · Enter apply · Ctrl-o clear · Esc cancel",
         Style::default().fg(palette.muted),
     )));
     frame.render_widget(Clear, area);
@@ -2768,6 +3009,8 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let accent = palette_theme.cursor;
     let surface = overlay_surface(state);
     let rows = palette.paint_rows();
+    // Rounded border plus one column of padding on each side.
+    let inner_width = area.width.saturating_sub(4) as usize;
     let max_rows = 12usize;
     let cursor_paint = rows.iter().position(|row| match row {
         super::command_palette::PalettePaintRow::Command { index, .. } => *index == palette.cursor,
@@ -2809,9 +3052,14 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(palette_theme.muted),
         )));
     } else {
+        // Rows under a painted group header do not repeat the group. A
+        // window scrolled into the middle of a group lost its header, so
+        // those rows keep the label.
+        let mut header_painted = false;
         for row in window {
             match row {
                 super::command_palette::PalettePaintRow::Header(title) => {
+                    header_painted = true;
                     lines.push(Line::from(Span::styled(
                         title.to_string(),
                         Style::default()
@@ -2839,6 +3087,11 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     if disabled {
                         style = style.add_modifier(Modifier::DIM);
                     }
+                    let dim = if disabled {
+                        Modifier::DIM
+                    } else {
+                        Modifier::empty()
+                    };
                     let mut spans = vec![
                         Span::styled(
                             cursor.to_string(),
@@ -2851,8 +3104,11 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                                 .bg(row_bg),
                         ),
                         Span::styled(command.title.to_string(), style),
-                        Span::raw(" "),
-                        key_chip(
+                    ];
+                    // Palette-only rows (Diff vs …, Close tab) have no key.
+                    if !command.keys.is_empty() {
+                        spans.push(Span::raw(" "));
+                        spans.push(key_chip(
                             command.keys,
                             if disabled {
                                 palette_theme.muted
@@ -2860,19 +3116,33 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                                 accent
                             },
                             surface,
-                        ),
-                    ];
-                    spans.push(Span::styled(
-                        format!("  {}", command.group.title()),
-                        Style::default()
-                            .fg(palette_theme.muted)
-                            .bg(row_bg)
-                            .add_modifier(if disabled {
-                                Modifier::DIM
-                            } else {
-                                Modifier::empty()
-                            }),
-                    ));
+                        ));
+                    }
+                    if !header_painted {
+                        spans.push(Span::styled(
+                            format!("  {}", command.group.title()),
+                            Style::default()
+                                .fg(palette_theme.muted)
+                                .bg(row_bg)
+                                .add_modifier(dim),
+                        ));
+                    }
+                    // The reason sits dimmed at the right edge when it fits,
+                    // so every disabled row says why, not only the cursor row.
+                    if let Some(why) = reason.as_deref() {
+                        let used = help_spans_width(&spans);
+                        let room = inner_width.saturating_sub(used);
+                        let need = visible_width(why) + 2;
+                        if room >= need {
+                            spans.push(Span::styled(
+                                format!("{}{why}", " ".repeat(room - need + 2)),
+                                Style::default()
+                                    .fg(palette_theme.muted)
+                                    .bg(row_bg)
+                                    .add_modifier(Modifier::DIM),
+                            ));
+                        }
+                    }
                     lines.push(Line::from(spans));
                 }
             }
@@ -2880,8 +3150,8 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
     if !state.status.is_empty() {
         lines.push(Line::from(Span::styled(
-            state.status.clone(),
-            Style::default().fg(overlay_status_color(&state.status, palette_theme)),
+            state.status.to_string(),
+            Style::default().fg(state.status.kind().color(palette_theme)),
         )));
     }
     let reason = palette
@@ -2913,11 +3183,7 @@ fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
     let palette = state.theme.palette();
     let accent = palette.branch_feature;
-    let short = create
-        .commit_id
-        .as_deref()
-        .map(|id| id.get(..7).unwrap_or(id).to_string())
-        .unwrap_or_default();
+    let short = short_id(&create.commit_id).to_string();
     let name = if create.name.is_empty() {
         "…"
     } else {
@@ -2927,10 +3193,10 @@ fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         "Create branch ",
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
     )];
-    if !short.is_empty() {
-        title.push(Span::styled("at ", Style::default().fg(palette.muted)));
-        title.push(Span::styled(short, Style::default().fg(palette.repo)));
-    }
+    // Graph `c` only creates the ref; it never checks the branch out.
+    let footer = format!("Enter create at {short} (no checkout) · Esc cancel");
+    title.push(Span::styled("at ", Style::default().fg(palette.muted)));
+    title.push(Span::styled(short, Style::default().fg(palette.repo)));
     let mut lines = vec![
         Line::from(title),
         Line::from(vec![
@@ -2940,12 +3206,12 @@ fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     ];
     if !state.status.is_empty() {
         lines.push(Line::from(Span::styled(
-            state.status.clone(),
-            Style::default().fg(overlay_status_color(&state.status, palette)),
+            state.status.to_string(),
+            Style::default().fg(state.status.kind().color(palette)),
         )));
     }
     lines.push(Line::from(Span::styled(
-        "Enter confirm · Esc cancel",
+        footer,
         Style::default().fg(palette.muted),
     )));
     frame.render_widget(Clear, area);
@@ -3050,10 +3316,17 @@ fn draw_comment_export(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             "Comments",
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::styled(
-            "copied to clipboard",
-            Style::default().fg(palette.added),
-        )),
+        match export.copied {
+            Some(true) => Line::from(Span::styled(
+                "copied to clipboard",
+                Style::default().fg(palette.added),
+            )),
+            Some(false) => Line::from(Span::styled(
+                "copy failed (no TTY or clipboard tool)",
+                Style::default().fg(palette.deleted),
+            )),
+            None => Line::from(Span::styled("copying…", Style::default().fg(palette.muted))),
+        },
     ];
     for row in export.markdown.lines() {
         lines.push(Line::from(Span::styled(
@@ -3061,14 +3334,14 @@ fn draw_comment_export(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(palette.repo),
         )));
     }
-    if !state.status.is_empty() && state.status != STATUS_COPIED {
+    if export_shows_status(&state.status) {
         lines.push(Line::from(Span::styled(
-            state.status.clone(),
-            Style::default().fg(overlay_status_color(&state.status, palette)),
+            state.status.to_string(),
+            Style::default().fg(state.status.kind().color(palette)),
         )));
     }
     lines.push(Line::from(Span::styled(
-        "copied · Esc close",
+        "Esc close",
         Style::default().fg(palette.muted),
     )));
     frame.render_widget(Clear, area);
@@ -3242,6 +3515,60 @@ mod tests {
         state
     }
 
+    /// A diff that overflows shows its vertical bar at the top, before any
+    /// scroll; the horizontal bar waits until the view leaves the left
+    /// edge. A diff that fits shows neither.
+    #[test]
+    fn diff_vertical_bar_shows_on_overflow_horizontal_after_pan() {
+        let mut state = long_panning_diff_state(0);
+        state.diff_cursor = 0;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert_eq!((state.diff_scroll, state.diff_col_offset), (0, 0));
+        assert!(
+            state.layout.diff_scrollbar_x.is_some(),
+            "vertical bar at the top"
+        );
+        assert!(
+            state.layout.diff_hscrollbar_y.is_none(),
+            "no horizontal bar at pan 0"
+        );
+        state.diff_col_offset = 1;
+        draw_state(&mut terminal, &mut state);
+        assert!(
+            state.layout.diff_hscrollbar_y.is_some(),
+            "horizontal bar once panned"
+        );
+
+        // A frame builds the diff rows once; the h-bar pan reuses them.
+        for offset in [1, 0] {
+            state.diff_col_offset = offset;
+            state.diff_row_builds.set(0);
+            draw_state(&mut terminal, &mut state);
+            assert_eq!(state.diff_row_builds.get(), 1, "pan {offset}");
+        }
+
+        let mut state = two_pane_diff_state();
+        state.set_diff(
+            "app".into(),
+            "README.md".into(),
+            super::super::diff::DiffContent::from_lines(vec![
+                "@@ -1,1 +1,1 @@".into(),
+                "-old".into(),
+                "+new".into(),
+            ]),
+        );
+        draw_state(&mut terminal, &mut state);
+        assert!(
+            state.layout.diff_scrollbar_x.is_none(),
+            "short diff: no bar"
+        );
+        assert!(
+            state.layout.diff_hscrollbar_y.is_none(),
+            "narrow diff: no bar"
+        );
+    }
+
     /// Text of one right-pane row, `width` cells from `x`.
     fn row_cells(terminal: &Terminal<TestBackend>, x: u16, y: u16, width: u16) -> String {
         let buf = terminal.backend().buffer();
@@ -3294,6 +3621,66 @@ mod tests {
             body.contains(&first),
             "first diff row `{first}` paints right below the header, got `{body}`:\n{}",
             buffer_text(&terminal)
+        );
+    }
+
+    /// Diff search marks every matching row with the filter pill, not only
+    /// the current hit, and the cursor bar stays on the current hit.
+    #[test]
+    fn diff_search_marks_every_matching_row() {
+        let mut state = two_pane_diff_state();
+        state.set_diff(
+            "app".into(),
+            "README.md".into(),
+            super::super::diff::DiffContent::from_lines(vec![
+                "@@ -1,3 +1,3 @@".into(),
+                "-old needle".into(),
+                "+new needle".into(),
+                " plain context".into(),
+            ]),
+        );
+        state.focus = FocusPane::Right;
+        state.dispatch(super::super::action::Action::SearchStart);
+        for c in "needle".chars() {
+            state.dispatch(super::super::action::Action::SearchChar(c));
+        }
+        assert_eq!(state.search_target, SearchPane::Diff);
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let pill = state.theme.pills().filter;
+        let cursor_bg = state.theme.palette().cursor_bg;
+        let buf = terminal.backend().buffer();
+        let mut seen = Vec::new();
+        for y in 0..buf.area().height {
+            let line: String = (0..buf.area().width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect();
+            for needle in ["old needle", "new needle", "plain context"] {
+                if let Some(byte) = line.find(needle) {
+                    let col = line[..byte].chars().count() as u16;
+                    let cell = &buf[(col, y)];
+                    seen.push((needle, cell.bg, cell.fg));
+                }
+            }
+        }
+        let bgs: Vec<_> = seen
+            .iter()
+            .filter(|(n, _, _)| n.contains("needle"))
+            .map(|(_, bg, _)| *bg)
+            .collect();
+        assert!(
+            bgs.contains(&cursor_bg),
+            "current hit keeps the cursor: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|(n, bg, fg)| n.contains("needle") && *bg == pill.bg && *fg == pill.fg),
+            "the other hit paints the filter pill: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|(n, bg, _)| *n == "plain context" && *bg != pill.bg),
+            "a row without the query stays unmarked: {seen:?}"
         );
     }
 
@@ -3356,6 +3743,48 @@ mod tests {
             format!(r#"+  "name": "{name}""#),
             " }".into(),
         ]
+    }
+
+    /// A 100-column right pane with the vertical bar showing paints 99
+    /// columns. Split needs 100, so rows are built and painted inline and
+    /// the added line still paints (it used to be built split and dropped).
+    #[test]
+    fn boundary_width_with_scrollbar_paints_added_lines() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let file = state
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::File)
+            .expect("file row");
+        state.cursor = file;
+        let mut unified = String::from("@@ -1,60 +1,60 @@\n");
+        for i in 0..60 {
+            if i == 35 {
+                unified.push_str("-old-line-gone\n+new-line-added\n");
+            } else {
+                unified.push_str(&format!(" ctx{i}\n"));
+            }
+        }
+        state.set_diff(
+            "app".into(),
+            "README.md".into(),
+            super::super::diff::DiffContent::from_unified(unified),
+        );
+        state.focus = FocusPane::Right;
+        state.diff_cursor = 40;
+        let mut terminal = Terminal::new(TestBackend::new(170, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_eq!(state.layout.diff_pane_width, 100);
+        assert!(state.diff_scroll > 0, "the vertical bar shows");
+        assert_eq!(state.diff_layout(), DiffMode::Inline);
+        let text = buffer_text(&terminal);
+        assert!(text.contains("inline (too narrow)"), "{text}");
+        assert!(text.contains("new-line-added"), "{text}");
+        assert!(text.contains("old-line-gone"), "{text}");
+        let status = text.lines().last().unwrap_or_default();
+        assert!(status.contains("split→inline"), "{status}");
     }
 
     fn json_syntax_diff_state() -> AppState {
@@ -3852,6 +4281,40 @@ mod tests {
             text.lines().any(|line| line.contains("│Z")),
             "subject tail wraps to its own footer row:\n{text}"
         );
+    }
+
+    /// A graph frame paints the model once: the widget paints it and the
+    /// scrollbar record counts its lines without a second paint. Both a
+    /// list that fits and one that overflows (vertical bar) hold.
+    #[test]
+    fn graph_frame_paints_the_model_once() {
+        let mut state = two_pane_graph_state();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        for commits in [1usize, 40] {
+            if let Some(model) = state.graph.as_mut() {
+                let seed = model.commits[0].clone();
+                model.commits = (0..commits)
+                    .map(|i| Commit {
+                        id: format!("{i:040x}"),
+                        ..seed.clone()
+                    })
+                    .collect();
+            }
+            let before = workspace_status_graph::paint_calls();
+            draw_state(&mut terminal, &mut state);
+            assert_eq!(
+                workspace_status_graph::paint_calls() - before,
+                1,
+                "{commits} commits"
+            );
+            let model = state.graph.as_ref().unwrap();
+            assert_eq!(
+                state.layout.graph_content_len,
+                workspace_status_graph::paint_model(model, &workspace_status_graph::UNICODE, None)
+                    .len()
+            );
+            assert_eq!(state.layout.graph_scrollbar_x.is_some(), commits > 1);
+        }
     }
 
     #[test]
@@ -4447,8 +4910,15 @@ mod tests {
     }
 
     /// Paint and return the tab row, one string per cell.
+    /// Paint only the tab strip (row 0), so narrow widths below the
+    /// terminal-too-small guard still exercise the strip's windowing.
     fn paint_tab_row(terminal: &mut Terminal<TestBackend>, state: &mut AppState) -> Vec<String> {
-        terminal.draw(|frame| draw(frame, state)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_tab_strip(frame, Rect { height: 1, ..area }, state);
+            })
+            .unwrap();
         let cols = terminal.backend().buffer().area.width;
         let buf = terminal.backend().buffer();
         (0..cols)
@@ -4521,6 +4991,126 @@ mod tests {
             format!(" {} {TAB_CLOSE_GLYPH} ", labels[index])
         };
         line.contains(&text)
+    }
+
+    /// Below the minimum only the resize notice paints, so only Esc, `q`,
+    /// Ctrl-c, and resize map: pane keys and write keys (`s`, `P`, `p`)
+    /// drop, and an open confirm or overlay cannot take a hidden `y`.
+    #[test]
+    fn terminal_below_minimum_drops_keys_for_a_hidden_overlay() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let key = |code, mods| Event::Key(KeyEvent::new(code, mods));
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(state.too_small);
+        for blind in ['j', 's', 'u', 'P', 'p', 'f'] {
+            let ev = key(KeyCode::Char(blind), KeyModifiers::NONE);
+            assert_eq!(
+                super::super::app::map_event(&state, &ev),
+                Action::None,
+                "{blind}"
+            );
+        }
+        assert_eq!(
+            super::super::app::map_event(&state, &key(KeyCode::Char('q'), KeyModifiers::NONE)),
+            Action::Quit
+        );
+        for allowed in [
+            key(KeyCode::Esc, KeyModifiers::NONE),
+            key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            Event::Resize(MIN_TERM_COLS, MIN_TERM_ROWS),
+        ] {
+            assert_ne!(
+                super::super::app::map_event(&state, &allowed),
+                Action::None,
+                "{allowed:?}"
+            );
+        }
+
+        state.confirm = Some(PendingConfirm::Revert {
+            label: "README.md".into(),
+            targets: vec![crate::tui::state::RevertTarget {
+                repo: "app".into(),
+                path: "README.md".into(),
+                untracked: false,
+                old_path: None,
+            }],
+        });
+        let y = key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(super::super::app::map_event(&state, &y), Action::None);
+        let enter = key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(super::super::app::map_event(&state, &enter), Action::None);
+        let esc = key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_ne!(super::super::app::map_event(&state, &esc), Action::None);
+
+        state.confirm = None;
+        state.help_open = true;
+        let slash = key(KeyCode::Char('/'), KeyModifiers::NONE);
+        assert_eq!(super::super::app::map_event(&state, &slash), Action::None);
+        for allowed in [
+            esc,
+            key(KeyCode::Char('q'), KeyModifiers::NONE),
+            key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            assert_ne!(
+                super::super::app::map_event(&state, &allowed),
+                Action::None,
+                "{allowed:?}"
+            );
+        }
+
+        // At the minimum size the overlay paints and takes every key again.
+        let mut terminal = Terminal::new(TestBackend::new(MIN_TERM_COLS, MIN_TERM_ROWS)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(!state.too_small);
+        assert_eq!(
+            super::super::app::map_event(&state, &slash),
+            Action::SearchStart
+        );
+    }
+
+    /// Below the minimum the frame is only the resize notice, and mouse
+    /// events stop mapping; at the minimum the panes paint again.
+    #[test]
+    fn terminal_below_minimum_paints_only_the_resize_notice() {
+        use crossterm::event::{
+            Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        for (cols, rows) in [
+            (MIN_TERM_COLS - 1, MIN_TERM_ROWS),
+            (MIN_TERM_COLS, MIN_TERM_ROWS - 1),
+            (20, 5),
+        ] {
+            let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let text = buffer_text(&terminal);
+            let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(state.too_small, "{cols}×{rows}");
+            assert!(
+                flat.contains(&format!("{cols}×{rows}")) && flat.contains("terminal too small"),
+                "{cols}×{rows}:\n{text}"
+            );
+            assert!(!text.contains("tree"), "no panes at {cols}×{rows}:\n{text}");
+            let click = Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 1,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            });
+            assert_eq!(super::super::app::map_event(&state, &click), Action::None);
+            let q = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+            assert_eq!(super::super::app::map_event(&state, &q), Action::Quit);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(MIN_TERM_COLS, MIN_TERM_ROWS)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        assert!(!state.too_small);
+        assert!(!text.contains("terminal too small"), "{text}");
+        assert!(text.contains("tree"), "{text}");
     }
 
     #[test]
@@ -4710,7 +5300,9 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("app"), "{text}");
         assert!(text.contains("README.md"), "{text}");
-        assert!(text.contains("changed ·"), "{text}");
+        // A 30-column tree keeps the workspace name and drops the sync part.
+        assert!(text.contains("# tmp"), "{text}");
+        assert!(text.contains("1 changed"), "{text}");
         let file_line = text
             .lines()
             .find(|line| line.contains("README.md"))
@@ -4897,6 +5489,112 @@ mod tests {
         assert_help_version_lower_right(&text);
     }
 
+    /// At 140×40 the help takes at most 24 rows and the tree keeps 13
+    /// (row-aligned columns left 5), and no column's text runs into the
+    /// next column. `overlay_height_grows_when_columns_narrow` holds the
+    /// same 24-row bound.
+    #[test]
+    fn help_columns_keep_a_gutter_and_the_panes_rows() {
+        use super::super::help::{help_column_widths, HELP_GROUPS};
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.help_open = true;
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        let lines: Vec<&str> = text.lines().collect();
+        let header = lines
+            .iter()
+            .position(|line| line.contains("MOVE") && line.contains("GIT") && line.contains("VIEW"))
+            .unwrap_or_else(|| panic!("help header:\n{text}"));
+        let footer = lines
+            .iter()
+            .position(|line| line.contains("/ search help"))
+            .unwrap_or_else(|| panic!("help footer:\n{text}"));
+        let overlay_rows = footer + 2 - (header - 1);
+        assert!(
+            overlay_rows <= 24,
+            "help takes {overlay_rows} rows:\n{text}"
+        );
+        assert!(
+            state.layout.tree_height >= 13,
+            "panes keep {} rows:\n{text}",
+            state.layout.tree_height
+        );
+        assert!(text.contains("quit (press twice)"), "{text}");
+        assert!(text.contains("apply/pop/drop"), "{text}");
+
+        // Border + padding put the first column at x = 2.
+        let widths = help_column_widths(HELP_GROUPS, help_inner_width(140));
+        let mut starts = vec![2usize];
+        for width in &widths[..widths.len() - 1] {
+            starts.push(starts.last().unwrap() + width);
+        }
+        let buf = terminal.backend().buffer();
+        for y in header + 1..footer {
+            for &start in &starts[1..] {
+                for x in start - 2..start {
+                    assert_eq!(
+                        buf[(x as u16, y as u16)].symbol(),
+                        " ",
+                        "gutter at x={x} y={y}:\n{}",
+                        lines[y]
+                    );
+                }
+            }
+        }
+    }
+
+    /// On a compare tab the overlay paints exactly the rows
+    /// `help_status_lines(cols, true)` reserves: the box, title row, the
+    /// tallest COMPARE / MOVE / VIEW column, and the footer, with the last
+    /// entry of each column on screen.
+    #[test]
+    fn compare_help_paints_its_reserved_rows() {
+        use super::super::help::{help_body_line_count, help_status_lines, HELP_COMPARE_GROUPS};
+        for cols in [64u16, 100, 140] {
+            let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+            state.tabs.open_or_focus("alpha".into(), "main".into());
+            assert!(state.is_compare_tab());
+            state.help_open = true;
+            let mut terminal = Terminal::new(TestBackend::new(cols, 120)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let text = buffer_text(&terminal);
+            let lines: Vec<&str> = text.lines().collect();
+            let header = lines
+                .iter()
+                .position(|l| l.contains("MOVE") && l.contains("COMPARE") && l.contains("VIEW"))
+                .unwrap_or_else(|| panic!("{cols} cols, compare help header:\n{text}"));
+            let top = header - 1;
+            assert!(lines[top].starts_with('╭'), "{cols} cols:\n{text}");
+            let bottom = (header..lines.len())
+                .find(|&y| lines[y].starts_with('╰'))
+                .unwrap_or_else(|| panic!("{cols} cols, help bottom border:\n{text}"));
+            let reserved = usize::from(help_status_lines(cols, true));
+            assert_eq!(bottom + 1 - top, reserved, "{cols} cols:\n{text}");
+            let inner = help_inner_width(usize::from(cols));
+            let body = help_body_line_count(
+                HELP_COMPARE_GROUPS,
+                &help_column_widths(HELP_COMPARE_GROUPS, inner),
+            );
+            let footer_rows = help_idle_footer_lines(inner).len();
+            assert_eq!(
+                bottom - header - 1,
+                body + footer_rows,
+                "{cols} cols:\n{text}"
+            );
+            let last_body = lines[header + body];
+            assert!(
+                !last_body.trim_matches(|c| c == '│' || c == ' ').is_empty(),
+                "{cols} cols: last body row is blank:\n{text}"
+            );
+            for needle in ["refresh now", "(1=Workspace)", "(press twice)"] {
+                assert!(text.contains(needle), "{cols} cols {needle}:\n{text}");
+            }
+        }
+    }
+
     #[test]
     fn help_search_highlights_without_hiding_rows() {
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
@@ -4953,7 +5651,7 @@ mod tests {
         assert!(!text.contains("untracked"), "{text}");
         assert!(chips.contains(" y  revert"), "{chips}");
         assert!(!chips.contains(" Y "), "{chips}");
-        assert!(chips.contains(" n  cancel"), "{chips}");
+        assert!(chips.contains(" n   Esc  cancel"), "{chips}");
 
         // One untracked file: `y` deletes it, no tracked line, no `Y` chip.
         let (text, chips) = draw_revert_confirm(&[("scratch.txt", true)]);
@@ -5038,7 +5736,7 @@ mod tests {
         assert!(text.contains("Drop"), "{text}");
         assert!(text.contains("stash@{0}"), "{text}");
         assert!(text.contains("drop"), "{text}");
-        assert!(text.contains("cancel"), "{text}");
+        assert!(text.contains(" n   Esc  cancel"), "{text}");
 
         state.confirm = Some(PendingConfirm::RemoveWorktree {
             primary: "app".into(),
@@ -5046,24 +5744,106 @@ mod tests {
             force: true,
             branch: "topic".into(),
             merged_into_default: Some(false),
+            changed: 3,
         });
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("Remove worktree"), "{text}");
         assert!(text.contains(".worktrees/topic"), "{text}");
         assert!(text.contains("NOT merged"), "{text}");
-        assert!(text.contains("--force"), "{text}");
+        assert!(
+            text.contains("3 changed files will be deleted permanently · branch topic is kept"),
+            "{text}"
+        );
+        assert!(!text.contains("--force"), "{text}");
+
+        // Detached: no branch line and nothing about a kept branch.
+        state.confirm = Some(PendingConfirm::RemoveWorktree {
+            primary: "app".into(),
+            path: ".worktrees/topic".into(),
+            force: true,
+            branch: crate::helpers::DETACHED_HEAD_BRANCH.into(),
+            merged_into_default: None,
+            changed: 1,
+        });
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("1 changed file will be deleted permanently"),
+            "{text}"
+        );
+        assert!(!text.contains("is kept"), "{text}");
+        assert!(!text.contains("merge status"), "{text}");
+
+        state.confirm = Some(PendingConfirm::RemoveWorktree {
+            primary: "app".into(),
+            path: ".worktrees/topic".into(),
+            force: false,
+            branch: "topic".into(),
+            merged_into_default: Some(true),
+            changed: 0,
+        });
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("clean worktree · branch topic is kept"),
+            "{text}"
+        );
 
         state.confirm = Some(PendingConfirm::CheckoutOutOfSync {
             repo: "app".into(),
             branch: "main".into(),
             remote_ref: "origin/main".into(),
+            ahead_behind: Some((0, 2)),
         });
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("is not in sync with"), "{text}");
-        assert!(text.contains("Checkout local then pull?"), "{text}");
-        assert!(text.contains("checkout then pull"), "{text}");
+        assert!(
+            text.contains("Check out main and fast-forward to origin/main (no fetch)?"),
+            "{text}"
+        );
+        assert!(
+            text.contains("local is 0 ahead, 2 behind origin/main"),
+            "{text}"
+        );
+        assert!(!text.contains("cannot fast-forward"), "{text}");
+        assert!(!text.contains("pull"), "{text}");
+
+        // Local-only commits: say the fast-forward cannot happen. Unknown counts: no line.
+        state.confirm = Some(PendingConfirm::CheckoutOutOfSync {
+            repo: "app".into(),
+            branch: "main".into(),
+            remote_ref: "origin/main".into(),
+            ahead_behind: Some((1, 2)),
+        });
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("local is 1 ahead, 2 behind origin/main · cannot fast-forward"),
+            "{text}"
+        );
+        state.confirm = Some(PendingConfirm::CheckoutOutOfSync {
+            repo: "app".into(),
+            branch: "main".into(),
+            remote_ref: "origin/main".into(),
+            ahead_behind: None,
+        });
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(!text.contains("local is"), "{text}");
+
+        state.confirm = Some(PendingConfirm::SwitchToDefault {
+            repos: vec!["app".into(), "lib".into(), "web".into()],
+        });
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("Switch 3 repos to their default branch?"),
+            "{text}"
+        );
+        assert!(text.contains("dirty repos are skipped"), "{text}");
+        assert!(text.contains(" y  switch"), "{text}");
+        assert!(text.contains(" n   Esc  cancel"), "{text}");
 
         state.confirm = Some(PendingConfirm::MergeIntoHead {
             repo: "app".into(),
@@ -5188,7 +5968,7 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("Comment"), "{text}");
         assert!(text.contains("hello▏"), "{text}");
-        assert!(text.contains("Ctrl-R resolve"), "{text}");
+        assert!(text.contains("Ctrl-r resolve"), "{text}");
         assert!(!text.contains("Comment · resolved"), "{text}");
         assert!(!text.contains("▏hello"), "{text}");
         assert_eq!(
@@ -5207,10 +5987,10 @@ mod tests {
         );
 
         assert!(
-            text.contains("Shift+Enter newline") && text.contains("Ctrl-Left/Right word"),
+            text.contains("Shift-Enter newline") && text.contains("Ctrl-Left/Right word"),
             "overlay must advertise textarea keys:\n{text}"
         );
-        assert!(text.contains("Ctrl-R resolve"), "{text}");
+        assert!(text.contains("Ctrl-r resolve"), "{text}");
         assert!(!text.contains("Comment · resolved"), "{text}");
 
         if let Some(prompt) = state.comment.as_mut() {
@@ -5227,8 +6007,8 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let resolved = buffer_text(&terminal);
         assert!(resolved.contains("Comment · resolved"), "{resolved}");
-        assert!(resolved.contains("Ctrl-R unresolve"), "{resolved}");
-        assert!(!resolved.contains("Ctrl-R resolve ·"), "{resolved}");
+        assert!(resolved.contains("Ctrl-r unresolve"), "{resolved}");
+        assert!(!resolved.contains("Ctrl-r resolve ·"), "{resolved}");
         assert!(
             resolved.contains("▏hello"),
             "resolve toggle must keep the caret:\n{resolved}"
@@ -5248,7 +6028,7 @@ mod tests {
             "multiline overlay must still occlude idle chips:\n{multi}"
         );
         assert!(
-            multi.contains("Comment · resolved") && multi.contains("Ctrl-R unresolve"),
+            multi.contains("Comment · resolved") && multi.contains("Ctrl-r unresolve"),
             "multiline overlay must keep resolve chrome:\n{multi}"
         );
     }
@@ -5335,7 +6115,7 @@ mod tests {
                 .all(|span| span.style.bg != Some(palette.cursor_bg)),
             "cursor_bg must not hide the flash"
         );
-        let search_bg = search_bg_unused();
+        let search_bg = search_bg_unused().bg;
         assert!(
             line.spans
                 .iter()
@@ -5407,6 +6187,52 @@ mod tests {
             palette,
             col_offset,
         ))
+    }
+
+    /// A narrowed tree keeps the workspace name: the root summary drops its
+    /// sync part, then shortens `N changed` to `N`, then goes, before the
+    /// name clips.
+    #[test]
+    fn narrow_workspace_root_row_shortens_summary_before_the_name() {
+        const NAME: &str = "demo-workspace";
+        let built = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, NAME);
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let mut row = rows
+            .iter()
+            .find(|r| r.kind == NodeKind::Workspace)
+            .expect("workspace row")
+            .clone();
+        row.chrome.change_count = 5;
+        row.chrome.sync_summary = "1 ahead, 1 diverged".into();
+        let name_end = 3 + row
+            .segments
+            .iter()
+            .map(|s| visible_width(&s.text))
+            .sum::<usize>();
+        let full = "5 changed · 1 ahead, 1 diverged";
+        for (width, trailing) in [
+            (name_end + 1 + full.chars().count(), full),
+            (name_end + 1 + full.chars().count() - 1, "5 changed"),
+            (name_end + 1 + "5 changed".len(), "5 changed"),
+            (name_end + 2, "5"),
+            (name_end + 1, ""),
+            (name_end, ""),
+        ] {
+            let text = paint_row(&row, width, 0);
+            let name_at = text
+                .find(NAME)
+                .unwrap_or_else(|| panic!("width {width} keeps the name:\n{text}"));
+            assert_eq!(
+                text[name_at + NAME.len()..].trim(),
+                trailing,
+                "width {width}:\n{text}"
+            );
+        }
+        // Narrower than the name: the name clips, no summary competes.
+        let text = paint_row(&row, name_end - 4, 0);
+        assert!(!text.contains('5'), "{text}");
+        assert!(text.contains("demo-work"), "{text}");
     }
 
     #[test]
@@ -5565,8 +6391,8 @@ mod tests {
         row.trailing_segs.iter().any(|s| s.text.trim() == glyph)
     }
 
-    fn search_bg_unused() -> Color {
-        crate::tui::theme::ThemeId::TokyoNight.pills().filter.bg
+    fn search_bg_unused() -> Pill {
+        crate::tui::theme::ThemeId::TokyoNight.pills().filter
     }
 
     #[test]
@@ -5609,16 +6435,18 @@ mod tests {
                 line.push_str(buf[(x, y)].symbol());
             }
             if line.contains("a.md") {
-                let col = line.find("a.md").unwrap();
-                a_bg = Some(buf[(col as u16, y)].bg);
+                let col = line[..line.find("a.md").unwrap()].chars().count();
+                let cell = &buf[(col as u16, y)];
+                a_bg = Some((cell.bg, cell.fg));
             }
             if line.contains("b.md") {
-                let col = line.find("b.md").unwrap();
-                b_bg = Some(buf[(col as u16, y)].bg);
+                let col = line[..line.find("b.md").unwrap()].chars().count();
+                let cell = &buf[(col as u16, y)];
+                b_bg = Some((cell.bg, cell.fg));
             }
         }
-        let a_bg = a_bg.expect("a.md row");
-        let b_bg = b_bg.expect("b.md row");
+        let (a_bg, a_fg) = a_bg.expect("a.md row");
+        let (b_bg, b_fg) = b_bg.expect("b.md row");
         assert!(
             a_bg == cursor_bg || b_bg == cursor_bg,
             "one match should keep the cursor: a={a_bg:?} b={b_bg:?}"
@@ -5628,6 +6456,62 @@ mod tests {
             "the other match should use search bg: a={a_bg:?} b={b_bg:?} search={search_bg:?}"
         );
         assert_ne!(a_bg, b_bg, "cursor and search-match paint must differ");
+        let match_fg = if a_bg == search_bg { a_fg } else { b_fg };
+        assert_eq!(
+            match_fg,
+            state.theme.pills().filter.fg,
+            "search-match text paints in the filter foreground"
+        );
+    }
+
+    /// Every theme keeps search-match text readable: the filter foreground
+    /// differs from the filter background by a clear luminance step, so
+    /// a tree, commit-file, graph, or diff match row stays legible.
+    #[test]
+    fn search_match_text_contrasts_with_search_bg_in_every_theme() {
+        fn luminance(color: Color) -> f64 {
+            let Color::Rgb(r, g, b) = color else {
+                panic!("theme colours are RGB: {color:?}");
+            };
+            let lin = |c: u8| {
+                let c = f64::from(c) / 255.0;
+                if c <= 0.039_28 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+        }
+        for id in crate::tui::theme::THEME_IDS {
+            let pill = id.pills().filter;
+            assert_ne!(pill.fg, pill.bg, "{id:?}");
+            let (hi, lo) = {
+                let (a, b) = (luminance(pill.fg), luminance(pill.bg));
+                (a.max(b), a.min(b))
+            };
+            let ratio = (hi + 0.05) / (lo + 0.05);
+            assert!(ratio >= 4.5, "{id:?} search text contrast {ratio:.2} < 4.5");
+            // The row paint must use that pill, not the segment colour.
+            let palette = id.palette();
+            let segs = NodeSegments {
+                segments: vec![TextSeg {
+                    text: "feature".into(),
+                    role: SegRole::BranchFeature,
+                    hex: None,
+                    bold: false,
+                    dim: true,
+                }],
+                trailing: Vec::new(),
+            };
+            let line = paint_segmented_row(
+                0, false, false, &segs, 20, false, true, None, true, pill, true, palette, 0,
+            );
+            for span in &line.spans {
+                assert_eq!(span.style.bg, Some(pill.bg), "{id:?} {span:?}");
+                assert_eq!(span.style.fg, Some(pill.fg), "{id:?} {span:?}");
+            }
+        }
     }
 
     #[test]
@@ -5708,6 +6592,8 @@ mod tests {
             }],
         );
         assert!(state.drill.is_files());
+        // The `1 file in aaa1111` note is status, not the parked subtitle.
+        state.status.clear();
         state.tabs.open_or_focus("app".into(), "main".into());
         {
             let tab = state.tabs.active_compare_mut().unwrap();
@@ -5904,7 +6790,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_commit_files_paint_loading_then_no_matching_rows() {
+    fn empty_commit_files_paint_loading_then_no_files_in_this_commit() {
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         let source = super::super::drill::CommitFileSource::Commit {
@@ -5917,14 +6803,50 @@ mod tests {
         let loading = buffer_text(&terminal);
         assert!(loading.contains(LOADING_FILES), "{loading}");
         assert!(!loading.contains(NO_MATCHING_ROWS), "{loading}");
-        assert!(!loading.contains("no files in this commit"), "{loading}");
+        assert!(!loading.contains(NO_FILES_IN_COMMIT), "{loading}");
 
         state.open_commit_files("app".into(), source, Vec::new());
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let empty = buffer_text(&terminal);
-        assert!(empty.contains(NO_MATCHING_ROWS), "{empty}");
+        assert!(empty.contains(NO_FILES_IN_COMMIT), "{empty}");
+        assert!(!empty.contains(NO_MATCHING_ROWS), "{empty}");
         assert!(!empty.contains(LOADING_FILES), "{empty}");
-        assert!(!empty.contains("no files in this commit"), "{empty}");
+    }
+
+    /// A failed `git diff` names git's reason; a focused repo whose graph
+    /// is still loading says so instead of asking to focus a repo.
+    #[test]
+    fn diff_failure_and_graph_load_have_their_own_empty_states() {
+        let mut state = two_pane_diff_state();
+        state.set_diff(
+            "app".into(),
+            "README.md".into(),
+            super::super::diff::DiffContent {
+                error: Some("index file corrupt".into()),
+                ..Default::default()
+            },
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("git diff failed: index file corrupt"),
+            "{text}"
+        );
+        assert!(!text.contains("(no diff)"), "{text}");
+
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.cursor = state
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::Repo)
+            .expect("repo row");
+        assert!(state.graph.is_none());
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        assert!(text.contains(LOADING_GRAPH), "{text}");
+        assert!(!text.contains("focus a repo for the graph"), "{text}");
     }
 
     #[test]
@@ -6173,5 +7095,148 @@ mod tests {
         assert_eq!(effect, Effect::None);
         assert!(state.text_selection.is_none());
         assert_eq!(reversed_cells(&terminal), baseline);
+    }
+
+    #[test]
+    fn palette_rows_paint_their_reason_and_skip_empty_chips() {
+        use crate::tui::action::{Action, PaletteOpenedBy};
+        use crate::tui::tabs::{ONLY_WORKSPACE_TAB_OPEN, WORKSPACE_TAB_CANNOT_CLOSE};
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.dispatch(Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK));
+        for c in "tab".chars() {
+            state.dispatch(Action::CommandPaletteChar(c));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        let row = |title: &str| {
+            text.lines()
+                .find(|line| line.contains(title))
+                .unwrap_or_else(|| panic!("no {title} row:\n{text}"))
+                .trim_end_matches(['│', ' '])
+                .to_string()
+        };
+        let next = row("Next tab");
+        assert!(next.ends_with(ONLY_WORKSPACE_TAB_OPEN), "{next}");
+        let close = row("Close tab");
+        let after_title = close.split("Close tab").nth(1).unwrap_or_default();
+        assert_eq!(
+            after_title.trim_start(),
+            WORKSPACE_TAB_CANNOT_CLOSE,
+            "no empty chip, no group label: {close}"
+        );
+        let other = row("Other pane");
+        assert!(
+            other.ends_with("Other pane  Tab"),
+            "an enabled row paints no reason: {other}"
+        );
+        // Rows sit under their painted group header and do not repeat it.
+        let lines: Vec<&str> = text.lines().collect();
+        let header = |name: &str| {
+            lines
+                .iter()
+                .position(|line| line.trim_matches(['│', ' ']) == name)
+                .unwrap_or_else(|| panic!("no {name} header:\n{text}"))
+        };
+        let at = |title: &str| lines.iter().position(|l| l.contains(title)).unwrap();
+        assert!(header("MOVE") < at("Other pane"), "{text}");
+        assert!(header("GIT") < at("Close tab"), "{text}");
+        for title in ["Next tab", "Close tab", "Other pane"] {
+            let line = row(title);
+            assert!(
+                !line.contains("  MOVE") && !line.contains("  GIT") && !line.contains("  VIEW"),
+                "{title} repeats its group: {line}"
+            );
+        }
+    }
+
+    /// A palette window scrolled into the middle of a group lost that
+    /// group's header, so its top rows keep the group label.
+    #[test]
+    fn palette_rows_keep_their_group_when_the_header_scrolled_off() {
+        use crate::tui::action::{Action, PaletteOpenedBy};
+        const GROUPS: [&str; 4] = ["HIGHLIGHT", "MOVE", "GIT", "VIEW"];
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.dispatch(Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK));
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        for _ in 0..60 {
+            state.dispatch(Action::CommandPaletteMove(1));
+            draw_state(&mut terminal, &mut state);
+            let text = buffer_text(&terminal);
+            let lines: Vec<&str> = text.lines().collect();
+            let prompt = lines
+                .iter()
+                .position(|line| line.contains("Ctrl-k …"))
+                .unwrap_or_else(|| panic!("no palette prompt:\n{text}"));
+            let first = lines[prompt + 1];
+            if GROUPS.contains(&first.trim_matches(['│', ' '])) {
+                continue;
+            }
+            assert!(
+                GROUPS.iter().any(|g| first.contains(&format!("  {g}"))),
+                "a row whose header scrolled off keeps its group: {first}\n{text}"
+            );
+            return;
+        }
+        panic!("the palette window never started inside a group");
+    }
+
+    #[test]
+    fn branch_picker_paints_the_create_row_last() {
+        use crate::git::LocalBranch;
+        use crate::tui::branches::BranchPickerState;
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let branch = |name: &str| LocalBranch {
+            name: name.into(),
+            current: false,
+            authordate: 0,
+        };
+        let mut picker = BranchPickerState::checkout("app".into(), vec![branch("topic/a")]);
+        picker.set_filter("topic".into());
+        state.branch_picker = Some(picker);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        let topic = text.find("❯   topic/a").expect("cursor on the branch row");
+        let create = text.find("+ create branch topic").expect("create row");
+        assert!(
+            topic < create,
+            "create row comes after the branches:\n{text}"
+        );
+        assert!(text.contains("Enter checkout"), "{text}");
+        state.branch_picker.as_mut().unwrap().move_cursor(1);
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("❯   + create branch topic"),
+            "the cursor lands on the create row:\n{text}"
+        );
+        assert!(
+            text.contains("Enter create and check out") && !text.contains("Enter checkout"),
+            "the footer names the create on its row:\n{text}"
+        );
+
+        let mut graph = BranchPickerState::from_names(
+            "app".into(),
+            vec!["main".into()],
+            Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            vec!["main".into()],
+        );
+        graph.set_filter("new".into());
+        state.branch_picker = Some(graph);
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("+ create branch new at aaa1111"),
+            "graph picker names the commit:\n{text}"
+        );
+        assert!(
+            text.contains("Enter create at aaa1111") && !text.contains("Enter checkout"),
+            "graph create row creates at the commit:\n{text}"
+        );
+        assert!(!text.contains("No matching branches"), "{text}");
     }
 }

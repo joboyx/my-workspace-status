@@ -38,7 +38,7 @@ fn no_remove_confirm(screen: &str) -> bool {
     !screen.contains("Remove worktree ")
         && !screen.contains("NOT merged into default")
         && !screen.contains("clean worktree")
-        && !screen.contains("dirty worktree — will use --force")
+        && !screen.contains("will be deleted permanently")
 }
 
 fn no_wrong_remove_overlays(screen: &str) -> bool {
@@ -119,10 +119,10 @@ fn remove_worktree_confirm(screen: &str) -> bool {
         && family_and_linked_on_tree(screen)
         && screen.contains(&format!("Remove worktree {LINKED_PATH}?"))
         && screen.contains(&format!("branch {LINKED_BRANCH} — NOT merged into default"))
-        && screen.contains("clean worktree")
+        && screen.contains(&format!("clean worktree · branch {LINKED_BRANCH} is kept"))
         && screen.contains("remove")
         && screen.contains("cancel")
-        && !screen.contains("dirty worktree — will use --force")
+        && !screen.contains("will be deleted permanently")
         && !crumb.contains("removed worktree")
         && no_wrong_remove_overlays(screen)
 }
@@ -146,7 +146,8 @@ fn documented_worktree_removed(screen: &str) -> bool {
 /// `W` on a linked worktree asks, then removes.
 ///
 /// Docs: Help GIT `W` = remove linked worktree. Keymap: `W` opens a
-/// boxed confirm (`y` / `n`, merge status, `--force` when dirty).
+/// boxed confirm (`y` / `n`, merge status, and the changed-file count
+/// `--force` deletes when dirty).
 /// Unshifted `w` does not. Other rows refuse with `Focus a linked
 /// worktree to remove`. Yes runs `remove_worktree` (`git worktree remove`).
 ///

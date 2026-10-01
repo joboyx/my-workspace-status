@@ -5,7 +5,8 @@
 //! and git writes in [`super::dispatch_write`].
 
 use super::super::action::{Action, Effect};
-use super::super::gates::dispatch_is_noop;
+use super::super::gates::{dispatch_is_noop, dispatch_noop_reason};
+use super::super::status::StatusMessage;
 use super::super::tabs::{CANNOT_STAGE_COMPARE, CANNOT_UNSTAGE_COMPARE, SWITCH_TO_WORKSPACE_TAB};
 use super::{AppState, FocusPane};
 
@@ -13,9 +14,10 @@ impl AppState {
     /// Why the active compare tab refuses `action`, or `None` when it may run.
     ///
     /// The one compare gate. [`Self::dispatch`] puts the reason on the status
-    /// line and the command palette paints it on the row, so a key press and
-    /// a palette row always give the same copy. The Workspace tab refuses
-    /// nothing here.
+    /// line, and the command palette paints it dimmed at the row's right edge
+    /// (and in the footer for the highlighted row) through
+    /// `palette_disabled_reason`, so a key press and a palette row always give
+    /// the same copy. The Workspace tab refuses nothing here.
     pub(crate) fn compare_refusal(&self, action: &Action) -> Option<String> {
         if !self.is_compare_tab() {
             return None;
@@ -31,7 +33,6 @@ impl AppState {
             | Action::DefaultBranch
             | Action::Branch
             | Action::BranchSubmit
-            | Action::CreateBranchStart
             | Action::CreateBranchSubmit
             | Action::RemoveWorktree
             | Action::GraphCheckout
@@ -87,7 +88,7 @@ impl AppState {
             self.g_pending_at = None;
         }
         if let Some(reason) = self.compare_refusal(&action) {
-            self.status = reason;
+            self.status = StatusMessage::warn(reason);
             return Effect::None;
         }
         let visual_write = self.diff_visual_anchor.is_some()
@@ -101,6 +102,14 @@ impl AppState {
             self.list_focus_target(),
         );
         if noop && !matches!(action, Action::FoldToggle) && !visual_write {
+            if let Some(reason) = dispatch_noop_reason(
+                &action,
+                self.nav_depth(),
+                self.focus == FocusPane::Right,
+                self.list_focus_target(),
+            ) {
+                self.status = StatusMessage::warn(reason);
+            }
             return Effect::None;
         }
         match action {
@@ -120,6 +129,7 @@ impl AppState {
             | Action::ConfirmYes
             | Action::ConfirmYesClean
             | Action::ConfirmNo
+            | Action::ConfirmEnter
             | Action::RemoveWorktree
             | Action::Push
             | Action::StashMenu
@@ -132,7 +142,6 @@ impl AppState {
             | Action::BranchBackspace
             | Action::BranchSubmit
             | Action::BranchCancel
-            | Action::CreateBranchStart
             | Action::CreateBranchChar(_)
             | Action::CreateBranchBackspace
             | Action::CreateBranchSubmit
@@ -164,6 +173,8 @@ impl AppState {
             | Action::Click { .. }
             | Action::Drag { .. }
             | Action::Release
+            | Action::BackClick
+            | Action::ResizeTree(_)
             | Action::ToggleDiffMode
             | Action::ToggleDiffWrap
             | Action::ToggleCommitMsgExpand
@@ -190,6 +201,7 @@ impl AppState {
             | Action::CycleTheme
             | Action::DiffVisualStart
             | Action::DiffVisualCancel
+            | Action::DiffVisualUnmapped
             | Action::CommentStart
             | Action::CommentInput(_)
             | Action::CommentSubmit

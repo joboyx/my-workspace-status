@@ -40,7 +40,7 @@ fn overlay_closed(screen: &str) -> bool {
 }
 
 fn export_overlay(screen: &str) -> bool {
-    screen.contains("# Comments") && screen.contains("copied · Esc close")
+    screen.contains("# Comments") && screen.contains("Esc close")
 }
 
 /// The diff row that shows `needle` (and nothing longer, e.g. keep-a vs
@@ -161,7 +161,7 @@ fn pty_compare_semicolon_comments_line_resolves_and_exports() {
         |screen| {
             comment_overlay(screen)
                 && screen.contains(LINE_BODY)
-                && screen.contains("Ctrl-R resolve")
+                && screen.contains("Ctrl-r resolve")
                 && !screen.contains("Comment · resolved")
         },
         "; on keep-a reopens the saved comment",
@@ -291,8 +291,8 @@ fn pty_compare_highlight_semicolon_comments_range() {
 /// The worktree changes keep-b (line 2). A Workspace `;` on that line
 /// paints `"` there. With the tree still on regions.txt, "Diff vs default"
 /// opens the compare tab: it shows the committed keep-b on line 2 of the
-/// same checkout and path, which must stay unmarked, and `y` on the
-/// compare diff must not copy the Workspace comment.
+/// same checkout and path, which must stay unmarked. `y` on the compare
+/// diff finds no comments in scope: it copies nothing and says so.
 #[test]
 fn pty_compare_hides_workspace_line_comment() {
     let (_root, workspace) = compare_regions_workspace();
@@ -362,11 +362,11 @@ fn pty_compare_hides_workspace_line_comment() {
         "the Workspace comment must not paint on the compare diff:\n{screen}"
     );
 
+    // The compare scope has no comments: `y` copies nothing and says so.
     tui.key('y');
-    tui.wait_pred(export_overlay, "y opens the export overlay", WAIT);
-    tui.wait_clipboard_pred(
-        |payloads| !payloads.is_empty(),
-        "y copies the compare scope",
+    tui.wait_pred(
+        |screen| !export_overlay(screen) && screen.contains("no comments here"),
+        "y on a compare scope with no comments says so and opens no overlay",
         WAIT,
     );
     let payloads = tui.clipboard_payloads();

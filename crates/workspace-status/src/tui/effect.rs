@@ -16,14 +16,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use workspace_status_graph::LOADING_OLDER;
 
-use crate::actions::switch_repo_to_default_branch;
+use crate::actions::{switch_repo_to_default_branch, SwitchOutcome};
 use crate::discovery::{discover_checkouts, process_repo, RepoCheckoutMeta};
 use crate::git::{
     apply_cached_patch, apply_worktree_patch_reverse, create_branch_at, create_branch_checkout,
     exec_git_checked, latest_stash_ref, list_compare_picker_branches, list_local_branches,
     pull_quiet_detailed, push_quiet, remove_untracked_file, remove_worktree, revert_compare_file,
     revert_compare_patch, revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop,
-    stash_push, unstage_file,
+    stash_push, unstage_file, COMPARE_REVERT_ABORTED,
 };
 use crate::parallel::env_fetch_concurrency;
 use crate::snapshot::RepoSnapshot;
@@ -36,8 +36,7 @@ use super::app::{
     discover_config, drop_undiscovered_checkouts, filter_repo_set, focused_repo_needs_pane,
     probe_compare_range, RightPaneLoad, RightPaneRequest, RightPaneTarget, TuiOpts,
 };
-use super::branches::is_valid_branch_name;
-use super::chrome::{STATUS_COPIED, STATUS_NOTHING_TO_PULL};
+use super::chrome::{is_idle_pull_status, STATUS_COPIED, STATUS_COPY_FAILED};
 use super::comments;
 use super::diff_tool::{
     prepare_rev_diff_paths, prepare_worktree_diff, resolve_diff_tool, PreparedDiff,
@@ -50,11 +49,13 @@ use super::graph_load::{
     GraphIdentity, ShouldAutoload,
 };
 use super::ops::{
-    format_completed_op, format_mixed_running_op, format_running_op, op_targets, Op, RunningOp,
+    format_completed_op, format_mixed_running_op, format_running_op, op_targets, Op, OpTally,
+    RepoOpResult, RunningOp,
 };
 use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
 use super::stash::{resolve_stash_menu_key, StashMenuKeyResult, StashOpId};
 use super::state::{revert_scope, AppState, PendingConfirm};
+use super::status::StatusMessage;
 
 /// Blocking work that produces one [`JobOutcome`].
 pub(crate) type JobWork = Box<dyn FnOnce() -> JobOutcome + Send>;
@@ -82,16 +83,17 @@ pub(crate) enum JobOutcome {
         load: super::app::RightPaneLoad,
     },
     Write {
-        status: String,
+        status: StatusMessage,
     },
     BulkRemote {
         kind: RunningOp,
-        ok: bool,
+        result: RepoOpResult,
         /// Checkout path the worker ran in. Occupancy releases this gitdir.
         repo: String,
     },
     DefaultBranch {
-        ok: bool,
+        repo: String,
+        result: RepoOpResult,
     },
     PrepareStash {
         gen: u64,
@@ -116,7 +118,6 @@ pub(crate) enum JobOutcome {
         gen: u64,
         page: workspace_status_graph::GraphModel,
         identity: GraphIdentity,
-        prev_status: String,
     },
     CommitFiles {
         gen: u64,
@@ -205,22 +206,24 @@ enum OccupyReason {
 }
 
 struct KindWave {
-    ok: usize,
-    failed: usize,
+    tally: OpTally,
     repos: Vec<String>,
+    /// A key (not only the background fetch tick) started this wave.
+    /// Background-only waves leave the status slot alone unless a repo fails.
+    foreground: bool,
 }
 
 impl KindWave {
     fn empty() -> Self {
         Self {
-            ok: 0,
-            failed: 0,
+            tally: OpTally::default(),
             repos: Vec::new(),
+            foreground: false,
         }
     }
 
     fn done(&self) -> usize {
-        self.ok + self.failed
+        self.tally.done()
     }
 
     fn note_repo(&mut self, checkout: &str) {
@@ -272,7 +275,63 @@ impl RemoteQueue {
     }
 }
 
+/// Final status of a finished bulk op: error when a repo failed, warn when
+/// one was skipped, else ok.
+fn completed_op_status(kind: RunningOp, tally: &OpTally) -> StatusMessage {
+    let text = format_completed_op(kind, tally);
+    if tally.has_failure() {
+        StatusMessage::error(text)
+    } else if tally.has_skip() {
+        StatusMessage::warn(text)
+    } else {
+        StatusMessage::ok(text)
+    }
+}
+
+/// Final status of an exclusive write named `op`.
+///
+/// A compare-tab refusal ([`COMPARE_REVERT_ABORTED`]) keeps its own copy as
+/// a warn: git did not fail, the write never ran.
+fn write_status(op: &str, result: Result<String, String>) -> StatusMessage {
+    match result {
+        Ok(text) => StatusMessage::ok(text),
+        Err(err) if err.starts_with(COMPARE_REVERT_ABORTED) => StatusMessage::warn(err),
+        Err(err) => StatusMessage::error(format!("{op} failed: {err}")),
+    }
+}
+
+/// Bulk pull result for one repo.
+fn pull_result(dir: &std::path::Path) -> RepoOpResult {
+    let pulled = pull_quiet_detailed(dir);
+    if pulled.stash_pop_failed {
+        RepoOpResult::StashConflict
+    } else if pulled.ok {
+        RepoOpResult::Ok
+    } else {
+        RepoOpResult::Failed(pulled.error.unwrap_or_else(|| "pull failed".into()))
+    }
+}
+
+/// Map a `git` `Result` to a bulk op result.
+fn git_result(result: Result<(), String>) -> RepoOpResult {
+    match result {
+        Ok(()) => RepoOpResult::Ok,
+        Err(reason) => RepoOpResult::Failed(reason),
+    }
+}
+
+/// Default-branch switch result for one repo.
+fn switch_result(outcome: SwitchOutcome) -> RepoOpResult {
+    match outcome {
+        SwitchOutcome::Switched => RepoOpResult::Ok,
+        SwitchOutcome::Skipped(reason) => RepoOpResult::Skipped(reason),
+        SwitchOutcome::Failed(reason) => RepoOpResult::Failed(reason),
+    }
+}
+
 struct WriteJob {
+    /// Short name for `busy: <op> running`.
+    op: &'static str,
     gitdirs: Vec<String>,
     work: Box<dyn FnOnce() -> Result<String, String> + Send>,
 }
@@ -333,6 +392,7 @@ fn overlay_write_checkouts(state: &AppState, action: &Action) -> Vec<String> {
             Some(PendingConfirm::RemoveWorktree { primary, path, .. }) => {
                 vec![primary.clone(), path.clone()]
             }
+            Some(PendingConfirm::SwitchToDefault { repos }) => repos.clone(),
             // `Y` keeps a compare confirm open, so it writes nothing.
             Some(
                 PendingConfirm::CompareRevertRange { target, .. }
@@ -376,10 +436,8 @@ fn branch_submit_write_checkouts(state: &AppState) -> Vec<String> {
     let Some(picker) = state.branch_picker.as_ref() else {
         return Vec::new();
     };
-    if picker.selected().is_some() {
-        return Vec::new();
-    }
-    if is_valid_branch_name(&picker.filter) {
+    // Only the create row writes a new ref from the picker.
+    if picker.on_create_row() {
         vec![picker.repo.clone()]
     } else {
         Vec::new()
@@ -406,9 +464,12 @@ pub(crate) struct Interpreter {
     compare_range: VecDeque<CompareRangeJob>,
     compare_diff: VecDeque<CompareDiffJob>,
     compare_probe: VecDeque<CompareProbeJob>,
+    /// Queued autoload: generation and graph target.
     autoload: Option<(u64, GraphIdentity)>,
-    default_ok: usize,
-    default_failed: usize,
+    /// The status `loading older…` replaced. Kept here, not on the job, so
+    /// a cancelled or stale autoload still puts it back.
+    older_prev: Option<StatusMessage>,
+    default_tally: OpTally,
     default_total: usize,
     default_repos: Vec<String>,
     pending_edit: Option<(String, String)>,
@@ -416,6 +477,8 @@ pub(crate) struct Interpreter {
     diff_prepare: Option<DiffPrepareJob>,
     pending_diff_launch: Option<DiffLaunch>,
     exclusive_inflight: HashMap<u64, Vec<String>>,
+    /// Name of the exclusive write or default-branch job on a worker.
+    running_write: Option<&'static str>,
     dirty: bool,
 }
 
@@ -440,8 +503,8 @@ impl Interpreter {
             compare_diff: VecDeque::new(),
             compare_probe: VecDeque::new(),
             autoload: None,
-            default_ok: 0,
-            default_failed: 0,
+            older_prev: None,
+            default_tally: OpTally::default(),
             default_total: 0,
             default_repos: Vec::new(),
             pending_edit: None,
@@ -449,6 +512,7 @@ impl Interpreter {
             diff_prepare: None,
             pending_diff_launch: None,
             exclusive_inflight: HashMap::new(),
+            running_write: None,
             dirty: false,
         }
     }
@@ -458,6 +522,12 @@ impl Interpreter {
     /// Remote fetch / pull / push use the per-gitdir queue and do not set this.
     pub(crate) fn busy_for_writes(&self) -> bool {
         self.sched.busy_for_writes()
+    }
+
+    /// Name of the running exclusive write (`stage`, `checkout`, …), if one
+    /// is on a worker. `None` while the job is still queued.
+    pub(crate) fn running_write_op(&self) -> Option<&'static str> {
+        self.running_write
     }
 
     #[cfg(test)]
@@ -570,7 +640,7 @@ impl Interpreter {
         match effect {
             Effect::Quit => {}
             Effect::None => {
-                if matches!(action, Action::Pull) && state.status == STATUS_NOTHING_TO_PULL {
+                if matches!(action, Action::Pull) && is_idle_pull_status(&state.status) {
                     self.enqueue_pull_after_inflight_fetch(state);
                 }
             }
@@ -594,15 +664,21 @@ impl Interpreter {
                     self.sched.request_pane();
                 }
             }
-            Effect::Fetch { repos } => self.start_bulk(state, RunningOp::Fetch, repos),
-            Effect::Pull { repos } => self.start_bulk(state, RunningOp::Pull, repos),
-            Effect::Push { repos } => self.start_bulk(state, RunningOp::Push, repos),
+            Effect::Fetch { repos } => {
+                let foreground = !matches!(action, Action::FetchTick);
+                self.start_bulk(state, RunningOp::Fetch, repos, foreground)
+            }
+            Effect::Pull { repos } => self.start_bulk(state, RunningOp::Pull, repos, true),
+            Effect::Push { repos } => self.start_bulk(state, RunningOp::Push, repos, true),
             Effect::DefaultBranch { repos } => {
                 self.default_total = repos.len();
-                self.default_ok = 0;
-                self.default_failed = 0;
+                self.default_tally = OpTally::default();
                 self.default_repos = repos.clone();
-                state.status = format_running_op(RunningOp::DefaultBranch, 0, repos.len());
+                state.status = StatusMessage::progress(format_running_op(
+                    RunningOp::DefaultBranch,
+                    0,
+                    repos.len(),
+                ));
                 self.mark();
                 self.occupy_default_branch(state, &repos);
                 self.default_queue = repos.into();
@@ -615,6 +691,7 @@ impl Interpreter {
                 let last = paths.last().cloned().unwrap_or_default();
                 self.enqueue_write(
                     state,
+                    "stage",
                     &[&repo],
                     Box::new(move || {
                         for path in &paths {
@@ -629,6 +706,7 @@ impl Interpreter {
                 let last = paths.last().cloned().unwrap_or_default();
                 self.enqueue_write(
                     state,
+                    "unstage",
                     &[&repo],
                     Box::new(move || {
                         for path in &paths {
@@ -648,6 +726,7 @@ impl Interpreter {
                 let verb = if reverse { "unstaged" } else { "staged" };
                 self.enqueue_write(
                     state,
+                    if reverse { "unstage" } else { "stage" },
                     &[&repo],
                     Box::new(move || {
                         apply_cached_patch(&dir, &patch, reverse)?;
@@ -659,6 +738,7 @@ impl Interpreter {
                 let dir = opts.cwd.join(&repo);
                 self.enqueue_write(
                     state,
+                    "revert",
                     &[&repo],
                     Box::new(move || {
                         apply_worktree_patch_reverse(&dir, &patch)?;
@@ -687,6 +767,7 @@ impl Interpreter {
                 };
                 self.enqueue_write(
                     state,
+                    "revert",
                     &[&repo],
                     Box::new(move || {
                         for path in &tracked {
@@ -708,6 +789,7 @@ impl Interpreter {
                 let dir = opts.cwd.join(&repo);
                 self.enqueue_write(
                     state,
+                    "revert",
                     &[&repo],
                     Box::new(move || {
                         revert_compare_patch(&dir, &head, &path, &patch)?;
@@ -733,6 +815,7 @@ impl Interpreter {
                 };
                 self.enqueue_write(
                     state,
+                    "revert",
                     &[&repo],
                     Box::new(move || {
                         revert_compare_file(&dir, &merge_base, &head, &path, old_path.as_deref())?;
@@ -759,6 +842,7 @@ impl Interpreter {
                 };
                 self.enqueue_write(
                     state,
+                    "stash",
                     &[&repo],
                     Box::new(move || stash_push(&dir, &paths).map(|_| ok_status)),
                 );
@@ -768,6 +852,7 @@ impl Interpreter {
                 let label = stash_ref.clone();
                 self.enqueue_write(
                     state,
+                    "stash apply",
                     &[&repo],
                     Box::new(move || {
                         stash_apply(&dir, &stash_ref).map(|_| format!("applied {label}"))
@@ -779,6 +864,7 @@ impl Interpreter {
                 let label = stash_ref.clone();
                 self.enqueue_write(
                     state,
+                    "stash pop",
                     &[&repo],
                     Box::new(move || {
                         stash_pop(&dir, &stash_ref).map(|_| format!("popped {label}"))
@@ -790,6 +876,7 @@ impl Interpreter {
                 let label = stash_ref.clone();
                 self.enqueue_write(
                     state,
+                    "stash drop",
                     &[&repo],
                     Box::new(move || {
                         stash_drop(&dir, &stash_ref).map(|_| format!("dropped {label}"))
@@ -826,6 +913,7 @@ impl Interpreter {
                 let label = name.clone();
                 self.enqueue_write(
                     state,
+                    "create branch",
                     &[&repo],
                     Box::new(move || {
                         create_branch_checkout(&dir, &name).map(|_| format!("created {label}"))
@@ -842,6 +930,7 @@ impl Interpreter {
                 let short = commit_id.get(..7).unwrap_or(&commit_id).to_string();
                 self.enqueue_write(
                     state,
+                    "create branch",
                     &[&repo],
                     Box::new(move || {
                         create_branch_at(&dir, &name, &commit_id)
@@ -865,6 +954,7 @@ impl Interpreter {
                 let label = path.clone();
                 self.enqueue_write(
                     state,
+                    "worktree remove",
                     &[&primary, &path],
                     Box::new(move || {
                         remove_worktree(&primary_dir, &path_dir, force)
@@ -953,11 +1043,20 @@ impl Interpreter {
             }
             Effect::CopyClipboard { text, announce } => {
                 let ok = comments::copy_to_clipboard(&text);
+                // `y` opens the export overlay right before this copy; its
+                // header shows the result.
+                if let Some(export) = state
+                    .comment_export
+                    .as_mut()
+                    .filter(|export| export.copied.is_none())
+                {
+                    export.copied = Some(ok);
+                }
                 if announce {
                     state.status = if ok {
-                        STATUS_COPIED.into()
+                        StatusMessage::ok(STATUS_COPIED)
                     } else {
-                        "copy failed".into()
+                        StatusMessage::error(STATUS_COPY_FAILED)
                     };
                 }
                 self.mark();
@@ -992,6 +1091,12 @@ impl Interpreter {
         };
         state.graph_loading_older = true;
         let gen = self.sched.request_autoload();
+        // Keep the slot's previous message so completion can put it back.
+        // A slot that still says `loading older…` (a cancelled load not yet
+        // back) keeps the message saved before it.
+        if state.status != LOADING_OLDER {
+            self.older_prev = Some(state.status.clone());
+        }
         self.autoload = Some((
             gen,
             GraphIdentity {
@@ -999,9 +1104,18 @@ impl Interpreter {
                 head: head.clone(),
             },
         ));
-        state.status = LOADING_OLDER.to_string();
+        state.status = StatusMessage::progress(LOADING_OLDER);
         self.sched.enqueue_user(UserTag::Autoload);
         self.mark();
+    }
+
+    /// Put back the status `loading older…` replaced, if the slot still
+    /// says `loading older…`. Called whenever no autoload is left to finish.
+    fn restore_older_prev(&mut self, state: &mut AppState) {
+        let prev = self.older_prev.take().unwrap_or_default();
+        if state.status == LOADING_OLDER {
+            state.status = prev;
+        }
     }
 
     /// Spawn every job the Scheduler will issue under the cap.
@@ -1158,8 +1272,11 @@ impl Interpreter {
                     let current = RightPaneRequest::from_state(state).target();
                     if accepted && target == current {
                         if matches!(&load, RightPaneLoad::Graph { .. }) {
+                            // A new graph cancels any older-page load.
                             let _ = self.sched.request_autoload();
+                            self.autoload = None;
                             state.graph_loading_older = false;
+                            self.restore_older_prev(state);
                         }
                         apply_right_pane_load(state, load);
                         self.mark();
@@ -1180,7 +1297,7 @@ impl Interpreter {
                 }
                 self.mark();
             }
-            JobOutcome::BulkRemote { kind, ok, repo } => {
+            JobOutcome::BulkRemote { kind, result, repo } => {
                 let gitdir = self
                     .remote
                     .occupy
@@ -1193,11 +1310,7 @@ impl Interpreter {
                     .unwrap_or_else(|| gitdir_key(state, &repo));
                 self.remote.occupy.remove(&gitdir);
                 if let Some(wave) = self.remote.wave_mut(kind) {
-                    if ok {
-                        wave.ok += 1;
-                    } else {
-                        wave.failed += 1;
-                    }
+                    wave.tally.note(&repo, result);
                     wave.note_repo(&repo);
                 }
                 self.mark();
@@ -1208,24 +1321,22 @@ impl Interpreter {
                 }
                 self.pump_remote_slots(state);
             }
-            JobOutcome::DefaultBranch { ok } => {
+            JobOutcome::DefaultBranch { repo, result } => {
                 self.sched.note_user_done(UserTag::DefaultBranch);
-                if ok {
-                    self.default_ok += 1;
-                } else {
-                    self.default_failed += 1;
-                }
-                let done = self.default_ok + self.default_failed;
-                state.status =
-                    format_running_op(RunningOp::DefaultBranch, done, self.default_total);
+                self.default_tally.note(&repo, result);
+                let done = self.default_tally.done();
+                state.status = StatusMessage::progress(format_running_op(
+                    RunningOp::DefaultBranch,
+                    done,
+                    self.default_total,
+                ));
                 if !self.default_queue.is_empty() {
                     self.sched.enqueue_user(UserTag::DefaultBranch);
                 } else {
                     state.stamp_checkout_flashes(&self.default_repos);
-                    state.status = format_completed_op(
+                    state.status = completed_op_status(
                         RunningOp::DefaultBranch,
-                        self.default_ok,
-                        self.default_failed,
+                        &std::mem::take(&mut self.default_tally),
                     );
                     self.default_repos.clear();
                     self.release_default_branch(state);
@@ -1298,7 +1409,6 @@ impl Interpreter {
                 gen,
                 page,
                 identity,
-                prev_status,
             } => {
                 self.sched.note_user_done(UserTag::Autoload);
                 let accepted = self.sched.accept_autoload_result(gen);
@@ -1314,9 +1424,11 @@ impl Interpreter {
                 }
                 if accepted {
                     state.graph_loading_older = false;
-                    if state.status == LOADING_OLDER {
-                        state.status = prev_status;
-                    }
+                    self.restore_older_prev(state);
+                    self.mark();
+                } else if !state.graph_loading_older {
+                    // Stale, and no newer autoload is running.
+                    self.restore_older_prev(state);
                     self.mark();
                 }
             }
@@ -1435,7 +1547,7 @@ impl Interpreter {
                         Ok(branches) => state.open_compare_picker(repo, branches),
                         Err(err) => {
                             state.abandon_compare_picker();
-                            state.status = err;
+                            state.status = StatusMessage::error(err);
                         }
                     }
                     self.mark();
@@ -1476,6 +1588,7 @@ impl Interpreter {
     fn enqueue_write(
         &mut self,
         state: &AppState,
+        op: &'static str,
         checkouts: &[&str],
         work: Box<dyn FnOnce() -> Result<String, String> + Send>,
     ) {
@@ -1484,7 +1597,7 @@ impl Interpreter {
             .map(|checkout| gitdir_key(state, checkout))
             .collect();
         self.occupy_exclusive(&gitdirs);
-        self.writes.push_back(WriteJob { gitdirs, work });
+        self.writes.push_back(WriteJob { op, gitdirs, work });
         self.sched.enqueue_user(UserTag::Write);
     }
 
@@ -1507,6 +1620,7 @@ impl Interpreter {
     }
 
     fn release_exclusive(&mut self, state: &mut AppState, id: u64) {
+        self.running_write = None;
         if let Some(gitdirs) = self.exclusive_inflight.remove(&id) {
             for gitdir in gitdirs {
                 if matches!(
@@ -1521,6 +1635,7 @@ impl Interpreter {
     }
 
     fn release_default_branch(&mut self, state: &mut AppState) {
+        self.running_write = None;
         self.remote
             .occupy
             .retain(|_, occ| !matches!(occ, OccupyReason::DefaultBranch));
@@ -1528,7 +1643,7 @@ impl Interpreter {
     }
 
     fn refuse_busy(&mut self, state: &mut AppState) {
-        state.status = "busy".to_string();
+        state.status = StatusMessage::warn("busy");
         self.mark();
     }
 
@@ -1550,7 +1665,7 @@ impl Interpreter {
             .iter()
             .any(|checkout| self.remote_gitdir_busy(state, checkout))
         {
-            state.status = "busy".to_string();
+            state.status = StatusMessage::warn("busy");
             true
         } else {
             false
@@ -1603,9 +1718,11 @@ impl Interpreter {
     /// Queue pull when `p` lands during an inflight/pending fetch on that gitdir.
     ///
     /// Dispatch keeps idle in-sync `p` as [`Effect::None`] and status
-    /// `nothing behind to pull`. An unfetched tracking checkout still looks
-    /// in-sync, so that path would drop `p` while fetch occupies the gitdir.
-    /// Other None Pull paths (right pane, compare tab, drill) must not follow.
+    /// `nothing behind to pull` (or a diverged line). An unfetched tracking
+    /// checkout still looks in-sync, so that path would drop `p` while fetch
+    /// occupies the gitdir. Other None Pull paths (right pane, compare tab,
+    /// drill) must not follow. Diverged targets stay out: `p` never pulls
+    /// them.
     fn enqueue_pull_after_inflight_fetch(&mut self, state: &mut AppState) {
         let targets = op_targets(
             &state.snapshot,
@@ -1615,17 +1732,35 @@ impl Interpreter {
         );
         let follow: Vec<String> = targets
             .into_iter()
+            .filter(|checkout| {
+                !state.snapshot.repos.iter().any(|r| {
+                    r.repo == *checkout && r.sync_status == crate::snapshot::SyncStatus::Diverged
+                })
+            })
             .filter(|checkout| self.fetch_live_for(state, checkout))
             .collect();
         if follow.is_empty() {
             return;
         }
-        self.start_bulk(state, RunningOp::Pull, follow);
+        self.start_bulk(state, RunningOp::Pull, follow, true);
     }
 
-    fn start_bulk(&mut self, state: &mut AppState, kind: RunningOp, repos: Vec<String>) {
+    /// Queue `repos` for `kind`. `foreground` is false only for the
+    /// background fetch tick, which paints nothing unless a repo fails.
+    fn start_bulk(
+        &mut self,
+        state: &mut AppState,
+        kind: RunningOp,
+        repos: Vec<String>,
+        foreground: bool,
+    ) {
         if repos.is_empty() {
             return;
+        }
+        if foreground {
+            if let Some(wave) = self.remote.wave_mut(kind) {
+                wave.foreground = true;
+            }
         }
         let mut flushed = false;
         for checkout in repos {
@@ -1749,11 +1884,13 @@ impl Interpreter {
             return false;
         }
         let repos = std::mem::take(&mut wave.repos);
-        let ok_n = wave.ok;
-        let failed_n = wave.failed;
+        let tally = std::mem::take(&mut wave.tally);
+        let quiet = !wave.foreground && !tally.has_failure();
         *wave = KindWave::empty();
         state.stamp_checkout_flashes(&repos);
-        state.status = format_completed_op(kind, ok_n, failed_n);
+        if !quiet {
+            state.status = completed_op_status(kind, &tally);
+        }
         self.sched.on_reload_snapshot(state.focused_checkout_path());
         if !state.is_compare_tab() {
             self.pane_req = Some(RightPaneRequest::from_state(state));
@@ -1800,10 +1937,14 @@ impl Interpreter {
                 .iter()
                 .filter(|job| job.kind == kind)
                 .count();
-            let done = self.remote.wave(kind).map(|wave| wave.done()).unwrap_or(0);
-            if inflight + pending == 0 {
+            let Some(wave) = self.remote.wave(kind) else {
+                continue;
+            };
+            // The background fetch tick runs without a progress line.
+            if inflight + pending == 0 || !wave.foreground {
                 continue;
             }
+            let done = wave.done();
             progress.push((kind, done, inflight, pending));
         }
         if progress.is_empty() {
@@ -1815,7 +1956,8 @@ impl Interpreter {
             .map(|(kind, _, inflight, _)| (*kind, *inflight))
             .collect();
         if inflight_parts.len() >= 2 {
-            state.status = format_mixed_running_op(&inflight_parts, 0, None);
+            state.status =
+                StatusMessage::progress(format_mixed_running_op(&inflight_parts, 0, None));
             return;
         }
         if inflight_parts.len() == 1 {
@@ -1831,16 +1973,17 @@ impl Interpreter {
                 .filter(|(kind, ..)| *kind != run)
                 .map(|(_, _, _, pending)| *pending)
                 .sum();
-            if other_queued > 0 {
-                state.status = format_mixed_running_op(&[], other_queued, Some((run, done, total)));
+            state.status = StatusMessage::progress(if other_queued > 0 {
+                format_mixed_running_op(&[], other_queued, Some((run, done, total)))
             } else {
-                state.status = format_running_op(run, done, total);
-            }
+                format_running_op(run, done, total)
+            });
             return;
         }
         if progress.len() == 1 {
             let (kind, done, inflight, pending) = progress[0];
-            state.status = format_running_op(kind, done, done + inflight + pending);
+            state.status =
+                StatusMessage::progress(format_running_op(kind, done, done + inflight + pending));
             return;
         }
         let (kind, done, inflight, pending) = progress[0];
@@ -1848,8 +1991,11 @@ impl Interpreter {
             .iter()
             .map(|(_, _, _, pending)| *pending)
             .sum();
-        state.status =
-            format_mixed_running_op(&[], other, Some((kind, done, done + inflight + pending)));
+        state.status = StatusMessage::progress(format_mixed_running_op(
+            &[],
+            other,
+            Some((kind, done, done + inflight + pending)),
+        ));
     }
 
     fn spawn_user(
@@ -1864,6 +2010,7 @@ impl Interpreter {
             UserTag::Write => {
                 if let Some((repo, name, ff, gitdir)) = self.checkout.take() {
                     self.exclusive_inflight.insert(id, vec![gitdir]);
+                    self.running_write = Some("checkout");
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
@@ -1876,6 +2023,7 @@ impl Interpreter {
                 }
                 if let Some((repo, rev, label, gitdir)) = self.merge.take() {
                     self.exclusive_inflight.insert(id, vec![gitdir]);
+                    self.running_write = Some("merge");
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
@@ -1888,14 +2036,12 @@ impl Interpreter {
                 }
                 if let Some(job) = self.writes.pop_front() {
                     self.exclusive_inflight.insert(id, job.gitdirs);
+                    self.running_write = Some(job.op);
+                    let op = job.op;
                     spawn(
                         id,
-                        Box::new(move || {
-                            let status = match (job.work)() {
-                                Ok(s) => s,
-                                Err(err) => err,
-                            };
-                            JobOutcome::Write { status }
+                        Box::new(move || JobOutcome::Write {
+                            status: write_status(op, (job.work)()),
                         }),
                     );
                     return;
@@ -1930,15 +2076,17 @@ impl Interpreter {
                 spawn(
                     id,
                     Box::new(move || {
-                        let ok = match kind {
+                        let result = match kind {
                             RunningOp::Fetch => {
-                                exec_git_checked(&["fetch", "--quiet"], &dir).is_ok()
+                                git_result(exec_git_checked(&["fetch", "--quiet"], &dir))
                             }
-                            RunningOp::Pull => pull_quiet_detailed(&dir).ok,
-                            RunningOp::Push => push_quiet(&dir).is_ok(),
-                            RunningOp::DefaultBranch => false,
+                            RunningOp::Pull => pull_result(&dir),
+                            RunningOp::Push => git_result(push_quiet(&dir)),
+                            RunningOp::DefaultBranch => {
+                                RepoOpResult::Failed("not a remote op".into())
+                            }
                         };
-                        JobOutcome::BulkRemote { kind, ok, repo }
+                        JobOutcome::BulkRemote { kind, result, repo }
                     }),
                 );
             }
@@ -1948,6 +2096,7 @@ impl Interpreter {
                     self.sched.note_user_done(UserTag::DefaultBranch);
                     return;
                 };
+                self.running_write = Some("default-branch switch");
                 let task = state
                     .snapshot
                     .repos
@@ -1958,19 +2107,19 @@ impl Interpreter {
                 spawn(
                     id,
                     Box::new(move || {
-                        let ok = match task {
-                            Some((branch, override_name)) => {
+                        let result = match task {
+                            Some((branch, override_name)) => switch_result(
                                 switch_repo_to_default_branch(
                                     &repo,
                                     &branch,
                                     &cwd,
                                     override_name.as_deref(),
                                 )
-                                .0
-                            }
-                            None => false,
+                                .0,
+                            ),
+                            None => RepoOpResult::Failed("not in the snapshot".into()),
                         };
-                        JobOutcome::DefaultBranch { ok }
+                        JobOutcome::DefaultBranch { repo, result }
                     }),
                 );
             }
@@ -2163,13 +2312,15 @@ impl Interpreter {
             }
             UserTag::Autoload => {
                 let Some((gen, identity)) = self.autoload.take() else {
+                    // A graph pane load cancelled it and already reset the
+                    // slot. A newer autoload may be running: leave it alone.
                     self.sched.note_job_finished(id);
-                    state.graph_loading_older = false;
                     return;
                 };
                 let Some(model) = state.graph.as_ref() else {
                     self.sched.note_job_finished(id);
                     state.graph_loading_older = false;
+                    self.restore_older_prev(state);
                     return;
                 };
                 let skip = autoload_skip(model);
@@ -2178,7 +2329,6 @@ impl Interpreter {
                 let snapshot = state.snapshot.clone();
                 let show_ignored = state.show_ignored;
                 let focus = state.graph_focus_revs();
-                let prev_status = state.status.clone();
                 let repo = identity.repo.clone();
                 spawn(
                     id,
@@ -2196,7 +2346,6 @@ impl Interpreter {
                             gen,
                             page,
                             identity,
-                            prev_status,
                         }
                     }),
                 );
@@ -2237,6 +2386,8 @@ mod tests {
     use crate::tui::state::{AppState, FocusPane};
 
     use super::*;
+    use crate::tui::chrome::{diverged_pull_status, STATUS_NOTHING_TO_PULL};
+    use crate::tui::status::StatusKind;
 
     fn repo(name: &str, dirty: bool) -> RepoSnapshot {
         RepoSnapshot {
@@ -3092,6 +3243,29 @@ mod tests {
     }
 
     #[test]
+    fn autoload_completion_restores_the_status_it_replaced() {
+        for before in [StatusMessage::warn("push failed"), StatusMessage::default()] {
+            let mut state = fixture_state();
+            let mut interp = Interpreter::new();
+            focus_repo(&mut state, "app");
+            state.drill = DrillView::Graph;
+            let mut graph = mini_graph(&["aaa"]);
+            graph.has_more = true;
+            state.graph = Some(graph);
+            state.graph_cursor = 10;
+            state.graph_identity = Some(("app".into(), "head-app".into()));
+            state.status = before.clone();
+            interp.maybe_queue_autoload(&mut state);
+            assert_eq!(state.status, LOADING_OLDER);
+            let opts = opts(&state);
+            interp.pump_sync(&mut state, &opts);
+            assert!(!state.graph_loading_older);
+            assert_ne!(state.status, LOADING_OLDER);
+            assert_eq!(state.status, before);
+        }
+    }
+
+    #[test]
     fn compare_probe_without_recorded_sha_does_not_force_reload() {
         let mut state = fixture_state();
         let (tab_id, gen) = open_compare_tab(&mut state);
@@ -3172,7 +3346,6 @@ mod tests {
                     repo: "lib".into(),
                     head: "head-lib".into(),
                 },
-                prev_status: String::new(),
             },
         );
         assert_eq!(
@@ -3212,7 +3385,6 @@ mod tests {
                     repo: "app".into(),
                     head: "head-app".into(),
                 },
-                prev_status: String::new(),
             },
         );
         assert_eq!(
@@ -3615,6 +3787,73 @@ mod tests {
         );
     }
 
+    fn apply_pane_graph(interp: &mut Interpreter, state: &mut AppState) {
+        let pane_id = interp.sched.request_pane();
+        let target = RightPaneRequest::from_state(state).target();
+        apply(
+            interp,
+            state,
+            JobOutcome::RightPane {
+                req_id: pane_id,
+                target,
+                load: RightPaneLoad::Graph {
+                    model: mini_graph(&["bbb"]),
+                    identity: GraphIdentity {
+                        repo: "app".into(),
+                        head: "head-app".into(),
+                    },
+                    files: None,
+                },
+            },
+        );
+    }
+
+    #[test]
+    fn pane_graph_over_a_running_autoload_puts_the_status_back() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::new();
+        state.status = StatusMessage::warn("push failed");
+        queue_autoload(&mut state, &mut interp);
+        assert_eq!(state.status, LOADING_OLDER);
+        let tui_opts = opts(&state);
+        let mut batch = Vec::new();
+        interp.spawn_ready(&mut state, &tui_opts, &mut |id, work| {
+            batch.push((id, work()));
+        });
+        let (id, stale) = batch
+            .into_iter()
+            .find(|(_, outcome)| matches!(outcome, JobOutcome::Autoload { .. }))
+            .expect("spawned Autoload");
+
+        apply_pane_graph(&mut interp, &mut state);
+        assert_eq!(state.status, "push failed");
+        apply_id(&mut interp, &mut state, id, stale);
+        assert!(!state.graph_loading_older);
+        assert_eq!(state.status, "push failed");
+        assert_eq!(state.status.kind(), StatusKind::Warn);
+    }
+
+    #[test]
+    fn pane_graph_over_a_queued_autoload_puts_the_status_back() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::new();
+        state.status = StatusMessage::warn("push failed");
+        queue_autoload(&mut state, &mut interp);
+        apply_pane_graph(&mut interp, &mut state);
+        assert_eq!(state.status, "push failed");
+        // The cancelled autoload tag still drains without a job.
+        let tui_opts = opts(&state);
+        let mut autoloads = 0;
+        interp.spawn_ready(&mut state, &tui_opts, &mut |_, work| {
+            if matches!(work(), JobOutcome::Autoload { .. }) {
+                autoloads += 1;
+            }
+        });
+        assert_eq!(autoloads, 0);
+        assert!(!state.graph_loading_older);
+        assert_eq!(state.status, "push failed");
+    }
+
     #[test]
     fn stale_autoload_gen_does_not_merge_when_identity_still_matches() {
         let mut state = fixture_state();
@@ -3633,7 +3872,6 @@ mod tests {
                     repo: "app".into(),
                     head: "head-app".into(),
                 },
-                prev_status: String::new(),
             },
         );
         assert_eq!(
@@ -3693,7 +3931,6 @@ mod tests {
                     repo: "app".into(),
                     head: "head-app".into(),
                 },
-                prev_status: String::new(),
             },
         );
         assert_eq!(
@@ -3971,7 +4208,7 @@ mod tests {
             first[0].0,
             JobOutcome::BulkRemote {
                 kind: RunningOp::Fetch,
-                ok: true,
+                result: RepoOpResult::Ok,
                 repo: "app".into(),
             },
         );
@@ -4046,6 +4283,60 @@ mod tests {
         );
         assert_eq!(interp.occupied_gitdirs(), vec!["app".to_string()]);
         assert_eq!(capture_jobs(&mut interp, &mut state).len(), 0);
+    }
+
+    #[test]
+    fn workspace_pull_during_fetch_with_a_diverged_repo_still_pulls_the_rest() {
+        let mut app = repo("app", false);
+        app.sync_status = SyncStatus::Diverged;
+        app.sync_note = "ahead 1, behind 1".into();
+        let mut lib = repo("lib", false);
+        lib.sync_status = SyncStatus::UpToDate;
+        let snapshot = build_workspace_snapshot(&[app, lib], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.cursor = 0;
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into(), "lib".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 2);
+
+        // `lib` is not fetched yet, so it still looks in sync. The diverged
+        // `app` stays out of the follow-up pull.
+        let effect = state.dispatch(Action::Pull);
+        assert_eq!(effect, Effect::None);
+        assert_eq!(state.status, diverged_pull_status(&["app".into()]));
+        schedule_effect(&mut interp, &mut state, effect, &Action::Pull);
+        assert_eq!(
+            interp.pending_remotes(),
+            vec![(RunningOp::Pull, "lib".into())]
+        );
+    }
+
+    #[test]
+    fn compare_refusal_is_a_warn_without_the_failed_prefix() {
+        let refused = write_status("revert", Err("revert aborted: HEAD moved".into()));
+        assert_eq!(refused, "revert aborted: HEAD moved");
+        assert_eq!(refused.kind(), StatusKind::Warn);
+        let failed = write_status("revert", Err("patch failed: a.txt:1".into()));
+        assert_eq!(failed, "revert failed: patch failed: a.txt:1");
+        assert_eq!(failed.kind(), StatusKind::Error);
+    }
+
+    #[test]
+    fn idle_pull_status_matches_the_dispatch_copy() {
+        assert!(is_idle_pull_status(STATUS_NOTHING_TO_PULL));
+        assert!(is_idle_pull_status(&diverged_pull_status(&["app".into()])));
+        assert!(is_idle_pull_status(&diverged_pull_status(&[
+            "app".into(),
+            "lib".into()
+        ])));
+        assert!(!is_idle_pull_status("Fetching 0/1…"));
     }
 
     #[test]
@@ -4199,7 +4490,7 @@ mod tests {
             first[0].0,
             JobOutcome::BulkRemote {
                 kind: RunningOp::Fetch,
-                ok: true,
+                result: RepoOpResult::Ok,
                 repo: "app".into(),
             },
         );
@@ -4339,7 +4630,7 @@ mod tests {
         state.create_branch = Some(CreateBranchState {
             repo: "app".into(),
             name: "topic".into(),
-            commit_id: None,
+            commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         });
         state.status = "new branch".into();
 
@@ -4419,7 +4710,7 @@ mod tests {
         );
         assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
 
-        let mut picker = BranchPickerState::new("app".into(), vec![local_branch("main")]);
+        let mut picker = BranchPickerState::checkout("app".into(), vec![local_branch("main")]);
         picker.set_filter("topic".into());
         state.branch_picker = Some(picker);
         state.status = "branch /topic".into();
@@ -4429,7 +4720,7 @@ mod tests {
         assert_eq!(state.status, "busy");
         assert_eq!(interp.write_jobs_queued(), 0);
 
-        let mut checkout = BranchPickerState::new("app".into(), vec![local_branch("feature")]);
+        let mut checkout = BranchPickerState::checkout("app".into(), vec![local_branch("feature")]);
         checkout.cursor = 0;
         state.branch_picker = Some(checkout);
         state.status = "branch".into();
@@ -4544,13 +4835,200 @@ mod tests {
             &mut state,
             spawned[0].0,
             JobOutcome::Write {
-                status: "staged README.md".into(),
+                status: StatusMessage::ok("staged README.md"),
             },
         );
         let _after = capture_jobs(&mut interp, &mut state);
         assert!(interp.pending_remotes().is_empty());
         assert!(interp.occupied_gitdirs().contains(&"app".to_string()));
         assert!(interp.occupied_gitdirs().contains(&"notes".to_string()));
+    }
+
+    #[test]
+    fn background_fetch_keeps_an_unread_error_on_success() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        state.status = StatusMessage::error("push failed");
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::FetchTick,
+        );
+        assert_eq!(state.status, "push failed", "no progress line");
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 1);
+        apply_id(
+            &mut interp,
+            &mut state,
+            jobs[0].0,
+            JobOutcome::BulkRemote {
+                kind: RunningOp::Fetch,
+                result: RepoOpResult::Ok,
+                repo: "app".into(),
+            },
+        );
+        assert_eq!(state.status, "push failed", "no completion line");
+        assert_eq!(state.status.kind(), StatusKind::Error);
+    }
+
+    #[test]
+    fn background_fetch_failure_writes_an_error() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::FetchTick,
+        );
+        let jobs = capture_jobs(&mut interp, &mut state);
+        apply_id(
+            &mut interp,
+            &mut state,
+            jobs[0].0,
+            JobOutcome::BulkRemote {
+                kind: RunningOp::Fetch,
+                result: RepoOpResult::Failed("could not read from remote repository".into()),
+                repo: "app".into(),
+            },
+        );
+        assert_eq!(
+            state.status,
+            "Fetched 1 repo (1 failed: app — could not read from remote repository)"
+        );
+        assert_eq!(state.status.kind(), StatusKind::Error);
+    }
+
+    #[test]
+    fn pane_reload_after_quiet_background_fetch_keeps_an_unread_error() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        focus_repo(&mut state, "app");
+        let source = commit_source();
+        state.begin_commit_files("app".into(), source.clone());
+        state.open_commit_files("app".into(), source.clone(), vec![commit_file("README.md")]);
+        assert_eq!(state.status, "1 file in aaa1111");
+        state.status = StatusMessage::error("push failed");
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::FetchTick,
+        );
+        let jobs = capture_jobs(&mut interp, &mut state);
+        apply_id(
+            &mut interp,
+            &mut state,
+            jobs[0].0,
+            JobOutcome::BulkRemote {
+                kind: RunningOp::Fetch,
+                result: RepoOpResult::Ok,
+                repo: "app".into(),
+            },
+        );
+        let pane_id = interp.sched.request_pane();
+        let target = RightPaneRequest::from_state(&state).target();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::RightPane {
+                req_id: pane_id,
+                target,
+                load: RightPaneLoad::CommitFiles {
+                    repo: "app".into(),
+                    source,
+                    files: vec![name_status("README.md"), name_status("src.rs")],
+                },
+            },
+        );
+        assert!(
+            matches!(&state.drill, DrillView::Files { files, .. } if files.len() == 2),
+            "the pane load must apply, got {:?}",
+            state.drill
+        );
+        assert_eq!(state.status, "push failed");
+        assert_eq!(state.status.kind(), StatusKind::Error);
+    }
+
+    #[test]
+    fn same_source_reload_does_not_rewrite_the_files_note() {
+        let mut state = fixture_state();
+        let source = commit_source();
+        state.begin_commit_files("app".into(), source.clone());
+        state.open_commit_files(
+            "app".into(),
+            source.clone(),
+            vec![commit_file("README.md"), commit_file("src.rs")],
+        );
+        assert_eq!(state.status, "2 files in aaa1111");
+        assert_eq!(state.status.kind(), StatusKind::Info);
+        state.status = "showing ignored repos".into();
+        state.open_commit_files("app".into(), source, vec![commit_file("README.md")]);
+        assert_eq!(state.status, "showing ignored repos");
+    }
+
+    #[test]
+    fn manual_fetch_paints_progress_then_ok() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::Fetch,
+        );
+        assert_eq!(state.status.kind(), StatusKind::Progress);
+        assert!(state.status.starts_with("Fetching"), "{}", state.status);
+        let jobs = capture_jobs(&mut interp, &mut state);
+        apply_id(
+            &mut interp,
+            &mut state,
+            jobs[0].0,
+            JobOutcome::BulkRemote {
+                kind: RunningOp::Fetch,
+                result: RepoOpResult::Ok,
+                repo: "app".into(),
+            },
+        );
+        assert_eq!(state.status, "Fetched 1 repo");
+        assert_eq!(state.status.kind(), StatusKind::Ok);
+    }
+
+    #[test]
+    fn running_write_names_the_op_until_it_finishes() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Stage {
+                repo: "app".into(),
+                paths: vec!["README.md".into()],
+            },
+            &Action::Stage,
+        );
+        assert_eq!(interp.running_write_op(), None, "queued, not running");
+        let jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(interp.running_write_op(), Some("stage"));
+        apply_id(
+            &mut interp,
+            &mut state,
+            jobs[0].0,
+            JobOutcome::Write {
+                status: StatusMessage::error("git add exited with code 1"),
+            },
+        );
+        assert_eq!(interp.running_write_op(), None);
+        assert_eq!(state.status.kind(), StatusKind::Error);
     }
 
     #[test]
@@ -4611,7 +5089,7 @@ mod tests {
             first[0].0,
             JobOutcome::BulkRemote {
                 kind: RunningOp::Fetch,
-                ok: true,
+                result: RepoOpResult::Ok,
                 repo: "app".into(),
             },
         );
@@ -4632,5 +5110,125 @@ mod tests {
             interp.pending_remotes(),
             vec![(RunningOp::Pull, "notes".into())]
         );
+    }
+
+    /// Workspace at a temp root with one real git repo `app` on `branch`.
+    fn git_app_state(tag: &str, branch: &str, dirty: bool) -> (PathBuf, AppState) {
+        let root = crate::testutil::unique_dir(tag);
+        let dir = root.join("app");
+        crate::testutil::init_repo(&dir);
+        if branch != "main" {
+            crate::testutil::git(&dir, &["checkout", "-q", "-b", branch]);
+        }
+        if dirty {
+            std::fs::write(dir.join("README.md"), "# dirty\n").unwrap();
+        }
+        let mut snap = repo("app", dirty);
+        snap.branch = branch.into();
+        let snapshot = build_workspace_snapshot(&[snap], &[], false, &[]);
+        (root.clone(), AppState::new(root, snapshot, true))
+    }
+
+    /// Run every ready job on this thread and apply its outcome.
+    fn run_jobs(interp: &mut Interpreter, state: &mut AppState) {
+        for (id, work) in capture_jobs(interp, state) {
+            let outcome = work();
+            apply_id(interp, state, id, outcome);
+        }
+    }
+
+    #[test]
+    fn failed_write_names_the_op_and_git_reason() {
+        let (root, mut state) = git_app_state("ws-effect-write-fail", "main", false);
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::StashPop {
+                repo: "app".into(),
+                stash_ref: "stash@{0}".into(),
+            },
+            &Action::None,
+        );
+        run_jobs(&mut interp, &mut state);
+        assert!(
+            state
+                .status
+                .starts_with("stash pop failed: stash@{0} is not a valid reference"),
+            "{}",
+            state.status
+        );
+        assert_eq!(state.status.kind(), StatusKind::Error);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn push_failure_names_the_repo_and_reason() {
+        let (root, mut state) = git_app_state("ws-effect-push-detached", "main", false);
+        crate::testutil::git(&root.join("app"), &["checkout", "-q", "--detach"]);
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Push {
+                repos: vec!["app".into()],
+            },
+            &Action::None,
+        );
+        run_jobs(&mut interp, &mut state);
+        assert_eq!(
+            state.status,
+            "Pushed 1 repo (1 failed: app — detached HEAD cannot push)"
+        );
+        assert_eq!(state.status.kind(), StatusKind::Error);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pull_stash_conflict_outcome_says_the_stash_is_kept() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Pull {
+                repos: vec!["app".into()],
+            },
+            &Action::Pull,
+        );
+        let jobs = capture_jobs(&mut interp, &mut state);
+        apply_id(
+            &mut interp,
+            &mut state,
+            jobs[0].0,
+            JobOutcome::BulkRemote {
+                kind: RunningOp::Pull,
+                result: RepoOpResult::StashConflict,
+                repo: "app".into(),
+            },
+        );
+        assert_eq!(
+            state.status,
+            "app: pulled, but restoring local changes conflicted — resolve, then check `git stash list`"
+        );
+        assert_eq!(state.status.kind(), StatusKind::Error);
+    }
+
+    #[test]
+    fn default_branch_counts_a_dirty_skip_apart() {
+        let (root, mut state) = git_app_state("ws-effect-default-dirty", "feature/x", true);
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::DefaultBranch {
+                repos: vec!["app".into()],
+            },
+            &Action::DefaultBranch,
+        );
+        run_jobs(&mut interp, &mut state);
+        assert_eq!(state.status, "Switched 1 repo (1 skipped: dirty)");
+        assert_eq!(state.status.kind(), StatusKind::Warn);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

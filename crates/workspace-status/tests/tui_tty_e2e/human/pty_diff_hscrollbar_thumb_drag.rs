@@ -7,8 +7,8 @@ use crate::harness::{
 use crate::seed::{daily_workspace, seed_long_diff_file};
 use crate::support::{
     no_mouse_toggle_toast, no_wrong_overlays, panes_tree_focused_diff_unfocused,
-    panes_tree_unfocused_diff_focused, right_pane, status_row, title_has_files, tree_cursor_on,
-    tree_has, tree_inactive_selection_on, SETTLE_MS, WAIT,
+    panes_tree_unfocused_diff_focused, right_pane, right_vbar_at_top, status_row, title_has_files,
+    tree_cursor_on, tree_has, tree_inactive_selection_on, SETTLE_MS, WAIT,
 };
 
 const FILE: &str = "unique-diffline.rs";
@@ -37,7 +37,9 @@ fn long_diff_clipped_tree_focus(screen: &str) -> bool {
         && right.contains("inline (too narrow)")
         && !right.contains("inline (too narrow) ·")
         && !right.contains(DIFF_HSCROLL_TAIL)
-        && !right.contains(THUMB)
+        // The vertical bar shows at the origin; the h-bar waits for a pan.
+        && right_vbar_at_top(screen)
+        && !right.contains('═')
         && !right.contains("app/README.md")
         && !right.contains("UNSTAGED")
         && !title_has_files(screen)
@@ -132,7 +134,7 @@ fn sgr_release(tui: &mut PtySession, col: u16, row: u16) {
 
 /// Drag the painted file-diff horizontal scrollbar. Not wheel, not keys.
 ///
-/// Help VIEW: `m` = mouse · split/bar/drag copy. File-diff paints
+/// Help VIEW: `m` = mouse on/off (graph commit: merge). File-diff paints
 /// `ScrollbarOrientation::HorizontalBottom` after pan leaves column 0.
 /// `hit_split` / `SplitDrag::DiffHScrollbar` must change `diff_col_offset`.
 ///

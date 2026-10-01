@@ -57,7 +57,7 @@ fn pty_shift_letters_csi_u_type_into_search() {
     tui.wait_pred(
         |screen| {
             screen.contains("MOVE")
-                && screen.contains("search focused pane")
+                && screen.contains("search focused")
                 && screen.contains("stash menu")
                 && screen.contains("top / bottom")
                 && screen.contains("cycle theme")
@@ -70,7 +70,7 @@ fn pty_shift_letters_csi_u_type_into_search() {
     tui.wait_pred(
         |screen| {
             !screen.contains("MOVE")
-                && !screen.contains("search focused pane")
+                && !screen.contains("search focused")
                 && screen.contains("? help")
                 && tree_cursor_on(screen, "README.md")
         },

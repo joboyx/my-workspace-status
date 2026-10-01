@@ -101,16 +101,57 @@ pub fn exec_git_status(args: &[&str], cwd: &Path) -> i32 {
 }
 
 /// Run git. `Err` when the process exits non-zero or fails to start.
+///
+/// The error is git's own reason line ([`git_reason_line`]), or
+/// `git <sub> exited with code N` when git printed none.
 pub fn exec_git_checked(args: &[&str], cwd: &Path) -> Result<(), String> {
     match run(args, cwd) {
         Ok(out) if out.status.success() => Ok(()),
-        Ok(out) => Err(format!(
-            "git {} exited with code {}",
-            args.first().copied().unwrap_or("git"),
-            out.status.code().unwrap_or(-1)
-        )),
+        Ok(out) => Err(git_failure_message(args, &out)),
         Err(err) => Err(err.to_string()),
     }
+}
+
+fn exit_code_message(args: &[&str], out: &std::process::Output) -> String {
+    format!(
+        "git {} exited with code {}",
+        args.first().copied().unwrap_or("git"),
+        out.status.code().unwrap_or(-1)
+    )
+}
+
+/// One line that says why a git run failed, without the `fatal:` / `error:` tag.
+///
+/// Order: a push `! [rejected]` line, then the first `fatal:` / `error:`
+/// line of stderr, then the first other stderr line that is not a `hint:`,
+/// then a stdout `CONFLICT` line (`stash apply` prints its conflict there).
+/// `None` when git printed nothing useful.
+pub(crate) fn git_reason_line(out: &std::process::Output) -> Option<String> {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines = || stderr.lines().map(str::trim).filter(|l| !l.is_empty());
+    let tagged = |line: &str| {
+        ["fatal:", "error:"]
+            .iter()
+            .find_map(|tag| line.strip_prefix(tag))
+            .map(|rest| rest.trim().to_string())
+    };
+    lines()
+        .find_map(|line| line.strip_prefix("! ").filter(|rest| rest.starts_with('[')))
+        .map(|rest| rest.split_whitespace().collect::<Vec<_>>().join(" "))
+        .or_else(|| lines().find_map(tagged))
+        .or_else(|| {
+            lines()
+                .find(|line| !line.starts_with("hint:"))
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            stdout
+                .lines()
+                .map(str::trim)
+                .find(|line| line.starts_with("CONFLICT"))
+                .map(str::to_string)
+        })
 }
 
 /// Binary-safe blob bytes for `<rev>:<path>` (`git cat-file blob`). Missing path → `None`.
@@ -169,6 +210,19 @@ pub fn fast_forward_to_remote_ref(remote_ref: &str, cwd: &Path) -> bool {
         return false;
     }
     rev_parse_quiet("HEAD", cwd).as_deref() == Some(target_sha.as_str())
+}
+
+/// Commits only on `left` and only on `right` (`rev-list --left-right --count left...right`).
+///
+/// `None` when either rev does not resolve or git fails.
+pub fn ahead_behind(left: &str, right: &str, cwd: &Path) -> Option<(usize, usize)> {
+    let range = format!("{left}...{right}");
+    let out = exec_git(&["rev-list", "--left-right", "--count", &range, "--"], cwd);
+    let mut counts = out.split_whitespace().map(str::parse::<usize>);
+    match (counts.next(), counts.next(), counts.next()) {
+        (Some(Ok(ahead)), Some(Ok(behind)), None) => Some((ahead, behind)),
+        _ => None,
+    }
 }
 
 /// Outcome of merging a rev into the current HEAD.
@@ -243,11 +297,17 @@ pub fn merge_into_head(rev: &str, cwd: &Path) -> MergeIntoHeadResult {
 
 const AUTO_STASH_MESSAGE: &str = "ws-status: auto-stash before pull";
 
-#[derive(Debug, Clone, Copy)]
+/// What [`pull_quiet_detailed`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullQuietResult {
+    /// The pull ran and any auto-stash came back cleanly.
     pub ok: bool,
+    /// Tracked local changes were stashed before the pull.
     pub stashed: bool,
+    /// The pull ran, but popping the auto-stash conflicted. The stash is kept.
     pub stash_pop_failed: bool,
+    /// Git's reason line when the auto-stash push or the pull failed.
+    pub error: Option<String>,
 }
 
 /// `git pull --quiet`, stashing tracked local changes first when needed.
@@ -255,25 +315,28 @@ pub fn pull_quiet_detailed(cwd: &Path) -> PullQuietResult {
     let dirty = repo_has_local_changes(cwd);
     let mut stashed = false;
     if dirty {
-        if exec_git_status(&["stash", "push", "-m", AUTO_STASH_MESSAGE, "--quiet"], cwd) != 0 {
+        let args = ["stash", "push", "-m", AUTO_STASH_MESSAGE, "--quiet"];
+        if let Err(err) = exec_git_checked(&args, cwd) {
             return PullQuietResult {
                 ok: false,
                 stashed: false,
                 stash_pop_failed: false,
+                error: Some(format!("auto-stash failed: {err}")),
             };
         }
         stashed = true;
     }
 
-    let pull_ok = exec_git_status(&["pull", "--quiet"], cwd) == 0;
+    let pulled = exec_git_checked(&["pull", "--quiet"], cwd);
     let mut stash_pop_failed = false;
     if stashed && exec_git_status(&["stash", "pop", "--quiet"], cwd) != 0 {
         stash_pop_failed = true;
     }
     PullQuietResult {
-        ok: pull_ok && !stash_pop_failed,
+        ok: pulled.is_ok() && !stash_pop_failed,
         stashed,
         stash_pop_failed,
+        error: pulled.err(),
     }
 }
 
@@ -436,6 +499,11 @@ pub fn revert_tracked_file(cwd: &Path, file_path: &str) -> Result<(), String> {
     exec_git_checked(&["restore", "--", file_path], cwd)
 }
 
+/// Start of every [`ensure_compare_head_clean`] refusal.
+///
+/// The TUI shows a refusal as-is (warn), not as a failed git write.
+pub const COMPARE_REVERT_ABORTED: &str = "revert aborted: ";
+
 /// Refuse a compare-tab write unless the checkout still is the compare head.
 ///
 /// `Err` when `HEAD` is not `head`, or when `git status` lists any of
@@ -446,7 +514,7 @@ pub fn revert_tracked_file(cwd: &Path, file_path: &str) -> Result<(), String> {
 pub fn ensure_compare_head_clean(cwd: &Path, head: &str, paths: &[&str]) -> Result<(), String> {
     match rev_parse_commit(cwd, "HEAD")? {
         Some(now) if now == head => {}
-        _ => return Err("revert aborted: HEAD moved".into()),
+        _ => return Err(format!("{COMPARE_REVERT_ABORTED}HEAD moved")),
     }
     let mut args = vec![
         "status",
@@ -461,7 +529,9 @@ pub fn ensure_compare_head_clean(cwd: &Path, head: &str, paths: &[&str]) -> Resu
         Ok(())
     } else {
         let path = paths.first().copied().unwrap_or_default();
-        Err(format!("revert aborted: {path} has uncommitted changes"))
+        Err(format!(
+            "{COMPARE_REVERT_ABORTED}{path} has uncommitted changes"
+        ))
     }
 }
 
@@ -818,16 +888,9 @@ fn exec_git_owned(args: &[String], cwd: &Path) -> String {
     exec_git(&refs, cwd)
 }
 
+/// Git's reason line ([`git_reason_line`]), or `git <sub> exited with code N`.
 fn git_failure_message(args: &[&str], out: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    if !stderr.is_empty() {
-        return stderr;
-    }
-    format!(
-        "git {} exited with code {}",
-        args.first().copied().unwrap_or("git"),
-        out.status.code().unwrap_or(-1)
-    )
+    git_reason_line(out).unwrap_or_else(|| exit_code_message(args, out))
 }
 
 /// Run git and return stdout. Failure is `Err`, never an empty success.
@@ -1345,6 +1408,8 @@ keep-z
         git(&dir, &["add", "ahead.txt"]);
         git(&dir, &["commit", "-q", "-m", "ahead"]);
         let ahead = exec_git(&["rev-parse", "HEAD"], &dir);
+        assert_eq!(ahead_behind("foo", "origin/foo", &dir), Some((1, 0)));
+        assert_eq!(ahead_behind("foo", "origin/missing", &dir), None);
         assert!(!fast_forward_to_remote_ref("origin/foo", &dir));
         assert_eq!(exec_git(&["rev-parse", "HEAD"], &dir), ahead);
         assert_eq!(exec_git(&["branch", "--show-current"], &dir), "foo");
@@ -1742,5 +1807,90 @@ keep-z
             .map(|b| b.name)
             .collect();
         assert_eq!(names, vec!["origin/main", "feature"]);
+    }
+
+    #[test]
+    fn checked_git_errors_carry_the_git_reason_line() {
+        let dir = unique_dir("ws-git-reason");
+        init_repo(&dir);
+        let err = stage_file(&dir, "nope.txt").unwrap_err();
+        assert_eq!(err, "pathspec 'nope.txt' did not match any files");
+        let err = stash_pop(&dir, "stash@{0}").unwrap_err();
+        assert!(err.contains("stash@{0} is not a valid reference"), "{err}");
+        assert!(!err.starts_with("error:"), "tag is stripped: {err}");
+
+        // `stash apply` prints its conflict on stdout, not stderr.
+        fs::write(dir.join("README.md"), "# stashed\n").unwrap();
+        git(&dir, &["stash", "-q"]);
+        fs::write(dir.join("README.md"), "# committed\n").unwrap();
+        git(&dir, &["commit", "-qam", "conflicting"]);
+        let err = stash_apply(&dir, "stash@{0}").unwrap_err();
+        assert!(err.starts_with("CONFLICT"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_patch_apply_reports_one_reason_line() {
+        let dir = unique_dir("ws-git-patch-reason");
+        init_repo(&dir);
+        // git prints two `error:` lines for a patch that does not apply.
+        let patch = "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n\
+                     @@ -1 +1 @@\n-# other\n+# new\n";
+        let err = apply_cached_patch(&dir, patch, false).unwrap_err();
+        assert_eq!(err, "patch failed: README.md:1");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pull_reports_an_auto_stash_conflict_and_keeps_the_stash() {
+        let root = unique_dir("ws-git-pull-conflict");
+        let up = root.join("up");
+        let down = root.join("down");
+        init_repo(&up);
+        git(
+            &root,
+            &["clone", "-q", up.to_str().unwrap(), down.to_str().unwrap()],
+        );
+        git(&down, &["config", "user.name", "workspace-status test"]);
+        git(
+            &down,
+            &[
+                "config",
+                "user.email",
+                "workspace-status-test@example.invalid",
+            ],
+        );
+        fs::write(up.join("README.md"), "# upstream\n").unwrap();
+        git(&up, &["commit", "-qam", "upstream"]);
+        fs::write(down.join("README.md"), "# local edit\n").unwrap();
+
+        let result = pull_quiet_detailed(&down);
+        assert!(result.stashed && result.stash_pop_failed && !result.ok);
+        assert_eq!(result.error, None, "the pull itself worked");
+        assert_eq!(list_stash_refs(&down).len(), 1, "stash entry is kept");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pull_failure_carries_the_git_reason() {
+        let dir = unique_dir("ws-git-pull-fail");
+        init_repo(&dir);
+        let result = pull_quiet_detailed(&dir);
+        assert!(!result.ok && !result.stash_pop_failed);
+        let reason = result.error.expect("reason");
+        assert!(
+            !reason.is_empty() && !reason.contains("exited with code"),
+            "{reason}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn push_on_detached_head_says_why() {
+        let dir = unique_dir("ws-git-push-detached");
+        init_repo(&dir);
+        git(&dir, &["checkout", "-q", "--detach"]);
+        assert_eq!(push_quiet(&dir).unwrap_err(), "detached HEAD cannot push");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

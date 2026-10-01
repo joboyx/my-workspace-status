@@ -42,7 +42,31 @@ This is the glance I wanted instead. Left pane is the workspace tree (repos, wor
 
 ![Help overlay](docs/images/08-help.gif)
 
-Rebuild these clips with `./scripts/capture-demo-stills.sh` (see [docs/demo.md](./docs/demo.md)).
+**Command palette** — Ctrl-k, then type a name or an alias (`compare`, `checkout`). Every letter types; disabled rows say why.
+
+![Command palette](docs/images/09-palette.gif)
+
+**Branch picker** — `b` on a checkout filters local branches. A new name shows an explicit `+ create branch <name>` row.
+
+![Branch picker](docs/images/10-branch-picker.gif)
+
+**Confirm** — `x` asks in a box with `y` / `n` / `Esc`. Enter does not confirm.
+
+![Revert confirm](docs/images/11-confirm.gif)
+
+**Blocked keys** — a key that cannot run here says why (`focus the tree (Tab) to stage`).
+
+![Blocked key](docs/images/12-blocked-key.gif)
+
+**Resize** — `<` / `>` move the tree / diff split. At 100 diff columns the diff turns side-by-side.
+
+![Pane resize and split diff](docs/images/13-split-resize.gif)
+
+**Search position** — the armed chip shows the match position, the count, and the pane (`/auth 2/2 · tree`).
+
+![Search position](docs/images/14-search-count.gif)
+
+Rebuild these clips and their PNG stills (`docs/images/stills/`) with `./scripts/capture-demo-stills.sh` (see [docs/demo.md](./docs/demo.md)).
 
 ## Install
 
@@ -55,7 +79,7 @@ curl -LsSf https://github.com/joboyx/my-workspace-status/releases/latest/downloa
 export PATH="$HOME/.local/bin:$PATH" && hash -r
 ```
 
-Update that install with `ws --update` (same as `workspace-status --update`). That prints GitHub Release notes for versions newer than the installed binary, then runs `workspace-status-update`. The installer also places that sidecar next to the binaries. On a TTY, `ws` also checks GitHub Releases at most every 6 hours and asks `new version available, update? [y/n]` before the TUI if a newer release exists. `--plain` and `--json` skip that check.
+Update that install with `ws --update` (same as `workspace-status --update`). That prints GitHub Release notes for versions newer than the installed binary, then runs `workspace-status-update`. The installer also places that sidecar next to the binaries. On a TTY, `ws` also checks GitHub Releases at most every 6 hours and asks `workspace-status <current> → <latest> available. Update? [y/N]` before the TUI if a newer release exists (blank Enter is no). `--plain` and `--json` skip that check; `WS_STATUS_UPDATE_CHECK=0` turns it off.
 
 Windows:
 
@@ -80,6 +104,14 @@ Requires rustc 1.85 or later. This repository is a Cargo workspace. Name the pac
 From a local clone:
 
     cargo install --path crates/workspace-status --locked
+
+### Dev build (side by side)
+
+Install this checkout next to the released `ws` without touching it:
+
+    ./scripts/install-dev.sh
+
+That builds into `target/dev-install` and installs `ws-dev`, `workspace-status-dev`, and `workspace-status-update-dev` into `~/.local/bin` (`WS_DEV_BIN_DIR` overrides). `ws-dev --version` shows the git sha. `ws-dev --update` rebuilds and reinstalls this checkout: the update shim points at it, so moving or deleting the checkout breaks `ws-dev --update` (run the script again from the new place). Dev builds skip the release update prompt. `./scripts/install-dev.sh --uninstall` removes only the `-dev` names.
 
 ## Agents
 
@@ -112,7 +144,7 @@ Set WS_STATUS_GLYPHS=ascii for plain markers.
 - `ignoredRepos` — skip those repos from discovery, status checks, fetch, pull, and default-branch switching
 - `maxDepth` — how many path segments below cwd to search for git repos (default **3**, so `group/app/module` is included)
 - `defaultBranches` — optional map of workspace-relative repo path → sole default branch. When set, that branch is used for classification, markers, ordering, and `--default-branch` / TUI `d`. When omitted for a repo, behaviour matches today (classification: `main`/`master`/`develop`; switch target from git).
-- `editor` — optional command for TUI `e` (same shape as `$EDITOR`). Omit the key or set `"editor": "vim"` for vim (the default). `"editor": "cursor"` opens Cursor IDE. Overrides `$EDITOR` / `$VISUAL`.
+- `editor` — optional command for TUI `e` (same shape as `$EDITOR`). Omit the key or set `"editor": "vim"` for vim (the default). `"editor": "cursor"` opens Cursor IDE. Order: config `editor`, `$VISUAL`, `$EDITOR`, then vim (git's order).
 - `diffTool` — optional command for TUI `E` (default vimdiff). `"diffTool": "cursor --diff --wait"` opens Cursor and keeps HEAD temps until the CLI exits. No `$EDITOR` fallback.
 
 Pass `-a` or `--all` to include repos listed in `ignoredRepos` for that run (`maxDepth` is unchanged). In the TUI, `.` shows or hides those repos at runtime (starts shown with `-a`, hidden without it). Hidden ignored repos stay out of workspace operations unless you show them.

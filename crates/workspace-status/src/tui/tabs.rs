@@ -16,6 +16,9 @@ pub const HEAD_HAS_NO_COMMIT: &str = "HEAD has no commit";
 pub const DEFAULT_BRANCH_NOT_FOUND: &str = "Default branch not found";
 /// Palette copy when Close is run on the Workspace tab.
 pub const WORKSPACE_TAB_CANNOT_CLOSE: &str = "Workspace tab cannot be closed";
+
+/// `gt` / `gT` and the Next / Previous tab palette rows with no compare tab.
+pub const ONLY_WORKSPACE_TAB_OPEN: &str = "only the Workspace tab is open";
 /// Mutation disable copy on a compare tab.
 pub const SWITCH_TO_WORKSPACE_TAB: &str = "Switch to Workspace tab";
 /// Stage disable copy on a compare tab (whole file or highlighted lines).
@@ -38,6 +41,19 @@ pub fn compare_file_dirty(path: &str) -> String {
 pub const NO_COMMITTED_CHANGES: &str = "No committed changes";
 /// Empty compare picker.
 pub const NO_BRANCHES_TO_COMPARE: &str = "No branches to compare";
+
+/// Compare picker copy when no row shows: no branches at all, or none
+/// that match the typed filter (`no branch matches <q>`).
+pub fn compare_picker_empty(picker: &super::branches::BranchPickerState) -> String {
+    if picker.branches.is_empty() {
+        NO_BRANCHES_TO_COMPARE.to_string()
+    } else {
+        format!("no branch matches {}", picker.filter)
+    }
+}
+
+/// Status after Esc closes the compare picker.
+pub const COMPARE_CANCELLED: &str = "compare cancelled";
 
 /// Right-pane empty copy for equal or behind tips.
 pub fn no_committed_changes_vs(base_ref: &str) -> String {

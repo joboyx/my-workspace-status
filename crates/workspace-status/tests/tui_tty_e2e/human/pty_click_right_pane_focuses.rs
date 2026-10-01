@@ -39,12 +39,11 @@ fn click_focuses_readme_diff(screen: &str) -> bool {
         && screen.contains("+dirty")
         && screen.contains("@@ -1 +1,2 @@")
         && screen.contains("app/README.md  inline (too narrow)")
-        && crumb.trim() == "[workspace]"
-        && !crumb.contains('›')
+        && crumb.trim() == "workspace › [app]"
         && !crumb.contains("[merger]")
-        && status.contains("drill")
+        && !status.contains("drill")
         && status.contains("Esc")
-        && status.contains("back")
+        && status.contains("← tree")
         && status.contains(" tree")
         && status.contains(" split")
         && !status.contains("focus right")
@@ -64,7 +63,7 @@ fn click_focuses_readme_diff(screen: &str) -> bool {
 /// same focus move. Chevron click and tree-row click are separate.
 ///
 /// Live PTY after first paint: SGR press+release on the UNSTAGED body
-/// brackets `[workspace]`, and swaps `focus right` for `drill` / Esc back.
+/// brackets `[app]`, and swaps `focus right` for `Esc ← tree` (no drill).
 /// `j` does not move the tree cursor. Esc unfocuses.
 /// A no-op, tree-row select, chevron fold, files drill, or paint-only
 /// flicker cannot pass.

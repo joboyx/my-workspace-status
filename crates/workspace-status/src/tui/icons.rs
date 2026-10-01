@@ -107,6 +107,17 @@ pub fn icon_merged_into_default(ascii: bool) -> &'static str {
 pub fn icon_open_vs_default(ascii: bool) -> &'static str {
     glyph(ascii, "", "o")
 }
+/// `ICON_STATUS_FAILED` nerd glyph: nf-fa-warning (`U+F071`).
+pub const ICON_STATUS_FAILED_NERD: &str = "\u{f071}";
+/// `ICON_STATUS_FAILED` ASCII fallback.
+pub const ICON_STATUS_FAILED_ASCII: &str = "!";
+
+/// Repo row whose `git status` failed. Nerd: nf-fa-warning; ASCII: `!`.
+/// Paints in place of the sync mark, which would otherwise read as no upstream.
+pub fn icon_status_failed(ascii: bool) -> &'static str {
+    glyph(ascii, ICON_STATUS_FAILED_NERD, ICON_STATUS_FAILED_ASCII)
+}
+
 /// `ICON_VIEWED` nerd glyph: nf-fa-eye (`U+F06E`).
 ///
 /// Do not substitute `◉` or another PUA eye.
@@ -565,6 +576,7 @@ mod tests {
             icon_diverged(true),
             icon_no_upstream(true),
             icon_synced(true),
+            icon_status_failed(true),
             icon_merged_into_default(true),
             icon_open_vs_default(true),
             icon_viewed(true),
@@ -587,6 +599,7 @@ mod tests {
             icon_diverged(false),
             icon_no_upstream(false),
             icon_synced(false),
+            icon_status_failed(false),
             icon_merged_into_default(false),
             icon_open_vs_default(false),
             icon_viewed(false),

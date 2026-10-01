@@ -35,7 +35,7 @@ fn overlay_closed(screen: &str) -> bool {
 fn export_overlay(screen: &str) -> bool {
     screen.contains("# Comments")
         && screen.contains("copied to clipboard")
-        && screen.contains("copied · Esc close")
+        && screen.contains("Esc close")
         && !screen.contains("MOVE")
 }
 
@@ -43,20 +43,20 @@ fn right_diff_focused(screen: &str) -> bool {
     tree_has(screen, "README.md")
         && !tree_cursor_on(screen, "README.md")
         && pane_unstaged_readme(screen)
-        && screen.contains("[workspace]")
+        && screen.contains("workspace › [app]")
         && !comment_overlay(screen)
 }
 
 fn overlay_resolved(screen: &str) -> bool {
     comment_overlay(screen)
         && screen.contains("Comment · resolved")
-        && screen.contains("Ctrl-R unresolve")
-        && !screen.contains("Ctrl-R resolve ·")
+        && screen.contains("Ctrl-r unresolve")
+        && !screen.contains("Ctrl-r resolve ·")
 }
 
 fn overlay_open(screen: &str) -> bool {
     comment_overlay(screen)
-        && screen.contains("Ctrl-R resolve")
+        && screen.contains("Ctrl-r resolve")
         && !screen.contains("Comment · resolved")
 }
 

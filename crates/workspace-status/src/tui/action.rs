@@ -68,6 +68,17 @@ pub enum Action {
         row: u16,
     },
     Release,
+    /// Right mouse button press: one step back, the same as Esc.
+    ///
+    /// Only Normal mode and visual-line highlight map it. A pending `z` /
+    /// `g` chord maps it like Esc (no step back). Overlays drop it. Ignored
+    /// while mouse capture is off.
+    BackClick,
+    /// Move the tree / right split by this many 5% steps (`<` / `>`).
+    ///
+    /// Negative narrows the tree. Session-only, like a divider drag, and
+    /// clamped the same way.
+    ResizeTree(i32),
     ToggleDiffMode,
     /// Toggle soft word-wrap on file diffs (`\`).
     ///
@@ -110,6 +121,8 @@ pub enum Action {
     ConfirmYes,
     ConfirmYesClean,
     ConfirmNo,
+    /// Enter on a confirm box. It does not confirm; the status names the key that does.
+    ConfirmEnter,
     Edit,
     /// Open the focused file in the configured external diff tool (`E`).
     ExternalDiff,
@@ -127,7 +140,6 @@ pub enum Action {
     BranchBackspace,
     BranchSubmit,
     BranchCancel,
-    CreateBranchStart,
     CreateBranchChar(char),
     CreateBranchBackspace,
     CreateBranchSubmit,
@@ -138,6 +150,8 @@ pub enum Action {
     DiffVisualStart,
     /// Leave visual-line highlight without commenting (Esc).
     DiffVisualCancel,
+    /// A key with no meaning during visual-line highlight. Says Esc exits.
+    DiffVisualUnmapped,
     /// Feed one key to the comment textarea (`tui-textarea` map).
     ///
     /// Shift+Enter is a newline. Unmodified Enter is [`Self::CommentSubmit`].
@@ -178,8 +192,9 @@ pub enum Action {
     /// Open or close the command palette (`Ctrl-k` or `:`).
     ///
     /// Stores [`PaletteOpenedBy`] on open so the prompt prefix matches the
-    /// key that opened it. A second open key while the palette is up closes
-    /// it with no run.
+    /// key that opened it. The keymap sends it only while the palette is
+    /// closed (inside it Ctrl-k moves and `:` types); a dispatch while it is
+    /// up closes it with no run.
     ToggleCommandPalette(PaletteOpenedBy),
     /// Move the command-palette highlight (`j` / `k` / arrows).
     CommandPaletteMove(i32),

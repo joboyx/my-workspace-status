@@ -13,10 +13,12 @@
 //! [`crate::snapshot::RepoSnapshot`] as it arrives. Applying a result must
 //! not call `git log` / `git diff` on the loop thread.
 //!
-//! While exclusive writes are in flight, nav / pane switch / cancel / quit
-//! still dispatch (`BusyAction::Handle`). Only actions that would start
-//! another exclusive git write are drained (`Ignore`). Fetch / pull / push
-//! / FetchTick stay Handle so they enqueue on the per-gitdir remote queue.
+//! While exclusive writes are in flight, nav / pane switch / cancel / Ctrl-C
+//! still dispatch (`BusyAction::Handle`); `q` arms the press-again prompt
+//! (`BusyAction::Quit`). Only actions that would start another exclusive git
+//! write are drained (`Ignore`), with a `busy: <op> running` status. Fetch /
+//! pull / push / FetchTick stay Handle so they enqueue on the per-gitdir
+//! remote queue.
 //!
 //! Held nav (`h`/`j`/`k`/`l`) maps Repeat to the same move as Press. The
 //! input thread drops queued copies of that key after each move so a hold
@@ -30,13 +32,14 @@ use super::keys::InputMode;
 /// What to do with an event while a git subprocess owns a worker thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BusyAction {
-    /// Drain the event. Used for actions that would start another git write.
+    /// Drain the event and say `busy: <op> running`. Used for actions that
+    /// would start another git write.
     Ignore,
     /// Dispatch and apply (nav, pane switch, cancel, overlay typing, …).
     Handle,
     /// Relayout while the worker continues.
     Resize { cols: u16, rows: u16 },
-    /// Finish the current worker, then leave the TUI.
+    /// `q`: arm the press-again prompt; a second `q` or Ctrl-C leaves.
     Quit,
 }
 

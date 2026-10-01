@@ -41,9 +41,7 @@ fn csi_u_enter(tui: &mut PtySession) {
 }
 
 fn help_lists_gg_g_top_bottom(screen: &str) -> bool {
-    screen.contains("MOVE")
-        && screen.contains("gg   G")
-        && screen.contains("top / bottom of focused")
+    screen.contains("MOVE") && screen.contains("gg   G") && screen.contains("top / bottom of")
 }
 
 fn right_cursor_is_first_body_row(screen: &str) -> bool {

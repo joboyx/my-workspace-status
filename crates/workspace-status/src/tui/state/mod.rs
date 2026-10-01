@@ -6,6 +6,7 @@ mod dispatch_keymap;
 mod dispatch_write;
 mod pan;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -14,9 +15,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 use workspace_status_graph::{
-    format_commit_message, format_relative_date, graph_chrome_budget_for, paint_model,
-    selection_footer_parts, wrap_commit_message, GraphChromeBudget, GraphFooterSelection,
-    GraphModel, GraphRow, PaintedLine, ASCII, COMMIT_MSG_EXPAND_MAX_LINES, UNICODE,
+    format_commit_message, format_relative_date, graph_chrome_budget_for, graph_vscroll_visible,
+    paint_model, selection_footer_parts, wrap_commit_message, GraphChromeBudget,
+    GraphFooterSelection, GraphModel, GraphRow, PaintedLine, ASCII, COMMIT_MSG_EXPAND_MAX_LINES,
+    UNICODE,
 };
 
 use crate::snapshot::{
@@ -27,10 +29,10 @@ use crate::snapshot::{
 use super::action::Action;
 use super::action::{Effect, ExternalDiffKind};
 use super::branches::{
-    can_open_branch_picker, checkoutable_branch_names, is_valid_branch_name, merge_rev_for_commit,
+    branch_name_error, can_open_branch_picker, checkoutable_branch_names, merge_rev_for_commit,
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
 };
-use super::chrome::{STATUS_COPIED, STATUS_NOTHING_TO_PULL};
+use super::chrome::{diverged_pull_status, status_uses_status_text, STATUS_NO_COMMENTS};
 use super::command_palette::CommandPaletteState;
 #[cfg(not(test))]
 use super::comments::comment_store_path;
@@ -45,7 +47,9 @@ use super::commit_files::{
     ancestor_dir_ids, collect_foldable_subtree_ids as collect_commit_subtree_ids,
     commit_file_cursor_index, flatten_commit_files, CommitFileRow,
 };
-use super::ctrl_c_exit::{handle_ctrl_c, is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT};
+use super::ctrl_c_exit::{
+    handle_ctrl_c, is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT, QUIT_WHILE_BUSY_PROMPT,
+};
 use super::diff::{
     anchor_row_text, build_diff_rows, build_partial_patch, diff_pane_header_rows,
     diff_row_content_width, diff_wrap_row_heights, find_anchor_row, gutter_width, row_search_text,
@@ -55,29 +59,34 @@ use super::drill::{
     source_from_graph_row, stash_ref_from_graph_row, CommitFile, CommitFileSource, DrillView,
 };
 use super::fetch::background_fetch_targets;
-use super::gates::ListFocusTarget;
+use super::gates::{
+    ListFocusTarget, FOCUS_A_FILE_TO_MARK_REVIEWED, REVIEWED_MARKS_ARE_FOR_TREE_FILES,
+};
 use super::graph_focus::GraphFocusPickerState;
 use super::icons::comment_mark_cols;
 use super::keys::{expire_stale_g_chord_echo, GChordEchoState, InputMode, DOUBLE_TAP_MS};
 use super::ops::{
-    collect_write_files, format_running_op, op_is_kind_noop, op_targets, push_targets,
-    refresh_target, Op, RevertScope, RunningOp, ScopedFile,
+    collect_write_files, format_running_op, op_is_kind_noop, op_kind_noop_reason, op_targets,
+    push_targets, refresh_target, Op, RevertScope, RunningOp, ScopedFile,
 };
 use super::search::{
-    focus_commit_file_search, focus_diff_search, focus_graph_search, focus_tree_search, SearchPane,
+    collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids,
+    focus_commit_file_search, focus_diff_search, focus_graph_search, focus_tree_search,
+    match_diff_line_indices, SearchPane,
 };
 use super::selection::TextSelection;
 use super::split::{
-    clamp_tree_fraction, diff_col_from_col, diff_col_from_delta, diff_split_fraction_from_col,
-    effective_diff_mode, graph_col_from_col, graph_col_from_delta, graph_scroll_from_delta,
-    graph_scroll_from_row, hit_split, is_side_by_side_split, tree_fraction_from_col, DiffMode,
-    SplitDrag, SplitHit, SplitLayout, DIFF_SPLIT_FRACTION, TREE_WIDTH_FRACTION,
+    clamp_tree_fraction, diff_col_from_col, diff_col_from_delta, diff_paint_width, diff_pane_mode,
+    diff_split_fraction_from_col, graph_col_from_col, graph_col_from_delta,
+    graph_scroll_from_delta, graph_scroll_from_row, hit_split, pane_widths, step_tree_fraction,
+    tree_fraction_from_col, DiffMode, SplitDrag, SplitHit, SplitLayout, DIFF_SPLIT_FRACTION,
+    NARROW_SXS, TREE_WIDTH_FRACTION,
 };
 use super::stash::{
     checkout_path, resolve_stash_menu_key, row_is_hidden_ignored, stash_dirty_for_row,
-    stash_menu_status, stash_ops_for_context, StashMenuKeyResult, StashOp, StashOpId,
-    StashOpsContext,
+    stash_ops_for_context, StashMenuKeyResult, StashOp, StashOpId, StashOpsContext,
 };
+use super::status::StatusMessage;
 use super::tabs::{
     compare_file_dirty, OpenCompare, TabStrip, COMPARE_FOCUS_A_FILE, COMPARE_HEAD_MOVED,
     COMPARE_STILL_LOADING, DEFAULT_BRANCH_NOT_FOUND, FOCUS_A_CHECKOUT, HEAD_HAS_NO_COMMIT,
@@ -104,8 +113,20 @@ use super::watch::{
 };
 use crate::git::FULL_DIFF_CONTEXT_LINES;
 
-/// Space / palette copy when the focus is not a file row.
-const FOCUS_A_FILE_TO_MARK_REVIEWED: &str = "focus a file to mark reviewed";
+/// Status for a key drained while a git write runs and the job has no name.
+pub(crate) const BUSY_WRITE_RUNNING: &str = "busy: a git write is running";
+
+/// `n` / `N` with no armed search.
+pub(crate) const NO_SEARCH_ARMED: &str = "no search — press / first";
+
+/// `n` / `N` stepped past the last (or first) match and started over.
+pub(crate) const SEARCH_WRAPPED: &str = "search wrapped";
+
+/// `z` where nothing folds (graph list, file diff).
+pub(crate) const Z_FOLDS_TREE_ROWS: &str = "z folds tree rows";
+
+/// Unmapped key during `V` highlight.
+pub(crate) const ESC_EXITS_HIGHLIGHT: &str = "Esc exits highlight";
 
 /// Which pane has keyboard focus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,6 +270,21 @@ fn hit_tab_box(hits: &[(u16, u16, usize)], tab_y: u16, col: u16, row: u16) -> Op
         .map(|(_, _, index)| *index)
 }
 
+/// Cursor, scroll, and folds saved when `/` opens. Esc while typing
+/// restores the bound pane from it, so an incremental search that moved
+/// the cursor leaves no trace.
+#[derive(Clone, Debug)]
+struct SearchOrigin {
+    tree_row: Option<String>,
+    folds: HashSet<String>,
+    graph_cursor: usize,
+    graph_scroll: u16,
+    commit_file_cursor: usize,
+    commit_file_folds: HashSet<String>,
+    diff_cursor: usize,
+    diff_scroll: u16,
+}
+
 /// Workspace chrome parked while a compare tab is active.
 #[derive(Clone, Debug)]
 struct WorkspacePark {
@@ -292,6 +328,8 @@ pub enum PendingConfirm {
         repo: String,
         branch: String,
         remote_ref: String,
+        /// Commits only on the local branch, then only on `remote_ref`, when git could count them.
+        ahead_behind: Option<(usize, usize)>,
     },
     RemoveWorktree {
         primary: String,
@@ -299,6 +337,12 @@ pub enum PendingConfirm {
         force: bool,
         branch: String,
         merged_into_default: Option<bool>,
+        /// Changed files in the worktree (snapshot count) that `--force` deletes.
+        changed: usize,
+    },
+    /// `d` on a scope that resolves to more than one repo off its default branch.
+    SwitchToDefault {
+        repos: Vec<String>,
     },
     MergeIntoHead {
         repo: String,
@@ -322,6 +366,19 @@ pub enum PendingConfirm {
 }
 
 impl PendingConfirm {
+    /// The key that accepts this confirm: `Y` when only `Y` is offered
+    /// (several untracked files), otherwise `y`.
+    pub fn accept_key(&self) -> char {
+        match self {
+            Self::Revert { targets, .. }
+                if revert_scope(targets).key_deletes_untracked(false).is_none() =>
+            {
+                'Y'
+            }
+            _ => 'y',
+        }
+    }
+
     /// True for the confirms a compare tab opens (and may accept).
     pub fn is_compare_owned(&self) -> bool {
         matches!(
@@ -395,6 +452,14 @@ enum DiffViewId {
     },
 }
 
+/// Cached [`AppState::diff_search_hits`] result.
+#[derive(Clone, Debug)]
+struct DiffSearchMemo {
+    /// Content fingerprint, painted layout, case-folded query.
+    key: (u64, DiffMode, String),
+    hits: Vec<usize>,
+}
+
 /// Interactive session state. Dispatch is pure besides the returned [`Effect`].
 #[derive(Clone, Debug)]
 pub struct AppState {
@@ -414,7 +479,8 @@ pub struct AppState {
     pub help_open: bool,
     pub help_search_query: Option<String>,
     pub focus: FocusPane,
-    pub status: String,
+    /// Breadcrumb trailing slot / overlay status row ([`StatusMessage`]).
+    pub status: StatusMessage,
     pub graph: Option<GraphModel>,
     pub graph_identity: Option<(String, String)>,
     pub graph_scroll: u16,
@@ -455,6 +521,8 @@ pub struct AppState {
     pub search_target: SearchPane,
     /// Current matching diff line, when the bound pane is a diff.
     pub search_hit: Option<usize>,
+    /// Where the bound pane stood when `/` opened. Cleared on Enter / Esc.
+    search_origin: Option<SearchOrigin>,
     pub diff_col_offset: u16,
     /// Horizontal pan of the left list (workspace tree or drill graph/files).
     pub left_col_offset: u16,
@@ -503,6 +571,10 @@ pub struct AppState {
     pub text_selection: Option<TextSelection>,
     /// Last painted frame before the selection highlight. Release copies from it.
     pub(crate) painted_frame: Buffer,
+    /// Last frame was below [`super::split::MIN_TERM_COLS`] ×
+    /// [`super::split::MIN_TERM_ROWS`] and painted only the resize notice.
+    /// Mouse events are dropped then, since no pane was painted to hit.
+    pub(crate) too_small: bool,
     pub theme: ThemeId,
     pub mouse_enabled: bool,
     /// Last pointer cell `(col, row)` from any-event motion. `None` when
@@ -515,6 +587,13 @@ pub struct AppState {
     pub(crate) g_chord_echo: GChordEchoState,
     pub(crate) ctrl_c_armed_until: Option<Instant>,
     last_click: Option<(u16, u16, Instant)>,
+    /// Diff search hits for one (content, layout, query), so the status
+    /// pill and the diff paint do not rebuild every diff row each frame.
+    diff_search_memo: RefCell<Option<DiffSearchMemo>>,
+    /// [`Self::current_diff_rows`] calls, so tests can bound the row
+    /// builds a frame or keypress costs on a large diff.
+    #[cfg(test)]
+    pub(crate) diff_row_builds: std::cell::Cell<usize>,
 }
 
 fn unix_now() -> i64 {
@@ -562,7 +641,7 @@ impl AppState {
             help_open: false,
             help_search_query: None,
             focus: FocusPane::Left,
-            status: String::new(),
+            status: StatusMessage::default(),
             graph: None,
             graph_identity: None,
             graph_scroll: 0,
@@ -592,6 +671,7 @@ impl AppState {
             search_query: String::new(),
             search_target: SearchPane::Tree,
             search_hit: None,
+            search_origin: None,
             diff_col_offset: 0,
             left_col_offset: 0,
             right_col_offset: 0,
@@ -625,6 +705,7 @@ impl AppState {
             drag: SplitDrag::None,
             text_selection: None,
             painted_frame: Buffer::default(),
+            too_small: false,
             theme: theme_from_env(),
             mouse_enabled: true,
             pointer: None,
@@ -633,6 +714,9 @@ impl AppState {
             g_chord_echo: GChordEchoState::default(),
             ctrl_c_armed_until: None,
             last_click: None,
+            diff_search_memo: RefCell::new(None),
+            #[cfg(test)]
+            diff_row_builds: std::cell::Cell::new(0),
         };
         state.reconcile_viewed_store();
         state.reconcile_comment_store();
@@ -747,9 +831,17 @@ impl AppState {
         }
     }
 
-    /// True when unshifted `h` / `l` fold the workspace tree.
+    /// True when unshifted `h` / `l` fold the focused row: the workspace
+    /// tree, or a folder row of a focused commit-file list. File rows and
+    /// other panes pan.
     pub(crate) fn hl_folds(&self) -> bool {
-        self.list_focus_target() == ListFocusTarget::Tree
+        match self.list_focus_target() {
+            ListFocusTarget::Tree => true,
+            ListFocusTarget::CommitFiles => self
+                .focused_commit_file_row()
+                .is_some_and(|row| row.foldable),
+            _ => false,
+        }
     }
 
     /// Which list (or diff) the focused pane is driving.
@@ -1506,7 +1598,7 @@ impl AppState {
             return Effect::Quit;
         }
         if result.prompt {
-            self.status = CTRL_C_EXIT_PROMPT.into();
+            self.status = StatusMessage::warn(CTRL_C_EXIT_PROMPT);
         }
         Effect::None
     }
@@ -1532,6 +1624,55 @@ impl AppState {
     pub fn ctrl_c_remaining_ms(&self, now: Instant) -> Option<u64> {
         let until = self.ctrl_c_armed_until?;
         Some(until.saturating_duration_since(now).as_millis() as u64)
+    }
+
+    /// `q` while an exclusive write or default-branch switch runs.
+    ///
+    /// Same chord as Ctrl-C: the first press arms the window and shows
+    /// [`QUIT_WHILE_BUSY_PROMPT`]; a second `q` or Ctrl-C inside it quits.
+    pub fn quit_while_busy(&mut self, now: Instant) -> Effect {
+        let result = handle_ctrl_c(self.ctrl_c_armed_until, now);
+        self.ctrl_c_armed_until = result.armed_until;
+        if result.quit {
+            return Effect::Quit;
+        }
+        self.status = StatusMessage::warn(QUIT_WHILE_BUSY_PROMPT);
+        Effect::None
+    }
+
+    /// Put `busy: <op> running` on the status slot for a key that a running
+    /// git write drained. `op` is `None` when the running job has no name.
+    pub fn note_busy_drop(&mut self, op: Option<&str>) {
+        let text = match op {
+            Some(op) => format!("busy: {op} running"),
+            None => BUSY_WRITE_RUNNING.to_string(),
+        };
+        self.status = StatusMessage::warn(text);
+    }
+
+    /// Milliseconds until an info / ok status clears. Starts its clock the
+    /// first time it is visible. `None` while an overlay paints `status`
+    /// as its own text, or when the message does not expire. While `?`
+    /// help hides the breadcrumb the clock restarts, so the message gets
+    /// its full time once help closes.
+    pub fn status_expiry_ms(&mut self, now: Instant) -> Option<u64> {
+        if self.help_open {
+            self.status.restart_clock();
+            return None;
+        }
+        if status_uses_status_text(self) {
+            return None;
+        }
+        self.status.expiry_ms(now)
+    }
+
+    /// Clear an expired info / ok status. True when the slot changed.
+    /// Never while `?` help is open.
+    pub fn expire_status(&mut self, now: Instant) -> bool {
+        if self.help_open || status_uses_status_text(self) {
+            return false;
+        }
+        self.status.expire(now)
     }
 
     fn prune_flash_state(&mut self, now: Instant) {
@@ -1655,7 +1796,7 @@ impl AppState {
 
     fn cycle_theme(&mut self) -> Effect {
         self.theme = cycle_theme_id(self.theme);
-        self.status = format!("theme: {}", self.theme.label());
+        self.status = format!("theme: {}", self.theme.label()).into();
         Effect::None
     }
 
@@ -1664,32 +1805,44 @@ impl AppState {
             .focused_row()
             .is_some_and(|row| op_is_kind_noop(row.kind, op))
         {
+            self.status = StatusMessage::warn(op_kind_noop_reason(op));
             return Effect::None;
         }
         let targets = op_targets(&self.snapshot, self.focused_row(), self.show_ignored, op);
         if targets.is_empty() {
-            self.status = "no visible repos for that op".into();
+            self.status = StatusMessage::warn("no visible repos for that op");
             return Effect::None;
         }
         match op {
             Op::Fetch => {
-                self.status = format_running_op(RunningOp::Fetch, 0, targets.len());
+                self.status =
+                    StatusMessage::progress(format_running_op(RunningOp::Fetch, 0, targets.len()));
                 Effect::Fetch { repos: targets }
             }
             Op::Pull => {
-                let behind: Vec<String> = targets
-                    .into_iter()
-                    .filter(|repo| {
-                        self.snapshot.repos.iter().any(|r| {
-                            r.repo == *repo && r.sync_status == crate::snapshot::SyncStatus::Behind
+                let with_sync = |sync: crate::snapshot::SyncStatus| -> Vec<String> {
+                    targets
+                        .iter()
+                        .filter(|repo| {
+                            self.snapshot
+                                .repos
+                                .iter()
+                                .any(|r| r.repo == **repo && r.sync_status == sync)
                         })
-                    })
-                    .collect();
+                        .cloned()
+                        .collect()
+                };
+                let behind = with_sync(crate::snapshot::SyncStatus::Behind);
+                let diverged = with_sync(crate::snapshot::SyncStatus::Diverged);
                 if behind.is_empty() {
-                    self.status = STATUS_NOTHING_TO_PULL.into();
+                    self.status = StatusMessage::warn(diverged_pull_status(&diverged));
                     Effect::None
                 } else {
-                    self.status = format_running_op(RunningOp::Pull, 0, behind.len());
+                    self.status = StatusMessage::progress(format_running_op(
+                        RunningOp::Pull,
+                        0,
+                        behind.len(),
+                    ));
                     Effect::Pull { repos: behind }
                 }
             }
@@ -1707,10 +1860,19 @@ impl AppState {
                     })
                     .collect::<Vec<_>>();
                 if repos.is_empty() {
-                    self.status = "no non-default branches to switch".into();
+                    self.status = StatusMessage::warn("no non-default branches to switch");
+                    Effect::None
+                } else if repos.len() > 1 {
+                    // A workspace-wide switch asks first; one repo runs now.
+                    self.cancel_mouse_drag();
+                    self.confirm = Some(PendingConfirm::SwitchToDefault { repos });
                     Effect::None
                 } else {
-                    self.status = format_running_op(RunningOp::DefaultBranch, 0, repos.len());
+                    self.status = StatusMessage::progress(format_running_op(
+                        RunningOp::DefaultBranch,
+                        0,
+                        repos.len(),
+                    ));
                     Effect::DefaultBranch { repos }
                 }
             }
@@ -1868,7 +2030,7 @@ impl AppState {
     }
 
     fn diff_body_height(&self) -> usize {
-        let h_bar = u16::from(self.diff_col_offset > 0);
+        let h_bar = u16::from(self.diff_hscroll_shown());
         self.layout
             .diff_pane_height
             .saturating_sub(self.diff_header_rows() + h_bar)
@@ -2098,13 +2260,16 @@ impl AppState {
     }
 
     fn diff_wrap_heights(&self) -> Vec<usize> {
-        let rows = self.current_diff_rows();
-        let v_cols = u16::from(self.diff_scroll > 0);
-        let pane_w = self.layout.diff_pane_width.saturating_sub(v_cols).max(1);
+        self.diff_wrap_heights_for(&self.current_diff_rows())
+    }
+
+    /// [`Self::diff_wrap_heights`] over rows the caller already built.
+    fn diff_wrap_heights_for(&self, rows: &[DiffRow]) -> Vec<usize> {
+        let pane_w = diff_paint_width(self.layout.diff_pane_width);
         let content_w = diff_row_content_width(pane_w as usize) as u16;
-        let gutter = gutter_width(&rows).saturating_add(comment_mark_cols(self.ascii));
-        let split = is_side_by_side_split(self.diff_mode, pane_w);
-        diff_wrap_row_heights(&rows, content_w, gutter, split, self.diff_split_fraction)
+        let gutter = gutter_width(rows).saturating_add(comment_mark_cols(self.ascii));
+        let split = self.diff_layout() == DiffMode::SideBySide;
+        diff_wrap_row_heights(rows, content_w, gutter, split, self.diff_split_fraction)
     }
 
     fn diff_logical_index_at_visual(&self, visual_y: usize) -> Option<usize> {
@@ -2297,11 +2462,33 @@ impl AppState {
             DiffMode::SideBySide => DiffMode::Inline,
             DiffMode::Inline => DiffMode::SideBySide,
         };
-        self.status = match self.diff_mode {
-            DiffMode::SideBySide => "Diff: split".into(),
-            DiffMode::Inline => "Diff: inline".into(),
-        };
+        self.status = self.diff_mode_status().into();
         self.drop_stale_diff_visual();
+        Effect::None
+    }
+
+    /// Status after `i`: the preferred mode, or what split needs when the
+    /// right pane is too narrow to paint it.
+    fn diff_mode_status(&self) -> String {
+        match (self.diff_mode, self.diff_layout()) {
+            (DiffMode::SideBySide, DiffMode::Inline) => format!(
+                "split needs a ≥{NARROW_SXS}-col diff pane (now {}) — widen it with < or drag",
+                diff_paint_width(self.layout.diff_pane_width)
+            ),
+            (DiffMode::SideBySide, DiffMode::SideBySide) => "Diff: split".into(),
+            (DiffMode::Inline, _) => "Diff: inline".into(),
+        }
+    }
+
+    /// Move the tree / right split by `steps` of 5% (`<` / `>`). Session-only, like a drag.
+    fn step_tree_width(&mut self, steps: i32) -> Effect {
+        let cols = self.layout.term_cols.max(1);
+        let before = pane_widths(cols, self.tree_fraction).tree_width;
+        self.tree_fraction = step_tree_fraction(cols, self.tree_fraction, steps);
+        if pane_widths(cols, self.tree_fraction).tree_width == before {
+            let edge = if steps < 0 { "narrowest" } else { "widest" };
+            self.status = StatusMessage::warn(format!("tree pane is at its {edge}"));
+        }
         Effect::None
     }
 
@@ -2516,6 +2703,9 @@ impl AppState {
         } else {
             None
         };
+        // `begin_commit_files` already set the source, so a first load is
+        // a new source or the pending `loading files…` list.
+        let first_load = !same_source || self.commit_files_loading;
         let previous_cursor = self.commit_files_cursor();
         let before = self.commit_file_signatures.clone();
         let old_rows = if same_source {
@@ -2528,7 +2718,9 @@ impl AppState {
             self.right_col_offset = 0;
         }
         self.commit_files_loading = false;
-        self.status = format!("files {}", files.len());
+        if first_load {
+            self.status.offer_info(source.files_status(files.len()));
+        }
         let cursor = DrillView::files_cursor(&files, 0);
         let retain_focus = !self.drill.is_graph();
         self.drill = DrillView::Files {
@@ -2588,7 +2780,6 @@ impl AppState {
         if entering {
             self.left_col_offset = 0;
         }
-        self.status = format!("diff {path}");
         self.drill = DrillView::Diff {
             repo,
             source,
@@ -2687,8 +2878,16 @@ impl AppState {
 
     /// Numbered rows for the current layout (inline vs split).
     pub fn current_diff_rows(&self) -> Vec<DiffRow> {
-        let mode = effective_diff_mode(self.diff_mode, self.layout.diff_pane_width);
-        build_diff_rows(self.current_diff_content(), mode)
+        #[cfg(test)]
+        self.diff_row_builds.set(self.diff_row_builds.get() + 1);
+        build_diff_rows(self.current_diff_content(), self.diff_layout())
+    }
+
+    /// Layout the file diff paints in: [`diff_pane_mode`] of the preferred
+    /// mode and the last painted right-pane width. Row build, header,
+    /// status pill, and paint all read this one decision.
+    pub fn diff_layout(&self) -> DiffMode {
+        diff_pane_mode(self.diff_mode, self.layout.diff_pane_width)
     }
 
     fn set_search_status(&mut self, hit: bool) {
@@ -2698,11 +2897,143 @@ impl AppState {
             // Armed query is a `/query` chip on the idle bar, not `n next N prev`.
             self.status.clear();
         } else {
-            self.status = "no match".into();
+            self.status = StatusMessage::warn("no match");
         }
     }
 
     fn apply_search(&mut self, dir: i32) -> Effect {
+        let before = if dir == 0 {
+            None
+        } else {
+            self.search_match_position().and_then(|(pos, _)| pos)
+        };
+        let effect = self.apply_search_step(dir);
+        let after = before.and_then(|_| self.search_match_position().and_then(|(pos, _)| pos));
+        if let (Some(before), Some(after)) = (before, after) {
+            if (dir > 0 && after <= before) || (dir < 0 && after >= before) {
+                self.status = StatusMessage::info(SEARCH_WRAPPED);
+            }
+        }
+        effect
+    }
+
+    /// Diff row indices whose search text contains `query` (case-folded),
+    /// cached by content fingerprint, layout, and query.
+    pub(crate) fn diff_search_hits(&self, query: &str) -> Vec<usize> {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let key = (
+            self.current_diff_content().syntax_fingerprint(),
+            self.diff_layout(),
+            query,
+        );
+        if let Some(memo) = self.diff_search_memo.borrow().as_ref() {
+            if memo.key == key {
+                return memo.hits.clone();
+            }
+        }
+        let texts: Vec<String> = self
+            .current_diff_rows()
+            .iter()
+            .map(row_search_text)
+            .collect();
+        let hits = match_diff_line_indices(&texts, &key.2);
+        *self.diff_search_memo.borrow_mut() = Some(DiffSearchMemo {
+            key,
+            hits: hits.clone(),
+        });
+        hits
+    }
+
+    /// 1-based match position of the bound pane's cursor (`None` when the
+    /// cursor is off a match) and the match count, for the `/q 3/7` pill.
+    ///
+    /// `None` with no query. Reads the same "current" each pane's `n` / `N`
+    /// steps from: tree row, graph cursor, commit file, diff search hit.
+    pub fn search_match_position(&self) -> Option<(Option<usize>, usize)> {
+        let query = self.search_query.trim();
+        if query.is_empty() {
+            return None;
+        }
+        let (current, hits): (Option<usize>, Vec<usize>) = match self.search_target {
+            SearchPane::Tree => {
+                let ids = collect_match_ids(&self.tree, query);
+                let current = self.focused_row().map(|row| row.id.as_str());
+                let pos = current.and_then(|id| ids.iter().position(|hit| hit == id));
+                return Some((pos.map(|p| p + 1), ids.len()));
+            }
+            SearchPane::Graph => {
+                let rows = self.graph.as_ref()?.visible_rows();
+                (
+                    Some(self.graph_cursor),
+                    collect_graph_match_indices(&rows, query),
+                )
+            }
+            SearchPane::CommitFiles => {
+                let files = self.commit_drill_files()?;
+                let current = self
+                    .focused_commit_file_row()
+                    .and_then(|row| files.iter().position(|file| file.path == row.path));
+                (current, collect_commit_file_match_indices(files, query))
+            }
+            SearchPane::Diff => (self.search_hit, self.diff_search_hits(query)),
+        };
+        let pos = current.and_then(|cur| hits.iter().position(|hit| *hit == cur));
+        Some((pos.map(|p| p + 1), hits.len()))
+    }
+
+    /// Save the bound pane's cursor, scroll, and folds as `/` opens.
+    fn save_search_origin(&mut self) {
+        self.search_origin = Some(SearchOrigin {
+            tree_row: self.focused_row().map(|row| row.id.clone()),
+            folds: self.folds.clone(),
+            graph_cursor: self.graph_cursor,
+            graph_scroll: self.graph_scroll,
+            commit_file_cursor: self.commit_files_cursor(),
+            commit_file_folds: self.commit_file_folds.clone(),
+            diff_cursor: self.diff_cursor,
+            diff_scroll: self.diff_scroll,
+        });
+    }
+
+    /// Put the bound pane back where `/` found it (Esc while typing).
+    pub(crate) fn restore_search_origin(&mut self) -> Effect {
+        let Some(origin) = self.search_origin.take() else {
+            return Effect::None;
+        };
+        match self.search_target {
+            SearchPane::Tree => {
+                self.folds = origin.folds;
+                self.rebuild_rows();
+                if let Some(idx) = origin
+                    .tree_row
+                    .and_then(|id| self.rows.iter().position(|row| row.id == id))
+                {
+                    self.cursor = idx;
+                }
+                Effect::LoadRightPane
+            }
+            SearchPane::Graph => {
+                self.graph_cursor = origin.graph_cursor;
+                self.graph_scroll = origin.graph_scroll;
+                self.follow_graph_files()
+            }
+            SearchPane::CommitFiles => {
+                self.commit_file_folds = origin.commit_file_folds;
+                self.set_commit_file_cursor(origin.commit_file_cursor);
+                self.maybe_load_focused_commit_diff()
+            }
+            SearchPane::Diff => {
+                self.diff_cursor = origin.diff_cursor;
+                self.diff_scroll = origin.diff_scroll;
+                Effect::None
+            }
+        }
+    }
+
+    fn apply_search_step(&mut self, dir: i32) -> Effect {
         match self.search_target {
             SearchPane::Tree => {
                 self.apply_tree_search(dir);
@@ -2955,13 +3286,13 @@ impl AppState {
         let (repo, path, patch) = match self.visual_patch(anchor, kind) {
             Ok(built) => built,
             Err(err) => {
-                self.status = err;
+                self.status = StatusMessage::warn(err);
                 return Effect::None;
             }
         };
         let reverse = matches!(write, FileWrite::Unstage);
-        let verb = if reverse { "unstaged" } else { "staged" };
-        self.status = format!("{verb} range {path}");
+        let verb = if reverse { "unstaging" } else { "staging" };
+        self.status = StatusMessage::progress(format!("{verb} range {path}…"));
         self.clear_diff_visual();
         Effect::ApplyCachedPatch {
             repo,
@@ -2993,10 +3324,9 @@ impl AppState {
             };
             (repo, path, kind)
         };
-        let mode = effective_diff_mode(self.diff_mode, self.layout.diff_pane_width);
         let patch = build_partial_patch(
             self.current_diff_content(),
-            mode,
+            self.diff_layout(),
             anchor,
             self.diff_cursor,
             kind,
@@ -3055,20 +3385,20 @@ impl AppState {
             .collect();
         if selected.is_empty() {
             let kind = self.focused_row().map(|row| row.kind);
-            self.status = empty_write_status(kind, write);
+            self.status = StatusMessage::warn(empty_write_status(kind, write));
             return Effect::None;
         }
         let groups = group_write_paths(&selected);
         let total: usize = groups.iter().map(|(_, paths)| paths.len()).sum();
         let verb = match write {
-            FileWrite::Stage => "stage",
-            FileWrite::Unstage => "unstage",
+            FileWrite::Stage => "staging",
+            FileWrite::Unstage => "unstaging",
         };
-        self.status = if total == 1 {
-            format!("{verb} {}", groups[0].1[0])
+        self.status = StatusMessage::progress(if total == 1 {
+            format!("{verb} {}…", groups[0].1[0])
         } else {
-            format!("{verb} {total} files")
-        };
+            format!("{verb} {total} files…")
+        });
         let effects: Vec<Effect> = groups
             .into_iter()
             .map(|(repo, paths)| match write {
@@ -3191,7 +3521,7 @@ impl AppState {
         let target = match self.compare_revert_target() {
             Ok(target) => target,
             Err(err) => {
-                self.status = err;
+                self.status = StatusMessage::warn(err);
                 return Effect::None;
             }
         };
@@ -3201,12 +3531,12 @@ impl AppState {
                     self.clear_diff_visual();
                     self.confirm = Some(PendingConfirm::CompareRevertRange { target, patch });
                 }
-                Err(err) => self.status = err,
+                Err(err) => self.status = StatusMessage::warn(err),
             }
             return Effect::None;
         }
         if let Some(err) = compare_file_revert_kind_refusal(&target.status) {
-            self.status = err;
+            self.status = StatusMessage::warn(err);
             return Effect::None;
         }
         self.confirm = Some(PendingConfirm::CompareRevertFile { target });
@@ -3231,8 +3561,8 @@ impl AppState {
                     && change.unstaged_status.is_none()
                     && !change.untracked
             });
-            self.status = if staged_only {
-                "nothing to discard (staged only)".into()
+            self.status = StatusMessage::warn(if staged_only {
+                "nothing to discard (staged only)"
             } else if matches!(
                 self.focused_row().map(|row| row.kind),
                 Some(
@@ -3243,10 +3573,10 @@ impl AppState {
                         | NodeKind::Section
                 )
             ) {
-                "nothing to discard".into()
+                "nothing to discard"
             } else {
-                "focus a file, dir, checkout, or repo to revert".into()
-            };
+                "focus a file, dir, checkout, or repo to revert"
+            });
             return Effect::None;
         }
         let targets: Vec<RevertTarget> = selected
@@ -3282,7 +3612,7 @@ impl AppState {
                 self.clear_diff_visual();
                 self.confirm = Some(PendingConfirm::RevertRange { repo, path, patch });
             }
-            Err(err) => self.status = err,
+            Err(err) => self.status = StatusMessage::warn(err),
         }
         Effect::None
     }
@@ -3303,17 +3633,17 @@ impl AppState {
                 let tracked_n: usize = groups.iter().map(|(_, tracked, _)| tracked.len()).sum();
                 let untracked_n: usize =
                     groups.iter().map(|(_, _, untracked)| untracked.len()).sum();
-                self.status = if tracked_n + untracked_n == 1 {
+                self.status = StatusMessage::progress(if tracked_n + untracked_n == 1 {
                     if untracked_n == 1 {
-                        format!("delete {}", groups[0].2[0])
+                        format!("deleting {}…", groups[0].2[0])
                     } else {
-                        format!("revert {}", groups[0].1[0])
+                        format!("reverting {}…", groups[0].1[0])
                     }
                 } else if tracked_n == 0 {
-                    format!("delete {untracked_n} untracked")
+                    format!("deleting {untracked_n} untracked…")
                 } else {
-                    format!("revert {tracked_n} tracked, {untracked_n} untracked")
-                };
+                    format!("reverting {tracked_n} tracked, {untracked_n} untracked…")
+                });
                 let effects: Vec<Effect> = groups
                     .into_iter()
                     .map(|(repo, tracked, untracked)| Effect::Revert {
@@ -3330,19 +3660,22 @@ impl AppState {
                 Effect::None
             }
             Some(PendingConfirm::RevertRange { repo, path, patch }) => {
-                self.status = format!("revert range {path}");
+                self.status = StatusMessage::progress(format!("reverting range {path}…"));
                 Effect::RevertPatch { repo, path, patch }
             }
             Some(PendingConfirm::StashDrop { repo, stash_ref }) => {
-                self.status = format!("drop {stash_ref}");
+                self.status = StatusMessage::progress(format!("dropping {stash_ref}…"));
                 Effect::StashDrop { repo, stash_ref }
             }
             Some(PendingConfirm::CheckoutOutOfSync {
                 repo,
                 branch,
                 remote_ref,
+                ..
             }) => {
-                self.status = format!("checkout {branch} then fast-forward {remote_ref}");
+                self.status = StatusMessage::progress(format!(
+                    "checking out {branch}, then fast-forwarding to {remote_ref}…"
+                ));
                 Effect::CheckoutBranch {
                     repo,
                     selected_name: branch,
@@ -3355,7 +3688,7 @@ impl AppState {
                 force,
                 ..
             }) => {
-                self.status = format!("remove worktree {path}");
+                self.status = StatusMessage::progress(format!("removing worktree {path}…"));
                 Effect::RemoveWorktree {
                     primary,
                     path,
@@ -3365,8 +3698,16 @@ impl AppState {
             Some(PendingConfirm::MergeIntoHead {
                 repo, rev, label, ..
             }) => {
-                self.status = format!("merge {label}");
+                self.status = StatusMessage::progress(format!("merging {label}…"));
                 Effect::MergeIntoHead { repo, rev, label }
+            }
+            Some(PendingConfirm::SwitchToDefault { repos }) => {
+                self.status = StatusMessage::progress(format_running_op(
+                    RunningOp::DefaultBranch,
+                    0,
+                    repos.len(),
+                ));
+                Effect::DefaultBranch { repos }
             }
             // Compare confirms offer only y / n: `Y` keeps them open.
             Some(pending) if pending.is_compare_owned() && clean => {
@@ -3384,7 +3725,10 @@ impl AppState {
                 Effect::None
             }
             Some(PendingConfirm::CompareRevertRange { target, patch }) => {
-                self.status = format!("revert range {} to merge base", target.path);
+                self.status = StatusMessage::progress(format!(
+                    "reverting range {} to merge base…",
+                    target.path
+                ));
                 Effect::CompareRevertPatch {
                     repo: target.repo,
                     path: target.path,
@@ -3393,7 +3737,8 @@ impl AppState {
                 }
             }
             Some(PendingConfirm::CompareRevertFile { target }) => {
-                self.status = format!("revert {} to merge base", target.path);
+                self.status =
+                    StatusMessage::progress(format!("reverting {} to merge base…", target.path));
                 Effect::CompareRevertFile {
                     repo: target.repo,
                     path: target.path,
@@ -3412,14 +3757,17 @@ impl AppState {
             return self.toggle_compare_reviewed();
         }
         if self.nav_depth() >= 1 {
+            self.status = StatusMessage::warn(REVIEWED_MARKS_ARE_FOR_TREE_FILES);
             return Effect::None;
         }
-        let Some(row) = self.focused_row().cloned() else {
+        let Some(row) = self
+            .focused_row()
+            .filter(|row| row.kind == NodeKind::File)
+            .cloned()
+        else {
+            self.status = StatusMessage::warn(FOCUS_A_FILE_TO_MARK_REVIEWED);
             return Effect::None;
         };
-        if row.kind != NodeKind::File {
-            return Effect::None;
-        }
         let Some(repo) = row.repo.as_deref() else {
             return Effect::None;
         };
@@ -3443,7 +3791,7 @@ impl AppState {
             &self.viewed_path,
             &workspace_store_id(&self.cwd),
         ) {
-            self.status = persist_failed_status("viewed", err);
+            self.status = StatusMessage::error(persist_failed_status("viewed", err));
         }
         self.reviewed = viewed_row_ids(&self.snapshot, &self.viewed_store, &self.cwd);
         Effect::None
@@ -3452,7 +3800,7 @@ impl AppState {
     /// Space on a compare tab: session-only mark on the focused committed file.
     fn toggle_compare_reviewed(&mut self) -> Effect {
         let Some((_, path)) = self.focused_commit_edit_path() else {
-            self.status = FOCUS_A_FILE_TO_MARK_REVIEWED.into();
+            self.status = StatusMessage::warn(FOCUS_A_FILE_TO_MARK_REVIEWED);
             return Effect::None;
         };
         if let Some(tab) = self.tabs.active_compare_mut() {
@@ -3471,7 +3819,7 @@ impl AppState {
                 &self.viewed_path,
                 &workspace_store_id(&self.cwd),
             ) {
-                self.status = persist_failed_status("viewed", err);
+                self.status = StatusMessage::error(persist_failed_status("viewed", err));
             }
         }
         self.reviewed = viewed_row_ids(&self.snapshot, &self.viewed_store, &self.cwd);
@@ -3487,7 +3835,7 @@ impl AppState {
                 &self.comment_path,
                 &workspace_store_id(&self.cwd),
             ) {
-                self.status = persist_failed_status("comment", err);
+                self.status = StatusMessage::error(persist_failed_status("comment", err));
             }
         }
     }
@@ -3662,7 +4010,7 @@ impl AppState {
 
     fn copy_entity_reference(&mut self) -> Effect {
         let Some(entity) = self.current_entity_reference() else {
-            self.status = "no copy target".into();
+            self.status = StatusMessage::warn("no copy target");
             return Effect::None;
         };
         let text = format_entity_reference(&entity);
@@ -3704,7 +4052,7 @@ impl AppState {
             return Effect::None;
         }
         if self.current_diff_rows().is_empty() {
-            self.status = "no highlight target".into();
+            self.status = StatusMessage::warn("no highlight target");
             return Effect::None;
         }
         self.cancel_mouse_drag();
@@ -3729,7 +4077,7 @@ impl AppState {
         self.help_open = false;
         self.comment_export = None;
         let Some(key) = self.current_comment_target() else {
-            self.status = "no comment target".into();
+            self.status = StatusMessage::warn("no comment target");
             return Effect::None;
         };
         self.clear_diff_visual();
@@ -3755,14 +4103,14 @@ impl AppState {
             &workspace_store_id(&self.cwd),
         ) {
             Ok(()) => {
-                self.status = if empty {
-                    "comment deleted".into()
+                self.status = StatusMessage::ok(if empty {
+                    "comment deleted"
                 } else {
-                    "comment saved".into()
-                };
+                    "comment saved"
+                });
             }
             Err(err) => {
-                self.status = persist_failed_status("comment", err);
+                self.status = StatusMessage::error(persist_failed_status("comment", err));
             }
         }
         Effect::None
@@ -3773,14 +4121,20 @@ impl AppState {
         self.help_open = false;
         self.comment = None;
         self.reconcile_comment_store();
-        let markdown = export_markdown(&self.scoped_comment_store());
+        let scoped = self.scoped_comment_store();
+        if scoped.is_empty() {
+            self.status = StatusMessage::info(STATUS_NO_COMMENTS);
+            return Effect::None;
+        }
+        let markdown = export_markdown(&scoped);
         self.comment_export = Some(CommentExport {
             markdown: markdown.clone(),
+            copied: None,
         });
-        self.status = STATUS_COPIED.into();
+        self.status.clear();
         Effect::CopyClipboard {
             text: markdown,
-            announce: false,
+            announce: true,
         }
     }
 
@@ -3824,7 +4178,7 @@ impl AppState {
     }
 
     fn refuse_remove_worktree(&mut self) -> Effect {
-        self.status = "Focus a linked worktree to remove".into();
+        self.status = StatusMessage::warn("Focus a linked worktree to remove");
         Effect::None
     }
 
@@ -3854,12 +4208,14 @@ impl AppState {
         let path = snap.repo.clone();
         let branch = snap.branch.clone();
         let merged_into_default = snap.merged_into_default;
+        let changed = snap.changes.len();
         self.confirm = Some(PendingConfirm::RemoveWorktree {
             primary,
             path,
             force,
             branch,
             merged_into_default,
+            changed,
         });
         Effect::None
     }
@@ -3869,7 +4225,7 @@ impl AppState {
         if targets.is_empty() {
             return Effect::None;
         }
-        self.status = format_running_op(RunningOp::Fetch, 0, targets.len());
+        // The background tick paints nothing unless a repo fails.
         Effect::Fetch { repos: targets }
     }
 
@@ -3884,19 +4240,27 @@ impl AppState {
     fn push_effect(&mut self) -> Effect {
         let targets = push_targets(&self.snapshot, self.focused_row(), self.show_ignored);
         if targets.is_empty() {
-            self.status = "nothing to push".into();
+            let on_checkout = self
+                .focused_row()
+                .is_some_and(|row| matches!(row.kind, NodeKind::Repo | NodeKind::Checkout));
+            self.status = StatusMessage::warn(if on_checkout {
+                "nothing to push"
+            } else {
+                "focus a repo or checkout to push"
+            });
             return Effect::None;
         }
-        self.status = format_running_op(RunningOp::Push, 0, targets.len());
+        self.status = StatusMessage::progress(format_running_op(RunningOp::Push, 0, targets.len()));
         Effect::Push { repos: targets }
     }
 
     fn begin_stash_menu(&mut self) -> Effect {
         if self.nav_depth() >= 2 {
+            self.status = StatusMessage::warn(super::gates::STASH_NEEDS_TREE_OR_GRAPH);
             return Effect::None;
         }
         let Some(repo) = self.focused_checkout_if_shown() else {
-            self.status = "focus a visible repo to stash".into();
+            self.status = StatusMessage::warn("focus a visible repo to stash");
             return Effect::None;
         };
         self.help_open = false;
@@ -3920,7 +4284,14 @@ impl AppState {
                 None => (false, None),
             }
         };
-        let latest_for_ops = if self.graph_pane_focused() {
+        // A tree row offers the latest stash only when its whole checkout
+        // is clean, so apply / pop cannot land on top of local changes.
+        let checkout_clean = !self
+            .snapshot
+            .repos
+            .iter()
+            .any(|r| r.repo == repo && (r.has_unstaged || r.has_staged || r.has_untracked));
+        let latest_for_ops = if self.graph_pane_focused() || checkout_clean {
             latest_stash_ref
         } else {
             None
@@ -3934,10 +4305,11 @@ impl AppState {
         if ops.is_empty() {
             self.stash_menu = None;
             self.stash_repo = None;
-            self.status = "nothing to stash".into();
+            self.status = StatusMessage::warn("nothing to stash");
             return;
         }
-        self.status = stash_menu_status(&ops);
+        // The box lists each op with its key; a chip summary would repeat it.
+        self.status.clear();
         self.stash_repo = Some(repo);
         self.stash_menu = Some(ops);
     }
@@ -3976,14 +4348,14 @@ impl AppState {
                 let stash_ref = op.stash_ref.unwrap_or_else(|| "stash@{0}".into());
                 self.stash_menu = None;
                 self.stash_repo = None;
-                self.status = format!("apply {stash_ref}");
+                self.status = StatusMessage::progress(format!("applying {stash_ref}…"));
                 Effect::StashApply { repo, stash_ref }
             }
             StashOpId::Pop => {
                 let stash_ref = op.stash_ref.unwrap_or_else(|| "stash@{0}".into());
                 self.stash_menu = None;
                 self.stash_repo = None;
-                self.status = format!("pop {stash_ref}");
+                self.status = StatusMessage::progress(format!("popping {stash_ref}…"));
                 Effect::StashPop { repo, stash_ref }
             }
             StashOpId::Drop => {
@@ -4000,19 +4372,19 @@ impl AppState {
 
     fn begin_branch_picker(&mut self) -> Effect {
         let Some(row) = self.focused_row() else {
-            self.status = "focus a repo to pick a branch".into();
+            self.status = StatusMessage::warn("focus a repo to pick a branch");
             return Effect::None;
         };
         if row_is_hidden_ignored(row, self.show_ignored) {
-            self.status = "focus a visible repo to pick a branch".into();
+            self.status = StatusMessage::warn("focus a visible repo to pick a branch");
             return Effect::None;
         }
         if !can_open_branch_picker(&self.snapshot, row) {
-            self.status = "focus a checkout to pick a branch".into();
+            self.status = StatusMessage::warn("focus a checkout to pick a branch");
             return Effect::None;
         }
         let Some(repo) = checkout_path(row) else {
-            self.status = "focus a checkout to pick a branch".into();
+            self.status = StatusMessage::warn("focus a checkout to pick a branch");
             return Effect::None;
         };
         self.help_open = false;
@@ -4022,7 +4394,7 @@ impl AppState {
     /// Fill the branch picker after git lists local branches.
     pub fn open_branch_picker(&mut self, repo: String, branches: Vec<crate::git::LocalBranch>) {
         if branches.is_empty() {
-            self.status = "no local branches".into();
+            self.status = StatusMessage::warn("no local branches");
             self.branch_picker = None;
             return;
         }
@@ -4033,7 +4405,7 @@ impl AppState {
             .find(|r| r.repo == repo)
             .and_then(|r| r.default_branch_override.clone());
         let sorted = super::branches::sort_branches_for_picker(branches, default.as_deref());
-        self.branch_picker = Some(BranchPickerState::new(repo, sorted));
+        self.branch_picker = Some(BranchPickerState::checkout(repo, sorted));
         self.status.clear();
     }
 
@@ -4079,6 +4451,11 @@ impl AppState {
         }
     }
 
+    /// True when `/` armed a non-empty query, so `n` / `N` step matches.
+    pub(crate) fn search_is_armed(&self) -> bool {
+        self.search_active && !self.search_query.trim().is_empty()
+    }
+
     /// True when the current row has an applied graph branch focus.
     pub(crate) fn graph_focus_is_active(&self) -> bool {
         let Some(repo) = self.graph_focus_picker_repo() else {
@@ -4104,7 +4481,7 @@ impl AppState {
         branches: Vec<crate::git::LocalBranch>,
     ) {
         if branches.is_empty() {
-            self.status = "no local branches".into();
+            self.status = StatusMessage::warn("no local branches");
             self.graph_focus_picker = None;
             return;
         }
@@ -4129,7 +4506,7 @@ impl AppState {
         };
         let repo = picker.repo.clone();
         let Some(names) = picker.apply_names() else {
-            self.status = "no matching branches".into();
+            self.status = StatusMessage::warn("no matching branches");
             return Effect::None;
         };
         self.graph_focus_picker = None;
@@ -4160,7 +4537,7 @@ impl AppState {
         } else {
             let label = names.join(", ");
             self.graph_branch_focus = Some((repo, names));
-            self.status = format!("graph focus: {label}");
+            self.status = format!("graph focus: {label}").into();
         }
         Effect::LoadRightPane
     }
@@ -4170,24 +4547,43 @@ impl AppState {
             return Effect::None;
         };
         let repo = picker.repo.clone();
-        let filter = picker.filter.clone();
         if let Some(selected) = picker.selected().cloned() {
             if selected.current {
                 self.branch_picker = None;
-                self.status = format!("Already on {}", selected.name);
+                self.status = format!("Already on {}", selected.name).into();
                 return Effect::None;
             }
             return self.checkout_or_confirm(repo, selected.name);
         }
-        if is_valid_branch_name(&filter) {
+        if picker.on_create_row() {
+            let name = picker.create_name().unwrap_or_default().to_string();
+            let commit_id = picker.commit_id.clone();
             self.branch_picker = None;
-            self.status = format!("create {filter}");
-            return Effect::CreateBranch {
-                repo,
-                name: filter.trim().to_string(),
+            // The graph picker creates at its commit and does not check out.
+            return match commit_id {
+                Some(commit_id) => {
+                    let short = commit_id.get(..7).unwrap_or(&commit_id);
+                    self.status = StatusMessage::progress(format!("creating {name} at {short}…"));
+                    Effect::CreateBranchAt {
+                        repo,
+                        name,
+                        commit_id,
+                    }
+                }
+                None => {
+                    self.status = StatusMessage::progress(format!("creating {name}…"));
+                    Effect::CreateBranch { repo, name }
+                }
             };
         }
-        self.status = "no matching branches".into();
+        // No branch matches and no create row: say why (a bad or existing
+        // name hides the create row).
+        let query = picker.filter.trim();
+        self.status = StatusMessage::warn(match picker.create_refusal() {
+            _ if query.is_empty() => "no matching branches".to_string(),
+            Some(reason) if picker.creates => format!("no branch matches {query} · {reason}"),
+            _ => format!("no branch matches {query}"),
+        });
         Effect::None
     }
 
@@ -4195,7 +4591,7 @@ impl AppState {
     /// (`plan_graph_checkout`) from the selected name, not from local vs origin
     /// of every checkout.
     pub fn checkout_or_confirm(&mut self, repo: String, selected_name: String) -> Effect {
-        self.status = format!("checkout {selected_name}");
+        self.status = StatusMessage::progress(format!("checking out {selected_name}…"));
         Effect::CheckoutBranch {
             repo,
             selected_name,
@@ -4204,17 +4600,21 @@ impl AppState {
     }
 
     /// Confirm checkout when a local exists and is out of sync with the selected `origin/*`.
+    ///
+    /// `ahead_behind` is local-only / remote-only commit counts for the box copy.
     pub fn confirm_checkout_if_out_of_sync(
         &mut self,
         repo: String,
         branch: String,
         remote_ref: Option<String>,
+        ahead_behind: Option<(usize, usize)>,
     ) -> Effect {
         if let Some(remote_ref) = remote_ref {
             self.confirm = Some(PendingConfirm::CheckoutOutOfSync {
                 repo,
                 branch: branch.clone(),
                 remote_ref: remote_ref.clone(),
+                ahead_behind,
             });
             Effect::None
         } else {
@@ -4222,44 +4622,21 @@ impl AppState {
         }
     }
 
-    fn begin_create_branch(&mut self) -> Effect {
-        let Some(picker) = self.branch_picker.as_ref() else {
-            self.status = "open the branch picker first".into();
-            return Effect::None;
-        };
-        let repo = picker.repo.clone();
-        let seed = picker.filter.clone();
-        self.create_branch = Some(CreateBranchState {
-            repo,
-            name: seed,
-            commit_id: None,
-        });
-        self.status.clear();
-        Effect::None
-    }
-
     fn submit_create_branch(&mut self) -> Effect {
         let Some(create) = self.create_branch.take() else {
             return Effect::None;
         };
-        if !is_valid_branch_name(&create.name) {
-            self.status = "invalid branch name".into();
+        // Git ref rules are checked here, so a bad name never reaches git.
+        if let Some(reason) = branch_name_error(&create.name) {
+            self.status = StatusMessage::warn(reason);
             self.create_branch = Some(create);
             return Effect::None;
         }
-        self.branch_picker = None;
-        self.status = format!("create {}", create.name.trim());
-        if let Some(commit_id) = create.commit_id {
-            Effect::CreateBranchAt {
-                repo: create.repo,
-                name: create.name.trim().to_string(),
-                commit_id,
-            }
-        } else {
-            Effect::CreateBranch {
-                repo: create.repo,
-                name: create.name.trim().to_string(),
-            }
+        self.status = StatusMessage::progress(format!("creating {}…", create.name.trim()));
+        Effect::CreateBranchAt {
+            repo: create.repo,
+            name: create.name.trim().to_string(),
+            commit_id: create.commit_id,
         }
     }
 
@@ -4268,7 +4645,7 @@ impl AppState {
             return Effect::None;
         }
         if self.hidden_ignored_focus() {
-            self.status = "focus a visible repo to checkout".into();
+            self.status = StatusMessage::warn("focus a visible repo to checkout");
             return Effect::None;
         }
         let Some(repo) = self.focused_graph_repo() else {
@@ -4282,17 +4659,28 @@ impl AppState {
             return Effect::None;
         }
         if self.graph_repo_is_dirty(&repo) {
-            self.status = DIRTY_WORKTREE_STATUS.into();
+            self.status = StatusMessage::warn(DIRTY_WORKTREE_STATUS);
             return Effect::None;
         }
         self.help_open = false;
         if names.len() == 1 {
             return self.checkout_or_confirm(repo, names[0].clone());
         }
+        // Every local branch, not only those on this commit, so the create
+        // row never offers a name that exists elsewhere. Snapshot data: no
+        // git on the loop thread.
+        let taken = self
+            .snapshot
+            .repos
+            .iter()
+            .find(|row| row.repo == repo)
+            .map(|row| row.local_branches.clone())
+            .unwrap_or_default();
         self.branch_picker = Some(BranchPickerState::from_names(
             repo,
             names,
             Some(commit.id.clone()),
+            taken,
         ));
         self.status.clear();
         Effect::None
@@ -4303,7 +4691,7 @@ impl AppState {
             return Effect::None;
         }
         if self.hidden_ignored_focus() {
-            self.status = "focus a visible repo to create a branch".into();
+            self.status = StatusMessage::warn("focus a visible repo to create a branch");
             return Effect::None;
         }
         let Some(repo) = self.focused_graph_repo() else {
@@ -4317,7 +4705,7 @@ impl AppState {
         self.create_branch = Some(CreateBranchState {
             repo,
             name: String::new(),
-            commit_id: Some(commit_id),
+            commit_id,
         });
         self.status.clear();
         Effect::None
@@ -4328,7 +4716,7 @@ impl AppState {
             return Effect::None;
         }
         if self.hidden_ignored_focus() {
-            self.status = "focus a visible repo to merge".into();
+            self.status = StatusMessage::warn("focus a visible repo to merge");
             return Effect::None;
         }
         let Some(repo) = self.focused_graph_repo() else {
@@ -4338,7 +4726,7 @@ impl AppState {
             return Effect::None;
         };
         if self.graph_repo_is_dirty(&repo) {
-            self.status = DIRTY_WORKTREE_STATUS.into();
+            self.status = StatusMessage::warn(DIRTY_WORKTREE_STATUS);
             return Effect::None;
         }
         let (rev, label) = merge_rev_for_commit(&commit.id, &commit.refs);
@@ -4371,7 +4759,8 @@ impl AppState {
             .is_some_and(|row| row.has_unstaged || row.has_staged)
     }
 
-    fn hidden_ignored_focus(&self) -> bool {
+    /// True when the focused tree row belongs to an ignored repo that `.` hides.
+    pub(crate) fn hidden_ignored_focus(&self) -> bool {
         self.focused_row()
             .is_some_and(|row| row_is_hidden_ignored(row, self.show_ignored))
     }
@@ -4435,6 +4824,19 @@ impl AppState {
         self.tree_fraction = clamp_tree_fraction(self.layout.term_cols, self.tree_fraction);
     }
 
+    /// Whether the graph list paints its vertical scrollbar: the painted
+    /// lines overflow the list, or it has left the top. Mirrors the widget
+    /// from the line count the last frame recorded, so a pan key does not
+    /// repaint the whole model to count it.
+    pub(crate) fn graph_vscroll_shown(&self) -> bool {
+        self.graph.is_some()
+            && graph_vscroll_visible(
+                self.layout.graph_content_len,
+                self.graph_chrome().list_height,
+                self.graph_scroll,
+            )
+    }
+
     pub(crate) fn sync_graph_scroll(&mut self) {
         let Some(model) = self.graph.as_ref() else {
             return;
@@ -4453,7 +4855,14 @@ impl AppState {
     }
 
     fn sync_diff_scroll(&mut self) {
-        let n = self.current_diff_rows().len();
+        let rows = self.current_diff_rows();
+        self.sync_diff_scroll_for(&rows);
+    }
+
+    /// [`Self::sync_diff_scroll`] over rows the caller already built, so a
+    /// cursor move on a large diff builds them once.
+    fn sync_diff_scroll_for(&mut self, rows: &[DiffRow]) {
+        let n = rows.len();
         if n == 0 {
             self.diff_cursor = 0;
             self.diff_scroll = 0;
@@ -4462,7 +4871,7 @@ impl AppState {
         }
         self.diff_cursor = self.diff_cursor.min(n - 1);
         if self.diff_wrap {
-            let heights = self.diff_wrap_heights();
+            let heights = self.diff_wrap_heights_for(rows);
             self.diff_scroll =
                 wrap_viewport_start(&heights, self.diff_cursor, self.diff_body_height()) as u16;
             return;
@@ -4472,15 +4881,12 @@ impl AppState {
     }
 
     fn move_diff_cursor(&mut self, delta: i32) {
-        let n = self.current_diff_rows().len();
-        if n == 0 {
-            self.diff_cursor = 0;
-            self.diff_scroll = 0;
-            self.clear_diff_visual();
-            return;
+        let rows = self.current_diff_rows();
+        let n = rows.len() as i32;
+        if n > 0 {
+            self.diff_cursor = (self.diff_cursor as i32 + delta).clamp(0, n - 1) as usize;
         }
-        self.diff_cursor = (self.diff_cursor as i32 + delta).clamp(0, n as i32 - 1) as usize;
-        self.sync_diff_scroll();
+        self.sync_diff_scroll_for(&rows);
     }
 
     fn page_step(&self) -> i32 {
@@ -4559,6 +4965,42 @@ impl AppState {
         }
     }
 
+    /// True when Enter on the right pane opens the next depth: a graph
+    /// commit or stash opens its files, a commit-file row opens its diff.
+    ///
+    /// Same checks as [`Self::nav_enter`] without the status copy. The
+    /// `Enter drill` hint shows only when this holds.
+    pub(crate) fn nav_enter_drills(&self) -> bool {
+        if self.is_compare_tab() || self.focus != FocusPane::Right || self.hidden_ignored_focus() {
+            return false;
+        }
+        match &self.drill {
+            DrillView::Graph => {
+                self.focused_graph_repo().is_some()
+                    && self
+                        .focused_graph_row()
+                        .is_some_and(|row| source_from_graph_row(&row).is_some())
+            }
+            DrillView::Files { cursor, .. } => self
+                .commit_file_rows()
+                .get(*cursor)
+                .is_some_and(|row| !row.is_dir()),
+            DrillView::Diff { .. } => false,
+        }
+    }
+
+    /// Title of the left pane: `tree`, `graph` (commit-files drill), or
+    /// `files` (commit diff drill and compare tabs).
+    pub fn left_pane_title(&self) -> &'static str {
+        if self.drill.is_diff() || self.is_compare_tab() {
+            "files"
+        } else if self.drill.is_files() {
+            "graph"
+        } else {
+            "tree"
+        }
+    }
+
     fn nav_enter(&mut self) -> Effect {
         if self.is_compare_tab() {
             if self.focus == FocusPane::Left {
@@ -4567,7 +5009,7 @@ impl AppState {
             return Effect::None;
         }
         if self.hidden_ignored_focus() {
-            self.status = "hidden ignored stay out of drill".into();
+            self.status = StatusMessage::warn("hidden ignored stay out of drill");
             return Effect::None;
         }
         if self.focus == FocusPane::Left {
@@ -4577,15 +5019,15 @@ impl AppState {
         match &self.drill {
             DrillView::Graph => {
                 let Some(repo) = self.focused_graph_repo() else {
-                    self.status = "focus a repo commit to drill".into();
+                    self.status = StatusMessage::warn("focus a repo commit to drill");
                     return Effect::None;
                 };
                 let Some(row) = self.focused_graph_row() else {
-                    self.status = "focus a graph commit to drill".into();
+                    self.status = StatusMessage::warn("focus a graph commit to drill");
                     return Effect::None;
                 };
                 let Some(source) = source_from_graph_row(&row) else {
-                    self.status = "focus a graph commit to drill".into();
+                    self.status = StatusMessage::warn("focus a graph commit to drill");
                     return Effect::None;
                 };
                 Effect::LoadCommitFiles { repo, source }
@@ -4598,7 +5040,7 @@ impl AppState {
             } => {
                 let rows = self.commit_file_rows();
                 let Some(row) = rows.get(*cursor) else {
-                    self.status = "no files in this commit".into();
+                    self.status = StatusMessage::warn("no files in this commit");
                     return Effect::None;
                 };
                 if row.is_dir() {
@@ -4645,12 +5087,10 @@ impl AppState {
                     files,
                     cursor,
                 };
-                self.status = "files".into();
                 Effect::DropCommitDiff
             }
             DrillView::Files { .. } => {
                 self.drill = DrillView::Graph;
-                self.status = "graph".into();
                 Effect::LoadRightPane
             }
             DrillView::Graph => Effect::None,
@@ -4662,20 +5102,20 @@ impl AppState {
             return Effect::None;
         }
         let Some(stash_ref) = self.focused_graph_stash_ref() else {
-            self.status = "focus a graph stash row".into();
+            self.status = StatusMessage::warn("focus a graph stash row");
             return Effect::None;
         };
         let Some(repo) = self.focused_graph_repo() else {
-            self.status = "focus a visible repo to stash".into();
+            self.status = StatusMessage::warn("focus a visible repo to stash");
             return Effect::None;
         };
         match id {
             StashOpId::Apply => {
-                self.status = format!("apply {stash_ref}");
+                self.status = StatusMessage::progress(format!("applying {stash_ref}…"));
                 Effect::StashApply { repo, stash_ref }
             }
             StashOpId::Pop => {
-                self.status = format!("pop {stash_ref}");
+                self.status = StatusMessage::progress(format!("popping {stash_ref}…"));
                 Effect::StashPop { repo, stash_ref }
             }
             StashOpId::Drop => {
@@ -4816,6 +5256,7 @@ impl AppState {
     fn activate_relative_tab(&mut self, delta: i32) -> Effect {
         let len = self.tabs.len() as i32;
         if len <= 1 {
+            self.status = StatusMessage::warn(super::tabs::ONLY_WORKSPACE_TAB_OPEN);
             return Effect::None;
         }
         let next = (self.tabs.active as i32 + delta).rem_euclid(len) as usize;
@@ -4897,19 +5338,19 @@ impl AppState {
 
     pub(crate) fn compare_vs_default(&mut self) -> Effect {
         let Some(checkout) = self.compare_target_checkout() else {
-            self.status = FOCUS_A_CHECKOUT.into();
+            self.status = StatusMessage::warn(FOCUS_A_CHECKOUT);
             return Effect::None;
         };
         let Some((head, default_tip)) = self.checkout_head_and_default(&checkout) else {
-            self.status = FOCUS_A_CHECKOUT.into();
+            self.status = StatusMessage::warn(FOCUS_A_CHECKOUT);
             return Effect::None;
         };
         if head.is_empty() {
-            self.status = HEAD_HAS_NO_COMMIT.into();
+            self.status = StatusMessage::warn(HEAD_HAS_NO_COMMIT);
             return Effect::None;
         }
         let Some(base_ref) = default_tip.map(str::to_string) else {
-            self.status = DEFAULT_BRANCH_NOT_FOUND.into();
+            self.status = StatusMessage::warn(DEFAULT_BRANCH_NOT_FOUND);
             return Effect::None;
         };
         self.open_compare_tab(checkout, base_ref)
@@ -4917,14 +5358,14 @@ impl AppState {
 
     pub(crate) fn compare_vs_branch(&mut self) -> Effect {
         let Some(checkout) = self.compare_target_checkout() else {
-            self.status = FOCUS_A_CHECKOUT.into();
+            self.status = StatusMessage::warn(FOCUS_A_CHECKOUT);
             return Effect::None;
         };
         if self
             .checkout_head_and_default(&checkout)
             .is_some_and(|(head, _)| head.is_empty())
         {
-            self.status = HEAD_HAS_NO_COMMIT.into();
+            self.status = StatusMessage::warn(HEAD_HAS_NO_COMMIT);
             return Effect::None;
         }
         self.compare_picker_pending = Some(checkout.clone());
@@ -4937,7 +5378,7 @@ impl AppState {
 
     fn close_compare_at(&mut self, index: usize) -> Effect {
         if index == 0 {
-            self.status = WORKSPACE_TAB_CANNOT_CLOSE.into();
+            self.status = StatusMessage::warn(WORKSPACE_TAB_CANNOT_CLOSE);
             return Effect::None;
         }
         let closing_active = index == self.tabs.active;
@@ -4975,7 +5416,7 @@ impl AppState {
             return Effect::None;
         };
         let Some(name) = picker.selected().map(|branch| branch.name.clone()) else {
-            self.status = super::tabs::NO_BRANCHES_TO_COMPARE.into();
+            self.status = StatusMessage::warn(super::tabs::compare_picker_empty(picker));
             return Effect::None;
         };
         let repo = picker.repo.clone();
@@ -5444,7 +5885,10 @@ mod tests {
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
     use crate::testutil::init_repo;
-    use crate::tui::split::{pane_widths, side_by_side_column_widths, DIFF_SPLIT_FRACTION};
+    use crate::tui::split::{
+        pane_widths, side_by_side_column_widths, DIFF_SPLIT_FRACTION, MIN_PANE_COLS,
+    };
+    use crate::tui::status::StatusKind;
     use crate::tui::watch::watch_interval_ms;
     use workspace_status_graph::{Commit, GraphModel, GraphRef, Stash};
 
@@ -5615,11 +6059,75 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(app.status, "Pulling 0/2…");
-        match app.dispatch(Action::DefaultBranch) {
+        // Two repos: `d` asks first and writes nothing until `y`.
+        assert_eq!(app.dispatch(Action::DefaultBranch), Effect::None);
+        assert_eq!(
+            app.confirm,
+            Some(PendingConfirm::SwitchToDefault {
+                repos: vec!["app".into(), "lib".into()],
+            })
+        );
+        match app.dispatch(Action::ConfirmYes) {
             Effect::DefaultBranch { repos } => assert_eq!(repos, vec!["app", "lib"]),
             other => panic!("{other:?}"),
         }
+        assert!(app.confirm.is_none());
         assert_eq!(app.status, "Switching 0/2…");
+    }
+
+    #[test]
+    fn multi_repo_default_switch_confirms_and_n_cancels() {
+        let mut app_snap = repo("app", false);
+        app_snap.branch = "feature/x".into();
+        let mut lib_snap = repo("lib", false);
+        lib_snap.branch = "feature/y".into();
+        let snapshot = build_workspace_snapshot(&[app_snap, lib_snap], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        app.cursor = 0;
+        assert_eq!(app.dispatch(Action::DefaultBranch), Effect::None);
+        assert!(matches!(
+            app.confirm,
+            Some(PendingConfirm::SwitchToDefault { ref repos }) if repos.len() == 2
+        ));
+        // Enter is not a yes: the box stays and the status names the key.
+        assert_eq!(app.dispatch(Action::ConfirmEnter), Effect::None);
+        assert!(app.confirm.is_some());
+        assert_eq!(app.status, "press y to confirm · n or Esc to cancel");
+        assert_eq!(app.status.kind(), StatusKind::Info);
+        assert_eq!(app.dispatch(Action::ConfirmNo), Effect::None);
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "switch cancelled");
+
+        // One repo in scope still switches at once.
+        focus_repo(&mut app, "app");
+        match app.dispatch(Action::DefaultBranch) {
+            Effect::DefaultBranch { repos } => assert_eq!(repos, vec!["app"]),
+            other => panic!("{other:?}"),
+        }
+        assert!(app.confirm.is_none());
+    }
+
+    #[test]
+    fn confirm_enter_names_shift_y_when_only_y_upper_accepts() {
+        let mut app = state();
+        let target = |path: &str| RevertTarget {
+            repo: "app".into(),
+            path: path.into(),
+            untracked: true,
+            old_path: None,
+        };
+        app.confirm = Some(PendingConfirm::Revert {
+            targets: vec![target("a.txt"), target("b.txt")],
+            label: "app".into(),
+        });
+        assert_eq!(app.dispatch(Action::ConfirmEnter), Effect::None);
+        assert!(app.confirm.is_some());
+        assert_eq!(app.status, "press Y to confirm · n or Esc to cancel");
+        // No confirm open: Enter in that mode cannot reach here, but stays inert.
+        app.confirm = None;
+        app.status.clear();
+        assert_eq!(app.dispatch(Action::ConfirmEnter), Effect::None);
+        assert!(app.status.is_empty());
     }
 
     #[test]
@@ -5711,7 +6219,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_writes_noop_when_depth_at_least_one_and_right_focused() {
+    fn tree_writes_say_why_when_depth_at_least_one_and_right_focused() {
         let mut app = state();
         focus_file(&mut app, "README.md");
         let cursor = app.cursor;
@@ -5725,18 +6233,23 @@ mod tests {
         );
         assert_eq!(app.focus, FocusPane::Right);
         assert!(app.in_commit_drill());
-        let status = app.status.clone();
-        for action in [
-            Action::Stage,
-            Action::Unstage,
-            Action::Revert,
-            Action::Fetch,
-            Action::Pull,
-            Action::Push,
-            Action::DefaultBranch,
-            Action::Branch,
-            Action::RemoveWorktree,
-            Action::StashMenu,
+        for (action, why) in [
+            (Action::Stage, "Esc back to the tree to stage"),
+            (Action::Unstage, "Esc back to the tree to unstage"),
+            (Action::Revert, "Esc back to the tree to revert"),
+            (Action::Fetch, "Esc back to the tree to fetch"),
+            (Action::Pull, "Esc back to the tree to pull"),
+            (Action::Push, "Esc back to the tree to push"),
+            (
+                Action::DefaultBranch,
+                "Esc back to the tree to switch to the default branch",
+            ),
+            (Action::Branch, "Esc back to the tree to pick a branch"),
+            (
+                Action::RemoveWorktree,
+                "Esc back to the tree to remove a worktree",
+            ),
+            (Action::StashMenu, "focus the left pane (Tab) to stash"),
         ] {
             assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
             assert_eq!(
@@ -5744,7 +6257,8 @@ mod tests {
                 "{action:?} must not move the tree cursor"
             );
             assert!(app.confirm.is_none(), "{action:?}");
-            assert_eq!(app.status, status, "{action:?} must stay silent");
+            assert_eq!(app.status, why, "{action:?} must say why");
+            assert_eq!(app.status.kind(), StatusKind::Warn, "{action:?}");
         }
         match app.dispatch(Action::Edit) {
             Effect::EditFile { path, .. } => assert_eq!(path, "README.md"),
@@ -5752,31 +6266,36 @@ mod tests {
         }
         assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
         assert!(!app.reviewed.contains(&id));
+        assert_eq!(app.status, REVIEWED_MARKS_ARE_FOR_TREE_FILES);
+        assert_eq!(
+            palette_reason(&app, "Mark reviewed").as_deref(),
+            Some(REVIEWED_MARKS_ARE_FOR_TREE_FILES)
+        );
     }
 
     #[test]
-    fn pull_and_default_on_file_or_dir_are_silent_fetch_stays() {
+    fn pull_and_default_on_file_or_dir_say_why_fetch_stays() {
         let mut snap = tree_repo();
         snap.branch = "feature/x".into();
         snap.sync_status = SyncStatus::Behind;
         let snapshot = build_workspace_snapshot(&[snap], &[], false, &[]);
         let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         focus_id(&mut app, "file:app:README.md");
-        let status = app.status.clone();
         assert_eq!(app.dispatch(Action::Pull), Effect::None);
-        assert_eq!(app.status, status);
+        assert_eq!(app.status, "focus a repo or checkout to pull");
+        assert_eq!(app.status.kind(), StatusKind::Warn);
         assert_eq!(app.dispatch(Action::DefaultBranch), Effect::None);
-        assert_eq!(app.status, status);
+        assert_eq!(app.status, "focus a repo or checkout to switch to default");
         match app.dispatch(Action::Fetch) {
             Effect::Fetch { repos } => assert_eq!(repos, vec!["app"]),
             other => panic!("{other:?}"),
         }
         focus_id(&mut app, "dir:app:src");
-        let status = app.status.clone();
         assert_eq!(app.dispatch(Action::Pull), Effect::None);
-        assert_eq!(app.status, status);
+        assert_eq!(app.status, "focus a repo or checkout to pull");
+        assert_eq!(app.status.kind(), StatusKind::Warn);
         assert_eq!(app.dispatch(Action::DefaultBranch), Effect::None);
-        assert_eq!(app.status, status);
+        assert_eq!(app.status, "focus a repo or checkout to switch to default");
         match app.dispatch(Action::Fetch) {
             Effect::Fetch { repos } => assert_eq!(repos, vec!["app"]),
             other => panic!("{other:?}"),
@@ -5873,9 +6392,16 @@ mod tests {
         assert!(app.confirm.is_none());
         focus_checkout(&mut app, "app/.worktrees/feat");
         assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
+        let want_changed = app
+            .snapshot
+            .repos
+            .iter()
+            .find(|r| r.repo == "app/.worktrees/feat")
+            .map(|r| r.changes.len())
+            .unwrap();
         assert!(matches!(
             app.confirm,
-            Some(PendingConfirm::RemoveWorktree { .. })
+            Some(PendingConfirm::RemoveWorktree { changed, .. }) if changed == want_changed
         ));
         assert!(app.confirm.is_some());
         app.dispatch(Action::ConfirmNo);
@@ -6214,7 +6740,8 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        assert_eq!(app.status, "delete new.txt");
+        assert_eq!(app.status, "deleting new.txt…");
+        assert_eq!(app.status.kind(), StatusKind::Progress);
 
         // Many untracked files: `y` is not offered, `Y` deletes them all.
         app.confirm = Some(untracked_confirm(&["a.txt", "b.txt"]));
@@ -6230,7 +6757,84 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(app.confirm.is_none());
-        assert_eq!(app.status, "delete 2 untracked");
+        assert_eq!(app.status, "deleting 2 untracked…");
+    }
+
+    #[test]
+    fn compare_picker_says_when_the_filter_matches_nothing_and_on_esc() {
+        let mut app = state();
+        let branch = |name: &str| crate::git::LocalBranch {
+            name: name.into(),
+            current: false,
+            authordate: 0,
+        };
+        app.open_compare_picker("app".into(), Vec::new());
+        assert_eq!(app.dispatch(Action::ComparePickerSubmit), Effect::None);
+        assert_eq!(app.status, "No branches to compare");
+
+        app.open_compare_picker("app".into(), vec![branch("develop")]);
+        app.dispatch(Action::ComparePickerChar('z'));
+        app.dispatch(Action::ComparePickerChar('q'));
+        assert_eq!(app.dispatch(Action::ComparePickerSubmit), Effect::None);
+        assert_eq!(app.status, "no branch matches zq");
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+
+        assert_eq!(app.dispatch(Action::ComparePickerCancel), Effect::None);
+        assert!(app.compare_picker.is_none());
+        assert_eq!(app.status, "compare cancelled");
+        assert_eq!(app.status.kind(), StatusKind::Info);
+    }
+
+    #[test]
+    fn branch_picker_typing_keeps_the_filter_off_the_status_rows() {
+        let mut app = state();
+        app.branch_picker = Some(crate::tui::branches::BranchPickerState::new(
+            "app".into(),
+            vec![crate::git::LocalBranch {
+                name: "topic".into(),
+                current: false,
+                authordate: 0,
+            }],
+        ));
+        app.dispatch(Action::BranchChar('t'));
+        assert_eq!(
+            app.branch_picker.as_ref().map(|p| p.filter.as_str()),
+            Some("t")
+        );
+        assert!(
+            app.status.is_empty(),
+            "title paints the filter: {}",
+            app.status
+        );
+        app.dispatch(Action::BranchBackspace);
+        assert!(app.status.is_empty());
+    }
+
+    #[test]
+    fn pull_on_a_diverged_repo_says_why_not_nothing_behind() {
+        let mut diverged = repo("app", false);
+        diverged.sync_status = SyncStatus::Diverged;
+        diverged.sync_note = "ahead 1, behind 1".into();
+        let snapshot = build_workspace_snapshot(&[diverged], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        focus_repo(&mut app, "app");
+        assert_eq!(app.dispatch(Action::Pull), Effect::None);
+        assert_eq!(app.status, "app has diverged — pull it from a terminal");
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+    }
+
+    #[test]
+    fn workspace_push_asks_for_a_checkout() {
+        let mut ahead = repo("app", false);
+        ahead.sync_status = SyncStatus::Ahead;
+        ahead.sync_note = "ahead 1".into();
+        let snapshot = build_workspace_snapshot(&[ahead], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        app.cursor = 0;
+        assert_eq!(app.focused_row().map(|r| r.kind), Some(NodeKind::Workspace));
+        assert_eq!(app.dispatch(Action::Push), Effect::None);
+        assert_eq!(app.status, "focus a repo or checkout to push");
+        assert_eq!(app.status.kind(), StatusKind::Warn);
     }
 
     #[test]
@@ -6298,6 +6902,130 @@ mod tests {
     fn q_still_quits_immediately() {
         let mut app = state();
         assert_eq!(app.dispatch(Action::Quit), Effect::Quit);
+    }
+
+    #[test]
+    fn q_while_busy_arms_the_press_again_prompt() {
+        let mut app = state();
+        let t0 = Instant::now();
+        assert_eq!(app.quit_while_busy(t0), Effect::None);
+        assert_eq!(app.status, QUIT_WHILE_BUSY_PROMPT);
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+        assert_eq!(
+            app.quit_while_busy(t0 + Duration::from_millis(100)),
+            Effect::Quit
+        );
+
+        // `q` then Ctrl-C inside the window also quits.
+        let mut app = state();
+        assert_eq!(app.quit_while_busy(Instant::now()), Effect::None);
+        assert_eq!(app.dispatch(Action::CtrlC), Effect::Quit);
+
+        // An expired arm is a fresh prompt, and the prompt clears with it.
+        let mut app = state();
+        assert_eq!(app.quit_while_busy(t0), Effect::None);
+        let until = app.ctrl_c_armed_until.expect("armed");
+        assert!(app.expire_ctrl_c_prompt(until));
+        assert!(app.status.is_empty());
+        assert_eq!(app.quit_while_busy(until), Effect::None);
+    }
+
+    #[test]
+    fn busy_drop_names_the_running_op() {
+        let mut app = state();
+        app.note_busy_drop(Some("revert"));
+        assert_eq!(app.status, "busy: revert running");
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+        app.note_busy_drop(None);
+        assert_eq!(app.status, BUSY_WRITE_RUNNING);
+    }
+
+    #[test]
+    fn info_status_expires_but_not_under_an_overlay() {
+        let mut app = state();
+        let t0 = Instant::now();
+        let ttl = Duration::from_millis(crate::tui::status::STATUS_TTL_MS);
+        assert_eq!(
+            app.dispatch(Action::ToggleShowIgnored),
+            Effect::LoadRightPane
+        );
+        assert_eq!(app.status.kind(), StatusKind::Info);
+        assert_eq!(
+            app.status_expiry_ms(t0),
+            Some(crate::tui::status::STATUS_TTL_MS)
+        );
+        assert!(!app.expire_status(t0 + ttl - Duration::from_millis(1)));
+        assert!(app.expire_status(t0 + ttl));
+        assert!(app.status.is_empty());
+
+        // Search typing echoes into `status`: no expiry while it is open.
+        assert_eq!(app.dispatch(Action::SearchStart), Effect::None);
+        app.status = "/".into();
+        assert_eq!(app.status_expiry_ms(t0), None);
+        assert!(!app.expire_status(t0 + ttl * 10));
+        assert_eq!(app.status, "/");
+
+        // Warnings stay until replaced.
+        let mut app = state();
+        app.status = StatusMessage::warn("nothing to push");
+        assert_eq!(app.status_expiry_ms(t0), None);
+        assert!(!app.expire_status(t0 + ttl * 10));
+    }
+
+    #[test]
+    fn help_holds_the_status_expiry_clock() {
+        let mut app = state();
+        let t0 = Instant::now();
+        let ttl = Duration::from_millis(crate::tui::status::STATUS_TTL_MS);
+        app.status = StatusMessage::ok("Fetched 1 repo");
+        assert_eq!(
+            app.status_expiry_ms(t0),
+            Some(crate::tui::status::STATUS_TTL_MS)
+        );
+        app.help_open = true;
+        let late = t0 + ttl * 10;
+        assert_eq!(app.status_expiry_ms(late), None);
+        assert!(!app.expire_status(late));
+        assert_eq!(app.status, "Fetched 1 repo");
+        app.help_open = false;
+        assert_eq!(
+            app.status_expiry_ms(late),
+            Some(crate::tui::status::STATUS_TTL_MS),
+            "the clock restarts once help closes"
+        );
+        assert!(app.expire_status(late + ttl));
+    }
+
+    #[test]
+    fn n_without_an_armed_search_says_so() {
+        let mut app = state();
+        let cursor = app.cursor;
+        assert_eq!(app.dispatch(Action::SearchNext), Effect::None);
+        assert_eq!(app.status, NO_SEARCH_ARMED);
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+        app.status.clear();
+        assert_eq!(app.dispatch(Action::SearchPrev), Effect::None);
+        assert_eq!(app.status, NO_SEARCH_ARMED);
+        assert_eq!(app.cursor, cursor);
+    }
+
+    #[test]
+    fn z_on_a_file_diff_says_tree_rows_and_arms_nothing() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        assert_eq!(app.dispatch(Action::FoldToggle), Effect::None);
+        assert_eq!(app.status, Z_FOLDS_TREE_ROWS);
+        assert!(app.z_pending_at.is_none(), "no fake z… pending");
+        assert!(!matches!(app.input_mode(), InputMode::ZPending { .. }));
+    }
+
+    #[test]
+    fn space_on_a_non_file_row_says_focus_a_file() {
+        let mut app = state();
+        app.cursor = 0;
+        assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
+        assert_eq!(app.status, FOCUS_A_FILE_TO_MARK_REVIEWED);
+        assert_eq!(app.status.kind(), StatusKind::Warn);
     }
 
     fn focus_file(app: &mut AppState, needle: &str) {
@@ -6743,7 +7471,8 @@ mod tests {
         assert_eq!(app.focused_row().unwrap().id, id);
         assert_eq!(app.folds, folds);
         assert_eq!(app.diff_scroll, 7);
-        assert_eq!(app.status, "edit README.md");
+        assert_eq!(app.status, "opening README.md…");
+        assert_eq!(app.status.kind(), StatusKind::Progress);
         app.cursor = 0;
         assert_eq!(app.dispatch(Action::Edit), Effect::None);
     }
@@ -6767,7 +7496,8 @@ mod tests {
                 path: "README.md".into(),
             }
         );
-        assert_eq!(app.status, "edit README.md");
+        assert_eq!(app.status, "opening README.md…");
+        assert_eq!(app.status.kind(), StatusKind::Progress);
         app.cursor = 0;
         assert_eq!(app.dispatch(Action::ExternalDiff), Effect::None);
         assert_eq!(app.status, "focus a file to diff");
@@ -7229,7 +7959,6 @@ mod tests {
             Action::DefaultBranch,
             Action::Branch,
             Action::BranchSubmit,
-            Action::CreateBranchStart,
             Action::CreateBranchSubmit,
             Action::RemoveWorktree,
             Action::GraphCheckout,
@@ -7917,7 +8646,7 @@ mod tests {
             hints.contains(&("x".into(), "revert to merge base".into())),
             "{hints:?}"
         );
-        assert!(has(&hints, "e") && has(&hints, "ctrl+o"), "{hints:?}");
+        assert!(has(&hints, "e") && has(&hints, "Ctrl-o"), "{hints:?}");
 
         // File list: the focused compare file decides.
         app.focus = FocusPane::Left;
@@ -8304,12 +9033,8 @@ mod tests {
         assert_eq!(app.commit_drill_source(), None);
         assert_eq!(app.dispatch(Action::CommentStart), Effect::None);
         assert_eq!(app.status, "no comment target");
-        match app.dispatch(Action::ExportComments) {
-            Effect::CopyClipboard { text, .. } => {
-                assert!(!text.contains("workspace-note"), "{text}")
-            }
-            other => panic!("expected CopyClipboard, got {other:?}"),
-        }
+        assert_eq!(app.dispatch(Action::ExportComments), Effect::None);
+        assert_eq!(app.status, STATUS_NO_COMMENTS);
     }
 
     #[test]
@@ -8841,9 +9566,31 @@ mod tests {
         app.rebuild_rows();
         focus_repo(&mut app, "lib");
         app.focus = FocusPane::Left;
-        app.open_stash_menu("lib".into(), Some("stash@{0}".into()));
+        app.open_stash_menu("lib".into(), None);
         assert!(app.stash_menu.is_none());
         assert!(app.status.contains("nothing to stash"));
+        // A clean checkout with a stash offers apply / pop of the latest.
+        app.open_stash_menu("lib".into(), Some("stash@{0}".into()));
+        let ops = app.stash_menu.clone().expect("clean row menu");
+        assert_eq!(
+            ops.iter().map(|op| op.id).collect::<Vec<_>>(),
+            vec![StashOpId::Apply, StashOpId::Pop]
+        );
+        assert!(
+            app.status.is_empty(),
+            "the box lists the keys; no status line repeats them: {:?}",
+            app.status
+        );
+        assert!(ops
+            .iter()
+            .all(|op| op.stash_ref.as_deref() == Some("stash@{0}")));
+        match app.dispatch(Action::StashMenuChar('a')) {
+            Effect::StashApply { repo, stash_ref } => {
+                assert_eq!(repo, "lib");
+                assert_eq!(stash_ref, "stash@{0}");
+            }
+            other => panic!("{other:?}"),
+        }
 
         focus_repo(&mut app, "app");
         install_graph(
@@ -8940,23 +9687,42 @@ mod tests {
                 authordate: 1,
             }],
         );
-        app.dispatch(Action::CreateBranchStart);
-        for c in "feature/new".chars() {
-            app.dispatch(Action::CreateBranchChar(c));
+        // A name git would refuse gets no create row; Enter says why.
+        for c in "bad..name".chars() {
+            app.dispatch(Action::BranchChar(c));
         }
-        match app.dispatch(Action::CreateBranchSubmit) {
+        assert_eq!(app.branch_picker.as_ref().unwrap().row_count(), 0);
+        assert_eq!(app.dispatch(Action::BranchSubmit), Effect::None);
+        assert!(app.branch_picker.is_some());
+        assert_eq!(
+            app.status,
+            "no branch matches bad..name · a branch name cannot contain .."
+        );
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+        for _ in "bad..name".chars() {
+            app.dispatch(Action::BranchBackspace);
+        }
+        for c in "feature/new".chars() {
+            app.dispatch(Action::BranchChar(c));
+        }
+        let picker = app.branch_picker.as_ref().unwrap();
+        assert!(picker.on_create_row(), "the create row is the only row");
+        match app.dispatch(Action::BranchSubmit) {
             Effect::CreateBranch { name, repo } => {
                 assert_eq!(repo, "app");
                 assert_eq!(name, "feature/new");
             }
             other => panic!("{other:?}"),
         }
+        assert!(app.branch_picker.is_none());
+        assert_eq!(app.status, "creating feature/new…");
 
         assert_eq!(
             app.confirm_checkout_if_out_of_sync(
                 "app".into(),
                 "feature/x".into(),
                 Some("origin/feature/x".into()),
+                Some((0, 1)),
             ),
             Effect::None
         );
@@ -8966,6 +9732,7 @@ mod tests {
             "app".into(),
             "feature/x".into(),
             Some("origin/feature/x".into()),
+            None,
         );
         match app.dispatch(Action::ConfirmYes) {
             Effect::CheckoutBranch {
@@ -9118,6 +9885,102 @@ mod tests {
     }
 
     #[test]
+    fn graph_checkout_picker_create_row_creates_at_the_commit() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_graph_commit(&mut app, &["topic", "main"]);
+        assert_eq!(app.dispatch(Action::GraphCheckout), Effect::None);
+        // j / k / C type into the filter: they never move or open a prompt.
+        for c in "jk/C".chars() {
+            app.dispatch(Action::BranchChar(c));
+        }
+        let picker = app.branch_picker.as_ref().expect("picker");
+        assert_eq!(picker.filter, "jk/C");
+        assert_eq!(picker.create_name(), Some("jk/C"));
+        assert!(picker.on_create_row());
+        match app.dispatch(Action::BranchSubmit) {
+            Effect::CreateBranchAt {
+                repo,
+                name,
+                commit_id,
+            } => {
+                assert_eq!(repo, "app");
+                assert_eq!(name, "jk/C");
+                assert_eq!(commit_id, "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(app.branch_picker.is_none());
+        assert_eq!(app.status, "creating jk/C at aaa1111…");
+    }
+
+    #[test]
+    fn graph_checkout_picker_exact_name_hides_the_create_row() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_graph_commit(&mut app, &["topic", "main"]);
+        app.dispatch(Action::GraphCheckout);
+        for c in "main".chars() {
+            app.dispatch(Action::BranchChar(c));
+        }
+        let picker = app.branch_picker.as_ref().expect("picker");
+        assert_eq!(picker.create_name(), None);
+        assert_eq!(picker.row_count(), 1);
+        app.dispatch(Action::BranchMove(1));
+        assert!(matches!(
+            app.dispatch(Action::BranchSubmit),
+            Effect::CheckoutBranch { selected_name, .. } if selected_name == "main"
+        ));
+    }
+
+    #[test]
+    fn graph_checkout_picker_hides_create_for_a_local_branch_on_another_commit() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        for repo in app.snapshot.repos.iter_mut().filter(|r| r.repo == "app") {
+            repo.local_branches = vec!["main".into(), "topic".into(), "elsewhere".into()];
+        }
+        install_graph_commit(&mut app, &["topic", "main"]);
+        app.dispatch(Action::GraphCheckout);
+        for c in "elsewhere".chars() {
+            app.dispatch(Action::BranchChar(c));
+        }
+        let picker = app.branch_picker.as_ref().expect("picker");
+        assert_eq!(picker.create_name(), None);
+        assert_eq!(picker.row_count(), 0);
+        assert_eq!(app.dispatch(Action::BranchSubmit), Effect::None);
+        assert!(app.branch_picker.is_some(), "nothing to run keeps it open");
+        assert_eq!(
+            app.status,
+            "no branch matches elsewhere · branch elsewhere already exists"
+        );
+    }
+
+    #[test]
+    fn tree_picker_with_matches_still_offers_create_last() {
+        use crate::git::LocalBranch;
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        app.open_branch_picker(
+            "app".into(),
+            vec![LocalBranch {
+                name: "feature/x".into(),
+                current: false,
+                authordate: 1,
+            }],
+        );
+        for c in "feat".chars() {
+            app.dispatch(Action::BranchChar(c));
+        }
+        assert_eq!(app.branch_picker.as_ref().unwrap().row_count(), 2);
+        app.dispatch(Action::BranchMove(1));
+        assert!(matches!(
+            app.dispatch(Action::BranchSubmit),
+            Effect::CreateBranch { name, .. } if name == "feat"
+        ));
+    }
+
+    #[test]
     fn graph_commit_b_dirty_refuses() {
         let mut app = graph_state(true);
         focus_repo(&mut app, "app");
@@ -9142,7 +10005,7 @@ mod tests {
         focus_repo(&mut app, "app");
         install_graph_commit(&mut app, &["main"]);
         assert_eq!(app.dispatch(Action::GraphCreateBranch), Effect::None);
-        assert!(app.create_branch.as_ref().unwrap().commit_id.is_some());
+        assert!(!app.create_branch.as_ref().unwrap().commit_id.is_empty());
         for c in "topic/x".chars() {
             app.dispatch(Action::CreateBranchChar(c));
         }
@@ -9546,11 +10409,10 @@ mod tests {
             .branches
             .iter()
             .any(|b| b.name == "main"));
-        app.dispatch(Action::CreateBranchStart);
         for c in "feature/pick".chars() {
-            app.dispatch(Action::CreateBranchChar(c));
+            app.dispatch(Action::BranchChar(c));
         }
-        match app.dispatch(Action::CreateBranchSubmit) {
+        match app.dispatch(Action::BranchSubmit) {
             Effect::CreateBranch { name, .. } => {
                 create_branch_checkout(&repo_dir, &name).unwrap();
             }
@@ -9707,7 +10569,8 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        assert_eq!(app.status, "Fetching 0/2…");
+        // The background tick leaves the status slot alone.
+        assert_eq!(app.status, "");
         assert_eq!(app.dispatch(Action::WatchTick), Effect::WatchRefresh);
         assert_eq!(watch_interval_ms(Some("0")), 0);
         assert_ne!(
@@ -10234,6 +11097,115 @@ mod tests {
         assert_eq!(app.commit_files_cursor(), 2, "list rows still map");
     }
 
+    /// The diff search memo answers repeat calls and follows a content or
+    /// query change instead of serving stale hits.
+    #[test]
+    fn diff_search_hits_follow_content_and_query() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            DiffContent::from_lines(vec![
+                "@@ -1,2 +1,2 @@".into(),
+                "-old needle".into(),
+                "+new needle".into(),
+            ]),
+        );
+        let first = app.diff_search_hits("Needle");
+        assert_eq!(first.len(), 2, "{first:?}");
+        assert_eq!(app.diff_search_hits("needle "), first, "memo hit");
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            DiffContent::from_lines(vec!["@@ -1,1 +1,1 @@".into(), "+needle".into()]),
+        );
+        assert_eq!(app.diff_search_hits("needle").len(), 1, "new content");
+        assert!(app.diff_search_hits("absent").is_empty(), "new query");
+        assert!(app.diff_search_hits("  ").is_empty());
+    }
+
+    /// The graph pan clamp reads the painted line count the last frame
+    /// recorded instead of repainting the model.
+    #[test]
+    fn graph_vscroll_shown_reads_the_recorded_line_count() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        assert!(!app.graph_vscroll_shown(), "no graph");
+        install_graph(&mut app, Vec::new());
+        let list = usize::from(app.graph_chrome().list_height);
+        app.layout.graph_content_len = list;
+        assert!(!app.graph_vscroll_shown(), "fits");
+        app.layout.graph_content_len = list + 1;
+        assert!(app.graph_vscroll_shown(), "overflows at the top");
+        app.layout.graph_content_len = 0;
+        app.graph_scroll = 1;
+        assert!(app.graph_vscroll_shown(), "left the top");
+    }
+
+    /// `h` / `l` on a commit-file folder row fold / unfold it like the
+    /// workspace tree; on a file row they still pan.
+    #[test]
+    fn h_l_fold_commit_file_dirs_and_pan_on_files() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        install_graph(&mut app, Vec::new());
+        app.open_commit_files(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![
+                CommitFile {
+                    status: "M".into(),
+                    path: "README.md".into(),
+                    old_path: None,
+                },
+                CommitFile {
+                    status: "A".into(),
+                    path: "src/lib.rs".into(),
+                    old_path: None,
+                },
+            ],
+        );
+        app.focus = FocusPane::Right;
+        let key = |c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        let at = |app: &mut AppState, id: &str| {
+            let idx = app
+                .commit_file_rows()
+                .iter()
+                .position(|row| row.id == id)
+                .expect(id);
+            if let DrillView::Files { cursor, .. } = &mut app.drill {
+                *cursor = idx;
+            }
+        };
+        at(&mut app, "dir:src");
+        assert!(app.hl_folds());
+        let close = super::super::app::map_event(&app, &key('h'));
+        assert_eq!(close, Action::FoldClose);
+        app.dispatch(close);
+        assert!(app.commit_file_folds.contains("dir:src"));
+        let open = super::super::app::map_event(&app, &key('l'));
+        assert_eq!(open, Action::FoldOpen);
+        app.dispatch(open);
+        assert!(!app.commit_file_folds.contains("dir:src"));
+
+        let file = app
+            .commit_file_rows()
+            .iter()
+            .find(|row| row.is_file())
+            .map(|row| row.id.clone())
+            .expect("file row");
+        at(&mut app, &file);
+        assert!(!app.hl_folds());
+        assert_eq!(
+            super::super::app::map_event(&app, &key('h')),
+            Action::PanDiff(-1)
+        );
+    }
+
     #[test]
     fn fold_on_depth_2_left_folds_commit_files() {
         let mut app = state();
@@ -10473,9 +11445,8 @@ mod tests {
         install_graph(&mut app, vec![graph_stash("stash@{0}", "latest")]);
         focus_graph_row(&mut app, |r| matches!(r, GraphRow::Commit { .. }));
         assert_eq!(app.focus, FocusPane::Right);
-        let status = app.status.clone();
         assert_eq!(app.dispatch(Action::StashMenu), Effect::None);
-        assert_eq!(app.status, status);
+        assert_eq!(app.status, "focus the left pane (Tab) to stash");
     }
 
     #[test]
@@ -10693,6 +11664,160 @@ mod tests {
         assert_eq!(app.diff_mode, DiffMode::Inline);
         app.dispatch(Action::ToggleDiffMode);
         assert_eq!(app.diff_mode, DiffMode::SideBySide);
+    }
+
+    #[test]
+    fn i_says_what_width_split_needs_when_the_pane_is_too_narrow() {
+        let mut app = state();
+        app.layout.diff_pane_width = 82;
+        app.diff_mode = DiffMode::Inline;
+        app.dispatch(Action::ToggleDiffMode);
+        assert_eq!(app.diff_mode, DiffMode::SideBySide);
+        assert_eq!(
+            app.status,
+            "split needs a ≥100-col diff pane (now 81) — widen it with < or drag"
+        );
+        app.dispatch(Action::ToggleDiffMode);
+        assert_eq!(app.status, "Diff: inline");
+        app.layout.diff_pane_width = 120;
+        app.dispatch(Action::ToggleDiffMode);
+        assert_eq!(app.status, "Diff: split");
+    }
+
+    #[test]
+    fn angle_brackets_move_the_tree_split_by_five_percent_and_clamp() {
+        let mut app = state();
+        app.layout.term_cols = 140;
+        let width = |app: &AppState| pane_widths(140, app.tree_fraction).tree_width;
+        assert_eq!(width(&app), 56);
+        assert_eq!(app.dispatch(Action::ResizeTree(1)), Effect::None);
+        assert_eq!(width(&app), 63);
+        app.dispatch(Action::ResizeTree(-1));
+        app.dispatch(Action::ResizeTree(-1));
+        assert_eq!(width(&app), 49);
+        for _ in 0..20 {
+            app.dispatch(Action::ResizeTree(-1));
+        }
+        assert_eq!(width(&app), MIN_PANE_COLS);
+        assert_eq!(app.status, "tree pane is at its narrowest");
+        for _ in 0..30 {
+            app.dispatch(Action::ResizeTree(1));
+        }
+        assert_eq!(
+            pane_widths(140, app.tree_fraction).diff_width,
+            MIN_PANE_COLS
+        );
+        assert_eq!(app.status, "tree pane is at its widest");
+    }
+
+    #[test]
+    fn right_click_steps_back_like_esc_and_respects_mouse_off() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        app.focus = FocusPane::Right;
+        app.dispatch(Action::BackClick);
+        assert_eq!(app.focus, FocusPane::Left);
+        app.focus = FocusPane::Right;
+        app.mouse_enabled = false;
+        app.dispatch(Action::BackClick);
+        assert_eq!(app.focus, FocusPane::Right, "mouse off ignores it");
+        app.mouse_enabled = true;
+        app.search_active = true;
+        app.search_query = "app".into();
+        app.dispatch(Action::BackClick);
+        assert!(!app.search_active, "an armed search clears first, like Esc");
+        assert_eq!(app.focus, FocusPane::Right);
+    }
+
+    fn needle_diff(app: &mut AppState) {
+        focus_file(app, "README.md");
+        let mut unified = String::from("@@ -1,9 +1,9 @@\n");
+        for i in 0..9 {
+            if i % 3 == 1 {
+                unified.push_str(&format!(" needle {i}\n"));
+            } else {
+                unified.push_str(&format!(" hay {i}\n"));
+            }
+        }
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            DiffContent::from_unified(unified),
+        );
+        app.focus = FocusPane::Right;
+    }
+
+    #[test]
+    fn diff_search_counts_matches_and_says_when_it_wraps() {
+        let mut app = state();
+        needle_diff(&mut app);
+        app.dispatch(Action::SearchStart);
+        for c in "needle".chars() {
+            app.dispatch(Action::SearchChar(c));
+        }
+        app.dispatch(Action::SearchSubmit);
+        assert_eq!(app.search_match_position(), Some((Some(1), 3)));
+        app.dispatch(Action::SearchNext);
+        assert_eq!(app.search_match_position(), Some((Some(2), 3)));
+        assert!(app.status.is_empty(), "{}", &*app.status);
+        app.dispatch(Action::SearchNext);
+        app.dispatch(Action::SearchNext);
+        assert_eq!(app.search_match_position(), Some((Some(1), 3)));
+        assert_eq!(app.status, SEARCH_WRAPPED);
+        assert_eq!(app.status.kind(), StatusKind::Info);
+        app.dispatch(Action::SearchPrev);
+        assert_eq!(app.search_match_position(), Some((Some(3), 3)));
+        assert_eq!(app.status, SEARCH_WRAPPED);
+    }
+
+    #[test]
+    fn esc_while_typing_puts_the_diff_cursor_back() {
+        let mut app = state();
+        needle_diff(&mut app);
+        app.diff_cursor = 0;
+        app.dispatch(Action::SearchStart);
+        for c in "needle".chars() {
+            app.dispatch(Action::SearchChar(c));
+        }
+        assert_ne!(app.diff_cursor, 0, "typing jumps to the first match");
+        app.dispatch(Action::SearchCancel);
+        assert_eq!(app.diff_cursor, 0);
+        assert!(!app.search_active && !app.search_mode);
+    }
+
+    #[test]
+    fn esc_while_typing_puts_the_tree_cursor_and_folds_back() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        let row = app.focused_row().map(|r| r.id.clone());
+        let folds = app.folds.clone();
+        app.dispatch(Action::SearchStart);
+        for c in "lib".chars() {
+            app.dispatch(Action::SearchChar(c));
+        }
+        assert_ne!(app.focused_row().map(|r| r.id.clone()), row);
+        assert_eq!(app.dispatch(Action::SearchCancel), Effect::LoadRightPane);
+        assert_eq!(app.focused_row().map(|r| r.id.clone()), row);
+        assert_eq!(app.folds, folds);
+    }
+
+    #[test]
+    fn esc_up_a_depth_leaves_no_toast() {
+        let mut app = graph_state(false);
+        install_graph_commit(&mut app, &["main"]);
+        app.drill = DrillView::Files {
+            repo: "app".into(),
+            source: CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            files: Vec::new(),
+            cursor: 0,
+        };
+        app.focus = FocusPane::Left;
+        app.status.clear();
+        assert_eq!(app.dispatch(Action::NavEsc), Effect::LoadRightPane);
+        assert!(app.drill.is_graph());
+        assert!(app.status.is_empty(), "{}", &*app.status);
     }
 
     #[test]
@@ -11216,6 +12341,57 @@ mod tests {
         let long = tall_diff_in_narrow_pane(LONG_DIFF_PATH);
         assert_eq!(long.diff_header_rows(), 3, "{}", long.diff_header_path());
         assert_eq!(long.diff_body_height(), 17);
+    }
+
+    /// The pan max over rows a caller already built matches the old
+    /// self-building derivation, the h-bar row waits for a pan, and a held
+    /// `j` / PageDown builds the diff rows once per key.
+    #[test]
+    fn diff_pan_max_reuses_rows_and_a_key_builds_rows_once() {
+        use super::super::diff::{cell_code_width, diff_row_content_width, gutter_width};
+        use super::super::search::max_col_offset;
+        let mut app = tall_diff_in_narrow_pane("README.md");
+        let mut lines = vec!["@@ -1,1 +1,41 @@".into(), format!("+{}", "w".repeat(60))];
+        lines.extend((0..40).map(|i| format!("+line {i}")));
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            DiffContent::from_lines(lines),
+        );
+        let rows = app.current_diff_rows();
+        let lens: Vec<usize> = rows
+            .iter()
+            .filter_map(|row| match row {
+                DiffRow::Line { left, .. } => Some(left.text.chars().count()),
+                _ => None,
+            })
+            .collect();
+        let gutter = gutter_width(&rows).saturating_add(comment_mark_cols(app.ascii));
+        let content_w = diff_row_content_width(diff_paint_width(20) as usize);
+        let expected = max_col_offset(&lens, cell_code_width(content_w, gutter));
+        assert!(expected > 0);
+        assert_eq!(app.diff_pan_max(), expected);
+        assert_eq!(app.diff_pan_max_for(&rows), expected);
+
+        assert!(!app.diff_hscroll_shown(), "no h-bar at pan 0");
+        assert_eq!(app.diff_body_height(), 19);
+        app.diff_col_offset = 1;
+        assert!(app.diff_hscroll_shown());
+        assert_eq!(app.diff_body_height(), 18, "the h-bar takes a body row");
+        app.diff_wrap = true;
+        assert_eq!(app.diff_pan_max(), 0);
+        assert!(!app.diff_hscroll_shown(), "wrap never pans");
+        app.diff_wrap = false;
+
+        app.focus = FocusPane::Right;
+        for wrap in [false, true] {
+            app.diff_wrap = wrap;
+            for action in [Action::Move(1), Action::PageMove(1)] {
+                app.diff_row_builds.set(0);
+                app.dispatch(action.clone());
+                assert_eq!(app.diff_row_builds.get(), 1, "{action:?} wrap={wrap}");
+            }
+        }
     }
 
     #[test]
@@ -12864,6 +14040,42 @@ mod tests {
     }
 
     #[test]
+    fn highlight_gg_and_g_move_the_head_and_keep_the_anchor() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        let last = app.current_diff_rows().len() - 1;
+        app.dispatch(Action::Move(2));
+        assert_eq!(app.dispatch(Action::DiffVisualStart), Effect::None);
+        let anchor = app.diff_visual_anchor.expect("highlight");
+        assert_eq!(app.dispatch(Action::MoveToEnd), Effect::None);
+        assert_eq!(app.diff_cursor, last);
+        assert_eq!(app.diff_visual_anchor, Some(anchor));
+        assert!(app.diff_visual_contains(last));
+        // `gg`: the first `g` arms, the second moves to the top.
+        assert_eq!(app.dispatch(Action::ArmGChord), Effect::None);
+        assert_eq!(app.diff_cursor, last);
+        assert_eq!(app.dispatch(Action::ArmGChord), Effect::None);
+        assert_eq!(app.diff_cursor, 0);
+        assert_eq!(app.diff_visual_anchor, Some(anchor));
+        assert!(app.g_pending_at.is_none());
+        assert_eq!(app.input_mode(), InputMode::DiffVisual);
+    }
+
+    #[test]
+    fn highlight_unmapped_key_says_esc_exits() {
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        assert_eq!(app.dispatch(Action::DiffVisualStart), Effect::None);
+        assert_eq!(app.dispatch(Action::DiffVisualUnmapped), Effect::None);
+        assert_eq!(app.status, ESC_EXITS_HIGHLIGHT);
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+        assert!(app.diff_visual_anchor.is_some(), "highlight stays");
+        assert_eq!(app.dispatch(Action::CycleTheme), Effect::None);
+        assert!(app.diff_visual_anchor.is_some(), "T keeps the highlight");
+        assert_eq!(app.dispatch(Action::Quit), Effect::Quit);
+    }
+
+    #[test]
     fn semicolon_without_visual_opens_covering_range() {
         let mut app = state();
         focus_readme_diff(&mut app, two_line_readme());
@@ -13088,7 +14300,7 @@ diff --git a/README.md b/README.md
             other => panic!("{other:?}"),
         }
         assert!(app.diff_visual_anchor.is_none());
-        assert!(app.status.contains("staged range"), "{}", app.status);
+        assert_eq!(app.status, "staging range README.md…");
     }
 
     #[test]
@@ -13188,6 +14400,7 @@ diff --git a/README.md b/README.md
             unstaged: patch,
             is_new: false,
             is_committed: false,
+            error: None,
         }
     }
 
@@ -13231,6 +14444,7 @@ diff --git a/README.md b/README.md
                 unstaged: String::new(),
                 is_new: false,
                 is_committed: false,
+                error: None,
             },
         );
         highlight_binary_stub(&mut app);
@@ -13321,7 +14535,7 @@ diff --git a/README.md b/README.md
             }
         );
         assert!(app.confirm.is_none());
-        assert_eq!(app.status, "revert range README.md");
+        assert_eq!(app.status, "reverting range README.md…");
     }
 
     #[test]
@@ -13520,8 +14734,106 @@ diff --git a/README.md b/README.md
         assert_eq!(palette_reason(&app, "Keymap help"), None);
         assert_eq!(
             palette_reason(&app, "Stage").as_deref(),
-            Some("not available here")
+            Some("focus the tree (Tab) to stage")
         );
+    }
+
+    #[test]
+    fn palette_tab_search_and_fold_rows_say_why_they_are_off() {
+        use super::super::tabs::ONLY_WORKSPACE_TAB_OPEN;
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        for title in ["Next tab", "Previous tab"] {
+            assert_eq!(
+                palette_reason(&app, title).as_deref(),
+                Some(ONLY_WORKSPACE_TAB_OPEN),
+                "{title}"
+            );
+        }
+        // `gt` gives the same copy as the palette row.
+        assert_eq!(app.dispatch(Action::NextTab), Effect::None);
+        assert_eq!(app.status, ONLY_WORKSPACE_TAB_OPEN);
+        for title in ["Next match", "Previous match"] {
+            assert_eq!(
+                palette_reason(&app, title).as_deref(),
+                Some(NO_SEARCH_ARMED),
+                "{title}"
+            );
+        }
+        app.search_active = true;
+        app.search_query = "app".into();
+        assert_eq!(palette_reason(&app, "Next match"), None);
+        assert_eq!(palette_reason(&app, "Fold subtree"), None, "tree row");
+        assert_eq!(palette_reason(&app, "Quit"), None);
+        assert_eq!(palette_reason(&app, "Other pane"), None);
+
+        install_graph(&mut app, vec![graph_stash("stash@{0}", "latest")]);
+        focus_graph_row(&mut app, |r| matches!(r, GraphRow::Commit { .. }));
+        assert_eq!(
+            palette_reason(&app, "Fold subtree").as_deref(),
+            Some(Z_FOLDS_TREE_ROWS)
+        );
+        assert_eq!(
+            palette_reason(&app, "Stash menu").as_deref(),
+            Some("focus the left pane (Tab) to stash")
+        );
+        assert_eq!(
+            palette_reason(&app, "Apply stash").as_deref(),
+            Some(super::super::gates::FOCUS_A_GRAPH_STASH)
+        );
+    }
+
+    #[test]
+    fn palette_other_pane_flips_focus_and_quit_quits() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        assert_eq!(app.focus, FocusPane::Left);
+        palette_select(&mut app, "Other pane");
+        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
+        assert!(app.command_palette.is_none());
+        assert_eq!(app.focus, FocusPane::Right);
+        palette_select(&mut app, "Other pane");
+        app.dispatch(Action::CommandPaletteSubmit);
+        assert_eq!(app.focus, FocusPane::Left, "Tab goes back from the right");
+        palette_select(&mut app, "Quit");
+        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::Quit);
+    }
+
+    #[test]
+    fn palette_fold_subtree_folds_an_open_parent_and_its_children_like_zz() {
+        let mut app = tree_app();
+        focus_id(&mut app, "repo:app");
+        assert!(!app.folds.contains("repo:app"));
+        palette_select(&mut app, "Fold subtree");
+        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
+        assert!(app.command_palette.is_none());
+        assert!(app.folds.contains("repo:app"), "the focused parent folds");
+        assert!(app.folds.contains("dir:app:src"), "its children fold too");
+        assert!(
+            app.z_pending_at.is_none(),
+            "no `z` chord stays armed after the palette run"
+        );
+
+        palette_select(&mut app, "Fold subtree");
+        app.dispatch(Action::CommandPaletteSubmit);
+        assert!(!app.folds.contains("repo:app"), "a second run opens it");
+        assert!(!app.folds.contains("dir:app:src"));
+        assert!(app.rows.iter().any(|r| r.id == "file:app:src/lib.rs"));
+    }
+
+    #[test]
+    fn palette_alias_finds_a_row_and_runs_it() {
+        use super::super::action::PaletteOpenedBy;
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        app.dispatch(Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK));
+        for c in "exit".chars() {
+            app.dispatch(Action::CommandPaletteChar(c));
+        }
+        let palette = app.command_palette.as_ref().expect("palette open");
+        assert_eq!(palette.filter, "exit");
+        assert_eq!(palette.selected().map(|c| c.title), Some("Quit"));
+        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::Quit);
     }
 
     #[test]
@@ -13628,8 +14940,7 @@ diff --git a/README.md b/README.md
         let text = assert_copy_clipboard(effect, "file", "README.md", true);
         assert!(text.contains("path: README.md"), "{text}");
         assert_ne!(
-            app.status.as_str(),
-            "copied",
+            &*app.status, "copied",
             "dispatch must not flash copied before the copy"
         );
         assert!(app.comment_export.is_none());
@@ -13664,7 +14975,7 @@ diff --git a/README.md b/README.md
             text.contains("deadbeef1234567890abdeadbeef1234567890ab"),
             "{text}"
         );
-        assert_ne!(app.status.as_str(), "copied");
+        assert_ne!(&*app.status, "copied");
         assert!(app.comment_export.is_none());
     }
 
@@ -13683,7 +14994,7 @@ diff --git a/README.md b/README.md
         let text = assert_copy_clipboard(effect, "diff", "README.md", true);
         assert!(text.contains("path: README.md"), "{text}");
         assert!(text.contains("lines: 2"), "{text}");
-        assert_ne!(app.status.as_str(), "copied");
+        assert_ne!(&*app.status, "copied");
         assert!(app.comment_export.is_none());
     }
 
@@ -13704,7 +15015,7 @@ diff --git a/README.md b/README.md
     }
 
     #[test]
-    fn apostrophe_announces_clipboard_and_y_does_not() {
+    fn apostrophe_and_y_both_announce_the_copy() {
         let mut app = state();
         focus_file(&mut app, "README.md");
         match app.dispatch(Action::CopyEntityReference) {
@@ -13712,17 +15023,31 @@ diff --git a/README.md b/README.md
             other => panic!("expected CopyClipboard, got {other:?}"),
         }
         assert_ne!(
-            app.status.as_str(),
-            "copied",
+            &*app.status, "copied",
             "entity copy leaves status to the interpreter"
         );
         assert!(app.comment_export.is_none());
 
+        app.comment_store = CommentStore::new();
+        assert_eq!(app.dispatch(Action::ExportComments), Effect::None);
+        assert_eq!(app.status, STATUS_NO_COMMENTS);
+        assert!(app.comment_export.is_none(), "nothing to show or copy");
+
+        let key = CommentKey::Worktree { path: "app".into() };
+        app.comment_store = put_comment(&app.comment_store, key, "note");
+        focus_repo(&mut app, "app");
         match app.dispatch(Action::ExportComments) {
-            Effect::CopyClipboard { announce, .. } => assert!(!announce),
+            Effect::CopyClipboard { announce, text } => {
+                assert!(announce);
+                assert!(text.contains("note"), "{text}");
+            }
             other => panic!("expected CopyClipboard, got {other:?}"),
         }
-        assert_eq!(app.status, "copied");
-        assert!(app.comment_export.is_some());
+        assert!(app.status.is_empty(), "the interpreter reports the copy");
+        assert_eq!(
+            app.comment_export.as_ref().map(|e| e.copied),
+            Some(None),
+            "header waits for the copy result"
+        );
     }
 }

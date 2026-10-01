@@ -29,8 +29,8 @@ fn comment_overlay(screen: &str) -> bool {
         && screen.contains("body:")
         && screen.contains("Enter save")
         && screen.contains("empty deletes")
-        && screen.contains("Shift+Enter newline")
-        && screen.contains("Ctrl-A/E line")
+        && screen.contains("Shift-Enter newline")
+        && screen.contains("Ctrl-a/e line")
         && screen.contains("Ctrl-Left/Right word")
         && !screen.contains("MOVE")
         && !screen.contains("# Comments")
@@ -69,7 +69,7 @@ fn right_diff_focused(screen: &str) -> bool {
     tree_has(screen, "README.md")
         && !tree_cursor_on(screen, "README.md")
         && pane_unstaged_readme(screen)
-        && screen.contains("[workspace]")
+        && screen.contains("workspace › [app]")
         && !comment_overlay(screen)
 }
 

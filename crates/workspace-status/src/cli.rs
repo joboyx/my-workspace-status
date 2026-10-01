@@ -6,7 +6,7 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crate::actions::{pull_behind_repos, switch_repo_to_default_branch};
+use crate::actions::{pull_behind_repos, switch_repo_to_default_branch, SwitchOutcome};
 use crate::config::load_workspace_status_config;
 use crate::discovery::{collect_snapshots, validate_filter_repos};
 use crate::helpers::{normalize_filter_repo, sorted_unique};
@@ -18,10 +18,19 @@ use crate::snapshot::{
 use crate::update::run_self_update;
 use crate::update_check::{offer_startup_update, StartupUpdateOffer};
 use clap::Parser;
+use std::sync::LazyLock;
+
+/// `--version` text: [`crate::version_label`] without the leading `v`.
+static CLI_VERSION: LazyLock<String> = LazyLock::new(|| cli_version_for(&crate::version_label()));
+
+fn cli_version_for(label: &str) -> String {
+    label.strip_prefix('v').unwrap_or(label).to_string()
+}
 
 #[derive(Parser, Debug)]
 #[command(
     name = "workspace-status",
+    version = CLI_VERSION.as_str(),
     about = "Workspace git status. TUI on a TTY. --plain / --json for agents.",
     long_about = "Display git repository status across repos in the workspace.\n\n\
 On a TTY, this binary opens a ratatui TUI unless you pass --plain, --json,\n\
@@ -36,7 +45,8 @@ and a newer published release exists, the process asks whether to update\n\
 before the TUI mounts. --plain, --json, and --update skip that check.\n\n\
 --update prints GitHub Release notes for versions newer than this install,\n\
 then runs the cargo-dist updater (workspace-status-update) and exits.\n\
-That run does not open the TUI or apply repo filters."
+That run does not open the TUI or apply repo filters. A dev build\n\
+(scripts/install-dev.sh) instead rebuilds and reinstalls its checkout."
 )]
 struct Cli {
     /// Include ignored repos (`showIgnored`).
@@ -260,7 +270,7 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
                 let Some(snapshot) = snapshots.iter().find(|s| s.repo == *repo) else {
                     continue;
                 };
-                let (ok, lines) = switch_repo_to_default_branch(
+                let (outcome, lines) = switch_repo_to_default_branch(
                     repo,
                     &snapshot.branch,
                     &cwd,
@@ -269,7 +279,7 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
                 for line in lines {
                     say(force_json, &line);
                 }
-                if ok {
+                if outcome == SwitchOutcome::Switched {
                     switched += 1;
                 }
             }
@@ -321,6 +331,20 @@ mod tests {
 
     fn canonical(path: &Path) -> PathBuf {
         path.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn cli_version_matches_version_label() {
+        use clap::CommandFactory;
+        assert_eq!(cli_version_for("v0.1.224"), "0.1.224");
+        assert_eq!(
+            cli_version_for("v0.1.224-dev (abc1234)"),
+            "0.1.224-dev (abc1234)"
+        );
+        assert_eq!(
+            Cli::command().get_version(),
+            Some(cli_version_for(&crate::version_label()).as_str())
+        );
     }
 
     #[test]

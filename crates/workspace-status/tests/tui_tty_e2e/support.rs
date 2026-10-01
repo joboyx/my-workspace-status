@@ -111,22 +111,23 @@ pub fn tree_inactive_selection_on(screen: &str, needle: &str) -> bool {
     tree_line_containing(screen, needle).is_some_and(|line| line.contains('\u{258F}'))
 }
 
-/// Breadcrumb is the workspace basename only (file-focused; no repo crumb).
-pub fn launch_breadcrumb_workspace_only(screen: &str) -> bool {
+/// Breadcrumb is the workspace plus the focused file's repo (`workspace › app`).
+pub fn launch_breadcrumb_workspace_app(screen: &str) -> bool {
     let lines: Vec<&str> = screen.lines().collect();
     let Some(crumb) = lines.get(lines.len().saturating_sub(2)) else {
         return false;
     };
-    crumb.trim() == "workspace"
+    crumb.trim() == "workspace › app"
 }
 
-/// Idle status: directory-tree + preferred split pills, help, file hints.
+/// Idle status: directory-tree pill, split preferred but painted inline
+/// (`split→inline`), help, file hints.
 pub fn launch_status_chrome(screen: &str) -> bool {
     let Some(status) = screen.lines().last() else {
         return false;
     };
     status.contains(" tree")
-        && status.contains(" split")
+        && status.contains(" split→inline ")
         && status.contains("? help")
         && status.contains("focus right")
         && status.contains("stage")
@@ -172,10 +173,9 @@ pub fn documented_launch_first_paint(screen: &str) -> bool {
         && screen.contains("UNSTAGED")
         && screen.contains("+dirty")
         && screen.contains("@@ -1 +1,2 @@")
-        && launch_breadcrumb_workspace_only(screen)
+        && launch_breadcrumb_workspace_app(screen)
         && launch_status_chrome(screen)
         && !screen.contains("[workspace]")
-        && !screen.contains("workspace ›")
         && !screen.contains("SEARCH")
         && !screen.contains("MOVE")
         && !screen.contains("WIP on graph")
@@ -234,18 +234,21 @@ fn breadcrumb_marks_right_focus(screen: &str) -> bool {
     })
 }
 
-/// Left focus: status still offers `focus right`, or overlay with no crumb brackets.
+/// Left focus: status still offers `focus right`, or the crumb has no
+/// `[brackets]` (a narrow row with an armed search can cut every hint).
 fn left_pane_focused(screen: &str) -> bool {
-    status_line(screen).contains("focus right")
-        || (overlay_box_open(screen) && !breadcrumb_marks_right_focus(screen))
+    let status = status_line(screen);
+    status.contains("focus right")
+        || ((overlay_box_open(screen) || status.contains("? help"))
+            && !status.contains("Esc ←")
+            && !breadcrumb_marks_right_focus(screen))
 }
 
-/// Right focus: drill / Esc / back on status, or crumb `[brackets]`.
+/// Right focus: drill / Esc on status, or crumb `[brackets]`.
 fn right_pane_focused(screen: &str) -> bool {
     let status = status_line(screen);
     breadcrumb_marks_right_focus(screen)
-        || (!status.contains("focus right")
-            && (status.contains("drill") || status.contains("Esc") || status.contains("back")))
+        || (!status.contains("focus right") && (status.contains("drill") || status.contains("Esc")))
 }
 
 /// True when a pane title on the top row names `files`.
@@ -348,7 +351,7 @@ pub fn merger_graph_left_unfocused(screen: &str) -> bool {
         && !crumb.contains("[merger]")
         && status.contains("focus right")
         && !status.contains("drill")
-        && !status.contains("Esc")
+        && !status.contains("← tree")
         && merger_graph_body(screen)
         && !still_file_diff(screen)
         && !screen.contains("SEARCH")
@@ -367,7 +370,7 @@ pub fn merger_graph_drilled_right(screen: &str) -> bool {
         && crumb.contains("workspace › [merger]")
         && status.contains("drill")
         && status.contains("Esc")
-        && status.contains("back")
+        && (status.contains("← tree") || status.contains("Esc   clear"))
         && !status.contains("focus right")
         && merger_graph_body(screen)
         && !still_file_diff(screen)
@@ -433,7 +436,7 @@ pub fn focusbox_graph_right_full(screen: &str) -> bool {
         && !crumb.contains("full graph")
         && status.contains("drill")
         && status.contains("Esc")
-        && status.contains("back")
+        && (status.contains("← tree") || status.contains("Esc   clear"))
         && status.contains("focus branches")
         && !status.contains("clear focus")
         && !status.contains("focus right")
@@ -453,7 +456,7 @@ pub fn graph_focus_overlay_open(screen: &str) -> bool {
         && screen.contains("* feature/keep")
         && screen.contains("topic/noise")
         && screen.contains("Enter apply")
-        && screen.contains("O clear")
+        && screen.contains("Ctrl-o clear")
         && screen.contains("Esc cancel")
         && screen.contains("workspace › [focusbox]")
         && !screen.contains("graph focus:")
@@ -463,8 +466,8 @@ pub fn graph_focus_overlay_open(screen: &str) -> bool {
 
 /// Overlay filter `feature`: cursor on `feature/keep`. Not `main`.
 ///
-/// Overlay `j`/`k` move the cursor, so a query that starts with `k` is
-/// not the filter text. `feature` is unique to `feature/keep`.
+/// Every letter types into the overlay filter. `feature` is unique to
+/// `feature/keep`.
 pub fn graph_focus_overlay_filtered_keep(screen: &str) -> bool {
     graph_focus_overlay_open(screen)
         && screen.contains("filter: feature")
@@ -483,7 +486,7 @@ pub fn graph_focus_applied_keep(screen: &str) -> bool {
         && crumb.contains("graph focus: feature/keep")
         && status.contains("drill")
         && status.contains("Esc")
-        && status.contains("back")
+        && (status.contains("← tree") || status.contains("Esc   clear"))
         && status.contains("focus branches")
         && status.contains("clear focus")
         && !status.contains("focus right")
@@ -634,7 +637,7 @@ pub fn idle_dirty_readme_unstaged(screen: &str) -> bool {
         && !has_unstage_hint(screen)
         && status.contains(" tree")
         && status.contains(" split")
-        && crumb_row(screen).trim() == "workspace"
+        && crumb_row(screen).trim() == "workspace › app"
         && no_wrong_overlays(screen)
 }
 
@@ -776,6 +779,17 @@ pub fn screen_line_from_end(screen: &str, from_end: usize) -> &str {
         .unwrap_or("")
 }
 
+/// Right-pane vertical scrollbar thumb at the top of its track: the first
+/// right-pane row whose last cell is the bar (`█` thumb or `║` track) is the
+/// thumb. The bar shows whenever the content overflows, at the origin too.
+pub fn right_vbar_at_top(screen: &str) -> bool {
+    right_pane(screen)
+        .lines()
+        .filter_map(|line| line.trim_end_matches('│').chars().last())
+        .find(|ch| matches!(ch, '█' | '║'))
+        == Some('█')
+}
+
 /// Right-pane cells, excluding top/bottom chrome (same rows as [`left_tree`]).
 pub fn right_pane(screen: &str) -> String {
     let lines: Vec<&str> = screen.lines().collect();
@@ -885,7 +899,7 @@ pub fn documented_graph_stash_pop(screen: &str) -> bool {
         && !status.contains("drop stash")
         && status.contains("drill")
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && no_wrong_stash_pop_overlays(screen)
 }
 
@@ -906,11 +920,14 @@ pub fn app_stash_on_graph(screen: &str) -> bool {
         && !screen.contains("WIP on graph")
 }
 
-/// Graph stash row hints. Status chips, not overlay `a apply`.
+/// Graph stash row hints on the status row, not the overlay op rows.
 pub fn has_graph_stash_hints(screen: &str) -> bool {
     let status = status_row(screen);
     status.contains("apply stash") && status.contains("drop stash") && status.contains("pop stash")
 }
+
+/// Stash overlay create row: ` s ` key chip, then the `stash` label.
+const STASH_CREATE_OP_ROW: &str = " s  stash";
 
 /// CSI-u Shift+S opened the create-only overlay on the dirty README.
 pub fn stash_create_overlay_open(screen: &str) -> bool {
@@ -920,11 +937,11 @@ pub fn stash_create_overlay_open(screen: &str) -> bool {
         && readme_unstaged_badge(screen)
         && pane_unstaged_readme(screen)
         && screen.contains("Stash app")
-        && screen.contains("s create")
+        && screen.contains(STASH_CREATE_OP_ROW)
         && screen.contains("Esc cancel")
-        && !screen.contains("a apply")
-        && !screen.contains("p pop")
-        && !screen.contains("d drop")
+        && !screen.contains("apply stash")
+        && !screen.contains("pop stash")
+        && !screen.contains("drop stash")
         && !screen.contains("SEARCH")
         && !screen.contains("MOVE")
         && !screen.contains("WIP on main")
@@ -942,7 +959,7 @@ pub fn documented_stash_created(screen: &str) -> bool {
         && tree_has(screen, "0 changed")
         && crumb.contains("Stashed 1 file")
         && !screen.contains("Stash app")
-        && !screen.contains("s create")
+        && !screen.contains(STASH_CREATE_OP_ROW)
         && !screen.contains("UNSTAGED")
         && !screen.contains("WIP on main")
         && !crumb.contains("staged")

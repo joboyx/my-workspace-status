@@ -101,8 +101,10 @@ fn same_g_chord_key(last: Option<(KeyCode, KeyModifiers)>, key: &KeyEvent) -> bo
 
 fn records_g_chord_press(mode: InputMode, key: &KeyEvent) -> bool {
     matches!(mode, InputMode::GPending { .. })
-        || (matches!(mode, InputMode::Normal { .. } | InputMode::ZPending { .. })
-            && matches!(key.code, KeyCode::Char('g')))
+        || (matches!(
+            mode,
+            InputMode::Normal { .. } | InputMode::ZPending { .. } | InputMode::DiffVisual
+        ) && matches!(key.code, KeyCode::Char('g')))
 }
 
 #[cfg(test)]
@@ -223,8 +225,9 @@ pub fn event_to_action(
 
 /// Map one terminal event to an [`Action`], including graph-stash and graph-commit keys.
 ///
-/// `hl_folds` is true when `h` / `l` / arrows should fold the workspace
-/// tree. Graph, commit-file, and diff focus pass false so those keys pan.
+/// Unshifted `h` / `l` / arrows fold the workspace tree when the left pane
+/// is focused and pan otherwise; [`event_to_action_with`] takes the fold
+/// decision from the caller.
 pub fn event_to_action_ex(
     event: &Event,
     mode: InputMode,
@@ -240,11 +243,15 @@ pub fn event_to_action_ex(
         focus_right,
         graph_stash_focused,
         graph_commit_focused,
-        true,
+        !focus_right,
     )
 }
 
 /// [`event_to_action_ex`] with an explicit fold-vs-pan flag for `h` / `l`.
+///
+/// `hl_folds` is true when `h` / `l` / arrows fold the focused row: the
+/// workspace tree, or a folder row of a focused commit-file list. Other
+/// rows and panes pass false so those keys pan.
 pub fn event_to_action_with(
     event: &Event,
     mode: InputMode,
@@ -285,6 +292,21 @@ pub fn event_to_action_with(
                     | InputMode::CommandPalette,
             ) {
                 Action::None
+            } else if matches!(
+                mode,
+                InputMode::ZPending { .. } | InputMode::GPending { .. }
+            ) && mouse.kind == MouseEventKind::Down(MouseButton::Right)
+            {
+                // Right-click is Esc; in a pending chord, Esc only ends the chord.
+                key_to_action(
+                    KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                    mode,
+                    right_is_diff,
+                    focus_right,
+                    graph_stash_focused,
+                    graph_commit_focused,
+                    hl_folds,
+                )
             } else {
                 mouse_to_action(*mouse)
             }
@@ -413,20 +435,21 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
                 )
         }
         InputMode::BranchPicker | InputMode::ComparePicker => match key.code {
+            _ if list_overlay_move(key).is_some() => true,
             KeyCode::Backspace => true,
-            KeyCode::Char('C') => false,
             KeyCode::Char(_) => typing,
             _ => false,
         },
         InputMode::GraphFocusPicker => match key.code {
+            _ if list_overlay_move(key).is_some() => true,
             KeyCode::Backspace => true,
-            KeyCode::Char('O') | KeyCode::Char(' ') => false,
+            KeyCode::Char(' ') => false,
             KeyCode::Char(_) => typing,
             _ => false,
         },
         InputMode::CommandPalette => match key.code {
+            _ if list_overlay_move(key).is_some() => true,
             KeyCode::Backspace => true,
-            KeyCode::Char(':') | KeyCode::Enter | KeyCode::Esc => false,
             KeyCode::Char(_) => typing,
             _ => false,
         },
@@ -489,11 +512,11 @@ fn key_to_action(
             InputMode::Normal { .. }
             | InputMode::ZPending { .. }
             | InputMode::GPending { .. }
-            | InputMode::DiffVisual
-            | InputMode::CommandPalette => {
+            | InputMode::DiffVisual => {
                 return Action::ToggleCommandPalette(opened_by);
             }
-            InputMode::SearchPrompt
+            InputMode::CommandPalette
+            | InputMode::SearchPrompt
             | InputMode::HelpSearch
             | InputMode::Comment
             | InputMode::CreateBranch
@@ -523,12 +546,11 @@ fn key_to_action(
             }
             _ => Action::None,
         },
-        InputMode::ZPending { search_active } => match key.code {
+        InputMode::ZPending { .. } => match key.code {
             KeyCode::Char('z') => Action::FoldToggleSubtree,
             KeyCode::Esc => Action::None,
             _ => normal_key(
                 key,
-                search_active,
                 right_is_diff,
                 focus_right,
                 graph_stash_focused,
@@ -536,7 +558,7 @@ fn key_to_action(
                 hl_folds,
             ),
         },
-        InputMode::GPending { search_active } => match key.code {
+        InputMode::GPending { .. } => match key.code {
             KeyCode::Char('g') => Action::MoveToStart,
             KeyCode::Char('t') => Action::NextTab,
             KeyCode::Char('T') => Action::PreviousTab,
@@ -544,7 +566,6 @@ fn key_to_action(
             KeyCode::Esc => Action::None,
             _ => normal_key(
                 key,
-                search_active,
                 right_is_diff,
                 focus_right,
                 graph_stash_focused,
@@ -554,7 +575,9 @@ fn key_to_action(
         },
         InputMode::Confirm => match key.code {
             KeyCode::Char('Y') => Action::ConfirmYesClean,
-            KeyCode::Char('y') | KeyCode::Enter => Action::ConfirmYes,
+            KeyCode::Char('y') => Action::ConfirmYes,
+            // Enter never confirms: a write needs the key the box shows.
+            KeyCode::Enter => Action::ConfirmEnter,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::ConfirmNo,
             _ => Action::None,
         },
@@ -578,41 +601,46 @@ fn key_to_action(
             }
             _ => Action::None,
         },
-        InputMode::ComparePicker => match key.code {
-            KeyCode::Esc => Action::ComparePickerCancel,
-            KeyCode::Enter => Action::ComparePickerSubmit,
-            KeyCode::Backspace => Action::ComparePickerBackspace,
-            KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::ComparePickerMove(1),
-            KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::ComparePickerMove(-1),
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Action::ComparePickerChar(c)
-            }
-            _ => Action::None,
+        InputMode::ComparePicker => match list_overlay_move(key) {
+            Some(delta) => Action::ComparePickerMove(delta),
+            None => match key.code {
+                KeyCode::Esc => Action::ComparePickerCancel,
+                KeyCode::Enter => Action::ComparePickerSubmit,
+                KeyCode::Backspace => Action::ComparePickerBackspace,
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Action::ComparePickerChar(c)
+                }
+                _ => Action::None,
+            },
         },
-        InputMode::BranchPicker => match key.code {
-            KeyCode::Esc => Action::BranchCancel,
-            KeyCode::Enter => Action::BranchSubmit,
-            KeyCode::Backspace => Action::BranchBackspace,
-            KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::BranchMove(1),
-            KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::BranchMove(-1),
-            KeyCode::Char('C') => Action::CreateBranchStart,
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Action::BranchChar(c)
-            }
-            _ => Action::None,
+        InputMode::BranchPicker => match list_overlay_move(key) {
+            Some(delta) => Action::BranchMove(delta),
+            None => match key.code {
+                KeyCode::Esc => Action::BranchCancel,
+                KeyCode::Enter => Action::BranchSubmit,
+                KeyCode::Backspace => Action::BranchBackspace,
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Action::BranchChar(c)
+                }
+                _ => Action::None,
+            },
         },
-        InputMode::GraphFocusPicker => match key.code {
-            KeyCode::Esc => Action::GraphFocusCancel,
-            KeyCode::Enter => Action::GraphFocusSubmit,
-            KeyCode::Backspace => Action::GraphFocusBackspace,
-            KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::GraphFocusMove(1),
-            KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::GraphFocusMove(-1),
-            KeyCode::Char(' ') => Action::GraphFocusToggle,
-            KeyCode::Char('O') => Action::GraphFocusClear,
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Action::GraphFocusChar(c)
-            }
-            _ => Action::None,
+        InputMode::GraphFocusPicker => match list_overlay_move(key) {
+            Some(delta) => Action::GraphFocusMove(delta),
+            None => match key.code {
+                KeyCode::Esc => Action::GraphFocusCancel,
+                KeyCode::Enter => Action::GraphFocusSubmit,
+                KeyCode::Backspace => Action::GraphFocusBackspace,
+                // Branch names cannot contain a space, so space never types.
+                KeyCode::Char(' ') => Action::GraphFocusToggle,
+                KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Action::GraphFocusClear
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Action::GraphFocusChar(c)
+                }
+                _ => Action::None,
+            },
         },
         InputMode::CreateBranch => match key.code {
             KeyCode::Esc => Action::CreateBranchCancel,
@@ -643,9 +671,8 @@ fn key_to_action(
         },
         InputMode::CommandPalette => command_palette_key(key),
         InputMode::DiffVisual => diff_visual_key(key),
-        InputMode::Normal { search_active } => normal_key(
+        InputMode::Normal { .. } => normal_key(
             key,
-            search_active,
             right_is_diff,
             focus_right,
             graph_stash_focused,
@@ -665,13 +692,30 @@ fn palette_open_key(key: KeyEvent) -> Option<PaletteOpenedBy> {
     None
 }
 
+/// Cursor step for a list overlay key (palette and every picker), if any.
+///
+/// Up / Down, Ctrl-n / Ctrl-p, and Ctrl-j / Ctrl-k move. Letters never move,
+/// so every printable character types into the filter. The palette follows
+/// the same rule: Ctrl-k moves up, `:` types, and only Esc closes it.
+fn list_overlay_move(key: KeyEvent) -> Option<i32> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Down => Some(1),
+        KeyCode::Up => Some(-1),
+        KeyCode::Char('n' | 'j') if ctrl => Some(1),
+        KeyCode::Char('p' | 'k') if ctrl => Some(-1),
+        _ => None,
+    }
+}
+
 fn command_palette_key(key: KeyEvent) -> Action {
+    if let Some(delta) = list_overlay_move(key) {
+        return Action::CommandPaletteMove(delta);
+    }
     match key.code {
         KeyCode::Esc => Action::CommandPaletteCancel,
         KeyCode::Enter => Action::CommandPaletteSubmit,
         KeyCode::Backspace => Action::CommandPaletteBackspace,
-        KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::CommandPaletteMove(1),
-        KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::CommandPaletteMove(-1),
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             Action::CommandPaletteChar(c)
         }
@@ -681,14 +725,34 @@ fn command_palette_key(key: KeyEvent) -> Action {
 
 /// Visual-line keys on a focused file diff.
 ///
-/// `j` / `k` / arrows move (and extend the range). `;` comments that
+/// `j` / `k` / arrows, `gg` / `G` / Home / End, PgUp / PgDn, and Ctrl-u /
+/// Ctrl-d move the head (and extend or shrink the range). `;` comments that
 /// range. `s` / `u` stage / unstage the highlighted add/del lines. `x`
 /// reverts them from the worktree (after a confirm). `'` copies an entity
-/// reference for the highlighted span. Esc or a second `V` leaves
-/// highlight without commenting. `Ctrl-k` / `:` open the command palette
-/// before this map runs; the highlight stays.
+/// reference for the highlighted span. `?`, `q`, `T`, and `m` act as in
+/// normal mode. Esc or a second `V` leaves highlight without commenting.
+/// Any other key is [`Action::DiffVisualUnmapped`] so the status can say
+/// how to leave. `Ctrl-k` / `:` open the command palette before this map
+/// runs; the highlight stays.
 fn diff_visual_key(key: KeyEvent) -> Action {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return match key.code {
+            KeyCode::Char('u') => Action::Move(-5),
+            KeyCode::Char('d') => Action::Move(5),
+            KeyCode::Char(_) => Action::DiffVisualUnmapped,
+            _ => Action::None,
+        };
+    }
     match key.code {
+        KeyCode::Char('?') => Action::ToggleHelp,
+        KeyCode::Char('q') => Action::Quit,
+        KeyCode::Char('T') => Action::CycleTheme,
+        KeyCode::Char('m') => Action::ToggleMouse,
+        KeyCode::Char('g') => Action::ArmGChord,
+        KeyCode::Char('G') | KeyCode::End => Action::MoveToEnd,
+        KeyCode::Home => Action::MoveToStart,
+        KeyCode::PageUp => Action::PageMove(-1),
+        KeyCode::PageDown => Action::PageMove(1),
         KeyCode::Esc | KeyCode::Char('V') => Action::DiffVisualCancel,
         KeyCode::Char(';') => Action::CommentStart,
         KeyCode::Char('\'') => Action::CopyEntityReference,
@@ -699,13 +763,20 @@ fn diff_visual_key(key: KeyEvent) -> Action {
         KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::Move(-1),
         KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => Action::PanDiff(-1),
         KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Right => Action::PanDiff(1),
+        KeyCode::Char(_)
+        | KeyCode::Enter
+        | KeyCode::Tab
+        | KeyCode::BackTab
+        | KeyCode::Backspace
+        | KeyCode::Delete
+        | KeyCode::Insert
+        | KeyCode::F(_) => Action::DiffVisualUnmapped,
         _ => Action::None,
     }
 }
 
 fn normal_key(
     key: KeyEvent,
-    search_active: bool,
     _right_is_diff: bool,
     focus_right: bool,
     graph_stash_focused: bool,
@@ -762,6 +833,8 @@ fn normal_key(
         KeyCode::Char('O') => Action::GraphFocusClear,
         KeyCode::Char('W') => Action::RemoveWorktree,
         KeyCode::Char('i') => Action::ToggleDiffMode,
+        KeyCode::Char('<') => Action::ResizeTree(-1),
+        KeyCode::Char('>') => Action::ResizeTree(1),
         KeyCode::Char('\\') => Action::ToggleDiffWrap,
         KeyCode::Char('M') => Action::ToggleCommitMsgExpand,
         KeyCode::Char('m') => Action::ToggleMouse,
@@ -769,8 +842,9 @@ fn normal_key(
         KeyCode::Char('V') => Action::DiffVisualStart,
         KeyCode::Char('y') => Action::ExportComments,
         KeyCode::Char('\'') => Action::CopyEntityReference,
-        KeyCode::Char('n') if search_active => Action::SearchNext,
-        KeyCode::Char('N') if search_active => Action::SearchPrev,
+        // With no armed search these still dispatch so the status can say why.
+        KeyCode::Char('n') => Action::SearchNext,
+        KeyCode::Char('N') => Action::SearchPrev,
         KeyCode::Tab => {
             if focus_right {
                 Action::FocusLeft
@@ -786,30 +860,26 @@ fn normal_key(
         KeyCode::PageDown => Action::PageMove(1),
         KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::Move(1),
         KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::Move(-1),
-        KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => {
-            hl_or_pan(key, -1, focus_right, hl_folds)
-        }
-        KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Right => {
-            hl_or_pan(key, 1, focus_right, hl_folds)
-        }
+        KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => hl_or_pan(key, -1, hl_folds),
+        KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Right => hl_or_pan(key, 1, hl_folds),
         KeyCode::Enter => Action::NavEnter,
         KeyCode::Esc => Action::NavEsc,
         _ => Action::None,
     }
 }
 
-/// `h` / `l` / arrows: fold the workspace tree, otherwise pan.
+/// `h` / `l` / arrows: fold the focused tree or commit-file folder row,
+/// otherwise pan.
 ///
-/// Shift+Left / Shift+Right always pan so long tree paths can move without
-/// stealing fold. Unshifted keys still fold when `hl_folds` is set and the
-/// left tree is focused.
-fn hl_or_pan(key: KeyEvent, delta: i32, focus_right: bool, hl_folds: bool) -> Action {
+/// Shift+Left / Shift+Right always pan so long paths can move without
+/// stealing fold. Unshifted keys fold when `hl_folds` is set.
+fn hl_or_pan(key: KeyEvent, delta: i32, hl_folds: bool) -> Action {
     let pan = if delta < 0 {
         Action::PanDiff(-1)
     } else {
         Action::PanDiff(1)
     };
-    if key.modifiers.contains(KeyModifiers::SHIFT) || !hl_folds || focus_right {
+    if key.modifiers.contains(KeyModifiers::SHIFT) || !hl_folds {
         return pan;
     }
     if delta < 0 {
@@ -830,6 +900,7 @@ fn mouse_to_action(mouse: MouseEvent) -> Action {
             row: mouse.row,
         },
         MouseEventKind::Up(MouseButton::Left) => Action::Release,
+        MouseEventKind::Down(MouseButton::Right) => Action::BackClick,
         MouseEventKind::Moved => Action::PointerMove {
             col: mouse.column,
             row: mouse.row,
@@ -891,6 +962,77 @@ mod tests {
             event_to_action(&Event::Resize(60, 18), InputMode::Confirm, true, true),
             Action::Resize { cols: 60, rows: 18 }
         );
+    }
+
+    #[test]
+    fn angle_brackets_resize_the_tree_in_normal_mode_only() {
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('<')), normal(), false, false),
+            Action::ResizeTree(-1)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('>')), normal(), true, true),
+            Action::ResizeTree(1)
+        );
+        assert_eq!(
+            event_to_action(
+                &key(KeyCode::Char('>')),
+                InputMode::SearchPrompt,
+                false,
+                false
+            ),
+            Action::SearchChar('>')
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('<')), InputMode::Help, false, false),
+            Action::None
+        );
+    }
+
+    #[test]
+    fn right_click_is_back_outside_overlays() {
+        let right = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(
+            event_to_action(&right, normal(), false, true),
+            Action::BackClick
+        );
+        assert_eq!(
+            event_to_action(&right, InputMode::DiffVisual, true, true),
+            Action::BackClick
+        );
+        for mode in [
+            InputMode::Help,
+            InputMode::Confirm,
+            InputMode::BranchPicker,
+            InputMode::CommandPalette,
+            InputMode::SearchPrompt,
+        ] {
+            assert_eq!(event_to_action(&right, mode, false, true), Action::None);
+        }
+        // A pending chord maps right-click exactly like Esc: no step back.
+        for mode in [
+            InputMode::ZPending {
+                search_active: false,
+            },
+            InputMode::GPending {
+                search_active: false,
+            },
+        ] {
+            assert_eq!(
+                event_to_action(&right, mode, false, true),
+                event_to_action(&key(KeyCode::Esc), mode, false, true),
+                "{mode:?}"
+            );
+            assert_ne!(
+                event_to_action(&right, mode, false, true),
+                Action::BackClick
+            );
+        }
     }
 
     #[test]
@@ -992,9 +1134,10 @@ mod tests {
             event_to_action(&shift(KeyCode::Char('e')), normal(), false, false),
             Action::ExternalDiff
         );
+        // Unarmed `n` still dispatches so the status can say "no search".
         assert_eq!(
             event_to_action(&key(KeyCode::Char('n')), normal(), false, false),
-            Action::None
+            Action::SearchNext
         );
         let armed = InputMode::Normal {
             search_active: true,
@@ -1056,6 +1199,14 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Char('n')), mode, false, false),
             Action::ConfirmNo
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Esc), mode, false, false),
+            Action::ConfirmNo
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Enter), mode, false, false),
+            Action::ConfirmEnter
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('s')), mode, false, false),
@@ -1147,7 +1298,8 @@ mod tests {
                 false,
                 false
             ),
-            Action::CreateBranchStart
+            Action::BranchChar('C'),
+            "C types into the filter; the create row replaced picker C"
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('o')), normal(), false, true),
@@ -1178,6 +1330,15 @@ mod tests {
         assert_eq!(
             event_to_action(
                 &key(KeyCode::Char('O')),
+                InputMode::GraphFocusPicker,
+                false,
+                true
+            ),
+            Action::GraphFocusChar('O')
+        );
+        assert_eq!(
+            event_to_action(
+                &ctrl(KeyCode::Char('o')),
                 InputMode::GraphFocusPicker,
                 false,
                 true
@@ -1224,7 +1385,7 @@ mod tests {
                 false,
                 true
             ),
-            Action::GraphFocusClear
+            Action::GraphFocusChar('O')
         );
         assert_eq!(
             event_to_action(&shift(KeyCode::Char('y')), InputMode::Confirm, false, false),
@@ -1452,12 +1613,7 @@ mod tests {
             Action::ExportCommentsCancel
         );
         assert_eq!(
-            event_to_action(
-                &key(KeyCode::Char('j')),
-                InputMode::BranchPicker,
-                false,
-                false
-            ),
+            event_to_action(&key(KeyCode::Down), InputMode::BranchPicker, false, false),
             Action::BranchMove(1)
         );
         assert_eq!(
@@ -1667,6 +1823,78 @@ mod tests {
             event_to_action(&moved, InputMode::CommandPalette, false, false),
             Action::None
         );
+    }
+
+    #[test]
+    fn highlight_keeps_global_keys_and_moves_the_head() {
+        let visual = InputMode::DiffVisual;
+        for (event, want) in [
+            (key(KeyCode::Char('?')), Action::ToggleHelp),
+            (key(KeyCode::Char('q')), Action::Quit),
+            (key(KeyCode::Char('T')), Action::CycleTheme),
+            (key(KeyCode::Char('m')), Action::ToggleMouse),
+            (key(KeyCode::Char('g')), Action::ArmGChord),
+            (key(KeyCode::Char('G')), Action::MoveToEnd),
+            (key(KeyCode::Home), Action::MoveToStart),
+            (key(KeyCode::End), Action::MoveToEnd),
+            (key(KeyCode::PageUp), Action::PageMove(-1)),
+            (key(KeyCode::PageDown), Action::PageMove(1)),
+            (ctrl(KeyCode::Char('u')), Action::Move(-5)),
+            (ctrl(KeyCode::Char('d')), Action::Move(5)),
+            (key(KeyCode::Char('j')), Action::Move(1)),
+            (key(KeyCode::Esc), Action::DiffVisualCancel),
+        ] {
+            assert_eq!(
+                event_to_action(&event, visual, true, true),
+                want,
+                "{event:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn highlight_unmapped_keys_say_how_to_leave() {
+        let visual = InputMode::DiffVisual;
+        for event in [
+            key(KeyCode::Char('f')),
+            key(KeyCode::Char('z')),
+            key(KeyCode::Enter),
+            key(KeyCode::Tab),
+            ctrl(KeyCode::Char('o')),
+        ] {
+            assert_eq!(
+                event_to_action(&event, visual, true, true),
+                Action::DiffVisualUnmapped,
+                "{event:?}"
+            );
+        }
+        // A held unmapped key does not repeat the warning.
+        assert_eq!(
+            event_to_action(
+                &key_kind(KeyCode::Char('f'), KeyEventKind::Repeat),
+                visual,
+                true,
+                true
+            ),
+            Action::None
+        );
+    }
+
+    #[test]
+    fn highlight_g_press_records_the_chord_echo() {
+        let mut echo = GChordEchoState::default();
+        let g = key(KeyCode::Char('g'));
+        assert!(!drop_protocol_dup_g_chord_press(
+            &mut echo,
+            InputMode::DiffVisual,
+            &g
+        ));
+        // The CSI-u echo of that same tap is dropped, not a second `g`.
+        assert!(drop_protocol_dup_g_chord_press(
+            &mut echo,
+            InputMode::DiffVisual,
+            &g
+        ));
     }
 
     fn ctrl(code: KeyCode) -> Event {
@@ -2346,7 +2574,7 @@ mod tests {
                 false,
                 false
             ),
-            Action::BranchMove(1)
+            Action::BranchChar('j')
         );
         assert_eq!(
             event_to_action(
@@ -2355,7 +2583,16 @@ mod tests {
                 false,
                 false
             ),
-            Action::None
+            Action::BranchChar('C')
+        );
+        assert_eq!(
+            event_to_action(
+                &key_kind(KeyCode::Down, KeyEventKind::Repeat),
+                InputMode::BranchPicker,
+                false,
+                false
+            ),
+            Action::BranchMove(1)
         );
     }
 
@@ -2447,6 +2684,7 @@ mod tests {
             InputMode::CreateBranch,
             InputMode::StashMenu,
             InputMode::CommentExport,
+            InputMode::CommandPalette,
         ];
         for mode in overlays {
             let ctrl_k = event_to_action(&ctrl(KeyCode::Char('k')), mode, false, false);
@@ -2576,11 +2814,10 @@ mod tests {
     }
 
     #[test]
-    fn command_palette_keys_move_filter_submit_cancel_and_toggle() {
-        use super::super::action::PaletteOpenedBy;
+    fn command_palette_keys_move_filter_submit_and_only_esc_cancels() {
         assert_eq!(
             event_to_action(&key(KeyCode::Char('j')), palette(), false, false),
-            Action::CommandPaletteMove(1)
+            Action::CommandPaletteChar('j')
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Down), palette(), false, false),
@@ -2588,7 +2825,7 @@ mod tests {
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('k')), palette(), false, false),
-            Action::CommandPaletteMove(-1)
+            Action::CommandPaletteChar('k')
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Up), palette(), false, false),
@@ -2616,16 +2853,18 @@ mod tests {
         );
         assert_eq!(
             event_to_action(&ctrl(KeyCode::Char('k')), palette(), false, false),
-            Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK)
+            Action::CommandPaletteMove(-1),
+            "Ctrl-k moves up like every picker; it does not close"
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char(':')), palette(), false, false),
-            Action::ToggleCommandPalette(PaletteOpenedBy::Colon)
+            Action::CommandPaletteChar(':'),
+            "`:` types into the filter; it does not close"
         );
     }
 
     #[test]
-    fn command_palette_repeat_types_but_not_enter_or_open_keys() {
+    fn command_palette_repeat_types_and_moves_but_not_enter_or_esc() {
         use super::super::action::PaletteOpenedBy;
         assert_eq!(
             event_to_action(
@@ -2652,7 +2891,7 @@ mod tests {
                 false,
                 false
             ),
-            Action::CommandPaletteMove(1)
+            Action::CommandPaletteChar('j')
         );
         assert_eq!(
             event_to_action(
@@ -2679,7 +2918,7 @@ mod tests {
                 false,
                 false
             ),
-            Action::None
+            Action::CommandPaletteChar(':')
         );
         assert_eq!(
             event_to_action(
@@ -2692,7 +2931,7 @@ mod tests {
                 false,
                 false
             ),
-            Action::None
+            Action::CommandPaletteMove(-1)
         );
         assert_ne!(
             event_to_action(
@@ -2707,6 +2946,66 @@ mod tests {
             ),
             Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK)
         );
+    }
+
+    #[test]
+    fn list_overlays_type_every_letter_and_move_on_arrows_and_ctrl() {
+        let modes = [
+            InputMode::CommandPalette,
+            InputMode::BranchPicker,
+            InputMode::ComparePicker,
+            InputMode::GraphFocusPicker,
+        ];
+        let moved = |mode: InputMode, delta: i32| match mode {
+            InputMode::CommandPalette => Action::CommandPaletteMove(delta),
+            InputMode::BranchPicker => Action::BranchMove(delta),
+            InputMode::ComparePicker => Action::ComparePickerMove(delta),
+            _ => Action::GraphFocusMove(delta),
+        };
+        let typed = |mode: InputMode, c: char| match mode {
+            InputMode::CommandPalette => Action::CommandPaletteChar(c),
+            InputMode::BranchPicker => Action::BranchChar(c),
+            InputMode::ComparePicker => Action::ComparePickerChar(c),
+            _ => Action::GraphFocusChar(c),
+        };
+        for mode in modes {
+            for c in ['j', 'k', 'J', 'K', 'C', 'O', 'n', 'p'] {
+                assert_eq!(
+                    event_to_action(&key(KeyCode::Char(c)), mode, false, false),
+                    typed(mode, c),
+                    "{mode:?} {c}"
+                );
+            }
+            for (event, delta) in [
+                (key(KeyCode::Down), 1),
+                (key(KeyCode::Up), -1),
+                (ctrl(KeyCode::Char('n')), 1),
+                (ctrl(KeyCode::Char('p')), -1),
+                (ctrl(KeyCode::Char('j')), 1),
+            ] {
+                assert_eq!(
+                    event_to_action(&event, mode, false, false),
+                    moved(mode, delta),
+                    "{mode:?} {event:?}"
+                );
+            }
+            let ctrl_k = event_to_action(&ctrl(KeyCode::Char('k')), mode, false, false);
+            assert_eq!(ctrl_k, moved(mode, -1), "{mode:?} Ctrl-k");
+            assert_eq!(
+                event_to_action(
+                    &Event::Key(KeyEvent::new_with_kind(
+                        KeyCode::Char('n'),
+                        KeyModifiers::CONTROL,
+                        KeyEventKind::Repeat
+                    )),
+                    mode,
+                    false,
+                    false
+                ),
+                moved(mode, 1),
+                "{mode:?} held Ctrl-n repeats"
+            );
+        }
     }
 
     #[test]

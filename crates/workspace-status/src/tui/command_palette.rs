@@ -1,6 +1,7 @@
 //! Named-command overlay (`Ctrl-k` / `:`).
 //!
-//! Filter is case-insensitive substring on title, key chips, and group.
+//! Filter is case-insensitive substring on title, key chips, group, and
+//! aliases (`exit` finds Quit, `compare` the Diff vs rows).
 //! Execute is close-then-dispatch through [`super::state::AppState::dispatch`].
 
 use super::action::{Action, PaletteOpenedBy};
@@ -56,6 +57,8 @@ pub struct PaletteCommand {
     pub group: CommandGroup,
     /// Dispatched after the palette closes.
     pub action: Action,
+    /// Other words that find this row (filter target), e.g. `exit` for Quit.
+    pub aliases: &'static [&'static str],
     /// Highlight mode in which the row is enabled.
     pub scope: CommandScope,
 }
@@ -67,6 +70,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "s",
         group: CommandGroup::Highlight,
         action: Action::Stage,
+        aliases: &["add"],
         scope: CommandScope::Highlight,
     },
     PaletteCommand {
@@ -74,6 +78,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "u",
         group: CommandGroup::Highlight,
         action: Action::Unstage,
+        aliases: &["reset"],
         scope: CommandScope::Highlight,
     },
     PaletteCommand {
@@ -81,6 +86,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "x",
         group: CommandGroup::Highlight,
         action: Action::Revert,
+        aliases: &["discard", "restore"],
         scope: CommandScope::Highlight,
     },
     PaletteCommand {
@@ -88,6 +94,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "Esc",
         group: CommandGroup::Highlight,
         action: Action::DiffVisualCancel,
+        aliases: &["cancel"],
         scope: CommandScope::Highlight,
     },
     PaletteCommand {
@@ -95,6 +102,56 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "/",
         group: CommandGroup::Move,
         action: Action::SearchStart,
+        aliases: &["find", "grep"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Next match",
+        keys: "n",
+        group: CommandGroup::Move,
+        action: Action::SearchNext,
+        aliases: &["find next", "search"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Previous match",
+        keys: "N",
+        group: CommandGroup::Move,
+        action: Action::SearchPrev,
+        aliases: &["find previous", "search"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Fold subtree",
+        keys: "zz",
+        group: CommandGroup::Move,
+        action: Action::FoldToggleSubtree,
+        aliases: &["collapse", "expand", "unfold"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Other pane",
+        keys: "Tab",
+        group: CommandGroup::Move,
+        // Palette Enter runs FocusLeft instead while the right pane has focus.
+        action: Action::FocusRight,
+        aliases: &["switch pane", "focus"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Next tab",
+        keys: "gt",
+        group: CommandGroup::Move,
+        action: Action::NextTab,
+        aliases: &["switch tab"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Previous tab",
+        keys: "gT",
+        group: CommandGroup::Move,
+        action: Action::PreviousTab,
+        aliases: &["switch tab"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -102,6 +159,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "s",
         group: CommandGroup::Git,
         action: Action::Stage,
+        aliases: &["add"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -109,6 +167,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "u",
         group: CommandGroup::Git,
         action: Action::Unstage,
+        aliases: &["reset"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -116,6 +175,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "x",
         group: CommandGroup::Git,
         action: Action::Revert,
+        aliases: &["discard", "restore"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -123,6 +183,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "S",
         group: CommandGroup::Git,
         action: Action::StashMenu,
+        aliases: &["save", "shelve"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -130,6 +191,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "f",
         group: CommandGroup::Git,
         action: Action::Fetch,
+        aliases: &["download", "update"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -137,6 +199,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "p",
         group: CommandGroup::Git,
         action: Action::Pull,
+        aliases: &["update", "sync"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -144,6 +207,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "P",
         group: CommandGroup::Git,
         action: Action::Push,
+        aliases: &["upload", "publish"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -151,6 +215,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "d",
         group: CommandGroup::Git,
         action: Action::DefaultBranch,
+        aliases: &["main", "switch"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -158,6 +223,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "b",
         group: CommandGroup::Git,
         action: Action::Branch,
+        aliases: &["checkout", "switch", "create branch", "new branch"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -165,6 +231,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "b",
         group: CommandGroup::Git,
         action: Action::GraphCheckout,
+        aliases: &["checkout", "switch"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -172,6 +239,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "c",
         group: CommandGroup::Git,
         action: Action::GraphCreateBranch,
+        aliases: &["new branch"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -179,6 +247,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "m",
         group: CommandGroup::Git,
         action: Action::GraphMerge,
+        aliases: &["integrate"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -186,6 +255,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "W",
         group: CommandGroup::Git,
         action: Action::RemoveWorktree,
+        aliases: &["worktree", "delete"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -193,6 +263,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "a",
         group: CommandGroup::Git,
         action: Action::GraphStashApply,
+        aliases: &["unstash"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -200,6 +271,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "p",
         group: CommandGroup::Git,
         action: Action::GraphStashPop,
+        aliases: &["unstash"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -207,6 +279,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "D",
         group: CommandGroup::Git,
         action: Action::GraphStashDrop,
+        aliases: &["delete"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -214,6 +287,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "e",
         group: CommandGroup::Git,
         action: Action::Edit,
+        aliases: &["edit", "vim"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -221,6 +295,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "E",
         group: CommandGroup::Git,
         action: Action::ExternalDiff,
+        aliases: &["difftool", "vimdiff"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -228,6 +303,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "r",
         group: CommandGroup::Git,
         action: Action::Refresh,
+        aliases: &["reload", "rescan"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -235,6 +311,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "",
         group: CommandGroup::Git,
         action: Action::CompareVsDefault,
+        aliases: &["compare"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -242,6 +319,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "",
         group: CommandGroup::Git,
         action: Action::CompareVsBranch,
+        aliases: &["compare"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -249,6 +327,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "",
         group: CommandGroup::Git,
         action: Action::CloseCompareTab,
+        aliases: &["close compare"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -256,6 +335,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "space",
         group: CommandGroup::Git,
         action: Action::ToggleReviewed,
+        aliases: &["viewed", "seen"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -263,6 +343,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "?",
         group: CommandGroup::View,
         action: Action::ToggleHelp,
+        aliases: &["help", "keys", "shortcuts"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -270,6 +351,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "T",
         group: CommandGroup::View,
         action: Action::CycleTheme,
+        aliases: &["theme", "color", "colour"],
         scope: CommandScope::Any,
     },
     PaletteCommand {
@@ -277,6 +359,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "t",
         group: CommandGroup::View,
         action: Action::ToggleTreeMode,
+        aliases: &["list"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -284,6 +367,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: ".",
         group: CommandGroup::View,
         action: Action::ToggleShowIgnored,
+        aliases: &["hidden"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -291,6 +375,23 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "i",
         group: CommandGroup::View,
         action: Action::ToggleDiffMode,
+        aliases: &["side by side", "unified"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Narrow tree",
+        keys: "<",
+        group: CommandGroup::View,
+        action: Action::ResizeTree(-1),
+        aliases: &["widen diff", "pane width", "resize", "shrink"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Widen tree",
+        keys: ">",
+        group: CommandGroup::View,
+        action: Action::ResizeTree(1),
+        aliases: &["narrow diff", "pane width", "resize", "grow"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -298,6 +399,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "\\",
         group: CommandGroup::View,
         action: Action::ToggleDiffWrap,
+        aliases: &["soft wrap"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -305,6 +407,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "M",
         group: CommandGroup::View,
         action: Action::ToggleCommitMsgExpand,
+        aliases: &["body"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -312,6 +415,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "m",
         group: CommandGroup::View,
         action: Action::ToggleMouse,
+        aliases: &["pointer", "click"],
         scope: CommandScope::Any,
     },
     PaletteCommand {
@@ -319,6 +423,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "Ctrl-o",
         group: CommandGroup::View,
         action: Action::ToggleFullContext,
+        aliases: &["expand"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -326,6 +431,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "o",
         group: CommandGroup::View,
         action: Action::GraphFocusBranches,
+        aliases: &["filter graph"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -333,6 +439,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "O",
         group: CommandGroup::View,
         action: Action::GraphFocusClear,
+        aliases: &["full graph", "unfocus"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -340,6 +447,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: ";",
         group: CommandGroup::View,
         action: Action::CommentStart,
+        aliases: &["note", "annotate"],
         scope: CommandScope::Any,
     },
     PaletteCommand {
@@ -347,6 +455,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "V",
         group: CommandGroup::View,
         action: Action::DiffVisualStart,
+        aliases: &["visual", "select lines"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -354,6 +463,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "y",
         group: CommandGroup::View,
         action: Action::ExportComments,
+        aliases: &["yank", "export"],
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
@@ -361,11 +471,20 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         keys: "'",
         group: CommandGroup::View,
         action: Action::CopyEntityReference,
+        aliases: &["yank", "link"],
+        scope: CommandScope::Any,
+    },
+    PaletteCommand {
+        title: "Quit",
+        keys: "q",
+        group: CommandGroup::View,
+        action: Action::Quit,
+        aliases: &["exit", "close app"],
         scope: CommandScope::Any,
     },
 ];
 
-/// Case-insensitive substring on title, key chips, and group.
+/// Case-insensitive substring on title, key chips, group, and aliases.
 pub fn command_matches(command: &PaletteCommand, query: &str) -> bool {
     let q = query.trim().to_ascii_lowercase();
     if q.is_empty() {
@@ -374,6 +493,10 @@ pub fn command_matches(command: &PaletteCommand, query: &str) -> bool {
     command.title.to_ascii_lowercase().contains(&q)
         || command.keys.to_ascii_lowercase().contains(&q)
         || command.group.title().to_ascii_lowercase().contains(&q)
+        || command
+            .aliases
+            .iter()
+            .any(|alias| alias.to_ascii_lowercase().contains(&q))
 }
 
 /// Filtered catalog in table order. Empty query keeps every command.
@@ -444,7 +567,7 @@ impl CommandPaletteState {
         self.selected().map(|command| &command.action)
     }
 
-    /// Clamp like the branch picker.
+    /// Move the highlight by `delta`, clamped like the branch picker.
     pub fn move_cursor(&mut self, delta: i32) {
         let len = self.visible().len();
         if len == 0 {
@@ -560,6 +683,48 @@ mod tests {
                 "/",
                 CommandGroup::Move,
                 Action::SearchStart,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Next match",
+                "n",
+                CommandGroup::Move,
+                Action::SearchNext,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Previous match",
+                "N",
+                CommandGroup::Move,
+                Action::SearchPrev,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Fold subtree",
+                "zz",
+                CommandGroup::Move,
+                Action::FoldToggleSubtree,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Other pane",
+                "Tab",
+                CommandGroup::Move,
+                Action::FocusRight,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Next tab",
+                "gt",
+                CommandGroup::Move,
+                Action::NextTab,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Previous tab",
+                "gT",
+                CommandGroup::Move,
+                Action::PreviousTab,
                 CommandScope::NoHighlight,
             ),
             (
@@ -759,6 +924,20 @@ mod tests {
                 CommandScope::NoHighlight,
             ),
             (
+                "Narrow tree",
+                "<",
+                CommandGroup::View,
+                Action::ResizeTree(-1),
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Widen tree",
+                ">",
+                CommandGroup::View,
+                Action::ResizeTree(1),
+                CommandScope::NoHighlight,
+            ),
+            (
                 "Wrap / unwrap",
                 "\\",
                 CommandGroup::View,
@@ -828,6 +1007,13 @@ mod tests {
                 Action::CopyEntityReference,
                 CommandScope::Any,
             ),
+            (
+                "Quit",
+                "q",
+                CommandGroup::View,
+                Action::Quit,
+                CommandScope::Any,
+            ),
         ];
         assert_eq!(PALETTE_COMMANDS.len(), wanted.len());
         for (i, (title, keys, group, action, scope)) in wanted.iter().enumerate() {
@@ -854,6 +1040,53 @@ mod tests {
             .iter()
             .filter(|c| c.group == CommandGroup::Move)
             .all(|c| command_matches(c, "move")));
+    }
+
+    #[test]
+    fn aliases_find_rows_their_titles_do_not_name() {
+        for (query, title) in [
+            ("compare", "Diff vs default"),
+            ("compare", "Diff vs branch…"),
+            ("quit", "Quit"),
+            ("exit", "Quit"),
+            ("discard", "Revert"),
+            ("restore", "Revert"),
+            ("checkout", "Branch picker"),
+            ("switch", "Branch picker"),
+            ("theme", "Cycle theme"),
+            ("color", "Cycle theme"),
+            ("mouse", "Toggle mouse"),
+            ("reload", "Refresh"),
+            ("unstage", "Unstage"),
+            ("add", "Stage"),
+            ("stash", "Stash menu"),
+            ("merge", "Merge into HEAD"),
+            ("worktree", "Remove worktree"),
+            ("help", "Keymap help"),
+            ("keys", "Keymap help"),
+            ("find", "Search focused pane"),
+            ("wrap", "Wrap / unwrap"),
+            ("split", "Inline / split"),
+            ("comment", "Comment"),
+            ("yank", "Copy comments"),
+            ("yank", "Copy entity reference"),
+        ] {
+            assert!(titles(query).contains(&title), "{query} -> {title}");
+        }
+        assert_eq!(titles("close app"), vec!["Quit"]);
+    }
+
+    #[test]
+    fn filter_typing_j_and_k_matches_rows_like_any_letter() {
+        let mut palette = CommandPaletteState::new(PaletteOpenedBy::Colon);
+        for c in "keymap".chars() {
+            palette.push_char(c);
+        }
+        assert_eq!(palette.filter, "keymap");
+        assert_eq!(palette.selected().map(|c| c.title), Some("Keymap help"));
+        palette.filter = String::new();
+        palette.push_char('j');
+        assert!(palette.visible().is_empty(), "no row names a j");
     }
 
     #[test]

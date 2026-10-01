@@ -66,10 +66,10 @@ fn graph_focused_diverged_before_create(screen: &str) -> bool {
         && !crumb.contains(&format!("created {BRANCH}"))
         && status.contains("drill")
         && status.contains("Esc")
-        && status.contains("back")
+        && (status.contains("← tree") || status.contains("Esc   clear"))
         && overlay_at_hash(screen).is_none()
         && !screen.contains("Create branch")
-        && !screen.contains("Enter confirm")
+        && !screen.contains("Enter create")
         && focusbox_still_on_keep(screen)
         && no_wrong_create_overlays(screen)
 }
@@ -92,7 +92,7 @@ fn create_branch_overlay(screen: &str, name_line: &str) -> bool {
         && overlay_at_hash(screen).is_some()
         && screen.contains("Create branch")
         && screen.contains(name_line)
-        && screen.contains("Enter confirm")
+        && screen.contains("(no checkout)")
         && screen.contains("Esc cancel")
         && graph_cursor_on(screen, "main-leaf-commit")
         && screen.contains("main-leaf-commit")
@@ -122,7 +122,7 @@ fn documented_graph_create_branch_at(screen: &str, overlay_hash: &str) -> bool {
         && !crumb.contains("Already on")
         && overlay_at_hash(screen).is_none()
         && !screen.contains("Create branch")
-        && !screen.contains("Enter confirm")
+        && !screen.contains("Enter create")
         && !screen.contains("Esc cancel")
         && main_leaf_chip_has_new_ref(screen)
         && screen.contains("[+feature/keep]")
@@ -131,20 +131,20 @@ fn documented_graph_create_branch_at(screen: &str, overlay_hash: &str) -> bool {
         && tree_has(screen, "focusbox")
         && status.contains("drill")
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && status.contains("create branch")
         && no_wrong_create_overlays(screen)
 }
 
 /// Graph `c` creates a local ref at the focused commit (no checkout).
 ///
-/// Docs: Help GIT `C` is picker create+checkout. Keymap: graph-focused `c`
+/// Docs: Help GIT `c` is create branch at graph commit (no checkout). Keymap: graph-focused `c`
 /// on a commit is `Action::GraphCreateBranch`. Overlay is the name prompt
-/// with `Create branch at <short>` and `Enter confirm · Esc cancel`.
+/// with `Create branch at <short>` and `Enter create at <short> (no checkout) · Esc cancel`.
 /// Enter runs `create_branch_at` (`git branch -- name commitId`). HEAD
 /// stays on the current branch. Tree-file `c` is a no-op
-/// (`pty_c_on_tree_file_is_not_commit`). Picker `C` stays
-/// `pty_branch_picker_shift_c_creates`.
+/// (`pty_c_on_tree_file_is_not_commit`). The tree picker create row is
+/// `pty_branch_picker_create_row_creates`.
 ///
 /// After first paint the cursor is already on `focusbox`. Tab focuses
 /// the graph. `/` lands on diverged `main-leaf-commit` (not HEAD
@@ -180,7 +180,7 @@ fn pty_graph_c_creates_branch_at_commit() {
     tui.key('c');
     tui.wait_pred(
         empty_create_branch_at_overlay,
-        "graph c opens Create branch at <short> (not picker C, not a write)",
+        "graph c opens Create branch at <short> (not the branch picker, not a write)",
         WAIT,
     );
     tui.wait_ms(SETTLE_MS);

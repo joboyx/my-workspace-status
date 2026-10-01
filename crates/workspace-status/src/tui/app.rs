@@ -25,10 +25,11 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 use crate::config::WorkspaceStatusConfig;
 use crate::discovery::{collect_snapshots, process_repo, RepoCheckoutMeta};
 use crate::git::{
-    checkout_branch, diff_commit_file_ctx, diff_compare_file_ctx, diff_stash_file_ctx,
-    fast_forward_to_remote_ref, git_diff_args, list_commit_name_status, list_compare_name_status,
-    list_stash_name_status, list_worktree_name_status, merge_base, merge_into_head,
-    repo_has_local_changes, rev_parse_commit, rev_parse_quiet, MergeIntoHeadResult, NameStatus,
+    ahead_behind, checkout_branch, diff_commit_file_ctx, diff_compare_file_ctx,
+    diff_stash_file_ctx, fast_forward_to_remote_ref, git_diff_args, list_commit_name_status,
+    list_compare_name_status, list_stash_name_status, list_worktree_name_status, merge_base,
+    merge_into_head, repo_has_local_changes, rev_parse_commit, rev_parse_quiet,
+    MergeIntoHeadResult, NameStatus,
 };
 use crate::snapshot::{
     build_workspace_snapshot, repo_snapshots_from_workspace, CheckoutKind, FileChange,
@@ -48,6 +49,7 @@ use super::graph_load::{
 use super::keys::KeyStrokeOrigin;
 use super::keys::{event_to_action_with, is_held_nav_backlog};
 use super::state::AppState;
+use super::status::StatusMessage;
 use super::tabs::{base_ref_not_found, no_merge_base, HEAD_HAS_NO_COMMIT};
 use super::tty::{disable_mouse, enable_mouse, poll_event, read_event, read_event_origin};
 #[cfg(test)]
@@ -130,6 +132,27 @@ pub(crate) fn terminal_size_rect() -> Rect {
 }
 
 pub(crate) fn map_event(state: &AppState, event: &crossterm::event::Event) -> Action {
+    use crossterm::event::{Event, KeyCode, KeyModifiers};
+    // Below the minimum size only the resize notice paints. Panes,
+    // overlays, confirms, and prompts are hidden, so only keys that close
+    // or quit (and resize) map: a blind `s`, `P`, or hidden `y` does nothing.
+    if state.too_small {
+        let closes = match event {
+            Event::Key(key) => match key.code {
+                KeyCode::Esc => true,
+                KeyCode::Char('q') => !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT),
+                KeyCode::Char('c') => key.modifiers.contains(KeyModifiers::CONTROL),
+                _ => false,
+            },
+            Event::Resize(..) => true,
+            _ => false,
+        };
+        if !closes {
+            return Action::None;
+        }
+    }
     event_to_action_with(
         event,
         state.input_mode(),
@@ -424,9 +447,11 @@ pub(crate) enum CheckoutCompute {
     Confirm {
         local_branch: String,
         remote_ref: String,
+        ahead_behind: Option<(usize, usize)>,
     },
+    /// HEAD moved. `status` is ok, or warn when the fast-forward did not happen.
     Done {
-        status: String,
+        status: StatusMessage,
     },
 }
 
@@ -456,14 +481,20 @@ pub(crate) fn compute_checkout(
                 clear_picker: true,
             };
         }
-        let ff = fast_forward_to_remote_ref(remote_ref, dir);
-        return CheckoutCompute::Done {
-            status: if ff {
-                format!("Checked out {selected_name} and fast-forwarded to {remote_ref}")
-            } else {
-                format!("Checked out {selected_name}; could not fast-forward to {remote_ref}")
-            },
+        let status = if fast_forward_to_remote_ref(remote_ref, dir) {
+            StatusMessage::ok(format!(
+                "Checked out {selected_name} and fast-forwarded to {remote_ref}"
+            ))
+        } else {
+            let reason = match ahead_behind("HEAD", remote_ref, dir) {
+                Some((ahead, _)) if ahead > 0 => format!(": local has commits {remote_ref} lacks"),
+                _ => String::new(),
+            };
+            StatusMessage::warn(format!(
+                "Checked out {selected_name}; could not fast-forward to {remote_ref}{reason}"
+            ))
         };
+        return CheckoutCompute::Done { status };
     }
 
     let local_name = checkout_name_for_ref(selected_name);
@@ -483,13 +514,17 @@ pub(crate) fn compute_checkout(
             local_branch,
             remote_ref,
         } => CheckoutCompute::Confirm {
+            ahead_behind: local_sha
+                .as_deref()
+                .zip(remote_sha.as_deref())
+                .and_then(|(local, remote)| ahead_behind(local, remote, dir)),
             local_branch,
             remote_ref,
         },
         GraphCheckoutPlan::Checkout { branch } => {
             if checkout_branch(&branch, dir) {
                 CheckoutCompute::Done {
-                    status: format!("Checked out {branch}"),
+                    status: StatusMessage::ok(format!("Checked out {branch}")),
                 }
             } else {
                 CheckoutCompute::Failed {
@@ -508,7 +543,7 @@ pub(crate) fn apply_checkout_compute(
 ) -> bool {
     match result {
         CheckoutCompute::Dirty => {
-            state.status = DIRTY_WORKTREE_STATUS.into();
+            state.status = StatusMessage::warn(DIRTY_WORKTREE_STATUS);
             false
         }
         CheckoutCompute::Failed {
@@ -518,15 +553,21 @@ pub(crate) fn apply_checkout_compute(
             if clear_picker {
                 state.branch_picker = None;
             }
-            state.status = status;
+            state.status = StatusMessage::error(status);
             false
         }
         CheckoutCompute::Confirm {
             local_branch,
             remote_ref,
+            ahead_behind,
         } => {
             state.branch_picker = None;
-            let _ = state.confirm_checkout_if_out_of_sync(repo, local_branch, Some(remote_ref));
+            let _ = state.confirm_checkout_if_out_of_sync(
+                repo,
+                local_branch,
+                Some(remote_ref),
+                ahead_behind,
+            );
             false
         }
         CheckoutCompute::Done { status } => {
@@ -553,7 +594,7 @@ pub(crate) fn compute_merge(dir: &Path, rev: &str) -> MergeCompute {
 pub(crate) fn apply_merge_compute(state: &mut AppState, label: &str, result: MergeCompute) -> bool {
     match result {
         MergeCompute::Dirty => {
-            state.status = DIRTY_WORKTREE_STATUS.into();
+            state.status = StatusMessage::warn(DIRTY_WORKTREE_STATUS);
             false
         }
         MergeCompute::AlreadyUpToDate => {
@@ -561,19 +602,19 @@ pub(crate) fn apply_merge_compute(state: &mut AppState, label: &str, result: Mer
             false
         }
         MergeCompute::FastForward => {
-            state.status = format!("Fast-forwarded to {label}");
+            state.status = StatusMessage::ok(format!("Fast-forwarded to {label}"));
             true
         }
         MergeCompute::MergeCommit => {
-            state.status = format!("Merged {label}");
+            state.status = StatusMessage::ok(format!("Merged {label}"));
             true
         }
         MergeCompute::Conflict => {
-            state.status = "Merge conflict — resolve in the worktree".into();
+            state.status = StatusMessage::warn("Merge conflict — resolve in the worktree");
             true
         }
         MergeCompute::Failed(err) => {
-            state.status = format!("merge failed: {err}");
+            state.status = StatusMessage::error(format!("merge failed: {err}"));
             false
         }
     }
@@ -731,8 +772,13 @@ pub(crate) fn compute_compare_diff(
 
 fn head_file_diff(dir: &Path, path: &str, context: Option<u32>) -> DiffContent {
     let args = git_diff_args(&["diff", "HEAD"], path, context);
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    DiffContent::from_unified(crate::git::exec_git(&refs, dir))
+    match super::diff::git_diff_text(&args, dir) {
+        Ok(text) => DiffContent::from_unified(text),
+        Err(reason) => DiffContent {
+            error: Some(reason),
+            ..DiffContent::default()
+        },
+    }
 }
 
 pub(crate) fn drain_pending_events() {
@@ -1004,6 +1050,8 @@ mod tests {
     use crate::testutil::{git, init_repo};
     use crate::tui::action::{Action, Effect};
     use crate::tui::branches::DIRTY_WORKTREE_STATUS;
+    use crate::tui::state::PendingConfirm;
+    use crate::tui::status::StatusKind;
     use std::fs;
     use std::process::Command;
     use std::sync::mpsc;
@@ -1190,7 +1238,13 @@ mod tests {
             "origin/foo".into(),
             None,
         ));
-        assert!(app.confirm.is_some());
+        assert!(matches!(
+            app.confirm,
+            Some(PendingConfirm::CheckoutOutOfSync {
+                ahead_behind: Some((0, 1)),
+                ..
+            })
+        ));
         match app.dispatch(Action::ConfirmYes) {
             Effect::CheckoutBranch {
                 selected_name,
@@ -1211,6 +1265,49 @@ mod tests {
         }
         assert_eq!(exec_git(&["branch", "--show-current"], &repo_dir), "foo");
         assert_eq!(exec_git(&["rev-parse", "HEAD"], &repo_dir), remote_sha);
+        assert_eq!(app.status.kind(), StatusKind::Ok);
+
+        // Local-only commit: the confirm counts it, and the fast-forward
+        // failure says why instead of a bare "could not".
+        fs::write(repo_dir.join("local.txt"), "local\n").unwrap();
+        git(&repo_dir, &["add", "local.txt"]);
+        git(&repo_dir, &["commit", "-q", "-m", "local"]);
+        let local_ahead = exec_git(&["rev-parse", "HEAD"], &repo_dir);
+        git(&repo_dir, &["checkout", "-q", "main"]);
+        assert!(!run_checkout_branch(
+            &mut app,
+            &workspace,
+            "app".into(),
+            "origin/foo".into(),
+            None,
+        ));
+        assert!(matches!(
+            app.confirm,
+            Some(PendingConfirm::CheckoutOutOfSync {
+                ahead_behind: Some((1, 0)),
+                ..
+            })
+        ));
+        match app.dispatch(Action::ConfirmYes) {
+            Effect::CheckoutBranch {
+                selected_name,
+                fast_forward_ref,
+                repo,
+            } => assert!(run_checkout_branch(
+                &mut app,
+                &workspace,
+                repo,
+                selected_name,
+                fast_forward_ref,
+            )),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            app.status,
+            "Checked out foo; could not fast-forward to origin/foo: local has commits origin/foo lacks"
+        );
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+        assert_eq!(exec_git(&["rev-parse", "HEAD"], &repo_dir), local_ahead);
         let _ = fs::remove_dir_all(&root);
     }
 

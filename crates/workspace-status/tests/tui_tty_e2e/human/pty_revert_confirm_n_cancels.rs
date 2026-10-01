@@ -73,8 +73,8 @@ fn documented_revert_n_cancelled(screen: &str) -> bool {
 /// tracked-only file shows the tracked line and `y` / `n`, with no
 /// untracked line and no `Y`. Keymap: `x` is `Action::Revert` (opens
 /// `PendingConfirm::Revert`); confirm `n` is `Action::ConfirmNo`
-/// (`revert cancelled`, no write). `y`/`Enter` would `git restore`
-/// tracked files (`reverted …`).
+/// (`revert cancelled`, no write). `y` would `git restore` tracked files
+/// (`reverted …`); Enter only names that key.
 ///
 /// After first paint the cursor is already on the dirty README. Do not
 /// `/` search (`n` would be next-match if confirm never armed). A no-op,

@@ -30,19 +30,35 @@ pub fn pull_behind_repos(cwd: &Path, repos: &[String]) -> Vec<String> {
     lines
 }
 
+/// How [`switch_repo_to_default_branch`] ended for one repo.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SwitchOutcome {
+    /// Checked out the default branch (the follow-up pull may still fail).
+    Switched,
+    /// Left alone on purpose: `dirty` (uncommitted changes) or already on default.
+    Skipped(String),
+    /// Could not switch. Holds the short reason.
+    Failed(String),
+}
+
+/// Check out the default branch of `repo_path` and pull it. Returns the
+/// outcome plus the CLI progress lines.
 pub fn switch_repo_to_default_branch(
     repo_path: &str,
     current_branch: &str,
     cwd: &Path,
     override_name: Option<&str>,
-) -> (bool, Vec<String>) {
+) -> (SwitchOutcome, Vec<String>) {
     let repo_dir = cwd.join(repo_path);
     let mut lines = Vec::new();
     let Some(default_branch) = get_default_branch(&repo_dir, override_name) else {
         lines.push(format!(
             "  ⚠️ {repo_path}: No default branch found (develop/main/master)"
         ));
-        return (false, lines);
+        return (
+            SwitchOutcome::Failed("no default branch found".into()),
+            lines,
+        );
     };
 
     if current_branch == default_branch {
@@ -65,14 +81,14 @@ pub fn switch_repo_to_default_branch(
         } else {
             lines.push("    ⚠️ Pull failed or no updates".to_string());
         }
-        return (false, lines);
+        return (SwitchOutcome::Skipped("already on default".into()), lines);
     }
 
     if repo_has_local_changes(&repo_dir) {
         lines.push(format!(
             "  ⚠️ {repo_path} ({current_branch}): Has uncommitted changes, skipping"
         ));
-        return (false, lines);
+        return (SwitchOutcome::Skipped("dirty".into()), lines);
     }
 
     lines.push(format!(
@@ -81,7 +97,10 @@ pub fn switch_repo_to_default_branch(
     let _ = exec_git_checked(&["fetch", "--quiet", "origin", &default_branch], &repo_dir);
     if !checkout_branch(&default_branch, &repo_dir) {
         lines.push("    ⚠️ Failed to switch (branch may not exist)".to_string());
-        return (false, lines);
+        return (
+            SwitchOutcome::Failed(format!("could not check out {default_branch}")),
+            lines,
+        );
     }
     lines.push("    ✅ Switched successfully".to_string());
     lines.push("    Pulling latest...".to_string());
@@ -99,5 +118,5 @@ pub fn switch_repo_to_default_branch(
     } else {
         lines.push("    ✅ Already up to date".to_string());
     }
-    (true, lines)
+    (SwitchOutcome::Switched, lines)
 }

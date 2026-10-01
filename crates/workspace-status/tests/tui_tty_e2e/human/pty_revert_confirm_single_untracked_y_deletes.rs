@@ -9,11 +9,11 @@ use crate::support::{
 
 const UNTRACKED: &str = "new.txt";
 
-/// Confirm chip row: the box line that ends with `n cancel`.
+/// Confirm chip row: the box line that ends with `n Esc cancel`.
 fn chip_row(screen: &str) -> String {
     screen
         .lines()
-        .find(|line| line.contains(" n  cancel"))
+        .find(|line| line.contains(" Esc  cancel"))
         .unwrap_or_default()
         .to_string()
 }
@@ -49,7 +49,7 @@ fn untracked_deleted(screen: &str) -> bool {
 ///
 /// Configuration: `x` confirms with counts and offers only the keys that
 /// apply. One untracked file with nothing tracked shows `y delete` and
-/// `n cancel`; Shift+Y is not shown, so it keeps the box open.
+/// `n Esc cancel`; Shift+Y is not shown, so it keeps the box open.
 ///
 /// Daily seed plus untracked `new.txt`. `j` moves from README to
 /// `new.txt`. Disk truth is the oracle: the file survives Shift+Y and is

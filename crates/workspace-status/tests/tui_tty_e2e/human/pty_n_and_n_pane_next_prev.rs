@@ -62,7 +62,7 @@ fn pty_n_and_n_pane_next_prev() {
             screen.contains("MOVE")
                 && screen.contains("n   N")
                 && screen.contains("next / prev match")
-                && screen.contains("search focused pane")
+                && screen.contains("search focused")
                 && screen.contains("Tab")
                 && screen.contains("other pane")
         },

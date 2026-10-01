@@ -10,7 +10,9 @@ use crate::git::{
     list_worktrees_porcelain, resolve_default_branch_name, resolve_default_branch_tip_ref,
     rev_parse_quiet,
 };
-use crate::helpers::{is_default_branch, DETACHED_HEAD_BRANCH, UNKNOWN_HEAD_BRANCH};
+use crate::helpers::{
+    is_default_branch, DETACHED_HEAD_BRANCH, STATUS_FAILED_NOTE, UNKNOWN_HEAD_BRANCH,
+};
 use crate::parallel::{env_fetch_concurrency, map_with_concurrency};
 use crate::snapshot::{CheckoutKind, FileChange, RepoSnapshot, SyncStatus};
 use crate::worktrees::{
@@ -200,7 +202,7 @@ fn failed_repo_snapshot(
         repo: repo_path.to_string(),
         branch: UNKNOWN_HEAD_BRANCH.to_string(),
         sync_status: SyncStatus::NoUpstream,
-        sync_note: "status failed".to_string(),
+        sync_note: STATUS_FAILED_NOTE.to_string(),
         head: String::new(),
         has_unstaged: false,
         has_staged: false,

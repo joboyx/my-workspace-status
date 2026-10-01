@@ -12,7 +12,7 @@ fn help_compact(text: &str) -> String {
 /// Independent of `HELP_GROUPS` so a wrong overlay still fails.
 const HELP_MOVE_ROWS: &[(&str, &str)] = &[
     ("j k", "down / up"),
-    ("h l", "fold · pan lists/diff · Shift+←→ tree"),
+    ("h l", "fold · pan lists/diff · Shift-←→ tree"),
     ("z", "toggle fold (instant; no-op on graph/diff)"),
     ("zz", "toggle subtree (no-op on graph/diff)"),
     ("gg G", "top / bottom of focused pane"),
@@ -36,7 +36,7 @@ const HELP_GIT_ROWS: &[(&str, &str)] = &[
     ("d", "default branch"),
     ("b", "depth 0 picker · graph local/origin/*"),
     ("m", "graph merge into HEAD"),
-    ("C", "create (in picker)"),
+    ("c", "create branch at graph commit (no checkout)"),
     ("W", "remove linked worktree"),
     ("r", "refresh now"),
     ("a p D", "focused stash apply/pop/drop"),
@@ -44,6 +44,7 @@ const HELP_GIT_ROWS: &[(&str, &str)] = &[
 
 const HELP_VIEW_ROWS: &[(&str, &str)] = &[
     ("i \\ M", "inline / split · wrap · msg"),
+    ("< >", "narrow / widen the tree pane"),
     ("t", "flat / tree · Staged split"),
     (".", "show / hide ignored repos"),
     ("T", "cycle theme"),
@@ -51,48 +52,51 @@ const HELP_VIEW_ROWS: &[(&str, &str)] = &[
     ("o O", "focus branches / clear (graph · repo)"),
     ("PgUp PgDn", "page focused pane"),
     ("Ctrl-u Ctrl-d", "page focused ±5"),
-    ("m", "mouse · split/bar/drag copy"),
-    ("; Ctrl-R", "comment focused row / line"),
+    ("m", "mouse on/off (graph commit: merge)"),
+    (";", "comment row/line · Ctrl-r resolves in box"),
     ("V", "highlight diff lines for ; / s / u / x / :"),
     ("y", "copy comments as markdown"),
     ("'", "copy entity reference"),
-    ("Esc", "back / unfocus · never quit"),
+    ("Esc", "back / unfocus · right-click · never quit"),
     ("Enter dblclick", "focus right / drill"),
     ("? Ctrl-k :", "help · command palette"),
     ("Tab", "other pane"),
     ("q", "quit"),
-    ("Ctrl-C Ctrl-C", "quit (press twice)"),
+    ("Ctrl-c Ctrl-c", "quit (press twice)"),
 ];
 
 /// Split the painted overlay into MOVE / GIT / VIEW columns.
 ///
-/// Inner width and column width follow `help_inner_width` /
-/// `help_column_width` at the PTY default. Footer is excluded so
-/// `/ search help` does not leak into the keymap columns.
+/// Columns are not even (`help_column_widths` widens the long one), so
+/// each column starts at its title icon (`{icon}  {title}`) on the header
+/// row. Footer is excluded so `/ search help` does not leak into the
+/// keymap columns.
 fn help_group_columns(screen: &str) -> Option<[String; 3]> {
     let lines: Vec<&str> = screen.lines().collect();
     let start = lines
         .iter()
         .position(|line| line.contains("MOVE") && line.contains("GIT") && line.contains("VIEW"))?;
     let inner_w = (COLS as usize).saturating_sub(4);
-    let col_w = inner_w / 3;
+    let header: Vec<char> = lines[start].chars().skip(2).take(inner_w).collect();
+    let title_at = |title: &str| -> Option<usize> {
+        let title: Vec<char> = title.chars().collect();
+        header
+            .windows(title.len())
+            .position(|window| window == title.as_slice())
+            .map(|at| at.saturating_sub(3))
+    };
+    let bounds = [0, title_at("GIT")?, title_at("VIEW")?, inner_w];
     let mut cols = [String::new(), String::new(), String::new()];
     for line in &lines[start..] {
         if line.contains("/ search help") || line.contains("Esc closes") {
             break;
         }
-        let chars: Vec<char> = line.chars().collect();
-        if chars.len() < 2 + col_w {
-            continue;
-        }
-        let inner: Vec<char> = chars.into_iter().skip(2).take(inner_w).collect();
+        let inner: Vec<char> = line.chars().skip(2).take(inner_w).collect();
         for (idx, col) in cols.iter_mut().enumerate() {
-            let from = idx * col_w;
-            let to = (from + col_w).min(inner.len());
-            if from < inner.len() {
-                col.extend(inner[from..to].iter());
-                col.push('\n');
-            }
+            let from = bounds[idx].min(inner.len());
+            let to = bounds[idx + 1].min(inner.len());
+            col.extend(inner[from..to].iter());
+            col.push('\n');
         }
     }
     Some(cols)

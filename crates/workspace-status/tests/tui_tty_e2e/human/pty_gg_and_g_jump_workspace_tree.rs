@@ -5,7 +5,7 @@ use crate::support::{
 };
 
 fn help_lists_gg_g_top_bottom(screen: &str) -> bool {
-    screen.contains("gg   G") && screen.contains("top / bottom of focused")
+    screen.contains("gg   G") && screen.contains("top / bottom of")
 }
 
 /// Help MOVE lists `gg G` as top/bottom of the focused pane. CSI-u `G`
@@ -49,7 +49,7 @@ fn pty_gg_and_g_jump_workspace_tree() {
         |screen| {
             screen.contains("MOVE")
                 && help_lists_gg_g_top_bottom(screen)
-                && screen.contains("top / bottom of focused")
+                && screen.contains("top / bottom of")
         },
         "help MOVE lists gg G as top/bottom of focused pane",
         WAIT,

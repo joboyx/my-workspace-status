@@ -28,7 +28,7 @@ whatever `visible_rows` the model holds.
 | `GraphWidget` | Ratatui `Widget` over a `GraphModel` |
 | `graph_scrollbar_thumb` | Thumb offset/length matching a painted bar (TUI hit-test, vertical or horizontal) |
 | `graph_col_max` | Max `col_offset` for the longest label in the pane |
-| `graph_vscroll_visible` / `graph_hscroll_visible` | Show the vertical bar only after leaving the top; the horizontal bar only after leaving the left edge |
+| `graph_vscroll_visible` / `graph_hscroll_visible` | Show the vertical bar whenever the painted lines overflow the list (or it has left the top); the horizontal bar only after leaving the left edge |
 | `Action` | `ToggleShowIgnored` and `SetShowIgnored` |
 | `Effect` | `None` today. Dispatch stays pure. |
 
@@ -36,7 +36,14 @@ whatever `visible_rows` the model holds.
 The widget does not bind keys or run an event loop. The TUI hit-tests the
 vertical and horizontal scrollbars through `tui/split.rs` (`hit_split` /
 `SplitDrag::GraphScrollbar` / `GraphHScrollbar`). The vertical bar is painted
-only when `scroll > 0`; the horizontal bar only when `col_offset > 0`.
+whenever the painted lines overflow the list, at the top too; the horizontal
+bar only when `col_offset > 0`, because it paints over the last list row.
+`painted_line_count` gives the painted line count without a paint (a commit
+or stash row is a node line plus a spacer, other rows one line; width does
+not change it). The widget decides the vertical bar from that count, then
+paints once at the width the bar leaves. The TUI records the same count for
+its hit boxes, so a graph frame paints the model once. The TUI pan clamp
+reads the count the last frame recorded (`graph_content_len`).
 
 `GraphWidget::gutter_width` caps painted gutter columns. Topology still
 uses the full lane model; every row shares the same left-aligned clip. `GraphWidget::loading_older` paints
@@ -45,7 +52,9 @@ gutter cell from `GraphCell.color_lane`; an empty slice uses
 `DEFAULT_LANE_COLORS`. The TUI passes the active built-in theme's eight
 colours (`T` cycles).
 `GraphWidget::search_matches` paints the filter/search background on
-selectable visible-row indexes. Spacers stay
+selectable visible-row indexes and paints their rails and label in the
+filter foreground, so lane and chip colours that equal the background stay
+readable. Spacers stay
 unhighlighted. `GraphWidget::flash_rows` paints the fade background on
 the same visible-row indexes, including spacers (a flashing commit
 keeps its spacer). Flash background wins over cursor and search.
@@ -129,7 +138,7 @@ left (local + matching `origin/*` merge into one chip; unmatched remotes
 stay as `[origin/…]`). On a commit with several refs, the checked-out
 branch chip is first, then default-branch / other locals / remotes / tags.
 Muted short hash / relative date / author sit on the right. Narrow panes drop hash, then date, then author, and keep refs.
-Relative dates: `just now` / `Nm` / `Nh` through 3 hours, then local `YYYY-MM-DD HH:MM` (operator timezone). Search still matches that painted clock and a stable UTC `YYYY-MM-DD HH:MM`. Narrow spacers keep painting a leftover **branch or tag** chip when part of its name still fits: truncate that name with `…` and keep the brackets (`[feat…]`). `[+N]` is only the count of chips that are **fully hidden** after the visible (full or truncated) chips — a merely truncated chip does not count toward `N`, and `[+N]` is omitted when nothing else is hidden (not muted `+N`). Overflow colour/bold still apply when `N > 0`. The spacer is capped to the pane width so the row does not grow with extra refs. Long subjects clip to the pane; `h` / `l` (and Shift+Left / Shift+Right) pan the label while the gutter stays put. When the gutter cap is tighter than topology, every row shares the same left-aligned clip (`clip_gutter_shared`) so vertical rails stay in the same columns. The selection footer still lists every full ref.
+Relative dates: `just now` / `Nm` / `Nh` through 3 hours, then local `YYYY-MM-DD HH:MM` (operator timezone). Search still matches that painted clock and a stable UTC `YYYY-MM-DD HH:MM`. Narrow spacers keep painting a leftover **branch or tag** chip when part of its name still fits: truncate that name with `…` and keep the brackets (`[feat…]`). `[+N]` is only the count of chips that are **fully hidden** after the visible (full or truncated) chips — a merely truncated chip does not count toward `N`, and `[+N]` is omitted when nothing else is hidden (not muted `+N`). Overflow colour/bold still apply when `N > 0`. The spacer is capped to the pane width so the row does not grow with extra refs. Long subjects clip to the pane; `h` / `l` (and Shift-Left / Shift-Right) pan the label while the gutter stays put. When the gutter cap is tighter than topology, every row shares the same left-aligned clip (`clip_gutter_shared`) so vertical rails stay in the same columns. The selection footer still lists every full ref.
 The spacer is not a second selectable row; cursor, search, `j`/`k`,
 and click treat it as the parent commit.
 

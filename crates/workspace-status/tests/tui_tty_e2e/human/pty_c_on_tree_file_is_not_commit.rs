@@ -22,7 +22,7 @@ fn local_branch_names(repo: &Path) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// Wrong `c` results: graph create-branch, picker `C`, commit overlay.
+/// Wrong `c` results: graph create-branch, the branch picker, commit overlay.
 fn tree_file_c_is_not_create_or_commit(screen: &str) -> bool {
     !screen.contains("Create branch")
         && !status_row(screen).contains("create branch")
@@ -43,7 +43,7 @@ fn help_after_tree_file_c(screen: &str) -> bool {
     screen.contains("MOVE")
         && screen.contains("GIT")
         && screen.contains("VIEW")
-        && screen.contains("create (in picker)")
+        && screen.contains("create branch at graph")
         && screen.contains("graph merge into HEAD")
         && !screen.contains("Create branch")
         && !screen.contains("commit message")
@@ -54,18 +54,19 @@ fn help_after_tree_file_c(screen: &str) -> bool {
 ///
 /// Docs: `c` creates a branch on a focused graph commit (name overlay,
 /// ref only, no checkout). It is a no-op on a tree, file, or workspace
-/// row. Help GIT lists picker `C` ("create (in picker)"); lowercase `c`
-/// is not a commit key. Keymap shows `c` / "create branch" only on a
+/// row. Help GIT lists `c` ("create branch at graph commit"); `c` is not a
+/// commit key. Keymap shows `c` / "create branch" only on a
 /// graph commit.
 ///
 /// Live PTY after first paint (cursor already on dirty README, file
 /// diff on the right): `c` left that paint. Status kept file hints
 /// (stage / revert / edit / reviewed), not "create branch". No Create
-/// branch overlay, no picker `C`, no commit overlay. `app` still had
-/// only `main`. `?` still opened help with picker `C`.
+/// branch overlay, no branch picker, no commit overlay. `app` still had
+/// only `main`. `?` still opened help listing graph `c`.
 ///
 /// Graph create-branch (`pty_graph_c_creates_branch_at_commit`) and
-/// picker `C` (`pty_branch_picker_shift_c_creates`) are other tests.
+/// the picker create row (`pty_branch_picker_create_row_creates`) are
+/// other tests.
 /// `/README` then "Create branch" absent, a paint-only tick, or a silent
 /// new ref cannot pass.
 #[test]
@@ -83,7 +84,7 @@ fn pty_c_on_tree_file_is_not_commit() {
     tui.key('c');
     tui.wait_pred(
         tree_file_c_left_file_diff,
-        "tree-file `c` stays on the README file-diff; not create-branch, picker C, or commit",
+        "tree-file `c` stays on the README file-diff; not create-branch, the branch picker, or commit",
         WAIT,
     );
     tui.wait_ms(SETTLE_MS);
@@ -102,7 +103,7 @@ fn pty_c_on_tree_file_is_not_commit() {
     tui.key('?');
     tui.wait_pred(
         help_after_tree_file_c,
-        "`?` after tree-file `c` opens help (picker C); not create-branch or commit",
+        "`?` after tree-file `c` opens help (graph c row); not create-branch or commit",
         WAIT,
     );
 }

@@ -1,6 +1,6 @@
 //! Horizontal pan for tree, graph, commit-file, and file-diff panes.
 
-use workspace_status_graph::graph_col_max;
+use workspace_status_graph::{graph_col_max, graph_hscroll_visible};
 
 use super::super::action::{Action, Effect};
 use super::super::comments::{
@@ -11,6 +11,7 @@ use super::super::diff::{cell_code_width, diff_row_content_width, gutter_width, 
 use super::super::gates::ListFocusTarget;
 use super::super::icons::comment_mark_cols;
 use super::super::search::{apply_pan, list_row_pan_max, max_col_offset};
+use super::super::split::diff_paint_width;
 use super::super::tree::{row_segments, with_comment_mark, with_viewed_mark, NodeKind};
 use super::{AppState, FocusPane};
 use crate::helpers::visible_width;
@@ -75,10 +76,14 @@ impl AppState {
     pub(crate) fn mouse_pan(&mut self, col: u16, delta: i32) {
         if col >= self.layout.right_x {
             self.pan_right_pane(delta);
-        } else if self.diff_can_pan() {
-            self.pan_diff_content(delta);
         } else {
-            self.pan_left_pane(delta);
+            // One row build decides and clamps the diff pan.
+            let max = self.shown_diff_pan_max();
+            if max > 0 {
+                self.diff_col_offset = apply_pan(self.diff_col_offset, delta, max);
+            } else {
+                self.pan_left_pane(delta);
+            }
         }
     }
 
@@ -150,20 +155,7 @@ impl AppState {
         let Some(model) = self.graph.as_ref() else {
             return 0;
         };
-        graph_col_max(model, self.ascii, pane_width, self.graph_scroll > 0)
-    }
-
-    fn diff_line_lens(&self) -> Vec<usize> {
-        let mut lens = Vec::new();
-        for row in self.current_diff_rows() {
-            if let DiffRow::Line { left, right } = row {
-                lens.push(left.text.chars().count());
-                if let Some(right) = right {
-                    lens.push(right.text.chars().count());
-                }
-            }
-        }
-        lens
+        graph_col_max(model, self.ascii, pane_width, self.graph_vscroll_shown())
     }
 
     /// Max `diff_col_offset` for the painted file diff (0 if it fits).
@@ -171,16 +163,37 @@ impl AppState {
         if self.diff_wrap {
             return 0;
         }
-        let rows = self.current_diff_rows();
-        let gutter = gutter_width(&rows).saturating_add(comment_mark_cols(self.ascii));
-        let v_cols = u16::from(self.diff_scroll > 0);
-        let pane_w = self.layout.diff_pane_width.saturating_sub(v_cols).max(1) as usize;
-        let content_w = diff_row_content_width(pane_w);
-        max_col_offset(&self.diff_line_lens(), cell_code_width(content_w, gutter))
+        self.diff_pan_max_for(&self.current_diff_rows())
     }
 
-    fn diff_can_pan(&self) -> bool {
-        (self.right_is_diff() || self.drill.is_diff()) && self.diff_pan_max() > 0
+    /// [`Self::diff_pan_max`] over `rows` the caller already built, so a
+    /// frame does not rebuild every diff row to size the pan. `rows` must be
+    /// this state's [`Self::current_diff_rows`] for the current layout;
+    /// other rows give a pan max for a diff that is not painted.
+    pub(crate) fn diff_pan_max_for(&self, rows: &[DiffRow]) -> usize {
+        if self.diff_wrap {
+            return 0;
+        }
+        let gutter = gutter_width(rows).saturating_add(comment_mark_cols(self.ascii));
+        let pane_w = diff_paint_width(self.layout.diff_pane_width) as usize;
+        let content_w = diff_row_content_width(pane_w);
+        max_col_offset(&diff_line_lens(rows), cell_code_width(content_w, gutter))
+    }
+
+    /// Whether the file diff paints its horizontal scrollbar: only after
+    /// the view leaves the left edge (like the graph bar), so an unpanned
+    /// diff keeps the body row the bar would take.
+    pub(crate) fn diff_hscroll_shown(&self) -> bool {
+        !self.diff_wrap && graph_hscroll_visible(self.diff_col_offset)
+    }
+
+    /// Pan max of the file diff the right pane shows; 0 when it shows none.
+    fn shown_diff_pan_max(&self) -> usize {
+        if self.right_is_diff() || self.drill.is_diff() {
+            self.diff_pan_max()
+        } else {
+            0
+        }
     }
 
     fn pan_diff_content(&mut self, delta: i32) {
@@ -235,4 +248,18 @@ impl AppState {
             _ => Effect::None,
         }
     }
+}
+
+/// Code-cell character counts of every line row (both sides in split).
+fn diff_line_lens(rows: &[DiffRow]) -> Vec<usize> {
+    let mut lens = Vec::new();
+    for row in rows {
+        if let DiffRow::Line { left, right } = row {
+            lens.push(left.text.chars().count());
+            if let Some(right) = right {
+                lens.push(right.text.chars().count());
+            }
+        }
+    }
+    lens
 }

@@ -3,7 +3,7 @@ use crate::seed::daily_workspace;
 use crate::support::{screen_line_from_end, tree_has, GIT_WAIT, WAIT};
 
 /// Pinned chrome copy after the first Ctrl+C (`tui/ctrl_c_exit.rs`).
-const CTRL_C_EXIT_PROMPT: &str = "Press Ctrl+C again to exit";
+const CTRL_C_EXIT_PROMPT: &str = "Press Ctrl-c again to exit";
 
 /// Idle daily seed: tree + status pills, breadcrumb on the penultimate row.
 ///
@@ -18,8 +18,8 @@ fn idle_tree_before_ctrl_c(screen: &str) -> bool {
         && status.contains(" tree")
         && status.contains("? help")
         && status.contains("focus right")
-        && crumb.trim() == "workspace"
-        && !crumb.contains("Ctrl+C")
+        && crumb.trim() == "workspace › app"
+        && !crumb.contains("Ctrl-c")
         && !status.contains(CTRL_C_EXIT_PROMPT)
         && !screen.contains(CTRL_C_EXIT_PROMPT)
         && !screen.contains("MOVE")
@@ -34,8 +34,8 @@ fn first_ctrl_c_pinned_prompt(screen: &str) -> bool {
     let prompt = screen_line_from_end(screen, 1);
     let crumb = screen_line_from_end(screen, 2);
     prompt.trim() == CTRL_C_EXIT_PROMPT
-        && crumb.trim() == "workspace"
-        && !crumb.contains("Ctrl+C")
+        && crumb.trim() == "workspace › app"
+        && !crumb.contains("Ctrl-c")
         && status.contains(" tree")
         && status.contains("? help")
         && status.contains("focus right")
@@ -48,7 +48,7 @@ fn first_ctrl_c_pinned_prompt(screen: &str) -> bool {
 
 /// First Ctrl+C keeps the process and pins the quit prompt.
 ///
-/// Docs + VIEW: `Ctrl-C Ctrl-C` / `quit (press twice)`. First press is not
+/// Docs + VIEW: `Ctrl-c Ctrl-c` / `quit (press twice)`. First press is not
 /// `q` and not the second Ctrl+C. Help overlay lists the row
 /// (`pty_help_overlay`). This claim is idle-tree chrome after one press.
 ///
@@ -58,7 +58,7 @@ fn first_ctrl_c_pinned_prompt(screen: &str) -> bool {
 /// paint both encodings painted the same pinned row.
 ///
 /// Documented result: process stays. Pinned chrome row between the
-/// breadcrumb and the status pills shows `Press Ctrl+C again to exit`.
+/// breadcrumb and the status pills shows `Press Ctrl-c again to exit`.
 /// Tree and pills stay. Fail if the process exits, if the copy is missing
 /// or only a breadcrumb toast, if the status line is replaced, or if
 /// nothing happens. Teardown sends `q` (second Ctrl+C is not claimed).
@@ -78,7 +78,7 @@ fn pty_ctrl_c_prompts_before_quit() {
     tui.ctrl_letter('c');
     tui.wait_pred(
         first_ctrl_c_pinned_prompt,
-        "first CSI-u Ctrl+C pins Press Ctrl+C again to exit between breadcrumb and status",
+        "first CSI-u Ctrl-c pins Press Ctrl-c again to exit between breadcrumb and status",
         WAIT,
     );
     tui.assert_running("after first Ctrl+C (must not quit)");

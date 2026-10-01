@@ -115,11 +115,11 @@ fn tree_picker_checkout_chrome(screen: &str) -> bool {
         && keep_is_checked_out(screen)
         && screen.contains("Branch ")
         && screen.contains("filter:")
-        && screen.contains("C create")
+        && !screen.contains("+ create branch")
         && screen.contains("Enter checkout")
         && screen.contains("Esc close")
         && !screen.contains("Create branch")
-        && !screen.contains("Enter confirm")
+        && !screen.contains("Enter create")
         && !screen.contains("Create branch at")
         && !screen.contains("Checkout at")
         && !crumb_row(screen).contains("Checked out")
@@ -157,9 +157,8 @@ fn documented_tree_picker_enter_checkout(screen: &str) -> bool {
         && !crumb.contains("failed")
         && !crumb.contains("Dirty worktree")
         && !screen.contains("Create branch")
-        && !screen.contains("Enter confirm")
+        && !screen.contains("Enter create")
         && !screen.contains("Enter checkout")
-        && !screen.contains("C create")
         && !screen.contains("filter:")
         && !screen.contains("Branch focusbox")
         && focusbox_tree_on_main(screen)
@@ -170,7 +169,7 @@ fn documented_tree_picker_enter_checkout(screen: &str) -> bool {
         && has_fetch_hint(screen)
         && status.contains("focus right")
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && !status.contains("create branch")
         && no_wrong_picker_overlays(screen)
 }
@@ -183,12 +182,11 @@ fn idle_focusbox_picker_closed(screen: &str) -> bool {
         && keep_is_checked_out(screen)
         && !screen.contains("Branch ")
         && !screen.contains("Enter checkout")
-        && !screen.contains("C create")
         && !screen.contains("filter:")
         && !crumb_row(screen).contains("Checked out")
         && !crumb_row(screen).contains("created ")
         && status.contains(" tree")
-        && status.contains(" split")
+        && !status.contains(" split")
         && status.contains("branch")
         && has_fetch_hint(screen)
         && no_wrong_picker_overlays(screen)
@@ -199,9 +197,9 @@ fn idle_focusbox_picker_closed(screen: &str) -> bool {
 /// Docs: Help GIT `b` is `depth 0 picker · graph local/origin/*`. Keymap:
 /// tree `b` is `Action::Branch` (local picker). Overlay title is
 /// `Branch` (not graph `Checkout at`). Footer is `Enter checkout` /
-/// `C create` / `Esc close`. Type to filter. Enter runs
-/// `checkout_branch` of the selected local name. `C` is create
-/// (`pty_branch_picker_shift_c_creates`). Graph `b` is refs on a
+/// `Esc close`. Type to filter. Enter runs `checkout_branch` of the
+/// selected local name. An exact name adds no create row; the create
+/// row is `pty_branch_picker_create_row_creates`. Graph `b` is refs on a
 /// commit (`pty_graph_b_checkout`).
 ///
 /// After first paint the cursor is already on `focusbox`
