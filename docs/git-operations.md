@@ -41,7 +41,7 @@ Every git subprocess also runs with `GIT_OPTIONAL_LOCKS=0` (set by `git::git_pro
 | `head_equals_ref(cwd, git_ref)` | `rev-parse` of `HEAD` and `git_ref` | boolean | Same-commit as default tip is open, not merged |
 | `resolve_default_branch_tip_ref` / `resolve_default_branch_name` / `get_default_branch` | `rev-parse` / `symbolic-ref` / `show-ref` | branch / tip | Default branch name and tip for classification and `-d` |
 | `create_branch_at(cwd, name, commit_id)` | `branch -- <name> <commitId>` | `Result` | Create a local ref **without** checking it out (graph `c`) |
-| `create_branch_checkout(cwd, name)` | `checkout -b <name> --quiet` | `Result` | Picker `C` |
+| `create_branch_checkout(cwd, name)` | `checkout -b <name> --quiet` | `Result` | Picker `C`. Both create paths check the name first with `branches::branch_name_error` (git `check-ref-format` rules); a bad name shows the reason and git does not run |
 | `stash_push` / `stash_apply` / `stash_pop` / `stash_drop` | `stash push -u` / `apply` / `pop` / `drop` | `Result` | Stash menu and graph stash rows. Unchanged stash list after push is failure |
 | `list_stash_refs` / `latest_stash_ref` | `stash list --format=%gd` | refs | Latest stash for graph `S` apply / pop on a non-stash row |
 | `remove_worktree(primary, path, force)` | `worktree remove [--force] <path>` from primary | `Result` | Remove a linked worktree after TUI confirm (`W`) |
@@ -51,6 +51,7 @@ Every git subprocess also runs with `GIT_OPTIONAL_LOCKS=0` (set by `git::git_pro
 | `diff_commit_file` / `_ctx` | `diff <commit>^ <commit> -- <path>`; empty → `show --first-parent` | unified diff lines | First-parent per-file diff |
 | `diff_stash_file` / `_ctx` | `diff <stash>^1 <stash> -- <path>` | unified diff lines | Per-file stash diff |
 | `origin_out_of_sync` | compare `rev-parse` of local vs `origin/<branch>` | `Option<origin/…>` | Helper for graph checkout confirm |
+| `ahead_behind(left, right, cwd)` | `rev-list --left-right --count <left>...<right>` | `Option<(ahead, behind)>` | Counts for the out-of-sync checkout confirm and the reason a fast-forward failed |
 | `merge_into_head` | `merge --ff-only --quiet -- <rev>`, else `merge --no-ff --no-edit --quiet -- <rev>` | `MergeIntoHeadResult` | Graph `m` confirm Yes: fast-forward HEAD when possible, otherwise a merge commit. No rebase. Conflicts leave `MERGE_HEAD` (no abort, no continue). Tags are passed as the commit id |
 
 Every wrapper that takes a path puts `--` before it, so a file named `-f` or `HEAD` cannot be read as an option or a revision.
@@ -142,9 +143,9 @@ The compare diff covers commits only, so it does not change after a revert. The 
 
 **Focused refresh (`r`).** Reloads the whole workspace on the workspace row or No-updates group, and otherwise one checkout (`refresh_target` → `ReloadSnapshot` vs `ReloadRepo { repo }`).
 
-**Bulk revert with counted confirm.** `x` uses the same `collect_write_files` scope (section headers and dirs stay side-filtered), keeping unstaged or untracked (staged-only skipped). Confirm shows counts and only the keys that apply. `y`/`Enter` runs `git restore` on tracked targets and **keeps** untracked; with untracked targets present, `Y` also deletes each untracked via `remove_untracked_file` (per-file `clean -f`, not `clean -fd`). Tracked only: no `Y`. One untracked target and nothing tracked: `y` deletes it, no `Y`. Several untracked and nothing tracked: only `Y` (deletes them). A key the box does not show does nothing. Empty after filter: `Nothing to discard` (or `Nothing to discard (staged only)` on a staged-only file).
+**Bulk revert with counted confirm.** `x` uses the same `collect_write_files` scope (section headers and dirs stay side-filtered), keeping unstaged or untracked (staged-only skipped). Confirm shows counts and only the keys that apply. `y` runs `git restore` on tracked targets and **keeps** untracked; with untracked targets present, `Y` also deletes each untracked via `remove_untracked_file` (per-file `clean -f`, not `clean -fd`). Tracked only: no `Y`. One untracked target and nothing tracked: `y` deletes it, no `Y`. Several untracked and nothing tracked: only `Y` (deletes them). A key the box does not show does nothing. Empty after filter: `Nothing to discard` (or `Nothing to discard (staged only)` on a staged-only file).
 
-**Remove linked worktree (`W`).** Linked `Checkout` rows only. Confirm shows branch, `merged into default` / `NOT merged into default`, and `--force` when dirty. Same-commit as the default tip is `NOT merged into default` (just created). On Unix, bind-mount aliases remap via inode so gitdir back-pointers match. On Windows, worktree identity is canonical path plus size and mtime (no inode / bind-mount remap).
+**Remove linked worktree (`W`).** Linked `Checkout` rows only. Confirm shows branch, `merged into default` / `NOT merged into default`, and what is lost: `N changed files will be deleted permanently · branch <b> is kept` when dirty (`--force`; N is the snapshot change count), else `clean worktree · branch <b> is kept`. A detached worktree shows neither branch part. Same-commit as the default tip is `NOT merged into default` (just created). On Unix, bind-mount aliases remap via inode so gitdir back-pointers match. On Windows, worktree identity is canonical path plus size and mtime (no inode / bind-mount remap).
 
 **Reverting an untracked file deletes it.** There is no git object to restore to, so untracked “revert” means remove from disk — irrecoverable. Bulk `y` leaves untracked alone; opt in with `Y`, or press `y` when the only target is one untracked file.
 
@@ -178,10 +179,11 @@ The compare diff covers commits only, so it does not change after a revert. The 
 | `x` single untracked (`y`) | `y`/`n` prompt | **no** — the file is deleted |
 | `-p` / `--pull` | none | yes — but can fail on conflicts |
 | `-d` / `--default-branch` | none | yes — dirty repos are skipped, so no work is lost |
-| `b` checkout (local / origin) | none when in sync; `y`/`n` when local exists and origin tips differ | yes — dirty worktrees refuse before checkout; confirm Yes is checkout then `fast_forward_to_remote_ref` of the selected `origin/*` (no reset) |
+| TUI `d` | none for one repo; `y`/`n` boxed confirm (`Switch N repos to their default branch?`) when the scope has more than one repo off its default | yes — dirty repos are skipped |
+| `b` checkout (local / origin) | none when in sync; `y`/`n` when local exists and origin tips differ (`Check out <b> and fast-forward to origin/<b> (no fetch)?`, plus `ahead_behind` counts) | yes — dirty worktrees refuse before checkout; confirm Yes is checkout then `fast_forward_to_remote_ref` of the already-fetched `origin/*` (no fetch, no reset). When local has commits the remote lacks, the checkout stays and the warn says `could not fast-forward to origin/<b>: local has commits origin/<b> lacks` |
 | `m` graph merge into HEAD | `y`/`n` boxed confirm | yes — dirty tracked worktrees refuse before confirm; conflicts stay uncommitted (no abort) |
 
-Revert, stash drop, origin-out-of-sync graph checkout, and graph merge use modal overlays, so no other key can act while one is up.
+Revert, stash drop, origin-out-of-sync graph checkout, graph merge, worktree remove, and multi-repo `d` use modal overlays, so no other key can act while one is up. Only the key the box shows (`y`, or `Y` where offered) accepts. Enter never confirms; it says which key does. `n` / Esc cancel.
 
 ## Write serialisation
 

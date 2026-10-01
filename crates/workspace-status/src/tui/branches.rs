@@ -40,10 +40,49 @@ pub fn filter_branches<'a>(branches: &'a [LocalBranch], query: &str) -> Vec<&'a 
         .collect()
 }
 
-/// Non-empty, no spaces, no leading `-`.
-pub fn is_valid_branch_name(name: &str) -> bool {
+/// Characters `git check-ref-format` refuses anywhere in a ref name.
+const BRANCH_NAME_BAD_CHARS: &[char] = &['~', '^', ':', '?', '*', '[', '\\'];
+
+/// Why `name` (trimmed) is not a valid new branch name, or `None` when it is.
+///
+/// Follows the `git check-ref-format --branch` rules so the create prompt can
+/// refuse locally, before git runs: empty, whitespace, a leading `-` or `/`,
+/// `..`, `@{`, `//`, a lone `@`, any of `~ ^ : ? * [ \`, control characters,
+/// a trailing `/` or `.`, and a `/`-separated part that starts with `.` or
+/// ends with `.lock`.
+pub fn branch_name_error(name: &str) -> Option<String> {
     let t = name.trim();
-    !t.is_empty() && !t.contains(char::is_whitespace) && !t.starts_with('-')
+    let reason = if t.is_empty() {
+        "name is empty".to_string()
+    } else if t.contains(char::is_whitespace) {
+        "no spaces in a branch name".to_string()
+    } else if t.chars().any(char::is_control) {
+        "no control characters in a branch name".to_string()
+    } else if let Some(c) = t.chars().find(|c| BRANCH_NAME_BAD_CHARS.contains(c)) {
+        format!("a branch name cannot contain {c}")
+    } else if t.starts_with('-') {
+        "a branch name cannot start with -".to_string()
+    } else if t == "@" {
+        "a branch name cannot be @".to_string()
+    } else if let Some(seq) = ["..", "@{", "//"].into_iter().find(|seq| t.contains(seq)) {
+        format!("a branch name cannot contain {seq}")
+    } else if t.starts_with('/') {
+        "a branch name cannot start with /".to_string()
+    } else if let Some(end) = ["/", "."].into_iter().find(|end| t.ends_with(end)) {
+        format!("a branch name cannot end with {end}")
+    } else if t.split('/').any(|part| part.starts_with('.')) {
+        "no part of a branch name can start with .".to_string()
+    } else if t.split('/').any(|part| part.ends_with(".lock")) {
+        "no part of a branch name can end with .lock".to_string()
+    } else {
+        return None;
+    };
+    Some(reason)
+}
+
+/// True when [`branch_name_error`] finds nothing wrong with `name`.
+pub fn is_valid_branch_name(name: &str) -> bool {
+    branch_name_error(name).is_none()
 }
 
 /// True iff `name` is an origin remote-tracking ref (`origin/...`).
@@ -295,6 +334,54 @@ mod tests {
         assert!(!is_valid_branch_name(""));
         assert!(!is_valid_branch_name("has space"));
         assert!(!is_valid_branch_name("-bad"));
+    }
+
+    #[test]
+    fn branch_name_error_follows_check_ref_format() {
+        let cases: &[(&str, Option<&str>)] = &[
+            ("feature/x", None),
+            ("JBY-12-fix", None),
+            ("  trimmed  ", None),
+            ("v1.2", None),
+            ("a@b", None),
+            ("", Some("name is empty")),
+            ("   ", Some("name is empty")),
+            ("has space", Some("no spaces in a branch name")),
+            ("tab\there", Some("no spaces in a branch name")),
+            ("bell\u{7}", Some("no control characters in a branch name")),
+            ("-bad", Some("a branch name cannot start with -")),
+            ("@", Some("a branch name cannot be @")),
+            ("a..b", Some("a branch name cannot contain ..")),
+            ("a@{b", Some("a branch name cannot contain @{")),
+            ("a//b", Some("a branch name cannot contain //")),
+            ("a~1", Some("a branch name cannot contain ~")),
+            ("a^", Some("a branch name cannot contain ^")),
+            ("a:b", Some("a branch name cannot contain :")),
+            ("a?", Some("a branch name cannot contain ?")),
+            ("a*", Some("a branch name cannot contain *")),
+            ("a[b", Some("a branch name cannot contain [")),
+            ("a\\b", Some("a branch name cannot contain \\")),
+            ("/lead", Some("a branch name cannot start with /")),
+            ("trail/", Some("a branch name cannot end with /")),
+            ("trail.", Some("a branch name cannot end with .")),
+            (
+                "main.lock",
+                Some("no part of a branch name can end with .lock"),
+            ),
+            (
+                "x.lock/y",
+                Some("no part of a branch name can end with .lock"),
+            ),
+            (".hidden", Some("no part of a branch name can start with .")),
+            (
+                "feature/.x",
+                Some("no part of a branch name can start with ."),
+            ),
+        ];
+        for (name, want) in cases {
+            assert_eq!(branch_name_error(name).as_deref(), *want, "{name:?}");
+            assert_eq!(is_valid_branch_name(name), want.is_none(), "{name:?}");
+        }
     }
 
     #[test]

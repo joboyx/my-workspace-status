@@ -110,6 +110,8 @@ pub enum Action {
     ConfirmYes,
     ConfirmYesClean,
     ConfirmNo,
+    /// Enter on a confirm box. It does not confirm; the status names the key that does.
+    ConfirmEnter,
     Edit,
     /// Open the focused file in the configured external diff tool (`E`).
     ExternalDiff,

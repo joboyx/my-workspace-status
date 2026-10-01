@@ -69,7 +69,7 @@ fn graph_focused_diverged_before_create(screen: &str) -> bool {
         && status.contains("back")
         && overlay_at_hash(screen).is_none()
         && !screen.contains("Create branch")
-        && !screen.contains("Enter confirm")
+        && !screen.contains("Enter create")
         && focusbox_still_on_keep(screen)
         && no_wrong_create_overlays(screen)
 }
@@ -92,7 +92,7 @@ fn create_branch_overlay(screen: &str, name_line: &str) -> bool {
         && overlay_at_hash(screen).is_some()
         && screen.contains("Create branch")
         && screen.contains(name_line)
-        && screen.contains("Enter confirm")
+        && screen.contains("(no checkout)")
         && screen.contains("Esc cancel")
         && graph_cursor_on(screen, "main-leaf-commit")
         && screen.contains("main-leaf-commit")
@@ -122,7 +122,7 @@ fn documented_graph_create_branch_at(screen: &str, overlay_hash: &str) -> bool {
         && !crumb.contains("Already on")
         && overlay_at_hash(screen).is_none()
         && !screen.contains("Create branch")
-        && !screen.contains("Enter confirm")
+        && !screen.contains("Enter create")
         && !screen.contains("Esc cancel")
         && main_leaf_chip_has_new_ref(screen)
         && screen.contains("[+feature/keep]")
@@ -140,7 +140,7 @@ fn documented_graph_create_branch_at(screen: &str, overlay_hash: &str) -> bool {
 ///
 /// Docs: Help GIT `C` is picker create+checkout. Keymap: graph-focused `c`
 /// on a commit is `Action::GraphCreateBranch`. Overlay is the name prompt
-/// with `Create branch at <short>` and `Enter confirm · Esc cancel`.
+/// with `Create branch at <short>` and `Enter create at <short> (no checkout) · Esc cancel`.
 /// Enter runs `create_branch_at` (`git branch -- name commitId`). HEAD
 /// stays on the current branch. Tree-file `c` is a no-op
 /// (`pty_c_on_tree_file_is_not_commit`). Picker `C` stays

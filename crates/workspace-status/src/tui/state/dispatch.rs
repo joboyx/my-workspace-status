@@ -129,6 +129,7 @@ impl AppState {
             | Action::ConfirmYes
             | Action::ConfirmYesClean
             | Action::ConfirmNo
+            | Action::ConfirmEnter
             | Action::RemoveWorktree
             | Action::Push
             | Action::StashMenu

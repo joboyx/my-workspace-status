@@ -212,6 +212,19 @@ pub fn fast_forward_to_remote_ref(remote_ref: &str, cwd: &Path) -> bool {
     rev_parse_quiet("HEAD", cwd).as_deref() == Some(target_sha.as_str())
 }
 
+/// Commits only on `left` and only on `right` (`rev-list --left-right --count left...right`).
+///
+/// `None` when either rev does not resolve or git fails.
+pub fn ahead_behind(left: &str, right: &str, cwd: &Path) -> Option<(usize, usize)> {
+    let range = format!("{left}...{right}");
+    let out = exec_git(&["rev-list", "--left-right", "--count", &range, "--"], cwd);
+    let mut counts = out.split_whitespace().map(str::parse::<usize>);
+    match (counts.next(), counts.next(), counts.next()) {
+        (Some(Ok(ahead)), Some(Ok(behind)), None) => Some((ahead, behind)),
+        _ => None,
+    }
+}
+
 /// Outcome of merging a rev into the current HEAD.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MergeIntoHeadResult {
@@ -1395,6 +1408,8 @@ keep-z
         git(&dir, &["add", "ahead.txt"]);
         git(&dir, &["commit", "-q", "-m", "ahead"]);
         let ahead = exec_git(&["rev-parse", "HEAD"], &dir);
+        assert_eq!(ahead_behind("foo", "origin/foo", &dir), Some((1, 0)));
+        assert_eq!(ahead_behind("foo", "origin/missing", &dir), None);
         assert!(!fast_forward_to_remote_ref("origin/foo", &dir));
         assert_eq!(exec_git(&["rev-parse", "HEAD"], &dir), ahead);
         assert_eq!(exec_git(&["branch", "--show-current"], &dir), "foo");

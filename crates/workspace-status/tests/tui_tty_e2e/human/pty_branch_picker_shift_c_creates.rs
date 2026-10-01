@@ -53,7 +53,7 @@ fn picker_create_overlay(screen: &str, name_line: &str) -> bool {
         && overlay_title
         && !screen.contains("Create branch at")
         && screen.contains(name_line)
-        && screen.contains("Enter confirm")
+        && screen.contains("Enter create and check out")
         && screen.contains("Esc cancel")
         && !screen.contains("C create")
         && !screen.contains("Enter checkout")
@@ -82,7 +82,7 @@ fn tree_picker_open_on_keep(screen: &str) -> bool {
         && screen.contains("Enter checkout")
         && screen.contains("Esc close")
         && !screen.contains("Create branch")
-        && !screen.contains("Enter confirm")
+        && !screen.contains("Enter create")
         && !screen.contains("Create branch at")
         && screen.contains("keep-leaf-commit")
         && screen.contains("main-leaf-commit")
@@ -101,7 +101,7 @@ fn documented_picker_create_checkout(screen: &str) -> bool {
         && !crumb.contains("Switched")
         && !crumb.contains("Already on")
         && !screen.contains("Create branch")
-        && !screen.contains("Enter confirm")
+        && !screen.contains("Enter create")
         && !screen.contains("Esc cancel")
         && !screen.contains("C create")
         && focusbox_checked_out_new_branch(screen)
@@ -121,7 +121,7 @@ fn documented_picker_create_checkout(screen: &str) -> bool {
 ///
 /// Docs: Help GIT `C` is create in the picker. Keymap: picker `C` is
 /// `Action::CreateBranchStart`. Overlay is the name prompt with
-/// `Create branch` (no `at <short>`) and `Enter confirm · Esc cancel`.
+/// `Create branch` (no `at <short>`) and `Enter create and check out · Esc cancel`.
 /// Enter runs `create_branch_checkout` (`git checkout -b name`). HEAD
 /// moves to the new branch. Graph `c` is ref-only at the focused commit
 /// (`pty_graph_c_creates_branch_at_commit`). Tree-file `c` is a no-op

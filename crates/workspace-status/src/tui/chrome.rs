@@ -463,7 +463,9 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
     }
     if let Some(pending) = state.confirm.as_ref() {
         return match pending {
-            super::state::PendingConfirm::RemoveWorktree { .. } => 6,
+            // Title, branch, changed-files, chips; one spare row for a wrapped detail.
+            super::state::PendingConfirm::RemoveWorktree { .. } => 7,
+            super::state::PendingConfirm::SwitchToDefault { .. } => 6,
             super::state::PendingConfirm::StashDrop { .. }
             | super::state::PendingConfirm::RevertRange { .. } => 5,
             // One row per count line: mixed is 7, the others 6.
@@ -1583,14 +1585,20 @@ mod tests {
             force: false,
             branch: "topic".into(),
             merged_into_default: Some(true),
+            changed: 0,
         });
-        assert_eq!(overlay_status_rows(&app), 6);
+        assert_eq!(overlay_status_rows(&app), 7);
         app.confirm = Some(super::super::state::PendingConfirm::CheckoutOutOfSync {
             repo: "app".into(),
             branch: "main".into(),
             remote_ref: "origin/main".into(),
+            ahead_behind: Some((0, 2)),
         });
         assert_eq!(overlay_status_rows(&app), 7);
+        app.confirm = Some(super::super::state::PendingConfirm::SwitchToDefault {
+            repos: vec!["app".into(), "lib".into()],
+        });
+        assert_eq!(overlay_status_rows(&app), 6);
         app.confirm = Some(super::super::state::PendingConfirm::MergeIntoHead {
             repo: "app".into(),
             rev: "topic".into(),

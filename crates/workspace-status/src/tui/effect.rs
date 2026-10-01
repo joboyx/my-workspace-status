@@ -393,6 +393,7 @@ fn overlay_write_checkouts(state: &AppState, action: &Action) -> Vec<String> {
             Some(PendingConfirm::RemoveWorktree { primary, path, .. }) => {
                 vec![primary.clone(), path.clone()]
             }
+            Some(PendingConfirm::SwitchToDefault { repos }) => repos.clone(),
             // `Y` keeps a compare confirm open, so it writes nothing.
             Some(
                 PendingConfirm::CompareRevertRange { target, .. }

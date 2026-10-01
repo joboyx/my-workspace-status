@@ -554,7 +554,9 @@ fn key_to_action(
         },
         InputMode::Confirm => match key.code {
             KeyCode::Char('Y') => Action::ConfirmYesClean,
-            KeyCode::Char('y') | KeyCode::Enter => Action::ConfirmYes,
+            KeyCode::Char('y') => Action::ConfirmYes,
+            // Enter never confirms: a write needs the key the box shows.
+            KeyCode::Enter => Action::ConfirmEnter,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::ConfirmNo,
             _ => Action::None,
         },
@@ -1084,6 +1086,14 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Char('n')), mode, false, false),
             Action::ConfirmNo
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Esc), mode, false, false),
+            Action::ConfirmNo
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Enter), mode, false, false),
+            Action::ConfirmEnter
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('s')), mode, false, false),

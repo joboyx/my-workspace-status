@@ -27,7 +27,7 @@ use crate::snapshot::{
 use super::action::Action;
 use super::action::{Effect, ExternalDiffKind};
 use super::branches::{
-    can_open_branch_picker, checkoutable_branch_names, is_valid_branch_name, merge_rev_for_commit,
+    branch_name_error, can_open_branch_picker, checkoutable_branch_names, merge_rev_for_commit,
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
 };
 use super::chrome::{diverged_pull_status, status_uses_status_text, STATUS_NO_COMMENTS};
@@ -305,6 +305,8 @@ pub enum PendingConfirm {
         repo: String,
         branch: String,
         remote_ref: String,
+        /// Commits only on the local branch, then only on `remote_ref`, when git could count them.
+        ahead_behind: Option<(usize, usize)>,
     },
     RemoveWorktree {
         primary: String,
@@ -312,6 +314,12 @@ pub enum PendingConfirm {
         force: bool,
         branch: String,
         merged_into_default: Option<bool>,
+        /// Changed files in the worktree (snapshot count) that `--force` deletes.
+        changed: usize,
+    },
+    /// `d` on a scope that resolves to more than one repo off its default branch.
+    SwitchToDefault {
+        repos: Vec<String>,
     },
     MergeIntoHead {
         repo: String,
@@ -335,6 +343,19 @@ pub enum PendingConfirm {
 }
 
 impl PendingConfirm {
+    /// The key that accepts this confirm: `Y` when only `Y` is offered
+    /// (several untracked files), otherwise `y`.
+    pub fn accept_key(&self) -> char {
+        match self {
+            Self::Revert { targets, .. }
+                if revert_scope(targets).key_deletes_untracked(false).is_none() =>
+            {
+                'Y'
+            }
+            _ => 'y',
+        }
+    }
+
     /// True for the confirms a compare tab opens (and may accept).
     pub fn is_compare_owned(&self) -> bool {
         matches!(
@@ -1783,6 +1804,11 @@ impl AppState {
                     .collect::<Vec<_>>();
                 if repos.is_empty() {
                     self.status = StatusMessage::warn("no non-default branches to switch");
+                    Effect::None
+                } else if repos.len() > 1 {
+                    // A workspace-wide switch asks first; one repo runs now.
+                    self.cancel_mouse_drag();
+                    self.confirm = Some(PendingConfirm::SwitchToDefault { repos });
                     Effect::None
                 } else {
                     self.status = StatusMessage::progress(format_running_op(
@@ -3424,6 +3450,7 @@ impl AppState {
                 repo,
                 branch,
                 remote_ref,
+                ..
             }) => {
                 self.status = StatusMessage::progress(format!(
                     "checking out {branch}, then fast-forwarding to {remote_ref}…"
@@ -3452,6 +3479,14 @@ impl AppState {
             }) => {
                 self.status = StatusMessage::progress(format!("merging {label}…"));
                 Effect::MergeIntoHead { repo, rev, label }
+            }
+            Some(PendingConfirm::SwitchToDefault { repos }) => {
+                self.status = StatusMessage::progress(format_running_op(
+                    RunningOp::DefaultBranch,
+                    0,
+                    repos.len(),
+                ));
+                Effect::DefaultBranch { repos }
             }
             // Compare confirms offer only y / n: `Y` keeps them open.
             Some(pending) if pending.is_compare_owned() && clean => {
@@ -3952,12 +3987,14 @@ impl AppState {
         let path = snap.repo.clone();
         let branch = snap.branch.clone();
         let merged_into_default = snap.merged_into_default;
+        let changed = snap.changes.len();
         self.confirm = Some(PendingConfirm::RemoveWorktree {
             primary,
             path,
             force,
             branch,
             merged_into_default,
+            changed,
         });
         Effect::None
     }
@@ -4292,16 +4329,25 @@ impl AppState {
             }
             return self.checkout_or_confirm(repo, selected.name);
         }
-        if is_valid_branch_name(&filter) {
-            self.branch_picker = None;
-            self.status = StatusMessage::progress(format!("creating {filter}…"));
-            return Effect::CreateBranch {
-                repo,
-                name: filter.trim().to_string(),
-            };
+        match branch_name_error(&filter) {
+            None => {
+                self.branch_picker = None;
+                self.status = StatusMessage::progress(format!("creating {filter}…"));
+                Effect::CreateBranch {
+                    repo,
+                    name: filter.trim().to_string(),
+                }
+            }
+            // An empty filter matched nothing; any other bad name says why.
+            Some(_) if filter.trim().is_empty() => {
+                self.status = StatusMessage::warn("no matching branches");
+                Effect::None
+            }
+            Some(reason) => {
+                self.status = StatusMessage::warn(format!("no matching branches · {reason}"));
+                Effect::None
+            }
         }
-        self.status = StatusMessage::warn("no matching branches");
-        Effect::None
     }
 
     /// Emit a checkout effect. Origin out-of-sync confirm is decided later
@@ -4317,17 +4363,21 @@ impl AppState {
     }
 
     /// Confirm checkout when a local exists and is out of sync with the selected `origin/*`.
+    ///
+    /// `ahead_behind` is local-only / remote-only commit counts for the box copy.
     pub fn confirm_checkout_if_out_of_sync(
         &mut self,
         repo: String,
         branch: String,
         remote_ref: Option<String>,
+        ahead_behind: Option<(usize, usize)>,
     ) -> Effect {
         if let Some(remote_ref) = remote_ref {
             self.confirm = Some(PendingConfirm::CheckoutOutOfSync {
                 repo,
                 branch: branch.clone(),
                 remote_ref: remote_ref.clone(),
+                ahead_behind,
             });
             Effect::None
         } else {
@@ -4355,8 +4405,9 @@ impl AppState {
         let Some(create) = self.create_branch.take() else {
             return Effect::None;
         };
-        if !is_valid_branch_name(&create.name) {
-            self.status = StatusMessage::warn("invalid branch name");
+        // Git ref rules are checked here, so a bad name never reaches git.
+        if let Some(reason) = branch_name_error(&create.name) {
+            self.status = StatusMessage::warn(reason);
             self.create_branch = Some(create);
             return Effect::None;
         }
@@ -5729,11 +5780,75 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(app.status, "Pulling 0/2…");
-        match app.dispatch(Action::DefaultBranch) {
+        // Two repos: `d` asks first and writes nothing until `y`.
+        assert_eq!(app.dispatch(Action::DefaultBranch), Effect::None);
+        assert_eq!(
+            app.confirm,
+            Some(PendingConfirm::SwitchToDefault {
+                repos: vec!["app".into(), "lib".into()],
+            })
+        );
+        match app.dispatch(Action::ConfirmYes) {
             Effect::DefaultBranch { repos } => assert_eq!(repos, vec!["app", "lib"]),
             other => panic!("{other:?}"),
         }
+        assert!(app.confirm.is_none());
         assert_eq!(app.status, "Switching 0/2…");
+    }
+
+    #[test]
+    fn multi_repo_default_switch_confirms_and_n_cancels() {
+        let mut app_snap = repo("app", false);
+        app_snap.branch = "feature/x".into();
+        let mut lib_snap = repo("lib", false);
+        lib_snap.branch = "feature/y".into();
+        let snapshot = build_workspace_snapshot(&[app_snap, lib_snap], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        app.cursor = 0;
+        assert_eq!(app.dispatch(Action::DefaultBranch), Effect::None);
+        assert!(matches!(
+            app.confirm,
+            Some(PendingConfirm::SwitchToDefault { ref repos }) if repos.len() == 2
+        ));
+        // Enter is not a yes: the box stays and the status names the key.
+        assert_eq!(app.dispatch(Action::ConfirmEnter), Effect::None);
+        assert!(app.confirm.is_some());
+        assert_eq!(app.status, "press y to confirm · n or Esc to cancel");
+        assert_eq!(app.status.kind(), StatusKind::Info);
+        assert_eq!(app.dispatch(Action::ConfirmNo), Effect::None);
+        assert!(app.confirm.is_none());
+        assert_eq!(app.status, "switch cancelled");
+
+        // One repo in scope still switches at once.
+        focus_repo(&mut app, "app");
+        match app.dispatch(Action::DefaultBranch) {
+            Effect::DefaultBranch { repos } => assert_eq!(repos, vec!["app"]),
+            other => panic!("{other:?}"),
+        }
+        assert!(app.confirm.is_none());
+    }
+
+    #[test]
+    fn confirm_enter_names_shift_y_when_only_y_upper_accepts() {
+        let mut app = state();
+        let target = |path: &str| RevertTarget {
+            repo: "app".into(),
+            path: path.into(),
+            untracked: true,
+            old_path: None,
+        };
+        app.confirm = Some(PendingConfirm::Revert {
+            targets: vec![target("a.txt"), target("b.txt")],
+            label: "app".into(),
+        });
+        assert_eq!(app.dispatch(Action::ConfirmEnter), Effect::None);
+        assert!(app.confirm.is_some());
+        assert_eq!(app.status, "press Y to confirm · n or Esc to cancel");
+        // No confirm open: Enter in that mode cannot reach here, but stays inert.
+        app.confirm = None;
+        app.status.clear();
+        assert_eq!(app.dispatch(Action::ConfirmEnter), Effect::None);
+        assert!(app.status.is_empty());
     }
 
     #[test]
@@ -5995,9 +6110,16 @@ mod tests {
         assert!(app.confirm.is_none());
         focus_checkout(&mut app, "app/.worktrees/feat");
         assert_eq!(app.dispatch(Action::RemoveWorktree), Effect::None);
+        let want_changed = app
+            .snapshot
+            .repos
+            .iter()
+            .find(|r| r.repo == "app/.worktrees/feat")
+            .map(|r| r.changes.len())
+            .unwrap();
         assert!(matches!(
             app.confirm,
-            Some(PendingConfirm::RemoveWorktree { .. })
+            Some(PendingConfirm::RemoveWorktree { changed, .. }) if changed == want_changed
         ));
         assert!(app.confirm.is_some());
         app.dispatch(Action::ConfirmNo);
@@ -9285,6 +9407,17 @@ mod tests {
             }],
         );
         app.dispatch(Action::CreateBranchStart);
+        // A name git would refuse stays in the prompt with the reason.
+        for c in "bad..name".chars() {
+            app.dispatch(Action::CreateBranchChar(c));
+        }
+        assert_eq!(app.dispatch(Action::CreateBranchSubmit), Effect::None);
+        assert!(app.create_branch.is_some());
+        assert_eq!(app.status, "a branch name cannot contain ..");
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+        for _ in "bad..name".chars() {
+            app.dispatch(Action::CreateBranchBackspace);
+        }
         for c in "feature/new".chars() {
             app.dispatch(Action::CreateBranchChar(c));
         }
@@ -9301,6 +9434,7 @@ mod tests {
                 "app".into(),
                 "feature/x".into(),
                 Some("origin/feature/x".into()),
+                Some((0, 1)),
             ),
             Effect::None
         );
@@ -9310,6 +9444,7 @@ mod tests {
             "app".into(),
             "feature/x".into(),
             Some("origin/feature/x".into()),
+            None,
         );
         match app.dispatch(Action::ConfirmYes) {
             Effect::CheckoutBranch {

@@ -60,7 +60,7 @@ use super::tree::{
     row_segments, visible_window, with_comment_mark, with_viewed_mark, NodeKind, NodeSegments,
     SegRole, TextSeg, VisibleRow,
 };
-use crate::helpers::visible_width;
+use crate::helpers::{is_detached_head_branch, visible_width};
 
 /// Empty tree / empty commit-file list.
 const NO_MATCHING_ROWS: &str = "No matching rows";
@@ -1841,7 +1841,10 @@ fn confirm_action_row(
             Style::default().fg(muted),
         ));
     }
+    // Enter does not confirm, so the row lists every key that answers.
     spans.push(key_chip("n", muted, surface));
+    spans.push(Span::raw(" "));
+    spans.push(key_chip("Esc", muted, surface));
     spans.push(Span::styled(" cancel", Style::default().fg(muted)));
     Line::from(spans)
 }
@@ -2029,6 +2032,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             force,
             branch,
             merged_into_default,
+            changed,
             ..
         } => {
             let accent = palette.deleted;
@@ -2043,57 +2047,109 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 ),
                 None => "merge status unknown".into(),
             };
+            // A detached worktree has no branch to keep or report.
+            let detached = is_detached_head_branch(branch);
+            let kept = if detached {
+                String::new()
+            } else {
+                format!(" · branch {branch} is kept")
+            };
             let dirty_line = if *force {
                 Line::from(Span::styled(
-                    "  dirty worktree — will use --force",
+                    format!(
+                        "  {changed} changed {} will be deleted permanently{kept}",
+                        files_word(*changed)
+                    ),
                     Style::default().fg(accent),
                 ))
             } else {
                 Line::from(Span::styled(
-                    "  clean worktree",
+                    format!("  clean worktree{kept}"),
                     Style::default().fg(palette.muted),
                 ))
             };
-            let lines = vec![
-                Line::from(vec![
-                    Span::styled(
-                        "Remove worktree ",
-                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(path.clone(), Style::default().fg(palette.file)),
-                    Span::styled("?", Style::default().fg(accent)),
-                ]),
-                Line::from(Span::styled(
+            let mut lines = vec![Line::from(vec![
+                Span::styled(
+                    "Remove worktree ",
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(path.clone(), Style::default().fg(palette.file)),
+                Span::styled("?", Style::default().fg(accent)),
+            ])];
+            if !detached {
+                lines.push(Line::from(Span::styled(
                     format!("  branch {branch} — {merge_text}"),
                     Style::default().fg(palette.muted),
-                )),
-                dirty_line,
-                confirm_action_row("y", "remove", None, accent, palette.muted, surface),
-            ];
+                )));
+            }
+            lines.push(dirty_line);
+            lines.push(confirm_action_row(
+                "y",
+                "remove",
+                None,
+                accent,
+                palette.muted,
+                surface,
+            ));
             (accent, lines)
         }
         PendingConfirm::CheckoutOutOfSync {
-            branch, remote_ref, ..
+            branch,
+            remote_ref,
+            ahead_behind,
+            ..
         } => {
+            let accent = palette.modified;
+            // `y` fast-forwards to the remote-tracking ref already fetched; it never fetches.
+            let mut lines = vec![Line::from(vec![
+                Span::styled(
+                    "Check out ",
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(branch.clone(), Style::default().fg(palette.file)),
+                Span::styled(" and fast-forward to ", Style::default().fg(palette.muted)),
+                Span::styled(remote_ref.clone(), Style::default().fg(palette.file)),
+                Span::styled(" (no fetch)?", Style::default().fg(accent)),
+            ])];
+            if let Some((ahead, behind)) = ahead_behind {
+                let mut detail = format!("  local is {ahead} ahead, {behind} behind {remote_ref}");
+                if *ahead > 0 {
+                    detail.push_str(" · cannot fast-forward");
+                }
+                lines.push(Line::from(Span::styled(
+                    detail,
+                    Style::default().fg(palette.muted),
+                )));
+            }
+            lines.push(confirm_action_row(
+                "y",
+                "check out + fast-forward",
+                None,
+                accent,
+                palette.muted,
+                surface,
+            ));
+            (accent, lines)
+        }
+        PendingConfirm::SwitchToDefault { repos } => {
             let accent = palette.modified;
             let lines = vec![
                 Line::from(vec![
-                    Span::styled(branch.clone(), Style::default().fg(palette.file)),
-                    Span::styled(" is not in sync with ", Style::default().fg(palette.muted)),
-                    Span::styled(remote_ref.clone(), Style::default().fg(palette.file)),
+                    Span::styled(
+                        "Switch ",
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{} repos", repos.len()),
+                        Style::default().fg(palette.file),
+                    ),
+                    Span::styled(" to their default branch?", Style::default().fg(accent)),
                 ]),
                 Line::from(Span::styled(
-                    "Checkout local then pull?",
-                    Style::default().fg(accent),
+                    "  dirty repos are skipped",
+                    Style::default().fg(palette.muted),
                 )),
-                confirm_action_row(
-                    "y",
-                    "checkout then pull",
-                    None,
-                    accent,
-                    palette.muted,
-                    surface,
-                ),
+                confirm_action_row("y", "switch", None, accent, palette.muted, surface),
             ];
             (accent, lines)
         }
@@ -2914,6 +2970,12 @@ fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         "Create branch ",
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
     )];
+    // Picker `C` checks the new branch out; graph `c` only creates the ref.
+    let footer = if short.is_empty() {
+        "Enter create and check out · Esc cancel".to_string()
+    } else {
+        format!("Enter create at {short} (no checkout) · Esc cancel")
+    };
     if !short.is_empty() {
         title.push(Span::styled("at ", Style::default().fg(palette.muted)));
         title.push(Span::styled(short, Style::default().fg(palette.repo)));
@@ -2932,7 +2994,7 @@ fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         )));
     }
     lines.push(Line::from(Span::styled(
-        "Enter confirm · Esc cancel",
+        footer,
         Style::default().fg(palette.muted),
     )));
     frame.render_widget(Clear, area);
@@ -4947,7 +5009,7 @@ mod tests {
         assert!(!text.contains("untracked"), "{text}");
         assert!(chips.contains(" y  revert"), "{chips}");
         assert!(!chips.contains(" Y "), "{chips}");
-        assert!(chips.contains(" n  cancel"), "{chips}");
+        assert!(chips.contains(" n   Esc  cancel"), "{chips}");
 
         // One untracked file: `y` deletes it, no tracked line, no `Y` chip.
         let (text, chips) = draw_revert_confirm(&[("scratch.txt", true)]);
@@ -5032,7 +5094,7 @@ mod tests {
         assert!(text.contains("Drop"), "{text}");
         assert!(text.contains("stash@{0}"), "{text}");
         assert!(text.contains("drop"), "{text}");
-        assert!(text.contains("cancel"), "{text}");
+        assert!(text.contains(" n   Esc  cancel"), "{text}");
 
         state.confirm = Some(PendingConfirm::RemoveWorktree {
             primary: "app".into(),
@@ -5040,24 +5102,106 @@ mod tests {
             force: true,
             branch: "topic".into(),
             merged_into_default: Some(false),
+            changed: 3,
         });
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("Remove worktree"), "{text}");
         assert!(text.contains(".worktrees/topic"), "{text}");
         assert!(text.contains("NOT merged"), "{text}");
-        assert!(text.contains("--force"), "{text}");
+        assert!(
+            text.contains("3 changed files will be deleted permanently · branch topic is kept"),
+            "{text}"
+        );
+        assert!(!text.contains("--force"), "{text}");
+
+        // Detached: no branch line and nothing about a kept branch.
+        state.confirm = Some(PendingConfirm::RemoveWorktree {
+            primary: "app".into(),
+            path: ".worktrees/topic".into(),
+            force: true,
+            branch: crate::helpers::DETACHED_HEAD_BRANCH.into(),
+            merged_into_default: None,
+            changed: 1,
+        });
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("1 changed file will be deleted permanently"),
+            "{text}"
+        );
+        assert!(!text.contains("is kept"), "{text}");
+        assert!(!text.contains("merge status"), "{text}");
+
+        state.confirm = Some(PendingConfirm::RemoveWorktree {
+            primary: "app".into(),
+            path: ".worktrees/topic".into(),
+            force: false,
+            branch: "topic".into(),
+            merged_into_default: Some(true),
+            changed: 0,
+        });
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("clean worktree · branch topic is kept"),
+            "{text}"
+        );
 
         state.confirm = Some(PendingConfirm::CheckoutOutOfSync {
             repo: "app".into(),
             branch: "main".into(),
             remote_ref: "origin/main".into(),
+            ahead_behind: Some((0, 2)),
         });
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("is not in sync with"), "{text}");
-        assert!(text.contains("Checkout local then pull?"), "{text}");
-        assert!(text.contains("checkout then pull"), "{text}");
+        assert!(
+            text.contains("Check out main and fast-forward to origin/main (no fetch)?"),
+            "{text}"
+        );
+        assert!(
+            text.contains("local is 0 ahead, 2 behind origin/main"),
+            "{text}"
+        );
+        assert!(!text.contains("cannot fast-forward"), "{text}");
+        assert!(!text.contains("pull"), "{text}");
+
+        // Local-only commits: say the fast-forward cannot happen. Unknown counts: no line.
+        state.confirm = Some(PendingConfirm::CheckoutOutOfSync {
+            repo: "app".into(),
+            branch: "main".into(),
+            remote_ref: "origin/main".into(),
+            ahead_behind: Some((1, 2)),
+        });
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("local is 1 ahead, 2 behind origin/main · cannot fast-forward"),
+            "{text}"
+        );
+        state.confirm = Some(PendingConfirm::CheckoutOutOfSync {
+            repo: "app".into(),
+            branch: "main".into(),
+            remote_ref: "origin/main".into(),
+            ahead_behind: None,
+        });
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(!text.contains("local is"), "{text}");
+
+        state.confirm = Some(PendingConfirm::SwitchToDefault {
+            repos: vec!["app".into(), "lib".into(), "web".into()],
+        });
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("Switch 3 repos to their default branch?"),
+            "{text}"
+        );
+        assert!(text.contains("dirty repos are skipped"), "{text}");
+        assert!(text.contains(" y  switch"), "{text}");
+        assert!(text.contains(" n   Esc  cancel"), "{text}");
 
         state.confirm = Some(PendingConfirm::MergeIntoHead {
             repo: "app".into(),

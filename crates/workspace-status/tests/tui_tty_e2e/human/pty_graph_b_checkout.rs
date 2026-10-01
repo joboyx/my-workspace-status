@@ -75,7 +75,7 @@ fn no_picker_or_wrong_overlays(screen: &str) -> bool {
         && !screen.contains("Branch ")
         && !screen.contains("Enter checkout")
         && !screen.contains("C create")
-        && !screen.contains("Enter confirm")
+        && !screen.contains("Enter create")
         && !screen.contains("fast-forward if possible")
         && !screen.contains("Merge main into")
         && !screen.contains("SEARCH")
