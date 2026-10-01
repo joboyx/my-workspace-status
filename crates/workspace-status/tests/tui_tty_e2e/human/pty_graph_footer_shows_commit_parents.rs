@@ -13,10 +13,19 @@ fn short(id: &str) -> String {
     id.chars().take(7).collect()
 }
 
-/// Graph cursor on `subject` and the footer meta reads `<hash> · <parents>`.
-fn footer_on(screen: &str, subject: &str, hash: &str, parents: &str) -> bool {
-    let meta = format!("{hash} · {parents} · ");
-    graph_cursor_on(screen, subject) && screen.lines().any(|line| line.contains(&meta))
+/// One selectable graph row: list subject plus the footer meta it paints.
+struct Row {
+    subject: &'static str,
+    footer: String,
+}
+
+/// Index of the row whose footer meta is on screen.
+///
+/// The footer is painted below the list, so its meta for a new row means
+/// that frame's list rows (cursor bar included) are already painted. Every
+/// row has a distinct meta, so at most one matches.
+fn footer_row(screen: &str, rows: &[Row]) -> Option<usize> {
+    rows.iter().position(|row| screen.contains(&row.footer))
 }
 
 /// The graph selection footer shows the focused commit's parents.
@@ -54,30 +63,64 @@ fn pty_graph_footer_shows_commit_parents() {
         WAIT,
     );
 
-    let merge_parents = format!("parents {right} {left}");
-    walk_down_to(&mut tui, "merge commit footer lists both parents", |s| {
-        footer_on(s, "merge", &merge, &merge_parents)
-    });
-
-    let left_parent = format!("parent {root}");
-    walk_down_to(&mut tui, "left commit footer lists its one parent", |s| {
-        footer_on(s, "left", &left, &left_parent)
-    });
-
-    walk_down_to(&mut tui, "root commit footer shows root commit", |s| {
-        footer_on(s, "root", &root, "root commit")
-    });
+    let stash = rev("stash@{0}");
+    let rows = [
+        Row {
+            subject: "WIP on graph",
+            footer: format!("stash@{{0}} · {stash} · "),
+        },
+        Row {
+            subject: "merge",
+            footer: format!("{merge} · parents {right} {left} · "),
+        },
+        Row {
+            subject: "right",
+            footer: format!("{right} · parent {root} · "),
+        },
+        Row {
+            subject: "left",
+            footer: format!("{left} · parent {root} · "),
+        },
+        Row {
+            subject: "root",
+            footer: format!("{root} · root commit · "),
+        },
+    ];
+    walk_down_to(&mut tui, &rows, 1, "merge commit footer lists both parents");
+    walk_down_to(
+        &mut tui,
+        &rows,
+        3,
+        "left commit footer lists its one parent",
+    );
+    walk_down_to(&mut tui, &rows, 4, "root commit footer shows root commit");
 }
 
-/// Press `j` until `pred` holds on the painted frame.
-fn walk_down_to(tui: &mut PtySession, what: &str, pred: impl Fn(&str) -> bool) {
-    for _ in 0..12 {
-        if pred(&tui.screen()) {
-            return;
+/// Press `j` one row at a time until the cursor and footer are on
+/// `rows[target]`.
+///
+/// Each `j` waits until the footer meta names a known row other than the
+/// previous one, so a half-painted frame never triggers an extra `j`. The
+/// uncommitted row (where the drill can start) is not in `rows`.
+fn walk_down_to(tui: &mut PtySession, rows: &[Row], target: usize, what: &str) {
+    let mut at = footer_row(&tui.screen(), rows);
+    for _ in 0..=rows.len() {
+        if at == Some(target) {
+            break;
         }
-        let before = tui.screen();
+        let prev = at;
         tui.key('j');
-        tui.wait_pred(|s| s != before || pred(s), what, WAIT);
+        tui.wait_pred(
+            |s| footer_row(s, rows).is_some_and(|now| Some(now) != prev),
+            &format!("{what}: footer settles on the next row"),
+            WAIT,
+        );
+        at = footer_row(&tui.screen(), rows);
     }
-    tui.wait_pred(pred, what, WAIT);
+    let row = &rows[target];
+    tui.wait_pred(
+        |s| graph_cursor_on(s, row.subject) && s.contains(&row.footer),
+        what,
+        WAIT,
+    );
 }
