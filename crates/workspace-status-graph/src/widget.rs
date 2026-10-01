@@ -15,7 +15,7 @@ use crate::glyphs::{ASCII, UNICODE};
 use crate::gutter::graph_gutter_cap;
 use crate::lane_colors::{default_lane_colors, lane_fg};
 use crate::model::GraphModel;
-use crate::paint::{paint_model_with, PaintOpts, PaintedLine};
+use crate::paint::{paint_model_with, painted_line_count, PaintOpts, PaintedLine};
 
 /// Subject, meta, and ref-chip colours for graph labels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -373,34 +373,31 @@ impl Widget for GraphWidget<'_> {
             self.model.sync.is_some(),
             footer_lines.len() as u16,
         );
-        // Paint at the width the vertical bar leaves. The painted line
-        // count does not depend on the width, so that paint decides the
-        // bar; only a list that fits (no bar) paints again at full width.
-        let paint_at = |v_cols: u16| {
-            let pane = area.width.saturating_sub(v_cols) as usize;
-            let cap = match self.gutter_width {
-                Some(w) => w as usize,
-                None => graph_gutter_cap(pane.max(1)),
-            };
-            // Cursor column plus the optional scrollbar.
-            let line_width = area.width.saturating_sub(1 + v_cols) as usize;
-            paint_model_with(
-                self.model,
-                glyphs,
-                PaintOpts {
-                    gutter_width: Some(cap),
-                    line_width: Some(line_width.max(1)),
-                    now_unix: self.now_unix,
-                },
-            )
-        };
-        let mut painted = paint_at(1);
-        let vscroll = graph_vscroll_visible(painted.len(), chrome.list_height, self.scroll);
-        if !vscroll {
-            painted = paint_at(0);
-        }
+        // The painted line count does not depend on the width, so the bar
+        // is decided before the one paint at the width it leaves.
+        let vscroll = graph_vscroll_visible(
+            painted_line_count(self.model),
+            chrome.list_height,
+            self.scroll,
+        );
         let hscroll = graph_hscroll_visible(self.col_offset);
         let v_cols = u16::from(vscroll);
+        let pane = area.width.saturating_sub(v_cols) as usize;
+        let cap = match self.gutter_width {
+            Some(w) => w as usize,
+            None => graph_gutter_cap(pane.max(1)),
+        };
+        // Cursor column plus the optional scrollbar.
+        let line_width = area.width.saturating_sub(1 + v_cols) as usize;
+        let painted = paint_model_with(
+            self.model,
+            glyphs,
+            PaintOpts {
+                gutter_width: Some(cap),
+                line_width: Some(line_width.max(1)),
+                now_unix: self.now_unix,
+            },
+        );
         let mut y = area.y;
         let list_bottom = area
             .y
@@ -2940,5 +2937,49 @@ mod tests {
                 .all(|l| l.chars().count() <= width as usize + 4),
             "panning must not grow the row past the pane"
         );
+    }
+
+    /// Sample model plus an orphan stash and a detached worktree, so every
+    /// row kind is present.
+    fn every_row_kind_model() -> GraphModel {
+        let mut model = sample_model();
+        model.stashes.push(Stash {
+            id: "ddd4444ddddddddddddddddddddddddddddddddd".into(),
+            stash_ref: "stash@{1}".into(),
+            subject: "WIP on gone".into(),
+            body: String::new(),
+            author_name: "Ada Lovelace".into(),
+            author_date_unix: NOW - 7200,
+            parent_id: Some("eee5555".into()),
+        });
+        model.worktrees.push(worktree("detached", "fff6666", false));
+        model
+    }
+
+    #[test]
+    fn painted_line_count_matches_paint_for_every_row_kind() {
+        for model in [
+            GraphModel::default(),
+            sample_model(),
+            merge_model(),
+            two_parent_join_model(),
+            every_row_kind_model(),
+        ] {
+            for width in [None, Some(4)] {
+                let painted = paint_model(&model, &UNICODE, width);
+                assert_eq!(painted_line_count(&model), painted.len(), "{width:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn widget_paints_the_model_once_per_render() {
+        let model = every_row_kind_model();
+        // Tall (list fits, no bar) and short (bar) panes.
+        for height in [40u16, 6] {
+            let before = crate::paint::paint_calls();
+            render_lines(&model, 60, height, false);
+            assert_eq!(crate::paint::paint_calls() - before, 1, "height {height}");
+        }
     }
 }

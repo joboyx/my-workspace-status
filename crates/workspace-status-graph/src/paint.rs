@@ -124,12 +124,43 @@ pub fn paint_model(
     )
 }
 
+/// Number of lines [`paint_model_with`] returns for `model`, without painting.
+///
+/// The count does not depend on width, glyphs or clock: a commit or stash
+/// row paints a node line plus a spacer, every other row paints one line.
+/// The widget and the TUI read it to decide the vertical bar before (or
+/// instead of) a paint.
+pub fn painted_line_count(model: &GraphModel) -> usize {
+    model
+        .visible_rows()
+        .iter()
+        .map(|row| match row {
+            GraphRow::Commit { .. } | GraphRow::Stash(_) => 2,
+            GraphRow::Uncommitted { .. } | GraphRow::Worktree(_) => 1,
+        })
+        .sum()
+}
+
+thread_local! {
+    static PAINT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Calls to [`paint_model_with`] on this thread so far.
+///
+/// A cost probe for tests that pin one paint per frame. Not part of the
+/// widget contract.
+#[doc(hidden)]
+pub fn paint_calls() -> usize {
+    PAINT_CALLS.with(|c| c.get())
+}
+
 /// Paint with an explicit line width and clock (widget / tests).
 pub fn paint_model_with(
     model: &GraphModel,
     glyphs: &GlyphSet,
     opts: PaintOpts,
 ) -> Vec<PaintedLine> {
+    PAINT_CALLS.with(|c| c.set(c.get() + 1));
     let gutter_width = opts.gutter_width;
     let line_width = opts.line_width.unwrap_or(200);
     let now_unix = opts.now_unix.unwrap_or_else(now_unix_seconds);

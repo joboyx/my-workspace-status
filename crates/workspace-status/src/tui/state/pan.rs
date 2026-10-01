@@ -167,7 +167,9 @@ impl AppState {
     }
 
     /// [`Self::diff_pan_max`] over `rows` the caller already built, so a
-    /// frame does not rebuild every diff row to size the pan.
+    /// frame does not rebuild every diff row to size the pan. `rows` must be
+    /// this state's [`Self::current_diff_rows`] for the current layout;
+    /// other rows give a pan max for a diff that is not painted.
     pub(crate) fn diff_pan_max_for(&self, rows: &[DiffRow]) -> usize {
         if self.diff_wrap {
             return 0;

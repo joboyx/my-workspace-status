@@ -5,7 +5,8 @@
 use std::collections::{BTreeMap, HashSet};
 
 use crate::helpers::{
-    is_attention_sync_note, is_default_branch, is_detached_head_branch, STATUS_FAILED_NOTE,
+    is_attention_sync_note, is_default_branch, is_detached_head_branch, visible_width,
+    STATUS_FAILED_NOTE,
 };
 use crate::snapshot::{
     CheckoutKind, FileChange, SyncStatus, WorkspaceRepoSnapshot, WorkspaceSnapshot,
@@ -1182,6 +1183,22 @@ fn workspace_segments(node: &TreeNode, ascii: bool) -> NodeSegments {
             SegRole::Muted,
         )],
     }
+}
+
+/// Workspace root trailing summary that fits `room` columns (pad included)
+/// beside the name. The name is the row's identity, so the summary gives
+/// way first: `N changed · sync`, then `N changed`, then `N`, then nothing.
+pub(crate) fn workspace_trailing_fit(chrome: &NodeChrome, room: usize) -> Vec<TextSeg> {
+    let n = chrome.change_count;
+    [
+        format!("{n} changed · {}", chrome.sync_summary),
+        format!("{n} changed"),
+        n.to_string(),
+    ]
+    .into_iter()
+    .find(|text| visible_width(text) < room)
+    .map(|text| vec![text_seg(text, SegRole::Muted)])
+    .unwrap_or_default()
 }
 
 /// Styled segments for a tree node — the TUI's only label source.

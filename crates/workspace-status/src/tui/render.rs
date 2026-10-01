@@ -11,7 +11,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 use workspace_status_graph::{
     footer_message_scroll_max, graph_col_max, graph_hscroll_visible, graph_vscroll_visible,
-    paint_model, GraphLabelPalette, GraphWidget, ASCII, UNICODE,
+    painted_line_count, short_id, GraphLabelPalette, GraphWidget,
 };
 
 use std::cell::RefCell;
@@ -58,8 +58,8 @@ use super::syntax::{
 use super::tabs::{compare_picker_empty, no_committed_changes_vs, NO_COMMITTED_CHANGES};
 use super::theme::{hex_color, Palette, Pill};
 use super::tree::{
-    row_segments, visible_window, with_comment_mark, with_viewed_mark, NodeKind, NodeSegments,
-    SegRole, TextSeg, VisibleRow,
+    row_segments, visible_window, with_comment_mark, with_viewed_mark, workspace_trailing_fit,
+    NodeKind, NodeSegments, SegRole, TextSeg, VisibleRow,
 };
 use crate::helpers::{is_detached_head_branch, visible_width};
 
@@ -425,7 +425,25 @@ fn paint_tree_row(
     palette: Palette,
     col_offset: usize,
 ) -> Line<'static> {
-    let segs = row_segments(row, ascii, viewed, commented, resolved);
+    let segs_width =
+        |segs: &[TextSeg]| -> usize { segs.iter().map(|s| visible_width(&s.text)).sum() };
+    let mut segs = row_segments(row, ascii, viewed, commented, resolved);
+    if row.kind == NodeKind::Workspace {
+        // The summary gives way before the name. Same prefix as
+        // `paint_segmented_row` (edge, indent, chevron); comment marks
+        // stay ahead of the summary.
+        let prefix_width = 1 + 2 * row.depth + 2;
+        let name_width = segs_width(&row.segments).saturating_sub(col_offset);
+        let marks = segs.trailing.len().saturating_sub(row.trailing_segs.len());
+        let marks_width = segs_width(&segs.trailing[..marks]);
+        let room = width
+            .saturating_sub(prefix_width)
+            .saturating_sub(name_width)
+            .saturating_sub(marks_width);
+        segs.trailing.truncate(marks);
+        segs.trailing
+            .extend(workspace_trailing_fit(&row.chrome, room));
+    }
     paint_segmented_row(
         row.depth,
         row.foldable,
@@ -749,11 +767,11 @@ fn record_graph_scrollbar(state: &mut AppState, area: Rect, col_offset: u16) {
         return;
     }
     let chrome = state.graph_chrome_in(area.height, area.width);
-    let glyphs = if state.ascii { &ASCII } else { &UNICODE };
     let Some(model) = state.graph.as_ref() else {
         return;
     };
-    let content_len = paint_model(model, glyphs, None).len();
+    // The widget already painted this frame; count without a second paint.
+    let content_len = painted_line_count(model);
     state.layout.graph_content_len = content_len;
     let vscroll = graph_vscroll_visible(content_len, chrome.list_height, state.graph_scroll);
     let hscroll = graph_hscroll_visible(col_offset);
@@ -2716,7 +2734,7 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         let short = picker
             .commit_id
             .as_deref()
-            .map(|id| id.get(..7).unwrap_or(id).to_string())
+            .map(|id| short_id(id).to_string())
             .unwrap_or_default();
         title.push(Span::styled(
             "Checkout ",
@@ -2804,7 +2822,7 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     // Enter names what it does on the cursor row: the create row makes a
     // branch (tree: and checks it out; graph: at the commit, no checkout).
     let enter = match (picker.on_create_row(), picker.commit_id.as_deref()) {
-        (true, Some(id)) => format!("Enter create at {}", id.get(..7).unwrap_or(id)),
+        (true, Some(id)) => format!("Enter create at {}", short_id(id)),
         (true, None) => "Enter create and check out".to_string(),
         (false, _) => "Enter checkout".to_string(),
     };
@@ -2868,7 +2886,7 @@ fn branch_create_row(
     ];
     if let Some(id) = commit_id {
         spans.push(Span::styled(
-            format!(" at {}", id.get(..7).unwrap_or(id)),
+            format!(" at {}", short_id(id)),
             Style::default().fg(label_fg).bg(row_bg),
         ));
     }
@@ -3165,11 +3183,7 @@ fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
     let palette = state.theme.palette();
     let accent = palette.branch_feature;
-    let short = create
-        .commit_id
-        .get(..7)
-        .unwrap_or(&create.commit_id)
-        .to_string();
+    let short = short_id(&create.commit_id).to_string();
     let name = if create.name.is_empty() {
         "…"
     } else {
@@ -4269,6 +4283,40 @@ mod tests {
         );
     }
 
+    /// A graph frame paints the model once: the widget paints it and the
+    /// scrollbar record counts its lines without a second paint. Both a
+    /// list that fits and one that overflows (vertical bar) hold.
+    #[test]
+    fn graph_frame_paints_the_model_once() {
+        let mut state = two_pane_graph_state();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        for commits in [1usize, 40] {
+            if let Some(model) = state.graph.as_mut() {
+                let seed = model.commits[0].clone();
+                model.commits = (0..commits)
+                    .map(|i| Commit {
+                        id: format!("{i:040x}"),
+                        ..seed.clone()
+                    })
+                    .collect();
+            }
+            let before = workspace_status_graph::paint_calls();
+            draw_state(&mut terminal, &mut state);
+            assert_eq!(
+                workspace_status_graph::paint_calls() - before,
+                1,
+                "{commits} commits"
+            );
+            let model = state.graph.as_ref().unwrap();
+            assert_eq!(
+                state.layout.graph_content_len,
+                workspace_status_graph::paint_model(model, &workspace_status_graph::UNICODE, None)
+                    .len()
+            );
+            assert_eq!(state.layout.graph_scrollbar_x.is_some(), commits > 1);
+        }
+    }
+
     #[test]
     fn graph_footer_shows_long_message_by_default_and_wheel_scrolls_it() {
         let mut state = two_pane_graph_state();
@@ -5230,7 +5278,9 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("app"), "{text}");
         assert!(text.contains("README.md"), "{text}");
-        assert!(text.contains("changed ·"), "{text}");
+        // A 30-column tree keeps the workspace name and drops the sync part.
+        assert!(text.contains("# tmp"), "{text}");
+        assert!(text.contains("1 changed"), "{text}");
         let file_line = text
             .lines()
             .find(|line| line.contains("README.md"))
@@ -6115,6 +6165,52 @@ mod tests {
             palette,
             col_offset,
         ))
+    }
+
+    /// A narrowed tree keeps the workspace name: the root summary drops its
+    /// sync part, then shortens `N changed` to `N`, then goes, before the
+    /// name clips.
+    #[test]
+    fn narrow_workspace_root_row_shortens_summary_before_the_name() {
+        const NAME: &str = "demo-workspace";
+        let built = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, NAME);
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let mut row = rows
+            .iter()
+            .find(|r| r.kind == NodeKind::Workspace)
+            .expect("workspace row")
+            .clone();
+        row.chrome.change_count = 5;
+        row.chrome.sync_summary = "1 ahead, 1 diverged".into();
+        let name_end = 3 + row
+            .segments
+            .iter()
+            .map(|s| visible_width(&s.text))
+            .sum::<usize>();
+        let full = "5 changed · 1 ahead, 1 diverged";
+        for (width, trailing) in [
+            (name_end + 1 + full.chars().count(), full),
+            (name_end + 1 + full.chars().count() - 1, "5 changed"),
+            (name_end + 1 + "5 changed".len(), "5 changed"),
+            (name_end + 2, "5"),
+            (name_end + 1, ""),
+            (name_end, ""),
+        ] {
+            let text = paint_row(&row, width, 0);
+            let name_at = text
+                .find(NAME)
+                .unwrap_or_else(|| panic!("width {width} keeps the name:\n{text}"));
+            assert_eq!(
+                text[name_at + NAME.len()..].trim(),
+                trailing,
+                "width {width}:\n{text}"
+            );
+        }
+        // Narrower than the name: the name clips, no summary competes.
+        let text = paint_row(&row, name_end - 4, 0);
+        assert!(!text.contains('5'), "{text}");
+        assert!(text.contains("demo-work"), "{text}");
     }
 
     #[test]
