@@ -120,6 +120,7 @@ fn beta_diff_at_origin(screen: &str) -> bool {
         && right.contains(BETA)
         && !right.contains(ALPHA)
         && !right.contains("pan ")
+        && !right.contains('═')
         && right_vbar_at_top(screen)
         && right_selection_on_first_body_row(screen)
 }

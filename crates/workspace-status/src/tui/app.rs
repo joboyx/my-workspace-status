@@ -47,7 +47,7 @@ use super::graph_load::{
     load_graph_model, load_graph_model_window, refresh_graph_limit, GraphIdentity,
 };
 use super::keys::KeyStrokeOrigin;
-use super::keys::{event_to_action_with, is_held_nav_backlog};
+use super::keys::{event_to_action_with, is_held_nav_backlog, InputMode};
 use super::state::AppState;
 use super::status::StatusMessage;
 use super::tabs::{base_ref_not_found, no_merge_base, HEAD_HAS_NO_COMMIT};
@@ -132,8 +132,30 @@ pub(crate) fn terminal_size_rect() -> Rect {
 }
 
 pub(crate) fn map_event(state: &AppState, event: &crossterm::event::Event) -> Action {
-    if state.too_small && matches!(event, crossterm::event::Event::Mouse(_)) {
-        return Action::None;
+    use crossterm::event::{Event, KeyCode, KeyModifiers};
+    if state.too_small {
+        if matches!(event, Event::Mouse(_)) {
+            return Action::None;
+        }
+        // An overlay, confirm, or prompt is not painted at this size: only
+        // keys that close or quit reach it, so a hidden `y` cannot confirm.
+        if hidden_input_mode(state.input_mode()) {
+            let closes = match event {
+                Event::Key(key) => match key.code {
+                    KeyCode::Esc => true,
+                    KeyCode::Char('q') => !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT),
+                    KeyCode::Char('c') => key.modifiers.contains(KeyModifiers::CONTROL),
+                    _ => false,
+                },
+                Event::Resize(..) => true,
+                _ => false,
+            };
+            if !closes {
+                return Action::None;
+            }
+        }
     }
     event_to_action_with(
         event,
@@ -143,6 +165,18 @@ pub(crate) fn map_event(state: &AppState, event: &crossterm::event::Event) -> Ac
         state.graph_stash_focused(),
         state.graph_commit_focused(),
         state.hl_folds(),
+    )
+}
+
+/// True for an input mode that paints an overlay, confirm, or prompt
+/// rather than plain pane navigation.
+fn hidden_input_mode(mode: InputMode) -> bool {
+    !matches!(
+        mode,
+        InputMode::Normal { .. }
+            | InputMode::ZPending { .. }
+            | InputMode::GPending { .. }
+            | InputMode::DiffVisual
     )
 }
 

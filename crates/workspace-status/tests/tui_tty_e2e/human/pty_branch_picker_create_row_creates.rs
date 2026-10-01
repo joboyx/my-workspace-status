@@ -56,6 +56,9 @@ fn picker_with_create_row(screen: &str) -> bool {
         && screen
             .lines()
             .any(|line| line.contains(&format!("❯   + create branch {BRANCH}")))
+        // The footer names what Enter does on the create row.
+        && screen.contains("Enter create and check out")
+        && !screen.contains("Enter checkout")
         && !screen.contains("No matching branches")
         && !screen.contains("Create branch")
         && !screen.contains(&format!("created {BRANCH}"))

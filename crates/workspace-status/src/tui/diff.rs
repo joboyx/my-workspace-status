@@ -70,6 +70,12 @@ pub enum DiffRow {
         left: DiffCell,
         right: Option<DiffCell>,
     },
+    /// `git diff` failed for one side while the other loaded: the
+    /// [`diff_failed_text`] line, so the missing section does not read as
+    /// "no changes".
+    Error {
+        text: String,
+    },
 }
 
 /// Parsed unified-diff line.
@@ -445,6 +451,8 @@ enum RowBind {
         hunk: usize,
         parsed: Vec<usize>,
     },
+    /// [`DiffRow::Error`]: no patch lines.
+    Error,
 }
 
 /// Apply target and direction for a visual-line partial patch.
@@ -594,7 +602,22 @@ fn annotated_diff_rows(content: &DiffContent, mode: DiffMode) -> Vec<(DiffRow, R
             push_hunk_rows(&mut out, section, idx, hunk, mode);
         }
     }
+    // With no rows at all the pane paints the failure as its empty text.
+    if let (Some(reason), false) = (content.error.as_deref(), out.is_empty()) {
+        out.push((
+            DiffRow::Error {
+                text: diff_failed_text(reason),
+            },
+            RowBind::Error,
+        ));
+    }
     out
+}
+
+/// Diff-pane text for a failed `git diff`: git's `reason` after a fixed
+/// prefix.
+pub fn diff_failed_text(reason: &str) -> String {
+    format!("git diff failed: {reason}")
 }
 
 /// Rows for both diff sections. Empty sections are omitted.
@@ -670,6 +693,7 @@ pub fn build_partial_patch(
                     .or_default()
                     .extend(parsed.iter().copied());
             }
+            RowBind::Error => {}
         }
     }
 
@@ -1201,7 +1225,7 @@ pub fn diff_pane_header_rows(path: &str, width: u16, height: u16) -> u16 {
 pub fn row_search_text(row: &DiffRow) -> String {
     match row {
         DiffRow::Section(section) => section_header(*section).to_string(),
-        DiffRow::Hunk { text } => text.clone(),
+        DiffRow::Hunk { text } | DiffRow::Error { text } => text.clone(),
         DiffRow::Line { left, right } => {
             let mut out = left.text.clone();
             if let Some(right) = right {
@@ -1232,7 +1256,9 @@ pub fn diff_row_visual_height(
             let text = format!(" {} ", section_header(*section));
             wrap_col_starts(&text, width).len().max(1)
         }
-        DiffRow::Hunk { text } => wrap_col_starts(text, width).len().max(1),
+        DiffRow::Hunk { text } | DiffRow::Error { text } => {
+            wrap_col_starts(text, width).len().max(1)
+        }
         DiffRow::Line { left, right } if split && right.is_some() => {
             let cols = side_by_side_column_widths(content_w, split_fraction);
             let left_h = wrap_col_starts(
@@ -1408,6 +1434,46 @@ index 1111111..2222222 100644
         let hunks = parse_unified_diff("@@ garbage @@\n+a\n");
         assert_eq!(hunks[0].lines[0].kind, DiffCellKind::Add);
         assert_eq!(hunks[0].lines[0].new_no, Some(0));
+    }
+
+    /// A staged diff that loaded beside a failed unstaged `git diff` ends
+    /// with the failure line; with no rows the pane's empty text says it.
+    #[test]
+    fn partial_diff_failure_appends_an_error_row() {
+        let content = DiffContent {
+            staged: FIXTURE.into(),
+            unstaged: String::new(),
+            is_new: false,
+            is_committed: false,
+            error: Some("fatal: bad object".into()),
+        };
+        let rows = build_diff_rows(&content, DiffMode::Inline);
+        assert_eq!(rows[0], DiffRow::Section(DiffSection::Staged));
+        let last = rows.last().expect("rows");
+        assert_eq!(
+            *last,
+            DiffRow::Error {
+                text: "git diff failed: fatal: bad object".into()
+            }
+        );
+        assert_eq!(row_search_text(last), "git diff failed: fatal: bad object");
+        let error_row = rows.len() - 1;
+        assert_eq!(
+            build_partial_patch(
+                &content,
+                DiffMode::Inline,
+                error_row,
+                error_row,
+                PartialPatchKind::Unstage,
+                "README.md",
+            ),
+            Err("nothing to unstage in highlight".into())
+        );
+        let failed_only = DiffContent {
+            error: Some("fatal: bad object".into()),
+            ..DiffContent::default()
+        };
+        assert!(build_diff_rows(&failed_only, DiffMode::Inline).is_empty());
     }
 
     #[test]

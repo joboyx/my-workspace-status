@@ -590,6 +590,10 @@ pub struct AppState {
     /// Diff search hits for one (content, layout, query), so the status
     /// pill and the diff paint do not rebuild every diff row each frame.
     diff_search_memo: RefCell<Option<DiffSearchMemo>>,
+    /// [`Self::current_diff_rows`] calls, so tests can bound the row
+    /// builds a frame or keypress costs on a large diff.
+    #[cfg(test)]
+    pub(crate) diff_row_builds: std::cell::Cell<usize>,
 }
 
 fn unix_now() -> i64 {
@@ -711,6 +715,8 @@ impl AppState {
             ctrl_c_armed_until: None,
             last_click: None,
             diff_search_memo: RefCell::new(None),
+            #[cfg(test)]
+            diff_row_builds: std::cell::Cell::new(0),
         };
         state.reconcile_viewed_store();
         state.reconcile_comment_store();
@@ -2254,12 +2260,16 @@ impl AppState {
     }
 
     fn diff_wrap_heights(&self) -> Vec<usize> {
-        let rows = self.current_diff_rows();
+        self.diff_wrap_heights_for(&self.current_diff_rows())
+    }
+
+    /// [`Self::diff_wrap_heights`] over rows the caller already built.
+    fn diff_wrap_heights_for(&self, rows: &[DiffRow]) -> Vec<usize> {
         let pane_w = diff_paint_width(self.layout.diff_pane_width);
         let content_w = diff_row_content_width(pane_w as usize) as u16;
-        let gutter = gutter_width(&rows).saturating_add(comment_mark_cols(self.ascii));
+        let gutter = gutter_width(rows).saturating_add(comment_mark_cols(self.ascii));
         let split = self.diff_layout() == DiffMode::SideBySide;
-        diff_wrap_row_heights(&rows, content_w, gutter, split, self.diff_split_fraction)
+        diff_wrap_row_heights(rows, content_w, gutter, split, self.diff_split_fraction)
     }
 
     fn diff_logical_index_at_visual(&self, visual_y: usize) -> Option<usize> {
@@ -2868,6 +2878,8 @@ impl AppState {
 
     /// Numbered rows for the current layout (inline vs split).
     pub fn current_diff_rows(&self) -> Vec<DiffRow> {
+        #[cfg(test)]
+        self.diff_row_builds.set(self.diff_row_builds.get() + 1);
         build_diff_rows(self.current_diff_content(), self.diff_layout())
     }
 
@@ -4813,17 +4825,16 @@ impl AppState {
     }
 
     /// Whether the graph list paints its vertical scrollbar: the painted
-    /// lines overflow the list, or it has left the top. Mirrors the widget.
+    /// lines overflow the list, or it has left the top. Mirrors the widget
+    /// from the line count the last frame recorded, so a pan key does not
+    /// repaint the whole model to count it.
     pub(crate) fn graph_vscroll_shown(&self) -> bool {
-        let Some(model) = self.graph.as_ref() else {
-            return false;
-        };
-        let glyphs = if self.ascii { &ASCII } else { &UNICODE };
-        graph_vscroll_visible(
-            paint_model(model, glyphs, None).len(),
-            self.graph_chrome().list_height,
-            self.graph_scroll,
-        )
+        self.graph.is_some()
+            && graph_vscroll_visible(
+                self.layout.graph_content_len,
+                self.graph_chrome().list_height,
+                self.graph_scroll,
+            )
     }
 
     pub(crate) fn sync_graph_scroll(&mut self) {
@@ -4844,7 +4855,14 @@ impl AppState {
     }
 
     fn sync_diff_scroll(&mut self) {
-        let n = self.current_diff_rows().len();
+        let rows = self.current_diff_rows();
+        self.sync_diff_scroll_for(&rows);
+    }
+
+    /// [`Self::sync_diff_scroll`] over rows the caller already built, so a
+    /// cursor move on a large diff builds them once.
+    fn sync_diff_scroll_for(&mut self, rows: &[DiffRow]) {
+        let n = rows.len();
         if n == 0 {
             self.diff_cursor = 0;
             self.diff_scroll = 0;
@@ -4853,7 +4871,7 @@ impl AppState {
         }
         self.diff_cursor = self.diff_cursor.min(n - 1);
         if self.diff_wrap {
-            let heights = self.diff_wrap_heights();
+            let heights = self.diff_wrap_heights_for(rows);
             self.diff_scroll =
                 wrap_viewport_start(&heights, self.diff_cursor, self.diff_body_height()) as u16;
             return;
@@ -4863,15 +4881,12 @@ impl AppState {
     }
 
     fn move_diff_cursor(&mut self, delta: i32) {
-        let n = self.current_diff_rows().len();
-        if n == 0 {
-            self.diff_cursor = 0;
-            self.diff_scroll = 0;
-            self.clear_diff_visual();
-            return;
+        let rows = self.current_diff_rows();
+        let n = rows.len() as i32;
+        if n > 0 {
+            self.diff_cursor = (self.diff_cursor as i32 + delta).clamp(0, n - 1) as usize;
         }
-        self.diff_cursor = (self.diff_cursor as i32 + delta).clamp(0, n as i32 - 1) as usize;
-        self.sync_diff_scroll();
+        self.sync_diff_scroll_for(&rows);
     }
 
     fn page_step(&self) -> i32 {
@@ -11110,6 +11125,24 @@ mod tests {
         assert!(app.diff_search_hits("  ").is_empty());
     }
 
+    /// The graph pan clamp reads the painted line count the last frame
+    /// recorded instead of repainting the model.
+    #[test]
+    fn graph_vscroll_shown_reads_the_recorded_line_count() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        assert!(!app.graph_vscroll_shown(), "no graph");
+        install_graph(&mut app, Vec::new());
+        let list = usize::from(app.graph_chrome().list_height);
+        app.layout.graph_content_len = list;
+        assert!(!app.graph_vscroll_shown(), "fits");
+        app.layout.graph_content_len = list + 1;
+        assert!(app.graph_vscroll_shown(), "overflows at the top");
+        app.layout.graph_content_len = 0;
+        app.graph_scroll = 1;
+        assert!(app.graph_vscroll_shown(), "left the top");
+    }
+
     /// `h` / `l` on a commit-file folder row fold / unfold it like the
     /// workspace tree; on a file row they still pan.
     #[test]
@@ -12308,6 +12341,57 @@ mod tests {
         let long = tall_diff_in_narrow_pane(LONG_DIFF_PATH);
         assert_eq!(long.diff_header_rows(), 3, "{}", long.diff_header_path());
         assert_eq!(long.diff_body_height(), 17);
+    }
+
+    /// The pan max over rows a caller already built matches the old
+    /// self-building derivation, the h-bar row waits for a pan, and a held
+    /// `j` / PageDown builds the diff rows once per key.
+    #[test]
+    fn diff_pan_max_reuses_rows_and_a_key_builds_rows_once() {
+        use super::super::diff::{cell_code_width, diff_row_content_width, gutter_width};
+        use super::super::search::max_col_offset;
+        let mut app = tall_diff_in_narrow_pane("README.md");
+        let mut lines = vec!["@@ -1,1 +1,41 @@".into(), format!("+{}", "w".repeat(60))];
+        lines.extend((0..40).map(|i| format!("+line {i}")));
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            DiffContent::from_lines(lines),
+        );
+        let rows = app.current_diff_rows();
+        let lens: Vec<usize> = rows
+            .iter()
+            .filter_map(|row| match row {
+                DiffRow::Line { left, .. } => Some(left.text.chars().count()),
+                _ => None,
+            })
+            .collect();
+        let gutter = gutter_width(&rows).saturating_add(comment_mark_cols(app.ascii));
+        let content_w = diff_row_content_width(diff_paint_width(20) as usize);
+        let expected = max_col_offset(&lens, cell_code_width(content_w, gutter));
+        assert!(expected > 0);
+        assert_eq!(app.diff_pan_max(), expected);
+        assert_eq!(app.diff_pan_max_for(&rows), expected);
+
+        assert!(!app.diff_hscroll_shown(), "no h-bar at pan 0");
+        assert_eq!(app.diff_body_height(), 19);
+        app.diff_col_offset = 1;
+        assert!(app.diff_hscroll_shown());
+        assert_eq!(app.diff_body_height(), 18, "the h-bar takes a body row");
+        app.diff_wrap = true;
+        assert_eq!(app.diff_pan_max(), 0);
+        assert!(!app.diff_hscroll_shown(), "wrap never pans");
+        app.diff_wrap = false;
+
+        app.focus = FocusPane::Right;
+        for wrap in [false, true] {
+            app.diff_wrap = wrap;
+            for action in [Action::Move(1), Action::PageMove(1)] {
+                app.diff_row_builds.set(0);
+                app.dispatch(action.clone());
+                assert_eq!(app.diff_row_builds.get(), 1, "{action:?} wrap={wrap}");
+            }
+        }
     }
 
     #[test]

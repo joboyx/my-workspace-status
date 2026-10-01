@@ -15,7 +15,7 @@ use crate::glyphs::{ASCII, UNICODE};
 use crate::gutter::graph_gutter_cap;
 use crate::lane_colors::{default_lane_colors, lane_fg};
 use crate::model::GraphModel;
-use crate::paint::{paint_model, paint_model_with, PaintOpts, PaintedLine};
+use crate::paint::{paint_model_with, PaintOpts, PaintedLine};
 
 /// Subject, meta, and ref-chip colours for graph labels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -373,20 +373,34 @@ impl Widget for GraphWidget<'_> {
             self.model.sync.is_some(),
             footer_lines.len() as u16,
         );
-        // The painted line count does not depend on the width, so the bar
-        // decision can read it before the width is known.
-        let vscroll = graph_vscroll_visible(
-            paint_model(self.model, glyphs, None).len(),
-            chrome.list_height,
-            self.scroll,
-        );
+        // Paint at the width the vertical bar leaves. The painted line
+        // count does not depend on the width, so that paint decides the
+        // bar; only a list that fits (no bar) paints again at full width.
+        let paint_at = |v_cols: u16| {
+            let pane = area.width.saturating_sub(v_cols) as usize;
+            let cap = match self.gutter_width {
+                Some(w) => w as usize,
+                None => graph_gutter_cap(pane.max(1)),
+            };
+            // Cursor column plus the optional scrollbar.
+            let line_width = area.width.saturating_sub(1 + v_cols) as usize;
+            paint_model_with(
+                self.model,
+                glyphs,
+                PaintOpts {
+                    gutter_width: Some(cap),
+                    line_width: Some(line_width.max(1)),
+                    now_unix: self.now_unix,
+                },
+            )
+        };
+        let mut painted = paint_at(1);
+        let vscroll = graph_vscroll_visible(painted.len(), chrome.list_height, self.scroll);
+        if !vscroll {
+            painted = paint_at(0);
+        }
         let hscroll = graph_hscroll_visible(self.col_offset);
         let v_cols = u16::from(vscroll);
-        let pane = area.width.saturating_sub(v_cols) as usize;
-        let cap = Some(match self.gutter_width {
-            Some(w) => w as usize,
-            None => graph_gutter_cap(pane.max(1)),
-        });
         let mut y = area.y;
         let list_bottom = area
             .y
@@ -408,16 +422,6 @@ impl Widget for GraphWidget<'_> {
         }
 
         let skip = self.scroll as usize;
-        let line_width = area.width.saturating_sub(1 + v_cols) as usize; // cursor + optional scrollbar
-        let painted = paint_model_with(
-            self.model,
-            glyphs,
-            PaintOpts {
-                gutter_width: cap,
-                line_width: Some(line_width.max(1)),
-                now_unix: self.now_unix,
-            },
-        );
         let content_len = painted.len();
         let list_top = y;
         let list_height = list_bottom.saturating_sub(list_top);

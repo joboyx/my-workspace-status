@@ -38,6 +38,10 @@ vertical and horizontal scrollbars through `tui/split.rs` (`hit_split` /
 `SplitDrag::GraphScrollbar` / `GraphHScrollbar`). The vertical bar is painted
 whenever the painted lines overflow the list, at the top too; the horizontal
 bar only when `col_offset > 0`, because it paints over the last list row.
+The widget paints once at the width the vertical bar leaves and reads the
+bar decision from that paint's line count (the count does not depend on the
+width); a list that fits paints again at full width. The TUI pan clamp reads
+the count the last frame recorded (`graph_content_len`).
 
 `GraphWidget::gutter_width` caps painted gutter columns. Topology still
 uses the full lane model; every row shares the same left-aligned clip. `GraphWidget::loading_older` paints

@@ -37,9 +37,9 @@ fn long_diff_clipped_tree_focus(screen: &str) -> bool {
         && right.contains("inline (too narrow)")
         && !right.contains("inline (too narrow) ·")
         && !right.contains(DIFF_HSCROLL_TAIL)
-        // Both bars show at the origin: the diff overflows both ways.
+        // The vertical bar shows at the origin; the h-bar waits for a pan.
         && right_vbar_at_top(screen)
-        && right.contains('═')
+        && !right.contains('═')
         && !right.contains("app/README.md")
         && !right.contains("UNSTAGED")
         && !title_has_files(screen)
@@ -201,7 +201,7 @@ fn pty_diff_hscrollbar_thumb_drag() {
     tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
         hbar_painted_tail_clipped,
-        "thumb grab must not jump (a left-edge track click pans back to the origin)",
+        "thumb grab must not jump (a left-edge track click hides the bar at origin)",
         WAIT,
     );
 

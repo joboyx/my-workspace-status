@@ -33,9 +33,9 @@ fn long_diff_clipped_tree_focus(screen: &str) -> bool {
         && right.contains("inline (too narrow)")
         && !right.contains("inline (too narrow) ·")
         && !right.contains(DIFF_HSCROLL_TAIL)
-        // Both bars show at the origin: the diff overflows both ways.
+        // The vertical bar shows at the origin; the h-bar waits for a pan.
         && right_vbar_at_top(screen)
-        && right.contains('═')
+        && !right.contains('═')
         && !right.contains("app/README.md")
         && !right.contains("UNSTAGED")
         && !screen.contains("WIP on graph")

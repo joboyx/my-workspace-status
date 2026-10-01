@@ -27,9 +27,9 @@ use super::comments::{
     tree_row_has_comment, CommentPrompt, COMMENT_OVERLAY_FOOTER_EDIT,
 };
 use super::diff::{
-    cell_code_width, cell_sign, diff_pane_header, diff_pane_header_rows, diff_pane_mode_label,
-    diff_row_content_width, diff_wrap_row_heights, gutter_width, section_header,
-    wrap_viewport_start, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
+    cell_code_width, cell_sign, diff_failed_text, diff_pane_header, diff_pane_header_rows,
+    diff_pane_mode_label, diff_row_content_width, diff_wrap_row_heights, gutter_width,
+    section_header, wrap_viewport_start, DiffCell, DiffCellKind, DiffRow, DiffSection, DIFF_RULE,
 };
 use super::drill::DrillView;
 use super::help::{
@@ -1120,7 +1120,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             "select a dirty file".to_string()
         } else if let Some(err) = state.current_diff_content().error.as_deref() {
             color = palette.deleted;
-            format!("git diff failed: {err}")
+            diff_failed_text(err)
         } else {
             "(no diff)".to_string()
         };
@@ -1245,8 +1245,12 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             &mut sb_state,
         );
     }
-    let col_max = state.diff_pan_max();
-    if hscroll && col_max > 0 && body.height > 0 && area.width > 0 {
+    let col_max = if hscroll {
+        state.diff_pan_max_for(&rows)
+    } else {
+        0
+    };
+    if col_max > 0 && body.height > 0 && area.width > 0 {
         state.layout.diff_hscrollbar_y = Some(body.y.saturating_add(body.height.saturating_sub(1)));
         state.layout.diff_hscrollbar_x = area.x;
         state.layout.diff_hscrollbar_width = area.width.saturating_sub(v_cols).max(1);
@@ -1311,6 +1315,17 @@ fn paint_diff_row(
                 .map(|chunk| {
                     Line::from(Span::styled(chunk, Style::default().fg(palette.diff_hunk)))
                 })
+                .collect()
+        }
+        DiffRow::Error { text } => {
+            let chunks = if wrap {
+                wrap_cols(text, width as usize)
+            } else {
+                vec![slice_cols(text, 0, width as usize)]
+            };
+            chunks
+                .into_iter()
+                .map(|chunk| Line::from(Span::styled(chunk, Style::default().fg(palette.deleted))))
                 .collect()
         }
         DiffRow::Line { left, right } if split && right.is_some() => {
@@ -2786,12 +2801,19 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(state.status.kind().color(palette)),
         )));
     }
+    // Enter names what it does on the cursor row: the create row makes a
+    // branch (tree: and checks it out; graph: at the commit, no checkout).
+    let enter = match (picker.on_create_row(), picker.commit_id.as_deref()) {
+        (true, Some(id)) => format!("Enter create at {}", id.get(..7).unwrap_or(id)),
+        (true, None) => "Enter create and check out".to_string(),
+        (false, _) => "Enter checkout".to_string(),
+    };
     let footer = if graph && !show_filter {
-        "↑↓ move · type a name to create · Enter checkout · Esc cancel"
+        format!("↑↓ move · type a name to create · {enter} · Esc cancel")
     } else if graph {
-        "↑↓ move · type to filter · Enter checkout · Esc cancel"
+        format!("↑↓ move · type to filter · {enter} · Esc cancel")
     } else {
-        "↑↓ move · type to filter · Enter checkout · Esc close"
+        format!("↑↓ move · type to filter · {enter} · Esc close")
     };
     lines.push(Line::from(Span::styled(
         footer,
@@ -3012,9 +3034,14 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(palette_theme.muted),
         )));
     } else {
+        // Rows under a painted group header do not repeat the group. A
+        // window scrolled into the middle of a group lost its header, so
+        // those rows keep the label.
+        let mut header_painted = false;
         for row in window {
             match row {
                 super::command_palette::PalettePaintRow::Header(title) => {
+                    header_painted = true;
                     lines.push(Line::from(Span::styled(
                         title.to_string(),
                         Style::default()
@@ -3073,13 +3100,15 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                             surface,
                         ));
                     }
-                    spans.push(Span::styled(
-                        format!("  {}", command.group.title()),
-                        Style::default()
-                            .fg(palette_theme.muted)
-                            .bg(row_bg)
-                            .add_modifier(dim),
-                    ));
+                    if !header_painted {
+                        spans.push(Span::styled(
+                            format!("  {}", command.group.title()),
+                            Style::default()
+                                .fg(palette_theme.muted)
+                                .bg(row_bg)
+                                .add_modifier(dim),
+                        ));
+                    }
                     // The reason sits dimmed at the right edge when it fits,
                     // so every disabled row says why, not only the cursor row.
                     if let Some(why) = reason.as_deref() {
@@ -3472,10 +3501,11 @@ mod tests {
         state
     }
 
-    /// A diff that overflows shows both bars at the top-left, before any
-    /// scroll or pan; a diff that fits shows neither.
+    /// A diff that overflows shows its vertical bar at the top, before any
+    /// scroll; the horizontal bar waits until the view leaves the left
+    /// edge. A diff that fits shows neither.
     #[test]
-    fn diff_bars_show_on_overflow_before_scrolling() {
+    fn diff_vertical_bar_shows_on_overflow_horizontal_after_pan() {
         let mut state = long_panning_diff_state(0);
         state.diff_cursor = 0;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -3486,9 +3516,23 @@ mod tests {
             "vertical bar at the top"
         );
         assert!(
-            state.layout.diff_hscrollbar_y.is_some(),
-            "horizontal bar at pan 0"
+            state.layout.diff_hscrollbar_y.is_none(),
+            "no horizontal bar at pan 0"
         );
+        state.diff_col_offset = 1;
+        draw_state(&mut terminal, &mut state);
+        assert!(
+            state.layout.diff_hscrollbar_y.is_some(),
+            "horizontal bar once panned"
+        );
+
+        // A frame builds the diff rows once; the h-bar pan reuses them.
+        for offset in [1, 0] {
+            state.diff_col_offset = offset;
+            state.diff_row_builds.set(0);
+            draw_state(&mut terminal, &mut state);
+            assert_eq!(state.diff_row_builds.get(), 1, "pan {offset}");
+        }
 
         let mut state = two_pane_diff_state();
         state.set_diff(
@@ -4899,6 +4943,62 @@ mod tests {
             format!(" {} {TAB_CLOSE_GLYPH} ", labels[index])
         };
         line.contains(&text)
+    }
+
+    /// Below the minimum an open confirm or overlay is not painted, so only
+    /// Esc, `q`, and Ctrl-c reach it; plain pane keys still map.
+    #[test]
+    fn terminal_below_minimum_drops_keys_for_a_hidden_overlay() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let key = |code, mods| Event::Key(KeyEvent::new(code, mods));
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(state.too_small);
+        let j = key(KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_ne!(super::super::app::map_event(&state, &j), Action::None);
+
+        state.confirm = Some(PendingConfirm::Revert {
+            label: "README.md".into(),
+            targets: vec![crate::tui::state::RevertTarget {
+                repo: "app".into(),
+                path: "README.md".into(),
+                untracked: false,
+                old_path: None,
+            }],
+        });
+        let y = key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(super::super::app::map_event(&state, &y), Action::None);
+        let enter = key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(super::super::app::map_event(&state, &enter), Action::None);
+        let esc = key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_ne!(super::super::app::map_event(&state, &esc), Action::None);
+
+        state.confirm = None;
+        state.help_open = true;
+        let slash = key(KeyCode::Char('/'), KeyModifiers::NONE);
+        assert_eq!(super::super::app::map_event(&state, &slash), Action::None);
+        for allowed in [
+            esc,
+            key(KeyCode::Char('q'), KeyModifiers::NONE),
+            key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            assert_ne!(
+                super::super::app::map_event(&state, &allowed),
+                Action::None,
+                "{allowed:?}"
+            );
+        }
+
+        // At the minimum size the overlay paints and takes every key again.
+        let mut terminal = Terminal::new(TestBackend::new(MIN_TERM_COLS, MIN_TERM_ROWS)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert!(!state.too_small);
+        assert_eq!(
+            super::super::app::map_event(&state, &slash),
+            Action::SearchStart
+        );
     }
 
     /// Below the minimum the frame is only the resize notice, and mouse
@@ -6902,13 +7002,67 @@ mod tests {
         let next = row("Next tab");
         assert!(next.ends_with(ONLY_WORKSPACE_TAB_OPEN), "{next}");
         let close = row("Close tab");
-        assert!(close.contains("Close tab  GIT"), "no empty chip: {close}");
-        assert!(close.ends_with(WORKSPACE_TAB_CANNOT_CLOSE), "{close}");
+        let after_title = close.split("Close tab").nth(1).unwrap_or_default();
+        assert_eq!(
+            after_title.trim_start(),
+            WORKSPACE_TAB_CANNOT_CLOSE,
+            "no empty chip, no group label: {close}"
+        );
         let other = row("Other pane");
         assert!(
-            other.ends_with("MOVE"),
+            other.ends_with("Other pane  Tab"),
             "an enabled row paints no reason: {other}"
         );
+        // Rows sit under their painted group header and do not repeat it.
+        let lines: Vec<&str> = text.lines().collect();
+        let header = |name: &str| {
+            lines
+                .iter()
+                .position(|line| line.trim_matches(['│', ' ']) == name)
+                .unwrap_or_else(|| panic!("no {name} header:\n{text}"))
+        };
+        let at = |title: &str| lines.iter().position(|l| l.contains(title)).unwrap();
+        assert!(header("MOVE") < at("Other pane"), "{text}");
+        assert!(header("GIT") < at("Close tab"), "{text}");
+        for title in ["Next tab", "Close tab", "Other pane"] {
+            let line = row(title);
+            assert!(
+                !line.contains("  MOVE") && !line.contains("  GIT") && !line.contains("  VIEW"),
+                "{title} repeats its group: {line}"
+            );
+        }
+    }
+
+    /// A palette window scrolled into the middle of a group lost that
+    /// group's header, so its top rows keep the group label.
+    #[test]
+    fn palette_rows_keep_their_group_when_the_header_scrolled_off() {
+        use crate::tui::action::{Action, PaletteOpenedBy};
+        const GROUPS: [&str; 4] = ["HIGHLIGHT", "MOVE", "GIT", "VIEW"];
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.dispatch(Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK));
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        for _ in 0..60 {
+            state.dispatch(Action::CommandPaletteMove(1));
+            draw_state(&mut terminal, &mut state);
+            let text = buffer_text(&terminal);
+            let lines: Vec<&str> = text.lines().collect();
+            let prompt = lines
+                .iter()
+                .position(|line| line.contains("Ctrl-k …"))
+                .unwrap_or_else(|| panic!("no palette prompt:\n{text}"));
+            let first = lines[prompt + 1];
+            if GROUPS.contains(&first.trim_matches(['│', ' '])) {
+                continue;
+            }
+            assert!(
+                GROUPS.iter().any(|g| first.contains(&format!("  {g}"))),
+                "a row whose header scrolled off keeps its group: {first}\n{text}"
+            );
+            return;
+        }
+        panic!("the palette window never started inside a group");
     }
 
     #[test]
@@ -6934,12 +7088,17 @@ mod tests {
             topic < create,
             "create row comes after the branches:\n{text}"
         );
+        assert!(text.contains("Enter checkout"), "{text}");
         state.branch_picker.as_mut().unwrap().move_cursor(1);
         draw_state(&mut terminal, &mut state);
         let text = buffer_text(&terminal);
         assert!(
             text.contains("❯   + create branch topic"),
             "the cursor lands on the create row:\n{text}"
+        );
+        assert!(
+            text.contains("Enter create and check out") && !text.contains("Enter checkout"),
+            "the footer names the create on its row:\n{text}"
         );
 
         let mut graph = BranchPickerState::from_names(
@@ -6955,6 +7114,10 @@ mod tests {
         assert!(
             text.contains("+ create branch new at aaa1111"),
             "graph picker names the commit:\n{text}"
+        );
+        assert!(
+            text.contains("Enter create at aaa1111") && !text.contains("Enter checkout"),
+            "graph create row creates at the commit:\n{text}"
         );
         assert!(!text.contains("No matching branches"), "{text}");
     }

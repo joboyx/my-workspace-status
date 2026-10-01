@@ -189,7 +189,7 @@ The compare diff covers commits only, so it does not change after a revert. The 
 | Compare `x` (whole file or highlighted lines) | `y`/`n` boxed confirm (`Y` not offered) | yes — the guard requires the file to match HEAD, so `git restore` brings it back |
 | `P` push | none | yes — never forces; a diverged remote makes the push fail |
 
-Revert, stash drop, origin-out-of-sync graph checkout, graph merge, worktree remove, and multi-repo `d` use modal overlays, so no other key can act while one is up. Only the key the box shows (`y`, or `Y` where offered) accepts. Enter never confirms; it says which key does. `n` / Esc cancel.
+Revert, compare `x`, stash drop, origin-out-of-sync graph checkout, graph merge, worktree remove, and multi-repo `d` use modal overlays, so no other key can act while one is up. Only the key the box shows (`y`, or `Y` where offered) accepts. Enter never confirms; it says which key does. `n` / Esc cancel.
 
 ## Write serialisation
 
