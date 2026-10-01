@@ -125,6 +125,7 @@ impl PtySession {
                     | "WS_STATUS_GLYPHS"
                     | "CLICOLOR_FORCE"
                     | "WS_STATUS_WORKSPACE"
+                    | "VISUAL"
             ) {
                 continue;
             }
@@ -133,9 +134,12 @@ impl PtySession {
         // CommandBuilder starts with the parent env. Skipping the copy
         // above does not drop these; remove them so the TTY paints colour
         // and the fixture cwd wins over an operator WS_STATUS_WORKSPACE.
+        // `e` reads $VISUAL before $EDITOR, so an operator VISUAL would
+        // outrank the stub EDITOR a test passes.
         cmd.env_remove("NO_COLOR");
         cmd.env_remove("FORCE_COLOR");
         cmd.env_remove("WS_STATUS_WORKSPACE");
+        cmd.env_remove("VISUAL");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("WS_STATUS_GLYPHS", "ascii");

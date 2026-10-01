@@ -17,8 +17,8 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 
 use super::chrome::{
-    breadcrumb_line, breadcrumb_rows, ctrl_c_prompt_line, ctrl_c_prompt_rows,
-    overlay_status_rows_for, status_line, STATUS_COPIED,
+    breadcrumb_line, breadcrumb_rows, ctrl_c_prompt_line, ctrl_c_prompt_rows, export_shows_status,
+    overlay_status_rows_for, status_line,
 };
 use super::comments::{
     comment_overlay_footer_save, commit_file_row_comments_resolved, commit_file_row_has_comment,
@@ -54,7 +54,7 @@ use super::state::{revert_scope, AppState, CompareRevertTarget, FocusPane, Pendi
 use super::syntax::{
     cached_highlight_diff_rows, slice_styled_cols, CachedDiffSyntax, DiffSyntaxKey,
 };
-use super::tabs::{no_committed_changes_vs, NO_BRANCHES_TO_COMPARE, NO_COMMITTED_CHANGES};
+use super::tabs::{compare_picker_empty, no_committed_changes_vs, NO_COMMITTED_CHANGES};
 use super::theme::{hex_color, Palette};
 use super::tree::{
     row_segments, visible_window, with_comment_mark, with_viewed_mark, NodeKind, NodeSegments,
@@ -2447,7 +2447,7 @@ fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let mut lines = vec![Line::from(title)];
     if window.is_empty() {
         lines.push(Line::from(Span::styled(
-            format!("  {NO_BRANCHES_TO_COMPARE}"),
+            format!("  {}", compare_picker_empty(picker)),
             Style::default().fg(palette.muted),
         )));
     } else {
@@ -3037,10 +3037,17 @@ fn draw_comment_export(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             "Comments",
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::styled(
-            "copied to clipboard",
-            Style::default().fg(palette.added),
-        )),
+        match export.copied {
+            Some(true) => Line::from(Span::styled(
+                "copied to clipboard",
+                Style::default().fg(palette.added),
+            )),
+            Some(false) => Line::from(Span::styled(
+                "copy failed (no TTY or clipboard tool)",
+                Style::default().fg(palette.deleted),
+            )),
+            None => Line::from(Span::styled("copying…", Style::default().fg(palette.muted))),
+        },
     ];
     for row in export.markdown.lines() {
         lines.push(Line::from(Span::styled(
@@ -3048,14 +3055,14 @@ fn draw_comment_export(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(palette.repo),
         )));
     }
-    if !state.status.is_empty() && state.status != STATUS_COPIED {
+    if export_shows_status(&state.status) {
         lines.push(Line::from(Span::styled(
             state.status.to_string(),
             Style::default().fg(state.status.kind().color(palette)),
         )));
     }
     lines.push(Line::from(Span::styled(
-        "copied · Esc close",
+        "Esc close",
         Style::default().fg(palette.muted),
     )));
     frame.render_widget(Clear, area);

@@ -39,6 +39,19 @@ pub const NO_COMMITTED_CHANGES: &str = "No committed changes";
 /// Empty compare picker.
 pub const NO_BRANCHES_TO_COMPARE: &str = "No branches to compare";
 
+/// Compare picker copy when no row shows: no branches at all, or none
+/// that match the typed filter (`no branch matches <q>`).
+pub fn compare_picker_empty(picker: &super::branches::BranchPickerState) -> String {
+    if picker.branches.is_empty() {
+        NO_BRANCHES_TO_COMPARE.to_string()
+    } else {
+        format!("no branch matches {}", picker.filter)
+    }
+}
+
+/// Status after Esc closes the compare picker.
+pub const COMPARE_CANCELLED: &str = "compare cancelled";
+
 /// Right-pane empty copy for equal or behind tips.
 pub fn no_committed_changes_vs(base_ref: &str) -> String {
     format!("No committed changes vs {base_ref}")

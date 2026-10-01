@@ -6,7 +6,7 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crate::actions::{pull_behind_repos, switch_repo_to_default_branch};
+use crate::actions::{pull_behind_repos, switch_repo_to_default_branch, SwitchOutcome};
 use crate::config::load_workspace_status_config;
 use crate::discovery::{collect_snapshots, validate_filter_repos};
 use crate::helpers::{normalize_filter_repo, sorted_unique};
@@ -269,7 +269,7 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
                 let Some(snapshot) = snapshots.iter().find(|s| s.repo == *repo) else {
                     continue;
                 };
-                let (ok, lines) = switch_repo_to_default_branch(
+                let (outcome, lines) = switch_repo_to_default_branch(
                     repo,
                     &snapshot.branch,
                     &cwd,
@@ -278,7 +278,7 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
                 for line in lines {
                     say(force_json, &line);
                 }
-                if ok {
+                if outcome == SwitchOutcome::Switched {
                     switched += 1;
                 }
             }

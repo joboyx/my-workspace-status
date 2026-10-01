@@ -211,8 +211,10 @@ pub struct CommentBodyLine {
 /// Overlay that shows exported markdown after copy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommentExport {
-    /// Markdown copied to the clipboard.
+    /// Markdown sent to the clipboard.
     pub markdown: String,
+    /// Copy result: `None` until the clipboard write returns.
+    pub copied: Option<bool>,
 }
 
 /// Overlay / export label for a key.

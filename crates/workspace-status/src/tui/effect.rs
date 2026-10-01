@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use workspace_status_graph::LOADING_OLDER;
 
-use crate::actions::switch_repo_to_default_branch;
+use crate::actions::{switch_repo_to_default_branch, SwitchOutcome};
 use crate::discovery::{discover_checkouts, process_repo, RepoCheckoutMeta};
 use crate::git::{
     apply_cached_patch, apply_worktree_patch_reverse, create_branch_at, create_branch_checkout,
@@ -37,7 +37,7 @@ use super::app::{
     probe_compare_range, RightPaneLoad, RightPaneRequest, RightPaneTarget, TuiOpts,
 };
 use super::branches::is_valid_branch_name;
-use super::chrome::{STATUS_COPIED, STATUS_NOTHING_TO_PULL};
+use super::chrome::{STATUS_COPIED, STATUS_COPY_FAILED, STATUS_NOTHING_TO_PULL};
 use super::comments;
 use super::diff_tool::{
     prepare_rev_diff_paths, prepare_worktree_diff, resolve_diff_tool, PreparedDiff,
@@ -50,7 +50,8 @@ use super::graph_load::{
     GraphIdentity, ShouldAutoload,
 };
 use super::ops::{
-    format_completed_op, format_mixed_running_op, format_running_op, op_targets, Op, RunningOp,
+    format_completed_op, format_mixed_running_op, format_running_op, op_targets, Op, OpTally,
+    RepoOpResult, RunningOp,
 };
 use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
 use super::stash::{resolve_stash_menu_key, StashMenuKeyResult, StashOpId};
@@ -87,12 +88,13 @@ pub(crate) enum JobOutcome {
     },
     BulkRemote {
         kind: RunningOp,
-        ok: bool,
+        result: RepoOpResult,
         /// Checkout path the worker ran in. Occupancy releases this gitdir.
         repo: String,
     },
     DefaultBranch {
-        ok: bool,
+        repo: String,
+        result: RepoOpResult,
     },
     PrepareStash {
         gen: u64,
@@ -206,8 +208,7 @@ enum OccupyReason {
 }
 
 struct KindWave {
-    ok: usize,
-    failed: usize,
+    tally: OpTally,
     repos: Vec<String>,
     /// A key (not only the background fetch tick) started this wave.
     /// Background-only waves leave the status slot alone unless a repo fails.
@@ -217,15 +218,14 @@ struct KindWave {
 impl KindWave {
     fn empty() -> Self {
         Self {
-            ok: 0,
-            failed: 0,
+            tally: OpTally::default(),
             repos: Vec::new(),
             foreground: false,
         }
     }
 
     fn done(&self) -> usize {
-        self.ok + self.failed
+        self.tally.done()
     }
 
     fn note_repo(&mut self, checkout: &str) {
@@ -277,13 +277,45 @@ impl RemoteQueue {
     }
 }
 
-/// Final status of a finished bulk op: ok when nothing failed, else error.
-fn completed_op_status(kind: RunningOp, ok: usize, failed: usize) -> StatusMessage {
-    let text = format_completed_op(kind, ok, failed);
-    if failed == 0 {
-        StatusMessage::ok(text)
-    } else {
+/// Final status of a finished bulk op: error when a repo failed, warn when
+/// one was skipped, else ok.
+fn completed_op_status(kind: RunningOp, tally: &OpTally) -> StatusMessage {
+    let text = format_completed_op(kind, tally);
+    if tally.has_failure() {
         StatusMessage::error(text)
+    } else if tally.has_skip() {
+        StatusMessage::warn(text)
+    } else {
+        StatusMessage::ok(text)
+    }
+}
+
+/// Bulk pull result for one repo.
+fn pull_result(dir: &std::path::Path) -> RepoOpResult {
+    let pulled = pull_quiet_detailed(dir);
+    if pulled.stash_pop_failed {
+        RepoOpResult::StashConflict
+    } else if pulled.ok {
+        RepoOpResult::Ok
+    } else {
+        RepoOpResult::Failed(pulled.error.unwrap_or_else(|| "pull failed".into()))
+    }
+}
+
+/// Map a `git` `Result` to a bulk op result.
+fn git_result(result: Result<(), String>) -> RepoOpResult {
+    match result {
+        Ok(()) => RepoOpResult::Ok,
+        Err(reason) => RepoOpResult::Failed(reason),
+    }
+}
+
+/// Default-branch switch result for one repo.
+fn switch_result(outcome: SwitchOutcome) -> RepoOpResult {
+    match outcome {
+        SwitchOutcome::Switched => RepoOpResult::Ok,
+        SwitchOutcome::Skipped(reason) => RepoOpResult::Skipped(reason),
+        SwitchOutcome::Failed(reason) => RepoOpResult::Failed(reason),
     }
 }
 
@@ -424,8 +456,7 @@ pub(crate) struct Interpreter {
     compare_diff: VecDeque<CompareDiffJob>,
     compare_probe: VecDeque<CompareProbeJob>,
     autoload: Option<(u64, GraphIdentity)>,
-    default_ok: usize,
-    default_failed: usize,
+    default_tally: OpTally,
     default_total: usize,
     default_repos: Vec<String>,
     pending_edit: Option<(String, String)>,
@@ -459,8 +490,7 @@ impl Interpreter {
             compare_diff: VecDeque::new(),
             compare_probe: VecDeque::new(),
             autoload: None,
-            default_ok: 0,
-            default_failed: 0,
+            default_tally: OpTally::default(),
             default_total: 0,
             default_repos: Vec::new(),
             pending_edit: None,
@@ -628,8 +658,7 @@ impl Interpreter {
             Effect::Push { repos } => self.start_bulk(state, RunningOp::Push, repos, true),
             Effect::DefaultBranch { repos } => {
                 self.default_total = repos.len();
-                self.default_ok = 0;
-                self.default_failed = 0;
+                self.default_tally = OpTally::default();
                 self.default_repos = repos.clone();
                 state.status = StatusMessage::progress(format_running_op(
                     RunningOp::DefaultBranch,
@@ -1000,11 +1029,20 @@ impl Interpreter {
             }
             Effect::CopyClipboard { text, announce } => {
                 let ok = comments::copy_to_clipboard(&text);
+                // `y` opens the export overlay right before this copy; its
+                // header shows the result.
+                if let Some(export) = state
+                    .comment_export
+                    .as_mut()
+                    .filter(|export| export.copied.is_none())
+                {
+                    export.copied = Some(ok);
+                }
                 if announce {
                     state.status = if ok {
                         StatusMessage::ok(STATUS_COPIED)
                     } else {
-                        StatusMessage::error("copy failed")
+                        StatusMessage::error(STATUS_COPY_FAILED)
                     };
                 }
                 self.mark();
@@ -1227,7 +1265,7 @@ impl Interpreter {
                 }
                 self.mark();
             }
-            JobOutcome::BulkRemote { kind, ok, repo } => {
+            JobOutcome::BulkRemote { kind, result, repo } => {
                 let gitdir = self
                     .remote
                     .occupy
@@ -1240,11 +1278,7 @@ impl Interpreter {
                     .unwrap_or_else(|| gitdir_key(state, &repo));
                 self.remote.occupy.remove(&gitdir);
                 if let Some(wave) = self.remote.wave_mut(kind) {
-                    if ok {
-                        wave.ok += 1;
-                    } else {
-                        wave.failed += 1;
-                    }
+                    wave.tally.note(&repo, result);
                     wave.note_repo(&repo);
                 }
                 self.mark();
@@ -1255,14 +1289,10 @@ impl Interpreter {
                 }
                 self.pump_remote_slots(state);
             }
-            JobOutcome::DefaultBranch { ok } => {
+            JobOutcome::DefaultBranch { repo, result } => {
                 self.sched.note_user_done(UserTag::DefaultBranch);
-                if ok {
-                    self.default_ok += 1;
-                } else {
-                    self.default_failed += 1;
-                }
-                let done = self.default_ok + self.default_failed;
+                self.default_tally.note(&repo, result);
+                let done = self.default_tally.done();
                 state.status = StatusMessage::progress(format_running_op(
                     RunningOp::DefaultBranch,
                     done,
@@ -1274,8 +1304,7 @@ impl Interpreter {
                     state.stamp_checkout_flashes(&self.default_repos);
                     state.status = completed_op_status(
                         RunningOp::DefaultBranch,
-                        self.default_ok,
-                        self.default_failed,
+                        &std::mem::take(&mut self.default_tally),
                     );
                     self.default_repos.clear();
                     self.release_default_branch(state);
@@ -1815,13 +1844,12 @@ impl Interpreter {
             return false;
         }
         let repos = std::mem::take(&mut wave.repos);
-        let ok_n = wave.ok;
-        let failed_n = wave.failed;
-        let quiet = !wave.foreground && failed_n == 0;
+        let tally = std::mem::take(&mut wave.tally);
+        let quiet = !wave.foreground && !tally.has_failure();
         *wave = KindWave::empty();
         state.stamp_checkout_flashes(&repos);
         if !quiet {
-            state.status = completed_op_status(kind, ok_n, failed_n);
+            state.status = completed_op_status(kind, &tally);
         }
         self.sched.on_reload_snapshot(state.focused_checkout_path());
         if !state.is_compare_tab() {
@@ -1969,12 +1997,13 @@ impl Interpreter {
                 if let Some(job) = self.writes.pop_front() {
                     self.exclusive_inflight.insert(id, job.gitdirs);
                     self.running_write = Some(job.op);
+                    let op = job.op;
                     spawn(
                         id,
                         Box::new(move || {
                             let status = match (job.work)() {
                                 Ok(s) => StatusMessage::ok(s),
-                                Err(err) => StatusMessage::error(err),
+                                Err(err) => StatusMessage::error(format!("{op} failed: {err}")),
                             };
                             JobOutcome::Write { status }
                         }),
@@ -2011,15 +2040,17 @@ impl Interpreter {
                 spawn(
                     id,
                     Box::new(move || {
-                        let ok = match kind {
+                        let result = match kind {
                             RunningOp::Fetch => {
-                                exec_git_checked(&["fetch", "--quiet"], &dir).is_ok()
+                                git_result(exec_git_checked(&["fetch", "--quiet"], &dir))
                             }
-                            RunningOp::Pull => pull_quiet_detailed(&dir).ok,
-                            RunningOp::Push => push_quiet(&dir).is_ok(),
-                            RunningOp::DefaultBranch => false,
+                            RunningOp::Pull => pull_result(&dir),
+                            RunningOp::Push => git_result(push_quiet(&dir)),
+                            RunningOp::DefaultBranch => {
+                                RepoOpResult::Failed("not a remote op".into())
+                            }
                         };
-                        JobOutcome::BulkRemote { kind, ok, repo }
+                        JobOutcome::BulkRemote { kind, result, repo }
                     }),
                 );
             }
@@ -2040,19 +2071,19 @@ impl Interpreter {
                 spawn(
                     id,
                     Box::new(move || {
-                        let ok = match task {
-                            Some((branch, override_name)) => {
+                        let result = match task {
+                            Some((branch, override_name)) => switch_result(
                                 switch_repo_to_default_branch(
                                     &repo,
                                     &branch,
                                     &cwd,
                                     override_name.as_deref(),
                                 )
-                                .0
-                            }
-                            None => false,
+                                .0,
+                            ),
+                            None => RepoOpResult::Failed("not in the snapshot".into()),
                         };
-                        JobOutcome::DefaultBranch { ok }
+                        JobOutcome::DefaultBranch { repo, result }
                     }),
                 );
             }
@@ -4054,7 +4085,7 @@ mod tests {
             first[0].0,
             JobOutcome::BulkRemote {
                 kind: RunningOp::Fetch,
-                ok: true,
+                result: RepoOpResult::Ok,
                 repo: "app".into(),
             },
         );
@@ -4282,7 +4313,7 @@ mod tests {
             first[0].0,
             JobOutcome::BulkRemote {
                 kind: RunningOp::Fetch,
-                ok: true,
+                result: RepoOpResult::Ok,
                 repo: "app".into(),
             },
         );
@@ -4658,7 +4689,7 @@ mod tests {
             jobs[0].0,
             JobOutcome::BulkRemote {
                 kind: RunningOp::Fetch,
-                ok: true,
+                result: RepoOpResult::Ok,
                 repo: "app".into(),
             },
         );
@@ -4685,11 +4716,14 @@ mod tests {
             jobs[0].0,
             JobOutcome::BulkRemote {
                 kind: RunningOp::Fetch,
-                ok: false,
+                result: RepoOpResult::Failed("could not read from remote repository".into()),
                 repo: "app".into(),
             },
         );
-        assert_eq!(state.status, "Fetched 1 repo (1 failed)");
+        assert_eq!(
+            state.status,
+            "Fetched 1 repo (1 failed: app — could not read from remote repository)"
+        );
         assert_eq!(state.status.kind(), StatusKind::Error);
     }
 
@@ -4714,7 +4748,7 @@ mod tests {
             jobs[0].0,
             JobOutcome::BulkRemote {
                 kind: RunningOp::Fetch,
-                ok: true,
+                result: RepoOpResult::Ok,
                 repo: "app".into(),
             },
         );
@@ -4808,7 +4842,7 @@ mod tests {
             first[0].0,
             JobOutcome::BulkRemote {
                 kind: RunningOp::Fetch,
-                ok: true,
+                result: RepoOpResult::Ok,
                 repo: "app".into(),
             },
         );
@@ -4829,5 +4863,125 @@ mod tests {
             interp.pending_remotes(),
             vec![(RunningOp::Pull, "notes".into())]
         );
+    }
+
+    /// Workspace at a temp root with one real git repo `app` on `branch`.
+    fn git_app_state(tag: &str, branch: &str, dirty: bool) -> (PathBuf, AppState) {
+        let root = crate::testutil::unique_dir(tag);
+        let dir = root.join("app");
+        crate::testutil::init_repo(&dir);
+        if branch != "main" {
+            crate::testutil::git(&dir, &["checkout", "-q", "-b", branch]);
+        }
+        if dirty {
+            std::fs::write(dir.join("README.md"), "# dirty\n").unwrap();
+        }
+        let mut snap = repo("app", dirty);
+        snap.branch = branch.into();
+        let snapshot = build_workspace_snapshot(&[snap], &[], false, &[]);
+        (root.clone(), AppState::new(root, snapshot, true))
+    }
+
+    /// Run every ready job on this thread and apply its outcome.
+    fn run_jobs(interp: &mut Interpreter, state: &mut AppState) {
+        for (id, work) in capture_jobs(interp, state) {
+            let outcome = work();
+            apply_id(interp, state, id, outcome);
+        }
+    }
+
+    #[test]
+    fn failed_write_names_the_op_and_git_reason() {
+        let (root, mut state) = git_app_state("ws-effect-write-fail", "main", false);
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::StashPop {
+                repo: "app".into(),
+                stash_ref: "stash@{0}".into(),
+            },
+            &Action::None,
+        );
+        run_jobs(&mut interp, &mut state);
+        assert!(
+            state
+                .status
+                .starts_with("stash pop failed: stash@{0} is not a valid reference"),
+            "{}",
+            state.status
+        );
+        assert_eq!(state.status.kind(), StatusKind::Error);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn push_failure_names_the_repo_and_reason() {
+        let (root, mut state) = git_app_state("ws-effect-push-detached", "main", false);
+        crate::testutil::git(&root.join("app"), &["checkout", "-q", "--detach"]);
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Push {
+                repos: vec!["app".into()],
+            },
+            &Action::None,
+        );
+        run_jobs(&mut interp, &mut state);
+        assert_eq!(
+            state.status,
+            "Pushed 1 repo (1 failed: app — detached HEAD cannot push)"
+        );
+        assert_eq!(state.status.kind(), StatusKind::Error);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pull_stash_conflict_outcome_says_the_stash_is_kept() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Pull {
+                repos: vec!["app".into()],
+            },
+            &Action::Pull,
+        );
+        let jobs = capture_jobs(&mut interp, &mut state);
+        apply_id(
+            &mut interp,
+            &mut state,
+            jobs[0].0,
+            JobOutcome::BulkRemote {
+                kind: RunningOp::Pull,
+                result: RepoOpResult::StashConflict,
+                repo: "app".into(),
+            },
+        );
+        assert_eq!(
+            state.status,
+            "app: pulled, but restoring local changes conflicted — resolve, then check `git stash list`"
+        );
+        assert_eq!(state.status.kind(), StatusKind::Error);
+    }
+
+    #[test]
+    fn default_branch_counts_a_dirty_skip_apart() {
+        let (root, mut state) = git_app_state("ws-effect-default-dirty", "feature/x", true);
+        let mut interp = Interpreter::with_cap(4);
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::DefaultBranch {
+                repos: vec!["app".into()],
+            },
+            &Action::DefaultBranch,
+        );
+        run_jobs(&mut interp, &mut state);
+        assert_eq!(state.status, "Switched 1 repo (1 skipped: dirty)");
+        assert_eq!(state.status.kind(), StatusKind::Warn);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

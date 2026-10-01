@@ -64,13 +64,17 @@ fn pty_compare_picker_never_checkouts() {
         WAIT,
     );
     tui.keys("zzz-missing");
-    tui.wait_contains("No branches to compare", WAIT);
+    tui.wait_contains("no branch matches zzz-missing", WAIT);
     assert_eq!(head_sha(&workspace), before);
     assert_eq!(head_branch(&workspace), branch);
     tui.esc();
     tui.wait_pred(
-        |screen| screen.contains("# workspace") && !screen.contains("app ↔"),
-        "Esc closes the picker and stays on Workspace",
+        |screen| {
+            screen.contains("# workspace")
+                && !screen.contains("app ↔")
+                && screen.contains("compare cancelled")
+        },
+        "Esc closes the picker with compare cancelled and stays on Workspace",
         WAIT,
     );
     assert_eq!(head_sha(&workspace), before);

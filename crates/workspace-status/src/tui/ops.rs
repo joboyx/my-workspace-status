@@ -298,24 +298,113 @@ pub fn format_mixed_running_op(
     String::new()
 }
 
+/// How one repo of a workspace op (fetch / pull / push / default) ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RepoOpResult {
+    /// The op did its work.
+    Ok,
+    /// The op failed. Holds git's reason line.
+    Failed(String),
+    /// Left alone on purpose. Holds the short reason (`dirty`).
+    Skipped(String),
+    /// The pull ran, but restoring the auto-stashed changes conflicted.
+    /// The tree has conflict markers and the stash entry is kept.
+    StashConflict,
+}
+
+/// Status copy for a pull whose auto-stash pop conflicted.
+pub const STASH_CONFLICT_COPY: &str =
+    "pulled, but restoring local changes conflicted — resolve, then check `git stash list`";
+
+/// Per-repo results of one workspace op, in finish order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OpTally {
+    results: Vec<(String, RepoOpResult)>,
+}
+
+impl OpTally {
+    /// Record how `repo` ended.
+    pub fn note(&mut self, repo: &str, result: RepoOpResult) {
+        self.results.push((repo.to_string(), result));
+    }
+
+    /// Repos that finished, whatever the result.
+    pub fn done(&self) -> usize {
+        self.results.len()
+    }
+
+    /// True when a repo failed or its auto-stash conflicted.
+    pub fn has_failure(&self) -> bool {
+        self.results
+            .iter()
+            .any(|(_, r)| matches!(r, RepoOpResult::Failed(_) | RepoOpResult::StashConflict))
+    }
+
+    /// True when a repo was skipped on purpose.
+    pub fn has_skip(&self) -> bool {
+        self.results
+            .iter()
+            .any(|(_, r)| matches!(r, RepoOpResult::Skipped(_)))
+    }
+}
+
 /// Completion line for a finished workspace op: `Pulled 3 repos`.
 ///
-/// `ok + failed` is how many repos the op ran against. `failed > 0`
-/// appends ` (N failed)`. Repo names are never listed — a long
-/// workspace must not swamp the breadcrumb trailing slot.
-pub fn format_completed_op(kind: RunningOp, ok: usize, failed: usize) -> String {
+/// The count is every repo the op ran against. Failures name the first
+/// repo and git's reason, then `+N more`
+/// (`Pushed 3 repos (2 failed: app — [rejected] main -> main (fetch first), +1 more)`).
+/// Skips count apart with the first reason (`1 skipped: dirty`). A pull
+/// whose auto-stash conflicted leads instead: `app: pulled, but restoring
+/// local changes conflicted — …`, with `(+N more failed)` for the rest.
+pub fn format_completed_op(kind: RunningOp, tally: &OpTally) -> String {
+    let failed: Vec<(&str, Option<&str>)> = tally
+        .results
+        .iter()
+        .filter_map(|(repo, r)| match r {
+            RepoOpResult::StashConflict => Some((repo.as_str(), None)),
+            RepoOpResult::Failed(reason) => Some((repo.as_str(), Some(reason.as_str()))),
+            _ => None,
+        })
+        .collect();
+    if let Some((repo, _)) = failed.iter().find(|(_, reason)| reason.is_none()) {
+        let more = failed.len() - 1;
+        return if more > 0 {
+            format!("{repo}: {STASH_CONFLICT_COPY} (+{more} more failed)")
+        } else {
+            format!("{repo}: {STASH_CONFLICT_COPY}")
+        };
+    }
+    let skipped: Vec<&str> = tally
+        .results
+        .iter()
+        .filter_map(|(_, r)| match r {
+            RepoOpResult::Skipped(reason) => Some(reason.as_str()),
+            _ => None,
+        })
+        .collect();
     let verb = match kind {
         RunningOp::Fetch => "Fetched",
         RunningOp::Pull => "Pulled",
         RunningOp::Push => "Pushed",
         RunningOp::DefaultBranch => "Switched",
     };
-    let total = ok.saturating_add(failed);
+    let total = tally.done();
     let noun = if total == 1 { "repo" } else { "repos" };
-    if failed > 0 {
-        format!("{verb} {total} {noun} ({failed} failed)")
-    } else {
+    let mut notes = Vec::new();
+    if let Some((repo, reason)) = failed.first() {
+        let mut note = format!("{} failed: {repo} — {}", failed.len(), reason.unwrap_or(""));
+        if failed.len() > 1 {
+            note.push_str(&format!(", +{} more", failed.len() - 1));
+        }
+        notes.push(note);
+    }
+    if let Some(reason) = skipped.first() {
+        notes.push(format!("{} skipped: {reason}", skipped.len()));
+    }
+    if notes.is_empty() {
         format!("{verb} {total} {noun}")
+    } else {
+        format!("{verb} {total} {noun} ({})", notes.join("; "))
     }
 }
 
@@ -1252,24 +1341,93 @@ mod tests {
         );
     }
 
+    fn tally(results: &[(&str, RepoOpResult)]) -> OpTally {
+        let mut tally = OpTally::default();
+        for (repo, result) in results {
+            tally.note(repo, result.clone());
+        }
+        tally
+    }
+
     #[test]
     fn completed_op_summary_counts_repos_and_failures() {
-        assert_eq!(format_completed_op(RunningOp::Pull, 3, 0), "Pulled 3 repos");
+        let ok = || RepoOpResult::Ok;
+        let failed = |why: &str| RepoOpResult::Failed(why.into());
+        let three_ok = tally(&[("a", ok()), ("b", ok()), ("c", ok())]);
         assert_eq!(
-            format_completed_op(RunningOp::Fetch, 3, 1),
-            "Fetched 4 repos (1 failed)"
-        );
-        assert_eq!(format_completed_op(RunningOp::Push, 1, 0), "Pushed 1 repo");
-        assert_eq!(
-            format_completed_op(RunningOp::Push, 0, 2),
-            "Pushed 2 repos (2 failed)"
+            format_completed_op(RunningOp::Pull, &three_ok),
+            "Pulled 3 repos"
         );
         assert_eq!(
-            format_completed_op(RunningOp::DefaultBranch, 2, 1),
-            "Switched 3 repos (1 failed)"
+            format_completed_op(
+                RunningOp::Push,
+                &tally(&[
+                    ("app", failed("detached HEAD cannot push")),
+                    ("b", ok()),
+                    ("c", ok())
+                ]),
+            ),
+            "Pushed 3 repos (1 failed: app — detached HEAD cannot push)"
         );
-        let listed = format_completed_op(RunningOp::Fetch, 2, 0);
-        assert!(!listed.contains("notes"), "{listed}");
-        assert!(!listed.contains("dotfiles"), "{listed}");
+        assert_eq!(
+            format_completed_op(RunningOp::Push, &tally(&[("b", ok())])),
+            "Pushed 1 repo"
+        );
+        assert_eq!(
+            format_completed_op(
+                RunningOp::Fetch,
+                &tally(&[
+                    ("app", failed("could not read from remote")),
+                    ("lib", failed("timeout")),
+                    ("notes", failed("timeout")),
+                ]),
+            ),
+            "Fetched 3 repos (3 failed: app — could not read from remote, +2 more)"
+        );
+        assert!(!three_ok.has_failure() && !three_ok.has_skip());
+    }
+
+    #[test]
+    fn completed_op_counts_skips_apart_from_failures() {
+        let skipped = || RepoOpResult::Skipped("dirty".into());
+        let mixed = tally(&[
+            ("a", RepoOpResult::Ok),
+            ("b", RepoOpResult::Ok),
+            ("c", skipped()),
+        ]);
+        assert_eq!(
+            format_completed_op(RunningOp::DefaultBranch, &mixed),
+            "Switched 3 repos (1 skipped: dirty)"
+        );
+        assert!(mixed.has_skip() && !mixed.has_failure());
+        let both = tally(&[
+            ("a", RepoOpResult::Failed("no default branch found".into())),
+            ("b", skipped()),
+        ]);
+        assert_eq!(
+            format_completed_op(RunningOp::DefaultBranch, &both),
+            "Switched 2 repos (1 failed: a — no default branch found; 1 skipped: dirty)"
+        );
+    }
+
+    #[test]
+    fn completed_pull_leads_with_a_stash_conflict() {
+        let one = tally(&[
+            ("ok", RepoOpResult::Ok),
+            ("app", RepoOpResult::StashConflict),
+        ]);
+        assert_eq!(
+            format_completed_op(RunningOp::Pull, &one),
+            format!("app: {STASH_CONFLICT_COPY}")
+        );
+        assert!(one.has_failure());
+        let more = tally(&[
+            ("lib", RepoOpResult::Failed("timeout".into())),
+            ("app", RepoOpResult::StashConflict),
+        ]);
+        assert_eq!(
+            format_completed_op(RunningOp::Pull, &more),
+            format!("app: {STASH_CONFLICT_COPY} (+1 more failed)")
+        );
     }
 }

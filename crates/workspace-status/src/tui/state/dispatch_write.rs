@@ -63,7 +63,8 @@ impl AppState {
                     let mut filter = picker.filter.clone();
                     filter.push(c);
                     picker.set_filter(filter);
-                    self.status = format!("branch /{}", picker.filter).into();
+                    // The picker title paints the filter; keep it off the status rows.
+                    self.status.clear();
                 }
                 Effect::None
             }
@@ -72,7 +73,8 @@ impl AppState {
                     let mut filter = picker.filter.clone();
                     filter.pop();
                     picker.set_filter(filter);
-                    self.status = format!("branch /{}", picker.filter).into();
+                    // The picker title paints the filter; keep it off the status rows.
+                    self.status.clear();
                 }
                 Effect::None
             }

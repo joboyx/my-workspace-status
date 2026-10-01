@@ -54,7 +54,7 @@ fn overlay_closed(screen: &str) -> bool {
 fn export_overlay(screen: &str) -> bool {
     screen.contains("# Comments")
         && screen.contains("copied to clipboard")
-        && screen.contains("copied · Esc close")
+        && screen.contains("Esc close")
         && !screen.contains("MOVE")
 }
 
@@ -277,11 +277,11 @@ fn pty_semicolon_object_comments_and_export() {
     tui.key('y');
     tui.wait_pred(
         |screen| {
-            export_overlay(screen)
+            !export_overlay(screen)
                 && !screen.contains(ATTACH_BODY)
-                && screen.contains("No comments")
+                && screen.contains("no comments here")
         },
-        "y export after GC omits the deleted branch comment",
+        "y after GC finds no comments: no overlay, no copy, says so",
         WAIT,
     );
     let stored = store_text(&workspace);

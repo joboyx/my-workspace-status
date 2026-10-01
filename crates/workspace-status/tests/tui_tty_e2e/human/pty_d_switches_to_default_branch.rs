@@ -120,7 +120,7 @@ fn crumb_already_on_default(screen: &str) -> bool {
 
 fn crumb_dirty_skip(screen: &str) -> bool {
     let crumb = crumb_row(screen);
-    crumb.contains("Switched 1 repo (1 failed)")
+    crumb.contains("Switched 1 repo (1 skipped: dirty)")
         && !crumb.contains("no non-default")
         && crumb.contains("workspace › focusbox")
 }
@@ -227,7 +227,7 @@ fn documented_d_file_row_says_why(screen: &str) -> bool {
 /// `no non-default branches to switch` and HEAD stays `main`.
 ///
 /// Dirty `keep.txt` with the repo focused: `d` toasts `Switched 1 repo
-/// (1 failed)` and HEAD stays `feature/keep`. File-row `d` on daily
+/// (1 skipped: dirty)` and HEAD stays `feature/keep`. File-row `d` on daily
 /// README says `focus a repo or checkout to switch to default`: `app`
 /// stays `main`, `merger` stays `feature/graph`.
 /// `/` search, a toast-only tick, or still-on-keep cannot pass.
@@ -301,7 +301,7 @@ fn pty_d_switches_to_default_branch() {
     dirty_tui.key('d');
     dirty_tui.wait_pred(
         documented_d_skips_dirty_keep,
-        "d on dirty keep: Switched 1 repo (1 failed); HEAD stays feature/keep",
+        "d on dirty keep: Switched 1 repo (1 skipped: dirty); HEAD stays feature/keep",
         GIT_WAIT,
     );
     dirty_tui.wait_ms(SETTLE_MS);

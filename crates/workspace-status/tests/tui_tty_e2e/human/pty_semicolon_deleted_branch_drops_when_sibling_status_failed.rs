@@ -33,7 +33,7 @@ fn overlay_closed(screen: &str) -> bool {
 fn export_overlay(screen: &str) -> bool {
     screen.contains("# Comments")
         && screen.contains("copied to clipboard")
-        && screen.contains("copied · Esc close")
+        && screen.contains("Esc close")
         && !screen.contains("MOVE")
 }
 
@@ -132,8 +132,10 @@ fn pty_semicolon_deleted_branch_drops_when_sibling_status_failed() {
     );
     tui.key('y');
     tui.wait_pred(
-        |screen| export_overlay(screen) && !screen.contains(BODY) && screen.contains("No comments"),
-        "y export must omit the deleted doomed comment",
+        |screen| {
+            !export_overlay(screen) && !screen.contains(BODY) && screen.contains("no comments here")
+        },
+        "y finds no comments once the doomed one is gone: no overlay, says so",
         WAIT,
     );
     let stored = store_text(&workspace);

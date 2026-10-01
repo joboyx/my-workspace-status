@@ -456,20 +456,23 @@ fn spawn_joinset(ctx: &mut LoopCtx<'_>) {
 fn schedule_edit(ctx: &mut LoopCtx<'_>, repo: String, path: String) {
     let editor = resolve_editor(
         ctx.opts.config.editor.as_deref(),
-        std::env::var("EDITOR").ok().as_deref(),
         std::env::var("VISUAL").ok().as_deref(),
+        std::env::var("EDITOR").ok().as_deref(),
     );
     let abs = ctx.opts.cwd.join(&repo).join(&path);
     let (cmd, args) = editor_command(&editor, &abs.to_string_lossy(), None);
     if is_detached_editor(&editor) {
-        let _ = Command::new(&cmd)
+        let spawned = Command::new(&cmd)
             .args(&args)
             .current_dir(ctx.opts.cwd.join(&repo))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn();
-        ctx.state.status = StatusMessage::ok(format!("opened {path}"));
+        ctx.state.status = match spawned {
+            Ok(_) => StatusMessage::ok(format!("opened {path}")),
+            Err(err) => StatusMessage::error(format!("edit failed: {cmd}: {err}")),
+        };
         ctx.presenter.mark();
         return;
     }

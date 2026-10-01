@@ -4,12 +4,26 @@
 
 use std::time::Duration;
 
-/// Status text the comment-export overlay paints inside its own box.
+/// Status text after a clipboard copy worked.
 ///
-/// Three call sites branch on this exact wording to decide whether the
-/// chrome reserves an extra status row, so producer and consumer share the
-/// constant rather than repeating the literal.
+/// The comment-export overlay paints the copy result in its own header, so
+/// it hides this status ([`export_shows_status`]) instead of repeating it.
 pub const STATUS_COPIED: &str = "copied";
+
+/// Status text after a clipboard copy failed. Hidden in the export overlay
+/// like [`STATUS_COPIED`].
+pub const STATUS_COPY_FAILED: &str = "copy failed";
+
+/// Status text when `y` finds no comments in scope. Nothing is copied.
+pub const STATUS_NO_COMMENTS: &str = "no comments here";
+
+/// True when the comment-export overlay paints `status` as its own row.
+///
+/// The copy result is already the overlay header, so `copied` /
+/// `copy failed` stay out. Row math and paint share this check.
+pub fn export_shows_status(status: &str) -> bool {
+    !status.is_empty() && status != STATUS_COPIED && status != STATUS_COPY_FAILED
+}
 
 /// Status text `p` sets when the focused checkout has nothing to pull.
 ///
@@ -454,7 +468,7 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
         return prompt.overlay_rows();
     }
     if let Some(export) = state.comment_export.as_ref() {
-        let extra = u16::from(!state.status.is_empty() && state.status != STATUS_COPIED);
+        let extra = u16::from(export_shows_status(&state.status));
         let body = export.markdown.lines().count() as u16;
         return (5u16.saturating_add(body).saturating_add(extra)).min(20);
     }
@@ -1075,14 +1089,18 @@ pub fn status_line(state: &AppState, width: u16) -> Line<'static> {
     let palette = state.theme.palette();
     let pills = state.theme.pills();
     let surface = hex_color(state.theme.theme().surface);
+    // These boxes paint `status` inside the overlay (stash chips, picker
+    // notes, the export result). Painting it here as well repeats it.
     if state.stash_menu.is_some()
         || state.branch_picker.is_some()
         || state.compare_picker.is_some()
         || state.graph_focus_picker.is_some()
         || state.create_branch.is_some()
-        || state.comment.is_some()
         || state.comment_export.is_some()
     {
+        return Line::default();
+    }
+    if state.comment.is_some() {
         return Line::from(Span::styled(
             truncate_visible(&state.status, width as usize),
             Style::default().fg(state.status.kind().color(palette)),
@@ -1490,6 +1508,24 @@ mod tests {
     }
 
     #[test]
+    fn overlay_status_paints_in_the_box_not_the_status_row() {
+        let mut app = state();
+        app.stash_menu = Some(Vec::new());
+        app.status = "stash  s create  a apply".into();
+        assert_eq!(line_plain(&status_line(&app, 80)).trim(), "");
+        app.stash_menu = None;
+        app.comment_export = Some(crate::tui::comments::CommentExport {
+            markdown: "# Comments\n".into(),
+            copied: Some(true),
+        });
+        app.status = "busy".into();
+        assert_eq!(line_plain(&status_line(&app, 80)).trim(), "");
+        assert!(export_shows_status(&app.status));
+        assert!(!export_shows_status(STATUS_COPIED));
+        assert!(!export_shows_status(STATUS_COPY_FAILED));
+    }
+
+    #[test]
     fn confirm_overlay_uses_row_budget() {
         let mut app = state();
         let target = |path: &str, untracked: bool| super::super::state::RevertTarget {
@@ -1595,6 +1631,7 @@ mod tests {
         app.status = STATUS_COPIED.into();
         app.comment_export = Some(CommentExport {
             markdown: "# Comments\n\nNo comments.\n".into(),
+            copied: Some(true),
         });
         assert_eq!(overlay_status_rows(&app), 8);
     }
@@ -1655,18 +1692,23 @@ mod tests {
     }
 
     #[test]
-    fn completed_op_summary_sits_on_breadcrumb_without_repo_names() {
-        use super::super::ops::{format_completed_op, RunningOp};
+    fn completed_op_summary_names_only_the_first_failure() {
+        use super::super::ops::{format_completed_op, OpTally, RepoOpResult, RunningOp};
         let mut app = state();
-        app.status = StatusMessage::error(format_completed_op(RunningOp::Fetch, 3, 1));
+        let mut tally = OpTally::default();
+        for repo in ["notes", "dotfiles", "lib"] {
+            tally.note(repo, RepoOpResult::Ok);
+        }
+        tally.note("app", RepoOpResult::Failed("timeout".into()));
+        app.status = StatusMessage::error(format_completed_op(RunningOp::Fetch, &tally));
         let crumb = line_plain(&breadcrumb_line(&app, 80));
         assert!(
-            crumb.contains("Fetched 4 repos (1 failed)"),
-            "breadcrumb trailing slot should show counts: {crumb:?}"
+            crumb.contains("Fetched 4 repos (1 failed: app — timeout)"),
+            "breadcrumb trailing slot should show counts and the failure: {crumb:?}"
         );
         assert!(
             !crumb.contains("notes") && !crumb.contains("dotfiles"),
-            "completed op must not list repo names: {crumb:?}"
+            "repos that worked are not listed: {crumb:?}"
         );
         let status = line_plain(&status_line(&app, 80));
         assert!(

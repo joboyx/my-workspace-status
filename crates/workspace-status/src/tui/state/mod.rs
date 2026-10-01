@@ -30,7 +30,7 @@ use super::branches::{
     can_open_branch_picker, checkoutable_branch_names, is_valid_branch_name, merge_rev_for_commit,
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
 };
-use super::chrome::{status_uses_status_text, STATUS_COPIED, STATUS_NOTHING_TO_PULL};
+use super::chrome::{status_uses_status_text, STATUS_NOTHING_TO_PULL, STATUS_NO_COMMENTS};
 use super::command_palette::CommandPaletteState;
 #[cfg(not(test))]
 use super::comments::comment_store_path;
@@ -1734,16 +1734,31 @@ impl AppState {
                 Effect::Fetch { repos: targets }
             }
             Op::Pull => {
-                let behind: Vec<String> = targets
-                    .into_iter()
-                    .filter(|repo| {
-                        self.snapshot.repos.iter().any(|r| {
-                            r.repo == *repo && r.sync_status == crate::snapshot::SyncStatus::Behind
+                let with_sync = |sync: crate::snapshot::SyncStatus| -> Vec<String> {
+                    targets
+                        .iter()
+                        .filter(|repo| {
+                            self.snapshot
+                                .repos
+                                .iter()
+                                .any(|r| r.repo == **repo && r.sync_status == sync)
                         })
-                    })
-                    .collect();
+                        .cloned()
+                        .collect()
+                };
+                let behind = with_sync(crate::snapshot::SyncStatus::Behind);
+                let diverged = with_sync(crate::snapshot::SyncStatus::Diverged);
                 if behind.is_empty() {
-                    self.status = StatusMessage::warn(STATUS_NOTHING_TO_PULL);
+                    self.status = match diverged.as_slice() {
+                        [] => StatusMessage::warn(STATUS_NOTHING_TO_PULL),
+                        [repo] => StatusMessage::warn(format!(
+                            "{repo} has diverged — pull it from a terminal"
+                        )),
+                        [repo, rest @ ..] => StatusMessage::warn(format!(
+                            "{repo} (+{} more) diverged — pull from a terminal",
+                            rest.len()
+                        )),
+                    };
                     Effect::None
                 } else {
                     self.status = StatusMessage::progress(format_running_op(
@@ -3843,14 +3858,20 @@ impl AppState {
         self.help_open = false;
         self.comment = None;
         self.reconcile_comment_store();
-        let markdown = export_markdown(&self.scoped_comment_store());
+        let scoped = self.scoped_comment_store();
+        if scoped.is_empty() {
+            self.status = StatusMessage::info(STATUS_NO_COMMENTS);
+            return Effect::None;
+        }
+        let markdown = export_markdown(&scoped);
         self.comment_export = Some(CommentExport {
             markdown: markdown.clone(),
+            copied: None,
         });
-        self.status = StatusMessage::ok(STATUS_COPIED);
+        self.status.clear();
         Effect::CopyClipboard {
             text: markdown,
-            announce: false,
+            announce: true,
         }
     }
 
@@ -3954,7 +3975,14 @@ impl AppState {
     fn push_effect(&mut self) -> Effect {
         let targets = push_targets(&self.snapshot, self.focused_row(), self.show_ignored);
         if targets.is_empty() {
-            self.status = StatusMessage::warn("nothing to push");
+            let on_checkout = self
+                .focused_row()
+                .is_some_and(|row| matches!(row.kind, NodeKind::Repo | NodeKind::Checkout));
+            self.status = StatusMessage::warn(if on_checkout {
+                "nothing to push"
+            } else {
+                "focus a repo or checkout to push"
+            });
             return Effect::None;
         }
         self.status = StatusMessage::progress(format_running_op(RunningOp::Push, 0, targets.len()));
@@ -3990,7 +4018,14 @@ impl AppState {
                 None => (false, None),
             }
         };
-        let latest_for_ops = if self.graph_pane_focused() {
+        // A tree row offers the latest stash only when its whole checkout
+        // is clean, so apply / pop cannot land on top of local changes.
+        let checkout_clean = !self
+            .snapshot
+            .repos
+            .iter()
+            .any(|r| r.repo == repo && (r.has_unstaged || r.has_staged || r.has_untracked));
+        let latest_for_ops = if self.graph_pane_focused() || checkout_clean {
             latest_stash_ref
         } else {
             None
@@ -5045,7 +5080,7 @@ impl AppState {
             return Effect::None;
         };
         let Some(name) = picker.selected().map(|branch| branch.name.clone()) else {
-            self.status = StatusMessage::warn(super::tabs::NO_BRANCHES_TO_COMPARE);
+            self.status = StatusMessage::warn(super::tabs::compare_picker_empty(picker));
             return Effect::None;
         };
         let repo = picker.repo.clone();
@@ -6307,6 +6342,83 @@ mod tests {
         }
         assert!(app.confirm.is_none());
         assert_eq!(app.status, "deleting 2 untracked…");
+    }
+
+    #[test]
+    fn compare_picker_says_when_the_filter_matches_nothing_and_on_esc() {
+        let mut app = state();
+        let branch = |name: &str| crate::git::LocalBranch {
+            name: name.into(),
+            current: false,
+            authordate: 0,
+        };
+        app.open_compare_picker("app".into(), Vec::new());
+        assert_eq!(app.dispatch(Action::ComparePickerSubmit), Effect::None);
+        assert_eq!(app.status, "No branches to compare");
+
+        app.open_compare_picker("app".into(), vec![branch("develop")]);
+        app.dispatch(Action::ComparePickerChar('z'));
+        app.dispatch(Action::ComparePickerChar('q'));
+        assert_eq!(app.dispatch(Action::ComparePickerSubmit), Effect::None);
+        assert_eq!(app.status, "no branch matches zq");
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+
+        assert_eq!(app.dispatch(Action::ComparePickerCancel), Effect::None);
+        assert!(app.compare_picker.is_none());
+        assert_eq!(app.status, "compare cancelled");
+        assert_eq!(app.status.kind(), StatusKind::Info);
+    }
+
+    #[test]
+    fn branch_picker_typing_keeps_the_filter_off_the_status_rows() {
+        let mut app = state();
+        app.branch_picker = Some(crate::tui::branches::BranchPickerState::new(
+            "app".into(),
+            vec![crate::git::LocalBranch {
+                name: "topic".into(),
+                current: false,
+                authordate: 0,
+            }],
+        ));
+        app.dispatch(Action::BranchChar('t'));
+        assert_eq!(
+            app.branch_picker.as_ref().map(|p| p.filter.as_str()),
+            Some("t")
+        );
+        assert!(
+            app.status.is_empty(),
+            "title paints the filter: {}",
+            app.status
+        );
+        app.dispatch(Action::BranchBackspace);
+        assert!(app.status.is_empty());
+    }
+
+    #[test]
+    fn pull_on_a_diverged_repo_says_why_not_nothing_behind() {
+        let mut diverged = repo("app", false);
+        diverged.sync_status = SyncStatus::Diverged;
+        diverged.sync_note = "ahead 1, behind 1".into();
+        let snapshot = build_workspace_snapshot(&[diverged], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        focus_repo(&mut app, "app");
+        assert_eq!(app.dispatch(Action::Pull), Effect::None);
+        assert_eq!(app.status, "app has diverged — pull it from a terminal");
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+    }
+
+    #[test]
+    fn workspace_push_asks_for_a_checkout() {
+        let mut ahead = repo("app", false);
+        ahead.sync_status = SyncStatus::Ahead;
+        ahead.sync_note = "ahead 1".into();
+        let snapshot = build_workspace_snapshot(&[ahead], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        app.cursor = 0;
+        assert_eq!(app.focused_row().map(|r| r.kind), Some(NodeKind::Workspace));
+        assert_eq!(app.dispatch(Action::Push), Effect::None);
+        assert_eq!(app.status, "focus a repo or checkout to push");
+        assert_eq!(app.status.kind(), StatusKind::Warn);
     }
 
     #[test]
@@ -8482,12 +8594,8 @@ mod tests {
         assert_eq!(app.commit_drill_source(), None);
         assert_eq!(app.dispatch(Action::CommentStart), Effect::None);
         assert_eq!(app.status, "no comment target");
-        match app.dispatch(Action::ExportComments) {
-            Effect::CopyClipboard { text, .. } => {
-                assert!(!text.contains("workspace-note"), "{text}")
-            }
-            other => panic!("expected CopyClipboard, got {other:?}"),
-        }
+        assert_eq!(app.dispatch(Action::ExportComments), Effect::None);
+        assert_eq!(app.status, STATUS_NO_COMMENTS);
     }
 
     #[test]
@@ -9019,9 +9127,26 @@ mod tests {
         app.rebuild_rows();
         focus_repo(&mut app, "lib");
         app.focus = FocusPane::Left;
-        app.open_stash_menu("lib".into(), Some("stash@{0}".into()));
+        app.open_stash_menu("lib".into(), None);
         assert!(app.stash_menu.is_none());
         assert!(app.status.contains("nothing to stash"));
+        // A clean checkout with a stash offers apply / pop of the latest.
+        app.open_stash_menu("lib".into(), Some("stash@{0}".into()));
+        let ops = app.stash_menu.clone().expect("clean row menu");
+        assert_eq!(
+            ops.iter().map(|op| op.id).collect::<Vec<_>>(),
+            vec![StashOpId::Apply, StashOpId::Pop]
+        );
+        assert!(ops
+            .iter()
+            .all(|op| op.stash_ref.as_deref() == Some("stash@{0}")));
+        match app.dispatch(Action::StashMenuChar('a')) {
+            Effect::StashApply { repo, stash_ref } => {
+                assert_eq!(repo, "lib");
+                assert_eq!(stash_ref, "stash@{0}");
+            }
+            other => panic!("{other:?}"),
+        }
 
         focus_repo(&mut app, "app");
         install_graph(
@@ -13917,7 +14042,7 @@ diff --git a/README.md b/README.md
     }
 
     #[test]
-    fn apostrophe_announces_clipboard_and_y_does_not() {
+    fn apostrophe_and_y_both_announce_the_copy() {
         let mut app = state();
         focus_file(&mut app, "README.md");
         match app.dispatch(Action::CopyEntityReference) {
@@ -13930,11 +14055,26 @@ diff --git a/README.md b/README.md
         );
         assert!(app.comment_export.is_none());
 
+        app.comment_store = CommentStore::new();
+        assert_eq!(app.dispatch(Action::ExportComments), Effect::None);
+        assert_eq!(app.status, STATUS_NO_COMMENTS);
+        assert!(app.comment_export.is_none(), "nothing to show or copy");
+
+        let key = CommentKey::Worktree { path: "app".into() };
+        app.comment_store = put_comment(&app.comment_store, key, "note");
+        focus_repo(&mut app, "app");
         match app.dispatch(Action::ExportComments) {
-            Effect::CopyClipboard { announce, .. } => assert!(!announce),
+            Effect::CopyClipboard { announce, text } => {
+                assert!(announce);
+                assert!(text.contains("note"), "{text}");
+            }
             other => panic!("expected CopyClipboard, got {other:?}"),
         }
-        assert_eq!(app.status, "copied");
-        assert!(app.comment_export.is_some());
+        assert!(app.status.is_empty(), "the interpreter reports the copy");
+        assert_eq!(
+            app.comment_export.as_ref().map(|e| e.copied),
+            Some(None),
+            "header waits for the copy result"
+        );
     }
 }

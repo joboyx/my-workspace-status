@@ -39,7 +39,7 @@ fn overlay_closed(screen: &str) -> bool {
 fn export_overlay(screen: &str) -> bool {
     screen.contains("# Comments")
         && screen.contains("copied to clipboard")
-        && screen.contains("copied · Esc close")
+        && screen.contains("Esc close")
         && !screen.contains("MOVE")
 }
 

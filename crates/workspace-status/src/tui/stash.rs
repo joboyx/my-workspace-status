@@ -4,7 +4,7 @@ use crate::snapshot::{FileChange, WorkspaceSnapshot};
 
 use super::tree::{NodeKind, VisibleRow};
 
-/// Overlay op id (`s` / `a` / `p` / `d`).
+/// Overlay op id (`s` / `a` / `p` / `D`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StashOpId {
     Create,
@@ -83,7 +83,7 @@ pub fn stash_ops_for_context(ctx: &StashOpsContext) -> Vec<StashOp> {
     if let Some(stash_ref) = ctx.focused_stash_ref.as_deref() {
         ops.push(StashOp {
             id: StashOpId::Drop,
-            key: 'd',
+            key: 'D',
             label: "drop stash",
             stash_ref: Some(stash_ref.to_string()),
             paths: None,
@@ -100,13 +100,15 @@ pub fn stash_menu_status(ops: &[StashOp]) -> String {
             StashOpId::Create => "s create",
             StashOpId::Apply => "a apply",
             StashOpId::Pop => "p pop",
-            StashOpId::Drop => "d drop",
+            StashOpId::Drop => "D drop",
         });
     }
     parts.join("  ")
 }
 
 /// Map overlay input to cancel / run / ignore. Enter runs the first listed op.
+///
+/// Drop is labelled `D` like the graph key; `d` runs it too.
 pub fn resolve_stash_menu_key(
     input: Option<char>,
     enter: bool,
@@ -125,6 +127,7 @@ pub fn resolve_stash_menu_key(
     let Some(key) = input else {
         return StashMenuKeyResult::Ignore;
     };
+    let key = if key == 'd' { 'D' } else { key };
     match ops.iter().find(|op| op.key == key) {
         Some(op) => StashMenuKeyResult::Run(op.clone()),
         None => StashMenuKeyResult::Ignore,
@@ -317,6 +320,22 @@ mod tests {
     }
 
     #[test]
+    fn drop_is_labelled_capital_d_and_takes_either_case() {
+        let ops = stash_ops_for_context(&ctx(false, Some("stash@{1}"), None));
+        let drop = ops
+            .iter()
+            .find(|op| op.id == StashOpId::Drop)
+            .expect("drop");
+        assert_eq!(drop.key, 'D');
+        for key in ['d', 'D'] {
+            assert!(matches!(
+                resolve_stash_menu_key(Some(key), false, false, &ops),
+                StashMenuKeyResult::Run(op) if op.id == StashOpId::Drop
+            ));
+        }
+    }
+
+    #[test]
     fn menu_status_lists_present_ops() {
         assert_eq!(stash_menu_status(&[]), "stash");
         let ops = stash_ops_for_context(&ctx(true, None, Some("stash@{0}")));
@@ -324,7 +343,7 @@ mod tests {
         let drop_ops = stash_ops_for_context(&ctx(false, Some("stash@{1}"), None));
         assert_eq!(
             stash_menu_status(&drop_ops),
-            "stash  a apply  p pop  d drop"
+            "stash  a apply  p pop  D drop"
         );
     }
 }
