@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use crate::harness::{PtySession, SGR_WHEEL_DOWN};
 use crate::seed::{seed_many_commit_files, seed_repo, seed_tall_graph, unique_root};
@@ -24,6 +25,12 @@ const KITTY_DOWN: u32 = 57353;
 
 /// Gap so the input thread does not drain a burst of nav as one move.
 const KEY_GAP_MS: u64 = 50;
+
+/// Upper bound for one nav step to repaint on a loaded host.
+const STEP_WAIT: Duration = Duration::from_secs(2);
+
+/// Poll interval while a nav step repaints.
+const STEP_POLL_MS: u64 = 25;
 
 #[derive(Clone, Copy)]
 enum RightList {
@@ -264,6 +271,26 @@ fn send_wheel_up(tui: &mut PtySession) {
     tui.sgr_mouse(SGR_WHEEL_UP, RIGHT_PANE_COL, 8);
 }
 
+/// Screen after one nav step: the focused marker differs from `before` and
+/// two polls in a row read the same frame (not a half-written one).
+///
+/// Waits at least [`KEY_GAP_MS`] and at most [`STEP_WAIT`]. At the bound it
+/// returns the last screen so the caller's assert fails with that frame.
+fn screen_after_step(tui: &PtySession, kind: RightList, before: &str) -> String {
+    tui.wait_ms(KEY_GAP_MS);
+    let start = Instant::now();
+    let mut last = tui.screen();
+    loop {
+        tui.wait_ms(STEP_POLL_MS);
+        let screen = tui.screen();
+        let moved = focus_geom(&screen, kind).is_some_and(|g| g.marker != before);
+        if (moved && screen == last) || start.elapsed() >= STEP_WAIT {
+            return screen;
+        }
+        last = screen;
+    }
+}
+
 /// One nav step must change the focused marker. After the row is past the
 /// midpoint, Y must be `body_h / 2`. End-clamp is only the last rows.
 fn step_focus(
@@ -275,8 +302,7 @@ fn step_focus(
 ) {
     let before = geom_or(&tui.screen(), kind, why);
     send(tui);
-    tui.wait_ms(KEY_GAP_MS);
-    let screen = tui.screen();
+    let screen = screen_after_step(tui, kind, &before.marker);
     let after = geom_or(&screen, kind, why);
     assert_ne!(
         after.marker, before.marker,
@@ -337,8 +363,7 @@ fn drive_to_middle(tui: &mut PtySession, kind: RightList, send: fn(&mut PtySessi
 fn move_stays_middle(tui: &mut PtySession, kind: RightList, send: fn(&mut PtySession), why: &str) {
     let before = geom_or(&tui.screen(), kind, why);
     send(tui);
-    tui.wait_ms(KEY_GAP_MS);
-    let screen = tui.screen();
+    let screen = screen_after_step(tui, kind, &before.marker);
     let after = geom_or(&screen, kind, why);
     assert_ne!(
         after.marker, before.marker,

@@ -41,6 +41,27 @@ impl CommitFileSource {
             Self::Stash { .. } | Self::Worktree => None,
         }
     }
+
+    /// Short name for chrome and status copy: a 7-char commit id,
+    /// `stash@{n}`, `base...HEAD`, or `uncommitted`.
+    pub fn short_label(&self) -> String {
+        match self {
+            Self::Worktree => "uncommitted".into(),
+            Self::Stash { stash_ref } => stash_ref.clone(),
+            Self::Commit { commit_id } => commit_id.chars().take(7).collect(),
+            Self::Compare { base_ref, .. } => format!("{base_ref}...HEAD"),
+        }
+    }
+
+    /// Status note for a loaded file list: `1 file in 49b9717`,
+    /// `3 files in stash@{0}`, or `2 uncommitted files`.
+    pub fn files_status(&self, count: usize) -> String {
+        let noun = if count == 1 { "file" } else { "files" };
+        match self {
+            Self::Worktree => format!("{count} uncommitted {noun}"),
+            _ => format!("{count} {noun} in {}", self.short_label()),
+        }
+    }
 }
 
 /// One file in a commit / stash / worktree list.

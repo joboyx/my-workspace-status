@@ -8,6 +8,7 @@ use super::super::command_palette::{CommandPaletteState, CommandScope, PaletteCo
 use super::super::diff::PartialPatchKind;
 use super::super::gates::{
     dispatch_is_noop, dispatch_noop_reason, ListFocusTarget, FOCUS_A_FILE_TO_MARK_REVIEWED,
+    REVIEWED_MARKS_ARE_FOR_TREE_FILES,
 };
 use super::super::graph_focus::GRAPH_FOCUS_NEED_CONTEXT;
 use super::super::ops::{collect_write_files, op_is_kind_noop, op_kind_noop_reason, Op};
@@ -678,7 +679,7 @@ impl AppState {
                         Some(FOCUS_A_FILE_TO_MARK_REVIEWED.into())
                     }
                 } else if self.nav_depth() >= 1 {
-                    Some(FOCUS_A_FILE_TO_MARK_REVIEWED.into())
+                    Some(REVIEWED_MARKS_ARE_FOR_TREE_FILES.into())
                 } else if self
                     .focused_row()
                     .is_some_and(|row| row.kind == super::super::tree::NodeKind::File)

@@ -57,7 +57,9 @@ use super::drill::{
     source_from_graph_row, stash_ref_from_graph_row, CommitFile, CommitFileSource, DrillView,
 };
 use super::fetch::background_fetch_targets;
-use super::gates::{ListFocusTarget, FOCUS_A_FILE_TO_MARK_REVIEWED};
+use super::gates::{
+    ListFocusTarget, FOCUS_A_FILE_TO_MARK_REVIEWED, REVIEWED_MARKS_ARE_FOR_TREE_FILES,
+};
 use super::graph_focus::GraphFocusPickerState;
 use super::icons::comment_mark_cols;
 use super::keys::{expire_stale_g_chord_echo, GChordEchoState, InputMode, DOUBLE_TAP_MS};
@@ -1573,8 +1575,14 @@ impl AppState {
 
     /// Milliseconds until an info / ok status clears. Starts its clock the
     /// first time it is visible. `None` while an overlay paints `status`
-    /// as its own text, or when the message does not expire.
+    /// as its own text, or when the message does not expire. While `?`
+    /// help hides the breadcrumb the clock restarts, so the message gets
+    /// its full time once help closes.
     pub fn status_expiry_ms(&mut self, now: Instant) -> Option<u64> {
+        if self.help_open {
+            self.status.restart_clock();
+            return None;
+        }
         if status_uses_status_text(self) {
             return None;
         }
@@ -1582,8 +1590,9 @@ impl AppState {
     }
 
     /// Clear an expired info / ok status. True when the slot changed.
+    /// Never while `?` help is open.
     pub fn expire_status(&mut self, now: Instant) -> bool {
-        if status_uses_status_text(self) {
+        if self.help_open || status_uses_status_text(self) {
             return false;
         }
         self.status.expire(now)
@@ -2596,6 +2605,9 @@ impl AppState {
         } else {
             None
         };
+        // `begin_commit_files` already set the source, so a first load is
+        // a new source or the pending `loading files…` list.
+        let first_load = !same_source || self.commit_files_loading;
         let previous_cursor = self.commit_files_cursor();
         let before = self.commit_file_signatures.clone();
         let old_rows = if same_source {
@@ -2608,7 +2620,9 @@ impl AppState {
             self.right_col_offset = 0;
         }
         self.commit_files_loading = false;
-        self.status = format!("files {}", files.len()).into();
+        if first_load {
+            self.status.offer_info(source.files_status(files.len()));
+        }
         let cursor = DrillView::files_cursor(&files, 0);
         let retain_focus = !self.drill.is_graph();
         self.drill = DrillView::Files {
@@ -2668,7 +2682,6 @@ impl AppState {
         if entering {
             self.left_col_offset = 0;
         }
-        self.status = format!("diff {path}").into();
         self.drill = DrillView::Diff {
             repo,
             source,
@@ -3497,9 +3510,13 @@ impl AppState {
         if self.is_compare_tab() {
             return self.toggle_compare_reviewed();
         }
+        if self.nav_depth() >= 1 {
+            self.status = StatusMessage::warn(REVIEWED_MARKS_ARE_FOR_TREE_FILES);
+            return Effect::None;
+        }
         let Some(row) = self
             .focused_row()
-            .filter(|row| self.nav_depth() == 0 && row.kind == NodeKind::File)
+            .filter(|row| row.kind == NodeKind::File)
             .cloned()
         else {
             self.status = StatusMessage::warn(FOCUS_A_FILE_TO_MARK_REVIEWED);
@@ -5861,7 +5878,11 @@ mod tests {
         }
         assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
         assert!(!app.reviewed.contains(&id));
-        assert_eq!(app.status, FOCUS_A_FILE_TO_MARK_REVIEWED);
+        assert_eq!(app.status, REVIEWED_MARKS_ARE_FOR_TREE_FILES);
+        assert_eq!(
+            palette_reason(&app, "Mark reviewed").as_deref(),
+            Some(REVIEWED_MARKS_ARE_FOR_TREE_FILES)
+        );
     }
 
     #[test]
@@ -6554,6 +6575,30 @@ mod tests {
         app.status = StatusMessage::warn("nothing to push");
         assert_eq!(app.status_expiry_ms(t0), None);
         assert!(!app.expire_status(t0 + ttl * 10));
+    }
+
+    #[test]
+    fn help_holds_the_status_expiry_clock() {
+        let mut app = state();
+        let t0 = Instant::now();
+        let ttl = Duration::from_millis(crate::tui::status::STATUS_TTL_MS);
+        app.status = StatusMessage::ok("Fetched 1 repo");
+        assert_eq!(
+            app.status_expiry_ms(t0),
+            Some(crate::tui::status::STATUS_TTL_MS)
+        );
+        app.help_open = true;
+        let late = t0 + ttl * 10;
+        assert_eq!(app.status_expiry_ms(late), None);
+        assert!(!app.expire_status(late));
+        assert_eq!(app.status, "Fetched 1 repo");
+        app.help_open = false;
+        assert_eq!(
+            app.status_expiry_ms(late),
+            Some(crate::tui::status::STATUS_TTL_MS),
+            "the clock restarts once help closes"
+        );
+        assert!(app.expire_status(late + ttl));
     }
 
     #[test]

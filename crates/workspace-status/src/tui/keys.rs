@@ -525,12 +525,11 @@ fn key_to_action(
             }
             _ => Action::None,
         },
-        InputMode::ZPending { search_active } => match key.code {
+        InputMode::ZPending { .. } => match key.code {
             KeyCode::Char('z') => Action::FoldToggleSubtree,
             KeyCode::Esc => Action::None,
             _ => normal_key(
                 key,
-                search_active,
                 right_is_diff,
                 focus_right,
                 graph_stash_focused,
@@ -538,7 +537,7 @@ fn key_to_action(
                 hl_folds,
             ),
         },
-        InputMode::GPending { search_active } => match key.code {
+        InputMode::GPending { .. } => match key.code {
             KeyCode::Char('g') => Action::MoveToStart,
             KeyCode::Char('t') => Action::NextTab,
             KeyCode::Char('T') => Action::PreviousTab,
@@ -546,7 +545,6 @@ fn key_to_action(
             KeyCode::Esc => Action::None,
             _ => normal_key(
                 key,
-                search_active,
                 right_is_diff,
                 focus_right,
                 graph_stash_focused,
@@ -645,9 +643,8 @@ fn key_to_action(
         },
         InputMode::CommandPalette => command_palette_key(key),
         InputMode::DiffVisual => diff_visual_key(key),
-        InputMode::Normal { search_active } => normal_key(
+        InputMode::Normal { .. } => normal_key(
             key,
-            search_active,
             right_is_diff,
             focus_right,
             graph_stash_focused,
@@ -735,7 +732,6 @@ fn diff_visual_key(key: KeyEvent) -> Action {
 
 fn normal_key(
     key: KeyEvent,
-    _search_active: bool,
     _right_is_diff: bool,
     focus_right: bool,
     graph_stash_focused: bool,

@@ -165,6 +165,7 @@ pub fn dispatch_noop_reason(
         return None;
     }
     Some(match action {
+        Action::ToggleReviewed if depth >= 1 => REVIEWED_MARKS_ARE_FOR_TREE_FILES,
         Action::ToggleReviewed => FOCUS_A_FILE_TO_MARK_REVIEWED,
         Action::Edit => "focus a file to edit",
         Action::ExternalDiff => "focus a file to diff",
@@ -176,6 +177,10 @@ pub fn dispatch_noop_reason(
 
 /// Space / palette copy when the focus is not a file row.
 pub const FOCUS_A_FILE_TO_MARK_REVIEWED: &str = "focus a file to mark reviewed";
+
+/// Space / palette copy in a commit drill: marks live on workspace-tree files.
+pub const REVIEWED_MARKS_ARE_FOR_TREE_FILES: &str =
+    "reviewed marks are for workspace-tree files · Esc back to the tree";
 
 #[cfg(test)]
 mod tests {

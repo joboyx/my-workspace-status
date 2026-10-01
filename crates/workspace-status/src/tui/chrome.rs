@@ -41,7 +41,7 @@ use crate::snapshot::{CheckoutKind, SyncStatus};
 use super::branches::{can_open_branch_picker, checkoutable_branch_names};
 use super::commit_files::CommitFileRowKind;
 use super::ctrl_c_exit::is_ctrl_c_exit_prompt;
-use super::drill::{CommitFileSource, DrillView};
+use super::drill::DrillView;
 use super::help::help_status_lines;
 use super::icons::truncate_visible;
 use super::keys::DOUBLE_TAP_MS;
@@ -955,18 +955,7 @@ fn drill_commit_label(state: &AppState) -> Option<String> {
         DrillView::Files { source, .. } | DrillView::Diff { source, .. } => source,
         DrillView::Graph => return None,
     };
-    Some(match source {
-        CommitFileSource::Worktree => "uncommitted".into(),
-        CommitFileSource::Stash { stash_ref } => stash_ref.clone(),
-        CommitFileSource::Commit { commit_id } => {
-            if commit_id.len() > 7 {
-                commit_id[..7].to_string()
-            } else {
-                commit_id.clone()
-            }
-        }
-        CommitFileSource::Compare { base_ref, .. } => format!("{base_ref}...HEAD"),
-    })
+    Some(source.short_label())
 }
 
 /// Visual breadcrumb (`workspace › [repo]` when the last segment is right-focused).

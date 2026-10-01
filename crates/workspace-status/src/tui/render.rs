@@ -5702,6 +5702,8 @@ mod tests {
             }],
         );
         assert!(state.drill.is_files());
+        // The `1 file in aaa1111` note is status, not the parked subtitle.
+        state.status.clear();
         state.tabs.open_or_focus("app".into(), "main".into());
         {
             let tab = state.tabs.active_compare_mut().unwrap();

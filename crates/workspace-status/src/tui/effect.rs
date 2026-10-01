@@ -455,7 +455,8 @@ pub(crate) struct Interpreter {
     compare_range: VecDeque<CompareRangeJob>,
     compare_diff: VecDeque<CompareDiffJob>,
     compare_probe: VecDeque<CompareProbeJob>,
-    autoload: Option<(u64, GraphIdentity)>,
+    /// Queued autoload: generation, graph target, and the status it replaced.
+    autoload: Option<(u64, GraphIdentity, StatusMessage)>,
     default_tally: OpTally,
     default_total: usize,
     default_repos: Vec<String>,
@@ -1077,12 +1078,19 @@ impl Interpreter {
         };
         state.graph_loading_older = true;
         let gen = self.sched.request_autoload();
+        // Keep the slot's previous message so completion can put it back.
+        let prev_status = if state.status == LOADING_OLDER {
+            StatusMessage::default()
+        } else {
+            state.status.clone()
+        };
         self.autoload = Some((
             gen,
             GraphIdentity {
                 repo: repo.clone(),
                 head: head.clone(),
             },
+            prev_status,
         ));
         state.status = StatusMessage::progress(LOADING_OLDER);
         self.sched.enqueue_user(UserTag::Autoload);
@@ -2275,7 +2283,7 @@ impl Interpreter {
                 self.sched.note_job_finished(id);
             }
             UserTag::Autoload => {
-                let Some((gen, identity)) = self.autoload.take() else {
+                let Some((gen, identity, prev_status)) = self.autoload.take() else {
                     self.sched.note_job_finished(id);
                     state.graph_loading_older = false;
                     return;
@@ -2283,6 +2291,9 @@ impl Interpreter {
                 let Some(model) = state.graph.as_ref() else {
                     self.sched.note_job_finished(id);
                     state.graph_loading_older = false;
+                    if state.status == LOADING_OLDER {
+                        state.status = prev_status;
+                    }
                     return;
                 };
                 let skip = autoload_skip(model);
@@ -2291,7 +2302,6 @@ impl Interpreter {
                 let snapshot = state.snapshot.clone();
                 let show_ignored = state.show_ignored;
                 let focus = state.graph_focus_revs();
-                let prev_status = state.status.clone();
                 let repo = identity.repo.clone();
                 spawn(
                     id,
@@ -3203,6 +3213,29 @@ mod tests {
             "compare tabs must not enqueue graph autoload"
         );
         assert_ne!(state.status, LOADING_OLDER);
+    }
+
+    #[test]
+    fn autoload_completion_restores_the_status_it_replaced() {
+        for before in [StatusMessage::warn("push failed"), StatusMessage::default()] {
+            let mut state = fixture_state();
+            let mut interp = Interpreter::new();
+            focus_repo(&mut state, "app");
+            state.drill = DrillView::Graph;
+            let mut graph = mini_graph(&["aaa"]);
+            graph.has_more = true;
+            state.graph = Some(graph);
+            state.graph_cursor = 10;
+            state.graph_identity = Some(("app".into(), "head-app".into()));
+            state.status = before.clone();
+            interp.maybe_queue_autoload(&mut state);
+            assert_eq!(state.status, LOADING_OLDER);
+            let opts = opts(&state);
+            interp.pump_sync(&mut state, &opts);
+            assert!(!state.graph_loading_older);
+            assert_ne!(state.status, LOADING_OLDER);
+            assert_eq!(state.status, before);
+        }
     }
 
     #[test]
@@ -4725,6 +4758,76 @@ mod tests {
             "Fetched 1 repo (1 failed: app — could not read from remote repository)"
         );
         assert_eq!(state.status.kind(), StatusKind::Error);
+    }
+
+    #[test]
+    fn pane_reload_after_quiet_background_fetch_keeps_an_unread_error() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        focus_repo(&mut state, "app");
+        let source = commit_source();
+        state.begin_commit_files("app".into(), source.clone());
+        state.open_commit_files("app".into(), source.clone(), vec![commit_file("README.md")]);
+        assert_eq!(state.status, "1 file in aaa1111");
+        state.status = StatusMessage::error("push failed");
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::Fetch {
+                repos: vec!["app".into()],
+            },
+            &Action::FetchTick,
+        );
+        let jobs = capture_jobs(&mut interp, &mut state);
+        apply_id(
+            &mut interp,
+            &mut state,
+            jobs[0].0,
+            JobOutcome::BulkRemote {
+                kind: RunningOp::Fetch,
+                result: RepoOpResult::Ok,
+                repo: "app".into(),
+            },
+        );
+        let pane_id = interp.sched.request_pane();
+        let target = RightPaneRequest::from_state(&state).target();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::RightPane {
+                req_id: pane_id,
+                target,
+                load: RightPaneLoad::CommitFiles {
+                    repo: "app".into(),
+                    source,
+                    files: vec![name_status("README.md"), name_status("src.rs")],
+                },
+            },
+        );
+        assert!(
+            matches!(&state.drill, DrillView::Files { files, .. } if files.len() == 2),
+            "the pane load must apply, got {:?}",
+            state.drill
+        );
+        assert_eq!(state.status, "push failed");
+        assert_eq!(state.status.kind(), StatusKind::Error);
+    }
+
+    #[test]
+    fn same_source_reload_does_not_rewrite_the_files_note() {
+        let mut state = fixture_state();
+        let source = commit_source();
+        state.begin_commit_files("app".into(), source.clone());
+        state.open_commit_files(
+            "app".into(),
+            source.clone(),
+            vec![commit_file("README.md"), commit_file("src.rs")],
+        );
+        assert_eq!(state.status, "2 files in aaa1111");
+        assert_eq!(state.status.kind(), StatusKind::Info);
+        state.status = "showing ignored repos".into();
+        state.open_commit_files("app".into(), source, vec![commit_file("README.md")]);
+        assert_eq!(state.status, "showing ignored repos");
     }
 
     #[test]

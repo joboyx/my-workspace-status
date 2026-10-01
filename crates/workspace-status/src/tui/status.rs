@@ -101,6 +101,15 @@ impl StatusMessage {
         self.kind
     }
 
+    /// Show `text` as info unless a progress, warn, or error message holds
+    /// the slot. For notes that a reload or a background job writes: they
+    /// must not hide work in flight or an unread failure.
+    pub fn offer_info(&mut self, text: impl Into<String>) {
+        if self.text.is_empty() || self.kind.expires() {
+            *self = Self::info(text);
+        }
+    }
+
     /// Clear the text. The kind falls back to [`StatusKind::Info`].
     pub fn clear(&mut self) {
         *self = Self::default();
@@ -116,6 +125,12 @@ impl StatusMessage {
         let shown = *self.shown_at.get_or_insert(now);
         let until = shown + Duration::from_millis(STATUS_TTL_MS);
         Some(until.saturating_duration_since(now).as_millis() as u64)
+    }
+
+    /// Forget when the message first showed, so the full TTL starts again
+    /// on the next visible frame. For a view that hides the slot (help).
+    pub fn restart_clock(&mut self) {
+        self.shown_at = None;
     }
 
     /// Clear the message when its time is up. Returns true when it cleared.
@@ -209,6 +224,17 @@ mod tests {
     }
 
     #[test]
+    fn restart_clock_gives_a_fresh_ttl() {
+        let t0 = Instant::now();
+        let mut status = StatusMessage::ok("Fetched 1 repo");
+        assert_eq!(status.expiry_ms(t0), Some(STATUS_TTL_MS));
+        let later = t0 + Duration::from_millis(STATUS_TTL_MS - 1);
+        status.restart_clock();
+        assert_eq!(status.expiry_ms(later), Some(STATUS_TTL_MS));
+        assert!(!status.expire(t0 + Duration::from_millis(STATUS_TTL_MS)));
+    }
+
+    #[test]
     fn warn_error_and_progress_stay_until_replaced() {
         let t0 = Instant::now();
         let late = t0 + Duration::from_secs(3600);
@@ -220,6 +246,26 @@ mod tests {
             assert_eq!(status.expiry_ms(t0), None);
             assert!(!status.expire(late));
             assert!(!status.is_empty());
+        }
+    }
+
+    #[test]
+    fn offer_info_replaces_only_empty_info_and_ok() {
+        for (before, replaced) in [
+            (StatusMessage::default(), true),
+            (StatusMessage::info("old"), true),
+            (StatusMessage::ok("Fetched 1 repo"), true),
+            (StatusMessage::progress("Fetching 1/3…"), false),
+            (StatusMessage::warn("busy"), false),
+            (StatusMessage::error("push failed"), false),
+        ] {
+            let mut status = before.clone();
+            status.offer_info("new");
+            if replaced {
+                assert_eq!(status, StatusMessage::info("new"));
+            } else {
+                assert_eq!(status, before);
+            }
         }
     }
 
