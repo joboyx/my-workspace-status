@@ -12,5 +12,9 @@ readme = "README.md"
 libc = "0.2"
 ratatui = { version = "0.29", default-features = false }
 
+[features]
+# Test-only paint call counter (`paint_calls`); keep off in release builds.
+paint-probe = []
+
 [lints]
 workspace = true

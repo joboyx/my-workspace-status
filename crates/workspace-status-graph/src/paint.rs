@@ -141,6 +141,7 @@ pub fn painted_line_count(model: &GraphModel) -> usize {
         .sum()
 }
 
+#[cfg(any(test, feature = "paint-probe"))]
 thread_local! {
     static PAINT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -148,7 +149,9 @@ thread_local! {
 /// Calls to [`paint_model_with`] on this thread so far.
 ///
 /// A cost probe for tests that pin one paint per frame. Not part of the
-/// widget contract.
+/// widget contract. Built only with the `paint-probe` feature (or in this
+/// crate's own tests).
+#[cfg(any(test, feature = "paint-probe"))]
 #[doc(hidden)]
 pub fn paint_calls() -> usize {
     PAINT_CALLS.with(|c| c.get())
@@ -160,6 +163,7 @@ pub fn paint_model_with(
     glyphs: &GlyphSet,
     opts: PaintOpts,
 ) -> Vec<PaintedLine> {
+    #[cfg(any(test, feature = "paint-probe"))]
     PAINT_CALLS.with(|c| c.set(c.get() + 1));
     let gutter_width = opts.gutter_width;
     let line_width = opts.line_width.unwrap_or(200);

@@ -40,6 +40,7 @@ libc = "0.2"
 [dev-dependencies]
 portable-pty = "0.8"
 vt100 = "0.15"
+workspace-status-graph = { path = "../workspace-status-graph", features = ["paint-probe"] }
 
 [lints]
 workspace = true

@@ -4993,8 +4993,9 @@ mod tests {
         line.contains(&text)
     }
 
-    /// Below the minimum an open confirm or overlay is not painted, so only
-    /// Esc, `q`, and Ctrl-c reach it; plain pane keys still map.
+    /// Below the minimum only the resize notice paints, so only Esc, `q`,
+    /// Ctrl-c, and resize map: pane keys and write keys (`s`, `P`, `p`)
+    /// drop, and an open confirm or overlay cannot take a hidden `y`.
     #[test]
     fn terminal_below_minimum_drops_keys_for_a_hidden_overlay() {
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -5004,8 +5005,29 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
         draw_state(&mut terminal, &mut state);
         assert!(state.too_small);
-        let j = key(KeyCode::Char('j'), KeyModifiers::NONE);
-        assert_ne!(super::super::app::map_event(&state, &j), Action::None);
+        for blind in ['j', 's', 'u', 'P', 'p', 'f'] {
+            let ev = key(KeyCode::Char(blind), KeyModifiers::NONE);
+            assert_eq!(
+                super::super::app::map_event(&state, &ev),
+                Action::None,
+                "{blind}"
+            );
+        }
+        assert_eq!(
+            super::super::app::map_event(&state, &key(KeyCode::Char('q'), KeyModifiers::NONE)),
+            Action::Quit
+        );
+        for allowed in [
+            key(KeyCode::Esc, KeyModifiers::NONE),
+            key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            Event::Resize(MIN_TERM_COLS, MIN_TERM_ROWS),
+        ] {
+            assert_ne!(
+                super::super::app::map_event(&state, &allowed),
+                Action::None,
+                "{allowed:?}"
+            );
+        }
 
         state.confirm = Some(PendingConfirm::Revert {
             label: "README.md".into(),

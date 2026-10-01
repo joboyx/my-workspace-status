@@ -407,7 +407,7 @@ mod tests {
     fn branch_name_error_follows_check_ref_format() {
         let cases: &[(&str, Option<&str>)] = &[
             ("feature/x", None),
-            ("JBY-12-fix", None),
+            ("ABC-12-fix", None),
             ("  trimmed  ", None),
             ("v1.2", None),
             ("a@b", None),
