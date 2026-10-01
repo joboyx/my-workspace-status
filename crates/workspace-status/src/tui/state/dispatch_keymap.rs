@@ -8,14 +8,16 @@ use super::super::command_palette::{CommandPaletteState, CommandScope, PaletteCo
 use super::super::diff::PartialPatchKind;
 use super::super::gates::{
     dispatch_is_noop, dispatch_noop_reason, ListFocusTarget, FOCUS_A_FILE_TO_MARK_REVIEWED,
-    REVIEWED_MARKS_ARE_FOR_TREE_FILES,
+    FOCUS_A_GRAPH_COMMIT, FOCUS_A_GRAPH_STASH, REVIEWED_MARKS_ARE_FOR_TREE_FILES,
+    STASH_NEEDS_TREE_OR_GRAPH,
 };
 use super::super::graph_focus::GRAPH_FOCUS_NEED_CONTEXT;
 use super::super::ops::{collect_write_files, op_is_kind_noop, op_kind_noop_reason, Op};
 use super::super::split::SplitDrag;
 use super::super::status::StatusMessage;
 use super::super::tabs::{
-    DEFAULT_BRANCH_NOT_FOUND, FOCUS_A_CHECKOUT, HEAD_HAS_NO_COMMIT, WORKSPACE_TAB_CANNOT_CLOSE,
+    DEFAULT_BRANCH_NOT_FOUND, FOCUS_A_CHECKOUT, HEAD_HAS_NO_COMMIT, ONLY_WORKSPACE_TAB_OPEN,
+    WORKSPACE_TAB_CANNOT_CLOSE,
 };
 use super::super::tree::NodeKind;
 use super::{AppState, FileWrite, FocusPane, FoldOp};
@@ -219,7 +221,7 @@ impl AppState {
                 }
             }
             Action::SearchNext | Action::SearchPrev => {
-                if self.search_active && !self.search_query.trim().is_empty() {
+                if self.search_is_armed() {
                     let step = if matches!(action, Action::SearchNext) {
                         1
                     } else {
@@ -485,7 +487,11 @@ impl AppState {
             }
             return Effect::None;
         }
-        let action = command.action.clone();
+        let action = match command.action {
+            // Other pane is Tab: it moves away from whichever pane has focus.
+            Action::FocusRight if self.focus == FocusPane::Right => Action::FocusLeft,
+            ref action => action.clone(),
+        };
         self.command_palette = None;
         self.dispatch(action)
     }
@@ -526,13 +532,15 @@ impl AppState {
             self.list_focus_target(),
         ) && !self.compare_revert_runs(action)
         {
-            let reason = dispatch_noop_reason(
+            // Only list moves and folds have no gate reason; the palette's
+            // one such row is Fold subtree.
+            return dispatch_noop_reason(
                 action,
                 self.nav_depth(),
                 self.focus == FocusPane::Right,
                 self.list_focus_target(),
-            );
-            return Some(reason.unwrap_or("not available here").into());
+            )
+            .or_else(|| Some(super::Z_FOLDS_TREE_ROWS.into()));
         }
         match action {
             // Same check as compare `x` with no highlight: the compare
@@ -600,14 +608,14 @@ impl AppState {
                 if self.graph_stash_focused() {
                     None
                 } else {
-                    Some("focus a graph stash row".into())
+                    Some(FOCUS_A_GRAPH_STASH.into())
                 }
             }
             Action::GraphCheckout | Action::GraphCreateBranch | Action::GraphMerge => {
                 if self.graph_commit_focused() {
                     None
                 } else {
-                    Some("focus a graph commit".into())
+                    Some(FOCUS_A_GRAPH_COMMIT.into())
                 }
             }
             Action::GraphFocusBranches => {
@@ -702,7 +710,7 @@ impl AppState {
             },
             Action::StashMenu => {
                 if self.nav_depth() >= 2 {
-                    Some("not available here".into())
+                    Some(STASH_NEEDS_TREE_OR_GRAPH.into())
                 } else if self.focused_checkout_if_shown().is_some() {
                     None
                 } else {
@@ -737,6 +745,17 @@ impl AppState {
                     None
                 }
             }
+            Action::NextTab | Action::PreviousTab => {
+                (self.tabs.len() <= 1).then(|| ONLY_WORKSPACE_TAB_OPEN.into())
+            }
+            Action::SearchNext | Action::SearchPrev => {
+                (!self.search_is_armed()).then(|| super::NO_SEARCH_ARMED.into())
+            }
+            Action::FoldToggleSubtree => (!matches!(
+                self.list_focus_target(),
+                ListFocusTarget::Tree | ListFocusTarget::CommitFiles
+            ))
+            .then(|| super::Z_FOLDS_TREE_ROWS.into()),
             _ => None,
         }
     }

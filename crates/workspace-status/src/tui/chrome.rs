@@ -504,7 +504,7 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
     let list_rows = state
         .branch_picker
         .as_ref()
-        .map(|picker| picker.visible().len())
+        .map(|picker| picker.row_count())
         .or_else(|| state.compare_picker.as_ref().map(|p| p.visible().len()))
         .or_else(|| state.graph_focus_picker.as_ref().map(|p| p.visible().len()))
         .or_else(|| state.command_palette.as_ref().map(|p| p.paint_rows().len()));
@@ -1615,7 +1615,7 @@ mod tests {
         app.create_branch = Some(CreateBranchState {
             repo: "app".into(),
             name: String::new(),
-            commit_id: Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         });
         assert_eq!(overlay_status_rows(&app), 5);
         app.status = "create topic".into();

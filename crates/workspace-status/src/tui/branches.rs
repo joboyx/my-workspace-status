@@ -1,4 +1,4 @@
-//! Local branch picker (`b`): list, filter, create, checkout.
+//! Local branch picker (`b`): list, filter, checkout, and a create row.
 
 use workspace_status_graph::{GraphRef, RefKind};
 
@@ -81,6 +81,7 @@ pub fn branch_name_error(name: &str) -> Option<String> {
 }
 
 /// True when [`branch_name_error`] finds nothing wrong with `name`.
+#[cfg(test)]
 pub fn is_valid_branch_name(name: &str) -> bool {
     branch_name_error(name).is_none()
 }
@@ -217,17 +218,26 @@ pub fn is_family_container(snapshot: &WorkspaceSnapshot, primary: &str) -> bool 
 }
 
 /// Interactive picker state.
+///
+/// The branch (`b`) and graph-checkout pickers end their list with a
+/// create row ([`Self::create_name`]); the compare picker does not.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchPickerState {
     pub repo: String,
     pub branches: Vec<LocalBranch>,
     pub filter: String,
+    /// Row index: a visible branch, or the create row right after them.
     pub cursor: usize,
-    /// Graph commit picker paints `Checkout at {short}`. Tree picker is `None`.
+    /// Graph commit picker paints `Checkout at {short}` and creates there.
+    /// Tree picker is `None`.
     pub commit_id: Option<String>,
+    /// True when a typed name that matches no branch exactly offers a
+    /// `+ create branch <name>` row.
+    pub creates: bool,
 }
 
 impl BranchPickerState {
+    /// Picker over `branches` with no create row (the compare picker).
     pub fn new(repo: String, branches: Vec<LocalBranch>) -> Self {
         Self {
             repo,
@@ -235,10 +245,20 @@ impl BranchPickerState {
             filter: String::new(),
             cursor: 0,
             commit_id: None,
+            creates: false,
         }
     }
 
-    /// Graph `b` picker: only the names on the focused commit.
+    /// Tree `b` picker: checkout, plus a create row that creates the typed
+    /// name at HEAD and checks it out.
+    pub fn checkout(repo: String, branches: Vec<LocalBranch>) -> Self {
+        let mut state = Self::new(repo, branches);
+        state.creates = true;
+        state
+    }
+
+    /// Graph `b` picker: only the names on the focused commit. Its create
+    /// row makes the branch at that commit without a checkout.
     pub fn from_names(repo: String, names: Vec<String>, commit_id: Option<String>) -> Self {
         let branches = names
             .into_iter()
@@ -248,22 +268,52 @@ impl BranchPickerState {
                 authordate: 0,
             })
             .collect();
-        let mut state = Self::new(repo, branches);
+        let mut state = Self::checkout(repo, branches);
         state.commit_id = commit_id;
         state
     }
 
+    /// Branches that match the filter, in list order.
     pub fn visible(&self) -> Vec<&LocalBranch> {
         filter_branches(&self.branches, &self.filter)
     }
 
+    /// Branch under the cursor; `None` on the create row.
     pub fn selected(&self) -> Option<&LocalBranch> {
         let visible = self.visible();
         visible.get(self.cursor).copied()
     }
 
+    /// Name the create row offers, or `None` when the row is hidden.
+    ///
+    /// Shown when this picker creates, the trimmed filter is non-empty,
+    /// it is a valid branch name ([`branch_name_error`]), and no listed
+    /// name equals it exactly.
+    pub fn create_name(&self) -> Option<&str> {
+        let name = self.filter.trim();
+        if !self.creates
+            || name.is_empty()
+            || branch_name_error(name).is_some()
+            || self.branches.iter().any(|branch| branch.name == name)
+        {
+            return None;
+        }
+        Some(name)
+    }
+
+    /// Visible branches plus the create row when it shows.
+    pub fn row_count(&self) -> usize {
+        self.visible().len() + usize::from(self.create_name().is_some())
+    }
+
+    /// True when the cursor sits on the create row.
+    pub fn on_create_row(&self) -> bool {
+        self.create_name().is_some() && self.cursor == self.visible().len()
+    }
+
+    /// Move the cursor by `delta` rows, clamped to the list.
     pub fn move_cursor(&mut self, delta: i32) {
-        let len = self.visible().len();
+        let len = self.row_count();
         if len == 0 {
             self.cursor = 0;
             return;
@@ -272,9 +322,10 @@ impl BranchPickerState {
         self.cursor = next.clamp(0, len as i32 - 1) as usize;
     }
 
+    /// Replace the filter and clamp the cursor to the new rows.
     pub fn set_filter(&mut self, filter: String) {
         self.filter = filter;
-        let len = self.visible().len();
+        let len = self.row_count();
         if len == 0 {
             self.cursor = 0;
         } else {
@@ -283,13 +334,13 @@ impl BranchPickerState {
     }
 }
 
-/// Name prompt after `C` in the picker, graph `c`, or Enter on a new filter.
+/// Name prompt after graph `c`: create a branch at a commit, no checkout.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreateBranchState {
     pub repo: String,
     pub name: String,
-    /// Graph `c` sets this. Picker `C` leaves it `None` (create+checkout at HEAD).
-    pub commit_id: Option<String>,
+    /// Commit the new branch points at.
+    pub commit_id: String,
 }
 
 #[cfg(test)]
@@ -503,5 +554,38 @@ mod tests {
         picker.set_filter("main".into());
         assert_eq!(picker.cursor, 0);
         assert_eq!(picker.selected().map(|b| b.name.as_str()), Some("main"));
+    }
+
+    #[test]
+    fn create_row_shows_for_a_new_valid_name_only() {
+        let mut picker = BranchPickerState::checkout(
+            "app".into(),
+            vec![b("main", true, 1), b("feature/x", false, 2)],
+        );
+        assert_eq!(picker.create_name(), None, "empty filter");
+        assert_eq!(picker.row_count(), 2);
+        picker.set_filter("feat".into());
+        assert_eq!(picker.create_name(), Some("feat"));
+        assert_eq!(picker.row_count(), 2, "feature/x + create row");
+        picker.move_cursor(5);
+        assert!(picker.on_create_row());
+        assert_eq!(picker.selected(), None);
+        picker.set_filter("feature/x".into());
+        assert_eq!(picker.create_name(), None, "exact existing name");
+        assert!(!picker.on_create_row());
+        picker.set_filter("bad name".into());
+        assert_eq!(picker.create_name(), None, "invalid name");
+        assert_eq!(picker.row_count(), 0);
+        picker.set_filter("  topic  ".into());
+        assert_eq!(picker.create_name(), Some("topic"));
+        assert!(picker.on_create_row(), "the only row");
+    }
+
+    #[test]
+    fn compare_picker_has_no_create_row() {
+        let mut picker = BranchPickerState::new("app".into(), vec![b("main", true, 1)]);
+        picker.set_filter("topic".into());
+        assert_eq!(picker.create_name(), None);
+        assert_eq!(picker.row_count(), 0);
     }
 }

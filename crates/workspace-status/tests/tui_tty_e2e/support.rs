@@ -453,7 +453,7 @@ pub fn graph_focus_overlay_open(screen: &str) -> bool {
         && screen.contains("* feature/keep")
         && screen.contains("topic/noise")
         && screen.contains("Enter apply")
-        && screen.contains("O clear")
+        && screen.contains("Ctrl-o clear")
         && screen.contains("Esc cancel")
         && screen.contains("workspace › [focusbox]")
         && !screen.contains("graph focus:")
@@ -463,8 +463,8 @@ pub fn graph_focus_overlay_open(screen: &str) -> bool {
 
 /// Overlay filter `feature`: cursor on `feature/keep`. Not `main`.
 ///
-/// Overlay `j`/`k` move the cursor, so a query that starts with `k` is
-/// not the filter text. `feature` is unique to `feature/keep`.
+/// Every letter types into the overlay filter. `feature` is unique to
+/// `feature/keep`.
 pub fn graph_focus_overlay_filtered_keep(screen: &str) -> bool {
     graph_focus_overlay_open(screen)
         && screen.contains("filter: feature")

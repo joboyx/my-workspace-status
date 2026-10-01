@@ -95,10 +95,6 @@ impl AppState {
                 self.status = "branch cancelled".into();
                 Effect::None
             }
-            Action::CreateBranchStart => {
-                self.cancel_mouse_drag();
-                self.begin_create_branch()
-            }
             Action::CreateBranchChar(c) => {
                 if let Some(create) = self.create_branch.as_mut() {
                     create.name.push(c);

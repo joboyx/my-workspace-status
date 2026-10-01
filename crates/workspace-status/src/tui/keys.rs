@@ -415,18 +415,21 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
                 )
         }
         InputMode::BranchPicker | InputMode::ComparePicker => match key.code {
+            _ if list_overlay_move(key).is_some() => true,
             KeyCode::Backspace => true,
-            KeyCode::Char('C') => false,
             KeyCode::Char(_) => typing,
             _ => false,
         },
         InputMode::GraphFocusPicker => match key.code {
+            _ if list_overlay_move(key).is_some() => true,
             KeyCode::Backspace => true,
-            KeyCode::Char('O') | KeyCode::Char(' ') => false,
+            KeyCode::Char(' ') => false,
             KeyCode::Char(_) => typing,
             _ => false,
         },
         InputMode::CommandPalette => match key.code {
+            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => false,
+            _ if list_overlay_move(key).is_some() => true,
             KeyCode::Backspace => true,
             KeyCode::Char(':') | KeyCode::Enter | KeyCode::Esc => false,
             KeyCode::Char(_) => typing,
@@ -580,41 +583,46 @@ fn key_to_action(
             }
             _ => Action::None,
         },
-        InputMode::ComparePicker => match key.code {
-            KeyCode::Esc => Action::ComparePickerCancel,
-            KeyCode::Enter => Action::ComparePickerSubmit,
-            KeyCode::Backspace => Action::ComparePickerBackspace,
-            KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::ComparePickerMove(1),
-            KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::ComparePickerMove(-1),
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Action::ComparePickerChar(c)
-            }
-            _ => Action::None,
+        InputMode::ComparePicker => match list_overlay_move(key) {
+            Some(delta) => Action::ComparePickerMove(delta),
+            None => match key.code {
+                KeyCode::Esc => Action::ComparePickerCancel,
+                KeyCode::Enter => Action::ComparePickerSubmit,
+                KeyCode::Backspace => Action::ComparePickerBackspace,
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Action::ComparePickerChar(c)
+                }
+                _ => Action::None,
+            },
         },
-        InputMode::BranchPicker => match key.code {
-            KeyCode::Esc => Action::BranchCancel,
-            KeyCode::Enter => Action::BranchSubmit,
-            KeyCode::Backspace => Action::BranchBackspace,
-            KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::BranchMove(1),
-            KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::BranchMove(-1),
-            KeyCode::Char('C') => Action::CreateBranchStart,
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Action::BranchChar(c)
-            }
-            _ => Action::None,
+        InputMode::BranchPicker => match list_overlay_move(key) {
+            Some(delta) => Action::BranchMove(delta),
+            None => match key.code {
+                KeyCode::Esc => Action::BranchCancel,
+                KeyCode::Enter => Action::BranchSubmit,
+                KeyCode::Backspace => Action::BranchBackspace,
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Action::BranchChar(c)
+                }
+                _ => Action::None,
+            },
         },
-        InputMode::GraphFocusPicker => match key.code {
-            KeyCode::Esc => Action::GraphFocusCancel,
-            KeyCode::Enter => Action::GraphFocusSubmit,
-            KeyCode::Backspace => Action::GraphFocusBackspace,
-            KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::GraphFocusMove(1),
-            KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::GraphFocusMove(-1),
-            KeyCode::Char(' ') => Action::GraphFocusToggle,
-            KeyCode::Char('O') => Action::GraphFocusClear,
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Action::GraphFocusChar(c)
-            }
-            _ => Action::None,
+        InputMode::GraphFocusPicker => match list_overlay_move(key) {
+            Some(delta) => Action::GraphFocusMove(delta),
+            None => match key.code {
+                KeyCode::Esc => Action::GraphFocusCancel,
+                KeyCode::Enter => Action::GraphFocusSubmit,
+                KeyCode::Backspace => Action::GraphFocusBackspace,
+                // Branch names cannot contain a space, so space never types.
+                KeyCode::Char(' ') => Action::GraphFocusToggle,
+                KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Action::GraphFocusClear
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Action::GraphFocusChar(c)
+                }
+                _ => Action::None,
+            },
         },
         InputMode::CreateBranch => match key.code {
             KeyCode::Esc => Action::CreateBranchCancel,
@@ -666,13 +674,30 @@ fn palette_open_key(key: KeyEvent) -> Option<PaletteOpenedBy> {
     None
 }
 
+/// Cursor step for a list overlay key (palette and every picker), if any.
+///
+/// Up / Down, Ctrl-n / Ctrl-p, and Ctrl-j / Ctrl-k move. Letters never move,
+/// so every printable character types into the filter. In the palette
+/// Ctrl-k and `:` still close it (they opened it) before this map runs.
+fn list_overlay_move(key: KeyEvent) -> Option<i32> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Down => Some(1),
+        KeyCode::Up => Some(-1),
+        KeyCode::Char('n' | 'j') if ctrl => Some(1),
+        KeyCode::Char('p' | 'k') if ctrl => Some(-1),
+        _ => None,
+    }
+}
+
 fn command_palette_key(key: KeyEvent) -> Action {
+    if let Some(delta) = list_overlay_move(key) {
+        return Action::CommandPaletteMove(delta);
+    }
     match key.code {
         KeyCode::Esc => Action::CommandPaletteCancel,
         KeyCode::Enter => Action::CommandPaletteSubmit,
         KeyCode::Backspace => Action::CommandPaletteBackspace,
-        KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::CommandPaletteMove(1),
-        KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::CommandPaletteMove(-1),
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             Action::CommandPaletteChar(c)
         }
@@ -1185,7 +1210,8 @@ mod tests {
                 false,
                 false
             ),
-            Action::CreateBranchStart
+            Action::BranchChar('C'),
+            "C types into the filter; the create row replaced picker C"
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('o')), normal(), false, true),
@@ -1216,6 +1242,15 @@ mod tests {
         assert_eq!(
             event_to_action(
                 &key(KeyCode::Char('O')),
+                InputMode::GraphFocusPicker,
+                false,
+                true
+            ),
+            Action::GraphFocusChar('O')
+        );
+        assert_eq!(
+            event_to_action(
+                &ctrl(KeyCode::Char('o')),
                 InputMode::GraphFocusPicker,
                 false,
                 true
@@ -1262,7 +1297,7 @@ mod tests {
                 false,
                 true
             ),
-            Action::GraphFocusClear
+            Action::GraphFocusChar('O')
         );
         assert_eq!(
             event_to_action(&shift(KeyCode::Char('y')), InputMode::Confirm, false, false),
@@ -1490,12 +1525,7 @@ mod tests {
             Action::ExportCommentsCancel
         );
         assert_eq!(
-            event_to_action(
-                &key(KeyCode::Char('j')),
-                InputMode::BranchPicker,
-                false,
-                false
-            ),
+            event_to_action(&key(KeyCode::Down), InputMode::BranchPicker, false, false),
             Action::BranchMove(1)
         );
         assert_eq!(
@@ -2456,7 +2486,7 @@ mod tests {
                 false,
                 false
             ),
-            Action::BranchMove(1)
+            Action::BranchChar('j')
         );
         assert_eq!(
             event_to_action(
@@ -2465,7 +2495,16 @@ mod tests {
                 false,
                 false
             ),
-            Action::None
+            Action::BranchChar('C')
+        );
+        assert_eq!(
+            event_to_action(
+                &key_kind(KeyCode::Down, KeyEventKind::Repeat),
+                InputMode::BranchPicker,
+                false,
+                false
+            ),
+            Action::BranchMove(1)
         );
     }
 
@@ -2690,7 +2729,7 @@ mod tests {
         use super::super::action::PaletteOpenedBy;
         assert_eq!(
             event_to_action(&key(KeyCode::Char('j')), palette(), false, false),
-            Action::CommandPaletteMove(1)
+            Action::CommandPaletteChar('j')
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Down), palette(), false, false),
@@ -2698,7 +2737,7 @@ mod tests {
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('k')), palette(), false, false),
-            Action::CommandPaletteMove(-1)
+            Action::CommandPaletteChar('k')
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Up), palette(), false, false),
@@ -2762,7 +2801,7 @@ mod tests {
                 false,
                 false
             ),
-            Action::CommandPaletteMove(1)
+            Action::CommandPaletteChar('j')
         );
         assert_eq!(
             event_to_action(
@@ -2817,6 +2856,74 @@ mod tests {
             ),
             Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK)
         );
+    }
+
+    #[test]
+    fn list_overlays_type_every_letter_and_move_on_arrows_and_ctrl() {
+        let modes = [
+            InputMode::CommandPalette,
+            InputMode::BranchPicker,
+            InputMode::ComparePicker,
+            InputMode::GraphFocusPicker,
+        ];
+        let moved = |mode: InputMode, delta: i32| match mode {
+            InputMode::CommandPalette => Action::CommandPaletteMove(delta),
+            InputMode::BranchPicker => Action::BranchMove(delta),
+            InputMode::ComparePicker => Action::ComparePickerMove(delta),
+            _ => Action::GraphFocusMove(delta),
+        };
+        let typed = |mode: InputMode, c: char| match mode {
+            InputMode::CommandPalette => Action::CommandPaletteChar(c),
+            InputMode::BranchPicker => Action::BranchChar(c),
+            InputMode::ComparePicker => Action::ComparePickerChar(c),
+            _ => Action::GraphFocusChar(c),
+        };
+        for mode in modes {
+            for c in ['j', 'k', 'J', 'K', 'C', 'O', 'n', 'p'] {
+                assert_eq!(
+                    event_to_action(&key(KeyCode::Char(c)), mode, false, false),
+                    typed(mode, c),
+                    "{mode:?} {c}"
+                );
+            }
+            for (event, delta) in [
+                (key(KeyCode::Down), 1),
+                (key(KeyCode::Up), -1),
+                (ctrl(KeyCode::Char('n')), 1),
+                (ctrl(KeyCode::Char('p')), -1),
+                (ctrl(KeyCode::Char('j')), 1),
+            ] {
+                assert_eq!(
+                    event_to_action(&event, mode, false, false),
+                    moved(mode, delta),
+                    "{mode:?} {event:?}"
+                );
+            }
+            let ctrl_k = event_to_action(&ctrl(KeyCode::Char('k')), mode, false, false);
+            if mode == InputMode::CommandPalette {
+                assert_eq!(
+                    ctrl_k,
+                    Action::ToggleCommandPalette(super::super::action::PaletteOpenedBy::CtrlK),
+                    "Ctrl-k still closes the palette it opened"
+                );
+            } else {
+                assert_eq!(ctrl_k, moved(mode, -1), "{mode:?} Ctrl-k");
+            }
+            assert_eq!(
+                event_to_action(
+                    &Event::Key(KeyEvent::new_with_kind(
+                        KeyCode::Char('n'),
+                        KeyModifiers::CONTROL,
+                        KeyEventKind::Repeat
+                    )),
+                    mode,
+                    false,
+                    false
+                ),
+                moved(mode, 1),
+                "{mode:?} held Ctrl-n repeats"
+            );
+        }
     }
 
     #[test]

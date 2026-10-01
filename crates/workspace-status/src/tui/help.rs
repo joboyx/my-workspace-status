@@ -1,7 +1,7 @@
 //! Help overlay entries and `/` search (highlight only).
 //!
 //! Three columns match `HELP_GROUPS` (MOVE / GIT / VIEW). Extra keys
-//! (`q`, Tab, picker `C`, stash `a p D`, Home/End) stay in those groups.
+//! (`q`, Tab, graph `c`, stash `a p D`, Home/End) stay in those groups.
 //! The footer shows [`crate::APP_VERSION`] in the lower-right.
 //! On a compare tab [`help_groups`] swaps GIT for [`HELP_COMPARE_GROUP`]
 //! (what acts on the compare diff and what needs the Workspace tab), so the
@@ -123,8 +123,8 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "graph merge into HEAD",
             },
             HelpEntry {
-                keys: "C",
-                desc: "create (in picker)",
+                keys: "c",
+                desc: "graph branch at commit",
             },
             HelpEntry {
                 keys: "W",
@@ -280,7 +280,7 @@ pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
             desc: "Workspace tab only",
         },
         HelpEntry {
-            keys: "b C W",
+            keys: "b c W",
             desc: "Workspace tab only",
         },
         HelpEntry {
@@ -656,7 +656,7 @@ mod tests {
         let keys: Vec<&str> = help_entries().map(|e| e.keys).collect();
         assert!(keys.contains(&"q"));
         assert!(keys.contains(&"Tab"));
-        assert!(keys.contains(&"C"));
+        assert!(keys.contains(&"c"));
         assert!(keys.contains(&"a p D"));
         assert!(keys.contains(&"Home End"));
         let git_keys: Vec<&str> = HELP_GROUPS[1].entries.iter().map(|e| e.keys).collect();
@@ -775,7 +775,7 @@ mod tests {
             "close tab",
             "s u",
             "f p P d",
-            "b C W",
+            "b c W",
             "S a p D",
             "o O",
             "r refresh now",
@@ -783,7 +783,7 @@ mod tests {
             assert!(text.contains(needle), "{needle} missing: {text}");
         }
         // `m` toggles mouse on a compare tab (no graph commit to merge).
-        assert!(!text.contains("b m C W"), "{text}");
+        assert!(!text.contains("b m c W"), "{text}");
     }
 
     #[test]

@@ -4035,6 +4035,7 @@ impl AppState {
 
     fn begin_stash_menu(&mut self) -> Effect {
         if self.nav_depth() >= 2 {
+            self.status = StatusMessage::warn(super::gates::STASH_NEEDS_TREE_OR_GRAPH);
             return Effect::None;
         }
         let Some(repo) = self.focused_checkout_if_shown() else {
@@ -4183,7 +4184,7 @@ impl AppState {
             .find(|r| r.repo == repo)
             .and_then(|r| r.default_branch_override.clone());
         let sorted = super::branches::sort_branches_for_picker(branches, default.as_deref());
-        self.branch_picker = Some(BranchPickerState::new(repo, sorted));
+        self.branch_picker = Some(BranchPickerState::checkout(repo, sorted));
         self.status.clear();
     }
 
@@ -4227,6 +4228,11 @@ impl AppState {
             Some(NodeKind::Repo | NodeKind::Checkout) => self.focused_graph_repo(),
             _ => None,
         }
+    }
+
+    /// True when `/` armed a non-empty query, so `n` / `N` step matches.
+    pub(crate) fn search_is_armed(&self) -> bool {
+        self.search_active && !self.search_query.trim().is_empty()
     }
 
     /// True when the current row has an applied graph branch focus.
@@ -4320,7 +4326,6 @@ impl AppState {
             return Effect::None;
         };
         let repo = picker.repo.clone();
-        let filter = picker.filter.clone();
         if let Some(selected) = picker.selected().cloned() {
             if selected.current {
                 self.branch_picker = None;
@@ -4329,25 +4334,36 @@ impl AppState {
             }
             return self.checkout_or_confirm(repo, selected.name);
         }
-        match branch_name_error(&filter) {
-            None => {
-                self.branch_picker = None;
-                self.status = StatusMessage::progress(format!("creating {filter}…"));
-                Effect::CreateBranch {
-                    repo,
-                    name: filter.trim().to_string(),
+        if picker.on_create_row() {
+            let name = picker.create_name().unwrap_or_default().to_string();
+            let commit_id = picker.commit_id.clone();
+            self.branch_picker = None;
+            // The graph picker creates at its commit and does not check out.
+            return match commit_id {
+                Some(commit_id) => {
+                    let short = commit_id.get(..7).unwrap_or(&commit_id);
+                    self.status = StatusMessage::progress(format!("creating {name} at {short}…"));
+                    Effect::CreateBranchAt {
+                        repo,
+                        name,
+                        commit_id,
+                    }
                 }
-            }
-            // An empty filter matched nothing; any other bad name says why.
-            Some(_) if filter.trim().is_empty() => {
-                self.status = StatusMessage::warn("no matching branches");
-                Effect::None
-            }
-            Some(reason) => {
-                self.status = StatusMessage::warn(format!("no matching branches · {reason}"));
-                Effect::None
-            }
+                None => {
+                    self.status = StatusMessage::progress(format!("creating {name}…"));
+                    Effect::CreateBranch { repo, name }
+                }
+            };
         }
+        // No branch matches and no create row: say why (a bad new name
+        // hides the create row).
+        let query = picker.filter.trim();
+        self.status = StatusMessage::warn(match branch_name_error(query) {
+            _ if query.is_empty() => "no matching branches".to_string(),
+            Some(reason) if picker.creates => format!("no branch matches {query} · {reason}"),
+            _ => format!("no branch matches {query}"),
+        });
+        Effect::None
     }
 
     /// Emit a checkout effect. Origin out-of-sync confirm is decided later
@@ -4385,22 +4401,6 @@ impl AppState {
         }
     }
 
-    fn begin_create_branch(&mut self) -> Effect {
-        let Some(picker) = self.branch_picker.as_ref() else {
-            self.status = StatusMessage::warn("open the branch picker first");
-            return Effect::None;
-        };
-        let repo = picker.repo.clone();
-        let seed = picker.filter.clone();
-        self.create_branch = Some(CreateBranchState {
-            repo,
-            name: seed,
-            commit_id: None,
-        });
-        self.status.clear();
-        Effect::None
-    }
-
     fn submit_create_branch(&mut self) -> Effect {
         let Some(create) = self.create_branch.take() else {
             return Effect::None;
@@ -4411,19 +4411,11 @@ impl AppState {
             self.create_branch = Some(create);
             return Effect::None;
         }
-        self.branch_picker = None;
         self.status = StatusMessage::progress(format!("creating {}…", create.name.trim()));
-        if let Some(commit_id) = create.commit_id {
-            Effect::CreateBranchAt {
-                repo: create.repo,
-                name: create.name.trim().to_string(),
-                commit_id,
-            }
-        } else {
-            Effect::CreateBranch {
-                repo: create.repo,
-                name: create.name.trim().to_string(),
-            }
+        Effect::CreateBranchAt {
+            repo: create.repo,
+            name: create.name.trim().to_string(),
+            commit_id: create.commit_id,
         }
     }
 
@@ -4481,7 +4473,7 @@ impl AppState {
         self.create_branch = Some(CreateBranchState {
             repo,
             name: String::new(),
-            commit_id: Some(commit_id),
+            commit_id,
         });
         self.status.clear();
         Effect::None
@@ -4980,6 +4972,7 @@ impl AppState {
     fn activate_relative_tab(&mut self, delta: i32) -> Effect {
         let len = self.tabs.len() as i32;
         if len <= 1 {
+            self.status = StatusMessage::warn(super::tabs::ONLY_WORKSPACE_TAB_OPEN);
             return Effect::None;
         }
         let next = (self.tabs.active as i32 + delta).rem_euclid(len) as usize;
@@ -5954,17 +5947,23 @@ mod tests {
         );
         assert_eq!(app.focus, FocusPane::Right);
         assert!(app.in_commit_drill());
-        for action in [
-            Action::Stage,
-            Action::Unstage,
-            Action::Revert,
-            Action::Fetch,
-            Action::Pull,
-            Action::Push,
-            Action::DefaultBranch,
-            Action::Branch,
-            Action::RemoveWorktree,
-            Action::StashMenu,
+        for (action, why) in [
+            (Action::Stage, "focus the tree (Esc) to stage"),
+            (Action::Unstage, "focus the tree (Esc) to unstage"),
+            (Action::Revert, "focus the tree (Esc) to revert"),
+            (Action::Fetch, "focus the tree (Esc) to fetch"),
+            (Action::Pull, "focus the tree (Esc) to pull"),
+            (Action::Push, "focus the tree (Esc) to push"),
+            (
+                Action::DefaultBranch,
+                "focus the tree (Esc) to switch to the default branch",
+            ),
+            (Action::Branch, "focus the tree (Esc) to pick a branch"),
+            (
+                Action::RemoveWorktree,
+                "focus the tree (Esc) to remove a worktree",
+            ),
+            (Action::StashMenu, "focus the left pane (Tab) to stash"),
         ] {
             assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
             assert_eq!(
@@ -5972,10 +5971,7 @@ mod tests {
                 "{action:?} must not move the tree cursor"
             );
             assert!(app.confirm.is_none(), "{action:?}");
-            assert_eq!(
-                app.status, "tree key · Esc back to the tree",
-                "{action:?} must say why"
-            );
+            assert_eq!(app.status, why, "{action:?} must say why");
             assert_eq!(app.status.kind(), StatusKind::Warn, "{action:?}");
         }
         match app.dispatch(Action::Edit) {
@@ -7677,7 +7673,6 @@ mod tests {
             Action::DefaultBranch,
             Action::Branch,
             Action::BranchSubmit,
-            Action::CreateBranchStart,
             Action::CreateBranchSubmit,
             Action::RemoveWorktree,
             Action::GraphCheckout,
@@ -9406,28 +9401,35 @@ mod tests {
                 authordate: 1,
             }],
         );
-        app.dispatch(Action::CreateBranchStart);
-        // A name git would refuse stays in the prompt with the reason.
+        // A name git would refuse gets no create row; Enter says why.
         for c in "bad..name".chars() {
-            app.dispatch(Action::CreateBranchChar(c));
+            app.dispatch(Action::BranchChar(c));
         }
-        assert_eq!(app.dispatch(Action::CreateBranchSubmit), Effect::None);
-        assert!(app.create_branch.is_some());
-        assert_eq!(app.status, "a branch name cannot contain ..");
+        assert_eq!(app.branch_picker.as_ref().unwrap().row_count(), 0);
+        assert_eq!(app.dispatch(Action::BranchSubmit), Effect::None);
+        assert!(app.branch_picker.is_some());
+        assert_eq!(
+            app.status,
+            "no branch matches bad..name · a branch name cannot contain .."
+        );
         assert_eq!(app.status.kind(), StatusKind::Warn);
         for _ in "bad..name".chars() {
-            app.dispatch(Action::CreateBranchBackspace);
+            app.dispatch(Action::BranchBackspace);
         }
         for c in "feature/new".chars() {
-            app.dispatch(Action::CreateBranchChar(c));
+            app.dispatch(Action::BranchChar(c));
         }
-        match app.dispatch(Action::CreateBranchSubmit) {
+        let picker = app.branch_picker.as_ref().unwrap();
+        assert!(picker.on_create_row(), "the create row is the only row");
+        match app.dispatch(Action::BranchSubmit) {
             Effect::CreateBranch { name, repo } => {
                 assert_eq!(repo, "app");
                 assert_eq!(name, "feature/new");
             }
             other => panic!("{other:?}"),
         }
+        assert!(app.branch_picker.is_none());
+        assert_eq!(app.status, "creating feature/new…");
 
         assert_eq!(
             app.confirm_checkout_if_out_of_sync(
@@ -9597,6 +9599,79 @@ mod tests {
     }
 
     #[test]
+    fn graph_checkout_picker_create_row_creates_at_the_commit() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_graph_commit(&mut app, &["topic", "main"]);
+        assert_eq!(app.dispatch(Action::GraphCheckout), Effect::None);
+        // j / k / C type into the filter: they never move or open a prompt.
+        for c in "jk/C".chars() {
+            app.dispatch(Action::BranchChar(c));
+        }
+        let picker = app.branch_picker.as_ref().expect("picker");
+        assert_eq!(picker.filter, "jk/C");
+        assert_eq!(picker.create_name(), Some("jk/C"));
+        assert!(picker.on_create_row());
+        match app.dispatch(Action::BranchSubmit) {
+            Effect::CreateBranchAt {
+                repo,
+                name,
+                commit_id,
+            } => {
+                assert_eq!(repo, "app");
+                assert_eq!(name, "jk/C");
+                assert_eq!(commit_id, "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(app.branch_picker.is_none());
+        assert_eq!(app.status, "creating jk/C at aaa1111…");
+    }
+
+    #[test]
+    fn graph_checkout_picker_exact_name_hides_the_create_row() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_graph_commit(&mut app, &["topic", "main"]);
+        app.dispatch(Action::GraphCheckout);
+        for c in "main".chars() {
+            app.dispatch(Action::BranchChar(c));
+        }
+        let picker = app.branch_picker.as_ref().expect("picker");
+        assert_eq!(picker.create_name(), None);
+        assert_eq!(picker.row_count(), 1);
+        app.dispatch(Action::BranchMove(1));
+        assert!(matches!(
+            app.dispatch(Action::BranchSubmit),
+            Effect::CheckoutBranch { selected_name, .. } if selected_name == "main"
+        ));
+    }
+
+    #[test]
+    fn tree_picker_with_matches_still_offers_create_last() {
+        use crate::git::LocalBranch;
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        app.open_branch_picker(
+            "app".into(),
+            vec![LocalBranch {
+                name: "feature/x".into(),
+                current: false,
+                authordate: 1,
+            }],
+        );
+        for c in "feat".chars() {
+            app.dispatch(Action::BranchChar(c));
+        }
+        assert_eq!(app.branch_picker.as_ref().unwrap().row_count(), 2);
+        app.dispatch(Action::BranchMove(1));
+        assert!(matches!(
+            app.dispatch(Action::BranchSubmit),
+            Effect::CreateBranch { name, .. } if name == "feat"
+        ));
+    }
+
+    #[test]
     fn graph_commit_b_dirty_refuses() {
         let mut app = graph_state(true);
         focus_repo(&mut app, "app");
@@ -9621,7 +9696,7 @@ mod tests {
         focus_repo(&mut app, "app");
         install_graph_commit(&mut app, &["main"]);
         assert_eq!(app.dispatch(Action::GraphCreateBranch), Effect::None);
-        assert!(app.create_branch.as_ref().unwrap().commit_id.is_some());
+        assert!(!app.create_branch.as_ref().unwrap().commit_id.is_empty());
         for c in "topic/x".chars() {
             app.dispatch(Action::CreateBranchChar(c));
         }
@@ -10025,11 +10100,10 @@ mod tests {
             .branches
             .iter()
             .any(|b| b.name == "main"));
-        app.dispatch(Action::CreateBranchStart);
         for c in "feature/pick".chars() {
-            app.dispatch(Action::CreateBranchChar(c));
+            app.dispatch(Action::BranchChar(c));
         }
-        match app.dispatch(Action::CreateBranchSubmit) {
+        match app.dispatch(Action::BranchSubmit) {
             Effect::CreateBranch { name, .. } => {
                 create_branch_checkout(&repo_dir, &name).unwrap();
             }
@@ -10954,7 +11028,7 @@ mod tests {
         focus_graph_row(&mut app, |r| matches!(r, GraphRow::Commit { .. }));
         assert_eq!(app.focus, FocusPane::Right);
         assert_eq!(app.dispatch(Action::StashMenu), Effect::None);
-        assert_eq!(app.status, "tree key · Tab to the tree");
+        assert_eq!(app.status, "focus the left pane (Tab) to stash");
     }
 
     #[test]
@@ -14035,8 +14109,84 @@ diff --git a/README.md b/README.md
         assert_eq!(palette_reason(&app, "Keymap help"), None);
         assert_eq!(
             palette_reason(&app, "Stage").as_deref(),
-            Some("tree key · Tab to the tree")
+            Some("focus the tree (Tab) to stage")
         );
+    }
+
+    #[test]
+    fn palette_tab_search_and_fold_rows_say_why_they_are_off() {
+        use super::super::tabs::ONLY_WORKSPACE_TAB_OPEN;
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        for title in ["Next tab", "Previous tab"] {
+            assert_eq!(
+                palette_reason(&app, title).as_deref(),
+                Some(ONLY_WORKSPACE_TAB_OPEN),
+                "{title}"
+            );
+        }
+        // `gt` gives the same copy as the palette row.
+        assert_eq!(app.dispatch(Action::NextTab), Effect::None);
+        assert_eq!(app.status, ONLY_WORKSPACE_TAB_OPEN);
+        for title in ["Next match", "Previous match"] {
+            assert_eq!(
+                palette_reason(&app, title).as_deref(),
+                Some(NO_SEARCH_ARMED),
+                "{title}"
+            );
+        }
+        app.search_active = true;
+        app.search_query = "app".into();
+        assert_eq!(palette_reason(&app, "Next match"), None);
+        assert_eq!(palette_reason(&app, "Fold subtree"), None, "tree row");
+        assert_eq!(palette_reason(&app, "Quit"), None);
+        assert_eq!(palette_reason(&app, "Other pane"), None);
+
+        install_graph(&mut app, vec![graph_stash("stash@{0}", "latest")]);
+        focus_graph_row(&mut app, |r| matches!(r, GraphRow::Commit { .. }));
+        assert_eq!(
+            palette_reason(&app, "Fold subtree").as_deref(),
+            Some(Z_FOLDS_TREE_ROWS)
+        );
+        assert_eq!(
+            palette_reason(&app, "Stash menu").as_deref(),
+            Some("focus the left pane (Tab) to stash")
+        );
+        assert_eq!(
+            palette_reason(&app, "Apply stash").as_deref(),
+            Some(super::super::gates::FOCUS_A_GRAPH_STASH)
+        );
+    }
+
+    #[test]
+    fn palette_other_pane_flips_focus_and_quit_quits() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        assert_eq!(app.focus, FocusPane::Left);
+        palette_select(&mut app, "Other pane");
+        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
+        assert!(app.command_palette.is_none());
+        assert_eq!(app.focus, FocusPane::Right);
+        palette_select(&mut app, "Other pane");
+        app.dispatch(Action::CommandPaletteSubmit);
+        assert_eq!(app.focus, FocusPane::Left, "Tab goes back from the right");
+        palette_select(&mut app, "Quit");
+        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::Quit);
+    }
+
+    #[test]
+    fn palette_alias_finds_a_row_and_runs_it() {
+        use super::super::action::PaletteOpenedBy;
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        app.dispatch(Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK));
+        for c in "exit".chars() {
+            app.dispatch(Action::CommandPaletteChar(c));
+        }
+        let palette = app.command_palette.as_ref().expect("palette open");
+        assert_eq!(palette.filter, "exit");
+        assert_eq!(palette.selected().map(|c| c.title), Some("Quit"));
+        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::Quit);
     }
 
     #[test]

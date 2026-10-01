@@ -36,7 +36,7 @@ const HELP_GIT_ROWS: &[(&str, &str)] = &[
     ("d", "default branch"),
     ("b", "depth 0 picker · graph local/origin/*"),
     ("m", "graph merge into HEAD"),
-    ("C", "create (in picker)"),
+    ("c", "graph branch at commit"),
     ("W", "remove linked worktree"),
     ("r", "refresh now"),
     ("a p D", "focused stash apply/pop/drop"),

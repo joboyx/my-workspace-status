@@ -16,6 +16,9 @@ pub const HEAD_HAS_NO_COMMIT: &str = "HEAD has no commit";
 pub const DEFAULT_BRANCH_NOT_FOUND: &str = "Default branch not found";
 /// Palette copy when Close is run on the Workspace tab.
 pub const WORKSPACE_TAB_CANNOT_CLOSE: &str = "Workspace tab cannot be closed";
+
+/// `gt` / `gT` and the Next / Previous tab palette rows with no compare tab.
+pub const ONLY_WORKSPACE_TAB_OPEN: &str = "only the Workspace tab is open";
 /// Mutation disable copy on a compare tab.
 pub const SWITCH_TO_WORKSPACE_TAB: &str = "Switch to Workspace tab";
 /// Stage disable copy on a compare tab (whole file or highlighted lines).

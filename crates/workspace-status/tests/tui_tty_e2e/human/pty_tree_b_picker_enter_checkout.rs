@@ -115,7 +115,7 @@ fn tree_picker_checkout_chrome(screen: &str) -> bool {
         && keep_is_checked_out(screen)
         && screen.contains("Branch ")
         && screen.contains("filter:")
-        && screen.contains("C create")
+        && !screen.contains("+ create branch")
         && screen.contains("Enter checkout")
         && screen.contains("Esc close")
         && !screen.contains("Create branch")
@@ -159,7 +159,6 @@ fn documented_tree_picker_enter_checkout(screen: &str) -> bool {
         && !screen.contains("Create branch")
         && !screen.contains("Enter create")
         && !screen.contains("Enter checkout")
-        && !screen.contains("C create")
         && !screen.contains("filter:")
         && !screen.contains("Branch focusbox")
         && focusbox_tree_on_main(screen)
@@ -183,7 +182,6 @@ fn idle_focusbox_picker_closed(screen: &str) -> bool {
         && keep_is_checked_out(screen)
         && !screen.contains("Branch ")
         && !screen.contains("Enter checkout")
-        && !screen.contains("C create")
         && !screen.contains("filter:")
         && !crumb_row(screen).contains("Checked out")
         && !crumb_row(screen).contains("created ")
@@ -199,9 +197,9 @@ fn idle_focusbox_picker_closed(screen: &str) -> bool {
 /// Docs: Help GIT `b` is `depth 0 picker · graph local/origin/*`. Keymap:
 /// tree `b` is `Action::Branch` (local picker). Overlay title is
 /// `Branch` (not graph `Checkout at`). Footer is `Enter checkout` /
-/// `C create` / `Esc close`. Type to filter. Enter runs
-/// `checkout_branch` of the selected local name. `C` is create
-/// (`pty_branch_picker_shift_c_creates`). Graph `b` is refs on a
+/// `Esc close`. Type to filter. Enter runs `checkout_branch` of the
+/// selected local name. An exact name adds no create row; the create
+/// row is `pty_branch_picker_create_row_creates`. Graph `b` is refs on a
 /// commit (`pty_graph_b_checkout`).
 ///
 /// After first paint the cursor is already on `focusbox`

@@ -6,7 +6,8 @@ use crate::support::{
     GIT_WAIT, SETTLE_MS, WAIT,
 };
 
-const BRANCH: &str = "e2e-from-picker";
+/// `j`, `k`, and `C` used to move or open a prompt; in the picker they type.
+const BRANCH: &str = "e2e-jk-Created";
 
 fn no_wrong_create_overlays(screen: &str) -> bool {
     !screen.contains("MOVE")
@@ -45,32 +46,23 @@ fn main_leaf_lacks_new_ref(screen: &str) -> bool {
         .is_some_and(|line| line.contains("[main]") && !line.contains(BRANCH))
 }
 
-fn picker_create_overlay(screen: &str, name_line: &str) -> bool {
-    let overlay_title = screen
-        .lines()
-        .any(|line| line.contains("Create branch") && !line.contains("Create branch at"));
+/// Tree picker is open on `focusbox`, its filter holds the typed name, and
+/// the list ends with the create row. No name prompt opened.
+fn picker_with_create_row(screen: &str) -> bool {
     tree_pane_focused(screen)
-        && overlay_title
-        && !screen.contains("Create branch at")
-        && screen.contains(name_line)
-        && screen.contains("Enter create and check out")
-        && screen.contains("Esc cancel")
-        && !screen.contains("C create")
-        && !screen.contains("Enter checkout")
-        && !screen.contains(&format!("created {BRANCH}"))
+        && tree_cursor_on(screen, "focusbox")
         && focusbox_on_keep(screen)
+        && screen.contains(&format!("filter: {BRANCH}"))
+        && screen
+            .lines()
+            .any(|line| line.contains(&format!("❯   + create branch {BRANCH}")))
+        && !screen.contains("No matching branches")
+        && !screen.contains("Create branch")
+        && !screen.contains(&format!("created {BRANCH}"))
         && no_wrong_create_overlays(screen)
 }
 
-fn empty_picker_create_overlay(screen: &str) -> bool {
-    picker_create_overlay(screen, "name: …") && !screen.contains(BRANCH)
-}
-
-fn named_picker_create_overlay(screen: &str) -> bool {
-    picker_create_overlay(screen, &format!("name: {BRANCH}"))
-}
-
-/// Tree picker is open on `focusbox`. `C` is create. Overlay is not graph `c`.
+/// Tree picker is open on `focusbox` with an empty filter: no create row.
 fn tree_picker_open_on_keep(screen: &str) -> bool {
     tree_pane_focused(screen)
         && tree_cursor_on(screen, "focusbox")
@@ -78,18 +70,16 @@ fn tree_picker_open_on_keep(screen: &str) -> bool {
         && screen.contains("Branch ")
         && screen.contains("filter:")
         && screen.contains("* feature/keep")
-        && screen.contains("C create")
         && screen.contains("Enter checkout")
         && screen.contains("Esc close")
+        && !screen.contains("+ create branch")
         && !screen.contains("Create branch")
-        && !screen.contains("Enter create")
-        && !screen.contains("Create branch at")
         && screen.contains("keep-leaf-commit")
         && screen.contains("main-leaf-commit")
         && no_wrong_create_overlays(screen)
 }
 
-/// Picker `C` + Enter ran `checkout -b` at HEAD. Not graph `c`, not tree-file `c`.
+/// The create row + Enter ran `checkout -b` at HEAD. Not graph `c`, not tree-file `c`.
 fn documented_picker_create_checkout(screen: &str) -> bool {
     let crumb = crumb_row(screen);
     let status = status_row(screen);
@@ -102,8 +92,7 @@ fn documented_picker_create_checkout(screen: &str) -> bool {
         && !crumb.contains("Already on")
         && !screen.contains("Create branch")
         && !screen.contains("Enter create")
-        && !screen.contains("Esc cancel")
-        && !screen.contains("C create")
+        && !screen.contains("+ create branch")
         && focusbox_checked_out_new_branch(screen)
         && keep_leaf_has_checked_out_new_ref(screen)
         && main_leaf_lacks_new_ref(screen)
@@ -117,23 +106,24 @@ fn documented_picker_create_checkout(screen: &str) -> bool {
         && no_wrong_create_overlays(screen)
 }
 
-/// Picker `C` creates a branch at HEAD and checks it out.
+/// The branch picker create row creates a branch at HEAD and checks it out.
 ///
-/// Docs: Help GIT `C` is create in the picker. Keymap: picker `C` is
-/// `Action::CreateBranchStart`. Overlay is the name prompt with
-/// `Create branch` (no `at <short>`) and `Enter create and check out · Esc cancel`.
-/// Enter runs `create_branch_checkout` (`git checkout -b name`). HEAD
-/// moves to the new branch. Graph `c` is ref-only at the focused commit
+/// Docs: every printable key types into the picker filter (`j`, `k`, `C`
+/// too). A filter that is a valid new name and not an exact local branch
+/// ends the list with `+ create branch <name>`. Enter on it runs
+/// `create_branch_checkout` (`git checkout -b name`) and HEAD moves to the
+/// new branch. Graph `c` is ref-only at the focused commit
 /// (`pty_graph_c_creates_branch_at_commit`). Tree-file `c` is a no-op
 /// (`pty_c_on_tree_file_is_not_commit`).
 ///
 /// After first paint the cursor is already on `focusbox` (`feature/keep`).
-/// `b` opens the local picker. Shift+C then a name then Enter must toast
-/// `created …` (not `created … at <short>`), check out the new name, and
-/// leave HEAD on `keep-leaf-commit`. A no-op, graph `c`, picker Enter
-/// onto `main`, overlay-only, or toast-only is red.
+/// `b` opens the local picker. Typing the name must land in the filter
+/// with the create row selected (a `j` / `k` that moved, or a `C` that
+/// opened a prompt, is red). Enter must toast `created …` (not `created …
+/// at <short>`), check out the new name, and leave HEAD on
+/// `keep-leaf-commit`.
 #[test]
-fn pty_branch_picker_shift_c_creates() {
+fn pty_branch_picker_create_row_creates() {
     let (_root, workspace) = focus_workspace();
     let mut tui = PtySession::open(&workspace);
     tui.wait_contains("focusbox", WAIT);
@@ -146,35 +136,28 @@ fn pty_branch_picker_shift_c_creates() {
     tui.key('b');
     tui.wait_pred(
         tree_picker_open_on_keep,
-        "b opens the local picker on focusbox; C create; HEAD still feature/keep",
+        "b opens the local picker on focusbox; no create row yet; HEAD still feature/keep",
         WAIT,
     );
     tui.wait_ms(SETTLE_MS);
-
-    tui.shift_letter('C');
-    tui.wait_pred(
-        empty_picker_create_overlay,
-        "picker Shift+C opens Create branch (not graph c, not a write)",
-        WAIT,
-    );
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        empty_picker_create_overlay,
-        "create-branch overlay holds (not a flicker or toast-only tick)",
-        WAIT,
-    );
 
     tui.keys(BRANCH);
     tui.wait_pred(
-        named_picker_create_overlay,
-        "typed name is in the overlay; Enter has not created the ref yet",
+        picker_with_create_row,
+        "j / k / C type into the filter and the create row takes the cursor",
+        WAIT,
+    );
+    tui.wait_ms(SETTLE_MS);
+    tui.wait_pred(
+        picker_with_create_row,
+        "the create row holds; Enter has not created the ref yet",
         WAIT,
     );
 
     tui.enter();
     tui.wait_pred(
         documented_picker_create_checkout,
-        "Enter creates e2e-from-picker at HEAD and checks it out",
+        "Enter on the create row creates the branch at HEAD and checks it out",
         GIT_WAIT,
     );
     tui.wait_ms(SETTLE_MS);

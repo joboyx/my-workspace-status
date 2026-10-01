@@ -129,7 +129,6 @@ pub enum Action {
     BranchBackspace,
     BranchSubmit,
     BranchCancel,
-    CreateBranchStart,
     CreateBranchChar(char),
     CreateBranchBackspace,
     CreateBranchSubmit,

@@ -40,8 +40,8 @@ Every git subprocess also runs with `GIT_OPTIONAL_LOCKS=0` (set by `git::git_pro
 | `is_ancestor(cwd, maybe_ancestor, tip)` | `merge-base --is-ancestor` | `Some(true/false)` / `None` | Merge-into-default probe |
 | `head_equals_ref(cwd, git_ref)` | `rev-parse` of `HEAD` and `git_ref` | boolean | Same-commit as default tip is open, not merged |
 | `resolve_default_branch_tip_ref` / `resolve_default_branch_name` / `get_default_branch` | `rev-parse` / `symbolic-ref` / `show-ref` | branch / tip | Default branch name and tip for classification and `-d` |
-| `create_branch_at(cwd, name, commit_id)` | `branch -- <name> <commitId>` | `Result` | Create a local ref **without** checking it out (graph `c`) |
-| `create_branch_checkout(cwd, name)` | `checkout -b <name> --quiet` | `Result` | Picker `C`. Both create paths check the name first with `branches::branch_name_error` (git `check-ref-format` rules); a bad name shows the reason and git does not run |
+| `create_branch_at(cwd, name, commit_id)` | `branch -- <name> <commitId>` | `Result` | Create a local ref **without** checking it out (graph `c`, and the create row of the graph `b` picker) |
+| `create_branch_checkout(cwd, name)` | `checkout -b <name> --quiet` | `Result` | The `+ create branch <name>` row of the tree `b` picker. Both create paths check the name first with `branches::branch_name_error` (git `check-ref-format` rules); a bad name shows the reason and git does not run |
 | `stash_push` / `stash_apply` / `stash_pop` / `stash_drop` | `stash push -u` / `apply` / `pop` / `drop` | `Result` | Stash menu and graph stash rows. Unchanged stash list after push is failure |
 | `list_stash_refs` / `latest_stash_ref` | `stash list --format=%gd` | refs | Latest stash for graph `S` apply / pop on a non-stash row |
 | `remove_worktree(primary, path, force)` | `worktree remove [--force] <path>` from primary | `Result` | Remove a linked worktree after TUI confirm (`W`) |
@@ -155,18 +155,18 @@ The compare diff covers commits only, so it does not change after a revert. The 
 
 **`stash_push` treats a no-op as failure.** Apple Git 2.50 prints `No local changes to save` but exits 0. The wrapper compares `stash list` before and after and returns `Err` when the list is unchanged.
 
-**Local branch picker (`b`).** Opens on a checkout or flat repo row (hidden on family containers), lists `refs/heads/` only (no remotes). Esc closes without quitting. Typing filters; `j`/`k` move; Enter checks out. Dirty worktrees refuse checkout with `Dirty worktree — commit or stash first`. Selecting the current branch closes with `Already on …` and skips the dirty check.
+**Local branch picker (`b`).** Opens on a checkout or flat repo row (hidden on family containers), lists `refs/heads/` only (no remotes). Esc closes without quitting. Every printable key types into the filter; ↑/↓, Ctrl-n / Ctrl-p, and Ctrl-j / Ctrl-k move; Enter checks out. A filter that is a valid new name and not an exact local branch adds a last row `+ create branch <name>`; Enter on it runs `create_branch_checkout`. Enter with no row warns `no branch matches <name>` (plus the name rule it breaks). Dirty worktrees refuse checkout with `Dirty worktree — commit or stash first`. Selecting the current branch closes with `Already on …` and skips the dirty check.
 
 **Graph actions** (graph list focused — depth 0 right or depth 1 left):
 
 | Key | When visible | Behaviour |
 | --- | --- | --- |
-| `b` | Commit row with ≥1 local branch or `origin/*` ref | Dirty check first. One name → checkout (creates tracking from origin when local is missing). Several names → picker (locals then `origin/*`). Selecting `origin/<name>` when a local exists and tips differ opens confirm: Yes checks out the local then `fast_forward_to_remote_ref` of that selected `origin/<name>` (no fetch; `merge --ff-only`). Tags and non-`origin` remotes are not targets. |
+| `b` | Commit row with ≥1 local branch or `origin/*` ref | Dirty check first. One name → checkout (creates tracking from origin when local is missing). Several names → picker (locals then `origin/*`); its `+ create branch <name> at <short>` row runs `create_branch_at` on that commit (no checkout). Selecting `origin/<name>` when a local exists and tips differ opens confirm: Yes checks out the local then `fast_forward_to_remote_ref` of that selected `origin/<name>` (no fetch; `merge --ff-only`). Tags and non-`origin` remotes are not targets. |
 | `c` | Any commit row | Name prompt → `create_branch_at` (ref only, HEAD unchanged). |
 | `m` | Any commit row | Boxed confirm, then merge that ref into the checkout's current HEAD. Local / `origin/*` names when present; tags and unlabeled commits use the commit id. `git merge --ff-only`, else `git merge --no-ff --no-edit` (no rebase). Dirty tracked worktree refuses (`Dirty worktree — commit or stash first`) before the overlay. Conflicts stay uncommitted (no abort, no continue). Linked worktrees only when that checkout row is focused. |
 | `S` | Uncommitted, stash, or commit with stash/dirty ops | Stash overlay (`stash_push -u` / apply / pop / drop as listed). |
 | `o` | Graph list, or highlighted repo / worktree | Local-branch overlay. Space marks a set; Enter applies visible marks or the cursor row. Hidden marks do not leak through a filter. Reloads the graph as ancestors of those tips. Overlay Esc cancels. File, dir, workspace, and commit-file rows are a no-op. |
-| `O` | Graph list, or highlighted repo / worktree with an active focus | Restore `--all`. Also clears from the focus overlay. |
+| `O` | Graph list, or highlighted repo / worktree with an active focus | Restore `--all`. In the focus overlay Ctrl-o clears (`O` types there). |
 | `a` / `p` / `D` | Stash row | Apply / pop / drop (drop confirms with `y`/`n`/Esc). |
 
 ## Destructive operations

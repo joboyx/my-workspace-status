@@ -14,9 +14,10 @@ impl AppState {
     /// Why the active compare tab refuses `action`, or `None` when it may run.
     ///
     /// The one compare gate. [`Self::dispatch`] puts the reason on the status
-    /// line and the command palette paints it on the row, so a key press and
-    /// a palette row always give the same copy. The Workspace tab refuses
-    /// nothing here.
+    /// line, and the command palette paints it dimmed at the row's right edge
+    /// (and in the footer for the highlighted row) through
+    /// `palette_disabled_reason`, so a key press and a palette row always give
+    /// the same copy. The Workspace tab refuses nothing here.
     pub(crate) fn compare_refusal(&self, action: &Action) -> Option<String> {
         if !self.is_compare_tab() {
             return None;
@@ -32,7 +33,6 @@ impl AppState {
             | Action::DefaultBranch
             | Action::Branch
             | Action::BranchSubmit
-            | Action::CreateBranchStart
             | Action::CreateBranchSubmit
             | Action::RemoveWorktree
             | Action::GraphCheckout
@@ -142,7 +142,6 @@ impl AppState {
             | Action::BranchBackspace
             | Action::BranchSubmit
             | Action::BranchCancel
-            | Action::CreateBranchStart
             | Action::CreateBranchChar(_)
             | Action::CreateBranchBackspace
             | Action::CreateBranchSubmit

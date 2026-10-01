@@ -2546,7 +2546,7 @@ fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         )));
     }
     lines.push(Line::from(Span::styled(
-        "j/k move · type to filter · Enter compare · Esc close",
+        "↑↓ move · type to filter · Enter compare · Esc close",
         Style::default().fg(palette.muted),
     )));
     frame.render_widget(Clear, area);
@@ -2568,25 +2568,25 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let palette = state.theme.palette();
     let accent = palette.branch_feature;
     let visible = picker.visible();
+    let create = picker.create_name();
+    let rows = picker.row_count();
     let max_rows = 12usize;
-    let start = if visible.len() <= max_rows {
+    let start = if rows <= max_rows {
         0
     } else {
         picker
             .cursor
             .saturating_sub(max_rows / 2)
-            .min(visible.len() - max_rows)
+            .min(rows - max_rows)
     };
-    let window = if visible.is_empty() {
-        Vec::new()
-    } else {
-        visible
-            .iter()
-            .skip(start)
-            .take(max_rows)
-            .copied()
-            .collect::<Vec<_>>()
-    };
+    let window = visible
+        .iter()
+        .skip(start)
+        .take(max_rows)
+        .copied()
+        .collect::<Vec<_>>();
+    // The create row sits after the last branch, inside the same window.
+    let create_painted = create.is_some() && visible.len() < start + max_rows;
     let filter = if picker.filter.is_empty() {
         "…"
     } else {
@@ -2628,7 +2628,7 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         ));
     }
     let mut lines = vec![Line::from(title)];
-    if window.is_empty() {
+    if window.is_empty() && !create_painted {
         lines.push(Line::from(Span::styled(
             "  No matching branches",
             Style::default().fg(palette.muted),
@@ -2668,6 +2668,15 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 ),
             ]));
         }
+        if let Some(name) = create.filter(|_| create_painted) {
+            lines.push(branch_create_row(
+                name,
+                picker.commit_id.as_deref(),
+                picker.on_create_row(),
+                palette,
+                accent,
+            ));
+        }
     }
     if !state.status.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -2676,11 +2685,11 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         )));
     }
     let footer = if graph && !show_filter {
-        "j/k move · Enter checkout · C create · Esc cancel"
+        "↑↓ move · type a name to create · Enter checkout · Esc cancel"
     } else if graph {
-        "j/k move · type to filter · Enter checkout · C create · Esc cancel"
+        "↑↓ move · type to filter · Enter checkout · Esc cancel"
     } else {
-        "j/k move · type to filter · Enter checkout · C create · Esc close"
+        "↑↓ move · type to filter · Enter checkout · Esc close"
     };
     lines.push(Line::from(Span::styled(
         footer,
@@ -2693,6 +2702,53 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+/// `+ create branch <name>` (graph picker: `… at <short>`) after the
+/// branch rows. Accent on the cursor, muted otherwise.
+fn branch_create_row(
+    name: &str,
+    commit_id: Option<&str>,
+    selected: bool,
+    palette: Palette,
+    accent: Color,
+) -> Line<'static> {
+    let row_bg = if selected {
+        palette.cursor_bg
+    } else {
+        Color::Reset
+    };
+    let label_fg = if selected { accent } else { palette.muted };
+    let mut spans = vec![
+        Span::styled(
+            if selected { "❯ " } else { "  " }.to_string(),
+            Style::default()
+                .fg(if selected {
+                    palette.cursor
+                } else {
+                    palette.muted
+                })
+                .bg(row_bg),
+        ),
+        Span::styled(
+            "  + create branch ".to_string(),
+            Style::default().fg(label_fg).bg(row_bg),
+        ),
+        Span::styled(
+            name.to_string(),
+            Style::default()
+                .fg(label_fg)
+                .bg(row_bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if let Some(id) = commit_id {
+        spans.push(Span::styled(
+            format!(" at {}", id.get(..7).unwrap_or(id)),
+            Style::default().fg(label_fg).bg(row_bg),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -2788,7 +2844,7 @@ fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
         )));
     }
     lines.push(Line::from(Span::styled(
-        "j/k move · type to filter · space toggle · Enter apply · O clear · Esc cancel",
+        "↑↓ move · type to filter · space toggle · Enter apply · Ctrl-o clear · Esc cancel",
         Style::default().fg(palette.muted),
     )));
     frame.render_widget(Clear, area);
@@ -2811,6 +2867,8 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let accent = palette_theme.cursor;
     let surface = overlay_surface(state);
     let rows = palette.paint_rows();
+    // Rounded border plus one column of padding on each side.
+    let inner_width = area.width.saturating_sub(4) as usize;
     let max_rows = 12usize;
     let cursor_paint = rows.iter().position(|row| match row {
         super::command_palette::PalettePaintRow::Command { index, .. } => *index == palette.cursor,
@@ -2882,6 +2940,11 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                     if disabled {
                         style = style.add_modifier(Modifier::DIM);
                     }
+                    let dim = if disabled {
+                        Modifier::DIM
+                    } else {
+                        Modifier::empty()
+                    };
                     let mut spans = vec![
                         Span::styled(
                             cursor.to_string(),
@@ -2894,8 +2957,11 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                                 .bg(row_bg),
                         ),
                         Span::styled(command.title.to_string(), style),
-                        Span::raw(" "),
-                        key_chip(
+                    ];
+                    // Palette-only rows (Diff vs …, Close tab) have no key.
+                    if !command.keys.is_empty() {
+                        spans.push(Span::raw(" "));
+                        spans.push(key_chip(
                             command.keys,
                             if disabled {
                                 palette_theme.muted
@@ -2903,19 +2969,31 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                                 accent
                             },
                             surface,
-                        ),
-                    ];
+                        ));
+                    }
                     spans.push(Span::styled(
                         format!("  {}", command.group.title()),
                         Style::default()
                             .fg(palette_theme.muted)
                             .bg(row_bg)
-                            .add_modifier(if disabled {
-                                Modifier::DIM
-                            } else {
-                                Modifier::empty()
-                            }),
+                            .add_modifier(dim),
                     ));
+                    // The reason sits dimmed at the right edge when it fits,
+                    // so every disabled row says why, not only the cursor row.
+                    if let Some(why) = reason.as_deref() {
+                        let used = help_spans_width(&spans);
+                        let room = inner_width.saturating_sub(used);
+                        let need = visible_width(why) + 2;
+                        if room >= need {
+                            spans.push(Span::styled(
+                                format!("{}{why}", " ".repeat(room - need + 2)),
+                                Style::default()
+                                    .fg(palette_theme.muted)
+                                    .bg(row_bg)
+                                    .add_modifier(Modifier::DIM),
+                            ));
+                        }
+                    }
                     lines.push(Line::from(spans));
                 }
             }
@@ -2958,9 +3036,9 @@ fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let accent = palette.branch_feature;
     let short = create
         .commit_id
-        .as_deref()
-        .map(|id| id.get(..7).unwrap_or(id).to_string())
-        .unwrap_or_default();
+        .get(..7)
+        .unwrap_or(&create.commit_id)
+        .to_string();
     let name = if create.name.is_empty() {
         "…"
     } else {
@@ -2970,16 +3048,10 @@ fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         "Create branch ",
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
     )];
-    // Picker `C` checks the new branch out; graph `c` only creates the ref.
-    let footer = if short.is_empty() {
-        "Enter create and check out · Esc cancel".to_string()
-    } else {
-        format!("Enter create at {short} (no checkout) · Esc cancel")
-    };
-    if !short.is_empty() {
-        title.push(Span::styled("at ", Style::default().fg(palette.muted)));
-        title.push(Span::styled(short, Style::default().fg(palette.repo)));
-    }
+    // Graph `c` only creates the ref; it never checks the branch out.
+    let footer = format!("Enter create at {short} (no checkout) · Esc cancel");
+    title.push(Span::styled("at ", Style::default().fg(palette.muted)));
+    title.push(Span::styled(short, Style::default().fg(palette.repo)));
     let mut lines = vec![
         Line::from(title),
         Line::from(vec![
@@ -6313,5 +6385,84 @@ mod tests {
         assert_eq!(effect, Effect::None);
         assert!(state.text_selection.is_none());
         assert_eq!(reversed_cells(&terminal), baseline);
+    }
+
+    #[test]
+    fn palette_rows_paint_their_reason_and_skip_empty_chips() {
+        use crate::tui::action::{Action, PaletteOpenedBy};
+        use crate::tui::tabs::{ONLY_WORKSPACE_TAB_OPEN, WORKSPACE_TAB_CANNOT_CLOSE};
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.dispatch(Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK));
+        for c in "tab".chars() {
+            state.dispatch(Action::CommandPaletteChar(c));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        let row = |title: &str| {
+            text.lines()
+                .find(|line| line.contains(title))
+                .unwrap_or_else(|| panic!("no {title} row:\n{text}"))
+                .trim_end_matches(['│', ' '])
+                .to_string()
+        };
+        let next = row("Next tab");
+        assert!(next.ends_with(ONLY_WORKSPACE_TAB_OPEN), "{next}");
+        let close = row("Close tab");
+        assert!(close.contains("Close tab  GIT"), "no empty chip: {close}");
+        assert!(close.ends_with(WORKSPACE_TAB_CANNOT_CLOSE), "{close}");
+        let other = row("Other pane");
+        assert!(
+            other.ends_with("MOVE"),
+            "an enabled row paints no reason: {other}"
+        );
+    }
+
+    #[test]
+    fn branch_picker_paints_the_create_row_last() {
+        use crate::git::LocalBranch;
+        use crate::tui::branches::BranchPickerState;
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let branch = |name: &str| LocalBranch {
+            name: name.into(),
+            current: false,
+            authordate: 0,
+        };
+        let mut picker = BranchPickerState::checkout("app".into(), vec![branch("topic/a")]);
+        picker.set_filter("topic".into());
+        state.branch_picker = Some(picker);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        let topic = text.find("❯   topic/a").expect("cursor on the branch row");
+        let create = text.find("+ create branch topic").expect("create row");
+        assert!(
+            topic < create,
+            "create row comes after the branches:\n{text}"
+        );
+        state.branch_picker.as_mut().unwrap().move_cursor(1);
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("❯   + create branch topic"),
+            "the cursor lands on the create row:\n{text}"
+        );
+
+        let mut graph = BranchPickerState::from_names(
+            "app".into(),
+            vec!["main".into()],
+            Some("aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+        );
+        graph.set_filter("new".into());
+        state.branch_picker = Some(graph);
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("+ create branch new at aaa1111"),
+            "graph picker names the commit:\n{text}"
+        );
+        assert!(!text.contains("No matching branches"), "{text}");
     }
 }

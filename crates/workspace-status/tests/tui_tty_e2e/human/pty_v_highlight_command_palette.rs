@@ -27,17 +27,25 @@ fn type_filter(tui: &mut PtySession, query: &str) {
     }
 }
 
-/// The palette status line (not the footer) shows `reason`.
+/// The palette status line (not the footer, not a catalog row) shows `reason`.
 fn palette_status_shows(screen: &str, reason: &str) -> bool {
+    screen.lines().any(|line| {
+        line.contains(reason) && !line.contains("Enter run") && !line.contains("Fetch remotes")
+    })
+}
+
+/// The disabled Fetch remotes row paints `reason` at its right edge.
+fn fetch_row_shows(screen: &str, reason: &str) -> bool {
     screen
         .lines()
-        .any(|line| line.contains(reason) && !line.contains("Enter run"))
+        .any(|line| line.contains("Fetch remotes") && line.contains(reason))
 }
 
 /// `V` over the first hunk, `:` palette, then "Revert highlighted lines".
 ///
 /// Highlight mode opens the palette. The HIGHLIGHT rows show first. A
-/// whole-file row shows why it waits (`exit highlight first`). Esc returns
+/// whole-file row shows why it waits (`exit highlight first`) on the row
+/// and in the footer. Esc returns
 /// to highlight with the same range. Enter on "Revert highlighted lines"
 /// opens the range confirm (`pty_v_x_y_reverts_one_hunk` covers the git
 /// result of that confirm).
@@ -62,9 +70,11 @@ fn pty_v_colon_palette_revert_opens_range_confirm() {
         "a whole-file row shows the exit-highlight reason in the footer",
         WAIT,
     );
+    let screen = tui.screen();
     assert!(
-        !palette_status_shows(&tui.screen(), "exit highlight first (Esc)"),
-        "before Enter the reason is only in the footer"
+        fetch_row_shows(&screen, "exit highlight first (Esc)")
+            && !palette_status_shows(&screen, "exit highlight first (Esc)"),
+        "before Enter the reason is on the row and in the footer, not the status line"
     );
     tui.enter();
     tui.wait_ms(SETTLE_MS);

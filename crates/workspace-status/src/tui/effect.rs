@@ -36,7 +36,6 @@ use super::app::{
     discover_config, drop_undiscovered_checkouts, filter_repo_set, focused_repo_needs_pane,
     probe_compare_range, RightPaneLoad, RightPaneRequest, RightPaneTarget, TuiOpts,
 };
-use super::branches::is_valid_branch_name;
 use super::chrome::{is_idle_pull_status, STATUS_COPIED, STATUS_COPY_FAILED};
 use super::comments;
 use super::diff_tool::{
@@ -437,10 +436,8 @@ fn branch_submit_write_checkouts(state: &AppState) -> Vec<String> {
     let Some(picker) = state.branch_picker.as_ref() else {
         return Vec::new();
     };
-    if picker.selected().is_some() {
-        return Vec::new();
-    }
-    if is_valid_branch_name(&picker.filter) {
+    // Only the create row writes a new ref from the picker.
+    if picker.on_create_row() {
         vec![picker.repo.clone()]
     } else {
         Vec::new()
@@ -4633,7 +4630,7 @@ mod tests {
         state.create_branch = Some(CreateBranchState {
             repo: "app".into(),
             name: "topic".into(),
-            commit_id: None,
+            commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         });
         state.status = "new branch".into();
 
@@ -4713,7 +4710,7 @@ mod tests {
         );
         assert_eq!(capture_jobs(&mut interp, &mut state).len(), 1);
 
-        let mut picker = BranchPickerState::new("app".into(), vec![local_branch("main")]);
+        let mut picker = BranchPickerState::checkout("app".into(), vec![local_branch("main")]);
         picker.set_filter("topic".into());
         state.branch_picker = Some(picker);
         state.status = "branch /topic".into();
@@ -4723,7 +4720,7 @@ mod tests {
         assert_eq!(state.status, "busy");
         assert_eq!(interp.write_jobs_queued(), 0);
 
-        let mut checkout = BranchPickerState::new("app".into(), vec![local_branch("feature")]);
+        let mut checkout = BranchPickerState::checkout("app".into(), vec![local_branch("feature")]);
         checkout.cursor = 0;
         state.branch_picker = Some(checkout);
         state.status = "branch".into();
