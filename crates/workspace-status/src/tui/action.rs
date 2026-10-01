@@ -70,8 +70,9 @@ pub enum Action {
     Release,
     /// Right mouse button press: one step back, the same as Esc.
     ///
-    /// Only Normal mode, pending chords, and visual-line highlight map it.
-    /// Overlays drop it. Ignored while mouse capture is off.
+    /// Only Normal mode and visual-line highlight map it. A pending `z` /
+    /// `g` chord maps it like Esc (no step back). Overlays drop it. Ignored
+    /// while mouse capture is off.
     BackClick,
     /// Move the tree / right split by this many 5% steps (`<` / `>`).
     ///

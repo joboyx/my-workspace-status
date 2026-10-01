@@ -4,16 +4,18 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use crate::helpers::{is_attention_sync_note, is_default_branch, is_detached_head_branch};
+use crate::helpers::{
+    is_attention_sync_note, is_default_branch, is_detached_head_branch, STATUS_FAILED_NOTE,
+};
 use crate::snapshot::{
     CheckoutKind, FileChange, SyncStatus, WorkspaceRepoSnapshot, WorkspaceSnapshot,
 };
 
 use super::icons::{
     file_icon, icon_branch, icon_changes, icon_clean, icon_comment, icon_comment_resolved,
-    icon_folder, icon_ignored, icon_linked_worktree, icon_repo, icon_staged, icon_viewed,
-    icon_workspace, status_letter_from_change, tui_file_badge, tui_merge_mark, tui_sync_mark,
-    StatusColorRole,
+    icon_folder, icon_ignored, icon_linked_worktree, icon_repo, icon_staged, icon_status_failed,
+    icon_viewed, icon_workspace, status_letter_from_change, tui_file_badge, tui_merge_mark,
+    tui_sync_mark, StatusColorRole,
 };
 
 /// Structural node kind.
@@ -856,6 +858,14 @@ fn sync_trailing(chrome: &NodeChrome, in_no_updates: bool, ascii: bool) -> Vec<T
     let Some(status) = chrome.sync_status else {
         return Vec::new();
     };
+    // A failed `git status` has no real sync state: say so instead of the
+    // no-upstream mark.
+    if chrome.sync_note == STATUS_FAILED_NOTE {
+        return vec![
+            text_seg(icon_status_failed(ascii), SegRole::Deleted),
+            text_seg(format!(" {STATUS_FAILED_NOTE}"), SegRole::Deleted),
+        ];
+    }
     let role = SegRole::from(super::icons::sync_color_role(status));
     if status == SyncStatus::UpToDate {
         if !show_clean_check(in_no_updates) {
@@ -2019,6 +2029,31 @@ mod tests {
         let ops = rows.iter().find(|r| r.id == "repo:ops").expect("ops");
         assert!(ops.trailing.contains('Y'), "{}", ops.trailing);
         assert!(!ops.label.contains("wt "));
+    }
+
+    #[test]
+    fn status_failed_repo_paints_an_error_mark_not_no_upstream() {
+        let mut broken = repo("broken", false, false);
+        broken.branch = crate::helpers::UNKNOWN_HEAD_BRANCH.into();
+        broken.sync_note = STATUS_FAILED_NOTE.into();
+        let built = build_workspace_snapshot(&[broken], &[], false, &[]);
+        let tree = build_tree(&visible_for_tree(&built), true, "ws");
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let row = rows.iter().find(|r| r.id == "repo:broken").expect("row");
+        assert!(row.trailing.contains("! status failed"), "{}", row.trailing);
+        assert!(
+            !row.trailing.contains('?'),
+            "no no-upstream mark: {}",
+            row.trailing
+        );
+        let segs = row_segments(row, true, false, false, false);
+        let failed: Vec<_> = segs
+            .trailing
+            .iter()
+            .filter(|seg| seg.text.contains('!') || seg.text.contains("status failed"))
+            .collect();
+        assert_eq!(failed.len(), 2, "{:?}", segs.trailing);
+        assert!(failed.iter().all(|seg| seg.role == SegRole::Deleted));
     }
 
     #[test]

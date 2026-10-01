@@ -5,6 +5,8 @@ use crate::snapshot::{CheckoutKind, RepoSnapshot, SyncStatus};
 pub const DETACHED_HEAD_BRANCH: &str = "HEAD (detached)";
 /// Porcelain-parse failure. Not a `refs/heads` name.
 pub const UNKNOWN_HEAD_BRANCH: &str = "(unknown)";
+/// Sync note of a checkout whose `git status` failed.
+pub const STATUS_FAILED_NOTE: &str = "status failed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchKind {
@@ -90,7 +92,7 @@ pub fn get_branch_emoji(branch: &str) -> &'static str {
 }
 
 pub fn is_attention_sync_note(note: &str) -> bool {
-    note == "no commits yet" || note == "status failed"
+    note == "no commits yet" || note == STATUS_FAILED_NOTE
 }
 
 pub fn is_detached_head_branch(branch: &str) -> bool {

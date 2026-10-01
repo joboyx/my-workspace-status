@@ -225,8 +225,9 @@ pub fn event_to_action(
 
 /// Map one terminal event to an [`Action`], including graph-stash and graph-commit keys.
 ///
-/// `hl_folds` is true when `h` / `l` / arrows should fold the workspace
-/// tree. Graph, commit-file, and diff focus pass false so those keys pan.
+/// Unshifted `h` / `l` / arrows fold the workspace tree when the left pane
+/// is focused and pan otherwise; [`event_to_action_with`] takes the fold
+/// decision from the caller.
 pub fn event_to_action_ex(
     event: &Event,
     mode: InputMode,
@@ -242,11 +243,15 @@ pub fn event_to_action_ex(
         focus_right,
         graph_stash_focused,
         graph_commit_focused,
-        true,
+        !focus_right,
     )
 }
 
 /// [`event_to_action_ex`] with an explicit fold-vs-pan flag for `h` / `l`.
+///
+/// `hl_folds` is true when `h` / `l` / arrows fold the focused row: the
+/// workspace tree, or a folder row of a focused commit-file list. Other
+/// rows and panes pass false so those keys pan.
 pub fn event_to_action_with(
     event: &Event,
     mode: InputMode,
@@ -287,6 +292,21 @@ pub fn event_to_action_with(
                     | InputMode::CommandPalette,
             ) {
                 Action::None
+            } else if matches!(
+                mode,
+                InputMode::ZPending { .. } | InputMode::GPending { .. }
+            ) && mouse.kind == MouseEventKind::Down(MouseButton::Right)
+            {
+                // Right-click is Esc; in a pending chord, Esc only ends the chord.
+                key_to_action(
+                    KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                    mode,
+                    right_is_diff,
+                    focus_right,
+                    graph_stash_focused,
+                    graph_commit_focused,
+                    hl_folds,
+                )
             } else {
                 mouse_to_action(*mouse)
             }
@@ -840,30 +860,26 @@ fn normal_key(
         KeyCode::PageDown => Action::PageMove(1),
         KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::Move(1),
         KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::Move(-1),
-        KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => {
-            hl_or_pan(key, -1, focus_right, hl_folds)
-        }
-        KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Right => {
-            hl_or_pan(key, 1, focus_right, hl_folds)
-        }
+        KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => hl_or_pan(key, -1, hl_folds),
+        KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Right => hl_or_pan(key, 1, hl_folds),
         KeyCode::Enter => Action::NavEnter,
         KeyCode::Esc => Action::NavEsc,
         _ => Action::None,
     }
 }
 
-/// `h` / `l` / arrows: fold the workspace tree, otherwise pan.
+/// `h` / `l` / arrows: fold the focused tree or commit-file folder row,
+/// otherwise pan.
 ///
-/// Shift+Left / Shift+Right always pan so long tree paths can move without
-/// stealing fold. Unshifted keys still fold when `hl_folds` is set and the
-/// left tree is focused.
-fn hl_or_pan(key: KeyEvent, delta: i32, focus_right: bool, hl_folds: bool) -> Action {
+/// Shift+Left / Shift+Right always pan so long paths can move without
+/// stealing fold. Unshifted keys fold when `hl_folds` is set.
+fn hl_or_pan(key: KeyEvent, delta: i32, hl_folds: bool) -> Action {
     let pan = if delta < 0 {
         Action::PanDiff(-1)
     } else {
         Action::PanDiff(1)
     };
-    if key.modifiers.contains(KeyModifiers::SHIFT) || !hl_folds || focus_right {
+    if key.modifiers.contains(KeyModifiers::SHIFT) || !hl_folds {
         return pan;
     }
     if delta < 0 {
@@ -997,6 +1013,25 @@ mod tests {
             InputMode::SearchPrompt,
         ] {
             assert_eq!(event_to_action(&right, mode, false, true), Action::None);
+        }
+        // A pending chord maps right-click exactly like Esc: no step back.
+        for mode in [
+            InputMode::ZPending {
+                search_active: false,
+            },
+            InputMode::GPending {
+                search_active: false,
+            },
+        ] {
+            assert_eq!(
+                event_to_action(&right, mode, false, true),
+                event_to_action(&key(KeyCode::Esc), mode, false, true),
+                "{mode:?}"
+            );
+            assert_ne!(
+                event_to_action(&right, mode, false, true),
+                Action::BackClick
+            );
         }
     }
 

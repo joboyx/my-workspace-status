@@ -132,6 +132,9 @@ pub(crate) fn terminal_size_rect() -> Rect {
 }
 
 pub(crate) fn map_event(state: &AppState, event: &crossterm::event::Event) -> Action {
+    if state.too_small && matches!(event, crossterm::event::Event::Mouse(_)) {
+        return Action::None;
+    }
     event_to_action_with(
         event,
         state.input_mode(),
@@ -751,8 +754,13 @@ pub(crate) fn compute_compare_diff(
 
 fn head_file_diff(dir: &Path, path: &str, context: Option<u32>) -> DiffContent {
     let args = git_diff_args(&["diff", "HEAD"], path, context);
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    DiffContent::from_unified(crate::git::exec_git(&refs, dir))
+    match super::diff::git_diff_text(&args, dir) {
+        Ok(text) => DiffContent::from_unified(text),
+        Err(reason) => DiffContent {
+            error: Some(reason),
+            ..DiffContent::default()
+        },
+    }
 }
 
 pub(crate) fn drain_pending_events() {

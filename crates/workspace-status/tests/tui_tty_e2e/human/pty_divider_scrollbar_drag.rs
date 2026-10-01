@@ -121,12 +121,24 @@ fn scrollbar_track_span(screen: &str, thumb_col: u16) -> Option<(u16, u16)> {
     Some((top?, bottom?))
 }
 
+/// The overflowing graph's bar shows at the top too: its thumb is the
+/// first cell of its track.
+fn graph_thumb_at_track_top(screen: &str) -> bool {
+    let Some((col, top_thumb)) = graph_thumb_cells(screen)
+        .into_iter()
+        .min_by_key(|(_, y)| *y)
+    else {
+        return false;
+    };
+    scrollbar_track_span(screen, col).is_some_and(|(track_top, _)| track_top == top_thumb)
+}
+
 fn history_graph_at_top(screen: &str) -> bool {
     screen.contains("count 29")
         && (screen.contains("Working tree") || screen.contains("working tree clean"))
         && tree_has(screen, "history")
         && title_has_graph(screen)
-        && graph_thumb_cells(screen).is_empty()
+        && graph_thumb_at_track_top(screen)
         && no_wrong_overlays(screen)
         && no_mouse_toggle_toast(screen)
 }
@@ -151,9 +163,10 @@ fn history_graph_at_bottom(screen: &str) -> bool {
 /// Live PTY, xterm SGR press + `Cb` 32 drag + release:
 /// 1. Divider: `┐┌` moves at least 24 cells right. README stays. No
 ///    focus steal, no Mouse toast.
-/// 2. Graph: `G` on overflowing `history` paints `█`. Drag from the last
-///    `║`/`█` track cell to the first restores `count 29` and hides the
-///    bar. Track click jumps. A mid-track `█` grab cannot reach the top.
+/// 2. Graph: overflowing `history` paints its bar at the top; `G` moves the
+///    `█` down. Drag from the last `║`/`█` track cell to the first restores
+///    `count 29` with the thumb back at the track top. Track click jumps. A
+///    mid-track `█` grab cannot reach the top.
 ///
 /// A no-op, row-select, pane-steal, or chrome flicker cannot pass.
 #[test]
@@ -198,7 +211,7 @@ fn pty_divider_scrollbar_drag() {
                 && (screen.contains("Working tree") || screen.contains("working tree clean"))
                 && panes_tree_focused_graph_unfocused(screen)
         },
-        "tall history paints a graph that still fits at the top (no scrollbar yet)",
+        "tall history paints the graph at the top (its bar already shows: the list overflows)",
         GIT_WAIT,
     );
     graph.tab();
@@ -237,7 +250,7 @@ fn pty_divider_scrollbar_drag() {
     sgr_release(&mut graph, thumb_col, track_top);
     graph.wait_pred(
         history_graph_at_top,
-        "track drag toward the top restores count 29 and hides █ (a no-op stays on count 0)",
+        "track drag toward the top restores count 29 with █ at the track top (a no-op stays on count 0)",
         GIT_WAIT,
     );
     graph.wait_ms(SETTLE_MS);

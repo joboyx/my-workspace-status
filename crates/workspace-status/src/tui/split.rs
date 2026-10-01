@@ -22,6 +22,16 @@ pub const NARROW_SXS: u16 = 100;
 /// picks split or inline, whether or not the bar shows.
 pub const DIFF_VSCROLL_COLS: u16 = 1;
 
+/// Narrowest terminal the panes paint in. The help overlay keeps every
+/// description at least `HELP_MIN_DESC_WIDTH` wide from 46 columns, and
+/// both panes need `2 × MIN_PANE_COLS + DIFF_PAD_X` (42). Narrower, the
+/// TUI paints a resize notice instead.
+pub const MIN_TERM_COLS: u16 = 46;
+
+/// Shortest terminal the panes paint in: the tab strip, breadcrumb, status
+/// row, and pane borders leave a graph list with its selection footer.
+pub const MIN_TERM_ROWS: u16 = 12;
+
 /// Tree / right split step for `<` / `>` (fraction of the terminal width).
 pub const TREE_FRACTION_STEP: f64 = 0.05;
 

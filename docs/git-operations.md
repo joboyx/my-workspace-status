@@ -11,7 +11,7 @@ Every git subprocess also runs with `GIT_OPTIONAL_LOCKS=0` (set by `git::git_pro
 | Function | Command | Returns | Purpose |
 | --- | --- | --- | --- |
 | `exec_git(args, cwd)` | `<git> <args>` | trimmed stdout, `""` on any failure | Generic read. Swallows errors by design — callers treat empty as "unknown". |
-| `exec_git_stdout(args, cwd)` | `<git> <args>` | `Result<String, String>` | Compare reads. Empty stdout is success. Failure is `Err`. |
+| `exec_git_stdout(args, cwd)` | `<git> <args>` | `Result<String, String>` | Compare reads, and the worktree file diff (`diff [--cached]` / `diff HEAD -- <path>`, `tui/diff.rs` `git_diff_text`). Empty stdout is success. Failure is `Err`; the diff pane paints `git diff failed: <reason>`. |
 | `rev_parse_commit` | `rev-parse --verify --quiet <ref>^{commit}` | `Result<Option<SHA>>` | Missing ref is `Ok(None)`. Other failures are `Err`. |
 | `merge_base` | `merge-base <a> <b>` | `Result<Option<SHA>>` | Unrelated histories are `Ok(None)`. |
 | `list_compare_name_status` | `diff --name-status --find-renames <base>...<head> --` | `Result<NameStatus[]>` | Committed three-dot file list. |
@@ -182,6 +182,12 @@ The compare diff covers commits only, so it does not change after a revert. The 
 | TUI `d` | none for one repo; `y`/`n` boxed confirm (`Switch N repos to their default branch?`) when the scope has more than one repo off its default | yes — dirty repos are skipped |
 | `b` checkout (local / origin) | none when in sync; `y`/`n` when local exists and origin tips differ (`Check out <b> and fast-forward to origin/<b> (no fetch)?`, plus `ahead_behind` counts) | yes — dirty worktrees refuse before checkout; confirm Yes is checkout then `fast_forward_to_remote_ref` of the already-fetched `origin/*` (no fetch, no reset). When local has commits the remote lacks, the checkout stays and the warn says `could not fast-forward to origin/<b>: local has commits origin/<b> lacks` |
 | `m` graph merge into HEAD | `y`/`n` boxed confirm | yes — dirty tracked worktrees refuse before confirm; conflicts stay uncommitted (no abort) |
+| `W` remove linked worktree, clean | `y`/`n` boxed confirm (`clean worktree · branch <b> is kept`) | yes — the branch and its commits stay; `git worktree add` brings the checkout back |
+| `W` remove linked worktree, dirty (`--force`) | same confirm, which says `N changed files will be deleted permanently` | **no** for uncommitted and untracked files in that worktree; the branch is kept |
+| Stash drop (`D` in the stash menu or on a graph stash row) | `y`/`n` boxed confirm | only from git's object store (`git fsck --unreachable`) until it is pruned |
+| Stash pop (`p`) | none | yes — on a conflict git keeps the stash, so nothing is lost |
+| Compare `x` (whole file or highlighted lines) | `y`/`n` boxed confirm (`Y` not offered) | yes — the guard requires the file to match HEAD, so `git restore` brings it back |
+| `P` push | none | yes — never forces; a diverged remote makes the push fail |
 
 Revert, stash drop, origin-out-of-sync graph checkout, graph merge, worktree remove, and multi-repo `d` use modal overlays, so no other key can act while one is up. Only the key the box shows (`y`, or `Y` where offered) accepts. Enter never confirms; it says which key does. `n` / Esc cancel.
 

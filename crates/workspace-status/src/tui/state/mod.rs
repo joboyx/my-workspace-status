@@ -6,6 +6,7 @@ mod dispatch_keymap;
 mod dispatch_write;
 mod pan;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -14,9 +15,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 use workspace_status_graph::{
-    format_commit_message, format_relative_date, graph_chrome_budget_for, paint_model,
-    selection_footer_parts, wrap_commit_message, GraphChromeBudget, GraphFooterSelection,
-    GraphModel, GraphRow, PaintedLine, ASCII, COMMIT_MSG_EXPAND_MAX_LINES, UNICODE,
+    format_commit_message, format_relative_date, graph_chrome_budget_for, graph_vscroll_visible,
+    paint_model, selection_footer_parts, wrap_commit_message, GraphChromeBudget,
+    GraphFooterSelection, GraphModel, GraphRow, PaintedLine, ASCII, COMMIT_MSG_EXPAND_MAX_LINES,
+    UNICODE,
 };
 
 use crate::snapshot::{
@@ -450,6 +452,14 @@ enum DiffViewId {
     },
 }
 
+/// Cached [`AppState::diff_search_hits`] result.
+#[derive(Clone, Debug)]
+struct DiffSearchMemo {
+    /// Content fingerprint, painted layout, case-folded query.
+    key: (u64, DiffMode, String),
+    hits: Vec<usize>,
+}
+
 /// Interactive session state. Dispatch is pure besides the returned [`Effect`].
 #[derive(Clone, Debug)]
 pub struct AppState {
@@ -561,6 +571,10 @@ pub struct AppState {
     pub text_selection: Option<TextSelection>,
     /// Last painted frame before the selection highlight. Release copies from it.
     pub(crate) painted_frame: Buffer,
+    /// Last frame was below [`super::split::MIN_TERM_COLS`] ×
+    /// [`super::split::MIN_TERM_ROWS`] and painted only the resize notice.
+    /// Mouse events are dropped then, since no pane was painted to hit.
+    pub(crate) too_small: bool,
     pub theme: ThemeId,
     pub mouse_enabled: bool,
     /// Last pointer cell `(col, row)` from any-event motion. `None` when
@@ -573,6 +587,9 @@ pub struct AppState {
     pub(crate) g_chord_echo: GChordEchoState,
     pub(crate) ctrl_c_armed_until: Option<Instant>,
     last_click: Option<(u16, u16, Instant)>,
+    /// Diff search hits for one (content, layout, query), so the status
+    /// pill and the diff paint do not rebuild every diff row each frame.
+    diff_search_memo: RefCell<Option<DiffSearchMemo>>,
 }
 
 fn unix_now() -> i64 {
@@ -684,6 +701,7 @@ impl AppState {
             drag: SplitDrag::None,
             text_selection: None,
             painted_frame: Buffer::default(),
+            too_small: false,
             theme: theme_from_env(),
             mouse_enabled: true,
             pointer: None,
@@ -692,6 +710,7 @@ impl AppState {
             g_chord_echo: GChordEchoState::default(),
             ctrl_c_armed_until: None,
             last_click: None,
+            diff_search_memo: RefCell::new(None),
         };
         state.reconcile_viewed_store();
         state.reconcile_comment_store();
@@ -806,9 +825,17 @@ impl AppState {
         }
     }
 
-    /// True when unshifted `h` / `l` fold the workspace tree.
+    /// True when unshifted `h` / `l` fold the focused row: the workspace
+    /// tree, or a folder row of a focused commit-file list. File rows and
+    /// other panes pan.
     pub(crate) fn hl_folds(&self) -> bool {
-        self.list_focus_target() == ListFocusTarget::Tree
+        match self.list_focus_target() {
+            ListFocusTarget::Tree => true,
+            ListFocusTarget::CommitFiles => self
+                .focused_commit_file_row()
+                .is_some_and(|row| row.foldable),
+            _ => false,
+        }
     }
 
     /// Which list (or diff) the focused pane is driving.
@@ -1997,7 +2024,7 @@ impl AppState {
     }
 
     fn diff_body_height(&self) -> usize {
-        let h_bar = u16::from(self.diff_col_offset > 0);
+        let h_bar = u16::from(self.diff_hscroll_shown());
         self.layout
             .diff_pane_height
             .saturating_sub(self.diff_header_rows() + h_bar)
@@ -2228,8 +2255,7 @@ impl AppState {
 
     fn diff_wrap_heights(&self) -> Vec<usize> {
         let rows = self.current_diff_rows();
-        let v_cols = u16::from(self.diff_scroll > 0);
-        let pane_w = self.layout.diff_pane_width.saturating_sub(v_cols).max(1);
+        let pane_w = diff_paint_width(self.layout.diff_pane_width);
         let content_w = diff_row_content_width(pane_w as usize) as u16;
         let gutter = gutter_width(&rows).saturating_add(comment_mark_cols(self.ascii));
         let split = self.diff_layout() == DiffMode::SideBySide;
@@ -2879,6 +2905,36 @@ impl AppState {
         effect
     }
 
+    /// Diff row indices whose search text contains `query` (case-folded),
+    /// cached by content fingerprint, layout, and query.
+    pub(crate) fn diff_search_hits(&self, query: &str) -> Vec<usize> {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let key = (
+            self.current_diff_content().syntax_fingerprint(),
+            self.diff_layout(),
+            query,
+        );
+        if let Some(memo) = self.diff_search_memo.borrow().as_ref() {
+            if memo.key == key {
+                return memo.hits.clone();
+            }
+        }
+        let texts: Vec<String> = self
+            .current_diff_rows()
+            .iter()
+            .map(row_search_text)
+            .collect();
+        let hits = match_diff_line_indices(&texts, &key.2);
+        *self.diff_search_memo.borrow_mut() = Some(DiffSearchMemo {
+            key,
+            hits: hits.clone(),
+        });
+        hits
+    }
+
     /// 1-based match position of the bound pane's cursor (`None` when the
     /// cursor is off a match) and the match count, for the `/q 3/7` pill.
     ///
@@ -2910,14 +2966,7 @@ impl AppState {
                     .and_then(|row| files.iter().position(|file| file.path == row.path));
                 (current, collect_commit_file_match_indices(files, query))
             }
-            SearchPane::Diff => {
-                let texts: Vec<String> = self
-                    .current_diff_rows()
-                    .iter()
-                    .map(row_search_text)
-                    .collect();
-                (self.search_hit, match_diff_line_indices(&texts, query))
-            }
+            SearchPane::Diff => (self.search_hit, self.diff_search_hits(query)),
         };
         let pos = current.and_then(|cur| hits.iter().position(|hit| *hit == cur));
         Some((pos.map(|p| p + 1), hits.len()))
@@ -4761,6 +4810,20 @@ impl AppState {
     fn apply_terminal_size(&mut self, cols: u16) {
         self.layout.term_cols = cols.max(1);
         self.tree_fraction = clamp_tree_fraction(self.layout.term_cols, self.tree_fraction);
+    }
+
+    /// Whether the graph list paints its vertical scrollbar: the painted
+    /// lines overflow the list, or it has left the top. Mirrors the widget.
+    pub(crate) fn graph_vscroll_shown(&self) -> bool {
+        let Some(model) = self.graph.as_ref() else {
+            return false;
+        };
+        let glyphs = if self.ascii { &ASCII } else { &UNICODE };
+        graph_vscroll_visible(
+            paint_model(model, glyphs, None).len(),
+            self.graph_chrome().list_height,
+            self.graph_scroll,
+        )
     }
 
     pub(crate) fn sync_graph_scroll(&mut self) {
@@ -11019,6 +11082,97 @@ mod tests {
         assert_eq!(app.commit_files_cursor(), 2, "list rows still map");
     }
 
+    /// The diff search memo answers repeat calls and follows a content or
+    /// query change instead of serving stale hits.
+    #[test]
+    fn diff_search_hits_follow_content_and_query() {
+        let mut app = state();
+        focus_file(&mut app, "README.md");
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            DiffContent::from_lines(vec![
+                "@@ -1,2 +1,2 @@".into(),
+                "-old needle".into(),
+                "+new needle".into(),
+            ]),
+        );
+        let first = app.diff_search_hits("Needle");
+        assert_eq!(first.len(), 2, "{first:?}");
+        assert_eq!(app.diff_search_hits("needle "), first, "memo hit");
+        app.set_diff(
+            "app".into(),
+            "README.md".into(),
+            DiffContent::from_lines(vec!["@@ -1,1 +1,1 @@".into(), "+needle".into()]),
+        );
+        assert_eq!(app.diff_search_hits("needle").len(), 1, "new content");
+        assert!(app.diff_search_hits("absent").is_empty(), "new query");
+        assert!(app.diff_search_hits("  ").is_empty());
+    }
+
+    /// `h` / `l` on a commit-file folder row fold / unfold it like the
+    /// workspace tree; on a file row they still pan.
+    #[test]
+    fn h_l_fold_commit_file_dirs_and_pan_on_files() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        install_graph(&mut app, Vec::new());
+        app.open_commit_files(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![
+                CommitFile {
+                    status: "M".into(),
+                    path: "README.md".into(),
+                    old_path: None,
+                },
+                CommitFile {
+                    status: "A".into(),
+                    path: "src/lib.rs".into(),
+                    old_path: None,
+                },
+            ],
+        );
+        app.focus = FocusPane::Right;
+        let key = |c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        let at = |app: &mut AppState, id: &str| {
+            let idx = app
+                .commit_file_rows()
+                .iter()
+                .position(|row| row.id == id)
+                .expect(id);
+            if let DrillView::Files { cursor, .. } = &mut app.drill {
+                *cursor = idx;
+            }
+        };
+        at(&mut app, "dir:src");
+        assert!(app.hl_folds());
+        let close = super::super::app::map_event(&app, &key('h'));
+        assert_eq!(close, Action::FoldClose);
+        app.dispatch(close);
+        assert!(app.commit_file_folds.contains("dir:src"));
+        let open = super::super::app::map_event(&app, &key('l'));
+        assert_eq!(open, Action::FoldOpen);
+        app.dispatch(open);
+        assert!(!app.commit_file_folds.contains("dir:src"));
+
+        let file = app
+            .commit_file_rows()
+            .iter()
+            .find(|row| row.is_file())
+            .map(|row| row.id.clone())
+            .expect("file row");
+        at(&mut app, &file);
+        assert!(!app.hl_folds());
+        assert_eq!(
+            super::super::app::map_event(&app, &key('h')),
+            Action::PanDiff(-1)
+        );
+    }
+
     #[test]
     fn fold_on_depth_2_left_folds_commit_files() {
         let mut app = state();
@@ -14162,6 +14316,7 @@ diff --git a/README.md b/README.md
             unstaged: patch,
             is_new: false,
             is_committed: false,
+            error: None,
         }
     }
 
@@ -14205,6 +14360,7 @@ diff --git a/README.md b/README.md
                 unstaged: String::new(),
                 is_new: false,
                 is_committed: false,
+                error: None,
             },
         );
         highlight_binary_stub(&mut app);

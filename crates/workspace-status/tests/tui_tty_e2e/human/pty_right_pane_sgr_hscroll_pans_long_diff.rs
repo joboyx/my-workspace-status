@@ -5,8 +5,8 @@ use crate::harness::{
 };
 use crate::seed::{daily_workspace, seed_long_diff_file};
 use crate::support::{
-    no_wrong_overlays, panes_tree_focused_diff_unfocused, right_pane, status_row, title_has_files,
-    tree_cursor_on, tree_has, SETTLE_MS, WAIT,
+    no_wrong_overlays, panes_tree_focused_diff_unfocused, right_pane, right_vbar_at_top,
+    status_row, title_has_files, tree_cursor_on, tree_has, SETTLE_MS, WAIT,
 };
 
 const FILE: &str = "unique-diffline.rs";
@@ -33,7 +33,9 @@ fn long_diff_clipped_tree_focus(screen: &str) -> bool {
         && right.contains("inline (too narrow)")
         && !right.contains("inline (too narrow) ·")
         && !right.contains(DIFF_HSCROLL_TAIL)
-        && !right.contains('█')
+        // Both bars show at the origin: the diff overflows both ways.
+        && right_vbar_at_top(screen)
+        && right.contains('═')
         && !right.contains("app/README.md")
         && !right.contains("UNSTAGED")
         && !screen.contains("WIP on graph")

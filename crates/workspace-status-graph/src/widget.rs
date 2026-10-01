@@ -15,7 +15,7 @@ use crate::glyphs::{ASCII, UNICODE};
 use crate::gutter::graph_gutter_cap;
 use crate::lane_colors::{default_lane_colors, lane_fg};
 use crate::model::GraphModel;
-use crate::paint::{paint_model_with, PaintOpts, PaintedLine};
+use crate::paint::{paint_model, paint_model_with, PaintOpts, PaintedLine};
 
 /// Subject, meta, and ref-chip colours for graph labels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +55,7 @@ pub struct GraphWidget<'a> {
     lane_colors: &'a [Color],
     search_matches: &'a [usize],
     search_bg: Option<Color>,
+    search_fg: Option<Color>,
     flash_rows: &'a [(usize, Color)],
     commented_rows: &'a [usize],
     /// Comment glyph (`ICON_COMMENT`: `"` / nf-fa-comment). Empty uses `"`.
@@ -95,6 +96,7 @@ impl<'a> GraphWidget<'a> {
             lane_colors: &[],
             search_matches: &[],
             search_bg: None,
+            search_fg: None,
             flash_rows: &[],
             commented_rows: &[],
             comment_glyph: "\"",
@@ -155,13 +157,16 @@ impl<'a> GraphWidget<'a> {
         self
     }
 
-    /// Paint search-match background on selectable graph rows.
+    /// Paint search-match rows on selectable graph rows: `bg` behind the
+    /// row and `fg` on its label, so the text stays readable whatever
+    /// colour the label had.
     ///
     /// `indices` are [`GraphModel::visible_rows`] indexes. Spacers stay
     /// unhighlighted. [`Self::selected`] still wins over a match.
-    pub fn search_matches(mut self, indices: &'a [usize], bg: Color) -> Self {
+    pub fn search_matches(mut self, indices: &'a [usize], bg: Color, fg: Color) -> Self {
         self.search_matches = indices;
         self.search_bg = Some(bg);
+        self.search_fg = Some(fg);
         self
     }
 
@@ -299,9 +304,11 @@ pub fn graph_scrollbar_thumb(
     Some((thumb_start, thumb_length))
 }
 
-/// Vertical graph scrollbar is painted only after the list leaves the top.
-pub fn graph_vscroll_visible(scroll: u16) -> bool {
-    scroll > 0
+/// Vertical graph scrollbar is painted whenever `content_len` painted lines
+/// overflow a `viewport`-row list, at the top too, so clipped rows always
+/// show a bar.
+pub fn graph_vscroll_visible(content_len: usize, viewport: u16, scroll: u16) -> bool {
+    scroll > 0 || content_len > usize::from(viewport)
 }
 
 /// Horizontal graph scrollbar is painted only after the viewport leaves the
@@ -341,14 +348,6 @@ impl Widget for GraphWidget<'_> {
             return;
         }
         let glyphs = if self.ascii { &ASCII } else { &UNICODE };
-        let vscroll = graph_vscroll_visible(self.scroll);
-        let hscroll = graph_hscroll_visible(self.col_offset);
-        let v_cols = u16::from(vscroll);
-        let pane = area.width.saturating_sub(v_cols) as usize;
-        let cap = Some(match self.gutter_width {
-            Some(w) => w as usize,
-            None => graph_gutter_cap(pane.max(1)),
-        });
         let default_colors = default_lane_colors();
         let lane_colors: &[Color] = if self.lane_colors.is_empty() {
             &default_colors
@@ -374,6 +373,20 @@ impl Widget for GraphWidget<'_> {
             self.model.sync.is_some(),
             footer_lines.len() as u16,
         );
+        // The painted line count does not depend on the width, so the bar
+        // decision can read it before the width is known.
+        let vscroll = graph_vscroll_visible(
+            paint_model(self.model, glyphs, None).len(),
+            chrome.list_height,
+            self.scroll,
+        );
+        let hscroll = graph_hscroll_visible(self.col_offset);
+        let v_cols = u16::from(vscroll);
+        let pane = area.width.saturating_sub(v_cols) as usize;
+        let cap = Some(match self.gutter_width {
+            Some(w) => w as usize,
+            None => graph_gutter_cap(pane.max(1)),
+        });
         let mut y = area.y;
         let list_bottom = area
             .y
@@ -447,6 +460,7 @@ impl Widget for GraphWidget<'_> {
                 },
                 RowColors {
                     search_bg: self.search_bg,
+                    search_fg: self.search_fg,
                     flash_bg,
                     cursor_fg: self.cursor_fg,
                     cursor_bg: self.cursor_bg,
@@ -588,6 +602,7 @@ struct RowFlags {
 /// Colours [`put_painted_line`] paints a row with. All come from the widget.
 struct RowColors<'a> {
     search_bg: Option<Color>,
+    search_fg: Option<Color>,
     flash_bg: Option<Color>,
     cursor_fg: Color,
     cursor_bg: Option<Color>,
@@ -617,6 +632,7 @@ fn put_painted_line(
     } = flags;
     let RowColors {
         search_bg,
+        search_fg,
         flash_bg,
         cursor_fg,
         cursor_bg,
@@ -649,6 +665,11 @@ fn put_painted_line(
     } else {
         None
     };
+    // A search-match row paints its rails and every label part in the search
+    // foreground: chip and lane colours can equal the search background.
+    let match_fg = (flash_bg.is_none() && !selected && search_match)
+        .then_some(search_fg)
+        .flatten();
     let mut bar_style = if cursor_bar {
         Style::default().fg(cursor_fg).add_modifier(Modifier::BOLD)
     } else {
@@ -669,7 +690,7 @@ fn put_painted_line(
         if col >= end {
             break;
         }
-        let fg = lane_fg(cell.color_lane, lane_colors, fallback);
+        let fg = match_fg.unwrap_or_else(|| lane_fg(cell.color_lane, lane_colors, fallback));
         let mut style = Style::default().fg(fg);
         if let Some(bg) = row_bg {
             style = style.bg(bg);
@@ -717,7 +738,13 @@ fn put_painted_line(
         return;
     }
     let sliced = slice_line_label(line, col_offset as usize, label_w as usize);
-    Line::from(label_spans(&sliced, palette, fallback))
+    let mut spans = label_spans(&sliced, palette, fallback);
+    if let Some(fg) = match_fg {
+        for span in &mut spans {
+            span.style = span.style.fg(fg);
+        }
+    }
+    Line::from(spans)
         .style(row_style)
         .render(Rect::new(col, y, label_w, 1), buf);
 }
@@ -1569,6 +1596,7 @@ mod tests {
             .position(|row| matches!(row, GraphRow::Stash(_)))
             .expect("stash row");
         let bg = Color::Rgb(187, 154, 247);
+        let fg = Color::Rgb(26, 27, 38);
         let matches = [stash_idx];
         let backend = TestBackend::new(80, 16);
         let mut terminal = Terminal::new(backend).expect("test backend");
@@ -1576,7 +1604,7 @@ mod tests {
             .draw(|frame| {
                 GraphWidget::new(&model)
                     .selected(Some(0))
-                    .search_matches(&matches, bg)
+                    .search_matches(&matches, bg, fg)
                     .now_unix(NOW)
                     .render(frame.area(), frame.buffer_mut());
             })
@@ -1607,6 +1635,17 @@ mod tests {
             saw_match_bg,
             "search match should paint filter bg on the stash node"
         );
+        // The label text paints in the search foreground, not its own colour.
+        let label_x = (0..78u16)
+            .find(|&x| {
+                (x..x + 3)
+                    .map(|cx| buffer[(cx, y)].symbol())
+                    .collect::<String>()
+                    == "WIP"
+            })
+            .expect("stash subject column");
+        assert_eq!(buffer[(label_x, y)].fg, fg, "match label fg");
+        assert_eq!(buffer[(label_x, y)].bg, bg, "match label bg");
         if let Some(spacer_y) = stash_spacer_y {
             let spacer_has_match = (0..80u16).any(|x| buffer[(x, spacer_y)].bg == bg);
             assert!(
@@ -1825,22 +1864,12 @@ mod tests {
     }
 
     #[test]
-    fn vertical_scrollbar_hidden_at_top_shown_when_scrolled() {
+    fn vertical_scrollbar_shows_at_top_when_the_list_overflows() {
         let model = tall_linear_model(24);
         let width = 40u16;
         let height = 16u16;
         let chrome = graph_chrome_budget(height, false, false);
-        let at_top = render_graph(&model, width, height, 0, 0);
         let sb_x = width.saturating_sub(1);
-        for i in 0..chrome.list_height {
-            let y = u16::from(chrome.header).saturating_add(i);
-            assert_ne!(
-                at_top[(sb_x, y)].symbol(),
-                "█",
-                "no vertical thumb at top y={y}"
-            );
-        }
-        let scrolled = render_graph(&model, width, height, 8, 0);
         let painted = paint_model_with(
             &model,
             &ASCII,
@@ -1850,11 +1879,25 @@ mod tests {
                 ..PaintOpts::default()
             },
         );
-        let (thumb_off, thumb_len) =
-            graph_scrollbar_thumb(painted.len(), 8, chrome.list_height).expect("thumb");
-        let thumb_y = u16::from(chrome.header).saturating_add(thumb_off);
-        assert_eq!(scrolled[(sb_x, thumb_y)].symbol(), "█");
-        assert!(thumb_len >= 1);
+        assert!(painted.len() > usize::from(chrome.list_height));
+        for scroll in [0u16, 8] {
+            let buf = render_graph(&model, width, height, scroll, 0);
+            let (thumb_off, thumb_len) =
+                graph_scrollbar_thumb(painted.len(), scroll, chrome.list_height).expect("thumb");
+            let thumb_y = u16::from(chrome.header).saturating_add(thumb_off);
+            assert_eq!(buf[(sb_x, thumb_y)].symbol(), "█", "scroll {scroll}");
+            assert!(thumb_len >= 1);
+        }
+        // A list that fits paints no bar.
+        let short = tall_linear_model(2);
+        let fits = render_graph(&short, width, height, 0, 0);
+        for i in 0..chrome.list_height {
+            let y = u16::from(chrome.header).saturating_add(i);
+            assert_ne!(fits[(sb_x, y)].symbol(), "█", "no thumb when it fits y={y}");
+        }
+        assert!(graph_vscroll_visible(10, 5, 0));
+        assert!(!graph_vscroll_visible(5, 5, 0));
+        assert!(graph_vscroll_visible(5, 5, 1));
     }
 
     #[test]

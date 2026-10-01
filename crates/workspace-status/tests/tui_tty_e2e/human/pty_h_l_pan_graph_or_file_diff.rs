@@ -3,8 +3,9 @@ use crate::harness::{left_tree, PtySession};
 use crate::seed::{daily_workspace, seed_long_diff_file};
 use crate::support::{
     crumb_row, launch_breadcrumb_workspace_app, no_updates_group_folded, no_wrong_overlays,
-    panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused, right_pane, status_row,
-    title_has_files, tree_cursor_on, tree_dir_expanded, tree_has, SETTLE_MS, WAIT,
+    panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused, right_pane,
+    right_vbar_at_top, status_row, title_has_files, tree_cursor_on, tree_dir_expanded, tree_has,
+    SETTLE_MS, WAIT,
 };
 
 const FILE: &str = "unique-diffline.rs";
@@ -51,7 +52,9 @@ fn clipped_new_diff(screen: &str) -> bool {
         && right.contains("inline (too narrow)")
         && !right.contains("inline (too narrow) ·")
         && !right.contains(DIFF_HSCROLL_TAIL)
-        && !right.contains('█')
+        // Both bars show at the origin: the diff overflows both ways.
+        && right_vbar_at_top(screen)
+        && right.contains('═')
         && !right.contains("app/README.md")
         && !right.contains("UNSTAGED")
         && !screen.contains("WIP on graph")

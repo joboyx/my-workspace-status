@@ -48,14 +48,15 @@ use super::search::{
     wrap_col_starts, wrap_cols, SearchPane,
 };
 use super::split::{
-    diff_split_rule_x, pane_widths, side_by_side_column_widths, DiffMode, MIN_PANE_COLS,
+    diff_paint_width, diff_split_rule_x, pane_widths, side_by_side_column_widths, DiffMode,
+    MIN_PANE_COLS, MIN_TERM_COLS, MIN_TERM_ROWS,
 };
 use super::state::{revert_scope, AppState, CompareRevertTarget, FocusPane, PendingConfirm};
 use super::syntax::{
     cached_highlight_diff_rows, slice_styled_cols, CachedDiffSyntax, DiffSyntaxKey,
 };
 use super::tabs::{compare_picker_empty, no_committed_changes_vs, NO_COMMITTED_CHANGES};
-use super::theme::{hex_color, Palette};
+use super::theme::{hex_color, Palette, Pill};
 use super::tree::{
     row_segments, visible_window, with_comment_mark, with_viewed_mark, NodeKind, NodeSegments,
     SegRole, TextSeg, VisibleRow,
@@ -64,6 +65,14 @@ use crate::helpers::{is_detached_head_branch, visible_width};
 
 /// Empty tree / empty commit-file list.
 const NO_MATCHING_ROWS: &str = "No matching rows";
+/// Right pane while the focused repo's graph loads.
+const LOADING_GRAPH: &str = "loading graph…";
+/// Empty commit-file list for a commit, after its files loaded.
+const NO_FILES_IN_COMMIT: &str = "no files in this commit";
+/// Empty commit-file list for a stash, after its files loaded.
+const NO_FILES_IN_STASH: &str = "no files in this stash";
+/// Empty commit-file list for the uncommitted row, after its files loaded.
+const NO_FILES_IN_WORKTREE: &str = "no uncommitted changes";
 /// Commit-file list while git is still listing.
 const LOADING_FILES: &str = "loading files…";
 
@@ -116,6 +125,11 @@ fn selection_marker(selected: bool, focused: bool) -> &'static str {
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.prune_expired_flashes();
     let area = frame.area();
+    state.too_small = area.width < MIN_TERM_COLS || area.height < MIN_TERM_ROWS;
+    if state.too_small {
+        draw_too_small(frame, area, state.theme.palette());
+        return;
+    }
     let overlay_h = overlay_status_rows_for(state, area.width);
     let crumb_h = breadcrumb_rows(state);
     let prompt_h = ctrl_c_prompt_rows(state);
@@ -318,6 +332,33 @@ fn pane_border(focused: bool, palette: Palette) -> Style {
     }
 }
 
+/// Resize notice in place of the panes when the terminal is below
+/// [`MIN_TERM_COLS`] × [`MIN_TERM_ROWS`]. Keys still dispatch (`q` quits).
+fn draw_too_small(frame: &mut Frame<'_>, area: Rect, palette: Palette) {
+    let text = too_small_notice(area.width, area.height);
+    let lines = wrap_cols(&text, area.width.max(1) as usize);
+    let top = area.height.saturating_sub(lines.len() as u16) / 2;
+    let body = Rect {
+        x: area.x,
+        y: area.y.saturating_add(top),
+        width: area.width,
+        height: area.height.saturating_sub(top),
+    };
+    let lines: Vec<Line> = lines
+        .into_iter()
+        .map(|line| Line::from(Span::styled(line, Style::default().fg(palette.modified))))
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center),
+        body,
+    );
+}
+
+/// `terminal too small (W×H — need ≥ 46×12)`.
+fn too_small_notice(cols: u16, rows: u16) -> String {
+    format!("terminal too small ({cols}×{rows} — need ≥ {MIN_TERM_COLS}×{MIN_TERM_ROWS})")
+}
+
 fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -336,7 +377,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         .unwrap_or(0);
     let (start, _) = visible_window(painted.len(), painted_cursor, height);
     state.layout.list_offset = start;
-    let search_bg = state.theme.pills().filter.bg;
+    let search = state.theme.pills().filter;
     let match_ids: HashSet<String> = if state.search_target == SearchPane::Tree {
         collect_match_ids(&state.tree, &state.search_query)
             .into_iter()
@@ -357,7 +398,7 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             state.focus == FocusPane::Left,
             state.flash_color(&row.id),
             match_ids.contains(&row.id),
-            search_bg,
+            search,
             state.ascii,
             viewed,
             commented,
@@ -376,7 +417,7 @@ fn paint_tree_row(
     focused: bool,
     flash: Option<Color>,
     search_match: bool,
-    search_bg: Color,
+    search: Pill,
     ascii: bool,
     viewed: bool,
     commented: bool,
@@ -395,7 +436,7 @@ fn paint_tree_row(
         focused,
         flash,
         search_match,
-        search_bg,
+        search,
         ascii,
         palette,
         col_offset,
@@ -412,12 +453,15 @@ fn paint_segmented_row(
     focused: bool,
     flash: Option<Color>,
     search_match: bool,
-    search_bg: Color,
+    search: Pill,
     ascii: bool,
     palette: Palette,
     col_offset: usize,
 ) -> Line<'static> {
-    let bg = row_match_bg(selected, focused, search_match, flash, palette, search_bg);
+    let bg = row_match_bg(selected, focused, search_match, flash, palette, search.bg);
+    // A search-match row paints its text in the filter foreground: the
+    // filter background can equal a segment colour (branch names).
+    let match_fg = (flash.is_none() && !selected && search_match).then_some(search.fg);
     let trailing_text: String = segs.trailing.iter().map(|s| s.text.as_str()).collect();
     let trailing_width = visible_width(&trailing_text);
     let pad = usize::from(trailing_width > 0);
@@ -466,6 +510,11 @@ fn paint_segmented_row(
         .sum();
     if used < width {
         spans.push(styled_span(&" ".repeat(width - used), Style::default(), bg));
+    }
+    if let Some(fg) = match_fg {
+        for span in &mut spans {
+            span.style = span.style.fg(fg).remove_modifier(Modifier::DIM);
+        }
     }
     Line::from(spans)
 }
@@ -579,10 +628,14 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if state.graph.is_some() {
         return;
     }
-    frame.render_widget(
-        Paragraph::new("focus a repo for the graph, or a file for its diff"),
-        area,
-    );
+    // A focused repo always has a graph load in flight until the graph
+    // lands (a file diff clears the graph it replaced).
+    let copy = if state.focused_graph_repo().is_some() {
+        LOADING_GRAPH
+    } else {
+        "focus a repo for the graph, or a file for its diff"
+    };
+    frame.render_widget(Paragraph::new(copy), area);
 }
 
 fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offset: u16) {
@@ -611,7 +664,11 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .scroll(state.graph_scroll)
         .col_offset(col_offset)
         .loading_older(state.graph_loading_older)
-        .search_matches(&matches, state.theme.pills().filter.bg)
+        .search_matches(
+            &matches,
+            state.theme.pills().filter.bg,
+            state.theme.pills().filter.fg,
+        )
         .flash_rows(&flash_rows)
         .commented_rows(&commented_rows)
         .resolved_comment_rows(&resolved_comment_rows)
@@ -698,7 +755,7 @@ fn record_graph_scrollbar(state: &mut AppState, area: Rect, col_offset: u16) {
     };
     let content_len = paint_model(model, glyphs, None).len();
     state.layout.graph_content_len = content_len;
-    let vscroll = graph_vscroll_visible(state.graph_scroll);
+    let vscroll = graph_vscroll_visible(content_len, chrome.list_height, state.graph_scroll);
     let hscroll = graph_hscroll_visible(col_offset);
     let list_top = area.y.saturating_add(u16::from(chrome.header));
     let list_height = chrome.list_height;
@@ -829,10 +886,16 @@ fn draw_commit_file_list(
             frame.render_widget(Paragraph::new(muted_copy(copy, palette)), area);
             return;
         }
+        // Commit-file lists have no row filter: empty after the load means
+        // the source has no files.
         let copy = if state.commit_files_loading {
             LOADING_FILES
         } else {
-            NO_MATCHING_ROWS
+            match state.commit_drill_source().map(|(_, source)| source) {
+                Some(super::drill::CommitFileSource::Stash { .. }) => NO_FILES_IN_STASH,
+                Some(super::drill::CommitFileSource::Worktree) => NO_FILES_IN_WORKTREE,
+                _ => NO_FILES_IN_COMMIT,
+            }
         };
         frame.render_widget(Paragraph::new(muted_copy(copy, palette)), area);
         return;
@@ -849,7 +912,7 @@ fn draw_commit_file_list(
         .unwrap_or(0);
     let (start, _) = visible_window(rows.len(), painted_cursor, height);
     state.layout.files_list_offset = start;
-    let search_bg = state.theme.pills().filter.bg;
+    let search = state.theme.pills().filter;
     let searching_files =
         state.search_target == SearchPane::CommitFiles && !state.search_query.trim().is_empty();
     let match_paths = commit_file_search_match_paths(state);
@@ -907,7 +970,7 @@ fn draw_commit_file_list(
                 files_focused,
                 state.commit_file_flash_color(&row.id),
                 search_match,
-                search_bg,
+                search,
                 state.ascii,
                 palette,
                 col_offset,
@@ -969,28 +1032,36 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         state.diff_cursor = state.diff_cursor.min(rows.len() - 1);
     }
     let wrap = state.diff_wrap;
-    let hscroll = !wrap && graph_hscroll_visible(state.diff_col_offset);
+    let hscroll = state.diff_hscroll_shown();
     let h_rows = u16::from(hscroll);
+    // Rows always leave the scrollbar column, whether or not the bar shows,
+    // so widths (split, wrap, pan) never change with the bar.
+    let line_width = diff_paint_width(area.width);
     let header_h = diff_pane_header_rows(&path, area.width, area.height);
     let list_h = area.height.saturating_sub(header_h).max(1);
     let line_h = list_h.saturating_sub(h_rows).max(1) as usize;
     let gutter = gutter_width(&rows);
     let gutter_with_mark = gutter.saturating_add(comment_mark_cols(state.ascii));
-    let start = if wrap {
+    // Viewport start and the visual rows the whole diff paints.
+    let (start, content_rows) = if wrap {
         let heights = diff_wrap_row_heights(
             &rows,
-            diff_row_content_width(area.width as usize) as u16,
+            diff_row_content_width(line_width as usize) as u16,
             gutter_with_mark,
             split,
             state.diff_split_fraction,
         );
-        wrap_viewport_start(&heights, state.diff_cursor, line_h)
+        let start = wrap_viewport_start(&heights, state.diff_cursor, line_h);
+        (start, heights.iter().map(|h| (*h).max(1)).sum::<usize>())
     } else {
-        visible_window(rows.len(), state.diff_cursor, line_h).0
+        (
+            visible_window(rows.len(), state.diff_cursor, line_h).0,
+            rows.len(),
+        )
     };
     state.diff_scroll = start as u16;
     let skip = start;
-    let vscroll = graph_vscroll_visible(state.diff_scroll);
+    let vscroll = graph_vscroll_visible(content_rows, line_h as u16, state.diff_scroll);
     let v_cols = u16::from(vscroll);
     let mode_label = diff_pane_mode_label(state.diff_mode, effective);
     let header = diff_pane_header(
@@ -1040,17 +1111,21 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         height: list_h,
     };
     if rows.is_empty() {
+        let mut color = palette.muted;
         let msg = if let Some(tab) = state.tabs.active_compare() {
             tab.error
                 .clone()
                 .unwrap_or_else(|| no_committed_changes_vs(&tab.base_ref))
         } else if path.is_empty() {
             "select a dirty file".to_string()
+        } else if let Some(err) = state.current_diff_content().error.as_deref() {
+            color = palette.deleted;
+            format!("git diff failed: {err}")
         } else {
             "(no diff)".to_string()
         };
         frame.render_widget(
-            Paragraph::new(Span::styled(msg, Style::default().fg(palette.muted))),
+            Paragraph::new(Span::styled(msg, Style::default().fg(color))),
             body,
         );
         return;
@@ -1060,7 +1135,6 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     } else {
         state.diff_col_offset as usize
     };
-    let line_width = area.width.saturating_sub(v_cols).max(1);
     let content_w = diff_row_content_width(line_width as usize) as u16;
     let content_len = rows.len();
     let paint_heights = if wrap {
@@ -1104,9 +1178,21 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             skip..logical_end,
         )
     });
+    // Armed diff search marks every matching row; the cursor bar sits on
+    // the current hit.
+    let search_hits: HashSet<usize> = if state.search_target == SearchPane::Diff {
+        state
+            .diff_search_hits(&state.search_query)
+            .into_iter()
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let search = state.theme.pills().filter;
     let mut painted: Vec<Line> = Vec::new();
     let mut i = skip;
     while painted.len() < line_h && i < rows.len() {
+        let search_match = search_hits.contains(&i);
         let lines = paint_diff_row(
             &rows[i],
             content_w,
@@ -1118,7 +1204,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             i == state.diff_cursor,
             state.focus == FocusPane::Right,
             state.diff_visual_contains(i),
-            state.search_hit == Some(i),
+            search_match.then_some(search),
             syntax.left(i),
             syntax.right(i),
         );
@@ -1195,7 +1281,7 @@ fn paint_diff_row(
     selected: bool,
     focused: bool,
     visual: bool,
-    search_hit: bool,
+    search: Option<Pill>,
     left_syntax: &[(String, Color)],
     right_syntax: &[(String, Color)],
 ) -> Vec<Line<'static>> {
@@ -1314,7 +1400,7 @@ fn paint_diff_row(
     };
     parts
         .into_iter()
-        .map(|line| finish_diff_line(line, selected, focused, visual, search_hit, palette))
+        .map(|line| finish_diff_line(line, selected, focused, visual, search, palette))
         .collect()
 }
 
@@ -1323,26 +1409,30 @@ fn finish_diff_line(
     selected: bool,
     focused: bool,
     visual: bool,
-    search_hit: bool,
+    search: Option<Pill>,
     palette: Palette,
 ) -> Line<'static> {
+    // A search match off the cursor paints the filter pill; its foreground
+    // replaces syntax colours so the text stays readable on that background.
+    let match_pill = search.filter(|_| !selected && !visual);
     let bg = if selected && focused {
         Some(palette.cursor_bg)
     } else if selected {
         Some(palette.cursor_bg_inactive)
     } else if visual {
         Some(palette.cursor_bg)
-    } else if search_hit {
-        Some(palette.flash)
     } else {
-        None
+        match_pill.map(|pill| pill.bg)
     };
     if let Some(bg) = bg {
         line.spans = line
             .spans
             .into_iter()
             .map(|span| {
-                let style = span.style.bg(bg);
+                let mut style = span.style.bg(bg);
+                if let Some(pill) = match_pill {
+                    style = style.fg(pill.fg);
+                }
                 Span::styled(span.content.to_string(), style)
             })
             .collect();
@@ -3382,6 +3472,45 @@ mod tests {
         state
     }
 
+    /// A diff that overflows shows both bars at the top-left, before any
+    /// scroll or pan; a diff that fits shows neither.
+    #[test]
+    fn diff_bars_show_on_overflow_before_scrolling() {
+        let mut state = long_panning_diff_state(0);
+        state.diff_cursor = 0;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert_eq!((state.diff_scroll, state.diff_col_offset), (0, 0));
+        assert!(
+            state.layout.diff_scrollbar_x.is_some(),
+            "vertical bar at the top"
+        );
+        assert!(
+            state.layout.diff_hscrollbar_y.is_some(),
+            "horizontal bar at pan 0"
+        );
+
+        let mut state = two_pane_diff_state();
+        state.set_diff(
+            "app".into(),
+            "README.md".into(),
+            super::super::diff::DiffContent::from_lines(vec![
+                "@@ -1,1 +1,1 @@".into(),
+                "-old".into(),
+                "+new".into(),
+            ]),
+        );
+        draw_state(&mut terminal, &mut state);
+        assert!(
+            state.layout.diff_scrollbar_x.is_none(),
+            "short diff: no bar"
+        );
+        assert!(
+            state.layout.diff_hscrollbar_y.is_none(),
+            "narrow diff: no bar"
+        );
+    }
+
     /// Text of one right-pane row, `width` cells from `x`.
     fn row_cells(terminal: &Terminal<TestBackend>, x: u16, y: u16, width: u16) -> String {
         let buf = terminal.backend().buffer();
@@ -3434,6 +3563,66 @@ mod tests {
             body.contains(&first),
             "first diff row `{first}` paints right below the header, got `{body}`:\n{}",
             buffer_text(&terminal)
+        );
+    }
+
+    /// Diff search marks every matching row with the filter pill, not only
+    /// the current hit, and the cursor bar stays on the current hit.
+    #[test]
+    fn diff_search_marks_every_matching_row() {
+        let mut state = two_pane_diff_state();
+        state.set_diff(
+            "app".into(),
+            "README.md".into(),
+            super::super::diff::DiffContent::from_lines(vec![
+                "@@ -1,3 +1,3 @@".into(),
+                "-old needle".into(),
+                "+new needle".into(),
+                " plain context".into(),
+            ]),
+        );
+        state.focus = FocusPane::Right;
+        state.dispatch(super::super::action::Action::SearchStart);
+        for c in "needle".chars() {
+            state.dispatch(super::super::action::Action::SearchChar(c));
+        }
+        assert_eq!(state.search_target, SearchPane::Diff);
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let pill = state.theme.pills().filter;
+        let cursor_bg = state.theme.palette().cursor_bg;
+        let buf = terminal.backend().buffer();
+        let mut seen = Vec::new();
+        for y in 0..buf.area().height {
+            let line: String = (0..buf.area().width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect();
+            for needle in ["old needle", "new needle", "plain context"] {
+                if let Some(byte) = line.find(needle) {
+                    let col = line[..byte].chars().count() as u16;
+                    let cell = &buf[(col, y)];
+                    seen.push((needle, cell.bg, cell.fg));
+                }
+            }
+        }
+        let bgs: Vec<_> = seen
+            .iter()
+            .filter(|(n, _, _)| n.contains("needle"))
+            .map(|(_, bg, _)| *bg)
+            .collect();
+        assert!(
+            bgs.contains(&cursor_bg),
+            "current hit keeps the cursor: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|(n, bg, fg)| n.contains("needle") && *bg == pill.bg && *fg == pill.fg),
+            "the other hit paints the filter pill: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|(n, bg, _)| *n == "plain context" && *bg != pill.bg),
+            "a row without the query stays unmarked: {seen:?}"
         );
     }
 
@@ -4629,8 +4818,15 @@ mod tests {
     }
 
     /// Paint and return the tab row, one string per cell.
+    /// Paint only the tab strip (row 0), so narrow widths below the
+    /// terminal-too-small guard still exercise the strip's windowing.
     fn paint_tab_row(terminal: &mut Terminal<TestBackend>, state: &mut AppState) -> Vec<String> {
-        terminal.draw(|frame| draw(frame, state)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_tab_strip(frame, Rect { height: 1, ..area }, state);
+            })
+            .unwrap();
         let cols = terminal.backend().buffer().area.width;
         let buf = terminal.backend().buffer();
         (0..cols)
@@ -4703,6 +4899,48 @@ mod tests {
             format!(" {} {TAB_CLOSE_GLYPH} ", labels[index])
         };
         line.contains(&text)
+    }
+
+    /// Below the minimum the frame is only the resize notice, and mouse
+    /// events stop mapping; at the minimum the panes paint again.
+    #[test]
+    fn terminal_below_minimum_paints_only_the_resize_notice() {
+        use crossterm::event::{
+            Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        for (cols, rows) in [
+            (MIN_TERM_COLS - 1, MIN_TERM_ROWS),
+            (MIN_TERM_COLS, MIN_TERM_ROWS - 1),
+            (20, 5),
+        ] {
+            let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let text = buffer_text(&terminal);
+            let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(state.too_small, "{cols}×{rows}");
+            assert!(
+                flat.contains(&format!("{cols}×{rows}")) && flat.contains("terminal too small"),
+                "{cols}×{rows}:\n{text}"
+            );
+            assert!(!text.contains("tree"), "no panes at {cols}×{rows}:\n{text}");
+            let click = Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 1,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            });
+            assert_eq!(super::super::app::map_event(&state, &click), Action::None);
+            let q = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+            assert_eq!(super::super::app::map_event(&state, &q), Action::Quit);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(MIN_TERM_COLS, MIN_TERM_ROWS)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        assert!(!state.too_small);
+        assert!(!text.contains("terminal too small"), "{text}");
+        assert!(text.contains("tree"), "{text}");
     }
 
     #[test]
@@ -5705,7 +5943,7 @@ mod tests {
                 .all(|span| span.style.bg != Some(palette.cursor_bg)),
             "cursor_bg must not hide the flash"
         );
-        let search_bg = search_bg_unused();
+        let search_bg = search_bg_unused().bg;
         assert!(
             line.spans
                 .iter()
@@ -5935,8 +6173,8 @@ mod tests {
         row.trailing_segs.iter().any(|s| s.text.trim() == glyph)
     }
 
-    fn search_bg_unused() -> Color {
-        crate::tui::theme::ThemeId::TokyoNight.pills().filter.bg
+    fn search_bg_unused() -> Pill {
+        crate::tui::theme::ThemeId::TokyoNight.pills().filter
     }
 
     #[test]
@@ -5979,16 +6217,18 @@ mod tests {
                 line.push_str(buf[(x, y)].symbol());
             }
             if line.contains("a.md") {
-                let col = line.find("a.md").unwrap();
-                a_bg = Some(buf[(col as u16, y)].bg);
+                let col = line[..line.find("a.md").unwrap()].chars().count();
+                let cell = &buf[(col as u16, y)];
+                a_bg = Some((cell.bg, cell.fg));
             }
             if line.contains("b.md") {
-                let col = line.find("b.md").unwrap();
-                b_bg = Some(buf[(col as u16, y)].bg);
+                let col = line[..line.find("b.md").unwrap()].chars().count();
+                let cell = &buf[(col as u16, y)];
+                b_bg = Some((cell.bg, cell.fg));
             }
         }
-        let a_bg = a_bg.expect("a.md row");
-        let b_bg = b_bg.expect("b.md row");
+        let (a_bg, a_fg) = a_bg.expect("a.md row");
+        let (b_bg, b_fg) = b_bg.expect("b.md row");
         assert!(
             a_bg == cursor_bg || b_bg == cursor_bg,
             "one match should keep the cursor: a={a_bg:?} b={b_bg:?}"
@@ -5998,6 +6238,62 @@ mod tests {
             "the other match should use search bg: a={a_bg:?} b={b_bg:?} search={search_bg:?}"
         );
         assert_ne!(a_bg, b_bg, "cursor and search-match paint must differ");
+        let match_fg = if a_bg == search_bg { a_fg } else { b_fg };
+        assert_eq!(
+            match_fg,
+            state.theme.pills().filter.fg,
+            "search-match text paints in the filter foreground"
+        );
+    }
+
+    /// Every theme keeps search-match text readable: the filter foreground
+    /// differs from the filter background by a clear luminance step, so
+    /// a tree, commit-file, graph, or diff match row stays legible.
+    #[test]
+    fn search_match_text_contrasts_with_search_bg_in_every_theme() {
+        fn luminance(color: Color) -> f64 {
+            let Color::Rgb(r, g, b) = color else {
+                panic!("theme colours are RGB: {color:?}");
+            };
+            let lin = |c: u8| {
+                let c = f64::from(c) / 255.0;
+                if c <= 0.039_28 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+        }
+        for id in crate::tui::theme::THEME_IDS {
+            let pill = id.pills().filter;
+            assert_ne!(pill.fg, pill.bg, "{id:?}");
+            let (hi, lo) = {
+                let (a, b) = (luminance(pill.fg), luminance(pill.bg));
+                (a.max(b), a.min(b))
+            };
+            let ratio = (hi + 0.05) / (lo + 0.05);
+            assert!(ratio >= 4.5, "{id:?} search text contrast {ratio:.2} < 4.5");
+            // The row paint must use that pill, not the segment colour.
+            let palette = id.palette();
+            let segs = NodeSegments {
+                segments: vec![TextSeg {
+                    text: "feature".into(),
+                    role: SegRole::BranchFeature,
+                    hex: None,
+                    bold: false,
+                    dim: true,
+                }],
+                trailing: Vec::new(),
+            };
+            let line = paint_segmented_row(
+                0, false, false, &segs, 20, false, true, None, true, pill, true, palette, 0,
+            );
+            for span in &line.spans {
+                assert_eq!(span.style.bg, Some(pill.bg), "{id:?} {span:?}");
+                assert_eq!(span.style.fg, Some(pill.fg), "{id:?} {span:?}");
+            }
+        }
     }
 
     #[test]
@@ -6276,7 +6572,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_commit_files_paint_loading_then_no_matching_rows() {
+    fn empty_commit_files_paint_loading_then_no_files_in_this_commit() {
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         let source = super::super::drill::CommitFileSource::Commit {
@@ -6289,14 +6585,50 @@ mod tests {
         let loading = buffer_text(&terminal);
         assert!(loading.contains(LOADING_FILES), "{loading}");
         assert!(!loading.contains(NO_MATCHING_ROWS), "{loading}");
-        assert!(!loading.contains("no files in this commit"), "{loading}");
+        assert!(!loading.contains(NO_FILES_IN_COMMIT), "{loading}");
 
         state.open_commit_files("app".into(), source, Vec::new());
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let empty = buffer_text(&terminal);
-        assert!(empty.contains(NO_MATCHING_ROWS), "{empty}");
+        assert!(empty.contains(NO_FILES_IN_COMMIT), "{empty}");
+        assert!(!empty.contains(NO_MATCHING_ROWS), "{empty}");
         assert!(!empty.contains(LOADING_FILES), "{empty}");
-        assert!(!empty.contains("no files in this commit"), "{empty}");
+    }
+
+    /// A failed `git diff` names git's reason; a focused repo whose graph
+    /// is still loading says so instead of asking to focus a repo.
+    #[test]
+    fn diff_failure_and_graph_load_have_their_own_empty_states() {
+        let mut state = two_pane_diff_state();
+        state.set_diff(
+            "app".into(),
+            "README.md".into(),
+            super::super::diff::DiffContent {
+                error: Some("index file corrupt".into()),
+                ..Default::default()
+            },
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("git diff failed: index file corrupt"),
+            "{text}"
+        );
+        assert!(!text.contains("(no diff)"), "{text}");
+
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.cursor = state
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::Repo)
+            .expect("repo row");
+        assert!(state.graph.is_none());
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        assert!(text.contains(LOADING_GRAPH), "{text}");
+        assert!(!text.contains("focus a repo for the graph"), "{text}");
     }
 
     #[test]

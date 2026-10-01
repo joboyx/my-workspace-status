@@ -22,7 +22,7 @@ render.rs paints section headers, line-number gutter, and cells
 A compare tab uses `DiffContent::from_compare_lines`. The single section label is `COMMITTED`, not staged or unstaged. Header text is `<base-ref>...HEAD`. `V` visual highlight paints on the compare diff the same way as on a Workspace file diff. `build_partial_patch` reads only that COMMITTED section for `PartialPatchKind::RevertCommitted` (compare `x` in a highlight, a reverse apply onto the worktree that restores the merge-base lines) and refuses a committed diff for every other kind. See [git-operations.md](./git-operations.md).
 ```
 
-`parse_unified_diff` skips file-level headers (`diff --git`, `index`, `---`, `+++`) until the first `@@`, tracks 1-based `old_no` / `new_no` per line, turns `\ No newline at end of file` into a `meta` line, and turns a `Binary files … differ` line into a single meta hunk with no header. Empty input returns no hunks, which is how "no diff" is detected upstream.
+`parse_unified_diff` skips file-level headers (`diff --git`, `index`, `---`, `+++`) until the first `@@`, tracks 1-based `old_no` / `new_no` per line, turns `\ No newline at end of file` into a `meta` line, and turns a `Binary files … differ` line into a single meta hunk with no header. Empty input returns no hunks, which is how "no diff" is detected upstream. A worktree `git diff` that fails keeps git's reason line in `DiffContent::error`, and the pane paints `git diff failed: <reason>` instead of `(no diff)`.
 
 Gutter width sizes the line-number column from the widest number present, minimum 2. A one-column comment mark sits to the left of that number column on every numbered cell, whether or not a comment exists, so adding a comment does not shift the numbers. Open comments paint `"` / nf-fa-comment. Resolved comments paint `'` / nf-fa-comment-o.
 Line numbers and the gutter rule use the theme `muted` colour without DIM so they stay readable on a dark terminal.
@@ -48,11 +48,12 @@ After both cached and worktree diffs come back empty *and* the node is untracked
 | Condition | Result |
 | --- | --- |
 | Not a regular file, or read fails | empty |
-| Size > `HUGE_FILE_BYTES` (1 MB) | `Binary files /dev/null and b/<path> differ` stub |
+| Size > `HUGE_FILE_BYTES` (1 MB), NUL in the first 8000 bytes | `Binary files /dev/null and b/<path> differ` stub |
+| Size > `HUGE_FILE_BYTES` (1 MB), no NUL there | `too large to preview (N.N MB)` stub |
 | Buffer contains a NUL byte | same binary stub |
 | Otherwise | a single `@@ -0,0 +1,N @@` hunk with every line prefixed `+` |
 
-An empty file yields `@@ -0,0 +0,0 @@`. Both stub shapes are chosen so the unified-diff parser handles them without a special case.
+An empty file yields `@@ -0,0 +0,0 @@`. The parser treats both stub lines as one header-less meta hunk, like `Binary files … differ`.
 
 `is_new` is set when the synthesised body is non-empty, and relabels the section header `NEW` instead of `UNSTAGED`.
 
@@ -64,7 +65,7 @@ Scroll position is reset only when the painted file-diff identity changes, so a 
 
 ## Side-by-side column drag
 
-Split rows (`left + RULE + right`) take column widths from `tui/split.rs`. Default fraction is 0.5. Mouse drag on the RULE (± 1 columns, same band as the tree/diff pane divider) updates a session-only split fraction; it is **not** written to disk, so the next launch resets to 50/50. Drag is armed only while the effective mode is side-by-side (`width ≥ NARROW_SXS`). `i` still toggles inline / split.
+Split rows (`left + RULE + right`) take column widths from `tui/split.rs`. Default fraction is 0.5. Mouse drag on the RULE (± 1 columns, same band as the tree/diff pane divider) updates a session-only split fraction; it is **not** written to disk, so the next launch resets to 50/50. Drag is armed only while the diff paints side-by-side (`diff_pane_mode`): the painted width (`diff_paint_width`, the right pane less its 1-column scrollbar column, reserved whether or not the bar shows) is ≥ `NARROW_SXS` (100), so the right pane needs ≥ 101 columns. `i` still toggles inline / split.
 
 ## Path header
 
@@ -84,7 +85,7 @@ While wrap is on, horizontal pan is a no-op: `h` / `l`, Shift-arrows, and mouse/
 
 ## Horizontal pan
 
-When wrap is off, long diff lines clip to the pane. The cursor bar uses one column. Pan max uses the remaining content width so the last character stays reachable. `h` / `←` and `l` / `→` pan when the right pane shows a file diff (same keys pan a focused graph or commit-file list). Shift-Left / Shift-Right pan the focused pane, including the tree. Mouse horizontal wheel (and Shift-wheel) pans the pane under the pointer without moving the focused row. When a file diff has long lines, trackpad hscroll (SGR `66`/`67`, same `tui/tty.rs` decode as the live loop) over the left pane pans that diff rather than a short tree label. Offset resets to 0 when the painted file-diff identity changes. Header shows `· pan N` when offset > 0. A 1-row horizontal bar paints after the viewport leaves the left edge; a 1-column vertical bar paints after the list leaves the top. The horizontal thumb is draggable (`hit_split` / `SplitDrag::DiffHScrollbar`, same stack as the graph bars). A track click jumps `diff_col_offset` without moving `diff_cursor`. Compare tabs use this same `draw_diff` paint. Tree and commit-file lists do not paint an h-bar. Rows stay clipped to the pane width.
+When wrap is off, long diff lines clip to the pane. The cursor bar uses one column. Pan max uses the remaining content width so the last character stays reachable. `h` / `←` and `l` / `→` pan when the right pane shows a file diff (same keys pan a focused graph or commit-file list). Shift-Left / Shift-Right pan the focused pane, including the tree. Mouse horizontal wheel (and Shift-wheel) pans the pane under the pointer without moving the focused row. When a file diff has long lines, trackpad hscroll (SGR `66`/`67`, same `tui/tty.rs` decode as the live loop) over the left pane pans that diff rather than a short tree label. Offset resets to 0 when the painted file-diff identity changes. Header shows `· pan N` when offset > 0. A 1-row horizontal bar paints whenever a line is wider than the pane; a 1-column vertical bar paints whenever the diff overflows the pane, at the top too. Rows always leave that column (`diff_paint_width`), so split, wrap, and pan widths do not change when the bar shows. The horizontal thumb is draggable (`hit_split` / `SplitDrag::DiffHScrollbar`, same stack as the graph bars). A track click jumps `diff_col_offset` without moving `diff_cursor`. Compare tabs use this same `draw_diff` paint. Tree and commit-file lists do not paint an h-bar. Rows stay clipped to the pane width.
 
 ## Full-file view
 

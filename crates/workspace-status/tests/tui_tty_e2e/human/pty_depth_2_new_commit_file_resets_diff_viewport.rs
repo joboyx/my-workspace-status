@@ -3,8 +3,8 @@ use crate::seed::{daily_workspace, seed_two_tall_commit_files};
 use crate::support::{
     graph_cursor_on, panes_files_focused, panes_files_focused_diff_unfocused,
     panes_files_unfocused_diff_focused, panes_tree_unfocused_graph_focused, right_pane,
-    title_has_diff, title_has_files, title_has_graph, tree_cursor_on, tree_has, GIT_WAIT,
-    SETTLE_MS, WAIT,
+    right_vbar_at_top, title_has_diff, title_has_files, title_has_graph, tree_cursor_on, tree_has,
+    GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 const ALPHA: &str = "alpha.rs";
@@ -120,7 +120,7 @@ fn beta_diff_at_origin(screen: &str) -> bool {
         && right.contains(BETA)
         && !right.contains(ALPHA)
         && !right.contains("pan ")
-        && !right.contains('█')
+        && right_vbar_at_top(screen)
         && right_selection_on_first_body_row(screen)
 }
 
@@ -144,7 +144,7 @@ fn unfocus_right(
 ///
 /// Docs: a new commit-file diff starts at the top and left. `G` then `l`
 /// leave the first file. Esc focuses the file list. `j` loads the next
-/// file with no leftover pan chrome and no vertical scrollbar. A no-op
+/// file with no leftover pan chrome and its vertical thumb back at the top. A no-op
 /// `G` / `l` / `j` cannot pass.
 #[test]
 fn pty_depth_2_new_commit_file_resets_diff_viewport() {
@@ -216,7 +216,7 @@ fn pty_depth_2_new_commit_file_resets_diff_viewport() {
     tui.key('j');
     tui.wait_pred(
         beta_diff_at_origin,
-        "j loads beta.rs at the origin (no leftover pan, no vertical thumb, first-row cursor)",
+        "j loads beta.rs at the origin (no leftover pan, vertical thumb at the top, first-row cursor)",
         WAIT,
     );
 }

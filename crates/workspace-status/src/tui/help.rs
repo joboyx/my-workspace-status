@@ -204,8 +204,8 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "copy entity reference",
             },
             HelpEntry {
-                keys: "Esc rclick",
-                desc: "back / unfocus · never quit",
+                keys: "Esc",
+                desc: "back / unfocus · right-click · never quit",
             },
             HelpEntry {
                 keys: "Enter dblclick",
@@ -454,7 +454,12 @@ pub fn help_desc_layout(
         return below;
     }
     let beside_rows = wrap_help_description(description, beside_width).len();
-    let below_rows = 1 + wrap_help_description(description, col).len();
+    // Chips row plus the non-empty wrapped lines, as
+    // [`help_entry_visual_lines`] paints them.
+    let below_rows = 1 + wrap_help_description(description, col)
+        .iter()
+        .filter(|line| !line.is_empty())
+        .count();
     if beside_rows <= below_rows {
         HelpDescLayout {
             indent: key_width,
@@ -808,7 +813,7 @@ mod tests {
         assert!(view_keys.contains(&"y"));
         assert!(view_keys.contains(&"'"));
         assert!(!view_keys.contains(&"y '"));
-        assert!(view_keys.contains(&"Esc rclick"));
+        assert!(view_keys.contains(&"Esc"));
         assert!(view_keys.contains(&"< >"));
         assert_eq!(
             HELP_GROUPS[2]
@@ -984,17 +989,21 @@ mod tests {
     }
 
     /// Narrow terminals paint no taller than the row-aligned layout did
-    /// (equal thirds, rows aligned across columns), and no description
-    /// wraps narrower than [`HELP_MIN_DESC_WIDTH`].
+    /// (equal thirds, rows aligned across columns) and stay within two rows
+    /// of the measured reflow height, and no description wraps narrower
+    /// than [`HELP_MIN_DESC_WIDTH`].
     #[test]
     fn narrow_terminals_stay_under_the_row_aligned_height() {
-        // (terminal cols, compare tab, row-aligned body rows as measured).
-        for (term, compare, row_aligned) in [
-            (60usize, false, 60usize),
-            (64, true, 251),
-            (80, false, 86),
-            (100, false, 47),
-            (140, false, 28),
+        // Slack over the measured reflow height before the test fails.
+        const SLACK: usize = 2;
+        // (terminal cols, compare tab, row-aligned body rows, reflow body
+        // rows as measured).
+        for (term, compare, row_aligned, measured) in [
+            (60usize, false, 60usize, 52usize),
+            (64, true, 251, 52),
+            (80, false, 86, 40),
+            (100, false, 47, 30),
+            (140, false, 28, 20),
         ] {
             let groups = help_groups(compare);
             let widths = help_column_widths(groups, help_inner_width(term));
@@ -1002,6 +1011,10 @@ mod tests {
             assert!(
                 body <= row_aligned,
                 "{term} cols: {body} rows > {row_aligned} ({widths:?})"
+            );
+            assert!(
+                body <= measured + SLACK,
+                "{term} cols: {body} rows > measured {measured} + {SLACK} ({widths:?})"
             );
             for (group, &width) in groups.iter().zip(&widths) {
                 let content = help_column_content_width(width);

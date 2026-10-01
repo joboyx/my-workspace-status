@@ -11,6 +11,7 @@ use super::super::diff::{cell_code_width, diff_row_content_width, gutter_width, 
 use super::super::gates::ListFocusTarget;
 use super::super::icons::comment_mark_cols;
 use super::super::search::{apply_pan, list_row_pan_max, max_col_offset};
+use super::super::split::diff_paint_width;
 use super::super::tree::{row_segments, with_comment_mark, with_viewed_mark, NodeKind};
 use super::{AppState, FocusPane};
 use crate::helpers::visible_width;
@@ -150,7 +151,7 @@ impl AppState {
         let Some(model) = self.graph.as_ref() else {
             return 0;
         };
-        graph_col_max(model, self.ascii, pane_width, self.graph_scroll > 0)
+        graph_col_max(model, self.ascii, pane_width, self.graph_vscroll_shown())
     }
 
     fn diff_line_lens(&self) -> Vec<usize> {
@@ -173,10 +174,15 @@ impl AppState {
         }
         let rows = self.current_diff_rows();
         let gutter = gutter_width(&rows).saturating_add(comment_mark_cols(self.ascii));
-        let v_cols = u16::from(self.diff_scroll > 0);
-        let pane_w = self.layout.diff_pane_width.saturating_sub(v_cols).max(1) as usize;
+        let pane_w = diff_paint_width(self.layout.diff_pane_width) as usize;
         let content_w = diff_row_content_width(pane_w);
         max_col_offset(&self.diff_line_lens(), cell_code_width(content_w, gutter))
+    }
+
+    /// Whether the file diff paints its horizontal scrollbar: a row is
+    /// wider than the pane, or the view has left the left edge.
+    pub(crate) fn diff_hscroll_shown(&self) -> bool {
+        !self.diff_wrap && (self.diff_col_offset > 0 || self.diff_pan_max() > 0)
     }
 
     fn diff_can_pan(&self) -> bool {

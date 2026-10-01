@@ -7,8 +7,8 @@ use crate::harness::{
 use crate::seed::{daily_workspace, seed_long_diff_file};
 use crate::support::{
     no_mouse_toggle_toast, no_wrong_overlays, panes_tree_focused_diff_unfocused,
-    panes_tree_unfocused_diff_focused, right_pane, status_row, title_has_files, tree_cursor_on,
-    tree_has, tree_inactive_selection_on, SETTLE_MS, WAIT,
+    panes_tree_unfocused_diff_focused, right_pane, right_vbar_at_top, status_row, title_has_files,
+    tree_cursor_on, tree_has, tree_inactive_selection_on, SETTLE_MS, WAIT,
 };
 
 const FILE: &str = "unique-diffline.rs";
@@ -37,7 +37,9 @@ fn long_diff_clipped_tree_focus(screen: &str) -> bool {
         && right.contains("inline (too narrow)")
         && !right.contains("inline (too narrow) ·")
         && !right.contains(DIFF_HSCROLL_TAIL)
-        && !right.contains(THUMB)
+        // Both bars show at the origin: the diff overflows both ways.
+        && right_vbar_at_top(screen)
+        && right.contains('═')
         && !right.contains("app/README.md")
         && !right.contains("UNSTAGED")
         && !title_has_files(screen)
@@ -199,7 +201,7 @@ fn pty_diff_hscrollbar_thumb_drag() {
     tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
         hbar_painted_tail_clipped,
-        "thumb grab must not jump (a left-edge track click hides the bar at origin)",
+        "thumb grab must not jump (a left-edge track click pans back to the origin)",
         WAIT,
     );
 

@@ -779,6 +779,17 @@ pub fn screen_line_from_end(screen: &str, from_end: usize) -> &str {
         .unwrap_or("")
 }
 
+/// Right-pane vertical scrollbar thumb at the top of its track: the first
+/// right-pane row whose last cell is the bar (`█` thumb or `║` track) is the
+/// thumb. The bar shows whenever the content overflows, at the origin too.
+pub fn right_vbar_at_top(screen: &str) -> bool {
+    right_pane(screen)
+        .lines()
+        .filter_map(|line| line.trim_end_matches('│').chars().last())
+        .find(|ch| matches!(ch, '█' | '║'))
+        == Some('█')
+}
+
 /// Right-pane cells, excluding top/bottom chrome (same rows as [`left_tree`]).
 pub fn right_pane(screen: &str) -> String {
     let lines: Vec<&str> = screen.lines().collect();
