@@ -95,7 +95,7 @@ Toggling full-file does **not** open an editor (`e` does). After the new rows lo
 
 ## Commit / stash / worktree diffs at depth 2
 
-At drill depth 2 the right pane still uses the same `DiffRow` paint, and the left pane is the commit-file list (`j`/`k` there move files and load the focused file's diff). The loader scopes content by commit-file source:
+At drill depth 2 the right pane still uses the same `DiffRow` paint, and the left pane is the commit-file list (`j`/`k` there move files and load the focused file's diff; a folder row shows the [folder summary](#folder-summary)). The loader scopes content by commit-file source:
 
 | Source | Staged slot | Unstaged slot |
 | --- | --- | --- |
@@ -104,3 +104,13 @@ At drill depth 2 the right pane still uses the same `DiffRow` paint, and the lef
 | `stash` | empty | `diff_stash_file` (`diff <stash>^1 <stash> -- path`) |
 
 `Ctrl-o` follows the focused **commit-file** row id. Commit and stash diffs are single-sided by design — name-status letters land on `FileChange.unstaged_status` so status letters keep A/M/D/R (not workspace staged-only `S`).
+
+## Folder summary
+
+On a depth-2 drill or a compare tab, a focused folder row in the file list paints a folder summary in the right pane instead of a diff (`draw_folder_summary` in `tui/render.rs`). The summary comes from `AppState::folder_summary`, built in memory from the loaded file list. It runs no git.
+
+- Header: `dir/` in the heading style, then muted `N files · +A −D`. The header wraps like the path header. The totals drop out when no file under the folder has line counts.
+- One row per changed file under the folder, at any depth, sorted by path. Each row uses the flat-mode file-list segments (icon, name, dimmed folder, status badge). `+added` (added colour) and `−deleted` (deleted colour) sit before the badge. A file with no counts (binary, untracked, failed numstat) shows the badge only.
+- ASCII glyph mode paints `-` for deletions.
+- Rows past the pane height fold into a last row `… N more`. The summary does not scroll.
+- The status row drops the `split` / `inline` pill, and the side-by-side rule is not armed for drag.
