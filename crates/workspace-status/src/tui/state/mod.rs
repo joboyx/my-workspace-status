@@ -2951,9 +2951,12 @@ impl AppState {
 
     /// Diff row indices whose search text contains `query` (case-folded),
     /// cached by content fingerprint, layout, and query.
+    ///
+    /// No hits while a [`Self::folder_summary`] hides the diff. That check
+    /// runs before the cache, which keys on the hidden diff's content.
     pub(crate) fn diff_search_hits(&self, query: &str) -> Vec<usize> {
         let query = query.trim().to_lowercase();
-        if query.is_empty() {
+        if query.is_empty() || self.folder_summary().is_some() {
             return Vec::new();
         }
         let key = (
@@ -8034,6 +8037,34 @@ mod tests {
         let _ = summary_move_to(&mut app, "src");
         app.focus = FocusPane::Right;
         assert_eq!(keys(&app), Vec::<String>::new());
+    }
+
+    /// A search typed over a folder summary must not cache empty hits for
+    /// the diff kept behind it, nor count that diff's hits.
+    #[test]
+    fn diff_search_over_a_folder_summary_does_not_reach_the_kept_diff() {
+        let mut app = summary_compare_app();
+        app.focus = FocusPane::Right;
+        assert_eq!(app.diff_search_hits("new").len(), 1, "file diff hit");
+
+        app.focus = FocusPane::Left;
+        let _ = summary_move_to(&mut app, "src");
+        app.focus = FocusPane::Right;
+        assert!(app.diff_search_hits("new").is_empty(), "summary: no hits");
+        app.dispatch(Action::SearchStart);
+        for c in "new".chars() {
+            app.dispatch(Action::SearchChar(c));
+        }
+        app.dispatch(Action::SearchSubmit);
+        assert_eq!(app.search_match_position(), Some((None, 0)));
+
+        // Same file again (no reload, same content): fresh hits, not the
+        // empty list from the summary.
+        app.focus = FocusPane::Left;
+        assert_eq!(summary_move_to(&mut app, "src/a.rs"), Effect::None);
+        app.focus = FocusPane::Right;
+        assert_eq!(app.diff_search_hits("new").len(), 1);
+        assert_eq!(app.search_match_position().map(|(_, n)| n), Some(1));
     }
 
     #[test]
