@@ -89,9 +89,10 @@ use super::stash::{
 };
 use super::status::StatusMessage;
 use super::tabs::{
-    compare_file_dirty, OpenCompare, TabStrip, COMPARE_FOCUS_A_FILE, COMPARE_HEAD_MOVED,
-    COMPARE_STILL_LOADING, DEFAULT_BRANCH_NOT_FOUND, FOCUS_A_CHECKOUT, HEAD_HAS_NO_COMMIT,
-    SWITCH_TO_WORKSPACE_TAB, WORKSPACE_TAB_CANNOT_CLOSE,
+    compare_file_dirty, compare_range_label, CommitPickerState, ComparePickerKind,
+    ComparePickerState, OpenCompare, TabStrip, CANNOT_REVERT_COMMITTED_DIFF, COMPARE_FOCUS_A_FILE,
+    COMPARE_HEAD_MOVED, COMPARE_HEAD_REF, COMPARE_STILL_LOADING, FOCUS_A_COMMIT_TO_DIFF,
+    ROOT_COMMIT_HAS_NO_PARENT, SWITCH_TO_WORKSPACE_TAB, WORKSPACE_TAB_CANNOT_CLOSE,
 };
 use super::theme::{cycle_theme_id, theme_from_env, ThemeId};
 use super::tree::{
@@ -544,7 +545,7 @@ pub struct AppState {
     pub command_palette: Option<CommandPaletteState>,
     /// Permanent Workspace plus session compare tabs.
     pub tabs: TabStrip,
-    pub compare_picker: Option<BranchPickerState>,
+    pub compare_picker: Option<ComparePickerState>,
     /// Checkout waiting for [`Effect::PrepareComparePicker`]. Cleared on open or abandon.
     pub(crate) compare_picker_pending: Option<String>,
     workspace_park: Option<WorkspacePark>,
@@ -1325,7 +1326,9 @@ impl AppState {
                     _ => stash_ref.clone(),
                 })
             }
-            CommitFileSource::Compare { base_ref, .. } => Some(format!("{base_ref}...HEAD")),
+            CommitFileSource::Compare {
+                base_ref, head_ref, ..
+            } => Some(compare_range_label(base_ref, head_ref)),
             CommitFileSource::Commit { commit_id } => {
                 let short = if commit_id.len() >= 7 {
                     &commit_id[..7]
@@ -1916,6 +1919,7 @@ impl AppState {
                 tab_id: tab.id,
                 repo: tab.checkout_path.clone(),
                 base_ref: tab.base_ref.clone(),
+                head_ref: tab.head_ref.clone(),
                 force: true,
             };
             return Effect::Batch(vec![base, compare]);
@@ -3447,6 +3451,8 @@ impl AppState {
 
     /// The compare-tab file that `x` would revert, or why it may not.
     ///
+    /// A tab with a pinned head refuses first (`cannot revert a committed
+    /// diff`).
     /// With a `V` highlight, or with the diff focused, the target is the
     /// open diff, and only once its content is loaded for the current
     /// range and path, and never while a folder summary hides it. On the
@@ -3456,6 +3462,10 @@ impl AppState {
         let Some(tab) = self.tabs.active_compare() else {
             return Err(SWITCH_TO_WORKSPACE_TAB.into());
         };
+        // A pinned head is a commit in history, never the working tree.
+        if tab.is_pinned() {
+            return Err(CANNOT_REVERT_COMMITTED_DIFF.into());
+        }
         if tab.loading {
             return Err(COMPARE_STILL_LOADING.into());
         }
@@ -5343,6 +5353,7 @@ impl AppState {
         }
     }
 
+    /// Snapshot HEAD sha (empty when unborn) and default tip ref of `checkout`.
     fn checkout_head_and_default(&self, checkout: &str) -> Option<(&str, Option<&str>)> {
         self.snapshot
             .repos
@@ -5351,10 +5362,12 @@ impl AppState {
             .map(|row| (row.head.as_str(), row.default_tip_ref.as_deref()))
     }
 
-    fn open_compare_tab(&mut self, checkout: String, base_ref: String) -> Effect {
+    fn open_compare_tab(&mut self, checkout: String, base_ref: String, head_ref: String) -> Effect {
         let before = self.tabs.active;
         self.park_active_session();
-        let opened = self.tabs.open_or_focus(checkout.clone(), base_ref.clone());
+        let opened = self
+            .tabs
+            .open_or_focus(checkout.clone(), base_ref.clone(), head_ref.clone());
         if self.tabs.active != before {
             self.clear_tab_transients();
         }
@@ -5370,46 +5383,73 @@ impl AppState {
                     tab_id,
                     repo: checkout,
                     base_ref,
+                    head_ref,
                     force: true,
                 }
             }
         }
     }
 
+    /// Diff vs default. [`Self::compare_refusal`] has already refused a
+    /// missing checkout, an unborn HEAD, and a missing default tip.
     pub(crate) fn compare_vs_default(&mut self) -> Effect {
         let Some(checkout) = self.compare_target_checkout() else {
-            self.status = StatusMessage::warn(FOCUS_A_CHECKOUT);
             return Effect::None;
         };
-        let Some((head, default_tip)) = self.checkout_head_and_default(&checkout) else {
-            self.status = StatusMessage::warn(FOCUS_A_CHECKOUT);
+        let Some(base_ref) = self
+            .checkout_head_and_default(&checkout)
+            .and_then(|(_, default_tip)| default_tip)
+            .map(str::to_string)
+        else {
             return Effect::None;
         };
-        if head.is_empty() {
-            self.status = StatusMessage::warn(HEAD_HAS_NO_COMMIT);
-            return Effect::None;
-        }
-        let Some(base_ref) = default_tip.map(str::to_string) else {
-            self.status = StatusMessage::warn(DEFAULT_BRANCH_NOT_FOUND);
-            return Effect::None;
-        };
-        self.open_compare_tab(checkout, base_ref)
+        self.open_compare_tab(checkout, base_ref, COMPARE_HEAD_REF.into())
     }
 
-    pub(crate) fn compare_vs_branch(&mut self) -> Effect {
+    /// Diff vs branch / Diff vs commit: prepare the compare picker that
+    /// lists `kind`. [`Self::compare_refusal`] has already refused a missing
+    /// checkout and an unborn HEAD.
+    pub(crate) fn prepare_compare_picker(&mut self, kind: ComparePickerKind) -> Effect {
         let Some(checkout) = self.compare_target_checkout() else {
-            self.status = StatusMessage::warn(FOCUS_A_CHECKOUT);
             return Effect::None;
         };
-        if self
-            .checkout_head_and_default(&checkout)
-            .is_some_and(|(head, _)| head.is_empty())
-        {
-            self.status = StatusMessage::warn(HEAD_HAS_NO_COMMIT);
-            return Effect::None;
-        }
         self.compare_picker_pending = Some(checkout.clone());
-        Effect::PrepareComparePicker { repo: checkout }
+        Effect::PrepareComparePicker {
+            repo: checkout,
+            kind,
+        }
+    }
+
+    /// Checkout and full commit id for Diff commit vs parent, or why it
+    /// refuses.
+    ///
+    /// The graph pane must focus a commit row (the same predicate as
+    /// [`Self::graph_commit_focused`]) that has a parent. The checkout is the
+    /// repo that owns the loaded graph, the one graph `b` / `m` act on.
+    fn commit_vs_parent_target(&self) -> Result<(String, String), &'static str> {
+        if !self.graph_commit_focused() {
+            return Err(FOCUS_A_COMMIT_TO_DIFF);
+        }
+        let Some(GraphRow::Commit { commit, .. }) = self.focused_graph_row() else {
+            return Err(FOCUS_A_COMMIT_TO_DIFF);
+        };
+        if commit.parents.is_empty() {
+            return Err(ROOT_COMMIT_HAS_NO_PARENT);
+        }
+        let repo = self.focused_graph_repo().ok_or(FOCUS_A_COMMIT_TO_DIFF)?;
+        Ok((repo, commit.id))
+    }
+
+    /// Diff commit vs parent: open or focus `<sha>^...<sha>` with the head
+    /// pinned to `<sha>`. `^` is the first parent, so a merge shows its
+    /// changes against the first parent. Never checks anything out.
+    /// [`Self::compare_refusal`] has already refused a non-commit focus and
+    /// a root commit.
+    pub(crate) fn compare_commit_vs_parent(&mut self) -> Effect {
+        let Ok((repo, commit_id)) = self.commit_vs_parent_target() else {
+            return Effect::None;
+        };
+        self.open_compare_tab(repo, format!("{commit_id}^"), commit_id)
     }
 
     pub(crate) fn close_compare_tab(&mut self) -> Effect {
@@ -5442,7 +5482,21 @@ impl AppState {
         branches: Vec<crate::git::LocalBranch>,
     ) {
         self.compare_picker_pending = None;
-        self.compare_picker = Some(BranchPickerState::new(repo, branches));
+        self.compare_picker = Some(ComparePickerState::Branch(BranchPickerState::new(
+            repo, branches,
+        )));
+        self.status.clear();
+    }
+
+    pub(crate) fn open_compare_commit_picker(
+        &mut self,
+        repo: String,
+        commits: Vec<crate::git::AncestorCommit>,
+    ) {
+        self.compare_picker_pending = None;
+        self.compare_picker = Some(ComparePickerState::Commit(CommitPickerState::new(
+            repo, commits,
+        )));
         self.status.clear();
     }
 
@@ -5455,13 +5509,13 @@ impl AppState {
         let Some(picker) = self.compare_picker.as_ref() else {
             return Effect::None;
         };
-        let Some(name) = picker.selected().map(|branch| branch.name.clone()) else {
+        let Some(base_ref) = picker.selected_base() else {
             self.status = StatusMessage::warn(super::tabs::compare_picker_empty(picker));
             return Effect::None;
         };
-        let repo = picker.repo.clone();
+        let repo = picker.repo().to_string();
         self.compare_picker = None;
-        self.open_compare_tab(repo, name)
+        self.open_compare_tab(repo, base_ref, COMPARE_HEAD_REF.into())
     }
 
     /// Path of the folder row under compare tab `tab_id`'s file cursor, if
@@ -5684,10 +5738,12 @@ impl AppState {
         }
         let repo = tab.checkout_path.clone();
         let base_ref = tab.base_ref.clone();
+        let head_ref = tab.head_ref.clone();
         Some(Effect::LoadCompareRange {
             tab_id,
             repo,
             base_ref,
+            head_ref,
             force: true,
         })
     }
@@ -5710,6 +5766,7 @@ impl AppState {
                 tab_id: tab.id,
                 repo: tab.checkout_path.clone(),
                 base_ref: tab.base_ref.clone(),
+                head_ref: tab.head_ref.clone(),
                 last_head: tab.last_head.clone(),
                 last_base_tip: tab.last_base_tip.clone(),
             })
@@ -6860,6 +6917,79 @@ mod tests {
     }
 
     #[test]
+    fn compare_commit_picker_filters_and_opens_a_live_tab_at_the_picked_commit() {
+        const OLD: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const NEW: &str = "ccc2222ddddddddddddddddddddddddddddddddd";
+        let mut app = state();
+        let commit = |id: &str, subject: &str| crate::git::AncestorCommit {
+            id: id.into(),
+            subject: subject.into(),
+        };
+        app.open_compare_commit_picker("app".into(), Vec::new());
+        assert_eq!(app.dispatch(Action::ComparePickerSubmit), Effect::None);
+        assert_eq!(app.status, "No commits to compare");
+
+        app.open_compare_commit_picker(
+            "app".into(),
+            vec![commit(NEW, "Add parser"), commit(OLD, "Initial import")],
+        );
+        let labels = |app: &AppState| {
+            app.compare_picker
+                .as_ref()
+                .unwrap()
+                .window_labels(0, usize::MAX)
+        };
+        assert_eq!(
+            labels(&app),
+            vec!["ccc2222  Add parser", "aaa1111  Initial import"]
+        );
+        for c in "AAA1".chars() {
+            app.dispatch(Action::ComparePickerChar(c));
+        }
+        assert_eq!(labels(&app), vec!["aaa1111  Initial import"]);
+        for _ in 0..4 {
+            app.dispatch(Action::ComparePickerBackspace);
+        }
+        for c in "pARSER".chars() {
+            app.dispatch(Action::ComparePickerChar(c));
+        }
+        assert_eq!(labels(&app), vec!["ccc2222  Add parser"]);
+        app.dispatch(Action::ComparePickerChar('z'));
+        assert_eq!(app.dispatch(Action::ComparePickerSubmit), Effect::None);
+        assert_eq!(app.status, "no commit matches pARSERz");
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+
+        for _ in 0.."pARSER".len() {
+            app.dispatch(Action::ComparePickerBackspace);
+        }
+        app.dispatch(Action::ComparePickerMove(1));
+        match app.dispatch(Action::ComparePickerSubmit) {
+            Effect::LoadCompareRange {
+                repo,
+                base_ref,
+                head_ref,
+                ..
+            } => {
+                assert_eq!(repo, "app");
+                assert_eq!(base_ref, OLD);
+                assert_eq!(head_ref, COMPARE_HEAD_REF);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(app.compare_picker.is_none());
+        let tab = app.tabs.active_compare_mut().unwrap();
+        assert_eq!(tab.label(), "app ↔ aaa1111");
+        assert!(!tab.is_pinned());
+
+        app.dispatch(Action::JumpToTab(1));
+        app.open_compare_commit_picker("app".into(), vec![commit(OLD, "Initial import")]);
+        assert_eq!(app.dispatch(Action::ComparePickerCancel), Effect::None);
+        assert!(app.compare_picker.is_none());
+        assert_eq!(app.status, "compare cancelled");
+        assert_eq!(app.status.kind(), StatusKind::Info);
+    }
+
+    #[test]
     fn branch_picker_typing_keeps_the_filter_off_the_status_rows() {
         let mut app = state();
         app.branch_picker = Some(crate::tui::branches::BranchPickerState::new(
@@ -7580,6 +7710,7 @@ mod tests {
     fn compare_source() -> CommitFileSource {
         CommitFileSource::Compare {
             base_ref: "main".into(),
+            head_ref: "HEAD".into(),
             base_tip: "bbb".into(),
             merge_base: "aaa".into(),
             head: "ccc".into(),
@@ -7607,7 +7738,8 @@ mod tests {
     fn compare_tab_edit_does_not_open_workspace_dirty_file() {
         let mut app = state();
         focus_file(&mut app, "README.md");
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         app.focus = FocusPane::Left;
         assert_eq!(app.dispatch(Action::Edit), Effect::None);
         assert_eq!(app.status, "focus a file to edit");
@@ -7623,7 +7755,8 @@ mod tests {
     fn compare_tab_edit_skips_dir_row() {
         let mut app = state();
         focus_file(&mut app, "README.md");
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         app.focus = FocusPane::Left;
         {
             let tab = app.tabs.active_compare_mut().unwrap();
@@ -7721,7 +7854,8 @@ mod tests {
             row.head = "ccc".into();
             row.changes.clear();
         }
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         app.focus = FocusPane::Left;
         let tab_id = app.tabs.active_compare().unwrap().id;
         let gen = app.tabs.active_compare().unwrap().generation;
@@ -8119,7 +8253,8 @@ mod tests {
     }
 
     fn compare_tab_with_view_rs(app: &mut AppState) {
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         app.focus = FocusPane::Left;
         let tab = app.tabs.active_compare_mut().unwrap();
         tab.source = Some(compare_source());
@@ -8205,7 +8340,8 @@ mod tests {
     #[test]
     fn apply_compare_range_selects_first_file_not_dir() {
         let mut app = state();
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         app.focus = FocusPane::Left;
         let tab_id = app.tabs.active_compare().unwrap().id;
         let gen = app.tabs.active_compare().unwrap().generation;
@@ -8236,7 +8372,8 @@ mod tests {
     #[test]
     fn compare_move_to_start_selects_first_file_not_dir() {
         let mut app = state();
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         app.focus = FocusPane::Left;
         let tab_id = app.tabs.active_compare().unwrap().id;
         let gen = app.tabs.active_compare().unwrap().generation;
@@ -8280,7 +8417,8 @@ mod tests {
     #[test]
     fn apply_compare_range_keeps_path_when_new_file_prepended() {
         let mut app = state();
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         let tab_id = app.tabs.active_compare().unwrap().id;
         let gen = app.tabs.active_compare().unwrap().generation;
         let _ = app.apply_compare_range(
@@ -8307,7 +8445,8 @@ mod tests {
     #[test]
     fn apply_compare_range_gone_path_clamps_to_neighbor() {
         let mut app = state();
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         let tab_id = app.tabs.active_compare().unwrap().id;
         let gen = app.tabs.active_compare().unwrap().generation;
         let _ = app.apply_compare_range(
@@ -8333,7 +8472,8 @@ mod tests {
     #[test]
     fn apply_compare_range_keeps_path_on_flattened_row() {
         let mut app = state();
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         let tab_id = app.tabs.active_compare().unwrap().id;
         let gen = app.tabs.active_compare().unwrap().generation;
         let _ = app.apply_compare_range(
@@ -8368,7 +8508,8 @@ mod tests {
     #[test]
     fn compare_t_restores_file_cursor() {
         let mut app = state();
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         app.focus = FocusPane::Left;
         let tab_id = app.tabs.active_compare().unwrap().id;
         let gen = app.tabs.active_compare().unwrap().generation;
@@ -8467,7 +8608,8 @@ mod tests {
         };
         let mut app = state();
         focus_file(&mut app, "README.md");
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         for (title, reason) in [
             ("Stage", CANNOT_STAGE_COMPARE),
             ("Unstage", CANNOT_UNSTAGE_COMPARE),
@@ -8559,7 +8701,8 @@ mod tests {
         }
         assert_eq!(app.compare_refusal(&Action::Stage), None);
 
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         for action in &switch {
             assert_eq!(
                 app.compare_refusal(action).as_deref(),
@@ -8606,7 +8749,8 @@ mod tests {
 
     /// Compare tab on `README.md` with two added lines (new 2 and 3), diff focused.
     fn compare_tab_with_added_lines(app: &mut AppState) {
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         let tab_id = app.tabs.active_compare().unwrap().id;
         let gen = app.tabs.active_compare().unwrap().generation;
         let _ = app.apply_compare_range(tab_id, gen, Ok(compare_range_load(&["README.md"])));
@@ -8645,7 +8789,8 @@ mod tests {
 
     /// Open a compare tab on `regions.txt` with the right pane focused.
     fn compare_tab_on_regions(app: &mut AppState) -> (u64, u64) {
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         let tab_id = app.tabs.active_compare().unwrap().id;
         let gen = app.tabs.active_compare().unwrap().generation;
         let _ = app.apply_compare_range(tab_id, gen, Ok(compare_range_load(&["regions.txt"])));
@@ -8868,7 +9013,8 @@ mod tests {
             row.head = "ccc".into();
             row.changes.clear();
         }
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         let tab_id = app.tabs.active_compare().unwrap().id;
         let gen = app.tabs.active_compare().unwrap().generation;
         let mut load = compare_range_load(&["regions.txt", "summary.txt", "new.txt"]);
@@ -9360,7 +9506,8 @@ mod tests {
     #[test]
     fn compare_left_apostrophe_names_base_branch() {
         let mut app = state();
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         let tab_id = app.tabs.active_compare().unwrap().id;
         let gen = app.tabs.active_compare().unwrap().generation;
         let _ = app.apply_compare_range(tab_id, gen, Ok(compare_range_load(&["README.md"])));
@@ -9377,7 +9524,8 @@ mod tests {
     #[test]
     fn compare_apostrophe_copies_diff_and_is_not_a_mutation() {
         let mut app = state();
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         let tab_id = app.tabs.active_compare().unwrap().id;
         let gen = app.tabs.active_compare().unwrap().generation;
         let _ = app.apply_compare_range(tab_id, gen, Ok(compare_range_load(&["README.md"])));
@@ -9587,7 +9735,8 @@ mod tests {
             end_line: 2,
         };
         app.comment_store = put_comment(&app.comment_store, worktree, "workspace-note");
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         app.focus = FocusPane::Right;
         assert_eq!(app.open_diff_target(), None);
         assert_eq!(app.commit_drill_source(), None);
@@ -9602,7 +9751,8 @@ mod tests {
         let mut app = state();
         focus_repo(&mut app, "app");
         app.drill = DrillView::Graph;
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         let tab_id = app.tabs.active_compare().unwrap().id;
         let gen = app.tabs.active_compare().unwrap().generation;
         let _ = app.apply_compare_range(
@@ -9660,7 +9810,8 @@ mod tests {
             DrillView::Files { cursor, .. } => *cursor,
             other => panic!("{other:?}"),
         };
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         let tab_id = app.tabs.active_compare().unwrap().id;
         let gen = app.tabs.active_compare().unwrap().generation;
         let _ = app.apply_compare_range(tab_id, gen, Ok(compare_range_load(&["README.md"])));
@@ -9699,8 +9850,10 @@ mod tests {
     #[test]
     fn compare_click_close_hits_close_compare_and_workspace_never_closes() {
         let mut app = state();
-        app.tabs.open_or_focus("app".into(), "main".into());
-        app.tabs.open_or_focus("app".into(), "develop".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        app.tabs
+            .open_or_focus("app".into(), "develop".into(), "HEAD".into());
         assert_eq!(app.tabs.active, 2);
         app.layout.tab_y = 0;
         app.layout.tab_hits = vec![(0, 12, 0), (13, 20, 1), (34, 22, 2)];
@@ -9721,7 +9874,8 @@ mod tests {
     #[test]
     fn pointer_move_reports_tab_close_hover_changes_and_keeps_chords() {
         let mut app = state();
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         app.layout.tab_y = 0;
         app.layout.tab_close_hits = vec![(28, 3, 1)];
         assert!(!app.set_pointer(Some((5, 0))), "off close: no hover change");
@@ -9753,7 +9907,8 @@ mod tests {
     #[test]
     fn toggle_mouse_clears_pointer_and_off_ignores_motion() {
         let mut app = state();
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         app.layout.tab_y = 0;
         app.layout.tab_close_hits = vec![(28, 3, 1)];
         assert!(app.set_pointer(Some((29, 0))));
@@ -9789,7 +9944,8 @@ mod tests {
             ],
         );
         app.dispatch(Action::BranchChar('f'));
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         assert!(app.is_compare_tab());
         assert_eq!(app.dispatch(Action::BranchSubmit), Effect::None);
         assert_eq!(app.status, super::super::tabs::SWITCH_TO_WORKSPACE_TAB);
@@ -9799,7 +9955,8 @@ mod tests {
     #[test]
     fn compare_probe_skips_loading_tabs() {
         let mut app = state();
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         app.tabs.active_compare_mut().unwrap().loading = true;
         assert!(app.compare_probe_effects().is_empty());
         app.tabs.active_compare_mut().unwrap().loading = false;
@@ -9809,7 +9966,8 @@ mod tests {
     #[test]
     fn nav_esc_on_compare_left_keeps_the_tab() {
         let mut app = state();
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         assert!(app.is_compare_tab());
         app.focus = FocusPane::Right;
         assert_eq!(app.dispatch(Action::NavEsc), Effect::None);
@@ -11981,6 +12139,236 @@ mod tests {
         app.graph_cursor = idx;
         app.focus = FocusPane::Right;
         app.drill = DrillView::Graph;
+    }
+
+    const PARENT_TITLE: &str = "Diff commit vs parent in new tab";
+    const CHILD_SHA: &str = "ccc2222ddddddddddddddddddddddddddddddddd";
+    const ROOT_SHA: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// `app` graph: uncommitted, a child commit, a stash, and a root commit.
+    fn install_parent_graph(app: &mut AppState) {
+        let model = GraphModel {
+            commits: vec![
+                Commit {
+                    id: CHILD_SHA.into(),
+                    subject: "child".into(),
+                    parents: vec![ROOT_SHA.into()],
+                    ..Commit::default()
+                },
+                graph_commit(ROOT_SHA, "root"),
+            ],
+            stashes: vec![graph_stash("stash@{0}", "wip")],
+            head_id: Some(CHILD_SHA.into()),
+            show_ignored: app.show_ignored,
+            uncommitted: Some(true),
+            ..GraphModel::default()
+        };
+        app.set_graph(model, "app".into(), CHILD_SHA.into());
+        app.focus = FocusPane::Right;
+        app.drill = DrillView::Graph;
+    }
+
+    fn focus_graph_commit(app: &mut AppState, id: &str) {
+        focus_graph_row(
+            app,
+            |r| matches!(r, GraphRow::Commit { commit, .. } if commit.id == id),
+        );
+    }
+
+    /// Palette row and dispatch give `reason` and open no tab.
+    fn assert_parent_compare_refused(app: &mut AppState, reason: &str) {
+        assert_eq!(
+            palette_reason(app, PARENT_TITLE).as_deref(),
+            Some(reason),
+            "palette"
+        );
+        let tabs = app.tabs.compare.len();
+        app.status.clear();
+        assert_eq!(app.dispatch(Action::CompareCommitVsParent), Effect::None);
+        assert_eq!(app.status, reason, "dispatch");
+        assert_eq!(app.tabs.compare.len(), tabs, "no tab opens");
+    }
+
+    #[test]
+    fn commit_vs_parent_opens_a_pinned_tab_on_the_graph_repo() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        install_parent_graph(&mut app);
+        focus_graph_commit(&mut app, CHILD_SHA);
+        assert_eq!(palette_reason(&app, PARENT_TITLE), None);
+        let tab_id = match app.dispatch(Action::CompareCommitVsParent) {
+            Effect::LoadCompareRange {
+                tab_id,
+                repo,
+                base_ref,
+                head_ref,
+                force,
+            } => {
+                assert_eq!(repo, "app");
+                assert_eq!(base_ref, format!("{CHILD_SHA}^"));
+                assert_eq!(head_ref, CHILD_SHA);
+                assert!(force);
+                tab_id
+            }
+            other => panic!("{other:?}"),
+        };
+        assert!(app.is_compare_tab());
+        let tab = app.tabs.active_compare().unwrap();
+        assert_eq!(tab.id, tab_id);
+        assert!(tab.is_pinned());
+        assert_eq!(tab.label(), "app ↔ ccc2222^");
+        assert_eq!(tab.range_header(), "ccc2222^...ccc2222");
+        assert_eq!(
+            app.commit_detail_meta().1.as_deref(),
+            Some("ccc2222^...ccc2222")
+        );
+        // Probes and reloads keep the pinned head.
+        match app.compare_probe_effects().as_slice() {
+            [] => {}
+            other => panic!("still loading, no probe: {other:?}"),
+        }
+        app.tabs.active_compare_mut().unwrap().loading = false;
+        match app.compare_probe_effects().as_slice() {
+            [Effect::ProbeCompareTab { head_ref, .. }] => assert_eq!(head_ref, CHILD_SHA),
+            other => panic!("{other:?}"),
+        }
+        match app.apply_compare_probe(tab_id, true, None) {
+            Some(Effect::LoadCompareRange { head_ref, .. }) => assert_eq!(head_ref, CHILD_SHA),
+            other => panic!("{other:?}"),
+        }
+
+        // On the compare tab no graph commit is focused.
+        assert_parent_compare_refused(&mut app, FOCUS_A_COMMIT_TO_DIFF);
+
+        // Back on Workspace the same commit focuses the existing tab.
+        app.dispatch(Action::JumpToTab(1));
+        focus_graph_commit(&mut app, CHILD_SHA);
+        assert_eq!(app.dispatch(Action::CompareCommitVsParent), Effect::None);
+        assert_eq!(app.tabs.compare.len(), 1);
+        assert_eq!(app.tabs.active, 1);
+    }
+
+    #[test]
+    fn commit_vs_parent_refuses_off_a_parented_graph_commit() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        install_parent_graph(&mut app);
+        focus_graph_commit(&mut app, ROOT_SHA);
+        assert_parent_compare_refused(&mut app, ROOT_COMMIT_HAS_NO_PARENT);
+        focus_graph_row(&mut app, |r| matches!(r, GraphRow::Uncommitted { .. }));
+        assert_parent_compare_refused(&mut app, FOCUS_A_COMMIT_TO_DIFF);
+        focus_graph_row(&mut app, |r| matches!(r, GraphRow::Stash(_)));
+        assert_parent_compare_refused(&mut app, FOCUS_A_COMMIT_TO_DIFF);
+        focus_graph_commit(&mut app, CHILD_SHA);
+        app.focus = FocusPane::Left;
+        assert_parent_compare_refused(&mut app, FOCUS_A_COMMIT_TO_DIFF);
+    }
+
+    #[test]
+    fn compare_open_refusals_match_on_palette_and_dispatch() {
+        use super::super::tabs::{DEFAULT_BRANCH_NOT_FOUND, FOCUS_A_CHECKOUT, HEAD_HAS_NO_COMMIT};
+        let mut app = state();
+        let check = |app: &mut AppState, title: &str, action: Action, reason: &str| {
+            assert_eq!(
+                palette_reason(app, title).as_deref(),
+                Some(reason),
+                "{title}"
+            );
+            app.status.clear();
+            assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
+            assert_eq!(app.status, reason, "{action:?}");
+            assert!(app.tabs.is_workspace());
+            assert!(app.compare_picker_pending.is_none());
+        };
+        app.cursor = 0;
+        for (title, action) in [
+            ("Diff vs default in new tab", Action::CompareVsDefault),
+            ("Diff vs branch in new tab…", Action::CompareVsBranch),
+            ("Diff vs commit in new tab…", Action::CompareVsCommit),
+        ] {
+            check(&mut app, title, action, FOCUS_A_CHECKOUT);
+        }
+        focus_repo(&mut app, "app");
+        app.focus = FocusPane::Left;
+        for (title, action) in [
+            ("Diff vs default in new tab", Action::CompareVsDefault),
+            ("Diff vs branch in new tab…", Action::CompareVsBranch),
+            ("Diff vs commit in new tab…", Action::CompareVsCommit),
+        ] {
+            check(&mut app, title, action, HEAD_HAS_NO_COMMIT);
+        }
+        for row in app.snapshot.repos.iter_mut().filter(|r| r.repo == "app") {
+            row.head = "ccc".into();
+        }
+        check(
+            &mut app,
+            "Diff vs default in new tab",
+            Action::CompareVsDefault,
+            DEFAULT_BRANCH_NOT_FOUND,
+        );
+        assert_eq!(palette_reason(&app, "Diff vs branch in new tab…"), None);
+        assert_eq!(
+            app.dispatch(Action::CompareVsBranch),
+            Effect::PrepareComparePicker {
+                repo: "app".into(),
+                kind: ComparePickerKind::Branch,
+            }
+        );
+        assert_eq!(palette_reason(&app, "Diff vs commit in new tab…"), None);
+        assert_eq!(
+            app.dispatch(Action::CompareVsCommit),
+            Effect::PrepareComparePicker {
+                repo: "app".into(),
+                kind: ComparePickerKind::Commit,
+            }
+        );
+        assert_eq!(app.compare_picker_pending.as_deref(), Some("app"));
+    }
+
+    #[test]
+    fn pinned_compare_tab_refuses_revert() {
+        let mut app = state();
+        focus_repo(&mut app, "app");
+        install_parent_graph(&mut app);
+        focus_graph_commit(&mut app, CHILD_SHA);
+        app.dispatch(Action::CompareCommitVsParent);
+        {
+            let tab = app.tabs.active_compare_mut().unwrap();
+            tab.loading = false;
+            tab.source = Some(CommitFileSource::Compare {
+                base_ref: format!("{CHILD_SHA}^"),
+                head_ref: CHILD_SHA.into(),
+                base_tip: ROOT_SHA.into(),
+                merge_base: ROOT_SHA.into(),
+                head: CHILD_SHA.into(),
+            });
+            tab.files = vec![CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+                stat: None,
+            }];
+        }
+        for row in app.snapshot.repos.iter_mut().filter(|r| r.repo == "app") {
+            row.head = CHILD_SHA.into();
+            row.changes.clear();
+        }
+        assert_eq!(
+            app.compare_revert_target().err().as_deref(),
+            Some(CANNOT_REVERT_COMMITTED_DIFF)
+        );
+        assert_eq!(
+            app.compare_file_revert_refusal().as_deref(),
+            Some(CANNOT_REVERT_COMMITTED_DIFF)
+        );
+        assert_eq!(
+            palette_reason(&app, "Revert").as_deref(),
+            Some(CANNOT_REVERT_COMMITTED_DIFF)
+        );
+        app.status.clear();
+        assert_eq!(app.dispatch(Action::Revert), Effect::None);
+        assert_eq!(app.status, CANNOT_REVERT_COMMITTED_DIFF);
+        assert!(app.confirm.is_none());
     }
 
     fn graph_stash(stash_ref: &str, subject: &str) -> Stash {
@@ -14235,7 +14623,8 @@ mod tests {
     #[test]
     fn g_pending_survives_ticks_none_and_release() {
         let mut app = state();
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         app.dispatch(Action::ArmGChord);
         assert!(app.g_pending_at.is_some());
         assert!(matches!(app.input_mode(), InputMode::GPending { .. }));

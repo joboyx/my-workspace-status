@@ -15,10 +15,7 @@ use super::super::graph_focus::GRAPH_FOCUS_NEED_CONTEXT;
 use super::super::ops::{collect_write_files, op_is_kind_noop, op_kind_noop_reason, Op};
 use super::super::split::SplitDrag;
 use super::super::status::StatusMessage;
-use super::super::tabs::{
-    DEFAULT_BRANCH_NOT_FOUND, FOCUS_A_CHECKOUT, HEAD_HAS_NO_COMMIT, ONLY_WORKSPACE_TAB_OPEN,
-    WORKSPACE_TAB_CANNOT_CLOSE,
-};
+use super::super::tabs::{ComparePickerKind, ONLY_WORKSPACE_TAB_OPEN, WORKSPACE_TAB_CANNOT_CLOSE};
 use super::super::tree::NodeKind;
 use super::{AppState, FileWrite, FocusPane, FoldOp};
 
@@ -407,7 +404,9 @@ impl AppState {
                 Effect::None
             }
             Action::CompareVsDefault => self.compare_vs_default(),
-            Action::CompareVsBranch => self.compare_vs_branch(),
+            Action::CompareVsBranch => self.prepare_compare_picker(ComparePickerKind::Branch),
+            Action::CompareVsCommit => self.prepare_compare_picker(ComparePickerKind::Commit),
+            Action::CompareCommitVsParent => self.compare_commit_vs_parent(),
             Action::CloseCompareTab => self.close_compare_tab(),
             Action::NextTab => self.activate_relative_tab(1),
             Action::PreviousTab => self.activate_relative_tab(-1),
@@ -420,7 +419,7 @@ impl AppState {
             }
             Action::ComparePickerChar(c) => {
                 if let Some(picker) = self.compare_picker.as_mut() {
-                    let mut filter = picker.filter.clone();
+                    let mut filter = picker.filter().to_string();
                     filter.push(c);
                     picker.set_filter(filter);
                 }
@@ -428,7 +427,7 @@ impl AppState {
             }
             Action::ComparePickerBackspace => {
                 if let Some(picker) = self.compare_picker.as_mut() {
-                    let mut filter = picker.filter.clone();
+                    let mut filter = picker.filter().to_string();
                     filter.pop();
                     picker.set_filter(filter);
                 }
@@ -519,8 +518,9 @@ impl AppState {
 
     /// Why palette row `command` cannot run, or `None` if Enter should dispatch.
     ///
-    /// Order: compare-tab refusal ([`Self::compare_refusal`]), folder-summary
-    /// refusal ([`Self::summary_refusal`]), then the row's
+    /// Order: compare refusal ([`Self::compare_refusal`], which also gates
+    /// the compare open commands on every tab), folder-summary refusal
+    /// ([`Self::summary_refusal`]), then the row's
     /// highlight scope, then the range patch (highlighted stage / unstage /
     /// revert), then the action gate.
     pub(crate) fn palette_disabled_reason(&self, command: &PaletteCommand) -> Option<String> {
@@ -740,27 +740,6 @@ impl AppState {
                     None
                 } else {
                     Some("focus a visible repo to stash".into())
-                }
-            }
-            Action::CompareVsDefault => {
-                let Some(checkout) = self.compare_target_checkout() else {
-                    return Some(FOCUS_A_CHECKOUT.into());
-                };
-                match self.checkout_head_and_default(&checkout) {
-                    Some(("", _)) => Some(HEAD_HAS_NO_COMMIT.into()),
-                    Some((_, None)) => Some(DEFAULT_BRANCH_NOT_FOUND.into()),
-                    Some(_) => None,
-                    None => Some(FOCUS_A_CHECKOUT.into()),
-                }
-            }
-            Action::CompareVsBranch => {
-                let Some(checkout) = self.compare_target_checkout() else {
-                    return Some(FOCUS_A_CHECKOUT.into());
-                };
-                match self.checkout_head_and_default(&checkout) {
-                    Some(("", _)) => Some(HEAD_HAS_NO_COMMIT.into()),
-                    Some(_) => None,
-                    None => Some(FOCUS_A_CHECKOUT.into()),
                 }
             }
             Action::CloseCompareTab => {

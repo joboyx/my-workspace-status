@@ -72,7 +72,7 @@ fn pty_compare_mouse_second_tab_close() {
     tui.search("app");
     tui.ctrl_letter('k');
     tui.keys("vs default");
-    tui.wait_contains("Diff vs default", WAIT);
+    tui.wait_contains("Diff vs default in new tab", WAIT);
     tui.enter();
     tui.wait_contains("app ↔ origin/main", GIT_WAIT);
     tui.ctrl_letter('k');

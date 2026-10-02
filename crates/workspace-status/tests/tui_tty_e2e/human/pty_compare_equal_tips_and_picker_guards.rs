@@ -13,7 +13,7 @@ fn head_branch(workspace: &std::path::Path) -> String {
     )
 }
 
-/// Equal tips hide dirty files. Diff vs default paints empty committed copy.
+/// Equal tips hide dirty files. Diff vs default in new tab paints empty committed copy.
 #[test]
 fn pty_compare_vs_default_equal_tips_hides_dirty() {
     let (_root, workspace) = daily_workspace();
@@ -24,7 +24,7 @@ fn pty_compare_vs_default_equal_tips_hides_dirty() {
     tui.search("app");
     tui.ctrl_letter('k');
     tui.keys("vs default");
-    tui.wait_contains("Diff vs default", WAIT);
+    tui.wait_contains("Diff vs default in new tab", WAIT);
     tui.enter();
     tui.wait_pred(
         |screen| {
@@ -56,7 +56,7 @@ fn pty_compare_picker_never_checkouts() {
     tui.wait_contains("feature/ahead", GIT_WAIT);
     tui.ctrl_letter('k');
     tui.keys("vs branch");
-    tui.wait_contains("Diff vs branch", WAIT);
+    tui.wait_contains("Diff vs branch in new tab", WAIT);
     tui.enter();
     tui.wait_pred(
         |screen| screen.contains("Compare") && !screen.contains("Checkout"),

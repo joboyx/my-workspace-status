@@ -1,7 +1,7 @@
 //! Named-command overlay (`Ctrl-k` / `:`).
 //!
 //! Filter is case-insensitive substring on title, key chips, group, and
-//! aliases (`exit` finds Quit, `compare` the Diff vs rows).
+//! aliases (`exit` finds Quit, `compare` the Diff … in new tab rows).
 //! Execute is close-then-dispatch through [`super::state::AppState::dispatch`].
 
 use super::action::{Action, PaletteOpenedBy};
@@ -307,7 +307,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
-        title: "Diff vs default",
+        title: "Diff vs default in new tab",
         keys: "",
         group: CommandGroup::Git,
         action: Action::CompareVsDefault,
@@ -315,10 +315,26 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
-        title: "Diff vs branch…",
+        title: "Diff vs branch in new tab…",
         keys: "",
         group: CommandGroup::Git,
         action: Action::CompareVsBranch,
+        aliases: &["compare"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Diff vs commit in new tab…",
+        keys: "",
+        group: CommandGroup::Git,
+        action: Action::CompareVsCommit,
+        aliases: &["compare"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Diff commit vs parent in new tab",
+        keys: "",
+        group: CommandGroup::Git,
+        action: Action::CompareCommitVsParent,
         aliases: &["compare"],
         scope: CommandScope::NoHighlight,
     },
@@ -861,17 +877,31 @@ mod tests {
                 CommandScope::NoHighlight,
             ),
             (
-                "Diff vs default",
+                "Diff vs default in new tab",
                 "",
                 CommandGroup::Git,
                 Action::CompareVsDefault,
                 CommandScope::NoHighlight,
             ),
             (
-                "Diff vs branch…",
+                "Diff vs branch in new tab…",
                 "",
                 CommandGroup::Git,
                 Action::CompareVsBranch,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Diff vs commit in new tab…",
+                "",
+                CommandGroup::Git,
+                Action::CompareVsCommit,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Diff commit vs parent in new tab",
+                "",
+                CommandGroup::Git,
+                Action::CompareCommitVsParent,
                 CommandScope::NoHighlight,
             ),
             (
@@ -1045,8 +1075,10 @@ mod tests {
     #[test]
     fn aliases_find_rows_their_titles_do_not_name() {
         for (query, title) in [
-            ("compare", "Diff vs default"),
-            ("compare", "Diff vs branch…"),
+            ("compare", "Diff vs default in new tab"),
+            ("compare", "Diff vs branch in new tab…"),
+            ("compare", "Diff vs commit in new tab…"),
+            ("compare", "Diff commit vs parent in new tab"),
             ("quit", "Quit"),
             ("exit", "Quit"),
             ("discard", "Revert"),
@@ -1087,6 +1119,32 @@ mod tests {
         palette.filter = String::new();
         palette.push_char('j');
         assert!(palette.visible().is_empty(), "no row names a j");
+    }
+
+    #[test]
+    fn diff_rows_open_in_a_new_tab_and_filters_find_them() {
+        assert_eq!(titles("vs default"), vec!["Diff vs default in new tab"]);
+        assert_eq!(titles("vs branch"), vec!["Diff vs branch in new tab…"]);
+        assert_eq!(titles("vs commit"), vec!["Diff vs commit in new tab…"]);
+        assert_eq!(
+            titles("vs parent"),
+            vec!["Diff commit vs parent in new tab"]
+        );
+        let diff_rows = vec![
+            "Diff vs default in new tab",
+            "Diff vs branch in new tab…",
+            "Diff vs commit in new tab…",
+            "Diff commit vs parent in new tab",
+        ];
+        assert_eq!(titles("new tab"), diff_rows);
+        let compare = titles("compare");
+        for title in &diff_rows {
+            assert!(compare.contains(title), "compare -> {title}");
+        }
+        // The diff rows sit together, right before Close tab.
+        let catalog: Vec<_> = PALETTE_COMMANDS.iter().map(|c| c.title).collect();
+        let close = catalog.iter().position(|t| *t == "Close tab").unwrap();
+        assert_eq!(catalog[close - 4..close], diff_rows[..]);
     }
 
     #[test]

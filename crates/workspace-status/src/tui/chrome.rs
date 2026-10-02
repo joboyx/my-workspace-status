@@ -506,7 +506,7 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
         .branch_picker
         .as_ref()
         .map(|picker| picker.row_count())
-        .or_else(|| state.compare_picker.as_ref().map(|p| p.visible().len()))
+        .or_else(|| state.compare_picker.as_ref().map(|p| p.visible_len()))
         .or_else(|| state.graph_focus_picker.as_ref().map(|p| p.visible().len()))
         .or_else(|| state.command_palette.as_ref().map(|p| p.paint_rows().len()));
     if let Some(visible) = list_rows {
@@ -1561,7 +1561,8 @@ mod tests {
     #[test]
     fn compare_right_pane_shows_no_drill_hint() {
         let mut app = state();
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         app.focus = FocusPane::Right;
         assert_eq!(nav_keys(&app), vec![pair("Esc", "← files")]);
         app.focus = FocusPane::Left;
@@ -1619,12 +1620,14 @@ mod tests {
     fn compare_space_hint_follows_file_focus() {
         use crate::tui::drill::{CommitFile, CommitFileSource};
         let mut app = state();
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         app.focus = FocusPane::Left;
         {
             let tab = app.tabs.active_compare_mut().unwrap();
             tab.source = Some(CommitFileSource::Compare {
                 base_ref: "main".into(),
+                head_ref: "HEAD".into(),
                 base_tip: "bbb".into(),
                 merge_base: "aaa".into(),
                 head: "ccc".into(),

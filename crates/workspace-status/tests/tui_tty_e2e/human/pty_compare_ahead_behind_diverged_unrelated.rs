@@ -40,10 +40,10 @@ fn open_vs_default(tui: &mut PtySession) {
     tui.wait_pred(
         |screen| {
             palette_open(screen)
-                && screen.contains("Diff vs default")
+                && screen.contains("Diff vs default in new tab")
                 && screen.contains("vs default")
         },
-        "palette filter `vs default` shows `Diff vs default` (Enter before the filter lands would run the first catalog row; a dropped nav letter would keep a truncated query)",
+        "palette filter `vs default` shows `Diff vs default in new tab` (Enter before the filter lands would run the first catalog row; a dropped nav letter would keep a truncated query)",
         WAIT,
     );
     tui.enter();
@@ -91,7 +91,7 @@ fn head_branch(workspace: &Path, name: &str) -> String {
     )
 }
 
-/// Diff vs default paints ahead files, empty behind, diverged feature-only,
+/// Diff vs default in new tab paints ahead files, empty behind, diverged feature-only,
 /// and unrelated merge-base chrome. Compare does not check out a tip.
 #[test]
 fn pty_compare_ahead_behind_diverged_and_unrelated() {

@@ -45,7 +45,7 @@ fn open_default_and_main(tui: &mut PtySession) {
     tui.search("app");
     tui.ctrl_letter('k');
     tui.keys("vs default");
-    tui.wait_contains("Diff vs default", WAIT);
+    tui.wait_contains("Diff vs default in new tab", WAIT);
     tui.enter();
     tui.wait_contains("app ↔ origin/main", GIT_WAIT);
     tui.ctrl_letter('k');
@@ -243,10 +243,10 @@ fn open_vs_default(tui: &mut PtySession) {
     tui.wait_pred(
         |screen| {
             palette_open(screen)
-                && screen.contains("Diff vs default")
+                && screen.contains("Diff vs default in new tab")
                 && screen.contains("vs default")
         },
-        "palette filter `vs default` shows `Diff vs default` (Enter before the filter lands would run the first catalog row; a dropped nav letter would keep a truncated query)",
+        "palette filter `vs default` shows `Diff vs default in new tab` (Enter before the filter lands would run the first catalog row; a dropped nav letter would keep a truncated query)",
         WAIT,
     );
     tui.enter();
@@ -344,7 +344,7 @@ fn pty_compare_gt_survives_watch() {
     );
 }
 
-/// Diff vs default from a graph Files drill paints DiffPane. Watch keeps it.
+/// Diff vs default in new tab from a graph Files drill paints DiffPane. Watch keeps it.
 ///
 /// Parked commit-files must not return on the right. Compare paint is
 /// committed-only. The watch apply oracle is a new committed path on
@@ -395,7 +395,7 @@ fn pty_compare_from_commit_files_drill_survives_watch() {
     open_vs_default(&mut tui);
     tui.wait_pred(
         compare_from_files_drill,
-        "Diff vs default from the Files drill paints files left and DiffPane right (not graph+files)",
+        "Diff vs default in new tab from the Files drill paints files left and DiffPane right (not graph+files)",
         GIT_WAIT,
     );
 

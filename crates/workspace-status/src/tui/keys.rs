@@ -78,7 +78,7 @@ pub enum InputMode {
     HelpSearch,
     StashMenu,
     BranchPicker,
-    /// Compare-only branch picker (no checkout).
+    /// Compare-only branch or commit picker (no checkout).
     ComparePicker,
     /// Graph `o` overlay: mark local branches, Enter applies ancestor focus.
     GraphFocusPicker,

@@ -37,10 +37,10 @@ fn open_vs_default(tui: &mut PtySession) {
     tui.wait_pred(
         |screen| {
             palette_open(screen)
-                && screen.contains("Diff vs default")
+                && screen.contains("Diff vs default in new tab")
                 && screen.contains("vs default")
         },
-        "palette filter `vs default` shows `Diff vs default` (Enter before the filter lands would run the first catalog row; a dropped nav letter would keep a truncated query)",
+        "palette filter `vs default` shows `Diff vs default in new tab` (Enter before the filter lands would run the first catalog row; a dropped nav letter would keep a truncated query)",
         WAIT,
     );
     tui.enter();
@@ -156,14 +156,14 @@ fn open_app_vs_default(tui: &mut PtySession) {
     open_vs_default(tui);
     tui.wait_pred(
         compare_vs_origin_main,
-        "Diff vs default paints app ↔ origin/main, COMMITTED, and alpha.txt",
+        "Diff vs default in new tab paints app ↔ origin/main, COMMITTED, and alpha.txt",
         GIT_WAIT,
     );
 }
 
 /// Refresh after the compare base ref disappears keeps the compare tab.
 ///
-/// Diff vs default on `app` paints `app ↔ origin/main` and the ahead
+/// Diff vs default in new tab on `app` paints `app ↔ origin/main` and the ahead
 /// files. Deleting `origin/main` then `r` paints `Base ref not found:
 /// origin/main`. The tab stays. Workspace-only (`# workspace` without
 /// ` ↔ `) fails. A no-op refresh that keeps the happy compare (no error)
@@ -188,7 +188,7 @@ fn pty_compare_missing_base_after_refresh_keeps_tab() {
 
 /// Vertical wheel moves the compare file list, then the focused DiffPane.
 ///
-/// Diff vs default starts on `alpha.txt`. Wheel down over that left-pane
+/// Diff vs default in new tab starts on `alpha.txt`. Wheel down over that left-pane
 /// row selects `beta.txt` and must not land on the parked workspace tree.
 /// Enter focuses the right DiffPane (`▌`, status drops `focus right`).
 /// Wheel down over the right pane moves the focused diff row; `beta.txt`

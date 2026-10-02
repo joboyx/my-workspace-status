@@ -20,10 +20,10 @@ use crate::actions::{switch_repo_to_default_branch, SwitchOutcome};
 use crate::discovery::{discover_checkouts, process_repo, RepoCheckoutMeta};
 use crate::git::{
     apply_cached_patch, apply_worktree_patch_reverse, create_branch_at, create_branch_checkout,
-    exec_git_checked, latest_stash_ref, list_compare_picker_branches, list_local_branches,
-    pull_quiet_detailed, push_quiet, remove_untracked_file, remove_worktree, revert_compare_file,
-    revert_compare_patch, revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop,
-    stash_push, unstage_file, COMPARE_REVERT_ABORTED,
+    exec_git_checked, latest_stash_ref, list_compare_picker_branches, list_compare_picker_commits,
+    list_local_branches, pull_quiet_detailed, push_quiet, remove_untracked_file, remove_worktree,
+    revert_compare_file, revert_compare_patch, revert_tracked_file, stage_file, stash_apply,
+    stash_drop, stash_pop, stash_push, unstage_file, COMPARE_REVERT_ABORTED,
 };
 use crate::parallel::env_fetch_concurrency;
 use crate::snapshot::RepoSnapshot;
@@ -56,6 +56,7 @@ use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
 use super::stash::{resolve_stash_menu_key, StashMenuKeyResult, StashOpId};
 use super::state::{revert_scope, AppState, PendingConfirm};
 use super::status::StatusMessage;
+use super::tabs::{ComparePickerKind, ComparePickerRows};
 
 /// Blocking work that produces one [`JobOutcome`].
 pub(crate) type JobWork = Box<dyn FnOnce() -> JobOutcome + Send>;
@@ -158,11 +159,11 @@ pub(crate) enum JobOutcome {
         path: String,
         content: Result<super::diff::DiffContent, String>,
     },
-    /// Local + `origin/*` names for the compare picker.
+    /// Compare picker rows: local + `origin/*` names, or HEAD's ancestors.
     ComparePicker {
         gen: u64,
         repo: String,
-        result: Result<Vec<crate::git::LocalBranch>, String>,
+        result: Result<ComparePickerRows, String>,
     },
     /// Watch probe: whether HEAD or the base tip moved.
     CompareProbe {
@@ -341,6 +342,7 @@ struct CompareRangeJob {
     tab_id: u64,
     repo: String,
     base_ref: String,
+    head_ref: String,
 }
 
 struct CompareDiffJob {
@@ -357,6 +359,7 @@ struct CompareProbeJob {
     tab_id: u64,
     repo: String,
     base_ref: String,
+    head_ref: String,
     last_head: Option<String>,
     last_base_tip: Option<String>,
 }
@@ -456,7 +459,7 @@ pub(crate) struct Interpreter {
     default_queue: VecDeque<String>,
     prepare_stash: Option<(u64, String)>,
     prepare_branches: Option<(u64, String, bool)>,
-    prepare_compare: Option<(u64, String)>,
+    prepare_compare: Option<(u64, String, ComparePickerKind)>,
     checkout: Option<(String, String, Option<String>, String)>,
     merge: Option<(String, String, String, String)>,
     commit_files: Option<(u64, String, CommitFileSource)>,
@@ -983,6 +986,7 @@ impl Interpreter {
                 tab_id,
                 repo,
                 base_ref,
+                head_ref,
                 force,
             } => {
                 if let Some(gen) = state.begin_compare_range(tab_id, force) {
@@ -991,6 +995,7 @@ impl Interpreter {
                         tab_id,
                         repo,
                         base_ref,
+                        head_ref,
                     });
                     self.sched.enqueue_user_front(UserTag::Pane);
                     self.mark();
@@ -1020,15 +1025,16 @@ impl Interpreter {
                     self.sched.enqueue_user_front(UserTag::Pane);
                 }
             }
-            Effect::PrepareComparePicker { repo } => {
+            Effect::PrepareComparePicker { repo, kind } => {
                 let gen = self.sched.request_prepare_compare();
-                self.prepare_compare = Some((gen, repo));
+                self.prepare_compare = Some((gen, repo, kind));
                 self.sched.enqueue_user(UserTag::Prepare);
             }
             Effect::ProbeCompareTab {
                 tab_id,
                 repo,
                 base_ref,
+                head_ref,
                 last_head,
                 last_base_tip,
             } => {
@@ -1036,6 +1042,7 @@ impl Interpreter {
                     tab_id,
                     repo,
                     base_ref,
+                    head_ref,
                     last_head,
                     last_base_tip,
                 });
@@ -1544,7 +1551,12 @@ impl Interpreter {
                 let waiting = state.compare_picker_pending.as_deref() == Some(repo.as_str());
                 if accepted && waiting {
                     match result {
-                        Ok(branches) => state.open_compare_picker(repo, branches),
+                        Ok(ComparePickerRows::Branches(branches)) => {
+                            state.open_compare_picker(repo, branches)
+                        }
+                        Ok(ComparePickerRows::Commits(commits)) => {
+                            state.open_compare_commit_picker(repo, commits)
+                        }
                         Err(err) => {
                             state.abandon_compare_picker();
                             state.status = StatusMessage::error(err);
@@ -2135,12 +2147,17 @@ impl Interpreter {
                     );
                     return;
                 }
-                if let Some((gen, repo)) = self.prepare_compare.take() {
+                if let Some((gen, repo, kind)) = self.prepare_compare.take() {
                     let dir = opts.cwd.join(&repo);
                     spawn(
                         id,
                         Box::new(move || {
-                            let result = list_compare_picker_branches(&dir);
+                            let result = match kind {
+                                ComparePickerKind::Branch => list_compare_picker_branches(&dir)
+                                    .map(ComparePickerRows::Branches),
+                                ComparePickerKind::Commit => list_compare_picker_commits(&dir)
+                                    .map(ComparePickerRows::Commits),
+                            };
                             JobOutcome::ComparePicker { gen, repo, result }
                         }),
                     );
@@ -2209,7 +2226,7 @@ impl Interpreter {
                         Box::new(move || JobOutcome::CompareRange {
                             tab_id: job.tab_id,
                             gen: job.gen,
-                            result: compute_compare_range(&dir, &job.base_ref),
+                            result: compute_compare_range(&dir, &job.base_ref, &job.head_ref),
                         }),
                     );
                     return;
@@ -2247,6 +2264,7 @@ impl Interpreter {
                             let result = probe_compare_range(
                                 &dir,
                                 &job.base_ref,
+                                &job.head_ref,
                                 job.last_head.as_deref(),
                                 job.last_base_tip.as_deref(),
                             )
@@ -2656,6 +2674,7 @@ mod tests {
     fn compare_source() -> CommitFileSource {
         CommitFileSource::Compare {
             base_ref: "main".into(),
+            head_ref: "HEAD".into(),
             base_tip: "bbb".into(),
             merge_base: "aaa".into(),
             head: "ccc".into(),
@@ -2672,7 +2691,9 @@ mod tests {
     }
 
     fn open_compare_tab(state: &mut AppState) -> (u64, u64) {
-        state.tabs.open_or_focus("app".into(), "main".into());
+        state
+            .tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         let tab = state.tabs.active_compare_mut().unwrap();
         tab.generation = 2;
         (tab.id, tab.generation)
@@ -2788,6 +2809,7 @@ mod tests {
                 gen,
                 source: CommitFileSource::Compare {
                     base_ref: "main".into(),
+                    head_ref: "HEAD".into(),
                     base_tip: "other".into(),
                     merge_base: "aaa".into(),
                     head: "ccc".into(),
@@ -2856,13 +2878,16 @@ mod tests {
             tab.source = Some(compare_source());
             tab.diff_req = 1;
         }
-        state.tabs.open_or_focus("app".into(), "develop".into());
+        state
+            .tabs
+            .open_or_focus("app".into(), "develop".into(), "HEAD".into());
         let tab_b = state.tabs.active_compare().unwrap().id;
         {
             let tab = state.tabs.get_id_mut(tab_b).unwrap();
             tab.generation = 2;
             tab.source = Some(CommitFileSource::Compare {
                 base_ref: "develop".into(),
+                head_ref: "HEAD".into(),
                 base_tip: "bbb".into(),
                 merge_base: "aaa".into(),
                 head: "ccc".into(),
@@ -2897,6 +2922,7 @@ mod tests {
                 gen: 2,
                 source: CommitFileSource::Compare {
                     base_ref: "develop".into(),
+                    head_ref: "HEAD".into(),
                     base_tip: "bbb".into(),
                     merge_base: "aaa".into(),
                     head: "ccc".into(),
@@ -3004,11 +3030,11 @@ mod tests {
             JobOutcome::ComparePicker {
                 gen,
                 repo: "app".into(),
-                result: Ok(vec![LocalBranch {
+                result: Ok(ComparePickerRows::Branches(vec![LocalBranch {
                     name: "main".into(),
                     current: true,
                     authordate: 1,
-                }]),
+                }])),
             },
         );
         assert!(
@@ -3030,11 +3056,11 @@ mod tests {
             JobOutcome::ComparePicker {
                 gen,
                 repo: "app".into(),
-                result: Ok(vec![LocalBranch {
+                result: Ok(ComparePickerRows::Branches(vec![LocalBranch {
                     name: "main".into(),
                     current: true,
                     authordate: 1,
-                }]),
+                }])),
             },
         );
         assert!(
@@ -3056,11 +3082,11 @@ mod tests {
             JobOutcome::ComparePicker {
                 gen,
                 repo: "app".into(),
-                result: Ok(vec![LocalBranch {
+                result: Ok(ComparePickerRows::Branches(vec![LocalBranch {
                     name: "main".into(),
                     current: true,
                     authordate: 1,
-                }]),
+                }])),
             },
         );
         assert!(
@@ -3087,17 +3113,73 @@ mod tests {
             JobOutcome::ComparePicker {
                 gen,
                 repo: "app".into(),
-                result: Ok(vec![LocalBranch {
+                result: Ok(ComparePickerRows::Branches(vec![LocalBranch {
                     name: "main".into(),
                     current: true,
                     authordate: 1,
-                }]),
+                }])),
             },
         );
         assert!(
             state.compare_picker.is_some(),
             "branch-picker gen must not drop a matching compare picker"
         );
+    }
+
+    fn ancestor_rows() -> ComparePickerRows {
+        ComparePickerRows::Commits(vec![crate::git::AncestorCommit {
+            id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            subject: "seed".into(),
+        }])
+    }
+
+    #[test]
+    fn matching_compare_commit_picker_opens_the_commit_rows() {
+        let mut state = fixture_state();
+        state.compare_picker_pending = Some("app".into());
+        let mut interp = Interpreter::new();
+        let gen = interp.sched.request_prepare_compare();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::ComparePicker {
+                gen,
+                repo: "app".into(),
+                result: Ok(ancestor_rows()),
+            },
+        );
+        assert!(
+            matches!(
+                state.compare_picker,
+                Some(crate::tui::tabs::ComparePickerState::Commit(_))
+            ),
+            "{:?}",
+            state.compare_picker
+        );
+        assert!(state.compare_picker_pending.is_none());
+    }
+
+    #[test]
+    fn superseded_compare_picker_kind_does_not_open() {
+        let mut state = fixture_state();
+        state.compare_picker_pending = Some("app".into());
+        let mut interp = Interpreter::new();
+        let branch_gen = interp.sched.request_prepare_compare();
+        let _commit_gen = interp.sched.request_prepare_compare();
+        apply(
+            &mut interp,
+            &mut state,
+            JobOutcome::ComparePicker {
+                gen: branch_gen,
+                repo: "app".into(),
+                result: Ok(ComparePickerRows::Branches(Vec::new())),
+            },
+        );
+        assert!(
+            state.compare_picker.is_none(),
+            "an older Diff vs branch job must not open over a newer Diff vs commit"
+        );
+        assert_eq!(state.compare_picker_pending.as_deref(), Some("app"));
     }
 
     #[test]

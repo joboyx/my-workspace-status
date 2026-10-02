@@ -1,6 +1,7 @@
 //! Session tab strip: permanent Workspace plus compare tabs.
 //!
-//! Compare identity is `(checkout_path, base_ref)`. Tabs are session-only.
+//! Compare identity is `(checkout_path, base_ref, head_ref)`. Tabs are
+//! session-only.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -14,6 +15,12 @@ pub const FOCUS_A_CHECKOUT: &str = "Focus a checkout to compare";
 pub const HEAD_HAS_NO_COMMIT: &str = "HEAD has no commit";
 /// Palette copy when the default tip ref does not exist.
 pub const DEFAULT_BRANCH_NOT_FOUND: &str = "Default branch not found";
+/// Diff commit vs parent refusal when the graph pane does not focus a commit.
+pub const FOCUS_A_COMMIT_TO_DIFF: &str = "focus a commit to diff";
+/// Diff commit vs parent refusal on a commit with no parent.
+pub const ROOT_COMMIT_HAS_NO_PARENT: &str = "root commit has no parent";
+/// Compare `x` refusal on a tab with a pinned head: the diff is history.
+pub const CANNOT_REVERT_COMMITTED_DIFF: &str = "cannot revert a committed diff";
 /// Palette copy when Close is run on the Workspace tab.
 pub const WORKSPACE_TAB_CANNOT_CLOSE: &str = "Workspace tab cannot be closed";
 
@@ -41,14 +48,198 @@ pub fn compare_file_dirty(path: &str) -> String {
 pub const NO_COMMITTED_CHANGES: &str = "No committed changes";
 /// Empty compare picker.
 pub const NO_BRANCHES_TO_COMPARE: &str = "No branches to compare";
+/// Empty compare commit picker: HEAD has no ancestor (a root commit).
+pub const NO_COMMITS_TO_COMPARE: &str = "No commits to compare";
 
-/// Compare picker copy when no row shows: no branches at all, or none
-/// that match the typed filter (`no branch matches <q>`).
-pub fn compare_picker_empty(picker: &super::branches::BranchPickerState) -> String {
-    if picker.branches.is_empty() {
-        NO_BRANCHES_TO_COMPARE.to_string()
-    } else {
-        format!("no branch matches {}", picker.filter)
+/// Compare picker copy when no row shows: no rows at all, or none that
+/// match the typed filter (`no branch matches <q>` / `no commit matches <q>`).
+pub fn compare_picker_empty(picker: &ComparePickerState) -> String {
+    match picker {
+        ComparePickerState::Branch(picker) if picker.branches.is_empty() => {
+            NO_BRANCHES_TO_COMPARE.to_string()
+        }
+        ComparePickerState::Branch(picker) => format!("no branch matches {}", picker.filter),
+        ComparePickerState::Commit(picker) if picker.commits.is_empty() => {
+            NO_COMMITS_TO_COMPARE.to_string()
+        }
+        ComparePickerState::Commit(picker) => format!("no commit matches {}", picker.filter),
+    }
+}
+
+/// What the compare picker lists: Diff vs branch or Diff vs commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComparePickerKind {
+    /// Local + `origin/*` branches.
+    Branch,
+    /// HEAD's ancestors, HEAD excluded.
+    Commit,
+}
+
+/// Rows a compare picker job loaded, by [`ComparePickerKind`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ComparePickerRows {
+    /// Branch rows for Diff vs branch.
+    Branches(Vec<crate::git::LocalBranch>),
+    /// Ancestor rows for Diff vs commit.
+    Commits(Vec<crate::git::AncestorCommit>),
+}
+
+/// The one compare picker overlay (`InputMode::ComparePicker`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ComparePickerState {
+    /// Diff vs branch: picks a branch name as the base.
+    Branch(super::branches::BranchPickerState),
+    /// Diff vs commit: picks an ancestor's full id as the base.
+    Commit(CommitPickerState),
+}
+
+impl ComparePickerState {
+    /// Checkout the picked base compares against.
+    pub fn repo(&self) -> &str {
+        match self {
+            Self::Branch(picker) => &picker.repo,
+            Self::Commit(picker) => &picker.repo,
+        }
+    }
+
+    /// Typed filter.
+    pub fn filter(&self) -> &str {
+        match self {
+            Self::Branch(picker) => &picker.filter,
+            Self::Commit(picker) => &picker.filter,
+        }
+    }
+
+    /// Highlighted row index into the visible rows.
+    pub fn cursor(&self) -> usize {
+        match self {
+            Self::Branch(picker) => picker.cursor,
+            Self::Commit(picker) => picker.cursor,
+        }
+    }
+
+    /// Painted text of `count` matching rows from `start`: `<name>` or
+    /// `<short sha>  <subject>`. Only the painted window is formatted.
+    pub fn window_labels(&self, start: usize, count: usize) -> Vec<String> {
+        match self {
+            Self::Branch(picker) => picker
+                .visible()
+                .into_iter()
+                .skip(start)
+                .take(count)
+                .map(|branch| branch.name.clone())
+                .collect(),
+            Self::Commit(picker) => picker
+                .visible()
+                .into_iter()
+                .skip(start)
+                .take(count)
+                .map(|commit| format!("{}  {}", short_rev(&commit.id), commit.subject))
+                .collect(),
+        }
+    }
+
+    /// Count of rows that match the filter.
+    pub fn visible_len(&self) -> usize {
+        match self {
+            Self::Branch(picker) => picker.visible().len(),
+            Self::Commit(picker) => picker.visible().len(),
+        }
+    }
+
+    /// Base ref under the cursor: a branch name or a full commit id.
+    pub fn selected_base(&self) -> Option<String> {
+        match self {
+            Self::Branch(picker) => picker.selected().map(|branch| branch.name.clone()),
+            Self::Commit(picker) => picker.selected().map(|commit| commit.id.clone()),
+        }
+    }
+
+    /// Move the cursor by `delta` rows, clamped to the visible rows.
+    pub fn move_cursor(&mut self, delta: i32) {
+        match self {
+            Self::Branch(picker) => picker.move_cursor(delta),
+            Self::Commit(picker) => picker.move_cursor(delta),
+        }
+    }
+
+    /// Replace the filter and clamp the cursor to the new rows.
+    pub fn set_filter(&mut self, filter: String) {
+        match self {
+            Self::Branch(picker) => picker.set_filter(filter),
+            Self::Commit(picker) => picker.set_filter(filter),
+        }
+    }
+}
+
+/// Diff vs commit picker: HEAD's ancestors, newest first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitPickerState {
+    /// Checkout whose HEAD the ancestors belong to.
+    pub repo: String,
+    /// Ancestors from `git log`, HEAD excluded.
+    pub commits: Vec<crate::git::AncestorCommit>,
+    /// Typed filter.
+    pub filter: String,
+    /// Index into [`Self::visible`].
+    pub cursor: usize,
+    /// Lowercased `<id>\n<subject>` per commit, built once for the filter.
+    search: Vec<String>,
+}
+
+impl CommitPickerState {
+    /// Picker over `commits` with an empty filter.
+    pub fn new(repo: String, commits: Vec<crate::git::AncestorCommit>) -> Self {
+        let search = commits
+            .iter()
+            .map(|commit| format!("{}\n{}", commit.id, commit.subject).to_lowercase())
+            .collect();
+        Self {
+            repo,
+            commits,
+            filter: String::new(),
+            cursor: 0,
+            search,
+        }
+    }
+
+    /// Commits whose full id, short id, or subject contains the trimmed
+    /// filter, ignoring case. A short id is a prefix of the full id, so the
+    /// full id covers both.
+    pub fn visible(&self) -> Vec<&crate::git::AncestorCommit> {
+        let query = self.filter.trim().to_lowercase();
+        if query.is_empty() {
+            return self.commits.iter().collect();
+        }
+        self.commits
+            .iter()
+            .zip(&self.search)
+            .filter(|(_, haystack)| haystack.contains(&query))
+            .map(|(commit, _)| commit)
+            .collect()
+    }
+
+    /// Commit under the cursor.
+    pub fn selected(&self) -> Option<&crate::git::AncestorCommit> {
+        self.visible().get(self.cursor).copied()
+    }
+
+    /// Move the cursor by `delta` rows, clamped to the visible rows.
+    pub fn move_cursor(&mut self, delta: i32) {
+        let len = self.visible().len();
+        if len == 0 {
+            self.cursor = 0;
+            return;
+        }
+        let next = self.cursor as i32 + delta;
+        self.cursor = next.clamp(0, len as i32 - 1) as usize;
+    }
+
+    /// Replace the filter and clamp the cursor to the new rows.
+    pub fn set_filter(&mut self, filter: String) {
+        self.filter = filter;
+        let len = self.visible().len();
+        self.cursor = self.cursor.min(len.saturating_sub(1));
     }
 }
 
@@ -57,29 +248,64 @@ pub const COMPARE_CANCELLED: &str = "compare cancelled";
 
 /// Right-pane empty copy for equal or behind tips.
 pub fn no_committed_changes_vs(base_ref: &str) -> String {
-    format!("No committed changes vs {base_ref}")
+    format!("No committed changes vs {}", short_rev(base_ref))
 }
 
 /// Missing base after the tab already exists.
 pub fn base_ref_not_found(base_ref: &str) -> String {
-    format!("Base ref not found: {base_ref}")
+    format!("Base ref not found: {}", short_rev(base_ref))
+}
+
+/// Pinned head that no longer resolves after the tab already exists.
+pub fn head_ref_not_found(head_ref: &str) -> String {
+    format!("Head ref not found: {}", short_rev(head_ref))
 }
 
 /// Unrelated histories after the tab already exists.
-pub fn no_merge_base(base_ref: &str) -> String {
-    format!("No merge base between {base_ref} and HEAD")
+pub fn no_merge_base(base_ref: &str, head_ref: &str) -> String {
+    format!(
+        "No merge base between {} and {}",
+        short_rev(base_ref),
+        short_rev(head_ref)
+    )
+}
+
+/// Compare head of a live tab: the checkout's HEAD at each load.
+///
+/// Any other [`CompareTab::head_ref`] is a full commit id that pins the head.
+pub const COMPARE_HEAD_REF: &str = "HEAD";
+
+/// Display form of a rev: a leading 40- or 64-hex object id shortens to 7
+/// chars and keeps any suffix (`<sha>^` → `abc1234^`). Branch names and
+/// `HEAD` pass through.
+pub fn short_rev(rev: &str) -> String {
+    let hex = rev.bytes().take_while(u8::is_ascii_hexdigit).count();
+    if hex == 40 || hex == 64 {
+        format!("{}{}", &rev[..7], &rev[hex..])
+    } else {
+        rev.to_string()
+    }
+}
+
+/// Range copy for chrome and status: `<short base>...<short head>`.
+///
+/// A live tab reads `main...HEAD`; a pinned tab `abc1234^...abc1234`.
+pub fn compare_range_label(base_ref: &str, head_ref: &str) -> String {
+    format!("{}...{}", short_rev(base_ref), short_rev(head_ref))
 }
 
 /// Bidirectional separator between checkout leaf and base ref (VS Code-style).
 pub const COMPARE_TAB_SEP: &str = " ↔ ";
 
-/// Tab strip label: `<checkout-leaf> ↔ <base-ref>`.
+/// Tab strip label: `<checkout-leaf> ↔ <short base-ref>`.
 ///
-/// Left is the checkout leaf; right is the compare base ref. Order is fixed.
+/// Left is the checkout leaf; right is the compare base ref (see
+/// [`short_rev`]). Order is fixed.
 pub fn compare_tab_label(checkout_path: &str, base_ref: &str) -> String {
     format!(
-        "{}{COMPARE_TAB_SEP}{base_ref}",
-        checkout_leaf(checkout_path)
+        "{}{COMPARE_TAB_SEP}{}",
+        checkout_leaf(checkout_path),
+        short_rev(base_ref)
     )
 }
 
@@ -100,8 +326,12 @@ pub struct CompareTab {
     pub id: u64,
     /// Checkout path (same string as snapshot `repo`).
     pub checkout_path: String,
-    /// Picker / default tip ref. Tab identity with [`Self::checkout_path`].
+    /// Picker / default tip ref, or `<sha>^`. Tab identity with
+    /// [`Self::checkout_path`] and [`Self::head_ref`].
     pub base_ref: String,
+    /// [`COMPARE_HEAD_REF`] for a live tab, else the full commit id that
+    /// pins the head (Diff commit vs parent).
+    pub head_ref: String,
     /// Immutable endpoints for the current load, when resolved.
     pub source: Option<CommitFileSource>,
     /// Load or probe error. Tab stays open.
@@ -142,11 +372,12 @@ pub struct CompareTab {
 }
 
 impl CompareTab {
-    fn new(id: u64, checkout_path: String, base_ref: String) -> Self {
+    fn new(id: u64, checkout_path: String, base_ref: String, head_ref: String) -> Self {
         Self {
             id,
             checkout_path,
             base_ref,
+            head_ref,
             source: None,
             error: None,
             files: Vec::new(),
@@ -186,9 +417,15 @@ impl CompareTab {
         self.generation
     }
 
-    /// Diff pane header range (`<base-ref>...HEAD`).
+    /// True when the head is a fixed commit, not the checkout's HEAD.
+    pub fn is_pinned(&self) -> bool {
+        self.head_ref != COMPARE_HEAD_REF
+    }
+
+    /// Diff pane header range (`<base-ref>...HEAD`, or
+    /// `abc1234^...abc1234` for a pinned head).
     pub fn range_header(&self) -> String {
-        format!("{}...HEAD", self.base_ref)
+        compare_range_label(&self.base_ref, &self.head_ref)
     }
 
     /// Path of the open diff when [`Self::content`] is loaded for the
@@ -290,23 +527,32 @@ impl TabStrip {
     }
 
     /// Find a tab by identity. `0` is never returned (Workspace).
-    pub fn find(&self, checkout_path: &str, base_ref: &str) -> Option<usize> {
+    pub fn find(&self, checkout_path: &str, base_ref: &str, head_ref: &str) -> Option<usize> {
         self.compare
             .iter()
-            .position(|tab| tab.checkout_path == checkout_path && tab.base_ref == base_ref)
+            .position(|tab| {
+                tab.checkout_path == checkout_path
+                    && tab.base_ref == base_ref
+                    && tab.head_ref == head_ref
+            })
             .map(|i| i + 1)
     }
 
     /// Focus an existing identity or append a new compare tab.
-    pub fn open_or_focus(&mut self, checkout_path: String, base_ref: String) -> OpenCompare {
-        if let Some(index) = self.find(&checkout_path, &base_ref) {
+    pub fn open_or_focus(
+        &mut self,
+        checkout_path: String,
+        base_ref: String,
+        head_ref: String,
+    ) -> OpenCompare {
+        if let Some(index) = self.find(&checkout_path, &base_ref, &head_ref) {
             self.active = index;
             return OpenCompare::Focused;
         }
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         self.compare
-            .push(CompareTab::new(id, checkout_path, base_ref));
+            .push(CompareTab::new(id, checkout_path, base_ref, head_ref));
         self.active = self.compare.len();
         OpenCompare::Created(id)
     }
@@ -402,12 +648,12 @@ mod tests {
     fn identity_reopen_focuses_without_reset() {
         let mut tabs = TabStrip::default();
         assert_eq!(
-            tabs.open_or_focus("app".into(), "origin/main".into()),
+            tabs.open_or_focus("app".into(), "origin/main".into(), "HEAD".into()),
             OpenCompare::Created(1)
         );
         tabs.active_compare_mut().unwrap().file_cursor = 3;
         assert_eq!(
-            tabs.open_or_focus("app".into(), "origin/main".into()),
+            tabs.open_or_focus("app".into(), "origin/main".into(), "HEAD".into()),
             OpenCompare::Focused
         );
         assert_eq!(tabs.active, 1);
@@ -417,8 +663,8 @@ mod tests {
     #[test]
     fn close_activates_left_and_workspace_never_closes() {
         let mut tabs = TabStrip::default();
-        tabs.open_or_focus("app".into(), "origin/main".into());
-        tabs.open_or_focus("app".into(), "develop".into());
+        tabs.open_or_focus("app".into(), "origin/main".into(), "HEAD".into());
+        tabs.open_or_focus("app".into(), "develop".into(), "HEAD".into());
         assert_eq!(tabs.active, 2);
         assert!(tabs.close_active_compare());
         assert_eq!(tabs.active, 1);
@@ -431,8 +677,8 @@ mod tests {
     #[test]
     fn jump_and_wrap() {
         let mut tabs = TabStrip::default();
-        tabs.open_or_focus("app".into(), "a".into());
-        tabs.open_or_focus("app".into(), "b".into());
+        tabs.open_or_focus("app".into(), "a".into(), "HEAD".into());
+        tabs.open_or_focus("app".into(), "b".into(), "HEAD".into());
         tabs.jump(1);
         assert!(tabs.is_workspace());
         tabs.jump(9);
@@ -449,8 +695,8 @@ mod tests {
     #[test]
     fn close_at_workspace_is_noop_and_inactive_compare_closes() {
         let mut tabs = TabStrip::default();
-        tabs.open_or_focus("app".into(), "a".into());
-        tabs.open_or_focus("app".into(), "b".into());
+        tabs.open_or_focus("app".into(), "a".into(), "HEAD".into());
+        tabs.open_or_focus("app".into(), "b".into(), "HEAD".into());
         assert_eq!(tabs.active, 2);
         assert!(!tabs.close_at(0));
         assert_eq!(tabs.active, 2);
@@ -474,10 +720,94 @@ mod tests {
         assert_eq!(right, "origin/main");
     }
 
+    const SHA: &str = "abc1234def5678abc1234def5678abc1234def56";
+
+    #[test]
+    fn short_rev_shortens_object_ids_and_keeps_names() {
+        assert_eq!(short_rev(SHA), "abc1234");
+        assert_eq!(short_rev(&format!("{SHA}^")), "abc1234^");
+        let sha256 = "a".repeat(64);
+        assert_eq!(short_rev(&sha256), "aaaaaaa");
+        assert_eq!(short_rev("origin/main"), "origin/main");
+        assert_eq!(short_rev("HEAD"), "HEAD");
+        assert_eq!(short_rev("deadbeef"), "deadbeef", "short hex is a name");
+        let long = "a".repeat(41);
+        assert_eq!(short_rev(&long), long, "41 hex is not an object id");
+    }
+
+    #[test]
+    fn identity_includes_head_ref() {
+        let mut tabs = TabStrip::default();
+        let base = format!("{SHA}^");
+        assert_eq!(
+            tabs.open_or_focus("app".into(), base.clone(), COMPARE_HEAD_REF.into()),
+            OpenCompare::Created(1)
+        );
+        assert_eq!(
+            tabs.open_or_focus("app".into(), base.clone(), SHA.into()),
+            OpenCompare::Created(2),
+            "same base, other head is a second tab"
+        );
+        tabs.active = 1;
+        assert_eq!(
+            tabs.open_or_focus("app".into(), base.clone(), SHA.into()),
+            OpenCompare::Focused
+        );
+        assert_eq!(tabs.active, 2);
+        assert_eq!(tabs.find("app", &base, SHA), Some(2));
+        assert_eq!(tabs.find("app", &base, COMPARE_HEAD_REF), Some(1));
+        assert_eq!(tabs.find("app", &base, "other"), None);
+    }
+
+    #[test]
+    fn pinned_tab_label_range_and_short_label_use_short_shas() {
+        let mut tabs = TabStrip::default();
+        tabs.open_or_focus("repos/app".into(), format!("{SHA}^"), SHA.into());
+        let tab = tabs.active_compare().unwrap();
+        assert!(tab.is_pinned());
+        assert_eq!(tab.label(), "app ↔ abc1234^");
+        assert_eq!(tab.range_header(), "abc1234^...abc1234");
+        let source = CommitFileSource::Compare {
+            base_ref: format!("{SHA}^"),
+            head_ref: SHA.into(),
+            base_tip: "b".repeat(40),
+            merge_base: "b".repeat(40),
+            head: SHA.into(),
+        };
+        assert_eq!(source.short_label(), "abc1234^...abc1234");
+        assert_eq!(source.files_status(2), "2 files in abc1234^...abc1234");
+
+        tabs.open_or_focus("repos/app".into(), "main".into(), COMPARE_HEAD_REF.into());
+        let live = tabs.active_compare().unwrap();
+        assert!(!live.is_pinned());
+        assert_eq!(live.label(), "app ↔ main");
+        assert_eq!(live.range_header(), "main...HEAD");
+    }
+
+    #[test]
+    fn range_copy_shortens_the_base_and_head() {
+        let base = format!("{SHA}^");
+        assert_eq!(
+            no_committed_changes_vs(&base),
+            "No committed changes vs abc1234^"
+        );
+        assert_eq!(base_ref_not_found(&base), "Base ref not found: abc1234^");
+        assert_eq!(head_ref_not_found(SHA), "Head ref not found: abc1234");
+        assert_eq!(
+            no_merge_base("main", COMPARE_HEAD_REF),
+            "No merge base between main and HEAD"
+        );
+        assert_eq!(
+            no_merge_base(&base, SHA),
+            "No merge base between abc1234^ and abc1234"
+        );
+    }
+
     fn loaded_tab(merge_base: &str, head: &str, base_tip: &str) -> CompareTab {
-        let mut tab = CompareTab::new(1, "app".into(), "main".into());
+        let mut tab = CompareTab::new(1, "app".into(), "main".into(), COMPARE_HEAD_REF.into());
         tab.source = Some(CommitFileSource::Compare {
             base_ref: "main".into(),
+            head_ref: "HEAD".into(),
             base_tip: base_tip.into(),
             merge_base: merge_base.into(),
             head: head.into(),
