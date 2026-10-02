@@ -7,9 +7,9 @@ use super::super::branches::can_open_branch_picker;
 use super::super::command_palette::{CommandPaletteState, CommandScope, PaletteCommand};
 use super::super::diff::PartialPatchKind;
 use super::super::gates::{
-    dispatch_is_noop, dispatch_noop_reason, ListFocusTarget, FOCUS_A_FILE_TO_MARK_REVIEWED,
-    FOCUS_A_GRAPH_COMMIT, FOCUS_A_GRAPH_STASH, REVIEWED_MARKS_ARE_FOR_TREE_FILES,
-    STASH_NEEDS_TREE_OR_GRAPH,
+    dispatch_is_noop, dispatch_noop_reason, ListFocusTarget, FOCUS_A_FILE_DIFF,
+    FOCUS_A_FILE_TO_MARK_REVIEWED, FOCUS_A_GRAPH_COMMIT, FOCUS_A_GRAPH_STASH,
+    REVIEWED_MARKS_ARE_FOR_TREE_FILES, STASH_NEEDS_TREE_OR_GRAPH,
 };
 use super::super::graph_focus::GRAPH_FOCUS_NEED_CONTEXT;
 use super::super::ops::{collect_write_files, op_is_kind_noop, op_kind_noop_reason, Op};
@@ -519,12 +519,16 @@ impl AppState {
 
     /// Why palette row `command` cannot run, or `None` if Enter should dispatch.
     ///
-    /// Order: compare-tab refusal ([`Self::compare_refusal`]), then the row's
+    /// Order: compare-tab refusal ([`Self::compare_refusal`]), folder-summary
+    /// refusal ([`Self::summary_refusal`]), then the row's
     /// highlight scope, then the range patch (highlighted stage / unstage /
     /// revert), then the action gate.
     pub(crate) fn palette_disabled_reason(&self, command: &PaletteCommand) -> Option<String> {
         let action = &command.action;
-        if let Some(reason) = self.compare_refusal(action) {
+        if let Some(reason) = self
+            .compare_refusal(action)
+            .or_else(|| self.summary_refusal(action))
+        {
             return Some(reason);
         }
         let highlighted = self.diff_visual_anchor.is_some();
@@ -659,12 +663,12 @@ impl AppState {
                 if self.right_is_diff() && self.displayed_diff_id().is_some() {
                     None
                 } else {
-                    Some("focus a file diff".into())
+                    Some(FOCUS_A_FILE_DIFF.into())
                 }
             }
             Action::DiffVisualStart => {
                 if self.list_focus_target() != ListFocusTarget::None {
-                    Some("focus a file diff".into())
+                    Some(FOCUS_A_FILE_DIFF.into())
                 } else if self.current_diff_rows().is_empty() {
                     Some("no highlight target".into())
                 } else {

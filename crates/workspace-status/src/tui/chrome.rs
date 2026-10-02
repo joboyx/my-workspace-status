@@ -956,7 +956,12 @@ pub fn hint_row_kind(state: &AppState) -> HintRowKind {
         };
     }
     if (state.drill.is_diff() || state.right_is_diff()) && state.focus == FocusPane::Right {
-        return HintRowKind::File;
+        // A folder summary hides the file diff: no file-diff keys.
+        return if state.folder_summary().is_some() {
+            HintRowKind::Dir
+        } else {
+            HintRowKind::File
+        };
     }
     match state.focused_row().map(|row| row.kind) {
         Some(NodeKind::Workspace) => HintRowKind::Workspace,

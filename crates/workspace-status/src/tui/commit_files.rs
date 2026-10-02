@@ -100,6 +100,53 @@ pub fn commit_file_cursor_index(rows: &[CommitFileRow], path: Option<&str>) -> u
     .min(rows.len() - 1)
 }
 
+/// Changed files under one folder of a commit-file list.
+///
+/// The right pane paints this in place of a file diff while a folder row
+/// is focused. Built from the full file list, so files under folded
+/// subfolders count too.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FolderSummary {
+    /// Folder path as on the dir row (`src/tui`), no trailing `/`.
+    pub dir: String,
+    /// Every changed file under `dir` at any depth, sorted by path.
+    pub files: Vec<CommitFile>,
+    /// Lines added over the files with a known [`CommitFile::stat`].
+    pub added: u32,
+    /// Lines deleted over the files with a known [`CommitFile::stat`].
+    pub deleted: u32,
+}
+
+/// Summary of the files in `files` whose path is under folder `dir`.
+///
+/// Matches on `"{dir}/"`, so dir `src` never takes `src2/lib.rs`. Totals
+/// skip files with no line counts (binary, untracked, failed numstat).
+pub(crate) fn folder_summary(files: &[CommitFile], dir: &str) -> FolderSummary {
+    let prefix = format!("{dir}/");
+    let mut under: Vec<CommitFile> = files
+        .iter()
+        .filter(|file| file.path.starts_with(&prefix))
+        .cloned()
+        .collect();
+    under.sort_by(|a, b| a.path.cmp(&b.path));
+    let (added, deleted) =
+        under
+            .iter()
+            .filter_map(|file| file.stat)
+            .fold((0u32, 0u32), |(added, deleted), stat| {
+                (
+                    added.saturating_add(stat.added),
+                    deleted.saturating_add(stat.deleted),
+                )
+            });
+    FolderSummary {
+        dir: dir.to_string(),
+        files: under,
+        added,
+        deleted,
+    }
+}
+
 /// Dir or file node in the commit-file forest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitFileNode {
@@ -327,6 +374,43 @@ mod tests {
             old_path: None,
             stat: None,
         }
+    }
+
+    fn file_with_stat(path: &str, stat: Option<(u32, u32)>) -> CommitFile {
+        CommitFile {
+            stat: stat.map(|(added, deleted)| crate::git::LineStat { added, deleted }),
+            ..file("M", path)
+        }
+    }
+
+    #[test]
+    fn folder_summary_takes_descendants_sorted_and_not_sibling_prefixes() {
+        let files = vec![
+            file_with_stat("src/z.rs", Some((1, 0))),
+            file_with_stat("src2/lib.rs", Some((50, 50))),
+            file_with_stat("src/deep/a.rs", Some((3, 2))),
+            file_with_stat("README.md", Some((9, 9))),
+            file_with_stat("src", Some((7, 7))),
+        ];
+        let summary = folder_summary(&files, "src");
+        assert_eq!(summary.dir, "src");
+        let paths: Vec<&str> = summary.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["src/deep/a.rs", "src/z.rs"]);
+        assert_eq!((summary.added, summary.deleted), (4, 2));
+    }
+
+    #[test]
+    fn folder_summary_totals_skip_unknown_stats() {
+        let files = vec![
+            file_with_stat("src/a.rs", Some((5, 1))),
+            file_with_stat("src/logo.png", None),
+            file_with_stat("src/b.rs", Some((0, 4))),
+        ];
+        let summary = folder_summary(&files, "src");
+        assert_eq!(summary.files.len(), 3);
+        assert_eq!(summary.files[1].path, "src/b.rs");
+        assert_eq!(summary.files[2].stat, None);
+        assert_eq!((summary.added, summary.deleted), (5, 5));
     }
 
     #[test]

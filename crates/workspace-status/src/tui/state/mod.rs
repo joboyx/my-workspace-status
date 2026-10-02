@@ -45,7 +45,7 @@ use super::comments::{
 };
 use super::commit_files::{
     ancestor_dir_ids, collect_foldable_subtree_ids as collect_commit_subtree_ids,
-    commit_file_cursor_index, flatten_commit_files, CommitFileRow,
+    commit_file_cursor_index, flatten_commit_files, folder_summary, CommitFileRow, FolderSummary,
 };
 use super::ctrl_c_exit::{
     handle_ctrl_c, is_ctrl_c_exit_prompt, CTRL_C_EXIT_PROMPT, QUIT_WHILE_BUSY_PROMPT,
@@ -60,7 +60,8 @@ use super::drill::{
 };
 use super::fetch::background_fetch_targets;
 use super::gates::{
-    ListFocusTarget, FOCUS_A_FILE_TO_MARK_REVIEWED, REVIEWED_MARKS_ARE_FOR_TREE_FILES,
+    ListFocusTarget, FOCUS_A_FILE_DIFF, FOCUS_A_FILE_TO_MARK_REVIEWED,
+    REVIEWED_MARKS_ARE_FOR_TREE_FILES,
 };
 use super::graph_focus::GraphFocusPickerState;
 use super::icons::comment_mark_cols;
@@ -1006,7 +1007,10 @@ impl AppState {
 
     /// Load the focused file's commit diff through `load_right`.
     ///
-    /// Directory rows and the already-shown path keep the previous diff.
+    /// A folder row loads nothing: the right pane shows its
+    /// [`Self::folder_summary`] and keeps the last diff loaded behind it.
+    /// The already-shown path loads nothing either, so a file → folder →
+    /// same file round trip repaints the kept diff.
     fn maybe_load_focused_commit_diff(&self) -> Effect {
         if let Some(tab) = self.tabs.active_compare() {
             let Some(row) = self.focused_commit_file_row() else {
@@ -1182,6 +1186,21 @@ impl AppState {
         self.focused_commit_file_row().map(|row| row.kind)
     }
 
+    /// Folder summary the right pane shows in place of a file diff.
+    ///
+    /// `Some` only while a file list sits next to a diff (a compare tab or
+    /// a depth-2 drill) and the focused list row is a folder. Derived from
+    /// the cursor, never stored: the previous file's diff stays loaded, so
+    /// moving back onto that file repaints it with no reload. Built from
+    /// the full file list, so files under folded subfolders count.
+    pub(crate) fn folder_summary(&self) -> Option<FolderSummary> {
+        if !self.is_compare_tab() && !self.drill.is_diff() {
+            return None;
+        }
+        let row = self.focused_commit_file_row().filter(|row| row.is_dir())?;
+        Some(folder_summary(self.commit_drill_files()?, &row.path))
+    }
+
     /// True when `row` is a compare-tab file row marked reviewed.
     pub(crate) fn compare_file_reviewed(&self, row: &CommitFileRow) -> bool {
         row.is_file()
@@ -1210,6 +1229,9 @@ impl AppState {
                 }
                 return Some((tab.checkout_path.clone(), row.path));
             }
+            if self.folder_summary().is_some() {
+                return None;
+            }
             return tab
                 .path
                 .as_ref()
@@ -1225,6 +1247,9 @@ impl AppState {
                 return None;
             }
             return Some((repo, row.path));
+        }
+        if self.folder_summary().is_some() {
+            return None;
         }
         match &self.drill {
             DrillView::Diff { path, .. } => Some((repo, path.clone())),
@@ -1522,7 +1547,8 @@ impl AppState {
             "Flat paths".into()
         };
         self.reseed_commit_file_signatures();
-        Effect::None
+        // Tree → flat from a folder lands on a file: load its diff.
+        self.maybe_load_focused_commit_diff()
     }
 
     fn restore_focus_after_tree_rebuild(&mut self, previous_id: Option<String>) {
@@ -2877,9 +2903,15 @@ impl AppState {
     }
 
     /// Numbered rows for the current layout (inline vs split).
+    ///
+    /// Empty while a [`Self::folder_summary`] covers the right pane, so
+    /// right-pane moves, wheel, search, and `V` never touch the hidden diff.
     pub fn current_diff_rows(&self) -> Vec<DiffRow> {
         #[cfg(test)]
         self.diff_row_builds.set(self.diff_row_builds.get() + 1);
+        if self.folder_summary().is_some() {
+            return Vec::new();
+        }
         build_diff_rows(self.current_diff_content(), self.diff_layout())
     }
 
@@ -3413,7 +3445,8 @@ impl AppState {
     ///
     /// With a `V` highlight, or with the diff focused, the target is the
     /// open diff, and only once its content is loaded for the current
-    /// range and path. On the file list it is the focused file row.
+    /// range and path, and never while a folder summary hides it. On the
+    /// file list it is the focused file row.
     /// [`Self::compare_head_is_worktree`] must then hold for the file.
     pub(crate) fn compare_revert_target(&self) -> Result<CompareRevertTarget, String> {
         let Some(tab) = self.tabs.active_compare() else {
@@ -3432,6 +3465,9 @@ impl AppState {
             return Err(COMPARE_STILL_LOADING.into());
         };
         let path = if self.diff_visual_anchor.is_some() || !self.commit_files_list_focused() {
+            if self.folder_summary().is_some() {
+                return Err(FOCUS_A_FILE_DIFF.into());
+            }
             tab.loaded_diff_path()
                 .ok_or(COMPARE_STILL_LOADING)?
                 .to_string()
@@ -5424,17 +5460,40 @@ impl AppState {
         self.open_compare_tab(repo, name)
     }
 
+    /// Path of the folder row under compare tab `tab_id`'s file cursor, if
+    /// the cursor is on a folder. An inactive tab reads its parked folds and
+    /// tree mode.
+    fn compare_tab_focused_dir(&self, tab_id: u64) -> Option<String> {
+        let tab = self.tabs.get_id(tab_id)?;
+        let active = self
+            .tabs
+            .active_compare()
+            .is_some_and(|active| active.id == tab_id);
+        let (tree_mode, folds) = if active {
+            (self.commit_tree_mode, &self.commit_file_folds)
+        } else {
+            (tab.tree_mode, &tab.folds)
+        };
+        let rows = flatten_commit_files(&tab.files, tree_mode, folds, self.ascii);
+        rows.into_iter()
+            .nth(tab.file_cursor)
+            .filter(|row| row.is_dir())
+            .map(|row| row.path)
+    }
+
     /// Apply a compare range load. Cursor is a flattened row, not a `files` index.
     ///
-    /// A still-present path keeps that file. A gone path clamps to
-    /// `min(old_index, n-1)`. A first load (no path yet) selects the
-    /// first file.
+    /// A focused folder row stays focused, so its summary shows for the new
+    /// range. Otherwise a still-present path keeps that file. A gone folder
+    /// or path clamps to `min(old_index, n-1)`. A first load (no path yet)
+    /// selects the first file.
     pub(crate) fn apply_compare_range(
         &mut self,
         tab_id: u64,
         gen: u64,
         result: Result<super::app::CompareRangeLoad, String>,
     ) -> Option<Effect> {
+        let focused_dir = self.compare_tab_focused_dir(tab_id);
         let (source, keep, checkout, previous_cursor, had_path) = {
             let tab = self.tabs.get_id_mut(tab_id)?;
             if tab.generation != gen {
@@ -5481,7 +5540,9 @@ impl AppState {
         } else {
             self.tabs.get_id(tab_id)?.folds.clone()
         };
-        if let Some(path) = keep.as_deref() {
+        // A focused folder wins over the open file's path.
+        let keep_path = focused_dir.as_deref().or(keep.as_deref());
+        if let Some(path) = keep_path {
             for id in ancestor_dir_ids(path) {
                 folds.remove(&id);
             }
@@ -5493,7 +5554,13 @@ impl AppState {
             self.tabs.get_id(tab_id)?.tree_mode
         };
         let rows = flatten_commit_files(&files, tree_mode, &folds, self.ascii);
-        let cursor = if keep.is_some() {
+        let cursor = if let Some(dir) = focused_dir.as_deref() {
+            // A gone folder clamps like a gone file; a clamp onto another
+            // folder shows that folder's summary.
+            rows.iter()
+                .position(|row| row.is_dir() && row.path == dir)
+                .unwrap_or_else(|| previous_cursor.min(rows.len().saturating_sub(1)))
+        } else if keep.is_some() {
             commit_file_cursor_index(&rows, keep.as_deref())
         } else if had_path && !rows.is_empty() {
             previous_cursor.min(rows.len() - 1)
@@ -7572,6 +7639,453 @@ mod tests {
         assert_eq!(app.dispatch(Action::ExternalDiff), Effect::None);
     }
 
+    /// Files for the folder-summary tests: `README.md`, then `src/` with
+    /// `a.rs` (+3 −1), `b.rs` (+2 −0), and `deep/c.rs` (binary, no counts).
+    ///
+    /// Tree rows: `src`, `src/deep`, `src/deep/c.rs`, `src/a.rs`,
+    /// `src/b.rs`, `README.md`. Flat rows start at `README.md`.
+    fn summary_files() -> Vec<CommitFile> {
+        [
+            ("README.md", Some((1, 1))),
+            ("src/a.rs", Some((3, 1))),
+            ("src/b.rs", Some((2, 0))),
+            ("src/deep/c.rs", None),
+        ]
+        .into_iter()
+        .map(|(path, stat)| CommitFile {
+            status: "M".into(),
+            path: path.into(),
+            old_path: None,
+            stat: stat.map(|(added, deleted)| crate::git::LineStat { added, deleted }),
+        })
+        .collect()
+    }
+
+    fn summary_row(app: &AppState, path: &str) -> usize {
+        app.commit_file_rows()
+            .iter()
+            .position(|row| row.path == path)
+            .unwrap_or_else(|| panic!("row {path}"))
+    }
+
+    /// Move the focused file list onto the row for `path`.
+    fn summary_move_to(app: &mut AppState, path: &str) -> Effect {
+        let delta = summary_row(app, path) as i32 - app.commit_files_cursor() as i32;
+        app.dispatch(Action::Move(delta))
+    }
+
+    fn summary_paths(summary: &FolderSummary) -> Vec<&str> {
+        summary
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect()
+    }
+
+    /// Depth-2 commit drill on [`summary_files`] with the `src/a.rs` diff
+    /// open and the file list focused on it.
+    fn summary_drill_app() -> AppState {
+        let mut app = state();
+        app.open_commit_diff(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            summary_files(),
+            0,
+            "src/a.rs".into(),
+            DiffContent::from_unified("@@ -1 +1,2 @@\n keep\n+line\n"),
+        );
+        let idx = summary_row(&app, "src/a.rs");
+        app.set_commit_file_cursor(idx);
+        app.focus = FocusPane::Left;
+        app
+    }
+
+    /// Compare tab `app ↔ main` on [`summary_files`] with the `src/a.rs`
+    /// diff loaded and the file list focused on it. The snapshot's `app`
+    /// HEAD is the compare head and its worktree is clean, so `x` may
+    /// revert `src/a.rs`.
+    fn summary_compare_app() -> AppState {
+        let mut app = state();
+        for row in app
+            .snapshot
+            .repos
+            .iter_mut()
+            .filter(|row| row.repo == "app")
+        {
+            row.head = "ccc".into();
+            row.changes.clear();
+        }
+        app.tabs.open_or_focus("app".into(), "main".into());
+        app.focus = FocusPane::Left;
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        let mut load = compare_range_load(&[]);
+        load.files = summary_files();
+        let _ = app.apply_compare_range(tab_id, gen, Ok(load));
+        let _ = summary_move_to(&mut app, "src/a.rs");
+        app.apply_compare_diff(
+            tab_id,
+            gen,
+            &compare_source(),
+            "src/a.rs",
+            Ok(DiffContent::from_compare_lines(
+                [
+                    "diff --git a/src/a.rs b/src/a.rs",
+                    "--- a/src/a.rs",
+                    "+++ b/src/a.rs",
+                    "@@ -1,2 +1,2 @@",
+                    " keep",
+                    "-old",
+                    "+new",
+                ]
+                .iter()
+                .map(|line| line.to_string())
+                .collect(),
+            )),
+        );
+        app
+    }
+
+    #[test]
+    fn drill_folder_focus_shows_summary_and_keeps_the_diff() {
+        let mut app = summary_drill_app();
+        assert_eq!(app.folder_summary(), None, "file row shows its diff");
+        assert!(!app.current_diff_rows().is_empty());
+
+        assert_eq!(summary_move_to(&mut app, "src"), Effect::None);
+        let summary = app.folder_summary().expect("folder summary");
+        assert_eq!(summary.dir, "src");
+        assert_eq!(
+            summary_paths(&summary),
+            ["src/a.rs", "src/b.rs", "src/deep/c.rs"]
+        );
+        assert_eq!((summary.added, summary.deleted), (5, 1));
+        assert!(app.current_diff_rows().is_empty(), "no hidden diff rows");
+        assert!(
+            matches!(&app.drill, DrillView::Diff { path, .. } if path == "src/a.rs"),
+            "the diff stays loaded behind the summary"
+        );
+
+        // Same file: the kept diff repaints with no reload.
+        assert_eq!(summary_move_to(&mut app, "src/a.rs"), Effect::None);
+        assert_eq!(app.folder_summary(), None);
+        assert!(!app.current_diff_rows().is_empty());
+
+        // Folder again: the summary, not the file diff.
+        assert_eq!(summary_move_to(&mut app, "src/deep"), Effect::None);
+        let summary = app.folder_summary().expect("nested folder summary");
+        assert_eq!(summary_paths(&summary), ["src/deep/c.rs"]);
+        assert_eq!((summary.added, summary.deleted), (0, 0));
+        assert!(app.current_diff_rows().is_empty());
+
+        // Another file loads its diff.
+        assert_eq!(summary_move_to(&mut app, "src/b.rs"), Effect::LoadRightPane);
+    }
+
+    #[test]
+    fn compare_folder_focus_shows_summary_and_keeps_the_diff() {
+        let mut app = summary_compare_app();
+        assert_eq!(app.folder_summary(), None);
+        assert!(!app.current_diff_rows().is_empty());
+
+        assert_eq!(summary_move_to(&mut app, "src"), Effect::None);
+        let summary = app.folder_summary().expect("folder summary");
+        assert_eq!(
+            summary_paths(&summary),
+            ["src/a.rs", "src/b.rs", "src/deep/c.rs"]
+        );
+        assert!(app.current_diff_rows().is_empty());
+        assert_eq!(
+            app.tabs.active_compare().unwrap().path.as_deref(),
+            Some("src/a.rs"),
+            "the diff stays loaded behind the summary"
+        );
+
+        assert_eq!(summary_move_to(&mut app, "src/a.rs"), Effect::None);
+        assert_eq!(app.folder_summary(), None);
+        assert!(!app.current_diff_rows().is_empty());
+
+        assert_eq!(summary_move_to(&mut app, "src"), Effect::None);
+        assert!(app.folder_summary().is_some(), "folder again: the summary");
+        assert!(app.current_diff_rows().is_empty());
+
+        match summary_move_to(&mut app, "src/b.rs") {
+            Effect::LoadCompareDiff { path, .. } => assert_eq!(path, "src/b.rs"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn folded_folder_summary_lists_every_descendant() {
+        for mut app in [summary_drill_app(), summary_compare_app()] {
+            let _ = summary_move_to(&mut app, "src");
+            assert_eq!(app.dispatch(Action::FoldClose), Effect::None);
+            assert!(!app
+                .commit_file_rows()
+                .iter()
+                .any(|row| row.path == "src/deep/c.rs"));
+            let summary = app.folder_summary().expect("folded folder summary");
+            assert_eq!(
+                summary_paths(&summary),
+                ["src/a.rs", "src/b.rs", "src/deep/c.rs"]
+            );
+        }
+    }
+
+    #[test]
+    fn folder_summary_needs_a_diff_beside_the_list() {
+        let mut app = summary_drill_app();
+        app.open_commit_files(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            summary_files(),
+        );
+        app.set_commit_file_cursor(0);
+        assert!(!app.focused_commit_file_row().unwrap().is_file());
+        assert_eq!(app.folder_summary(), None, "depth 1 has no diff pane");
+    }
+
+    /// Dispatch `action` and read the palette row `title`; both must refuse
+    /// with `reason` and run nothing.
+    fn assert_summary_refuses(app: &mut AppState, action: Action, title: &str, reason: &str) {
+        assert_eq!(
+            palette_reason(app, title).as_deref(),
+            Some(reason),
+            "palette {title}"
+        );
+        app.status.clear();
+        assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
+        assert_eq!(app.status, reason, "{action:?}");
+        assert_eq!(app.confirm, None, "{action:?}");
+    }
+
+    #[test]
+    fn drill_folder_summary_refuses_file_diff_keys() {
+        let mut app = summary_drill_app();
+        let _ = summary_move_to(&mut app, "src");
+        for focus in [FocusPane::Left, FocusPane::Right] {
+            app.focus = focus;
+            assert_summary_refuses(
+                &mut app,
+                Action::Edit,
+                "Open in editor",
+                "focus a file to edit",
+            );
+            assert_summary_refuses(
+                &mut app,
+                Action::ExternalDiff,
+                "Open in diff tool",
+                "focus a file to diff",
+            );
+            assert_summary_refuses(
+                &mut app,
+                Action::ToggleFullContext,
+                "Full-file context",
+                FOCUS_A_FILE_DIFF,
+            );
+            assert_summary_refuses(
+                &mut app,
+                Action::DiffVisualStart,
+                "Highlight diff lines",
+                FOCUS_A_FILE_DIFF,
+            );
+            assert!(app.full_context.is_empty(), "{focus:?}");
+            assert_eq!(app.diff_visual_anchor, None, "{focus:?}");
+        }
+
+        // The right pane's own keys refuse while it shows the summary.
+        app.focus = FocusPane::Right;
+        assert_summary_refuses(&mut app, Action::CommentStart, "Comment", FOCUS_A_FILE_DIFF);
+        assert_eq!(app.comment, None);
+        assert_summary_refuses(
+            &mut app,
+            Action::CopyEntityReference,
+            "Copy entity reference",
+            FOCUS_A_FILE_DIFF,
+        );
+        assert_summary_refuses(
+            &mut app,
+            Action::ExportComments,
+            "Copy comments",
+            FOCUS_A_FILE_DIFF,
+        );
+
+        // A highlight left on the hidden diff never writes it.
+        app.diff_visual_anchor = Some(0);
+        assert_summary_refuses(
+            &mut app,
+            Action::Stage,
+            "Stage highlighted lines",
+            FOCUS_A_FILE_DIFF,
+        );
+        assert_summary_refuses(
+            &mut app,
+            Action::Revert,
+            "Revert highlighted lines",
+            FOCUS_A_FILE_DIFF,
+        );
+
+        // Back on a file the keys run again.
+        app.diff_visual_anchor = None;
+        app.focus = FocusPane::Left;
+        let _ = summary_move_to(&mut app, "src/a.rs");
+        assert_eq!(palette_reason(&app, "Open in editor"), None);
+        assert!(matches!(
+            app.dispatch(Action::Edit),
+            Effect::EditFile { ref path, .. } if path == "src/a.rs"
+        ));
+    }
+
+    #[test]
+    fn compare_folder_summary_refuses_file_diff_keys() {
+        let mut app = summary_compare_app();
+        app.focus = FocusPane::Right;
+        assert!(app.compare_revert_target().is_ok(), "src/a.rs may revert");
+        assert_eq!(palette_reason(&app, "Mark reviewed"), None);
+        app.focus = FocusPane::Left;
+        let _ = summary_move_to(&mut app, "src");
+
+        for focus in [FocusPane::Left, FocusPane::Right] {
+            app.focus = focus;
+            assert_summary_refuses(
+                &mut app,
+                Action::Edit,
+                "Open in editor",
+                "focus a file to edit",
+            );
+            assert_summary_refuses(
+                &mut app,
+                Action::ExternalDiff,
+                "Open in diff tool",
+                "focus a file to diff",
+            );
+            assert_summary_refuses(
+                &mut app,
+                Action::ToggleReviewed,
+                "Mark reviewed",
+                FOCUS_A_FILE_TO_MARK_REVIEWED,
+            );
+            assert_summary_refuses(
+                &mut app,
+                Action::ToggleFullContext,
+                "Full-file context",
+                FOCUS_A_FILE_DIFF,
+            );
+            assert_summary_refuses(
+                &mut app,
+                Action::DiffVisualStart,
+                "Highlight diff lines",
+                FOCUS_A_FILE_DIFF,
+            );
+            assert!(app.tabs.active_compare().unwrap().reviewed.is_empty());
+        }
+
+        // Right pane: `x` would revert the hidden diff's file.
+        assert_summary_refuses(&mut app, Action::Revert, "Revert", FOCUS_A_FILE_DIFF);
+        assert_summary_refuses(&mut app, Action::CommentStart, "Comment", FOCUS_A_FILE_DIFF);
+        assert_summary_refuses(
+            &mut app,
+            Action::CopyEntityReference,
+            "Copy entity reference",
+            FOCUS_A_FILE_DIFF,
+        );
+        assert_summary_refuses(
+            &mut app,
+            Action::ExportComments,
+            "Copy comments",
+            FOCUS_A_FILE_DIFF,
+        );
+        // The file list keeps its own `x` copy.
+        app.focus = FocusPane::Left;
+        assert_summary_refuses(&mut app, Action::Revert, "Revert", COMPARE_FOCUS_A_FILE);
+
+        // V-highlight revert of the hidden diff.
+        app.focus = FocusPane::Right;
+        app.diff_visual_anchor = Some(1);
+        assert_eq!(
+            app.highlight_revert_refusal().as_deref(),
+            Some(FOCUS_A_FILE_DIFF)
+        );
+        assert_summary_refuses(
+            &mut app,
+            Action::Revert,
+            "Revert highlighted lines",
+            FOCUS_A_FILE_DIFF,
+        );
+    }
+
+    #[test]
+    fn compare_folder_summary_hides_file_diff_hints() {
+        let mut app = summary_compare_app();
+        app.focus = FocusPane::Right;
+        let keys = |app: &AppState| -> Vec<String> {
+            super::super::chrome::action_hint_segments(app)
+                .into_iter()
+                .map(|segment| segment.key)
+                .collect()
+        };
+        assert!(keys(&app).contains(&"e".into()), "{:?}", keys(&app));
+        assert!(keys(&app).contains(&"x".into()), "{:?}", keys(&app));
+        app.focus = FocusPane::Left;
+        let _ = summary_move_to(&mut app, "src");
+        app.focus = FocusPane::Right;
+        assert_eq!(keys(&app), Vec::<String>::new());
+    }
+
+    #[test]
+    fn tree_to_flat_from_a_folder_loads_the_landed_file() {
+        let mut app = summary_drill_app();
+        let _ = summary_move_to(&mut app, "src");
+        assert_eq!(app.dispatch(Action::ToggleTreeMode), Effect::LoadRightPane);
+        assert_eq!(app.focused_commit_file_row().unwrap().path, "README.md");
+
+        let mut app = summary_compare_app();
+        let _ = summary_move_to(&mut app, "src");
+        match app.dispatch(Action::ToggleTreeMode) {
+            Effect::LoadCompareDiff { path, .. } => assert_eq!(path, "README.md"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn compare_range_reload_keeps_a_focused_folder() {
+        let mut app = summary_compare_app();
+        let _ = summary_move_to(&mut app, "src");
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        // A new folder sorts above `src`: the cursor follows the folder.
+        let mut load = compare_range_load(&["app/new.rs"]);
+        load.files.extend(summary_files());
+        assert_eq!(app.apply_compare_range(tab_id, gen, Ok(load)), None);
+        let row = app.focused_commit_file_row().expect("kept row");
+        assert!(row.is_dir(), "{row:?}");
+        assert_eq!(row.path, "src");
+        assert_ne!(app.commit_files_cursor(), 0);
+        assert_eq!(app.folder_summary().unwrap().dir, "src");
+        let tab = app.tabs.active_compare().unwrap();
+        assert_eq!(tab.path, None, "the old range's diff is dropped");
+    }
+
+    #[test]
+    fn compare_range_reload_clamps_a_gone_folder() {
+        let mut app = summary_compare_app();
+        let tab_id = app.tabs.active_compare().unwrap().id;
+        let gen = app.tabs.active_compare().unwrap().generation;
+        // A gone folder clamps; landing on another folder shows its summary.
+        let _ = summary_move_to(&mut app, "src/deep");
+        let previous = app.commit_files_cursor();
+        let load = compare_range_load(&["README.md", "src/a.rs", "lib/sub/x.rs", "lib/y.rs"]);
+        assert_eq!(app.apply_compare_range(tab_id, gen, Ok(load)), None);
+        assert_eq!(app.commit_files_cursor(), previous);
+        let summary = app.folder_summary().expect("clamped onto a folder");
+        assert_eq!(summary.dir, "lib/sub");
+        assert_eq!(summary_paths(&summary), ["lib/sub/x.rs"]);
+    }
+
     fn compare_tab_with_view_rs(app: &mut AppState) {
         app.tabs.open_or_focus("app".into(), "main".into());
         app.focus = FocusPane::Left;
@@ -7640,7 +8154,13 @@ mod tests {
         let mut app = state();
         focus_file(&mut app, "README.md");
         compare_tab_with_view_rs(&mut app);
-        app.tabs.active_compare_mut().unwrap().path = Some("src/view.rs".into());
+        {
+            // The open diff is the focused file row (row 0 is `src`, whose
+            // summary would cover the diff).
+            let tab = app.tabs.active_compare_mut().unwrap();
+            tab.path = Some("src/view.rs".into());
+            tab.file_cursor = 1;
+        }
         app.focus = FocusPane::Right;
         assert_eq!(app.dispatch(Action::ToggleReviewed), Effect::None);
         assert!(app
