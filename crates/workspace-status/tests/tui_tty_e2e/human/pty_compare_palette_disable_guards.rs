@@ -82,11 +82,11 @@ fn esc_closes_palette(tui: &mut PtySession) {
     );
 }
 
-/// Missing default and unborn HEAD keep Diff vs default / vs branch dimmed.
+/// Missing default and unborn HEAD keep Diff vs default in new tab / vs branch dimmed.
 ///
 /// On `topic`, the palette shows Default branch not found. Enter keeps the
-/// overlay and does not add a compare tab. On `empty`, both Diff vs default
-/// and Diff vs branch show HEAD has no commit. Enter still does not open a tab.
+/// overlay and does not add a compare tab. On `empty`, both Diff vs default in new tab
+/// and Diff vs branch in new tab show HEAD has no commit. Enter still does not open a tab.
 #[test]
 fn pty_compare_missing_default_and_unborn_disable_open() {
     let (_root, workspace) = topic_and_unborn_workspace();
@@ -108,19 +108,19 @@ fn pty_compare_missing_default_and_unborn_disable_open() {
         "/topic keeps the tree cursor on topic (a miss jumps to empty or workspace)",
         WAIT,
     );
-    open_ctrl_k_filter(&mut tui, "vs default", "Diff vs default");
+    open_ctrl_k_filter(&mut tui, "vs default", "Diff vs default in new tab");
     tui.wait_pred(
         |screen| {
             palette_open(screen)
-                && screen.contains("Diff vs default")
+                && screen.contains("Diff vs default in new tab")
                 && screen.contains("Default branch not found")
         },
-        "Diff vs default on topic shows Default branch not found",
+        "Diff vs default in new tab on topic shows Default branch not found",
         WAIT,
     );
     enter_keeps_palette_open(
         &mut tui,
-        "Enter on dimmed Diff vs default keeps the palette",
+        "Enter on dimmed Diff vs default in new tab keeps the palette",
     );
     tui.wait_pred(
         |screen| {
@@ -144,14 +144,14 @@ fn pty_compare_missing_default_and_unborn_disable_open() {
         "/empty keeps the tree cursor on empty (a miss jumps to topic or workspace)",
         WAIT,
     );
-    open_ctrl_k_filter(&mut tui, "vs default", "Diff vs default");
+    open_ctrl_k_filter(&mut tui, "vs default", "Diff vs default in new tab");
     tui.wait_pred(
         |screen| {
             palette_open(screen)
-                && screen.contains("Diff vs default")
+                && screen.contains("Diff vs default in new tab")
                 && screen.contains("HEAD has no commit")
         },
-        "Diff vs default on empty shows HEAD has no commit",
+        "Diff vs default in new tab on empty shows HEAD has no commit",
         WAIT,
     );
     esc_closes_palette(&mut tui);
@@ -161,17 +161,20 @@ fn pty_compare_missing_default_and_unborn_disable_open() {
         "Esc leaves the cursor on empty with the palette closed",
         WAIT,
     );
-    open_ctrl_k_filter(&mut tui, "vs branch", "Diff vs branch…");
+    open_ctrl_k_filter(&mut tui, "vs branch", "Diff vs branch in new tab…");
     tui.wait_pred(
         |screen| {
             palette_open(screen)
-                && screen.contains("Diff vs branch…")
+                && screen.contains("Diff vs branch in new tab…")
                 && screen.contains("HEAD has no commit")
         },
-        "Diff vs branch on empty shows HEAD has no commit",
+        "Diff vs branch in new tab on empty shows HEAD has no commit",
         WAIT,
     );
-    enter_keeps_palette_open(&mut tui, "Enter on dimmed Diff vs branch keeps the palette");
+    enter_keeps_palette_open(
+        &mut tui,
+        "Enter on dimmed Diff vs branch in new tab keeps the palette",
+    );
     tui.wait_pred(
         |screen| {
             palette_open(screen) && screen.contains("HEAD has no commit") && workspace_only(screen)
@@ -183,7 +186,7 @@ fn pty_compare_missing_default_and_unborn_disable_open() {
 
 /// Workspace and family rows are not compare targets.
 ///
-/// Diff vs default stays dimmed with Focus a checkout to compare. Close
+/// Diff vs default in new tab stays dimmed with Focus a checkout to compare. Close
 /// compare tab cannot close the Workspace tab.
 #[test]
 fn pty_compare_workspace_and_family_are_not_targets() {
@@ -207,14 +210,14 @@ fn pty_compare_workspace_and_family_are_not_targets() {
         "gg moves the tree cursor to the workspace row (not app or a checkout leaf)",
         WAIT,
     );
-    open_ctrl_k_filter(&mut tui, "vs default", "Diff vs default");
+    open_ctrl_k_filter(&mut tui, "vs default", "Diff vs default in new tab");
     tui.wait_pred(
         |screen| {
             palette_open(screen)
-                && screen.contains("Diff vs default")
+                && screen.contains("Diff vs default in new tab")
                 && screen.contains("Focus a checkout to compare")
         },
-        "Diff vs default on the workspace row shows Focus a checkout to compare",
+        "Diff vs default in new tab on the workspace row shows Focus a checkout to compare",
         WAIT,
     );
     esc_closes_palette(&mut tui);
@@ -225,14 +228,14 @@ fn pty_compare_workspace_and_family_are_not_targets() {
         "/app lands on the family row, not a checkout leaf or workspace",
         WAIT,
     );
-    open_ctrl_k_filter(&mut tui, "vs default", "Diff vs default");
+    open_ctrl_k_filter(&mut tui, "vs default", "Diff vs default in new tab");
     tui.wait_pred(
         |screen| {
             palette_open(screen)
-                && screen.contains("Diff vs default")
+                && screen.contains("Diff vs default in new tab")
                 && screen.contains("Focus a checkout to compare")
         },
-        "Diff vs default on the family row shows Focus a checkout to compare",
+        "Diff vs default in new tab on the family row shows Focus a checkout to compare",
         WAIT,
     );
     esc_closes_palette(&mut tui);

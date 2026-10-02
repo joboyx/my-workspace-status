@@ -76,7 +76,7 @@ fn pty_compare_gg_first_file_not_dir() {
     tui.enter();
     tui.wait_pred(
         cursor_on_auth_ts,
-        "Diff vs default selects the first file leaf (auth.ts), not src",
+        "Diff vs default in new tab selects the first file leaf (auth.ts), not src",
         GIT_WAIT,
     );
 

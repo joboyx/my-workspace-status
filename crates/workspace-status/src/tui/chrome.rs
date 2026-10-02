@@ -1561,7 +1561,8 @@ mod tests {
     #[test]
     fn compare_right_pane_shows_no_drill_hint() {
         let mut app = state();
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         app.focus = FocusPane::Right;
         assert_eq!(nav_keys(&app), vec![pair("Esc", "← files")]);
         app.focus = FocusPane::Left;
@@ -1619,12 +1620,14 @@ mod tests {
     fn compare_space_hint_follows_file_focus() {
         use crate::tui::drill::{CommitFile, CommitFileSource};
         let mut app = state();
-        app.tabs.open_or_focus("app".into(), "main".into());
+        app.tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         app.focus = FocusPane::Left;
         {
             let tab = app.tabs.active_compare_mut().unwrap();
             tab.source = Some(CommitFileSource::Compare {
                 base_ref: "main".into(),
+                head_ref: "HEAD".into(),
                 base_tip: "bbb".into(),
                 merge_base: "aaa".into(),
                 head: "ccc".into(),

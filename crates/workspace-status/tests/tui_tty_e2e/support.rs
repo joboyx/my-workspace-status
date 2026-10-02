@@ -1202,7 +1202,7 @@ pub fn open_compare_regions_diff(workspace: &Path) -> PtySession {
 /// regions.txt diff, as [`open_compare_regions_diff`] does at launch.
 ///
 /// The Workspace tree must hold focus on a row of `app` (the repo row or
-/// one of its files): "Diff vs default" compares the focused checkout.
+/// one of its files): "Diff vs default in new tab" compares the focused checkout.
 pub fn open_compare_regions_in(tui: &mut PtySession) {
     tui.ctrl_letter('k');
     tui.wait_pred(
@@ -1212,8 +1212,8 @@ pub fn open_compare_regions_in(tui: &mut PtySession) {
     );
     type_palette_filter(tui, "vs default");
     tui.wait_pred(
-        |screen| screen.contains("Diff vs default") && screen.contains("vs default"),
-        "palette filter lands on Diff vs default",
+        |screen| screen.contains("Diff vs default in new tab") && screen.contains("vs default"),
+        "palette filter lands on Diff vs default in new tab",
         WAIT,
     );
     tui.enter();
@@ -1223,7 +1223,7 @@ pub fn open_compare_regions_in(tui: &mut PtySession) {
                 && screen.contains("regions.txt")
                 && screen.contains(REGIONS_ALPHA)
         },
-        "Diff vs default opens the compare tab on regions.txt",
+        "Diff vs default in new tab opens the compare tab on regions.txt",
         GIT_WAIT,
     );
     tui.enter();

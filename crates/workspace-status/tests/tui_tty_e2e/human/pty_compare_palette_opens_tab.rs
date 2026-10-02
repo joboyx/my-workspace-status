@@ -13,7 +13,7 @@ fn head_branch(workspace: &std::path::Path) -> String {
     )
 }
 
-/// Palette Diff vs branch opens a compare tab and leaves HEAD on feature.
+/// Palette Diff vs branch in new tab opens a compare tab and leaves HEAD on feature.
 #[test]
 fn pty_compare_palette_opens_tab() {
     let (_root, workspace) = compare_ahead_workspace();
@@ -27,7 +27,7 @@ fn pty_compare_palette_opens_tab() {
     tui.wait_contains("feature/ahead", GIT_WAIT);
     tui.ctrl_letter('k');
     tui.keys("vs branch");
-    tui.wait_contains("Diff vs branch", WAIT);
+    tui.wait_contains("Diff vs branch in new tab", WAIT);
     tui.enter();
     tui.wait_pred(
         |screen| screen.contains("Compare") && !screen.contains("Checkout"),

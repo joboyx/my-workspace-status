@@ -3236,7 +3236,7 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                         ),
                         Span::styled(command.title.to_string(), style),
                     ];
-                    // Palette-only rows (Diff vs …, Close tab) have no key.
+                    // Palette-only rows (Diff … in new tab, Close tab) have no key.
                     if !command.keys.is_empty() {
                         spans.push(Span::raw(" "));
                         spans.push(key_chip(
@@ -4399,7 +4399,9 @@ mod tests {
                 stat: None,
             }],
         );
-        state.tabs.open_or_focus("app".into(), "main".into());
+        state
+            .tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         {
             let tab = state.tabs.active_compare_mut().unwrap();
             tab.loading = false;
@@ -4425,6 +4427,7 @@ mod tests {
         state.tabs.active_compare_mut().unwrap().source =
             Some(super::super::drill::CommitFileSource::Compare {
                 base_ref: "main".into(),
+                head_ref: "HEAD".into(),
                 base_tip: "bbb".into(),
                 merge_base: "ccc".into(),
                 head: "ddd".into(),
@@ -4555,6 +4558,7 @@ mod tests {
         assert!(first.contains("alpha-syntax"), "{first}");
         let source = super::super::drill::CommitFileSource::Compare {
             base_ref: "main".into(),
+            head_ref: "HEAD".into(),
             base_tip: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             merge_base: "cccccccccccccccccccccccccccccccccccccccc".into(),
             head: "dddddddddddddddddddddddddddddddddddddddd".into(),
@@ -5278,8 +5282,12 @@ mod tests {
     fn tab_strip_hit_boxes_match_painted_cells_after_arrow_labels() {
         let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
-        state.tabs.open_or_focus("app".into(), "main".into());
-        state.tabs.open_or_focus("app".into(), "develop".into());
+        state
+            .tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        state
+            .tabs
+            .open_or_focus("app".into(), "develop".into(), "HEAD".into());
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let tab_y = state.layout.tab_y;
@@ -5331,8 +5339,12 @@ mod tests {
     fn tab_close_is_dim_until_hovered_on_active_and_inactive_tabs() {
         let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
-        state.tabs.open_or_focus("app".into(), "main".into());
-        state.tabs.open_or_focus("app".into(), "develop".into());
+        state
+            .tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        state
+            .tabs
+            .open_or_focus("app".into(), "develop".into(), "HEAD".into());
         assert_eq!(state.tabs.active, 2);
         let palette = state.theme.palette();
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
@@ -5411,7 +5423,9 @@ mod tests {
         let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         for checkout in ["alpha", "bravo", "charlie", "delta", "echo"] {
-            state.tabs.open_or_focus(checkout.into(), "main".into());
+            state
+                .tabs
+                .open_or_focus(checkout.into(), "main".into(), "HEAD".into());
         }
         assert_eq!(state.tabs.active, 5);
         state
@@ -6067,7 +6081,9 @@ mod tests {
         for cols in [64u16, 100, 140] {
             let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
             let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
-            state.tabs.open_or_focus("alpha".into(), "main".into());
+            state
+                .tabs
+                .open_or_focus("alpha".into(), "main".into(), "HEAD".into());
             assert!(state.is_compare_tab());
             state.help_open = true;
             let mut terminal = Terminal::new(TestBackend::new(cols, 120)).unwrap();
@@ -7109,7 +7125,9 @@ mod tests {
         assert!(state.drill.is_files());
         // The `1 file in aaa1111` note is status, not the parked subtitle.
         state.status.clear();
-        state.tabs.open_or_focus("app".into(), "main".into());
+        state
+            .tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         {
             let tab = state.tabs.active_compare_mut().unwrap();
             tab.loading = false;
@@ -7161,7 +7179,9 @@ mod tests {
     fn search_match_paints_filter_bg_on_compare_commit_file_rows() {
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
-        state.tabs.open_or_focus("app".into(), "main".into());
+        state
+            .tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         state.focus = FocusPane::Left;
         {
             let tab = state.tabs.active_compare_mut().unwrap();

@@ -289,7 +289,7 @@ fn pty_compare_highlight_semicolon_comments_range() {
 /// and is not in its export.
 ///
 /// The worktree changes keep-b (line 2). A Workspace `;` on that line
-/// paints `"` there. With the tree still on regions.txt, "Diff vs default"
+/// paints `"` there. With the tree still on regions.txt, "Diff vs default in new tab"
 /// opens the compare tab: it shows the committed keep-b on line 2 of the
 /// same checkout and path, which must stay unmarked. `y` on the compare
 /// diff finds no comments in scope: it copies nothing and says so.

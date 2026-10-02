@@ -213,7 +213,7 @@ pub fn topic_and_unborn_workspace() -> (PathBuf, PathBuf) {
     (root, workspace)
 }
 
-/// Ahead, behind, diverged, and unrelated orphan checkouts for Diff vs default.
+/// Ahead, behind, diverged, and unrelated orphan checkouts for Diff vs default in new tab.
 pub fn compare_tip_shape_workspace() -> (PathBuf, PathBuf) {
     let (root, workspace) = new_workspace("ws-tui-tty-compare-shapes");
     seed_compare_ahead(&workspace, "ahead");
@@ -286,7 +286,7 @@ pub const COMPARE_ADDED_FILE: &str = "summary.txt";
 ///
 /// `main` commits `regions.txt` ([`REGIONS_COMMITTED`]). The feature commit
 /// changes ALPHA and OMEGA (two separated hunks) and adds
-/// [`COMPARE_ADDED_FILE`]. The worktree is clean. Diff vs default compares
+/// [`COMPARE_ADDED_FILE`]. The worktree is clean. Diff vs default in new tab compares
 /// against `origin/main`.
 pub fn compare_regions_workspace() -> (PathBuf, PathBuf) {
     let (root, workspace) = new_workspace("ws-tui-tty-compare-regions");

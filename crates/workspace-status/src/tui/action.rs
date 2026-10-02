@@ -210,6 +210,9 @@ pub enum Action {
     CompareVsDefault,
     /// Open the compare-only branch picker.
     CompareVsBranch,
+    /// Open or focus a compare tab of the focused graph commit versus its
+    /// first parent (`<sha>^...<sha>`, head pinned to `<sha>`).
+    CompareCommitVsParent,
     /// Close the active compare tab.
     CloseCompareTab,
     /// Cycle to the next tab (`gt`).
@@ -426,6 +429,8 @@ pub enum Effect {
         tab_id: u64,
         repo: String,
         base_ref: String,
+        /// `HEAD`, or the full commit id of a pinned head.
+        head_ref: String,
         force: bool,
     },
     /// Load one compare-file diff.
@@ -445,6 +450,8 @@ pub enum Effect {
         tab_id: u64,
         repo: String,
         base_ref: String,
+        /// `HEAD`, or the full commit id of a pinned head.
+        head_ref: String,
         last_head: Option<String>,
         last_base_tip: Option<String>,
     },

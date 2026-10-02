@@ -15,12 +15,14 @@ pub enum CommitFileSource {
     Stash { stash_ref: String },
     /// Dirty worktree versus HEAD.
     Worktree,
-    /// Three-dot compare of committed `base...HEAD` on one checkout.
+    /// Three-dot compare of committed `base...head` on one checkout.
     ///
-    /// `base_ref` is the tab key. SHA fields are immutable endpoints for
-    /// one load and stale-result checks.
+    /// `base_ref` and `head_ref` are the tab key (`head_ref` is `HEAD`, or a
+    /// full commit id for a pinned head). SHA fields are immutable endpoints
+    /// for one load and stale-result checks; `head` is `head_ref` resolved.
     Compare {
         base_ref: String,
+        head_ref: String,
         base_tip: String,
         merge_base: String,
         head: String,
@@ -43,13 +45,16 @@ impl CommitFileSource {
     }
 
     /// Short name for chrome and status copy: a 7-char commit id,
-    /// `stash@{n}`, `base...HEAD`, or `uncommitted`.
+    /// `stash@{n}`, `base...HEAD` (`abc1234^...abc1234` for a pinned head),
+    /// or `uncommitted`.
     pub fn short_label(&self) -> String {
         match self {
             Self::Worktree => "uncommitted".into(),
             Self::Stash { stash_ref } => stash_ref.clone(),
             Self::Commit { commit_id } => commit_id.chars().take(7).collect(),
-            Self::Compare { base_ref, .. } => format!("{base_ref}...HEAD"),
+            Self::Compare {
+                base_ref, head_ref, ..
+            } => super::tabs::compare_range_label(base_ref, head_ref),
         }
     }
 

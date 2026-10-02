@@ -505,6 +505,7 @@ fn commit_file_source_key(source: &CommitFileSource) -> String {
             base_tip,
             merge_base,
             head,
+            ..
         } => format!("compare:{base_ref}:{base_tip}:{merge_base}:{head}"),
     }
 }

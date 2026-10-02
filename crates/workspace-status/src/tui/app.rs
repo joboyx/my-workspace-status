@@ -50,7 +50,9 @@ use super::keys::KeyStrokeOrigin;
 use super::keys::{event_to_action_with, is_held_nav_backlog};
 use super::state::AppState;
 use super::status::StatusMessage;
-use super::tabs::{base_ref_not_found, no_merge_base, HEAD_HAS_NO_COMMIT};
+use super::tabs::{
+    base_ref_not_found, head_ref_not_found, no_merge_base, COMPARE_HEAD_REF, HEAD_HAS_NO_COMMIT,
+};
 use super::tty::{disable_mouse, enable_mouse, poll_event, read_event, read_event_origin};
 #[cfg(test)]
 use super::watch::{checkout_watch_identities, watch_needs_pane_reload};
@@ -674,14 +676,25 @@ pub(crate) struct CompareRangeLoad {
     pub base_tip: String,
 }
 
-/// Resolve HEAD / base / merge-base and list committed compare files.
+/// Resolve head / base / merge-base and list committed compare files.
+///
+/// `head_ref` is `HEAD` for a live tab or a full commit id for a pinned
+/// one; a pinned `<sha>^...<sha>` lists that commit's first-parent changes.
 pub(crate) fn compute_compare_range(
     dir: &Path,
     base_ref: &str,
+    head_ref: &str,
 ) -> Result<CompareRangeLoad, String> {
-    let head = rev_parse_commit(dir, "HEAD")?.ok_or_else(|| HEAD_HAS_NO_COMMIT.to_string())?;
+    let head = rev_parse_commit(dir, head_ref)?.ok_or_else(|| {
+        if head_ref == COMPARE_HEAD_REF {
+            HEAD_HAS_NO_COMMIT.to_string()
+        } else {
+            head_ref_not_found(head_ref)
+        }
+    })?;
     let base_tip = rev_parse_commit(dir, base_ref)?.ok_or_else(|| base_ref_not_found(base_ref))?;
-    let merge = merge_base(dir, &base_tip, &head)?.ok_or_else(|| no_merge_base(base_ref))?;
+    let merge =
+        merge_base(dir, &base_tip, &head)?.ok_or_else(|| no_merge_base(base_ref, head_ref))?;
     let files = list_compare_name_status(dir, &base_tip, &head)?
         .into_iter()
         .map(Into::into)
@@ -689,6 +702,7 @@ pub(crate) fn compute_compare_range(
     Ok(CompareRangeLoad {
         source: CommitFileSource::Compare {
             base_ref: base_ref.to_string(),
+            head_ref: head_ref.to_string(),
             base_tip: base_tip.clone(),
             merge_base: merge,
             head: head.clone(),
@@ -700,13 +714,17 @@ pub(crate) fn compute_compare_range(
 }
 
 /// Probe whether compare endpoints moved. `Ok(true)` means reload.
+///
+/// Resolves `head_ref`, so a pinned tab (full sha head, `<sha>^` base)
+/// never reloads when the checkout's HEAD moves.
 pub(crate) fn probe_compare_range(
     dir: &Path,
     base_ref: &str,
+    head_ref: &str,
     last_head: Option<&str>,
     last_base_tip: Option<&str>,
 ) -> Result<(bool, Option<String>, Option<String>), String> {
-    let head = rev_parse_commit(dir, "HEAD")?;
+    let head = rev_parse_commit(dir, head_ref)?;
     let base_tip = rev_parse_commit(dir, base_ref)?;
     let changed = match (last_head, last_base_tip) {
         (Some(prev_head), Some(prev_base)) => {
@@ -1815,6 +1833,93 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    fn commit_file(dir: &Path, name: &str) -> String {
+        fs::write(dir.join(name), format!("{name}\n")).unwrap();
+        git(dir, &["add", name]);
+        git(dir, &["commit", "-q", "-m", name]);
+        exec_git(&["rev-parse", "HEAD"], dir)
+    }
+
+    fn compare_paths(load: &CompareRangeLoad) -> Vec<(String, String)> {
+        load.files
+            .iter()
+            .map(|file| (file.status.clone(), file.path.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn pinned_head_compares_a_commit_with_its_first_parent() {
+        let dir = crate::testutil::unique_dir("ws-compare-pinned");
+        init_repo(&dir);
+        let first = commit_file(&dir, "a.txt");
+        git(&dir, &["checkout", "-q", "-b", "topic"]);
+        commit_file(&dir, "topic.txt");
+        git(&dir, &["checkout", "-q", "main"]);
+        let main_tip = commit_file(&dir, "main.txt");
+        git(
+            &dir,
+            &["merge", "--no-ff", "-q", "-m", "merge topic", "topic"],
+        );
+        let merge = exec_git(&["rev-parse", "HEAD"], &dir);
+        // HEAD moves past both commits: a pinned head ignores it.
+        commit_file(&dir, "later.txt");
+
+        let load = compute_compare_range(&dir, &format!("{first}^"), &first).unwrap();
+        assert_eq!(compare_paths(&load), vec![("A".into(), "a.txt".into())]);
+        assert_eq!(load.head, first);
+        match &load.source {
+            CommitFileSource::Compare {
+                base_ref,
+                head_ref,
+                head,
+                merge_base,
+                ..
+            } => {
+                assert_eq!(base_ref, &format!("{first}^"));
+                assert_eq!(head_ref, &first);
+                assert_eq!(head, &first);
+                assert_eq!(merge_base, &load.base_tip, "parent is the merge base");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // A merge shows what it brought in versus its first parent.
+        let load = compute_compare_range(&dir, &format!("{merge}^"), &merge).unwrap();
+        assert_eq!(load.base_tip, main_tip);
+        assert_eq!(compare_paths(&load), vec![("A".into(), "topic.txt".into())]);
+
+        // A live tab still reads the checkout's HEAD.
+        let live = compute_compare_range(&dir, &first, "HEAD").unwrap();
+        let mut paths: Vec<_> = compare_paths(&live).into_iter().map(|(_, p)| p).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["later.txt", "main.txt", "topic.txt"]);
+
+        assert_eq!(
+            compute_compare_range(&dir, "main", &"0".repeat(40)).err(),
+            Some(head_ref_not_found(&"0".repeat(40)))
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn probe_ignores_head_moves_for_a_pinned_head() {
+        let dir = crate::testutil::unique_dir("ws-probe-pinned");
+        init_repo(&dir);
+        let pinned = commit_file(&dir, "a.txt");
+        let base = format!("{pinned}^");
+        let parent = exec_git(&["rev-parse", &base], &dir);
+        commit_file(&dir, "next.txt");
+        let (changed, head, base_tip) =
+            probe_compare_range(&dir, &base, &pinned, Some(&pinned), Some(&parent)).unwrap();
+        assert!(!changed, "HEAD moved but the pinned endpoints did not");
+        assert_eq!(head.as_deref(), Some(pinned.as_str()));
+        assert_eq!(base_tip.as_deref(), Some(parent.as_str()));
+        let (changed, _, _) =
+            probe_compare_range(&dir, &base, "HEAD", Some(&pinned), Some(&parent)).unwrap();
+        assert!(changed, "a live tab on the same base reloads");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn probe_without_recorded_sha_is_not_a_change() {
         let dir = std::env::temp_dir().join(format!(
@@ -1826,22 +1931,41 @@ mod tests {
         ));
         init_repo(&dir);
         let head = exec_git(&["rev-parse", "HEAD"], &dir);
-        let (changed, got_head, got_base) = probe_compare_range(&dir, "HEAD", None, None).unwrap();
+        let (changed, got_head, got_base) =
+            probe_compare_range(&dir, "HEAD", "HEAD", None, None).unwrap();
         assert!(!changed, "missing recorded SHAs must not force a reload");
         assert_eq!(got_head.as_deref(), Some(head.as_str()));
         assert_eq!(got_base.as_deref(), Some(head.as_str()));
-        let (changed, _, _) =
-            probe_compare_range(&dir, "HEAD", Some(head.as_str()), Some(head.as_str())).unwrap();
+        let (changed, _, _) = probe_compare_range(
+            &dir,
+            "HEAD",
+            "HEAD",
+            Some(head.as_str()),
+            Some(head.as_str()),
+        )
+        .unwrap();
         assert!(!changed, "equal tips must not reload");
         fs::write(dir.join("dirty.txt"), "dirty\n").unwrap();
-        let (changed, _, _) =
-            probe_compare_range(&dir, "HEAD", Some(head.as_str()), Some(head.as_str())).unwrap();
+        let (changed, _, _) = probe_compare_range(
+            &dir,
+            "HEAD",
+            "HEAD",
+            Some(head.as_str()),
+            Some(head.as_str()),
+        )
+        .unwrap();
         assert!(!changed, "dirty-only worktree must not reload compare");
         fs::write(dir.join("next.txt"), "next\n").unwrap();
         git(&dir, &["add", "next.txt"]);
         git(&dir, &["commit", "-q", "-m", "move head"]);
-        let (changed, _, _) =
-            probe_compare_range(&dir, "HEAD", Some(head.as_str()), Some(head.as_str())).unwrap();
+        let (changed, _, _) = probe_compare_range(
+            &dir,
+            "HEAD",
+            "HEAD",
+            Some(head.as_str()),
+            Some(head.as_str()),
+        )
+        .unwrap();
         assert!(changed, "HEAD SHA change must reload");
         let _ = fs::remove_dir_all(&dir);
     }

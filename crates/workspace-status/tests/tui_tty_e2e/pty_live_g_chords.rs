@@ -14,7 +14,7 @@ fn open_default_and_main(tui: &mut PtySession) {
     tui.search("app");
     tui.ctrl_letter('k');
     tui.keys("vs default");
-    tui.wait_contains("Diff vs default", WAIT);
+    tui.wait_contains("Diff vs default in new tab", WAIT);
     tui.enter();
     tui.wait_contains("app ↔ origin/main", GIT_WAIT);
     tui.ctrl_letter('k');
@@ -66,7 +66,7 @@ fn leave_workspace_root(tui: &mut PtySession) {
 /// One typeless CSI-u per tap: `gg` at 40ms jumps, then `gt` / `gT` switch tabs.
 ///
 /// 40ms is inside the 400ms chord and under the old 80ms echo. Compare
-/// uses Diff vs default on `app` (alpha.txt / beta.txt), not an empty
+/// uses Diff vs default in new tab on `app` (alpha.txt / beta.txt), not an empty
 /// "No committed changes" list. Immediate typeless press+echo `gt` stays
 /// in leftover `pty_compare_gt_chords_and_gg`.
 #[test]
@@ -99,7 +99,7 @@ fn pty_typeless_one_report_gg_and_gt() {
     tui.csi_u_typeless('2');
     tui.wait_pred(
         |screen| on_compare_origin_main(screen) && !tree_or_theme_fired(screen),
-        "typeless g2 activates Diff vs default (origin/main)",
+        "typeless g2 activates Diff vs default in new tab (origin/main)",
         WAIT,
     );
 

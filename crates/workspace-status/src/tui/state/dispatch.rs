@@ -10,18 +10,26 @@ use super::super::gates::{
     FOCUS_A_FILE_TO_MARK_REVIEWED,
 };
 use super::super::status::StatusMessage;
-use super::super::tabs::{CANNOT_STAGE_COMPARE, CANNOT_UNSTAGE_COMPARE, SWITCH_TO_WORKSPACE_TAB};
+use super::super::tabs::{
+    CANNOT_STAGE_COMPARE, CANNOT_UNSTAGE_COMPARE, DEFAULT_BRANCH_NOT_FOUND, FOCUS_A_CHECKOUT,
+    HEAD_HAS_NO_COMMIT, SWITCH_TO_WORKSPACE_TAB,
+};
 use super::{AppState, FocusPane};
 
 impl AppState {
-    /// Why the active compare tab refuses `action`, or `None` when it may run.
+    /// Why `action` refuses as a compare command, or `None` when it may run.
     ///
     /// The one compare gate. [`Self::dispatch`] puts the reason on the status
     /// line, and the command palette paints it dimmed at the row's right edge
     /// (and in the footer for the highlighted row) through
     /// `palette_disabled_reason`, so a key press and a palette row always give
-    /// the same copy. The Workspace tab refuses nothing here.
+    /// the same copy. The commands that open a compare tab are checked on
+    /// every tab ([`Self::compare_open_refusal`]); the rest refuse only on a
+    /// compare tab, and the Workspace tab refuses nothing else here.
     pub(crate) fn compare_refusal(&self, action: &Action) -> Option<String> {
+        if let Some(reason) = self.compare_open_refusal(action) {
+            return Some(reason.into());
+        }
         if !self.is_compare_tab() {
             return None;
         }
@@ -97,6 +105,31 @@ impl AppState {
             _ => return None,
         };
         self.folder_summary().is_some().then(|| reason.into())
+    }
+
+    /// Why a command that opens a compare tab cannot run, or `None`.
+    ///
+    /// Diff vs default / branch need a concrete checkout with a born HEAD;
+    /// Diff vs default also needs a default tip. Diff commit vs parent needs
+    /// a focused graph commit that has a parent.
+    fn compare_open_refusal(&self, action: &Action) -> Option<&'static str> {
+        match action {
+            Action::CompareVsDefault | Action::CompareVsBranch => {
+                let Some(checkout) = self.compare_target_checkout() else {
+                    return Some(FOCUS_A_CHECKOUT);
+                };
+                match self.checkout_head_and_default(&checkout) {
+                    None => Some(FOCUS_A_CHECKOUT),
+                    Some(("", _)) => Some(HEAD_HAS_NO_COMMIT),
+                    Some((_, None)) if matches!(action, Action::CompareVsDefault) => {
+                        Some(DEFAULT_BRANCH_NOT_FOUND)
+                    }
+                    Some(_) => None,
+                }
+            }
+            Action::CompareCommitVsParent => self.commit_vs_parent_target().err(),
+            _ => None,
+        }
     }
 
     /// True when `action` is a compare-tab `x`, which the right-pane
@@ -256,6 +289,7 @@ impl AppState {
             | Action::CommandPaletteCancel
             | Action::CompareVsDefault
             | Action::CompareVsBranch
+            | Action::CompareCommitVsParent
             | Action::CloseCompareTab
             | Action::NextTab
             | Action::PreviousTab

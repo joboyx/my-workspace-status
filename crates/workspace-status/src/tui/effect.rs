@@ -341,6 +341,7 @@ struct CompareRangeJob {
     tab_id: u64,
     repo: String,
     base_ref: String,
+    head_ref: String,
 }
 
 struct CompareDiffJob {
@@ -357,6 +358,7 @@ struct CompareProbeJob {
     tab_id: u64,
     repo: String,
     base_ref: String,
+    head_ref: String,
     last_head: Option<String>,
     last_base_tip: Option<String>,
 }
@@ -983,6 +985,7 @@ impl Interpreter {
                 tab_id,
                 repo,
                 base_ref,
+                head_ref,
                 force,
             } => {
                 if let Some(gen) = state.begin_compare_range(tab_id, force) {
@@ -991,6 +994,7 @@ impl Interpreter {
                         tab_id,
                         repo,
                         base_ref,
+                        head_ref,
                     });
                     self.sched.enqueue_user_front(UserTag::Pane);
                     self.mark();
@@ -1029,6 +1033,7 @@ impl Interpreter {
                 tab_id,
                 repo,
                 base_ref,
+                head_ref,
                 last_head,
                 last_base_tip,
             } => {
@@ -1036,6 +1041,7 @@ impl Interpreter {
                     tab_id,
                     repo,
                     base_ref,
+                    head_ref,
                     last_head,
                     last_base_tip,
                 });
@@ -2209,7 +2215,7 @@ impl Interpreter {
                         Box::new(move || JobOutcome::CompareRange {
                             tab_id: job.tab_id,
                             gen: job.gen,
-                            result: compute_compare_range(&dir, &job.base_ref),
+                            result: compute_compare_range(&dir, &job.base_ref, &job.head_ref),
                         }),
                     );
                     return;
@@ -2247,6 +2253,7 @@ impl Interpreter {
                             let result = probe_compare_range(
                                 &dir,
                                 &job.base_ref,
+                                &job.head_ref,
                                 job.last_head.as_deref(),
                                 job.last_base_tip.as_deref(),
                             )
@@ -2656,6 +2663,7 @@ mod tests {
     fn compare_source() -> CommitFileSource {
         CommitFileSource::Compare {
             base_ref: "main".into(),
+            head_ref: "HEAD".into(),
             base_tip: "bbb".into(),
             merge_base: "aaa".into(),
             head: "ccc".into(),
@@ -2672,7 +2680,9 @@ mod tests {
     }
 
     fn open_compare_tab(state: &mut AppState) -> (u64, u64) {
-        state.tabs.open_or_focus("app".into(), "main".into());
+        state
+            .tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
         let tab = state.tabs.active_compare_mut().unwrap();
         tab.generation = 2;
         (tab.id, tab.generation)
@@ -2788,6 +2798,7 @@ mod tests {
                 gen,
                 source: CommitFileSource::Compare {
                     base_ref: "main".into(),
+                    head_ref: "HEAD".into(),
                     base_tip: "other".into(),
                     merge_base: "aaa".into(),
                     head: "ccc".into(),
@@ -2856,13 +2867,16 @@ mod tests {
             tab.source = Some(compare_source());
             tab.diff_req = 1;
         }
-        state.tabs.open_or_focus("app".into(), "develop".into());
+        state
+            .tabs
+            .open_or_focus("app".into(), "develop".into(), "HEAD".into());
         let tab_b = state.tabs.active_compare().unwrap().id;
         {
             let tab = state.tabs.get_id_mut(tab_b).unwrap();
             tab.generation = 2;
             tab.source = Some(CommitFileSource::Compare {
                 base_ref: "develop".into(),
+                head_ref: "HEAD".into(),
                 base_tip: "bbb".into(),
                 merge_base: "aaa".into(),
                 head: "ccc".into(),
@@ -2897,6 +2911,7 @@ mod tests {
                 gen: 2,
                 source: CommitFileSource::Compare {
                     base_ref: "develop".into(),
+                    head_ref: "HEAD".into(),
                     base_tip: "bbb".into(),
                     merge_base: "aaa".into(),
                     head: "ccc".into(),
