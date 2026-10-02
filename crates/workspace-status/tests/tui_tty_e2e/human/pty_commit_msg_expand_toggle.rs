@@ -4,9 +4,9 @@ use crate::seed::{
 };
 use crate::support::{
     crumb_row, graph_cursor_on, no_wrong_overlays, panes_files_focused,
-    panes_tree_focused_graph_unfocused, panes_tree_unfocused_graph_focused, right_pane, status_row,
-    title_has_files, title_has_graph, tree_cursor_on, tree_has, tree_inactive_selection_on,
-    SETTLE_MS, WAIT,
+    panes_files_unfocused_diff_focused, panes_tree_focused_graph_unfocused,
+    panes_tree_unfocused_graph_focused, right_pane, status_row, title_has_diff, title_has_files,
+    title_has_graph, tree_cursor_on, tree_has, tree_inactive_selection_on, SETTLE_MS, WAIT,
 };
 
 const REPO: &str = "longmsg";
@@ -98,11 +98,14 @@ fn graph_msg_expanded(screen: &str) -> bool {
         && no_wrong_overlays(screen)
 }
 
+/// Depth 1: the left graph footer carries the message; the right files pane
+/// is a plain file list with no commit footer.
 fn files_msg_expanded(screen: &str) -> bool {
     panes_files_focused(screen)
         && title_has_files(screen)
         && title_has_graph(screen)
-        && right_pane(screen).contains(COMMIT_MSG_BODY)
+        && left_tree(screen).contains(COMMIT_MSG_BODY)
+        && !right_pane(screen).contains(COMMIT_MSG_BODY)
         && right_pane(screen).contains("wip.txt")
         && crumb_row(screen).contains("longmsg")
         && crumb_row(screen).contains('[')
@@ -114,8 +117,34 @@ fn files_msg_collapsed(screen: &str) -> bool {
     panes_files_focused(screen)
         && title_has_files(screen)
         && title_has_graph(screen)
+        && !left_tree(screen).contains(COMMIT_MSG_BODY)
         && !right_pane(screen).contains(COMMIT_MSG_BODY)
         && right_pane(screen).contains("wip.txt")
+        && crumb_row(screen).contains("msg off")
+        && !crumb_row(screen).contains("msg on")
+        && no_wrong_overlays(screen)
+}
+
+/// Depth 2: the left files pane pins the message under `wip.txt`; the right
+/// diff pane carries no commit message.
+fn diff_msg_expanded(screen: &str) -> bool {
+    let left = left_tree(screen);
+    panes_files_unfocused_diff_focused(screen)
+        && title_has_diff(screen)
+        && left
+            .find("wip.txt")
+            .is_some_and(|file| left.find(COMMIT_MSG_BODY).is_some_and(|body| body > file))
+        && !right_pane(screen).contains(COMMIT_MSG_BODY)
+        && !crumb_row(screen).contains("msg off")
+        && no_wrong_overlays(screen)
+}
+
+fn diff_msg_collapsed(screen: &str) -> bool {
+    panes_files_unfocused_diff_focused(screen)
+        && title_has_diff(screen)
+        && left_tree(screen).contains("wip.txt")
+        && !left_tree(screen).contains(COMMIT_MSG_BODY)
+        && !right_pane(screen).contains(COMMIT_MSG_BODY)
         && crumb_row(screen).contains("msg off")
         && !crumb_row(screen).contains("msg on")
         && no_wrong_overlays(screen)
@@ -129,11 +158,15 @@ fn files_msg_collapsed(screen: &str) -> bool {
 /// one line. With no key, `j` onto the commit paints `UNIQUE_MSG_BODY_LINE`
 /// but not `UNIQUE_MSG_BODY_TAIL`. Wheel down over the footer brings the
 /// tail in without moving the list cursor; wheel up goes back. `M` hides the
-/// body (`msg off`), `M` again shows it (`msg on`). Enter keeps expand on
-/// the files footer, where `M` toggles it the same way.
+/// body (`msg off`), `M` again shows it (`msg on`). Enter (depth 1) keeps
+/// expand on the left graph footer; the right files pane shows no message,
+/// and `M` toggles the graph footer the same way. Enter on `wip.txt` (depth
+/// 2) pins the message under the left file list; the right diff shows none,
+/// and `M` toggles that footer.
 ///
 /// Live PTY (80×28 so the subject clips). A collapsed default, a wheel that
-/// moves the list, a graph-row wrap, or a toast-only toggle cannot pass.
+/// moves the list, a graph-row wrap, a toast-only toggle, or a message on
+/// the depth 1 files pane or the depth 2 diff pane cannot pass.
 #[test]
 fn pty_commit_msg_expand_toggle() {
     let (_root, workspace) = daily_workspace();
@@ -213,14 +246,14 @@ fn pty_commit_msg_expand_toggle() {
     tui.enter();
     tui.wait_pred(
         files_msg_expanded,
-        "Enter keeps the expanded message on the commit-files footer",
+        "depth 1 keeps the expanded message on the left graph footer only",
         WAIT,
     );
 
     tui.key('M');
     tui.wait_pred(
         files_msg_collapsed,
-        "second M hides the body on the commit-files footer",
+        "depth 1 M hides the body on the graph footer",
         WAIT,
     );
     tui.wait_ms(SETTLE_MS);
@@ -233,7 +266,30 @@ fn pty_commit_msg_expand_toggle() {
     tui.key('M');
     tui.wait_pred(
         files_msg_expanded,
-        "third M shows the body on the commit-files footer again",
+        "depth 1 M shows the body on the graph footer again",
+        WAIT,
+    );
+
+    tui.enter();
+    tui.wait_pred(
+        diff_msg_expanded,
+        "depth 2 pins the expanded message under the left file list",
+        WAIT,
+    );
+
+    tui.key('M');
+    tui.wait_pred(
+        diff_msg_collapsed,
+        "depth 2 M hides the body on the left files footer",
+        WAIT,
+    );
+    tui.wait_ms(SETTLE_MS);
+    tui.wait_pred(diff_msg_collapsed, "depth 2 collapse holds", WAIT);
+
+    tui.key('M');
+    tui.wait_pred(
+        diff_msg_expanded,
+        "depth 2 M shows the body on the left files footer again",
         WAIT,
     );
 }
