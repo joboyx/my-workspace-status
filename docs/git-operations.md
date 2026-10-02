@@ -14,7 +14,7 @@ Every git subprocess also runs with `GIT_OPTIONAL_LOCKS=0` (set by `git::git_pro
 | `exec_git_stdout(args, cwd)` | `<git> <args>` | `Result<String, String>` | Compare reads, and the worktree file diff (`diff [--cached]` / `diff HEAD -- <path>`, `tui/diff.rs` `git_diff_text`). Empty stdout is success. Failure is `Err`; the diff pane paints `git diff failed: <reason>`. |
 | `rev_parse_commit` | `rev-parse --verify --quiet <ref>^{commit}` | `Result<Option<SHA>>` | Missing ref is `Ok(None)`. Other failures are `Err`. |
 | `merge_base` | `merge-base <a> <b>` | `Result<Option<SHA>>` | Unrelated histories are `Ok(None)`. |
-| `list_compare_name_status` | `diff --name-status --find-renames <base>...<head> --` | `Result<NameStatus[]>` | Committed three-dot file list. |
+| `list_compare_name_status` | `diff --name-status --find-renames <base>...<head> --`, then `diff --numstat -z --find-renames <base>...<head> --` | `Result<NameStatus[]>` | Committed three-dot file list. The numstat call fills `stat` (added / deleted lines). Its failure leaves `stat` `None`; the list still loads. |
 | `diff_compare_file_ctx` | `diff <base>...<head> -- <path>` | `Result<lines>` | One compare path. Empty stdout is `(no diff)`. |
 | `list_compare_picker_branches` | `for-each-ref` on `refs/heads/` + `refs/remotes/origin/` | `Result<LocalBranch[]>` | Drops `origin/HEAD` and the current local. No checkout. |
 | `exec_git_status(args, cwd)` | `<git> <args>` | exit code, `-1` on throw | Generic write / predicate. |
@@ -45,9 +45,10 @@ Every git subprocess also runs with `GIT_OPTIONAL_LOCKS=0` (set by `git::git_pro
 | `stash_push` / `stash_apply` / `stash_pop` / `stash_drop` | `stash push -u` / `apply` / `pop` / `drop` | `Result` | Stash menu and graph stash rows. Unchanged stash list after push is failure |
 | `list_stash_refs` / `latest_stash_ref` | `stash list --format=%gd` | refs | Latest stash for graph `S` apply / pop on a non-stash row |
 | `remove_worktree(primary, path, force)` | `worktree remove [--force] <path>` from primary | `Result` | Remove a linked worktree after TUI confirm (`W`) |
-| `list_commit_name_status` | `diff-tree --name-status -r <commit>^ <commit>`; empty → `--root` | `NameStatus[]` | First-parent file list (merges); `--root` for root commits |
-| `list_worktree_name_status` | `diff HEAD --name-status` + untracked | `NameStatus[]` | Worktree + index + untracked |
-| `list_stash_name_status` | `stash show --name-status <ref>` | `NameStatus[]` | Files in a stash entry |
+| `list_commit_name_status` | `diff-tree --name-status -r <commit>^ <commit>`; empty → `--root`. Then `diff-tree --numstat -z -r` with the same revisions | `NameStatus[]` | First-parent file list (merges); `--root` for root commits. `stat` is the added / deleted line count; binary files and a failed numstat give `None` |
+| `list_worktree_name_status` | `diff HEAD --name-status` + `diff HEAD --numstat -z` + untracked | `NameStatus[]` | Worktree + index + untracked. Untracked files have `stat` `None` |
+| `list_stash_name_status` | `stash show --name-status <ref>` + `stash show --numstat -z <ref>` | `NameStatus[]` | Files in a stash entry, with line counts |
+| `parse_numstat_z` | — (pure) | `(path, Option<LineStat>)[]` | Parses `--numstat -z`: plain rows, rename rows (`added\tdeleted\t\0old\0new\0`, new path kept), `-\t-` binary → `None`. Counts attach to the name-status list by new path |
 | `diff_commit_file` / `_ctx` | `diff <commit>^ <commit> -- <path>`; empty → `show --first-parent` | unified diff lines | First-parent per-file diff |
 | `diff_stash_file` / `_ctx` | `diff <stash>^1 <stash> -- <path>` | unified diff lines | Per-file stash diff |
 | `origin_out_of_sync` | compare `rev-parse` of local vs `origin/<branch>` | `Option<origin/…>` | Helper for graph checkout confirm |

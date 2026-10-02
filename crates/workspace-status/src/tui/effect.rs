@@ -2467,6 +2467,7 @@ mod tests {
             status: "M".into(),
             path: path.into(),
             old_path: None,
+            stat: None,
         }
     }
 
@@ -2475,6 +2476,7 @@ mod tests {
             status: "M".into(),
             path: path.into(),
             old_path: None,
+            stat: None,
         }
     }
 

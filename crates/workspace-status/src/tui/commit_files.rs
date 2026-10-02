@@ -325,6 +325,7 @@ mod tests {
             status: status.into(),
             path: path.into(),
             old_path: None,
+            stat: None,
         }
     }
 

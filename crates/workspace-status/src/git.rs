@@ -761,12 +761,21 @@ pub fn create_branch_at(cwd: &Path, name: &str, commit_id: &str) -> Result<(), S
     exec_git_checked(&create_branch_at_args(name, commit_id), cwd)
 }
 
+/// Added and deleted line counts for one file, from `git --numstat`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LineStat {
+    pub added: u32,
+    pub deleted: u32,
+}
+
 /// One path from `git diff --name-status` / `diff-tree` / `stash show`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NameStatus {
     pub status: String,
     pub path: String,
     pub old_path: Option<String>,
+    /// Line counts. `None` for binary and untracked files, and when numstat failed.
+    pub stat: Option<LineStat>,
 }
 
 /// Parse newline `name-status` (`M\\tpath` or `R100\\told\\tnew`).
@@ -790,6 +799,7 @@ pub fn parse_name_status_lines(stdout: &str) -> Vec<NameStatus> {
                 status: status.chars().next().unwrap_or('M').to_string(),
                 path,
                 old_path,
+                stat: None,
             });
             continue;
         }
@@ -800,12 +810,57 @@ pub fn parse_name_status_lines(stdout: &str) -> Vec<NameStatus> {
             status: status.chars().next().unwrap_or('M').to_string(),
             path,
             old_path: None,
+            stat: None,
         });
     }
     out
 }
 
+/// Parse `git --numstat -z` output into `(path, counts)` rows.
+///
+/// A plain row is `added\tdeleted\tpath\0`. A rename or copy row is
+/// `added\tdeleted\t\0old\0new\0`; the path is the new one. Binary files
+/// print `-\t-` and give `None`.
+pub fn parse_numstat_z(stdout: &str) -> Vec<(String, Option<LineStat>)> {
+    let mut out = Vec::new();
+    let mut tokens = stdout.split('\0').filter(|t| !t.is_empty());
+    while let Some(token) = tokens.next() {
+        let mut parts = token.splitn(3, '\t');
+        let (Some(added), Some(deleted), Some(path)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let stat = match (added.parse::<u32>(), deleted.parse::<u32>()) {
+            (Ok(added), Ok(deleted)) => Some(LineStat { added, deleted }),
+            _ => None,
+        };
+        let path = if path.is_empty() {
+            let _old = tokens.next();
+            match tokens.next() {
+                Some(new) => new,
+                None => continue,
+            }
+        } else {
+            path
+        };
+        out.push((path.to_string(), stat));
+    }
+    out
+}
+
+/// Fill `stat` on each file from `--numstat -z` output, matched by new path.
+fn attach_numstat(files: &mut [NameStatus], numstat_z: &str) {
+    for (path, stat) in parse_numstat_z(numstat_z) {
+        if let Some(file) = files.iter_mut().find(|f| f.path == path) {
+            file.stat = stat;
+        }
+    }
+}
+
 /// First-parent files in `commit_id`. Root commits fall back to `--root`.
+///
+/// Line counts come from a second `--numstat -z` call with the same revisions.
+/// A numstat failure leaves `stat` as `None`; the list still loads.
 pub fn list_commit_name_status(cwd: &Path, commit_id: &str) -> Vec<NameStatus> {
     let parent = format!("{commit_id}^");
     let out = exec_git(
@@ -820,7 +875,21 @@ pub fn list_commit_name_status(cwd: &Path, commit_id: &str) -> Vec<NameStatus> {
         cwd,
     );
     if !out.is_empty() {
-        return parse_name_status_lines(&out);
+        let mut files = parse_name_status_lines(&out);
+        let numstat = exec_git(
+            &[
+                "diff-tree",
+                "--no-commit-id",
+                "--numstat",
+                "-z",
+                "-r",
+                &parent,
+                commit_id,
+            ],
+            cwd,
+        );
+        attach_numstat(&mut files, &numstat);
+        return files;
     }
     let root = exec_git(
         &[
@@ -833,20 +902,42 @@ pub fn list_commit_name_status(cwd: &Path, commit_id: &str) -> Vec<NameStatus> {
         ],
         cwd,
     );
-    parse_name_status_lines(&root)
+    let mut files = parse_name_status_lines(&root);
+    let numstat = exec_git(
+        &[
+            "diff-tree",
+            "--no-commit-id",
+            "--numstat",
+            "-z",
+            "-r",
+            "--root",
+            commit_id,
+        ],
+        cwd,
+    );
+    attach_numstat(&mut files, &numstat);
+    files
 }
 
-/// Files recorded in a stash entry.
+/// Files recorded in a stash entry, with line counts from `--numstat -z`.
 pub fn list_stash_name_status(cwd: &Path, stash_ref: &str) -> Vec<NameStatus> {
-    parse_name_status_lines(&exec_git(
+    let mut files = parse_name_status_lines(&exec_git(
         &["stash", "show", "--name-status", stash_ref],
         cwd,
-    ))
+    ));
+    let numstat = exec_git(&["stash", "show", "--numstat", "-z", stash_ref], cwd);
+    attach_numstat(&mut files, &numstat);
+    files
 }
 
 /// Worktree + index changes versus HEAD, plus untracked files.
+///
+/// Tracked files carry line counts from `diff HEAD --numstat -z`. Untracked
+/// files have `stat: None`.
 pub fn list_worktree_name_status(cwd: &Path) -> Vec<NameStatus> {
     let mut files = parse_name_status_lines(&exec_git(&["diff", "HEAD", "--name-status"], cwd));
+    let numstat = exec_git(&["diff", "HEAD", "--numstat", "-z"], cwd);
+    attach_numstat(&mut files, &numstat);
     let untracked = exec_git(&["ls-files", "--others", "--exclude-standard"], cwd);
     for path in untracked.lines().map(str::trim).filter(|l| !l.is_empty()) {
         if files.iter().any(|f| f.path == path) {
@@ -856,6 +947,7 @@ pub fn list_worktree_name_status(cwd: &Path) -> Vec<NameStatus> {
             status: "?".into(),
             path: path.to_string(),
             old_path: None,
+            stat: None,
         });
     }
     files
@@ -934,6 +1026,9 @@ pub fn merge_base(cwd: &Path, a: &str, b: &str) -> Result<Option<String>, String
 }
 
 /// Committed `base...HEAD` paths. Empty stdout is an empty list, not a failure.
+///
+/// Line counts come from a second `--numstat -z` call. Its failure leaves
+/// `stat` as `None`; it does not fail the list.
 pub fn list_compare_name_status(
     cwd: &Path,
     base_sha: &str,
@@ -944,7 +1039,14 @@ pub fn list_compare_name_status(
         &["diff", "--name-status", "--find-renames", &range, "--"],
         cwd,
     )?;
-    Ok(parse_name_status_lines(&stdout))
+    let mut files = parse_name_status_lines(&stdout);
+    let numstat = exec_git_stdout(
+        &["diff", "--numstat", "-z", "--find-renames", &range, "--"],
+        cwd,
+    )
+    .unwrap_or_default();
+    attach_numstat(&mut files, &numstat);
+    Ok(files)
 }
 
 /// `git diff` argv for one compare path, with optional rename old path.
@@ -1534,11 +1636,13 @@ keep-z
                     status: "M".into(),
                     path: "src/a.rs".into(),
                     old_path: None,
+                    stat: None,
                 },
                 NameStatus {
                     status: "R".into(),
                     path: "new.rs".into(),
                     old_path: Some("old.rs".into()),
+                    stat: None,
                 },
             ]
         );
@@ -1579,6 +1683,133 @@ keep-z
             worktree.iter().any(|f| f.path == "untracked.txt"),
             "{worktree:?}"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_numstat_z_plain_rename_binary_and_empty() {
+        assert!(parse_numstat_z("").is_empty());
+        assert_eq!(
+            parse_numstat_z(concat!(
+                "3\t1\tsrc/a.rs\0",
+                "-\t-\timg.png\0",
+                "0\t0\tdir/with\ttab.txt\0"
+            )),
+            vec![
+                (
+                    "src/a.rs".to_string(),
+                    Some(LineStat {
+                        added: 3,
+                        deleted: 1
+                    })
+                ),
+                ("img.png".to_string(), None),
+                (
+                    "dir/with\ttab.txt".to_string(),
+                    Some(LineStat {
+                        added: 0,
+                        deleted: 0
+                    })
+                ),
+            ]
+        );
+        assert_eq!(
+            parse_numstat_z(concat!("2\t5\t\0old.rs\0new.rs\0", "1\t1\tz.rs\0")),
+            vec![
+                (
+                    "new.rs".to_string(),
+                    Some(LineStat {
+                        added: 2,
+                        deleted: 5
+                    })
+                ),
+                (
+                    "z.rs".to_string(),
+                    Some(LineStat {
+                        added: 1,
+                        deleted: 1
+                    })
+                ),
+            ]
+        );
+        // A rename row cut short drops the row instead of panicking.
+        assert!(parse_numstat_z("2\t5\t\0old.rs\0").is_empty());
+    }
+
+    fn stat_of(files: &[NameStatus], path: &str) -> Option<LineStat> {
+        files
+            .iter()
+            .find(|f| f.path == path)
+            .unwrap_or_else(|| panic!("{path} not listed in {files:?}"))
+            .stat
+    }
+
+    fn counts(added: u32, deleted: u32) -> Option<LineStat> {
+        Some(LineStat { added, deleted })
+    }
+
+    #[test]
+    fn list_commit_name_status_carries_line_counts() {
+        let dir = unique_dir("ws-git-numstat-commit");
+        init_repo_empty(&dir);
+        // Root commit: exercises the `--root` fallback.
+        fs::write(dir.join("a.txt"), "1\n2\n3\n").unwrap();
+        git(&dir, &["add", "a.txt"]);
+        git(&dir, &["commit", "-q", "-m", "root"]);
+        let root = exec_git(&["rev-parse", "HEAD"], &dir);
+        assert_eq!(
+            stat_of(&list_commit_name_status(&dir, &root), "a.txt"),
+            counts(3, 0)
+        );
+
+        fs::write(dir.join("a.txt"), "1\nX\n3\n4\n").unwrap();
+        fs::write(dir.join("bin.dat"), b"\x00\x01\x02").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "second"]);
+        let head = exec_git(&["rev-parse", "HEAD"], &dir);
+        let files = list_commit_name_status(&dir, &head);
+        assert_eq!(stat_of(&files, "a.txt"), counts(2, 1));
+        assert_eq!(stat_of(&files, "bin.dat"), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_stash_name_status_carries_line_counts() {
+        let dir = unique_dir("ws-git-numstat-stash");
+        init_repo(&dir);
+        fs::write(dir.join("README.md"), "# seed\nmore\nlines\n").unwrap();
+        stash_push(&dir, &[]).unwrap();
+        let refs = list_stash_refs(&dir);
+        let files = list_stash_name_status(&dir, &refs[0]);
+        assert_eq!(stat_of(&files, "README.md"), counts(2, 0));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_worktree_name_status_carries_line_counts_but_not_for_untracked() {
+        let dir = unique_dir("ws-git-numstat-worktree");
+        init_repo(&dir);
+        fs::write(dir.join("README.md"), "changed\n").unwrap();
+        fs::write(dir.join("untracked.txt"), "u\nv\n").unwrap();
+        let files = list_worktree_name_status(&dir);
+        assert_eq!(stat_of(&files, "README.md"), counts(1, 1));
+        assert_eq!(stat_of(&files, "untracked.txt"), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_compare_name_status_carries_line_counts_incl_rename() {
+        let dir = unique_dir("ws-git-numstat-compare");
+        init_repo(&dir);
+        let base = exec_git(&["rev-parse", "HEAD"], &dir);
+        fs::write(dir.join("new.txt"), "a\nb\n").unwrap();
+        git(&dir, &["mv", "README.md", "RENAMED.md"]);
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "change"]);
+        let head = exec_git(&["rev-parse", "HEAD"], &dir);
+        let files = list_compare_name_status(&dir, &base, &head).unwrap();
+        assert_eq!(stat_of(&files, "new.txt"), counts(2, 0));
+        assert_eq!(stat_of(&files, "RENAMED.md"), counts(0, 0));
         let _ = fs::remove_dir_all(&dir);
     }
 

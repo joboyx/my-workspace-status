@@ -3893,6 +3893,7 @@ mod tests {
                 status: "M".into(),
                 path: "parked-drill.md".into(),
                 old_path: None,
+                stat: None,
             }],
         );
         state.tabs.open_or_focus("app".into(), "main".into());
@@ -3904,6 +3905,7 @@ mod tests {
                 status: "M".into(),
                 path: "pack.json".into(),
                 old_path: None,
+                stat: None,
             }];
             tab.content = super::super::diff::DiffContent::from_compare_lines(json_named_lines(
                 "alpha-syntax",
@@ -4404,6 +4406,7 @@ mod tests {
                 status: "M".into(),
                 path: "README.md".into(),
                 old_path: None,
+                stat: None,
             }],
         );
         state
@@ -4417,6 +4420,7 @@ mod tests {
                 status: "A".into(),
                 path: format!("keepmid-{i:02}.txt"),
                 old_path: None,
+                stat: None,
             })
             .collect();
         state.open_commit_files(
@@ -4465,6 +4469,7 @@ mod tests {
                 status: "M".into(),
                 path: "README.md".into(),
                 old_path: None,
+                stat: None,
             }],
             0,
             "README.md".into(),
@@ -5339,11 +5344,13 @@ mod tests {
                     status: "A".into(),
                     path: "src/lib.rs".into(),
                     old_path: None,
+                    stat: None,
                 },
                 super::super::drill::CommitFile {
                     status: "M".into(),
                     path: "README.md".into(),
                     old_path: None,
+                    stat: None,
                 },
             ],
         );
@@ -5401,11 +5408,13 @@ mod tests {
                     status: "A".into(),
                     path: "src/lib.rs".into(),
                     old_path: None,
+                    stat: None,
                 },
                 super::super::drill::CommitFile {
                     status: "M".into(),
                     path: "README.md".into(),
                     old_path: None,
+                    stat: None,
                 },
             ],
         );
@@ -6528,11 +6537,13 @@ mod tests {
                     status: "M".into(),
                     path: "a.md".into(),
                     old_path: None,
+                    stat: None,
                 },
                 super::super::drill::CommitFile {
                     status: "M".into(),
                     path: "b.md".into(),
                     old_path: None,
+                    stat: None,
                 },
             ],
         );
@@ -6589,6 +6600,7 @@ mod tests {
                 status: "M".into(),
                 path: "parked-drill.md".into(),
                 old_path: None,
+                stat: None,
             }],
         );
         assert!(state.drill.is_files());
@@ -6603,6 +6615,7 @@ mod tests {
                 status: "M".into(),
                 path: "compare-only.md".into(),
                 old_path: None,
+                stat: None,
             }];
             tab.content = super::super::diff::DiffContent::from_compare_lines(vec![
                 "@@ -1,1 +1,1 @@".into(),
@@ -6654,11 +6667,13 @@ mod tests {
                     status: "M".into(),
                     path: "a.md".into(),
                     old_path: None,
+                    stat: None,
                 },
                 super::super::drill::CommitFile {
                     status: "M".into(),
                     path: "b.md".into(),
                     old_path: None,
+                    stat: None,
                 },
             ];
         }

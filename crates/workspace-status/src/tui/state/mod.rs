@@ -6167,6 +6167,7 @@ mod tests {
             status: "M".into(),
             path: "README.md".into(),
             old_path: None,
+            stat: None,
         }]
     }
 
@@ -6182,11 +6183,13 @@ mod tests {
                 status: "M".into(),
                 path: "one.rs".into(),
                 old_path: None,
+                stat: None,
             },
             CommitFile {
                 status: "M".into(),
                 path: "two.rs".into(),
                 old_path: None,
+                stat: None,
             },
         ]
     }
@@ -7521,6 +7524,7 @@ mod tests {
                     status: "M".into(),
                     path: (*path).into(),
                     old_path: None,
+                    stat: None,
                 })
                 .collect(),
             head: "ccc".into(),
@@ -7557,6 +7561,7 @@ mod tests {
                 status: "A".into(),
                 path: "src/view.rs".into(),
                 old_path: None,
+                stat: None,
             }];
             tab.file_cursor = 0;
         }
@@ -7576,6 +7581,7 @@ mod tests {
             status: "A".into(),
             path: "src/view.rs".into(),
             old_path: None,
+            stat: None,
         }];
     }
 
@@ -7849,11 +7855,13 @@ mod tests {
                     status: "M".into(),
                     path: "src/a.rs".into(),
                     old_path: None,
+                    stat: None,
                 },
                 CommitFile {
                     status: "M".into(),
                     path: "src/b.rs".into(),
                     old_path: None,
+                    stat: None,
                 },
             ],
         );
@@ -9085,11 +9093,13 @@ mod tests {
                     status: "M".into(),
                     path: "src/a.rs".into(),
                     old_path: None,
+                    stat: None,
                 },
                 CommitFile {
                     status: "M".into(),
                     path: "src/b.rs".into(),
                     old_path: None,
+                    stat: None,
                 },
             ],
         );
@@ -9281,6 +9291,7 @@ mod tests {
                 status: "M".into(),
                 path: "src/lib.rs".into(),
                 old_path: None,
+                stat: None,
             }],
         );
         let idx = app
@@ -9315,6 +9326,7 @@ mod tests {
                 status: "M".into(),
                 path: "src/lib.rs".into(),
                 old_path: None,
+                stat: None,
             }],
             idx,
             "src/lib.rs".into(),
@@ -9343,6 +9355,7 @@ mod tests {
                 status: "M".into(),
                 path: "src/lib.rs".into(),
                 old_path: None,
+                stat: None,
             }],
         );
         if let DrillView::Files { cursor, .. } = &mut app.drill {
@@ -9369,6 +9382,7 @@ mod tests {
                 status: "M".into(),
                 path: "src/lib.rs".into(),
                 old_path: None,
+                stat: None,
             }],
         );
         if let DrillView::Files { cursor, .. } = &mut app.drill {
@@ -10883,11 +10897,13 @@ mod tests {
                     status: "M".into(),
                     path: "README.md".into(),
                     old_path: None,
+                    stat: None,
                 },
                 CommitFile {
                     status: "A".into(),
                     path: "src/lib.rs".into(),
                     old_path: None,
+                    stat: None,
                 },
             ],
         );
@@ -10915,6 +10931,7 @@ mod tests {
                 status: "A".into(),
                 path: "src/lib.rs".into(),
                 old_path: None,
+                stat: None,
             }],
             0,
             "src/lib.rs".into(),
@@ -10951,6 +10968,7 @@ mod tests {
                 status: "M".into(),
                 path: "README.md".into(),
                 old_path: None,
+                stat: None,
             }],
         );
         assert_eq!(app.focus, FocusPane::Right);
@@ -10971,11 +10989,13 @@ mod tests {
                 status: "M".into(),
                 path: "README.md".into(),
                 old_path: None,
+                stat: None,
             },
             CommitFile {
                 status: "A".into(),
                 path: "src/lib.rs".into(),
                 old_path: None,
+                stat: None,
             },
         ];
         app.open_commit_files(
@@ -11037,6 +11057,7 @@ mod tests {
                 status: "M".into(),
                 path: "README.md".into(),
                 old_path: None,
+                stat: None,
             }],
         );
         app.focus = FocusPane::Left;
@@ -11059,6 +11080,7 @@ mod tests {
                 status: "M".into(),
                 path: path.into(),
                 old_path: None,
+                stat: None,
             })
             .collect();
         app.open_commit_files(
@@ -11161,11 +11183,13 @@ mod tests {
                     status: "M".into(),
                     path: "README.md".into(),
                     old_path: None,
+                    stat: None,
                 },
                 CommitFile {
                     status: "A".into(),
                     path: "src/lib.rs".into(),
                     old_path: None,
+                    stat: None,
                 },
             ],
         );
@@ -11216,11 +11240,13 @@ mod tests {
                 status: "M".into(),
                 path: "README.md".into(),
                 old_path: None,
+                stat: None,
             },
             CommitFile {
                 status: "A".into(),
                 path: "src/lib.rs".into(),
                 old_path: None,
+                stat: None,
             },
         ];
         app.open_commit_diff(
@@ -11922,6 +11948,7 @@ mod tests {
                 status: "A".into(),
                 path: "src/lib.rs".into(),
                 old_path: None,
+                stat: None,
             }],
         );
         let collapsed_files_footer = {
@@ -12640,11 +12667,13 @@ mod tests {
                     status: "A".into(),
                     path: "src/lib.rs".into(),
                     old_path: None,
+                    stat: None,
                 },
                 CommitFile {
                     status: "M".into(),
                     path: "README.md".into(),
                     old_path: None,
+                    stat: None,
                 },
             ],
         );
@@ -12784,11 +12813,13 @@ mod tests {
                     status: "M".into(),
                     path: "README.md".into(),
                     old_path: None,
+                    stat: None,
                 },
                 CommitFile {
                     status: "A".into(),
                     path: "src/lib.rs".into(),
                     old_path: None,
+                    stat: None,
                 },
             ],
         );
@@ -12936,6 +12967,7 @@ mod tests {
                 status: "A".into(),
                 path: "zero.rs".into(),
                 old_path: None,
+                stat: None,
             },
         );
         app.open_commit_files("app".into(), sample_commit_source(), files);
@@ -12959,16 +12991,19 @@ mod tests {
                     status: "M".into(),
                     path: "a.rs".into(),
                     old_path: None,
+                    stat: None,
                 },
                 CommitFile {
                     status: "M".into(),
                     path: "b.rs".into(),
                     old_path: None,
+                    stat: None,
                 },
                 CommitFile {
                     status: "M".into(),
                     path: "c.rs".into(),
                     old_path: None,
+                    stat: None,
                 },
             ],
         );
@@ -12985,11 +13020,13 @@ mod tests {
                     status: "M".into(),
                     path: "a.rs".into(),
                     old_path: None,
+                    stat: None,
                 },
                 CommitFile {
                     status: "M".into(),
                     path: "c.rs".into(),
                     old_path: None,
+                    stat: None,
                 },
             ],
         );
@@ -13354,6 +13391,7 @@ mod tests {
                 status: "M".into(),
                 path: "README.md".into(),
                 old_path: None,
+                stat: None,
             }],
             0,
             "README.md".into(),
@@ -13373,6 +13411,7 @@ mod tests {
                 status: "M".into(),
                 path: "README.md".into(),
                 old_path: None,
+                stat: None,
             }],
         );
         assert_eq!(commit.diff_context_lines(), None);
@@ -13454,6 +13493,7 @@ mod tests {
                 status: "A".into(),
                 path: "src/lib.rs".into(),
                 old_path: None,
+                stat: None,
             }],
         );
         assert!(app.graph.is_some());
@@ -13489,6 +13529,7 @@ mod tests {
                 status: "A".into(),
                 path: "src/lib.rs".into(),
                 old_path: None,
+                stat: None,
             }],
         );
         let idx = app
@@ -13515,6 +13556,7 @@ mod tests {
                 status: "A".into(),
                 path: "src/lib.rs".into(),
                 old_path: None,
+                stat: None,
             }],
             idx,
             "src/lib.rs".into(),

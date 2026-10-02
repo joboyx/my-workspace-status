@@ -486,6 +486,7 @@ mod tests {
             status: "M".into(),
             path: "src/a.rs".into(),
             old_path: None,
+            stat: None,
         }];
         tab
     }

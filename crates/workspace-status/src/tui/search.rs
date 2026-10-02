@@ -665,11 +665,13 @@ mod tests {
                 status: "M".into(),
                 path: "README.md".into(),
                 old_path: None,
+                stat: None,
             },
             CommitFile {
                 status: "A".into(),
                 path: "src/lib.rs".into(),
                 old_path: None,
+                stat: None,
             },
         ];
         assert_eq!(focus_commit_file_search(&files, "lib", 0, 0), Some(1));

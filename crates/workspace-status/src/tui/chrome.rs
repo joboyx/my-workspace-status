@@ -1510,6 +1510,7 @@ mod tests {
             status: "M".into(),
             path: "src/a.rs".into(),
             old_path: None,
+            stat: None,
         }];
         let source = CommitFileSource::Commit {
             commit_id: "abc1234".into(),
@@ -1626,6 +1627,7 @@ mod tests {
                 status: "M".into(),
                 path: "src/a.rs".into(),
                 old_path: None,
+                stat: None,
             }];
         }
         let keys = |app: &AppState| -> Vec<String> {
