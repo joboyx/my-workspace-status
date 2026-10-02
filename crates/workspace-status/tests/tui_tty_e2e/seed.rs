@@ -325,3 +325,29 @@ pub fn regions_diff(repo: &Path, cached: bool) -> String {
     args.extend(["--", "regions.txt"]);
     git_stdout(repo, &args)
 }
+
+/// Commit subjects of [`compare_history_workspace`], oldest first. Each
+/// commit adds one file named after the subject's first word
+/// (`first.txt`, `second.txt`, `third.txt`).
+pub const HISTORY_SUBJECTS: [&str; 3] = ["first note", "second note", "third note"];
+
+/// Repo `app` on `feature/history`: `seed app` (README.md), then one commit
+/// per [`HISTORY_SUBJECTS`] entry, each adding its own file. HEAD is
+/// `third note`. The worktree is clean.
+pub fn compare_history_workspace() -> (PathBuf, PathBuf) {
+    let root = unique_root("ws-tui-tty-compare-history");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    seed_repo(&workspace, "app", "feature/history", false);
+    let repo = workspace.join("app");
+    for subject in HISTORY_SUBJECTS {
+        let stem = subject.split(' ').next().unwrap();
+        write_commit(
+            &repo,
+            &format!("{stem}.txt"),
+            &format!("{subject}\n"),
+            subject,
+        );
+    }
+    (root, workspace)
+}
