@@ -1,8 +1,9 @@
 # Diff rendering
 
 `crates/workspace-status/src/tui/diff.rs` (paint in `tui/render.rs`, syntax in
-`tui/syntax.rs`). Path header, line-number gutter, and STAGED / UNSTAGED / NEW / COMMITTED
-labels. Intra-line word diff is not implemented yet.
+`tui/syntax.rs`, word ranges in `tui/word_diff.rs`). Path header, line-number gutter, and
+STAGED / UNSTAGED / NEW / COMMITTED labels. Changed words on a paired modified line get a
+stronger background (see [Word highlight](#word-highlight)).
 
 ## Pipeline
 
@@ -16,6 +17,8 @@ parse_unified_diff(text) ──► Hunk[]  { header, lines, old_start, new_start
 build_diff_rows({staged, unstaged, mode, is_new}) ──► DiffRow[]
         inline: one cell per line
         side-by-side: pair del-runs against add-runs by index
+        ▼
+word_diff.rs (paint time, on a span-cache miss) ──► word ranges per paired del/add line
         ▼
 render.rs paints section headers, line-number gutter, and cells
 
@@ -37,7 +40,27 @@ Syntax highlighting uses `two-face` (syntect). Language comes from the file path
 
 Add and del rows keep `palette.diffAddBg` / `palette.diffDelBg` on the gutter, sign, code, and pad. The `+` / `-` signs stay `added` / `deleted` (bold). Cursor, visual-line, and search overlays still replace that row background. A syntax colour that fails a contrast floor of 3.0 against the add/del background falls back to `repo`. Syntect parse state is kept across lines inside one hunk (old-file vs new-file streams) so a JSON property line after `{` still gets token colours. A section label or hunk header starts a new pair of highlighters. Paint highlights the visible viewport. Lines above the viewport in the same hunk still feed parse state. Paint reuses the last span list when the file path, theme, viewport, and diff text stay the same. A watch or compare reload that replaces same-length text still computes new spans.
 
-Context lines use the same token foregrounds on the surface (no add/del tint). Meta lines stay muted. Line numbers use muted without DIM. Intra-line word diff is still out of scope.
+Context lines use the same token foregrounds on the surface (no add/del tint). Meta lines stay muted. Line numbers use muted without DIM.
+
+## Word highlight
+
+Every `draw_diff_pane` caller (workspace dirty files, compare tabs, commit and stash drills) paints it. A modified line keeps its row background (`palette.diffAddBg` / `palette.diffDelBg`). The words that changed on that line get a stronger shade of the same hue: `palette.diffAddWordBg` on the added line, `palette.diffDelWordBg` on the removed line. Only the code column changes. Line numbers, the comment mark, the gutter rule, and the `+` / `-` sign stay on the row background. Signs stay `added` / `deleted` (bold).
+
+Git output stays line-based (no `--word-diff`). The parser, hunk headers, line numbers, and partial patch (`V` highlight, stage / unstage / revert) do not change. `tui/word_diff.rs` computes word ranges from the paired line texts as a paint overlay.
+
+Pairing is the side-by-side pairing (del-runs against add-runs by index), in inline mode as well as split. Only a paired line that shares some unchanged non-whitespace text with its pair gets word highlight. These keep the row background only:
+
+- unpaired lines: pure add, pure del, untracked `NEW`, the extra lines of a longer run, a line split from its run by a `\ No newline` meta line
+- a total rewrite (no shared text)
+- a line over 4096 chars, or a pair over the fixed work budget
+
+Tokens are words (letters, digits, `_`), whitespace runs, and each other char (punctuation, symbol, emoji) on its own. Combining marks, VS16, ZWJ, and skin-tone modifiers stay with their glyph. A change inside a word highlights the whole word. Several edits paint several spans; unchanged text between them stays on the row background. A whitespace-only edit highlights the changed whitespace.
+
+Syntax foregrounds stay; word highlight sets the background only. The 3.0 contrast floor is checked against the background behind the glyph (word or row background). A failing colour falls back to `repo`. Cursor, visual-line, and search overlays still replace the whole row background, word spans included.
+
+Wrap off: spans clip and pan with the line by display columns and stay on the changed glyphs. Emoji are not split. Wrap on: continuation rows keep the word highlight on their slice of the line. `j` / `k` still move by logical row.
+
+Word ranges are computed with the syntax spans on a cache miss and live in the same span cache. A repaint with the same text reuses them. A watch or compare reload that replaces same-length text computes them again.
 
 ## Untracked files
 
