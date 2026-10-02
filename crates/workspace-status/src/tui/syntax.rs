@@ -3,7 +3,8 @@
 //! Language comes from the file path (basename, then extension), then an
 //! optional first-line shebang. Unknown paths use Plain Text.
 //! Highlighting sets **foreground** only. Add/del row backgrounds stay in
-//! the paint layer. Intra-line word diff is separate and still out of scope.
+//! the paint layer. Changed-word runs from [`super::word_diff`] are flagged
+//! here so paint can put the word background behind them.
 
 use std::ops::Range;
 use std::path::Path;
@@ -17,6 +18,7 @@ use two_face::theme::{extra as extra_themes, EmbeddedLazyThemeSet, EmbeddedTheme
 
 use super::diff::{DiffCell, DiffCellKind, DiffRow};
 use super::theme::ThemeId;
+use super::word_diff::diff_word_ranges;
 use crate::helpers::visible_width;
 
 /// Skip highlighting past this many characters. The rest uses the fallback
@@ -147,25 +149,37 @@ pub(crate) fn highlight_spans(
     if line.is_empty() {
         return Vec::new();
     }
-    let (head, tail) = split_highlight_budget(line);
-    let mut spans = highlight_range(path, head, theme, fallback, row_bg);
-    if !tail.is_empty() {
-        let fg = readable_fg(fallback, row_bg, fallback);
-        if let Some(last) = spans.last_mut() {
-            if last.1 == fg {
-                last.0.push_str(tail);
-            } else {
-                spans.push((tail.to_string(), fg));
-            }
-        } else {
-            spans.push((tail.to_string(), fg));
-        }
-    }
-    if spans.is_empty() {
-        vec![(line.to_string(), readable_fg(fallback, row_bg, fallback))]
-    } else {
-        spans
-    }
+    let raw = highlight_range(path, line, theme, fallback);
+    resolve_spans(raw, &[], fallback, row_bg, None)
+        .into_iter()
+        .map(|span| (span.text, span.fg))
+        .collect()
+}
+
+/// One painted run of diff code text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CodeSpan {
+    /// Text of the run.
+    pub text: String,
+    /// Foreground, already checked for contrast against the background
+    /// painted behind this run.
+    pub fg: Color,
+    /// True for changed text on a paired add/del line. Paint puts the
+    /// word background behind it instead of the row background.
+    pub word: bool,
+}
+
+/// Add/del backgrounds that syntax foregrounds must stay readable on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DiffBackgrounds {
+    /// Add-line row background.
+    pub add: Color,
+    /// Del-line row background.
+    pub del: Color,
+    /// Changed-word background on an add line.
+    pub add_word: Color,
+    /// Changed-word background on a del line.
+    pub del_word: Color,
 }
 
 /// Token foregrounds for each file-diff row, old-file and new-file streams.
@@ -174,18 +188,21 @@ pub(crate) fn highlight_spans(
 /// hunk header rows start a new pair of highlighters so omitted lines cannot
 /// leak into a later hunk or a staged/unstaged section. Add lines feed the
 /// new stream. Del lines feed the old stream. Context feeds both on inline
-/// rows, or the matching side on split rows.
+/// rows, or the matching side on split rows. Spans are split at the
+/// changed-word ranges from [`diff_word_ranges`].
 pub(crate) struct DiffSyntaxSpans {
-    left: Vec<Vec<(String, Color)>>,
-    right: Vec<Vec<(String, Color)>>,
+    left: Vec<Vec<CodeSpan>>,
+    right: Vec<Vec<CodeSpan>>,
 }
 
 impl DiffSyntaxSpans {
-    pub(crate) fn left(&self, row: usize) -> &[(String, Color)] {
+    /// Spans of the left (or only) cell of `row`. Empty off the viewport.
+    pub(crate) fn left(&self, row: usize) -> &[CodeSpan] {
         self.left.get(row).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    pub(crate) fn right(&self, row: usize) -> &[(String, Color)] {
+    /// Spans of the right cell of `row` (split rows only).
+    pub(crate) fn right(&self, row: usize) -> &[CodeSpan] {
         self.right.get(row).map(Vec::as_slice).unwrap_or(&[])
     }
 }
@@ -196,8 +213,8 @@ pub(crate) struct DiffSyntaxKey {
     pub path: String,
     pub theme: ThemeId,
     pub fallback: Color,
-    pub add_bg: Color,
-    pub del_bg: Color,
+    /// Row and word backgrounds the contrast floor checks against.
+    pub bgs: DiffBackgrounds,
     pub visible_start: usize,
     pub visible_end: usize,
     /// Painted diff-text identity. Must change when unified text changes.
@@ -214,14 +231,14 @@ pub(crate) struct CachedDiffSyntax {
 ///
 /// Each hunk/section is an independent parse stream. Lines above the
 /// viewport in the same hunk still feed the highlighter so multiline
-/// tokens stay correct, but those rows do not store spans.
+/// tokens stay correct, but those rows do not store spans. Visible paired
+/// add/del cells get their changed-word runs flagged.
 pub(crate) fn highlight_diff_rows(
     path: &str,
     rows: &[DiffRow],
     theme: ThemeId,
     fallback: Color,
-    add_bg: Color,
-    del_bg: Color,
+    bgs: DiffBackgrounds,
     visible: Range<usize>,
 ) -> DiffSyntaxSpans {
     let n = rows.len();
@@ -231,10 +248,30 @@ pub(crate) fn highlight_diff_rows(
     if visible.is_empty() {
         return DiffSyntaxSpans { left, right };
     }
+    let words = diff_word_ranges(rows, visible.clone());
+    let finish = |cell: &DiffCell, raw: Vec<(String, Color)>, ranges: &[Range<usize>]| {
+        resolve_spans(
+            raw,
+            ranges,
+            fallback,
+            cell_bg(cell.kind, bgs),
+            word_bg(cell.kind, bgs),
+        )
+    };
     if is_plain_text(path, None) {
-        fill_plain_visible(
-            rows, &visible, fallback, add_bg, del_bg, &mut left, &mut right,
-        );
+        for idx in visible {
+            let Some(DiffRow::Line {
+                left: cell,
+                right: other,
+            }) = rows.get(idx)
+            else {
+                continue;
+            };
+            left[idx] = finish(cell, plain_cell_spans(cell, fallback), words.left(idx));
+            if let Some(other) = other {
+                right[idx] = finish(other, plain_cell_spans(other, fallback), words.right(idx));
+            }
+        }
         return DiffSyntaxSpans { left, right };
     }
     let syntax = syntax_for(path, None);
@@ -264,39 +301,18 @@ pub(crate) fn highlight_diff_rows(
                     };
                     let store = idx >= visible.start && idx < visible.end;
                     if let Some(other) = other {
-                        let left_spans = feed_split_cell(
-                            cell,
-                            false,
-                            &mut old_hl,
-                            &mut new_hl,
-                            fallback,
-                            add_bg,
-                            del_bg,
-                        );
-                        let right_spans = feed_split_cell(
-                            other,
-                            true,
-                            &mut old_hl,
-                            &mut new_hl,
-                            fallback,
-                            add_bg,
-                            del_bg,
-                        );
+                        let left_raw =
+                            feed_split_cell(cell, false, &mut old_hl, &mut new_hl, fallback);
+                        let right_raw =
+                            feed_split_cell(other, true, &mut old_hl, &mut new_hl, fallback);
                         if store {
-                            left[idx] = left_spans;
-                            right[idx] = right_spans;
+                            left[idx] = finish(cell, left_raw, words.left(idx));
+                            right[idx] = finish(other, right_raw, words.right(idx));
                         }
                     } else {
-                        let spans = feed_inline_cell(
-                            cell,
-                            &mut old_hl,
-                            &mut new_hl,
-                            fallback,
-                            add_bg,
-                            del_bg,
-                        );
+                        let raw = feed_inline_cell(cell, &mut old_hl, &mut new_hl, fallback);
                         if store {
-                            left[idx] = spans;
+                            left[idx] = finish(cell, raw, words.left(idx));
                         }
                     }
                 }
@@ -307,17 +323,12 @@ pub(crate) fn highlight_diff_rows(
     DiffSyntaxSpans { left, right }
 }
 
-/// Reuse `cache` when `key` matches. Misses call [`highlight_diff_rows`].
+/// Reuse `cache` when `key` matches. Misses call [`highlight_diff_rows`]
+/// with the path, theme, colours, and viewport from `key`.
 pub(crate) fn cached_highlight_diff_rows(
     cache: &mut Option<CachedDiffSyntax>,
     key: DiffSyntaxKey,
-    path: &str,
     rows: &[DiffRow],
-    theme: ThemeId,
-    fallback: Color,
-    add_bg: Color,
-    del_bg: Color,
-    visible: Range<usize>,
 ) -> Arc<DiffSyntaxSpans> {
     if let Some(hit) = cache.as_ref() {
         if hit.key == key {
@@ -325,7 +336,12 @@ pub(crate) fn cached_highlight_diff_rows(
         }
     }
     let spans = Arc::new(highlight_diff_rows(
-        path, rows, theme, fallback, add_bg, del_bg, visible,
+        &key.path,
+        rows,
+        key.theme,
+        key.fallback,
+        key.bgs,
+        key.visible_start..key.visible_end,
     ));
     *cache = Some(CachedDiffSyntax {
         key,
@@ -334,85 +350,108 @@ pub(crate) fn cached_highlight_diff_rows(
     spans
 }
 
-fn fill_plain_visible(
-    rows: &[DiffRow],
-    visible: &Range<usize>,
-    fallback: Color,
-    add_bg: Color,
-    del_bg: Color,
-    left: &mut [Vec<(String, Color)>],
-    right: &mut [Vec<(String, Color)>],
-) {
-    for idx in visible.clone() {
-        let Some(DiffRow::Line {
-            left: cell,
-            right: other,
-        }) = rows.get(idx)
-        else {
-            continue;
-        };
-        left[idx] = plain_cell_spans(cell, fallback, add_bg, del_bg);
-        right[idx] = other
-            .as_ref()
-            .map(|cell| plain_cell_spans(cell, fallback, add_bg, del_bg))
-            .unwrap_or_default();
-    }
-}
-
-fn cell_bg(kind: DiffCellKind, add_bg: Color, del_bg: Color) -> Option<Color> {
+fn cell_bg(kind: DiffCellKind, bgs: DiffBackgrounds) -> Option<Color> {
     match kind {
-        DiffCellKind::Add => Some(add_bg),
-        DiffCellKind::Del => Some(del_bg),
+        DiffCellKind::Add => Some(bgs.add),
+        DiffCellKind::Del => Some(bgs.del),
         DiffCellKind::Ctx | DiffCellKind::Meta | DiffCellKind::Empty => None,
     }
 }
 
-fn plain_cell_spans(
-    cell: &DiffCell,
-    fallback: Color,
-    add_bg: Color,
-    del_bg: Color,
-) -> Vec<(String, Color)> {
-    match cell.kind {
-        DiffCellKind::Empty | DiffCellKind::Meta => Vec::new(),
-        _ => vec![(
-            cell.text.clone(),
-            readable_fg(fallback, cell_bg(cell.kind, add_bg, del_bg), fallback),
-        )],
+fn word_bg(kind: DiffCellKind, bgs: DiffBackgrounds) -> Option<Color> {
+    match kind {
+        DiffCellKind::Add => Some(bgs.add_word),
+        DiffCellKind::Del => Some(bgs.del_word),
+        DiffCellKind::Ctx | DiffCellKind::Meta | DiffCellKind::Empty => None,
     }
 }
 
+/// Raw Plain Text spans for one cell: the whole text in `fallback`.
+fn plain_cell_spans(cell: &DiffCell, fallback: Color) -> Vec<(String, Color)> {
+    match cell.kind {
+        DiffCellKind::Empty | DiffCellKind::Meta => Vec::new(),
+        _ => vec![(cell.text.clone(), fallback)],
+    }
+}
+
+/// Split raw `(text, syntect fg)` spans at the word `ranges` (byte ranges
+/// into the joined text) and apply the contrast floor per run: word runs
+/// against `word_bg`, the rest against `row_bg`. Neighbours with the same
+/// fg and flag merge. Without a `word_bg` nothing is flagged.
+fn resolve_spans(
+    raw: Vec<(String, Color)>,
+    ranges: &[Range<usize>],
+    fallback: Color,
+    row_bg: Option<Color>,
+    word_bg: Option<Color>,
+) -> Vec<CodeSpan> {
+    let ranges = if word_bg.is_some() { ranges } else { &[] };
+    let mut out: Vec<CodeSpan> = Vec::new();
+    let mut pos = 0usize;
+    for (text, raw_fg) in raw {
+        let end = pos + text.len();
+        let mut at = pos;
+        while at < end {
+            let (word, next) = word_segment(ranges, at, end);
+            let piece = &text[at - pos..next - pos];
+            let fg = readable_fg(raw_fg, if word { word_bg } else { row_bg }, fallback);
+            match out.last_mut() {
+                Some(last) if last.fg == fg && last.word == word => last.text.push_str(piece),
+                _ => out.push(CodeSpan {
+                    text: piece.to_string(),
+                    fg,
+                    word,
+                }),
+            }
+            at = next;
+        }
+        pos = end;
+    }
+    out
+}
+
+/// Whether byte `at` is inside a word range, and where that run ends
+/// (capped at `end`). `ranges` are sorted and disjoint.
+fn word_segment(ranges: &[Range<usize>], at: usize, end: usize) -> (bool, usize) {
+    for range in ranges {
+        if range.end <= at {
+            continue;
+        }
+        if range.start <= at {
+            return (true, range.end.min(end));
+        }
+        return (false, range.start.min(end));
+    }
+    (false, end)
+}
+
+/// Raw spans for an inline cell. Context feeds both streams.
 fn feed_inline_cell(
     cell: &DiffCell,
     old_hl: &mut HighlightLines<'_>,
     new_hl: &mut HighlightLines<'_>,
     fallback: Color,
-    add_bg: Color,
-    del_bg: Color,
 ) -> Vec<(String, Color)> {
-    let bg = cell_bg(cell.kind, add_bg, del_bg);
     match cell.kind {
         DiffCellKind::Empty | DiffCellKind::Meta => Vec::new(),
-        DiffCellKind::Add => feed_line(new_hl, &cell.text, fallback, bg),
-        DiffCellKind::Del => feed_line(old_hl, &cell.text, fallback, bg),
+        DiffCellKind::Add => feed_line(new_hl, &cell.text, fallback),
+        DiffCellKind::Del => feed_line(old_hl, &cell.text, fallback),
         DiffCellKind::Ctx => {
-            let spans = feed_line(new_hl, &cell.text, fallback, bg);
-            let _ = feed_line(old_hl, &cell.text, fallback, bg);
+            let spans = feed_line(new_hl, &cell.text, fallback);
+            let _ = feed_line(old_hl, &cell.text, fallback);
             spans
         }
     }
 }
 
+/// Raw spans for one side of a split row.
 fn feed_split_cell(
     cell: &DiffCell,
     is_right: bool,
     old_hl: &mut HighlightLines<'_>,
     new_hl: &mut HighlightLines<'_>,
     fallback: Color,
-    add_bg: Color,
-    del_bg: Color,
 ) -> Vec<(String, Color)> {
-    let bg = cell_bg(cell.kind, add_bg, del_bg);
     let use_new = if is_right {
         matches!(cell.kind, DiffCellKind::Add | DiffCellKind::Ctx)
     } else {
@@ -420,8 +459,8 @@ fn feed_split_cell(
     };
     match cell.kind {
         DiffCellKind::Empty | DiffCellKind::Meta => Vec::new(),
-        _ if use_new => feed_line(new_hl, &cell.text, fallback, bg),
-        _ => feed_line(old_hl, &cell.text, fallback, bg),
+        _ if use_new => feed_line(new_hl, &cell.text, fallback),
+        _ => feed_line(old_hl, &cell.text, fallback),
     }
 }
 
@@ -446,15 +485,14 @@ fn highlight_range(
     line: &str,
     theme: ThemeId,
     fallback: Color,
-    row_bg: Option<Color>,
 ) -> Vec<(String, Color)> {
     if line.is_empty() || is_plain_text(path, None) {
-        return vec![(line.to_string(), readable_fg(fallback, row_bg, fallback))];
+        return vec![(line.to_string(), fallback)];
     }
     let syntax = syntax_for(path, None);
     let syn_theme = theme_set().get(syntect_theme_name(theme));
     let mut highlighter = HighlightLines::new(syntax, syn_theme);
-    feed_line(&mut highlighter, line, fallback, row_bg)
+    feed_line(&mut highlighter, line, fallback)
 }
 
 #[cfg(test)]
@@ -467,11 +505,13 @@ fn take_syntax_fed_lines() -> usize {
     FED_LINES.with(|count| count.replace(0))
 }
 
+/// Raw `(text, syntect fg)` spans for one line. Text past
+/// [`MAX_HIGHLIGHT_CHARS`] uses `fallback`. The contrast floor is applied
+/// later by [`resolve_spans`], once the background behind each run is known.
 fn feed_line(
     highlighter: &mut HighlightLines<'_>,
     line: &str,
     fallback: Color,
-    row_bg: Option<Color>,
 ) -> Vec<(String, Color)> {
     if line.is_empty() {
         return Vec::new();
@@ -479,21 +519,12 @@ fn feed_line(
     #[cfg(test)]
     FED_LINES.with(|count| count.set(count.get() + 1));
     let (head, tail) = split_highlight_budget(line);
-    let mut out = feed_head(highlighter, head, fallback, row_bg);
+    let mut out = feed_head(highlighter, head, fallback);
     if !tail.is_empty() {
-        let fg = readable_fg(fallback, row_bg, fallback);
-        if let Some(last) = out.last_mut() {
-            if last.1 == fg {
-                last.0.push_str(tail);
-            } else {
-                out.push((tail.to_string(), fg));
-            }
-        } else {
-            out.push((tail.to_string(), fg));
-        }
+        push_raw(&mut out, tail, fallback);
     }
     if out.is_empty() {
-        vec![(line.to_string(), readable_fg(fallback, row_bg, fallback))]
+        vec![(line.to_string(), fallback)]
     } else {
         out
     }
@@ -503,14 +534,13 @@ fn feed_head(
     highlighter: &mut HighlightLines<'_>,
     line: &str,
     fallback: Color,
-    row_bg: Option<Color>,
 ) -> Vec<(String, Color)> {
     if line.is_empty() {
         return Vec::new();
     }
     let set = syntax_set();
     let Ok(ranges) = highlighter.highlight_line(line, set) else {
-        return vec![(line.to_string(), readable_fg(fallback, row_bg, fallback))];
+        return vec![(line.to_string(), fallback)];
     };
     let mut out: Vec<(String, Color)> = Vec::new();
     for (style, text) in ranges {
@@ -518,16 +548,17 @@ fn feed_head(
             continue;
         }
         let fg = syntect_fg(style.foreground).map_or(fallback, |(r, g, b)| Color::Rgb(r, g, b));
-        let fg = readable_fg(fg, row_bg, fallback);
-        if let Some(last) = out.last_mut() {
-            if last.1 == fg {
-                last.0.push_str(text);
-                continue;
-            }
-        }
-        out.push((text.to_string(), fg));
+        push_raw(&mut out, text, fg);
     }
     out
+}
+
+/// Append `text` in `fg`, merging into the last span when the fg matches.
+fn push_raw(out: &mut Vec<(String, Color)>, text: &str, fg: Color) {
+    match out.last_mut() {
+        Some(last) if last.1 == fg => last.0.push_str(text),
+        _ => out.push((text.to_string(), fg)),
+    }
 }
 
 fn syntect_fg(color: SyntectColor) -> Option<(u8, u8, u8)> {
@@ -573,19 +604,17 @@ fn contrast_ratio(fg: Color, bg: Color) -> f64 {
 }
 
 /// Skip `offset` display columns, then take up to `width` columns.
-pub(crate) fn slice_styled_cols(
-    parts: &[(String, Color)],
-    offset: usize,
-    width: usize,
-) -> Vec<(String, Color)> {
+///
+/// Never splits a char. Neighbours merge only when fg and word flag match.
+pub(crate) fn slice_styled_cols(parts: &[CodeSpan], offset: usize, width: usize) -> Vec<CodeSpan> {
     if width == 0 {
         return Vec::new();
     }
     let mut skipped = 0usize;
     let mut taken = 0usize;
-    let mut out: Vec<(String, Color)> = Vec::new();
-    for (text, color) in parts {
-        for ch in text.chars() {
+    let mut out: Vec<CodeSpan> = Vec::new();
+    for part in parts {
+        for ch in part.text.chars() {
             let mut buf = [0u8; 4];
             let s = ch.encode_utf8(&mut buf);
             let cw = visible_width(s);
@@ -596,15 +625,15 @@ pub(crate) fn slice_styled_cols(
             if taken.saturating_add(cw) > width {
                 return out;
             }
-            if let Some(last) = out.last_mut() {
-                if last.1 == *color {
-                    last.0.push(ch);
-                    taken = taken.saturating_add(cw);
-                    continue;
-                }
-            }
-            out.push((ch.to_string(), *color));
             taken = taken.saturating_add(cw);
+            match out.last_mut() {
+                Some(last) if last.fg == part.fg && last.word == part.word => last.text.push(ch),
+                _ => out.push(CodeSpan {
+                    text: ch.to_string(),
+                    fg: part.fg,
+                    word: part.word,
+                }),
+            }
         }
     }
     out
@@ -620,6 +649,17 @@ mod tests {
     const FALLBACK: Color = Color::Rgb(0xc0, 0xca, 0xf5);
     const ADD_BG: Color = Color::Rgb(0x3f, 0x4d, 0x39);
     const DEL_BG: Color = Color::Rgb(0x58, 0x34, 0x43);
+    const BGS: DiffBackgrounds = DiffBackgrounds {
+        add: ADD_BG,
+        del: DEL_BG,
+        add_word: Color::Rgb(0x42, 0x68, 0x32),
+        del_word: Color::Rgb(0x81, 0x3d, 0x59),
+    };
+
+    /// `(text, fg)` pairs, to compare with [`highlight_spans`].
+    fn tuples(spans: &[CodeSpan]) -> Vec<(String, Color)> {
+        spans.iter().map(|s| (s.text.clone(), s.fg)).collect()
+    }
 
     fn line_row(kind: DiffCellKind, text: &str, line_no: u32) -> DiffRow {
         DiffRow::Line {
@@ -638,8 +678,7 @@ mod tests {
             rows,
             ThemeId::TokyoNight,
             FALLBACK,
-            ADD_BG,
-            DEL_BG,
+            BGS,
             0..rows.len(),
         )
     }
@@ -733,7 +772,7 @@ mod tests {
             },
         ];
         let spans = highlight_all("pack.json", &rows);
-        let colors: std::collections::HashSet<_> = spans.left(1).iter().map(|(_, c)| *c).collect();
+        let colors: std::collections::HashSet<_> = spans.left(1).iter().map(|s| s.fg).collect();
         assert!(
             colors.len() >= 2,
             "property line after '{{' should keep JSON token colours: {colors:?} {:?}",
@@ -773,19 +812,170 @@ mod tests {
         }
     }
 
+    /// Text of the runs flagged `word`, in order.
+    fn word_texts(spans: &[CodeSpan]) -> Vec<String> {
+        spans
+            .iter()
+            .filter(|s| s.word)
+            .map(|s| s.text.clone())
+            .collect()
+    }
+
+    fn modified_pair() -> Vec<DiffRow> {
+        vec![
+            DiffRow::Hunk {
+                text: "@@ -1,1 +1,1 @@".into(),
+            },
+            line_row(DiffCellKind::Del, "let total = price * qty;", 1),
+            line_row(DiffCellKind::Add, "let total = price * count;", 1),
+            line_row(DiffCellKind::Add, "let extra = 1;", 2),
+        ]
+    }
+
+    #[test]
+    fn paired_lines_flag_changed_words_only() {
+        for path in ["calc.rs", "notes.txt"] {
+            let spans = highlight_all(path, &modified_pair());
+            assert_eq!(word_texts(spans.left(1)), vec!["qty"], "{path}");
+            assert_eq!(word_texts(spans.left(2)), vec!["count"], "{path}");
+            assert!(word_texts(spans.left(3)).is_empty(), "{path} pure add");
+            let joined: String = spans.left(2).iter().map(|s| s.text.as_str()).collect();
+            assert_eq!(joined, "let total = price * count;", "{path}");
+        }
+    }
+
+    #[test]
+    fn split_row_flags_both_sides() {
+        let cell = |kind, text: &str| DiffCell {
+            kind,
+            text: text.into(),
+            line_no: Some(1),
+        };
+        let rows = vec![DiffRow::Line {
+            left: cell(DiffCellKind::Del, "let total = price * qty;"),
+            right: Some(cell(DiffCellKind::Add, "let total = price * count;")),
+        }];
+        let spans = highlight_all("calc.rs", &rows);
+        assert_eq!(word_texts(spans.left(0)), vec!["qty"]);
+        assert_eq!(word_texts(spans.right(0)), vec!["count"]);
+    }
+
+    #[test]
+    fn word_run_fg_is_readable_on_the_word_background() {
+        let rows = vec![
+            line_row(DiffCellKind::Del, r#"  "ttlMs": 5000, "on": true"#, 1),
+            line_row(DiffCellKind::Add, r#"  "ttlMs": 2000, "on": false"#, 1),
+        ];
+        let spans = highlight_all("pack.json", &rows);
+        for (row, row_bg, word_bg) in [(0, DEL_BG, BGS.del_word), (1, ADD_BG, BGS.add_word)] {
+            let line = spans.left(row);
+            assert!(line.iter().any(|s| s.word), "row {row}: {line:?}");
+            for span in line {
+                let bg = if span.word { word_bg } else { row_bg };
+                assert!(
+                    span.fg == FALLBACK || contrast_ratio(span.fg, bg) >= ROW_BG_CONTRAST_FLOOR,
+                    "row {row} {span:?} must stay readable on {bg:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn contrast_floor_uses_the_background_behind_each_run() {
+        // Readable on the row bg, unreadable on the word bg: only the word
+        // run falls back.
+        let fg = Color::Rgb(0xff, 0xff, 0xff);
+        let row_bg = Color::Rgb(0x00, 0x00, 0x00);
+        let word_bg = Color::Rgb(0xf0, 0xf0, 0xf0);
+        let spans = resolve_spans(
+            vec![("ab cd".into(), fg)],
+            std::slice::from_ref(&(3..5)),
+            FALLBACK,
+            Some(row_bg),
+            Some(word_bg),
+        );
+        let expected = vec![
+            CodeSpan {
+                text: "ab ".into(),
+                fg,
+                word: false,
+            },
+            CodeSpan {
+                text: "cd".into(),
+                fg: FALLBACK,
+                word: true,
+            },
+        ];
+        assert_eq!(spans, expected);
+    }
+
+    #[test]
+    fn word_run_keeps_raw_fg_that_only_the_word_background_can_carry() {
+        // Unreadable on the row bg, readable on the word bg: the row run
+        // falls back, the word run keeps the raw syntect fg.
+        let fg = Color::Rgb(0x10, 0x10, 0x10);
+        let row_bg = Color::Rgb(0x00, 0x00, 0x00);
+        let word_bg = Color::Rgb(0xf0, 0xf0, 0xf0);
+        assert!(contrast_ratio(fg, row_bg) < ROW_BG_CONTRAST_FLOOR);
+        assert!(contrast_ratio(fg, word_bg) >= ROW_BG_CONTRAST_FLOOR);
+        let spans = resolve_spans(
+            vec![("ab cd".into(), fg)],
+            std::slice::from_ref(&(3..5)),
+            FALLBACK,
+            Some(row_bg),
+            Some(word_bg),
+        );
+        let expected = vec![
+            CodeSpan {
+                text: "ab ".into(),
+                fg: FALLBACK,
+                word: false,
+            },
+            CodeSpan {
+                text: "cd".into(),
+                fg,
+                word: true,
+            },
+        ];
+        assert_eq!(spans, expected);
+    }
+
+    #[test]
+    fn slice_styled_cols_keeps_word_flag_and_splits_on_it() {
+        let span = |text: &str, word| CodeSpan {
+            text: text.into(),
+            fg: Color::Red,
+            word,
+        };
+        let parts = vec![span("a😀", false), span("bc", true), span("d", false)];
+        assert_eq!(
+            slice_styled_cols(&parts, 1, 4),
+            vec![span("😀", false), span("bc", true)]
+        );
+        assert_eq!(
+            slice_styled_cols(&parts, 3, 9),
+            vec![span("bc", true), span("d", false)]
+        );
+    }
+
     #[test]
     fn slice_styled_cols_keeps_emoji_display_width() {
         let emoji = '😀';
         assert_eq!(visible_width(&emoji.to_string()), 2);
+        let span = |text: &str, fg: Color| CodeSpan {
+            text: text.into(),
+            fg,
+            word: false,
+        };
         let parts = vec![
-            ("A".into(), Color::Red),
-            (emoji.to_string(), Color::Green),
-            ("B".into(), Color::Blue),
+            span("A", Color::Red),
+            span(&emoji.to_string(), Color::Green),
+            span("B", Color::Blue),
         ];
         let sliced = slice_styled_cols(&parts, 1, 2);
-        assert_eq!(sliced, vec![(emoji.to_string(), Color::Green)]);
+        assert_eq!(sliced, vec![span(&emoji.to_string(), Color::Green)]);
         let clipped = slice_styled_cols(&parts, 0, 2);
-        assert_eq!(clipped, vec![("A".into(), Color::Red)]);
+        assert_eq!(clipped, vec![span("A", Color::Red)]);
     }
 
     fn syntax_key(visible: Range<usize>, cache_id: u64) -> DiffSyntaxKey {
@@ -793,8 +983,7 @@ mod tests {
             path: "pack.json".into(),
             theme: ThemeId::TokyoNight,
             fallback: FALLBACK,
-            add_bg: ADD_BG,
-            del_bg: DEL_BG,
+            bgs: BGS,
             visible_start: visible.start,
             visible_end: visible.end,
             cache_id,
@@ -822,8 +1011,7 @@ mod tests {
             &rows,
             ThemeId::TokyoNight,
             FALLBACK,
-            ADD_BG,
-            DEL_BG,
+            BGS,
             visible.clone(),
         );
         let fed = take_syntax_fed_lines();
@@ -859,29 +1047,9 @@ mod tests {
         let key = syntax_key(visible.clone(), 7);
         let mut cache = None;
         let _ = take_syntax_fed_lines();
-        let first = cached_highlight_diff_rows(
-            &mut cache,
-            key.clone(),
-            "pack.json",
-            &rows,
-            ThemeId::TokyoNight,
-            FALLBACK,
-            ADD_BG,
-            DEL_BG,
-            visible.clone(),
-        );
+        let first = cached_highlight_diff_rows(&mut cache, key.clone(), &rows);
         let fed_first = take_syntax_fed_lines();
-        let second = cached_highlight_diff_rows(
-            &mut cache,
-            key,
-            "pack.json",
-            &rows,
-            ThemeId::TokyoNight,
-            FALLBACK,
-            ADD_BG,
-            DEL_BG,
-            visible.clone(),
-        );
+        let second = cached_highlight_diff_rows(&mut cache, key, &rows);
         let fed_second = take_syntax_fed_lines();
         assert!(fed_first > 0, "first paint feeds syntect");
         assert_eq!(fed_second, 0, "unchanged rows must not re-feed syntect");
@@ -910,28 +1078,8 @@ mod tests {
         assert_eq!(alpha.len(), omega.len());
         let visible = 0..alpha.len();
         let mut cache = None;
-        let first = cached_highlight_diff_rows(
-            &mut cache,
-            syntax_key(visible.clone(), 1),
-            "pack.json",
-            &alpha,
-            ThemeId::TokyoNight,
-            FALLBACK,
-            ADD_BG,
-            DEL_BG,
-            visible.clone(),
-        );
-        let second = cached_highlight_diff_rows(
-            &mut cache,
-            syntax_key(visible.clone(), 2),
-            "pack.json",
-            &omega,
-            ThemeId::TokyoNight,
-            FALLBACK,
-            ADD_BG,
-            DEL_BG,
-            visible,
-        );
+        let first = cached_highlight_diff_rows(&mut cache, syntax_key(visible.clone(), 1), &alpha);
+        let second = cached_highlight_diff_rows(&mut cache, syntax_key(visible.clone(), 2), &omega);
         assert!(
             !Arc::ptr_eq(&first, &second),
             "a new cache_id must not reuse the previous span list"
@@ -939,7 +1087,7 @@ mod tests {
         let omega_text: String = second
             .left(2)
             .iter()
-            .map(|(text, _)| text.as_str())
+            .map(|span| span.text.as_str())
             .collect();
         assert!(
             omega_text.contains("omega-syntax"),
@@ -950,11 +1098,36 @@ mod tests {
             "second paint must not keep the prior cached text: {omega_text:?}"
         );
         let omega_fgs: std::collections::HashSet<_> =
-            second.left(2).iter().map(|(_, color)| *color).collect();
+            second.left(2).iter().map(|span| span.fg).collect();
         assert!(
             omega_fgs.len() >= 2,
             "replacement JSON must still get token colours: {omega_fgs:?}"
         );
+    }
+
+    #[test]
+    fn cached_word_runs_reuse_on_same_key_and_refresh_on_new_cache_id() {
+        let rows_with = |new: &str| {
+            vec![
+                line_row(DiffCellKind::Del, r#"  "ttlMs": 5000"#, 1),
+                line_row(DiffCellKind::Add, new, 1),
+            ]
+        };
+        let alpha = rows_with(r#"  "ttlMs": 2000"#);
+        let omega = rows_with(r#"  "maxMs": 5000"#);
+        let visible = 0..alpha.len();
+        let mut cache = None;
+        let first = cached_highlight_diff_rows(&mut cache, syntax_key(visible.clone(), 1), &alpha);
+        assert_eq!(word_texts(first.left(0)), vec!["5000"]);
+        assert_eq!(word_texts(first.left(1)), vec!["2000"]);
+        let _ = take_syntax_fed_lines();
+        let again = cached_highlight_diff_rows(&mut cache, syntax_key(visible.clone(), 1), &alpha);
+        assert_eq!(take_syntax_fed_lines(), 0, "same key must not recompute");
+        assert!(Arc::ptr_eq(&first, &again));
+        let reloaded = cached_highlight_diff_rows(&mut cache, syntax_key(visible, 2), &omega);
+        assert!(!Arc::ptr_eq(&first, &reloaded));
+        assert_eq!(word_texts(reloaded.left(0)), vec!["ttlMs"]);
+        assert_eq!(word_texts(reloaded.left(1)), vec!["maxMs"]);
     }
 
     #[test]
@@ -986,7 +1159,7 @@ mod tests {
             within_spans
                 .left(1)
                 .iter()
-                .map(|(_, c)| *c)
+                .map(|s| s.fg)
                 .collect::<std::collections::HashSet<_>>()
                 .len()
                 >= 2,
@@ -994,8 +1167,8 @@ mod tests {
             within_spans.left(1)
         );
         assert_eq!(
-            across_spans.left(3),
-            fresh.as_slice(),
+            tuples(across_spans.left(3)),
+            fresh,
             "a later hunk must match a fresh highlighter, not the prior hunk stream"
         );
         assert_ne!(
@@ -1028,8 +1201,8 @@ mod tests {
             Some(ADD_BG),
         );
         assert_eq!(
-            spans.left(5),
-            fresh.as_slice(),
+            tuples(spans.left(5)),
+            fresh,
             "unstaged section must not inherit staged parse state"
         );
     }
@@ -1080,7 +1253,7 @@ mod tests {
             FALLBACK,
             Some(DEL_BG),
         );
-        assert_eq!(across_spans.left(3), fresh.as_slice());
+        assert_eq!(tuples(across_spans.left(3)), fresh);
         assert_ne!(across_spans.left(3), within_spans.left(1));
     }
 }

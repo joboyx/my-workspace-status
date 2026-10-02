@@ -54,7 +54,8 @@ use super::split::{
 };
 use super::state::{revert_scope, AppState, CompareRevertTarget, FocusPane, PendingConfirm};
 use super::syntax::{
-    cached_highlight_diff_rows, slice_styled_cols, CachedDiffSyntax, DiffSyntaxKey,
+    cached_highlight_diff_rows, slice_styled_cols, CachedDiffSyntax, CodeSpan, DiffBackgrounds,
+    DiffSyntaxKey,
 };
 use super::tabs::{compare_picker_empty, no_committed_changes_vs, NO_COMMITTED_CHANGES};
 use super::theme::{hex_color, Palette, Pill};
@@ -1298,19 +1299,17 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                 path: syntax_path.to_string(),
                 theme: state.theme,
                 fallback: palette.repo,
-                add_bg: palette.diff_add_bg,
-                del_bg: palette.diff_del_bg,
+                bgs: DiffBackgrounds {
+                    add: palette.diff_add_bg,
+                    del: palette.diff_del_bg,
+                    add_word: palette.diff_add_word_bg,
+                    del_word: palette.diff_del_word_bg,
+                },
                 visible_start: skip,
                 visible_end: logical_end,
                 cache_id: diff_syntax_cache_id(state, split),
             },
-            syntax_path,
             &rows,
-            state.theme,
-            palette.repo,
-            palette.diff_add_bg,
-            palette.diff_del_bg,
-            skip..logical_end,
         )
     });
     // Armed diff search marks every matching row; the cursor bar sits on
@@ -1421,8 +1420,8 @@ fn paint_diff_row(
     focused: bool,
     visual: bool,
     search: Option<Pill>,
-    left_syntax: &[(String, Color)],
-    right_syntax: &[(String, Color)],
+    left_syntax: &[CodeSpan],
+    right_syntax: &[CodeSpan],
 ) -> Vec<Line<'static>> {
     let palette = state.theme.palette();
     let parts: Vec<Line<'static>> = match row {
@@ -1622,7 +1621,7 @@ fn paint_cell_spans(
     palette: Palette,
     state: &AppState,
     ascii: bool,
-    syntax: &[(String, Color)],
+    syntax: &[CodeSpan],
 ) -> Vec<Span<'static>> {
     let width = width as usize;
     let mark_w = comment_mark_cols(ascii);
@@ -1642,6 +1641,7 @@ fn paint_cell_spans(
     let sign = if first { cell_sign(cell.kind) } else { ' ' };
     let accent = cell_accent(cell.kind, palette);
     let row_bg = cell_row_bg(cell.kind, palette);
+    let word_bg = cell_word_bg(cell.kind, palette).or(row_bg);
     let gutter_style = with_row_bg(diff_gutter_style(palette), row_bg);
     let sign_style = with_row_bg(
         accent.unwrap_or_default().add_modifier(Modifier::BOLD),
@@ -1664,7 +1664,7 @@ fn paint_cell_spans(
         + 4
         + code_parts
             .iter()
-            .map(|(text, _)| visible_width(text))
+            .map(|part| visible_width(&part.text))
             .sum::<usize>();
     let pad = width.saturating_sub(used);
     let mut spans = vec![
@@ -1672,10 +1672,11 @@ fn paint_cell_spans(
         Span::styled(format!(" {DIFF_RULE} "), gutter_style),
         Span::styled(sign.to_string(), sign_style),
     ];
-    for (text, fg) in code_parts {
+    for part in code_parts {
+        let bg = if part.word { word_bg } else { row_bg };
         spans.push(Span::styled(
-            text,
-            with_row_bg(Style::default().fg(fg), row_bg),
+            part.text,
+            with_row_bg(Style::default().fg(part.fg), bg),
         ));
     }
     spans.push(Span::styled(
@@ -1687,14 +1688,18 @@ fn paint_cell_spans(
 
 fn paint_code_parts(
     cell: &DiffCell,
-    syntax: &[(String, Color)],
+    syntax: &[CodeSpan],
     col_offset: usize,
     code_w: usize,
     palette: Palette,
-) -> Vec<(String, Color)> {
+) -> Vec<CodeSpan> {
     match cell.kind {
         DiffCellKind::Empty => Vec::new(),
-        DiffCellKind::Meta => vec![(slice_cols(&cell.text, col_offset, code_w), palette.muted)],
+        DiffCellKind::Meta => vec![CodeSpan {
+            text: slice_cols(&cell.text, col_offset, code_w),
+            fg: palette.muted,
+            word: false,
+        }],
         _ => slice_styled_cols(syntax, col_offset, code_w),
     }
 }
@@ -1710,6 +1715,15 @@ fn cell_row_bg(kind: DiffCellKind, palette: Palette) -> Option<Color> {
     match kind {
         DiffCellKind::Add => Some(palette.diff_add_bg),
         DiffCellKind::Del => Some(palette.diff_del_bg),
+        DiffCellKind::Ctx | DiffCellKind::Meta | DiffCellKind::Empty => None,
+    }
+}
+
+/// Changed-word background: only add and del cells have one.
+fn cell_word_bg(kind: DiffCellKind, palette: Palette) -> Option<Color> {
+    match kind {
+        DiffCellKind::Add => Some(palette.diff_add_word_bg),
+        DiffCellKind::Del => Some(palette.diff_del_word_bg),
         DiffCellKind::Ctx | DiffCellKind::Meta | DiffCellKind::Empty => None,
     }
 }
@@ -3958,10 +3972,17 @@ mod tests {
             add_cells.iter().all(|cell| cell.bg == palette.diff_add_bg),
             "add-line syntax must keep diff_add_bg, not a syntect background:\n{text}"
         );
-        let del_cells = needle_cells(buf, del_y, "5000");
+        let del_cells = needle_cells(buf, del_y, "ttlMs");
         assert!(
             del_cells.iter().all(|cell| cell.bg == palette.diff_del_bg),
             "del-line syntax must keep diff_del_bg:\n{text}"
+        );
+        // `5000` -> `2000` is the changed word of the paired del/add lines.
+        assert!(
+            needle_cells(buf, del_y, "5000")
+                .iter()
+                .all(|cell| cell.bg == palette.diff_del_word_bg),
+            "changed del word sits on diff_del_word_bg:\n{text}"
         );
 
         let add_line = buf_line(buf, add_y);
@@ -3996,6 +4017,371 @@ mod tests {
         assert!(
             add_cells.iter().any(|cell| cell.fg != palette.added),
             "syntax fg must not wash the add line with the added accent: {add_line}"
+        );
+    }
+
+    /// A paired modified line, a pure add, and a pure del.
+    fn word_diff_lines(old: &str, new: &str) -> Vec<String> {
+        vec![
+            "@@ -1,5 +1,5 @@".into(),
+            " fn main() {".into(),
+            format!("-{old}"),
+            format!("+{new}"),
+            "+let fresh_only = 1;".into(),
+            " let keep = 0;".into(),
+            "-let stale_only = 2;".into(),
+            " }".into(),
+        ]
+    }
+
+    fn word_diff_state(lines: Vec<String>, mode: DiffMode) -> AppState {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let file = state
+            .rows
+            .iter()
+            .position(|r| r.kind == NodeKind::File)
+            .expect("file row");
+        state.cursor = file;
+        state.focus = FocusPane::Left;
+        state.diff_mode = mode;
+        state.set_diff(
+            "app".into(),
+            "calc.rs".into(),
+            super::super::diff::DiffContent::from_lines(lines),
+        );
+        state
+    }
+
+    /// Columns of row `y` painted on `bg`.
+    fn cols_with_bg(buf: &ratatui::buffer::Buffer, y: u16, bg: Color) -> Vec<u16> {
+        (0..buf.area().width)
+            .filter(|&x| buf[(x, y)].bg == bg)
+            .collect()
+    }
+
+    /// Columns of the first `needle` on row `y` (one cell per char).
+    fn needle_cols(buf: &ratatui::buffer::Buffer, y: u16, needle: &str) -> Vec<u16> {
+        let start = find_cell_col(buf, y, needle).expect(needle);
+        (start..start + needle.chars().count() as u16).collect()
+    }
+
+    /// Rows that hold at least one cell on `bg`.
+    fn rows_with_bg(buf: &ratatui::buffer::Buffer, bg: Color) -> Vec<u16> {
+        (0..buf.area().height)
+            .filter(|&y| !cols_with_bg(buf, y, bg).is_empty())
+            .collect()
+    }
+
+    /// Diff row index whose left or right cell text contains `needle`.
+    fn diff_row_index(state: &AppState, needle: &str) -> usize {
+        state
+            .current_diff_rows()
+            .iter()
+            .position(|row| match row {
+                DiffRow::Line { left, right } => {
+                    left.text.contains(needle)
+                        || right.as_ref().is_some_and(|r| r.text.contains(needle))
+                }
+                _ => false,
+            })
+            .expect(needle)
+    }
+
+    const QTY_LINE: &str = "let total = price * qty;";
+    const COUNT_LINE: &str = "let total = price * count;";
+
+    #[test]
+    fn inline_word_diff_paints_word_bg_on_changed_text_only() {
+        let mut state = word_diff_state(word_diff_lines(QTY_LINE, COUNT_LINE), DiffMode::Inline);
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.diff_layout(), DiffMode::Inline);
+        let buf = terminal.backend().buffer();
+        let text = buffer_text(&terminal);
+        let add_y = first_row_with(buf, "price * count").expect("add line");
+        let del_y = first_row_with(buf, "price * qty").expect("del line");
+        assert_ne!(add_y, del_y);
+
+        for (y, word, row_bg, word_bg, sign, sign_fg) in [
+            (
+                add_y,
+                "count",
+                palette.diff_add_bg,
+                palette.diff_add_word_bg,
+                "+",
+                palette.added,
+            ),
+            (
+                del_y,
+                "qty",
+                palette.diff_del_bg,
+                palette.diff_del_word_bg,
+                "-",
+                palette.deleted,
+            ),
+        ] {
+            assert_eq!(
+                cols_with_bg(buf, y, word_bg),
+                needle_cols(buf, y, word),
+                "only `{word}` sits on the word bg:\n{text}"
+            );
+            assert!(
+                needle_cells(buf, y, "let total = price * ")
+                    .iter()
+                    .all(|cell| cell.bg == row_bg),
+                "unchanged text keeps the row bg:\n{text}"
+            );
+            let after = needle_cols(buf, y, word).last().unwrap() + 1;
+            assert_eq!(buf[(after, y)].symbol(), ";");
+            assert_eq!(buf[(after, y)].bg, row_bg, "`;` after `{word}`");
+            // The sign sits right before the code text.
+            let sign_at = find_cell_col(buf, y, "let total").expect("code") - 1;
+            let sign_cell = &buf[(sign_at, y)];
+            assert_eq!(sign_cell.symbol(), sign);
+            assert_eq!((sign_cell.fg, sign_cell.bg), (sign_fg, row_bg));
+            assert!(sign_cell.modifier.contains(Modifier::BOLD));
+            // Line number gutter and rule, right after the edge marker.
+            let x0 = state.layout.diff_content_x + 1;
+            for x in x0..sign_at {
+                assert_eq!(buf[(x, y)].bg, row_bg, "gutter col {x} on row {y}:\n{text}");
+            }
+        }
+        assert!(
+            rows_with_bg(buf, palette.diff_add_word_bg) == vec![add_y]
+                && rows_with_bg(buf, palette.diff_del_word_bg) == vec![del_y],
+            "pure add / pure del rows have no word bg:\n{text}"
+        );
+        for pure in ["fresh_only", "stale_only"] {
+            let y = first_row_with(buf, pure).expect(pure);
+            let cells = needle_cells(buf, y, pure);
+            assert!(
+                cells
+                    .iter()
+                    .all(|c| c.bg == palette.diff_add_bg || c.bg == palette.diff_del_bg),
+                "{pure} stays on its row bg:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_word_diff_paints_word_bg_on_both_sides() {
+        let mut state =
+            word_diff_state(word_diff_lines(QTY_LINE, COUNT_LINE), DiffMode::SideBySide);
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(220, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.diff_layout(), DiffMode::SideBySide);
+        let buf = terminal.backend().buffer();
+        let text = buffer_text(&terminal);
+        let y = first_row_with(buf, "price * count").expect("split row");
+        assert!(buf_line(buf, y).contains("price * qty"), "{text}");
+        assert_eq!(
+            cols_with_bg(buf, y, palette.diff_del_word_bg),
+            needle_cols(buf, y, "qty"),
+            "{text}"
+        );
+        assert_eq!(
+            cols_with_bg(buf, y, palette.diff_add_word_bg),
+            needle_cols(buf, y, "count"),
+            "{text}"
+        );
+        for (needle, bg) in [
+            ("let total = price * qty", palette.diff_del_bg),
+            ("let total = price * count", palette.diff_add_bg),
+        ] {
+            let prefix = &needle[..needle.len() - needle.rsplit(' ').next().unwrap().len()];
+            let start = find_cell_col(buf, y, needle).expect(needle);
+            for i in 0..prefix.len() as u16 {
+                assert_eq!(buf[(start + i, y)].bg, bg, "{needle} col {i}:\n{text}");
+            }
+        }
+        for (needle, sign, bg) in [
+            ("let total = price * qty", "-", palette.diff_del_bg),
+            ("let total = price * count", "+", palette.diff_add_bg),
+        ] {
+            let at = find_cell_col(buf, y, needle).expect(needle) - 1;
+            assert_eq!((buf[(at, y)].symbol(), buf[(at, y)].bg), (sign, bg));
+        }
+        assert_eq!(rows_with_bg(buf, palette.diff_add_word_bg), vec![y]);
+        assert_eq!(rows_with_bg(buf, palette.diff_del_word_bg), vec![y]);
+    }
+
+    #[test]
+    fn two_edits_on_one_line_keep_the_middle_on_the_row_bg() {
+        let mut state = word_diff_state(
+            word_diff_lines("call(alpha, middle, beta);", "call(gamma, middle, delta);"),
+            DiffMode::Inline,
+        );
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let buf = terminal.backend().buffer();
+        let text = buffer_text(&terminal);
+        let y = first_row_with(buf, "call(gamma").expect("add line");
+        let mut expected = needle_cols(buf, y, "gamma");
+        expected.extend(needle_cols(buf, y, "delta"));
+        assert_eq!(
+            cols_with_bg(buf, y, palette.diff_add_word_bg),
+            expected,
+            "{text}"
+        );
+        assert!(
+            needle_cells(buf, y, ", middle, ")
+                .iter()
+                .all(|cell| cell.bg == palette.diff_add_bg),
+            "text between two edits stays on the row bg:\n{text}"
+        );
+    }
+
+    #[test]
+    fn wrapped_word_diff_keeps_word_bg_on_continuation_row() {
+        let shared = format!("let total = {}", "price + ".repeat(14));
+        let mut state = word_diff_state(
+            word_diff_lines(&format!("{shared}qty;"), &format!("{shared}count;")),
+            DiffMode::Inline,
+        );
+        state.diff_wrap = true;
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let buf = terminal.backend().buffer();
+        let text = buffer_text(&terminal);
+        let first_y = first_row_with(buf, "let total = price").expect("first add row");
+        let add_first_y = (first_y..buf.area().height)
+            .find(|&y| {
+                buf_line(buf, y).contains("let total = price")
+                    && cols_with_bg(buf, y, palette.diff_add_bg).len() > 1
+            })
+            .expect("add line first row");
+        let word_rows = rows_with_bg(buf, palette.diff_add_word_bg);
+        assert!(!word_rows.is_empty(), "{text}");
+        assert!(
+            word_rows.iter().all(|&y| y > add_first_y),
+            "the changed word wraps onto a continuation row: {word_rows:?}\n{text}"
+        );
+        let painted: String = word_rows
+            .iter()
+            .flat_map(|&y| {
+                cols_with_bg(buf, y, palette.diff_add_word_bg)
+                    .into_iter()
+                    .map(move |x| buf[(x, y)].symbol().to_string())
+            })
+            .collect();
+        assert_eq!(painted, "count", "{text}");
+        let y = word_rows[0];
+        let first_word = cols_with_bg(buf, y, palette.diff_add_word_bg)[0];
+        let x0 = state.layout.diff_content_x + 1;
+        for x in x0..first_word {
+            assert_eq!(
+                buf[(x, y)].bg,
+                palette.diff_add_bg,
+                "continuation gutter / text col {x} stays on the row bg:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn panned_word_diff_stays_on_changed_glyphs_past_an_emoji() {
+        let tail = format!(" // {}", "z".repeat(150));
+        let mut state = word_diff_state(
+            word_diff_lines(
+                &format!("🙂 let total = price * qty;{tail}"),
+                &format!("🙂 let total = price * count;{tail}"),
+            ),
+            DiffMode::Inline,
+        );
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        for offset in [0u16, 1, 2, 5] {
+            state.diff_col_offset = offset;
+            draw_state(&mut terminal, &mut state);
+            let buf = terminal.backend().buffer();
+            let text = buffer_text(&terminal);
+            let y = first_row_with(buf, "price * count").expect("add line");
+            assert_eq!(
+                cols_with_bg(buf, y, palette.diff_add_word_bg),
+                needle_cols(buf, y, "count"),
+                "pan {offset}:\n{text}"
+            );
+            let del_y = first_row_with(buf, "price * qty").expect("del line");
+            assert_eq!(
+                cols_with_bg(buf, del_y, palette.diff_del_word_bg),
+                needle_cols(buf, del_y, "qty"),
+                "pan {offset}:\n{text}"
+            );
+            if offset == 0 {
+                let emoji = find_cell_col(buf, y, "🙂").expect("whole emoji at pan 0");
+                assert_eq!(buf[(emoji, y)].bg, palette.diff_add_bg);
+            } else {
+                assert!(
+                    !buf_line(buf, y).contains('🙂'),
+                    "a panned emoji is dropped whole, never half-painted:\n{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_row_overlay_replaces_the_word_bg() {
+        let mut state = word_diff_state(word_diff_lines(QTY_LINE, COUNT_LINE), DiffMode::Inline);
+        let palette = state.theme.palette();
+        state.focus = FocusPane::Right;
+        state.diff_cursor = diff_row_index(&state, "price * count");
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let buf = terminal.backend().buffer();
+        let text = buffer_text(&terminal);
+        let add_y = first_row_with(buf, "price * count").expect("add line");
+        let del_y = first_row_with(buf, "price * qty").expect("del line");
+        assert!(
+            cols_with_bg(buf, add_y, palette.diff_add_word_bg).is_empty(),
+            "cursor row has no word bg:\n{text}"
+        );
+        assert!(
+            needle_cells(buf, add_y, "count")
+                .iter()
+                .all(|cell| cell.bg == palette.cursor_bg),
+            "cursor bg wins over the word bg:\n{text}"
+        );
+        assert_eq!(
+            cols_with_bg(buf, del_y, palette.diff_del_word_bg),
+            needle_cols(buf, del_y, "qty"),
+            "non-cursor row keeps its word bg:\n{text}"
+        );
+    }
+
+    #[test]
+    fn same_size_reload_recomputes_word_ranges() {
+        let mut state = word_diff_state(word_diff_lines(QTY_LINE, COUNT_LINE), DiffMode::Inline);
+        let palette = state.theme.palette();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let rows_before = state.current_diff_rows().len();
+        state.set_diff(
+            "app".into(),
+            "calc.rs".into(),
+            super::super::diff::DiffContent::from_lines(word_diff_lines(
+                QTY_LINE,
+                "let total = cost * qty;",
+            )),
+        );
+        assert_eq!(state.current_diff_rows().len(), rows_before);
+        draw_state(&mut terminal, &mut state);
+        let buf = terminal.backend().buffer();
+        let text = buffer_text(&terminal);
+        let add_y = first_row_with(buf, "cost * qty").expect("reloaded add line");
+        let del_y = first_row_with(buf, "price * qty").expect("del line");
+        assert_eq!(
+            cols_with_bg(buf, add_y, palette.diff_add_word_bg),
+            needle_cols(buf, add_y, "cost"),
+            "{text}"
+        );
+        assert_eq!(
+            cols_with_bg(buf, del_y, palette.diff_del_word_bg),
+            needle_cols(buf, del_y, "price"),
+            "{text}"
         );
     }
 

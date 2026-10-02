@@ -18,6 +18,9 @@ const ADDED: (u8, u8, u8) = (0x9e, 0xce, 0x6a);
 const DELETED: (u8, u8, u8) = (0xf7, 0x76, 0x8e);
 const DIFF_ADD_BG: (u8, u8, u8) = (0x3f, 0x4d, 0x39);
 const DIFF_DEL_BG: (u8, u8, u8) = (0x58, 0x34, 0x43);
+/// Tokyo Night `diffAddWordBg` / `diffDelWordBg`.
+const DIFF_ADD_WORD_BG: (u8, u8, u8) = (0x42, 0x68, 0x32);
+const DIFF_DEL_WORD_BG: (u8, u8, u8) = (0x81, 0x3d, 0x59);
 
 /// Tracked JSON with one replaced string and one replaced number.
 fn seed_syntax_json(workspace: &Path) {
@@ -57,10 +60,30 @@ fn documented_json_syntax_diff(screen: &str) -> bool {
         && no_wrong_overlays(screen)
 }
 
+/// Every cell of the first `needle` sits on `row_bg` or `word_bg`, and at
+/// least one keeps `row_bg` (the unchanged text of a paired line).
+fn needle_on_row_and_word_bg(
+    tui: &PtySession,
+    needle: &str,
+    row_bg: (u8, u8, u8),
+    word_bg: (u8, u8, u8),
+) -> bool {
+    match tui.first_needle_bgs(needle) {
+        Some(bgs) if !bgs.is_empty() => {
+            bgs.iter()
+                .all(|bg| *bg == Some(row_bg) || *bg == Some(word_bg))
+                && bgs.contains(&Some(row_bg))
+        }
+        _ => false,
+    }
+}
+
 /// File-diff syntax keeps +/- signs and add/del row backgrounds.
 ///
 /// Docs: language from path/extension; token foregrounds only; `+` / `-`
-/// stay `added` / `deleted`; add/del rows use `diffAddBg` / `diffDelBg`.
+/// stay `added` / `deleted`; add/del rows use `diffAddBg` / `diffDelBg`;
+/// the changed words of the paired lines use `diffAddWordBg` /
+/// `diffDelWordBg`.
 /// Cursor overlay must not cover the JSON add/del lines (left pane stays
 /// focused). A no-op, a solid add-accent wash, or a syntect background
 /// that replaces the row tint is red.
@@ -78,13 +101,36 @@ fn pty_diff_syntax_highlight_keeps_signs_and_row_bg() {
 
     let screen = tui.screen();
     assert!(
-        tui.needle_has_bg(ADD_MARK, DIFF_ADD_BG.0, DIFF_ADD_BG.1, DIFF_ADD_BG.2),
-        "add-line JSON must keep diffAddBg under syntax fg:\n{screen}"
+        needle_on_row_and_word_bg(&tui, ADD_MARK, DIFF_ADD_BG, DIFF_ADD_WORD_BG),
+        "add-line JSON must keep diffAddBg / diffAddWordBg under syntax fg:\n{screen}"
     );
     assert!(
-        tui.needle_has_bg(DEL_MARK, DIFF_DEL_BG.0, DIFF_DEL_BG.1, DIFF_DEL_BG.2),
-        "del-line JSON must keep diffDelBg under syntax fg:\n{screen}"
+        needle_on_row_and_word_bg(&tui, DEL_MARK, DIFF_DEL_BG, DIFF_DEL_WORD_BG),
+        "del-line JSON must keep diffDelBg / diffDelWordBg under syntax fg:\n{screen}"
     );
+    // Unchanged text right after the sign keeps the row bg. The sign makes
+    // each needle unique to its own row.
+    for (needle, (r, g, b)) in [
+        ("+  \"name\": \"", DIFF_ADD_BG),
+        ("-  \"name\": \"", DIFF_DEL_BG),
+    ] {
+        assert!(
+            tui.needle_has_bg(needle, r, g, b),
+            "unchanged `{needle}` keeps the row bg:\n{screen}"
+        );
+    }
+    // The opening quote is unchanged; the changed word after it is not.
+    for (needle, row_bg, word_bg) in [
+        ("\"alpha", DIFF_ADD_BG, DIFF_ADD_WORD_BG),
+        ("\"old", DIFF_DEL_BG, DIFF_DEL_WORD_BG),
+    ] {
+        let bgs = tui
+            .first_needle_bgs(needle)
+            .unwrap_or_else(|| panic!("{needle} missing:\n{screen}"));
+        let mut expected = vec![Some(row_bg)];
+        expected.resize(needle.chars().count(), Some(word_bg));
+        assert_eq!(bgs, expected, "changed word after `{needle}`:\n{screen}");
+    }
     assert_eq!(
         tui.first_glyph_on_needle_row_fg(ADD_MARK, '+'),
         Some(Some(ADDED)),

@@ -10,9 +10,6 @@
 //! single other chars. A token-level LCS marks the changed tokens. Ranges
 //! are byte ranges into the cell text and always land on char boundaries.
 
-// TODO: the paint task wires this module into render and removes this allow.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::ops::Range;
 
 use super::diff::{DiffCellKind, DiffRow};
@@ -53,17 +50,33 @@ struct Token {
     class: TokenClass,
 }
 
+/// True for combining marks and emoji skin-tone modifiers: they attach to
+/// the char before them even when `visible_width` gives them a column.
+fn extends_cluster(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0300}'..='\u{036f}'
+            | '\u{1ab0}'..='\u{1aff}'
+            | '\u{1dc0}'..='\u{1dff}'
+            | '\u{20d0}'..='\u{20ff}'
+            | '\u{fe20}'..='\u{fe2f}'
+            | '\u{1f3fb}'..='\u{1f3ff}'
+    )
+}
+
 /// Split `text` into word, whitespace, and single-char tokens.
 ///
-/// A zero-width char (VS16, ZWJ) and the char after a ZWJ extend the
-/// previous token, so a glyph cluster is never split.
+/// A zero-width char (VS16, ZWJ), a combining mark, a skin-tone modifier,
+/// and the char after a ZWJ extend the previous token, so a glyph cluster
+/// is never split.
 fn tokenize(text: &str) -> Vec<Token> {
     let mut tokens: Vec<Token> = Vec::new();
     let mut after_zwj = false;
     for (start, c) in text.char_indices() {
         let end = start + c.len_utf8();
         let class = char_class(c);
-        let joins_cluster = after_zwj || visible_width(c.encode_utf8(&mut [0; 4])) == 0;
+        let joins_cluster =
+            after_zwj || extends_cluster(c) || visible_width(c.encode_utf8(&mut [0; 4])) == 0;
         after_zwj = c == ZWJ;
         if let Some(last) = tokens.last_mut() {
             let same_run = class == last.class && class != TokenClass::Other;
@@ -424,6 +437,19 @@ mod tests {
             changed("dev 👨‍💻 here", "dev 👩‍💻 here"),
             (vec!["👨‍💻"], vec!["👩‍💻"])
         );
+    }
+
+    #[test]
+    fn combining_mark_edit_marks_the_whole_word() {
+        assert_eq!(
+            changed("a nai\u{0308}ve b", "a naive b"),
+            (vec!["nai\u{0308}ve"], vec!["naive"])
+        );
+    }
+
+    #[test]
+    fn skin_tone_edit_marks_the_whole_emoji() {
+        assert_eq!(changed("ok 👍🏽 now", "ok 👍🏿 now"), (vec!["👍🏽"], vec!["👍🏿"]));
     }
 
     #[test]

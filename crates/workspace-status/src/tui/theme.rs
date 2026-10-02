@@ -274,7 +274,8 @@ impl ThemeId {
 /// remove `#774152` = `Rgb(119, 65, 82)`.
 /// Diff add/del row backgrounds: add `#3f4d39` = `Rgb(63, 77, 57)`,
 /// del `#583443` = `Rgb(88, 52, 67)`.
-/// Changed-word backgrounds: add `#426832`, del `#813d59`.
+/// Changed-word backgrounds: add `#426832` = `Rgb(66, 104, 50)`,
+/// del `#813d59` = `Rgb(129, 61, 89)`.
 const TOKYO_NIGHT: Theme = Theme {
     id: ThemeId::TokyoNight,
     label: "Tokyo Night",
