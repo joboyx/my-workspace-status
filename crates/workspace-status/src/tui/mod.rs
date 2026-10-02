@@ -42,6 +42,7 @@ mod tree;
 pub(crate) mod tty;
 pub(crate) mod viewed;
 pub(crate) mod watch;
+mod word_diff;
 
 pub use app::{collect_full_snapshot, run_tui, TuiOpts};
 pub use keys::InputMode;
