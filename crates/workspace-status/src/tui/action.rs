@@ -210,6 +210,9 @@ pub enum Action {
     CompareVsDefault,
     /// Open the compare-only branch picker.
     CompareVsBranch,
+    /// Open the compare picker over HEAD's ancestors (HEAD excluded); the
+    /// picked commit is the base of a live `<sha>...HEAD` tab.
+    CompareVsCommit,
     /// Open or focus a compare tab of the focused graph commit versus its
     /// first parent (`<sha>^...<sha>`, head pinned to `<sha>`).
     CompareCommitVsParent,
@@ -227,7 +230,7 @@ pub enum Action {
     ComparePickerChar(char),
     /// Delete the last compare picker filter character.
     ComparePickerBackspace,
-    /// Open or focus the highlighted compare branch.
+    /// Open or focus the highlighted compare branch or commit.
     ComparePickerSubmit,
     /// Close the compare picker without opening a tab.
     ComparePickerCancel,
@@ -441,9 +444,11 @@ pub enum Effect {
         path: String,
         old_path: Option<String>,
     },
-    /// List local + `origin/*` for the compare picker (no checkout).
+    /// List the compare picker rows (no checkout): local + `origin/*`
+    /// branches, or HEAD's ancestors, by `kind`.
     PrepareComparePicker {
         repo: String,
+        kind: super::tabs::ComparePickerKind,
     },
     /// Probe HEAD / base-tip SHAs for one compare tab after watch.
     ProbeCompareTab {

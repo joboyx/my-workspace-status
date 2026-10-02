@@ -15,7 +15,7 @@ use super::super::graph_focus::GRAPH_FOCUS_NEED_CONTEXT;
 use super::super::ops::{collect_write_files, op_is_kind_noop, op_kind_noop_reason, Op};
 use super::super::split::SplitDrag;
 use super::super::status::StatusMessage;
-use super::super::tabs::{ONLY_WORKSPACE_TAB_OPEN, WORKSPACE_TAB_CANNOT_CLOSE};
+use super::super::tabs::{ComparePickerKind, ONLY_WORKSPACE_TAB_OPEN, WORKSPACE_TAB_CANNOT_CLOSE};
 use super::super::tree::NodeKind;
 use super::{AppState, FileWrite, FocusPane, FoldOp};
 
@@ -404,7 +404,8 @@ impl AppState {
                 Effect::None
             }
             Action::CompareVsDefault => self.compare_vs_default(),
-            Action::CompareVsBranch => self.compare_vs_branch(),
+            Action::CompareVsBranch => self.prepare_compare_picker(ComparePickerKind::Branch),
+            Action::CompareVsCommit => self.prepare_compare_picker(ComparePickerKind::Commit),
             Action::CompareCommitVsParent => self.compare_commit_vs_parent(),
             Action::CloseCompareTab => self.close_compare_tab(),
             Action::NextTab => self.activate_relative_tab(1),
@@ -418,7 +419,7 @@ impl AppState {
             }
             Action::ComparePickerChar(c) => {
                 if let Some(picker) = self.compare_picker.as_mut() {
-                    let mut filter = picker.filter.clone();
+                    let mut filter = picker.filter().to_string();
                     filter.push(c);
                     picker.set_filter(filter);
                 }
@@ -426,7 +427,7 @@ impl AppState {
             }
             Action::ComparePickerBackspace => {
                 if let Some(picker) = self.compare_picker.as_mut() {
-                    let mut filter = picker.filter.clone();
+                    let mut filter = picker.filter().to_string();
                     filter.pop();
                     picker.set_filter(filter);
                 }

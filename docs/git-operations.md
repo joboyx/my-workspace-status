@@ -17,6 +17,7 @@ Every git subprocess also runs with `GIT_OPTIONAL_LOCKS=0` (set by `git::git_pro
 | `list_compare_name_status` | `diff --name-status --find-renames <base>...<head> --`, then `diff --numstat -z --find-renames <base>...<head> --` | `Result<NameStatus[]>` | Committed three-dot file list. The numstat call fills `stat` (added / deleted lines). Its failure leaves `stat` `None`; the list still loads. |
 | `diff_compare_file_ctx` | `diff <base>...<head> -- <path>` | `Result<lines>` | One compare path. Empty stdout is `(no diff)`. |
 | `list_compare_picker_branches` | `for-each-ref` on `refs/heads/` + `refs/remotes/origin/` | `Result<LocalBranch[]>` | Drops `origin/HEAD` and the current local. No checkout. |
+| `list_compare_picker_commits` | `log --format=%H%x09%s --max-count=<limit+1> HEAD --` | `Result<AncestorCommit[]>` | Diff vs commit picker. Read-only. Drops the first row (HEAD), so a root HEAD lists none and at most `limit` rows remain. `limit` is `COMPARE_PICKER_COMMIT_LIMIT` (10,000 newest ancestors). Does not use `HEAD^@`: on a root commit it expands to nothing and `git log` falls back to HEAD. |
 | `exec_git_status(args, cwd)` | `<git> <args>` | exit code, `-1` on throw | Generic write / predicate. |
 | `exec_git_checked(args, cwd)` | `<git> <args>` | `Result<(), String>` | Surfaces failure to the caller. `Err` is git's reason line (`git_reason_line`: a push `! [rejected]` line, else the first `fatal:` / `error:` stderr line without its tag, else the first non-`hint:` stderr line, else a stdout `CONFLICT` line), or `git <sub> exited with code N` when git printed none. TUI writes show it as `<op> failed: <reason>` (`stash pop failed: …`). `exec_git_stdout` and the patch-on-stdin wrappers return the same one line. |
 | `repo_has_local_changes(cwd)` | `diff --quiet`, then `diff --cached --quiet` | boolean | True when either exits non-zero. Untracked files are **not** counted. |
@@ -97,7 +98,7 @@ git diff --name-status --find-renames <base-sha>...<head-sha> --
 git diff <base-sha>...<head-sha> -- <path>
 ```
 
-`<head-ref>` is `HEAD` for Diff vs default / branch. Diff commit vs parent pins it: `<base-ref>` is `<sha>^` and `<head-ref>` is `<sha>` (full id), so the range is `<sha>^...<sha>`. `^` is the first parent, so a merge commit lists its changes against its first parent. The merge base of `<sha>^` and `<sha>` is `<sha>^`, so three-dot is the commit's own first-parent diff. Nothing is checked out.
+`<head-ref>` is `HEAD` for Diff vs default / branch / commit (Diff vs commit's `<base-ref>` is the picked ancestor's full id). Diff commit vs parent pins it: `<base-ref>` is `<sha>^` and `<head-ref>` is `<sha>` (full id), so the range is `<sha>^...<sha>`. `^` is the first parent, so a merge commit lists its changes against its first parent. The merge base of `<sha>^` and `<sha>` is `<sha>^`, so three-dot is the commit's own first-parent diff. Nothing is checked out.
 
 `E` on a compare file uses LEFT `<merge-base>:<old-path-or-path>` and RIGHT `<head>:<path>`. Compare never changes HEAD or the index. The only compare write is `x` (below), which changes the worktree. The picker never checkouts, creates, or fetches. A watch probe reloads only after both SHAs are recorded and the head or the base-tip SHA then changes. The probe resolves `<head-ref>`, so a pinned tab never reloads when HEAD moves.
 

@@ -1130,6 +1130,50 @@ pub fn parse_compare_picker_branches(raw: &str) -> Vec<LocalBranch> {
         .collect()
 }
 
+/// Newest HEAD ancestors the compare commit picker lists (HEAD itself is
+/// not counted). Older history is cut off so a huge repo still opens the
+/// picker quickly; type a sha or subject to find a listed commit.
+pub const COMPARE_PICKER_COMMIT_LIMIT: usize = 10_000;
+
+/// One ancestor row in the compare commit picker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AncestorCommit {
+    /// Full object id.
+    pub id: String,
+    /// First line of the message.
+    pub subject: String,
+}
+
+/// HEAD's ancestors, newest first, without HEAD: at most
+/// [`COMPARE_PICKER_COMMIT_LIMIT`] rows. A root HEAD lists none.
+///
+/// Runs `git log HEAD` with `--max-count=<limit + 1>` and drops the first
+/// row (the walk starts at HEAD), which leaves at most `limit` rows.
+/// `HEAD^@` is not used: on a root commit it expands to nothing and
+/// `git log` would fall back to HEAD.
+pub fn list_compare_picker_commits(cwd: &Path) -> Result<Vec<AncestorCommit>, String> {
+    list_compare_picker_commits_capped(cwd, COMPARE_PICKER_COMMIT_LIMIT)
+}
+
+fn list_compare_picker_commits_capped(
+    cwd: &Path,
+    limit: usize,
+) -> Result<Vec<AncestorCommit>, String> {
+    let max_count = format!("--max-count={}", limit.saturating_add(1));
+    let raw = exec_git_stdout(&["log", "--format=%H%x09%s", &max_count, "HEAD", "--"], cwd)?;
+    Ok(raw
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (id, subject) = line.split_once('\t').unwrap_or((line, ""));
+            (!id.is_empty()).then(|| AncestorCommit {
+                id: id.to_string(),
+                subject: subject.to_string(),
+            })
+        })
+        .collect())
+}
+
 /// First-parent unified diff for one path in a commit.
 pub fn diff_commit_file(cwd: &Path, commit_id: &str, path: &str) -> Vec<String> {
     diff_commit_file_ctx(cwd, commit_id, path, None)
@@ -2038,6 +2082,53 @@ keep-z
             .map(|b| b.name)
             .collect();
         assert_eq!(names, vec!["origin/main", "feature"]);
+    }
+
+    #[test]
+    fn compare_picker_commits_list_ancestors_without_head() {
+        let dir = unique_dir("ws-git-picker-commits");
+        init_repo(&dir);
+        let rev = |r: &str| rev_parse_commit(&dir, r).unwrap().unwrap();
+        // Root HEAD has no ancestors.
+        assert_eq!(list_compare_picker_commits(&dir).unwrap(), Vec::new());
+        let root = rev("HEAD");
+
+        git(&dir, &["checkout", "-q", "-b", "side"]);
+        fs::write(dir.join("side.txt"), "side\n").unwrap();
+        git(&dir, &["add", "side.txt"]);
+        git(&dir, &["commit", "-q", "-m", "Side\twork"]);
+        let side = rev("HEAD");
+        git(&dir, &["checkout", "-q", "main"]);
+        fs::write(dir.join("main.txt"), "main\n").unwrap();
+        git(&dir, &["add", "main.txt"]);
+        git(&dir, &["commit", "-q", "-m", "Main work"]);
+        let main = rev("HEAD");
+        git(
+            &dir,
+            &["merge", "-q", "--no-ff", "-m", "Merge side", "side"],
+        );
+        let head = rev("HEAD");
+
+        let rows = list_compare_picker_commits(&dir).unwrap();
+        let mut ids: Vec<_> = rows.iter().map(|c| c.id.as_str()).collect();
+        assert!(!ids.contains(&head.as_str()), "HEAD is excluded: {ids:?}");
+        ids.sort_unstable();
+        let mut want = vec![root.as_str(), side.as_str(), main.as_str()];
+        want.sort_unstable();
+        assert_eq!(ids, want, "first- and merge-side ancestors");
+        let side_row = rows.iter().find(|c| c.id == side).unwrap();
+        assert_eq!(side_row.subject, "Side\twork", "a tab stays in the subject");
+
+        // The cap keeps the newest `limit` ancestors and still drops HEAD.
+        let capped = list_compare_picker_commits_capped(&dir, 1).unwrap();
+        assert_eq!(capped.len(), 1);
+        assert_eq!(capped[0].id, rows[0].id);
+        assert_ne!(capped[0].id, head);
+        assert_eq!(
+            list_compare_picker_commits_capped(&dir, 0).unwrap(),
+            Vec::new()
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

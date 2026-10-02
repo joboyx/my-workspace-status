@@ -48,14 +48,198 @@ pub fn compare_file_dirty(path: &str) -> String {
 pub const NO_COMMITTED_CHANGES: &str = "No committed changes";
 /// Empty compare picker.
 pub const NO_BRANCHES_TO_COMPARE: &str = "No branches to compare";
+/// Empty compare commit picker: HEAD has no ancestor (a root commit).
+pub const NO_COMMITS_TO_COMPARE: &str = "No commits to compare";
 
-/// Compare picker copy when no row shows: no branches at all, or none
-/// that match the typed filter (`no branch matches <q>`).
-pub fn compare_picker_empty(picker: &super::branches::BranchPickerState) -> String {
-    if picker.branches.is_empty() {
-        NO_BRANCHES_TO_COMPARE.to_string()
-    } else {
-        format!("no branch matches {}", picker.filter)
+/// Compare picker copy when no row shows: no rows at all, or none that
+/// match the typed filter (`no branch matches <q>` / `no commit matches <q>`).
+pub fn compare_picker_empty(picker: &ComparePickerState) -> String {
+    match picker {
+        ComparePickerState::Branch(picker) if picker.branches.is_empty() => {
+            NO_BRANCHES_TO_COMPARE.to_string()
+        }
+        ComparePickerState::Branch(picker) => format!("no branch matches {}", picker.filter),
+        ComparePickerState::Commit(picker) if picker.commits.is_empty() => {
+            NO_COMMITS_TO_COMPARE.to_string()
+        }
+        ComparePickerState::Commit(picker) => format!("no commit matches {}", picker.filter),
+    }
+}
+
+/// What the compare picker lists: Diff vs branch or Diff vs commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComparePickerKind {
+    /// Local + `origin/*` branches.
+    Branch,
+    /// HEAD's ancestors, HEAD excluded.
+    Commit,
+}
+
+/// Rows a compare picker job loaded, by [`ComparePickerKind`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ComparePickerRows {
+    /// Branch rows for Diff vs branch.
+    Branches(Vec<crate::git::LocalBranch>),
+    /// Ancestor rows for Diff vs commit.
+    Commits(Vec<crate::git::AncestorCommit>),
+}
+
+/// The one compare picker overlay (`InputMode::ComparePicker`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ComparePickerState {
+    /// Diff vs branch: picks a branch name as the base.
+    Branch(super::branches::BranchPickerState),
+    /// Diff vs commit: picks an ancestor's full id as the base.
+    Commit(CommitPickerState),
+}
+
+impl ComparePickerState {
+    /// Checkout the picked base compares against.
+    pub fn repo(&self) -> &str {
+        match self {
+            Self::Branch(picker) => &picker.repo,
+            Self::Commit(picker) => &picker.repo,
+        }
+    }
+
+    /// Typed filter.
+    pub fn filter(&self) -> &str {
+        match self {
+            Self::Branch(picker) => &picker.filter,
+            Self::Commit(picker) => &picker.filter,
+        }
+    }
+
+    /// Highlighted row index into the visible rows.
+    pub fn cursor(&self) -> usize {
+        match self {
+            Self::Branch(picker) => picker.cursor,
+            Self::Commit(picker) => picker.cursor,
+        }
+    }
+
+    /// Painted text of `count` matching rows from `start`: `<name>` or
+    /// `<short sha>  <subject>`. Only the painted window is formatted.
+    pub fn window_labels(&self, start: usize, count: usize) -> Vec<String> {
+        match self {
+            Self::Branch(picker) => picker
+                .visible()
+                .into_iter()
+                .skip(start)
+                .take(count)
+                .map(|branch| branch.name.clone())
+                .collect(),
+            Self::Commit(picker) => picker
+                .visible()
+                .into_iter()
+                .skip(start)
+                .take(count)
+                .map(|commit| format!("{}  {}", short_rev(&commit.id), commit.subject))
+                .collect(),
+        }
+    }
+
+    /// Count of rows that match the filter.
+    pub fn visible_len(&self) -> usize {
+        match self {
+            Self::Branch(picker) => picker.visible().len(),
+            Self::Commit(picker) => picker.visible().len(),
+        }
+    }
+
+    /// Base ref under the cursor: a branch name or a full commit id.
+    pub fn selected_base(&self) -> Option<String> {
+        match self {
+            Self::Branch(picker) => picker.selected().map(|branch| branch.name.clone()),
+            Self::Commit(picker) => picker.selected().map(|commit| commit.id.clone()),
+        }
+    }
+
+    /// Move the cursor by `delta` rows, clamped to the visible rows.
+    pub fn move_cursor(&mut self, delta: i32) {
+        match self {
+            Self::Branch(picker) => picker.move_cursor(delta),
+            Self::Commit(picker) => picker.move_cursor(delta),
+        }
+    }
+
+    /// Replace the filter and clamp the cursor to the new rows.
+    pub fn set_filter(&mut self, filter: String) {
+        match self {
+            Self::Branch(picker) => picker.set_filter(filter),
+            Self::Commit(picker) => picker.set_filter(filter),
+        }
+    }
+}
+
+/// Diff vs commit picker: HEAD's ancestors, newest first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitPickerState {
+    /// Checkout whose HEAD the ancestors belong to.
+    pub repo: String,
+    /// Ancestors from `git log`, HEAD excluded.
+    pub commits: Vec<crate::git::AncestorCommit>,
+    /// Typed filter.
+    pub filter: String,
+    /// Index into [`Self::visible`].
+    pub cursor: usize,
+    /// Lowercased `<id>\n<subject>` per commit, built once for the filter.
+    search: Vec<String>,
+}
+
+impl CommitPickerState {
+    /// Picker over `commits` with an empty filter.
+    pub fn new(repo: String, commits: Vec<crate::git::AncestorCommit>) -> Self {
+        let search = commits
+            .iter()
+            .map(|commit| format!("{}\n{}", commit.id, commit.subject).to_lowercase())
+            .collect();
+        Self {
+            repo,
+            commits,
+            filter: String::new(),
+            cursor: 0,
+            search,
+        }
+    }
+
+    /// Commits whose full id, short id, or subject contains the trimmed
+    /// filter, ignoring case. A short id is a prefix of the full id, so the
+    /// full id covers both.
+    pub fn visible(&self) -> Vec<&crate::git::AncestorCommit> {
+        let query = self.filter.trim().to_lowercase();
+        if query.is_empty() {
+            return self.commits.iter().collect();
+        }
+        self.commits
+            .iter()
+            .zip(&self.search)
+            .filter(|(_, haystack)| haystack.contains(&query))
+            .map(|(commit, _)| commit)
+            .collect()
+    }
+
+    /// Commit under the cursor.
+    pub fn selected(&self) -> Option<&crate::git::AncestorCommit> {
+        self.visible().get(self.cursor).copied()
+    }
+
+    /// Move the cursor by `delta` rows, clamped to the visible rows.
+    pub fn move_cursor(&mut self, delta: i32) {
+        let len = self.visible().len();
+        if len == 0 {
+            self.cursor = 0;
+            return;
+        }
+        let next = self.cursor as i32 + delta;
+        self.cursor = next.clamp(0, len as i32 - 1) as usize;
+    }
+
+    /// Replace the filter and clamp the cursor to the new rows.
+    pub fn set_filter(&mut self, filter: String) {
+        self.filter = filter;
+        let len = self.visible().len();
+        self.cursor = self.cursor.min(len.saturating_sub(1));
     }
 }
 

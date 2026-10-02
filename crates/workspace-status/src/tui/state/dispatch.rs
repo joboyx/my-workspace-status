@@ -109,12 +109,12 @@ impl AppState {
 
     /// Why a command that opens a compare tab cannot run, or `None`.
     ///
-    /// Diff vs default / branch need a concrete checkout with a born HEAD;
-    /// Diff vs default also needs a default tip. Diff commit vs parent needs
-    /// a focused graph commit that has a parent.
+    /// Diff vs default / branch / commit need a concrete checkout with a
+    /// born HEAD; Diff vs default also needs a default tip. Diff commit vs
+    /// parent needs a focused graph commit that has a parent.
     fn compare_open_refusal(&self, action: &Action) -> Option<&'static str> {
         match action {
-            Action::CompareVsDefault | Action::CompareVsBranch => {
+            Action::CompareVsDefault | Action::CompareVsBranch | Action::CompareVsCommit => {
                 let Some(checkout) = self.compare_target_checkout() else {
                     return Some(FOCUS_A_CHECKOUT);
                 };
@@ -289,6 +289,7 @@ impl AppState {
             | Action::CommandPaletteCancel
             | Action::CompareVsDefault
             | Action::CompareVsBranch
+            | Action::CompareVsCommit
             | Action::CompareCommitVsParent
             | Action::CloseCompareTab
             | Action::NextTab

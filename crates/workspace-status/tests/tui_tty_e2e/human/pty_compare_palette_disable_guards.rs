@@ -82,7 +82,7 @@ fn esc_closes_palette(tui: &mut PtySession) {
     );
 }
 
-/// Missing default and unborn HEAD keep Diff vs default in new tab / vs branch dimmed.
+/// A missing default and an unborn HEAD keep the Diff vs default and Diff vs branch rows dimmed.
 ///
 /// On `topic`, the palette shows Default branch not found. Enter keeps the
 /// overlay and does not add a compare tab. On `empty`, both Diff vs default in new tab

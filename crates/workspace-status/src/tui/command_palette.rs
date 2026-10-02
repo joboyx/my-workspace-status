@@ -323,6 +323,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
+        title: "Diff vs commit in new tab…",
+        keys: "",
+        group: CommandGroup::Git,
+        action: Action::CompareVsCommit,
+        aliases: &["compare"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
         title: "Diff commit vs parent in new tab",
         keys: "",
         group: CommandGroup::Git,
@@ -883,6 +891,13 @@ mod tests {
                 CommandScope::NoHighlight,
             ),
             (
+                "Diff vs commit in new tab…",
+                "",
+                CommandGroup::Git,
+                Action::CompareVsCommit,
+                CommandScope::NoHighlight,
+            ),
+            (
                 "Diff commit vs parent in new tab",
                 "",
                 CommandGroup::Git,
@@ -1062,6 +1077,7 @@ mod tests {
         for (query, title) in [
             ("compare", "Diff vs default in new tab"),
             ("compare", "Diff vs branch in new tab…"),
+            ("compare", "Diff vs commit in new tab…"),
             ("compare", "Diff commit vs parent in new tab"),
             ("quit", "Quit"),
             ("exit", "Quit"),
@@ -1109,6 +1125,7 @@ mod tests {
     fn diff_rows_open_in_a_new_tab_and_filters_find_them() {
         assert_eq!(titles("vs default"), vec!["Diff vs default in new tab"]);
         assert_eq!(titles("vs branch"), vec!["Diff vs branch in new tab…"]);
+        assert_eq!(titles("vs commit"), vec!["Diff vs commit in new tab…"]);
         assert_eq!(
             titles("vs parent"),
             vec!["Diff commit vs parent in new tab"]
@@ -1116,6 +1133,7 @@ mod tests {
         let diff_rows = vec![
             "Diff vs default in new tab",
             "Diff vs branch in new tab…",
+            "Diff vs commit in new tab…",
             "Diff commit vs parent in new tab",
         ];
         assert_eq!(titles("new tab"), diff_rows);
@@ -1126,7 +1144,7 @@ mod tests {
         // The diff rows sit together, right before Close tab.
         let catalog: Vec<_> = PALETTE_COMMANDS.iter().map(|c| c.title).collect();
         let close = catalog.iter().position(|t| *t == "Close tab").unwrap();
-        assert_eq!(catalog[close - 3..close], diff_rows[..]);
+        assert_eq!(catalog[close - 4..close], diff_rows[..]);
     }
 
     #[test]

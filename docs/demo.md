@@ -116,7 +116,7 @@ Mid still: the help overlay.
 
 Keys: Ctrl-k, `compare` (typed), Backspace ×7, `checkout` (typed), Esc.
 
-Show: the palette. The alias `compare` finds Diff vs default in new tab / Diff vs branch in new tab… / Diff commit vs parent in new tab / Close tab (with its disabled reason). `checkout` types its `c` and `k` (letters no longer move the cursor) and finds Branch picker / Checkout commit refs with their disabled reasons. Esc closes with no run.
+Show: the palette. The alias `compare` finds Diff vs default in new tab / Diff vs branch in new tab… / Diff vs commit in new tab… / Diff commit vs parent in new tab / Close tab (with its disabled reason). `checkout` types its `c` and `k` (letters no longer move the cursor) and finds Branch picker / Checkout commit refs with their disabled reasons. Esc closes with no run.
 
 Mid still: the `compare` alias match.
 

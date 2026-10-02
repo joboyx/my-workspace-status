@@ -89,10 +89,10 @@ use super::stash::{
 };
 use super::status::StatusMessage;
 use super::tabs::{
-    compare_file_dirty, compare_range_label, OpenCompare, TabStrip, CANNOT_REVERT_COMMITTED_DIFF,
-    COMPARE_FOCUS_A_FILE, COMPARE_HEAD_MOVED, COMPARE_HEAD_REF, COMPARE_STILL_LOADING,
-    FOCUS_A_COMMIT_TO_DIFF, ROOT_COMMIT_HAS_NO_PARENT, SWITCH_TO_WORKSPACE_TAB,
-    WORKSPACE_TAB_CANNOT_CLOSE,
+    compare_file_dirty, compare_range_label, CommitPickerState, ComparePickerKind,
+    ComparePickerState, OpenCompare, TabStrip, CANNOT_REVERT_COMMITTED_DIFF, COMPARE_FOCUS_A_FILE,
+    COMPARE_HEAD_MOVED, COMPARE_HEAD_REF, COMPARE_STILL_LOADING, FOCUS_A_COMMIT_TO_DIFF,
+    ROOT_COMMIT_HAS_NO_PARENT, SWITCH_TO_WORKSPACE_TAB, WORKSPACE_TAB_CANNOT_CLOSE,
 };
 use super::theme::{cycle_theme_id, theme_from_env, ThemeId};
 use super::tree::{
@@ -545,7 +545,7 @@ pub struct AppState {
     pub command_palette: Option<CommandPaletteState>,
     /// Permanent Workspace plus session compare tabs.
     pub tabs: TabStrip,
-    pub compare_picker: Option<BranchPickerState>,
+    pub compare_picker: Option<ComparePickerState>,
     /// Checkout waiting for [`Effect::PrepareComparePicker`]. Cleared on open or abandon.
     pub(crate) compare_picker_pending: Option<String>,
     workspace_park: Option<WorkspacePark>,
@@ -5353,7 +5353,7 @@ impl AppState {
     }
 
     /// Snapshot HEAD sha (empty when unborn) and default tip ref of `checkout`.
-    pub(crate) fn checkout_head_and_default(&self, checkout: &str) -> Option<(&str, Option<&str>)> {
+    fn checkout_head_and_default(&self, checkout: &str) -> Option<(&str, Option<&str>)> {
         self.snapshot
             .repos
             .iter()
@@ -5405,14 +5405,18 @@ impl AppState {
         self.open_compare_tab(checkout, base_ref, COMPARE_HEAD_REF.into())
     }
 
-    /// Diff vs branch: prepare the compare picker. [`Self::compare_refusal`]
-    /// has already refused a missing checkout and an unborn HEAD.
-    pub(crate) fn compare_vs_branch(&mut self) -> Effect {
+    /// Diff vs branch / Diff vs commit: prepare the compare picker that
+    /// lists `kind`. [`Self::compare_refusal`] has already refused a missing
+    /// checkout and an unborn HEAD.
+    pub(crate) fn prepare_compare_picker(&mut self, kind: ComparePickerKind) -> Effect {
         let Some(checkout) = self.compare_target_checkout() else {
             return Effect::None;
         };
         self.compare_picker_pending = Some(checkout.clone());
-        Effect::PrepareComparePicker { repo: checkout }
+        Effect::PrepareComparePicker {
+            repo: checkout,
+            kind,
+        }
     }
 
     /// Checkout and full commit id for Diff commit vs parent, or why it
@@ -5421,7 +5425,7 @@ impl AppState {
     /// The graph pane must focus a commit row (the same predicate as
     /// [`Self::graph_commit_focused`]) that has a parent. The checkout is the
     /// repo that owns the loaded graph, the one graph `b` / `m` act on.
-    pub(crate) fn commit_vs_parent_target(&self) -> Result<(String, String), &'static str> {
+    fn commit_vs_parent_target(&self) -> Result<(String, String), &'static str> {
         if !self.graph_commit_focused() {
             return Err(FOCUS_A_COMMIT_TO_DIFF);
         }
@@ -5477,7 +5481,21 @@ impl AppState {
         branches: Vec<crate::git::LocalBranch>,
     ) {
         self.compare_picker_pending = None;
-        self.compare_picker = Some(BranchPickerState::new(repo, branches));
+        self.compare_picker = Some(ComparePickerState::Branch(BranchPickerState::new(
+            repo, branches,
+        )));
+        self.status.clear();
+    }
+
+    pub(crate) fn open_compare_commit_picker(
+        &mut self,
+        repo: String,
+        commits: Vec<crate::git::AncestorCommit>,
+    ) {
+        self.compare_picker_pending = None;
+        self.compare_picker = Some(ComparePickerState::Commit(CommitPickerState::new(
+            repo, commits,
+        )));
         self.status.clear();
     }
 
@@ -5490,13 +5508,13 @@ impl AppState {
         let Some(picker) = self.compare_picker.as_ref() else {
             return Effect::None;
         };
-        let Some(name) = picker.selected().map(|branch| branch.name.clone()) else {
+        let Some(base_ref) = picker.selected_base() else {
             self.status = StatusMessage::warn(super::tabs::compare_picker_empty(picker));
             return Effect::None;
         };
-        let repo = picker.repo.clone();
+        let repo = picker.repo().to_string();
         self.compare_picker = None;
-        self.open_compare_tab(repo, name, COMPARE_HEAD_REF.into())
+        self.open_compare_tab(repo, base_ref, COMPARE_HEAD_REF.into())
     }
 
     /// Path of the folder row under compare tab `tab_id`'s file cursor, if
@@ -6891,6 +6909,79 @@ mod tests {
         assert_eq!(app.status, "no branch matches zq");
         assert_eq!(app.status.kind(), StatusKind::Warn);
 
+        assert_eq!(app.dispatch(Action::ComparePickerCancel), Effect::None);
+        assert!(app.compare_picker.is_none());
+        assert_eq!(app.status, "compare cancelled");
+        assert_eq!(app.status.kind(), StatusKind::Info);
+    }
+
+    #[test]
+    fn compare_commit_picker_filters_and_opens_a_live_tab_at_the_picked_commit() {
+        const OLD: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const NEW: &str = "ccc2222ddddddddddddddddddddddddddddddddd";
+        let mut app = state();
+        let commit = |id: &str, subject: &str| crate::git::AncestorCommit {
+            id: id.into(),
+            subject: subject.into(),
+        };
+        app.open_compare_commit_picker("app".into(), Vec::new());
+        assert_eq!(app.dispatch(Action::ComparePickerSubmit), Effect::None);
+        assert_eq!(app.status, "No commits to compare");
+
+        app.open_compare_commit_picker(
+            "app".into(),
+            vec![commit(NEW, "Add parser"), commit(OLD, "Initial import")],
+        );
+        let labels = |app: &AppState| {
+            app.compare_picker
+                .as_ref()
+                .unwrap()
+                .window_labels(0, usize::MAX)
+        };
+        assert_eq!(
+            labels(&app),
+            vec!["ccc2222  Add parser", "aaa1111  Initial import"]
+        );
+        for c in "AAA1".chars() {
+            app.dispatch(Action::ComparePickerChar(c));
+        }
+        assert_eq!(labels(&app), vec!["aaa1111  Initial import"]);
+        for _ in 0..4 {
+            app.dispatch(Action::ComparePickerBackspace);
+        }
+        for c in "pARSER".chars() {
+            app.dispatch(Action::ComparePickerChar(c));
+        }
+        assert_eq!(labels(&app), vec!["ccc2222  Add parser"]);
+        app.dispatch(Action::ComparePickerChar('z'));
+        assert_eq!(app.dispatch(Action::ComparePickerSubmit), Effect::None);
+        assert_eq!(app.status, "no commit matches pARSERz");
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+
+        for _ in 0.."pARSER".len() {
+            app.dispatch(Action::ComparePickerBackspace);
+        }
+        app.dispatch(Action::ComparePickerMove(1));
+        match app.dispatch(Action::ComparePickerSubmit) {
+            Effect::LoadCompareRange {
+                repo,
+                base_ref,
+                head_ref,
+                ..
+            } => {
+                assert_eq!(repo, "app");
+                assert_eq!(base_ref, OLD);
+                assert_eq!(head_ref, COMPARE_HEAD_REF);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(app.compare_picker.is_none());
+        let tab = app.tabs.active_compare_mut().unwrap();
+        assert_eq!(tab.label(), "app ↔ aaa1111");
+        assert!(!tab.is_pinned());
+
+        app.dispatch(Action::JumpToTab(1));
+        app.open_compare_commit_picker("app".into(), vec![commit(OLD, "Initial import")]);
         assert_eq!(app.dispatch(Action::ComparePickerCancel), Effect::None);
         assert!(app.compare_picker.is_none());
         assert_eq!(app.status, "compare cancelled");
@@ -12184,6 +12275,7 @@ mod tests {
         for (title, action) in [
             ("Diff vs default in new tab", Action::CompareVsDefault),
             ("Diff vs branch in new tab…", Action::CompareVsBranch),
+            ("Diff vs commit in new tab…", Action::CompareVsCommit),
         ] {
             check(&mut app, title, action, FOCUS_A_CHECKOUT);
         }
@@ -12192,6 +12284,7 @@ mod tests {
         for (title, action) in [
             ("Diff vs default in new tab", Action::CompareVsDefault),
             ("Diff vs branch in new tab…", Action::CompareVsBranch),
+            ("Diff vs commit in new tab…", Action::CompareVsCommit),
         ] {
             check(&mut app, title, action, HEAD_HAS_NO_COMMIT);
         }
@@ -12207,8 +12300,20 @@ mod tests {
         assert_eq!(palette_reason(&app, "Diff vs branch in new tab…"), None);
         assert_eq!(
             app.dispatch(Action::CompareVsBranch),
-            Effect::PrepareComparePicker { repo: "app".into() }
+            Effect::PrepareComparePicker {
+                repo: "app".into(),
+                kind: ComparePickerKind::Branch,
+            }
         );
+        assert_eq!(palette_reason(&app, "Diff vs commit in new tab…"), None);
+        assert_eq!(
+            app.dispatch(Action::CompareVsCommit),
+            Effect::PrepareComparePicker {
+                repo: "app".into(),
+                kind: ComparePickerKind::Commit,
+            }
+        );
+        assert_eq!(app.compare_picker_pending.as_deref(), Some("app"));
     }
 
     #[test]

@@ -40,8 +40,8 @@ use super::help::{
 };
 use super::icons::{
     comment_mark_cols, glyph, icon_branch, icon_comment, icon_comment_resolved, icon_diff,
-    icon_merged_into_default, icon_move, icon_open_vs_default, CURSOR_BAR, CURSOR_BAR_INACTIVE,
-    FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
+    icon_merged_into_default, icon_move, icon_open_vs_default, truncate_visible, CURSOR_BAR,
+    CURSOR_BAR_INACTIVE, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
 };
 use super::ops::RevertScope;
 use super::search::{
@@ -57,7 +57,9 @@ use super::syntax::{
     cached_highlight_diff_rows, slice_styled_cols, CachedDiffSyntax, CodeSpan, DiffBackgrounds,
     DiffSyntaxKey,
 };
-use super::tabs::{compare_picker_empty, no_committed_changes_vs, NO_COMMITTED_CHANGES};
+use super::tabs::{
+    compare_picker_empty, no_committed_changes_vs, ComparePickerState, NO_COMMITTED_CHANGES,
+};
 use super::theme::{hex_color, Palette, Pill};
 use super::tree::{
     file_change_from_name_status, file_change_segments, row_segments, visible_window,
@@ -2723,6 +2725,15 @@ fn draw_tab_strip(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     );
 }
 
+/// `value` cut to `width` columns, ending in `…` when it was cut.
+fn fit_with_ellipsis(value: &str, width: usize) -> String {
+    if visible_width(value) <= width {
+        value.to_string()
+    } else {
+        format!("{}…", truncate_visible(value, width.saturating_sub(1)))
+    }
+}
+
 fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let Some(picker) = state.compare_picker.as_ref() else {
         return;
@@ -2732,37 +2743,36 @@ fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
     let palette = state.theme.palette();
     let accent = palette.branch_feature;
-    let visible = picker.visible();
+    let visible_len = picker.visible_len();
     let max_rows = 12usize;
-    let start = if visible.len() <= max_rows {
+    let start = if visible_len <= max_rows {
         0
     } else {
         picker
-            .cursor
+            .cursor()
             .saturating_sub(max_rows / 2)
-            .min(visible.len() - max_rows)
+            .min(visible_len - max_rows)
     };
-    let window = if visible.is_empty() {
-        Vec::new()
-    } else {
-        visible
-            .iter()
-            .skip(start)
-            .take(max_rows)
-            .copied()
-            .collect::<Vec<_>>()
-    };
-    let filter = if picker.filter.is_empty() {
+    let window = picker.window_labels(start, max_rows);
+    // One line per row: the overlay height counts rows, so a label wider
+    // than the box (borders, padding, `❯ ` and its two-space indent) is cut
+    // with an ellipsis instead of wrapping.
+    let label_cols = usize::from(area.width).saturating_sub(4 + 4);
+    let filter = if picker.filter().is_empty() {
         "…"
     } else {
-        picker.filter.as_str()
+        picker.filter()
+    };
+    let heading = match picker {
+        ComparePickerState::Branch(_) => "Compare ",
+        ComparePickerState::Commit(_) => "Compare vs commit ",
     };
     let title = vec![
         Span::styled(
-            "Compare ",
+            heading,
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(picker.repo.clone(), Style::default().fg(palette.repo)),
+        Span::styled(picker.repo().to_string(), Style::default().fg(palette.repo)),
         Span::styled("  filter: ", Style::default().fg(palette.muted)),
         Span::styled(filter.to_string(), Style::default().fg(palette.cursor)),
     ];
@@ -2773,9 +2783,9 @@ fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(palette.muted),
         )));
     } else {
-        for (i, branch) in window.iter().enumerate() {
+        for (i, label) in window.iter().enumerate() {
             let index = start + i;
-            let selected = index == picker.cursor;
+            let selected = index == picker.cursor();
             let cursor = if selected { "❯ " } else { "  " };
             let row_bg = if selected {
                 palette.cursor_bg
@@ -2799,7 +2809,7 @@ fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                         .bg(row_bg),
                 ),
                 Span::styled(
-                    format!("  {}", branch.name),
+                    format!("  {}", fit_with_ellipsis(label, label_cols)),
                     Style::default().fg(name_fg).bg(row_bg),
                 ),
             ]));
@@ -7719,6 +7729,80 @@ mod tests {
             return;
         }
         panic!("the palette window never started inside a group");
+    }
+
+    #[test]
+    fn compare_commit_picker_paints_short_sha_and_subject_rows() {
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.open_compare_commit_picker(
+            "app".into(),
+            vec![crate::git::AncestorCommit {
+                id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                subject: "Initial import".into(),
+            }],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Compare vs commit app"), "{text}");
+        assert!(text.contains("❯   aaa1111  Initial import"), "{text}");
+        assert!(
+            !text.contains("aaa1111b"),
+            "rows paint the short sha:\n{text}"
+        );
+
+        state
+            .compare_picker
+            .as_mut()
+            .unwrap()
+            .set_filter("zz".into());
+        draw_state(&mut terminal, &mut state);
+        assert!(buffer_text(&terminal).contains("no commit matches zz"));
+        state.open_compare_commit_picker("app".into(), Vec::new());
+        draw_state(&mut terminal, &mut state);
+        assert!(buffer_text(&terminal).contains("No commits to compare"));
+    }
+
+    #[test]
+    fn compare_commit_picker_cuts_long_subjects_to_one_line_per_row() {
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let long = "word ".repeat(40);
+        let commits: Vec<_> = (0..5)
+            .map(|i| crate::git::AncestorCommit {
+                id: format!("{i}{}", "a".repeat(39)),
+                subject: format!("{i} {long}tail"),
+            })
+            .collect();
+        state.open_compare_commit_picker("app".into(), commits);
+        state.compare_picker.as_mut().unwrap().move_cursor(4);
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        assert!(!text.contains("tail"), "subjects are cut:\n{text}");
+        for i in 0..5 {
+            let short = format!("{i}aaaaaa  {i} word");
+            let rows: Vec<_> = text.lines().filter(|l| l.contains(&short)).collect();
+            assert_eq!(rows.len(), 1, "row {i} paints once:\n{text}");
+            assert!(
+                rows[0].contains('…'),
+                "row {i} ends in an ellipsis:\n{text}"
+            );
+        }
+        assert_eq!(
+            text.lines().filter(|l| l.contains("word")).count(),
+            5,
+            "no row wraps onto a second line:\n{text}"
+        );
+        assert!(
+            text.contains("❯   4aaaaaa  4 word"),
+            "the selected row stays visible:\n{text}"
+        );
+        assert!(
+            text.contains("Enter compare"),
+            "footer stays in the box:\n{text}"
+        );
     }
 
     #[test]

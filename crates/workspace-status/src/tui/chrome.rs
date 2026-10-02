@@ -506,7 +506,7 @@ pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
         .branch_picker
         .as_ref()
         .map(|picker| picker.row_count())
-        .or_else(|| state.compare_picker.as_ref().map(|p| p.visible().len()))
+        .or_else(|| state.compare_picker.as_ref().map(|p| p.visible_len()))
         .or_else(|| state.graph_focus_picker.as_ref().map(|p| p.visible().len()))
         .or_else(|| state.command_palette.as_ref().map(|p| p.paint_rows().len()));
     if let Some(visible) = list_rows {
