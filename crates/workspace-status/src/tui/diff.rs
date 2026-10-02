@@ -1,8 +1,9 @@
 //! File-diff load, unified-diff parse, and numbered rows.
 //!
 //! Path header, line-number gutter, and STAGED / UNSTAGED / NEW labels.
-//! Syntax highlighting lives in [`super::syntax`] and paint. Intra-line
-//! word diff stays out of scope.
+//! Syntax highlighting lives in [`super::syntax`] and paint. Rows stay
+//! line-based git output; the changed-word highlight is a paint overlay
+//! from [`super::word_diff`].
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};

@@ -167,7 +167,7 @@ The TUI uses the terminal **alternate screen** (DEC 1049, same idea as Vim/less)
 
 Requirements, keymap, and layout details: [docs/configuration.md](./docs/configuration.md).
 
-Known limits: intra-line word diff is not in this TUI yet; macOS PageUp needs the terminal to deliver the key (`Fn+Up` / mapped PageUp); search `/` is armed with Enter before `n` / `N` step matches.
+Known limits: macOS PageUp needs the terminal to deliver the key (`Fn+Up` / mapped PageUp); search `/` is armed with Enter before `n` / `N` step matches.
 
 Several graph features — including checkout confirm when a local branch is out of sync with `origin/*` — are inspired by [Git Graph](https://github.com/mhutchie/vscode-git-graph) (mhutchie, VS Code).
 
@@ -241,7 +241,7 @@ That isolation is deliberate. Refactors should be able to change implementation 
 | [docs/tui-model.md](./docs/tui-model.md) | Tree model, row kinds, session state, action registry |
 | [docs/git-graph-topology.md](./docs/git-graph-topology.md) | Graph gutter glyphs, junctions, densify rails, stash leaf tips |
 | [docs/graph.md](./docs/graph.md) | Ratatui workspace-status-graph widget contract |
-| [docs/diff-rendering.md](./docs/diff-rendering.md) | Diff pipeline and syntax highlighting |
+| [docs/diff-rendering.md](./docs/diff-rendering.md) | Diff pipeline, syntax highlighting, and word highlight |
 | [docs/git-operations.md](./docs/git-operations.md) | Git commands, operation semantics, safety rules |
 | [docs/demo.md](./docs/demo.md) | Demo workspace and screenshot clips |
 | [docs/tui-rust.md](./docs/tui-rust.md) | Ratatui TUI keys, layout, and chrome |

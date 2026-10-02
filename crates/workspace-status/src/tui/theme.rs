@@ -65,6 +65,12 @@ pub struct Palette {
     pub diff_add_bg: Color,
     /// Del-line row background. Syntax fg paints on top. Cursor overlay wins.
     pub diff_del_bg: Color,
+    /// Changed-word background on a paired add line. Stronger shade of
+    /// [`Self::diff_add_bg`]. Syntax fg paints on top. Cursor overlay wins.
+    pub diff_add_word_bg: Color,
+    /// Changed-word background on a paired del line. Stronger shade of
+    /// [`Self::diff_del_bg`]. Syntax fg paints on top. Cursor overlay wins.
+    pub diff_del_word_bg: Color,
     /// Add-flash peak. Equals index 0 of [`Self::flash_ramp`].
     pub flash: Color,
     /// Four-step add fade. Index 0 is [`Self::flash`].
@@ -113,6 +119,12 @@ pub struct ThemePalette {
     pub diff_add_bg: &'static str,
     /// Del-line row background hex (`palette.diffDelBg` in docs).
     pub diff_del_bg: &'static str,
+    /// Changed-word background hex on a paired add line
+    /// (`palette.diffAddWordBg` in docs). Stronger shade of [`Self::diff_add_bg`].
+    pub diff_add_word_bg: &'static str,
+    /// Changed-word background hex on a paired del line
+    /// (`palette.diffDelWordBg` in docs). Stronger shade of [`Self::diff_del_bg`].
+    pub diff_del_word_bg: &'static str,
     /// Add-flash peak hex. Index 0 of [`Self::flash_ramp`].
     pub flash: &'static str,
     /// Four-step add fade hex. Index 0 matches [`Self::flash`].
@@ -228,6 +240,8 @@ impl ThemeId {
             diff_hunk: hex_color(p.diff_hunk),
             diff_add_bg: hex_color(p.diff_add_bg),
             diff_del_bg: hex_color(p.diff_del_bg),
+            diff_add_word_bg: hex_color(p.diff_add_word_bg),
+            diff_del_word_bg: hex_color(p.diff_del_word_bg),
             flash: hex_color(p.flash),
             flash_ramp: p.flash_ramp.map(hex_color),
             flash_update: hex_color(p.flash_update),
@@ -260,6 +274,8 @@ impl ThemeId {
 /// remove `#774152` = `Rgb(119, 65, 82)`.
 /// Diff add/del row backgrounds: add `#3f4d39` = `Rgb(63, 77, 57)`,
 /// del `#583443` = `Rgb(88, 52, 67)`.
+/// Changed-word backgrounds: add `#426832` = `Rgb(66, 104, 50)`,
+/// del `#813d59` = `Rgb(129, 61, 89)`.
 const TOKYO_NIGHT: Theme = Theme {
     id: ThemeId::TokyoNight,
     label: "Tokyo Night",
@@ -287,6 +303,8 @@ const TOKYO_NIGHT: Theme = Theme {
         diff_hunk: "#7dcfff",
         diff_add_bg: "#3f4d39",
         diff_del_bg: "#583443",
+        diff_add_word_bg: "#426832",
+        diff_del_word_bg: "#813d59",
         flash: "#516643",
         flash_ramp: ["#516643", "#3f4d39", "#2f3831", "#25292b"],
         flash_update: "#6d5942",
@@ -334,6 +352,8 @@ const MONOKAI: Theme = Theme {
         diff_hunk: "#66d9ef",
         diff_add_bg: "#4b5c25",
         diff_del_bg: "#63383f",
+        diff_add_word_bg: "#59751b",
+        diff_del_word_bg: "#8f404d",
         flash: "#5c7627",
         flash_ramp: ["#5c7627", "#4b5c25", "#3b4624", "#313723"],
         flash_update: "#777344",
@@ -381,6 +401,8 @@ const DRACULA: Theme = Theme {
         diff_hunk: "#8be9fd",
         diff_add_bg: "#336449",
         diff_del_bg: "#64363f",
+        diff_add_word_bg: "#287f4f",
+        diff_del_word_bg: "#8f3e4e",
         flash: "#398153",
         flash_ramp: ["#398153", "#336449", "#2e4b41", "#2b3b3c"],
         flash_update: "#7c815a",
@@ -428,6 +450,8 @@ const GRUVBOX_DARK: Theme = Theme {
         diff_hunk: "#83a598",
         diff_add_bg: "#505127",
         diff_del_bg: "#63312b",
+        diff_add_word_bg: "#66671e",
+        diff_del_word_bg: "#963226",
         flash: "#646627",
         flash_ramp: ["#646627", "#505127", "#3f4028", "#343428"],
         flash_update: "#80672b",
@@ -475,6 +499,8 @@ const CATPPUCCIN_MOCHA: Theme = Theme {
         diff_hunk: "#89dceb",
         diff_add_bg: "#44554e",
         diff_del_bg: "#5a3d50",
+        diff_add_word_bg: "#3b715b",
+        diff_del_word_bg: "#82476d",
         flash: "#57715e",
         flash_ramp: ["#57715e", "#44554e", "#343e40", "#292e37"],
         flash_update: "#7a7064",
@@ -693,6 +719,8 @@ mod tests {
         assert_eq!(tokyo.flash_remove, Color::Rgb(0x77, 0x41, 0x52));
         assert_eq!(tokyo.diff_add_bg, Color::Rgb(0x3f, 0x4d, 0x39));
         assert_eq!(tokyo.diff_del_bg, Color::Rgb(0x58, 0x34, 0x43));
+        assert_eq!(tokyo.diff_add_word_bg, Color::Rgb(0x42, 0x68, 0x32));
+        assert_eq!(tokyo.diff_del_word_bg, Color::Rgb(0x81, 0x3d, 0x59));
     }
 
     fn srgb_lin(c: u8) -> f64 {
@@ -716,6 +744,30 @@ mod tests {
         let l2 = relative_luminance(bg);
         let (lighter, darker) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
         (lighter + 0.05) / (darker + 0.05)
+    }
+
+    /// HSL hue (degrees) and saturation (0..=1) of an RGB colour.
+    fn hue_sat(color: Color) -> (f64, f64) {
+        let Color::Rgb(r, g, b) = color else {
+            panic!("{color:?} must be rgb");
+        };
+        let [r, g, b] = [r, g, b].map(|c| f64::from(c) / 255.0);
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        let delta = max - min;
+        if delta == 0.0 {
+            return (0.0, 0.0);
+        }
+        let light = (max + min) / 2.0;
+        let sat = delta / (1.0 - (2.0 * light - 1.0).abs());
+        let hue = if max == r {
+            60.0 * ((g - b) / delta).rem_euclid(6.0)
+        } else if max == g {
+            60.0 * ((b - r) / delta + 2.0)
+        } else {
+            60.0 * ((r - g) / delta + 4.0)
+        };
+        (hue, sat)
     }
 
     #[test]
@@ -786,6 +838,8 @@ mod tests {
                 ("repo on diff_del_bg", pal.repo, pal.diff_del_bg),
                 ("muted on diff_add_bg", pal.muted, pal.diff_add_bg),
                 ("muted on diff_del_bg", pal.muted, pal.diff_del_bg),
+                ("repo on diff_add_word_bg", pal.repo, pal.diff_add_word_bg),
+                ("repo on diff_del_word_bg", pal.repo, pal.diff_del_word_bg),
             ] {
                 let ratio = contrast_ratio(fg, bg);
                 assert!(
@@ -797,6 +851,36 @@ mod tests {
                 pal.diff_add_bg, pal.diff_del_bg,
                 "{id:?} add/del row backgrounds must differ"
             );
+            assert_ne!(
+                pal.diff_add_word_bg, pal.diff_del_word_bg,
+                "{id:?} add/del word backgrounds must differ"
+            );
+            // Word bg reads as a highlight on its row: visibly different,
+            // same hue family, at least as saturated.
+            const WORD_VS_ROW_FLOOR: f64 = 1.25;
+            const WORD_HUE_MAX_DEG: f64 = 20.0;
+            for (name, word, row) in [
+                ("add", pal.diff_add_word_bg, pal.diff_add_bg),
+                ("del", pal.diff_del_word_bg, pal.diff_del_bg),
+            ] {
+                let ratio = contrast_ratio(word, row);
+                assert!(
+                    ratio >= WORD_VS_ROW_FLOOR,
+                    "{id:?} {name} word bg vs row bg contrast {ratio:.2} < {WORD_VS_ROW_FLOOR}"
+                );
+                let (word_hue, word_sat) = hue_sat(word);
+                let (row_hue, row_sat) = hue_sat(row);
+                let diff = (word_hue - row_hue).abs() % 360.0;
+                let hue_dist = diff.min(360.0 - diff);
+                assert!(
+                    hue_dist <= WORD_HUE_MAX_DEG,
+                    "{id:?} {name} word bg hue {word_hue:.1} drifts {hue_dist:.1}° from row hue {row_hue:.1}"
+                );
+                assert!(
+                    word_sat >= row_sat,
+                    "{id:?} {name} word bg saturation {word_sat:.2} < row {row_sat:.2}"
+                );
+            }
         }
         let muteds: Vec<_> = THEME_IDS
             .iter()
