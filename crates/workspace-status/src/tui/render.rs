@@ -199,13 +199,13 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     let tree_inner = tree_block.inner(panes[0]);
     frame.render_widget(tree_block, panes[0]);
     if left_is_files {
-        draw_commit_file_list(
-            frame,
-            tree_inner,
-            state,
-            state.commit_files_cursor(),
-            state.left_col_offset as usize,
-        );
+        let cursor = state.commit_files_cursor();
+        let col_offset = state.left_col_offset as usize;
+        if state.is_compare_tab() {
+            draw_commit_file_list(frame, tree_inner, state, cursor, col_offset);
+        } else {
+            draw_commit_detail(frame, tree_inner, state, cursor, col_offset);
+        }
     } else if left_is_graph {
         draw_graph(frame, tree_inner, state, state.left_col_offset);
     } else {
@@ -302,20 +302,20 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         state.layout.files_list_offset = start;
     } else if let super::drill::DrillView::Diff { file_cursor, .. } = &state.drill {
         let cursor = *file_cursor;
+        let footer_len = state
+            .commit_detail_footer_lines(tree_inner.width as usize)
+            .len();
+        let footer_h = commit_detail_footer_height(footer_len, tree_inner.height);
+        let list_h = tree_inner.height.saturating_sub(footer_h);
         state.layout.files_list_y = tree_inner.y;
-        state.layout.files_list_height = tree_inner.height;
-        let list_h = tree_inner.height as usize;
-        let (start, _) = visible_window(state.painted_commit_file_rows().len(), cursor, list_h);
+        state.layout.files_list_height = list_h;
+        let painted_n = state.painted_commit_file_rows().len();
+        let (start, _) = visible_window(painted_n, cursor, list_h as usize);
         state.layout.files_list_offset = start;
     } else if let super::drill::DrillView::Files { cursor, .. } = &state.drill {
-        let footer_len = state
-            .commit_detail_footer_lines(right_inner.width as usize)
-            .len();
-        let footer_h = commit_detail_footer_height(footer_len, right_inner.height);
-        let list_h = right_inner.height.saturating_sub(footer_h);
         state.layout.files_list_y = right_inner.y;
-        state.layout.files_list_height = list_h;
-        let list_h = list_h as usize;
+        state.layout.files_list_height = right_inner.height;
+        let list_h = right_inner.height as usize;
         let painted_n = state.painted_commit_file_rows().len();
         let (start, _) = visible_window(painted_n, *cursor, list_h);
         state.layout.files_list_offset = start;
@@ -640,7 +640,8 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     }
     match &state.drill {
         DrillView::Files { cursor, .. } => {
-            draw_commit_detail(frame, area, state, *cursor);
+            let col_offset = state.right_col_offset as usize;
+            draw_commit_file_list(frame, area, state, *cursor, col_offset);
             return;
         }
         DrillView::Diff { .. } => {
@@ -940,10 +941,18 @@ fn commit_detail_footer_height(footer_len: usize, pane_h: u16) -> u16 {
     footer_len.min(max)
 }
 
-/// Commit files at depth 1: the file list on top, the selected commit's
-/// title, meta, and message pinned to the bottom rows as a footer (like the
-/// graph selection footer at depth 0).
-fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, cursor: usize) {
+/// Commit files beside the file diff (depth 2, left pane): the file list on
+/// top, the selected commit's title, meta, and message pinned to the bottom
+/// rows as a footer (like the graph selection footer on the graph pane).
+///
+/// `col_offset` is the horizontal pan of the file list.
+fn draw_commit_detail(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &mut AppState,
+    cursor: usize,
+    col_offset: usize,
+) {
     let footer = state.commit_detail_footer_lines(area.width as usize);
     let footer_h = commit_detail_footer_height(footer.len(), area.height);
     let list_h = area.height.saturating_sub(footer_h);
@@ -954,13 +963,7 @@ fn draw_commit_detail(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, c
             width: area.width,
             height: list_h,
         };
-        draw_commit_file_list(
-            frame,
-            list_area,
-            state,
-            cursor,
-            state.right_col_offset as usize,
-        );
+        draw_commit_file_list(frame, list_area, state, cursor, col_offset);
     }
     if footer_h == 0 {
         return;
@@ -4597,6 +4600,138 @@ mod tests {
             ]),
         );
         state
+    }
+
+    /// Text of the `w`×`h` buffer region at `(x, y)`, one line per row.
+    fn region_text(terminal: &Terminal<TestBackend>, x: u16, y: u16, w: u16, h: u16) -> String {
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        for row in y..y + h {
+            for col in x..x + w {
+                out.push_str(buf[(col, row)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn left_inner_text(terminal: &Terminal<TestBackend>, state: &AppState) -> String {
+        let l = &state.layout;
+        region_text(terminal, l.tree_x, l.tree_y, l.tree_width, l.tree_height)
+    }
+
+    fn right_inner_text(terminal: &Terminal<TestBackend>, state: &AppState) -> String {
+        let l = &state.layout;
+        region_text(
+            terminal,
+            l.diff_content_x,
+            l.right_y,
+            l.diff_pane_width,
+            l.diff_pane_height,
+        )
+    }
+
+    const FOOTER_BODY_TOKEN: &str = "FOOTERBODYTOKEN";
+
+    fn set_seed_commit_body(state: &mut AppState, body: &str) {
+        if let Some(model) = state.graph.as_mut() {
+            model.commits[0].body = body.into();
+        }
+    }
+
+    #[test]
+    fn depth_1_files_pane_has_no_commit_footer_beside_the_graph_footer() {
+        let mut state = two_pane_files_state();
+        set_seed_commit_body(&mut state, FOOTER_BODY_TOKEN);
+        // Select the seed commit row (row 0 is uncommitted changes).
+        state.graph_cursor = 1;
+        assert!(state.commit_msg_expand, "multiline is the default");
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let left = left_inner_text(&terminal, &state);
+        let right = right_inner_text(&terminal, &state);
+        assert!(
+            left.contains(FOOTER_BODY_TOKEN),
+            "graph footer keeps the message:\n{left}"
+        );
+        assert!(right.contains("README.md"), "files list paints:\n{right}");
+        assert!(
+            !right.contains(FOOTER_BODY_TOKEN),
+            "files pane has no commit footer at depth 1:\n{right}"
+        );
+        assert_eq!(state.layout.files_list_y, state.layout.right_y);
+        assert_eq!(
+            state.layout.files_list_height, state.layout.diff_pane_height,
+            "file list takes the full files pane"
+        );
+    }
+
+    #[test]
+    fn depth_2_left_files_pane_pins_commit_footer_under_the_list() {
+        let mut state = two_pane_commit_diff_state();
+        set_seed_commit_body(&mut state, FOOTER_BODY_TOKEN);
+        state.focus = FocusPane::Left;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let left = left_inner_text(&terminal, &state);
+        let right = right_inner_text(&terminal, &state);
+        assert!(
+            !right.contains(FOOTER_BODY_TOKEN),
+            "diff pane has no commit footer:\n{right}"
+        );
+        let rows: Vec<&str> = left.lines().collect();
+        let file_row = rows
+            .iter()
+            .position(|row| row.contains("README.md"))
+            .unwrap_or_else(|| panic!("file list paints:\n{left}"));
+        let token_row = rows
+            .iter()
+            .position(|row| row.contains(FOOTER_BODY_TOKEN))
+            .unwrap_or_else(|| panic!("footer shows the message:\n{left}"));
+        assert!(token_row > file_row, "footer sits under the list:\n{left}");
+
+        let layout = &state.layout;
+        let footer_len = state
+            .commit_detail_footer_lines(layout.tree_width as usize)
+            .len();
+        let footer_h = commit_detail_footer_height(footer_len, layout.tree_height);
+        assert!(footer_h > 0);
+        assert_eq!(layout.files_list_y, layout.tree_y);
+        assert_eq!(
+            layout.files_list_height,
+            layout.tree_height - footer_h,
+            "click map matches the painted list"
+        );
+        assert!(
+            token_row >= layout.files_list_height as usize,
+            "footer rows are below the list rows:\n{left}"
+        );
+    }
+
+    #[test]
+    fn depth_2_left_footer_keeps_one_list_row_on_a_short_pane() {
+        let mut state = two_pane_commit_diff_state();
+        let body = (0..30)
+            .map(|i| format!("{FOOTER_BODY_TOKEN}{i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        set_seed_commit_body(&mut state, &body);
+        let mut terminal = Terminal::new(TestBackend::new(120, MIN_TERM_ROWS)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let layout = &state.layout;
+        let footer_len = state
+            .commit_detail_footer_lines(layout.tree_width as usize)
+            .len();
+        assert!(
+            footer_len >= layout.tree_height as usize,
+            "footer is taller than the pane ({footer_len} >= {})",
+            layout.tree_height
+        );
+        assert_eq!(layout.files_list_height, 1, "list keeps one row");
+        let left = left_inner_text(&terminal, &state);
+        let first = left.lines().next().unwrap_or_default();
+        assert!(first.contains("README.md"), "list row paints:\n{left}");
+        assert!(left.contains(FOOTER_BODY_TOKEN), "footer paints:\n{left}");
     }
 
     fn assert_titles_heading_borders_split(state: &mut AppState) {

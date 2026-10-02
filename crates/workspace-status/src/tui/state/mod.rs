@@ -1370,10 +1370,11 @@ impl AppState {
 
     /// Title plus subtitle / wrapped message for the commit-files footer.
     ///
-    /// The footer sits at the bottom of the commit-files pane, under the
-    /// file list. Collapsed is the dense one-line subtitle from
-    /// [`Self::commit_detail_meta`]. Expanded wraps subject plus body under a
-    /// meta line (sha / refs / author). Never empty.
+    /// The footer sits at the bottom of the left commit-files pane beside a
+    /// file diff, under the file list. The depth-1 files pane has no footer
+    /// (the graph pane beside it already shows one). Collapsed is the dense
+    /// one-line subtitle from [`Self::commit_detail_meta`]. Expanded wraps
+    /// subject plus body under a meta line (sha / refs / author). Never empty.
     pub(crate) fn commit_detail_footer_lines(&self, width: usize) -> Vec<String> {
         let (title, subtitle) = self.commit_detail_meta();
         let mut footer = Vec::new();
@@ -11625,7 +11626,7 @@ mod tests {
         let mut app = state();
         focus_repo(&mut app, "app");
         install_graph(&mut app, Vec::new());
-        let files = ["a.txt", "b.txt", "c.txt", "d.txt"]
+        let files: Vec<CommitFile> = ["a.txt", "b.txt", "c.txt", "d.txt"]
             .into_iter()
             .map(|path| CommitFile {
                 status: "M".into(),
@@ -11634,13 +11635,20 @@ mod tests {
                 stat: None,
             })
             .collect();
-        app.open_commit_files(
+        let source = CommitFileSource::Commit {
+            commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        };
+        app.open_commit_files("app".into(), source.clone(), files.clone());
+        // Depth 2: the file list and its commit footer sit in the left pane.
+        app.open_commit_diff(
             "app".into(),
-            CommitFileSource::Commit {
-                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
-            },
+            source,
             files,
+            0,
+            "a.txt".into(),
+            DiffContent::from_lines(vec!["+a".into()]),
         );
+        assert!(app.drill.is_diff());
         assert_eq!(app.commit_file_rows().len(), 4);
         app.layout = wide_split_layout();
         // Two list rows scrolled by one (b.txt, c.txt); the footer is under
@@ -11649,8 +11657,9 @@ mod tests {
         app.layout.files_list_height = 2;
         app.layout.files_list_offset = 1;
         app.set_commit_file_cursor(1);
-        app.focus = FocusPane::Right;
-        let col = app.layout.right_x + 10;
+        app.focus = FocusPane::Left;
+        let col = 10;
+        assert!(col < app.layout.right_x, "click lands in the left pane");
 
         let footer_row = app.layout.files_list_y + app.layout.files_list_height;
         assert_eq!(

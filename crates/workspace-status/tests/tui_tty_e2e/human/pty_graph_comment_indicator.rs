@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::harness::PtySession;
+use crate::harness::{left_tree, PtySession};
 use crate::seed::{daily_workspace, git, seed_repo};
 use crate::support::{
     documented_launch_first_paint, graph_cursor_on, merger_graph_drilled_right,
@@ -71,13 +71,16 @@ fn seed_readme_and_lib_commit(workspace: &Path) {
     git(&repo, &["checkout", "-q", "-b", "feature/pair"]);
 }
 
+/// Depth 1: the left graph keeps the commit (row and footer); the right
+/// files pane lists its files with no commit footer.
 fn pair_files_on_right(screen: &str) -> bool {
     let right = right_pane(screen);
     overlay_closed(screen)
         && title_has_files(screen)
         && right.contains(README_FILE)
         && right.contains(LIB_FILE)
-        && right.contains(PAIR_COMMIT)
+        && !right.contains(PAIR_COMMIT)
+        && left_tree(screen).contains(PAIR_COMMIT)
         && !screen.contains("wip.txt")
 }
 
