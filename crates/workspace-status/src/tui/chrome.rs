@@ -956,7 +956,12 @@ pub fn hint_row_kind(state: &AppState) -> HintRowKind {
         };
     }
     if (state.drill.is_diff() || state.right_is_diff()) && state.focus == FocusPane::Right {
-        return HintRowKind::File;
+        // A folder summary hides the file diff: no file-diff keys.
+        return if state.folder_summary().is_some() {
+            HintRowKind::Dir
+        } else {
+            HintRowKind::File
+        };
     }
     match state.focused_row().map(|row| row.kind) {
         Some(NodeKind::Workspace) => HintRowKind::Workspace,
@@ -1247,7 +1252,8 @@ fn idle_status_line(
 
     let mut spans = vec![pill_span(mode_label, pills.mode)];
     // The diff pill is the layout the open diff paints in; no diff, no pill.
-    if state.right_is_diff() {
+    // A folder summary is not a diff.
+    if state.right_is_diff() && state.folder_summary().is_none() {
         spans.push(pill_span(
             diff_pill_label(state.diff_mode, state.diff_layout()),
             pills.diff,
@@ -1510,6 +1516,7 @@ mod tests {
             status: "M".into(),
             path: "src/a.rs".into(),
             old_path: None,
+            stat: None,
         }];
         let source = CommitFileSource::Commit {
             commit_id: "abc1234".into(),
@@ -1626,6 +1633,7 @@ mod tests {
                 status: "M".into(),
                 path: "src/a.rs".into(),
                 old_path: None,
+                stat: None,
             }];
         }
         let keys = |app: &AppState| -> Vec<String> {

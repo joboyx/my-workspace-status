@@ -2,7 +2,7 @@
 
 use workspace_status_graph::GraphRow;
 
-use crate::git::NameStatus;
+use crate::git::{LineStat, NameStatus};
 
 use super::diff::DiffContent;
 
@@ -70,6 +70,8 @@ pub struct CommitFile {
     pub status: String,
     pub path: String,
     pub old_path: Option<String>,
+    /// Line counts. `None` for binary and untracked files.
+    pub stat: Option<LineStat>,
 }
 
 impl From<NameStatus> for CommitFile {
@@ -78,6 +80,7 @@ impl From<NameStatus> for CommitFile {
             status: row.status,
             path: row.path,
             old_path: row.old_path,
+            stat: row.stat,
         }
     }
 }
@@ -213,11 +216,13 @@ mod tests {
                 status: "M".into(),
                 path: "a".into(),
                 old_path: None,
+                stat: None,
             },
             CommitFile {
                 status: "A".into(),
                 path: "b".into(),
                 old_path: None,
+                stat: None,
             },
         ];
         assert_eq!(DrillView::files_cursor(&files, 9), 1);

@@ -172,7 +172,7 @@ pub fn dispatch_noop_reason(
         Action::ToggleReviewed => FOCUS_A_FILE_TO_MARK_REVIEWED,
         Action::Edit => "focus a file to edit",
         Action::ExternalDiff => "focus a file to diff",
-        Action::ToggleFullContext => "focus a file diff",
+        Action::ToggleFullContext => FOCUS_A_FILE_DIFF,
         Action::GraphCheckout | Action::GraphCreateBranch | Action::GraphMerge => {
             FOCUS_A_GRAPH_COMMIT
         }
@@ -222,6 +222,10 @@ pub const FOCUS_A_GRAPH_COMMIT: &str = "focus a graph commit";
 
 /// Graph `a` / `p` / `D` (and their palette rows) off a graph stash row.
 pub const FOCUS_A_GRAPH_STASH: &str = "focus a graph stash row";
+
+/// Copy for a key that acts on the open file diff when none is focused or
+/// shown (Ctrl+O, `V`, and the right-pane keys over a folder summary).
+pub const FOCUS_A_FILE_DIFF: &str = "focus a file diff";
 
 /// Space / palette copy when the focus is not a file row.
 pub const FOCUS_A_FILE_TO_MARK_REVIEWED: &str = "focus a file to mark reviewed";

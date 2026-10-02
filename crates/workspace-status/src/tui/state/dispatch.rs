@@ -5,7 +5,10 @@
 //! and git writes in [`super::dispatch_write`].
 
 use super::super::action::{Action, Effect};
-use super::super::gates::{dispatch_is_noop, dispatch_noop_reason};
+use super::super::gates::{
+    dispatch_is_noop, dispatch_noop_reason, ListFocusTarget, FOCUS_A_FILE_DIFF,
+    FOCUS_A_FILE_TO_MARK_REVIEWED,
+};
 use super::super::status::StatusMessage;
 use super::super::tabs::{CANNOT_STAGE_COMPARE, CANNOT_UNSTAGE_COMPARE, SWITCH_TO_WORKSPACE_TAB};
 use super::{AppState, FocusPane};
@@ -65,6 +68,37 @@ impl AppState {
         Some(reason.into())
     }
 
+    /// Why a folder summary in the right pane refuses `action`, or `None`.
+    ///
+    /// The summary hides the last file diff, which stays loaded. Keys that
+    /// would act on that hidden diff refuse here, in [`Self::dispatch`] and
+    /// in `palette_disabled_reason`, with the same copy. Compare `x` refuses
+    /// earlier, in [`Self::compare_revert_target`]. On the focused file list
+    /// `;`, `'`, and `y` keep their folder scope.
+    pub(crate) fn summary_refusal(&self, action: &Action) -> Option<String> {
+        let diff_focused = self.list_focus_target() == ListFocusTarget::None;
+        let reason = match action {
+            Action::Edit => "focus a file to edit",
+            Action::ExternalDiff => "focus a file to diff",
+            Action::ToggleFullContext | Action::DiffVisualStart => FOCUS_A_FILE_DIFF,
+            // A drill keeps its own copy: marks are for workspace-tree files.
+            Action::ToggleReviewed if self.is_compare_tab() => FOCUS_A_FILE_TO_MARK_REVIEWED,
+            // A `V` highlight writes the open diff's lines.
+            Action::Stage | Action::Unstage | Action::Revert
+                if self.diff_visual_anchor.is_some() =>
+            {
+                FOCUS_A_FILE_DIFF
+            }
+            Action::CommentStart | Action::CopyEntityReference | Action::ExportComments
+                if diff_focused =>
+            {
+                FOCUS_A_FILE_DIFF
+            }
+            _ => return None,
+        };
+        self.folder_summary().is_some().then(|| reason.into())
+    }
+
     /// True when `action` is a compare-tab `x`, which the right-pane
     /// no-op gate must let through: it reverts the open diff's file.
     pub(crate) fn compare_revert_runs(&self, action: &Action) -> bool {
@@ -88,6 +122,10 @@ impl AppState {
             self.g_pending_at = None;
         }
         if let Some(reason) = self.compare_refusal(&action) {
+            self.status = StatusMessage::warn(reason);
+            return Effect::None;
+        }
+        if let Some(reason) = self.summary_refusal(&action) {
             self.status = StatusMessage::warn(reason);
             return Effect::None;
         }
