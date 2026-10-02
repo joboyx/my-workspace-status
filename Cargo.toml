@@ -4,7 +4,7 @@ members = ["crates/workspace-status-graph", "crates/workspace-status"]
 
 [workspace.lints.clippy]
 # Known debt, not a blanket exemption. Eight wide signatures remain:
-# `render.rs` (414, 465, 1294, 1497), `comments/target.rs` (199, 274),
+# `render.rs` (419, 470, 1411, 1614), `comments/target.rs` (199, 274),
 # `diff.rs` (1180), `graph/layout.rs` (205). Each wants
 # the params-struct treatment `graph/widget.rs::put_painted_line` got
 # (20 args -> 9). Drop this line once they are done.
