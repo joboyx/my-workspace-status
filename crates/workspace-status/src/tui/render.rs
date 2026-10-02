@@ -26,6 +26,7 @@ use super::comments::{
     graph_row_comments_resolved, graph_row_has_comment, tree_row_comments_resolved,
     tree_row_has_comment, CommentPrompt, COMMENT_OVERLAY_FOOTER_EDIT,
 };
+use super::commit_files::FolderSummary;
 use super::diff::{
     cell_code_width, cell_sign, diff_failed_text, diff_pane_header, diff_pane_header_rows,
     diff_pane_mode_label, diff_row_content_width, diff_wrap_row_heights, gutter_width,
@@ -38,7 +39,7 @@ use super::help::{
     help_version_label, HELP_SEARCH_ESC_HINT,
 };
 use super::icons::{
-    comment_mark_cols, icon_branch, icon_comment, icon_comment_resolved, icon_diff,
+    comment_mark_cols, glyph, icon_branch, icon_comment, icon_comment_resolved, icon_diff,
     icon_merged_into_default, icon_move, icon_open_vs_default, CURSOR_BAR, CURSOR_BAR_INACTIVE,
     FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
 };
@@ -58,8 +59,9 @@ use super::syntax::{
 use super::tabs::{compare_picker_empty, no_committed_changes_vs, NO_COMMITTED_CHANGES};
 use super::theme::{hex_color, Palette, Pill};
 use super::tree::{
-    row_segments, visible_window, with_comment_mark, with_viewed_mark, workspace_trailing_fit,
-    NodeKind, NodeSegments, SegRole, TextSeg, VisibleRow,
+    file_change_from_name_status, file_change_segments, row_segments, visible_window,
+    with_comment_mark, with_viewed_mark, workspace_trailing_fit, NodeKind, NodeSegments, SegRole,
+    TextSeg, VisibleRow,
 };
 use crate::helpers::{is_detached_head_branch, visible_width};
 
@@ -279,13 +281,16 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.diff_pane_width = right_inner.width;
     state.layout.diff_pane_height = right_inner.height;
     state.layout.diff_content_x = right_inner.x;
-    state.layout.diff_split_rule_x =
-        if state.right_is_diff() && state.diff_layout() == DiffMode::SideBySide {
-            let split = side_by_side_column_widths(right_inner.width, state.diff_split_fraction);
-            Some(diff_split_rule_x(panes[0].width, split.left_width).saturating_sub(1))
-        } else {
-            None
-        };
+    // No rule to drag while a folder summary stands in for the diff.
+    state.layout.diff_split_rule_x = if state.right_is_diff()
+        && state.folder_summary().is_none()
+        && state.diff_layout() == DiffMode::SideBySide
+    {
+        let split = side_by_side_column_widths(right_inner.width, state.diff_split_fraction);
+        Some(diff_split_rule_x(panes[0].width, split.left_width).saturating_sub(1))
+    } else {
+        None
+    };
 
     state.layout.right_y = right_inner.y;
     if state.is_compare_tab() {
@@ -623,6 +628,12 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    // A focused folder beside a diff wins over the kept file diff and the
+    // compare empty copy (a range reload can leave the folder with no path).
+    if let Some(summary) = state.folder_summary() {
+        draw_folder_summary(frame, area, state, &summary);
+        return;
+    }
     if state.is_compare_tab() {
         draw_diff_pane(frame, area, state);
         return;
@@ -654,6 +665,112 @@ fn draw_right(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         "focus a repo for the graph, or a file for its diff"
     };
     frame.render_widget(Paragraph::new(copy), area);
+}
+
+/// Folder summary in the diff pane: `dir/` and its totals, then one row per
+/// changed file under it. Rows past the pane height fold into `… N more`.
+fn draw_folder_summary(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    summary: &FolderSummary,
+) {
+    let palette = state.theme.palette();
+    let ascii = state.ascii;
+    let minus = glyph(ascii, "−", "-");
+    let title = format!("{}/", summary.dir);
+    let n = summary.files.len();
+    let mut extra = format!("  {n} {}", if n == 1 { "file" } else { "files" });
+    if summary.files.iter().any(|file| file.stat.is_some()) {
+        extra.push_str(&format!(" · +{} {minus}{}", summary.added, summary.deleted));
+    }
+    // Same header shape as the file diff: the title wraps by columns and
+    // the muted extras follow on its last row.
+    let header_h = diff_pane_header_rows(&title, area.width, area.height);
+    let heading = Style::default()
+        .fg(palette.heading)
+        .add_modifier(Modifier::BOLD);
+    let mut header_lines: Vec<Line> = wrap_cols(&title, area.width as usize)
+        .into_iter()
+        .take(header_h as usize)
+        .map(|chunk| Line::from(Span::styled(chunk, heading)))
+        .collect();
+    if let Some(last) = header_lines.last_mut() {
+        last.spans
+            .push(Span::styled(extra, Style::default().fg(palette.muted)));
+    }
+    let header_area = Rect {
+        height: header_h.min(area.height),
+        ..area
+    };
+    frame.render_widget(Paragraph::new(header_lines), header_area);
+    if area.height <= header_h {
+        return;
+    }
+    let body = Rect {
+        y: area.y.saturating_add(header_h),
+        height: area.height - header_h,
+        ..area
+    };
+    let list_h = body.height as usize;
+    let shown = if n > list_h {
+        list_h.saturating_sub(1)
+    } else {
+        n
+    };
+    let width = body.width as usize;
+    let search = state.theme.pills().filter;
+    let paint = |segs: &NodeSegments| {
+        paint_segmented_row(
+            0, false, false, segs, width, false, false, None, false, search, ascii, palette, 0,
+        )
+    };
+    let mut lines: Vec<Line> = summary.files[..shown]
+        .iter()
+        .map(|file| {
+            let change = file_change_from_name_status(
+                &file.status,
+                file.path.clone(),
+                file.old_path.clone(),
+            );
+            let mut segs = file_change_segments(&change, false, ascii);
+            if let Some(stat) = file.stat {
+                // Counts sit before the badge so badges line up as in the list.
+                let badge = std::mem::take(&mut segs.trailing);
+                segs.trailing = vec![
+                    TextSeg {
+                        text: format!("+{}", stat.added),
+                        role: SegRole::Added,
+                        hex: None,
+                        bold: false,
+                        dim: false,
+                    },
+                    TextSeg {
+                        text: format!(" {minus}{}  ", stat.deleted),
+                        role: SegRole::Deleted,
+                        hex: None,
+                        bold: false,
+                        dim: false,
+                    },
+                ];
+                segs.trailing.extend(badge);
+            }
+            paint(&segs)
+        })
+        .collect();
+    if shown < n {
+        lines.push(paint(&NodeSegments {
+            segments: vec![TextSeg {
+                text: format!("… {} more", n - shown),
+                role: SegRole::Muted,
+                hex: None,
+                bold: false,
+                dim: false,
+            }],
+            trailing: Vec::new(),
+        }));
+    }
+    frame.render_widget(Paragraph::new(lines), body);
 }
 
 fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offset: u16) {
@@ -7253,5 +7370,266 @@ mod tests {
             "graph create row creates at the commit:\n{text}"
         );
         assert!(!text.contains("No matching branches"), "{text}");
+    }
+
+    /// Hidden body line of the `src/a.rs` diff in the folder-summary tests.
+    const SUMMARY_DIFF_BODY: &str = "summary-hidden-body";
+
+    /// `README.md`, then `src/` with `a.rs` (+3 −1), `b.rs` (+2 −0), and
+    /// `deep/c.rs` (binary: no counts).
+    fn summary_files() -> Vec<super::super::drill::CommitFile> {
+        [
+            ("README.md", Some((1, 1))),
+            ("src/a.rs", Some((3, 1))),
+            ("src/b.rs", Some((2, 0))),
+            ("src/deep/c.rs", None),
+        ]
+        .into_iter()
+        .map(|(path, stat)| super::super::drill::CommitFile {
+            status: "M".into(),
+            path: path.into(),
+            old_path: None,
+            stat: stat.map(|(added, deleted)| crate::git::LineStat { added, deleted }),
+        })
+        .collect()
+    }
+
+    /// Move the focused file list onto the row for `path`.
+    fn summary_move_to(state: &mut AppState, path: &str) -> Effect {
+        let row = state
+            .commit_file_rows()
+            .iter()
+            .position(|row| row.path == path)
+            .unwrap_or_else(|| panic!("row {path}"));
+        let delta = row as i32 - state.commit_files_cursor() as i32;
+        state.dispatch(Action::Move(delta))
+    }
+
+    /// Depth-2 commit drill on `files` with the `src/a.rs` diff open and the
+    /// file list focused on it.
+    fn summary_drill_state(files: Vec<super::super::drill::CommitFile>) -> AppState {
+        let mut state = two_pane_files_state();
+        state.ascii = false;
+        state.open_commit_diff(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            files,
+            0,
+            "src/a.rs".into(),
+            super::super::diff::DiffContent::from_lines(vec![
+                "@@ -1,1 +1,1 @@".into(),
+                "-old line".into(),
+                format!("+{SUMMARY_DIFF_BODY}"),
+            ]),
+        );
+        state.focus = FocusPane::Left;
+        let _ = summary_move_to(&mut state, "src/a.rs");
+        state
+    }
+
+    /// Compare tab on `files` with the `src/a.rs` diff loaded and the file
+    /// list focused on it.
+    fn summary_compare_state(files: Vec<super::super::drill::CommitFile>) -> AppState {
+        let mut state = compare_json_over_stale_workspace_state();
+        state.ascii = false;
+        {
+            let tab = state.tabs.active_compare_mut().unwrap();
+            tab.files = files;
+            tab.path = Some("src/a.rs".into());
+            tab.content = super::super::diff::DiffContent::from_compare_lines(vec![
+                "diff --git a/src/a.rs b/src/a.rs".into(),
+                "--- a/src/a.rs".into(),
+                "+++ b/src/a.rs".into(),
+                "@@ -1,1 +1,1 @@".into(),
+                "-old line".into(),
+                format!("+{SUMMARY_DIFF_BODY}"),
+            ]);
+        }
+        state.focus = FocusPane::Left;
+        assert_eq!(summary_move_to(&mut state, "src/a.rs"), Effect::None);
+        state
+    }
+
+    /// Right-pane text (inside the border) of the last frame.
+    fn summary_pane_text(terminal: &Terminal<TestBackend>, state: &AppState) -> String {
+        let text = buffer_text(terminal);
+        let x0 = state.layout.diff_content_x as usize;
+        let w = state.layout.diff_pane_width as usize;
+        let y0 = state.layout.right_y as usize;
+        let h = state.layout.diff_pane_height as usize;
+        text.lines()
+            .skip(y0)
+            .take(h)
+            .map(|line| line.chars().skip(x0).take(w).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn summary_status_line(terminal: &Terminal<TestBackend>) -> String {
+        buffer_text(terminal)
+            .lines()
+            .last()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// File → folder → same file on a depth-2 drill and a compare tab: the
+    /// folder paints its summary in place of the kept diff, and the file
+    /// repaints its diff.
+    #[test]
+    fn folder_row_paints_summary_and_file_row_repaints_diff() {
+        for (name, mut state) in [
+            ("drill", summary_drill_state(summary_files())),
+            ("compare", summary_compare_state(summary_files())),
+        ] {
+            // Wide enough for a split diff, so the file view has a rule.
+            let mut terminal = Terminal::new(TestBackend::new(220, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let pane = summary_pane_text(&terminal, &state);
+            assert!(
+                pane.contains(SUMMARY_DIFF_BODY),
+                "{name} file diff:\n{pane}"
+            );
+            assert!(
+                state.layout.diff_split_rule_x.is_some(),
+                "{name} split rule on a file"
+            );
+            let pill = crate::tui::chrome::diff_pill_label(state.diff_mode, state.diff_layout());
+            assert!(
+                summary_status_line(&terminal).contains(pill),
+                "{name} diff pill on a file"
+            );
+
+            assert_eq!(summary_move_to(&mut state, "src"), Effect::None, "{name}");
+            draw_state(&mut terminal, &mut state);
+            let pane = summary_pane_text(&terminal, &state);
+            let lines: Vec<&str> = pane.lines().collect();
+            assert!(
+                lines[0].starts_with("src/  3 files · +5 −1"),
+                "{name} header:\n{pane}"
+            );
+            for (file, counts) in [
+                ("a.rs", Some("+3 −1")),
+                ("b.rs", Some("+2 −0")),
+                ("c.rs", None),
+            ] {
+                let row = lines
+                    .iter()
+                    .find(|line| line.contains(file))
+                    .unwrap_or_else(|| panic!("{name} row {file}:\n{pane}"));
+                assert!(row.trim_end().ends_with('M'), "{name} badge: {row}");
+                match counts {
+                    Some(counts) => assert!(row.contains(counts), "{name} counts: {row}"),
+                    None => assert!(
+                        !row.contains('+') && !row.contains('−'),
+                        "{name} no counts without a stat: {row}"
+                    ),
+                }
+            }
+            assert!(!pane.contains("README.md"), "{name} sibling file:\n{pane}");
+            assert!(
+                !pane.contains(SUMMARY_DIFF_BODY),
+                "{name} hidden diff:\n{pane}"
+            );
+            assert!(!pane.contains("No diff"), "{name}:\n{pane}");
+            assert!(
+                !summary_status_line(&terminal).contains(pill),
+                "{name} no diff pill over a summary"
+            );
+            assert_eq!(state.layout.diff_split_rule_x, None, "{name} no split rule");
+
+            assert_eq!(
+                summary_move_to(&mut state, "src/a.rs"),
+                Effect::None,
+                "{name}"
+            );
+            draw_state(&mut terminal, &mut state);
+            let pane = summary_pane_text(&terminal, &state);
+            assert!(
+                pane.contains(SUMMARY_DIFF_BODY),
+                "{name} diff back:\n{pane}"
+            );
+            assert!(!pane.contains("3 files"), "{name} summary gone:\n{pane}");
+        }
+    }
+
+    /// More files than rows: the last row folds the rest into `… N more`.
+    #[test]
+    fn folder_summary_overflow_ends_with_more_row() {
+        let mut files = summary_files();
+        files.extend((0..40).map(|i| super::super::drill::CommitFile {
+            status: "A".into(),
+            path: format!("src/many/f{i:02}.rs"),
+            old_path: None,
+            stat: Some(crate::git::LineStat {
+                added: 1,
+                deleted: 0,
+            }),
+        }));
+        for (name, mut state) in [
+            ("drill", summary_drill_state(files.clone())),
+            ("compare", summary_compare_state(files.clone())),
+        ] {
+            let _ = summary_move_to(&mut state, "src");
+            let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let pane = summary_pane_text(&terminal, &state);
+            let lines: Vec<&str> = pane.lines().collect();
+            assert!(
+                lines[0].starts_with("src/  43 files · +45 −1"),
+                "{name}:\n{pane}"
+            );
+            // One header row; the last body row is the overflow row.
+            let shown = lines.len() - 2;
+            let more = format!("… {} more", 43 - shown);
+            assert!(
+                lines.last().unwrap().contains(&more),
+                "{name} expected {more}:\n{pane}"
+            );
+            assert!(lines[1].contains("a.rs"), "{name} sorted by path:\n{pane}");
+        }
+    }
+
+    /// No file with a stat: no totals in the header and no counts on rows.
+    /// ASCII mode paints a plain `-` for deletions.
+    #[test]
+    fn folder_summary_counts_follow_stats_and_ascii() {
+        let mut state = summary_drill_state(summary_files());
+        let _ = summary_move_to(&mut state, "src/deep");
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let pane = summary_pane_text(&terminal, &state);
+        let header = pane.lines().next().unwrap();
+        assert_eq!(header.trim_end(), "src/deep/  1 file", "{pane}");
+        assert!(!pane.contains('+') && !pane.contains('−'), "{pane}");
+
+        let mut state = summary_drill_state(summary_files());
+        state.ascii = true;
+        let _ = summary_move_to(&mut state, "src");
+        draw_state(&mut terminal, &mut state);
+        let pane = summary_pane_text(&terminal, &state);
+        assert!(pane.starts_with("src/  3 files · +5 -1"), "{pane}");
+        assert!(pane.contains("+3 -1"), "{pane}");
+        assert!(!pane.contains('−'), "{pane}");
+    }
+
+    /// A compare reload that keeps a folder focused drops the old diff
+    /// (`path` is `None`); the summary still wins over the empty copy.
+    #[test]
+    fn compare_folder_summary_wins_over_no_committed_changes() {
+        let mut state = summary_compare_state(summary_files());
+        let _ = summary_move_to(&mut state, "src");
+        {
+            let tab = state.tabs.active_compare_mut().unwrap();
+            tab.path = None;
+            tab.content = super::super::diff::DiffContent::default();
+        }
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let pane = summary_pane_text(&terminal, &state);
+        assert!(pane.starts_with("src/  3 files"), "{pane}");
+        assert!(!pane.contains("No committed changes"), "{pane}");
     }
 }

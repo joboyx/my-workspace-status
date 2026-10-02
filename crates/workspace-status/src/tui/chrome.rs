@@ -1252,7 +1252,8 @@ fn idle_status_line(
 
     let mut spans = vec![pill_span(mode_label, pills.mode)];
     // The diff pill is the layout the open diff paints in; no diff, no pill.
-    if state.right_is_diff() {
+    // A folder summary is not a diff.
+    if state.right_is_diff() && state.folder_summary().is_none() {
         spans.push(pill_span(
             diff_pill_label(state.diff_mode, state.diff_layout()),
             pills.diff,
