@@ -620,6 +620,7 @@ pub fn validate_filter_repos(cwd: &Path, filter_repos: &[String]) -> Result<(), 
         default_branches: loaded.default_branches,
         editor: loaded.editor,
         diff_tool: loaded.diff_tool,
+        view_defaults: loaded.view_defaults,
     };
     let walk_primaries = find_repos_with_config(cwd, &config, None);
     let entries = expand_repos_with_linked_worktrees(cwd, &walk_primaries, &config, None);

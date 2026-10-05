@@ -88,12 +88,14 @@ fn idle_chrome_left(screen: &str) -> bool {
         && no_wrong_overlays(screen)
 }
 
-fn long_diff_clipped(screen: &str) -> bool {
+fn long_diff_wrapped_at_launch(screen: &str) -> bool {
     panes_tree_focused_diff_unfocused(screen)
         && tree_cursor_on(screen, FILE)
         && tree_stays_on_long_file(screen)
-        && clipped_new_diff(screen)
+        && wrapped_new_diff(screen)
         && idle_chrome_left(screen)
+        && !crumb_row(screen).contains("wrap on")
+        && !crumb_row(screen).contains("wrap off")
 }
 
 fn long_diff_wrapped(screen: &str) -> bool {
@@ -120,13 +122,15 @@ fn long_diff_unwrapped(screen: &str) -> bool {
 
 /// `\` toggles soft word-wrap on a file diff.
 ///
-/// Docs + help VIEW: `\` is wrap / unwrap. Default clip hides
-/// `UNIQUE_DIFF_TAIL` on a long NEW line. Wrap shows that tail without
-/// `h`/`l` pan, paints `· wrap`, and toasts `wrap on`. A second `\`
-/// restores clip. Pan is a no-op while wrap is on.
+/// Docs + help VIEW: `\` is wrap / unwrap. Wrap is on at launch, so a
+/// long NEW line shows `UNIQUE_DIFF_TAIL` without `h`/`l` pan and the
+/// header paints `· wrap`. `\` restores clip (tail hidden, `wrap off`
+/// toast); a second `\` wraps again (`wrap on`). Pan is a no-op while
+/// wrap is on.
 ///
-/// Live PTY (default 140×32 so the NEW line still clips). A no-op, a
-/// header-only `· wrap`, or a pan that never needed wrap cannot pass.
+/// Live PTY (default 140×32 so the NEW line clips once wrap is off). A
+/// no-op, a header-only `· wrap`, or a pan that never needed wrap cannot
+/// pass.
 #[test]
 fn pty_diff_wrap_toggle() {
     let (_root, workspace) = daily_workspace();
@@ -154,34 +158,34 @@ fn pty_diff_wrap_toggle() {
 
     tui.search("unique-diffline");
     tui.wait_pred(
-        long_diff_clipped,
-        "search loads the clipped NEW file-diff; tail needs pan or wrap",
-        WAIT,
-    );
-
-    tui.key('\\');
-    tui.wait_pred(
-        long_diff_wrapped,
-        "\\ wraps the long NEW line; UNIQUE_DIFF_TAIL is visible without pan",
-        WAIT,
-    );
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        long_diff_wrapped,
-        "wrap holds (not a flicker, header-only, or a pan that revealed the tail)",
+        long_diff_wrapped_at_launch,
+        "search loads the NEW file-diff wrapped at launch; tail visible without pan",
         WAIT,
     );
 
     tui.key('\\');
     tui.wait_pred(
         long_diff_unwrapped,
-        "second \\ restores clip; UNIQUE_DIFF_TAIL is hidden again without pan",
+        "\\ turns wrap off; UNIQUE_DIFF_TAIL is clipped again without pan",
         WAIT,
     );
     tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
         long_diff_unwrapped,
-        "clip holds (not a no-op second \\ or a stale wrap header)",
+        "clip holds (not a flicker or a no-op \\)",
+        WAIT,
+    );
+
+    tui.key('\\');
+    tui.wait_pred(
+        long_diff_wrapped,
+        "second \\ wraps the long NEW line again; UNIQUE_DIFF_TAIL is visible",
+        WAIT,
+    );
+    tui.wait_ms(SETTLE_MS);
+    tui.wait_pred(
+        long_diff_wrapped,
+        "wrap holds (not a stale clip header or a pan that revealed the tail)",
         WAIT,
     );
 }

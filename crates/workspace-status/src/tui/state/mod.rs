@@ -21,6 +21,7 @@ use workspace_status_graph::{
     UNICODE,
 };
 
+use crate::config::ViewDefaults;
 use crate::snapshot::{
     carry_status_failed_local_branches, CheckoutKind, FileChange, WorkspaceSnapshot,
 };
@@ -559,7 +560,8 @@ pub struct AppState {
     pub tree_fraction: f64,
     pub diff_split_fraction: f64,
     pub diff_mode: DiffMode,
-    /// Soft-wrap file-diff code. Session-only (no XDG store).
+    /// Soft-wrap file-diff code. On by default; `viewDefaults.wrap` sets the
+    /// launch value and `\` flips it for this session (no XDG store).
     pub diff_wrap: bool,
     /// Expand commit / stash messages in the graph footer and commit-files
     /// header. On by default; `M` collapses for this session (no XDG store).
@@ -701,7 +703,7 @@ impl AppState {
             tree_fraction: TREE_WIDTH_FRACTION,
             diff_split_fraction: DIFF_SPLIT_FRACTION,
             diff_mode: DiffMode::SideBySide,
-            diff_wrap: false,
+            diff_wrap: true,
             commit_msg_expand: true,
             commit_msg_scroll: None,
             drag: SplitDrag::None,
@@ -723,6 +725,42 @@ impl AppState {
         state.reconcile_viewed_store();
         state.reconcile_comment_store();
         state
+    }
+
+    /// Apply the workspace config `viewDefaults` once at launch.
+    ///
+    /// Sets each key that is present and leaves omitted keys at the in-app
+    /// defaults from [`Self::new`]. A `tree` change rebuilds the workspace
+    /// tree, folds, rows, cursor, and signatures like the `t` toggle, with
+    /// no status message.
+    pub fn apply_view_defaults(&mut self, defaults: &ViewDefaults) {
+        if let Some(tree) = defaults.tree {
+            if tree != self.tree_mode {
+                self.tree_mode = tree;
+                self.tree = self.visible_tree();
+                self.folds = default_folds(&self.tree);
+                self.rows = flatten_with(&self.tree, &self.folds, self.ascii);
+                self.cursor = initial_cursor(&self.rows);
+                self.signatures = tree_signatures(&self.tree, &self.cwd);
+                self.tree_ghosts.clear();
+            }
+        }
+        if let Some(commit_tree) = defaults.commit_tree {
+            self.commit_tree_mode = commit_tree;
+        }
+        if let Some(split) = defaults.diff_split {
+            self.diff_mode = if split {
+                DiffMode::SideBySide
+            } else {
+                DiffMode::Inline
+            };
+        }
+        if let Some(wrap) = defaults.wrap {
+            self.diff_wrap = wrap;
+        }
+        if let Some(expand) = defaults.commit_message_expand {
+            self.commit_msg_expand = expand;
+        }
     }
 
     pub fn input_mode(&self) -> InputMode {
@@ -6331,6 +6369,7 @@ mod tests {
     }
 
     fn pan_and_scroll_focused_diff(app: &mut AppState) {
+        app.diff_wrap = false;
         app.focus = FocusPane::Right;
         // Wide enough for a one-row `app/<path>` header, narrow enough to pan.
         app.layout.diff_pane_width = 16;
@@ -12805,20 +12844,18 @@ mod tests {
             "README.md".into(),
             DiffContent::from_unified(format!("@@ -0,0 +1,1 @@\n+{}", "x".repeat(40))),
         );
-        app.dispatch(Action::PanDiff(4));
-        assert!(app.diff_col_offset > 0);
-        assert!(!app.diff_wrap);
-        app.dispatch(Action::ToggleDiffWrap);
-        assert!(app.diff_wrap);
-        assert_eq!(app.diff_col_offset, 0);
-        assert_eq!(app.status, "wrap on");
+        assert!(app.diff_wrap, "wrap is on at launch");
         app.dispatch(Action::PanDiff(4));
         assert_eq!(app.diff_col_offset, 0, "pan is a no-op while wrap is on");
         app.dispatch(Action::ToggleDiffWrap);
         assert!(!app.diff_wrap);
         assert_eq!(app.status, "wrap off");
-        app.dispatch(Action::PanDiff(1));
-        assert!(app.diff_col_offset > 0, "clip+pan returns after wrap off");
+        app.dispatch(Action::PanDiff(4));
+        assert!(app.diff_col_offset > 0, "clip+pan works after wrap off");
+        app.dispatch(Action::ToggleDiffWrap);
+        assert!(app.diff_wrap);
+        assert_eq!(app.diff_col_offset, 0);
+        assert_eq!(app.status, "wrap on");
     }
 
     #[test]
@@ -13326,6 +13363,7 @@ mod tests {
         use super::super::diff::{cell_code_width, diff_row_content_width, gutter_width};
         use super::super::search::max_col_offset;
         let mut app = tall_diff_in_narrow_pane("README.md");
+        app.diff_wrap = false;
         let mut lines = vec!["@@ -1,1 +1,41 @@".into(), format!("+{}", "w".repeat(60))];
         lines.extend((0..40).map(|i| format!("+line {i}")));
         app.set_diff(
@@ -13545,6 +13583,46 @@ mod tests {
         assert!(lib.label.contains("lib.rs"));
         assert!(!lib.label.contains("src/lib.rs"));
         assert!(app.rows.iter().any(|row| row.id == "file:app:README.md"));
+    }
+
+    #[test]
+    fn view_defaults_set_launch_modes_and_omitted_keys_keep_in_app_defaults() {
+        let mut app = tree_app();
+        assert!(app.diff_wrap, "wrap is on by default");
+        let rows_before: Vec<String> = app.rows.iter().map(|row| row.id.clone()).collect();
+        let cursor_before = app.cursor;
+
+        app.apply_view_defaults(&ViewDefaults::default());
+        assert!(app.tree_mode);
+        assert!(app.commit_tree_mode);
+        assert_eq!(app.diff_mode, DiffMode::SideBySide);
+        assert!(app.diff_wrap);
+        assert!(app.commit_msg_expand);
+        assert_eq!(
+            app.rows
+                .iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>(),
+            rows_before
+        );
+        assert_eq!(app.cursor, cursor_before);
+
+        app.apply_view_defaults(&ViewDefaults {
+            tree: Some(false),
+            commit_tree: Some(false),
+            diff_split: Some(false),
+            wrap: Some(false),
+            commit_message_expand: Some(false),
+        });
+        assert!(!app.tree_mode);
+        assert!(app.rows.iter().all(|row| row.kind != NodeKind::Dir));
+        assert!(app.rows.iter().any(|row| row.id == "file:app:src/lib.rs"));
+        assert!(app.focused_row().is_some());
+        assert!(!app.commit_tree_mode);
+        assert_eq!(app.diff_mode, DiffMode::Inline);
+        assert!(!app.diff_wrap);
+        assert!(!app.commit_msg_expand);
+        assert_eq!(app.status, "", "launch defaults post no status");
     }
 
     #[test]
@@ -14097,6 +14175,7 @@ mod tests {
     #[test]
     fn focused_diff_l_increases_pan_h_decreases_tree_still_folds() {
         let mut app = state();
+        app.diff_wrap = false;
         focus_file(&mut app, "README.md");
         app.focus = FocusPane::Right;
         app.layout.diff_pane_width = 8;
@@ -14127,6 +14206,7 @@ mod tests {
     #[test]
     fn mouse_hscroll_over_left_pane_pans_long_diff() {
         let mut app = state();
+        app.diff_wrap = false;
         focus_file(&mut app, "README.md");
         app.focus = FocusPane::Left;
         app.layout.right_x = 48;
