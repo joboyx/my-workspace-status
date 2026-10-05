@@ -68,10 +68,10 @@ const HELP_VIEW_ROWS: &[(&str, &str)] = &[
 /// Split the painted overlay into MOVE / GIT / VIEW columns.
 ///
 /// The help dialog is centered with a two-column margin, so its inner
-/// text starts at x = 4 and is `COLS - 8` wide. Columns are not even (`help_column_widths` widens the long one), so
-/// each column starts at its title icon (`{icon}  {title}`) on the header
-/// row. Footer is excluded so `/ search help` does not leak into the
-/// keymap columns.
+/// text starts at x = 4 and is `COLS - 8` wide. Columns are not even
+/// (`help_column_widths` widens the long one), so each column starts at
+/// its title icon (`{icon}  {title}`) on the header row. Footer is
+/// excluded so `/ search help` does not leak into the keymap columns.
 fn help_group_columns(screen: &str) -> Option<[String; 3]> {
     let lines: Vec<&str> = screen.lines().collect();
     let start = lines

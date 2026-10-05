@@ -298,7 +298,12 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         let width = dialog_width(chunks[1], kind);
         let rect = dialog_rect(chunks[1], width, dialog_height(state, kind, width));
         match kind {
-            DialogKind::Help => state.layout.help_scroll_max = draw_help(frame, rect, state),
+            DialogKind::Help => {
+                let max = draw_help(frame, rect, state);
+                state.layout.help_scroll_max = max;
+                // A resize can lower the max: keep the next `k` live.
+                state.help_scroll = state.help_scroll.min(max);
+            }
             DialogKind::Confirm => draw_confirm(frame, rect, state),
             DialogKind::StashMenu => draw_stash_menu(frame, rect, state),
             DialogKind::CreateBranch => draw_create_branch(frame, rect, state),
@@ -2797,8 +2802,41 @@ fn paint_list_dialog(
         frame.render_widget(Paragraph::new(status), row_at(h - 2));
     }
     if h >= 2 {
+        let footer = fit_list_dialog_footer(footer, usize::from(inner.width));
         frame.render_widget(Paragraph::new(footer), row_at(h - 1));
     }
+}
+
+/// `footer` cut to `width` columns with its `Esc …` chip kept.
+///
+/// A footer that fits paints as is. Otherwise its ` · `-separated chips
+/// drop from the left, the `Esc` chip never, until the rest fits; a lone
+/// chip still too wide ends in `…`. The line keeps its first span's style.
+fn fit_list_dialog_footer(footer: Line<'static>, width: usize) -> Line<'static> {
+    if footer.width() <= width {
+        return footer;
+    }
+    let style = footer
+        .spans
+        .first()
+        .map(|span| span.style)
+        .unwrap_or_default();
+    let text: String = footer
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    let mut chips: Vec<&str> = text.split(" · ").collect();
+    while chips.len() > 1 && visible_width(&chips.join(" · ")) > width {
+        let Some(drop) = chips.iter().position(|chip| !chip.starts_with("Esc")) else {
+            break;
+        };
+        chips.remove(drop);
+    }
+    Line::from(Span::styled(
+        fit_with_ellipsis(&chips.join(" · "), width),
+        style,
+    ))
 }
 
 fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -8178,8 +8216,51 @@ mod tests {
         );
         state.dispatch(Action::HelpScroll(1000));
         assert_eq!(state.help_scroll, max);
+
+        // A taller terminal lowers the max; the scroll follows it down so
+        // the first `k` still moves the body.
+        let mut taller = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        draw_state(&mut taller, &mut state);
+        let lower = state.layout.help_scroll_max;
+        assert!(lower < max, "{lower} < {max}");
+        assert_eq!(state.help_scroll, lower);
+        state.dispatch(Action::HelpScroll(-1));
+        assert_eq!(state.help_scroll, lower.saturating_sub(1));
         state.dispatch(Action::HelpScroll(-1000));
         assert_eq!(state.help_scroll, 0);
+    }
+
+    #[test]
+    fn list_dialog_footer_keeps_esc_on_narrow_terminals() {
+        use crate::git::LocalBranch;
+        use crate::tui::graph_focus::GraphFocusPickerState;
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.graph_focus_picker = Some(GraphFocusPickerState::new(
+            "app".into(),
+            vec![LocalBranch {
+                name: "main".into(),
+                current: true,
+                authordate: 0,
+            }],
+            &[],
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(50, 20)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        let footer = text
+            .lines()
+            .find(|line| line.contains("Enter apply"))
+            .unwrap_or_else(|| panic!("footer row:\n{text}"));
+        assert!(footer.contains("Esc cancel"), "{text}");
+        assert!(!footer.contains("↑↓ move"), "{text}");
+
+        // A footer that fits keeps its exact text.
+        let mut wide = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut wide, &mut state);
+        assert!(buffer_text(&wide).contains(
+            "↑↓ move · type to filter · space toggle · Enter apply · Ctrl-o clear · Esc cancel"
+        ));
     }
 
     #[test]
