@@ -491,7 +491,8 @@ struct DiffSearchMemo {
 struct FileSearchMemo {
     /// Tab id, load generation, case-folded query.
     key: (u64, u64, String),
-    hits: Vec<usize>,
+    /// Shared with every caller of the frame, so a hit does not copy.
+    hits: std::rc::Rc<[usize]>,
 }
 
 /// Interactive session state. Dispatch is pure besides the returned [`Effect`].
@@ -3076,8 +3077,12 @@ impl AppState {
             }
             SearchPane::Diff => (self.search_hit, self.diff_search_hits(query)),
             SearchPane::File => {
-                let cursor = self.tabs.active_file().map(|tab| tab.cursor);
-                (cursor, self.file_search_hits(query))
+                let hits = self.file_search_hits(query);
+                let pos = self
+                    .tabs
+                    .active_file()
+                    .and_then(|tab| hits.binary_search(&tab.cursor).ok());
+                return Some((pos.map(|p| p + 1), hits.len()));
             }
         };
         let pos = current.and_then(|cur| hits.iter().position(|hit| *hit == cur));

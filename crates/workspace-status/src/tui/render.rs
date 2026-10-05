@@ -51,7 +51,7 @@ use super::ops::RevertScope;
 use super::quick_open::{files_row_shows_status, FileIndexState, QuickOpenMode, QuickOpenState};
 use super::search::{
     collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids, slice_cols,
-    wrap_col_starts, wrap_cols, SearchPane,
+    wrap_col_starts, wrap_col_starts_capped, wrap_cols, SearchPane,
 };
 use super::split::{
     diff_paint_width, diff_split_rule_x, pane_widths, side_by_side_column_widths, DiffMode,
@@ -469,9 +469,12 @@ fn draw_file_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let gutter = file_gutter_width(lines.len());
     let code_w = (inner.width as usize).saturating_sub(gutter).max(1);
     let wrap = state.diff_wrap;
+    // A row count past the view height is never needed, so a 2 MiB
+    // single-line file scans at most one screen of its text per call.
+    let row_cap = height + 1;
     let rows_of = |line: usize| {
         if wrap {
-            wrap_col_starts(&lines[line], code_w).len().max(1)
+            wrap_col_starts_capped(&lines[line], code_w, row_cap).len()
         } else {
             1
         }
@@ -487,7 +490,7 @@ fn draw_file_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let hits = if state.search_target == SearchPane::File {
         state.file_search_hits(&state.search_query)
     } else {
-        Vec::new()
+        std::rc::Rc::from([])
     };
     let search = state.theme.pills().filter;
     let gutter_style = diff_gutter_style(palette);
@@ -501,7 +504,7 @@ fn draw_file_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         let match_fg = (hit && !selected).then_some(search.fg);
         let code = spans.get(line - scroll).map(Vec::as_slice).unwrap_or(&[]);
         let starts = if wrap {
-            wrap_col_starts(text, code_w)
+            wrap_col_starts_capped(text, code_w, row_cap)
         } else {
             vec![col_offset]
         };
@@ -9248,5 +9251,80 @@ mod tests {
         assert!(text.contains("new compare"), "{text}");
         assert!(!text.contains("# app"), "file body is not painted: {text}");
         assert!(state.layout.file_view_row_lines.is_empty());
+    }
+
+    #[test]
+    fn file_tab_wrap_scan_of_a_huge_line_is_bounded_by_the_view() {
+        let huge = "m".repeat(1024 * 1024);
+        let mut state = file_tab_state(&[huge.as_str(), "tail"]);
+        state.dispatch(Action::ToggleDiffWrap);
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let height = usize::from(state.layout.file_view_height);
+        let rows = &state.layout.file_view_row_lines;
+        assert_eq!(rows.len(), height, "{rows:?}");
+        assert!(
+            rows.iter().all(|&line| line == 0),
+            "the long line fills the view"
+        );
+        let code_w = usize::from(state.layout.file_view_width) - file_gutter_width(2);
+        let capped = wrap_col_starts_capped(&huge, code_w, height + 1);
+        assert_eq!(
+            capped.len(),
+            height + 1,
+            "the scan stops one row past the view"
+        );
+        assert_eq!(capped[height], height * code_w);
+        assert!(buf_line(terminal.backend().buffer(), state.layout.file_view_y).contains("mmmm"));
+    }
+
+    /// On a file tab help paints MOVE / FILE / VIEW at the rows
+    /// `help_status_lines(box, HelpTab::File)` reserves.
+    #[test]
+    fn file_help_paints_its_reserved_rows() {
+        use super::super::chrome::{dialog_height, dialog_rect, dialog_width, DialogKind};
+        use super::super::help::{
+            help_body_line_count, help_status_lines, HelpTab, HELP_FILE_GROUPS,
+        };
+        for cols in [68u16, 104, 144] {
+            let mut state = file_tab_state(&["# app"]);
+            state.help_open = true;
+            let mut terminal = Terminal::new(TestBackend::new(cols, 120)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let text = buffer_text(&terminal);
+            let lines: Vec<&str> = text.lines().collect();
+            let header = lines
+                .iter()
+                .position(|l| l.contains("MOVE") && l.contains("FILE") && l.contains("VIEW"))
+                .unwrap_or_else(|| panic!("{cols} cols, file help header:\n{text}"));
+            let top = header - 1;
+            let box_w = cols - 4;
+            let panes = Rect::new(0, 1, cols, state.layout.pane_height);
+            assert_eq!(dialog_width(panes, DialogKind::Help), box_w);
+            let rect = dialog_rect(panes, box_w, dialog_height(&state, DialogKind::Help, box_w));
+            assert_eq!(rect.y as usize, top, "{cols} cols:\n{text}");
+            let bottom = (header..lines.len())
+                .find(|&y| buffer_row(&terminal, y as u16, 2, 3) == "╰")
+                .unwrap_or_else(|| panic!("{cols} cols, help bottom border:\n{text}"));
+            let reserved = usize::from(help_status_lines(box_w, HelpTab::File));
+            assert_eq!(bottom + 1 - top, reserved, "{cols} cols:\n{text}");
+            let inner = help_inner_width(usize::from(box_w));
+            let body = help_body_line_count(
+                HELP_FILE_GROUPS,
+                &help_column_widths(HELP_FILE_GROUPS, inner),
+            );
+            let footer_rows = help_idle_footer_lines(inner).len();
+            assert_eq!(
+                bottom - header - 1,
+                body + footer_rows,
+                "{cols} cols:\n{text}"
+            );
+            assert_eq!(state.layout.help_scroll_max, 0, "{cols} cols fits");
+            for needle in ["editor at line", "reload", "(1=Workspace)"] {
+                assert!(text.contains(needle), "{cols} cols {needle}:\n{text}");
+            }
+            assert!(!text.contains("COMPARE"), "{cols} cols:\n{text}");
+        }
     }
 }

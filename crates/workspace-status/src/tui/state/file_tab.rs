@@ -5,6 +5,7 @@
 //! [`AppState::apply_file_tab`], which drops a result for an older load
 //! generation. Git writes refuse with the Workspace-tab copy.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use ratatui::layout::Rect;
@@ -53,7 +54,9 @@ impl AppState {
     /// file tab).
     ///
     /// Git writes, comments, highlight, diff-only keys, and the commands
-    /// that open a compare tab need the Workspace tab. [`Self::dispatch`]
+    /// that open a compare tab need the Workspace tab. So does a confirm:
+    /// a late checkout / merge result can open one while a file tab is
+    /// active, and `y` there must not write (n / Esc still close it). [`Self::dispatch`]
     /// puts the reason on the status line; `palette_disabled_reason` shows
     /// the same copy on the row.
     pub(crate) fn file_tab_refusal(&self, action: &Action) -> Option<String> {
@@ -94,6 +97,8 @@ impl AppState {
                 | Action::CompareVsBranch
                 | Action::CompareVsCommit
                 | Action::CompareCommitVsParent
+                | Action::ConfirmYes
+                | Action::ConfirmYesClean
         )
         .then(|| SWITCH_TO_WORKSPACE_TAB.to_string())
     }
@@ -101,7 +106,9 @@ impl AppState {
     /// Palette row reason on a file tab after [`Self::file_tab_refusal`].
     ///
     /// The Workspace gates read the parked tree, so a file tab answers the
-    /// few rows whose state lives here and lets the rest run.
+    /// few rows whose state lives here. View rows for the Workspace panes
+    /// (tree / flat, ignored repos, inline / split, tree width, other pane,
+    /// commit message) do nothing on a file tab and say so; the rest run.
     pub(crate) fn file_tab_palette_reason(&self, command: &PaletteCommand) -> Option<String> {
         if command.scope == CommandScope::Highlight {
             return Some("highlight diff lines first (V)".into());
@@ -114,6 +121,13 @@ impl AppState {
                 (self.tabs.len() <= 1).then(|| ONLY_WORKSPACE_TAB_OPEN.into())
             }
             Action::FoldToggleSubtree => Some(Z_FOLDS_TREE_ROWS.into()),
+            Action::ToggleTreeMode
+            | Action::ToggleShowIgnored
+            | Action::ToggleDiffMode
+            | Action::ResizeTree(_)
+            | Action::FocusLeft
+            | Action::FocusRight
+            | Action::ToggleCommitMsgExpand => Some(SWITCH_TO_WORKSPACE_TAB.into()),
             _ => None,
         }
     }
@@ -307,25 +321,26 @@ impl AppState {
         true
     }
 
-    /// Lines of the active file tab that contain `query`, ignoring case.
-    pub(crate) fn file_search_hits(&self, query: &str) -> Vec<usize> {
+    /// Lines of the active file tab that contain `query`, ignoring case,
+    /// ascending.
+    ///
+    /// Memoized per tab, load, and query; the paint and the status pill
+    /// share one list instead of copying it each frame.
+    pub(crate) fn file_search_hits(&self, query: &str) -> Rc<[usize]> {
         let query = query.trim().to_lowercase();
-        let Some(tab) = self.tabs.active_file() else {
-            return Vec::new();
+        let Some(tab) = self.tabs.active_file().filter(|_| !query.is_empty()) else {
+            return Rc::from([]);
         };
-        if query.is_empty() {
-            return Vec::new();
-        }
         let key = (tab.id, tab.generation, query);
         if let Some(memo) = self.file_search_memo.borrow().as_ref() {
             if memo.key == key {
-                return memo.hits.clone();
+                return Rc::clone(&memo.hits);
             }
         }
-        let hits = match_diff_line_indices(tab.lines(), &key.2);
+        let hits: Rc<[usize]> = match_diff_line_indices(tab.lines(), &key.2).into();
         *self.file_search_memo.borrow_mut() = Some(FileSearchMemo {
             key,
-            hits: hits.clone(),
+            hits: Rc::clone(&hits),
         });
         hits
     }
@@ -382,6 +397,7 @@ mod tests {
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
+    use crate::tui::drill::{CommitFile, CommitFileSource};
     use crate::tui::search::SearchPane;
 
     fn repo(name: &str) -> RepoSnapshot {
@@ -680,6 +696,104 @@ mod tests {
         app.dispatch(Action::NextTab);
         assert!(app.is_compare_tab());
         assert_eq!(app.compare_probe_effects().len(), 0, "range still loading");
+
+        let (tab_id, gen) = {
+            let tab = app.tabs.active_compare().unwrap();
+            (tab.id, tab.generation)
+        };
+        let load = crate::tui::app::CompareRangeLoad {
+            source: CommitFileSource::Compare {
+                base_ref: "main".into(),
+                head_ref: "HEAD".into(),
+                base_tip: "bbb".into(),
+                merge_base: "aaa".into(),
+                head: "ccc".into(),
+            },
+            files: vec![CommitFile {
+                status: "M".into(),
+                path: "src/a.rs".into(),
+                old_path: None,
+                stat: None,
+            }],
+            head: "ccc".into(),
+            base_tip: "bbb".into(),
+        };
+        let follow = app.apply_compare_range(tab_id, gen, Ok(load));
+        assert!(
+            matches!(follow, Some(Effect::LoadCompareDiff { tab_id: id, ref path, .. }) if id == tab_id && path == "src/a.rs"),
+            "{follow:?}"
+        );
+        let tab = app.tabs.get_id(tab_id).expect("compare tab by id");
+        assert!(!tab.loading);
+        assert_eq!(tab.files.len(), 1);
+        assert_eq!(tab.files[0].path, "src/a.rs");
+        assert_eq!(app.compare_probe_effects().len(), 1, "loaded tab probes");
+    }
+
+    #[test]
+    fn late_checkout_confirm_cannot_write_from_a_file_tab() {
+        let mut app = state();
+        open_loaded(&mut app, "README.md", &["# app"]);
+        crate::tui::app::apply_checkout_compute(
+            &mut app,
+            "app".into(),
+            crate::tui::app::CheckoutCompute::Confirm {
+                local_branch: "main".into(),
+                remote_ref: "origin/main".into(),
+                ahead_behind: Some((0, 1)),
+            },
+        );
+        assert!(app.confirm.is_some(), "the late result opens its confirm");
+        for action in [Action::ConfirmYes, Action::ConfirmYesClean] {
+            app.status.clear();
+            assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
+            assert_eq!(app.status, SWITCH_TO_WORKSPACE_TAB, "{action:?}");
+            assert!(app.confirm.is_some(), "{action:?} does not consume it");
+        }
+        assert_eq!(app.dispatch(Action::ConfirmNo), Effect::None);
+        assert!(app.confirm.is_none(), "n still closes it");
+    }
+
+    #[test]
+    fn workspace_view_rows_are_disabled_on_a_file_tab() {
+        let mut app = state();
+        open_loaded(&mut app, "README.md", &["# app"]);
+        let reason = |title: &str| {
+            let command = PALETTE_COMMANDS
+                .iter()
+                .find(|command| command.title == title)
+                .unwrap_or_else(|| panic!("no {title} row"));
+            app.palette_disabled_reason(command)
+        };
+        for title in [
+            "Flat / tree",
+            "Show ignored",
+            "Inline / split",
+            "Narrow tree",
+            "Widen tree",
+            "Other pane",
+            "Collapse / expand commit message",
+        ] {
+            assert_eq!(
+                reason(title).as_deref(),
+                Some(SWITCH_TO_WORKSPACE_TAB),
+                "{title}"
+            );
+        }
+        for title in [
+            "Wrap / unwrap",
+            "Cycle theme",
+            "Toggle mouse",
+            "Keymap help",
+            "Quit",
+            "Close tab",
+            "Refresh",
+            "Open in editor",
+            "Copy entity reference",
+            "Search focused pane",
+        ] {
+            assert_eq!(reason(title), None, "{title}");
+        }
     }
 
     #[test]

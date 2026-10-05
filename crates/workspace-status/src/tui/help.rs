@@ -1150,7 +1150,8 @@ mod tests {
     /// A compare tab paints MOVE / COMPARE / VIEW; COMPARE lists what acts
     /// on the compare diff and what needs the Workspace tab. The row budget
     /// is checked against the paint in `render.rs`
-    /// (`compare_help_paints_its_reserved_rows`).
+    /// (`compare_help_paints_centered_and_scrolls_every_body_row`,
+    /// `file_help_paints_its_reserved_rows`).
     #[test]
     fn compare_column_lists_compare_keys() {
         assert_eq!(HELP_COMPARE_GROUPS.len(), HELP_COLUMN_COUNT);
