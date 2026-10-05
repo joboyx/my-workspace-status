@@ -19,7 +19,7 @@ use super::super::selection::TextSelection;
 use super::super::split::SplitDrag;
 use super::super::status::StatusMessage;
 use super::super::tabs::{
-    checkout_leaf, file_gutter_width, OpenFile, ONLY_WORKSPACE_TAB_OPEN, SWITCH_TO_WORKSPACE_TAB,
+    file_gutter_width, OpenFile, ONLY_WORKSPACE_TAB_OPEN, SWITCH_TO_WORKSPACE_TAB,
 };
 use super::{AppState, FileSearchMemo, NO_SEARCH_ARMED, Z_FOLDS_TREE_ROWS};
 
@@ -31,7 +31,7 @@ impl AppState {
     pub(crate) fn open_file_tab(&mut self, checkout: String, rel: String) -> Effect {
         let before = self.tabs.active;
         self.park_active_session();
-        let display = format!("{}/{rel}", checkout_leaf(&checkout));
+        let display = format!("{checkout}/{rel}");
         let opened = self
             .tabs
             .open_or_focus_file(checkout.clone(), rel.clone(), display);

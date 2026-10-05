@@ -51,8 +51,9 @@ const SKIPPED_COMPONENTS: [&str; 3] = [".git", "target", "node_modules"];
 pub struct IndexRoot {
     /// Snapshot `repo` path of the checkout, relative to the workspace cwd.
     pub checkout: String,
-    /// Display prefix for this root's files: `""`, or `"<leaf>/"` when the
-    /// index spans several checkouts.
+    /// Display prefix for this root's files: `""`, or `"<checkout>/"` (the
+    /// snapshot `repo` path, unique per checkout) when the index spans
+    /// several checkouts.
     pub prefix: String,
 }
 
@@ -79,7 +80,7 @@ impl FileEntry {
 pub struct FileIndex {
     /// Checkouts this index lists, in request order.
     pub roots: Vec<IndexRoot>,
-    /// Listed files, sorted and deduplicated by `display`.
+    /// Listed files, sorted by `display`, deduplicated per root.
     pub entries: Vec<FileEntry>,
     /// True when listing stopped at the entry cap.
     pub truncated: bool,
@@ -110,8 +111,9 @@ pub fn keep_listed_path(rel: &str) -> bool {
 /// [`keep_listed_path`], then only paths that exist and are not a
 /// directory (`symlink_metadata`). That drops deleted-but-indexed files and
 /// submodule directories. Listing stops at `max_entries` and sets
-/// `truncated`. Entries are then sorted by `display` and deduplicated
-/// (an unmerged path repeats once per index stage).
+/// `truncated`. Entries are then sorted by `display` (root order on a tie)
+/// and deduplicated on `(root, display)`: an unmerged path repeats once
+/// per index stage, while two roots that show the same `display` both stay.
 pub fn build_file_index(cwd: &Path, roots: Vec<IndexRoot>, max_entries: usize) -> FileIndex {
     let mut index = FileIndex {
         roots,
@@ -150,8 +152,12 @@ pub fn build_file_index(cwd: &Path, roots: Vec<IndexRoot>, max_entries: usize) -
             });
         }
     }
-    index.entries.sort_by(|a, b| a.display.cmp(&b.display));
-    index.entries.dedup_by(|a, b| a.display == b.display);
+    index
+        .entries
+        .sort_by(|a, b| a.display.cmp(&b.display).then(a.root.cmp(&b.root)));
+    index
+        .entries
+        .dedup_by(|a, b| a.root == b.root && a.display == b.display);
     index
 }
 
@@ -491,6 +497,54 @@ mod tests {
         let lib_entry = &index.entries[1];
         assert_eq!(lib_entry.rel(), "README.md");
         assert_eq!(index.checkout(lib_entry), "lib");
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn same_display_in_two_roots_keeps_both() {
+        let cwd = unique_dir("ws-file-index-same-display");
+        init_repo(&cwd.join("web"));
+        init_repo(&cwd.join("legacy/web"));
+
+        let index = build_file_index(
+            &cwd,
+            vec![root("web", "web/"), root("legacy/web", "web/")],
+            MAX_INDEX_ENTRIES,
+        );
+        let listed: Vec<(&str, &str)> = index
+            .entries
+            .iter()
+            .map(|entry| (entry.display.as_str(), index.checkout(entry)))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![("web/README.md", "web"), ("web/README.md", "legacy/web")],
+            "dedup is per root; ties keep root order"
+        );
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn unmerged_path_lists_once_per_root() {
+        let (cwd, app) = workspace_with_app("unmerged");
+        git(&app, &["checkout", "-q", "-b", "topic"]);
+        write(&app, "README.md", "# topic\n");
+        git(&app, &["commit", "-q", "-am", "topic"]);
+        git(&app, &["checkout", "-q", "main"]);
+        write(&app, "README.md", "# main\n");
+        git(&app, &["commit", "-q", "-am", "main"]);
+        assert_eq!(
+            git::merge_into_head("topic", &app),
+            git::MergeIntoHeadResult::Conflict
+        );
+        let raw = git::list_checkout_files(&app).expect("ls-files");
+        assert!(
+            raw.iter().filter(|path| *path == "README.md").count() > 1,
+            "one line per index stage: {raw:?}"
+        );
+
+        let index = build_file_index(&cwd, vec![root("app", "app/")], MAX_INDEX_ENTRIES);
+        assert_eq!(displays(&index), vec!["app/README.md"]);
         let _ = fs::remove_dir_all(&cwd);
     }
 

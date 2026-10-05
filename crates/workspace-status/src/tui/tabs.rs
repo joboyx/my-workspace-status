@@ -511,7 +511,8 @@ pub struct FileTab {
     pub checkout: String,
     /// Path relative to [`Self::checkout`]. Identity with the checkout.
     pub rel: String,
-    /// Pane title: `<checkout leaf>/<rel>`.
+    /// Pane title: `<checkout>/<rel>` (snapshot `repo` path, unique per
+    /// checkout).
     pub display: String,
     /// Loaded body. `None` while a load is in flight.
     pub body: Option<Arc<FileRead>>,

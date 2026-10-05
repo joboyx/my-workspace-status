@@ -18,7 +18,6 @@ use super::super::quick_open::{
     commands_filter, FileIndexState, QuickOpenMode, QuickOpenScope, QuickOpenState, NO_FILE_MATCHES,
 };
 use super::super::status::StatusMessage;
-use super::super::tabs::checkout_leaf;
 use super::{visible_snapshot, AppState, FocusPane};
 
 impl AppState {
@@ -69,7 +68,8 @@ impl AppState {
     /// Index roots for `scope`.
     ///
     /// Workspace: every primary checkout of the visible snapshot, each
-    /// prefixed `<leaf>/`. One checkout: that checkout, no prefix.
+    /// prefixed with its snapshot `repo` path plus `/` (unique per checkout,
+    /// unlike the leaf). One checkout: that checkout, no prefix.
     pub(crate) fn quick_open_roots(&self, scope: &QuickOpenScope) -> Vec<IndexRoot> {
         match scope {
             QuickOpenScope::Workspace => visible_snapshot(&self.snapshot, self.show_ignored)
@@ -77,7 +77,7 @@ impl AppState {
                 .into_iter()
                 .filter(|repo| repo.checkout_kind == CheckoutKind::Primary)
                 .map(|repo| IndexRoot {
-                    prefix: format!("{}/", checkout_leaf(&repo.repo)),
+                    prefix: format!("{}/", repo.repo),
                     checkout: repo.repo,
                 })
                 .collect(),
@@ -384,8 +384,11 @@ mod tests {
 
     use super::super::super::tree::NodeKind;
     use super::*;
-    use crate::file_index::FileEntry;
+    use crate::file_index::{
+        build_file_index, score_files, FileEntry, MAX_INDEX_ENTRIES, MAX_RESULTS,
+    };
     use crate::snapshot::{build_workspace_snapshot, FileChange, RepoSnapshot, SyncStatus};
+    use crate::testutil::{init_repo, unique_dir};
 
     fn repo(name: &str, kind: CheckoutKind, primary: Option<&str>) -> RepoSnapshot {
         RepoSnapshot {
@@ -602,7 +605,7 @@ mod tests {
                     prefix: "lib/".into(),
                 },
             ],
-            "primary checkouts only, each prefixed with its leaf"
+            "primary checkouts only, each prefixed with its repo path"
         );
 
         focus_row(&mut app, NodeKind::Repo, Some("app"));
@@ -633,6 +636,99 @@ mod tests {
             QuickOpenScope::Checkout(linked.into()),
             "a compare tab scopes to its checkout"
         );
+    }
+
+    /// Map a plain key press the way the event loop does, then dispatch it.
+    fn press(app: &mut AppState, c: char) {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let event = Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        let action = crate::tui::app::map_event(app, &event);
+        app.dispatch(action);
+    }
+
+    #[test]
+    fn angle_keys_type_in_quick_open_and_resize_the_tree_after_esc() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = family_state();
+        app.layout.term_cols = 140;
+        let fraction = app.tree_fraction;
+
+        press(&mut app, ':');
+        assert!(app.quick_open.is_some(), "`:` opens Quick Open");
+        press(&mut app, '>');
+        press(&mut app, '<');
+        assert_eq!(quick(&app).query, "><", "both keys type into the query");
+        assert_eq!(app.tree_fraction, fraction, "no resize while open");
+
+        let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let action = crate::tui::app::map_event(&app, &esc);
+        app.dispatch(action);
+        assert!(app.quick_open.is_none(), "Esc closes Quick Open");
+
+        press(&mut app, '<');
+        assert!(app.tree_fraction < fraction, "`<` narrows the tree again");
+    }
+
+    /// Two primaries that share the leaf `web`, each with a `README.md`:
+    /// workspace Quick Open lists both under their repo path and Enter
+    /// opens the picked checkout's file.
+    #[test]
+    fn workspace_scope_keeps_same_leaf_checkouts_apart() {
+        let cwd = unique_dir("ws-quick-open-same-leaf");
+        let (clients, legacy) = ("clients/a/web", "legacy/web");
+        init_repo(&cwd.join(clients));
+        init_repo(&cwd.join(legacy));
+        let snapshot = build_workspace_snapshot(
+            &[
+                repo(clients, CheckoutKind::Primary, None),
+                repo(legacy, CheckoutKind::Primary, None),
+            ],
+            &[],
+            false,
+            &[],
+        );
+        let mut app = AppState::new(cwd.clone(), snapshot, true);
+        focus_row(&mut app, NodeKind::Workspace, None);
+
+        let (gen, roots) = match app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Files)) {
+            Effect::LoadFileIndex { gen, roots } => (gen, roots),
+            other => panic!("expected an index load, got {other:?}"),
+        };
+        let prefixes: Vec<&str> = roots.iter().map(|root| root.prefix.as_str()).collect();
+        assert_eq!(prefixes, vec!["clients/a/web/", "legacy/web/"]);
+
+        let index = build_file_index(&cwd, roots, MAX_INDEX_ENTRIES);
+        let listed: Vec<(&str, &str, &str)> = index
+            .entries
+            .iter()
+            .map(|entry| (entry.display.as_str(), index.checkout(entry), entry.rel()))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("clients/a/web/README.md", clients, "README.md"),
+                ("legacy/web/README.md", legacy, "README.md"),
+            ],
+            "same rel in two same-leaf checkouts: two entries"
+        );
+
+        app.apply_file_index(gen, index);
+        let Effect::ScoreFiles { gen, index, query } = type_text(&mut app, "legacy readme") else {
+            panic!("expected a score");
+        };
+        let hits = score_files(&index, &query, MAX_RESULTS);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        app.apply_file_score(gen, hits);
+        let effect = app.dispatch(Action::QuickOpenSubmit);
+        assert!(
+            matches!(effect, Effect::LoadFileTab { ref repo, ref path, .. }
+                if repo == legacy && path == "README.md"),
+            "{effect:?}"
+        );
+        let tab = app.tabs.active_file().expect("file tab");
+        assert_eq!(tab.checkout, legacy);
+        assert_eq!(tab.display, "legacy/web/README.md");
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 
     #[test]

@@ -422,7 +422,8 @@ fn file_view_scroll(
 }
 
 /// The active file tab: one bordered pane over the full width, titled with
-/// `<checkout leaf>/<rel>`, with line numbers and highlighted code.
+/// `<checkout>/<rel>` (snapshot `repo` path), with line numbers and
+/// highlighted code.
 fn draw_file_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let palette = state.theme.palette();
     let Some(tab) = state.tabs.active_file() else {

@@ -2801,18 +2801,6 @@ mod tests {
     }
 
     #[test]
-    fn angle_keys_resize_tree_when_quick_open_closed() {
-        assert_eq!(
-            event_to_action(&key(KeyCode::Char('<')), normal(), false, false),
-            Action::ResizeTree(-1)
-        );
-        assert_eq!(
-            event_to_action(&key(KeyCode::Char('>')), normal(), false, false),
-            Action::ResizeTree(1)
-        );
-    }
-
-    #[test]
     fn overlays_do_not_open_quick_open_on_ctrl_k_or_colon() {
         use super::super::action::QuickOpenEntry;
         let overlays = [
