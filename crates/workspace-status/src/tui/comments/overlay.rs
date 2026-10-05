@@ -22,7 +22,8 @@ pub fn comment_overlay_footer_save(resolved: bool) -> String {
 pub const COMMENT_OVERLAY_FOOTER_EDIT: &str =
     "Shift-Enter newline · Ctrl-a/e line · Ctrl-Left/Right word";
 
-/// Border (2) + title + target + two footer rows. Body lines add to this.
+/// Border (2) + title + target + two footer rows. The dialog adds room for
+/// [`COMMENT_OVERLAY_MAX_BODY_LINES`] body lines.
 pub const COMMENT_OVERLAY_CHROME_ROWS: u16 = 6;
 
 /// Visible body lines inside the box. Extra lines scroll around the caret.
@@ -85,11 +86,6 @@ impl CommentPrompt {
     /// Line count (always ≥ 1).
     pub fn line_count(&self) -> usize {
         self.textarea.lines().len().max(1)
-    }
-
-    /// Overlay height including borders. Idle status does not add a row.
-    pub fn overlay_rows(&self) -> u16 {
-        COMMENT_OVERLAY_CHROME_ROWS + self.visible_line_count() as u16
     }
 
     /// Body lines painted in the box, clamped to [`COMMENT_OVERLAY_MAX_BODY_LINES`].
@@ -354,7 +350,7 @@ mod tests {
         assert_eq!(prompt.body(), "one\ntwo");
         assert_eq!(prompt.cursor(), (1, 3));
         assert_eq!(prompt.line_count(), 2);
-        assert_eq!(prompt.overlay_rows(), 8);
+        assert_eq!(prompt.visible_line_count(), 2);
     }
 
     #[test]

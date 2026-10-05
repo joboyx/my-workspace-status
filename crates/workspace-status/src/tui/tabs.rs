@@ -1,10 +1,14 @@
-//! Session tab strip: permanent Workspace plus compare tabs.
+//! Session tab strip: permanent Workspace plus compare and file tabs.
 //!
-//! Compare identity is `(checkout_path, base_ref, head_ref)`. Tabs are
-//! session-only.
+//! Compare identity is `(checkout_path, base_ref, head_ref)`; file identity
+//! is `(checkout, rel)`. Both kinds share one strip in creation order and
+//! one id counter. Tabs are session-only.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
+
+use crate::file_index::FileRead;
 
 use super::diff::DiffContent;
 use super::drill::{CommitFile, CommitFileSource};
@@ -26,8 +30,17 @@ pub const WORKSPACE_TAB_CANNOT_CLOSE: &str = "Workspace tab cannot be closed";
 
 /// `gt` / `gT` and the Next / Previous tab palette rows with no compare tab.
 pub const ONLY_WORKSPACE_TAB_OPEN: &str = "only the Workspace tab is open";
-/// Mutation disable copy on a compare tab.
+/// Mutation disable copy on a compare or file tab.
 pub const SWITCH_TO_WORKSPACE_TAB: &str = "Switch to Workspace tab";
+/// File tab body for a file with a NUL byte near the start.
+pub const FILE_IS_BINARY: &str = "binary file — e opens it in the editor";
+
+/// File tab body for a file over the 2 MiB read cap:
+/// `file is over 2 MiB (X.Y MiB) — e opens it in the editor`.
+pub fn file_too_large(bytes: u64) -> String {
+    let mib = bytes as f64 / (1024.0 * 1024.0);
+    format!("file is over 2 MiB ({mib:.1} MiB) — e opens it in the editor")
+}
 /// Stage disable copy on a compare tab (whole file or highlighted lines).
 pub const CANNOT_STAGE_COMPARE: &str = "cannot stage a compare diff";
 /// Unstage disable copy on a compare tab (whole file or highlighted lines).
@@ -483,12 +496,141 @@ impl CompareTab {
     }
 }
 
-/// Permanent Workspace plus compare tabs in creation order.
+/// Columns of the file tab line-number gutter: the digits of
+/// `line_count` plus one blank separator column.
+pub fn file_gutter_width(line_count: usize) -> usize {
+    line_count.max(1).to_string().len() + 1
+}
+
+/// One session-only read-only file tab.
+#[derive(Clone, Debug)]
+pub struct FileTab {
+    /// Stable id for in-flight loads (shared counter with compare tabs).
+    pub id: u64,
+    /// Checkout path (same string as snapshot `repo`).
+    pub checkout: String,
+    /// Path relative to [`Self::checkout`]. Identity with the checkout.
+    pub rel: String,
+    /// Pane title: `<checkout>/<rel>` (snapshot `repo` path, unique per
+    /// checkout).
+    pub display: String,
+    /// Loaded body. `None` while a load is in flight.
+    pub body: Option<Arc<FileRead>>,
+    /// Load generation. A result for an older generation is dropped.
+    pub generation: u64,
+    /// Focused 0-based line.
+    pub cursor: usize,
+    /// First painted line.
+    pub scroll: usize,
+    /// Horizontal pan of the code columns.
+    pub col_offset: u16,
+    /// Parked `/` typing state while another tab is active.
+    pub search_mode: bool,
+    /// Parked armed-search flag.
+    pub search_active: bool,
+    /// Parked search query.
+    pub search_query: String,
+    /// Line of the last search match.
+    pub search_hit: Option<usize>,
+}
+
+impl FileTab {
+    fn new(id: u64, checkout: String, rel: String, display: String) -> Self {
+        Self {
+            id,
+            checkout,
+            rel,
+            display,
+            body: None,
+            generation: 0,
+            cursor: 0,
+            scroll: 0,
+            col_offset: 0,
+            search_mode: false,
+            search_active: false,
+            search_query: String::new(),
+            search_hit: None,
+        }
+    }
+
+    /// Strip label: the file name of [`Self::rel`].
+    pub fn label(&self) -> String {
+        checkout_leaf(&self.rel)
+    }
+
+    /// Painted lines. Empty unless the body loaded as text.
+    pub fn lines(&self) -> &[String] {
+        match self.body.as_deref() {
+            Some(FileRead::Text { lines, .. }) => lines,
+            _ => &[],
+        }
+    }
+
+    /// Bump the load generation and drop the body (loading again).
+    pub fn bump_generation(&mut self) -> u64 {
+        self.generation = self.generation.saturating_add(1);
+        self.body = None;
+        self.generation
+    }
+}
+
+/// One tab after Workspace: a compare tab or a file tab.
+#[derive(Clone, Debug)]
+pub enum SessionTab {
+    /// Committed-range compare tab.
+    Compare(CompareTab),
+    /// Read-only file viewer tab.
+    File(FileTab),
+}
+
+impl SessionTab {
+    /// Strip label.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Compare(tab) => tab.label(),
+            Self::File(tab) => tab.label(),
+        }
+    }
+
+    /// The compare tab, if this is one.
+    pub fn as_compare(&self) -> Option<&CompareTab> {
+        match self {
+            Self::Compare(tab) => Some(tab),
+            Self::File(_) => None,
+        }
+    }
+
+    /// Mutable [`Self::as_compare`].
+    pub fn as_compare_mut(&mut self) -> Option<&mut CompareTab> {
+        match self {
+            Self::Compare(tab) => Some(tab),
+            Self::File(_) => None,
+        }
+    }
+
+    /// The file tab, if this is one.
+    pub fn as_file(&self) -> Option<&FileTab> {
+        match self {
+            Self::File(tab) => Some(tab),
+            Self::Compare(_) => None,
+        }
+    }
+
+    /// Mutable [`Self::as_file`].
+    pub fn as_file_mut(&mut self) -> Option<&mut FileTab> {
+        match self {
+            Self::File(tab) => Some(tab),
+            Self::Compare(_) => None,
+        }
+    }
+}
+
+/// Permanent Workspace plus compare and file tabs in creation order.
 #[derive(Clone, Debug)]
 pub struct TabStrip {
-    /// 0 is Workspace. Compare tabs follow.
+    /// 0 is Workspace. Session tabs follow.
     pub active: usize,
-    pub compare: Vec<CompareTab>,
+    tabs: Vec<SessionTab>,
     /// Commit-file list mode a new compare tab opens in: directory tree
     /// (`true`) or flat paths. The launch `viewDefaults.commitTree`, else
     /// `true`. The `t` toggle changes one tab only, never this default.
@@ -500,7 +642,7 @@ impl Default for TabStrip {
     fn default() -> Self {
         Self {
             active: 0,
-            compare: Vec::new(),
+            tabs: Vec::new(),
             commit_tree_default: true,
             next_id: 1,
         }
@@ -510,7 +652,7 @@ impl Default for TabStrip {
 impl TabStrip {
     /// Tab count including Workspace.
     pub fn len(&self) -> usize {
-        self.compare.len() + 1
+        self.tabs.len() + 1
     }
 
     /// True when the Workspace tab is active.
@@ -518,35 +660,83 @@ impl TabStrip {
         self.active == 0
     }
 
+    fn active_tab(&self) -> Option<&SessionTab> {
+        self.active.checked_sub(1).and_then(|i| self.tabs.get(i))
+    }
+
+    fn active_tab_mut(&mut self) -> Option<&mut SessionTab> {
+        self.active
+            .checked_sub(1)
+            .and_then(|i| self.tabs.get_mut(i))
+    }
+
     /// Active compare tab, if any.
     pub fn active_compare(&self) -> Option<&CompareTab> {
-        self.active.checked_sub(1).and_then(|i| self.compare.get(i))
+        self.active_tab().and_then(SessionTab::as_compare)
     }
 
     /// Mutable active compare tab, if any.
     pub fn active_compare_mut(&mut self) -> Option<&mut CompareTab> {
-        self.active
-            .checked_sub(1)
-            .and_then(|i| self.compare.get_mut(i))
+        self.active_tab_mut().and_then(SessionTab::as_compare_mut)
+    }
+
+    /// Active file tab, if any.
+    pub fn active_file(&self) -> Option<&FileTab> {
+        self.active_tab().and_then(SessionTab::as_file)
+    }
+
+    /// Mutable active file tab, if any.
+    pub fn active_file_mut(&mut self) -> Option<&mut FileTab> {
+        self.active_tab_mut().and_then(SessionTab::as_file_mut)
+    }
+
+    /// Every compare tab in strip order.
+    pub fn compare_tabs(&self) -> impl Iterator<Item = &CompareTab> {
+        self.tabs.iter().filter_map(SessionTab::as_compare)
+    }
+
+    #[cfg(test)]
+    /// Count of open compare tabs.
+    pub fn compare_count(&self) -> usize {
+        self.compare_tabs().count()
     }
 
     /// Strip labels in paint order.
     pub fn labels(&self) -> Vec<String> {
         let mut out = vec!["Workspace".to_string()];
-        out.extend(self.compare.iter().map(CompareTab::label));
+        out.extend(self.tabs.iter().map(SessionTab::label));
         out
     }
 
-    /// Find a tab by identity. `0` is never returned (Workspace).
+    /// Find a compare tab by identity. `0` is never returned (Workspace).
     pub fn find(&self, checkout_path: &str, base_ref: &str, head_ref: &str) -> Option<usize> {
-        self.compare
+        self.tabs
             .iter()
             .position(|tab| {
-                tab.checkout_path == checkout_path
-                    && tab.base_ref == base_ref
-                    && tab.head_ref == head_ref
+                tab.as_compare().is_some_and(|tab| {
+                    tab.checkout_path == checkout_path
+                        && tab.base_ref == base_ref
+                        && tab.head_ref == head_ref
+                })
             })
             .map(|i| i + 1)
+    }
+
+    /// Find a file tab by identity. `0` is never returned (Workspace).
+    pub fn find_file(&self, checkout: &str, rel: &str) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|tab| {
+                tab.as_file()
+                    .is_some_and(|tab| tab.checkout == checkout && tab.rel == rel)
+            })
+            .map(|i| i + 1)
+    }
+
+    fn take_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        id
     }
 
     /// Focus an existing identity or append a new compare tab.
@@ -560,41 +750,60 @@ impl TabStrip {
             self.active = index;
             return OpenCompare::Focused;
         }
-        let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
-        self.compare.push(CompareTab::new(
+        let id = self.take_id();
+        self.tabs.push(SessionTab::Compare(CompareTab::new(
             id,
             checkout_path,
             base_ref,
             head_ref,
             self.commit_tree_default,
-        ));
-        self.active = self.compare.len();
+        )));
+        self.active = self.tabs.len();
         OpenCompare::Created(id)
     }
 
+    /// Focus the file tab for `(checkout, rel)` or append a new one that
+    /// paints `display` as its pane title.
+    pub fn open_or_focus_file(
+        &mut self,
+        checkout: String,
+        rel: String,
+        display: String,
+    ) -> OpenFile {
+        if let Some(index) = self.find_file(&checkout, &rel) {
+            self.active = index;
+            return OpenFile::Focused;
+        }
+        let id = self.take_id();
+        self.tabs
+            .push(SessionTab::File(FileTab::new(id, checkout, rel, display)));
+        self.active = self.tabs.len();
+        OpenFile::Created(id)
+    }
+
     #[cfg(test)]
-    /// Close the active compare tab. Workspace is a no-op.
+    /// Close the active session tab. Workspace is a no-op.
     ///
     /// Activates the tab immediately to the left.
-    pub fn close_active_compare(&mut self) -> bool {
+    pub fn close_active(&mut self) -> bool {
         self.close_at(self.active)
     }
 
-    /// Close the compare tab at strip `index`. `0` (Workspace) is a no-op.
+    /// Close the compare or file tab at strip `index`. `0` (Workspace) is a
+    /// no-op.
     ///
     /// Closing the active tab activates the tab immediately to the left.
     /// Closing a tab left of the active tab shifts `active` down by one.
     pub fn close_at(&mut self, index: usize) -> bool {
-        let Some(cmp_i) = index.checked_sub(1) else {
+        let Some(tab_i) = index.checked_sub(1) else {
             return false;
         };
-        if cmp_i >= self.compare.len() {
+        if tab_i >= self.tabs.len() {
             return false;
         }
-        self.compare.remove(cmp_i);
+        self.tabs.remove(tab_i);
         match self.active.cmp(&index) {
-            std::cmp::Ordering::Equal => self.active = cmp_i,
+            std::cmp::Ordering::Equal => self.active = tab_i,
             std::cmp::Ordering::Greater => self.active -= 1,
             std::cmp::Ordering::Less => {}
         }
@@ -638,13 +847,33 @@ impl TabStrip {
 
     /// Compare tab by stable id.
     pub fn get_id(&self, id: u64) -> Option<&CompareTab> {
-        self.compare.iter().find(|tab| tab.id == id)
+        self.compare_tabs().find(|tab| tab.id == id)
     }
 
     /// Mutable compare tab by stable id.
     pub fn get_id_mut(&mut self, id: u64) -> Option<&mut CompareTab> {
-        self.compare.iter_mut().find(|tab| tab.id == id)
+        self.tabs
+            .iter_mut()
+            .filter_map(SessionTab::as_compare_mut)
+            .find(|tab| tab.id == id)
     }
+
+    /// Mutable file tab by stable id.
+    pub fn get_file_id_mut(&mut self, id: u64) -> Option<&mut FileTab> {
+        self.tabs
+            .iter_mut()
+            .filter_map(SessionTab::as_file_mut)
+            .find(|tab| tab.id == id)
+    }
+}
+
+/// Result of [`TabStrip::open_or_focus_file`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenFile {
+    /// Existing identity. State is unchanged.
+    Focused,
+    /// New tab that still needs a load.
+    Created(u64),
 }
 
 /// Result of [`TabStrip::open_or_focus`].
@@ -682,11 +911,11 @@ mod tests {
         tabs.open_or_focus("app".into(), "origin/main".into(), "HEAD".into());
         tabs.open_or_focus("app".into(), "develop".into(), "HEAD".into());
         assert_eq!(tabs.active, 2);
-        assert!(tabs.close_active_compare());
+        assert!(tabs.close_active());
         assert_eq!(tabs.active, 1);
-        assert!(tabs.close_active_compare());
+        assert!(tabs.close_active());
         assert!(tabs.is_workspace());
-        assert!(!tabs.close_active_compare());
+        assert!(!tabs.close_active());
         assert!(tabs.is_workspace());
     }
 
@@ -716,11 +945,84 @@ mod tests {
         assert_eq!(tabs.active, 2);
         assert!(!tabs.close_at(0));
         assert_eq!(tabs.active, 2);
-        assert_eq!(tabs.compare.len(), 2);
+        assert_eq!(tabs.compare_count(), 2);
         assert!(tabs.close_at(1));
         assert_eq!(tabs.active, 1);
-        assert_eq!(tabs.compare.len(), 1);
+        assert_eq!(tabs.compare_count(), 1);
         assert_eq!(tabs.labels()[1], "app ↔ b");
+    }
+
+    #[test]
+    fn file_tab_identity_reopen_focuses() {
+        let mut tabs = TabStrip::default();
+        let open = |tabs: &mut TabStrip| {
+            tabs.open_or_focus_file("app".into(), "src/main.rs".into(), "app/src/main.rs".into())
+        };
+        assert_eq!(open(&mut tabs), OpenFile::Created(1));
+        tabs.active_file_mut().unwrap().cursor = 4;
+        tabs.active = 0;
+        assert_eq!(open(&mut tabs), OpenFile::Focused);
+        assert_eq!(tabs.active, 1);
+        assert_eq!(tabs.active_file().unwrap().cursor, 4);
+        assert_eq!(tabs.labels()[1], "main.rs");
+        assert_eq!(
+            tabs.open_or_focus_file("lib".into(), "src/main.rs".into(), "lib/src/main.rs".into()),
+            OpenFile::Created(2),
+            "same path in another checkout is another tab"
+        );
+    }
+
+    #[test]
+    fn strip_keeps_creation_order_across_kinds() {
+        let mut tabs = TabStrip::default();
+        tabs.open_or_focus_file("app".into(), "README.md".into(), "app/README.md".into());
+        assert_eq!(
+            tabs.open_or_focus("app".into(), "main".into(), COMPARE_HEAD_REF.into()),
+            OpenCompare::Created(2),
+            "one id counter for both kinds"
+        );
+        assert_eq!(tabs.labels(), vec!["Workspace", "README.md", "app ↔ main"]);
+        tabs.active = 1;
+        assert!(tabs.active_compare().is_none());
+        assert!(tabs.active_file().is_some());
+        tabs.active = 2;
+        assert!(tabs.active_compare().is_some());
+        assert!(tabs.active_file().is_none());
+        assert_eq!(tabs.find("app", "main", COMPARE_HEAD_REF), Some(2));
+        assert_eq!(
+            tabs.get_id(2).map(|tab| tab.base_ref.as_str()),
+            Some("main")
+        );
+        assert!(tabs.get_id(1).is_none(), "id 1 is the file tab");
+
+        tabs.active = 1;
+        assert!(tabs.close_at(1));
+        assert!(tabs.is_workspace(), "closing the active tab activates left");
+        assert_eq!(tabs.labels(), vec!["Workspace", "app ↔ main"]);
+        assert_eq!(tabs.compare_count(), 1);
+        assert_eq!(tabs.find("app", "main", COMPARE_HEAD_REF), Some(1));
+    }
+
+    #[test]
+    fn file_tab_lines_and_too_large_copy() {
+        let mut tabs = TabStrip::default();
+        tabs.open_or_focus_file("app".into(), "a.txt".into(), "app/a.txt".into());
+        let tab = tabs.active_file_mut().unwrap();
+        assert!(tab.lines().is_empty(), "loading");
+        tab.body = Some(Arc::new(FileRead::Text {
+            lines: vec!["one".into(), "two".into()],
+            max_cols: 3,
+        }));
+        assert_eq!(tab.lines(), ["one", "two"]);
+        assert_eq!(tab.bump_generation(), 1);
+        assert!(tab.body.is_none());
+        assert_eq!(
+            file_too_large(3 * 1024 * 1024 + 512 * 1024),
+            "file is over 2 MiB (3.5 MiB) — e opens it in the editor"
+        );
+        assert_eq!(file_gutter_width(9), 2);
+        assert_eq!(file_gutter_width(10), 3);
+        assert_eq!(file_gutter_width(0), 2);
     }
 
     #[test]

@@ -450,11 +450,17 @@ pub fn focusbox_graph_right_full(screen: &str) -> bool {
 ///
 /// The overlay covers the status row, so crumb/status helpers do not apply.
 pub fn graph_focus_overlay_open(screen: &str) -> bool {
+    graph_focus_overlay_chrome(screen) && screen.contains("topic/noise")
+}
+
+/// Focus branches dialog chrome, whatever the filter hides. The centered
+/// dialog covers the graph rows behind it, so `topic/noise` shows only
+/// while the list itself has that row.
+fn graph_focus_overlay_chrome(screen: &str) -> bool {
     panes_tree_unfocused_graph_focused(screen)
         && screen.contains("Focus branches")
         && screen.contains("filter:")
         && screen.contains("* feature/keep")
-        && screen.contains("topic/noise")
         && screen.contains("Enter apply")
         && screen.contains("Ctrl-o clear")
         && screen.contains("Esc cancel")
@@ -469,7 +475,7 @@ pub fn graph_focus_overlay_open(screen: &str) -> bool {
 /// Every letter types into the overlay filter. `feature` is unique to
 /// `feature/keep`.
 pub fn graph_focus_overlay_filtered_keep(screen: &str) -> bool {
-    graph_focus_overlay_open(screen)
+    graph_focus_overlay_chrome(screen)
         && screen.contains("filter: feature")
         && screen
             .lines()
@@ -1207,7 +1213,7 @@ pub fn open_compare_regions_in(tui: &mut PtySession) {
     tui.ctrl_letter('k');
     tui.wait_pred(
         |screen| screen.contains("Enter run"),
-        "Ctrl-k opens the command palette",
+        "Ctrl-k opens Quick Open commands",
         WAIT,
     );
     type_palette_filter(tui, "vs default");

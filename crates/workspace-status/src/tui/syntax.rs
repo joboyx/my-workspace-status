@@ -1,4 +1,4 @@
-//! File-aware syntax highlighting for painted diff cells.
+//! File-aware syntax highlighting for painted diff cells and file tabs.
 //!
 //! Language comes from the file path (basename, then extension), then an
 //! optional first-line shebang. Unknown paths use Plain Text.
@@ -24,6 +24,11 @@ use crate::helpers::visible_width;
 /// Skip highlighting past this many characters. The rest uses the fallback
 /// foreground. Stops a huge diff line from stalling a paint.
 const MAX_HIGHLIGHT_CHARS: usize = 4096;
+
+/// Lines a file-tab window feeds the highlighter above its first painted
+/// line, so a block comment or string opened just above starts in the
+/// right state without parsing the whole file.
+pub(crate) const FILE_HIGHLIGHT_LOOKBACK: usize = 200;
 
 /// WCAG contrast floor for syntax fg on an add/del row background.
 const ROW_BG_CONTRAST_FLOOR: f64 = 3.0;
@@ -321,6 +326,53 @@ pub(crate) fn highlight_diff_rows(
         }
     }
     DiffSyntaxSpans { left, right }
+}
+
+/// Token spans for the file-tab lines in `window`, one list per line.
+///
+/// One parse stream starts [`FILE_HIGHLIGHT_LOOKBACK`] lines above the
+/// window and runs to its end; only the window's spans are kept. Text past
+/// [`MAX_HIGHLIGHT_CHARS`] on a line uses `fallback`, as in diffs. The
+/// language comes from `path`, then the file's first line (shebang).
+pub(crate) fn highlight_file_window(
+    path: &str,
+    lines: &[String],
+    theme: ThemeId,
+    fallback: Color,
+    window: Range<usize>,
+) -> Vec<Vec<CodeSpan>> {
+    let end = window.end.min(lines.len());
+    let start = window.start.min(end);
+    let first = lines.first().map(String::as_str);
+    let finish = |raw| resolve_spans(raw, &[], fallback, None, None);
+    if is_plain_text(path, first) {
+        return lines[start..end]
+            .iter()
+            .map(|line| {
+                if line.is_empty() {
+                    Vec::new()
+                } else {
+                    finish(vec![(line.clone(), fallback)])
+                }
+            })
+            .collect();
+    }
+    let syntax = syntax_for(path, first);
+    let syn_theme = theme_set().get(syntect_theme_name(theme));
+    let mut highlighter = HighlightLines::new(syntax, syn_theme);
+    let mut out = Vec::with_capacity(end - start);
+    for (idx, line) in lines
+        .iter()
+        .enumerate()
+        .take(end)
+        .skip(start.saturating_sub(FILE_HIGHLIGHT_LOOKBACK))
+    {
+        let raw = feed_line(&mut highlighter, line, fallback);
+        if idx >= start {
+            out.push(finish(raw));
+        }
+    }
+    out
 }
 
 /// Reuse `cache` when `key` matches. Misses call [`highlight_diff_rows`]
@@ -938,6 +990,41 @@ mod tests {
             },
         ];
         assert_eq!(spans, expected);
+    }
+
+    #[test]
+    fn file_window_keeps_lookback_state_and_only_window_spans() {
+        let mut lines: Vec<String> = vec!["/* opened above".into()];
+        lines.extend((0..10).map(|i| format!("still comment {i}")));
+        lines.push("*/".into());
+        lines.push("fn main() {}".into());
+        let window = highlight_file_window("a.rs", &lines, ThemeId::TokyoNight, FALLBACK, 5..13);
+        assert_eq!(window.len(), 8);
+        let comment_fg = window[0][0].fg;
+        let alone =
+            highlight_file_window("a.rs", &lines[5..6], ThemeId::TokyoNight, FALLBACK, 0..1);
+        assert_ne!(alone[0][0].fg, comment_fg, "look-back sets comment state");
+        let code = &window[7];
+        assert_eq!(
+            code.iter()
+                .map(|span| span.text.as_str())
+                .collect::<String>(),
+            "fn main() {}"
+        );
+        assert!(code.len() > 1, "code after the comment is tokenised");
+
+        let plain = highlight_file_window(
+            "notes.unknownext",
+            &lines,
+            ThemeId::TokyoNight,
+            FALLBACK,
+            0..2,
+        );
+        assert_eq!(plain.len(), 2);
+        assert_eq!(plain[0][0].fg, FALLBACK);
+        assert!(
+            highlight_file_window("a.rs", &lines, ThemeId::TokyoNight, FALLBACK, 40..50).is_empty()
+        );
     }
 
     #[test]

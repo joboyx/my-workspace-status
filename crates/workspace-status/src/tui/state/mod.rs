@@ -3,7 +3,9 @@
 mod dispatch;
 mod dispatch_drill;
 mod dispatch_keymap;
+mod dispatch_quick_open;
 mod dispatch_write;
+mod file_tab;
 mod pan;
 
 use std::cell::RefCell;
@@ -34,7 +36,6 @@ use super::branches::{
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
 };
 use super::chrome::{diverged_pull_status, status_uses_status_text, STATUS_NO_COMMENTS};
-use super::command_palette::CommandPaletteState;
 #[cfg(not(test))]
 use super::comments::comment_store_path;
 use super::comments::{
@@ -71,6 +72,7 @@ use super::ops::{
     collect_write_files, format_running_op, op_is_kind_noop, op_kind_noop_reason, op_targets,
     push_targets, refresh_target, Op, RevertScope, RunningOp, ScopedFile,
 };
+use super::quick_open::QuickOpenState;
 use super::search::{
     collect_graph_match_indices, collect_match_ids, commit_file_row_match_indices,
     focus_commit_file_search, focus_diff_search, focus_graph_search, focus_tree_search,
@@ -217,11 +219,25 @@ pub struct LayoutHit {
     ///
     /// An overflow marker (`‹N` / `N›`) maps to its nearest hidden tab.
     pub tab_hits: Vec<(u16, u16, usize)>,
-    /// Close `[✗]` hit boxes for compare tabs. Workspace never has one.
+    /// Close `[✗]` hit boxes for compare and file tabs. Workspace never has one.
     pub tab_close_hits: Vec<(u16, u16, usize)>,
     /// First tab the strip painted. Kept across paints so the window only
     /// scrolls when the active tab would leave it. `0` when every tab fits.
     pub tab_scroll: usize,
+    /// Max help body scroll the last paint allowed. `0` when help is closed
+    /// or every body row fits.
+    pub help_scroll_max: usize,
+    /// 0-based first column of the painted file tab body (gutter included).
+    pub file_view_x: u16,
+    /// 0-based first row of the painted file tab body.
+    pub file_view_y: u16,
+    /// File tab body width, gutter included.
+    pub file_view_width: u16,
+    /// File tab body height in rows.
+    pub file_view_height: u16,
+    /// 0-based file line painted on each body row from
+    /// [`Self::file_view_y`] (a wrapped line repeats). Empty off a file tab.
+    pub file_view_row_lines: Vec<usize>,
 }
 
 impl Default for LayoutHit {
@@ -268,6 +284,12 @@ impl Default for LayoutHit {
             tab_hits: Vec::new(),
             tab_close_hits: Vec::new(),
             tab_scroll: 0,
+            help_scroll_max: 0,
+            file_view_x: 0,
+            file_view_y: 0,
+            file_view_width: 0,
+            file_view_height: 0,
+            file_view_row_lines: Vec::new(),
         }
     }
 }
@@ -295,9 +317,11 @@ struct SearchOrigin {
     commit_file_folds: HashSet<String>,
     diff_cursor: usize,
     diff_scroll: u16,
+    file_cursor: usize,
+    file_scroll: usize,
 }
 
-/// Workspace chrome parked while a compare tab is active.
+/// Workspace chrome parked while a compare or file tab is active.
 #[derive(Clone, Debug)]
 struct WorkspacePark {
     focus: FocusPane,
@@ -472,6 +496,15 @@ struct DiffSearchMemo {
     hits: Vec<usize>,
 }
 
+/// Memo for [`AppState::file_search_hits`].
+#[derive(Clone, Debug)]
+struct FileSearchMemo {
+    /// Tab id, load generation, case-folded query.
+    key: (u64, u64, String),
+    /// Shared with every caller of the frame, so a hit does not copy.
+    hits: std::rc::Rc<[usize]>,
+}
+
 /// Interactive session state. Dispatch is pure besides the returned [`Effect`].
 #[derive(Clone, Debug)]
 pub struct AppState {
@@ -490,6 +523,9 @@ pub struct AppState {
     pub cursor: usize,
     pub help_open: bool,
     pub help_search_query: Option<String>,
+    /// Help body rows scrolled off the top when the columns are taller
+    /// than the help dialog. Clamped to [`LayoutHit::help_scroll_max`].
+    pub help_scroll: usize,
     pub focus: FocusPane,
     /// Breadcrumb trailing slot / overlay status row ([`StatusMessage`]).
     pub status: StatusMessage,
@@ -552,8 +588,11 @@ pub struct AppState {
     /// Per-repo local branch names whose ancestors the graph shows. `None` = `--all`.
     pub graph_branch_focus: Option<(String, Vec<String>)>,
     pub create_branch: Option<CreateBranchState>,
-    pub command_palette: Option<CommandPaletteState>,
-    /// Permanent Workspace plus session compare tabs.
+    /// Open Quick Open overlay (`:` files, Ctrl-k / `>` commands).
+    pub quick_open: Option<QuickOpenState>,
+    /// Session counter for Quick Open index and score generations.
+    quick_open_gen: u64,
+    /// Permanent Workspace plus session compare and file tabs.
     pub tabs: TabStrip,
     pub compare_picker: Option<ComparePickerState>,
     /// Checkout waiting for [`Effect::PrepareComparePicker`]. Cleared on open or abandon.
@@ -603,6 +642,9 @@ pub struct AppState {
     /// Diff search hits for one (content, layout, query), so the status
     /// pill and the diff paint do not rebuild every diff row each frame.
     diff_search_memo: RefCell<Option<DiffSearchMemo>>,
+    /// File tab search hits for one (tab id, load generation, case-folded
+    /// query), so the status pill and the paint do not rescan the file.
+    file_search_memo: RefCell<Option<FileSearchMemo>>,
     /// [`Self::current_diff_rows`] calls, so tests can bound the row
     /// builds a frame or keypress costs on a large diff.
     #[cfg(test)]
@@ -653,6 +695,7 @@ impl AppState {
             cursor,
             help_open: false,
             help_search_query: None,
+            help_scroll: 0,
             focus: FocusPane::Left,
             status: StatusMessage::default(),
             graph: None,
@@ -697,7 +740,8 @@ impl AppState {
             graph_focus_picker: None,
             graph_branch_focus: None,
             create_branch: None,
-            command_palette: None,
+            quick_open: None,
+            quick_open_gen: 0,
             tabs: TabStrip::default(),
             compare_picker: None,
             compare_picker_pending: None,
@@ -728,6 +772,7 @@ impl AppState {
             ctrl_c_armed_until: None,
             last_click: None,
             diff_search_memo: RefCell::new(None),
+            file_search_memo: RefCell::new(None),
             #[cfg(test)]
             diff_row_builds: std::cell::Cell::new(0),
         };
@@ -791,8 +836,8 @@ impl AppState {
             InputMode::ComparePicker
         } else if self.graph_focus_picker.is_some() {
             InputMode::GraphFocusPicker
-        } else if self.command_palette.is_some() {
-            InputMode::CommandPalette
+        } else if self.quick_open.is_some() {
+            InputMode::QuickOpen
         } else if self.help_open {
             if self.help_search_query.is_some() {
                 InputMode::HelpSearch
@@ -853,11 +898,12 @@ impl AppState {
     }
 
     pub fn graph_stash_focused(&self) -> bool {
-        self.graph_pane_focused() && self.focused_graph_stash_ref().is_some()
+        !self.is_file_tab() && self.graph_pane_focused() && self.focused_graph_stash_ref().is_some()
     }
 
     pub fn graph_commit_focused(&self) -> bool {
-        self.graph_pane_focused()
+        !self.is_file_tab()
+            && self.graph_pane_focused()
             && matches!(self.focused_graph_row(), Some(GraphRow::Commit { .. }))
     }
 
@@ -865,9 +911,14 @@ impl AppState {
         self.is_compare_tab() || self.drill.is_files() || self.drill.is_diff()
     }
 
-    /// True when a compare tab (not Workspace) is active.
+    /// True when a compare tab is active.
     pub fn is_compare_tab(&self) -> bool {
-        !self.tabs.is_workspace()
+        self.tabs.active_compare().is_some()
+    }
+
+    /// True when a read-only file tab is active.
+    pub fn is_file_tab(&self) -> bool {
+        self.tabs.active_file().is_some()
     }
 
     /// ViewStack depth: 0 workspace or compare, 1 commit files, 2 commit diff.
@@ -886,6 +937,9 @@ impl AppState {
     /// tree, or a folder row of a focused commit-file list. File rows and
     /// other panes pan.
     pub(crate) fn hl_folds(&self) -> bool {
+        if self.is_file_tab() {
+            return false;
+        }
         match self.list_focus_target() {
             ListFocusTarget::Tree => true,
             ListFocusTarget::CommitFiles => self
@@ -1732,8 +1786,8 @@ impl AppState {
     /// Milliseconds until an info / ok status clears. Starts its clock the
     /// first time it is visible. `None` while an overlay paints `status`
     /// as its own text, or when the message does not expire. While `?`
-    /// help hides the breadcrumb the clock restarts, so the message gets
-    /// its full time once help closes.
+    /// help is open the clock restarts, so the message gets its full time
+    /// once help closes.
     pub fn status_expiry_ms(&mut self, now: Instant) -> Option<u64> {
         if self.help_open {
             self.status.restart_clock();
@@ -2164,7 +2218,7 @@ impl AppState {
     fn click(&mut self, col: u16, row: u16) -> Effect {
         self.text_selection = None;
         if let Some(index) = self.hit_tab_close(col, row) {
-            return self.close_compare_at(index);
+            return self.close_tab_at(index);
         }
         if let Some(index) = self.hit_tab(col, row) {
             return self.activate_tab(index);
@@ -2910,6 +2964,9 @@ impl AppState {
     }
 
     fn current_search_pane(&self) -> SearchPane {
+        if self.is_file_tab() {
+            return SearchPane::File;
+        }
         match self.list_focus_target() {
             ListFocusTarget::Tree => SearchPane::Tree,
             ListFocusTarget::Graph => SearchPane::Graph,
@@ -2996,6 +3053,7 @@ impl AppState {
             SearchPane::Graph => self.apply_graph_search(dir),
             SearchPane::CommitFiles => self.apply_commit_file_search(dir),
             SearchPane::Diff => self.apply_diff_search(dir),
+            SearchPane::File => self.apply_file_search(dir),
         };
         if wrapped {
             self.status = StatusMessage::info(if dir < 0 {
@@ -3071,6 +3129,14 @@ impl AppState {
                 (current, commit_file_row_match_indices(&rows, query))
             }
             SearchPane::Diff => (self.search_hit, self.diff_search_hits(query)),
+            SearchPane::File => {
+                let hits = self.file_search_hits(query);
+                let pos = self
+                    .tabs
+                    .active_file()
+                    .and_then(|tab| hits.binary_search(&tab.cursor).ok());
+                return Some((pos.map(|p| p + 1), hits.len()));
+            }
         };
         let pos = current.and_then(|cur| hits.iter().position(|hit| *hit == cur));
         Some((pos.map(|p| p + 1), hits.len()))
@@ -3087,6 +3153,8 @@ impl AppState {
             commit_file_folds: self.commit_file_folds.clone(),
             diff_cursor: self.diff_cursor,
             diff_scroll: self.diff_scroll,
+            file_cursor: self.tabs.active_file().map_or(0, |tab| tab.cursor),
+            file_scroll: self.tabs.active_file().map_or(0, |tab| tab.scroll),
         });
     }
 
@@ -3124,6 +3192,12 @@ impl AppState {
                 self.diff_cursor = origin.diff_cursor;
                 self.diff_scroll = origin.diff_scroll;
             }
+            SearchPane::File => {
+                if let Some(tab) = self.tabs.active_file_mut() {
+                    tab.cursor = origin.file_cursor;
+                    tab.scroll = origin.file_scroll;
+                }
+            }
         }
     }
 
@@ -3133,7 +3207,7 @@ impl AppState {
             SearchPane::Tree => Effect::LoadRightPane,
             SearchPane::Graph => self.follow_graph_files(),
             SearchPane::CommitFiles => self.maybe_load_focused_commit_diff(),
-            SearchPane::Diff => Effect::None,
+            SearchPane::Diff | SearchPane::File => Effect::None,
         }
     }
 
@@ -4002,6 +4076,15 @@ impl AppState {
     }
 
     fn current_entity_reference(&self) -> Option<EntityRef> {
+        if let Some(tab) = self.tabs.active_file() {
+            let primary = self
+                .snapshot
+                .repos
+                .iter()
+                .find(|repo| repo.repo == tab.checkout)
+                .and_then(|repo| repo.primary_repo.as_deref());
+            return Some(EntityRef::file(&tab.checkout, primary, tab.rel.clone()));
+        }
         match self.list_focus_target() {
             ListFocusTarget::None => {
                 let (repo, path, source) = self.open_diff_target()?;
@@ -5255,6 +5338,14 @@ impl AppState {
     }
 
     fn park_active_session(&mut self) {
+        // A file tab owns only its search; Workspace stays parked.
+        if let Some(tab) = self.tabs.active_file_mut() {
+            tab.search_mode = self.search_mode;
+            tab.search_active = self.search_active;
+            tab.search_query = self.search_query.clone();
+            tab.search_hit = self.search_hit;
+            return;
+        }
         if let Some(tab) = self.tabs.active_compare_mut() {
             tab.focus_right = self.focus == FocusPane::Right;
             tab.search_mode = self.search_mode;
@@ -5287,6 +5378,14 @@ impl AppState {
     }
 
     fn apply_active_session(&mut self) {
+        if let Some(tab) = self.tabs.active_file() {
+            self.search_mode = tab.search_mode;
+            self.search_active = tab.search_active;
+            self.search_query = tab.search_query.clone();
+            self.search_target = SearchPane::File;
+            self.search_hit = tab.search_hit;
+            return;
+        }
         if let Some(tab) = self.tabs.active_compare() {
             self.focus = if tab.focus_right {
                 FocusPane::Right
@@ -5501,11 +5600,12 @@ impl AppState {
         self.open_compare_tab(repo, format!("{commit_id}^"), commit_id)
     }
 
-    pub(crate) fn close_compare_tab(&mut self) -> Effect {
-        self.close_compare_at(self.tabs.active)
+    /// Close the active compare or file tab (Workspace refuses).
+    pub(crate) fn close_active_tab(&mut self) -> Effect {
+        self.close_tab_at(self.tabs.active)
     }
 
-    fn close_compare_at(&mut self, index: usize) -> Effect {
+    fn close_tab_at(&mut self, index: usize) -> Effect {
         if index == 0 {
             self.status = StatusMessage::warn(WORKSPACE_TAB_CANNOT_CLOSE);
             return Effect::None;
@@ -5808,8 +5908,7 @@ impl AppState {
 
     pub(crate) fn compare_probe_effects(&self) -> Vec<Effect> {
         self.tabs
-            .compare
-            .iter()
+            .compare_tabs()
             .filter(|tab| !tab.loading)
             .map(|tab| Effect::ProbeCompareTab {
                 tab_id: tab.id,
@@ -7716,7 +7815,7 @@ mod tests {
         let folds = app.folds.clone();
         app.diff_scroll = 7;
         match app.dispatch(Action::Edit) {
-            Effect::EditFile { repo, path } => {
+            Effect::EditFile { repo, path, .. } => {
                 assert_eq!(repo, "app");
                 assert_eq!(path, "README.md");
             }
@@ -7748,6 +7847,7 @@ mod tests {
             Effect::EditFile {
                 repo: "app".into(),
                 path: "README.md".into(),
+                line: None,
             }
         );
         assert_eq!(app.status, "opening README.md…");
@@ -8415,6 +8515,7 @@ mod tests {
             Effect::EditFile {
                 repo: "app".into(),
                 path: "src/view.rs".into(),
+                line: None,
             }
         );
     }
@@ -8793,7 +8894,7 @@ mod tests {
             Action::ExternalDiff,
             Action::Move(1),
             Action::ConfirmNo,
-            Action::CloseCompareTab,
+            Action::CloseTab,
         ];
 
         let mut app = state();
@@ -9577,7 +9678,7 @@ mod tests {
         app.dispatch(Action::DiffVisualStart);
         assert!(app.diff_visual_anchor.is_some());
         app.confirm = Some(stash_drop());
-        app.dispatch(Action::CloseCompareTab);
+        app.dispatch(Action::CloseTab);
         assert!(!app.is_compare_tab());
         assert_eq!(app.diff_visual_anchor, None);
         assert_eq!(app.confirm, None);
@@ -9964,12 +10065,12 @@ mod tests {
             Effect::None
         );
         assert_eq!(app.tabs.active, 1);
-        assert_eq!(app.tabs.compare.len(), 1);
+        assert_eq!(app.tabs.compare_count(), 1);
         app.layout.tab_close_hits = vec![(2, 3, 0)];
         assert_eq!(app.dispatch(Action::Click { col: 3, row: 0 }), Effect::None);
         assert_eq!(app.status, WORKSPACE_TAB_CANNOT_CLOSE);
         assert_eq!(app.tabs.active, 1);
-        assert_eq!(app.tabs.compare.len(), 1);
+        assert_eq!(app.tabs.compare_count(), 1);
     }
 
     #[test]
@@ -10075,7 +10176,7 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Left);
         assert_eq!(app.dispatch(Action::NavEsc), Effect::None);
         assert!(app.is_compare_tab());
-        assert_eq!(app.tabs.compare.len(), 1);
+        assert_eq!(app.tabs.compare_count(), 1);
         assert_eq!(app.tabs.active, 1);
     }
 
@@ -12283,11 +12384,11 @@ mod tests {
             Some(reason),
             "palette"
         );
-        let tabs = app.tabs.compare.len();
+        let tabs = app.tabs.compare_count();
         app.status.clear();
         assert_eq!(app.dispatch(Action::CompareCommitVsParent), Effect::None);
         assert_eq!(app.status, reason, "dispatch");
-        assert_eq!(app.tabs.compare.len(), tabs, "no tab opens");
+        assert_eq!(app.tabs.compare_count(), tabs, "no tab opens");
     }
 
     #[test]
@@ -12345,7 +12446,7 @@ mod tests {
         app.dispatch(Action::JumpToTab(1));
         focus_graph_commit(&mut app, CHILD_SHA);
         assert_eq!(app.dispatch(Action::CompareCommitVsParent), Effect::None);
-        assert_eq!(app.tabs.compare.len(), 1);
+        assert_eq!(app.tabs.compare_count(), 1);
         assert_eq!(app.tabs.active, 1);
     }
 
@@ -14936,7 +15037,7 @@ mod tests {
             *cursor = idx;
         }
         match app.dispatch(Action::Edit) {
-            Effect::EditFile { repo, path } => {
+            Effect::EditFile { repo, path, .. } => {
                 assert_eq!(repo, "app");
                 assert_eq!(path, "src/lib.rs");
             }
@@ -14958,7 +15059,7 @@ mod tests {
             DiffContent::from_lines(vec!["+fn x() {}".into()]),
         );
         match app.dispatch(Action::Edit) {
-            Effect::EditFile { repo, path } => {
+            Effect::EditFile { repo, path, .. } => {
                 assert_eq!(repo, "app");
                 assert_eq!(path, "src/lib.rs");
             }
@@ -16029,16 +16130,17 @@ diff --git a/README.md b/README.md
         assert_eq!(app.status, "nothing to revert in highlight");
     }
 
-    /// Open the palette, filter to `title`, and put the cursor on that row.
+    /// Open Quick Open in commands mode, filter to `title`, and put the
+    /// cursor on that row.
     fn palette_select(app: &mut AppState, title: &str) {
-        use super::super::action::PaletteOpenedBy;
-        if app.command_palette.is_none() {
-            app.dispatch(Action::ToggleCommandPalette(PaletteOpenedBy::Colon));
+        use super::super::action::QuickOpenEntry;
+        if app.quick_open.is_none() {
+            app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
         }
         for c in title.chars() {
-            app.dispatch(Action::CommandPaletteChar(c));
+            app.dispatch(Action::QuickOpenChar(c));
         }
-        let palette = app.command_palette.as_mut().expect("palette open");
+        let palette = app.command_palette_mut().expect("palette open");
         let index = palette
             .visible()
             .iter()
@@ -16055,13 +16157,13 @@ diff --git a/README.md b/README.md
         let anchor = app.diff_visual_anchor;
         let cursor = app.diff_cursor;
         assert_eq!(app.input_mode(), InputMode::DiffVisual);
-        app.dispatch(Action::ToggleCommandPalette(
-            super::super::action::PaletteOpenedBy::CtrlK,
+        app.dispatch(Action::ToggleQuickOpen(
+            super::super::action::QuickOpenEntry::Commands,
         ));
-        assert_eq!(app.input_mode(), InputMode::CommandPalette);
+        assert_eq!(app.input_mode(), InputMode::QuickOpen);
         assert_eq!(app.diff_visual_anchor, anchor, "open keeps the anchor");
-        app.dispatch(Action::CommandPaletteCancel);
-        assert!(app.command_palette.is_none());
+        app.dispatch(Action::QuickOpenCancel);
+        assert!(app.quick_open.is_none());
         assert_eq!(app.diff_visual_anchor, anchor, "Esc keeps the anchor");
         assert_eq!(app.diff_cursor, cursor);
         assert_eq!(app.input_mode(), InputMode::DiffVisual);
@@ -16069,13 +16171,13 @@ diff --git a/README.md b/README.md
 
     /// Open the palette, type `filter`, and return the row under the cursor.
     fn palette_cursor_title(app: &mut AppState, filter: &str) -> &'static str {
-        app.dispatch(Action::ToggleCommandPalette(
-            super::super::action::PaletteOpenedBy::CtrlK,
+        app.dispatch(Action::ToggleQuickOpen(
+            super::super::action::QuickOpenEntry::Commands,
         ));
         for c in filter.chars() {
-            app.dispatch(Action::CommandPaletteChar(c));
+            app.dispatch(Action::QuickOpenChar(c));
         }
-        let palette = app.command_palette.as_ref().expect("palette open");
+        let palette = app.command_palette().expect("palette open");
         palette.selected().expect("a visible row").title
     }
 
@@ -16093,16 +16195,16 @@ diff --git a/README.md b/README.md
             .expect("catalog row");
         assert_ne!(command.group, CommandGroup::Highlight, "{first}");
         assert_eq!(app.palette_disabled_reason(command), None, "{first}");
-        app.command_palette = None;
+        app.quick_open = None;
 
         assert_eq!(palette_cursor_title(&mut app, "revert"), "Revert");
         // Backspace re-lands the cursor on the wider list too.
-        app.dispatch(Action::CommandPaletteBackspace);
-        let palette = app.command_palette.as_ref().expect("palette open");
+        app.dispatch(Action::QuickOpenBackspace);
+        let palette = app.command_palette().expect("palette open");
         assert_eq!(palette.selected().map(|c| c.title), Some("Revert"));
         // j / k still reach the disabled HIGHLIGHT row.
-        app.dispatch(Action::CommandPaletteMove(-1));
-        let palette = app.command_palette.as_ref().expect("palette open");
+        app.dispatch(Action::QuickOpenMove(-1));
+        let palette = app.command_palette().expect("palette open");
         assert_eq!(
             palette.selected().map(|c| c.title),
             Some("Revert highlighted lines")
@@ -16144,9 +16246,9 @@ diff --git a/README.md b/README.md
             assert_eq!(palette_reason(&app, title), None, "{title}");
         }
         palette_select(&mut app, "Fetch remotes");
-        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
         assert!(
-            app.command_palette.is_some(),
+            app.command_palette().is_some(),
             "a disabled row keeps the palette open"
         );
         assert_eq!(app.status, "exit highlight first (Esc)");
@@ -16227,14 +16329,14 @@ diff --git a/README.md b/README.md
         focus_repo(&mut app, "app");
         assert_eq!(app.focus, FocusPane::Left);
         palette_select(&mut app, "Other pane");
-        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
-        assert!(app.command_palette.is_none());
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.quick_open.is_none());
         assert_eq!(app.focus, FocusPane::Right);
         palette_select(&mut app, "Other pane");
-        app.dispatch(Action::CommandPaletteSubmit);
+        app.dispatch(Action::QuickOpenSubmit);
         assert_eq!(app.focus, FocusPane::Left, "Tab goes back from the right");
         palette_select(&mut app, "Quit");
-        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::Quit);
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::Quit);
     }
 
     #[test]
@@ -16243,8 +16345,8 @@ diff --git a/README.md b/README.md
         focus_id(&mut app, "repo:app");
         assert!(!app.folds.contains("repo:app"));
         palette_select(&mut app, "Fold subtree");
-        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
-        assert!(app.command_palette.is_none());
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.quick_open.is_none());
         assert!(app.folds.contains("repo:app"), "the focused parent folds");
         assert!(app.folds.contains("dir:app:src"), "its children fold too");
         assert!(
@@ -16253,7 +16355,7 @@ diff --git a/README.md b/README.md
         );
 
         palette_select(&mut app, "Fold subtree");
-        app.dispatch(Action::CommandPaletteSubmit);
+        app.dispatch(Action::QuickOpenSubmit);
         assert!(!app.folds.contains("repo:app"), "a second run opens it");
         assert!(!app.folds.contains("dir:app:src"));
         assert!(app.rows.iter().any(|r| r.id == "file:app:src/lib.rs"));
@@ -16261,17 +16363,17 @@ diff --git a/README.md b/README.md
 
     #[test]
     fn palette_alias_finds_a_row_and_runs_it() {
-        use super::super::action::PaletteOpenedBy;
+        use super::super::action::QuickOpenEntry;
         let mut app = state();
         focus_repo(&mut app, "app");
-        app.dispatch(Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK));
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
         for c in "exit".chars() {
-            app.dispatch(Action::CommandPaletteChar(c));
+            app.dispatch(Action::QuickOpenChar(c));
         }
-        let palette = app.command_palette.as_ref().expect("palette open");
+        let palette = app.command_palette().expect("palette open");
         assert_eq!(palette.filter, "exit");
         assert_eq!(palette.selected().map(|c| c.title), Some("Quit"));
-        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::Quit);
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::Quit);
     }
 
     #[test]
@@ -16285,9 +16387,9 @@ diff --git a/README.md b/README.md
             app.diff_visual_anchor.is_none(),
             "the reload drops the range"
         );
-        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
         assert!(
-            app.command_palette.is_some(),
+            app.command_palette().is_some(),
             "a disabled row keeps it open"
         );
         assert_eq!(app.status, "highlight diff lines first (V)");
@@ -16299,16 +16401,17 @@ diff --git a/README.md b/README.md
         focus_readme_diff(&mut app, two_hunk_readme());
         highlight_first_readme_hunk(&mut app);
         palette_select(&mut app, "Fetch remotes");
-        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
         assert_eq!(app.status, "exit highlight first (Esc)");
-        app.dispatch(Action::CommandPaletteCancel);
+        app.dispatch(Action::QuickOpenCancel);
         assert_eq!(app.input_mode(), InputMode::DiffVisual);
         assert_eq!(app.status, "", "the reason does not linger in highlight");
 
-        // A status the palette did not set stays.
-        app.status = "staged range README.md".into();
+        // A status the palette did not set stays. Open clears a leftover
+        // one, so this one lands while the palette is up.
         palette_select(&mut app, "Fetch remotes");
-        app.dispatch(Action::CommandPaletteCancel);
+        app.status = "staged range README.md".into();
+        app.dispatch(Action::QuickOpenCancel);
         assert_eq!(app.status, "staged range README.md");
     }
 
@@ -16319,8 +16422,8 @@ diff --git a/README.md b/README.md
         highlight_first_readme_hunk(&mut app);
         assert_eq!(palette_reason(&app, "Exit highlight"), None);
         palette_select(&mut app, "Exit highlight");
-        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
-        assert!(app.command_palette.is_none());
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.quick_open.is_none());
         assert!(app.diff_visual_anchor.is_none());
     }
 
@@ -16335,7 +16438,7 @@ diff --git a/README.md b/README.md
             Some("nothing to unstage in highlight")
         );
         palette_select(&mut app, "Stage highlighted lines");
-        match app.dispatch(Action::CommandPaletteSubmit) {
+        match app.dispatch(Action::QuickOpenSubmit) {
             Effect::ApplyCachedPatch { patch, reverse, .. } => {
                 assert!(!reverse);
                 assert!(

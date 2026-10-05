@@ -80,15 +80,16 @@ pub fn classify_busy_action(action: &Action) -> BusyAction {
     }
 }
 
-/// Classify one input while a git write is in flight, including palette Enter.
+/// Classify one input while a git write is in flight, including Quick Open Enter.
 ///
-/// [`Action::CommandPaletteSubmit`] then dispatches the highlighted catalog
-/// action, so busy classification uses that inner action when provided.
-/// Palette nav / typing stay [`BusyAction::Handle`]. Submit with no inner
-/// action stays Handle (same as [`classify_busy_action`]).
+/// In commands mode [`Action::QuickOpenSubmit`] then dispatches the
+/// highlighted catalog action, so busy classification uses that inner action
+/// when provided. Quick Open nav / typing stay [`BusyAction::Handle`]. Submit
+/// with no inner action (files mode, empty list) stays Handle (same as
+/// [`classify_busy_action`]).
 pub fn classify_busy_dispatch(action: &Action, palette_submit: Option<&Action>) -> BusyAction {
     match (action, palette_submit) {
-        (Action::CommandPaletteSubmit, Some(inner)) => classify_busy_action(inner),
+        (Action::QuickOpenSubmit, Some(inner)) => classify_busy_action(inner),
         _ => classify_busy_action(action),
     }
 }
@@ -182,7 +183,7 @@ mod tests {
             search_active: false
         }));
         assert!(!overlay_blocks_background_ticks(InputMode::DiffVisual));
-        assert!(overlay_blocks_background_ticks(InputMode::CommandPalette));
+        assert!(overlay_blocks_background_ticks(InputMode::QuickOpen));
     }
 
     #[test]
@@ -257,21 +258,21 @@ mod tests {
     }
 
     #[test]
-    fn command_palette_submit_classifies_as_inner_action() {
+    fn quick_open_submit_classifies_as_inner_action() {
         assert_eq!(
-            classify_busy_dispatch(&Action::CommandPaletteSubmit, Some(&Action::Pull)),
+            classify_busy_dispatch(&Action::QuickOpenSubmit, Some(&Action::Pull)),
             BusyAction::Handle
         );
         assert_eq!(
-            classify_busy_dispatch(&Action::CommandPaletteSubmit, Some(&Action::ToggleHelp)),
+            classify_busy_dispatch(&Action::QuickOpenSubmit, Some(&Action::ToggleHelp)),
             BusyAction::Handle
         );
         assert_eq!(
-            classify_busy_dispatch(&Action::CommandPaletteMove(1), None),
+            classify_busy_dispatch(&Action::QuickOpenMove(1), None),
             BusyAction::Handle
         );
         assert_eq!(
-            classify_busy_dispatch(&Action::CommandPaletteSubmit, None),
+            classify_busy_dispatch(&Action::QuickOpenSubmit, None),
             BusyAction::Handle
         );
     }

@@ -1,6 +1,7 @@
 //! Bottom chrome: status pills, hint chips, and breadcrumb.
 //!
-//! Confirm overlays are boxed, not status-line y/n.
+//! Also the dialog geometry ([`dialog_rect`]): confirms, pickers, and help
+//! are boxes centered over the panes, not status-line prompts.
 
 use std::time::Duration;
 
@@ -20,7 +21,7 @@ pub const STATUS_NO_COMMENTS: &str = "no comments here";
 /// True when the comment-export overlay paints `status` as its own row.
 ///
 /// The copy result is already the overlay header, so `copied` /
-/// `copy failed` stay out. Row math and paint share this check.
+/// `copy failed` stay out. The export paint reads this check.
 pub fn export_shows_status(status: &str) -> bool {
     !status.is_empty() && status != STATUS_COPIED && status != STATUS_COPY_FAILED
 }
@@ -57,6 +58,7 @@ pub fn is_idle_pull_status(status: &str) -> bool {
         || status.ends_with(" diverged — pull from a terminal")
 }
 
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use workspace_status_graph::GraphRow;
@@ -65,10 +67,11 @@ use crate::helpers::{is_default_branch, visible_width};
 use crate::snapshot::{CheckoutKind, SyncStatus};
 
 use super::branches::{can_open_branch_picker, checkoutable_branch_names};
+use super::comments::{COMMENT_OVERLAY_CHROME_ROWS, COMMENT_OVERLAY_MAX_BODY_LINES};
 use super::commit_files::CommitFileRowKind;
 use super::ctrl_c_exit::is_ctrl_c_exit_prompt;
 use super::drill::DrillView;
-use super::help::help_status_lines;
+use super::help::{help_status_lines, HelpTab};
 use super::icons::truncate_visible;
 use super::keys::DOUBLE_TAP_MS;
 use super::ops::{collect_write_files, op_targets, push_targets, Op};
@@ -78,6 +81,7 @@ use super::state::{
     revert_scope, AppState, FocusPane, SEARCH_NO_MATCH, SEARCH_WRAPPED_TO_BOTTOM,
     SEARCH_WRAPPED_TO_TOP,
 };
+use super::tabs::checkout_leaf;
 use super::theme::{hex_color, Palette, Pill, Pills};
 use super::tree::NodeKind;
 
@@ -409,21 +413,10 @@ const GRAPH_HINT_KINDS: &[HintRowKind] = &[
     HintRowKind::GraphUncommitted,
 ];
 
-/// Rows reserved below the panes for breadcrumb + status / overlay.
-///
-/// Help hides the breadcrumb. Confirms,
-/// stash, create-branch, and pickers replace the status line with a
-/// boxed overlay and shrink the panes by the overlay row budget.
-#[allow(dead_code)]
-pub fn bottom_chrome_rows(state: &AppState) -> u16 {
-    breadcrumb_rows(state)
-        .saturating_add(ctrl_c_prompt_rows(state))
-        .saturating_add(overlay_status_rows(state))
-}
-
-/// Breadcrumb row. Hidden while `?` help is open.
-pub fn breadcrumb_rows(state: &AppState) -> u16 {
-    u16::from(!state.help_open)
+/// Breadcrumb row. Always painted: dialogs sit over the panes, not in
+/// place of the bottom chrome.
+pub fn breadcrumb_rows(_state: &AppState) -> u16 {
+    1
 }
 
 /// Pinned Ctrl-C prompt row. Overlay pickers render the copy inline instead.
@@ -441,7 +434,7 @@ pub fn ctrl_c_prompt_pinned(state: &AppState) -> bool {
         && state.create_branch.is_none()
         && state.comment.is_none()
         && state.comment_export.is_none()
-        && state.command_palette.is_none()
+        && state.quick_open.is_none()
 }
 
 /// Bold quit-prompt line painted between the breadcrumb and the status / overlay.
@@ -455,86 +448,164 @@ pub fn ctrl_c_prompt_line(state: &AppState, width: u16) -> Line<'static> {
     ))
 }
 
-/// Status line or replacing overlay rows.
-pub fn overlay_status_rows(state: &AppState) -> u16 {
-    overlay_status_rows_for(state, state.layout.term_cols.max(1))
+/// A boxed dialog painted centered over the panes.
+///
+/// Variants follow the paint order in [`open_dialog`]: when two overlays
+/// are open at once, the first one in this list paints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogKind {
+    /// `?` help, idle or with its `/` search.
+    Help,
+    /// y/n confirm for a write.
+    Confirm,
+    /// Stash operations menu.
+    StashMenu,
+    /// Graph `c` create-branch prompt.
+    CreateBranch,
+    /// Comment textarea.
+    Comment,
+    /// Comment export result.
+    CommentExport,
+    /// Branch checkout / create picker.
+    BranchPicker,
+    /// Compare branch or commit picker.
+    ComparePicker,
+    /// Graph branch focus picker.
+    GraphFocusPicker,
+    /// Quick Open: `:` files, Ctrl-k / `>` commands.
+    QuickOpen,
 }
 
-/// Overlay row budget at `term_cols` so wrap math can follow a resize.
-pub fn overlay_status_rows_for(state: &AppState, term_cols: u16) -> u16 {
+/// The dialog that paints this frame, or `None` when only the panes and
+/// the bottom chrome paint.
+///
+/// Same order as the render if-chain: help, confirm, stash, create
+/// branch, comment, export, then the list pickers and the palette.
+pub fn open_dialog(state: &AppState) -> Option<DialogKind> {
     if state.help_open {
-        return help_status_lines(term_cols, state.is_compare_tab());
+        Some(DialogKind::Help)
+    } else if state.confirm.is_some() {
+        Some(DialogKind::Confirm)
+    } else if state.stash_menu.is_some() {
+        Some(DialogKind::StashMenu)
+    } else if state.create_branch.is_some() {
+        Some(DialogKind::CreateBranch)
+    } else if state.comment.is_some() {
+        Some(DialogKind::Comment)
+    } else if state.comment_export.is_some() {
+        Some(DialogKind::CommentExport)
+    } else if state.branch_picker.is_some() {
+        Some(DialogKind::BranchPicker)
+    } else if state.compare_picker.is_some() {
+        Some(DialogKind::ComparePicker)
+    } else if state.graph_focus_picker.is_some() {
+        Some(DialogKind::GraphFocusPicker)
+    } else if state.quick_open.is_some() {
+        Some(DialogKind::QuickOpen)
+    } else {
+        None
     }
-    if let Some(pending) = state.confirm.as_ref() {
-        return match pending {
-            // Title, branch, changed-files, chips; one spare row for a wrapped detail.
-            super::state::PendingConfirm::RemoveWorktree { .. } => 7,
-            super::state::PendingConfirm::SwitchToDefault { .. } => 6,
-            super::state::PendingConfirm::StashDrop { .. }
-            | super::state::PendingConfirm::RevertRange { .. } => 5,
-            // One row per count line: mixed is 7, the others 6.
-            super::state::PendingConfirm::Revert { targets, .. } => {
-                5 + revert_scope(targets).count_lines()
-            }
-            super::state::PendingConfirm::CheckoutOutOfSync { .. }
-            | super::state::PendingConfirm::MergeIntoHead { .. }
-            | super::state::PendingConfirm::CompareRevertRange { .. }
-            | super::state::PendingConfirm::CompareRevertFile { .. } => 7,
-        };
-    }
-    if let Some(ops) = state.stash_menu.as_ref() {
-        let extra = u16::from(!state.status.is_empty());
-        return 4u16.saturating_add(ops.len() as u16).saturating_add(extra);
-    }
-    if state.create_branch.is_some() {
-        // Title + name + confirm footer is 5 rows. Typing writes `status`
-        // (`create {name}`); stash / pickers already grow for that line.
-        let extra = u16::from(!state.status.is_empty());
-        return 5u16.saturating_add(extra);
-    }
-    if let Some(prompt) = state.comment.as_ref() {
-        // Title + target + body lines + footer, plus 2 border rows. Idle
-        // status stays out of the box; typing does not echo `body:` into
-        // `status`. Extra body lines grow the box up to the cap.
-        return prompt.overlay_rows();
-    }
-    if let Some(export) = state.comment_export.as_ref() {
-        let extra = u16::from(export_shows_status(&state.status));
-        let body = export.markdown.lines().count() as u16;
-        return (5u16.saturating_add(body).saturating_add(extra)).min(20);
-    }
-    // Branch / compare / graph-focus pickers and the command palette all
-    // paint the same list box, in this order.
-    let list_rows = state
-        .branch_picker
-        .as_ref()
-        .map(|picker| picker.row_count())
-        .or_else(|| state.compare_picker.as_ref().map(|p| p.visible_len()))
-        .or_else(|| state.graph_focus_picker.as_ref().map(|p| p.visible().len()))
-        .or_else(|| state.command_palette.as_ref().map(|p| p.paint_rows().len()));
-    if let Some(visible) = list_rows {
-        return list_overlay_rows(state, visible);
-    }
-    1
 }
 
-/// Border, title, and footer rows a list overlay paints around its rows.
+/// Widest a dialog other than help gets, in columns.
+///
+/// Help lays its three columns out across the whole pane area instead.
+pub const DIALOG_MAX_WIDTH: u16 = 96;
+
+/// Border, title, and footer rows a list dialog paints around its rows.
 const LIST_OVERLAY_CHROME_ROWS: u16 = 4;
 
-/// Rows a list overlay shows before it stops growing.
-const LIST_OVERLAY_MAX_ROWS: usize = 12;
+/// List rows a list dialog shows; more results scroll inside the box.
+///
+/// The cursor row stays in the window.
+pub const LIST_OVERLAY_MAX_ROWS: usize = 12;
 
-/// Hard cap on a list overlay, status line included.
-const LIST_OVERLAY_MAX_TOTAL_ROWS: u16 = 17;
+/// Fixed height of a list dialog (pickers and Quick Open).
+///
+/// Border (2), query / title row, [`LIST_OVERLAY_MAX_ROWS`] rows, the
+/// reserved status row, and the footer. The result count never changes it.
+pub const LIST_DIALOG_ROWS: u16 = LIST_OVERLAY_CHROME_ROWS + LIST_OVERLAY_MAX_ROWS as u16 + 1;
 
-/// Rows a list overlay takes for `visible` entries, plus the status line.
-fn list_overlay_rows(state: &AppState, visible: usize) -> u16 {
-    let rows = visible.clamp(1, LIST_OVERLAY_MAX_ROWS) as u16;
-    let status = u16::from(!state.status.is_empty());
-    LIST_OVERLAY_CHROME_ROWS
-        .saturating_add(rows)
-        .saturating_add(status)
-        .min(LIST_OVERLAY_MAX_TOTAL_ROWS)
+/// Box width of `kind` inside `area` (the pane area).
+///
+/// Help takes the whole width less a two-column margin each side; the
+/// other dialogs also stop at [`DIALOG_MAX_WIDTH`].
+pub fn dialog_width(area: Rect, kind: DialogKind) -> u16 {
+    let width = area.width.saturating_sub(4);
+    match kind {
+        DialogKind::Help => width,
+        _ => width.min(DIALOG_MAX_WIDTH),
+    }
+}
+
+/// Which help columns the active tab paints.
+pub fn help_tab(state: &AppState) -> HelpTab {
+    if state.is_file_tab() {
+        HelpTab::File
+    } else if state.is_compare_tab() {
+        HelpTab::Compare
+    } else {
+        HelpTab::Workspace
+    }
+}
+
+/// Box height of `kind` at box `width`, borders included.
+///
+/// Fixed per kind and never from a result count, so the input row stays
+/// put while the list changes. [`dialog_rect`] clamps it to the panes.
+pub fn dialog_height(state: &AppState, kind: DialogKind, width: u16) -> u16 {
+    match kind {
+        // Help lays its columns out at the box width.
+        DialogKind::Help => help_status_lines(width, help_tab(state)),
+        DialogKind::Confirm => match state.confirm.as_ref() {
+            // Title, branch, changed-files, chips; one spare row for a wrapped detail.
+            Some(super::state::PendingConfirm::RemoveWorktree { .. }) => 7,
+            Some(super::state::PendingConfirm::SwitchToDefault { .. }) => 6,
+            Some(
+                super::state::PendingConfirm::StashDrop { .. }
+                | super::state::PendingConfirm::RevertRange { .. },
+            ) => 5,
+            // One row per count line: mixed is 7, the others 6.
+            Some(super::state::PendingConfirm::Revert { targets, .. }) => {
+                5 + revert_scope(targets).count_lines()
+            }
+            Some(
+                super::state::PendingConfirm::CheckoutOutOfSync { .. }
+                | super::state::PendingConfirm::MergeIntoHead { .. }
+                | super::state::PendingConfirm::CompareRevertRange { .. }
+                | super::state::PendingConfirm::CompareRevertFile { .. },
+            ) => 7,
+            None => 0,
+        },
+        // Border, title, one row per op, the status row, and the footer.
+        DialogKind::StashMenu => {
+            let ops = state.stash_menu.as_ref().map_or(0, Vec::len) as u16;
+            4u16.saturating_add(ops).saturating_add(1)
+        }
+        // Border, title, name, the status row (`create {name}`), and the footer.
+        DialogKind::CreateBranch => 6,
+        // Room for the most body lines; fewer lines leave blank rows.
+        DialogKind::Comment => COMMENT_OVERLAY_CHROME_ROWS + COMMENT_OVERLAY_MAX_BODY_LINES as u16,
+        DialogKind::CommentExport => 20,
+        DialogKind::BranchPicker
+        | DialogKind::ComparePicker
+        | DialogKind::GraphFocusPicker
+        | DialogKind::QuickOpen => LIST_DIALOG_ROWS,
+    }
+}
+
+/// A `width` × `height` box centered in `pane_area`, clamped to it.
+///
+/// Dialogs paint over the panes, so the panes never shrink for one.
+pub fn dialog_rect(pane_area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(pane_area.width);
+    let height = height.min(pane_area.height);
+    Rect {
+        x: pane_area.x + (pane_area.width - width) / 2,
+        y: pane_area.y + (pane_area.height - height) / 2,
+        width,
+        height,
+    }
 }
 
 /// Plain-text join of chip key + gap + label (tests / width math).
@@ -978,8 +1049,15 @@ pub fn hint_row_kind(state: &AppState) -> HintRowKind {
 }
 
 /// Display segments for the breadcrumb (workspace + drill frames).
+///
+/// A file tab reads `workspace › <checkout leaf> › <rel>`.
 pub fn breadcrumb_segments(state: &AppState) -> Vec<String> {
     let mut out = vec![workspace_label(state)];
+    if let Some(tab) = state.tabs.active_file() {
+        out.push(checkout_leaf(&tab.checkout));
+        out.push(tab.rel.clone());
+        return out;
+    }
     let mut seen_repo: Option<String> = None;
     let mut seen_commit: Option<String> = None;
 
@@ -1098,7 +1176,7 @@ pub(crate) fn status_uses_status_text(state: &AppState) -> bool {
         || state.create_branch.is_some()
         || state.comment.is_some()
         || state.comment_export.is_some()
-        || state.command_palette.is_some()
+        || state.quick_open.is_some()
 }
 
 fn breadcrumb_op_status(state: &AppState) -> String {
@@ -1116,7 +1194,12 @@ pub fn breadcrumb_line(state: &AppState, width: u16) -> Line<'static> {
     let op = breadcrumb_op_status(state);
     let (crumb_max, op_max) = allocate_chrome_row(width, visible_width(&op));
     let segments = breadcrumb_segments(state);
-    let focus = state.focus;
+    // A file tab is one pane: no right-focus mark on the path.
+    let focus = if state.is_file_tab() {
+        FocusPane::Left
+    } else {
+        state.focus
+    };
     let mut spans = Vec::new();
     let mut used = 0usize;
     for (i, seg) in segments.iter().enumerate() {
@@ -1174,27 +1257,68 @@ pub fn status_line(state: &AppState, width: u16) -> Line<'static> {
     let palette = state.theme.palette();
     let pills = state.theme.pills();
     let surface = hex_color(state.theme.theme().surface);
-    // These boxes paint `status` inside the overlay (stash chips, picker
-    // notes, the export result). Painting it here as well repeats it.
-    if state.stash_menu.is_some()
-        || state.branch_picker.is_some()
-        || state.compare_picker.is_some()
-        || state.graph_focus_picker.is_some()
-        || state.create_branch.is_some()
-        || state.comment_export.is_some()
-    {
-        return Line::default();
-    }
-    if state.comment.is_some() {
-        return Line::from(Span::styled(
-            truncate_visible(&state.status, width as usize),
-            Style::default().fg(state.status.kind().color(palette)),
-        ));
+    // Dialogs paint `status` inside the box (stash chips, picker notes, the
+    // export result) or have no use for the hints. The comment box has no
+    // status row, so its status stays here.
+    match open_dialog(state) {
+        Some(DialogKind::Comment) => {
+            return Line::from(Span::styled(
+                truncate_visible(&state.status, width as usize),
+                Style::default().fg(state.status.kind().color(palette)),
+            ));
+        }
+        Some(_) => return Line::default(),
+        None => {}
     }
     if state.search_mode {
         return search_typing_line(state, palette, pills.filter);
     }
+    if state.is_file_tab() {
+        return file_tab_status_line(state, palette, pills, surface, width);
+    }
     idle_status_line(state, palette, pills, surface, width)
+}
+
+/// Hint chips on a file tab, in cut order (the last ones truncate first).
+pub fn file_tab_hint_segments() -> Vec<HintSegment> {
+    vec![
+        hint("e", "edit", false),
+        hint("/", "search", false),
+        hint("\\", "wrap", false),
+        hint("'", "copy ref", false),
+        hint("r", "reload", false),
+        hint(":", "go to file", false),
+    ]
+}
+
+/// Idle row on a file tab: `wrap` and armed-search pills, `? help`, the
+/// viewer hints, then the pinned `q quit`.
+fn file_tab_status_line(
+    state: &AppState,
+    palette: Palette,
+    pills: Pills,
+    surface: Color,
+    width: u16,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    if state.diff_wrap {
+        spans.push(pill_span("wrap", pills.diff));
+    }
+    if let Some(label) = search_pill_label(state) {
+        spans.push(pill_span(&label, pills.filter));
+    }
+    spans.push(Span::styled(
+        " ? help".to_string(),
+        Style::default().fg(palette.file),
+    ));
+    push_hint_pieces(
+        &mut spans,
+        &file_tab_hint_segments(),
+        palette,
+        surface,
+        width,
+    );
+    Line::from(spans)
 }
 
 fn search_typing_line(state: &AppState, palette: Palette, filter: Pill) -> Line<'static> {
@@ -1288,12 +1412,6 @@ fn idle_status_line(
         format!(" {message}"),
         Style::default().fg(palette.file),
     ));
-    let used = spans
-        .iter()
-        .map(|span| visible_width(&span.content))
-        .sum::<usize>()
-        + HINT_SEPARATOR.len();
-
     let hints = if visual {
         visual_hint_segments(state)
     } else {
@@ -1305,55 +1423,72 @@ fn idle_status_line(
         hints.extend(extra_hint_segments());
         hints
     };
+    push_hint_pieces(&mut spans, &hints, palette, surface, width);
+    Line::from(spans)
+}
+
+/// Fit `hints` plus the pinned `q quit` into the room `spans` leave on a
+/// `width`-column row, then append them as chips.
+fn push_hint_pieces(
+    spans: &mut Vec<Span<'static>>,
+    hints: &[HintSegment],
+    palette: Palette,
+    surface: Color,
+    width: u16,
+) {
+    let used = spans
+        .iter()
+        .map(|span| visible_width(&span.content))
+        .sum::<usize>()
+        + HINT_SEPARATOR.len();
     let fitted = fit_hint_segments(
-        &hints,
+        hints,
         &pinned_hint_segments(),
         (width as usize).saturating_sub(used),
     );
-
-    if !fitted.is_empty() {
-        spans.push(Span::raw(HINT_SEPARATOR));
-        for (i, piece) in fitted.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::raw(HINT_SEPARATOR));
+    if fitted.is_empty() {
+        return;
+    }
+    spans.push(Span::raw(HINT_SEPARATOR));
+    for (i, piece) in fitted.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(HINT_SEPARATOR));
+        }
+        let segment = match piece {
+            HintPiece::Hint(segment) => segment,
+            HintPiece::More => {
+                spans.push(Span::styled(
+                    HINT_ELLIPSIS,
+                    Style::default().fg(palette.muted),
+                ));
+                continue;
             }
-            let segment = match piece {
-                HintPiece::Hint(segment) => segment,
-                HintPiece::More => {
-                    spans.push(Span::styled(
-                        HINT_ELLIPSIS,
-                        Style::default().fg(palette.muted),
-                    ));
-                    continue;
-                }
-            };
-            let chip_bg = if segment.destructive {
+        };
+        let chip_bg = if segment.destructive {
+            palette.deleted
+        } else {
+            palette.cursor
+        };
+        spans.push(Span::styled(
+            format!(" {} ", segment.key),
+            Style::default()
+                .fg(surface)
+                .bg(chip_bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        if !segment.label.is_empty() {
+            spans.push(Span::raw(" ".repeat(HINT_CHIP_GAP)));
+            let label_fg = if segment.destructive {
                 palette.deleted
             } else {
-                palette.cursor
+                palette.muted
             };
             spans.push(Span::styled(
-                format!(" {} ", segment.key),
-                Style::default()
-                    .fg(surface)
-                    .bg(chip_bg)
-                    .add_modifier(Modifier::BOLD),
+                segment.label.clone(),
+                Style::default().fg(label_fg),
             ));
-            if !segment.label.is_empty() {
-                spans.push(Span::raw(" ".repeat(HINT_CHIP_GAP)));
-                let label_fg = if segment.destructive {
-                    palette.deleted
-                } else {
-                    palette.muted
-                };
-                spans.push(Span::styled(
-                    segment.label.clone(),
-                    Style::default().fg(label_fg),
-                ));
-            }
         }
     }
-    Line::from(spans)
 }
 
 fn z_pending(state: &AppState) -> bool {
@@ -1867,16 +2002,96 @@ mod tests {
     }
 
     #[test]
-    fn bottom_chrome_hides_breadcrumb_during_help() {
+    fn breadcrumb_stays_while_help_open() {
         let idle = state();
         assert_eq!(breadcrumb_rows(&idle), 1);
-        assert_eq!(overlay_status_rows(&idle), 1);
-        assert_eq!(bottom_chrome_rows(&idle), 2);
+        assert_eq!(open_dialog(&idle), None);
         let mut help = state();
         help.help_open = true;
-        assert_eq!(breadcrumb_rows(&help), 0);
-        assert!(overlay_status_rows(&help) > 1);
-        assert_eq!(bottom_chrome_rows(&help), overlay_status_rows(&help));
+        assert_eq!(breadcrumb_rows(&help), 1);
+        assert_eq!(open_dialog(&help), Some(DialogKind::Help));
+        assert_eq!(
+            dialog_height(&help, DialogKind::Help, 116),
+            help_status_lines(116, crate::tui::help::HelpTab::Workspace)
+        );
+    }
+
+    #[test]
+    fn dialog_rect_centers_inside_pane_area() {
+        let area = Rect::new(0, 1, 120, 30);
+        let width = dialog_width(area, DialogKind::QuickOpen);
+        assert_eq!(width, DIALOG_MAX_WIDTH);
+        let rect = dialog_rect(area, width, LIST_DIALOG_ROWS);
+        assert_eq!(rect.width, 96);
+        assert_eq!(rect.x, 12);
+        assert_eq!(rect.height, LIST_DIALOG_ROWS);
+        assert_eq!(rect.y, 1 + (30 - LIST_DIALOG_ROWS) / 2);
+        assert_eq!(dialog_width(area, DialogKind::Help), 116);
+    }
+
+    #[test]
+    fn dialog_rect_clamps_to_small_pane_area() {
+        let area = Rect::new(0, 1, 46, 9);
+        let width = dialog_width(area, DialogKind::BranchPicker);
+        let rect = dialog_rect(area, width, LIST_DIALOG_ROWS);
+        assert_eq!(rect.width, 42);
+        assert_eq!(rect.height, 9);
+        assert!(rect.x >= area.x && rect.right() <= area.right(), "{rect:?}");
+        assert!(
+            rect.y >= area.y && rect.bottom() <= area.bottom(),
+            "{rect:?}"
+        );
+    }
+
+    #[test]
+    fn dialog_height_is_fixed_per_kind() {
+        use crate::git::LocalBranch;
+        use crate::tui::branches::{BranchPickerState, CreateBranchState};
+        use crate::tui::comments::{CommentKey, CommentPrompt};
+        let branches = |n: usize| {
+            (0..n)
+                .map(|i| LocalBranch {
+                    name: format!("topic/{i}"),
+                    current: false,
+                    authordate: 0,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut app = state();
+        app.branch_picker = Some(BranchPickerState::checkout("app".into(), branches(1)));
+        assert_eq!(open_dialog(&app), Some(DialogKind::BranchPicker));
+        let one = dialog_height(&app, DialogKind::BranchPicker, 96);
+        app.branch_picker = Some(BranchPickerState::checkout("app".into(), branches(40)));
+        let many = dialog_height(&app, DialogKind::BranchPicker, 96);
+        assert_eq!(one, LIST_DIALOG_ROWS);
+        assert_eq!(many, LIST_DIALOG_ROWS);
+        app.branch_picker = None;
+
+        let mut prompt = CommentPrompt::new(
+            CommentKey::Branch {
+                repo: "app".into(),
+                branch: "feature/x".into(),
+            },
+            "one".into(),
+            "app · branch feature/x".into(),
+        );
+        app.comment = Some(prompt.clone());
+        assert_eq!(dialog_height(&app, DialogKind::Comment, 96), 14);
+        prompt.insert_newline();
+        prompt.insert_newline();
+        assert_eq!(prompt.line_count(), 3);
+        app.comment = Some(prompt);
+        assert_eq!(dialog_height(&app, DialogKind::Comment, 96), 14);
+        app.comment = None;
+
+        app.create_branch = Some(CreateBranchState {
+            repo: "app".into(),
+            name: String::new(),
+            commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        });
+        assert_eq!(dialog_height(&app, DialogKind::CreateBranch, 96), 6);
+        app.status = "create topic".into();
+        assert_eq!(dialog_height(&app, DialogKind::CreateBranch, 96), 6);
     }
 
     #[test]
@@ -1889,7 +2104,7 @@ mod tests {
             "quit prompt must not sit in the breadcrumb toast: {crumb:?}"
         );
         assert_eq!(ctrl_c_prompt_rows(&app), 1);
-        assert_eq!(bottom_chrome_rows(&app), 3);
+        assert_eq!(breadcrumb_rows(&app), 1);
         let prompt = line_plain(&ctrl_c_prompt_line(&app, 80));
         assert!(
             prompt.contains("Ctrl-c again"),
@@ -1927,7 +2142,7 @@ mod tests {
     }
 
     #[test]
-    fn confirm_overlay_uses_row_budget() {
+    fn confirm_dialog_height_per_variant() {
         let mut app = state();
         let target = |path: &str, untracked: bool| super::super::state::RevertTarget {
             repo: "app".into(),
@@ -1940,30 +2155,31 @@ mod tests {
             targets: vec![target("README.md", false)],
             label: "README.md".into(),
         });
-        assert_eq!(overlay_status_rows(&app), 6);
+        assert_eq!(dialog_height(&app, DialogKind::Confirm, 96), 6);
+        assert_eq!(open_dialog(&app), Some(DialogKind::Confirm));
         assert_eq!(breadcrumb_rows(&app), 1);
         // Mixed scope paints tracked and untracked count lines.
         app.confirm = Some(super::super::state::PendingConfirm::Revert {
             targets: vec![target("README.md", false), target("new.txt", true)],
             label: "app".into(),
         });
-        assert_eq!(overlay_status_rows(&app), 7);
+        assert_eq!(dialog_height(&app, DialogKind::Confirm, 96), 7);
         app.confirm = Some(super::super::state::PendingConfirm::Revert {
             targets: vec![target("a.txt", true), target("b.txt", true)],
             label: "app".into(),
         });
-        assert_eq!(overlay_status_rows(&app), 6);
+        assert_eq!(dialog_height(&app, DialogKind::Confirm, 96), 6);
         app.confirm = Some(super::super::state::PendingConfirm::StashDrop {
             repo: "app".into(),
             stash_ref: "stash@{0}".into(),
         });
-        assert_eq!(overlay_status_rows(&app), 5);
+        assert_eq!(dialog_height(&app, DialogKind::Confirm, 96), 5);
         app.confirm = Some(super::super::state::PendingConfirm::RevertRange {
             repo: "app".into(),
             path: "README.md".into(),
             patch: String::new(),
         });
-        assert_eq!(overlay_status_rows(&app), 5);
+        assert_eq!(dialog_height(&app, DialogKind::Confirm, 96), 5);
         app.confirm = Some(super::super::state::PendingConfirm::RemoveWorktree {
             primary: "app".into(),
             path: ".worktrees/topic".into(),
@@ -1972,29 +2188,29 @@ mod tests {
             merged_into_default: Some(true),
             changed: 0,
         });
-        assert_eq!(overlay_status_rows(&app), 7);
+        assert_eq!(dialog_height(&app, DialogKind::Confirm, 96), 7);
         app.confirm = Some(super::super::state::PendingConfirm::CheckoutOutOfSync {
             repo: "app".into(),
             branch: "main".into(),
             remote_ref: "origin/main".into(),
             ahead_behind: Some((0, 2)),
         });
-        assert_eq!(overlay_status_rows(&app), 7);
+        assert_eq!(dialog_height(&app, DialogKind::Confirm, 96), 7);
         app.confirm = Some(super::super::state::PendingConfirm::SwitchToDefault {
             repos: vec!["app".into(), "lib".into()],
         });
-        assert_eq!(overlay_status_rows(&app), 6);
+        assert_eq!(dialog_height(&app, DialogKind::Confirm, 96), 6);
         app.confirm = Some(super::super::state::PendingConfirm::MergeIntoHead {
             repo: "app".into(),
             rev: "topic".into(),
             label: "topic".into(),
             into: "main".into(),
         });
-        assert_eq!(overlay_status_rows(&app), 7);
+        assert_eq!(dialog_height(&app, DialogKind::Confirm, 96), 7);
     }
 
     #[test]
-    fn create_branch_overlay_grows_for_status() {
+    fn create_branch_and_stash_reserve_their_status_row() {
         use crate::tui::branches::CreateBranchState;
         let mut app = state();
         app.create_branch = Some(CreateBranchState {
@@ -2002,13 +2218,19 @@ mod tests {
             name: String::new(),
             commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         });
-        assert_eq!(overlay_status_rows(&app), 5);
+        assert_eq!(dialog_height(&app, DialogKind::CreateBranch, 96), 6);
         app.status = "create topic".into();
-        assert_eq!(overlay_status_rows(&app), 6);
+        assert_eq!(dialog_height(&app, DialogKind::CreateBranch, 96), 6);
+        app.create_branch = None;
+        app.stash_menu = Some(Vec::new());
+        app.status.clear();
+        assert_eq!(dialog_height(&app, DialogKind::StashMenu, 96), 5);
+        app.status = "stash  s stash".into();
+        assert_eq!(dialog_height(&app, DialogKind::StashMenu, 96), 5);
     }
 
     #[test]
-    fn comment_overlay_ignores_status_echo() {
+    fn comment_dialog_ignores_status_echo() {
         use crate::tui::comments::{CommentExport, CommentKey, CommentPrompt};
         let mut app = state();
         app.comment = Some(CommentPrompt::new(
@@ -2019,20 +2241,25 @@ mod tests {
             String::new(),
             "app · branch feature/x".into(),
         ));
-        assert_eq!(overlay_status_rows(&app), 7);
+        assert_eq!(dialog_height(&app, DialogKind::Comment, 96), 14);
         app.status = "body: hello".into();
         assert_eq!(
-            overlay_status_rows(&app),
-            7,
-            "idle / typing status must not grow the comment overlay"
+            dialog_height(&app, DialogKind::Comment, 96),
+            14,
+            "idle / typing status must not grow the comment dialog"
+        );
+        assert_eq!(
+            line_plain(&status_line(&app, 80)),
+            "body: hello",
+            "the comment box has no status row; the status line keeps it"
         );
         if let Some(prompt) = app.comment.as_mut() {
             prompt.insert_newline();
         }
         assert_eq!(
-            overlay_status_rows(&app),
-            8,
-            "a second body line grows the box; status still does not"
+            dialog_height(&app, DialogKind::Comment, 96),
+            14,
+            "a second body line does not grow the box"
         );
         app.comment = None;
         app.status = STATUS_COPIED.into();
@@ -2040,28 +2267,81 @@ mod tests {
             markdown: "# Comments\n\nNo comments.\n".into(),
             copied: Some(true),
         });
-        assert_eq!(overlay_status_rows(&app), 8);
+        assert_eq!(dialog_height(&app, DialogKind::CommentExport, 96), 20);
     }
 
     #[test]
-    fn command_palette_overlay_uses_picker_row_budget() {
-        use crate::tui::action::PaletteOpenedBy;
-        use crate::tui::command_palette::CommandPaletteState;
+    fn quick_open_uses_list_dialog_height() {
+        use crate::tui::action::QuickOpenEntry;
+        use crate::tui::quick_open::{QuickOpenScope, QuickOpenState};
         let mut app = state();
-        app.command_palette = Some(CommandPaletteState::new(PaletteOpenedBy::CtrlK));
-        let rows = overlay_status_rows(&app);
-        assert!(rows >= 5, "prompt + list + footer: {rows}");
-        assert!(rows <= 17, "capped like the branch picker: {rows}");
+        app.quick_open = Some(QuickOpenState::new(
+            QuickOpenEntry::Commands,
+            QuickOpenScope::Workspace,
+        ));
+        assert_eq!(open_dialog(&app), Some(DialogKind::QuickOpen));
+        assert_eq!(LIST_DIALOG_ROWS, 17);
+        assert_eq!(
+            dialog_height(&app, DialogKind::QuickOpen, 96),
+            LIST_DIALOG_ROWS
+        );
+        assert_eq!(line_plain(&status_line(&app, 80)), "");
         app.status = "Press Ctrl-c again to exit".into();
         assert_eq!(
             ctrl_c_prompt_rows(&app),
             0,
-            "palette shows the quit prompt inline"
+            "Quick Open shows the quit prompt inline"
         );
     }
 
     fn line_plain(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn file_tab_chrome_names_the_file_and_viewer_keys() {
+        let mut app = state();
+        app.focus = FocusPane::Right;
+        app.open_file_tab("app".into(), "src/main.rs".into());
+        assert_eq!(
+            breadcrumb_segments(&app),
+            ["workspace", "app", "src/main.rs"]
+        );
+        assert_eq!(
+            line_plain(&breadcrumb_line(&app, 80)),
+            "workspace › app › src/main.rs",
+            "no right-focus mark on a file tab"
+        );
+        assert_eq!(help_tab(&app), HelpTab::File);
+        // A file tab opens wrapped: it shares the diff wrap flag (on by default).
+        assert!(app.diff_wrap);
+        let row = line_plain(&status_line(&app, 160));
+        assert!(
+            row.starts_with(" wrap  ? help"),
+            "no tree / diff pill: {row}"
+        );
+        app.diff_wrap = false;
+        let row = line_plain(&status_line(&app, 160));
+        assert!(row.starts_with(" ? help"), "no tree / diff pill: {row}");
+        for chip in [
+            "edit",
+            "search",
+            "wrap",
+            "copy ref",
+            "reload",
+            "go to file",
+            "quit",
+        ] {
+            assert!(row.contains(chip), "{chip}: {row}");
+        }
+        assert!(!row.contains("stage"), "{row}");
+        app.diff_wrap = true;
+        let row = line_plain(&status_line(&app, 60));
+        assert!(row.starts_with(" wrap "), "{row}");
+        assert!(
+            row.trim_end().ends_with("quit"),
+            "q quit stays pinned: {row}"
+        );
     }
 
     #[test]

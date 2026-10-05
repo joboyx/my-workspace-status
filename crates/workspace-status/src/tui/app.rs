@@ -398,9 +398,9 @@ impl RightPaneRequest {
     }
 }
 
-/// Apply a coalesced right-pane load. Compare tabs ignore this path.
+/// Apply a coalesced right-pane load. Compare and file tabs ignore this path.
 pub(crate) fn apply_right_pane_load(state: &mut AppState, payload: RightPaneLoad) {
-    if state.is_compare_tab() {
+    if !state.tabs.is_workspace() {
         return;
     }
     match payload {

@@ -48,8 +48,8 @@ fn type_palette_filter(tui: &mut PtySession, query: &str) {
 fn open_ctrl_k_filter(tui: &mut PtySession, query: &str, title: &str) {
     tui.ctrl_letter('k');
     tui.wait_pred(
-        |screen| palette_open(screen) && screen.contains("Ctrl-k"),
-        "Ctrl-k opens the command palette (a no-op leaves idle chrome without Enter run)",
+        |screen| palette_open(screen) && screen.contains(">▏"),
+        "Ctrl-k opens Quick Open commands (a no-op leaves idle chrome without Enter run)",
         WAIT,
     );
     type_palette_filter(tui, query);
@@ -77,7 +77,7 @@ fn esc_closes_palette(tui: &mut PtySession) {
     tui.esc();
     tui.wait_pred(
         palette_closed,
-        "Esc closes the command palette (a stuck overlay keeps Enter run)",
+        "Esc closes Quick Open (a stuck overlay keeps Enter run)",
         WAIT,
     );
 }
@@ -93,7 +93,7 @@ fn pty_compare_missing_default_and_unborn_disable_open() {
     let mut tui = PtySession::open(&workspace);
     tui.wait_pred(
         |screen| tree_has(screen, "topic") && tree_has(screen, "empty") && palette_closed(screen),
-        "first paint: topic and empty are on the tree; command palette is closed",
+        "first paint: topic and empty are on the tree; Quick Open is closed",
         WAIT,
     );
 
@@ -194,7 +194,7 @@ fn pty_compare_workspace_and_family_are_not_targets() {
     let mut tui = PtySession::open(&workspace);
     tui.wait_pred(
         |screen| family_visible(screen) && palette_closed(screen),
-        "first paint: family app, primary, and linked branches; command palette is closed",
+        "first paint: family app, primary, and linked branches; Quick Open is closed",
         WAIT,
     );
 

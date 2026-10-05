@@ -2,9 +2,9 @@
 
 use std::time::Instant;
 
-use super::super::action::{Action, Effect, ExternalDiffKind, PaletteOpenedBy};
+use super::super::action::{Action, Effect, ExternalDiffKind};
 use super::super::branches::can_open_branch_picker;
-use super::super::command_palette::{CommandPaletteState, CommandScope, PaletteCommand};
+use super::super::command_palette::{CommandScope, PaletteCommand};
 use super::super::diff::PartialPatchKind;
 use super::super::gates::{
     dispatch_is_noop, dispatch_noop_reason, ListFocusTarget, FOCUS_A_FILE_DIFF,
@@ -46,8 +46,15 @@ impl AppState {
                 self.help_open = !self.help_open;
                 self.clear_help_search();
                 if self.help_open {
+                    self.help_scroll = 0;
                     self.clear_diff_visual();
                 }
+                Effect::None
+            }
+            Action::HelpScroll(delta) => {
+                let max = self.layout.help_scroll_max as i64;
+                self.help_scroll =
+                    (self.help_scroll as i64 + i64::from(delta)).clamp(0, max) as usize;
                 Effect::None
             }
             Action::Move(delta) => self.move_focused(delta),
@@ -178,6 +185,7 @@ impl AppState {
                     if let Some(q) = &mut self.help_search_query {
                         q.push(c);
                     }
+                    self.help_scroll = 0;
                     Effect::None
                 } else if self.search_mode {
                     self.search_query.push(c);
@@ -191,6 +199,7 @@ impl AppState {
                     if let Some(q) = &mut self.help_search_query {
                         q.pop();
                     }
+                    self.help_scroll = 0;
                     Effect::None
                 } else if self.search_mode {
                     self.search_query.pop();
@@ -252,7 +261,11 @@ impl AppState {
             Action::Edit => {
                 if let Some((repo, path)) = self.focused_commit_edit_path() {
                     self.status = StatusMessage::progress(format!("opening {path}…"));
-                    Effect::EditFile { repo, path }
+                    Effect::EditFile {
+                        repo,
+                        path,
+                        line: None,
+                    }
                 } else if self.is_compare_tab() {
                     self.status = StatusMessage::warn("focus a file to edit");
                     Effect::None
@@ -261,6 +274,7 @@ impl AppState {
                     Effect::EditFile {
                         repo,
                         path: change.path,
+                        line: None,
                     }
                 } else {
                     self.status = StatusMessage::warn("focus a dirty file to edit");
@@ -380,37 +394,17 @@ impl AppState {
                 self.apply_terminal_size(cols);
                 Effect::None
             }
-            Action::ToggleCommandPalette(opened_by) => self.toggle_command_palette(opened_by),
-            Action::CommandPaletteMove(delta) => {
-                if let Some(palette) = self.command_palette.as_mut() {
-                    palette.move_cursor(delta);
-                }
-                Effect::None
-            }
-            Action::CommandPaletteChar(c) => {
-                if let Some(palette) = self.command_palette.as_mut() {
-                    palette.push_char(c);
-                }
-                self.land_palette_cursor();
-                Effect::None
-            }
-            Action::CommandPaletteBackspace => {
-                if let Some(palette) = self.command_palette.as_mut() {
-                    palette.backspace();
-                }
-                self.land_palette_cursor();
-                Effect::None
-            }
-            Action::CommandPaletteSubmit => self.submit_command_palette(),
-            Action::CommandPaletteCancel => {
-                self.close_command_palette();
-                Effect::None
-            }
+            Action::ToggleQuickOpen(_)
+            | Action::QuickOpenMove(_)
+            | Action::QuickOpenChar(_)
+            | Action::QuickOpenBackspace
+            | Action::QuickOpenSubmit
+            | Action::QuickOpenCancel => self.dispatch_quick_open(action),
             Action::CompareVsDefault => self.compare_vs_default(),
             Action::CompareVsBranch => self.prepare_compare_picker(ComparePickerKind::Branch),
             Action::CompareVsCommit => self.prepare_compare_picker(ComparePickerKind::Commit),
             Action::CompareCommitVsParent => self.compare_commit_vs_parent(),
-            Action::CloseCompareTab => self.close_compare_tab(),
+            Action::CloseTab => self.close_active_tab(),
             Action::NextTab => self.activate_relative_tab(1),
             Action::PreviousTab => self.activate_relative_tab(-1),
             Action::JumpToTab(n) => self.jump_to_tab(n),
@@ -447,87 +441,21 @@ impl AppState {
         }
     }
 
-    fn toggle_command_palette(&mut self, opened_by: PaletteOpenedBy) -> Effect {
-        if self.command_palette.is_some() {
-            self.close_command_palette();
-        } else {
-            self.cancel_mouse_drag();
-            self.help_open = false;
-            self.clear_help_search();
-            self.command_palette = Some(CommandPaletteState::new(opened_by));
-            self.land_palette_cursor();
-        }
-        Effect::None
-    }
-
-    /// Close the palette with no run. A disabled-row reason that Enter put
-    /// on the status line goes too, so it does not linger after the close.
-    fn close_command_palette(&mut self) {
-        let shown = self
-            .command_palette
-            .take()
-            .and_then(|palette| palette.shown_reason);
-        if shown.is_some_and(|reason| self.status == reason) {
-            self.status.clear();
-        }
-    }
-
-    /// Put the palette cursor on the first enabled visible row (0 if none).
-    ///
-    /// Runs on open and on each filter change, so the HIGHLIGHT rows that
-    /// paint first do not take the cursor while they are disabled. `j` / `k`
-    /// still move over every row.
-    fn land_palette_cursor(&mut self) {
-        let Some(visible) = self.command_palette.as_ref().map(|p| p.visible()) else {
-            return;
-        };
-        let cursor = visible
-            .iter()
-            .position(|command| self.palette_disabled_reason(command).is_none())
-            .unwrap_or(0);
-        if let Some(palette) = self.command_palette.as_mut() {
-            palette.cursor = cursor;
-        }
-    }
-
-    fn submit_command_palette(&mut self) -> Effect {
-        let Some(command) = self
-            .command_palette
-            .as_ref()
-            .and_then(|palette| palette.selected())
-        else {
-            return Effect::None;
-        };
-        if let Some(reason) = self.palette_disabled_reason(command) {
-            self.status = StatusMessage::warn(reason.clone());
-            if let Some(palette) = self.command_palette.as_mut() {
-                palette.shown_reason = Some(reason);
-            }
-            return Effect::None;
-        }
-        let action = match command.action {
-            // Other pane is Tab: it moves away from whichever pane has focus.
-            Action::FocusRight if self.focus == FocusPane::Right => Action::FocusLeft,
-            ref action => action.clone(),
-        };
-        self.command_palette = None;
-        if action == Action::FoldToggleSubtree {
-            // Fold subtree is `zz`: toggle this row, then match its
-            // descendants. Both fold actions return `Effect::None`.
-            self.dispatch(Action::FoldToggle);
-        }
-        self.dispatch(action)
-    }
-
     /// Why palette row `command` cannot run, or `None` if Enter should dispatch.
     ///
-    /// Order: compare refusal ([`Self::compare_refusal`], which also gates
+    /// On a file tab: [`Self::file_tab_refusal`], then
+    /// [`Self::file_tab_palette_reason`]. Otherwise: compare refusal ([`Self::compare_refusal`], which also gates
     /// the compare open commands on every tab), folder-summary refusal
     /// ([`Self::summary_refusal`]), then the row's
     /// highlight scope, then the range patch (highlighted stage / unstage /
     /// revert), then the action gate.
     pub(crate) fn palette_disabled_reason(&self, command: &PaletteCommand) -> Option<String> {
         let action = &command.action;
+        if self.is_file_tab() {
+            return self
+                .file_tab_refusal(action)
+                .or_else(|| self.file_tab_palette_reason(command));
+        }
         if let Some(reason) = self
             .compare_refusal(action)
             .or_else(|| self.summary_refusal(action))
@@ -745,7 +673,7 @@ impl AppState {
                     Some("focus a visible repo to stash".into())
                 }
             }
-            Action::CloseCompareTab => {
+            Action::CloseTab => {
                 if self.tabs.is_workspace() {
                     Some(WORKSPACE_TAB_CANNOT_CLOSE.into())
                 } else {

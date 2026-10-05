@@ -75,7 +75,7 @@ fn pty_m_toggles_terminal_mouse_tracking() {
         tui.ctrl_letter('k');
         tui.wait_pred(
             |screen| screen.contains("Enter run"),
-            "Ctrl-k opens the command palette",
+            "Ctrl-k opens Quick Open commands",
             WAIT,
         );
         for c in "toggle mouse".chars() {

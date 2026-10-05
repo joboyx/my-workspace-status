@@ -55,6 +55,8 @@ pub enum UserTag {
     /// External-diff blob + temp prepare (`E`).
     DiffPrepare,
     Autoload,
+    /// Quick Open file index load or fuzzy score (latest-only slots).
+    QuickOpen,
 }
 
 /// A job the loop should `spawn_blocking`.

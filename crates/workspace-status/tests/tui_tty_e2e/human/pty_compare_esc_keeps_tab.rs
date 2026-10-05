@@ -31,7 +31,7 @@ fn pty_compare_esc_keeps_tab() {
     );
 
     tui.ctrl_letter('k');
-    tui.wait_contains("Ctrl-k", WAIT);
+    tui.wait_contains(">▏", WAIT);
     for c in "close tab".chars() {
         tui.key(c);
         if c == 'l' {

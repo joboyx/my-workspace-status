@@ -7,8 +7,9 @@
 //! short as it can be. The footer shows [`crate::APP_VERSION`] in the
 //! lower-right. On a compare tab [`help_groups`] swaps GIT for
 //! [`HELP_COMPARE_GROUP`] (what acts on the compare diff and what needs the
-//! Workspace tab); [`help_status_lines`] reserves the rows of the columns
-//! that paint.
+//! Workspace tab), on a file tab for [`HELP_FILE_GROUP`];
+//! [`help_status_lines`] sizes the help dialog for the columns that paint.
+//! A dialog shorter than that scrolls its body.
 
 /// One help row: key chips plus a short description.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,7 +194,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: "V",
-                desc: "highlight diff lines for ; / s / u / x / :",
+                desc: "highlight diff lines for ; / s / u / x / Ctrl-k",
             },
             HelpEntry {
                 keys: "y",
@@ -212,8 +213,12 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "focus right / drill",
             },
             HelpEntry {
-                keys: "? Ctrl-k :",
-                desc: "help · command palette",
+                keys: ": Ctrl-k",
+                desc: "go to file · commands (> in : switches)",
+            },
+            HelpEntry {
+                keys: "?",
+                desc: "help",
             },
             HelpEntry {
                 keys: "Tab",
@@ -241,7 +246,7 @@ pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
     entries: &[
         HelpEntry {
             keys: "V",
-            desc: "highlight for ; x ' :",
+            desc: "highlight for ; x ' Ctrl-k",
         },
         HelpEntry {
             keys: ";",
@@ -273,7 +278,7 @@ pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
         },
         HelpEntry {
             keys: super::render::TAB_CLOSE_GLYPH,
-            desc: "close tab (or palette)",
+            desc: "close tab (or Ctrl-k)",
         },
         HelpEntry {
             keys: "s u",
@@ -305,13 +310,69 @@ pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
 /// Help columns on a compare tab: MOVE, [`HELP_COMPARE_GROUP`], VIEW.
 pub const HELP_COMPARE_GROUPS: &[HelpGroup] = &[HELP_GROUPS[0], HELP_COMPARE_GROUP, HELP_GROUPS[2]];
 
+/// File-tab column that takes the place of GIT while a file tab is active.
+///
+/// Lists what acts on the read-only file and the git keys that stay on the
+/// Workspace tab. The tab-close chip is the tab bar glyph.
+pub const HELP_FILE_GROUP: HelpGroup = HelpGroup {
+    title: "FILE",
+    entries: &[
+        HelpEntry {
+            keys: "/ n N",
+            desc: "search",
+        },
+        HelpEntry {
+            keys: "\\",
+            desc: "wrap",
+        },
+        HelpEntry {
+            keys: "'",
+            desc: "copy reference",
+        },
+        HelpEntry {
+            keys: "e",
+            desc: "editor at line",
+        },
+        HelpEntry {
+            keys: "r",
+            desc: "reload",
+        },
+        HelpEntry {
+            keys: super::render::TAB_CLOSE_GLYPH,
+            desc: "close tab",
+        },
+        HelpEntry {
+            keys: "s u x S",
+            desc: "Workspace tab only",
+        },
+        HelpEntry {
+            keys: "f p P d",
+            desc: "Workspace tab only",
+        },
+    ],
+};
+
+/// Help columns on a file tab: MOVE, [`HELP_FILE_GROUP`], VIEW.
+pub const HELP_FILE_GROUPS: &[HelpGroup] = &[HELP_GROUPS[0], HELP_FILE_GROUP, HELP_GROUPS[2]];
+
+/// Which kind of tab the help overlay describes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HelpTab {
+    /// The Workspace tab: MOVE / GIT / VIEW.
+    Workspace,
+    /// A compare tab: MOVE / COMPARE / VIEW.
+    Compare,
+    /// A file tab: MOVE / FILE / VIEW.
+    File,
+}
+
 /// Help columns for the active tab: [`HELP_COMPARE_GROUPS`] on a compare
-/// tab, else [`HELP_GROUPS`].
-pub fn help_groups(compare: bool) -> &'static [HelpGroup] {
-    if compare {
-        HELP_COMPARE_GROUPS
-    } else {
-        HELP_GROUPS
+/// tab, [`HELP_FILE_GROUPS`] on a file tab, else [`HELP_GROUPS`].
+pub fn help_groups(tab: HelpTab) -> &'static [HelpGroup] {
+    match tab {
+        HelpTab::Workspace => HELP_GROUPS,
+        HelpTab::Compare => HELP_COMPARE_GROUPS,
+        HelpTab::File => HELP_FILE_GROUPS,
     }
 }
 
@@ -729,11 +790,11 @@ pub fn help_overlay_height(groups: &[HelpGroup], term_width: usize, footer: &str
     help_overlay_row_count(body, footer_lines.len().max(1))
 }
 
-/// Overlay rows reserved for `?` help at `term_cols`, for the columns
-/// [`help_groups`] paints (`compare` on a compare tab).
-pub fn help_status_lines(term_cols: u16, compare: bool) -> u16 {
+/// Help dialog height at box width `term_cols`, for the columns
+/// [`help_groups`] paints on `tab`.
+pub fn help_status_lines(term_cols: u16, tab: HelpTab) -> u16 {
     help_overlay_height(
-        help_groups(compare),
+        help_groups(tab),
         usize::from(term_cols.max(1)),
         &help_idle_footer(),
     ) as u16
@@ -800,8 +861,9 @@ mod tests {
         assert!(!view_keys.contains(&"i \\"));
         assert!(!view_keys.contains(&"i"));
         assert!(view_keys.contains(&"Ctrl-o"));
-        assert!(view_keys.contains(&"? Ctrl-k :"));
-        assert!(!view_keys.contains(&"?"));
+        assert!(view_keys.contains(&": Ctrl-k"));
+        assert!(view_keys.contains(&"?"));
+        assert!(!view_keys.contains(&"? Ctrl-k :"));
         assert!(view_keys.contains(&"o O"));
         assert!(view_keys.contains(&"m"));
         assert!(view_keys.contains(&";"));
@@ -853,7 +915,7 @@ mod tests {
     fn help_keys_use_one_spelling() {
         let groups = HELP_GROUPS
             .iter()
-            .chain(std::iter::once(&HELP_COMPARE_GROUP));
+            .chain([&HELP_COMPARE_GROUP, &HELP_FILE_GROUP]);
         for entry in groups.flat_map(|g| g.entries.iter()) {
             let text = help_entry_label(entry.keys, entry.desc);
             assert!(!text.contains("Ctrl+"), "{text}");
@@ -877,19 +939,19 @@ mod tests {
             .map(|group| group.entries.len())
             .max()
             .unwrap_or(0);
-        let wide = help_status_lines(300, false);
-        let mid = help_status_lines(128, false);
-        let narrow = help_status_lines(80, false);
+        let wide = help_status_lines(300, HelpTab::Workspace);
+        let mid = help_status_lines(128, HelpTab::Workspace);
+        let narrow = help_status_lines(80, HelpTab::Workspace);
         assert_eq!(wide, (2 + 1 + row_count + 1) as u16);
         assert!(mid > wide, "128 cols still wraps some descriptions");
         assert!(
             narrow > mid,
             "narrow terminals wrap more and take more rows"
         );
-        let at_140 = help_status_lines(140, false);
+        let at_140 = help_status_lines(140, HelpTab::Workspace);
         assert!(
-            at_140 <= 24,
-            "at 140×40 the tree keeps ≥ 13 rows \
+            at_140 <= 26,
+            "at 140×40 the help dialog fits without scrolling \
              (render `help_columns_keep_a_gutter_and_the_panes_rows`): {at_140}"
         );
     }
@@ -926,7 +988,7 @@ mod tests {
     fn key_width_follows_the_widest_chip_set() {
         for group in HELP_GROUPS
             .iter()
-            .chain(std::iter::once(&HELP_COMPARE_GROUP))
+            .chain([&HELP_COMPARE_GROUP, &HELP_FILE_GROUP])
         {
             let key_width = help_key_width(group);
             let widest = group
@@ -977,7 +1039,7 @@ mod tests {
     fn column_rows_never_grow_with_width() {
         for group in HELP_GROUPS
             .iter()
-            .chain(std::iter::once(&HELP_COMPARE_GROUP))
+            .chain([&HELP_COMPARE_GROUP, &HELP_FILE_GROUP])
         {
             let mut prev = usize::MAX;
             for width in help_column_floor(group)..=240 {
@@ -996,16 +1058,16 @@ mod tests {
     fn narrow_terminals_stay_under_the_row_aligned_height() {
         // Slack over the measured reflow height before the test fails.
         const SLACK: usize = 2;
-        // (terminal cols, compare tab, row-aligned body rows, reflow body
-        // rows as measured).
-        for (term, compare, row_aligned, measured) in [
-            (60usize, false, 60usize, 52usize),
-            (64, true, 251, 52),
-            (80, false, 86, 40),
-            (100, false, 47, 30),
-            (140, false, 28, 20),
+        // (terminal cols, tab, row-aligned body rows, reflow body rows as
+        // measured).
+        for (term, tab, row_aligned, measured) in [
+            (60usize, HelpTab::Workspace, 60usize, 56usize),
+            (64, HelpTab::Compare, 251, 56),
+            (80, HelpTab::Workspace, 86, 42),
+            (100, HelpTab::Workspace, 47, 30),
+            (140, HelpTab::Workspace, 28, 22),
         ] {
-            let groups = help_groups(compare);
+            let groups = help_groups(tab);
             let widths = help_column_widths(groups, help_inner_width(term));
             let body = help_body_line_count(groups, &widths);
             assert!(
@@ -1038,8 +1100,8 @@ mod tests {
     fn descriptions_leave_the_gutter_blank() {
         for term in [60usize, 64, 80, 100, 120, 140, 200] {
             let inner = help_inner_width(term);
-            for compare in [false, true] {
-                let groups = help_groups(compare);
+            for tab in [HelpTab::Workspace, HelpTab::Compare, HelpTab::File] {
+                let groups = help_groups(tab);
                 for (group, width) in groups.iter().zip(help_column_widths(groups, inner)) {
                     let content = help_column_content_width(width);
                     let key_width = help_key_width(group);
@@ -1061,17 +1123,45 @@ mod tests {
         }
     }
 
+    /// A file tab paints MOVE / FILE / VIEW; FILE lists the viewer keys and
+    /// the git keys that need the Workspace tab.
+    #[test]
+    fn file_column_lists_viewer_keys() {
+        let rows: Vec<String> = HELP_FILE_GROUP
+            .entries
+            .iter()
+            .map(|e| help_entry_label(e.keys, e.desc))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "/ n N search",
+                "\\ wrap",
+                "' copy reference",
+                "e editor at line",
+                "r reload",
+                format!("{} close tab", super::super::render::TAB_CLOSE_GLYPH).as_str(),
+                "s u x S Workspace tab only",
+                "f p P d Workspace tab only",
+            ]
+        );
+    }
+
     /// A compare tab paints MOVE / COMPARE / VIEW; COMPARE lists what acts
     /// on the compare diff and what needs the Workspace tab. The row budget
     /// is checked against the paint in `render.rs`
-    /// (`compare_help_paints_its_reserved_rows`).
+    /// (`compare_help_paints_centered_and_scrolls_every_body_row`,
+    /// `file_help_paints_its_reserved_rows`).
     #[test]
     fn compare_column_lists_compare_keys() {
         assert_eq!(HELP_COMPARE_GROUPS.len(), HELP_COLUMN_COUNT);
-        assert_eq!(help_groups(false), HELP_GROUPS);
-        assert_eq!(help_groups(true)[1].title, "COMPARE");
-        assert_eq!(help_groups(true)[0], HELP_GROUPS[0]);
-        assert_eq!(help_groups(true)[2], HELP_GROUPS[2]);
+        assert_eq!(help_groups(HelpTab::Workspace), HELP_GROUPS);
+        assert_eq!(help_groups(HelpTab::Compare)[1].title, "COMPARE");
+        assert_eq!(help_groups(HelpTab::Compare)[0], HELP_GROUPS[0]);
+        assert_eq!(help_groups(HelpTab::Compare)[2], HELP_GROUPS[2]);
+        assert_eq!(help_groups(HelpTab::File)[1].title, "FILE");
+        assert_eq!(help_groups(HelpTab::File)[0], HELP_GROUPS[0]);
+        assert_eq!(help_groups(HelpTab::File)[2], HELP_GROUPS[2]);
         let text: String = HELP_COMPARE_GROUP
             .entries
             .iter()

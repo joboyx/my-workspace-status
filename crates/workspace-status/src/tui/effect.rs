@@ -13,11 +13,16 @@
 //! then enqueues blob/temp prepare on `spawn_blocking` before spawning the tool.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use workspace_status_graph::LOADING_OLDER;
 
 use crate::actions::{switch_repo_to_default_branch, SwitchOutcome};
 use crate::discovery::{discover_checkouts, process_repo, RepoCheckoutMeta};
+use crate::file_index::{
+    build_file_index, read_text_file, score_files, FileHit, FileIndex, FileRead, IndexRoot,
+    MAX_FILE_BYTES, MAX_INDEX_ENTRIES, MAX_RESULTS,
+};
 use crate::git::{
     apply_cached_patch, apply_worktree_patch_reverse, create_branch_at, create_branch_checkout,
     exec_git_checked, latest_stash_ref, list_compare_picker_branches, list_compare_picker_commits,
@@ -169,6 +174,22 @@ pub(crate) enum JobOutcome {
     CompareProbe {
         tab_id: u64,
         result: Result<bool, String>,
+    },
+    /// Quick Open file listing for index generation `gen`.
+    FileIndex {
+        gen: u64,
+        index: FileIndex,
+    },
+    /// Quick Open ranked hits for score generation `gen`.
+    FileScore {
+        gen: u64,
+        hits: Vec<FileHit>,
+    },
+    /// File tab body for load generation `gen`.
+    FileTab {
+        tab_id: u64,
+        gen: u64,
+        body: FileRead,
     },
 }
 
@@ -475,10 +496,16 @@ pub(crate) struct Interpreter {
     default_tally: OpTally,
     default_total: usize,
     default_repos: Vec<String>,
-    pending_edit: Option<(String, String)>,
+    pending_edit: Option<(String, String, Option<u32>)>,
     pending_diff: Option<(String, String, ExternalDiffKind)>,
     diff_prepare: Option<DiffPrepareJob>,
     pending_diff_launch: Option<DiffLaunch>,
+    /// Latest Quick Open index request; a newer one replaces it before spawn.
+    file_index_job: Option<(u64, Vec<IndexRoot>)>,
+    /// Latest Quick Open score request; a newer one replaces it before spawn.
+    file_score_job: Option<(u64, Arc<FileIndex>, String)>,
+    /// Queued file tab reads: tab id, load generation, checkout, path.
+    file_tab_jobs: VecDeque<(u64, u64, String, String)>,
     exclusive_inflight: HashMap<u64, Vec<String>>,
     /// Name of the exclusive write or default-branch job on a worker.
     running_write: Option<&'static str>,
@@ -514,6 +541,9 @@ impl Interpreter {
             pending_diff: None,
             diff_prepare: None,
             pending_diff_launch: None,
+            file_index_job: None,
+            file_score_job: None,
+            file_tab_jobs: VecDeque::new(),
             exclusive_inflight: HashMap::new(),
             running_write: None,
             dirty: false,
@@ -574,7 +604,9 @@ impl Interpreter {
     }
 
     /// TTY `$EDITOR` request, if [`Effect::EditFile`] ran since the last take.
-    pub(crate) fn take_pending_edit(&mut self) -> Option<(String, String)> {
+    ///
+    /// `(checkout, path, 1-based line)`.
+    pub(crate) fn take_pending_edit(&mut self) -> Option<(String, String, Option<u32>)> {
         self.pending_edit.take()
     }
 
@@ -662,7 +694,7 @@ impl Interpreter {
                 self.sched.on_reload_repo(repo);
             }
             Effect::LoadRightPane => {
-                if !state.is_compare_tab() {
+                if state.tabs.is_workspace() {
                     self.pane_req = Some(RightPaneRequest::from_state(state));
                     self.sched.request_pane();
                 }
@@ -826,8 +858,8 @@ impl Interpreter {
                     }),
                 );
             }
-            Effect::EditFile { repo, path } => {
-                self.pending_edit = Some((repo, path));
+            Effect::EditFile { repo, path, line } => {
+                self.pending_edit = Some((repo, path, line));
                 self.mark();
             }
             Effect::ExternalDiff { repo, path, kind } => {
@@ -966,7 +998,7 @@ impl Interpreter {
                 );
             }
             Effect::LoadCommitFiles { repo, source } => {
-                if !state.is_compare_tab() {
+                if state.tabs.is_workspace() {
                     state.begin_commit_files(repo.clone(), source.clone());
                     let gen = self.sched.request_commit_files();
                     self.commit_files = Some((gen, repo, source));
@@ -1048,6 +1080,23 @@ impl Interpreter {
                 });
                 self.sched.enqueue_user(UserTag::Pane);
             }
+            Effect::LoadFileIndex { gen, roots } => {
+                self.file_index_job = Some((gen, roots));
+                self.sched.enqueue_user(UserTag::QuickOpen);
+            }
+            Effect::ScoreFiles { gen, index, query } => {
+                self.file_score_job = Some((gen, index, query));
+                self.sched.enqueue_user(UserTag::QuickOpen);
+            }
+            Effect::LoadFileTab {
+                tab_id,
+                gen,
+                repo,
+                path,
+            } => {
+                self.file_tab_jobs.push_back((tab_id, gen, repo, path));
+                self.sched.enqueue_user(UserTag::QuickOpen);
+            }
             Effect::CopyClipboard { text, announce } => {
                 let ok = comments::copy_to_clipboard(&text);
                 // `y` opens the export overlay right before this copy; its
@@ -1073,7 +1122,7 @@ impl Interpreter {
 
     /// Queue graph autoload when the cursor sits on the last loaded row.
     pub(crate) fn maybe_queue_autoload(&mut self, state: &mut AppState) {
-        if state.is_compare_tab() {
+        if !state.tabs.is_workspace() {
             return;
         }
         if state.graph_loading_older {
@@ -1256,7 +1305,7 @@ impl Interpreter {
                 let decision = self.sched.note_repo_done(gen, &path);
                 if focused.as_deref() == Some(path.as_str())
                     && focused_repo_needs_pane(&before_sigs, &before_snap, state, &path)
-                    && !state.is_compare_tab()
+                    && state.tabs.is_workspace()
                 {
                     self.pane_req = Some(RightPaneRequest::from_state(state));
                     self.sched.request_pane();
@@ -1272,7 +1321,7 @@ impl Interpreter {
                 load,
             } => {
                 let accepted = self.sched.accept_pane_result(req_id);
-                if state.is_compare_tab() {
+                if !state.tabs.is_workspace() {
                     // Consume the result. Do not recapture parked Workspace
                     // drill / tree cursor into a new pane request.
                 } else {
@@ -1298,7 +1347,7 @@ impl Interpreter {
                 self.release_exclusive(state, id);
                 state.status = status;
                 self.sched.on_reload_snapshot(state.focused_checkout_path());
-                if !state.is_compare_tab() {
+                if state.tabs.is_workspace() {
                     self.pane_req = Some(RightPaneRequest::from_state(state));
                     self.sched.request_pane();
                 }
@@ -1348,7 +1397,7 @@ impl Interpreter {
                     self.default_repos.clear();
                     self.release_default_branch(state);
                     self.sched.on_reload_snapshot(state.focused_checkout_path());
-                    if !state.is_compare_tab() {
+                    if state.tabs.is_workspace() {
                         self.pane_req = Some(RightPaneRequest::from_state(state));
                         self.sched.request_pane();
                     }
@@ -1359,7 +1408,9 @@ impl Interpreter {
                 self.sched.note_user_done(UserTag::Prepare);
                 let accepted = self.sched.accept_prepare_stash_result(gen);
                 let current = state.focused_checkout_path();
-                if accepted && current.as_deref() == Some(repo.as_str()) && !state.is_compare_tab()
+                if accepted
+                    && current.as_deref() == Some(repo.as_str())
+                    && state.tabs.is_workspace()
                 {
                     state.open_stash_menu(repo, latest);
                     self.mark();
@@ -1378,7 +1429,9 @@ impl Interpreter {
                 } else {
                     state.focused_checkout_path()
                 };
-                if accepted && current.as_deref() == Some(repo.as_str()) && !state.is_compare_tab()
+                if accepted
+                    && current.as_deref() == Some(repo.as_str())
+                    && state.tabs.is_workspace()
                 {
                     if graph_focus {
                         state.open_graph_focus_picker(repo, branches);
@@ -1394,7 +1447,7 @@ impl Interpreter {
                 if apply_checkout_compute(state, repo, result) {
                     self.sched.on_reload_snapshot(state.focused_checkout_path());
                 }
-                if !state.is_compare_tab() {
+                if state.tabs.is_workspace() {
                     self.pane_req = Some(RightPaneRequest::from_state(state));
                     self.sched.request_pane();
                 }
@@ -1406,7 +1459,7 @@ impl Interpreter {
                 if apply_merge_compute(state, &label, result) {
                     self.sched.on_reload_snapshot(state.focused_checkout_path());
                 }
-                if !state.is_compare_tab() {
+                if state.tabs.is_workspace() {
                     self.pane_req = Some(RightPaneRequest::from_state(state));
                     self.sched.request_pane();
                 }
@@ -1454,7 +1507,7 @@ impl Interpreter {
                     } => live_repo == &repo && live_source == &source,
                     _ => false,
                 };
-                if accepted && current && !state.is_compare_tab() {
+                if accepted && current && state.tabs.is_workspace() {
                     state.open_commit_files(
                         repo,
                         source,
@@ -1487,7 +1540,7 @@ impl Interpreter {
                     } => live_repo == &repo && live_source == &source,
                     DrillView::Graph => false,
                 };
-                if accepted && current && !state.is_compare_tab() {
+                if accepted && current && state.tabs.is_workspace() {
                     state.open_commit_diff(repo, source, files, file_cursor, path, content);
                     self.mark();
                 }
@@ -1545,6 +1598,23 @@ impl Interpreter {
                     self.mark();
                 }
             }
+            JobOutcome::FileIndex { gen, index } => {
+                if let Some(follow) = state.apply_file_index(gen, index) {
+                    self.schedule(state, opts, follow, &Action::None);
+                    self.mark();
+                }
+            }
+            JobOutcome::FileScore { gen, hits } => {
+                if let Some(follow) = state.apply_file_score(gen, hits) {
+                    self.schedule(state, opts, follow, &Action::None);
+                    self.mark();
+                }
+            }
+            JobOutcome::FileTab { tab_id, gen, body } => {
+                if state.apply_file_tab(tab_id, gen, body) {
+                    self.mark();
+                }
+            }
             JobOutcome::ComparePicker { gen, repo, result } => {
                 self.sched.note_user_done(UserTag::Prepare);
                 let accepted = self.sched.accept_prepare_compare_result(gen);
@@ -1586,7 +1656,7 @@ impl Interpreter {
     /// Reload a checkout after a TTY editor returns.
     pub(crate) fn after_edit(&mut self, state: &mut AppState, repo: String) {
         self.sched.on_reload_repo(repo);
-        if !state.is_compare_tab() {
+        if state.tabs.is_workspace() {
             self.pane_req = Some(RightPaneRequest::from_state(state));
             self.sched.request_pane();
         }
@@ -1904,7 +1974,7 @@ impl Interpreter {
             state.status = completed_op_status(kind, &tally);
         }
         self.sched.on_reload_snapshot(state.focused_checkout_path());
-        if !state.is_compare_tab() {
+        if state.tabs.is_workspace() {
             self.pane_req = Some(RightPaneRequest::from_state(state));
             self.sched.request_pane();
         }
@@ -2328,6 +2398,44 @@ impl Interpreter {
                 }
                 self.sched.note_job_finished(id);
             }
+            UserTag::QuickOpen => {
+                // Reads are queued one per enqueue, so draining them first
+                // never strands one behind the latest-only index / score slots.
+                if let Some((tab_id, gen, repo, path)) = self.file_tab_jobs.pop_front() {
+                    let file = opts.cwd.join(repo).join(path);
+                    spawn(
+                        id,
+                        Box::new(move || JobOutcome::FileTab {
+                            tab_id,
+                            gen,
+                            body: read_text_file(&file, MAX_FILE_BYTES),
+                        }),
+                    );
+                    return;
+                }
+                if let Some((gen, roots)) = self.file_index_job.take() {
+                    let cwd = opts.cwd.clone();
+                    spawn(
+                        id,
+                        Box::new(move || JobOutcome::FileIndex {
+                            gen,
+                            index: build_file_index(&cwd, roots, MAX_INDEX_ENTRIES),
+                        }),
+                    );
+                    return;
+                }
+                if let Some((gen, index, query)) = self.file_score_job.take() {
+                    spawn(
+                        id,
+                        Box::new(move || JobOutcome::FileScore {
+                            gen,
+                            hits: score_files(&index, &query, MAX_RESULTS),
+                        }),
+                    );
+                    return;
+                }
+                self.sched.note_job_finished(id);
+            }
             UserTag::Autoload => {
                 let Some((gen, identity)) = self.autoload.take() else {
                     // A graph pane load cancelled it and already reset the
@@ -2703,7 +2811,7 @@ mod tests {
     fn late_compare_range_after_close_does_not_reopen_tab() {
         let mut state = fixture_state();
         let (tab_id, gen) = open_compare_tab(&mut state);
-        assert!(state.tabs.close_active_compare());
+        assert!(state.tabs.close_active());
         let mut interp = Interpreter::new();
         apply(
             &mut interp,
@@ -5219,6 +5327,122 @@ mod tests {
             let outcome = work();
             apply_id(interp, state, id, outcome);
         }
+    }
+
+    #[test]
+    fn quick_open_pipeline_indexes_and_scores_real_checkout() {
+        use crate::tui::action::QuickOpenEntry;
+        use crate::tui::quick_open::FileIndexState;
+        let (root, mut state) = git_app_state("ws-effect-quick-open", "main", true);
+        std::fs::create_dir_all(root.join("app/src")).unwrap();
+        std::fs::write(root.join("app/src/main.rs"), "fn main() {}\n").unwrap();
+        state.cursor = state
+            .rows
+            .iter()
+            .position(|row| row.repo.as_deref() == Some("app"))
+            .expect("app row");
+        let opts = opts(&state);
+        let mut interp = Interpreter::with_cap(4);
+        let open = Action::ToggleQuickOpen(QuickOpenEntry::Files);
+        let effect = state.dispatch(open.clone());
+        assert!(matches!(effect, Effect::LoadFileIndex { .. }), "{effect:?}");
+        interp.interpret_sync(&mut state, &opts, effect, &open);
+        for c in "main".chars() {
+            let typed = Action::QuickOpenChar(c);
+            let effect = state.dispatch(typed.clone());
+            interp.interpret_sync(&mut state, &opts, effect, &typed);
+        }
+        let quick = state.quick_open.as_ref().expect("Quick Open open");
+        let FileIndexState::Ready(index) = &quick.index else {
+            panic!("index not ready: {:?}", quick.index);
+        };
+        assert!(!quick.score_pending);
+        let top = quick.hits.first().expect("a hit for main");
+        assert_eq!(index.entries[top.entry].display, "src/main.rs");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_tab_load_drops_stale_generation() {
+        let (root, mut state) = git_app_state("ws-effect-file-tab-stale", "main", false);
+        std::fs::write(root.join("app/notes.txt"), "old\n").unwrap();
+        let mut interp = Interpreter::with_cap(4);
+        let first = state.open_file_tab("app".into(), "notes.txt".into());
+        assert!(
+            matches!(first, Effect::LoadFileTab { gen: 0, .. }),
+            "{first:?}"
+        );
+        schedule_effect(&mut interp, &mut state, first, &Action::None);
+        let stale = capture_jobs(&mut interp, &mut state);
+        assert_eq!(stale.len(), 1);
+        let reload = state.dispatch(Action::Refresh);
+        assert!(
+            matches!(reload, Effect::LoadFileTab { gen: 1, .. }),
+            "{reload:?}"
+        );
+        std::fs::write(root.join("app/notes.txt"), "fresh\nlines\n").unwrap();
+        for (id, work) in stale {
+            apply_id(&mut interp, &mut state, id, work());
+        }
+        assert!(
+            state.tabs.active_file().unwrap().body.is_none(),
+            "a generation-0 read is dropped after r"
+        );
+        let opts = opts(&state);
+        interp.interpret_sync(&mut state, &opts, reload, &Action::Refresh);
+        assert_eq!(
+            state.tabs.active_file().unwrap().lines(),
+            ["fresh", "lines"]
+        );
+
+        state.dispatch(Action::CloseTab);
+        let gone = JobOutcome::FileTab {
+            tab_id: 1,
+            gen: 1,
+            body: FileRead::Binary,
+        };
+        apply(&mut interp, &mut state, gone);
+        assert!(state.tabs.is_workspace(), "a closed tab takes no result");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_tab_loads_text_binary_and_too_large() {
+        let (root, mut state) = git_app_state("ws-effect-file-tab-kinds", "main", false);
+        let app = root.join("app");
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        std::fs::write(app.join("src/main.rs"), "fn main() {\n\tprintln!();\n}\n").unwrap();
+        std::fs::write(app.join("logo.bin"), b"PNG\0\x01\x02").unwrap();
+        std::fs::write(app.join("big.log"), vec![b'a'; MAX_FILE_BYTES as usize + 1]).unwrap();
+        let opts = opts(&state);
+        let mut interp = Interpreter::with_cap(4);
+        let mut load = |state: &mut AppState, rel: &str| -> FileRead {
+            let effect = state.open_file_tab("app".into(), rel.into());
+            interp.interpret_sync(state, &opts, effect, &Action::None);
+            let tab = state.tabs.active_file().expect("file tab");
+            assert_eq!(tab.rel, rel);
+            tab.body.as_deref().cloned().expect("loaded")
+        };
+        match load(&mut state, "src/main.rs") {
+            FileRead::Text { lines, .. } => {
+                assert_eq!(lines.len(), 3);
+                assert_eq!(lines[1], "    println!();", "tabs expand");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(load(&mut state, "logo.bin"), FileRead::Binary);
+        assert_eq!(
+            load(&mut state, "big.log"),
+            FileRead::TooLarge {
+                bytes: MAX_FILE_BYTES + 1
+            }
+        );
+        assert!(matches!(
+            load(&mut state, "missing.txt"),
+            FileRead::Failed(_)
+        ));
+        assert_eq!(state.tabs.len(), 5, "one tab per file");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

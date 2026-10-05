@@ -16,11 +16,14 @@ use workspace_status_graph::{
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use super::chrome::{
-    breadcrumb_line, breadcrumb_rows, ctrl_c_prompt_line, ctrl_c_prompt_rows, export_shows_status,
-    overlay_status_rows_for, status_line,
+    breadcrumb_line, breadcrumb_rows, ctrl_c_prompt_line, ctrl_c_prompt_rows, dialog_height,
+    dialog_rect, dialog_width, export_shows_status, help_tab, open_dialog, status_line, DialogKind,
+    LIST_OVERLAY_MAX_ROWS,
 };
+use super::command_palette::{CommandPaletteState, PalettePaintRow};
 use super::comments::{
     comment_overlay_footer_save, commit_file_row_comments_resolved, commit_file_row_has_comment,
     graph_row_comments_resolved, graph_row_has_comment, tree_row_comments_resolved,
@@ -34,9 +37,10 @@ use super::diff::{
 };
 use super::drill::DrillView;
 use super::help::{
-    help_chip_gap_spaces, help_column_content_width, help_column_widths, help_entry_matches,
-    help_entry_visual_lines, help_groups, help_idle_footer_lines, help_inner_width, help_key_width,
-    help_version_label, HELP_SEARCH_ESC_HINT,
+    attach_help_version, help_chip_gap_spaces, help_column_content_width, help_column_widths,
+    help_entry_matches, help_entry_visual_lines, help_groups, help_idle_footer,
+    help_idle_footer_lines, help_inner_width, help_key_width, help_version_label, wrap_help_footer,
+    HELP_SEARCH_ESC_HINT,
 };
 use super::icons::{
     comment_mark_cols, glyph, icon_branch, icon_comment, icon_comment_resolved, icon_diff,
@@ -44,9 +48,10 @@ use super::icons::{
     CURSOR_BAR_INACTIVE, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
 };
 use super::ops::RevertScope;
+use super::quick_open::{files_row_shows_status, FileIndexState, QuickOpenMode, QuickOpenState};
 use super::search::{
     collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids, slice_cols,
-    wrap_col_starts, wrap_cols, SearchPane,
+    wrap_col_starts, wrap_col_starts_capped, wrap_cols, SearchPane,
 };
 use super::split::{
     diff_paint_width, diff_split_rule_x, pane_widths, side_by_side_column_widths, DiffMode,
@@ -54,18 +59,21 @@ use super::split::{
 };
 use super::state::{revert_scope, AppState, CompareRevertTarget, FocusPane, PendingConfirm};
 use super::syntax::{
-    cached_highlight_diff_rows, slice_styled_cols, CachedDiffSyntax, CodeSpan, DiffBackgrounds,
-    DiffSyntaxKey,
+    cached_highlight_diff_rows, highlight_file_window, slice_styled_cols, CachedDiffSyntax,
+    CodeSpan, DiffBackgrounds, DiffSyntaxKey,
 };
 use super::tabs::{
-    compare_picker_empty, no_committed_changes_vs, ComparePickerState, NO_COMMITTED_CHANGES,
+    compare_picker_empty, file_gutter_width, file_too_large, no_committed_changes_vs,
+    ComparePickerState, FileTab, FILE_IS_BINARY, NO_COMMITTED_CHANGES,
 };
+use super::theme::ThemeId;
 use super::theme::{hex_color, Palette, Pill};
 use super::tree::{
     file_change_from_name_status, file_change_segments, row_segments, visible_window,
     with_comment_mark, with_viewed_mark, workspace_trailing_fit, NodeKind, NodeSegments, SegRole,
     TextSeg, VisibleRow,
 };
+use crate::file_index::FileRead;
 use crate::helpers::{is_detached_head_branch, visible_width};
 
 /// Empty tree / empty commit-file list.
@@ -135,44 +143,21 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         draw_too_small(frame, area, state.theme.palette());
         return;
     }
-    let overlay_h = overlay_status_rows_for(state, area.width);
+    // Dialogs paint over the panes (see the end of this fn), so no open
+    // overlay changes these rows.
     let crumb_h = breadcrumb_rows(state);
     let prompt_h = ctrl_c_prompt_rows(state);
-    let tab_h = 1u16;
-    let chrome_h = crumb_h
-        .saturating_add(prompt_h)
-        .saturating_add(overlay_h)
-        .saturating_add(tab_h);
-    // Help keeps its wrapped row budget. Panes take leftover rows (this
-    // can be fewer than the idle Min(3)). A fixed Min(3) clips the last
-    // GIT wrap at the default 140×32 PTY.
-    let pane_min = if state.help_open {
-        area.height.saturating_sub(chrome_h)
-    } else {
-        3
-    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(tab_h),
-            Constraint::Min(pane_min),
+            Constraint::Length(1),
+            Constraint::Min(3),
             Constraint::Length(crumb_h),
             Constraint::Length(prompt_h),
-            Constraint::Length(overlay_h),
+            Constraint::Length(1),
         ])
         .split(area);
     draw_tab_strip(frame, chunks[0], state);
-    let widths = pane_widths(area.width, state.tree_fraction);
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(widths.tree_width),
-            Constraint::Min(MIN_PANE_COLS),
-        ])
-        .split(chunks[1]);
-
-    let left_is_files = state.drill.is_diff() || state.is_compare_tab();
-    let left_is_graph = !state.is_compare_tab() && state.drill.is_files();
     state.layout.graph_scrollbar_x = None;
     state.layout.graph_scrollbar_y = 0;
     state.layout.graph_scrollbar_height = 0;
@@ -190,6 +175,76 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.diff_hscrollbar_x = 0;
     state.layout.diff_hscrollbar_width = 0;
     state.layout.diff_col_max = 0;
+    state.layout.file_view_row_lines.clear();
+    state.layout.term_cols = area.width;
+    state.layout.pane_height = chunks[1].height;
+    if state.is_file_tab() {
+        draw_file_tab(frame, chunks[1], state);
+    } else {
+        draw_panes(frame, chunks[1], state);
+    }
+
+    frame.render_widget(
+        Paragraph::new(breadcrumb_line(state, chunks[2].width)),
+        chunks[2],
+    );
+    if prompt_h > 0 {
+        frame.render_widget(
+            Paragraph::new(ctrl_c_prompt_line(state, chunks[3].width)),
+            chunks[3],
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(status_line(state, chunks[4].width)),
+        chunks[4],
+    );
+
+    // Dialogs paint last: a fixed-height box centered over the panes.
+    state.layout.help_scroll_max = 0;
+    if let Some(kind) = open_dialog(state) {
+        let width = dialog_width(chunks[1], kind);
+        let rect = dialog_rect(chunks[1], width, dialog_height(state, kind, width));
+        match kind {
+            DialogKind::Help => {
+                let max = draw_help(frame, rect, state);
+                state.layout.help_scroll_max = max;
+                // A resize can lower the max: keep the next `k` live.
+                state.help_scroll = state.help_scroll.min(max);
+            }
+            DialogKind::Confirm => draw_confirm(frame, rect, state),
+            DialogKind::StashMenu => draw_stash_menu(frame, rect, state),
+            DialogKind::CreateBranch => draw_create_branch(frame, rect, state),
+            DialogKind::Comment => draw_comment(frame, rect, state),
+            DialogKind::CommentExport => draw_comment_export(frame, rect, state),
+            DialogKind::BranchPicker => draw_branch_picker(frame, rect, state),
+            DialogKind::ComparePicker => draw_compare_picker(frame, rect, state),
+            DialogKind::GraphFocusPicker => draw_graph_focus_picker(frame, rect, state),
+            DialogKind::QuickOpen => draw_quick_open(frame, rect, state),
+        }
+    }
+
+    // Keep the frame as painted so a mouse release copies what is on screen,
+    // then reverse the selected cells on top of it.
+    state.painted_frame = frame.buffer_mut().clone();
+    if let Some(selection) = state.text_selection.as_ref() {
+        selection.highlight(frame.buffer_mut());
+    }
+}
+
+/// Tree / graph / files pane on the left and graph / files / diff on the
+/// right (Workspace and compare tabs), plus their layout for mouse hits.
+fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
+    let widths = pane_widths(pane_area.width, state.tree_fraction);
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(widths.tree_width),
+            Constraint::Min(MIN_PANE_COLS),
+        ])
+        .split(pane_area);
+
+    let left_is_files = state.drill.is_diff() || state.is_compare_tab();
+    let left_is_graph = !state.is_compare_tab() && state.drill.is_files();
     let left_name = state.left_pane_title();
     let palette = state.theme.palette();
     let title_style = Style::default().fg(palette.heading);
@@ -236,50 +291,11 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     frame.render_widget(right_block, panes[1]);
     draw_right(frame, right_inner, state);
 
-    if crumb_h > 0 {
-        frame.render_widget(
-            Paragraph::new(breadcrumb_line(state, chunks[2].width)),
-            chunks[2],
-        );
-    }
-    if prompt_h > 0 {
-        frame.render_widget(
-            Paragraph::new(ctrl_c_prompt_line(state, chunks[3].width)),
-            chunks[3],
-        );
-    }
-    let overlay = chunks[4];
-    if state.help_open {
-        draw_help(frame, overlay, state);
-    } else if state.confirm.is_some() {
-        draw_confirm(frame, overlay, state);
-    } else if state.stash_menu.is_some() {
-        draw_stash_menu(frame, overlay, state);
-    } else if state.create_branch.is_some() {
-        draw_create_branch(frame, overlay, state);
-    } else if state.comment.is_some() {
-        draw_comment(frame, overlay, state);
-    } else if state.comment_export.is_some() {
-        draw_comment_export(frame, overlay, state);
-    } else if state.branch_picker.is_some() {
-        draw_branch_picker(frame, overlay, state);
-    } else if state.compare_picker.is_some() {
-        draw_compare_picker(frame, overlay, state);
-    } else if state.graph_focus_picker.is_some() {
-        draw_graph_focus_picker(frame, overlay, state);
-    } else if state.command_palette.is_some() {
-        draw_command_palette(frame, overlay, state);
-    } else {
-        frame.render_widget(Paragraph::new(status_line(state, overlay.width)), overlay);
-    }
-
     state.layout.tree_x = tree_inner.x;
     state.layout.tree_y = tree_inner.y;
     state.layout.tree_width = tree_inner.width;
     state.layout.tree_height = tree_inner.height;
     state.layout.right_x = panes[1].x;
-    state.layout.term_cols = area.width;
-    state.layout.pane_height = chunks[1].height;
     state.layout.outer_tree_width = panes[0].width;
     state.layout.diff_pane_width = right_inner.width;
     state.layout.diff_pane_height = right_inner.height;
@@ -323,12 +339,207 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         let (start, _) = visible_window(painted_n, *cursor, list_h);
         state.layout.files_list_offset = start;
     }
+}
 
-    // Keep the frame as painted so a mouse release copies what is on screen,
-    // then reverse the selected cells on top of it.
-    state.painted_frame = frame.buffer_mut().clone();
-    if let Some(selection) = state.text_selection.as_ref() {
-        selection.highlight(frame.buffer_mut());
+/// File tab body copy while it loads.
+const LOADING_FILE: &str = "loading…";
+/// File tab body for an empty file.
+const EMPTY_FILE: &str = "empty file";
+
+/// Syntax spans of one file-tab window: tab id, load generation, theme,
+/// first and end line.
+type FileSyntaxKey = (u64, u64, ThemeId, usize, usize);
+
+/// Spans per painted file-tab line, shared between the cache and paint.
+type FileSyntaxSpans = Arc<Vec<Vec<CodeSpan>>>;
+
+thread_local! {
+    static FILE_SYNTAX_CACHE: RefCell<Option<(FileSyntaxKey, FileSyntaxSpans)>> =
+        const { RefCell::new(None) };
+}
+
+/// Syntax spans for `lines[window]` of `tab`, reused while the window,
+/// load, and theme stay the same.
+fn file_window_spans(
+    tab: &FileTab,
+    lines: &[String],
+    theme: ThemeId,
+    fallback: Color,
+    window: std::ops::Range<usize>,
+) -> FileSyntaxSpans {
+    let key = (tab.id, tab.generation, theme, window.start, window.end);
+    FILE_SYNTAX_CACHE.with(|slot| {
+        let mut cache = slot.borrow_mut();
+        if let Some((hit_key, spans)) = cache.as_ref() {
+            if *hit_key == key {
+                return Arc::clone(spans);
+            }
+        }
+        let spans = Arc::new(highlight_file_window(
+            &tab.rel, lines, theme, fallback, window,
+        ));
+        *cache = Some((key, Arc::clone(&spans)));
+        spans
+    })
+}
+
+/// First line to paint so `cursor` shows in `height` rows.
+///
+/// Keeps `scroll` when the cursor already shows. `rows_of(line)` is the
+/// painted row count of a line (more than 1 only while wrap is on); the
+/// walk reads at most one screen of lines, never the whole file.
+fn file_view_scroll(
+    scroll: usize,
+    cursor: usize,
+    height: usize,
+    rows_of: impl Fn(usize) -> usize,
+) -> usize {
+    let height = height.max(1);
+    if cursor < scroll {
+        return cursor;
+    }
+    let mut used = 0usize;
+    for line in scroll..=cursor {
+        used += rows_of(line);
+        if used > height {
+            break;
+        }
+    }
+    if used <= height {
+        return scroll;
+    }
+    let mut top = cursor;
+    let mut used = rows_of(cursor);
+    while top > 0 {
+        let above = rows_of(top - 1);
+        if used + above > height {
+            break;
+        }
+        used += above;
+        top -= 1;
+    }
+    top
+}
+
+/// The active file tab: one bordered pane over the full width, titled with
+/// `<checkout>/<rel>` (snapshot `repo` path), with line numbers and
+/// highlighted code.
+fn draw_file_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
+    let palette = state.theme.palette();
+    let Some(tab) = state.tabs.active_file() else {
+        return;
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(pane_title(&tab.display))
+        .title_style(Style::default().fg(palette.heading))
+        .border_style(pane_border(true, palette));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    state.layout.file_view_x = inner.x;
+    state.layout.file_view_y = inner.y;
+    state.layout.file_view_width = inner.width;
+    state.layout.file_view_height = inner.height;
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let Some(tab) = state.tabs.active_file() else {
+        return;
+    };
+    let notice = match tab.body.as_deref() {
+        None => Some((LOADING_FILE.to_string(), palette.muted)),
+        Some(FileRead::Binary) => Some((FILE_IS_BINARY.to_string(), palette.muted)),
+        Some(FileRead::TooLarge { bytes }) => Some((file_too_large(*bytes), palette.muted)),
+        Some(FileRead::Failed(err)) => Some((err.clone(), palette.deleted)),
+        Some(FileRead::Text { lines, .. })
+            if lines.is_empty() || (lines.len() == 1 && lines[0].is_empty()) =>
+        {
+            Some((EMPTY_FILE.to_string(), palette.muted))
+        }
+        Some(FileRead::Text { .. }) => None,
+    };
+    if let Some((text, color)) = notice {
+        frame.render_widget(
+            Paragraph::new(Span::styled(text, Style::default().fg(color))),
+            inner,
+        );
+        return;
+    }
+    let lines = tab.lines();
+    let height = inner.height as usize;
+    let gutter = file_gutter_width(lines.len());
+    let code_w = (inner.width as usize).saturating_sub(gutter).max(1);
+    let wrap = state.diff_wrap;
+    // A row count past the view height is never needed, so a 2 MiB
+    // single-line file scans at most one screen of its text per call.
+    let row_cap = height + 1;
+    let rows_of = |line: usize| {
+        if wrap {
+            wrap_col_starts_capped(&lines[line], code_w, row_cap).len()
+        } else {
+            1
+        }
+    };
+    let scroll = file_view_scroll(tab.scroll, tab.cursor, height, rows_of);
+    let mut end = scroll;
+    let mut used = 0usize;
+    while end < lines.len() && used < height {
+        used += rows_of(end);
+        end += 1;
+    }
+    let spans = file_window_spans(tab, lines, state.theme, palette.repo, scroll..end);
+    let hits = if state.search_target == SearchPane::File {
+        state.file_search_hits(&state.search_query)
+    } else {
+        std::rc::Rc::from([])
+    };
+    let search = state.theme.pills().filter;
+    let gutter_style = diff_gutter_style(palette);
+    let col_offset = if wrap { 0 } else { tab.col_offset as usize };
+    let mut painted: Vec<Line> = Vec::with_capacity(height);
+    let mut row_lines = Vec::with_capacity(height);
+    for (line, text) in lines.iter().enumerate().take(end).skip(scroll) {
+        let selected = line == tab.cursor;
+        let hit = hits.binary_search(&line).is_ok();
+        let bg = row_match_bg(selected, true, hit, None, palette, search.bg);
+        let match_fg = (hit && !selected).then_some(search.fg);
+        let code = spans.get(line - scroll).map(Vec::as_slice).unwrap_or(&[]);
+        let starts = if wrap {
+            wrap_col_starts_capped(text, code_w, row_cap)
+        } else {
+            vec![col_offset]
+        };
+        for (part, &start) in starts.iter().enumerate() {
+            if painted.len() >= height {
+                break;
+            }
+            let number = if part == 0 {
+                format!("{:>width$} ", line + 1, width = gutter - 1)
+            } else {
+                " ".repeat(gutter)
+            };
+            let with_bg = |style: Style| bg.map_or(style, |bg| style.bg(bg));
+            let mut row = vec![Span::styled(number, with_bg(gutter_style))];
+            let mut used = 0usize;
+            for span in slice_styled_cols(code, start, code_w) {
+                used += visible_width(&span.text);
+                let fg = match_fg.unwrap_or(span.fg);
+                row.push(Span::styled(span.text, with_bg(Style::default().fg(fg))));
+            }
+            if bg.is_some() && used < code_w {
+                row.push(Span::styled(
+                    " ".repeat(code_w - used),
+                    with_bg(Style::default()),
+                ));
+            }
+            painted.push(Line::from(row));
+            row_lines.push(line);
+        }
+    }
+    frame.render_widget(Paragraph::new(painted), inner);
+    state.layout.file_view_row_lines = row_lines;
+    if let Some(tab) = state.tabs.active_file_mut() {
+        tab.scroll = scroll;
     }
 }
 
@@ -1958,17 +2169,19 @@ fn overlay_block(accent: Color) -> Block<'static> {
         .padding(Padding::horizontal(1))
 }
 
-fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+/// Paint `?` help in `area` and return its max body scroll (0 when every
+/// body row fits). The group-title row stays pinned above the scrolled body.
+fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
     if area.width == 0 || area.height == 0 {
-        return;
+        return 0;
     }
     let query = state.help_search_query.as_deref().unwrap_or("");
     let searching = state.help_search_query.is_some();
     let palette = state.theme.palette();
     let pills = state.theme.pills();
     let surface = overlay_surface(state);
-    // A compare tab swaps GIT for the COMPARE column.
-    let groups = help_groups(state.is_compare_tab());
+    // A compare tab swaps GIT for the COMPARE column, a file tab for FILE.
+    let groups = help_groups(help_tab(state));
     let mut lines: Vec<Line> = Vec::new();
 
     let term_width = area.width as usize;
@@ -2034,7 +2247,13 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         lines.push(Line::from(spans));
     }
 
-    let footer = if searching {
+    let idle_footer = |parts: Vec<String>| -> Vec<Line<'static>> {
+        parts
+            .into_iter()
+            .map(|part| Line::from(Span::styled(part, Style::default().fg(palette.muted))))
+            .collect()
+    };
+    let mut footer = if searching {
         let q = state.help_search_query.as_deref().unwrap_or("");
         help_footer_with_version(
             vec![
@@ -2050,10 +2269,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             palette.muted,
         )
     } else {
-        help_idle_footer_lines(inner)
-            .into_iter()
-            .map(|part| Line::from(Span::styled(part, Style::default().fg(palette.muted))))
-            .collect()
+        idle_footer(help_idle_footer_lines(inner))
     };
 
     frame.render_widget(Clear, area);
@@ -2061,13 +2277,31 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
     if inner_area.width == 0 || inner_area.height == 0 {
-        return;
+        return 0;
+    }
+    // Body rows under the pinned title row once `footer` takes its rows.
+    let body_room = |footer: &[Line<'static>]| {
+        let footer_h = (footer.len() as u16).min(inner_area.height).max(1);
+        usize::from(inner_area.height.saturating_sub(footer_h).saturating_sub(1))
+    };
+    let mut scroll_max = body_rows.saturating_sub(body_room(&footer));
+    if scroll_max > 0 && !searching {
+        let mut parts = wrap_help_footer(&format!("j/k scroll · {}", help_idle_footer()), inner);
+        attach_help_version(&mut parts, inner);
+        footer = idle_footer(parts);
+        scroll_max = body_rows.saturating_sub(body_room(&footer));
     }
     let footer_h = (footer.len() as u16).min(inner_area.height).max(1);
     let body_h = inner_area.height.saturating_sub(footer_h);
     if body_h > 0 {
+        let scroll = state.help_scroll.min(scroll_max);
+        let mut lines = lines.into_iter();
+        let title = lines.next().into_iter();
+        let visible: Vec<Line> = title
+            .chain(lines.skip(scroll).take(usize::from(body_h) - 1))
+            .collect();
         frame.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            Paragraph::new(visible),
             Rect {
                 x: inner_area.x,
                 y: inner_area.y,
@@ -2085,6 +2319,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             height: footer_h,
         },
     );
+    scroll_max
 }
 
 fn files_word(n: usize) -> &'static str {
@@ -2497,12 +2732,11 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         }
         lines.push(Line::from(spans));
     }
-    if !state.status.is_empty() {
-        lines.push(Line::from(Span::styled(
-            state.status.to_string(),
-            Style::default().fg(state.status.kind().color(palette)),
-        )));
-    }
+    // The status row is always there, so typing never grows the box.
+    lines.push(Line::from(Span::styled(
+        state.status.to_string(),
+        Style::default().fg(state.status.kind().color(palette)),
+    )));
     lines.push(Line::from(Span::styled(
         "Esc cancel",
         Style::default().fg(palette.muted),
@@ -2739,6 +2973,91 @@ fn fit_with_ellipsis(value: &str, width: usize) -> String {
     }
 }
 
+/// List rows a list dialog paints at inner height `inner_h`: the box less
+/// its query, status, and footer rows, capped at [`LIST_OVERLAY_MAX_ROWS`].
+fn list_dialog_rows(inner_h: u16) -> usize {
+    usize::from(inner_h.saturating_sub(3)).min(LIST_OVERLAY_MAX_ROWS)
+}
+
+/// Status row of a list dialog: `state.status`, blank when empty.
+fn list_dialog_status(state: &AppState, palette: Palette) -> Line<'static> {
+    Line::from(Span::styled(
+        state.status.to_string(),
+        Style::default().fg(state.status.kind().color(palette)),
+    ))
+}
+
+/// Paint a list dialog at fixed rows: `header` (the query / title row) on
+/// the first inner row, `rows` under it (cut to fit), `status` on the row
+/// above the last, and `footer` on the last. Result count never moves the
+/// header or the footer.
+fn paint_list_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    block: Block<'static>,
+    header: Line<'static>,
+    rows: Vec<Line<'static>>,
+    status: Line<'static>,
+    footer: Line<'static>,
+) {
+    frame.render_widget(Clear, area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let row_at = |offset: u16| Rect {
+        x: inner.x,
+        y: inner.y + offset,
+        width: inner.width,
+        height: 1,
+    };
+    let h = inner.height;
+    frame.render_widget(Paragraph::new(header), row_at(0));
+    for (offset, line) in (1..h.saturating_sub(2)).zip(rows) {
+        frame.render_widget(Paragraph::new(line), row_at(offset));
+    }
+    if h >= 3 {
+        frame.render_widget(Paragraph::new(status), row_at(h - 2));
+    }
+    if h >= 2 {
+        let footer = fit_list_dialog_footer(footer, usize::from(inner.width));
+        frame.render_widget(Paragraph::new(footer), row_at(h - 1));
+    }
+}
+
+/// `footer` cut to `width` columns with its `Esc …` chip kept.
+///
+/// A footer that fits paints as is. Otherwise its ` · `-separated chips
+/// drop from the left, the `Esc` chip never, until the rest fits; a lone
+/// chip still too wide ends in `…`. The line keeps its first span's style.
+fn fit_list_dialog_footer(footer: Line<'static>, width: usize) -> Line<'static> {
+    if footer.width() <= width {
+        return footer;
+    }
+    let style = footer
+        .spans
+        .first()
+        .map(|span| span.style)
+        .unwrap_or_default();
+    let text: String = footer
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    let mut chips: Vec<&str> = text.split(" · ").collect();
+    while chips.len() > 1 && visible_width(&chips.join(" · ")) > width {
+        let Some(drop) = chips.iter().position(|chip| !chip.starts_with("Esc")) else {
+            break;
+        };
+        chips.remove(drop);
+    }
+    Line::from(Span::styled(
+        fit_with_ellipsis(&chips.join(" · "), width),
+        style,
+    ))
+}
+
 fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let Some(picker) = state.compare_picker.as_ref() else {
         return;
@@ -2749,7 +3068,7 @@ fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let palette = state.theme.palette();
     let accent = palette.branch_feature;
     let visible_len = picker.visible_len();
-    let max_rows = 12usize;
+    let max_rows = list_dialog_rows(area.height.saturating_sub(2));
     let start = if visible_len <= max_rows {
         0
     } else {
@@ -2781,9 +3100,9 @@ fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Span::styled("  filter: ", Style::default().fg(palette.muted)),
         Span::styled(filter.to_string(), Style::default().fg(palette.cursor)),
     ];
-    let mut lines = vec![Line::from(title)];
+    let mut rows = Vec::new();
     if window.is_empty() {
-        lines.push(Line::from(Span::styled(
+        rows.push(Line::from(Span::styled(
             format!("  {}", compare_picker_empty(picker)),
             Style::default().fg(palette.muted),
         )));
@@ -2802,7 +3121,7 @@ fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             } else {
                 palette.muted
             };
-            lines.push(Line::from(vec![
+            rows.push(Line::from(vec![
                 Span::styled(
                     cursor.to_string(),
                     Style::default()
@@ -2820,22 +3139,18 @@ fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ]));
         }
     }
-    if !state.status.is_empty() {
-        lines.push(Line::from(Span::styled(
-            state.status.to_string(),
-            Style::default().fg(state.status.kind().color(palette)),
-        )));
-    }
-    lines.push(Line::from(Span::styled(
+    let footer = Line::from(Span::styled(
         "↑↓ move · type to filter · Enter compare · Esc close",
         Style::default().fg(palette.muted),
-    )));
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(overlay_block(accent))
-            .wrap(Wrap { trim: false }),
+    ));
+    paint_list_dialog(
+        frame,
         area,
+        overlay_block(accent),
+        Line::from(title),
+        rows,
+        list_dialog_status(state, palette),
+        footer,
     );
 }
 
@@ -2850,15 +3165,15 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let accent = palette.branch_feature;
     let visible = picker.visible();
     let create = picker.create_name();
-    let rows = picker.row_count();
-    let max_rows = 12usize;
-    let start = if rows <= max_rows {
+    let row_count = picker.row_count();
+    let max_rows = list_dialog_rows(area.height.saturating_sub(2));
+    let start = if row_count <= max_rows {
         0
     } else {
         picker
             .cursor
             .saturating_sub(max_rows / 2)
-            .min(rows - max_rows)
+            .min(row_count - max_rows)
     };
     let window = visible
         .iter()
@@ -2908,9 +3223,9 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(palette.cursor),
         ));
     }
-    let mut lines = vec![Line::from(title)];
+    let mut rows = Vec::new();
     if window.is_empty() && !create_painted {
-        lines.push(Line::from(Span::styled(
+        rows.push(Line::from(Span::styled(
             "  No matching branches",
             Style::default().fg(palette.muted),
         )));
@@ -2932,7 +3247,7 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             } else {
                 palette.muted
             };
-            lines.push(Line::from(vec![
+            rows.push(Line::from(vec![
                 Span::styled(
                     cursor.to_string(),
                     Style::default()
@@ -2950,7 +3265,7 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ]));
         }
         if let Some(name) = create.filter(|_| create_painted) {
-            lines.push(branch_create_row(
+            rows.push(branch_create_row(
                 name,
                 picker.commit_id.as_deref(),
                 picker.on_create_row(),
@@ -2958,12 +3273,6 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 accent,
             ));
         }
-    }
-    if !state.status.is_empty() {
-        lines.push(Line::from(Span::styled(
-            state.status.to_string(),
-            Style::default().fg(state.status.kind().color(palette)),
-        )));
     }
     // Enter names what it does on the cursor row: the create row makes a
     // branch (tree: and checks it out; graph: at the commit, no checkout).
@@ -2979,16 +3288,14 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     } else {
         format!("↑↓ move · type to filter · {enter} · Esc close")
     };
-    lines.push(Line::from(Span::styled(
-        footer,
-        Style::default().fg(palette.muted),
-    )));
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(overlay_block(accent))
-            .wrap(Wrap { trim: false }),
+    paint_list_dialog(
+        frame,
         area,
+        overlay_block(accent),
+        Line::from(title),
+        rows,
+        list_dialog_status(state, palette),
+        Line::from(Span::styled(footer, Style::default().fg(palette.muted))),
     );
 }
 
@@ -3049,7 +3356,7 @@ fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
     let palette = state.theme.palette();
     let accent = palette.branch_feature;
     let visible = picker.visible();
-    let max_rows = 12usize;
+    let max_rows = list_dialog_rows(area.height.saturating_sub(2));
     let start = if visible.len() <= max_rows {
         0
     } else {
@@ -3073,7 +3380,7 @@ fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
     } else {
         picker.filter.as_str()
     };
-    let mut lines = vec![Line::from(vec![
+    let header = Line::from(vec![
         Span::styled(
             "Focus branches ",
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
@@ -3081,9 +3388,10 @@ fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
         Span::styled(picker.repo.clone(), Style::default().fg(palette.repo)),
         Span::styled("  filter: ", Style::default().fg(palette.muted)),
         Span::styled(filter.to_string(), Style::default().fg(palette.cursor)),
-    ])];
+    ]);
+    let mut rows = Vec::new();
     if window.is_empty() {
-        lines.push(Line::from(Span::styled(
+        rows.push(Line::from(Span::styled(
             "  No matching branches",
             Style::default().fg(palette.muted),
         )));
@@ -3107,7 +3415,7 @@ fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
             } else {
                 palette.muted
             };
-            lines.push(Line::from(vec![
+            rows.push(Line::from(vec![
                 Span::styled(
                     cursor.to_string(),
                     Style::default()
@@ -3125,27 +3433,23 @@ fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
             ]));
         }
     }
-    if !state.status.is_empty() {
-        lines.push(Line::from(Span::styled(
-            state.status.to_string(),
-            Style::default().fg(state.status.kind().color(palette)),
-        )));
-    }
-    lines.push(Line::from(Span::styled(
+    let footer = Line::from(Span::styled(
         "↑↓ move · type to filter · space toggle · Enter apply · Ctrl-o clear · Esc cancel",
         Style::default().fg(palette.muted),
-    )));
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(overlay_block(accent))
-            .wrap(Wrap { trim: false }),
+    ));
+    paint_list_dialog(
+        frame,
         area,
+        overlay_block(accent),
+        header,
+        rows,
+        list_dialog_status(state, palette),
+        footer,
     );
 }
 
-fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let Some(palette) = state.command_palette.as_ref() else {
+fn draw_quick_open(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let Some(quick) = state.quick_open.as_ref() else {
         return;
     };
     if area.width == 0 || area.height == 0 {
@@ -3153,45 +3457,196 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
     let palette_theme = state.theme.palette();
     let accent = palette_theme.cursor;
-    let surface = overlay_surface(state);
-    let rows = palette.paint_rows();
+    let muted = Style::default().fg(palette_theme.muted);
     // Rounded border plus one column of padding on each side.
     let inner_width = area.width.saturating_sub(4) as usize;
-    let max_rows = 12usize;
-    let cursor_paint = rows.iter().position(|row| match row {
-        super::command_palette::PalettePaintRow::Command { index, .. } => *index == palette.cursor,
+    let max_rows = list_dialog_rows(area.height.saturating_sub(2));
+    let files = quick.mode() == QuickOpenMode::Files;
+    let title = if files {
+        quick.scope.title()
+    } else {
+        "Commands".to_string()
+    };
+    let block = overlay_block(accent).title(Span::styled(
+        title,
+        Style::default()
+            .fg(palette_theme.heading)
+            .add_modifier(Modifier::BOLD),
+    ));
+    let caret = Span::styled("▏", Style::default().fg(accent));
+    let header = if files && quick.query.is_empty() {
+        Line::from(vec![caret, Span::styled("type a file name…", muted)])
+    } else {
+        let (query, _) = cut_left(&quick.query, inner_width.saturating_sub(1));
+        Line::from(vec![
+            Span::styled(query, Style::default().fg(accent)),
+            caret,
+        ])
+    };
+    let (rows, status, footer) = if files {
+        let status = if files_row_shows_status(&state.status) {
+            list_dialog_status(state, palette_theme)
+        } else {
+            Line::from(Span::styled(quick.file_status_text(), muted))
+        };
+        (
+            quick_open_file_rows(quick, palette_theme, max_rows, inner_width),
+            status,
+            "↑↓ move · Enter open · > commands · Esc close".to_string(),
+        )
+    } else {
+        let commands = &quick.commands;
+        let reason = commands
+            .selected()
+            .and_then(|command| state.palette_disabled_reason(command));
+        let footer = match reason {
+            Some(why) => format!("Enter run · Esc close · {why}"),
+            None => "Enter run · Esc close".into(),
+        };
+        (
+            quick_open_command_rows(state, commands, max_rows, inner_width),
+            list_dialog_status(state, palette_theme),
+            footer,
+        )
+    };
+    paint_list_dialog(
+        frame,
+        area,
+        block,
+        header,
+        rows,
+        status,
+        Line::from(Span::styled(footer, muted)),
+    );
+}
+
+/// `text` cut from the left to `width` columns, a leading `…` in place of
+/// the dropped head. Also returns how many chars were dropped.
+fn cut_left(text: &str, width: usize) -> (String, usize) {
+    if visible_width(text) <= width {
+        return (text.to_string(), 0);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let budget = width.saturating_sub(1);
+    let mut used = 0;
+    let mut keep_from = chars.len();
+    let mut buf = [0u8; 4];
+    while keep_from > 0 {
+        let w = visible_width(chars[keep_from - 1].encode_utf8(&mut buf));
+        if used + w > budget {
+            break;
+        }
+        used += w;
+        keep_from -= 1;
+    }
+    let kept: String = chars[keep_from..].iter().collect();
+    (format!("…{kept}"), keep_from)
+}
+
+/// Files-mode rows: `❯ ` on the cursor row, each path cut from the left so
+/// the file name stays, matched chars bold in the accent color.
+fn quick_open_file_rows(
+    quick: &QuickOpenState,
+    palette: Palette,
+    max_rows: usize,
+    inner_width: usize,
+) -> Vec<Line<'static>> {
+    let FileIndexState::Ready(index) = &quick.index else {
+        return Vec::new();
+    };
+    let len = quick.hits.len();
+    let start = if len <= max_rows {
+        0
+    } else {
+        quick
+            .file_cursor
+            .saturating_sub(max_rows / 2)
+            .min(len - max_rows)
+    };
+    let path_cols = inner_width.saturating_sub(2);
+    let mut rows = Vec::new();
+    for (offset, hit) in quick.hits.iter().skip(start).take(max_rows).enumerate() {
+        let Some(entry) = index.entries.get(hit.entry) else {
+            continue;
+        };
+        let selected = start + offset == quick.file_cursor;
+        let row_bg = if selected {
+            palette.cursor_bg
+        } else {
+            Color::Reset
+        };
+        let plain = Style::default()
+            .fg(if selected {
+                palette.file
+            } else {
+                palette.muted
+            })
+            .bg(row_bg);
+        let matched = Style::default()
+            .fg(palette.cursor)
+            .bg(row_bg)
+            .add_modifier(Modifier::BOLD);
+        let mut spans = vec![Span::styled(
+            if selected { "❯ " } else { "  " },
+            Style::default()
+                .fg(if selected {
+                    palette.cursor
+                } else {
+                    palette.muted
+                })
+                .bg(row_bg),
+        )];
+        let (shown, dropped) = cut_left(&entry.display, path_cols);
+        // With a cut, painted char 0 is the `…` and char i is source char
+        // `i - 1 + dropped`.
+        let skip = usize::from(dropped > 0);
+        let mut run = String::new();
+        let mut run_matched = false;
+        for (i, ch) in shown.chars().enumerate() {
+            let is_match = i >= skip
+                && u32::try_from(i - skip + dropped)
+                    .is_ok_and(|pos| hit.indices.binary_search(&pos).is_ok());
+            if is_match != run_matched && !run.is_empty() {
+                let style = if run_matched { matched } else { plain };
+                spans.push(Span::styled(std::mem::take(&mut run), style));
+            }
+            run_matched = is_match;
+            run.push(ch);
+        }
+        if !run.is_empty() {
+            spans.push(Span::styled(run, if run_matched { matched } else { plain }));
+        }
+        rows.push(Line::from(spans));
+    }
+    rows
+}
+
+/// Commands-mode rows: group headers, command titles, key chips, and the
+/// disabled reason at the right edge when it fits.
+fn quick_open_command_rows(
+    state: &AppState,
+    palette: &CommandPaletteState,
+    max_rows: usize,
+    inner_width: usize,
+) -> Vec<Line<'static>> {
+    let palette_theme = state.theme.palette();
+    let accent = palette_theme.cursor;
+    let surface = overlay_surface(state);
+    let paint_rows = palette.paint_rows();
+    let cursor_paint = paint_rows.iter().position(|row| match row {
+        PalettePaintRow::Command { index, .. } => *index == palette.cursor,
         _ => false,
     });
-    let start = if rows.len() <= max_rows {
+    let start = if paint_rows.len() <= max_rows {
         0
     } else {
         let focus = cursor_paint.unwrap_or(0);
         focus
             .saturating_sub(max_rows / 2)
-            .min(rows.len() - max_rows)
+            .min(paint_rows.len() - max_rows)
     };
-    let window = if rows.is_empty() {
-        Vec::new()
-    } else {
-        rows.iter().skip(start).take(max_rows).cloned().collect()
-    };
-    let prefix = match palette.opened_by {
-        super::action::PaletteOpenedBy::Colon => ":",
-        super::action::PaletteOpenedBy::CtrlK => "Ctrl-k",
-    };
-    let query = if palette.filter.is_empty() {
-        "…"
-    } else {
-        palette.filter.as_str()
-    };
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            prefix.to_string(),
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" ", Style::default()),
-        Span::styled(query.to_string(), Style::default().fg(accent)),
-    ])];
+    let window: Vec<PalettePaintRow> = paint_rows.into_iter().skip(start).take(max_rows).collect();
+    let mut lines = Vec::new();
     if window.is_empty() {
         lines.push(Line::from(Span::styled(
             "  No matching commands",
@@ -3204,7 +3659,7 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         let mut header_painted = false;
         for row in window {
             match row {
-                super::command_palette::PalettePaintRow::Header(title) => {
+                PalettePaintRow::Header(title) => {
                     header_painted = true;
                     lines.push(Line::from(Span::styled(
                         title.to_string(),
@@ -3213,7 +3668,7 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                             .add_modifier(Modifier::BOLD),
                     )));
                 }
-                super::command_palette::PalettePaintRow::Command { command, index } => {
+                PalettePaintRow::Command { command, index } => {
                     let selected = index == palette.cursor;
                     let reason = state.palette_disabled_reason(command);
                     let disabled = reason.is_some();
@@ -3294,30 +3749,7 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             }
         }
     }
-    if !state.status.is_empty() {
-        lines.push(Line::from(Span::styled(
-            state.status.to_string(),
-            Style::default().fg(state.status.kind().color(palette_theme)),
-        )));
-    }
-    let reason = palette
-        .selected()
-        .and_then(|command| state.palette_disabled_reason(command));
-    let footer = match reason {
-        Some(why) => format!("Enter run · Esc close · {why}"),
-        None => "Enter run · Esc close".into(),
-    };
-    lines.push(Line::from(Span::styled(
-        footer,
-        Style::default().fg(palette_theme.muted),
-    )));
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(overlay_block(accent))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+    lines
 }
 
 fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -3350,12 +3782,11 @@ fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Span::styled(name.to_string(), Style::default().fg(palette.cursor)),
         ]),
     ];
-    if !state.status.is_empty() {
-        lines.push(Line::from(Span::styled(
-            state.status.to_string(),
-            Style::default().fg(state.status.kind().color(palette)),
-        )));
-    }
+    // The status row is always there, so typing never grows the box.
+    lines.push(Line::from(Span::styled(
+        state.status.to_string(),
+        Style::default().fg(state.status.kind().color(palette)),
+    )));
     lines.push(Line::from(Span::styled(
         footer,
         Style::default().fg(palette.muted),
@@ -3405,6 +3836,40 @@ fn comment_body_lines(prompt: &CommentPrompt, palette: Palette) -> Vec<Line<'sta
         .collect()
 }
 
+/// Paint `body` from the top of a text dialog and pin `footer` to its last
+/// inner rows. A body taller than the room left is cut at the bottom.
+fn paint_text_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    block: Block<'static>,
+    body: Vec<Line<'static>>,
+    footer: Vec<Line<'static>>,
+) {
+    frame.render_widget(Clear, area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let footer_h = (footer.len() as u16).min(inner.height);
+    let body_h = inner.height - footer_h;
+    frame.render_widget(
+        Paragraph::new(body).wrap(Wrap { trim: false }),
+        Rect {
+            height: body_h,
+            ..inner
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(footer),
+        Rect {
+            y: inner.y + body_h,
+            height: footer_h,
+            ..inner
+        },
+    );
+}
+
 fn draw_comment(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let Some(prompt) = state.comment.as_ref() else {
         return;
@@ -3431,20 +3896,22 @@ fn draw_comment(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         )),
     ];
     lines.extend(comment_body_lines(prompt, palette));
-    lines.push(Line::from(Span::styled(
-        comment_overlay_footer_save(prompt.resolved),
-        Style::default().fg(palette.muted),
-    )));
-    lines.push(Line::from(Span::styled(
-        COMMENT_OVERLAY_FOOTER_EDIT,
-        Style::default().fg(palette.muted),
-    )));
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(overlay_block_filled(accent, surface))
-            .wrap(Wrap { trim: false }),
+    let footer = vec![
+        Line::from(Span::styled(
+            comment_overlay_footer_save(prompt.resolved),
+            Style::default().fg(palette.muted),
+        )),
+        Line::from(Span::styled(
+            COMMENT_OVERLAY_FOOTER_EDIT,
+            Style::default().fg(palette.muted),
+        )),
+    ];
+    paint_text_dialog(
+        frame,
         area,
+        overlay_block_filled(accent, surface),
+        lines,
+        footer,
     );
 }
 
@@ -3486,17 +3953,11 @@ fn draw_comment_export(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(state.status.kind().color(palette)),
         )));
     }
-    lines.push(Line::from(Span::styled(
+    let footer = vec![Line::from(Span::styled(
         "Esc close",
         Style::default().fg(palette.muted),
-    )));
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(overlay_block(accent))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+    ))];
+    paint_text_dialog(frame, area, overlay_block(accent), lines, footer);
 }
 
 #[cfg(test)]
@@ -6164,10 +6625,9 @@ mod tests {
         assert_help_version_lower_right(&text);
     }
 
-    /// At 140×40 the help takes at most 24 rows and the tree keeps 13
-    /// (row-aligned columns left 5), and no column's text runs into the
-    /// next column. `overlay_height_grows_when_columns_narrow` holds the
-    /// same 24-row bound.
+    /// At 140×40 the help dialog fits over the panes without scrolling,
+    /// the panes keep their full height under it, and no column's text
+    /// runs into the next column.
     #[test]
     fn help_columns_keep_a_gutter_and_the_panes_rows() {
         use super::super::help::{help_column_widths, HELP_GROUPS};
@@ -6188,20 +6648,21 @@ mod tests {
             .unwrap_or_else(|| panic!("help footer:\n{text}"));
         let overlay_rows = footer + 2 - (header - 1);
         assert!(
-            overlay_rows <= 24,
+            overlay_rows <= usize::from(state.layout.pane_height),
             "help takes {overlay_rows} rows:\n{text}"
         );
-        assert!(
-            state.layout.tree_height >= 13,
-            "panes keep {} rows:\n{text}",
-            state.layout.tree_height
+        assert_eq!(state.layout.help_scroll_max, 0, "{text}");
+        assert_eq!(
+            state.layout.tree_height,
+            40 - 3 - 2,
+            "panes keep every row under the dialog:\n{text}"
         );
         assert!(text.contains("quit (press twice)"), "{text}");
         assert!(text.contains("apply/pop/drop"), "{text}");
 
-        // Border + padding put the first column at x = 2.
-        let widths = help_column_widths(HELP_GROUPS, help_inner_width(140));
-        let mut starts = vec![2usize];
+        // The box sits at x = 2; border + padding put the first column at x = 4.
+        let widths = help_column_widths(HELP_GROUPS, help_inner_width(136));
+        let mut starts = vec![4usize];
         for width in &widths[..widths.len() - 1] {
             starts.push(starts.last().unwrap() + width);
         }
@@ -6220,14 +6681,21 @@ mod tests {
         }
     }
 
-    /// On a compare tab the overlay paints exactly the rows
-    /// `help_status_lines(cols, true)` reserves: the box, title row, the
-    /// tallest COMPARE / MOVE / VIEW column, and the footer, with the last
-    /// entry of each column on screen.
+    /// Cells `x0..x1` of buffer row `y`.
+    fn buffer_row(terminal: &Terminal<TestBackend>, y: u16, x0: u16, x1: u16) -> String {
+        let buf = terminal.backend().buffer();
+        (x0..x1).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    /// On a compare tab help paints centered over the panes at the box
+    /// width: the rows `help_status_lines(box, true)` reserves when they
+    /// fit, and on a short terminal every body row is reachable by scroll.
     #[test]
-    fn compare_help_paints_its_reserved_rows() {
+    fn compare_help_paints_centered_and_scrolls_every_body_row() {
+        use super::super::chrome::{dialog_height, dialog_rect, dialog_width, DialogKind};
         use super::super::help::{help_body_line_count, help_status_lines, HELP_COMPARE_GROUPS};
-        for cols in [64u16, 100, 140] {
+        // Box widths 64, 100, and 140.
+        for cols in [68u16, 104, 144] {
             let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
             let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
             state
@@ -6244,13 +6712,23 @@ mod tests {
                 .position(|l| l.contains("MOVE") && l.contains("COMPARE") && l.contains("VIEW"))
                 .unwrap_or_else(|| panic!("{cols} cols, compare help header:\n{text}"));
             let top = header - 1;
-            assert!(lines[top].starts_with('╭'), "{cols} cols:\n{text}");
+            let box_w = cols - 4;
+            let panes = Rect::new(0, 1, cols, state.layout.pane_height);
+            assert_eq!(dialog_width(panes, DialogKind::Help), box_w);
+            let rect = dialog_rect(panes, box_w, dialog_height(&state, DialogKind::Help, box_w));
+            assert_eq!(rect.y as usize, top, "{cols} cols:\n{text}");
+            assert_eq!(
+                buffer_row(&terminal, rect.y, 2, 3),
+                "╭",
+                "{cols} cols:\n{text}"
+            );
             let bottom = (header..lines.len())
-                .find(|&y| lines[y].starts_with('╰'))
+                .find(|&y| buffer_row(&terminal, y as u16, 2, 3) == "╰")
                 .unwrap_or_else(|| panic!("{cols} cols, help bottom border:\n{text}"));
-            let reserved = usize::from(help_status_lines(cols, true));
+            let reserved =
+                usize::from(help_status_lines(box_w, crate::tui::help::HelpTab::Compare));
             assert_eq!(bottom + 1 - top, reserved, "{cols} cols:\n{text}");
-            let inner = help_inner_width(usize::from(cols));
+            let inner = help_inner_width(usize::from(box_w));
             let body = help_body_line_count(
                 HELP_COMPARE_GROUPS,
                 &help_column_widths(HELP_COMPARE_GROUPS, inner),
@@ -6261,13 +6739,41 @@ mod tests {
                 body + footer_rows,
                 "{cols} cols:\n{text}"
             );
-            let last_body = lines[header + body];
+            assert_eq!(state.layout.help_scroll_max, 0, "{cols} cols fits");
+            let (x0, x1) = (rect.x + 2, rect.right() - 2);
+            let full: Vec<String> = (0..body)
+                .map(|row| buffer_row(&terminal, (header + 1 + row) as u16, x0, x1))
+                .collect();
             assert!(
-                !last_body.trim_matches(|c| c == '│' || c == ' ').is_empty(),
+                !full[body - 1].trim().is_empty(),
                 "{cols} cols: last body row is blank:\n{text}"
             );
             for needle in ["refresh now", "(1=Workspace)", "(press twice)"] {
                 assert!(text.contains(needle), "{cols} cols {needle}:\n{text}");
+            }
+
+            // A short terminal clips the box; scrolling shows every row.
+            let mut terminal = Terminal::new(TestBackend::new(cols, 20)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let max = state.layout.help_scroll_max;
+            assert!(max > 0, "{cols} cols × 20 rows scrolls");
+            let short = buffer_text(&terminal);
+            let header = short
+                .lines()
+                .position(|l| l.contains("MOVE") && l.contains("COMPARE"))
+                .unwrap_or_else(|| panic!("{cols} cols short header:\n{short}"));
+            let visible = body - max;
+            for scroll in 0..=max {
+                state.help_scroll = scroll;
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                for row in 0..visible {
+                    assert_eq!(
+                        buffer_row(&terminal, (header + 1 + row) as u16, x0, x1),
+                        full[scroll + row],
+                        "{cols} cols, scroll {scroll}, row {row}:\n{}",
+                        buffer_text(&terminal)
+                    );
+                }
             }
         }
     }
@@ -6685,12 +7191,15 @@ mod tests {
         assert!(text.contains("Ctrl-r resolve"), "{text}");
         assert!(!text.contains("Comment · resolved"), "{text}");
         assert!(!text.contains("▏hello"), "{text}");
+        // The comment box has no status row; `status` stays on the last row.
+        let rows: Vec<&str> = text.lines().collect();
+        let (last, boxed) = rows.split_last().expect("rows");
         assert_eq!(
-            text.matches("hello").count(),
+            boxed.concat().matches("hello").count(),
             1,
             "typed body must not also echo as status inside the overlay:\n{text}"
         );
-        let last = text.lines().last().unwrap_or("");
+        assert_eq!(last.trim(), "body: hello", "{text}");
         assert!(
             !last.contains("? help") && !last.contains("focus right"),
             "idle status must not paint on the last row:\n{last}"
@@ -7823,13 +8332,13 @@ mod tests {
 
     #[test]
     fn palette_rows_paint_their_reason_and_skip_empty_chips() {
-        use crate::tui::action::{Action, PaletteOpenedBy};
+        use crate::tui::action::{Action, QuickOpenEntry};
         use crate::tui::tabs::{ONLY_WORKSPACE_TAB_OPEN, WORKSPACE_TAB_CANNOT_CLOSE};
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
-        state.dispatch(Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK));
+        state.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
         for c in "tab".chars() {
-            state.dispatch(Action::CommandPaletteChar(c));
+            state.dispatch(Action::QuickOpenChar(c));
         }
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         draw_state(&mut terminal, &mut state);
@@ -7879,21 +8388,21 @@ mod tests {
     /// group's header, so its top rows keep the group label.
     #[test]
     fn palette_rows_keep_their_group_when_the_header_scrolled_off() {
-        use crate::tui::action::{Action, PaletteOpenedBy};
+        use crate::tui::action::{Action, QuickOpenEntry};
         const GROUPS: [&str; 4] = ["HIGHLIGHT", "MOVE", "GIT", "VIEW"];
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
-        state.dispatch(Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK));
+        state.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         for _ in 0..60 {
-            state.dispatch(Action::CommandPaletteMove(1));
+            state.dispatch(Action::QuickOpenMove(1));
             draw_state(&mut terminal, &mut state);
             let text = buffer_text(&terminal);
             let lines: Vec<&str> = text.lines().collect();
             let prompt = lines
                 .iter()
-                .position(|line| line.contains("Ctrl-k …"))
-                .unwrap_or_else(|| panic!("no palette prompt:\n{text}"));
+                .position(|line| line.contains(">▏"))
+                .unwrap_or_else(|| panic!("no `>` query row:\n{text}"));
             let first = lines[prompt + 1];
             if GROUPS.contains(&first.trim_matches(['│', ' '])) {
                 continue;
@@ -7938,6 +8447,316 @@ mod tests {
         state.open_compare_commit_picker("app".into(), Vec::new());
         draw_state(&mut terminal, &mut state);
         assert!(buffer_text(&terminal).contains("No commits to compare"));
+    }
+
+    /// Row index of the first buffer line that contains `needle`.
+    fn row_of(text: &str, needle: &str) -> usize {
+        text.lines()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("no row with {needle:?}:\n{text}"))
+    }
+
+    #[test]
+    fn list_dialog_input_row_stays_when_results_change() {
+        let commits = |n: usize| {
+            (0..n)
+                .map(|i| crate::git::AncestorCommit {
+                    id: format!("{i:02}{}", "a".repeat(38)),
+                    subject: format!("commit {i}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        state.open_compare_commit_picker("app".into(), commits(2));
+        draw_state(&mut terminal, &mut state);
+        let few = buffer_text(&terminal);
+        state.open_compare_commit_picker("app".into(), commits(30));
+        draw_state(&mut terminal, &mut state);
+        let many = buffer_text(&terminal);
+        assert_eq!(
+            row_of(&few, "Compare vs commit"),
+            row_of(&many, "Compare vs commit"),
+            "input row moved:\n{few}\n{many}"
+        );
+        assert_eq!(
+            row_of(&few, "Enter compare"),
+            row_of(&many, "Enter compare"),
+            "footer row moved:\n{few}\n{many}"
+        );
+        assert!(many.contains("commit 11"), "{many}");
+        assert!(!many.contains("commit 12"), "12 rows at most:\n{many}");
+    }
+
+    #[test]
+    fn dialog_open_keeps_pane_height() {
+        use crate::tui::action::QuickOpenEntry;
+        use crate::tui::quick_open::{QuickOpenScope, QuickOpenState};
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let idle = state.layout.pane_height;
+        state.help_open = true;
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.layout.pane_height, idle, "help");
+        state.help_open = false;
+        state.confirm = Some(PendingConfirm::StashDrop {
+            repo: "app".into(),
+            stash_ref: "stash@{0}".into(),
+        });
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.layout.pane_height, idle, "confirm");
+        state.confirm = None;
+        state.quick_open = Some(QuickOpenState::new(
+            QuickOpenEntry::Commands,
+            QuickOpenScope::Workspace,
+        ));
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.layout.pane_height, idle, "palette");
+    }
+
+    /// Files-mode Quick Open on `app` with 50 indexed paths, `hits` of them
+    /// ranked for the query `file`.
+    fn quick_open_files_state(hits: usize) -> AppState {
+        use crate::file_index::{FileEntry, FileHit, FileIndex, IndexRoot};
+        use crate::tui::action::QuickOpenEntry;
+        use crate::tui::quick_open::QuickOpenScope;
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let index = FileIndex {
+            roots: vec![IndexRoot {
+                checkout: "app".into(),
+                prefix: String::new(),
+            }],
+            entries: (0..50)
+                .map(|i| FileEntry {
+                    root: 0,
+                    display: format!("src/file{i:02}.rs"),
+                    rel_start: 0,
+                })
+                .collect(),
+            truncated: false,
+            errors: Vec::new(),
+        };
+        let mut quick = QuickOpenState::new(
+            QuickOpenEntry::Files,
+            QuickOpenScope::Checkout("app".into()),
+        );
+        quick.query = "file".into();
+        quick.index = FileIndexState::Ready(std::sync::Arc::new(index));
+        quick.hits = (0..hits)
+            .map(|entry| FileHit {
+                entry,
+                score: 1,
+                indices: vec![4, 5, 6, 7],
+            })
+            .collect();
+        state.quick_open = Some(quick);
+        state
+    }
+
+    #[test]
+    fn quick_open_input_row_stays_when_hit_count_changes() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let mut state = quick_open_files_state(1);
+        draw_state(&mut terminal, &mut state);
+        let few = buffer_text(&terminal);
+        let mut state = quick_open_files_state(50);
+        draw_state(&mut terminal, &mut state);
+        let many = buffer_text(&terminal);
+        assert!(few.contains("Go to file · app"), "{few}");
+        assert_eq!(
+            row_of(&few, "file▏"),
+            row_of(&many, "file▏"),
+            "query row moved:\n{few}\n{many}"
+        );
+        assert_eq!(
+            row_of(&few, "Enter open"),
+            row_of(&many, "Enter open"),
+            "footer row moved:\n{few}\n{many}"
+        );
+        assert!(few.contains("50 files"), "status row: {few}");
+        // A status from outside the overlay never hides the file count.
+        let mut state = quick_open_files_state(1);
+        state.status = "Fetched 2 repos".into();
+        draw_state(&mut terminal, &mut state);
+        let leftover = buffer_text(&terminal);
+        assert!(leftover.contains("50 files"), "{leftover}");
+        assert!(!leftover.contains("Fetched 2 repos"), "{leftover}");
+        assert!(many.contains("src/file11.rs"), "{many}");
+        assert!(!many.contains("src/file12.rs"), "12 rows at most:\n{many}");
+    }
+
+    #[test]
+    fn quick_open_files_footer_is_not_enter_run() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let mut state = quick_open_files_state(3);
+        draw_state(&mut terminal, &mut state);
+        let files = buffer_text(&terminal);
+        assert!(files.contains("Enter open"), "{files}");
+        assert!(!files.contains("Enter run"), "{files}");
+        state.dispatch(Action::QuickOpenBackspace);
+        state.dispatch(Action::QuickOpenBackspace);
+        state.dispatch(Action::QuickOpenBackspace);
+        state.dispatch(Action::QuickOpenBackspace);
+        state.dispatch(Action::QuickOpenChar('>'));
+        draw_state(&mut terminal, &mut state);
+        let commands = buffer_text(&terminal);
+        assert!(commands.contains("Enter run"), "{commands}");
+        assert!(!commands.contains("Enter open"), "{commands}");
+        assert!(commands.contains(">▏"), "the `>` stays in the query row");
+    }
+
+    #[test]
+    fn quick_open_cuts_long_paths_from_the_left_and_bolds_matches() {
+        use crate::file_index::{FileEntry, FileHit};
+        let mut state = quick_open_files_state(0);
+        let long = format!("{}/main.rs", "deep".repeat(40));
+        let quick = state.quick_open.as_mut().unwrap();
+        let FileIndexState::Ready(index) = &mut quick.index else {
+            unreachable!()
+        };
+        std::sync::Arc::make_mut(index).entries.push(FileEntry {
+            root: 0,
+            display: long.clone(),
+            rel_start: 0,
+        });
+        let last = long.chars().count() as u32;
+        quick.query = "main".into();
+        quick.hits = vec![FileHit {
+            entry: 50,
+            score: 1,
+            indices: (last - 7..last - 3).collect(),
+        }];
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        let y = row_of(&text, "/main.rs") as u16;
+        let line = text.lines().nth(y as usize).unwrap();
+        assert!(
+            line.contains("❯ …"),
+            "head cut with a leading ellipsis: {line}"
+        );
+        assert!(!line.contains(&"deep".repeat(40)), "{line}");
+        let buf = terminal.backend().buffer();
+        let x = (0..buf.area().width)
+            .find(|&x| {
+                (0..7u16).all(|i| buf[(x + i, y)].symbol() == &"main.rs"[i as usize..=i as usize])
+            })
+            .expect("main.rs cells");
+        for i in 0..4 {
+            assert!(
+                buf[(x + i, y)].modifier.contains(Modifier::BOLD),
+                "matched char {i} is bold"
+            );
+        }
+        assert!(
+            !buf[(x + 4, y)].modifier.contains(Modifier::BOLD),
+            "`.` is not"
+        );
+    }
+
+    #[test]
+    fn status_row_stays_last_with_dialog_open() {
+        use crate::tui::action::QuickOpenEntry;
+        use crate::tui::quick_open::{QuickOpenScope, QuickOpenState};
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.quick_open = Some(QuickOpenState::new(
+            QuickOpenEntry::Commands,
+            QuickOpenScope::Workspace,
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(text.contains("Enter run"), "{text}");
+        assert_eq!(lines[29].trim(), "", "status row is blank:\n{text}");
+        let crumb: String = breadcrumb_line(&state, 120)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(!crumb.trim().is_empty());
+        assert_eq!(
+            lines[28].trim_end(),
+            crumb.trim_end(),
+            "breadcrumb row:\n{text}"
+        );
+    }
+
+    #[test]
+    fn help_dialog_scrolls_when_columns_exceed_box() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        assert_eq!(state.dispatch(Action::ToggleHelp), Effect::None);
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let max = state.layout.help_scroll_max;
+        assert!(max > 3, "help is taller than 16 rows: {max}");
+        let text = buffer_text(&terminal);
+        assert!(text.contains("j/k scroll"), "{text}");
+        let header = row_of(&text, "MOVE");
+        let first = text.lines().nth(header + 1).unwrap().to_string();
+        assert_eq!(state.dispatch(Action::HelpScroll(3)), Effect::None);
+        assert_eq!(state.help_scroll, 3);
+        draw_state(&mut terminal, &mut state);
+        let scrolled = buffer_text(&terminal);
+        assert_eq!(row_of(&scrolled, "MOVE"), header, "title row stays pinned");
+        assert_ne!(
+            scrolled.lines().nth(header + 1).unwrap(),
+            first,
+            "body scrolled:\n{text}\n{scrolled}"
+        );
+        state.dispatch(Action::HelpScroll(1000));
+        assert_eq!(state.help_scroll, max);
+
+        // A taller terminal lowers the max; the scroll follows it down so
+        // the first `k` still moves the body.
+        let mut taller = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        draw_state(&mut taller, &mut state);
+        let lower = state.layout.help_scroll_max;
+        assert!(lower < max, "{lower} < {max}");
+        assert_eq!(state.help_scroll, lower);
+        state.dispatch(Action::HelpScroll(-1));
+        assert_eq!(state.help_scroll, lower.saturating_sub(1));
+        state.dispatch(Action::HelpScroll(-1000));
+        assert_eq!(state.help_scroll, 0);
+    }
+
+    #[test]
+    fn list_dialog_footer_keeps_esc_on_narrow_terminals() {
+        use crate::git::LocalBranch;
+        use crate::tui::graph_focus::GraphFocusPickerState;
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.graph_focus_picker = Some(GraphFocusPickerState::new(
+            "app".into(),
+            vec![LocalBranch {
+                name: "main".into(),
+                current: true,
+                authordate: 0,
+            }],
+            &[],
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(50, 20)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        let footer = text
+            .lines()
+            .find(|line| line.contains("Enter apply"))
+            .unwrap_or_else(|| panic!("footer row:\n{text}"));
+        assert!(footer.contains("Esc cancel"), "{text}");
+        assert!(!footer.contains("↑↓ move"), "{text}");
+
+        // A footer that fits keeps its exact text.
+        let mut wide = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut wide, &mut state);
+        assert!(buffer_text(&wide).contains(
+            "↑↓ move · type to filter · space toggle · Enter apply · Ctrl-o clear · Esc cancel"
+        ));
     }
 
     #[test]
@@ -8297,5 +9116,230 @@ mod tests {
         let pane = summary_pane_text(&terminal, &state);
         assert!(pane.starts_with("src/  3 files"), "{pane}");
         assert!(!pane.contains("No committed changes"), "{pane}");
+    }
+
+    /// `app` with a file tab on `README.md` loaded as `lines`.
+    fn file_tab_state(lines: &[&str]) -> AppState {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let Effect::LoadFileTab { tab_id, gen, .. } =
+            state.open_file_tab("app".into(), "README.md".into())
+        else {
+            panic!("expected a load");
+        };
+        let body = FileRead::Text {
+            lines: lines.iter().map(|line| (*line).to_string()).collect(),
+            max_cols: lines.iter().map(|line| line.len()).max().unwrap_or(0),
+        };
+        assert!(state.apply_file_tab(tab_id, gen, body));
+        state
+    }
+
+    #[test]
+    fn file_tab_paints_full_width_pane_titled_with_path() {
+        let mut state = file_tab_state(&["# app", "dirty"]);
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let buf = terminal.backend().buffer();
+        let top = buf_line(buf, 1);
+        let corners: Vec<(usize, char)> = top
+            .chars()
+            .enumerate()
+            .filter(|(_, c)| matches!(c, '╭' | '╮' | '┌' | '┐'))
+            .collect();
+        assert_eq!(corners.len(), 2, "one border pair:\n{top}");
+        assert_eq!(corners[0].0, 0, "{top}");
+        assert_eq!(corners[1].0, 79, "{top}");
+        assert!(top.contains("app/README.md"), "{top}");
+        assert!(
+            buf_line(buf, 2).starts_with("│1 # app"),
+            "{}",
+            buf_line(buf, 2)
+        );
+        assert!(
+            buf_line(buf, 3).starts_with("│2 dirty"),
+            "{}",
+            buf_line(buf, 3)
+        );
+        assert_eq!(state.layout.file_view_x, 1);
+        assert_eq!(state.layout.file_view_y, 2);
+        assert_eq!(state.layout.file_view_width, 78);
+        assert_eq!(state.layout.file_view_row_lines, vec![0, 1]);
+        let crumb = buffer_text(&terminal);
+        assert!(crumb.contains("app › README.md"), "{crumb}");
+        assert!(crumb.contains("edit") && crumb.contains("quit"), "{crumb}");
+    }
+
+    #[test]
+    fn file_tab_wraps_and_keeps_the_cursor_in_view() {
+        let lines: Vec<String> = (0..30).map(|i| format!("line {i}")).collect();
+        let mut refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let long = "w".repeat(150);
+        refs[25] = &long;
+        let mut state = file_tab_state(&refs);
+        assert!(
+            state.diff_wrap,
+            "a file tab opens wrapped (diff wrap default)"
+        );
+        state.dispatch(Action::MoveToEnd);
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let rows = state.layout.file_view_row_lines.clone();
+        assert_eq!(rows.last(), Some(&29), "cursor line paints: {rows:?}");
+        assert_eq!(
+            rows.iter().filter(|&&line| line == 25).count(),
+            2,
+            "the long line wraps onto two rows: {rows:?}"
+        );
+        let buf = terminal.backend().buffer();
+        let second = rows.iter().position(|&line| line == 25).unwrap() + 1;
+        let continuation = buf_line(buf, state.layout.file_view_y + second as u16);
+        assert!(
+            continuation.starts_with("│   w"),
+            "blank gutter: {continuation}"
+        );
+
+        state.dispatch(Action::ToggleDiffWrap);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let rows = state.layout.file_view_row_lines.clone();
+        assert_eq!(rows.last(), Some(&29), "{rows:?}");
+        let scroll = state.tabs.active_file().unwrap().scroll;
+        assert_eq!(rows.first(), Some(&scroll));
+        assert_eq!(
+            rows.iter().filter(|&&line| line == 25).count(),
+            1,
+            "unwrapped, the long line takes one row: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn file_tab_paints_binary_and_loading_notices() {
+        let mut state = file_tab_state(&["x"]);
+        let id = state.tabs.active_file().unwrap().id;
+        let Effect::LoadFileTab { gen, .. } = state.dispatch(Action::Refresh) else {
+            panic!("r reloads");
+        };
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert!(buffer_text(&terminal).contains("loading…"));
+        state.apply_file_tab(id, gen, FileRead::Binary);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert!(buffer_text(&terminal).contains(FILE_IS_BINARY));
+    }
+
+    #[test]
+    fn compare_tab_opened_after_file_tab_paints_right() {
+        let mut state = file_tab_state(&["# app"]);
+        state
+            .tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        {
+            let tab = state.tabs.active_compare_mut().unwrap();
+            tab.loading = false;
+            tab.path = Some("compare-only.md".into());
+            tab.files = vec![super::super::drill::CommitFile {
+                status: "M".into(),
+                path: "compare-only.md".into(),
+                old_path: None,
+                stat: None,
+            }];
+            tab.content = super::super::diff::DiffContent::from_compare_lines(vec![
+                "@@ -1,1 +1,1 @@".into(),
+                "-old compare".into(),
+                "+new compare".into(),
+            ]);
+        }
+        assert!(state.is_compare_tab());
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("README.md"), "file tab label: {text}");
+        assert!(text.contains("app ↔ main"), "{text}");
+        assert!(text.contains("compare-only.md"), "{text}");
+        assert!(text.contains("new compare"), "{text}");
+        assert!(!text.contains("# app"), "file body is not painted: {text}");
+        assert!(state.layout.file_view_row_lines.is_empty());
+    }
+
+    #[test]
+    fn file_tab_wrap_scan_of_a_huge_line_is_bounded_by_the_view() {
+        let huge = "m".repeat(1024 * 1024);
+        let mut state = file_tab_state(&[huge.as_str(), "tail"]);
+        assert!(
+            state.diff_wrap,
+            "a file tab opens wrapped (diff wrap default)"
+        );
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let height = usize::from(state.layout.file_view_height);
+        let rows = &state.layout.file_view_row_lines;
+        assert_eq!(rows.len(), height, "{rows:?}");
+        assert!(
+            rows.iter().all(|&line| line == 0),
+            "the long line fills the view"
+        );
+        let code_w = usize::from(state.layout.file_view_width) - file_gutter_width(2);
+        let capped = wrap_col_starts_capped(&huge, code_w, height + 1);
+        assert_eq!(
+            capped.len(),
+            height + 1,
+            "the scan stops one row past the view"
+        );
+        assert_eq!(capped[height], height * code_w);
+        assert!(buf_line(terminal.backend().buffer(), state.layout.file_view_y).contains("mmmm"));
+    }
+
+    /// On a file tab help paints MOVE / FILE / VIEW at the rows
+    /// `help_status_lines(box, HelpTab::File)` reserves.
+    #[test]
+    fn file_help_paints_its_reserved_rows() {
+        use super::super::chrome::{dialog_height, dialog_rect, dialog_width, DialogKind};
+        use super::super::help::{
+            help_body_line_count, help_status_lines, HelpTab, HELP_FILE_GROUPS,
+        };
+        for cols in [68u16, 104, 144] {
+            let mut state = file_tab_state(&["# app"]);
+            state.help_open = true;
+            let mut terminal = Terminal::new(TestBackend::new(cols, 120)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let text = buffer_text(&terminal);
+            let lines: Vec<&str> = text.lines().collect();
+            let header = lines
+                .iter()
+                .position(|l| l.contains("MOVE") && l.contains("FILE") && l.contains("VIEW"))
+                .unwrap_or_else(|| panic!("{cols} cols, file help header:\n{text}"));
+            let top = header - 1;
+            let box_w = cols - 4;
+            let panes = Rect::new(0, 1, cols, state.layout.pane_height);
+            assert_eq!(dialog_width(panes, DialogKind::Help), box_w);
+            let rect = dialog_rect(panes, box_w, dialog_height(&state, DialogKind::Help, box_w));
+            assert_eq!(rect.y as usize, top, "{cols} cols:\n{text}");
+            let bottom = (header..lines.len())
+                .find(|&y| buffer_row(&terminal, y as u16, 2, 3) == "╰")
+                .unwrap_or_else(|| panic!("{cols} cols, help bottom border:\n{text}"));
+            let reserved = usize::from(help_status_lines(box_w, HelpTab::File));
+            assert_eq!(bottom + 1 - top, reserved, "{cols} cols:\n{text}");
+            let inner = help_inner_width(usize::from(box_w));
+            let body = help_body_line_count(
+                HELP_FILE_GROUPS,
+                &help_column_widths(HELP_FILE_GROUPS, inner),
+            );
+            let footer_rows = help_idle_footer_lines(inner).len();
+            assert_eq!(
+                bottom - header - 1,
+                body + footer_rows,
+                "{cols} cols:\n{text}"
+            );
+            assert_eq!(state.layout.help_scroll_max, 0, "{cols} cols fits");
+            for needle in ["editor at line", "reload", "(1=Workspace)"] {
+                assert!(text.contains(needle), "{cols} cols {needle}:\n{text}");
+            }
+            assert!(!text.contains("COMPARE"), "{cols} cols:\n{text}");
+        }
     }
 }

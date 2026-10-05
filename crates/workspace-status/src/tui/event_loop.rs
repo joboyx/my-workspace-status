@@ -353,10 +353,9 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
         return;
     }
     if ctx.interp.busy_for_writes() {
-        let palette_submit = if matches!(action, Action::CommandPaletteSubmit) {
+        let palette_submit = if matches!(action, Action::QuickOpenSubmit) {
             ctx.state
-                .command_palette
-                .as_ref()
+                .command_palette()
                 .and_then(|palette| palette.selected_action())
         } else {
             None
@@ -403,8 +402,8 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
     }
     ctx.interp
         .schedule(ctx.state, ctx.opts, effect, &action_for_load);
-    if let Some((repo, path)) = ctx.interp.take_pending_edit() {
-        schedule_edit(ctx, repo, path);
+    if let Some((repo, path, line)) = ctx.interp.take_pending_edit() {
+        schedule_edit(ctx, repo, path, line);
     }
     if let Some((repo, path, kind)) = ctx.interp.take_pending_diff() {
         ctx.interp.enqueue_diff_prepare(repo, path, kind, ctx.opts);
@@ -453,14 +452,14 @@ fn spawn_joinset(ctx: &mut LoopCtx<'_>) {
     });
 }
 
-fn schedule_edit(ctx: &mut LoopCtx<'_>, repo: String, path: String) {
+fn schedule_edit(ctx: &mut LoopCtx<'_>, repo: String, path: String, line: Option<u32>) {
     let editor = resolve_editor(
         ctx.opts.config.editor.as_deref(),
         std::env::var("VISUAL").ok().as_deref(),
         std::env::var("EDITOR").ok().as_deref(),
     );
     let abs = ctx.opts.cwd.join(&repo).join(&path);
-    let (cmd, args) = editor_command(&editor, &abs.to_string_lossy(), None);
+    let (cmd, args) = editor_command(&editor, &abs.to_string_lossy(), line);
     if is_detached_editor(&editor) {
         let spawned = Command::new(&cmd)
             .args(&args)
@@ -487,6 +486,11 @@ fn schedule_edit(ctx: &mut LoopCtx<'_>, repo: String, path: String) {
         }
         Ok(()) => {
             ctx.state.status = StatusMessage::ok(format!("edited {path}"));
+            // A file tab showing this file reads it again.
+            if let Some(reload) = ctx.state.reload_file_tab_after_edit(&repo, &path) {
+                ctx.interp
+                    .schedule(ctx.state, ctx.opts, reload, &Action::None);
+            }
             ctx.interp.after_edit(ctx.state, repo);
             if ctx.interp.take_dirty() {
                 ctx.presenter.mark();

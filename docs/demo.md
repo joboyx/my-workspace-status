@@ -112,11 +112,11 @@ Show: the MOVE / GIT / VIEW key overlay (each column flows on its own, version i
 
 Mid still: the help overlay.
 
-## 09 — command palette
+## 09 — commands (Ctrl-k)
 
 Keys: Ctrl-k, `compare` (typed), Backspace ×7, `checkout` (typed), Esc.
 
-Show: the palette. The alias `compare` finds Diff vs default in new tab / Diff vs branch in new tab… / Diff vs commit in new tab… / Diff commit vs parent in new tab / Close tab (with its disabled reason). `checkout` types its `c` and `k` (letters no longer move the cursor) and finds Branch picker / Checkout commit refs with their disabled reasons. Esc closes with no run.
+Show: the commands list. The alias `compare` finds Diff vs default in new tab / Diff vs branch in new tab… / Diff vs commit in new tab… / Diff commit vs parent in new tab / Close tab (with its disabled reason). `checkout` types its `c` and `k` (letters no longer move the cursor) and finds Branch picker / Checkout commit refs with their disabled reasons. Esc closes with no run.
 
 Mid still: the `compare` alias match.
 

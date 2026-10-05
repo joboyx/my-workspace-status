@@ -20,7 +20,7 @@ impl AppState {
     /// Why `action` refuses as a compare command, or `None` when it may run.
     ///
     /// The one compare gate. [`Self::dispatch`] puts the reason on the status
-    /// line, and the command palette paints it dimmed at the row's right edge
+    /// line, and Quick Open commands mode paints it dimmed at the row's right edge
     /// (and in the footer for the highlighted row) through
     /// `palette_disabled_reason`, so a key press and a palette row always give
     /// the same copy. The commands that open a compare tab are checked on
@@ -154,11 +154,23 @@ impl AppState {
         ) {
             self.g_pending_at = None;
         }
+        // A file tab answers its own keys and refuses writes; the Workspace
+        // gates below read the parked tree, so it skips them.
+        let file_tab = self.is_file_tab();
+        if file_tab {
+            if let Some(reason) = self.file_tab_refusal(&action) {
+                self.status = StatusMessage::warn(reason);
+                return Effect::None;
+            }
+            if let Some(effect) = self.dispatch_file_tab(&action) {
+                return effect;
+            }
+        }
         if let Some(reason) = self.compare_refusal(&action) {
             self.status = StatusMessage::warn(reason);
             return Effect::None;
         }
-        if let Some(reason) = self.summary_refusal(&action) {
+        if let Some(reason) = self.summary_refusal(&action).filter(|_| !file_tab) {
             self.status = StatusMessage::warn(reason);
             return Effect::None;
         }
@@ -166,12 +178,13 @@ impl AppState {
             && matches!(action, Action::Stage | Action::Unstage | Action::Revert);
         // Compare `x` also runs from the focused diff (the open file).
         let visual_write = visual_write || self.compare_revert_runs(&action);
-        let noop = dispatch_is_noop(
-            &action,
-            self.nav_depth(),
-            self.focus == FocusPane::Right,
-            self.list_focus_target(),
-        );
+        let noop = !file_tab
+            && dispatch_is_noop(
+                &action,
+                self.nav_depth(),
+                self.focus == FocusPane::Right,
+                self.list_focus_target(),
+            );
         if noop && !matches!(action, Action::FoldToggle) && !visual_write {
             if let Some(reason) = dispatch_noop_reason(
                 &action,
@@ -227,6 +240,7 @@ impl AppState {
             | Action::Quit
             | Action::CtrlC
             | Action::ToggleHelp
+            | Action::HelpScroll(_)
             | Action::Move(_)
             | Action::MoveToStart
             | Action::MoveToEnd
@@ -281,17 +295,17 @@ impl AppState {
             | Action::ExportComments
             | Action::ExportCommentsCancel
             | Action::CopyEntityReference
-            | Action::ToggleCommandPalette(_)
-            | Action::CommandPaletteMove(_)
-            | Action::CommandPaletteChar(_)
-            | Action::CommandPaletteBackspace
-            | Action::CommandPaletteSubmit
-            | Action::CommandPaletteCancel
+            | Action::ToggleQuickOpen(_)
+            | Action::QuickOpenMove(_)
+            | Action::QuickOpenChar(_)
+            | Action::QuickOpenBackspace
+            | Action::QuickOpenSubmit
+            | Action::QuickOpenCancel
             | Action::CompareVsDefault
             | Action::CompareVsBranch
             | Action::CompareVsCommit
             | Action::CompareCommitVsParent
-            | Action::CloseCompareTab
+            | Action::CloseTab
             | Action::NextTab
             | Action::PreviousTab
             | Action::JumpToTab(_)

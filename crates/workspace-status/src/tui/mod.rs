@@ -27,6 +27,7 @@ mod icons;
 mod keys;
 mod ops;
 pub(crate) mod persist;
+mod quick_open;
 mod render;
 mod scheduler;
 pub(crate) mod search;
