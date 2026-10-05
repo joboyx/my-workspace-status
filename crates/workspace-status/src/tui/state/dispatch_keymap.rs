@@ -405,6 +405,9 @@ impl AppState {
             Action::CompareVsBranch => self.prepare_compare_picker(ComparePickerKind::Branch),
             Action::CompareVsCommit => self.prepare_compare_picker(ComparePickerKind::Commit),
             Action::CompareCommitVsParent => self.compare_commit_vs_parent(),
+            Action::BlameCommitVsParent => self.blame_commit_vs_parent(),
+            Action::BlamePreviousChange => self.blame_previous_change(),
+            Action::BlameRevealGraph => self.blame_reveal_graph(),
             Action::CloseTab => self.close_active_tab(),
             Action::NextTab => self.activate_relative_tab(1),
             Action::PreviousTab => self.activate_relative_tab(-1),
@@ -444,9 +447,10 @@ impl AppState {
 
     /// Why palette row `command` cannot run, or `None` if Enter should dispatch.
     ///
-    /// On a file tab: [`Self::file_tab_refusal`], then
-    /// [`Self::file_tab_palette_reason`]. Otherwise: compare refusal ([`Self::compare_refusal`], which also gates
-    /// the compare open commands on every tab), folder-summary refusal
+    /// On a file tab: [`Self::file_tab_refusal`], the blame gate
+    /// ([`Self::blame_refusal`]), then [`Self::file_tab_palette_reason`].
+    /// Otherwise: compare refusal ([`Self::compare_refusal`], which also gates
+    /// the compare open commands on every tab), the blame gate, folder-summary refusal
     /// ([`Self::summary_refusal`]), then the row's
     /// highlight scope, then the range patch (highlighted stage / unstage /
     /// revert), then the action gate.
@@ -455,10 +459,12 @@ impl AppState {
         if self.is_file_tab() {
             return self
                 .file_tab_refusal(action)
+                .or_else(|| self.blame_refusal(action))
                 .or_else(|| self.file_tab_palette_reason(command));
         }
         if let Some(reason) = self
             .compare_refusal(action)
+            .or_else(|| self.blame_refusal(action))
             .or_else(|| self.summary_refusal(action))
         {
             return Some(reason);

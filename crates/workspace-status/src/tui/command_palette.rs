@@ -307,6 +307,30 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
+        title: "Blame: open commit changes",
+        keys: "",
+        group: CommandGroup::Git,
+        action: Action::BlameCommitVsParent,
+        aliases: &["blame", "compare", "gitlens"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Blame: open previous line change",
+        keys: "",
+        group: CommandGroup::Git,
+        action: Action::BlamePreviousChange,
+        aliases: &["blame", "compare", "previous revision", "gitlens"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Blame: show commit in graph",
+        keys: "",
+        group: CommandGroup::Git,
+        action: Action::BlameRevealGraph,
+        aliases: &["blame", "reveal", "details", "gitlens"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
         title: "Diff vs default in new tab",
         keys: "",
         group: CommandGroup::Git,
@@ -876,6 +900,27 @@ mod tests {
                 CommandScope::NoHighlight,
             ),
             (
+                "Blame: open commit changes",
+                "",
+                CommandGroup::Git,
+                Action::BlameCommitVsParent,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Blame: open previous line change",
+                "",
+                CommandGroup::Git,
+                Action::BlamePreviousChange,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Blame: show commit in graph",
+                "",
+                CommandGroup::Git,
+                Action::BlameRevealGraph,
+                CommandScope::NoHighlight,
+            ),
+            (
                 "Diff vs default in new tab",
                 "",
                 CommandGroup::Git,
@@ -1151,9 +1196,24 @@ mod tests {
     }
 
     #[test]
-    fn blame_filter_finds_the_line_blame_toggle() {
-        assert!(titles("blame").contains(&"Line blame on / off"));
-        assert!(titles("gitlens").contains(&"Line blame on / off"));
+    fn blame_filter_finds_the_blame_rows_and_the_toggle() {
+        let blame_rows = vec![
+            "Blame: open commit changes",
+            "Blame: open previous line change",
+            "Blame: show commit in graph",
+            "Line blame on / off",
+        ];
+        assert_eq!(titles("blame"), blame_rows);
+        assert_eq!(titles("gitlens"), blame_rows);
+        assert_eq!(titles("previous revision"), vec![blame_rows[1]]);
+        assert_eq!(titles("reveal"), vec![blame_rows[2]]);
+        // The Blame rows sit right before the Diff … in new tab rows.
+        let catalog: Vec<_> = PALETTE_COMMANDS.iter().map(|c| c.title).collect();
+        let diff = catalog
+            .iter()
+            .position(|t| *t == "Diff vs default in new tab")
+            .unwrap();
+        assert_eq!(catalog[diff - 3..diff], blame_rows[..3]);
     }
 
     #[test]

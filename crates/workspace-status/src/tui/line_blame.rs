@@ -23,6 +23,43 @@ pub const UNCOMMITTED_TEXT: &str = "You · uncommitted";
 /// Annotation for an added line in the STAGED section (no git call).
 pub const STAGED_TEXT: &str = "You · staged";
 
+/// Blame action refusal: the annotation is off.
+pub const BLAME_IS_OFF: &str = "line blame is off (B)";
+
+/// Blame action refusal: no file-tab or file-diff line has focus.
+pub const FOCUS_A_DIFF_OR_FILE_LINE: &str = "focus a diff or file line";
+
+/// Blame action refusal: git has not answered for the focused line yet.
+pub const BLAME_STILL_LOADING: &str = "line blame still loading";
+
+/// Blame action refusal: the focused line is staged or in the working
+/// tree only.
+pub const LINE_NOT_COMMITTED: &str = "line is not committed yet";
+
+/// Blame action refusal: git has no blame for the focused row (untracked
+/// file, binary, hunk header, failed run).
+pub const NO_BLAME_FOR_LINE: &str = "no blame for this line";
+
+/// Older graph pages a reveal may load before it gives up.
+pub const GRAPH_REVEAL_MAX_PAGES: u8 = 10;
+
+/// Pending "show commit in graph": select [`Self::sha`] once the graph of
+/// [`Self::repo`] holds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphReveal {
+    /// Checkout whose graph must show the commit.
+    pub repo: String,
+    /// Full commit id to select.
+    pub sha: String,
+    /// Older pages loaded so far for this reveal.
+    pub pages: u8,
+}
+
+/// First seven characters of a commit id.
+pub fn short_sha(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
 /// One `git blame -L n,n` question: checkout, revision, path, line, and
 /// the content epoch it was asked under.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -140,7 +177,7 @@ pub fn annotation_text(blame: &LineBlame, now_unix: i64) -> String {
     if blame.uncommitted {
         return UNCOMMITTED_TEXT.into();
     }
-    let sha7: String = blame.sha.chars().take(7).collect();
+    let sha7 = short_sha(&blame.sha);
     format!(
         "{}, {} · {sha7} · {}",
         blame.author,

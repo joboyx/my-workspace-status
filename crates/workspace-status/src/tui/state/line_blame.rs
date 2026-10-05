@@ -10,16 +10,25 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use super::super::action::Effect;
+use workspace_status_graph::GraphRow;
+
+use super::super::action::{Action, Effect};
 use super::super::diff::{row_line_ref, DiffCellKind, DiffSection, RowLineRef};
-use super::super::drill::CommitFileSource;
+use super::super::drill::{CommitFileSource, DrillView};
 use super::super::gates::ListFocusTarget;
 use super::super::line_blame::{
-    annotation_text, BlameKey, BlameSide, LineAnnotation, STAGED_TEXT, UNCOMMITTED_TEXT,
+    annotation_text, short_sha, BlameKey, BlameSide, GraphReveal, LineAnnotation, BLAME_IS_OFF,
+    BLAME_STILL_LOADING, FOCUS_A_DIFF_OR_FILE_LINE, GRAPH_REVEAL_MAX_PAGES, LINE_NOT_COMMITTED,
+    NO_BLAME_FOR_LINE, STAGED_TEXT, UNCOMMITTED_TEXT,
 };
+use super::super::search::unfold_ancestors;
 use super::super::split::DiffMode;
-use super::AppState;
-use crate::git::{BlameRev, LineBlame};
+use super::super::status::StatusMessage;
+use super::super::tabs::ROOT_COMMIT_HAS_NO_PARENT;
+use super::super::tree::NodeKind;
+use super::super::watch::graph_row_id;
+use super::{single_or_batch, AppState, FocusPane};
+use crate::git::{BlameRev, LineBlame, PreviousLineChange};
 
 /// Where the focused line's annotation comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,6 +120,263 @@ impl AppState {
             "line blame off".into()
         };
         Effect::None
+    }
+
+    /// Why a blame action cannot run, or `None` when it may (also for
+    /// every other action).
+    ///
+    /// The one blame gate. [`Self::dispatch`] puts the reason on the
+    /// status line and `palette_disabled_reason` paints it on the row, so
+    /// a key and a palette row give the same copy. The actions run on the
+    /// Workspace, compare, and file tabs.
+    pub(crate) fn blame_refusal(&self, action: &Action) -> Option<String> {
+        if !matches!(
+            action,
+            Action::BlameCommitVsParent | Action::BlamePreviousChange | Action::BlameRevealGraph
+        ) {
+            return None;
+        }
+        match self.blamed_line() {
+            Err(reason) => Some(reason.into()),
+            Ok((_, blame)) if blame.boundary && *action == Action::BlameCommitVsParent => {
+                Some(ROOT_COMMIT_HAS_NO_PARENT.into())
+            }
+            Ok(_) => None,
+        }
+    }
+
+    /// Checkout and committed blame of the focused line, or why the blame
+    /// actions refuse.
+    fn blamed_line(&self) -> Result<(String, LineBlame), &'static str> {
+        if !self.line_blame.enabled {
+            return Err(BLAME_IS_OFF);
+        }
+        if let Some(tab) = self.tabs.active_file() {
+            if tab.body.is_none() {
+                return Err(BLAME_STILL_LOADING);
+            }
+        } else if self.list_focus_target() != ListFocusTarget::None
+            || self.folder_summary().is_some()
+            || self.open_diff_target().is_none()
+        {
+            return Err(FOCUS_A_DIFF_OR_FILE_LINE);
+        }
+        match self.focused_blame().map(|(blame, _)| blame) {
+            None => Err(NO_BLAME_FOR_LINE),
+            Some(FocusedBlame::Fixed(_)) => Err(LINE_NOT_COMMITTED),
+            Some(FocusedBlame::Ask(key)) => match self.line_blame.cached(&key) {
+                None => Err(BLAME_STILL_LOADING),
+                Some(None) => Err(NO_BLAME_FOR_LINE),
+                Some(Some(blame)) if blame.uncommitted => Err(LINE_NOT_COMMITTED),
+                Some(Some(blame)) => Ok((key.repo, blame.clone())),
+            },
+        }
+    }
+
+    /// Blame: open commit changes. Open or focus `<sha>^...<sha>` with the
+    /// head pinned to the focused line's blame commit, in the surface's
+    /// checkout. Never checks anything out. [`Self::blame_refusal`] has
+    /// already refused everything else.
+    pub(super) fn blame_commit_vs_parent(&mut self) -> Effect {
+        let Ok((repo, blame)) = self.blamed_line() else {
+            return Effect::None;
+        };
+        self.open_compare_tab(repo, format!("{}^", blame.sha), blame.sha)
+    }
+
+    /// Blame: open previous line change. Starts the
+    /// [`Effect::LoadBlamePrevious`] search; [`Self::apply_blame_previous`]
+    /// lands it.
+    pub(super) fn blame_previous_change(&mut self) -> Effect {
+        let Ok((repo, blame)) = self.blamed_line() else {
+            return Effect::None;
+        };
+        self.blame_previous_gen += 1;
+        self.status = StatusMessage::progress("finding previous change…");
+        Effect::LoadBlamePrevious {
+            gen: self.blame_previous_gen,
+            repo,
+            blame: Box::new(blame),
+        }
+    }
+
+    /// Land a previous-line-change search for request `gen` on blame
+    /// commit `sha` in `repo`.
+    ///
+    /// A stale `gen` is dropped (`None`). An earlier commit opens its own
+    /// `<prev>^...<prev>` tab; the returned effect loads it. A line the
+    /// commit added, or an earlier change in a root commit, says so on the
+    /// status line.
+    pub(crate) fn apply_blame_previous(
+        &mut self,
+        gen: u64,
+        repo: String,
+        sha: &str,
+        result: Result<PreviousLineChange, String>,
+    ) -> Option<Effect> {
+        if gen != self.blame_previous_gen {
+            return None;
+        }
+        match result {
+            Ok(PreviousLineChange::AddedIn) => {
+                self.status = StatusMessage::warn(format!("line was added in {}", short_sha(sha)));
+                None
+            }
+            Ok(PreviousLineChange::Found(prev)) if prev.boundary => {
+                self.status = StatusMessage::warn(format!(
+                    "earlier change {} is the root commit",
+                    short_sha(&prev.sha)
+                ));
+                None
+            }
+            Ok(PreviousLineChange::Found(prev)) => {
+                self.status.clear();
+                Some(self.open_compare_tab(repo, format!("{}^", prev.sha), prev.sha))
+            }
+            Err(err) => {
+                self.status = StatusMessage::error(err);
+                None
+            }
+        }
+    }
+
+    /// Blame: show commit in graph. Goes to the Workspace tab, leaves a
+    /// commit drill, puts the tree cursor on the checkout, and focuses its
+    /// graph. The commit row is selected now when the graph holds it, else
+    /// after the graph loads ([`Self::retry_graph_reveal`]) or after older
+    /// pages ([`Self::graph_reveal_wants_older`]).
+    pub(super) fn blame_reveal_graph(&mut self) -> Effect {
+        let Ok((repo, blame)) = self.blamed_line() else {
+            return Effect::None;
+        };
+        if !self.tabs.is_workspace() {
+            let _ = self.activate_tab(0);
+        }
+        let mut effects = Vec::new();
+        if !self.drill.is_graph() {
+            self.drill = DrillView::Graph;
+            effects.push(Effect::DropCommitDiff);
+        }
+        let moved = match self.focus_checkout_row(&repo) {
+            Some(moved) => moved,
+            None => {
+                self.status = StatusMessage::warn(format!("{repo} is not in the tree"));
+                return single_or_batch(effects);
+            }
+        };
+        self.focus = FocusPane::Right;
+        self.graph_reveal = Some(GraphReveal {
+            repo: repo.clone(),
+            sha: blame.sha,
+            pages: 0,
+        });
+        let loaded = self.graph.is_some()
+            && self
+                .graph_identity
+                .as_ref()
+                .is_some_and(|(graph_repo, _)| *graph_repo == repo);
+        if loaded && !moved {
+            self.retry_graph_reveal(&repo);
+        } else {
+            effects.push(Effect::LoadRightPane);
+        }
+        single_or_batch(effects)
+    }
+
+    /// Put the tree cursor on `repo`'s checkout row (or its repo row),
+    /// unfolding its ancestors. `Some(true)` when the cursor moved,
+    /// `Some(false)` when it was already there, `None` when the tree has
+    /// no such row.
+    fn focus_checkout_row(&mut self, repo: &str) -> Option<bool> {
+        if self.focused_row().is_some_and(|row| {
+            matches!(row.kind, NodeKind::Repo | NodeKind::Checkout)
+                && row.repo.as_deref() == Some(repo)
+        }) && self.focused_graph_repo().as_deref() == Some(repo)
+        {
+            return Some(false);
+        }
+        for id in [format!("checkout:{repo}"), format!("repo:{repo}")] {
+            let folds = unfold_ancestors(&self.tree, &self.folds, &id);
+            if folds != self.folds {
+                self.folds = folds;
+                self.rebuild_rows();
+            }
+            if let Some(idx) = self.rows.iter().position(|row| row.id == id) {
+                self.cursor = idx;
+                return Some(true);
+            }
+        }
+        None
+    }
+
+    /// Select the pending reveal's commit when the graph of `repo` holds
+    /// it. Called after every [`Self::set_graph`]; a graph of another repo
+    /// drops the reveal.
+    pub(super) fn retry_graph_reveal(&mut self, repo: &str) {
+        let Some(reveal) = self.graph_reveal.as_ref() else {
+            return;
+        };
+        if reveal.repo != repo {
+            self.graph_reveal = None;
+            return;
+        }
+        let want = format!("commit:{}", reveal.sha);
+        let Some(idx) = self.graph.as_ref().and_then(|model| {
+            model.visible_rows().iter().position(|row| match row {
+                GraphRow::Stash(stash) => stash.id == reveal.sha,
+                row => graph_row_id(row) == want,
+            })
+        }) else {
+            return;
+        };
+        self.graph_cursor = idx;
+        self.sync_graph_scroll();
+        self.graph_reveal = None;
+    }
+
+    /// Drop a pending reveal once the Workspace graph pane loses focus,
+    /// so a later load of that graph does not move the cursor.
+    pub(crate) fn drop_graph_reveal_off_graph(&mut self) {
+        if self.graph_reveal.is_some() && self.tabs.is_workspace() && !self.graph_pane_focused() {
+            self.graph_reveal = None;
+        }
+    }
+
+    /// True when the pending reveal needs one more page of older graph
+    /// rows; counts the page. Past [`GRAPH_REVEAL_MAX_PAGES`], or when the
+    /// history ends, the reveal gives up with a status.
+    ///
+    /// Waits (false) while the graph of the reveal's repo is not loaded or
+    /// an older page is already on its way.
+    pub(crate) fn graph_reveal_wants_older(&mut self) -> bool {
+        let Some(reveal) = self.graph_reveal.as_mut() else {
+            return false;
+        };
+        let Some(model) = self.graph.as_ref() else {
+            return false;
+        };
+        let same_repo = self
+            .graph_identity
+            .as_ref()
+            .is_some_and(|(repo, _)| *repo == reveal.repo);
+        if !same_repo || self.graph_loading_older {
+            return false;
+        }
+        if model.has_more && reveal.pages < GRAPH_REVEAL_MAX_PAGES {
+            reveal.pages += 1;
+            return true;
+        }
+        let hint = if self.graph_branch_focus.is_some() {
+            " (graph focus on, O clears)"
+        } else {
+            ""
+        };
+        self.status = StatusMessage::warn(format!(
+            "{} is not in the loaded graph{hint}",
+            short_sha(&reveal.sha)
+        ));
+        self.graph_reveal = None;
+        false
     }
 
     /// True when the focused line asks git and the cache has no answer yet.
@@ -257,11 +523,13 @@ impl AppState {
 mod tests {
     use std::path::PathBuf;
 
+    use workspace_status_graph::{Commit, GraphModel};
+
     use super::super::super::action::Action;
+    use super::super::super::command_palette::PALETTE_COMMANDS;
     use super::super::super::diff::DiffContent;
     use super::super::super::drill::CommitFile;
     use super::super::super::selection::TextSelection;
-    use super::super::FocusPane;
     use super::*;
     use crate::config::ViewDefaults;
     use crate::file_index::FileRead;
@@ -662,5 +930,440 @@ mod tests {
         assert_eq!(app.line_blame_want(), first);
         app.diff_cursor = 3;
         assert_ne!(app.line_blame_want(), first, "cursor move maps again");
+    }
+
+    const OTHER: &str = "ddd4444eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const BLAME_ACTIONS: [(&str, Action); 3] = [
+        ("Blame: open commit changes", Action::BlameCommitVsParent),
+        (
+            "Blame: open previous line change",
+            Action::BlamePreviousChange,
+        ),
+        ("Blame: show commit in graph", Action::BlameRevealGraph),
+    ];
+
+    fn palette_reason(app: &AppState, title: &str) -> Option<String> {
+        let command = PALETTE_COMMANDS
+            .iter()
+            .find(|command| command.title == title)
+            .unwrap_or_else(|| panic!("no palette row {title}"));
+        app.palette_disabled_reason(command)
+    }
+
+    /// Every blame action gives `reason` on its palette row and as the
+    /// status of a dispatch, which changes nothing else.
+    fn assert_blame_refused(app: &mut AppState, reason: &str) {
+        for (title, action) in BLAME_ACTIONS {
+            assert_eq!(
+                palette_reason(app, title).as_deref(),
+                Some(reason),
+                "{title}"
+            );
+            let tabs = app.tabs.len();
+            app.status.clear();
+            assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
+            assert_eq!(app.status, reason, "{action:?}");
+            assert_eq!(app.tabs.len(), tabs, "{action:?} opens no tab");
+        }
+    }
+
+    fn blamed(sha: &str) -> LineBlame {
+        LineBlame {
+            sha: sha.into(),
+            ..blame("subject")
+        }
+    }
+
+    /// Answer the focused line's blame question with `answer`.
+    fn answer(app: &mut AppState, answer: Option<LineBlame>) {
+        let key = app.line_blame_want().expect("focused line asks");
+        assert!(app.apply_line_blame(key, Ok(answer)));
+    }
+
+    #[test]
+    fn blame_actions_refuse_with_the_same_copy_on_key_and_palette() {
+        let mut app = worktree_diff("", BODY, false);
+        app.diff_cursor = 2;
+        assert_blame_refused(&mut app, BLAME_STILL_LOADING);
+        answer(&mut app, None);
+        assert_blame_refused(&mut app, NO_BLAME_FOR_LINE);
+        app.diff_cursor = 1;
+        assert_blame_refused(&mut app, NO_BLAME_FOR_LINE);
+        app.diff_cursor = 4;
+        assert_blame_refused(&mut app, LINE_NOT_COMMITTED);
+        app.diff_cursor = 5;
+        answer(
+            &mut app,
+            Some(LineBlame {
+                uncommitted: true,
+                ..blamed(&"0".repeat(40))
+            }),
+        );
+        assert_blame_refused(&mut app, LINE_NOT_COMMITTED);
+        app.focus = FocusPane::Left;
+        assert_blame_refused(&mut app, FOCUS_A_DIFF_OR_FILE_LINE);
+        app.focus = FocusPane::Right;
+        app.line_blame.set_enabled(false);
+        assert_blame_refused(&mut app, BLAME_IS_OFF);
+
+        let mut untracked = worktree_diff("", "@@ -0,0 +1,2 @@\n+a\n+b\n", true);
+        untracked.diff_cursor = 2;
+        assert_blame_refused(&mut untracked, NO_BLAME_FOR_LINE);
+    }
+
+    #[test]
+    fn blame_vs_parent_refuses_a_root_commit_but_reveal_runs() {
+        let mut app = worktree_diff("", BODY, false);
+        app.diff_cursor = 2;
+        answer(
+            &mut app,
+            Some(LineBlame {
+                boundary: true,
+                ..blamed(SHA)
+            }),
+        );
+        assert_eq!(
+            palette_reason(&app, "Blame: open commit changes").as_deref(),
+            Some(ROOT_COMMIT_HAS_NO_PARENT)
+        );
+        app.dispatch(Action::BlameCommitVsParent);
+        assert_eq!(app.status, ROOT_COMMIT_HAS_NO_PARENT);
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(
+            palette_reason(&app, "Blame: open previous line change"),
+            None
+        );
+        assert_eq!(palette_reason(&app, "Blame: show commit in graph"), None);
+    }
+
+    fn expect_parent_tab(effect: Effect, sha: &str) -> u64 {
+        match effect {
+            Effect::LoadCompareRange {
+                tab_id,
+                repo,
+                base_ref,
+                head_ref,
+                force,
+            } => {
+                assert_eq!(repo, "app");
+                assert_eq!(base_ref, format!("{sha}^"));
+                assert_eq!(head_ref, sha);
+                assert!(force);
+                tab_id
+            }
+            other => panic!("expected a compare load, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn blame_vs_parent_opens_a_pinned_tab_from_drill_compare_and_file_tab() {
+        // Commit drill: the added line blames the drilled commit.
+        let mut app = state();
+        app.open_commit_diff(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: SHA.into(),
+            },
+            vec![CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+                stat: None,
+            }],
+            0,
+            "README.md".into(),
+            DiffContent::from_unified(BODY),
+        );
+        app.focus = FocusPane::Right;
+        app.diff_cursor = 4;
+        answer(&mut app, Some(blamed(SHA)));
+        assert_eq!(palette_reason(&app, "Blame: open commit changes"), None);
+        let tab_id = expect_parent_tab(app.dispatch(Action::BlameCommitVsParent), SHA);
+        let tab = app.tabs.active_compare().expect("compare tab");
+        assert_eq!(tab.id, tab_id);
+        assert!(tab.is_pinned());
+        assert_eq!(tab.label(), "app ↔ aaa1111^");
+
+        // That compare tab: a line blamed to another commit opens its own tab.
+        let tab = app.tabs.active_compare_mut().unwrap();
+        tab.source = Some(CommitFileSource::Compare {
+            base_ref: format!("{SHA}^"),
+            head_ref: SHA.into(),
+            base_tip: "bbb".into(),
+            merge_base: "bbb".into(),
+            head: SHA.into(),
+        });
+        tab.files = vec![CommitFile {
+            status: "M".into(),
+            path: "README.md".into(),
+            old_path: None,
+            stat: None,
+        }];
+        tab.path = Some("README.md".into());
+        tab.content = DiffContent::from_compare_lines(BODY.lines().map(String::from).collect());
+        app.focus = FocusPane::Right;
+        app.diff_cursor = 2;
+        answer(&mut app, Some(blamed(OTHER)));
+        expect_parent_tab(app.dispatch(Action::BlameCommitVsParent), OTHER);
+        assert_eq!(app.tabs.compare_count(), 2);
+        assert_eq!(app.tabs.active_compare().unwrap().label(), "app ↔ ddd4444^");
+
+        // A file tab: the cursor line's blame, same checkout.
+        let Effect::LoadFileTab { tab_id, gen, .. } =
+            app.open_file_tab("app".into(), "README.md".into())
+        else {
+            panic!("expected a load");
+        };
+        assert_blame_refused(&mut app, BLAME_STILL_LOADING);
+        assert!(app.apply_file_tab(
+            tab_id,
+            gen,
+            FileRead::Text {
+                lines: vec!["a".into(), "c".into()],
+                max_cols: 1,
+            }
+        ));
+        answer(&mut app, Some(blamed(SHA)));
+        assert_eq!(app.dispatch(Action::BlameCommitVsParent), Effect::None);
+        assert_eq!(app.tabs.compare_count(), 2, "focuses the drill's tab");
+        assert_eq!(app.tabs.active_compare().unwrap().label(), "app ↔ aaa1111^");
+    }
+
+    #[test]
+    fn blame_previous_change_lands_only_the_latest_request() {
+        let mut app = worktree_diff("", BODY, false);
+        app.diff_cursor = 2;
+        answer(&mut app, Some(blamed(SHA)));
+        let Effect::LoadBlamePrevious { gen, repo, blame } =
+            app.dispatch(Action::BlamePreviousChange)
+        else {
+            panic!("expected a previous-change load");
+        };
+        assert_eq!((repo.as_str(), blame.sha.as_str()), ("app", SHA));
+        assert_eq!(app.status, "finding previous change…");
+        let Effect::LoadBlamePrevious { gen: latest, .. } =
+            app.dispatch(Action::BlamePreviousChange)
+        else {
+            panic!("expected a previous-change load");
+        };
+        assert_eq!(
+            app.apply_blame_previous(
+                gen,
+                "app".into(),
+                SHA,
+                Ok(PreviousLineChange::Found(blamed(OTHER)))
+            ),
+            None,
+            "stale request dropped"
+        );
+        assert_eq!(app.tabs.len(), 1);
+
+        assert_eq!(
+            app.apply_blame_previous(latest, "app".into(), SHA, Ok(PreviousLineChange::AddedIn)),
+            None
+        );
+        assert_eq!(app.status, "line was added in aaa1111");
+        assert_eq!(
+            app.status.kind(),
+            super::super::super::status::StatusKind::Warn
+        );
+
+        let root = LineBlame {
+            boundary: true,
+            ..blamed(OTHER)
+        };
+        assert_eq!(
+            app.apply_blame_previous(
+                latest,
+                "app".into(),
+                SHA,
+                Ok(PreviousLineChange::Found(root))
+            ),
+            None
+        );
+        assert_eq!(app.status, "earlier change ddd4444 is the root commit");
+        assert_eq!(app.tabs.len(), 1);
+
+        let follow = app.apply_blame_previous(
+            latest,
+            "app".into(),
+            SHA,
+            Ok(PreviousLineChange::Found(blamed(OTHER))),
+        );
+        expect_parent_tab(follow.expect("opens a tab"), OTHER);
+        assert_eq!(app.tabs.active_compare().unwrap().label(), "app ↔ ddd4444^");
+        assert_eq!(app.status, "");
+    }
+
+    fn graph_with(ids: &[&str], has_more: bool) -> GraphModel {
+        GraphModel {
+            commits: ids
+                .iter()
+                .map(|id| Commit {
+                    id: (*id).into(),
+                    subject: format!("s-{id}"),
+                    parents: vec!["parent".into()],
+                    ..Commit::default()
+                })
+                .collect(),
+            has_more,
+            ..GraphModel::default()
+        }
+    }
+
+    fn focused_commit(app: &AppState) -> Option<String> {
+        match app.focused_graph_row() {
+            Some(GraphRow::Commit { commit, .. }) => Some(commit.id),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn blame_reveal_from_a_worktree_diff_loads_the_graph_then_selects() {
+        let mut app = worktree_diff("", BODY, false);
+        app.diff_cursor = 2;
+        answer(&mut app, Some(blamed(SHA)));
+        assert_eq!(
+            app.dispatch(Action::BlameRevealGraph),
+            Effect::LoadRightPane
+        );
+        assert_eq!(
+            app.focused_row().map(|row| row.id.as_str()),
+            Some("repo:app")
+        );
+        assert!(app.graph_pane_focused(), "graph pane has focus");
+        assert!(app.graph_reveal.is_some());
+
+        app.set_graph(graph_with(&[OTHER, SHA], false), "app".into(), OTHER.into());
+        assert_eq!(focused_commit(&app).as_deref(), Some(SHA));
+        assert_eq!(app.graph_reveal, None, "done");
+    }
+
+    #[test]
+    fn blame_reveal_from_a_commit_drill_selects_the_loaded_row() {
+        let mut app = state();
+        app.cursor = app
+            .rows
+            .iter()
+            .position(|row| row.id == "repo:app")
+            .unwrap();
+        app.set_graph(graph_with(&[OTHER, SHA], false), "app".into(), OTHER.into());
+        app.open_commit_diff(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: OTHER.into(),
+            },
+            vec![CommitFile {
+                status: "M".into(),
+                path: "README.md".into(),
+                old_path: None,
+                stat: None,
+            }],
+            0,
+            "README.md".into(),
+            DiffContent::from_unified(BODY),
+        );
+        app.focus = FocusPane::Right;
+        app.diff_cursor = 2;
+        answer(&mut app, Some(blamed(SHA)));
+        assert_eq!(
+            app.dispatch(Action::BlameRevealGraph),
+            Effect::DropCommitDiff
+        );
+        assert!(app.drill.is_graph());
+        assert!(app.graph_pane_focused());
+        assert_eq!(focused_commit(&app).as_deref(), Some(SHA));
+        assert_eq!(app.graph_reveal, None);
+    }
+
+    #[test]
+    fn blame_reveal_from_a_file_tab_goes_to_workspace_and_widens_to_the_cap() {
+        let mut app = state();
+        app.cursor = app
+            .rows
+            .iter()
+            .position(|row| row.id == "repo:app")
+            .unwrap();
+        app.set_graph(graph_with(&[OTHER], true), "app".into(), OTHER.into());
+        let Effect::LoadFileTab { tab_id, gen, .. } =
+            app.open_file_tab("app".into(), "README.md".into())
+        else {
+            panic!("expected a load");
+        };
+        assert!(app.apply_file_tab(
+            tab_id,
+            gen,
+            FileRead::Text {
+                lines: vec!["a".into()],
+                max_cols: 1,
+            }
+        ));
+        answer(&mut app, Some(blamed(SHA)));
+        app.graph_branch_focus = Some(("app".into(), vec!["main".into()]));
+        assert_eq!(app.dispatch(Action::BlameRevealGraph), Effect::None);
+        assert!(app.tabs.is_workspace());
+        assert!(app.graph_pane_focused());
+        assert_eq!(
+            focused_commit(&app).as_deref(),
+            Some(OTHER),
+            "not loaded yet"
+        );
+
+        app.graph_loading_older = true;
+        assert!(
+            !app.graph_reveal_wants_older(),
+            "an older page is on its way"
+        );
+        app.graph_loading_older = false;
+        for page in 1..=GRAPH_REVEAL_MAX_PAGES {
+            assert!(app.graph_reveal_wants_older(), "page {page}");
+            assert_eq!(app.graph_reveal.as_ref().map(|r| r.pages), Some(page));
+        }
+        assert!(!app.graph_reveal_wants_older(), "cap reached");
+        assert_eq!(app.graph_reveal, None);
+        assert_eq!(
+            app.status,
+            "aaa1111 is not in the loaded graph (graph focus on, O clears)"
+        );
+    }
+
+    #[test]
+    fn blame_reveal_drops_on_another_repo_graph_and_gives_up_at_the_end() {
+        let mut app = state();
+        app.graph_reveal = Some(GraphReveal {
+            repo: "app".into(),
+            sha: SHA.into(),
+            pages: 0,
+        });
+        app.set_graph(graph_with(&[OTHER], true), "lib".into(), OTHER.into());
+        assert_eq!(app.graph_reveal, None, "another repo's graph drops it");
+
+        app.cursor = app
+            .rows
+            .iter()
+            .position(|row| row.id == "repo:app")
+            .unwrap();
+        app.focus = FocusPane::Right;
+        app.graph_reveal = Some(GraphReveal {
+            repo: "app".into(),
+            sha: SHA.into(),
+            pages: 0,
+        });
+        app.drop_graph_reveal_off_graph();
+        assert!(app.graph_reveal.is_some(), "graph pane still focused");
+        app.focus = FocusPane::Left;
+        app.drop_graph_reveal_off_graph();
+        assert_eq!(app.graph_reveal, None, "leaving the graph drops it");
+
+        app.graph_reveal = Some(GraphReveal {
+            repo: "app".into(),
+            sha: SHA.into(),
+            pages: 0,
+        });
+        app.set_graph(graph_with(&[OTHER], false), "app".into(), OTHER.into());
+        assert!(app.graph_reveal.is_some(), "not found yet");
+        assert!(!app.graph_reveal_wants_older(), "history ends");
+        assert_eq!(app.status, "aaa1111 is not in the loaded graph");
+        assert_eq!(app.graph_reveal, None);
     }
 }

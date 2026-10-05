@@ -226,6 +226,15 @@ pub enum Action {
     /// Open or focus a compare tab of the focused graph commit versus its
     /// first parent (`<sha>^...<sha>`, head pinned to `<sha>`).
     CompareCommitVsParent,
+    /// Open or focus a compare tab of the focused line's blame commit
+    /// versus its first parent (`<sha>^...<sha>`, head pinned to `<sha>`).
+    BlameCommitVsParent,
+    /// Find the commit that changed the focused line before its blame
+    /// commit, then open that commit versus its first parent.
+    BlamePreviousChange,
+    /// Select the focused line's blame commit in the Workspace graph,
+    /// loading older pages until it shows.
+    BlameRevealGraph,
     /// Close the active compare or file tab.
     CloseTab,
     /// Cycle to the next tab (`gt`).
@@ -460,6 +469,16 @@ pub enum Effect {
         source: CommitFileSource,
         path: String,
         old_path: Option<String>,
+    },
+    /// Find the change to a blamed line before its commit
+    /// ([`crate::git::previous_line_change`]). `gen` is the session's
+    /// latest request; a stale result is dropped.
+    LoadBlamePrevious {
+        gen: u64,
+        /// Checkout path (snapshot `repo`).
+        repo: String,
+        /// Blame of the focused line.
+        blame: Box<crate::git::LineBlame>,
     },
     /// List the compare picker rows (no checkout): local + `origin/*`
     /// branches, or HEAD's ancestors, by `kind`.

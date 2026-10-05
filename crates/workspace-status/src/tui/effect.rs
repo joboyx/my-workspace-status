@@ -26,8 +26,8 @@ use crate::file_index::{
 use crate::git::{
     apply_cached_patch, apply_worktree_patch_reverse, blame_line, create_branch_at,
     create_branch_checkout, exec_git_checked, latest_stash_ref, list_compare_picker_branches,
-    list_compare_picker_commits, list_local_branches, pull_quiet_detailed, push_quiet,
-    remove_untracked_file, remove_worktree, revert_compare_file, revert_compare_patch,
+    list_compare_picker_commits, list_local_branches, previous_line_change, pull_quiet_detailed,
+    push_quiet, remove_untracked_file, remove_worktree, revert_compare_file, revert_compare_patch,
     revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop, stash_push, unstage_file,
     COMPARE_REVERT_ABORTED,
 };
@@ -197,6 +197,14 @@ pub(crate) enum JobOutcome {
     LineBlame {
         key: BlameKey,
         result: Result<Option<crate::git::LineBlame>, String>,
+    },
+    /// Previous change to a blamed line, for request `gen` on blame
+    /// commit `sha`.
+    BlamePrevious {
+        gen: u64,
+        repo: String,
+        sha: String,
+        result: Result<crate::git::PreviousLineChange, String>,
     },
 }
 
@@ -518,6 +526,9 @@ pub(crate) struct Interpreter {
     line_blame_slot: Option<BlameKey>,
     /// A [`UserTag::LineBlame`] job is queued or running.
     line_blame_inflight: bool,
+    /// Latest blame previous-change request; a newer one replaces it
+    /// before spawn.
+    blame_previous: Option<(u64, String, Box<crate::git::LineBlame>)>,
     exclusive_inflight: HashMap<u64, Vec<String>>,
     /// Name of the exclusive write or default-branch job on a worker.
     running_write: Option<&'static str>,
@@ -558,6 +569,7 @@ impl Interpreter {
             file_tab_jobs: VecDeque::new(),
             line_blame_slot: None,
             line_blame_inflight: false,
+            blame_previous: None,
             exclusive_inflight: HashMap::new(),
             running_write: None,
             dirty: false,
@@ -675,8 +687,8 @@ impl Interpreter {
         self.pump_sync(state, opts);
     }
 
-    /// Enqueue work for `effect`, then the focused line's blame if it
-    /// needs one. Does not spawn.
+    /// Enqueue work for `effect`, then the state-driven follow-ups
+    /// ([`Self::after_change`]). Does not spawn.
     pub(crate) fn schedule(
         &mut self,
         state: &mut AppState,
@@ -685,7 +697,7 @@ impl Interpreter {
         action: &Action,
     ) {
         self.schedule_effect(state, opts, effect, action);
-        self.maybe_queue_line_blame(state);
+        self.after_change(state);
     }
 
     fn schedule_effect(
@@ -1083,6 +1095,10 @@ impl Interpreter {
                     self.sched.enqueue_user_front(UserTag::Pane);
                 }
             }
+            Effect::LoadBlamePrevious { gen, repo, blame } => {
+                self.blame_previous = Some((gen, repo, blame));
+                self.sched.enqueue_user(UserTag::Prepare);
+            }
             Effect::PrepareComparePicker { repo, kind } => {
                 let gen = self.sched.request_prepare_compare();
                 self.prepare_compare = Some((gen, repo, kind));
@@ -1146,6 +1162,17 @@ impl Interpreter {
         }
     }
 
+    /// Jobs the state asks for after any schedule or apply: the focused
+    /// line's blame, and an older graph page for a pending blame reveal
+    /// (dropped once the graph pane loses focus).
+    fn after_change(&mut self, state: &mut AppState) {
+        self.maybe_queue_line_blame(state);
+        state.drop_graph_reveal_off_graph();
+        if Self::autoload_allowed(state) && state.graph_reveal_wants_older() {
+            self.queue_autoload(state);
+        }
+    }
+
     /// Queue a blame for the focused line when the cache has no answer.
     ///
     /// Latest-only: the slot holds the newest question, and at most one
@@ -1168,13 +1195,7 @@ impl Interpreter {
 
     /// Queue graph autoload when the cursor sits on the last loaded row.
     pub(crate) fn maybe_queue_autoload(&mut self, state: &mut AppState) {
-        if !state.tabs.is_workspace() {
-            return;
-        }
-        if state.graph_loading_older {
-            return;
-        }
-        if state.right_is_diff() && !state.in_commit_drill() {
+        if !Self::autoload_allowed(state) {
             return;
         }
         let Some(model) = state.graph.as_ref() else {
@@ -1188,6 +1209,21 @@ impl Interpreter {
         }) {
             return;
         }
+        self.queue_autoload(state);
+    }
+
+    /// True when an older graph page may load now: Workspace tab, a graph
+    /// loaded and shown, and no older page already on its way.
+    fn autoload_allowed(state: &AppState) -> bool {
+        state.tabs.is_workspace()
+            && !state.graph_loading_older
+            && (!state.right_is_diff() || state.in_commit_drill())
+            && state.graph.is_some()
+    }
+
+    /// Queue the next older page of the loaded graph and say `loading
+    /// older…`.
+    fn queue_autoload(&mut self, state: &mut AppState) {
         let Some((repo, head)) = state.graph_identity.as_ref() else {
             return;
         };
@@ -1315,7 +1351,7 @@ impl Interpreter {
     }
 
     /// Apply one worker result. May enqueue follow-up jobs, then the
-    /// focused line's blame if it needs one.
+    /// state-driven follow-ups ([`Self::after_change`]).
     pub(crate) fn apply(
         &mut self,
         state: &mut AppState,
@@ -1324,7 +1360,7 @@ impl Interpreter {
         outcome: JobOutcome,
     ) {
         self.apply_outcome(state, opts, id, outcome);
-        self.maybe_queue_line_blame(state);
+        self.after_change(state);
     }
 
     fn apply_outcome(
@@ -1678,6 +1714,18 @@ impl Interpreter {
                 if state.apply_line_blame(key, result) {
                     self.mark();
                 }
+            }
+            JobOutcome::BlamePrevious {
+                gen,
+                repo,
+                sha,
+                result,
+            } => {
+                self.sched.note_user_done(UserTag::Prepare);
+                if let Some(follow) = state.apply_blame_previous(gen, repo, &sha, result) {
+                    self.schedule(state, opts, follow, &Action::None);
+                }
+                self.mark();
             }
             JobOutcome::ComparePicker { gen, repo, result } => {
                 self.sched.note_user_done(UserTag::Prepare);
@@ -2297,6 +2345,22 @@ impl Interpreter {
                     );
                     return;
                 }
+                if let Some((gen, repo, blame)) = self.blame_previous.take() {
+                    let dir = opts.cwd.join(&repo);
+                    spawn(
+                        id,
+                        Box::new(move || {
+                            let result = previous_line_change(&dir, &blame);
+                            JobOutcome::BlamePrevious {
+                                gen,
+                                repo,
+                                sha: blame.sha,
+                                result,
+                            }
+                        }),
+                    );
+                    return;
+                }
                 if let Some((gen, repo, graph_focus)) = self.prepare_branches.take() {
                     let dir = opts.cwd.join(&repo);
                     spawn(
@@ -2580,7 +2644,7 @@ impl Interpreter {
 mod tests {
     use std::path::PathBuf;
 
-    use workspace_status_graph::{Commit, GraphModel};
+    use workspace_status_graph::{Commit, GraphModel, GraphRow};
 
     use crate::config::WorkspaceStatusConfig;
     use crate::git::{LocalBranch, NameStatus};
@@ -5717,6 +5781,131 @@ mod tests {
         assert_eq!(
             state.painted_line_annotation(),
             Some(("You · uncommitted".into(), BlameSide::New))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn older_page(ids: &[&str]) -> GraphModel {
+        GraphModel {
+            has_more: true,
+            ..mini_graph(ids)
+        }
+    }
+
+    /// Workspace graph of `app` focused on the right with a pending reveal
+    /// of commit `sha`.
+    fn reveal_state(sha: &str) -> AppState {
+        let mut state = fixture_state();
+        focus_repo(&mut state, "app");
+        state.drill = DrillView::Graph;
+        state.focus = FocusPane::Right;
+        state.set_graph(older_page(&["aaa"]), "app".into(), "head-app".into());
+        state.graph_reveal = Some(crate::tui::line_blame::GraphReveal {
+            repo: "app".into(),
+            sha: sha.into(),
+            pages: 0,
+        });
+        assert!(state.graph_pane_focused());
+        state
+    }
+
+    /// Land the queued autoload with `page`.
+    fn land_older_page(interp: &mut Interpreter, state: &mut AppState, page: GraphModel) {
+        let (gen, _) = interp.autoload.clone().expect("autoload queued");
+        apply(
+            interp,
+            state,
+            JobOutcome::Autoload {
+                gen,
+                page,
+                identity: GraphIdentity {
+                    repo: "app".into(),
+                    head: "head-app".into(),
+                },
+            },
+        );
+    }
+
+    #[test]
+    fn blame_reveal_loads_older_pages_until_the_commit_shows() {
+        let mut state = reveal_state("ccc");
+        let mut interp = Interpreter::new();
+        schedule_effect(&mut interp, &mut state, Effect::None, &Action::None);
+        assert!(state.graph_loading_older, "the hook asks for an older page");
+        assert_eq!(state.status, LOADING_OLDER);
+        land_older_page(&mut interp, &mut state, older_page(&["bbb"]));
+        assert!(state.graph_loading_older, "still missing: one more page");
+        land_older_page(&mut interp, &mut state, older_page(&["ccc", "ddd"]));
+        assert!(!state.graph_loading_older, "found: no more pages");
+        assert_eq!(state.graph_reveal, None);
+        match state.focused_graph_row() {
+            Some(GraphRow::Commit { commit, .. }) => assert_eq!(commit.id, "ccc"),
+            other => panic!("expected the revealed commit, got {other:?}"),
+        }
+        assert_ne!(state.status, LOADING_OLDER);
+    }
+
+    #[test]
+    fn blame_reveal_stops_widening_at_the_page_cap() {
+        let mut state = reveal_state("zzz");
+        let mut interp = Interpreter::new();
+        schedule_effect(&mut interp, &mut state, Effect::None, &Action::None);
+        let mut pages = 0;
+        while state.graph_loading_older {
+            pages += 1;
+            assert!(pages <= 20, "the chain must stop");
+            let id = format!("old{pages}");
+            land_older_page(&mut interp, &mut state, older_page(&[id.as_str()]));
+        }
+        assert_eq!(
+            pages,
+            usize::from(crate::tui::line_blame::GRAPH_REVEAL_MAX_PAGES)
+        );
+        assert_eq!(state.graph_reveal, None);
+        assert_eq!(state.status, "zzz is not in the loaded graph");
+        assert_eq!(state.status.kind(), StatusKind::Warn);
+    }
+
+    #[test]
+    fn blame_previous_change_opens_the_earlier_commit_tab() {
+        let root = crate::testutil::unique_dir("ws-effect-blame-previous");
+        let dir = root.join("app");
+        crate::testutil::init_repo(&dir);
+        let rev = |rev: &str| crate::git::exec_git(&["rev-parse", rev], &dir);
+        std::fs::write(dir.join("README.md"), "a\nb\n").unwrap();
+        crate::testutil::git(&dir, &["commit", "-q", "-am", "one"]);
+        let one = rev("HEAD");
+        std::fs::write(dir.join("README.md"), "a\nB\n").unwrap();
+        crate::testutil::git(&dir, &["commit", "-q", "-am", "two"]);
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(root.clone(), snapshot, true);
+        let opts = opts(&state);
+        let mut interp = Interpreter::with_cap(4);
+
+        // File tab on README.md, cursor on line 2 (`B`, from `two`).
+        let open = state.open_file_tab("app".into(), "README.md".into());
+        interp.interpret_sync(&mut state, &opts, open, &Action::None);
+        state.tabs.active_file_mut().unwrap().cursor = 1;
+        interp.interpret_sync(&mut state, &opts, Effect::None, &Action::Move(1));
+        let (text, _) = state.painted_line_annotation().expect("line 2 blamed");
+        assert!(text.ends_with(" · two"), "{text}");
+
+        let effect = state.dispatch(Action::BlamePreviousChange);
+        assert!(
+            matches!(effect, Effect::LoadBlamePrevious { .. }),
+            "{effect:?}"
+        );
+        interp.interpret_sync(&mut state, &opts, effect, &Action::BlamePreviousChange);
+        let tab = state.tabs.active_compare().expect("earlier commit tab");
+        assert_eq!(tab.label(), format!("app ↔ {}^", &one[..7]));
+        assert!(tab.is_pinned());
+        assert!(!tab.loading, "the follow-up range load ran");
+        assert_eq!(
+            tab.files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["README.md"]
         );
         let _ = std::fs::remove_dir_all(root);
     }

@@ -166,7 +166,10 @@ impl AppState {
                 return effect;
             }
         }
-        if let Some(reason) = self.compare_refusal(&action) {
+        if let Some(reason) = self
+            .compare_refusal(&action)
+            .or_else(|| self.blame_refusal(&action))
+        {
             self.status = StatusMessage::warn(reason);
             return Effect::None;
         }
@@ -306,6 +309,9 @@ impl AppState {
             | Action::CompareVsBranch
             | Action::CompareVsCommit
             | Action::CompareCommitVsParent
+            | Action::BlameCommitVsParent
+            | Action::BlamePreviousChange
+            | Action::BlameRevealGraph
             | Action::CloseTab
             | Action::NextTab
             | Action::PreviousTab

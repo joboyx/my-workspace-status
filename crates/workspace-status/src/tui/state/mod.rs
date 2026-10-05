@@ -69,7 +69,7 @@ use super::gates::{
 use super::graph_focus::GraphFocusPickerState;
 use super::icons::comment_mark_cols;
 use super::keys::{expire_stale_g_chord_echo, GChordEchoState, InputMode, DOUBLE_TAP_MS};
-use super::line_blame::LineBlameState;
+use super::line_blame::{GraphReveal, LineBlameState};
 use super::ops::{
     collect_write_files, format_running_op, op_is_kind_noop, op_kind_noop_reason, op_targets,
     push_targets, refresh_target, Op, RevertScope, RunningOp, ScopedFile,
@@ -652,6 +652,12 @@ pub struct AppState {
     /// Focused diff row's source line, so the blame hook does not rebuild
     /// the diff rows after every schedule and apply.
     line_blame_row_memo: RefCell<line_blame::RowLineMemo>,
+    /// Pending blame "show commit in graph": selected once the graph
+    /// holds the commit. Dropped when the graph repo changes.
+    pub graph_reveal: Option<GraphReveal>,
+    /// Latest blame "previous line change" request; an older result is
+    /// dropped.
+    blame_previous_gen: u64,
     /// [`Self::current_diff_rows`] calls, so tests can bound the row
     /// builds a frame or keypress costs on a large diff.
     #[cfg(test)]
@@ -782,6 +788,8 @@ impl AppState {
             file_search_memo: RefCell::new(None),
             line_blame: LineBlameState::default(),
             line_blame_row_memo: RefCell::new(None),
+            graph_reveal: None,
+            blame_previous_gen: 0,
             #[cfg(test)]
             diff_row_builds: std::cell::Cell::new(0),
         };
@@ -2714,6 +2722,7 @@ impl AppState {
             previous_row_id.as_deref(),
             previous_cursor,
         );
+        self.retry_graph_reveal(&repo);
         if self.drill.is_graph() {
             self.diff_content = DiffContent::default();
             self.diff_repo = None;

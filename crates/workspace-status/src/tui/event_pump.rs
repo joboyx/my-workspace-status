@@ -388,6 +388,7 @@ mod tests {
             "prepare_rev_diff(",
             "prepare_rev_diff_paths(",
             "blame_line(",
+            "previous_line_change(",
         ] {
             assert!(
                 !app.contains(banned) && !loop_src.contains(banned),
@@ -399,6 +400,11 @@ mod tests {
         assert!(
             !render.contains("blame_line(") && !blame_state.contains("blame_line("),
             "line blame paint and state must read the cache, never run git"
+        );
+        assert!(
+            !blame_state.contains("previous_line_change(")
+                && effect.contains("previous_line_change(&dir"),
+            "blame previous-change git runs on spawn_blocking via Interpreter"
         );
         assert!(
             effect.contains("blame_line(") && effect.contains("UserTag::LineBlame"),
