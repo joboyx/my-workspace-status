@@ -16,10 +16,11 @@ use workspace_status_graph::{
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use super::chrome::{
     breadcrumb_line, breadcrumb_rows, ctrl_c_prompt_line, ctrl_c_prompt_rows, dialog_height,
-    dialog_rect, dialog_width, export_shows_status, open_dialog, status_line, DialogKind,
+    dialog_rect, dialog_width, export_shows_status, help_tab, open_dialog, status_line, DialogKind,
     LIST_OVERLAY_MAX_ROWS,
 };
 use super::command_palette::{CommandPaletteState, PalettePaintRow};
@@ -58,18 +59,21 @@ use super::split::{
 };
 use super::state::{revert_scope, AppState, CompareRevertTarget, FocusPane, PendingConfirm};
 use super::syntax::{
-    cached_highlight_diff_rows, slice_styled_cols, CachedDiffSyntax, CodeSpan, DiffBackgrounds,
-    DiffSyntaxKey,
+    cached_highlight_diff_rows, highlight_file_window, slice_styled_cols, CachedDiffSyntax,
+    CodeSpan, DiffBackgrounds, DiffSyntaxKey,
 };
 use super::tabs::{
-    compare_picker_empty, no_committed_changes_vs, ComparePickerState, NO_COMMITTED_CHANGES,
+    compare_picker_empty, file_gutter_width, file_too_large, no_committed_changes_vs,
+    ComparePickerState, FileTab, FILE_IS_BINARY, NO_COMMITTED_CHANGES,
 };
+use super::theme::ThemeId;
 use super::theme::{hex_color, Palette, Pill};
 use super::tree::{
     file_change_from_name_status, file_change_segments, row_segments, visible_window,
     with_comment_mark, with_viewed_mark, workspace_trailing_fit, NodeKind, NodeSegments, SegRole,
     TextSeg, VisibleRow,
 };
+use crate::file_index::FileRead;
 use crate::helpers::{is_detached_head_branch, visible_width};
 
 /// Empty tree / empty commit-file list.
@@ -154,17 +158,6 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         ])
         .split(area);
     draw_tab_strip(frame, chunks[0], state);
-    let widths = pane_widths(area.width, state.tree_fraction);
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(widths.tree_width),
-            Constraint::Min(MIN_PANE_COLS),
-        ])
-        .split(chunks[1]);
-
-    let left_is_files = state.drill.is_diff() || state.is_compare_tab();
-    let left_is_graph = !state.is_compare_tab() && state.drill.is_files();
     state.layout.graph_scrollbar_x = None;
     state.layout.graph_scrollbar_y = 0;
     state.layout.graph_scrollbar_height = 0;
@@ -182,6 +175,76 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.layout.diff_hscrollbar_x = 0;
     state.layout.diff_hscrollbar_width = 0;
     state.layout.diff_col_max = 0;
+    state.layout.file_view_row_lines.clear();
+    state.layout.term_cols = area.width;
+    state.layout.pane_height = chunks[1].height;
+    if state.is_file_tab() {
+        draw_file_tab(frame, chunks[1], state);
+    } else {
+        draw_panes(frame, chunks[1], state);
+    }
+
+    frame.render_widget(
+        Paragraph::new(breadcrumb_line(state, chunks[2].width)),
+        chunks[2],
+    );
+    if prompt_h > 0 {
+        frame.render_widget(
+            Paragraph::new(ctrl_c_prompt_line(state, chunks[3].width)),
+            chunks[3],
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(status_line(state, chunks[4].width)),
+        chunks[4],
+    );
+
+    // Dialogs paint last: a fixed-height box centered over the panes.
+    state.layout.help_scroll_max = 0;
+    if let Some(kind) = open_dialog(state) {
+        let width = dialog_width(chunks[1], kind);
+        let rect = dialog_rect(chunks[1], width, dialog_height(state, kind, width));
+        match kind {
+            DialogKind::Help => {
+                let max = draw_help(frame, rect, state);
+                state.layout.help_scroll_max = max;
+                // A resize can lower the max: keep the next `k` live.
+                state.help_scroll = state.help_scroll.min(max);
+            }
+            DialogKind::Confirm => draw_confirm(frame, rect, state),
+            DialogKind::StashMenu => draw_stash_menu(frame, rect, state),
+            DialogKind::CreateBranch => draw_create_branch(frame, rect, state),
+            DialogKind::Comment => draw_comment(frame, rect, state),
+            DialogKind::CommentExport => draw_comment_export(frame, rect, state),
+            DialogKind::BranchPicker => draw_branch_picker(frame, rect, state),
+            DialogKind::ComparePicker => draw_compare_picker(frame, rect, state),
+            DialogKind::GraphFocusPicker => draw_graph_focus_picker(frame, rect, state),
+            DialogKind::QuickOpen => draw_quick_open(frame, rect, state),
+        }
+    }
+
+    // Keep the frame as painted so a mouse release copies what is on screen,
+    // then reverse the selected cells on top of it.
+    state.painted_frame = frame.buffer_mut().clone();
+    if let Some(selection) = state.text_selection.as_ref() {
+        selection.highlight(frame.buffer_mut());
+    }
+}
+
+/// Tree / graph / files pane on the left and graph / files / diff on the
+/// right (Workspace and compare tabs), plus their layout for mouse hits.
+fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
+    let widths = pane_widths(pane_area.width, state.tree_fraction);
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(widths.tree_width),
+            Constraint::Min(MIN_PANE_COLS),
+        ])
+        .split(pane_area);
+
+    let left_is_files = state.drill.is_diff() || state.is_compare_tab();
+    let left_is_graph = !state.is_compare_tab() && state.drill.is_files();
     let left_name = state.left_pane_title();
     let palette = state.theme.palette();
     let title_style = Style::default().fg(palette.heading);
@@ -228,28 +291,11 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     frame.render_widget(right_block, panes[1]);
     draw_right(frame, right_inner, state);
 
-    frame.render_widget(
-        Paragraph::new(breadcrumb_line(state, chunks[2].width)),
-        chunks[2],
-    );
-    if prompt_h > 0 {
-        frame.render_widget(
-            Paragraph::new(ctrl_c_prompt_line(state, chunks[3].width)),
-            chunks[3],
-        );
-    }
-    frame.render_widget(
-        Paragraph::new(status_line(state, chunks[4].width)),
-        chunks[4],
-    );
-
     state.layout.tree_x = tree_inner.x;
     state.layout.tree_y = tree_inner.y;
     state.layout.tree_width = tree_inner.width;
     state.layout.tree_height = tree_inner.height;
     state.layout.right_x = panes[1].x;
-    state.layout.term_cols = area.width;
-    state.layout.pane_height = chunks[1].height;
     state.layout.outer_tree_width = panes[0].width;
     state.layout.diff_pane_width = right_inner.width;
     state.layout.diff_pane_height = right_inner.height;
@@ -293,36 +339,203 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         let (start, _) = visible_window(painted_n, *cursor, list_h);
         state.layout.files_list_offset = start;
     }
+}
 
-    // Dialogs paint last: a fixed-height box centered over the panes.
-    state.layout.help_scroll_max = 0;
-    if let Some(kind) = open_dialog(state) {
-        let width = dialog_width(chunks[1], kind);
-        let rect = dialog_rect(chunks[1], width, dialog_height(state, kind, width));
-        match kind {
-            DialogKind::Help => {
-                let max = draw_help(frame, rect, state);
-                state.layout.help_scroll_max = max;
-                // A resize can lower the max: keep the next `k` live.
-                state.help_scroll = state.help_scroll.min(max);
+/// File tab body copy while it loads.
+const LOADING_FILE: &str = "loading…";
+/// File tab body for an empty file.
+const EMPTY_FILE: &str = "empty file";
+
+/// Syntax spans of one file-tab window: tab id, load generation, theme,
+/// first and end line.
+type FileSyntaxKey = (u64, u64, ThemeId, usize, usize);
+
+/// Spans per painted file-tab line, shared between the cache and paint.
+type FileSyntaxSpans = Arc<Vec<Vec<CodeSpan>>>;
+
+thread_local! {
+    static FILE_SYNTAX_CACHE: RefCell<Option<(FileSyntaxKey, FileSyntaxSpans)>> =
+        const { RefCell::new(None) };
+}
+
+/// Syntax spans for `lines[window]` of `tab`, reused while the window,
+/// load, and theme stay the same.
+fn file_window_spans(
+    tab: &FileTab,
+    lines: &[String],
+    theme: ThemeId,
+    fallback: Color,
+    window: std::ops::Range<usize>,
+) -> FileSyntaxSpans {
+    let key = (tab.id, tab.generation, theme, window.start, window.end);
+    FILE_SYNTAX_CACHE.with(|slot| {
+        let mut cache = slot.borrow_mut();
+        if let Some((hit_key, spans)) = cache.as_ref() {
+            if *hit_key == key {
+                return Arc::clone(spans);
             }
-            DialogKind::Confirm => draw_confirm(frame, rect, state),
-            DialogKind::StashMenu => draw_stash_menu(frame, rect, state),
-            DialogKind::CreateBranch => draw_create_branch(frame, rect, state),
-            DialogKind::Comment => draw_comment(frame, rect, state),
-            DialogKind::CommentExport => draw_comment_export(frame, rect, state),
-            DialogKind::BranchPicker => draw_branch_picker(frame, rect, state),
-            DialogKind::ComparePicker => draw_compare_picker(frame, rect, state),
-            DialogKind::GraphFocusPicker => draw_graph_focus_picker(frame, rect, state),
-            DialogKind::QuickOpen => draw_quick_open(frame, rect, state),
+        }
+        let spans = Arc::new(highlight_file_window(
+            &tab.rel, lines, theme, fallback, window,
+        ));
+        *cache = Some((key, Arc::clone(&spans)));
+        spans
+    })
+}
+
+/// First line to paint so `cursor` shows in `height` rows.
+///
+/// Keeps `scroll` when the cursor already shows. `rows_of(line)` is the
+/// painted row count of a line (more than 1 only while wrap is on); the
+/// walk reads at most one screen of lines, never the whole file.
+fn file_view_scroll(
+    scroll: usize,
+    cursor: usize,
+    height: usize,
+    rows_of: impl Fn(usize) -> usize,
+) -> usize {
+    let height = height.max(1);
+    if cursor < scroll {
+        return cursor;
+    }
+    let mut used = 0usize;
+    for line in scroll..=cursor {
+        used += rows_of(line);
+        if used > height {
+            break;
         }
     }
+    if used <= height {
+        return scroll;
+    }
+    let mut top = cursor;
+    let mut used = rows_of(cursor);
+    while top > 0 {
+        let above = rows_of(top - 1);
+        if used + above > height {
+            break;
+        }
+        used += above;
+        top -= 1;
+    }
+    top
+}
 
-    // Keep the frame as painted so a mouse release copies what is on screen,
-    // then reverse the selected cells on top of it.
-    state.painted_frame = frame.buffer_mut().clone();
-    if let Some(selection) = state.text_selection.as_ref() {
-        selection.highlight(frame.buffer_mut());
+/// The active file tab: one bordered pane over the full width, titled with
+/// `<checkout leaf>/<rel>`, with line numbers and highlighted code.
+fn draw_file_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
+    let palette = state.theme.palette();
+    let Some(tab) = state.tabs.active_file() else {
+        return;
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(pane_title(&tab.display))
+        .title_style(Style::default().fg(palette.heading))
+        .border_style(pane_border(true, palette));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    state.layout.file_view_x = inner.x;
+    state.layout.file_view_y = inner.y;
+    state.layout.file_view_width = inner.width;
+    state.layout.file_view_height = inner.height;
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let Some(tab) = state.tabs.active_file() else {
+        return;
+    };
+    let notice = match tab.body.as_deref() {
+        None => Some((LOADING_FILE.to_string(), palette.muted)),
+        Some(FileRead::Binary) => Some((FILE_IS_BINARY.to_string(), palette.muted)),
+        Some(FileRead::TooLarge { bytes }) => Some((file_too_large(*bytes), palette.muted)),
+        Some(FileRead::Failed(err)) => Some((err.clone(), palette.deleted)),
+        Some(FileRead::Text { lines, .. })
+            if lines.is_empty() || (lines.len() == 1 && lines[0].is_empty()) =>
+        {
+            Some((EMPTY_FILE.to_string(), palette.muted))
+        }
+        Some(FileRead::Text { .. }) => None,
+    };
+    if let Some((text, color)) = notice {
+        frame.render_widget(
+            Paragraph::new(Span::styled(text, Style::default().fg(color))),
+            inner,
+        );
+        return;
+    }
+    let lines = tab.lines();
+    let height = inner.height as usize;
+    let gutter = file_gutter_width(lines.len());
+    let code_w = (inner.width as usize).saturating_sub(gutter).max(1);
+    let wrap = state.diff_wrap;
+    let rows_of = |line: usize| {
+        if wrap {
+            wrap_col_starts(&lines[line], code_w).len().max(1)
+        } else {
+            1
+        }
+    };
+    let scroll = file_view_scroll(tab.scroll, tab.cursor, height, rows_of);
+    let mut end = scroll;
+    let mut used = 0usize;
+    while end < lines.len() && used < height {
+        used += rows_of(end);
+        end += 1;
+    }
+    let spans = file_window_spans(tab, lines, state.theme, palette.repo, scroll..end);
+    let hits = if state.search_target == SearchPane::File {
+        state.file_search_hits(&state.search_query)
+    } else {
+        Vec::new()
+    };
+    let search = state.theme.pills().filter;
+    let gutter_style = diff_gutter_style(palette);
+    let col_offset = if wrap { 0 } else { tab.col_offset as usize };
+    let mut painted: Vec<Line> = Vec::with_capacity(height);
+    let mut row_lines = Vec::with_capacity(height);
+    for (line, text) in lines.iter().enumerate().take(end).skip(scroll) {
+        let selected = line == tab.cursor;
+        let hit = hits.binary_search(&line).is_ok();
+        let bg = row_match_bg(selected, true, hit, None, palette, search.bg);
+        let match_fg = (hit && !selected).then_some(search.fg);
+        let code = spans.get(line - scroll).map(Vec::as_slice).unwrap_or(&[]);
+        let starts = if wrap {
+            wrap_col_starts(text, code_w)
+        } else {
+            vec![col_offset]
+        };
+        for (part, &start) in starts.iter().enumerate() {
+            if painted.len() >= height {
+                break;
+            }
+            let number = if part == 0 {
+                format!("{:>width$} ", line + 1, width = gutter - 1)
+            } else {
+                " ".repeat(gutter)
+            };
+            let with_bg = |style: Style| bg.map_or(style, |bg| style.bg(bg));
+            let mut row = vec![Span::styled(number, with_bg(gutter_style))];
+            let mut used = 0usize;
+            for span in slice_styled_cols(code, start, code_w) {
+                used += visible_width(&span.text);
+                let fg = match_fg.unwrap_or(span.fg);
+                row.push(Span::styled(span.text, with_bg(Style::default().fg(fg))));
+            }
+            if bg.is_some() && used < code_w {
+                row.push(Span::styled(
+                    " ".repeat(code_w - used),
+                    with_bg(Style::default()),
+                ));
+            }
+            painted.push(Line::from(row));
+            row_lines.push(line);
+        }
+    }
+    frame.render_widget(Paragraph::new(painted), inner);
+    state.layout.file_view_row_lines = row_lines;
+    if let Some(tab) = state.tabs.active_file_mut() {
+        tab.scroll = scroll;
     }
 }
 
@@ -1963,8 +2176,8 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
     let palette = state.theme.palette();
     let pills = state.theme.pills();
     let surface = overlay_surface(state);
-    // A compare tab swaps GIT for the COMPARE column.
-    let groups = help_groups(state.is_compare_tab());
+    // A compare tab swaps GIT for the COMPARE column, a file tab for FILE.
+    let groups = help_groups(help_tab(state));
     let mut lines: Vec<Line> = Vec::new();
 
     let term_width = area.width as usize;
@@ -6506,7 +6719,8 @@ mod tests {
             let bottom = (header..lines.len())
                 .find(|&y| buffer_row(&terminal, y as u16, 2, 3) == "╰")
                 .unwrap_or_else(|| panic!("{cols} cols, help bottom border:\n{text}"));
-            let reserved = usize::from(help_status_lines(box_w, true));
+            let reserved =
+                usize::from(help_status_lines(box_w, crate::tui::help::HelpTab::Compare));
             assert_eq!(bottom + 1 - top, reserved, "{cols} cols:\n{text}");
             let inner = help_inner_width(usize::from(box_w));
             let body = help_body_line_count(
@@ -8896,5 +9110,143 @@ mod tests {
         let pane = summary_pane_text(&terminal, &state);
         assert!(pane.starts_with("src/  3 files"), "{pane}");
         assert!(!pane.contains("No committed changes"), "{pane}");
+    }
+
+    /// `app` with a file tab on `README.md` loaded as `lines`.
+    fn file_tab_state(lines: &[&str]) -> AppState {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let Effect::LoadFileTab { tab_id, gen, .. } =
+            state.open_file_tab("app".into(), "README.md".into())
+        else {
+            panic!("expected a load");
+        };
+        let body = FileRead::Text {
+            lines: lines.iter().map(|line| (*line).to_string()).collect(),
+            max_cols: lines.iter().map(|line| line.len()).max().unwrap_or(0),
+        };
+        assert!(state.apply_file_tab(tab_id, gen, body));
+        state
+    }
+
+    #[test]
+    fn file_tab_paints_full_width_pane_titled_with_path() {
+        let mut state = file_tab_state(&["# app", "dirty"]);
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let buf = terminal.backend().buffer();
+        let top = buf_line(buf, 1);
+        let corners: Vec<(usize, char)> = top
+            .chars()
+            .enumerate()
+            .filter(|(_, c)| matches!(c, '╭' | '╮' | '┌' | '┐'))
+            .collect();
+        assert_eq!(corners.len(), 2, "one border pair:\n{top}");
+        assert_eq!(corners[0].0, 0, "{top}");
+        assert_eq!(corners[1].0, 79, "{top}");
+        assert!(top.contains("app/README.md"), "{top}");
+        assert!(
+            buf_line(buf, 2).starts_with("│1 # app"),
+            "{}",
+            buf_line(buf, 2)
+        );
+        assert!(
+            buf_line(buf, 3).starts_with("│2 dirty"),
+            "{}",
+            buf_line(buf, 3)
+        );
+        assert_eq!(state.layout.file_view_x, 1);
+        assert_eq!(state.layout.file_view_y, 2);
+        assert_eq!(state.layout.file_view_width, 78);
+        assert_eq!(state.layout.file_view_row_lines, vec![0, 1]);
+        let crumb = buffer_text(&terminal);
+        assert!(crumb.contains("app › README.md"), "{crumb}");
+        assert!(crumb.contains("edit") && crumb.contains("quit"), "{crumb}");
+    }
+
+    #[test]
+    fn file_tab_wraps_and_keeps_the_cursor_in_view() {
+        let lines: Vec<String> = (0..30).map(|i| format!("line {i}")).collect();
+        let mut refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let long = "w".repeat(150);
+        refs[25] = &long;
+        let mut state = file_tab_state(&refs);
+        state.dispatch(Action::MoveToEnd);
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let rows = state.layout.file_view_row_lines.clone();
+        assert_eq!(rows.last(), Some(&29), "cursor line paints: {rows:?}");
+        let scroll = state.tabs.active_file().unwrap().scroll;
+        assert_eq!(rows.first(), Some(&scroll));
+
+        state.dispatch(Action::ToggleDiffWrap);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let rows = state.layout.file_view_row_lines.clone();
+        assert_eq!(rows.last(), Some(&29), "{rows:?}");
+        assert_eq!(
+            rows.iter().filter(|&&line| line == 25).count(),
+            2,
+            "the long line wraps onto two rows: {rows:?}"
+        );
+        let buf = terminal.backend().buffer();
+        let second = rows.iter().position(|&line| line == 25).unwrap() + 1;
+        let continuation = buf_line(buf, state.layout.file_view_y + second as u16);
+        assert!(
+            continuation.starts_with("│   w"),
+            "blank gutter: {continuation}"
+        );
+    }
+
+    #[test]
+    fn file_tab_paints_binary_and_loading_notices() {
+        let mut state = file_tab_state(&["x"]);
+        let id = state.tabs.active_file().unwrap().id;
+        let Effect::LoadFileTab { gen, .. } = state.dispatch(Action::Refresh) else {
+            panic!("r reloads");
+        };
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert!(buffer_text(&terminal).contains("loading…"));
+        state.apply_file_tab(id, gen, FileRead::Binary);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert!(buffer_text(&terminal).contains(FILE_IS_BINARY));
+    }
+
+    #[test]
+    fn compare_tab_opened_after_file_tab_paints_right() {
+        let mut state = file_tab_state(&["# app"]);
+        state
+            .tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        {
+            let tab = state.tabs.active_compare_mut().unwrap();
+            tab.loading = false;
+            tab.path = Some("compare-only.md".into());
+            tab.files = vec![super::super::drill::CommitFile {
+                status: "M".into(),
+                path: "compare-only.md".into(),
+                old_path: None,
+                stat: None,
+            }];
+            tab.content = super::super::diff::DiffContent::from_compare_lines(vec![
+                "@@ -1,1 +1,1 @@".into(),
+                "-old compare".into(),
+                "+new compare".into(),
+            ]);
+        }
+        assert!(state.is_compare_tab());
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("README.md"), "file tab label: {text}");
+        assert!(text.contains("app ↔ main"), "{text}");
+        assert!(text.contains("compare-only.md"), "{text}");
+        assert!(text.contains("new compare"), "{text}");
+        assert!(!text.contains("# app"), "file body is not painted: {text}");
+        assert!(state.layout.file_view_row_lines.is_empty());
     }
 }

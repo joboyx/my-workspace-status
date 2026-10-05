@@ -221,8 +221,8 @@ pub enum Action {
     /// Open or focus a compare tab of the focused graph commit versus its
     /// first parent (`<sha>^...<sha>`, head pinned to `<sha>`).
     CompareCommitVsParent,
-    /// Close the active compare tab.
-    CloseCompareTab,
+    /// Close the active compare or file tab.
+    CloseTab,
     /// Cycle to the next tab (`gt`).
     NextTab,
     /// Cycle to the previous tab (`gT`).
@@ -353,9 +353,15 @@ pub enum Effect {
         merge_base: String,
         head: String,
     },
+    /// Open `repo`/`path` in the configured editor.
     EditFile {
+        /// Checkout path (snapshot `repo`).
         repo: String,
+        /// Path relative to the checkout.
         path: String,
+        /// 1-based line to open at, when the editor takes one. A file tab
+        /// passes its cursor line; every other producer passes `None`.
+        line: Option<u32>,
     },
     /// Open LEFT/RIGHT in the configured external diff tool (`E`).
     ExternalDiff {
@@ -478,6 +484,16 @@ pub enum Effect {
         gen: u64,
         index: std::sync::Arc<crate::file_index::FileIndex>,
         query: String,
+    },
+    /// Read one file tab's body on the blocking pool. `gen` is the tab's
+    /// load generation; a stale result is dropped.
+    LoadFileTab {
+        tab_id: u64,
+        gen: u64,
+        /// Checkout path (snapshot `repo`).
+        repo: String,
+        /// Path relative to the checkout.
+        path: String,
     },
     /// Copy `text` to the clipboard (OSC 52 / host tool).
     CopyClipboard {

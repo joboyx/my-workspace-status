@@ -23,6 +23,8 @@ pub enum SearchPane {
     Graph,
     CommitFiles,
     Diff,
+    /// The active file tab's lines.
+    File,
 }
 
 impl SearchPane {
@@ -33,6 +35,7 @@ impl SearchPane {
             Self::Graph => "graph",
             Self::CommitFiles => "files",
             Self::Diff => "diff",
+            Self::File => "file",
         }
     }
 }

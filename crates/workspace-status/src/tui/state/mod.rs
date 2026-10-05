@@ -5,6 +5,7 @@ mod dispatch_drill;
 mod dispatch_keymap;
 mod dispatch_quick_open;
 mod dispatch_write;
+mod file_tab;
 mod pan;
 
 use std::cell::RefCell;
@@ -209,7 +210,7 @@ pub struct LayoutHit {
     ///
     /// An overflow marker (`‹N` / `N›`) maps to its nearest hidden tab.
     pub tab_hits: Vec<(u16, u16, usize)>,
-    /// Close `[✗]` hit boxes for compare tabs. Workspace never has one.
+    /// Close `[✗]` hit boxes for compare and file tabs. Workspace never has one.
     pub tab_close_hits: Vec<(u16, u16, usize)>,
     /// First tab the strip painted. Kept across paints so the window only
     /// scrolls when the active tab would leave it. `0` when every tab fits.
@@ -217,6 +218,17 @@ pub struct LayoutHit {
     /// Max help body scroll the last paint allowed. `0` when help is closed
     /// or every body row fits.
     pub help_scroll_max: usize,
+    /// 0-based first column of the painted file tab body (gutter included).
+    pub file_view_x: u16,
+    /// 0-based first row of the painted file tab body.
+    pub file_view_y: u16,
+    /// File tab body width, gutter included.
+    pub file_view_width: u16,
+    /// File tab body height in rows.
+    pub file_view_height: u16,
+    /// 0-based file line painted on each body row from
+    /// [`Self::file_view_y`] (a wrapped line repeats). Empty off a file tab.
+    pub file_view_row_lines: Vec<usize>,
 }
 
 impl Default for LayoutHit {
@@ -264,6 +276,11 @@ impl Default for LayoutHit {
             tab_close_hits: Vec::new(),
             tab_scroll: 0,
             help_scroll_max: 0,
+            file_view_x: 0,
+            file_view_y: 0,
+            file_view_width: 0,
+            file_view_height: 0,
+            file_view_row_lines: Vec::new(),
         }
     }
 }
@@ -290,9 +307,11 @@ struct SearchOrigin {
     commit_file_folds: HashSet<String>,
     diff_cursor: usize,
     diff_scroll: u16,
+    file_cursor: usize,
+    file_scroll: usize,
 }
 
-/// Workspace chrome parked while a compare tab is active.
+/// Workspace chrome parked while a compare or file tab is active.
 #[derive(Clone, Debug)]
 struct WorkspacePark {
     focus: FocusPane,
@@ -467,6 +486,14 @@ struct DiffSearchMemo {
     hits: Vec<usize>,
 }
 
+/// Memo for [`AppState::file_search_hits`].
+#[derive(Clone, Debug)]
+struct FileSearchMemo {
+    /// Tab id, load generation, case-folded query.
+    key: (u64, u64, String),
+    hits: Vec<usize>,
+}
+
 /// Interactive session state. Dispatch is pure besides the returned [`Effect`].
 #[derive(Clone, Debug)]
 pub struct AppState {
@@ -554,7 +581,7 @@ pub struct AppState {
     pub quick_open: Option<QuickOpenState>,
     /// Session counter for Quick Open index and score generations.
     quick_open_gen: u64,
-    /// Permanent Workspace plus session compare tabs.
+    /// Permanent Workspace plus session compare and file tabs.
     pub tabs: TabStrip,
     pub compare_picker: Option<ComparePickerState>,
     /// Checkout waiting for [`Effect::PrepareComparePicker`]. Cleared on open or abandon.
@@ -603,6 +630,9 @@ pub struct AppState {
     /// Diff search hits for one (content, layout, query), so the status
     /// pill and the diff paint do not rebuild every diff row each frame.
     diff_search_memo: RefCell<Option<DiffSearchMemo>>,
+    /// File tab search hits for one (tab id, load generation, case-folded
+    /// query), so the status pill and the paint do not rescan the file.
+    file_search_memo: RefCell<Option<FileSearchMemo>>,
     /// [`Self::current_diff_rows`] calls, so tests can bound the row
     /// builds a frame or keypress costs on a large diff.
     #[cfg(test)]
@@ -730,6 +760,7 @@ impl AppState {
             ctrl_c_armed_until: None,
             last_click: None,
             diff_search_memo: RefCell::new(None),
+            file_search_memo: RefCell::new(None),
             #[cfg(test)]
             diff_row_builds: std::cell::Cell::new(0),
         };
@@ -817,11 +848,12 @@ impl AppState {
     }
 
     pub fn graph_stash_focused(&self) -> bool {
-        self.graph_pane_focused() && self.focused_graph_stash_ref().is_some()
+        !self.is_file_tab() && self.graph_pane_focused() && self.focused_graph_stash_ref().is_some()
     }
 
     pub fn graph_commit_focused(&self) -> bool {
-        self.graph_pane_focused()
+        !self.is_file_tab()
+            && self.graph_pane_focused()
             && matches!(self.focused_graph_row(), Some(GraphRow::Commit { .. }))
     }
 
@@ -829,9 +861,14 @@ impl AppState {
         self.is_compare_tab() || self.drill.is_files() || self.drill.is_diff()
     }
 
-    /// True when a compare tab (not Workspace) is active.
+    /// True when a compare tab is active.
     pub fn is_compare_tab(&self) -> bool {
-        !self.tabs.is_workspace()
+        self.tabs.active_compare().is_some()
+    }
+
+    /// True when a read-only file tab is active.
+    pub fn is_file_tab(&self) -> bool {
+        self.tabs.active_file().is_some()
     }
 
     /// ViewStack depth: 0 workspace or compare, 1 commit files, 2 commit diff.
@@ -850,6 +887,9 @@ impl AppState {
     /// tree, or a folder row of a focused commit-file list. File rows and
     /// other panes pan.
     pub(crate) fn hl_folds(&self) -> bool {
+        if self.is_file_tab() {
+            return false;
+        }
         match self.list_focus_target() {
             ListFocusTarget::Tree => true,
             ListFocusTarget::CommitFiles => self
@@ -2128,7 +2168,7 @@ impl AppState {
     fn click(&mut self, col: u16, row: u16) -> Effect {
         self.text_selection = None;
         if let Some(index) = self.hit_tab_close(col, row) {
-            return self.close_compare_at(index);
+            return self.close_tab_at(index);
         }
         if let Some(index) = self.hit_tab(col, row) {
             return self.activate_tab(index);
@@ -2882,6 +2922,9 @@ impl AppState {
     }
 
     fn current_search_pane(&self) -> SearchPane {
+        if self.is_file_tab() {
+            return SearchPane::File;
+        }
         match self.list_focus_target() {
             ListFocusTarget::Tree => SearchPane::Tree,
             ListFocusTarget::Graph => SearchPane::Graph,
@@ -3032,6 +3075,10 @@ impl AppState {
                 (current, collect_commit_file_match_indices(files, query))
             }
             SearchPane::Diff => (self.search_hit, self.diff_search_hits(query)),
+            SearchPane::File => {
+                let cursor = self.tabs.active_file().map(|tab| tab.cursor);
+                (cursor, self.file_search_hits(query))
+            }
         };
         let pos = current.and_then(|cur| hits.iter().position(|hit| *hit == cur));
         Some((pos.map(|p| p + 1), hits.len()))
@@ -3048,6 +3095,8 @@ impl AppState {
             commit_file_folds: self.commit_file_folds.clone(),
             diff_cursor: self.diff_cursor,
             diff_scroll: self.diff_scroll,
+            file_cursor: self.tabs.active_file().map_or(0, |tab| tab.cursor),
+            file_scroll: self.tabs.active_file().map_or(0, |tab| tab.scroll),
         });
     }
 
@@ -3083,6 +3132,13 @@ impl AppState {
                 self.diff_scroll = origin.diff_scroll;
                 Effect::None
             }
+            SearchPane::File => {
+                if let Some(tab) = self.tabs.active_file_mut() {
+                    tab.cursor = origin.file_cursor;
+                    tab.scroll = origin.file_scroll;
+                }
+                Effect::None
+            }
         }
     }
 
@@ -3102,6 +3158,10 @@ impl AppState {
             }
             SearchPane::Diff => {
                 self.apply_diff_search(dir);
+                Effect::None
+            }
+            SearchPane::File => {
+                self.apply_file_search(dir);
                 Effect::None
             }
         }
@@ -3966,6 +4026,15 @@ impl AppState {
     }
 
     fn current_entity_reference(&self) -> Option<EntityRef> {
+        if let Some(tab) = self.tabs.active_file() {
+            let primary = self
+                .snapshot
+                .repos
+                .iter()
+                .find(|repo| repo.repo == tab.checkout)
+                .and_then(|repo| repo.primary_repo.as_deref());
+            return Some(EntityRef::file(&tab.checkout, primary, tab.rel.clone()));
+        }
         match self.list_focus_target() {
             ListFocusTarget::None => {
                 let (repo, path, source) = self.open_diff_target()?;
@@ -5219,6 +5288,14 @@ impl AppState {
     }
 
     fn park_active_session(&mut self) {
+        // A file tab owns only its search; Workspace stays parked.
+        if let Some(tab) = self.tabs.active_file_mut() {
+            tab.search_mode = self.search_mode;
+            tab.search_active = self.search_active;
+            tab.search_query = self.search_query.clone();
+            tab.search_hit = self.search_hit;
+            return;
+        }
         if let Some(tab) = self.tabs.active_compare_mut() {
             tab.focus_right = self.focus == FocusPane::Right;
             tab.search_mode = self.search_mode;
@@ -5251,6 +5328,14 @@ impl AppState {
     }
 
     fn apply_active_session(&mut self) {
+        if let Some(tab) = self.tabs.active_file() {
+            self.search_mode = tab.search_mode;
+            self.search_active = tab.search_active;
+            self.search_query = tab.search_query.clone();
+            self.search_target = SearchPane::File;
+            self.search_hit = tab.search_hit;
+            return;
+        }
         if let Some(tab) = self.tabs.active_compare() {
             self.focus = if tab.focus_right {
                 FocusPane::Right
@@ -5465,11 +5550,12 @@ impl AppState {
         self.open_compare_tab(repo, format!("{commit_id}^"), commit_id)
     }
 
-    pub(crate) fn close_compare_tab(&mut self) -> Effect {
-        self.close_compare_at(self.tabs.active)
+    /// Close the active compare or file tab (Workspace refuses).
+    pub(crate) fn close_active_tab(&mut self) -> Effect {
+        self.close_tab_at(self.tabs.active)
     }
 
-    fn close_compare_at(&mut self, index: usize) -> Effect {
+    fn close_tab_at(&mut self, index: usize) -> Effect {
         if index == 0 {
             self.status = StatusMessage::warn(WORKSPACE_TAB_CANNOT_CLOSE);
             return Effect::None;
@@ -5772,8 +5858,7 @@ impl AppState {
 
     pub(crate) fn compare_probe_effects(&self) -> Vec<Effect> {
         self.tabs
-            .compare
-            .iter()
+            .compare_tabs()
             .filter(|tab| !tab.loading)
             .map(|tab| Effect::ProbeCompareTab {
                 tab_id: tab.id,
@@ -7679,7 +7764,7 @@ mod tests {
         let folds = app.folds.clone();
         app.diff_scroll = 7;
         match app.dispatch(Action::Edit) {
-            Effect::EditFile { repo, path } => {
+            Effect::EditFile { repo, path, .. } => {
                 assert_eq!(repo, "app");
                 assert_eq!(path, "README.md");
             }
@@ -7711,6 +7796,7 @@ mod tests {
             Effect::EditFile {
                 repo: "app".into(),
                 path: "README.md".into(),
+                line: None,
             }
         );
         assert_eq!(app.status, "opening README.md…");
@@ -8378,6 +8464,7 @@ mod tests {
             Effect::EditFile {
                 repo: "app".into(),
                 path: "src/view.rs".into(),
+                line: None,
             }
         );
     }
@@ -8705,7 +8792,7 @@ mod tests {
             Action::ExternalDiff,
             Action::Move(1),
             Action::ConfirmNo,
-            Action::CloseCompareTab,
+            Action::CloseTab,
         ];
 
         let mut app = state();
@@ -9489,7 +9576,7 @@ mod tests {
         app.dispatch(Action::DiffVisualStart);
         assert!(app.diff_visual_anchor.is_some());
         app.confirm = Some(stash_drop());
-        app.dispatch(Action::CloseCompareTab);
+        app.dispatch(Action::CloseTab);
         assert!(!app.is_compare_tab());
         assert_eq!(app.diff_visual_anchor, None);
         assert_eq!(app.confirm, None);
@@ -9876,12 +9963,12 @@ mod tests {
             Effect::None
         );
         assert_eq!(app.tabs.active, 1);
-        assert_eq!(app.tabs.compare.len(), 1);
+        assert_eq!(app.tabs.compare_count(), 1);
         app.layout.tab_close_hits = vec![(2, 3, 0)];
         assert_eq!(app.dispatch(Action::Click { col: 3, row: 0 }), Effect::None);
         assert_eq!(app.status, WORKSPACE_TAB_CANNOT_CLOSE);
         assert_eq!(app.tabs.active, 1);
-        assert_eq!(app.tabs.compare.len(), 1);
+        assert_eq!(app.tabs.compare_count(), 1);
     }
 
     #[test]
@@ -9987,7 +10074,7 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Left);
         assert_eq!(app.dispatch(Action::NavEsc), Effect::None);
         assert!(app.is_compare_tab());
-        assert_eq!(app.tabs.compare.len(), 1);
+        assert_eq!(app.tabs.compare_count(), 1);
         assert_eq!(app.tabs.active, 1);
     }
 
@@ -12195,11 +12282,11 @@ mod tests {
             Some(reason),
             "palette"
         );
-        let tabs = app.tabs.compare.len();
+        let tabs = app.tabs.compare_count();
         app.status.clear();
         assert_eq!(app.dispatch(Action::CompareCommitVsParent), Effect::None);
         assert_eq!(app.status, reason, "dispatch");
-        assert_eq!(app.tabs.compare.len(), tabs, "no tab opens");
+        assert_eq!(app.tabs.compare_count(), tabs, "no tab opens");
     }
 
     #[test]
@@ -12257,7 +12344,7 @@ mod tests {
         app.dispatch(Action::JumpToTab(1));
         focus_graph_commit(&mut app, CHILD_SHA);
         assert_eq!(app.dispatch(Action::CompareCommitVsParent), Effect::None);
-        assert_eq!(app.tabs.compare.len(), 1);
+        assert_eq!(app.tabs.compare_count(), 1);
         assert_eq!(app.tabs.active, 1);
     }
 
@@ -14502,7 +14589,7 @@ mod tests {
             *cursor = idx;
         }
         match app.dispatch(Action::Edit) {
-            Effect::EditFile { repo, path } => {
+            Effect::EditFile { repo, path, .. } => {
                 assert_eq!(repo, "app");
                 assert_eq!(path, "src/lib.rs");
             }
@@ -14524,7 +14611,7 @@ mod tests {
             DiffContent::from_lines(vec!["+fn x() {}".into()]),
         );
         match app.dispatch(Action::Edit) {
-            Effect::EditFile { repo, path } => {
+            Effect::EditFile { repo, path, .. } => {
                 assert_eq!(repo, "app");
                 assert_eq!(path, "src/lib.rs");
             }

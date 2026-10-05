@@ -342,7 +342,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         title: "Close tab",
         keys: "",
         group: CommandGroup::Git,
-        action: Action::CloseCompareTab,
+        action: Action::CloseTab,
         aliases: &["close compare"],
         scope: CommandScope::NoHighlight,
     },
@@ -899,7 +899,7 @@ mod tests {
                 "Close tab",
                 "",
                 CommandGroup::Git,
-                Action::CloseCompareTab,
+                Action::CloseTab,
                 CommandScope::NoHighlight,
             ),
             (

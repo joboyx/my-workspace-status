@@ -3,7 +3,8 @@
 //! Index loads and scores leave here as [`Effect::LoadFileIndex`] /
 //! [`Effect::ScoreFiles`] and come back through [`AppState::apply_file_index`]
 //! / [`AppState::apply_file_score`], which drop any result whose generation
-//! is no longer the overlay's latest.
+//! is no longer the overlay's latest. Files-mode Enter opens the picked file
+//! in a file tab; an Enter that arrives before the query's score waits for it.
 
 use std::sync::Arc;
 
@@ -48,10 +49,14 @@ impl AppState {
 
     /// Checkouts Quick Open lists for the focused context.
     ///
-    /// The active compare tab's checkout; else the focused row's checkout
+    /// The active file tab's checkout; the active compare tab's checkout;
+    /// else the focused row's checkout
     /// ([`Self::focused_checkout_path`]); else (workspace row, group) the
     /// whole workspace.
     pub(crate) fn quick_open_scope(&self) -> QuickOpenScope {
+        if let Some(tab) = self.tabs.active_file() {
+            return QuickOpenScope::Checkout(tab.checkout.clone());
+        }
         if let Some(tab) = self.tabs.active_compare() {
             return QuickOpenScope::Checkout(tab.checkout_path.clone());
         }
@@ -89,6 +94,7 @@ impl AppState {
             Action::ToggleQuickOpen(entry) => self.toggle_quick_open(entry),
             Action::QuickOpenMove(delta) => {
                 if let Some(quick) = self.quick_open.as_mut() {
+                    quick.submit_on_ready = false;
                     match quick.mode() {
                         QuickOpenMode::Commands => quick.commands.move_cursor(delta),
                         QuickOpenMode::Files => quick.move_file_cursor(delta),
@@ -181,6 +187,7 @@ impl AppState {
         };
         let before = quick.mode();
         quick.query = query;
+        quick.submit_on_ready = false;
         let mode = quick.mode();
         if mode != before {
             // A disabled-row reason belongs to the commands list it came from.
@@ -253,29 +260,42 @@ impl AppState {
     fn submit_quick_open(&mut self) -> Effect {
         match self.quick_open.as_ref().map(|quick| quick.mode()) {
             Some(QuickOpenMode::Commands) => self.submit_command(),
-            Some(QuickOpenMode::Files) => {
-                self.submit_file();
-                Effect::None
-            }
+            Some(QuickOpenMode::Files) => self.submit_file(),
             None => Effect::None,
         }
     }
 
-    /// Files-mode Enter: close and name the picked file on the status line.
-    fn submit_file(&mut self) {
-        let display = self.quick_open.as_ref().and_then(|quick| {
-            let FileIndexState::Ready(index) = &quick.index else {
-                return None;
-            };
-            let hit = quick.selected_hit()?;
-            index.entries.get(hit.entry).map(|e| e.display.clone())
-        });
-        match display {
-            Some(display) => {
+    /// Files-mode Enter: close, then open or focus the highlighted file in
+    /// a file tab. Warns `no file matches` without a hit.
+    ///
+    /// While the index loads or the latest score is pending the hits are
+    /// stale, so Enter waits ([`QuickOpenState::submit_on_ready`]) and
+    /// [`Self::apply_file_score`] submits once that score lands.
+    fn submit_file(&mut self) -> Effect {
+        let Some(quick) = self.quick_open.as_mut() else {
+            return Effect::None;
+        };
+        if quick.score_pending || quick.index == FileIndexState::Loading {
+            quick.submit_on_ready = true;
+            return Effect::None;
+        }
+        quick.submit_on_ready = false;
+        let pick = match &quick.index {
+            FileIndexState::Ready(index) => quick
+                .selected_hit()
+                .and_then(|hit| index.entries.get(hit.entry))
+                .map(|entry| (index.checkout(entry).to_string(), entry.rel().to_string())),
+            _ => None,
+        };
+        match pick {
+            Some((checkout, rel)) => {
                 self.close_quick_open();
-                self.status = StatusMessage::info(display);
+                self.open_file_tab(checkout, rel)
             }
-            None => self.status = StatusMessage::warn(NO_FILE_MATCHES),
+            None => {
+                self.status = StatusMessage::warn(NO_FILE_MATCHES);
+                Effect::None
+            }
         }
     }
 
@@ -323,6 +343,8 @@ impl AppState {
             .as_mut()
             .filter(|quick| quick.index_gen == gen)?;
         quick.index = if index.entries.is_empty() && !index.errors.is_empty() {
+            // No score follows; the status row shows the error instead.
+            quick.submit_on_ready = false;
             FileIndexState::Failed(index.errors.join("; "))
         } else {
             FileIndexState::Ready(Arc::new(index))
@@ -337,19 +359,22 @@ impl AppState {
     /// Accept finished hits for score generation `gen`. Dropped unless the
     /// overlay is open and `gen` is its latest score request.
     ///
-    /// True when the hits were accepted.
-    pub(crate) fn apply_file_score(&mut self, gen: u64, hits: Vec<FileHit>) -> bool {
-        let Some(quick) = self
+    /// `None` when the result was dropped; `Some(follow-up)` when accepted.
+    /// The follow-up is the waiting Enter's [`Effect::LoadFileTab`] (see
+    /// [`QuickOpenState::submit_on_ready`]), else [`Effect::None`].
+    pub(crate) fn apply_file_score(&mut self, gen: u64, hits: Vec<FileHit>) -> Option<Effect> {
+        let quick = self
             .quick_open
             .as_mut()
-            .filter(|quick| quick.score_gen == gen)
-        else {
-            return false;
-        };
+            .filter(|quick| quick.score_gen == gen)?;
         quick.hits = hits;
         quick.file_cursor = 0;
         quick.score_pending = false;
-        true
+        Some(if quick.submit_on_ready {
+            self.submit_file()
+        } else {
+            Effect::None
+        })
     }
 }
 
@@ -643,10 +668,13 @@ mod tests {
             score: 1,
             indices: vec![0],
         };
-        assert!(!app.apply_file_score(first, vec![hit.clone()]));
+        assert_eq!(app.apply_file_score(first, vec![hit.clone()]), None);
         assert!(quick(&app).hits.is_empty(), "old score gen ignored");
         assert!(quick(&app).score_pending);
-        assert!(app.apply_file_score(second, vec![hit.clone()]));
+        assert_eq!(
+            app.apply_file_score(second, vec![hit.clone()]),
+            Some(Effect::None)
+        );
         assert_eq!(quick(&app).hits, vec![hit]);
         assert!(!quick(&app).score_pending);
     }
@@ -666,41 +694,121 @@ mod tests {
         assert_eq!(quick(&app).file_status_text(), "app: not a git repository");
     }
 
+    fn hit(entry: usize) -> FileHit {
+        FileHit {
+            entry,
+            score: 0,
+            indices: Vec::new(),
+        }
+    }
+
+    fn score_gen(effect: Option<Effect>) -> u64 {
+        match effect {
+            Some(Effect::ScoreFiles { gen, .. }) => gen,
+            other => panic!("expected a score, got {other:?}"),
+        }
+    }
+
+    fn opened_rel(app: &AppState) -> &str {
+        app.tabs.active_file().map_or("", |tab| tab.rel.as_str())
+    }
+
     #[test]
-    fn files_enter_names_the_hit_or_warns_without_one() {
+    fn files_enter_opens_the_hit_or_warns_without_one() {
         let mut app = family_state();
         focus_row(&mut app, NodeKind::Checkout, Some("app"));
         let gen = open_files(&mut app);
-        app.dispatch(Action::QuickOpenSubmit);
+        let score = score_gen(app.apply_file_index(gen, index_of(&["README.md", "src/main.rs"])));
+        assert_eq!(app.apply_file_score(score, Vec::new()), Some(Effect::None));
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
         assert_eq!(app.status, NO_FILE_MATCHES);
         assert!(app.quick_open.is_some(), "a miss keeps the overlay");
 
-        let Some(Effect::ScoreFiles { gen: score, .. }) =
-            app.apply_file_index(gen, index_of(&["README.md", "src/main.rs"]))
-        else {
-            panic!("expected a score");
-        };
-        assert!(app.apply_file_score(
-            score,
-            vec![
-                FileHit {
-                    entry: 0,
-                    score: 0,
-                    indices: Vec::new(),
-                },
-                FileHit {
-                    entry: 1,
-                    score: 0,
-                    indices: Vec::new(),
-                },
-            ],
-        ));
-        type_text(&mut app, "m");
+        let score = score_gen(Some(type_text(&mut app, "m")));
         assert!(app.status.is_empty(), "typing clears the miss warning");
+        app.apply_file_score(score, vec![hit(0), hit(1)]);
         app.dispatch(Action::QuickOpenMove(1));
-        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        let effect = app.dispatch(Action::QuickOpenSubmit);
         assert!(app.quick_open.is_none());
-        assert_eq!(app.status, "src/main.rs");
+        assert!(app.is_file_tab());
+        assert_eq!(opened_rel(&app), "src/main.rs");
+        assert!(
+            matches!(effect, Effect::LoadFileTab { ref path, .. } if path == "src/main.rs"),
+            "{effect:?}"
+        );
+    }
+
+    #[test]
+    fn enter_before_the_score_lands_opens_the_new_query_hit() {
+        let mut app = family_state();
+        focus_row(&mut app, NodeKind::Checkout, Some("app"));
+        let gen = open_files(&mut app);
+        let old = score_gen(app.apply_file_index(gen, index_of(&["README.md", "src/main.rs"])));
+        app.apply_file_score(old, vec![hit(0)]);
+        let new = score_gen(Some(type_text(&mut app, "main")));
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.quick_open.is_some(), "Enter waits for the score");
+        assert!(app.status.is_empty(), "no miss warning on stale hits");
+        assert_eq!(app.apply_file_score(old, vec![hit(0)]), None, "stale score");
+        assert!(app.quick_open.is_some());
+        let follow = app.apply_file_score(new, vec![hit(1)]);
+        assert!(
+            matches!(follow, Some(Effect::LoadFileTab { ref path, .. }) if path == "src/main.rs"),
+            "{follow:?}"
+        );
+        assert!(app.quick_open.is_none());
+        assert_eq!(opened_rel(&app), "src/main.rs");
+    }
+
+    #[test]
+    fn enter_while_indexing_opens_after_index_and_score_land() {
+        let mut app = family_state();
+        focus_row(&mut app, NodeKind::Checkout, Some("app"));
+        let gen = open_files(&mut app);
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.status.is_empty(), "no miss warning while indexing");
+        let score = score_gen(app.apply_file_index(gen, index_of(&["README.md"])));
+        assert!(app.quick_open.is_some(), "still waiting for the score");
+        let follow = app.apply_file_score(score, vec![hit(0)]);
+        assert!(
+            matches!(follow, Some(Effect::LoadFileTab { .. })),
+            "{follow:?}"
+        );
+        assert_eq!(opened_rel(&app), "README.md");
+
+        // A waiting Enter with no hit warns once the score lands.
+        let gen = open_files(&mut app);
+        app.dispatch(Action::QuickOpenSubmit);
+        let score = score_gen(app.apply_file_index(gen, index_of(&["README.md"])));
+        assert_eq!(app.apply_file_score(score, Vec::new()), Some(Effect::None));
+        assert_eq!(app.status, NO_FILE_MATCHES);
+        assert!(app.quick_open.is_some());
+    }
+
+    #[test]
+    fn edit_or_move_after_enter_cancels_the_wait() {
+        let mut app = family_state();
+        focus_row(&mut app, NodeKind::Checkout, Some("app"));
+        let gen = open_files(&mut app);
+        let score = score_gen(app.apply_file_index(gen, index_of(&["README.md"])));
+        app.dispatch(Action::QuickOpenSubmit);
+        assert!(quick(&app).submit_on_ready);
+        app.dispatch(Action::QuickOpenMove(1));
+        assert!(!quick(&app).submit_on_ready);
+        assert_eq!(
+            app.apply_file_score(score, vec![hit(0)]),
+            Some(Effect::None)
+        );
+        assert!(app.quick_open.is_some(), "the move cancelled the open");
+
+        let score = score_gen(Some(type_text(&mut app, "r")));
+        app.dispatch(Action::QuickOpenSubmit);
+        let next = score_gen(Some(type_text(&mut app, "e")));
+        assert!(!quick(&app).submit_on_ready, "typing cancels the wait");
+        assert_eq!(app.apply_file_score(score, vec![hit(0)]), None);
+        assert_eq!(app.apply_file_score(next, vec![hit(0)]), Some(Effect::None));
+        assert!(app.quick_open.is_some());
+        assert!(app.tabs.is_workspace());
     }
 
     #[test]
@@ -722,7 +830,9 @@ mod tests {
     fn files_warning_does_not_carry_into_commands() {
         let mut app = family_state();
         focus_row(&mut app, NodeKind::Checkout, Some("app"));
-        open_files(&mut app);
+        let gen = open_files(&mut app);
+        let score = score_gen(app.apply_file_index(gen, index_of(&["README.md"])));
+        app.apply_file_score(score, Vec::new());
         app.dispatch(Action::QuickOpenSubmit);
         assert_eq!(app.status, NO_FILE_MATCHES);
         type_text(&mut app, ">");

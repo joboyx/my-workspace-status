@@ -258,7 +258,11 @@ impl AppState {
             Action::Edit => {
                 if let Some((repo, path)) = self.focused_commit_edit_path() {
                     self.status = StatusMessage::progress(format!("opening {path}…"));
-                    Effect::EditFile { repo, path }
+                    Effect::EditFile {
+                        repo,
+                        path,
+                        line: None,
+                    }
                 } else if self.is_compare_tab() {
                     self.status = StatusMessage::warn("focus a file to edit");
                     Effect::None
@@ -267,6 +271,7 @@ impl AppState {
                     Effect::EditFile {
                         repo,
                         path: change.path,
+                        line: None,
                     }
                 } else {
                     self.status = StatusMessage::warn("focus a dirty file to edit");
@@ -396,7 +401,7 @@ impl AppState {
             Action::CompareVsBranch => self.prepare_compare_picker(ComparePickerKind::Branch),
             Action::CompareVsCommit => self.prepare_compare_picker(ComparePickerKind::Commit),
             Action::CompareCommitVsParent => self.compare_commit_vs_parent(),
-            Action::CloseCompareTab => self.close_compare_tab(),
+            Action::CloseTab => self.close_active_tab(),
             Action::NextTab => self.activate_relative_tab(1),
             Action::PreviousTab => self.activate_relative_tab(-1),
             Action::JumpToTab(n) => self.jump_to_tab(n),
@@ -435,13 +440,19 @@ impl AppState {
 
     /// Why palette row `command` cannot run, or `None` if Enter should dispatch.
     ///
-    /// Order: compare refusal ([`Self::compare_refusal`], which also gates
+    /// On a file tab: [`Self::file_tab_refusal`], then
+    /// [`Self::file_tab_palette_reason`]. Otherwise: compare refusal ([`Self::compare_refusal`], which also gates
     /// the compare open commands on every tab), folder-summary refusal
     /// ([`Self::summary_refusal`]), then the row's
     /// highlight scope, then the range patch (highlighted stage / unstage /
     /// revert), then the action gate.
     pub(crate) fn palette_disabled_reason(&self, command: &PaletteCommand) -> Option<String> {
         let action = &command.action;
+        if self.is_file_tab() {
+            return self
+                .file_tab_refusal(action)
+                .or_else(|| self.file_tab_palette_reason(command));
+        }
         if let Some(reason) = self
             .compare_refusal(action)
             .or_else(|| self.summary_refusal(action))
@@ -659,7 +670,7 @@ impl AppState {
                     Some("focus a visible repo to stash".into())
                 }
             }
-            Action::CloseCompareTab => {
+            Action::CloseTab => {
                 if self.tabs.is_workspace() {
                     Some(WORKSPACE_TAB_CANNOT_CLOSE.into())
                 } else {

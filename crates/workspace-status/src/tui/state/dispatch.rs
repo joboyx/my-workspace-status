@@ -154,11 +154,23 @@ impl AppState {
         ) {
             self.g_pending_at = None;
         }
+        // A file tab answers its own keys and refuses writes; the Workspace
+        // gates below read the parked tree, so it skips them.
+        let file_tab = self.is_file_tab();
+        if file_tab {
+            if let Some(reason) = self.file_tab_refusal(&action) {
+                self.status = StatusMessage::warn(reason);
+                return Effect::None;
+            }
+            if let Some(effect) = self.dispatch_file_tab(&action) {
+                return effect;
+            }
+        }
         if let Some(reason) = self.compare_refusal(&action) {
             self.status = StatusMessage::warn(reason);
             return Effect::None;
         }
-        if let Some(reason) = self.summary_refusal(&action) {
+        if let Some(reason) = self.summary_refusal(&action).filter(|_| !file_tab) {
             self.status = StatusMessage::warn(reason);
             return Effect::None;
         }
@@ -166,12 +178,13 @@ impl AppState {
             && matches!(action, Action::Stage | Action::Unstage | Action::Revert);
         // Compare `x` also runs from the focused diff (the open file).
         let visual_write = visual_write || self.compare_revert_runs(&action);
-        let noop = dispatch_is_noop(
-            &action,
-            self.nav_depth(),
-            self.focus == FocusPane::Right,
-            self.list_focus_target(),
-        );
+        let noop = !file_tab
+            && dispatch_is_noop(
+                &action,
+                self.nav_depth(),
+                self.focus == FocusPane::Right,
+                self.list_focus_target(),
+            );
         if noop && !matches!(action, Action::FoldToggle) && !visual_write {
             if let Some(reason) = dispatch_noop_reason(
                 &action,
@@ -292,7 +305,7 @@ impl AppState {
             | Action::CompareVsBranch
             | Action::CompareVsCommit
             | Action::CompareCommitVsParent
-            | Action::CloseCompareTab
+            | Action::CloseTab
             | Action::NextTab
             | Action::PreviousTab
             | Action::JumpToTab(_)

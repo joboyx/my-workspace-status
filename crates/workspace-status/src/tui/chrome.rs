@@ -71,13 +71,14 @@ use super::comments::{COMMENT_OVERLAY_CHROME_ROWS, COMMENT_OVERLAY_MAX_BODY_LINE
 use super::commit_files::CommitFileRowKind;
 use super::ctrl_c_exit::is_ctrl_c_exit_prompt;
 use super::drill::DrillView;
-use super::help::help_status_lines;
+use super::help::{help_status_lines, HelpTab};
 use super::icons::truncate_visible;
 use super::keys::DOUBLE_TAP_MS;
 use super::ops::{collect_write_files, op_targets, push_targets, Op};
 use super::split::DiffMode;
 use super::stash::{stash_ops_for_context, StashOpsContext};
 use super::state::{revert_scope, AppState, FocusPane};
+use super::tabs::checkout_leaf;
 use super::theme::{hex_color, Palette, Pill, Pills};
 use super::tree::NodeKind;
 
@@ -534,6 +535,17 @@ pub fn dialog_width(area: Rect, kind: DialogKind) -> u16 {
     }
 }
 
+/// Which help columns the active tab paints.
+pub fn help_tab(state: &AppState) -> HelpTab {
+    if state.is_file_tab() {
+        HelpTab::File
+    } else if state.is_compare_tab() {
+        HelpTab::Compare
+    } else {
+        HelpTab::Workspace
+    }
+}
+
 /// Box height of `kind` at box `width`, borders included.
 ///
 /// Fixed per kind and never from a result count, so the input row stays
@@ -541,7 +553,7 @@ pub fn dialog_width(area: Rect, kind: DialogKind) -> u16 {
 pub fn dialog_height(state: &AppState, kind: DialogKind, width: u16) -> u16 {
     match kind {
         // Help lays its columns out at the box width.
-        DialogKind::Help => help_status_lines(width, state.is_compare_tab()),
+        DialogKind::Help => help_status_lines(width, help_tab(state)),
         DialogKind::Confirm => match state.confirm.as_ref() {
             // Title, branch, changed-files, chips; one spare row for a wrapped detail.
             Some(super::state::PendingConfirm::RemoveWorktree { .. }) => 7,
@@ -1034,8 +1046,15 @@ pub fn hint_row_kind(state: &AppState) -> HintRowKind {
 }
 
 /// Display segments for the breadcrumb (workspace + drill frames).
+///
+/// A file tab reads `workspace › <checkout leaf> › <rel>`.
 pub fn breadcrumb_segments(state: &AppState) -> Vec<String> {
     let mut out = vec![workspace_label(state)];
+    if let Some(tab) = state.tabs.active_file() {
+        out.push(checkout_leaf(&tab.checkout));
+        out.push(tab.rel.clone());
+        return out;
+    }
     let mut seen_repo: Option<String> = None;
     let mut seen_commit: Option<String> = None;
 
@@ -1172,7 +1191,12 @@ pub fn breadcrumb_line(state: &AppState, width: u16) -> Line<'static> {
     let op = breadcrumb_op_status(state);
     let (crumb_max, op_max) = allocate_chrome_row(width, visible_width(&op));
     let segments = breadcrumb_segments(state);
-    let focus = state.focus;
+    // A file tab is one pane: no right-focus mark on the path.
+    let focus = if state.is_file_tab() {
+        FocusPane::Left
+    } else {
+        state.focus
+    };
     let mut spans = Vec::new();
     let mut used = 0usize;
     for (i, seg) in segments.iter().enumerate() {
@@ -1246,7 +1270,52 @@ pub fn status_line(state: &AppState, width: u16) -> Line<'static> {
     if state.search_mode {
         return search_typing_line(state, palette, pills.filter);
     }
+    if state.is_file_tab() {
+        return file_tab_status_line(state, palette, pills, surface, width);
+    }
     idle_status_line(state, palette, pills, surface, width)
+}
+
+/// Hint chips on a file tab, in cut order (the last ones truncate first).
+pub fn file_tab_hint_segments() -> Vec<HintSegment> {
+    vec![
+        hint("e", "edit", false),
+        hint("/", "search", false),
+        hint("\\", "wrap", false),
+        hint("'", "copy ref", false),
+        hint("r", "reload", false),
+        hint(":", "go to file", false),
+    ]
+}
+
+/// Idle row on a file tab: `wrap` and armed-search pills, `? help`, the
+/// viewer hints, then the pinned `q quit`.
+fn file_tab_status_line(
+    state: &AppState,
+    palette: Palette,
+    pills: Pills,
+    surface: Color,
+    width: u16,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    if state.diff_wrap {
+        spans.push(pill_span("wrap", pills.diff));
+    }
+    if let Some(label) = search_pill_label(state) {
+        spans.push(pill_span(&label, pills.filter));
+    }
+    spans.push(Span::styled(
+        " ? help".to_string(),
+        Style::default().fg(palette.file),
+    ));
+    push_hint_pieces(
+        &mut spans,
+        &file_tab_hint_segments(),
+        palette,
+        surface,
+        width,
+    );
+    Line::from(spans)
 }
 
 fn search_typing_line(state: &AppState, palette: Palette, filter: Pill) -> Line<'static> {
@@ -1324,12 +1393,6 @@ fn idle_status_line(
         format!(" {message}"),
         Style::default().fg(palette.file),
     ));
-    let used = spans
-        .iter()
-        .map(|span| visible_width(&span.content))
-        .sum::<usize>()
-        + HINT_SEPARATOR.len();
-
     let hints = if visual {
         visual_hint_segments(state)
     } else {
@@ -1341,55 +1404,72 @@ fn idle_status_line(
         hints.extend(extra_hint_segments());
         hints
     };
+    push_hint_pieces(&mut spans, &hints, palette, surface, width);
+    Line::from(spans)
+}
+
+/// Fit `hints` plus the pinned `q quit` into the room `spans` leave on a
+/// `width`-column row, then append them as chips.
+fn push_hint_pieces(
+    spans: &mut Vec<Span<'static>>,
+    hints: &[HintSegment],
+    palette: Palette,
+    surface: Color,
+    width: u16,
+) {
+    let used = spans
+        .iter()
+        .map(|span| visible_width(&span.content))
+        .sum::<usize>()
+        + HINT_SEPARATOR.len();
     let fitted = fit_hint_segments(
-        &hints,
+        hints,
         &pinned_hint_segments(),
         (width as usize).saturating_sub(used),
     );
-
-    if !fitted.is_empty() {
-        spans.push(Span::raw(HINT_SEPARATOR));
-        for (i, piece) in fitted.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::raw(HINT_SEPARATOR));
+    if fitted.is_empty() {
+        return;
+    }
+    spans.push(Span::raw(HINT_SEPARATOR));
+    for (i, piece) in fitted.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(HINT_SEPARATOR));
+        }
+        let segment = match piece {
+            HintPiece::Hint(segment) => segment,
+            HintPiece::More => {
+                spans.push(Span::styled(
+                    HINT_ELLIPSIS,
+                    Style::default().fg(palette.muted),
+                ));
+                continue;
             }
-            let segment = match piece {
-                HintPiece::Hint(segment) => segment,
-                HintPiece::More => {
-                    spans.push(Span::styled(
-                        HINT_ELLIPSIS,
-                        Style::default().fg(palette.muted),
-                    ));
-                    continue;
-                }
-            };
-            let chip_bg = if segment.destructive {
+        };
+        let chip_bg = if segment.destructive {
+            palette.deleted
+        } else {
+            palette.cursor
+        };
+        spans.push(Span::styled(
+            format!(" {} ", segment.key),
+            Style::default()
+                .fg(surface)
+                .bg(chip_bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        if !segment.label.is_empty() {
+            spans.push(Span::raw(" ".repeat(HINT_CHIP_GAP)));
+            let label_fg = if segment.destructive {
                 palette.deleted
             } else {
-                palette.cursor
+                palette.muted
             };
             spans.push(Span::styled(
-                format!(" {} ", segment.key),
-                Style::default()
-                    .fg(surface)
-                    .bg(chip_bg)
-                    .add_modifier(Modifier::BOLD),
+                segment.label.clone(),
+                Style::default().fg(label_fg),
             ));
-            if !segment.label.is_empty() {
-                spans.push(Span::raw(" ".repeat(HINT_CHIP_GAP)));
-                let label_fg = if segment.destructive {
-                    palette.deleted
-                } else {
-                    palette.muted
-                };
-                spans.push(Span::styled(
-                    segment.label.clone(),
-                    Style::default().fg(label_fg),
-                ));
-            }
         }
     }
-    Line::from(spans)
 }
 
 fn z_pending(state: &AppState) -> bool {
@@ -1872,7 +1952,7 @@ mod tests {
         assert_eq!(open_dialog(&help), Some(DialogKind::Help));
         assert_eq!(
             dialog_height(&help, DialogKind::Help, 116),
-            help_status_lines(116, false)
+            help_status_lines(116, crate::tui::help::HelpTab::Workspace)
         );
     }
 
@@ -2156,6 +2236,44 @@ mod tests {
 
     fn line_plain(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn file_tab_chrome_names_the_file_and_viewer_keys() {
+        let mut app = state();
+        app.focus = FocusPane::Right;
+        app.open_file_tab("app".into(), "src/main.rs".into());
+        assert_eq!(
+            breadcrumb_segments(&app),
+            ["workspace", "app", "src/main.rs"]
+        );
+        assert_eq!(
+            line_plain(&breadcrumb_line(&app, 80)),
+            "workspace › app › src/main.rs",
+            "no right-focus mark on a file tab"
+        );
+        assert_eq!(help_tab(&app), HelpTab::File);
+        let row = line_plain(&status_line(&app, 160));
+        assert!(row.starts_with(" ? help"), "no tree / diff pill: {row}");
+        for chip in [
+            "edit",
+            "search",
+            "wrap",
+            "copy ref",
+            "reload",
+            "go to file",
+            "quit",
+        ] {
+            assert!(row.contains(chip), "{chip}: {row}");
+        }
+        assert!(!row.contains("stage"), "{row}");
+        app.diff_wrap = true;
+        let row = line_plain(&status_line(&app, 60));
+        assert!(row.starts_with(" wrap "), "{row}");
+        assert!(
+            row.trim_end().ends_with("quit"),
+            "q quit stays pinned: {row}"
+        );
     }
 
     #[test]

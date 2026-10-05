@@ -108,6 +108,10 @@ pub struct QuickOpenState {
     pub hits: Vec<FileHit>,
     /// Highlight index into [`Self::hits`].
     pub file_cursor: usize,
+    /// Files-mode Enter came while the index or the latest score was still
+    /// pending: submit once that score is accepted. Any edit or highlight
+    /// move clears it.
+    pub submit_on_ready: bool,
 }
 
 impl QuickOpenState {
@@ -128,6 +132,7 @@ impl QuickOpenState {
             score_pending: false,
             hits: Vec::new(),
             file_cursor: 0,
+            submit_on_ready: false,
         }
     }
 
