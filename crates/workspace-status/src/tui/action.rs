@@ -246,7 +246,7 @@ pub enum Action {
     BlameMenuChar(char),
     /// Enter in the blame-actions menu: run the first row.
     BlameMenuEnter,
-    /// Esc in the blame-actions menu: close it.
+    /// Esc or `q` in the blame-actions menu: close it.
     BlameMenuCancel,
     /// Close the active compare or file tab.
     CloseTab,

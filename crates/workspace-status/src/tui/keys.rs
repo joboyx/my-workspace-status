@@ -82,7 +82,8 @@ pub enum InputMode {
     /// `?` overlay with `/` help query open (chars append; highlight only).
     HelpSearch,
     StashMenu,
-    /// `A` blame-actions menu: `c` / `p` / `w` / `g` pick a row.
+    /// `A` blame-actions menu: `c` / `p` / `w` / `g` pick a row, Esc / `q`
+    /// close it.
     BlameMenu,
     BranchPicker,
     /// Compare-only branch or commit picker (no checkout).
@@ -690,7 +691,7 @@ fn key_to_action(
         InputMode::BlameMenu => match key.code {
             // Menu letters are hotkeys (changes, previous, working tree, graph).
             _ if is_unbound_chord(key) => Action::None,
-            KeyCode::Esc => Action::BlameMenuCancel,
+            KeyCode::Esc | KeyCode::Char('q') => Action::BlameMenuCancel,
             KeyCode::Enter => Action::BlameMenuEnter,
             KeyCode::Char(c) => Action::BlameMenuChar(c),
             _ => Action::None,
@@ -2515,7 +2516,7 @@ mod tests {
 
     /// `A` opens the blame menu from every Normal context (tree, graph
     /// commit or stash row, diff, either pane) and through pending `z` /
-    /// `g`. Inside the menu its letters, Enter, and Esc stay menu keys,
+    /// `g`. Inside the menu its letters, Enter, Esc, and `q` stay menu keys,
     /// so nothing moves the focused line; mouse input does nothing.
     #[test]
     fn a_opens_the_blame_menu_and_the_menu_owns_its_keys() {
@@ -2546,10 +2547,13 @@ mod tests {
                 Action::BlameMenuChar(c)
             );
         }
-        assert_eq!(
-            event_to_action(&key(KeyCode::Esc), menu, true, true),
-            Action::BlameMenuCancel
-        );
+        for code in [KeyCode::Esc, KeyCode::Char('q')] {
+            assert_eq!(
+                event_to_action(&key(code), menu, true, true),
+                Action::BlameMenuCancel,
+                "{code:?}"
+            );
+        }
         assert_eq!(
             event_to_action(&key(KeyCode::Enter), menu, true, true),
             Action::BlameMenuEnter
@@ -3361,6 +3365,7 @@ mod tests {
                 Action::BlameMenuChar('g'),
             ),
             (InputMode::BlameMenu, 0, Enter, Action::BlameMenuEnter),
+            (InputMode::BlameMenu, 0, Char('q'), Action::BlameMenuCancel),
             (
                 InputMode::CommentExport,
                 0,

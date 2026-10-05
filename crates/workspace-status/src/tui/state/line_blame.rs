@@ -152,9 +152,12 @@ impl AppState {
     /// `A`: open the blame-actions menu. [`Self::blame_refusal`] has
     /// already refused a line with no committed blame, with the copy the
     /// actions use. A root commit still opens it: `c` refuses on pick.
+    /// A drag text selection hides the annotation, so it ends here and
+    /// the header shows the line's blame.
     pub(super) fn open_blame_menu(&mut self) -> Effect {
         // The box lists each action with its key; a status would repeat it.
         self.status.clear();
+        self.cancel_mouse_drag();
         self.blame_menu = true;
         Effect::None
     }
@@ -1937,6 +1940,19 @@ mod tests {
         assert_eq!(app.dispatch(Action::BlameMenuCancel), Effect::None);
         assert!(!app.blame_menu);
         assert!(matches!(app.input_mode(), InputMode::Normal { .. }));
+
+        // A drag selection hides the annotation; opening the menu ends it
+        // so the header shows the blame.
+        app.text_selection = Some(TextSelection {
+            pane: Default::default(),
+            anchor: (0, 0),
+            head: (0, 0),
+        });
+        assert_eq!(app.painted_line_annotation(), None);
+        app.dispatch(Action::BlameMenu);
+        assert!(app.blame_menu);
+        assert!(app.text_selection.is_none());
+        assert!(app.painted_line_annotation().is_some());
     }
 
     #[test]

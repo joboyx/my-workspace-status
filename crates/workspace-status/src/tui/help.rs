@@ -145,7 +145,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: "A",
-                desc: "line blame menu",
+                desc: "blame menu",
             },
         ],
     },
