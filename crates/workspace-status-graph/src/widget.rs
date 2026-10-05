@@ -717,7 +717,11 @@ fn put_painted_line(
         } else {
             comment_glyph
         };
-        let mut mark_style = Style::default().fg(cursor_fg).add_modifier(Modifier::BOLD);
+        // The cursor colour can equal the search background, so a match row
+        // paints the mark in the search foreground like its rails and label.
+        let mut mark_style = Style::default()
+            .fg(match_fg.unwrap_or(cursor_fg))
+            .add_modifier(Modifier::BOLD);
         if let Some(bg) = row_bg {
             mark_style = mark_style.bg(bg);
         }
@@ -1654,6 +1658,68 @@ mod tests {
                 "stash spacer is not a searchMatchIds target"
             );
         }
+    }
+
+    #[test]
+    fn search_match_paints_comment_mark_in_search_fg() {
+        let model = sample_model();
+        let rows = model.visible_rows();
+        let stash_idx = rows
+            .iter()
+            .position(|row| matches!(row, GraphRow::Stash(_)))
+            .expect("stash row");
+        let prior_idx = rows
+            .iter()
+            .position(|row| {
+                matches!(row, GraphRow::Commit { commit, .. } if commit.subject == "prior commit")
+            })
+            .expect("prior commit row");
+        // Cursor fg equals the search bg (a theme can share one accent).
+        let bg = Color::Rgb(189, 147, 249);
+        let fg = Color::Rgb(40, 42, 54);
+        let cursor_fg = bg;
+        let matches = [stash_idx];
+        let commented = [stash_idx, prior_idx];
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                GraphWidget::new(&model)
+                    .selected(Some(0))
+                    .search_matches(&matches, bg, fg)
+                    .commented_rows(&commented)
+                    .cursor_style(cursor_fg, Color::DarkGray)
+                    .now_unix(NOW)
+                    .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let line_y = |needle: &str| {
+            (0..16u16)
+                .find(|&y| {
+                    (0..80u16)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                        .contains(needle)
+                })
+                .unwrap_or_else(|| panic!("line with {needle}"))
+        };
+        let mark_x = |y: u16| {
+            (0..80u16)
+                .find(|&x| buffer[(x, y)].symbol() == "\"")
+                .unwrap_or_else(|| panic!("comment mark on row {y}"))
+        };
+        let match_y = line_y("WIP on main");
+        let match_x = mark_x(match_y);
+        assert_eq!(buffer[(match_x, match_y)].fg, fg, "match mark fg");
+        assert_eq!(buffer[(match_x, match_y)].bg, bg, "match mark bg");
+        let plain_y = line_y("prior commit");
+        let plain_x = mark_x(plain_y);
+        assert_eq!(
+            buffer[(plain_x, plain_y)].fg,
+            cursor_fg,
+            "non-match commented mark keeps the cursor fg"
+        );
     }
 
     #[test]

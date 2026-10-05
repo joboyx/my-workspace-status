@@ -52,9 +52,9 @@ gutter cell from `GraphCell.color_lane`; an empty slice uses
 `DEFAULT_LANE_COLORS`. The TUI passes the active built-in theme's eight
 colours (`T` cycles).
 `GraphWidget::search_matches` paints the filter/search background on
-selectable visible-row indexes and paints their rails and label in the
-filter foreground, so lane and chip colours that equal the background stay
-readable. Spacers stay
+selectable visible-row indexes and paints their rails, comment mark, and
+label in the filter foreground, so lane, chip, and cursor colours that
+equal the background stay readable. Spacers stay
 unhighlighted. `GraphWidget::flash_rows` paints the fade background on
 the same visible-row indexes, including spacers (a flashing commit
 keeps its spacer). Flash background wins over cursor and search.
