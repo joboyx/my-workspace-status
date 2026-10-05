@@ -2722,7 +2722,7 @@ impl AppState {
             previous_row_id.as_deref(),
             previous_cursor,
         );
-        self.retry_graph_reveal(&repo);
+        self.retry_graph_reveal(&repo, true);
         if self.drill.is_graph() {
             self.diff_content = DiffContent::default();
             self.diff_repo = None;
@@ -8870,6 +8870,31 @@ mod tests {
             "Comment is open on compare; this tab has no loaded file yet"
         );
         assert_eq!(palette_reason(&app, "Copy comments"), None);
+
+        // Blame actions run on a compare tab; with the file list focused
+        // they refuse with the blame gate's copy, key and palette alike.
+        app.focus = FocusPane::Left;
+        for (title, action) in [
+            ("Blame: open commit changes", Action::BlameCommitVsParent),
+            (
+                "Blame: open previous line change",
+                Action::BlamePreviousChange,
+            ),
+            ("Blame: show commit in graph", Action::BlameRevealGraph),
+        ] {
+            assert_eq!(
+                palette_reason(&app, title).as_deref(),
+                Some(super::super::line_blame::FOCUS_A_DIFF_OR_FILE_LINE),
+                "{title}"
+            );
+            app.status.clear();
+            assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
+            assert_eq!(
+                app.status,
+                super::super::line_blame::FOCUS_A_DIFF_OR_FILE_LINE,
+                "{action:?}"
+            );
+        }
     }
 
     #[test]

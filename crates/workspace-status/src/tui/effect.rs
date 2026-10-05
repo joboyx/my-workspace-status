@@ -5804,6 +5804,8 @@ mod tests {
             repo: "app".into(),
             sha: sha.into(),
             pages: 0,
+            // The graph is on screen with no load pending.
+            seen_load: true,
         });
         assert!(state.graph_pane_focused());
         state
@@ -5843,6 +5845,58 @@ mod tests {
             other => panic!("expected the revealed commit, got {other:?}"),
         }
         assert_ne!(state.status, LOADING_OLDER);
+    }
+
+    #[test]
+    fn blame_reveal_from_a_dir_row_queues_no_older_page_for_a_loaded_commit() {
+        let mut app_repo = repo("app", true);
+        app_repo.changes[0].path = "src/lib.rs".into();
+        let snapshot = build_workspace_snapshot(&[app_repo], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.cursor = state
+            .rows
+            .iter()
+            .position(|row| row.id == "dir:app:src")
+            .expect("dir row");
+        state.set_graph(older_page(&["aaa", "ccc"]), "app".into(), "head-app".into());
+        let Effect::LoadFileTab { tab_id, gen, .. } =
+            state.open_file_tab("app".into(), "src/lib.rs".into())
+        else {
+            panic!("expected a load");
+        };
+        assert!(state.apply_file_tab(
+            tab_id,
+            gen,
+            FileRead::Text {
+                lines: vec!["a".into()],
+                max_cols: 1,
+            }
+        ));
+        let key = state.line_blame_want().expect("cursor line asks");
+        state.apply_line_blame(
+            key,
+            Ok(Some(crate::git::LineBlame {
+                sha: "ccc".into(),
+                author: "Ada".into(),
+                author_time: 0,
+                summary: "s-ccc".into(),
+                orig_line: 1,
+                filename: "src/lib.rs".into(),
+                previous: None,
+                boundary: false,
+                uncommitted: false,
+            })),
+        );
+        let mut interp = Interpreter::new();
+        let effect = state.dispatch(Action::BlameRevealGraph);
+        schedule_effect(&mut interp, &mut state, effect, &Action::BlameRevealGraph);
+        assert!(!state.graph_loading_older, "no older page");
+        assert!(interp.autoload.is_none());
+        assert_eq!(state.graph_reveal, None);
+        match state.focused_graph_row() {
+            Some(GraphRow::Commit { commit, .. }) => assert_eq!(commit.id, "ccc"),
+            other => panic!("expected the revealed commit, got {other:?}"),
+        }
     }
 
     #[test]

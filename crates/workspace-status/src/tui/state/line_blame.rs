@@ -250,7 +250,9 @@ impl AppState {
             return Effect::None;
         };
         if !self.tabs.is_workspace() {
-            let _ = self.activate_tab(0);
+            // A tab switch only swaps session state; it loads nothing.
+            let switched = self.activate_tab(0);
+            debug_assert_eq!(switched, Effect::None);
         }
         let mut effects = Vec::new();
         if !self.drill.is_graph() {
@@ -269,15 +271,20 @@ impl AppState {
             repo: repo.clone(),
             sha: blame.sha,
             pages: 0,
+            seen_load: false,
         });
         let loaded = self.graph.is_some()
             && self
                 .graph_identity
                 .as_ref()
                 .is_some_and(|(graph_repo, _)| *graph_repo == repo);
-        if loaded && !moved {
-            self.retry_graph_reveal(&repo);
-        } else {
+        // The graph on screen may already hold the commit. Only a graph
+        // with no load pending counts as seen: after a cursor move the
+        // pane loads again, and widening waits for that load.
+        if loaded {
+            self.retry_graph_reveal(&repo, !moved);
+        }
+        if !loaded || moved {
             effects.push(Effect::LoadRightPane);
         }
         single_or_batch(effects)
@@ -310,16 +317,19 @@ impl AppState {
     }
 
     /// Select the pending reveal's commit when the graph of `repo` holds
-    /// it. Called after every [`Self::set_graph`]; a graph of another repo
-    /// drops the reveal.
-    pub(super) fn retry_graph_reveal(&mut self, repo: &str) {
-        let Some(reveal) = self.graph_reveal.as_ref() else {
+    /// it. Called after every [`Self::set_graph`] (`seen` true: the graph
+    /// just loaded) and once when the reveal starts; a graph of another
+    /// repo drops the reveal.
+    pub(super) fn retry_graph_reveal(&mut self, repo: &str, seen: bool) {
+        let Some(reveal) = self.graph_reveal.as_mut() else {
             return;
         };
         if reveal.repo != repo {
             self.graph_reveal = None;
             return;
         }
+        reveal.seen_load |= seen;
+        let reveal = &*reveal;
         let want = format!("commit:{}", reveal.sha);
         let Some(idx) = self.graph.as_ref().and_then(|model| {
             model.visible_rows().iter().position(|row| match row {
@@ -346,8 +356,9 @@ impl AppState {
     /// rows; counts the page. Past [`GRAPH_REVEAL_MAX_PAGES`], or when the
     /// history ends, the reveal gives up with a status.
     ///
-    /// Waits (false) while the graph of the reveal's repo is not loaded or
-    /// an older page is already on its way.
+    /// Waits (false) until the reveal has seen a graph load
+    /// ([`GraphReveal::seen_load`]), and while an older page is already on
+    /// its way.
     pub(crate) fn graph_reveal_wants_older(&mut self) -> bool {
         let Some(reveal) = self.graph_reveal.as_mut() else {
             return false;
@@ -359,7 +370,7 @@ impl AppState {
             .graph_identity
             .as_ref()
             .is_some_and(|(repo, _)| *repo == reveal.repo);
-        if !same_repo || self.graph_loading_older {
+        if !same_repo || !reveal.seen_load || self.graph_loading_older {
             return false;
         }
         if model.has_more && reveal.pages < GRAPH_REVEAL_MAX_PAGES {
@@ -1218,6 +1229,106 @@ mod tests {
         }
     }
 
+    /// The graph selection footer (the details view) is on commit `sha`:
+    /// its row identity and its subject line.
+    fn assert_footer_on(app: &AppState, sha: &str) {
+        assert_eq!(
+            app.graph_selected_row_identity(),
+            Some(format!("app#commit:{sha}"))
+        );
+        let model = app.graph.as_ref().expect("graph");
+        let rows = model.visible_rows();
+        let [subject, _] = workspace_status_graph::selection_detail_lines(
+            model,
+            workspace_status_graph::GraphFooterSelection::from(rows.get(app.graph_cursor)),
+            &workspace_status_graph::UNICODE,
+            200,
+            0,
+        );
+        assert!(subject.contains(&format!("s-{sha}")), "{subject}");
+    }
+
+    /// Workspace with a change under `src/`, the tree cursor on the
+    /// `dir:app:src` row, and the app graph loaded from `ids`.
+    fn dir_row_state(ids: &[&str], has_more: bool) -> AppState {
+        let mut app_repo = repo("app");
+        app_repo.changes[0].path = "src/lib.rs".into();
+        let snapshot = build_workspace_snapshot(&[app_repo], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        app.cursor = app
+            .rows
+            .iter()
+            .position(|row| row.id == "dir:app:src")
+            .expect("dir row");
+        app.set_graph(graph_with(ids, has_more), "app".into(), ids[0].into());
+        app
+    }
+
+    /// Open a file tab of `src/lib.rs` whose cursor line blames `sha`.
+    fn file_tab_blamed(app: &mut AppState, sha: &str) {
+        let Effect::LoadFileTab { tab_id, gen, .. } =
+            app.open_file_tab("app".into(), "src/lib.rs".into())
+        else {
+            panic!("expected a load");
+        };
+        assert!(app.apply_file_tab(
+            tab_id,
+            gen,
+            FileRead::Text {
+                lines: vec!["a".into()],
+                max_cols: 1,
+            }
+        ));
+        answer(app, Some(blamed(sha)));
+    }
+
+    #[test]
+    fn blame_reveal_from_a_dir_row_selects_a_loaded_commit_at_once() {
+        for has_more in [false, true] {
+            let mut app = dir_row_state(&[OTHER, SHA], has_more);
+            file_tab_blamed(&mut app, SHA);
+            assert_eq!(
+                app.dispatch(Action::BlameRevealGraph),
+                Effect::LoadRightPane
+            );
+            assert_eq!(
+                app.focused_row().map(|row| row.id.as_str()),
+                Some("repo:app")
+            );
+            assert_eq!(app.graph_reveal, None, "selected from the graph on screen");
+            assert_eq!(focused_commit(&app).as_deref(), Some(SHA));
+            assert_footer_on(&app, SHA);
+            assert!(!app.graph_reveal_wants_older(), "no older page");
+            assert!(
+                !app.status.contains("not in the loaded graph"),
+                "{}",
+                app.status
+            );
+        }
+    }
+
+    #[test]
+    fn blame_reveal_after_a_cursor_move_waits_for_the_graph_load() {
+        let mut app = dir_row_state(&[OTHER], false);
+        file_tab_blamed(&mut app, SHA);
+        assert_eq!(
+            app.dispatch(Action::BlameRevealGraph),
+            Effect::LoadRightPane
+        );
+        assert!(
+            !app.graph_reveal_wants_older(),
+            "the old graph may be stale"
+        );
+        assert!(app.graph_reveal.is_some(), "still waiting for the load");
+        assert!(!app.status.contains("not in the loaded graph"));
+
+        // The pane load lands: now the reveal may give up.
+        app.set_graph(graph_with(&[OTHER], false), "app".into(), OTHER.into());
+        assert!(!app.graph_reveal_wants_older());
+        assert_eq!(app.status, "aaa1111 is not in the loaded graph");
+        assert_eq!(app.graph_reveal, None);
+    }
+
     #[test]
     fn blame_reveal_from_a_worktree_diff_loads_the_graph_then_selects() {
         let mut app = worktree_diff("", BODY, false);
@@ -1236,6 +1347,7 @@ mod tests {
 
         app.set_graph(graph_with(&[OTHER, SHA], false), "app".into(), OTHER.into());
         assert_eq!(focused_commit(&app).as_deref(), Some(SHA));
+        assert_footer_on(&app, SHA);
         assert_eq!(app.graph_reveal, None, "done");
     }
 
@@ -1273,6 +1385,7 @@ mod tests {
         assert!(app.drill.is_graph());
         assert!(app.graph_pane_focused());
         assert_eq!(focused_commit(&app).as_deref(), Some(SHA));
+        assert_footer_on(&app, SHA);
         assert_eq!(app.graph_reveal, None);
     }
 
@@ -1334,6 +1447,7 @@ mod tests {
             repo: "app".into(),
             sha: SHA.into(),
             pages: 0,
+            seen_load: false,
         });
         app.set_graph(graph_with(&[OTHER], true), "lib".into(), OTHER.into());
         assert_eq!(app.graph_reveal, None, "another repo's graph drops it");
@@ -1348,6 +1462,7 @@ mod tests {
             repo: "app".into(),
             sha: SHA.into(),
             pages: 0,
+            seen_load: false,
         });
         app.drop_graph_reveal_off_graph();
         assert!(app.graph_reveal.is_some(), "graph pane still focused");
@@ -1359,6 +1474,7 @@ mod tests {
             repo: "app".into(),
             sha: SHA.into(),
             pages: 0,
+            seen_load: false,
         });
         app.set_graph(graph_with(&[OTHER], false), "app".into(), OTHER.into());
         assert!(app.graph_reveal.is_some(), "not found yet");

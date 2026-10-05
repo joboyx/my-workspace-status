@@ -53,6 +53,10 @@ pub struct GraphReveal {
     pub sha: String,
     /// Older pages loaded so far for this reveal.
     pub pages: u8,
+    /// A graph of [`Self::repo`] loaded, or was already shown with no
+    /// load pending, after the reveal started. Until then the graph on
+    /// screen may be stale, so the reveal neither widens nor gives up.
+    pub seen_load: bool,
 }
 
 /// First seven characters of a commit id.
