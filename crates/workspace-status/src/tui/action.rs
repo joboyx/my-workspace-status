@@ -238,6 +238,16 @@ pub enum Action {
     /// Select the focused line's blame commit in the Workspace graph,
     /// loading older pages until it shows.
     BlameRevealGraph,
+    /// Open the `A` blame-actions menu for the focused line. Refused with
+    /// the blame actions' copy when the line has no committed blame.
+    BlameMenu,
+    /// A key typed in the blame-actions menu (`c` / `p` / `w` / `g` pick a
+    /// row; any other key is ignored).
+    BlameMenuChar(char),
+    /// Enter in the blame-actions menu: run the first row.
+    BlameMenuEnter,
+    /// Esc in the blame-actions menu: close it.
+    BlameMenuCancel,
     /// Close the active compare or file tab.
     CloseTab,
     /// Cycle to the next tab (`gt`).

@@ -18,8 +18,8 @@ use super::super::drill::{CommitFileSource, DrillView};
 use super::super::gates::ListFocusTarget;
 use super::super::line_blame::{
     annotation_text, short_sha, BlameKey, BlameSide, GraphReveal, LineAnnotation, BLAME_IS_OFF,
-    BLAME_STILL_LOADING, FOCUS_A_DIFF_OR_FILE_LINE, GRAPH_REVEAL_MAX_PAGES, LINE_NOT_COMMITTED,
-    NO_BLAME_FOR_LINE, STAGED_TEXT, UNCOMMITTED_TEXT,
+    BLAME_MENU_ROWS, BLAME_STILL_LOADING, FOCUS_A_DIFF_OR_FILE_LINE, GRAPH_REVEAL_MAX_PAGES,
+    LINE_NOT_COMMITTED, NO_BLAME_FOR_LINE, STAGED_TEXT, UNCOMMITTED_TEXT,
 };
 use super::super::search::unfold_ancestors;
 use super::super::split::DiffMode;
@@ -136,6 +136,7 @@ impl AppState {
                 | Action::BlamePreviousChange
                 | Action::BlameCommitVsWorktree
                 | Action::BlameRevealGraph
+                | Action::BlameMenu
         ) {
             return None;
         }
@@ -146,6 +147,32 @@ impl AppState {
             }
             Ok(_) => None,
         }
+    }
+
+    /// `A`: open the blame-actions menu. [`Self::blame_refusal`] has
+    /// already refused a line with no committed blame, with the copy the
+    /// actions use. A root commit still opens it: `c` refuses on pick.
+    pub(super) fn open_blame_menu(&mut self) -> Effect {
+        // The box lists each action with its key; a status would repeat it.
+        self.status.clear();
+        self.blame_menu = true;
+        Effect::None
+    }
+
+    /// A key in the blame-actions menu: `Some(key)` picks the row with
+    /// that key, `None` (Enter) the first row. A pick closes the menu and
+    /// dispatches the row's blame action, which runs its own gate. Other
+    /// keys leave the menu open.
+    pub(super) fn blame_menu_pick(&mut self, key: Option<char>) -> Effect {
+        let row = match key {
+            Some(key) => BLAME_MENU_ROWS.iter().find(|row| row.key == key),
+            None => BLAME_MENU_ROWS.first(),
+        };
+        let Some(row) = row else {
+            return Effect::None;
+        };
+        self.blame_menu = false;
+        self.dispatch(row.action.clone())
     }
 
     /// Checkout and committed blame of the focused line, or why the blame
@@ -583,6 +610,7 @@ mod tests {
     use super::super::super::command_palette::PALETTE_COMMANDS;
     use super::super::super::diff::DiffContent;
     use super::super::super::drill::CommitFile;
+    use super::super::super::keys::InputMode;
     use super::super::super::selection::TextSelection;
     use super::*;
     use crate::config::ViewDefaults;
@@ -1854,5 +1882,150 @@ mod tests {
         app.open_worktree_compare_tab("app".into(), SHA.into(), disk_file("README.md", None));
         load_worktree_tab(&mut app);
         assert_eq!(app.external_diff_kind(), None);
+    }
+
+    /// `A` refuses with `reason`, the copy every blame palette row shows,
+    /// and leaves the menu closed.
+    fn assert_menu_refused(app: &mut AppState, reason: &str) {
+        app.status.clear();
+        assert_eq!(app.dispatch(Action::BlameMenu), Effect::None);
+        assert_eq!(app.status, reason);
+        assert!(!app.blame_menu);
+        assert_eq!(
+            palette_reason(app, "Blame: show commit in graph").as_deref(),
+            Some(reason)
+        );
+    }
+
+    #[test]
+    fn blame_menu_opens_only_on_a_committed_line_with_the_actions_copy() {
+        let mut app = worktree_diff("", BODY, false);
+        app.diff_cursor = 2;
+        assert_menu_refused(&mut app, BLAME_STILL_LOADING);
+        answer(&mut app, None);
+        assert_menu_refused(&mut app, NO_BLAME_FOR_LINE);
+        app.diff_cursor = 4;
+        assert_menu_refused(&mut app, LINE_NOT_COMMITTED);
+        app.diff_cursor = 5;
+        answer(
+            &mut app,
+            Some(LineBlame {
+                uncommitted: true,
+                ..blamed(&"0".repeat(40))
+            }),
+        );
+        assert_menu_refused(&mut app, LINE_NOT_COMMITTED);
+        app.diff_cursor = 3;
+        answer(&mut app, Some(blamed(SHA)));
+        app.focus = FocusPane::Left;
+        assert_menu_refused(&mut app, FOCUS_A_DIFF_OR_FILE_LINE);
+        app.focus = FocusPane::Right;
+        app.line_blame.set_enabled(false);
+        assert_menu_refused(&mut app, BLAME_IS_OFF);
+        app.line_blame.set_enabled(true);
+        answer(&mut app, Some(blamed(SHA)));
+
+        app.status = "stale".into();
+        assert_eq!(app.dispatch(Action::BlameMenu), Effect::None);
+        assert!(app.blame_menu);
+        assert_eq!(app.input_mode(), InputMode::BlameMenu);
+        assert_eq!(app.status, "", "the box lists the actions");
+
+        // A key the menu does not bind keeps it open; Esc closes it.
+        assert_eq!(app.dispatch(Action::BlameMenuChar('x')), Effect::None);
+        assert!(app.blame_menu);
+        assert_eq!(app.dispatch(Action::BlameMenuCancel), Effect::None);
+        assert!(!app.blame_menu);
+        assert!(matches!(app.input_mode(), InputMode::Normal { .. }));
+    }
+
+    #[test]
+    fn blame_menu_opens_on_a_root_commit_and_c_refuses_like_the_palette() {
+        let mut app = worktree_diff("", BODY, false);
+        app.diff_cursor = 2;
+        answer(
+            &mut app,
+            Some(LineBlame {
+                boundary: true,
+                ..blamed(SHA)
+            }),
+        );
+        app.dispatch(Action::BlameMenu);
+        assert!(app.blame_menu);
+        assert_eq!(app.dispatch(Action::BlameMenuChar('c')), Effect::None);
+        assert!(!app.blame_menu, "a pick closes the menu");
+        assert_eq!(app.status, ROOT_COMMIT_HAS_NO_PARENT);
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    /// Worktree diff with a committed focused line and the menu open.
+    fn menu_open() -> AppState {
+        let mut app = worktree_diff("", BODY, false);
+        app.diff_cursor = 2;
+        answer(&mut app, Some(blamed(SHA)));
+        app.dispatch(Action::BlameMenu);
+        assert!(app.blame_menu);
+        app
+    }
+
+    #[test]
+    fn blame_menu_keys_dispatch_the_blame_actions() {
+        let picks = BLAME_MENU_ROWS
+            .iter()
+            .map(|row| (Action::BlameMenuChar(row.key), row.action.clone()))
+            .chain([(Action::BlameMenuEnter, Action::BlameCommitVsParent)]);
+        for (key, action) in picks {
+            let mut direct = menu_open();
+            direct.dispatch(Action::BlameMenuCancel);
+            let want = direct.dispatch(action.clone());
+            assert_ne!(want, Effect::None, "{action:?} runs");
+
+            let mut menu = menu_open();
+            assert_eq!(menu.dispatch(key.clone()), want, "{key:?}");
+            assert!(!menu.blame_menu, "{key:?} closes the menu");
+            assert_eq!(menu.status, direct.status, "{key:?}");
+            assert_eq!(menu.tabs.len(), direct.tabs.len(), "{key:?}");
+            assert_eq!(menu.focus, direct.focus, "{key:?}");
+        }
+        let titles: Vec<String> = BLAME_MENU_ROWS
+            .iter()
+            .map(|row| format!("Blame: {}", row.label))
+            .collect();
+        let palette: Vec<String> = BLAME_ACTIONS
+            .iter()
+            .map(|(title, _)| (*title).to_string())
+            .collect();
+        assert_eq!(titles, palette, "rows read like the palette rows");
+        for (row, (_, action)) in BLAME_MENU_ROWS.iter().zip(BLAME_ACTIONS) {
+            assert_eq!(row.action, action);
+        }
+    }
+
+    #[test]
+    fn blame_menu_runs_on_a_file_tab() {
+        let mut app = dir_row_state(&[OTHER, SHA], false);
+        file_tab_blamed(&mut app, SHA);
+        assert_eq!(app.dispatch(Action::BlameMenu), Effect::None);
+        assert!(app.blame_menu);
+        expect_parent_tab(app.dispatch(Action::BlameMenuChar('c')), SHA);
+        assert!(!app.blame_menu);
+        assert_eq!(app.tabs.active_compare().unwrap().label(), "app ↔ aaa1111^");
+    }
+
+    #[test]
+    fn blame_menu_stays_open_and_on_its_line_when_an_answer_lands() {
+        let mut app = menu_open();
+        let focused = app.line_blame_want().expect("focused line");
+        let header = app.painted_line_annotation();
+        let other = BlameKey {
+            line: 99,
+            ..focused.clone()
+        };
+        assert!(!app.apply_line_blame(other, Ok(Some(blamed(OTHER)))));
+        assert!(app.apply_line_blame(focused.clone(), Ok(Some(blamed(SHA)))));
+        assert!(app.blame_menu);
+        assert_eq!(app.input_mode(), InputMode::BlameMenu);
+        assert_eq!(app.line_blame_want(), Some(focused));
+        assert_eq!(app.painted_line_annotation(), header);
     }
 }

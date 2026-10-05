@@ -47,7 +47,7 @@ use super::icons::{
     icon_merged_into_default, icon_move, icon_open_vs_default, truncate_visible, CURSOR_BAR,
     CURSOR_BAR_INACTIVE, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
 };
-use super::line_blame::{fit_annotation, BlameSide};
+use super::line_blame::{fit_annotation, BlameSide, BLAME_MENU_ROWS};
 use super::ops::RevertScope;
 use super::quick_open::{files_row_shows_status, FileIndexState, QuickOpenMode, QuickOpenState};
 use super::search::{
@@ -214,6 +214,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
             }
             DialogKind::Confirm => draw_confirm(frame, rect, state),
             DialogKind::StashMenu => draw_stash_menu(frame, rect, state),
+            DialogKind::BlameMenu => draw_blame_menu(frame, rect, state),
             DialogKind::CreateBranch => draw_create_branch(frame, rect, state),
             DialogKind::Comment => draw_comment(frame, rect, state),
             DialogKind::CommentExport => draw_comment_export(frame, rect, state),
@@ -2804,6 +2805,44 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+/// `A` blame-actions menu: the focused line's annotation (the same text
+/// the pane paints at the line's end, cut to one row), then one row per
+/// action with its key.
+fn draw_blame_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let palette = state.theme.palette();
+    let surface = overlay_surface(state);
+    let accent = palette.modified;
+    const TITLE: &str = "Blame ";
+    // Inside the border, after the title.
+    let room = usize::from(area.width.saturating_sub(2)).saturating_sub(TITLE.len());
+    let header = state
+        .painted_line_annotation()
+        .and_then(|(text, _)| fit_annotation(&text, room))
+        .unwrap_or_default();
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            TITLE,
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(header, Style::default().fg(palette.muted)),
+    ])];
+    for row in &BLAME_MENU_ROWS {
+        lines.push(Line::from(vec![
+            key_chip(&row.key.to_string(), accent, surface),
+            Span::styled(format!(" {}", row.label), Style::default().fg(palette.file)),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
+        "Esc cancel",
+        Style::default().fg(palette.muted),
+    )));
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
 }
 
 /// Compare-tab close control as painted and hit-tested: brackets around
@@ -9319,6 +9358,36 @@ mod tests {
         state.dispatch(Action::ToggleLineBlame);
         draw_state(&mut terminal, &mut state);
         assert!(!buffer_text(&terminal).contains("aaa1111"), "B hides it");
+    }
+
+    #[test]
+    fn blame_menu_shows_the_annotation_and_one_row_per_action() {
+        let mut state = file_tab_state(&["# app", "dirty"]);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        cache_focused_blame(&mut state, "seed the app");
+        assert_eq!(state.dispatch(Action::BlameMenu), Effect::None);
+        assert_eq!(open_dialog(&state), Some(DialogKind::BlameMenu));
+        draw_state(&mut terminal, &mut state);
+        let buf = terminal.backend().buffer();
+        let text = buffer_text(&terminal);
+        let (note, _) = state.painted_line_annotation().expect("annotation");
+        let header = first_row_with(buf, "Blame ").expect("menu header");
+        assert!(buf_line(buf, header).contains(&note), "{text}");
+        for (offset, row) in BLAME_MENU_ROWS.iter().enumerate() {
+            let line = buf_line(buf, header + 1 + offset as u16);
+            assert!(
+                line.contains(&format!(" {}  {}", row.key, row.label)),
+                "{text}"
+            );
+        }
+        assert!(
+            buf_line(buf, header + 1 + BLAME_MENU_ROWS.len() as u16).contains("Esc cancel"),
+            "{text}"
+        );
+        assert_eq!(state.dispatch(Action::BlameMenuCancel), Effect::None);
+        draw_state(&mut terminal, &mut state);
+        assert!(!buffer_text(&terminal).contains("Esc cancel"));
     }
 
     #[test]

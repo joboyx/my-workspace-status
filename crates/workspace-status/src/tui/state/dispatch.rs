@@ -329,6 +329,10 @@ impl AppState {
             | Action::BlamePreviousChange
             | Action::BlameCommitVsWorktree
             | Action::BlameRevealGraph
+            | Action::BlameMenu
+            | Action::BlameMenuChar(_)
+            | Action::BlameMenuEnter
+            | Action::BlameMenuCancel
             | Action::CloseTab
             | Action::NextTab
             | Action::PreviousTab

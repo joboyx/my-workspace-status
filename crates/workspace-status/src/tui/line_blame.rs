@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use super::action::Action;
 use crate::git::{BlameRev, LineBlame};
 
 /// Narrowest annotation worth painting. Below this the pane paints none.
@@ -39,6 +40,44 @@ pub const LINE_NOT_COMMITTED: &str = "line is not committed yet";
 /// Blame action refusal: git has no blame for the focused row (untracked
 /// file, binary, hunk header, failed run).
 pub const NO_BLAME_FOR_LINE: &str = "no blame for this line";
+
+/// One row of the `A` blame-actions menu: the key that picks it, its
+/// label, and the blame action it runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlameMenuRow {
+    /// Key that picks the row inside the menu.
+    pub key: char,
+    /// Label painted after the key chip (the palette title without
+    /// `Blame: `).
+    pub label: &'static str,
+    /// Blame action the row dispatches.
+    pub action: Action,
+}
+
+/// Rows of the `A` blame-actions menu, in paint order. Enter runs the
+/// first row.
+pub const BLAME_MENU_ROWS: [BlameMenuRow; 4] = [
+    BlameMenuRow {
+        key: 'c',
+        label: "open commit changes",
+        action: Action::BlameCommitVsParent,
+    },
+    BlameMenuRow {
+        key: 'p',
+        label: "open previous line change",
+        action: Action::BlamePreviousChange,
+    },
+    BlameMenuRow {
+        key: 'w',
+        label: "diff commit to working tree",
+        action: Action::BlameCommitVsWorktree,
+    },
+    BlameMenuRow {
+        key: 'g',
+        label: "show commit in graph",
+        action: Action::BlameRevealGraph,
+    },
+];
 
 /// Older graph pages a reveal may load before it gives up.
 pub const GRAPH_REVEAL_MAX_PAGES: u8 = 10;

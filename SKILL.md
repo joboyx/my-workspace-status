@@ -94,6 +94,8 @@ Live TUI keymap (full overlay detail in [docs/configuration.md](./docs/configura
 | `W`                                   | remove linked worktree (confirm). Unshifted `w` does not                                                               |
 | `i`                                   | inline ↔ split                                                                                                                                         |
 | `\`                                   | wrap ↔ unwrap file-diff lines (on by default; session toggle)                                                                                          |
+| `B`                                   | line blame note on ↔ off (on by default; session toggle)                                                                                               |
+| `A`                                   | blame menu: `c` commit changes, `p` previous change, `w` vs working tree, `g` graph                                                                    |
 | `r`                                   | refresh focused repo; full workspace if on workspace / “No updates” group                                                                              |
 | `f`                                   | `git fetch` for the focused checkout, or primary checkouts on the workspace / family row. Linked worktrees only when that row is focused               |
 | `p`                                   | pull behind primaries (workspace / family) or the focused checkout (including a linked worktree)                                                       |

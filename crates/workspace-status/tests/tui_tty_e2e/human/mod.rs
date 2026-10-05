@@ -13,6 +13,7 @@ mod desktop_xfce_stash_graph_pop;
 mod desktop_xterm_xtest_trackpad_hscroll;
 mod pty_apostrophe_copies_entity_reference;
 mod pty_armed_search_chip_survives_tab;
+mod pty_blame_menu_opens_commit_changes;
 mod pty_blame_palette_opens_commit_changes;
 mod pty_branch_picker_create_row_creates;
 mod pty_c_on_tree_file_is_not_commit;

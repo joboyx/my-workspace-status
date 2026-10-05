@@ -414,6 +414,14 @@ impl AppState {
             Action::BlamePreviousChange => self.blame_previous_change(),
             Action::BlameCommitVsWorktree => self.blame_commit_vs_worktree(),
             Action::BlameRevealGraph => self.blame_reveal_graph(),
+            Action::BlameMenu => self.open_blame_menu(),
+            Action::BlameMenuChar(key) => self.blame_menu_pick(Some(key)),
+            Action::BlameMenuEnter => self.blame_menu_pick(None),
+            Action::BlameMenuCancel => {
+                self.blame_menu = false;
+                self.status.clear();
+                Effect::None
+            }
             Action::CloseTab => self.close_active_tab(),
             Action::NextTab => self.activate_relative_tab(1),
             Action::PreviousTab => self.activate_relative_tab(-1),

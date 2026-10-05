@@ -586,6 +586,9 @@ pub struct AppState {
     pub confirm: Option<PendingConfirm>,
     pub stash_menu: Option<Vec<StashOp>>,
     pub stash_repo: Option<String>,
+    /// The `A` blame-actions menu is open. Its header reads the focused
+    /// line's annotation live, so it holds no copy of the blame.
+    pub blame_menu: bool,
     pub branch_picker: Option<BranchPickerState>,
     pub graph_focus_picker: Option<GraphFocusPickerState>,
     /// Per-repo local branch names whose ancestors the graph shows. `None` = `--all`.
@@ -750,6 +753,7 @@ impl AppState {
             confirm: None,
             stash_menu: None,
             stash_repo: None,
+            blame_menu: false,
             branch_picker: None,
             graph_focus_picker: None,
             graph_branch_focus: None,
@@ -845,6 +849,8 @@ impl AppState {
             InputMode::Confirm
         } else if self.stash_menu.is_some() {
             InputMode::StashMenu
+        } else if self.blame_menu {
+            InputMode::BlameMenu
         } else if self.comment.is_some() {
             InputMode::Comment
         } else if self.comment_export.is_some() {

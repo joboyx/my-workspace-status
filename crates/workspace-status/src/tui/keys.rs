@@ -82,6 +82,8 @@ pub enum InputMode {
     /// `?` overlay with `/` help query open (chars append; highlight only).
     HelpSearch,
     StashMenu,
+    /// `A` blame-actions menu: `c` / `p` / `w` / `g` pick a row.
+    BlameMenu,
     BranchPicker,
     /// Compare-only branch or commit picker (no checkout).
     ComparePicker,
@@ -288,6 +290,7 @@ pub fn event_to_action_with(
                     | InputMode::Help
                     | InputMode::HelpSearch
                     | InputMode::StashMenu
+                    | InputMode::BlameMenu
                     | InputMode::BranchPicker
                     | InputMode::ComparePicker
                     | InputMode::GraphFocusPicker
@@ -515,6 +518,7 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
         | InputMode::Confirm
         | InputMode::Help
         | InputMode::StashMenu
+        | InputMode::BlameMenu
         | InputMode::CommentExport => false,
     }
 }
@@ -553,8 +557,8 @@ pub(crate) fn held_nav_key(event: &Event) -> Option<KeyEvent> {
 /// Map one folded key press in `mode` to an [`Action`].
 ///
 /// Explicit chords (Ctrl-c, Ctrl-k, and the per-mode Ctrl bindings) match
-/// first. In Normal, pending `z` / `g`, Help, Confirm, the stash menu,
-/// comment export, and visual highlight a key with Ctrl / Alt / Super /
+/// first. In Normal, pending `z` / `g`, Help, Confirm, the stash and blame
+/// menus, comment export, and visual highlight a key with Ctrl / Alt / Super /
 /// Hyper / Meta never runs the plain-key action ([`is_unbound_chord`]).
 /// Text overlays keep their own matching.
 fn key_to_action(
@@ -585,7 +589,8 @@ fn key_to_action(
             | InputMode::BranchPicker
             | InputMode::ComparePicker
             | InputMode::GraphFocusPicker
-            | InputMode::StashMenu => {}
+            | InputMode::StashMenu
+            | InputMode::BlameMenu => {}
             _ => return Action::None,
         }
     }
@@ -680,6 +685,14 @@ fn key_to_action(
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Action::StashMenuChar(c)
             }
+            _ => Action::None,
+        },
+        InputMode::BlameMenu => match key.code {
+            // Menu letters are hotkeys (changes, previous, working tree, graph).
+            _ if is_unbound_chord(key) => Action::None,
+            KeyCode::Esc => Action::BlameMenuCancel,
+            KeyCode::Enter => Action::BlameMenuEnter,
+            KeyCode::Char(c) => Action::BlameMenuChar(c),
             _ => Action::None,
         },
         InputMode::ComparePicker => match list_overlay_move(key) {
@@ -933,6 +946,7 @@ fn normal_key(
         KeyCode::Char('\\') => Action::ToggleDiffWrap,
         KeyCode::Char('M') => Action::ToggleCommitMsgExpand,
         KeyCode::Char('B') => Action::ToggleLineBlame,
+        KeyCode::Char('A') => Action::BlameMenu,
         KeyCode::Char('m') => Action::ToggleMouse,
         KeyCode::Char(';') => Action::CommentStart,
         KeyCode::Char('V') => Action::DiffVisualStart,
@@ -2499,6 +2513,70 @@ mod tests {
         );
     }
 
+    /// `A` opens the blame menu from every Normal context (tree, graph
+    /// commit or stash row, diff, either pane) and through pending `z` /
+    /// `g`. Inside the menu its letters, Enter, and Esc stay menu keys,
+    /// so nothing moves the focused line; mouse input does nothing.
+    #[test]
+    fn a_opens_the_blame_menu_and_the_menu_owns_its_keys() {
+        let a = key(KeyCode::Char('A'));
+        let pending_z = InputMode::ZPending {
+            search_active: false,
+        };
+        for mode in [normal(), pending_z, pending_g()] {
+            for (right_is_diff, focus_right) in [(false, false), (false, true), (true, true)] {
+                for (stash, commit) in [(false, false), (true, false), (false, true)] {
+                    assert_eq!(
+                        event_to_action_ex(&a, mode, right_is_diff, focus_right, stash, commit),
+                        Action::BlameMenu,
+                        "{mode:?} diff={right_is_diff} right={focus_right} {stash} {commit}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('w')), normal(), true, true),
+            Action::None,
+            "w stays unbound outside the menu"
+        );
+        let menu = InputMode::BlameMenu;
+        for c in ['c', 'p', 'w', 'g', 'j', 'k', ':'] {
+            assert_eq!(
+                event_to_action(&key(KeyCode::Char(c)), menu, true, true),
+                Action::BlameMenuChar(c)
+            );
+        }
+        assert_eq!(
+            event_to_action(&key(KeyCode::Esc), menu, true, true),
+            Action::BlameMenuCancel
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Enter), menu, true, true),
+            Action::BlameMenuEnter
+        );
+        for code in [KeyCode::Down, KeyCode::Up, KeyCode::PageDown, KeyCode::Tab] {
+            assert_eq!(
+                event_to_action(&key(code), menu, true, true),
+                Action::None,
+                "{code:?}"
+            );
+        }
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('k')), menu, true, true),
+            Action::None,
+            "no Quick Open over the menu"
+        );
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::ScrollDown,
+        ] {
+            assert_eq!(
+                event_to_action(&mouse(kind, 40, 4), menu, true, true),
+                Action::None
+            );
+        }
+    }
+
     fn pending_g() -> InputMode {
         InputMode::GPending {
             search_active: false,
@@ -3185,6 +3263,7 @@ mod tests {
             (n, 0, Char('\\'), Action::ToggleDiffWrap),
             (n, 0, Char('M'), Action::ToggleCommitMsgExpand),
             (n, 0, Char('B'), Action::ToggleLineBlame),
+            (n, 0, Char('A'), Action::BlameMenu),
             (n, 0, Char('m'), Action::ToggleMouse),
             (n, 0, Char(';'), Action::CommentStart),
             (n, 0, Char('V'), Action::DiffVisualStart),
@@ -3257,6 +3336,31 @@ mod tests {
                 Action::StashMenuChar('d'),
             ),
             (InputMode::StashMenu, 0, Enter, Action::StashMenuEnter),
+            (
+                InputMode::BlameMenu,
+                0,
+                Char('c'),
+                Action::BlameMenuChar('c'),
+            ),
+            (
+                InputMode::BlameMenu,
+                0,
+                Char('p'),
+                Action::BlameMenuChar('p'),
+            ),
+            (
+                InputMode::BlameMenu,
+                0,
+                Char('w'),
+                Action::BlameMenuChar('w'),
+            ),
+            (
+                InputMode::BlameMenu,
+                0,
+                Char('g'),
+                Action::BlameMenuChar('g'),
+            ),
+            (InputMode::BlameMenu, 0, Enter, Action::BlameMenuEnter),
             (
                 InputMode::CommentExport,
                 0,
