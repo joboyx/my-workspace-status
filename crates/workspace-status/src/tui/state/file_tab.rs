@@ -555,6 +555,9 @@ mod tests {
         assert_eq!(app.cursor, tree_cursor, "tree cursor untouched");
 
         assert!(!app.hl_folds());
+        // Wrap is on by default and stops the pan; turn it off first.
+        app.dispatch(Action::ToggleDiffWrap);
+        assert!(!app.diff_wrap);
         app.dispatch(Action::PanDiff(5));
         assert_eq!(app.tabs.active_file().unwrap().col_offset, 5);
         app.dispatch(Action::PanDiff(-2));

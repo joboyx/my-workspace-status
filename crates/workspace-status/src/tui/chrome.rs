@@ -2313,6 +2313,14 @@ mod tests {
             "no right-focus mark on a file tab"
         );
         assert_eq!(help_tab(&app), HelpTab::File);
+        // A file tab opens wrapped: it shares the diff wrap flag (on by default).
+        assert!(app.diff_wrap);
+        let row = line_plain(&status_line(&app, 160));
+        assert!(
+            row.starts_with(" wrap  ? help"),
+            "no tree / diff pill: {row}"
+        );
+        app.diff_wrap = false;
         let row = line_plain(&status_line(&app, 160));
         assert!(row.starts_with(" ? help"), "no tree / diff pill: {row}");
         for chip in [

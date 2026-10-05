@@ -9177,19 +9177,16 @@ mod tests {
         let long = "w".repeat(150);
         refs[25] = &long;
         let mut state = file_tab_state(&refs);
+        assert!(
+            state.diff_wrap,
+            "a file tab opens wrapped (diff wrap default)"
+        );
         state.dispatch(Action::MoveToEnd);
         let backend = TestBackend::new(80, 16);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let rows = state.layout.file_view_row_lines.clone();
         assert_eq!(rows.last(), Some(&29), "cursor line paints: {rows:?}");
-        let scroll = state.tabs.active_file().unwrap().scroll;
-        assert_eq!(rows.first(), Some(&scroll));
-
-        state.dispatch(Action::ToggleDiffWrap);
-        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-        let rows = state.layout.file_view_row_lines.clone();
-        assert_eq!(rows.last(), Some(&29), "{rows:?}");
         assert_eq!(
             rows.iter().filter(|&&line| line == 25).count(),
             2,
@@ -9201,6 +9198,18 @@ mod tests {
         assert!(
             continuation.starts_with("│   w"),
             "blank gutter: {continuation}"
+        );
+
+        state.dispatch(Action::ToggleDiffWrap);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let rows = state.layout.file_view_row_lines.clone();
+        assert_eq!(rows.last(), Some(&29), "{rows:?}");
+        let scroll = state.tabs.active_file().unwrap().scroll;
+        assert_eq!(rows.first(), Some(&scroll));
+        assert_eq!(
+            rows.iter().filter(|&&line| line == 25).count(),
+            1,
+            "unwrapped, the long line takes one row: {rows:?}"
         );
     }
 
@@ -9259,7 +9268,10 @@ mod tests {
     fn file_tab_wrap_scan_of_a_huge_line_is_bounded_by_the_view() {
         let huge = "m".repeat(1024 * 1024);
         let mut state = file_tab_state(&[huge.as_str(), "tail"]);
-        state.dispatch(Action::ToggleDiffWrap);
+        assert!(
+            state.diff_wrap,
+            "a file tab opens wrapped (diff wrap default)"
+        );
         let backend = TestBackend::new(80, 16);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
