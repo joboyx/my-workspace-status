@@ -4,17 +4,19 @@ use crate::support::{tree_cursor_on, GIT_WAIT, WAIT};
 
 /// Painted SEARCH status line with this query and the typing cursor.
 ///
-/// The capital glyphs must sit on that line. A lowercase type-in, an
-/// armed `/{query}` chip, or a global Shift binding cannot pass.
+/// The capital glyphs must sit on that line, followed by the Enter-arms
+/// hint or the live preview's `no match`. A lowercase type-in, an armed
+/// `/{query}` chip, or a global Shift binding cannot pass.
 fn search_prompt_has_query(screen: &str, query: &str) -> bool {
     let Some(status) = screen.lines().last() else {
         return false;
     };
+    let hint = status.contains("Enter arms query")
+        && status.contains("Esc clears")
+        && status.contains("n/N after Enter");
     status.contains("SEARCH")
         && status.contains(&format!("{query}▏"))
-        && status.contains("Enter arms query")
-        && status.contains("Esc clears")
-        && status.contains("n/N after Enter")
+        && (hint || status.contains("no match"))
         && (query.is_empty() || !status.contains(&format!("/{query}")))
 }
 
@@ -28,7 +30,6 @@ fn search_did_not_fire_global_shift(screen: &str) -> bool {
         && !screen.contains("Flat paths")
         && !screen.contains("Focus branches")
         && !screen.contains("full graph")
-        && !tree_cursor_on(screen, "No updates")
 }
 
 /// CSI-u Shift+letters in an armed `/` query type capitals.
@@ -115,9 +116,15 @@ fn pty_shift_letters_csi_u_type_into_search() {
     tui.shift_letter('G');
     tui.wait_pred(
         |screen| {
+            // `OSG` has no hit, so the preview puts the cursor back on
+            // the `/` origin. Shift+G would leave it on the last row.
             search_prompt_has_query(screen, "OSG")
+                && screen
+                    .lines()
+                    .last()
+                    .is_some_and(|s| s.contains("no match"))
                 && search_did_not_fire_global_shift(screen)
-                && !tree_cursor_on(screen, "No updates")
+                && tree_cursor_on(screen, "README.md")
         },
         "CSI-u Shift+G types G; it must not jump to the last tree row",
         WAIT,

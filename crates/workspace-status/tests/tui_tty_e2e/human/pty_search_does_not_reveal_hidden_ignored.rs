@@ -1,22 +1,21 @@
 use crate::harness::PtySession;
 use crate::seed::daily_workspace;
 use crate::support::{
-    crumb_row, documented_launch_first_paint, status_row, tree_cursor_on, tree_dir_expanded,
+    crumb_row, documented_launch_first_paint, no_updates_group_folded, status_row, tree_cursor_on,
     tree_has, tree_line_containing, SETTLE_MS, WAIT,
 };
 
-/// Painted SEARCH status line with this query and the typing cursor.
+/// Painted SEARCH status line with this query, the typing cursor, and the
+/// live preview's `no match` in place of the Enter-arms hint.
 ///
-/// An armed `/{query}` chip, help `HELP  /{query}`, or a missing Enter-arms
-/// hint cannot pass.
-fn search_prompt_has_query(screen: &str, query: &str) -> bool {
+/// An armed `/{query}` chip or help `HELP  /{query}` cannot pass.
+fn search_prompt_has_no_match_query(screen: &str, query: &str) -> bool {
     let status = status_row(screen);
     status.contains("SEARCH")
         && status.contains(&format!("{query}▏"))
-        && status.contains("Enter arms query")
-        && status.contains("Esc clears")
-        && status.contains("n/N after Enter")
-        && (query.is_empty() || !status.contains(&format!("/{query}")))
+        && status.contains("no match")
+        && !status.contains("Enter arms query")
+        && !status.contains(&format!("/{query}"))
 }
 
 /// Ignored `notes` is absent from the left tree and is not the cursor.
@@ -32,29 +31,28 @@ fn hidden_notes_stay_out(screen: &str) -> bool {
         && !screen.contains("[notes]")
 }
 
-/// Seed repos stay painted. `/n` / `/no` hit the visible No-updates group.
+/// Seed repos stay painted, back where `/` found them.
 ///
-/// A filter that hides app/merger/README, a jump onto ignored `notes`, or a
-/// no-op that leaves the launch README cursor cannot pass.
+/// `/n` / `/no` hit the visible No-updates group, but `notes` has no hit,
+/// so the tree returns to the `/` origin: the launch README cursor with
+/// No updates folded again. A filter that hides app/merger/README, a jump
+/// onto ignored `notes`, or a cursor left on No updates cannot pass.
 fn seed_tree_after_notes_query(screen: &str) -> bool {
     tree_has(screen, "README.md")
         && tree_has(screen, "app")
         && tree_has(screen, "merger")
-        && tree_has(screen, "No updates")
-        && tree_has(screen, "lib")
-        && tree_dir_expanded(screen, "No updates")
-        && tree_cursor_on(screen, "No updates")
-        && !tree_cursor_on(screen, "README.md")
+        && no_updates_group_folded(screen)
+        && tree_cursor_on(screen, "README.md")
+        && !tree_cursor_on(screen, "No updates")
         && !tree_cursor_on(screen, "app")
         && !tree_cursor_on(screen, "merger")
-        && !tree_cursor_on(screen, "lib")
         && !tree_cursor_on(screen, "workspace")
 }
 
 /// Typing `/notes` on the tree. Help `/` paints `HELP  /notes`.
 fn typing_notes_search_hidden(screen: &str) -> bool {
     let crumb = crumb_row(screen);
-    search_prompt_has_query(screen, "notes")
+    search_prompt_has_no_match_query(screen, "notes")
         && hidden_notes_stay_out(screen)
         && seed_tree_after_notes_query(screen)
         && !screen.contains("MOVE")
@@ -84,9 +82,10 @@ fn armed_notes_search_no_match(screen: &str) -> bool {
 /// Docs + keymap: `/` search jumps among visible rows (including folded
 /// rows already in the tree). Ignored repos stay out until `.`. Daily
 /// seed first paint hides `notes`. Typing `/notes` keeps SEARCH on the
-/// status row (`notes▏` + Enter-arms hint). Each character applies: `n`
-/// and `no` hit the visible `No updates` group; `notes` itself has no
-/// visible hit, so that group stays focused and expanded. Ignored
+/// status row (`notes▏` + the preview's `no match`). Each character
+/// applies from the `/` origin: `n` and `no` hit the visible `No updates`
+/// group; `notes` itself has no visible hit, so the tree goes back to the
+/// launch README cursor with that group folded (vim incsearch). Ignored
 /// `@ notes` is never inserted. Enter arms `/notes` with a `no match`
 /// breadcrumb toast. A no-op `/`, help search (`HELP  /notes`), `.`
 /// show-ignored, a jump onto `notes`, or a filter that hides
@@ -105,7 +104,7 @@ fn pty_search_does_not_reveal_hidden_ignored() {
     tui.keys("notes");
     tui.wait_pred(
         typing_notes_search_hidden,
-        "/notes types SEARCH notes▏; ignored notes stay off the tree and cursor; n/no leave No updates focused (a no-op `/`, help `HELP  /notes`, or `.` `@ notes` cannot pass)",
+        "/notes types SEARCH notes▏ no match; ignored notes stay off the tree and cursor; no hit puts the cursor back on README (a no-op `/`, help `HELP  /notes`, or `.` `@ notes` cannot pass)",
         WAIT,
     );
 

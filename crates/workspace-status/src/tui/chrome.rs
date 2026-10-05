@@ -74,7 +74,10 @@ use super::keys::DOUBLE_TAP_MS;
 use super::ops::{collect_write_files, op_targets, push_targets, Op};
 use super::split::DiffMode;
 use super::stash::{stash_ops_for_context, StashOpsContext};
-use super::state::{revert_scope, AppState, FocusPane};
+use super::state::{
+    revert_scope, AppState, FocusPane, SEARCH_NO_MATCH, SEARCH_WRAPPED_TO_BOTTOM,
+    SEARCH_WRAPPED_TO_TOP,
+};
 use super::theme::{hex_color, Palette, Pill, Pills};
 use super::tree::NodeKind;
 
@@ -1196,14 +1199,30 @@ pub fn status_line(state: &AppState, width: u16) -> Line<'static> {
 
 fn search_typing_line(state: &AppState, palette: Palette, filter: Pill) -> Line<'static> {
     let query = state.search_query.clone();
+    // The live preview's `no match` / wrap notice replaces the hint, so it
+    // shows before Enter (the idle bar that paints `status` is hidden).
+    let notice = [
+        SEARCH_NO_MATCH,
+        SEARCH_WRAPPED_TO_TOP,
+        SEARCH_WRAPPED_TO_BOTTOM,
+    ]
+    .contains(&&*state.status);
+    let tail = if notice {
+        Span::styled(
+            format!("   {}", &*state.status),
+            Style::default().fg(state.status.kind().color(palette)),
+        )
+    } else {
+        Span::styled(
+            format!("   {SEARCH_TYPING_HINT}"),
+            Style::default().fg(palette.muted),
+        )
+    };
     Line::from(vec![
         pill_span("SEARCH", filter),
         Span::styled(format!(" {query}"), Style::default().fg(palette.repo)),
         Span::styled("▏", Style::default().fg(palette.cursor)),
-        Span::styled(
-            format!("   {SEARCH_TYPING_HINT}"),
-            Style::default().fg(palette.muted),
-        ),
+        tail,
     ])
 }
 
@@ -1797,6 +1816,47 @@ mod tests {
         let text = format_breadcrumb(&breadcrumb_segments(&app), app.focus);
         assert!(text.contains('›'), "{text}");
         assert!(text.contains("[app]"), "{text}");
+    }
+
+    #[test]
+    fn typing_line_shows_the_preview_wrap_and_no_match_before_enter() {
+        use crate::tui::action::Action;
+        let mut app = state();
+        let readme = app
+            .rows
+            .iter()
+            .position(|row| row.id == "file:app:README.md")
+            .expect("app README");
+        // From the last row, the only `README` match is behind the cursor.
+        app.cursor = app.rows.len() - 1;
+        assert!(readme < app.cursor);
+        app.dispatch(Action::SearchStart);
+        let text = line_plain(&status_line(&app, 200));
+        assert!(text.contains(SEARCH_TYPING_HINT), "{text}");
+        for c in "README".chars() {
+            app.dispatch(Action::SearchChar(c));
+        }
+        assert!(app.search_mode);
+        let line = status_line(&app, 200);
+        let text = line_plain(&line);
+        assert!(text.contains(SEARCH_WRAPPED_TO_TOP), "{text}");
+        assert!(!text.contains(SEARCH_TYPING_HINT), "{text}");
+        let notice = line
+            .spans
+            .iter()
+            .find(|span| span.content.contains(SEARCH_WRAPPED_TO_TOP))
+            .expect("notice span");
+        assert_eq!(
+            notice.style.fg,
+            Some(app.status.kind().color(app.theme.palette()))
+        );
+        app.dispatch(Action::SearchChar('Z'));
+        let text = line_plain(&status_line(&app, 200));
+        assert!(text.contains(SEARCH_NO_MATCH), "{text}");
+        assert!(!text.contains(SEARCH_TYPING_HINT), "{text}");
+        app.status = StatusMessage::info("/");
+        let text = line_plain(&status_line(&app, 200));
+        assert!(text.contains(SEARCH_TYPING_HINT), "{text}");
     }
 
     #[test]

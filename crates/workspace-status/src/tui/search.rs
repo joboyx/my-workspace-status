@@ -5,12 +5,16 @@
 //! search unless shown (`.` / `-a`). Graph search matches subject, body, author,
 //! painted (relative or local) or UTC time, branch and tag names, and sha. Commit-file search
 //! matches paths. Diff search matches painted line text.
+//!
+//! Like vim `/`, a step lands on the first match after the pane cursor
+//! (`N`: the last one before it) and wraps at the ends.
 
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use workspace_status_graph::{format_relative_date, format_utc_timestamp, short_id, GraphRow};
 
+use super::commit_files::CommitFileRow;
 use super::drill::CommitFile;
 use super::tree::{flatten, TreeNode};
 use crate::helpers::visible_width;
@@ -51,22 +55,61 @@ pub fn match_indices(labels: &[&str], query: &str) -> Vec<usize> {
         .collect()
 }
 
-/// Next/prev match id with wrap. Empty `ids` → `None`.
-pub fn step_match_id(ids: &[String], current_id: Option<&str>, dir: i32) -> Option<String> {
-    if ids.is_empty() {
-        return None;
+/// Match a search step landed on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchLanding<T> {
+    /// Landed match: a row index or a stable row id, per pane.
+    pub target: T,
+    /// True when the step ran off the end and started over from the other
+    /// end (top for a forward step, bottom for a backward one).
+    pub wrapped: bool,
+}
+
+impl<T> SearchLanding<T> {
+    fn map<U>(self, f: impl FnOnce(T) -> U) -> SearchLanding<U> {
+        SearchLanding {
+            target: f(self.target),
+            wrapped: self.wrapped,
+        }
     }
-    let pos = current_id.and_then(|id| ids.iter().position(|x| x == id));
-    let Some(pos) = pos else {
-        return if dir < 0 {
-            ids.last().cloned()
-        } else {
-            ids.first().cloned()
-        };
+}
+
+/// Step from `anchor` to the next hit, vim `/` style.
+///
+/// `hits` are ascending positions in the pane's search order. `dir` >= 0
+/// takes the first hit strictly after `anchor`, `dir` < 0 the last hit
+/// strictly before it. With no hit that way, the step wraps to the other
+/// end and says so; an anchor that is the only hit wraps onto itself. No
+/// `anchor` lands on the first (forward) or last (backward) hit, unwrapped.
+pub fn step_from_anchor(
+    hits: &[usize],
+    anchor: Option<usize>,
+    dir: i32,
+) -> Option<SearchLanding<usize>> {
+    let (first, last) = (*hits.first()?, *hits.last()?);
+    let forward = dir >= 0;
+    let Some(anchor) = anchor else {
+        let target = if forward { first } else { last };
+        return Some(SearchLanding {
+            target,
+            wrapped: false,
+        });
     };
-    let len = ids.len() as i32;
-    let next = (pos as i32 + dir).rem_euclid(len) as usize;
-    ids.get(next).cloned()
+    let ahead = if forward {
+        hits.iter().copied().find(|hit| *hit > anchor)
+    } else {
+        hits.iter().rev().copied().find(|hit| *hit < anchor)
+    };
+    Some(match ahead {
+        Some(target) => SearchLanding {
+            target,
+            wrapped: false,
+        },
+        None => SearchLanding {
+            target: if forward { first } else { last },
+            wrapped: true,
+        },
+    })
 }
 
 /// Stable ids whose labels match `query`, in tree order (including folded).
@@ -116,25 +159,28 @@ pub fn unfold_ancestors(
     next
 }
 
-/// Focus a match. `dir` is `0` (first), `1` (next), or `-1` (previous).
-/// Unfolds ancestors of the chosen match only.
+/// Step to a tree match from `current_id`, in tree order (folded rows
+/// included). `dir` `0` and `1` step forward, `-1` back; see
+/// [`step_from_anchor`]. Unfolds ancestors of the chosen match only.
 pub fn focus_tree_search(
     tree: &TreeNode,
     folds: &HashSet<String>,
     query: &str,
     current_id: Option<&str>,
     dir: i32,
-) -> (HashSet<String>, Option<String>) {
-    let ids = collect_match_ids(tree, query);
-    let focus_id = if dir == 0 {
-        ids.first().cloned()
-    } else {
-        step_match_id(&ids, current_id, dir)
-    };
-    let Some(focus_id) = focus_id else {
+) -> (HashSet<String>, Option<SearchLanding<String>>) {
+    let all = flatten(tree, &HashSet::new());
+    let labels: Vec<&str> = all.iter().map(|r| r.label.as_str()).collect();
+    let hits = match_indices(&labels, query);
+    let anchor = current_id.and_then(|id| all.iter().position(|r| r.id == id));
+    let Some(landing) = step_from_anchor(&hits, anchor, dir) else {
         return (folds.clone(), None);
     };
-    (unfold_ancestors(tree, folds, &focus_id), Some(focus_id))
+    let landing = landing.map(|i| all[i].id.clone());
+    (
+        unfold_ancestors(tree, folds, &landing.target),
+        Some(landing),
+    )
 }
 
 /// Search text for one graph row.
@@ -229,21 +275,18 @@ pub fn collect_graph_match_indices(rows: &[GraphRow], query: &str) -> Vec<usize>
     match_indices(&refs, query)
 }
 
-/// Next/prev graph match index with wrap. `dir` 0 = first hit.
+/// Step to a graph match from row `current`. See [`step_from_anchor`].
 pub fn focus_graph_search(
     rows: &[GraphRow],
     query: &str,
     current: usize,
     dir: i32,
-) -> Option<usize> {
-    let hits = collect_graph_match_indices(rows, query);
-    if hits.is_empty() {
-        return None;
-    }
-    if dir == 0 {
-        return hits.first().copied();
-    }
-    step_match_index(&hits, current, dir)
+) -> Option<SearchLanding<usize>> {
+    step_from_anchor(
+        &collect_graph_match_indices(rows, query),
+        Some(current),
+        dir,
+    )
 }
 
 /// Indices of commit-file paths that match `query`.
@@ -252,21 +295,29 @@ pub fn collect_commit_file_match_indices(files: &[CommitFile], query: &str) -> V
     match_indices(&labels, query)
 }
 
-/// Next/prev commit-file match index. `dir` 0 = first hit.
+/// Positions in `rows` of the file rows whose path matches `query`.
+///
+/// `rows` is the commit-file list flattened with no folds, so the hits
+/// follow the painted order (tree mode puts folders before files).
+pub fn commit_file_row_match_indices(rows: &[CommitFileRow], query: &str) -> Vec<usize> {
+    let file_rows: Vec<usize> = (0..rows.len()).filter(|&i| rows[i].is_file()).collect();
+    let paths: Vec<&str> = file_rows.iter().map(|&i| rows[i].path.as_str()).collect();
+    match_indices(&paths, query)
+        .into_iter()
+        .map(|k| file_rows[k])
+        .collect()
+}
+
+/// Step to a commit-file match from row `current` of `rows` (the list
+/// flattened with no folds). A folder row is a valid anchor. See
+/// [`step_from_anchor`].
 pub fn focus_commit_file_search(
-    files: &[CommitFile],
+    rows: &[CommitFileRow],
     query: &str,
-    current: usize,
+    current: Option<usize>,
     dir: i32,
-) -> Option<usize> {
-    let hits = collect_commit_file_match_indices(files, query);
-    if hits.is_empty() {
-        return None;
-    }
-    if dir == 0 {
-        return hits.first().copied();
-    }
-    step_match_index(&hits, current, dir)
+) -> Option<SearchLanding<usize>> {
+    step_from_anchor(&commit_file_row_match_indices(rows, query), current, dir)
 }
 
 /// Indices of painted diff lines that contain `query`.
@@ -275,41 +326,14 @@ pub fn match_diff_line_indices(lines: &[String], query: &str) -> Vec<usize> {
     match_indices(&labels, query)
 }
 
-/// Next/prev matching diff line. `dir` 0 = first hit.
+/// Step to a matching diff line from row `current`. See [`step_from_anchor`].
 pub fn focus_diff_search(
     lines: &[String],
     query: &str,
-    current: Option<usize>,
+    current: usize,
     dir: i32,
-) -> Option<usize> {
-    let hits = match_diff_line_indices(lines, query);
-    if hits.is_empty() {
-        return None;
-    }
-    if dir == 0 {
-        return hits.first().copied();
-    }
-    let cur = current.unwrap_or(usize::MAX);
-    step_match_index(&hits, cur, dir)
-}
-
-/// Next/prev match index with wrap. If `current` is not a hit, jump to first
-/// (`dir` > 0) or last (`dir` < 0).
-pub fn step_match_index(indices: &[usize], current: usize, dir: i32) -> Option<usize> {
-    if indices.is_empty() {
-        return None;
-    }
-    let pos = indices.iter().position(|i| *i == current);
-    let Some(pos) = pos else {
-        return if dir < 0 {
-            indices.last().copied()
-        } else {
-            indices.first().copied()
-        };
-    };
-    let len = indices.len() as i32;
-    let next = (pos as i32 + dir).rem_euclid(len) as usize;
-    indices.get(next).copied()
+) -> Option<SearchLanding<usize>> {
+    step_from_anchor(&match_diff_line_indices(lines, query), Some(current), dir)
 }
 
 /// Clamp a horizontal pan offset to `[0, max_offset]`.
@@ -503,21 +527,43 @@ mod tests {
         build_tree(&visible_for_tree(&built), true, "workspace")
     }
 
+    fn landed(target: usize, wrapped: bool) -> Option<SearchLanding<usize>> {
+        Some(SearchLanding { target, wrapped })
+    }
+
     #[test]
-    fn next_and_prev_wrap() {
-        let ids = vec!["a".into(), "b".into(), "c".into()];
-        assert_eq!(step_match_id(&ids, Some("a"), 1).as_deref(), Some("b"));
-        assert_eq!(step_match_id(&ids, Some("c"), 1).as_deref(), Some("a"));
-        assert_eq!(step_match_id(&ids, Some("a"), -1).as_deref(), Some("c"));
-        assert_eq!(step_match_id(&ids, None, 1).as_deref(), Some("a"));
-        assert_eq!(step_match_id(&ids, None, -1).as_deref(), Some("c"));
+    fn step_lands_after_or_before_the_anchor_and_wraps() {
+        let hits = [2, 5, 8];
+        // Forward (`/`, Enter, `n`) from a mid-list non-match: next below.
+        assert_eq!(step_from_anchor(&hits, Some(4), 0), landed(5, false));
+        assert_eq!(step_from_anchor(&hits, Some(4), 1), landed(5, false));
+        // The anchor row itself matching is skipped.
+        assert_eq!(step_from_anchor(&hits, Some(5), 0), landed(8, false));
+        assert_eq!(step_from_anchor(&hits, Some(5), -1), landed(2, false));
+        // Backward from a non-match: previous above.
+        assert_eq!(step_from_anchor(&hits, Some(4), -1), landed(2, false));
+        // Off either end wraps to the other end.
+        assert_eq!(step_from_anchor(&hits, Some(8), 1), landed(2, true));
+        assert_eq!(step_from_anchor(&hits, Some(9), 0), landed(2, true));
+        assert_eq!(step_from_anchor(&hits, Some(2), -1), landed(8, true));
+        assert_eq!(step_from_anchor(&hits, Some(0), -1), landed(8, true));
+        // No anchor: first / last, no wrap.
+        assert_eq!(step_from_anchor(&hits, None, 1), landed(2, false));
+        assert_eq!(step_from_anchor(&hits, None, -1), landed(8, false));
+        // The only match is the anchor: landing on it is a wrap.
+        assert_eq!(step_from_anchor(&[3], Some(3), 1), landed(3, true));
+        assert_eq!(step_from_anchor(&[3], Some(3), -1), landed(3, true));
+        // No matches: nothing to land on.
+        assert_eq!(step_from_anchor(&[], Some(3), 1), None);
+        assert_eq!(step_from_anchor(&[], None, -1), None);
     }
 
     #[test]
     fn first_match_unfolds_parent() {
         let tree = tree(false);
         let folds = default_folds(&tree);
-        let (next_folds, id) = focus_tree_search(&tree, &folds, "README", None, 0);
+        let (next_folds, landing) = focus_tree_search(&tree, &folds, "README", None, 0);
+        let id = landing.map(|l| l.target);
         assert_eq!(id.as_deref(), Some("file:app:README.md"));
         let rows = flatten(&tree, &next_folds);
         assert!(rows.iter().any(|r| r.id == "file:app:README.md"));
@@ -529,11 +575,15 @@ mod tests {
         let mut folds = HashSet::new();
         folds.insert("repo:app".into());
         folds.insert("group:no-updates".into());
-        let (folds, first) = focus_tree_search(&tree, &folds, "main", None, 0);
+        let step = |folds: &HashSet<String>, from: Option<&str>, dir: i32| {
+            let (folds, landing) = focus_tree_search(&tree, folds, "main", from, dir);
+            (folds, landing.map(|l| l.target))
+        };
+        let (folds, first) = step(&folds, None, 0);
         assert!(first.is_some());
-        let (folds, second) = focus_tree_search(&tree, &folds, "main", first.as_deref(), 1);
+        let (folds, second) = step(&folds, first.as_deref(), 1);
         assert_ne!(second, first);
-        let (folds, prev) = focus_tree_search(&tree, &folds, "main", second.as_deref(), -1);
+        let (folds, prev) = step(&folds, second.as_deref(), -1);
         assert_eq!(prev, first);
         if let Some(id) = prev {
             let rows = flatten(&tree, &folds);
@@ -615,8 +665,9 @@ mod tests {
             vec![0]
         );
         assert_eq!(collect_graph_match_indices(&rows, "aa11bb2"), vec![0]);
-        assert_eq!(focus_graph_search(&rows, "o", 0, 1), Some(1));
-        assert_eq!(focus_graph_search(&rows, "o", 1, -1), Some(0));
+        assert_eq!(focus_graph_search(&rows, "o", 0, 1), landed(1, false));
+        assert_eq!(focus_graph_search(&rows, "o", 1, -1), landed(0, false));
+        assert_eq!(focus_graph_search(&rows, "o", 1, 0), landed(0, true));
     }
 
     #[test]
@@ -659,6 +710,54 @@ mod tests {
     }
 
     #[test]
+    fn commit_file_search_follows_painted_tree_order() {
+        let files: Vec<CommitFile> = ["README.md", "src/a.rs", "src/b.rs", "src/deep/c.rs"]
+            .into_iter()
+            .map(|path| CommitFile {
+                status: "M".into(),
+                path: path.into(),
+                old_path: None,
+                stat: None,
+            })
+            .collect();
+        let rows =
+            crate::tui::commit_files::flatten_commit_files(&files, true, &HashSet::new(), false);
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "dir:src",
+                "dir:src/deep",
+                "file:src/deep/c.rs",
+                "file:src/a.rs",
+                "file:src/b.rs",
+                "file:README.md",
+            ]
+        );
+        // Painted order, not `files` order; folder rows never match.
+        assert_eq!(commit_file_row_match_indices(&rows, ".rs"), vec![2, 3, 4]);
+        assert_eq!(commit_file_row_match_indices(&rows, "src"), vec![2, 3, 4]);
+        // From `src/a.rs`: next is `src/b.rs`, then wrap to `src/deep/c.rs`.
+        assert_eq!(
+            focus_commit_file_search(&rows, ".rs", Some(3), 1),
+            landed(4, false)
+        );
+        assert_eq!(
+            focus_commit_file_search(&rows, ".rs", Some(4), 1),
+            landed(2, true)
+        );
+        // A folder row anchors at its own position.
+        assert_eq!(
+            focus_commit_file_search(&rows, ".rs", Some(1), 0),
+            landed(2, false)
+        );
+        assert_eq!(
+            focus_commit_file_search(&rows, ".rs", Some(1), -1),
+            landed(4, true)
+        );
+    }
+
+    #[test]
     fn commit_file_and_diff_search_and_pan_clamp() {
         let files = vec![
             CommitFile {
@@ -674,13 +773,19 @@ mod tests {
                 stat: None,
             },
         ];
-        assert_eq!(focus_commit_file_search(&files, "lib", 0, 0), Some(1));
+        let rows =
+            crate::tui::commit_files::flatten_commit_files(&files, false, &HashSet::new(), false);
+        assert_eq!(
+            focus_commit_file_search(&rows, "lib", Some(0), 0),
+            landed(1, false)
+        );
         let lines = vec![
             "@@ hunk @@".into(),
             "+needle line".into(),
             " context".into(),
         ];
-        assert_eq!(focus_diff_search(&lines, "needle", None, 0), Some(1));
+        assert_eq!(focus_diff_search(&lines, "needle", 0, 0), landed(1, false));
+        assert_eq!(focus_diff_search(&lines, "needle", 1, 0), landed(1, true));
         assert_eq!(apply_pan(0, -1, 4), 0);
         assert_eq!(apply_pan(0, 1, 4), 1);
         assert_eq!(apply_pan(4, 1, 4), 4);

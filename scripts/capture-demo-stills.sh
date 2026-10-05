@@ -741,7 +741,7 @@ mark_mid
 send "type:>"
 clip_commit 13-split-resize
 
-# 14 search position chip: /auth 1/2, 2/2, then wrap to 1/2.
+# 14 search position chip: /auth 2/2 (first match after the cursor), wrap to 1/2, then 2/2.
 launch_tui
 clip_start 14-search-count
 send slash type:auth
