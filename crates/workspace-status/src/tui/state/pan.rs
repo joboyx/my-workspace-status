@@ -1,5 +1,8 @@
 //! Horizontal pan for tree, graph, commit-file, and file-diff panes.
 
+use std::path::Path;
+
+use ratatui::style::Color;
 use workspace_status_graph::{graph_col_max, graph_hscroll_visible};
 
 use super::super::action::{Action, Effect};
@@ -12,7 +15,10 @@ use super::super::gates::ListFocusTarget;
 use super::super::icons::comment_mark_cols;
 use super::super::search::{apply_pan, list_row_pan_max, max_col_offset};
 use super::super::split::diff_paint_width;
-use super::super::tree::{row_segments, with_comment_mark, with_viewed_mark, NodeKind};
+use super::super::tree::{
+    pr_badge_mark, pr_badge_repo, row_segments, with_comment_mark, with_pr_badge, with_viewed_mark,
+    NodeKind,
+};
 use super::{AppState, FocusPane};
 use crate::helpers::visible_width;
 
@@ -96,7 +102,10 @@ impl AppState {
                 let commented = tree_row_has_comment(&self.comment_store, &self.snapshot, row);
                 let resolved = commented
                     && tree_row_comments_resolved(&self.comment_store, &self.snapshot, row);
-                let segs = row_segments(row, self.ascii, viewed, commented, resolved);
+                let mut segs = row_segments(row, self.ascii, viewed, commented, resolved);
+                // A painted PR badge widens the label, so pan can reach it.
+                let pr = pr_badge_repo(row).and_then(|repo| self.pr_badge(Path::new(repo)));
+                with_pr_badge(&mut segs.segments, self.ascii, pr);
                 let label: usize = segs.segments.iter().map(|s| visible_width(&s.text)).sum();
                 let trailing: usize = segs.trailing.iter().map(|s| visible_width(&s.text)).sum();
                 list_row_pan_max(label, row.depth, trailing, width)
@@ -155,7 +164,19 @@ impl AppState {
         let Some(model) = self.graph.as_ref() else {
             return 0;
         };
-        graph_col_max(model, self.ascii, pane_width, self.graph_vscroll_shown())
+        // Same badges the graph paints, so pan can reach them.
+        let badges: Vec<(usize, &str, Color)> = self
+            .graph_pr_badges()
+            .into_iter()
+            .map(|(index, _, pr)| (index, pr_badge_mark(self.ascii, pr).0, Color::Reset))
+            .collect();
+        graph_col_max(
+            model,
+            self.ascii,
+            pane_width,
+            self.graph_vscroll_shown(),
+            &badges,
+        )
     }
 
     /// Max `diff_col_offset` for the painted file diff (0 if it fits).

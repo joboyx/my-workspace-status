@@ -641,6 +641,20 @@ fn push_remote_name(cwd: &Path, branch: &str) -> String {
         .to_string()
 }
 
+/// Fetch URL of the remote that `branch` pushes to, or `None`.
+///
+/// The remote is the one `push` would use: `branch.<branch>.remote`, else
+/// the first configured remote, else `origin`. The URL comes from
+/// `git remote get-url <name>`, so `url.<base>.insteadOf` rewrites apply.
+/// `None` when that remote does not exist or git prints no URL.
+pub fn remote_url_for_branch(cwd: &Path, branch: &str) -> Option<String> {
+    let remote = push_remote_name(cwd, branch);
+    exec_git_stdout(&["remote", "get-url", &remote], cwd)
+        .ok()
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+}
+
 /// Stash worktree changes. Includes untracked files (`-u`).
 pub fn stash_push(cwd: &Path, paths: &[String]) -> Result<(), String> {
     let before = exec_git(&["stash", "list"], cwd);
@@ -2926,6 +2940,47 @@ filename new.txt
         fs::write(dir.join("big.txt"), big).unwrap();
         git(&dir, &["add", "big.txt"]);
         assert_eq!(blame_line(&dir, &BlameRev::Index, "big.txt", 1), Ok(None));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remote_url_for_branch_follows_branch_remote_then_first_remote() {
+        let dir = unique_dir("ws-git-remote-url");
+        init_repo(&dir);
+        assert_eq!(remote_url_for_branch(&dir, "main"), None, "no remote yet");
+
+        git(
+            &dir,
+            &["remote", "add", "origin", "git@github.com:octo/demo.git"],
+        );
+        git(
+            &dir,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "https://gitlab.com/group/sub/demo.git",
+            ],
+        );
+        assert_eq!(
+            remote_url_for_branch(&dir, "main").as_deref(),
+            Some("git@github.com:octo/demo.git"),
+            "no branch remote: first remote"
+        );
+
+        git(&dir, &["config", "branch.main.remote", "upstream"]);
+        assert_eq!(
+            remote_url_for_branch(&dir, "main").as_deref(),
+            Some("https://gitlab.com/group/sub/demo.git"),
+            "branch.<b>.remote wins"
+        );
+
+        git(&dir, &["config", "branch.topic.remote", "gone"]);
+        assert_eq!(
+            remote_url_for_branch(&dir, "topic"),
+            None,
+            "configured remote that does not exist"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -13,6 +13,8 @@
 //! then enqueues blob/temp prepare on `spawn_blocking` before spawning the tool.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use workspace_status_graph::LOADING_OLDER;
@@ -27,9 +29,9 @@ use crate::git::{
     apply_cached_patch, apply_worktree_patch_reverse, blame_line, create_branch_at,
     create_branch_checkout, exec_git_checked, latest_stash_ref, list_compare_picker_branches,
     list_compare_picker_commits, list_local_branches, previous_line_change, pull_quiet_detailed,
-    push_quiet, remove_untracked_file, remove_worktree, revert_compare_file, revert_compare_patch,
-    revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop, stash_push, unstage_file,
-    COMPARE_REVERT_ABORTED,
+    push_quiet, remote_url_for_branch, remove_untracked_file, remove_worktree, revert_compare_file,
+    revert_compare_patch, revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop,
+    stash_push, unstage_file, COMPARE_REVERT_ABORTED,
 };
 use crate::parallel::env_fetch_concurrency;
 use crate::snapshot::RepoSnapshot;
@@ -60,6 +62,9 @@ use super::ops::{
     format_completed_op, format_mixed_running_op, format_running_op, op_targets, Op, OpTally,
     RepoOpResult, RunningOp,
 };
+use super::pull_request::{lookup, PrLookup};
+#[cfg(not(test))]
+use super::pull_request::{open_in_browser, run_cli};
 use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
 use super::stash::{resolve_stash_menu_key, StashMenuKeyResult, StashOpId};
 use super::state::{revert_scope, AppState, PendingConfirm};
@@ -207,7 +212,52 @@ pub(crate) enum JobOutcome {
         sha: String,
         result: Result<crate::git::PreviousLineChange, String>,
     },
+    /// Badge lookup of `branch` in checkout `repo`. `remote` is the URL the
+    /// worker resolved.
+    PullRequestBadge {
+        repo: PathBuf,
+        branch: String,
+        remote: Option<String>,
+        lookup: PrLookup,
+    },
+    /// `gx` lookup of `branch` in checkout `repo`, then the browser open.
+    /// `opened` is true when the browser started for a found PR.
+    PullRequestOpen {
+        repo: PathBuf,
+        branch: String,
+        remote: Option<String>,
+        lookup: PrLookup,
+        opened: bool,
+    },
 }
+
+/// Forge CLI runner for PR lookups: argv and the quit flag in, stdout out.
+type PrCliRunner = fn(&[String], &AtomicBool) -> Result<String, ()>;
+
+/// Opens a PR URL in the operator's browser; stops waiting on the quit flag.
+type PrUrlOpener = fn(&str, &AtomicBool) -> Result<(), ()>;
+
+/// Forge CLI runner a new [`Interpreter`] starts with.
+#[cfg(not(test))]
+const DEFAULT_PR_CLI: PrCliRunner = run_cli;
+
+/// Test builds never spawn `gh` / `glab`: the default fails without a
+/// spawn, and a test that needs an answer sets a fake.
+#[cfg(test)]
+const DEFAULT_PR_CLI: PrCliRunner = |_, _| Err(());
+
+/// Browser opener a new [`Interpreter`] starts with.
+#[cfg(not(test))]
+const DEFAULT_PR_OPENER: PrUrlOpener = open_in_browser;
+
+/// Test builds never start a browser: the default fails without a spawn,
+/// and a test that needs an open sets a fake.
+#[cfg(test)]
+const DEFAULT_PR_OPENER: PrUrlOpener = |_, _| Err(());
+
+/// Most badge lookups on workers at once, so pane loads are not starved.
+/// A `gx` open does not wait for this cap.
+const PR_BADGE_LOOKUPS_MAX: usize = 2;
 
 /// Live TTY launch after [`JobOutcome::DiffPrepared`].
 pub(crate) struct DiffLaunch {
@@ -532,6 +582,19 @@ pub(crate) struct Interpreter {
     /// Latest blame previous-change request; a newer one replaces it
     /// before spawn.
     blame_previous: Option<(u64, String, Box<crate::git::LineBlame>)>,
+    /// Queued `gx` opens: checkout, branch. Each has its own slot.
+    pr_opens: VecDeque<(PathBuf, String)>,
+    /// Queued badge lookups: checkout, branch.
+    pr_badges: VecDeque<(PathBuf, String)>,
+    /// Badge lookups on a worker (at most [`PR_BADGE_LOOKUPS_MAX`]).
+    pr_badges_running: usize,
+    /// Forge CLI runner ([`DEFAULT_PR_CLI`]; tests swap in a fake).
+    pr_cli: PrCliRunner,
+    /// Browser opener ([`DEFAULT_PR_OPENER`]; tests swap in a fake).
+    pr_opener: PrUrlOpener,
+    /// Set on quit. PR jobs on workers stop their CLI or opener wait at
+    /// once, so the runtime shutdown does not wait for them.
+    pr_cancel: Arc<AtomicBool>,
     exclusive_inflight: HashMap<u64, Vec<String>>,
     /// Name of the exclusive write or default-branch job on a worker.
     running_write: Option<&'static str>,
@@ -573,10 +636,26 @@ impl Interpreter {
             line_blame_slot: None,
             line_blame_inflight: false,
             blame_previous: None,
+            pr_opens: VecDeque::new(),
+            pr_badges: VecDeque::new(),
+            pr_badges_running: 0,
+            pr_cli: DEFAULT_PR_CLI,
+            pr_opener: DEFAULT_PR_OPENER,
+            pr_cancel: Arc::new(AtomicBool::new(false)),
             exclusive_inflight: HashMap::new(),
             running_write: None,
             dirty: false,
         }
+    }
+
+    /// Stop PR lookups and opens on workers: a running forge CLI is killed,
+    /// an opener wait ends, and a job that has not started fails at once.
+    ///
+    /// The live loop calls this when it exits, before the runtime that owns
+    /// the worker threads shuts down and waits for them. Their outcomes are
+    /// never applied. Other jobs are not affected.
+    pub(crate) fn cancel_pull_request_jobs(&self) {
+        self.pr_cancel.store(true, Ordering::Relaxed);
     }
 
     /// True when an exclusive write or default-branch switch is in flight or queued.
@@ -729,9 +808,11 @@ impl Interpreter {
                 self.sched.on_watch_tick(state.focused_checkout_path());
             }
             Effect::ReloadSnapshot => {
+                state.forget_pr_lookups(None);
                 self.sched.on_reload_snapshot(state.focused_checkout_path());
             }
             Effect::ReloadRepo { repo } => {
+                state.forget_pr_lookups(Some(Path::new(&repo)));
                 self.sched.on_reload_repo(repo);
             }
             Effect::LoadRightPane => {
@@ -1147,6 +1228,14 @@ impl Interpreter {
                 self.file_tab_jobs.push_back((tab_id, gen, repo, path));
                 self.sched.enqueue_user(UserTag::QuickOpen);
             }
+            Effect::OpenPullRequest { repo, branch } => {
+                self.pr_opens.push_back((repo, branch));
+                self.sched.enqueue_user(UserTag::PullRequest);
+            }
+            Effect::LookupPullRequests { targets } => {
+                self.pr_badges.extend(targets);
+                self.fill_pr_badge_slots();
+            }
             Effect::CopyClipboard { text, announce } => {
                 let ok = comments::copy_to_clipboard(&text);
                 // `y` opens the export overlay right before this copy; its
@@ -1394,6 +1483,7 @@ impl Interpreter {
                     .into_iter()
                     .map(|(path, meta, ov)| (path, (meta, ov)))
                     .collect();
+                self.queue_due_pr_lookups(state, opts);
                 self.mark();
             }
             JobOutcome::RepoStatus { gen, path, snap } => {
@@ -1407,6 +1497,7 @@ impl Interpreter {
                 if let Some(reload) = state.worktree_compare_reload(&path) {
                     self.schedule(state, opts, reload, &Action::None);
                 }
+                self.queue_due_pr_lookups(state, opts);
                 let decision = self.sched.note_repo_done(gen, &path);
                 if focused.as_deref() == Some(path.as_str())
                     && focused_repo_needs_pane(&before_sigs, &before_snap, state, &path)
@@ -1738,6 +1829,28 @@ impl Interpreter {
                 }
                 self.mark();
             }
+            JobOutcome::PullRequestBadge {
+                repo,
+                branch,
+                remote,
+                lookup,
+            } => {
+                self.pr_badges_running = self.pr_badges_running.saturating_sub(1);
+                if state.apply_pr_lookup(&repo, &branch, remote, lookup) {
+                    self.mark();
+                }
+                self.fill_pr_badge_slots();
+            }
+            JobOutcome::PullRequestOpen {
+                repo,
+                branch,
+                remote,
+                lookup,
+                opened,
+            } => {
+                state.apply_pr_open(&repo, &branch, remote, lookup, opened);
+                self.mark();
+            }
             JobOutcome::ComparePicker { gen, repo, result } => {
                 self.sched.note_user_done(UserTag::Prepare);
                 let accepted = self.sched.accept_prepare_compare_result(gen);
@@ -1788,6 +1901,29 @@ impl Interpreter {
 
     fn mark(&mut self) {
         self.dirty = true;
+    }
+
+    /// Queue badge lookups for checkouts whose branch is new or changed.
+    fn queue_due_pr_lookups(&mut self, state: &mut AppState, opts: &TuiOpts) {
+        let targets = state.due_pr_lookups();
+        if !targets.is_empty() {
+            self.schedule(
+                state,
+                opts,
+                Effect::LookupPullRequests { targets },
+                &Action::None,
+            );
+        }
+    }
+
+    /// Queue `UserTag::PullRequest` slots for waiting badge lookups, up to
+    /// [`PR_BADGE_LOOKUPS_MAX`] on workers. `gx` opens queue their own slot.
+    fn fill_pr_badge_slots(&mut self) {
+        let free = PR_BADGE_LOOKUPS_MAX.saturating_sub(self.pr_badges_running);
+        let wanted = self.pr_opens.len() + self.pr_badges.len().min(free);
+        for _ in self.sched.queued_user_tag(UserTag::PullRequest)..wanted {
+            self.sched.enqueue_user(UserTag::PullRequest);
+        }
     }
 
     fn enqueue_write(
@@ -2595,6 +2731,55 @@ impl Interpreter {
                         JobOutcome::LineBlame { key, result }
                     }),
                 );
+            }
+            UserTag::PullRequest => {
+                let cwd = opts.cwd.clone();
+                let cli = self.pr_cli;
+                let cancel = Arc::clone(&self.pr_cancel);
+                if let Some((repo, branch)) = self.pr_opens.pop_front() {
+                    let open = self.pr_opener;
+                    spawn(
+                        id,
+                        Box::new(move || {
+                            let run = |argv: &[String]| cli(argv, &cancel);
+                            let remote = remote_url_for_branch(&cwd.join(&repo), &branch);
+                            let lookup = lookup(remote.as_deref(), &branch, &run);
+                            let opened = match &lookup {
+                                PrLookup::Found(pr) => open(&pr.url, &cancel).is_ok(),
+                                PrLookup::NoPr | PrLookup::Failed => false,
+                            };
+                            JobOutcome::PullRequestOpen {
+                                repo,
+                                branch,
+                                remote,
+                                lookup,
+                                opened,
+                            }
+                        }),
+                    );
+                    return;
+                }
+                if self.pr_badges_running < PR_BADGE_LOOKUPS_MAX {
+                    if let Some((repo, branch)) = self.pr_badges.pop_front() {
+                        self.pr_badges_running += 1;
+                        spawn(
+                            id,
+                            Box::new(move || {
+                                let run = |argv: &[String]| cli(argv, &cancel);
+                                let remote = remote_url_for_branch(&cwd.join(&repo), &branch);
+                                let lookup = lookup(remote.as_deref(), &branch, &run);
+                                JobOutcome::PullRequestBadge {
+                                    repo,
+                                    branch,
+                                    remote,
+                                    lookup,
+                                }
+                            }),
+                        );
+                        return;
+                    }
+                }
+                self.sched.note_job_finished(id);
             }
             UserTag::Autoload => {
                 let Some((gen, identity)) = self.autoload.take() else {
@@ -6031,5 +6216,297 @@ mod tests {
         let tab = state.tabs.active_compare().unwrap();
         assert!(tab.content.unstaged.contains("+C"), "{:?}", tab.content);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    const PR_URL: &str = "https://github.com/octo/demo/pull/7";
+
+    thread_local! {
+        /// URLs the fake opener was asked to open (sync pump: same thread).
+        static OPENED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn opened_urls() -> Vec<String> {
+        OPENED.with(|urls| urls.borrow_mut().drain(..).collect())
+    }
+
+    fn gh_approved_pr(argv: &[String], _: &AtomicBool) -> Result<String, ()> {
+        assert_eq!(argv.first().map(String::as_str), Some("gh"), "{argv:?}");
+        Ok(format!(
+            r#"[{{"number":7,"state":"OPEN","url":"{PR_URL}","headRefName":"feature","isCrossRepository":false,"reviewDecision":"APPROVED","updatedAt":"2026-01-02T00:00:00Z"}}]"#
+        ))
+    }
+
+    fn gh_no_pr(_: &[String], _: &AtomicBool) -> Result<String, ()> {
+        Ok("[]".into())
+    }
+
+    fn gh_fails(_: &[String], _: &AtomicBool) -> Result<String, ()> {
+        Err(())
+    }
+
+    fn cli_must_not_run(argv: &[String], _: &AtomicBool) -> Result<String, ()> {
+        panic!("no forge CLI expected: {argv:?}")
+    }
+
+    fn opener_ok(url: &str, _: &AtomicBool) -> Result<(), ()> {
+        OPENED.with(|urls| urls.borrow_mut().push(url.to_string()));
+        Ok(())
+    }
+
+    fn opener_fails(url: &str, _: &AtomicBool) -> Result<(), ()> {
+        OPENED.with(|urls| urls.borrow_mut().push(url.to_string()));
+        Err(())
+    }
+
+    /// Real checkout `app` on `feature`, with `origin` at `remote` when set,
+    /// focused in the tree.
+    fn pr_app(tag: &str, remote: Option<&str>) -> (PathBuf, AppState) {
+        let (root, mut state) = git_app_state(tag, "feature", false);
+        if let Some(remote) = remote {
+            crate::testutil::git(&root.join("app"), &["remote", "add", "origin", remote]);
+        }
+        focus_repo(&mut state, "app");
+        (root, state)
+    }
+
+    /// `gx` on the focused row with fake CLI and opener; returns the status.
+    fn run_gx(state: &mut AppState, cli: PrCliRunner, opener: PrUrlOpener) -> StatusMessage {
+        let mut interp = Interpreter::with_cap(4);
+        interp.pr_cli = cli;
+        interp.pr_opener = opener;
+        let effect = state.dispatch(Action::OpenPullRequest);
+        assert_eq!(
+            effect,
+            Effect::OpenPullRequest {
+                repo: PathBuf::from("app"),
+                branch: "feature".into(),
+            }
+        );
+        let opts = opts(state);
+        interp.interpret_sync(state, &opts, effect, &Action::OpenPullRequest);
+        state.status.clone()
+    }
+
+    #[test]
+    fn open_pull_request_opens_the_found_pr_and_caches_it() {
+        let (root, mut state) = pr_app("ws-effect-pr-open", Some("git@github.com:octo/demo.git"));
+        let _ = opened_urls();
+        let status = run_gx(&mut state, gh_approved_pr, opener_ok);
+        assert_eq!(status, "opened PR #7");
+        assert_eq!(status.kind(), StatusKind::Ok);
+        assert_eq!(opened_urls(), vec![PR_URL.to_string()]);
+        assert_eq!(
+            state.pr_badge(Path::new("app")),
+            Some(crate::tui::pull_request::PrState::Approved),
+            "the open's fresh answer feeds the badge"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn open_pull_request_reports_no_pr_lookup_failure_and_open_failure() {
+        let (root, mut state) = pr_app("ws-effect-pr-status", Some("git@github.com:octo/demo.git"));
+        let _ = opened_urls();
+        let cases: [(PrCliRunner, PrUrlOpener, &str, StatusKind, usize); 3] = [
+            (
+                gh_no_pr,
+                opener_ok,
+                "no PR for feature",
+                StatusKind::Warn,
+                0,
+            ),
+            (
+                gh_fails,
+                opener_ok,
+                "could not look up PR for feature",
+                StatusKind::Error,
+                0,
+            ),
+            (
+                gh_approved_pr,
+                opener_fails,
+                "could not open PR",
+                StatusKind::Error,
+                1,
+            ),
+        ];
+        for (cli, opener, text, kind, opens) in cases {
+            let status = run_gx(&mut state, cli, opener);
+            assert_eq!(status, text);
+            assert_eq!(status.kind(), kind, "{text}");
+            assert_eq!(opened_urls().len(), opens, "{text}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn open_pull_request_without_a_forge_remote_says_no_pr_without_a_cli() {
+        for (tag, remote) in [
+            ("ws-effect-pr-no-remote", None),
+            (
+                "ws-effect-pr-other-forge",
+                Some("https://git.example.org/o/r.git"),
+            ),
+        ] {
+            let (root, mut state) = pr_app(tag, remote);
+            let status = run_gx(&mut state, cli_must_not_run, opener_ok);
+            assert_eq!(status, "no PR for feature", "{remote:?}");
+            assert!(opened_urls().is_empty());
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn test_build_defaults_fail_without_a_forge_cli_or_browser() {
+        let (root, mut state) = pr_app(
+            "ws-effect-pr-defaults",
+            Some("git@github.com:octo/demo.git"),
+        );
+        let mut interp = Interpreter::with_cap(4);
+        let live = AtomicBool::new(false);
+        assert_eq!((interp.pr_cli)(&["gh".to_string()], &live), Err(()));
+        assert_eq!((interp.pr_opener)(PR_URL, &live), Err(()));
+        let effect = state.dispatch(Action::OpenPullRequest);
+        let opts = opts(&state);
+        interp.interpret_sync(&mut state, &opts, effect, &Action::OpenPullRequest);
+        assert_eq!(state.status, "could not look up PR for feature");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Answers "no PR" until the quit flag is set, then fails as a killed
+    /// CLI would.
+    fn gh_no_pr_until_cancelled(_: &[String], cancel: &AtomicBool) -> Result<String, ()> {
+        if cancel.load(Ordering::Relaxed) {
+            Err(())
+        } else {
+            Ok("[]".into())
+        }
+    }
+
+    #[test]
+    fn cancel_pull_request_jobs_sets_the_flag_pr_jobs_see() {
+        let (root, mut state) = pr_app("ws-effect-pr-cancel", Some("git@github.com:octo/demo.git"));
+        let mut interp = Interpreter::with_cap(4);
+        interp.pr_cli = gh_no_pr_until_cancelled;
+        assert!(!interp.pr_cancel.load(Ordering::Relaxed));
+        let opts = opts(&state);
+        let effect = state.dispatch(Action::OpenPullRequest);
+        interp.interpret_sync(&mut state, &opts, effect, &Action::OpenPullRequest);
+        assert_eq!(state.status, "no PR for feature");
+
+        interp.cancel_pull_request_jobs();
+        assert!(interp.pr_cancel.load(Ordering::Relaxed));
+        let effect = state.dispatch(Action::OpenPullRequest);
+        interp.interpret_sync(&mut state, &opts, effect, &Action::OpenPullRequest);
+        assert_eq!(
+            state.status, "could not look up PR for feature",
+            "a job after the cancel gets the set flag"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn badge_lookups_run_two_at_a_time_and_an_open_does_not_wait() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(8);
+        interp.pr_cli = cli_must_not_run;
+        let targets: Vec<(PathBuf, String)> = (0..5)
+            .map(|i| (PathBuf::from(format!("missing-{i}")), "feature".to_string()))
+            .collect();
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::LookupPullRequests { targets },
+            &Action::None,
+        );
+        let first = capture_jobs(&mut interp, &mut state);
+        assert_eq!(first.len(), 2, "badge lookups are capped");
+        assert_eq!(interp.pr_badges.len(), 3);
+
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::OpenPullRequest {
+                repo: PathBuf::from("missing-open"),
+                branch: "feature".into(),
+            },
+            &Action::OpenPullRequest,
+        );
+        let open = capture_jobs(&mut interp, &mut state);
+        assert_eq!(open.len(), 1, "gx runs beside two badge lookups");
+        assert_eq!(interp.pr_badges.len(), 3);
+
+        for (id, work) in first {
+            let outcome = work();
+            assert!(matches!(outcome, JobOutcome::PullRequestBadge { .. }));
+            apply_id(&mut interp, &mut state, id, outcome);
+        }
+        assert_eq!(capture_jobs(&mut interp, &mut state).len(), 2);
+        assert_eq!(interp.pr_badges.len(), 1);
+    }
+
+    /// Land a fresh status for checkout `app` on `branch` (collect `gen`).
+    fn apply_app_status(interp: &mut Interpreter, state: &mut AppState, gen: u64, branch: &str) {
+        let mut snap = repo("app", true);
+        snap.branch = branch.into();
+        apply(
+            interp,
+            state,
+            JobOutcome::RepoStatus {
+                gen,
+                path: "app".into(),
+                snap: Some(snap),
+            },
+        );
+    }
+
+    #[test]
+    fn applied_status_looks_up_new_branches_only_and_refresh_looks_up_again() {
+        let mut state = fixture_state();
+        let mut interp = Interpreter::with_cap(4);
+        let first = state.due_pr_lookups();
+        assert_eq!(
+            first,
+            vec![
+                (PathBuf::from("app"), "main".to_string()),
+                (PathBuf::from("lib"), "main".to_string()),
+            ],
+            "first snapshot: every visible checkout with a branch"
+        );
+
+        apply_app_status(&mut interp, &mut state, 0, "main");
+        assert!(interp.pr_badges.is_empty(), "same branch: no new lookup");
+
+        apply_app_status(&mut interp, &mut state, 0, "feature");
+        assert_eq!(
+            interp.pr_badges,
+            VecDeque::from([(PathBuf::from("app"), "feature".to_string())])
+        );
+        assert_eq!(state.pr_badge(Path::new("app")), None, "in flight");
+        interp.pr_badges.clear();
+
+        focus_repo(&mut state, "app");
+        let effect = state.dispatch(Action::Refresh);
+        assert_eq!(effect, Effect::ReloadRepo { repo: "app".into() });
+        schedule_effect(&mut interp, &mut state, effect, &Action::Refresh);
+        apply_app_status(&mut interp, &mut state, 1, "feature");
+        assert_eq!(
+            interp.pr_badges,
+            VecDeque::from([(PathBuf::from("app"), "feature".to_string())]),
+            "r forgets the checkout, so the next status looks it up again"
+        );
+        interp.pr_badges.clear();
+
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::ReloadSnapshot,
+            &Action::Refresh,
+        );
+        assert_eq!(
+            state.due_pr_lookups().len(),
+            2,
+            "a full reload forgets every checkout"
+        );
     }
 }

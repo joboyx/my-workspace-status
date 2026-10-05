@@ -28,6 +28,7 @@ One key spelling everywhere a key is shown (help, hint chips, palette, prompts, 
 | `n` / `N` | Next / previous match on the pane bound at `/` (previous is `N`, not `p`). It steps from the pane's current cursor row: `n` goes to the first match after it, `N` to the first match before it, and a cursor row that is itself a match is skipped. A step past the last (or first) match starts over and says `search wrapped to top` (`n`) or `search wrapped to bottom` (`N`); landing back on the only match counts as a wrap. No match at all says `no match`. With no armed search they say `no search — press / first`. While help search is open these keys append to the query instead |
 | `g` / `G` | `gg` (second `g` within ~400ms) moves to the start of the focused list or file-diff. On a commit-file list (compare or drill), start is the first file row, the same index as a new compare load, not a directory. Lone `g` expires with no move. Key release does not move and does not cancel the pending. A typeless CSI-u echo of `g` inside a few milliseconds is ignored. A later typeless `g` (one CSI-u per tap), including a fast human `gg` under 80ms, completes `gg`. A raw-byte second `g` also completes `gg`. Pending expiry clears a stale arming-`g` echo. `G` is the end. Home / End also jump to start / end. The viewport follows |
 | `gt` / `gT` / `g1`–`g9` | Next tab / previous tab / jump to tab. `1` is Workspace. A missing index is a silent no-op. Bare `t` stays flat/tree. Bare `T` stays theme. A typeless CSI-u echo of the same key does not fire bare `t` / `T`. Pending expiry must not turn a later `gt` / `gT` into bare `t` / `T` |
+| `gx` | Open the PR of the focused branch row in the browser: a tree checkout row with a branch, or a graph worktree row with a branch. Looks the PR up first (`gh` / `glab`), so it needs the CLI installed and logged in. Opens an open PR, else a merged one. Says `no PR for this row` on any other row or a detached HEAD, `no PR for <branch>`, `could not look up PR for <branch>`, `could not open PR`, or `opened PR #<n>`. Bare `x` stays revert. Palette: Open PR |
 | `Ctrl-u` / `Ctrl-d` | Move the focused list or file-diff ±5 rows. The viewport keeps that row near the vertical middle. PageUp / PageDown stay one viewport |
 | `Ctrl-o` | Toggle unlimited `-U` context when the right pane is already a file diff. Fires from a left-focused workspace file or commit-file as well as from the right pane. A second press restores the previous context. No-op on tree, graph, or a commit-file list. Over a folder summary it says `focus a file diff` |
 | `s` | Stage dirty files in the focused scope (file, dir, section, checkout, or flat repo). Workspace and family-container rows are a no-op. On a `V` highlight of a working-tree file diff, stage only that add/del range (`git apply --cached`), not the whole file. On a commit / stash / worktree drill diff, refuse with a breadcrumb (no `git apply --cached`). A compare tab refuses with `cannot stage a compare diff` |
@@ -56,6 +57,7 @@ One key spelling everywhere a key is shown (help, hint chips, palette, prompts, 
 | `W` | Remove the focused linked worktree after a boxed confirm (`y` / `n`). Unshifted `w` is not this action. Other rows refuse with `Focus a linked worktree to remove` |
 | `Tab` | Focus the other pane |
 | click | Select a tree, graph, or commit-file row, or focus the right pane. Click the fold chevron to toggle that row's fold |
+| Ctrl+click | On a PR badge in the tree or the graph: select that row like a click and open its PR (same lookup as `gx`). Anywhere else it is a plain click |
 | double-click | Same as Enter / drill on the clicked cell. A chevron double-click still folds (once; it does not Enter) |
 | right-click | Same as Esc: one step back (or leave `V` highlight); in a pending `z` / `g` chord it is swallowed like Esc, with no step back. Overlays ignore it. Off with mouse capture |
 | `m` | Toggle mouse capture except on a focused graph commit (merge, above). Off ignores click / drag / wheel |
@@ -128,6 +130,7 @@ Daily tree paint lives in `crates/workspace-status/src/tui/icons.rs` + `tree.rs`
 - Workspace header is file-oriented: `{cwd basename}` trailing `{N} changed · {ahead/behind/diverged/attention|all current}`. The name is the row's identity: when a narrow tree pane would clip it, the summary gives way first (`{N} changed`, then `{N}`, then nothing); the name clips only when it alone is wider than the pane.
 - Linked worktrees under a family are checkout rows labeled by **branch**, not `wt <path>`. Detached linked checkouts fall back to the short worktree path. The primary checkout uses the branch glyph on the left — never the linked-worktree mark (`` / `L`). That linked mark leads the name for `git worktree list` extras (`.git` gitfile) only. Linked-only snapshots (no primary in the window) stay a flat `Repo` row — no phantom primary container.
 - Repo / checkout trailing sync marks: `↑N` / `↓N` / diverged / no-upstream. A checkout whose `git status` failed paints `ICON_STATUS_FAILED` (nerd nf-fa-warning `U+F071` / ASCII `!`) and `status failed` in the `deleted` color instead of a sync mark. Merged-into-default sits next to the branch on linked extras and on the primary checkout when HEAD is a strict ancestor of the default tip. Open-vs-default stays on **linked** worktrees only. A linked worktree whose HEAD matches that tip is open (just created), not merged. Up-to-date `` only inside No updates. The No updates count is a trailing number, not `(N)` in the label.
+- PR badge: a one-column glyph after the branch text of a checkout row when its branch has an open, approved, or merged PR. See **Pull request badge** below.
 
 Also bound: `q`, Tab, Home/End, family-row `b`, graph `c`. Confirms are boxed overlays, not status-line `y/n`. Bottom chrome: mode pills, contextual hint chips (extras `q` / `Tab` append and truncate with `…`), breadcrumb `workspace › [repo]`, armed search as a `/{query}` chip.
 
@@ -136,6 +139,39 @@ Glyphs live in `crates/workspace-status/src/tui/icons.rs`. Labels are built in `
 Real-TTY coverage (PTY + live `event::read`, plus xfce keys and xterm XTEST wheel in Actions) is `crates/workspace-status/tests/tui_tty_e2e/`. Shared git seeds and the tree hscroll oracle live in `crates/workspace-status/tests/common/`. Desktop Actions use `scripts/with-desktop-session.sh`. See [tui-tty-e2e.md](./tui-tty-e2e.md).
 
 See [tui-model.md](./tui-model.md) for the tree model and action registry.
+
+## Pull request badge
+
+A tree checkout row with a branch and a graph worktree row with a branch show a one-column badge after the branch name when the branch has an open or a merged PR (GitHub PR or GitLab merge request; the UI says PR). The badge is one space plus one glyph, never a word. Closed-unmerged PRs, branches with no PR, lookups in flight, and lookups that failed show nothing. Other graph rows (commit, stash, uncommitted) get no badge.
+
+| State | Glyph (Nerd / ASCII) | Colour role | Tokyo Night | Monokai | Dracula | Gruvbox Dark | Catppuccin Mocha |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Open | nf-oct-git_pull_request `U+F407` / `P` | `branch_feature` | `#bb9af7` | `#ae81ff` | `#bd93f9` | `#d3869b` | `#cba6f7` |
+| Approved (open, forge reports approved) | nf-oct-check `U+F42E` / `A` | `added` | `#9ece6a` | `#a6e22e` | `#50fa7b` | `#b8bb26` | `#a6e3a1` |
+| Merged | nf-oct-git_merge `U+F419` / `m` | `muted` | `#9aa5ce` | `#b8b39c` | `#b4bce4` | `#bdae93` | `#a6adc8` |
+
+`WS_STATUS_GLYPHS=ascii` selects the ASCII column. No new theme colour exists: the roles are the ones the branch text (`branch_feature`), added files (`added`), and secondary text (`muted`) already use. Merged is muted because the work is done. In every theme the three badge colours differ from each other. The glyphs are `icon_pr_open`, `icon_pr_approved`, and `icon_pr_merged` in `tui/icons.rs`. On a search-match graph row the badge takes the filter foreground like the label.
+
+The tree paints the badge at paint time, after the branch segment (`with_pr_badge` in `tui/tree.rs`), so it pans and clips with the label and counts toward the tree's max pan. The graph widget paints it after the worktree label (`GraphWidget::row_badges`, see [graph.md](./graph.md)). Each painted badge records its screen cells in `LayoutHit.pr_badge_hits`; only those cells react to Ctrl+click. A badge that is scrolled out, panned past, or clipped has no cells. The graph pan limit (`graph_col_max`) counts the badge too.
+
+Status text of `gx`, palette Open PR, and Ctrl+click (one status, set when the job finishes):
+
+| Status | Kind | When |
+| --- | --- | --- |
+| `opened PR #<n>` | ok | the PR was found and the browser started |
+| `no PR for <branch>` | warn | the forge answered and no open or merged PR exists, or the remote is not GitHub or GitLab, or there is no remote |
+| `no PR for this row` | warn | the focused row is not a branch row, or the HEAD is detached |
+| `could not look up PR for <branch>` | error | `gh` / `glab` is missing, not logged in, failed, timed out, or printed output the TUI cannot read |
+| `could not open PR` | error | the PR was found and the browser command failed |
+
+Background badge lookups never set a status.
+
+### Pull request jobs
+
+- A PR lookup and the browser open run on the blocking pool as `UserTag::PullRequest` jobs (`Effect::OpenPullRequest`, `Effect::LookupPullRequests` in `tui/effect.rs`). Neither runs on the TTY event thread, and neither takes the terminal the way `$EDITOR` does: the browser starts with null stdio in its own process group. When the loop exits, `LoopCtx`'s drop calls `Interpreter::cancel_pull_request_jobs`: a running `gh` / `glab` is killed and an opener wait ends, so the runtime drop does not wait up to 20 s per call. `run_tui` restores the terminal before it drops the runtime, so any worker still running (a git fetch, say) never holds a raw-mode screen.
+- Badge lookups are capped at 2 at a time (`PR_BADGE_LOOKUPS_MAX`). A `gx` open is not capped and goes first, so it never waits behind badge lookups.
+- Each job resolves the remote URL, then calls `gh` or `glab` ([git-operations.md](./git-operations.md) → **Pull request lookup**). A CLI is killed after 20 s. The opener gets 3 s to report an exit code.
+- The first snapshot, a new or changed branch, `r`, and a full reload queue lookups. A watch tick on the same branch does not. See [tui-model.md](./tui-model.md) → **Pull request badge and open**.
 
 ## Routing
 

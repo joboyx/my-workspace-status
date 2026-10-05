@@ -93,15 +93,18 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
             return Err(1);
         }
     };
-    let result = {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .map_err(|_| 1u8)?;
-        rt.block_on(super::event_loop::run(&mut terminal, &mut state, &opts))
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build();
+    let result = match &rt {
+        Ok(rt) => rt.block_on(super::event_loop::run(&mut terminal, &mut state, &opts)),
+        Err(_) => Err(1),
     };
     restore_terminal();
     let _ = terminal.show_cursor();
+    // The runtime drop waits for workers that are still running (a git
+    // fetch, say). Drop it only once the terminal is back to normal.
+    drop(rt);
     result
 }
 

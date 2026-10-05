@@ -1,5 +1,7 @@
 //! Elm-style Action / Effect for the ratatui TUI.
 
+use std::path::PathBuf;
+
 use super::drill::CommitFileSource;
 
 /// User or system input that changes TUI state.
@@ -55,6 +57,15 @@ pub enum Action {
     /// Toggle unlimited `-U` context on the focused file diff.
     ToggleFullContext,
     Click {
+        col: u16,
+        row: u16,
+    },
+    /// Left mouse button press with Ctrl held.
+    ///
+    /// On a painted PR badge it selects the row (as [`Action::Click`]) and
+    /// opens that row's PR. Anywhere else it is the same as
+    /// [`Action::Click`].
+    CtrlClick {
         col: u16,
         row: u16,
     },
@@ -175,6 +186,11 @@ pub enum Action {
     ExportCommentsCancel,
     /// Copy a pasteable entity reference for the focused row (`'`).
     CopyEntityReference,
+    /// Open the PR of the focused branch row in the browser (`gx`).
+    ///
+    /// The target is a tree checkout row or a graph worktree row with a
+    /// branch. Any other row sets the status `no PR for this row`.
+    OpenPullRequest,
     NavEnter,
     NavEsc,
     GraphStashApply,
@@ -531,6 +547,23 @@ pub enum Effect {
         repo: String,
         /// Path relative to the checkout.
         path: String,
+    },
+    /// Look up the PR of `branch` on a worker, then open it in the browser.
+    ///
+    /// The lookup is always fresh and also updates the PR cache. The status
+    /// line reports the result.
+    OpenPullRequest {
+        /// Checkout path (snapshot `repo`).
+        repo: PathBuf,
+        /// Branch checked out there.
+        branch: String,
+    },
+    /// Look up the PR of each `(checkout, branch)` for its row badge.
+    ///
+    /// At most two lookups run at once. A failed lookup stays silent.
+    LookupPullRequests {
+        /// Checkout path (snapshot `repo`) and the branch to look up.
+        targets: Vec<(PathBuf, String)>,
     },
     /// Copy `text` to the clipboard (OSC 52 / host tool).
     CopyClipboard {

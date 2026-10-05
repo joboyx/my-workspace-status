@@ -39,6 +39,22 @@ pub struct GraphLabelPalette {
     pub overflow: Color,
 }
 
+/// Painted cells of one row badge (see [`GraphWidget::row_badges`]).
+///
+/// [`GraphWidget::render_with_badge_spans`] returns one per badge that is
+/// on screen. Coordinates are absolute buffer cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowBadgeSpan {
+    /// [`GraphModel::visible_rows`] index of the badged row.
+    pub row_index: usize,
+    /// First painted column of the badge glyph.
+    pub x: u16,
+    /// Buffer row of the badge.
+    pub y: u16,
+    /// Painted width of the badge glyph in columns.
+    pub width: u16,
+}
+
 /// Renderable git-graph widget.
 ///
 /// Paint with [`Widget::render`]. Tests use a `Buffer` or `TestBackend`.
@@ -64,6 +80,8 @@ pub struct GraphWidget<'a> {
     resolved_comment_rows: &'a [usize],
     /// Glyph for [`Self::resolved_comment_rows`]. Empty uses `'`.
     resolved_comment_glyph: &'a str,
+    /// `(row index, glyph, colour)` painted after the row label.
+    row_badges: &'a [(usize, &'a str, Color)],
     cursor_fg: Color,
     cursor_bg: Option<Color>,
     cursor_inactive_fg: Color,
@@ -102,6 +120,7 @@ impl<'a> GraphWidget<'a> {
             comment_glyph: "\"",
             resolved_comment_rows: &[],
             resolved_comment_glyph: "'",
+            row_badges: &[],
             cursor_fg: Color::Cyan,
             cursor_bg: None,
             cursor_inactive_fg: Color::Gray,
@@ -213,6 +232,20 @@ impl<'a> GraphWidget<'a> {
         self
     }
 
+    /// Paint a badge glyph after the label of selectable rows.
+    ///
+    /// Each entry is a [`GraphModel::visible_rows`] index, the glyph (one
+    /// column), and its colour. The badge follows the label after one space
+    /// and scrolls and clips with it ([`Self::col_offset`], pane width). The
+    /// gutter is not touched. Spacers and rows not listed get no badge and
+    /// reserve no column. A search-match row paints the glyph in the search
+    /// foreground, like its label. Use [`Self::render_with_badge_spans`] to
+    /// learn where each badge landed.
+    pub fn row_badges(mut self, badges: &'a [(usize, &'a str, Color)]) -> Self {
+        self.row_badges = badges;
+        self
+    }
+
     /// Cursor bar (`▌`) plus `cursorBg`. Spacers keep the background only.
     pub fn cursor_style(mut self, fg: Color, bg: Color) -> Self {
         self.cursor_fg = fg;
@@ -319,8 +352,17 @@ pub fn graph_hscroll_visible(col_offset: u16) -> bool {
 
 /// Max `col_offset` so the longest label can sit in the viewport.
 ///
-/// `vscroll` is true when the 1-column vertical bar is reserved.
-pub fn graph_col_max(model: &GraphModel, ascii: bool, pane_width: u16, vscroll: bool) -> usize {
+/// `vscroll` is true when the 1-column vertical bar is reserved. `badges`
+/// are the [`GraphWidget::row_badges`] entries (the colour is not read): a
+/// badged row counts its label plus the space and glyph, so pan can reach
+/// the badge.
+pub fn graph_col_max(
+    model: &GraphModel,
+    ascii: bool,
+    pane_width: u16,
+    vscroll: bool,
+    badges: &[(usize, &str, Color)],
+) -> usize {
     let glyphs = if ascii { &ASCII } else { &UNICODE };
     let pane = pane_width.max(1) as usize;
     let inner = if vscroll {
@@ -336,7 +378,14 @@ pub fn graph_col_max(model: &GraphModel, ascii: bool, pane_width: u16, vscroll: 
     let longest = model
         .visible_rows()
         .iter()
-        .map(|row| format_label(row, glyphs).chars().count())
+        .enumerate()
+        .map(|(index, row)| {
+            let badge = badges
+                .iter()
+                .find(|(idx, _, _)| *idx == index)
+                .map_or(0, |(_, glyph, _)| 1 + Span::raw(*glyph).width());
+            format_label(row, glyphs).chars().count() + badge
+        })
         .max()
         .unwrap_or(0);
     longest.saturating_sub(label_viewport.max(1))
@@ -344,8 +393,21 @@ pub fn graph_col_max(model: &GraphModel, ascii: bool, pane_width: u16, vscroll: 
 
 impl Widget for GraphWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        self.render_with_badge_spans(area, buf);
+    }
+}
+
+impl GraphWidget<'_> {
+    /// Paint like [`Widget::render`] and return the painted cells of every
+    /// [`Self::row_badges`] glyph that is on screen.
+    ///
+    /// A badge scrolled out of the list, cut by [`Self::col_offset`], or
+    /// clipped by the pane width is left out. Callers use the spans for
+    /// mouse hit tests.
+    pub fn render_with_badge_spans(self, area: Rect, buf: &mut Buffer) -> Vec<RowBadgeSpan> {
+        let mut badge_spans = Vec::new();
         if area.width == 0 || area.height == 0 {
-            return;
+            return badge_spans;
         }
         let glyphs = if self.ascii { &ASCII } else { &UNICODE };
         let default_colors = default_lane_colors();
@@ -447,7 +509,12 @@ impl Widget for GraphWidget<'_> {
                     .find(|(idx, _)| *idx == i)
                     .map(|(_, color)| *color)
             });
-            put_painted_line(
+            let badge = line
+                .row_index
+                .filter(|_| line.selectable)
+                .and_then(|i| self.row_badges.iter().find(|(idx, _, _)| *idx == i))
+                .map(|(_, glyph, color)| (*glyph, *color));
+            let badge_cells = put_painted_line(
                 buf,
                 area.x,
                 y,
@@ -477,7 +544,16 @@ impl Widget for GraphWidget<'_> {
                 } else {
                     self.comment_glyph
                 },
+                badge,
             );
+            if let (Some(row_index), Some((x, width))) = (line.row_index, badge_cells) {
+                badge_spans.push(RowBadgeSpan {
+                    row_index,
+                    x,
+                    y,
+                    width,
+                });
+            }
             y = y.saturating_add(1);
         }
         if vscroll && list_height > 0 && area.width > 0 {
@@ -499,7 +575,7 @@ impl Widget for GraphWidget<'_> {
             );
         }
         if hscroll && list_height > 0 && area.width > 0 {
-            let max = graph_col_max(self.model, self.ascii, area.width, vscroll);
+            let max = graph_col_max(self.model, self.ascii, area.width, vscroll, self.row_badges);
             if max > 0 {
                 let mut sb_state =
                     ScrollbarState::new(max).position((self.col_offset as usize).min(max));
@@ -517,6 +593,8 @@ impl Widget for GraphWidget<'_> {
                     buf,
                     &mut sb_state,
                 );
+                // The bar paints over the last list row and hides its badge.
+                badge_spans.retain(|span| span.y != sb_area.y);
             }
         }
 
@@ -579,6 +657,7 @@ impl Widget for GraphWidget<'_> {
                 );
             }
         }
+        badge_spans
     }
 }
 
@@ -614,6 +693,8 @@ struct RowColors<'a> {
     palette: Option<GraphLabelPalette>,
 }
 
+/// Paint one graph line. Returns the painted `(x, width)` of `badge`'s
+/// glyph when it is on screen.
 fn put_painted_line(
     buf: &mut Buffer,
     x: u16,
@@ -624,7 +705,8 @@ fn put_painted_line(
     colors: RowColors<'_>,
     col_offset: u16,
     comment_glyph: &str,
-) {
+    badge: Option<(&str, Color)>,
+) -> Option<(u16, u16)> {
     let RowFlags {
         selected,
         cursor_bar,
@@ -644,7 +726,7 @@ fn put_painted_line(
         palette,
     } = colors;
     if width == 0 {
-        return;
+        return None;
     }
     let row = Rect::new(x, y, width, 1);
     let show_bar = selected && line.selectable;
@@ -740,7 +822,7 @@ fn put_painted_line(
     }
     let label_w = end.saturating_sub(col);
     if label_w == 0 {
-        return;
+        return None;
     }
     let sliced = slice_line_label(line, col_offset as usize, label_w as usize);
     let mut spans = label_spans(&sliced, palette, fallback);
@@ -749,9 +831,33 @@ fn put_painted_line(
             span.style = span.style.fg(fg);
         }
     }
-    Line::from(spans)
+    let painted = Line::from(spans);
+    let painted_w = u16::try_from(painted.width())
+        .unwrap_or(u16::MAX)
+        .min(label_w);
+    painted
         .style(row_style)
         .render(Rect::new(col, y, label_w, 1), buf);
+    let (glyph, color) = badge?;
+    // Label slicing counts chars: one space after the label, then the glyph.
+    let label_chars = line.label.chars().count();
+    let gap = match (col_offset as usize).cmp(&(label_chars + 1)) {
+        std::cmp::Ordering::Less => 1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => return None,
+    };
+    let glyph_x = col.saturating_add(painted_w).saturating_add(gap);
+    let glyph_w = u16::try_from(Span::raw(glyph).width()).unwrap_or(u16::MAX);
+    if glyph.is_empty() || glyph_w == 0 || glyph_x.saturating_add(glyph_w) > end {
+        return None;
+    }
+    let mut style = Style::default().fg(match_fg.unwrap_or(color));
+    if let Some(bg) = row_bg {
+        style = style.bg(bg);
+    }
+    buf[(glyph_x, y)].set_symbol(glyph);
+    buf[(glyph_x, y)].set_style(style);
+    Some((glyph_x, glyph_w))
 }
 
 fn slice_line_label(line: &PaintedLine, offset: usize, width: usize) -> PaintedLine {
@@ -2270,6 +2376,182 @@ mod tests {
             !quote_on_cursor,
             "unselected commented rows should not steal the cursor bar"
         );
+    }
+
+    /// One commit and one worktree row (its HEAD is outside the window).
+    fn badge_model() -> (GraphModel, usize) {
+        let model = GraphModel {
+            commits: vec![commit(
+                "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "seed",
+                &[],
+            )],
+            worktrees: vec![worktree("app/.worktrees/feat", "elsewhere", false)],
+            ..GraphModel::default()
+        };
+        let worktree_row = model
+            .visible_rows()
+            .iter()
+            .position(|row| matches!(row, GraphRow::Worktree(_)))
+            .expect("worktree row");
+        (model, worktree_row)
+    }
+
+    fn render_badges(
+        model: &GraphModel,
+        width: u16,
+        col_offset: u16,
+        badges: &[(usize, &str, Color)],
+    ) -> (Buffer, Vec<RowBadgeSpan>) {
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, 12));
+        let spans = GraphWidget::new(model)
+            .now_unix(NOW)
+            .col_offset(col_offset)
+            .row_badges(badges)
+            .render_with_badge_spans(buf.area, &mut buf);
+        (buf, spans)
+    }
+
+    fn buf_row(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn row_badge_paints_after_the_label_and_reports_its_cell() {
+        let (model, worktree_row) = badge_model();
+        let badges = [(worktree_row, "P", Color::Green)];
+        let (plain, none) = render_badges(&model, 80, 0, &[]);
+        assert!(none.is_empty());
+        let (buf, spans) = render_badges(&model, 80, 0, &badges);
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        let span = spans[0];
+        assert_eq!((span.row_index, span.width), (worktree_row, 1));
+        let line = buf_row(&buf, span.y);
+        let label = "app/.worktrees/feat feature/graph";
+        let at = line.find(label).expect("worktree label") + label.len();
+        // One column per char on this row (the worktree mark is one column).
+        assert_eq!(usize::from(span.x), line[..at].chars().count() + 1);
+        assert_eq!(buf[(span.x, span.y)].symbol(), "P");
+        assert_eq!(buf[(span.x, span.y)].fg, Color::Green);
+        assert_eq!(buf[(span.x - 1, span.y)].symbol(), " ");
+        // Only the badge cell differs: gutter, label and other rows stay put.
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if (x, y) != (span.x, span.y) {
+                    assert_eq!(buf[(x, y)], plain[(x, y)], "cell {x},{y}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn col_max_counts_the_badge_so_pan_can_reach_it() {
+        let model = GraphModel {
+            commits: vec![commit(
+                "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "seed",
+                &[],
+            )],
+            worktrees: vec![worktree(
+                "app/.worktrees/a-worktree-path-longer-than-the-pane",
+                "elsewhere",
+                false,
+            )],
+            ..GraphModel::default()
+        };
+        let row = model
+            .visible_rows()
+            .iter()
+            .position(|row| matches!(row, GraphRow::Worktree(_)))
+            .expect("worktree row");
+        let badges = [(row, "P", Color::Green)];
+        let width = 40;
+        let plain = graph_col_max(&model, false, width, false, &[]);
+        let badged = graph_col_max(&model, false, width, false, &badges);
+        assert!(plain > 0, "the worktree label overflows the pane");
+        assert_eq!(badged, plain + 2, "space and glyph");
+        assert_eq!(
+            graph_col_max(&model, false, width, false, &[(row + 9, "P", Color::Green)]),
+            plain
+        );
+        // Panned to the max, the badge is painted and reported.
+        let (buf, spans) = render_badges(&model, width, badged as u16, &badges);
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        assert_eq!(buf[(spans[0].x, spans[0].y)].symbol(), "P");
+    }
+
+    #[test]
+    fn row_badge_under_the_horizontal_bar_is_not_reported() {
+        let (model, worktree_row) = badge_model();
+        let badges = [(worktree_row, "P", Color::Green)];
+        let width = 30;
+        let max = graph_col_max(&model, false, width, false, &badges) as u16;
+        assert!(max > 0, "the label overflows, so panning shows the bar");
+        let render = |height: u16, col_offset: u16| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
+            let spans = GraphWidget::new(&model)
+                .now_unix(NOW)
+                .col_offset(col_offset)
+                .row_badges(&badges)
+                .render_with_badge_spans(buf.area, &mut buf);
+            (buf, spans)
+        };
+        let mut covered = 0;
+        for height in 3..16 {
+            // Unpanned: no bar; find the worktree row.
+            let (plain, _) = render(height, 0);
+            let Some(y) = (0..height).find(|y| buf_row(&plain, *y).contains("app/")) else {
+                continue;
+            };
+            // Panned to the max: the label tail and badge are in view unless
+            // the bar paints over that row.
+            let (buf, spans) = render(height, max);
+            for span in &spans {
+                assert_eq!(buf[(span.x, span.y)].symbol(), "P", "height {height}");
+            }
+            if buf_row(&buf, y).contains("graph") {
+                assert_eq!(spans.len(), 1, "height {height}");
+            } else {
+                covered += 1;
+                assert!(spans.is_empty(), "height {height}: {spans:?}");
+            }
+        }
+        assert!(
+            covered > 0,
+            "some height puts the worktree row under the bar"
+        );
+    }
+
+    #[test]
+    fn row_badge_skips_unlisted_rows_and_clips_with_the_label() {
+        let (model, worktree_row) = badge_model();
+        let badges = [(worktree_row, "P", Color::Green)];
+        let (buf, _) = render_badges(&model, 80, 0, &badges);
+        let commit_y = (0..buf.area.height)
+            .find(|y| buf_row(&buf, *y).contains("seed"))
+            .expect("commit line");
+        assert!(
+            !buf_row(&buf, commit_y).contains('P'),
+            "commit row unbadged"
+        );
+
+        let (_, spans) = render_badges(&model, 80, 0, &badges);
+        let full = spans[0].x;
+        // Panned: the badge moves left with the label.
+        let (buf, spans) = render_badges(&model, 80, 4, &badges);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].x, full - 4);
+        assert_eq!(buf[(spans[0].x, spans[0].y)].symbol(), "P");
+        // Panned past the badge: nothing painted or reported.
+        let (buf, spans) = render_badges(&model, 80, 200, &badges);
+        assert!(spans.is_empty(), "{spans:?}");
+        assert!((0..buf.area.height).all(|y| !buf_row(&buf, y).contains('P')));
+        // Too narrow for the badge after the label: not reported.
+        let (buf, spans) = render_badges(&model, full, 0, &badges);
+        assert!(spans.is_empty(), "{spans:?}");
+        assert!((0..buf.area.height).all(|y| !buf_row(&buf, y).contains('P')));
+        let (_, spans) = render_badges(&model, full + 2, 0, &badges);
+        assert_eq!(spans.len(), 1, "fits at the last column");
     }
 
     #[test]

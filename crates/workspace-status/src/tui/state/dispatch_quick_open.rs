@@ -239,18 +239,27 @@ impl AppState {
         }
     }
 
-    /// Put the commands cursor on the first enabled visible row (0 if none).
+    /// Put the commands cursor on the first enabled landing row, else on the
+    /// first landing row.
     ///
     /// Runs on open and on each filter change, so the HIGHLIGHT rows that
-    /// paint first do not take the cursor while they are disabled. Moves
-    /// still go over every row.
+    /// paint first do not take the cursor while they are disabled. Landing
+    /// rows are [`CommandPaletteState::landing_rows`]: a row found only by
+    /// an alias never takes the cursor from an in-scope row found by its
+    /// name, even a disabled one. Moves still go over every row.
     fn land_palette_cursor(&mut self) {
-        let Some(visible) = self.command_palette().map(|p| p.visible()) else {
+        let highlighted = self.diff_visual_anchor.is_some();
+        let Some((visible, landing)) = self
+            .command_palette()
+            .map(|p| (p.visible(), p.landing_rows(highlighted)))
+        else {
             return;
         };
-        let cursor = visible
+        let cursor = landing
             .iter()
-            .position(|command| self.palette_disabled_reason(command).is_none())
+            .copied()
+            .find(|&index| self.palette_disabled_reason(visible[index]).is_none())
+            .or_else(|| landing.first().copied())
             .unwrap_or(0);
         if let Some(palette) = self.command_palette_mut() {
             palette.cursor = cursor;

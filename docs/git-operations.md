@@ -32,6 +32,7 @@ Every git subprocess also runs with `GIT_OPTIONAL_LOCKS=0` (set by `git::git_pro
 | `list_local_branches(cwd)` | `for-each-ref` on `refs/heads/` | `LocalBranch[]` | Local branches only (no remotes). |
 | `pull_quiet_detailed(cwd)` | when dirty: `stash push -m …` → `pull --quiet` → `stash pop`; else `pull --quiet` | `PullQuietResult` | Auto-stash tracked local changes around pull; pop always runs after pull. `stash_pop_failed` when that pop conflicted (stash kept); `error` holds git's reason when the stash push or pull failed |
 | `pull_quiet(cwd)` | delegates to `pull_quiet_detailed` | boolean (`result.ok`) | |
+| `remote_url_for_branch(cwd, branch)` | `config --get branch.<branch>.remote`, else `remote`, then `remote get-url <name>` | `Option<String>` | Remote URL for the PR lookup. The remote is the one push uses: `branch.<branch>.remote`, else the first remote, else `origin`. `get-url` applies `url.<base>.insteadOf`. `None` when that remote does not exist or prints nothing. |
 | `push_quiet(cwd)` | `push --quiet`, or `push -u <remote> HEAD --quiet` when no/wrong upstream | `Result` | TUI `P`. No force, no auto-stash; first publish uses `-u`; diverged remotes may fail |
 | `FULL_DIFF_CONTEXT_LINES` | — | `999_999` | Large enough `-U` value to keep a typical source file in one hunk. |
 | `git_diff_args(base, path, context)` | inserts `-U<n>` and `-- <path>` | argv | Shared builder for worktree / cached / commit / stash diffs. |
@@ -120,6 +121,34 @@ A commit-vs-working-tree tab (`Blame: diff commit to working tree`) resolves its
 | `refresh_target` | Workspace / No-updates → whole snapshot; otherwise the focused checkout path. |
 
 After `p` / `P` / `d` / `f`, the TUI refreshes the affected repos and stamps those `repo:<path>` and `checkout:<path>` ids into the flash map. TTY local writes (`s` / `u` / `x` / stash / checkout / create-branch / merge / remove-worktree, including DiffVisual range `git apply --cached` / `git apply --reverse`) run on `spawn_blocking` in `tui/effect.rs`. Error paths still enqueue snapshot + pane so leftover keys cannot flush. Independent per-repo `f` / `p` / `P` (and `FetchTick`) share the per-gitdir remote queue. Cap is `FETCH_CONCURRENCY` (10).
+
+## Pull request lookup (`tui/pull_request.rs`, `tui/effect.rs`)
+
+The TUI finds the PR of a branch with the forge's own CLI and opens it in the operator's browser. It reads no token and never writes to git or to the forge. Everything here runs on a worker thread, never on the TTY event thread. Background badge lookups and `gx` / Ctrl+click share it.
+
+**Remote.** `git::remote_url_for_branch` (above) gives the URL. A branch with no usable remote has no PR.
+
+**Forge.** `parse_remote` reads the URL forms `git@host:path`, `ssh://[user@]host[:port]/path`, `https://host/path`, and `http://host/path`, with or without `.git` and a trailing slash. An SSH port is dropped (it is not the web port); an HTTPS port stays. The forge comes from the host name only: a host containing `github` is GitHub (the path must be exactly `owner/repo`) and a host containing `gitlab` is GitLab (subgroups allowed). Any other host, a `file://` URL, and a local path have no PR. SSH host aliases from `~/.ssh/config` (for example `github-work`) are not resolved: an alias that does not contain `github` or `gitlab` has no PR, and one that does is sent to the CLI as the host name. A lookup therefore runs against any remote host whose name contains `github` or `gitlab`, and `gh` / `glab` use the operator's own login for that host (for example `GH_ENTERPRISE_TOKEN` or `GITLAB_TOKEN`).
+
+**Commands.** Argv is built without a shell; the program is first.
+
+| Forge | Call | Argv |
+| --- | --- | --- |
+| GitHub | PR list | `gh pr list -R <host>/<owner>/<repo> --head <branch> --state all --json number,state,url,headRefName,isCrossRepository,reviewDecision,updatedAt --limit 30` |
+| GitLab | MR list (a GitLab merge request is a PR in the UI) | `glab api --hostname <host> "projects/<url-encoded path>/merge_requests?source_branch=<url-encoded branch>&state=all&per_page=30"` |
+| GitLab | approvals, only for the open MR that was picked | `glab api --hostname <host> "projects/<url-encoded path>/merge_requests/<iid>/approvals"` |
+
+The GitLab project path and the branch are percent-encoded (everything except letters, digits, `-`, `.`, `_`, `~`), so `group/sub/demo` becomes `group%2Fsub%2Fdemo`.
+
+**Which PR counts.** From the list, in order: an open PR, else a merged PR. A closed PR that was not merged is ignored (GitHub `CLOSED`, GitLab `closed` and `locked`). Among PRs of the same kind, an exact head-branch match wins, then the latest `updatedAt` / `updated_at` (compared as text; both forges print fixed-layout UTC). A PR from a fork is ignored (GitHub `isCrossRepository`; GitLab `source_project_id` differs from `target_project_id`), because `--head` and `source_branch` match the branch name alone. A list that holds no counted PR is "no PR".
+
+**Approved.** Only an open PR can be approved, and only when the forge says so: GitHub `reviewDecision == "APPROVED"`; GitLab approvals `approved == true`. Anything else (`REVIEW_REQUIRED`, `CHANGES_REQUESTED`, no decision, a failed or unreadable approvals call, a missing field) stays open. The TUI never infers approval. A merged PR is never approved. GitLab reports an MR as approved when its approval rules are met, and that can include rules that need zero approvals.
+
+**Failure.** A CLI that cannot start, is not logged in, exits non-zero, is killed by the time limit, or prints JSON that does not fit the expected list is a failed lookup, not "no PR". A failed lookup shows no badge. On `gx` it says `could not look up PR for <branch>`.
+
+**Environment and time.** Each call runs with stdin and stderr null, `GH_PROMPT_DISABLED=1`, `NO_PROMPT=1` (the `glab` switch), and `NO_COLOR=1`, so a CLI that wants a login fails at once and does not draw on the TUI's terminal. No token is passed; the CLIs use their own login. A call is killed after 20 s. On quit the TUI sets a cancel flag before its runtime waits for the workers: a running call is killed, the opener's 3 s wait ends, and a call that has not started does not start, so quit does not wait for the forge.
+
+**Opening.** The URL comes from the forge's answer. Only `http://` and `https://` URLs without whitespace, control characters, or the `cmd.exe` syntax characters `&`, `|`, `^`, `%`, `<`, `>`, and `"` are handed to a command (the Windows opener runs through `cmd`; no forge PR URL contains them); anything else fails with `could not open PR`. The command is `$BROWSER` when it is set and not blank (first non-empty `:`-separated entry, split on whitespace, `%s` replaced by the URL, else the URL appended), else `open` on macOS, `cmd /c start "" <url>` on Windows, and `xdg-open` elsewhere. It runs with null stdio and, on Unix, in its own process group. A platform opener has 3 s to exit: a non-zero exit inside that window is `could not open PR`, and one still running after it counts as success (some `xdg-open` setups stay up while the browser runs). A `$BROWSER` command counts as success once it starts. A detached thread reaps the child, so no zombie stays. Quoting inside `$BROWSER` is not interpreted: arguments with spaces do not work.
 
 ## Graph load (`tui/graph_load.rs`)
 
