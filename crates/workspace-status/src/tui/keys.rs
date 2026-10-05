@@ -569,13 +569,13 @@ fn key_to_action(
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Action::CtrlC;
     }
-    if let Some(opened_by) = quick_open_key(key) {
+    if let Some(entry) = quick_open_key(key) {
         match mode {
             InputMode::Normal { .. }
             | InputMode::ZPending { .. }
             | InputMode::GPending { .. }
             | InputMode::DiffVisual => {
-                return Action::ToggleQuickOpen(opened_by);
+                return Action::ToggleQuickOpen(entry);
             }
             InputMode::QuickOpen
             | InputMode::SearchPrompt

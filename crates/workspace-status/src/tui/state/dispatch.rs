@@ -20,7 +20,7 @@ impl AppState {
     /// Why `action` refuses as a compare command, or `None` when it may run.
     ///
     /// The one compare gate. [`Self::dispatch`] puts the reason on the status
-    /// line, and the command palette paints it dimmed at the row's right edge
+    /// line, and Quick Open commands mode paints it dimmed at the row's right edge
     /// (and in the footer for the highlighted row) through
     /// `palette_disabled_reason`, so a key press and a palette row always give
     /// the same copy. The commands that open a compare tab are checked on

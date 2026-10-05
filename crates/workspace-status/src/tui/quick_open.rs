@@ -13,7 +13,21 @@ use crate::file_index::{FileHit, FileIndex, MAX_INDEX_ENTRIES};
 
 use super::action::QuickOpenEntry;
 use super::command_palette::CommandPaletteState;
+use super::ctrl_c_exit::is_ctrl_c_exit_prompt;
 use super::tabs::checkout_leaf;
+
+/// Files-mode warning when Enter has no hit to act on.
+pub const NO_FILE_MATCHES: &str = "no file matches";
+
+/// Whether the files-mode status row paints `status` instead of
+/// [`QuickOpenState::file_status_text`].
+///
+/// Only text Quick Open set itself ([`NO_FILE_MATCHES`]) and the Ctrl-c quit
+/// prompt (Quick Open shows it inline) qualify. Any other status is a
+/// leftover from outside the overlay and would hide the file count.
+pub fn files_row_shows_status(status: &str) -> bool {
+    status == NO_FILE_MATCHES || is_ctrl_c_exit_prompt(status)
+}
 
 /// Which list the Quick Open query drives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,8 +154,8 @@ impl QuickOpenState {
 
     /// Files-mode status row text.
     ///
-    /// `indexing…` until the index is ready, then the file count (with
-    /// `(first N)` when the listing hit the cap), or `no file matches` once a
+    /// `indexing…` until the index is ready, then the file count
+    /// (`first N files` when the listing hit the cap), or `no file matches` once a
     /// non-blank query's score came back empty. A failed index shows its
     /// error text.
     pub fn file_status_text(&self) -> String {
@@ -150,9 +164,9 @@ impl QuickOpenState {
             FileIndexState::Failed(err) => err.clone(),
             FileIndexState::Ready(index) => {
                 if !self.query.trim().is_empty() && !self.score_pending && self.hits.is_empty() {
-                    "no file matches".to_string()
+                    NO_FILE_MATCHES.to_string()
                 } else if index.truncated {
-                    format!("{} files (first {MAX_INDEX_ENTRIES})", index.entries.len())
+                    format!("first {MAX_INDEX_ENTRIES} files")
                 } else {
                     format!("{} files", index.entries.len())
                 }
@@ -234,6 +248,14 @@ mod tests {
     }
 
     #[test]
+    fn files_row_shows_only_quick_open_status() {
+        assert!(files_row_shows_status(NO_FILE_MATCHES));
+        assert!(files_row_shows_status("Press Ctrl-c again to exit"));
+        assert!(!files_row_shows_status("Fetched 2 repos"));
+        assert!(!files_row_shows_status(""));
+    }
+
+    #[test]
     fn file_status_text_follows_index_and_score() {
         let mut state = QuickOpenState::new(QuickOpenEntry::Files, QuickOpenScope::Workspace);
         assert_eq!(state.file_status_text(), "indexing…");
@@ -251,7 +273,7 @@ mod tests {
         state.index = ready(&["a.rs"], true);
         assert_eq!(
             state.file_status_text(),
-            format!("1 files (first {MAX_INDEX_ENTRIES})")
+            format!("first {MAX_INDEX_ENTRIES} files")
         );
         state.index = FileIndexState::Failed("app: not a git repository".into());
         assert_eq!(state.file_status_text(), "app: not a git repository");

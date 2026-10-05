@@ -12,15 +12,13 @@ use crate::snapshot::CheckoutKind;
 
 use super::super::action::{Action, Effect, QuickOpenEntry};
 use super::super::command_palette::CommandPaletteState;
+use super::super::ctrl_c_exit::is_ctrl_c_exit_prompt;
 use super::super::quick_open::{
-    commands_filter, FileIndexState, QuickOpenMode, QuickOpenScope, QuickOpenState,
+    commands_filter, FileIndexState, QuickOpenMode, QuickOpenScope, QuickOpenState, NO_FILE_MATCHES,
 };
 use super::super::status::StatusMessage;
 use super::super::tabs::checkout_leaf;
 use super::{visible_snapshot, AppState, FocusPane};
-
-/// Files-mode warning when Enter has no hit to act on.
-const NO_FILE_MATCHES: &str = "no file matches";
 
 impl AppState {
     /// Commands-mode list of the open Quick Open overlay.
@@ -129,6 +127,11 @@ impl AppState {
         self.cancel_mouse_drag();
         self.help_open = false;
         self.clear_help_search();
+        // A leftover toast would sit in the status row and never expire
+        // while the overlay is open. The quit prompt stays: it shows inline.
+        if !is_ctrl_c_exit_prompt(&self.status) {
+            self.status.clear();
+        }
         let scope = self.quick_open_scope();
         self.quick_open = Some(QuickOpenState::new(entry, scope));
         match entry {
@@ -176,10 +179,25 @@ impl AppState {
         let Some(quick) = self.quick_open.as_mut() else {
             return Effect::None;
         };
+        let before = quick.mode();
         quick.query = query;
-        match quick.mode() {
+        let mode = quick.mode();
+        if mode != before {
+            // A disabled-row reason belongs to the commands list it came from.
+            let reason = quick.commands.shown_reason.take();
+            if reason.is_some_and(|reason| self.status == reason) {
+                self.status.clear();
+            }
+        }
+        match mode {
             QuickOpenMode::Commands => {
-                quick.commands.set_filter(commands_filter(&quick.query));
+                // The files miss warning does not carry into commands.
+                if self.status == NO_FILE_MATCHES {
+                    self.status.clear();
+                }
+                if let Some(quick) = self.quick_open.as_mut() {
+                    quick.commands.set_filter(commands_filter(&quick.query));
+                }
                 self.land_palette_cursor();
                 Effect::None
             }
@@ -297,39 +315,41 @@ impl AppState {
     /// request. An index with no entries and root errors becomes
     /// [`FileIndexState::Failed`]. In files mode the current query is then
     /// scored: the returned effect is that [`Effect::ScoreFiles`].
-    pub(crate) fn apply_file_index(&mut self, gen: u64, index: FileIndex) -> Effect {
-        let Some(quick) = self
+    ///
+    /// `None` when the result was dropped; `Some(follow-up)` when accepted.
+    pub(crate) fn apply_file_index(&mut self, gen: u64, index: FileIndex) -> Option<Effect> {
+        let quick = self
             .quick_open
             .as_mut()
-            .filter(|quick| quick.index_gen == gen)
-        else {
-            return Effect::None;
-        };
+            .filter(|quick| quick.index_gen == gen)?;
         quick.index = if index.entries.is_empty() && !index.errors.is_empty() {
             FileIndexState::Failed(index.errors.join("; "))
         } else {
             FileIndexState::Ready(Arc::new(index))
         };
-        if quick.mode() == QuickOpenMode::Files {
+        Some(if quick.mode() == QuickOpenMode::Files {
             self.request_file_score()
         } else {
             Effect::None
-        }
+        })
     }
 
     /// Accept finished hits for score generation `gen`. Dropped unless the
     /// overlay is open and `gen` is its latest score request.
-    pub(crate) fn apply_file_score(&mut self, gen: u64, hits: Vec<FileHit>) {
+    ///
+    /// True when the hits were accepted.
+    pub(crate) fn apply_file_score(&mut self, gen: u64, hits: Vec<FileHit>) -> bool {
         let Some(quick) = self
             .quick_open
             .as_mut()
             .filter(|quick| quick.score_gen == gen)
         else {
-            return;
+            return false;
         };
         quick.hits = hits;
         quick.file_cursor = 0;
         quick.score_pending = false;
+        true
     }
 }
 
@@ -475,7 +495,10 @@ mod tests {
         focus_row(&mut app, NodeKind::Checkout, Some("app"));
         let gen = open_files(&mut app);
         let follow = app.apply_file_index(gen, index_of(&["README.md", "src/main.rs"]));
-        assert!(matches!(follow, Effect::ScoreFiles { .. }), "{follow:?}");
+        assert!(
+            matches!(follow, Some(Effect::ScoreFiles { .. })),
+            "{follow:?}"
+        );
 
         assert_eq!(type_text(&mut app, ">"), Effect::None, "no score for `>`");
         assert_eq!(quick(&app).mode(), QuickOpenMode::Commands);
@@ -595,11 +618,11 @@ mod tests {
         app.dispatch(Action::QuickOpenCancel);
         let gen = open_files(&mut app);
         assert_ne!(old, gen);
-        assert_eq!(app.apply_file_index(old, index_of(&["a.rs"])), Effect::None);
+        assert_eq!(app.apply_file_index(old, index_of(&["a.rs"])), None);
         assert_eq!(quick(&app).index, FileIndexState::Loading, "old gen");
 
         app.dispatch(Action::QuickOpenCancel);
-        assert_eq!(app.apply_file_index(gen, index_of(&["a.rs"])), Effect::None);
+        assert_eq!(app.apply_file_index(gen, index_of(&["a.rs"])), None);
         assert!(
             app.quick_open.is_none(),
             "a result after close opens nothing"
@@ -620,10 +643,10 @@ mod tests {
             score: 1,
             indices: vec![0],
         };
-        app.apply_file_score(first, vec![hit.clone()]);
+        assert!(!app.apply_file_score(first, vec![hit.clone()]));
         assert!(quick(&app).hits.is_empty(), "old score gen ignored");
         assert!(quick(&app).score_pending);
-        app.apply_file_score(second, vec![hit.clone()]);
+        assert!(app.apply_file_score(second, vec![hit.clone()]));
         assert_eq!(quick(&app).hits, vec![hit]);
         assert!(!quick(&app).score_pending);
     }
@@ -635,7 +658,7 @@ mod tests {
         let gen = open_files(&mut app);
         let mut index = index_of(&[]);
         index.errors = vec!["app: not a git repository".into()];
-        assert_eq!(app.apply_file_index(gen, index), Effect::None);
+        assert_eq!(app.apply_file_index(gen, index), Some(Effect::None));
         assert_eq!(
             quick(&app).index,
             FileIndexState::Failed("app: not a git repository".into())
@@ -652,12 +675,12 @@ mod tests {
         assert_eq!(app.status, NO_FILE_MATCHES);
         assert!(app.quick_open.is_some(), "a miss keeps the overlay");
 
-        let Effect::ScoreFiles { gen: score, .. } =
+        let Some(Effect::ScoreFiles { gen: score, .. }) =
             app.apply_file_index(gen, index_of(&["README.md", "src/main.rs"]))
         else {
             panic!("expected a score");
         };
-        app.apply_file_score(
+        assert!(app.apply_file_score(
             score,
             vec![
                 FileHit {
@@ -671,12 +694,60 @@ mod tests {
                     indices: Vec::new(),
                 },
             ],
-        );
+        ));
         type_text(&mut app, "m");
         assert!(app.status.is_empty(), "typing clears the miss warning");
         app.dispatch(Action::QuickOpenMove(1));
         assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
         assert!(app.quick_open.is_none());
         assert_eq!(app.status, "src/main.rs");
+    }
+
+    #[test]
+    fn open_clears_a_leftover_status_but_keeps_the_quit_prompt() {
+        let mut app = family_state();
+        focus_row(&mut app, NodeKind::Checkout, Some("app"));
+        app.status = StatusMessage::info("Fetched 2 repos");
+        open_files(&mut app);
+        assert!(app.status.is_empty(), "{}", app.status);
+        assert_eq!(quick(&app).file_status_text(), "indexing…");
+        app.dispatch(Action::QuickOpenCancel);
+
+        app.status = StatusMessage::info("Press Ctrl-c again to exit");
+        open_files(&mut app);
+        assert_eq!(app.status, "Press Ctrl-c again to exit");
+    }
+
+    #[test]
+    fn files_warning_does_not_carry_into_commands() {
+        let mut app = family_state();
+        focus_row(&mut app, NodeKind::Checkout, Some("app"));
+        open_files(&mut app);
+        app.dispatch(Action::QuickOpenSubmit);
+        assert_eq!(app.status, NO_FILE_MATCHES);
+        type_text(&mut app, ">");
+        assert_eq!(quick(&app).mode(), QuickOpenMode::Commands);
+        assert!(app.status.is_empty(), "{}", app.status);
+    }
+
+    #[test]
+    fn commands_reason_does_not_carry_into_files() {
+        let mut app = family_state();
+        focus_row(&mut app, NodeKind::Checkout, Some("app"));
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        type_text(&mut app, "next match");
+        let palette = app.command_palette().expect("commands mode");
+        assert_eq!(palette.selected().map(|c| c.title), Some("Next match"));
+        app.dispatch(Action::QuickOpenSubmit);
+        assert!(!app.status.is_empty(), "Enter on a disabled row shows why");
+        for _ in 0.."next match".len() {
+            app.dispatch(Action::QuickOpenBackspace);
+        }
+        assert_eq!(quick(&app).mode(), QuickOpenMode::Commands);
+        assert!(!app.status.is_empty(), "same mode keeps the reason");
+        app.dispatch(Action::QuickOpenBackspace);
+        assert_eq!(quick(&app).mode(), QuickOpenMode::Files);
+        assert!(app.status.is_empty(), "{}", app.status);
+        assert_eq!(quick(&app).commands.shown_reason, None);
     }
 }

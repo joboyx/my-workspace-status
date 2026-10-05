@@ -1574,16 +1574,13 @@ impl Interpreter {
                 }
             }
             JobOutcome::FileIndex { gen, index } => {
-                let open_gen = state.quick_open.as_ref().map(|quick| quick.index_gen);
-                let follow = state.apply_file_index(gen, index);
-                if open_gen == Some(gen) {
+                if let Some(follow) = state.apply_file_index(gen, index) {
                     self.schedule(state, opts, follow, &Action::None);
                     self.mark();
                 }
             }
             JobOutcome::FileScore { gen, hits } => {
-                if state.quick_open.as_ref().map(|quick| quick.score_gen) == Some(gen) {
-                    state.apply_file_score(gen, hits);
+                if state.apply_file_score(gen, hits) {
                     self.mark();
                 }
             }

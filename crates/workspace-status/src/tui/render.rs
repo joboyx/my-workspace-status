@@ -47,7 +47,7 @@ use super::icons::{
     CURSOR_BAR_INACTIVE, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
 };
 use super::ops::RevertScope;
-use super::quick_open::{FileIndexState, QuickOpenMode, QuickOpenState};
+use super::quick_open::{files_row_shows_status, FileIndexState, QuickOpenMode, QuickOpenState};
 use super::search::{
     collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids, slice_cols,
     wrap_col_starts, wrap_cols, SearchPane,
@@ -3267,10 +3267,10 @@ fn draw_quick_open(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         ])
     };
     let (rows, status, footer) = if files {
-        let status = if state.status.is_empty() {
-            Line::from(Span::styled(quick.file_status_text(), muted))
-        } else {
+        let status = if files_row_shows_status(&state.status) {
             list_dialog_status(state, palette_theme)
+        } else {
+            Line::from(Span::styled(quick.file_status_text(), muted))
         };
         (
             quick_open_file_rows(quick, palette_theme, max_rows, inner_width),
@@ -8358,6 +8358,13 @@ mod tests {
             "footer row moved:\n{few}\n{many}"
         );
         assert!(few.contains("50 files"), "status row: {few}");
+        // A status from outside the overlay never hides the file count.
+        let mut state = quick_open_files_state(1);
+        state.status = "Fetched 2 repos".into();
+        draw_state(&mut terminal, &mut state);
+        let leftover = buffer_text(&terminal);
+        assert!(leftover.contains("50 files"), "{leftover}");
+        assert!(!leftover.contains("Fetched 2 repos"), "{leftover}");
         assert!(many.contains("src/file11.rs"), "{many}");
         assert!(!many.contains("src/file12.rs"), "12 rows at most:\n{many}");
     }

@@ -419,11 +419,7 @@ fn pty_workspace_palette_does_not_steal_daily_keys() {
 
     tui.key('p');
     tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        palette_closed,
-        "bare p does not open Quick Open",
-        WAIT,
-    );
+    tui.wait_pred(palette_closed, "bare p does not open Quick Open", WAIT);
     tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
         palette_closed,

@@ -15872,9 +15872,10 @@ diff --git a/README.md b/README.md
         assert_eq!(app.input_mode(), InputMode::DiffVisual);
         assert_eq!(app.status, "", "the reason does not linger in highlight");
 
-        // A status the palette did not set stays.
-        app.status = "staged range README.md".into();
+        // A status the palette did not set stays. Open clears a leftover
+        // one, so this one lands while the palette is up.
         palette_select(&mut app, "Fetch remotes");
+        app.status = "staged range README.md".into();
         app.dispatch(Action::QuickOpenCancel);
         assert_eq!(app.status, "staged range README.md");
     }
