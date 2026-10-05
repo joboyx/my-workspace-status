@@ -124,6 +124,13 @@ impl AppState {
                     self.click(col, row)
                 }
             }
+            Action::CtrlClick { col, row } => {
+                if !self.mouse_enabled {
+                    Effect::None
+                } else {
+                    self.ctrl_click(col, row)
+                }
+            }
             Action::Drag { col, row } => {
                 if !self.mouse_enabled {
                     Effect::None
@@ -390,6 +397,7 @@ impl AppState {
             }
             Action::ExportComments => self.export_comments(),
             Action::CopyEntityReference => self.copy_entity_reference(),
+            Action::OpenPullRequest => self.open_pull_request(),
             Action::ExportCommentsCancel => {
                 self.comment_export = None;
                 self.status.clear();

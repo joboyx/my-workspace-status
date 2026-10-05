@@ -14,10 +14,11 @@ use crate::snapshot::{
 
 use super::icons::{
     file_icon, icon_branch, icon_changes, icon_clean, icon_comment, icon_comment_resolved,
-    icon_folder, icon_ignored, icon_linked_worktree, icon_repo, icon_staged, icon_status_failed,
-    icon_viewed, icon_workspace, status_letter_from_change, tui_file_badge, tui_merge_mark,
-    tui_sync_mark, StatusColorRole,
+    icon_folder, icon_ignored, icon_linked_worktree, icon_pr_approved, icon_pr_merged,
+    icon_pr_open, icon_repo, icon_staged, icon_status_failed, icon_viewed, icon_workspace,
+    status_letter_from_change, tui_file_badge, tui_merge_mark, tui_sync_mark, StatusColorRole,
 };
+use super::pull_request::PrState;
 
 /// Structural node kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1314,6 +1315,54 @@ pub fn with_viewed_mark(mut trailing: Vec<TextSeg>, ascii: bool, viewed: bool) -
     ];
     marked.append(&mut trailing);
     marked
+}
+
+/// Glyph and colour role of the PR badge for `state`.
+///
+/// Open is [`icon_pr_open`] in [`SegRole::BranchFeature`], approved is
+/// [`icon_pr_approved`] in [`SegRole::Added`], merged is [`icon_pr_merged`]
+/// in [`SegRole::Muted`] (done work steps back). The tree and the graph
+/// share this mapping.
+pub fn pr_badge_mark(ascii: bool, state: PrState) -> (&'static str, SegRole) {
+    match state {
+        PrState::Open => (icon_pr_open(ascii), SegRole::BranchFeature),
+        PrState::Approved => (icon_pr_approved(ascii), SegRole::Added),
+        PrState::Merged => (icon_pr_merged(ascii), SegRole::Muted),
+    }
+}
+
+/// Checkout path of a tree row that can carry a PR badge.
+///
+/// A checkout row, or a repo row with one checkout (it paints the branch).
+/// A repo row that groups checkouts and every other row give `None`.
+pub fn pr_badge_repo(row: &VisibleRow) -> Option<&str> {
+    match row.kind {
+        NodeKind::Checkout => row.repo.as_deref(),
+        NodeKind::Repo if !row.chrome.is_family => row.repo.as_deref(),
+        _ => None,
+    }
+}
+
+/// Insert the PR badge (a space, then the glyph) right after the branch
+/// segment of a repo or checkout row.
+///
+/// Returns the index of the glyph segment, or `None` when `state` is `None`
+/// or the row paints no branch. Tree rows are built without PR state, so
+/// paint adds the badge per frame.
+pub fn with_pr_badge(
+    segments: &mut Vec<TextSeg>,
+    ascii: bool,
+    state: Option<PrState>,
+) -> Option<usize> {
+    let state = state?;
+    let branch = segments
+        .iter()
+        .rposition(|seg| matches!(seg.role, SegRole::BranchDefault | SegRole::BranchFeature))?;
+    let (glyph, role) = pr_badge_mark(ascii, state);
+    let at = branch + 1;
+    segments.insert(at, text_seg(" ", SegRole::Muted));
+    segments.insert(at + 1, text_seg(glyph, role));
+    Some(at + 1)
 }
 
 /// Visible snapshot used for the tree: hidden ignored stay out, including

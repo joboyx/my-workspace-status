@@ -26,8 +26,9 @@ whatever `visible_rows` the model holds.
 | `GraphCell` | One gutter column: glyph, colour lane, role |
 | `LaidOutCommit` | Lane assignment plus stem metadata for one commit |
 | `GraphWidget` | Ratatui `Widget` over a `GraphModel` |
+| `RowBadgeSpan` | Painted cell of one row badge (row index, x, y, width), from `render_with_badge_spans` |
 | `graph_scrollbar_thumb` | Thumb offset/length matching a painted bar (TUI hit-test, vertical or horizontal) |
-| `graph_col_max` | Max `col_offset` for the longest label in the pane |
+| `graph_col_max` | Max `col_offset` for the longest label in the pane, counting the space and glyph of each `row_badges` entry |
 | `graph_vscroll_visible` / `graph_hscroll_visible` | Show the vertical bar whenever the painted lines overflow the list (or it has left the top); the horizontal bar only after leaving the left edge |
 | `Action` | `ToggleShowIgnored` and `SetShowIgnored` |
 | `Effect` | `None` today. Dispatch stays pure. |
@@ -76,6 +77,20 @@ column. Spacers stay unmarked. The TUI passes `icon_comment` /
 The widget does not use reverse video for the cursor.
 `GraphWidget::col_offset` skips label columns (gutter stays put) so long
 subjects can pan without growing the row.
+`GraphWidget::row_badges` takes `(visible-row index, glyph, colour)`
+entries and paints the glyph one space after the label of those selectable
+rows. The badge pans and clips with the label (`col_offset`, pane width).
+It does not change the gutter, and rows that are not listed reserve no
+column. A search-match row paints the badge in the filter foreground.
+`GraphWidget::render_with_badge_spans` paints like `render` and returns one
+`RowBadgeSpan` per badge that is on screen, so the caller can hit-test it.
+A badge that is scrolled out, panned past, clipped, or under the
+horizontal scrollbar is left out. Pass the same entries to `graph_col_max`
+so panning can bring a badge on a long label into view. The TUI badges
+`GraphRow::Worktree` rows whose painted branch is the checkout's current
+branch and that have a known PR (open, approved, or merged), and records
+the spans for Ctrl+click. A graph loaded before a branch switch paints the
+old branch and gets no badge. Commit rows get no badge.
 
 ## Visible rows
 

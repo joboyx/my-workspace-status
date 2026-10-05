@@ -5,7 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, StatefulWidget, Widget, Wrap,
+    ScrollbarState, StatefulWidget, Wrap,
 };
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
@@ -16,6 +16,7 @@ use workspace_status_graph::{
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::chrome::{
@@ -49,6 +50,7 @@ use super::icons::{
 };
 use super::line_blame::{fit_annotation, BlameSide, BLAME_MENU_ROWS};
 use super::ops::RevertScope;
+use super::pull_request::PrState;
 use super::quick_open::{files_row_shows_status, FileIndexState, QuickOpenMode, QuickOpenState};
 use super::search::{
     collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids, slice_cols,
@@ -58,7 +60,9 @@ use super::split::{
     diff_paint_width, diff_split_rule_x, pane_widths, side_by_side_column_widths, DiffMode,
     MIN_PANE_COLS, MIN_TERM_COLS, MIN_TERM_ROWS,
 };
-use super::state::{revert_scope, AppState, CompareRevertTarget, FocusPane, PendingConfirm};
+use super::state::{
+    revert_scope, AppState, CompareRevertTarget, FocusPane, PendingConfirm, PrBadgeHit,
+};
 use super::syntax::{
     cached_highlight_diff_rows, highlight_file_window, slice_styled_cols, CachedDiffSyntax,
     CodeSpan, DiffBackgrounds, DiffSyntaxKey,
@@ -70,9 +74,9 @@ use super::tabs::{
 use super::theme::ThemeId;
 use super::theme::{hex_color, Palette, Pill};
 use super::tree::{
-    file_change_from_name_status, file_change_segments, row_segments, visible_window,
-    with_comment_mark, with_viewed_mark, workspace_trailing_fit, NodeKind, NodeSegments, SegRole,
-    TextSeg, VisibleRow,
+    file_change_from_name_status, file_change_segments, pr_badge_mark, pr_badge_repo, row_segments,
+    visible_window, with_comment_mark, with_pr_badge, with_viewed_mark, workspace_trailing_fit,
+    NodeKind, NodeSegments, SegRole, TextSeg, VisibleRow,
 };
 use crate::file_index::FileRead;
 use crate::helpers::{is_detached_head_branch, visible_width};
@@ -138,6 +142,9 @@ fn selection_marker(selected: bool, focused: bool) -> &'static str {
 /// Draw one frame. Updates `state.layout` for mouse hits.
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     state.prune_expired_flashes();
+    // Every frame starts with no PR badge; only a pane that paints one
+    // records it again, so a hidden badge never opens a PR.
+    state.layout.pr_badge_hits.clear();
     let area = frame.area();
     state.too_small = area.width < MIN_TERM_COLS || area.height < MIN_TERM_ROWS;
     if state.too_small {
@@ -613,12 +620,15 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         HashSet::new()
     };
     let mut lines = Vec::new();
-    for row in painted.iter().skip(start).take(height) {
+    let mut badges = Vec::new();
+    for (y, row) in (area.y..).zip(painted.iter().skip(start).take(height)) {
         let viewed = row.kind == NodeKind::File && state.reviewed.contains(&row.id);
         let commented = tree_row_has_comment(&state.comment_store, &state.snapshot, row);
         let resolved =
             commented && tree_row_comments_resolved(&state.comment_store, &state.snapshot, row);
-        lines.push(paint_tree_row(
+        let pr_repo = pr_badge_repo(row);
+        let pr = pr_repo.and_then(|repo| state.pr_badge(Path::new(repo)));
+        let (line, badge) = paint_tree_row(
             row,
             width,
             Some(row.id.as_str()) == focus_id,
@@ -630,13 +640,27 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             viewed,
             commented,
             resolved,
+            pr,
             palette,
             state.left_col_offset as usize,
-        ));
+        );
+        lines.push(line);
+        if let (Some(repo), Some((x, w))) = (pr_repo, badge) {
+            badges.push(PrBadgeHit {
+                y,
+                x: area.x.saturating_add(u16::try_from(x).unwrap_or(u16::MAX)),
+                width: u16::try_from(w).unwrap_or(u16::MAX),
+                repo: PathBuf::from(repo),
+            });
+        }
     }
+    state.layout.pr_badge_hits.extend(badges);
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+/// Paint one tree row. Also returns the painted span of its PR badge
+/// glyph (column offset from the row start, width) when `pr` is set and
+/// the glyph is on screen after `col_offset` and the label budget.
 fn paint_tree_row(
     row: &VisibleRow,
     width: usize,
@@ -649,12 +673,14 @@ fn paint_tree_row(
     viewed: bool,
     commented: bool,
     resolved: bool,
+    pr: Option<PrState>,
     palette: Palette,
     col_offset: usize,
-) -> Line<'static> {
+) -> (Line<'static>, Option<(usize, usize)>) {
     let segs_width =
         |segs: &[TextSeg]| -> usize { segs.iter().map(|s| visible_width(&s.text)).sum() };
     let mut segs = row_segments(row, ascii, viewed, commented, resolved);
+    let badge = pr_badge_repo(row).and_then(|_| with_pr_badge(&mut segs.segments, ascii, pr));
     if row.kind == NodeKind::Workspace {
         // The summary gives way before the name. Same prefix as
         // `paint_segmented_row` (edge, indent, chevron); comment marks
@@ -671,7 +697,18 @@ fn paint_tree_row(
         segs.trailing
             .extend(workspace_trailing_fit(&row.chrome, room));
     }
-    paint_segmented_row(
+    let span = badge.and_then(|index| {
+        let (prefix_width, label_budget) = segmented_label_area(row.depth, &segs, width);
+        painted_seg_span(
+            &segs.segments,
+            index,
+            prefix_width,
+            col_offset,
+            label_budget,
+            width,
+        )
+    });
+    let line = paint_segmented_row(
         row.depth,
         row.foldable,
         row.folded,
@@ -685,7 +722,46 @@ fn paint_tree_row(
         ascii,
         palette,
         col_offset,
-    )
+    );
+    (line, span)
+}
+
+/// Prefix width (edge, indent, chevron) and label budget of a row that
+/// [`paint_segmented_row`] paints `width` columns wide.
+fn segmented_label_area(depth: usize, segs: &NodeSegments, width: usize) -> (usize, usize) {
+    let trailing_width: usize = segs.trailing.iter().map(|s| visible_width(&s.text)).sum();
+    let pad = usize::from(trailing_width > 0);
+    let prefix_width = 1 + 2 * depth + 2;
+    let label_budget = width
+        .saturating_sub(prefix_width)
+        .saturating_sub(trailing_width)
+        .saturating_sub(pad);
+    (prefix_width, label_budget)
+}
+
+/// Painted span (column offset from the row start, width) of label
+/// segment `index` after [`slice_segs`] cuts the label at `col_offset` and
+/// the label budget, clipped to the row `width`. `None` when no cell of
+/// that segment is on screen.
+fn painted_seg_span(
+    segs: &[TextSeg],
+    index: usize,
+    prefix_width: usize,
+    col_offset: usize,
+    label_budget: usize,
+    width: usize,
+) -> Option<(usize, usize)> {
+    // Slice exactly as paint does, so a wide glyph cut by the offset
+    // moves the span the same way it moves the painted cells.
+    let painted_width = |end: usize| -> usize {
+        slice_segs(&segs[..end], col_offset, label_budget.max(1))
+            .iter()
+            .map(|s| visible_width(&s.text))
+            .sum()
+    };
+    let start = prefix_width + painted_width(index);
+    let end = (prefix_width + painted_width(index + 1)).min(width);
+    (start < end).then(|| (start, end - start))
 }
 
 fn paint_segmented_row(
@@ -731,12 +807,7 @@ fn paint_segmented_row(
         Style::default().fg(palette.muted),
         bg,
     ));
-    let prefix_width = 1 + visible_width(&indent) + 2;
-
-    let label_budget = width
-        .saturating_sub(prefix_width)
-        .saturating_sub(trailing_width)
-        .saturating_sub(pad);
+    let (_, label_budget) = segmented_label_area(depth, segs, width);
     let label = slice_segs(&segs.segments, col_offset, label_budget.max(1));
     let label_width: usize = label.iter().map(|s| visible_width(&s.text)).sum();
     for seg in &label {
@@ -788,24 +859,27 @@ fn styled_span(text: &str, mut style: Style, bg: Option<ratatui::style::Color>) 
     Span::styled(text.to_string(), style)
 }
 
+fn seg_role_color(role: SegRole, palette: Palette) -> Color {
+    match role {
+        SegRole::Heading => palette.heading,
+        SegRole::Repo => palette.repo,
+        SegRole::Dir => palette.dir,
+        SegRole::File => palette.file,
+        SegRole::Muted => palette.muted,
+        SegRole::Added => palette.added,
+        SegRole::Modified => palette.modified,
+        SegRole::Deleted => palette.deleted,
+        SegRole::Renamed => palette.renamed,
+        SegRole::Viewed => palette.viewed,
+        SegRole::BranchDefault => palette.branch_default,
+        SegRole::BranchFeature => palette.branch_feature,
+    }
+}
+
 fn seg_style(seg: &TextSeg, palette: Palette) -> Style {
-    let fg = if let Some(hex) = seg.hex {
-        hex_color(hex)
-    } else {
-        match seg.role {
-            SegRole::Heading => palette.heading,
-            SegRole::Repo => palette.repo,
-            SegRole::Dir => palette.dir,
-            SegRole::File => palette.file,
-            SegRole::Muted => palette.muted,
-            SegRole::Added => palette.added,
-            SegRole::Modified => palette.modified,
-            SegRole::Deleted => palette.deleted,
-            SegRole::Renamed => palette.renamed,
-            SegRole::Viewed => palette.viewed,
-            SegRole::BranchDefault => palette.branch_default,
-            SegRole::BranchFeature => palette.branch_feature,
-        }
+    let fg = match seg.hex {
+        Some(hex) => hex_color(hex),
+        None => seg_role_color(seg.role, palette),
     };
     let mut style = Style::default().fg(fg);
     if seg.bold {
@@ -1015,7 +1089,12 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
     } else {
         state.focus == FocusPane::Right
     };
-    GraphWidget::new(model)
+    let badge_rows = graph_pr_badges(state);
+    let badges: Vec<(usize, &str, Color)> = badge_rows
+        .iter()
+        .map(|(index, _, glyph, color)| (*index, *glyph, *color))
+        .collect();
+    let spans = GraphWidget::new(model)
         .ascii(state.ascii)
         .selected(Some(state.graph_cursor))
         .cursor_bar(graph_focused)
@@ -1047,8 +1126,32 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
             head_mark: pal.head_mark,
             overflow: pal.heading,
         })
-        .render(area, frame.buffer_mut());
-    record_graph_scrollbar(state, area, col_offset);
+        .row_badges(&badges)
+        .render_with_badge_spans(area, frame.buffer_mut());
+    for span in spans {
+        if let Some((_, repo, _, _)) = badge_rows.iter().find(|row| row.0 == span.row_index) {
+            state.layout.pr_badge_hits.push(PrBadgeHit {
+                y: span.y,
+                x: span.x,
+                width: span.width,
+                repo: repo.clone(),
+            });
+        }
+    }
+    record_graph_scrollbar(state, area, col_offset, &badges);
+}
+
+/// [`AppState::graph_pr_badges`] with the glyph and colour to paint.
+fn graph_pr_badges(state: &AppState) -> Vec<(usize, PathBuf, &'static str, Color)> {
+    let palette = state.theme.palette();
+    state
+        .graph_pr_badges()
+        .into_iter()
+        .map(|(index, path, pr)| {
+            let (glyph, role) = pr_badge_mark(state.ascii, pr);
+            (index, path, glyph, seg_role_color(role, palette))
+        })
+        .collect()
 }
 
 fn graph_commented_row_indices(state: &AppState, resolved_only: bool) -> Vec<usize> {
@@ -1099,7 +1202,12 @@ fn graph_search_matches(state: &AppState) -> Vec<usize> {
     collect_graph_match_indices(&model.visible_rows(), &state.search_query)
 }
 
-fn record_graph_scrollbar(state: &mut AppState, area: Rect, col_offset: u16) {
+fn record_graph_scrollbar(
+    state: &mut AppState,
+    area: Rect,
+    col_offset: u16,
+    badges: &[(usize, &str, Color)],
+) {
     if state.graph.is_none() {
         return;
     }
@@ -1139,7 +1247,7 @@ fn record_graph_scrollbar(state: &mut AppState, area: Rect, col_offset: u16) {
     }
     if hscroll && list_height > 0 {
         let v_cols = u16::from(vscroll);
-        let max = graph_col_max(model, state.ascii, area.width, vscroll);
+        let max = graph_col_max(model, state.ascii, area.width, vscroll, badges);
         if max > 0 {
             state.layout.graph_hscrollbar_y =
                 Some(list_top.saturating_add(list_height).saturating_sub(1));
@@ -4064,6 +4172,7 @@ mod tests {
     use crate::tui::action::{Action, Effect};
     use crate::tui::comments::{put_comment, CommentKey};
     use crate::tui::icons::{icon_linked_worktree, icon_repo};
+    use crate::tui::pull_request::{PrLookup, PullRequest};
     use crate::tui::split::SplitDrag;
     use crate::tui::state::AppState;
     use crate::tui::tree::{build_tree, flatten_with, visible_for_tree};
@@ -4071,7 +4180,7 @@ mod tests {
     use ratatui::Terminal;
     use std::collections::HashSet;
     use std::path::PathBuf;
-    use workspace_status_graph::{graph_gutter_cap, Commit, GraphModel};
+    use workspace_status_graph::{graph_gutter_cap, Commit, GraphModel, GraphRow};
 
     fn repo(name: &str, dirty: bool) -> RepoSnapshot {
         RepoSnapshot {
@@ -7490,21 +7599,25 @@ mod tests {
 
     fn paint_row(row: &VisibleRow, width: usize, col_offset: usize) -> String {
         let palette = crate::tui::theme::ThemeId::TokyoNight.palette();
-        line_text(&paint_tree_row(
-            row,
-            width,
-            false,
-            false,
-            None,
-            false,
-            search_bg_unused(),
-            true,
-            false,
-            false,
-            false,
-            palette,
-            col_offset,
-        ))
+        line_text(
+            &paint_tree_row(
+                row,
+                width,
+                false,
+                false,
+                None,
+                false,
+                search_bg_unused(),
+                true,
+                false,
+                false,
+                false,
+                None,
+                palette,
+                col_offset,
+            )
+            .0,
+        )
     }
 
     /// A narrowed tree keeps the workspace name: the root summary drops its
@@ -9560,5 +9673,540 @@ mod tests {
             }
             assert!(!text.contains("COMPARE"), "{cols} cols:\n{text}");
         }
+    }
+
+    // ── PR badge ──────────────────────────────────────────────────────────
+
+    const PR_REMOTE: &str = "git@github.com:octo/demo.git";
+
+    fn branch_repo(name: &str, branch: &str) -> RepoSnapshot {
+        let mut row = repo(name, false);
+        row.branch = branch.into();
+        row
+    }
+
+    fn linked_repo(name: &str, primary: &str, branch: &str) -> RepoSnapshot {
+        let mut row = branch_repo(name, branch);
+        row.checkout_kind = crate::snapshot::CheckoutKind::Linked;
+        row.primary_repo = Some(primary.into());
+        row
+    }
+
+    /// State with every checkout's PR lookup in flight.
+    fn pr_state(repos: &[RepoSnapshot], ascii: bool) -> AppState {
+        let snapshot = build_workspace_snapshot(repos, &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, ascii);
+        assert_eq!(state.due_pr_lookups().len(), repos.len());
+        state
+    }
+
+    fn set_pr(state: &mut AppState, repo: &str, branch: &str, lookup: PrLookup) {
+        assert!(state.apply_pr_lookup(Path::new(repo), branch, Some(PR_REMOTE.into()), lookup));
+    }
+
+    fn found_pr(state: PrState) -> PrLookup {
+        PrLookup::Found(PullRequest {
+            number: 7,
+            url: "https://github.com/octo/demo/pull/7".into(),
+            state,
+        })
+    }
+
+    fn pr_terminal() -> Terminal<TestBackend> {
+        Terminal::new(TestBackend::new(120, 24)).unwrap()
+    }
+
+    /// Screen row of tree row `id`.
+    fn tree_row_y(state: &AppState, id: &str) -> u16 {
+        let index = state
+            .painted_tree_rows()
+            .iter()
+            .position(|row| row.id == id)
+            .unwrap_or_else(|| panic!("missing row {id}"));
+        state.layout.tree_y + u16::try_from(index - state.layout.list_offset).unwrap()
+    }
+
+    fn focus_tree_row(state: &mut AppState, id: &str) {
+        state.cursor = state
+            .rows
+            .iter()
+            .position(|row| row.id == id)
+            .unwrap_or_else(|| panic!("missing row {id}"));
+    }
+
+    /// The PR this effect opens, if any.
+    fn pr_opened(effect: &Effect) -> Option<(PathBuf, String)> {
+        match effect {
+            Effect::OpenPullRequest { repo, branch } => Some((repo.clone(), branch.clone())),
+            Effect::Batch(effects) => effects.iter().find_map(pr_opened),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn tree_pr_badge_paints_after_the_branch_and_records_its_cell() {
+        use crate::tui::icons::{icon_pr_approved, icon_pr_merged, icon_pr_open};
+        let palette = ThemeId::TokyoNight.palette();
+        let cases = [
+            (
+                PrState::Open,
+                icon_pr_open as fn(bool) -> &'static str,
+                palette.branch_feature,
+            ),
+            (PrState::Approved, icon_pr_approved, palette.added),
+            (PrState::Merged, icon_pr_merged, palette.muted),
+        ];
+        for ascii in [true, false] {
+            for (pr, icon, color) in cases {
+                let what = format!("{pr:?} ascii={ascii}");
+                let mut state = pr_state(
+                    &[branch_repo("app", "feature"), branch_repo("lib", "main")],
+                    ascii,
+                );
+                assert_eq!(state.theme.palette(), palette);
+                set_pr(&mut state, "app", "feature", found_pr(pr));
+                let mut terminal = pr_terminal();
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                let buf = terminal.backend().buffer();
+                let y = tree_row_y(&state, "repo:app");
+                let branch_x = find_cell_col(buf, y, "feature")
+                    .unwrap_or_else(|| panic!("{what}: branch on\n{}", buf_line(buf, y)));
+                let x = branch_x + 8;
+                assert_eq!(
+                    state.layout.pr_badge_hits,
+                    vec![PrBadgeHit {
+                        y,
+                        x,
+                        width: 1,
+                        repo: PathBuf::from("app"),
+                    }],
+                    "{what}"
+                );
+                assert_eq!(buf[(x - 1, y)].symbol(), " ", "{what}");
+                assert_eq!(buf[(x, y)].symbol(), icon(ascii), "{what}");
+                assert_eq!(buf[(x, y)].fg, color, "{what}");
+                for word in ["open", "approved", "merged"] {
+                    assert!(!buf_line(buf, y).contains(word), "{what}: {word}");
+                }
+            }
+        }
+        assert_eq!(icon_pr_open(true), "P");
+        assert_eq!(icon_pr_approved(true), "A");
+        assert_eq!(icon_pr_merged(true), "m");
+    }
+
+    #[test]
+    fn tree_pr_badge_needs_a_ready_pr() {
+        for (lookup, what) in [
+            (None, "in flight"),
+            (Some(PrLookup::Failed), "failed"),
+            (Some(PrLookup::NoPr), "no PR"),
+        ] {
+            let mut state = pr_state(&[branch_repo("app", "feature")], true);
+            if let Some(lookup) = lookup {
+                set_pr(&mut state, "app", "feature", lookup);
+            }
+            let mut terminal = pr_terminal();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            assert!(state.layout.pr_badge_hits.is_empty(), "{what}");
+            let buf = terminal.backend().buffer();
+            let y = tree_row_y(&state, "repo:app");
+            let x = find_cell_col(buf, y, "feature").expect("branch") + 7;
+            assert_eq!(buf[(x, y)].symbol(), " ", "{what}");
+            assert_eq!(buf[(x + 1, y)].symbol(), " ", "{what}");
+        }
+    }
+
+    #[test]
+    fn tree_pr_badge_is_on_checkout_rows_only() {
+        let mut state = pr_state(
+            &[
+                branch_repo("fam", "main"),
+                linked_repo("fam/.worktrees/feat", "fam", "feat"),
+                repo("dirty", true),
+            ],
+            true,
+        );
+        set_pr(&mut state, "fam", "main", found_pr(PrState::Open));
+        set_pr(
+            &mut state,
+            "fam/.worktrees/feat",
+            "feat",
+            found_pr(PrState::Merged),
+        );
+        set_pr(&mut state, "dirty", "main", found_pr(PrState::Approved));
+        let mut terminal = pr_terminal();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let mut got: Vec<(u16, PathBuf)> = state
+            .layout
+            .pr_badge_hits
+            .iter()
+            .map(|hit| (hit.y, hit.repo.clone()))
+            .collect();
+        got.sort();
+        let mut want = vec![
+            (tree_row_y(&state, "checkout:fam"), PathBuf::from("fam")),
+            (
+                tree_row_y(&state, "checkout:fam/.worktrees/feat"),
+                PathBuf::from("fam/.worktrees/feat"),
+            ),
+            (tree_row_y(&state, "repo:dirty"), PathBuf::from("dirty")),
+        ];
+        want.sort();
+        assert_eq!(
+            got, want,
+            "family container, file and workspace rows stay bare"
+        );
+        let buf = terminal.backend().buffer();
+        let family = buf_line(buf, tree_row_y(&state, "repo:fam"));
+        assert!(!family.contains(" P"), "{family}");
+        let file_y = state
+            .painted_tree_rows()
+            .iter()
+            .position(|row| row.kind == NodeKind::File)
+            .map(|index| state.layout.tree_y + index as u16)
+            .expect("file row");
+        assert!(!buf_line(buf, file_y).contains(" A"), "file row");
+    }
+
+    #[test]
+    fn tree_pr_badge_hit_follows_hscroll_and_drops_when_cut() {
+        let mut state = pr_state(&[branch_repo("app", "feature")], true);
+        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        let mut terminal = pr_terminal();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let x = state.layout.pr_badge_hits[0].x;
+
+        state.left_col_offset = 3;
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_eq!(state.layout.pr_badge_hits.len(), 1);
+        let hit = state.layout.pr_badge_hits[0].clone();
+        assert_eq!(hit.x, x - 3);
+        assert_eq!(terminal.backend().buffer()[(hit.x, hit.y)].symbol(), "P");
+
+        // Scrolled past the badge: nothing painted, nothing recorded.
+        state.left_col_offset = 40;
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert!(state.layout.pr_badge_hits.is_empty());
+        let buf = terminal.backend().buffer();
+        let row = buf_line(buf, tree_row_y(&state, "repo:app"));
+        let tree: String = row.chars().take(state.layout.tree_width as usize).collect();
+        assert!(!tree.contains('P'), "{row}");
+    }
+
+    #[test]
+    fn tree_pr_badge_span_matches_paint_at_every_width() {
+        let state = pr_state(&[branch_repo("app", "feature")], true);
+        let row = state
+            .rows
+            .iter()
+            .find(|row| row.id == "repo:app")
+            .expect("repo row")
+            .clone();
+        let palette = ThemeId::TokyoNight.palette();
+        let (mut shown, mut cut) = (0, 0);
+        for width in 8..48 {
+            for col_offset in [0, 2, 9] {
+                let (line, span) = paint_tree_row(
+                    &row,
+                    width,
+                    false,
+                    false,
+                    None,
+                    false,
+                    search_bg_unused(),
+                    true,
+                    false,
+                    false,
+                    false,
+                    Some(PrState::Open),
+                    palette,
+                    col_offset,
+                );
+                // ASCII row: one column per char.
+                let text: Vec<char> = line_text(&line).chars().collect();
+                let what = format!("width {width} offset {col_offset}: {text:?}");
+                match span {
+                    Some((x, w)) => {
+                        shown += 1;
+                        assert_eq!(w, 1, "{what}");
+                        assert!(x + w <= width, "{what}");
+                        assert_eq!(text[x], 'P', "{what}");
+                    }
+                    None => {
+                        cut += 1;
+                        assert!(!text.contains(&'P'), "{what}");
+                    }
+                }
+            }
+        }
+        assert!(shown > 0 && cut > 0, "shown {shown} cut {cut}");
+    }
+
+    #[test]
+    fn ctrl_click_on_the_painted_tree_badge_opens_its_pr_only_there() {
+        let mut state = pr_state(&[branch_repo("app", "feature"), repo("lib", true)], true);
+        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        focus_tree_row(&mut state, "repo:lib");
+        let mut terminal = pr_terminal();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let hit = state.layout.pr_badge_hits[0].clone();
+        let want = Some((PathBuf::from("app"), "feature".to_string()));
+
+        let effect = state.dispatch(Action::CtrlClick {
+            col: hit.x,
+            row: hit.y,
+        });
+        assert_eq!(pr_opened(&effect), want);
+        assert_eq!(state.rows[state.cursor].id, "repo:app");
+
+        // One column left is the branch text: a plain click.
+        let effect = state.dispatch(Action::CtrlClick {
+            col: hit.x - 1,
+            row: hit.y,
+        });
+        assert_eq!(pr_opened(&effect), None);
+        // A plain click on the badge only selects.
+        let effect = state.dispatch(Action::Click {
+            col: hit.x,
+            row: hit.y,
+        });
+        assert_eq!(pr_opened(&effect), None);
+        assert_eq!(state.rows[state.cursor].id, "repo:app");
+    }
+
+    #[test]
+    fn pr_badge_hits_clear_when_the_frame_paints_no_badge() {
+        let mut state = pr_state(&[branch_repo("app", "feature")], true);
+        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        let mut terminal = pr_terminal();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let hit = state.layout.pr_badge_hits[0].clone();
+
+        state
+            .tabs
+            .open_or_focus("app".into(), "main".into(), "HEAD".into());
+        assert!(state.is_compare_tab());
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert!(state.layout.pr_badge_hits.is_empty());
+        let effect = state.dispatch(Action::CtrlClick {
+            col: hit.x,
+            row: hit.y,
+        });
+        assert_eq!(pr_opened(&effect), None);
+
+        // A too-small frame paints no pane and keeps no hit either.
+        state.tabs.active = 0;
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_eq!(state.layout.pr_badge_hits.len(), 1);
+        let mut tiny = Terminal::new(TestBackend::new(20, 5)).unwrap();
+        tiny.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert!(state.layout.pr_badge_hits.is_empty());
+    }
+
+    #[test]
+    fn graph_worktree_badge_paints_and_ctrl_click_opens_its_pr() {
+        use workspace_status_graph::Worktree;
+        const HEAD: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut state = pr_state(
+            &[
+                branch_repo("app", "main"),
+                linked_repo("app/.worktrees/feat", "app", "feat"),
+            ],
+            true,
+        );
+        set_pr(&mut state, "app", "main", found_pr(PrState::Approved));
+        set_pr(
+            &mut state,
+            "app/.worktrees/feat",
+            "feat",
+            found_pr(PrState::Open),
+        );
+        focus_tree_row(&mut state, "checkout:app");
+        state.graph = Some(GraphModel {
+            commits: vec![Commit {
+                id: HEAD.into(),
+                subject: "seed graph".into(),
+                refs: vec!["main".into()],
+                author_name: "Ada".into(),
+                author_date_unix: 1_700_000_000,
+                ..Commit::default()
+            }],
+            head_id: Some(HEAD.into()),
+            // The commit row lists `app`; only the worktree row is badged.
+            worktrees: vec![
+                Worktree {
+                    path: "app".into(),
+                    head_id: Some(HEAD.into()),
+                    branch: Some("main".into()),
+                    ignored: false,
+                    is_current: true,
+                },
+                Worktree {
+                    path: "app/.worktrees/feat".into(),
+                    head_id: None,
+                    branch: Some("feat".into()),
+                    ignored: false,
+                    is_current: false,
+                },
+            ],
+            ..GraphModel::default()
+        });
+        let mut terminal = pr_terminal();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let right_x = state.layout.right_x;
+        let graph_hits: Vec<PrBadgeHit> = state
+            .layout
+            .pr_badge_hits
+            .iter()
+            .filter(|hit| hit.x >= right_x)
+            .cloned()
+            .collect();
+        assert_eq!(graph_hits.len(), 1, "{graph_hits:?}");
+        let hit = graph_hits[0].clone();
+        assert_eq!(
+            (hit.width, hit.repo.as_path()),
+            (1, Path::new("app/.worktrees/feat"))
+        );
+        let buf = terminal.backend().buffer();
+        let row = buf_line(buf, hit.y);
+        let label_x = find_cell_col(buf, hit.y, "app/.worktrees/feat feat P")
+            .unwrap_or_else(|| panic!("worktree label then badge:\n{row}"));
+        assert_eq!(hit.x, label_x + 25);
+        assert_eq!(buf[(hit.x, hit.y)].symbol(), "P");
+        assert_eq!(buf[(hit.x, hit.y)].fg, state.theme.palette().branch_feature);
+        let commit_y = (0..24)
+            .find(|y| buf_line(buf, *y).contains("seed graph"))
+            .expect("commit row");
+        let commit_row: String = buf_line(buf, commit_y)
+            .chars()
+            .skip(right_x as usize)
+            .collect();
+        assert!(!commit_row.contains(" A"), "{commit_row}");
+
+        let effect = state.dispatch(Action::CtrlClick {
+            col: hit.x,
+            row: hit.y,
+        });
+        assert_eq!(
+            pr_opened(&effect),
+            Some((PathBuf::from("app/.worktrees/feat"), "feat".to_string()))
+        );
+        let effect = state.dispatch(Action::CtrlClick {
+            col: hit.x - 1,
+            row: hit.y,
+        });
+        assert_eq!(pr_opened(&effect), None);
+    }
+
+    /// `app` on `main` plus linked checkout `linked` on `feat` (both with an
+    /// open PR), and a graph whose worktree row for `linked` paints
+    /// `graph_branch`.
+    fn pr_graph_state(linked: &str, graph_branch: &str, with_pr: bool) -> AppState {
+        use workspace_status_graph::Worktree;
+        const HEAD: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut state = pr_state(
+            &[
+                branch_repo("app", "main"),
+                linked_repo(linked, "app", "feat"),
+            ],
+            true,
+        );
+        if with_pr {
+            set_pr(&mut state, linked, "feat", found_pr(PrState::Open));
+        }
+        focus_tree_row(&mut state, "checkout:app");
+        state.graph = Some(GraphModel {
+            commits: vec![Commit {
+                id: HEAD.into(),
+                subject: "seed graph".into(),
+                author_name: "Ada".into(),
+                author_date_unix: 1_700_000_000,
+                ..Commit::default()
+            }],
+            head_id: Some(HEAD.into()),
+            worktrees: vec![Worktree {
+                path: linked.into(),
+                head_id: None,
+                branch: Some(graph_branch.into()),
+                ignored: false,
+                is_current: false,
+            }],
+            ..GraphModel::default()
+        });
+        state
+    }
+
+    fn graph_badge_hits(state: &AppState) -> Vec<PrBadgeHit> {
+        state
+            .layout
+            .pr_badge_hits
+            .iter()
+            .filter(|hit| hit.x >= state.layout.right_x)
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn stale_graph_worktree_branch_gets_no_badge_and_opens_only_its_own_branch() {
+        // The checkout moved to `feat`; the loaded graph still paints `old`.
+        let mut state = pr_graph_state("app/.worktrees/wt", "old", true);
+        let mut terminal = pr_terminal();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert!(graph_badge_hits(&state).is_empty());
+        assert_eq!(state.graph_pr_badges(), Vec::new());
+        let buf = terminal.backend().buffer();
+        let y = (0..24)
+            .find(|y| find_cell_col(buf, *y, "app/.worktrees/wt old").is_some())
+            .expect("stale worktree row");
+        let x = find_cell_col(buf, y, "app/.worktrees/wt old").unwrap() + 22;
+        assert_eq!(buf[(x, y)].symbol(), " ", "no badge after the stale label");
+        // The tree row shows the snapshot branch, so it keeps its badge.
+        assert_eq!(state.layout.pr_badge_hits.len(), 1);
+
+        // Ctrl+click where a badge would be: a plain click, nothing opens.
+        let effect = state.dispatch(Action::CtrlClick { col: x, row: y });
+        assert_eq!(pr_opened(&effect), None);
+        // `gx` on the row opens the branch the row paints, never `feat`'s PR.
+        let rows = state.graph.as_ref().unwrap().visible_rows();
+        state.focus = FocusPane::Right;
+        state.graph_cursor = rows
+            .iter()
+            .position(|row| matches!(row, GraphRow::Worktree(_)))
+            .expect("worktree row");
+        assert_eq!(
+            pr_opened(&state.dispatch(Action::OpenPullRequest)),
+            Some((PathBuf::from("app/.worktrees/wt"), "old".to_string()))
+        );
+
+        // Once the graph paints the snapshot branch, the badge is back.
+        let mut state = pr_graph_state("app/.worktrees/wt", "feat", true);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_eq!(graph_badge_hits(&state).len(), 1);
+    }
+
+    #[test]
+    fn graph_pan_reaches_the_badge_on_a_clipped_worktree_label() {
+        let linked = "app/.worktrees/a-linked-worktree-path-that-runs-well-past-the-graph-pane";
+        let pan_max = |with_pr: bool| {
+            let mut state = pr_graph_state(linked, "feat", with_pr);
+            let mut terminal = pr_terminal();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            assert!(graph_badge_hits(&state).is_empty(), "clipped at offset 0");
+            state.mouse_pan(state.layout.right_x + 1, 10_000);
+            let offset = state.right_col_offset;
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            (offset, state, terminal)
+        };
+        let (plain, _, _) = pan_max(false);
+        let (badged, state, terminal) = pan_max(true);
+        assert!(plain > 0);
+        assert_eq!(badged, plain + 2, "pan reaches the space and glyph");
+        let hits = graph_badge_hits(&state);
+        assert_eq!(hits.len(), 1, "badge in view at the pan max");
+        assert_eq!(
+            terminal.backend().buffer()[(hits[0].x, hits[0].y)].symbol(),
+            "P"
+        );
     }
 }

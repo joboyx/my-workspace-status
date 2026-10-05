@@ -643,6 +643,7 @@ fn key_to_action(
             KeyCode::Char('g') if !has_command_modifier(key) => Action::MoveToStart,
             KeyCode::Char('t') if !has_command_modifier(key) => Action::NextTab,
             KeyCode::Char('T') if !has_command_modifier(key) => Action::PreviousTab,
+            KeyCode::Char('x') if !has_command_modifier(key) => Action::OpenPullRequest,
             KeyCode::Char(c @ '1'..='9') if !has_command_modifier(key) => {
                 Action::JumpToTab(c as u8 - b'0')
             }
@@ -1002,6 +1003,14 @@ fn hl_or_pan(key: KeyEvent, delta: i32, hl_folds: bool) -> Action {
 
 fn mouse_to_action(mouse: MouseEvent) -> Action {
     match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left)
+            if mouse.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            Action::CtrlClick {
+                col: mouse.column,
+                row: mouse.row,
+            }
+        }
         MouseEventKind::Down(MouseButton::Left) => Action::Click {
             col: mouse.column,
             row: mouse.row,
@@ -1809,6 +1818,61 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_left_press_is_a_ctrl_click_and_other_buttons_are_unchanged() {
+        let ctrl = KeyModifiers::CONTROL;
+        let left = MouseEventKind::Down(MouseButton::Left);
+        assert_eq!(
+            event_to_action(&mouse_mods(left, 12, 3, ctrl), normal(), false, false),
+            Action::CtrlClick { col: 12, row: 3 }
+        );
+        assert_eq!(
+            event_to_action(&mouse(left, 12, 3), normal(), false, false),
+            Action::Click { col: 12, row: 3 }
+        );
+        assert_eq!(
+            event_to_action(
+                &mouse_mods(MouseEventKind::Drag(MouseButton::Left), 12, 3, ctrl),
+                normal(),
+                false,
+                false
+            ),
+            Action::Drag { col: 12, row: 3 }
+        );
+        assert_eq!(
+            event_to_action(
+                &mouse_mods(MouseEventKind::Up(MouseButton::Left), 12, 3, ctrl),
+                normal(),
+                false,
+                false
+            ),
+            Action::Release
+        );
+        assert_eq!(
+            event_to_action(
+                &mouse_mods(MouseEventKind::Down(MouseButton::Right), 12, 3, ctrl),
+                normal(),
+                false,
+                false
+            ),
+            Action::BackClick
+        );
+        assert_eq!(
+            event_to_action(
+                &mouse_mods(MouseEventKind::ScrollDown, 12, 3, ctrl),
+                normal(),
+                false,
+                false
+            ),
+            Action::ScrollWheel {
+                col: 12,
+                row: 3,
+                delta: 1,
+                horizontal: false,
+            }
+        );
+    }
+
+    #[test]
     fn mouse_hscroll_and_shift_wheel_map_to_horizontal_pan() {
         assert_eq!(
             event_to_action(
@@ -2335,6 +2399,15 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Char('g')), pending, false, false),
             Action::MoveToStart
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('x')), pending, false, false),
+            Action::OpenPullRequest
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('x')), normal(), false, false),
+            Action::Revert,
+            "bare x stays revert"
         );
         assert_eq!(
             event_to_action(&key(KeyCode::Char('t')), normal(), false, false),
@@ -3377,6 +3450,7 @@ mod tests {
             (pending_g(), 0, Char('g'), Action::MoveToStart),
             (pending_g(), 0, Char('t'), Action::NextTab),
             (pending_g(), 0, Char('T'), Action::PreviousTab),
+            (pending_g(), 0, Char('x'), Action::OpenPullRequest),
             (pending_g(), 0, Char('1'), Action::JumpToTab(1)),
             (pending_g(), 0, Char('9'), Action::JumpToTab(9)),
             (pending_g(), 0, Char('p'), Action::Pull),

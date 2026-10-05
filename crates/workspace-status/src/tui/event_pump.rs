@@ -122,6 +122,7 @@ pub fn action_triggers_graph_autoload(action: &Action) -> bool {
                 ..
             }
             | Action::Click { .. }
+            | Action::CtrlClick { .. }
     )
 }
 
@@ -145,6 +146,14 @@ mod tests {
             row: 1
         }));
         assert!(action_triggers_graph_autoload(&Action::Move(1)));
+        assert!(action_triggers_graph_autoload(&Action::Click {
+            col: 1,
+            row: 1
+        }));
+        assert!(action_triggers_graph_autoload(&Action::CtrlClick {
+            col: 1,
+            row: 1
+        }));
         assert!(action_triggers_graph_autoload(&Action::MoveToEnd));
         assert!(action_triggers_graph_autoload(&Action::PageMove(-1)));
         assert!(action_triggers_graph_autoload(&Action::ScrollWheel {
@@ -242,6 +251,10 @@ mod tests {
             BusyAction::Handle
         );
         assert_eq!(
+            classify_busy_action(&Action::CtrlClick { col: 4, row: 8 }),
+            BusyAction::Handle
+        );
+        assert_eq!(
             classify_busy_action(&Action::ScrollWheel {
                 col: 4,
                 row: 8,
@@ -279,6 +292,11 @@ mod tests {
         );
         assert_eq!(
             classify_busy_action(&Action::CopyEntityReference),
+            BusyAction::Handle
+        );
+        // `gx` writes no git state: its lookup and browser open run on the pool.
+        assert_eq!(
+            classify_busy_action(&Action::OpenPullRequest),
             BusyAction::Handle
         );
     }

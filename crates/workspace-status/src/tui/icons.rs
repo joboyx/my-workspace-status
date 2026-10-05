@@ -107,6 +107,21 @@ pub fn icon_merged_into_default(ascii: bool) -> &'static str {
 pub fn icon_open_vs_default(ascii: bool) -> &'static str {
     glyph(ascii, "", "o")
 }
+/// PR badge: open, not reported approved. Nerd: nf-oct-git_pull_request
+/// (`U+F407`); ASCII: `P`.
+pub fn icon_pr_open(ascii: bool) -> &'static str {
+    glyph(ascii, "\u{f407}", "P")
+}
+/// PR badge: open and approved. Nerd: nf-oct-check (`U+F42E`); ASCII: `A`.
+///
+/// Distinct from [`icon_merged_into_default`].
+pub fn icon_pr_approved(ascii: bool) -> &'static str {
+    glyph(ascii, "\u{f42e}", "A")
+}
+/// PR badge: merged. Nerd: nf-oct-git_merge (`U+F419`); ASCII: `m`.
+pub fn icon_pr_merged(ascii: bool) -> &'static str {
+    glyph(ascii, "\u{f419}", "m")
+}
 /// `ICON_STATUS_FAILED` nerd glyph: nf-fa-warning (`U+F071`).
 pub const ICON_STATUS_FAILED_NERD: &str = "\u{f071}";
 /// `ICON_STATUS_FAILED` ASCII fallback.
@@ -584,6 +599,9 @@ mod tests {
             icon_comment_resolved(true),
             icon_staged(true),
             icon_changes(true),
+            icon_pr_open(true),
+            icon_pr_approved(true),
+            icon_pr_merged(true),
             ASCII_FILE_GLYPH,
         ];
         let nerd = [
@@ -607,6 +625,9 @@ mod tests {
             icon_comment_resolved(false),
             icon_staged(false),
             icon_changes(false),
+            icon_pr_open(false),
+            icon_pr_approved(false),
+            icon_pr_merged(false),
             CURSOR_BAR,
             CURSOR_BAR_INACTIVE,
             FOLD_EXPANDED,
@@ -633,6 +654,39 @@ mod tests {
         assert_eq!(comment_mark_cols(false), 1);
         assert_ne!(icon_viewed(false), icon_clean(false));
         assert_ne!(icon_viewed(false), icon_synced(false));
+    }
+
+    #[test]
+    fn pr_badge_glyphs_are_distinct_and_never_words() {
+        assert_eq!(icon_pr_open(false), "\u{f407}");
+        assert_eq!(icon_pr_approved(false), "\u{f42e}");
+        assert_eq!(icon_pr_merged(false), "\u{f419}");
+        assert_eq!(
+            [
+                icon_pr_open(true),
+                icon_pr_approved(true),
+                icon_pr_merged(true)
+            ],
+            ["P", "A", "m"]
+        );
+        for ascii in [true, false] {
+            let marks = [
+                icon_pr_open(ascii),
+                icon_pr_approved(ascii),
+                icon_pr_merged(ascii),
+            ];
+            for mark in marks {
+                assert_eq!(visible_width(mark), 1, "{mark:?}");
+                // Graph nodes and the tab close glyph.
+                for taken in ["●", "◇", "✗"] {
+                    assert_ne!(mark, taken);
+                }
+            }
+            assert_ne!(marks[0], marks[1]);
+            assert_ne!(marks[1], marks[2]);
+            assert_ne!(marks[0], marks[2]);
+            assert_ne!(icon_pr_approved(ascii), icon_merged_into_default(ascii));
+        }
     }
 
     #[test]

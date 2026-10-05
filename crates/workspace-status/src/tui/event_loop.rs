@@ -198,6 +198,15 @@ struct LoopCtx<'a> {
     quit: bool,
 }
 
+impl Drop for LoopCtx<'_> {
+    /// Every exit from [`run`], an error included, ends here before the
+    /// caller drops the runtime. That drop waits for running workers, so
+    /// stop the PR lookups and opens, which can take many seconds.
+    fn drop(&mut self) {
+        self.interp.cancel_pull_request_jobs();
+    }
+}
+
 /// Run until quit. Caller owns terminal restore.
 pub async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -225,6 +234,13 @@ pub async fn run(
     };
     ctx.interp
         .schedule(ctx.state, ctx.opts, Effect::LoadRightPane, &Action::None);
+    // Watch ticks look up only new or changed branches; the first snapshot
+    // is all new.
+    let lookups = Effect::LookupPullRequests {
+        targets: ctx.state.due_pr_lookups(),
+    };
+    ctx.interp
+        .schedule(ctx.state, ctx.opts, lookups, &Action::None);
     if opts.start_fetch {
         let effect = ctx.state.dispatch(Action::Fetch);
         ctx.interp

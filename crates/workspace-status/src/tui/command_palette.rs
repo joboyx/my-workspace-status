@@ -46,6 +46,17 @@ pub enum CommandScope {
     NoHighlight,
 }
 
+impl CommandScope {
+    /// True when a row with this scope may run in the current highlight mode.
+    pub fn fits(self, highlighted: bool) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Highlight => highlighted,
+            Self::NoHighlight => !highlighted,
+        }
+    }
+}
+
 /// One named command in the palette catalog.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaletteCommand {
@@ -307,6 +318,20 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
+        title: "Open PR",
+        keys: "gx",
+        group: CommandGroup::Git,
+        action: Action::OpenPullRequest,
+        aliases: &[
+            "pull request",
+            "merge request",
+            "browser",
+            "github",
+            "gitlab",
+        ],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
         title: "Blame: open commit changes",
         keys: "",
         group: CommandGroup::Git,
@@ -543,16 +568,21 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
 /// Case-insensitive substring on title, key chips, group, and aliases.
 pub fn command_matches(command: &PaletteCommand, query: &str) -> bool {
     let q = query.trim().to_ascii_lowercase();
-    if q.is_empty() {
-        return true;
-    }
-    command.title.to_ascii_lowercase().contains(&q)
-        || command.keys.to_ascii_lowercase().contains(&q)
-        || command.group.title().to_ascii_lowercase().contains(&q)
+    command_matches_by_name(command, &q)
         || command
             .aliases
             .iter()
             .any(|alias| alias.to_ascii_lowercase().contains(&q))
+}
+
+/// Case-insensitive substring on title, key chips, and group (not aliases).
+///
+/// `query` is already trimmed and lowercase. An empty query matches.
+fn command_matches_by_name(command: &PaletteCommand, q: &str) -> bool {
+    q.is_empty()
+        || command.title.to_ascii_lowercase().contains(q)
+        || command.keys.to_ascii_lowercase().contains(q)
+        || command.group.title().to_ascii_lowercase().contains(q)
 }
 
 /// Filtered catalog in table order. Empty query keeps every command.
@@ -608,6 +638,34 @@ impl CommandPaletteState {
     /// Commands that match the current filter, table order.
     pub fn visible(&self) -> Vec<&'static PaletteCommand> {
         filter_commands(&self.filter)
+    }
+
+    /// Indexes into [`Self::visible`] that the cursor may land on after a
+    /// filter change. `highlighted` is true while a diff range is
+    /// highlighted.
+    ///
+    /// Rows the filter finds by title, key chips, or group, and whose scope
+    /// fits the highlight mode, outrank rows it finds only by an alias:
+    /// typing `pull` lands on Pull behind, not on a row that has a
+    /// `pull request` alias. With no such row, every visible row may take
+    /// the cursor (`exit` outside a highlight lands on Quit, not on Exit
+    /// highlight).
+    pub fn landing_rows(&self, highlighted: bool) -> Vec<usize> {
+        let visible = self.visible();
+        let q = self.filter.trim().to_ascii_lowercase();
+        let named: Vec<usize> = visible
+            .iter()
+            .enumerate()
+            .filter(|(_, command)| {
+                command_matches_by_name(command, &q) && command.scope.fits(highlighted)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if named.is_empty() {
+            (0..visible.len()).collect()
+        } else {
+            named
+        }
     }
 
     /// Highlighted command, if the filtered list is non-empty.
@@ -908,6 +966,13 @@ mod tests {
                 CommandScope::NoHighlight,
             ),
             (
+                "Open PR",
+                "gx",
+                CommandGroup::Git,
+                Action::OpenPullRequest,
+                CommandScope::NoHighlight,
+            ),
+            (
                 "Blame: open commit changes",
                 "",
                 CommandGroup::Git,
@@ -1168,10 +1233,50 @@ mod tests {
             ("comment", "Comment"),
             ("yank", "Copy comments"),
             ("yank", "Copy entity reference"),
+            ("pull request", "Open PR"),
+            ("merge request", "Open PR"),
+            ("PR", "Open PR"),
+            ("browser", "Open PR"),
+            ("github", "Open PR"),
+            ("gitlab", "Open PR"),
         ] {
             assert!(titles(query).contains(&title), "{query} -> {title}");
         }
         assert_eq!(titles("close app"), vec!["Quit"]);
+    }
+
+    /// An alias-only hit never takes the cursor from a row the query names.
+    #[test]
+    fn landing_rows_rank_name_matches_over_alias_only_matches() {
+        let landing_in = |query: &str, highlighted: bool| {
+            let mut palette = CommandPaletteState::new();
+            palette.set_filter(query);
+            let visible = palette.visible();
+            palette
+                .landing_rows(highlighted)
+                .into_iter()
+                .map(|index| visible[index].title)
+                .collect::<Vec<_>>()
+        };
+        let landing = |query: &str| landing_in(query, false);
+        assert!(titles("pull").contains(&"Open PR"), "alias still finds it");
+        assert!(!landing("pull").contains(&"Open PR"));
+        assert_eq!(landing("pull").first(), Some(&"Pull behind"));
+        assert_eq!(landing("pull request"), vec!["Open PR"]);
+        assert_eq!(landing("merge request"), vec!["Open PR"]);
+        assert!(landing("PR").contains(&"Open PR"));
+        assert_eq!(landing("gx"), vec!["Open PR"]);
+        assert!(!landing("merge").contains(&"Open PR"));
+        assert_eq!(
+            landing("").len(),
+            PALETTE_COMMANDS
+                .iter()
+                .filter(|command| command.scope.fits(false))
+                .count()
+        );
+        // A named row out of scope does not count: `exit` keeps Quit (alias).
+        assert!(landing("exit").contains(&"Quit"));
+        assert_eq!(landing_in("exit", true), vec!["Exit highlight"]);
     }
 
     #[test]

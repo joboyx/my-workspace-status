@@ -8,6 +8,7 @@ mod dispatch_write;
 mod file_tab;
 mod line_blame;
 mod pan;
+mod pull_request;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -151,6 +152,29 @@ pub enum FocusPane {
     Right,
 }
 
+/// One painted PR badge, for Ctrl+click hit testing.
+///
+/// A tree repo / checkout row and a graph worktree row each record one
+/// span. Ctrl+click inside it opens the PR of [`Self::repo`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrBadgeHit {
+    /// 0-based screen row of the badge.
+    pub y: u16,
+    /// 0-based first screen column of the badge.
+    pub x: u16,
+    /// Painted width in display columns.
+    pub width: u16,
+    /// Checkout path (snapshot `repo`) of the row the badge is on.
+    pub repo: PathBuf,
+}
+
+impl PrBadgeHit {
+    /// True when screen cell (`col`, `row`) is inside this badge.
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        row == self.y && col >= self.x && col < self.x.saturating_add(self.width)
+    }
+}
+
 /// Last painted layout, used for mouse hit testing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LayoutHit {
@@ -224,6 +248,10 @@ pub struct LayoutHit {
     pub tab_hits: Vec<(u16, u16, usize)>,
     /// Close `[✗]` hit boxes for compare and file tabs. Workspace never has one.
     pub tab_close_hits: Vec<(u16, u16, usize)>,
+    /// PR badge spans painted on tree and graph rows, rebuilt every paint.
+    ///
+    /// Empty when no row shows a badge.
+    pub pr_badge_hits: Vec<PrBadgeHit>,
     /// First tab the strip painted. Kept across paints so the window only
     /// scrolls when the active tab would leave it. `0` when every tab fits.
     pub tab_scroll: usize,
@@ -286,6 +314,7 @@ impl Default for LayoutHit {
             tab_y: 0,
             tab_hits: Vec::new(),
             tab_close_hits: Vec::new(),
+            pr_badge_hits: Vec::new(),
             tab_scroll: 0,
             help_scroll_max: 0,
             file_view_x: 0,
@@ -645,6 +674,8 @@ pub struct AppState {
     pub(crate) g_chord_echo: GChordEchoState,
     pub(crate) ctrl_c_armed_until: Option<Instant>,
     last_click: Option<(u16, u16, Instant)>,
+    /// PR answers for branch-row badges, per checkout and (remote, branch).
+    pr_cache: pull_request::PrCache,
     /// Diff search hits for one (content, layout, query), so the status
     /// pill and the diff paint do not rebuild every diff row each frame.
     diff_search_memo: RefCell<Option<DiffSearchMemo>>,
@@ -789,6 +820,7 @@ impl AppState {
             g_chord_echo: GChordEchoState::default(),
             ctrl_c_armed_until: None,
             last_click: None,
+            pr_cache: pull_request::PrCache::default(),
             diff_search_memo: RefCell::new(None),
             file_search_memo: RefCell::new(None),
             line_blame: LineBlameState::default(),
@@ -16413,6 +16445,7 @@ diff --git a/README.md b/README.md
             "Stage",
             "Revert",
             "Inline / split",
+            "Open PR",
             // Help clears the highlight, and highlight mode has no `?` key.
             "Keymap help",
         ] {

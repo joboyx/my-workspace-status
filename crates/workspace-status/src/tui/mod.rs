@@ -28,6 +28,7 @@ mod keys;
 mod line_blame;
 mod ops;
 pub(crate) mod persist;
+mod pull_request;
 mod quick_open;
 mod render;
 mod scheduler;

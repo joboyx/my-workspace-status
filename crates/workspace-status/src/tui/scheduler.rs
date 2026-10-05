@@ -59,6 +59,8 @@ pub enum UserTag {
     QuickOpen,
     /// Focused-line `git blame -L n,n` (latest-only slot).
     LineBlame,
+    /// Forge PR lookup for a row badge, or a `gx` lookup then browser open.
+    PullRequest,
 }
 
 /// A job the loop should `spawn_blocking`.

@@ -275,6 +275,7 @@ impl AppState {
             | Action::FocusRight
             | Action::ToggleFullContext
             | Action::Click { .. }
+            | Action::CtrlClick { .. }
             | Action::Drag { .. }
             | Action::Release
             | Action::BackClick
@@ -315,6 +316,7 @@ impl AppState {
             | Action::ExportComments
             | Action::ExportCommentsCancel
             | Action::CopyEntityReference
+            | Action::OpenPullRequest
             | Action::ToggleQuickOpen(_)
             | Action::QuickOpenMove(_)
             | Action::QuickOpenChar(_)

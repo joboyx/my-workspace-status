@@ -174,7 +174,10 @@ impl AppState {
             }
             Action::Edit => Some(self.edit_file_tab()),
             Action::Refresh => Some(self.reload_active_file_tab()),
-            Action::Click { col, row } if row != self.layout.tab_y => {
+            // A file tab paints no PR badge, so Ctrl+click is a plain click.
+            Action::Click { col, row } | Action::CtrlClick { col, row }
+                if row != self.layout.tab_y =>
+            {
                 if self.mouse_enabled {
                     self.click_file_tab(col, row);
                 }
@@ -841,5 +844,12 @@ mod tests {
         assert!(app.text_selection.is_some());
         app.dispatch(Action::Release);
         assert!(app.text_selection.is_none());
+        // Ctrl+click is a plain click here: a file tab paints no PR badge.
+        assert_eq!(
+            app.dispatch(Action::CtrlClick { col: 5, row: 5 }),
+            Effect::None
+        );
+        assert_eq!(cursor(&app), 2);
+        assert!(app.text_selection.is_some());
     }
 }
