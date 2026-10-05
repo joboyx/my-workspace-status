@@ -306,7 +306,10 @@ impl AppState {
         let Ok((repo, blame)) = self.blamed_line() else {
             return Effect::None;
         };
-        if !self.tabs.is_workspace() {
+        // The Workspace graph does not reload while another tab is
+        // active, so a parked graph may miss newer commits.
+        let from_other_tab = !self.tabs.is_workspace();
+        if from_other_tab {
             // A tab switch only swaps session state; it loads nothing.
             let switched = self.activate_tab(0);
             debug_assert_eq!(switched, Effect::None);
@@ -336,12 +339,14 @@ impl AppState {
                 .as_ref()
                 .is_some_and(|(graph_repo, _)| *graph_repo == repo);
         // The graph on screen may already hold the commit. Only a graph
-        // with no load pending counts as seen: after a cursor move the
-        // pane loads again, and widening waits for that load.
+        // with no load pending counts as seen: after a cursor move or a
+        // switch from another tab the pane loads again, and widening or
+        // giving up waits for that load.
+        let reload = !loaded || moved || from_other_tab;
         if loaded {
-            self.retry_graph_reveal(&repo, !moved);
+            self.retry_graph_reveal(&repo, !reload);
         }
-        if !loaded || moved {
+        if reload {
             effects.push(Effect::LoadRightPane);
         }
         single_or_batch(effects)
@@ -1492,7 +1497,11 @@ mod tests {
         ));
         answer(&mut app, Some(blamed(SHA)));
         app.graph_branch_focus = Some(("app".into(), vec!["main".into()]));
-        assert_eq!(app.dispatch(Action::BlameRevealGraph), Effect::None);
+        assert_eq!(
+            app.dispatch(Action::BlameRevealGraph),
+            Effect::LoadRightPane,
+            "the parked graph may be stale: reload it"
+        );
         assert!(app.tabs.is_workspace());
         assert!(app.graph_pane_focused());
         assert_eq!(
@@ -1500,7 +1509,14 @@ mod tests {
             Some(OTHER),
             "not loaded yet"
         );
+        assert!(
+            !app.graph_reveal_wants_older(),
+            "no widening from the parked graph"
+        );
+        assert!(app.graph_reveal.is_some());
 
+        // The reload lands without the commit; now the reveal widens.
+        app.set_graph(graph_with(&[OTHER], true), "app".into(), OTHER.into());
         app.graph_loading_older = true;
         assert!(
             !app.graph_reveal_wants_older(),
@@ -1517,6 +1533,68 @@ mod tests {
             app.status,
             "aaa1111 is not in the loaded graph (graph focus on, O clears)"
         );
+    }
+
+    #[test]
+    fn blame_reveal_from_a_file_tab_finds_a_commit_only_the_reload_has() {
+        for has_more in [false, true] {
+            let mut app = state();
+            app.cursor = app
+                .rows
+                .iter()
+                .position(|row| row.id == "repo:app")
+                .unwrap();
+            app.set_graph(graph_with(&[OTHER], has_more), "app".into(), OTHER.into());
+            file_tab_on_readme_blamed(&mut app, SHA);
+            assert_eq!(
+                app.dispatch(Action::BlameRevealGraph),
+                Effect::LoadRightPane
+            );
+            assert!(
+                !app.graph_reveal_wants_older(),
+                "no older page from the parked graph"
+            );
+            assert!(app.graph_reveal.is_some(), "waits for the reload");
+            assert!(
+                !app.status.contains("not in the loaded graph"),
+                "{}",
+                app.status
+            );
+
+            // A commit made while the file tab was active is in the reload.
+            app.set_graph(
+                graph_with(&[SHA, OTHER], has_more),
+                "app".into(),
+                SHA.into(),
+            );
+            assert_eq!(app.graph_reveal, None);
+            assert_eq!(focused_commit(&app).as_deref(), Some(SHA));
+            assert_footer_on(&app, SHA);
+            assert!(!app.graph_reveal_wants_older());
+            assert!(
+                !app.status.contains("not in the loaded graph"),
+                "{}",
+                app.status
+            );
+        }
+    }
+
+    /// Open a file tab of `README.md` whose cursor line blames `sha`.
+    fn file_tab_on_readme_blamed(app: &mut AppState, sha: &str) {
+        let Effect::LoadFileTab { tab_id, gen, .. } =
+            app.open_file_tab("app".into(), "README.md".into())
+        else {
+            panic!("expected a load");
+        };
+        assert!(app.apply_file_tab(
+            tab_id,
+            gen,
+            FileRead::Text {
+                lines: vec!["a".into()],
+                max_cols: 1,
+            }
+        ));
+        answer(app, Some(blamed(sha)));
     }
 
     #[test]
