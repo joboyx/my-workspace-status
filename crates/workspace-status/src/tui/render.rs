@@ -1854,13 +1854,15 @@ fn clamp_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
     out
 }
 
-fn with_bg(spans: Vec<Span<'static>>, bg: Option<Color>) -> Vec<Span<'static>> {
-    let Some(bg) = bg else {
+/// Paint a help search hit with the search pill's fg/bg pair on every span
+/// (chips, descriptions, padding), as pane match rows do. Modifiers stay.
+fn with_search_pill(spans: Vec<Span<'static>>, pill: Option<Pill>) -> Vec<Span<'static>> {
+    let Some(pill) = pill else {
         return spans;
     };
     spans
         .into_iter()
-        .map(|span| span.patch_style(Style::default().bg(bg)))
+        .map(|span| span.patch_style(Style::default().fg(pill.fg).bg(pill.bg)))
         .collect()
 }
 
@@ -1999,9 +2001,9 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             let mut rows = Vec::new();
             for entry in group.entries {
                 let hit = searching && help_entry_matches(entry.keys, entry.desc, query);
-                let bg = hit.then_some(pills.filter.bg);
+                let pill = hit.then_some(pills.filter);
                 for vis in help_entry_visual_lines(entry.desc, content, key_width) {
-                    let mut spans = with_bg(
+                    let mut spans = with_search_pill(
                         help_visual_cell_spans(
                             entry,
                             &vis,
@@ -2011,7 +2013,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                             palette.muted,
                             content,
                         ),
-                        bg,
+                        pill,
                     );
                     spans.push(Span::raw(" ".repeat(gutter)));
                     rows.push(spans);
@@ -6270,20 +6272,57 @@ mod tests {
 
     #[test]
     fn help_search_highlights_without_hiding_rows() {
-        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
-        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
-        state.help_open = true;
-        state.help_search_query = Some("quit".into());
-        let backend = TestBackend::new(200, 40);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-        let text = buffer_text(&terminal);
-        assert!(text.contains("MOVE"), "{text}");
-        assert!(text.contains("stage scope"), "{text}");
-        assert!(text.contains("quit"), "{text}");
-        assert!(text.contains("Esc clears search"), "{text}");
-        assert!(!text.contains("n/N wrap"), "{text}");
-        assert_help_version_lower_right(&text);
+        for id in crate::tui::theme::THEME_IDS {
+            let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+            state.theme = id;
+            state.help_open = true;
+            state.help_search_query = Some("quit".into());
+            let backend = TestBackend::new(200, 40);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let text = buffer_text(&terminal);
+            assert!(text.contains("MOVE"), "{text}");
+            assert!(text.contains("stage scope"), "{text}");
+            assert!(text.contains("quit"), "{text}");
+            assert!(text.contains("Esc clears search"), "{text}");
+            assert!(!text.contains("n/N wrap"), "{text}");
+            assert_help_version_lower_right(&text);
+
+            // A hit paints the filter pill's fg/bg pair on chips and the muted
+            // description alike, so the text stays readable on every theme.
+            let pill = id.pills().filter;
+            let buf = terminal.backend().buffer();
+            let lines: Vec<&str> = text.lines().collect();
+            let hit_y = lines
+                .iter()
+                .position(|l| l.contains("quit (press twice)"))
+                .expect("quit (press twice) row") as u16;
+            let desc = needle_cols(buf, hit_y, "quit (press twice)");
+            let chip = needle_cols(buf, hit_y, "Ctrl-c");
+            for x in desc.iter().chain(&chip) {
+                let cell = &buf[(*x, hit_y)];
+                assert_eq!(cell.bg, pill.bg, "{id:?} hit cell {x} bg");
+                assert_eq!(cell.fg, pill.fg, "{id:?} hit cell {x} fg");
+            }
+            assert!(
+                buf[(chip[0], hit_y)].modifier.contains(Modifier::BOLD),
+                "{id:?} hit chip keeps bold"
+            );
+            for y in rows_with_bg(buf, pill.bg) {
+                for x in cols_with_bg(buf, y, pill.bg) {
+                    assert_eq!(buf[(x, y)].fg, pill.fg, "{id:?} ({x},{y}) on pill bg");
+                }
+            }
+            // A non-matching entry keeps its normal paint.
+            let miss_y = lines
+                .iter()
+                .position(|l| l.contains("stage scope"))
+                .expect("stage scope row") as u16;
+            for x in needle_cols(buf, miss_y, "stage scope") {
+                assert_ne!(buf[(x, miss_y)].bg, pill.bg, "{id:?} miss cell {x}");
+            }
+        }
     }
 
     /// Draw a whole-file revert confirm over `(path, untracked)` targets and

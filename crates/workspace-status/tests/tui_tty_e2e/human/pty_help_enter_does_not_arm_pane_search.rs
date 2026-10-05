@@ -5,6 +5,18 @@ use crate::support::{tree_cursor_on, tree_has, GIT_WAIT, WAIT};
 /// Tokyo Night `pills.filter.bg` (`#bb9af7`). Help `/` highlight uses this.
 const HELP_SEARCH_FILTER_BG: (u8, u8, u8) = (0xbb, 0x9a, 0xf7);
 
+/// Tokyo Night `pills.filter.fg` (`#1a1b26`). Help `/` hits paint text in this
+/// colour on `HELP_SEARCH_FILTER_BG`, so muted descriptions stay readable.
+const HELP_SEARCH_FILTER_FG: (u8, u8, u8) = (0x1a, 0x1b, 0x26);
+
+/// True when every cell of the first on-screen `needle` uses the filter fg.
+fn needle_has_filter_fg(tui: &PtySession, needle: &str) -> bool {
+    match tui.first_needle_fgs(needle) {
+        Some(fgs) if !fgs.is_empty() => fgs.iter().all(|fg| *fg == Some(HELP_SEARCH_FILTER_FG)),
+        _ => false,
+    }
+}
+
 /// Pane `/` typing chrome. Distinct from help `search focused pane (Enter arms)`.
 fn pane_search_prompt(screen: &str) -> bool {
     screen.contains("SEARCH")
@@ -37,6 +49,8 @@ fn help_quit_rows_highlighted(tui: &PtySession) -> bool {
     let (r, g, b) = HELP_SEARCH_FILTER_BG;
     tui.needle_has_bg("press twice", r, g, b)
         && tui.needle_has_bg("never quit", r, g, b)
+        && needle_has_filter_fg(tui, "press twice")
+        && needle_has_filter_fg(tui, "never quit")
         && tui.needle_lacks_bg("stage scope", r, g, b)
 }
 
@@ -53,7 +67,8 @@ fn help_quit_rows_unhighlighted(tui: &PtySession) -> bool {
 /// stay visible; no Enter-arm; no `n`/`N` next/prev). A no-op `/`, an Enter
 /// that opens pane SEARCH, or a close that leaves `/{query}` armed cannot
 /// pass. Glyphs-only screen delta is not enough: matching `quit` rows must
-/// use the filter background, and non-matching rows must stay unhighlighted.
+/// use the filter pill background and foreground, and non-matching rows must
+/// stay unhighlighted.
 #[test]
 fn pty_help_enter_does_not_arm_pane_search() {
     let (_root, workspace) = daily_workspace();
