@@ -548,10 +548,10 @@ pub(crate) fn held_nav_key(event: &Event) -> Option<KeyEvent> {
 /// Map one folded key press in `mode` to an [`Action`].
 ///
 /// Explicit chords (Ctrl-c, Ctrl-k, and the per-mode Ctrl bindings) match
-/// first. In Normal, pending `z` / `g`, Help, Confirm, comment export, and
-/// visual highlight a key with Ctrl / Alt / Super / Hyper / Meta never
-/// runs the plain-key action ([`is_unbound_chord`]). Text overlays keep
-/// their own matching.
+/// first. In Normal, pending `z` / `g`, Help, Confirm, the stash menu,
+/// comment export, and visual highlight a key with Ctrl / Alt / Super /
+/// Hyper / Meta never runs the plain-key action ([`is_unbound_chord`]).
+/// Text overlays keep their own matching.
 fn key_to_action(
     key: KeyEvent,
     mode: InputMode,
@@ -659,6 +659,8 @@ fn key_to_action(
             _ => Action::None,
         },
         InputMode::StashMenu => match key.code {
+            // Menu letters are hotkeys (pop, apply, drop), not typed text.
+            _ if is_unbound_chord(key) => Action::None,
             KeyCode::Esc => Action::StashMenuCancel,
             KeyCode::Enter => Action::StashMenuEnter,
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -752,7 +754,7 @@ fn palette_open_key(key: KeyEvent) -> Option<PaletteOpenedBy> {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('k') {
         return Some(PaletteOpenedBy::CtrlK);
     }
-    if !key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char(':') {
+    if !has_command_modifier(key) && key.code == KeyCode::Char(':') {
         return Some(PaletteOpenedBy::Colon);
     }
     None
@@ -3104,6 +3106,12 @@ mod tests {
             (n, 0, Char('q'), Action::Quit),
             (n, 0, Char('?'), Action::ToggleHelp),
             (n, 0, Char('.'), Action::ToggleShowIgnored),
+            (
+                n,
+                0,
+                Char(':'),
+                Action::ToggleCommandPalette(PaletteOpenedBy::Colon),
+            ),
             (n, 0, Char('f'), Action::Fetch),
             (n, 0, Char('p'), Action::Pull),
             (n, 0, Char('d'), Action::DefaultBranch),
@@ -3169,6 +3177,37 @@ mod tests {
             (InputMode::Confirm, 0, Char('N'), Action::ConfirmNo),
             (InputMode::Confirm, 0, Enter, Action::ConfirmEnter),
             (
+                InputMode::StashMenu,
+                0,
+                Char('s'),
+                Action::StashMenuChar('s'),
+            ),
+            (
+                InputMode::StashMenu,
+                0,
+                Char('a'),
+                Action::StashMenuChar('a'),
+            ),
+            (
+                InputMode::StashMenu,
+                0,
+                Char('p'),
+                Action::StashMenuChar('p'),
+            ),
+            (
+                InputMode::StashMenu,
+                0,
+                Char('D'),
+                Action::StashMenuChar('D'),
+            ),
+            (
+                InputMode::StashMenu,
+                0,
+                Char('d'),
+                Action::StashMenuChar('d'),
+            ),
+            (InputMode::StashMenu, 0, Enter, Action::StashMenuEnter),
+            (
                 InputMode::CommentExport,
                 0,
                 Enter,
@@ -3230,10 +3269,26 @@ mod tests {
                 }
             }
             for (code, mods) in chords {
-                // Explicit Ctrl chords keep their own bindings.
+                // Explicit Ctrl chords keep their own bindings: Ctrl-c
+                // everywhere, Ctrl-k where the palette opens, Ctrl-o / u / d
+                // in Normal and pending chords, Ctrl-u / d in highlight.
                 let ctrl_only = !mods.intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
                     && mods.contains(KeyModifiers::CONTROL);
-                if ctrl_only && matches!(code, Char('c' | 'k' | 'o' | 'u' | 'd')) {
+                let normal_like = matches!(
+                    mode,
+                    InputMode::Normal { .. }
+                        | InputMode::ZPending { .. }
+                        | InputMode::GPending { .. }
+                );
+                let visual = mode == InputMode::DiffVisual;
+                let bound = match code {
+                    Char('c') => true,
+                    Char('k') => normal_like || visual,
+                    Char('o') => normal_like,
+                    Char('u' | 'd') => normal_like || visual,
+                    _ => false,
+                };
+                if ctrl_only && bound {
                     continue;
                 }
                 let want = match (mode, code) {

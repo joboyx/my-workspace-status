@@ -212,7 +212,7 @@ File-diff add/del rows use `palette.diffAddBg` / `palette.diffDelBg` behind synt
 
 ## Keymap
 
-See [tui-rust.md](./tui-rust.md) for the same keys with layout notes. A key with Ctrl, Alt, Super, Hyper, or Meta runs only an explicit chord from this table (Ctrl-c, Ctrl-k, Ctrl-o, Ctrl-u / Ctrl-d, picker moves); any other such chord does nothing, so Ctrl-p is not `p` pull. Shift still selects the shifted binding (`P` push). On Windows, a symbol typed with AltGr (reported as Ctrl+Alt) still acts as that symbol.
+See [tui-rust.md](./tui-rust.md) for the same keys with layout notes. In Normal, pending `z` / `g`, help, confirm, the stash menu, comment export, and visual highlight, a key with Ctrl, Alt, Super, Hyper, or Meta runs only an explicit chord from this table (Ctrl-c, Ctrl-k, Ctrl-o, Ctrl-u / Ctrl-d) and otherwise does nothing, so Ctrl-p is not `p` pull; Shift still selects the shifted binding (`P` push), and an AltGr symbol (Windows Ctrl+Alt) still acts as that symbol. Text overlays (search, pickers, palette filter, comment) keep their own typing rules.
 
 
 | Keys                                       | Action                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
