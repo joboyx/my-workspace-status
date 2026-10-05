@@ -59,7 +59,10 @@ fn run(args: &[&str], cwd: &Path) -> std::io::Result<std::process::Output> {
     git_command(git_binary(), args, cwd).output()
 }
 
-/// Run git with `stdin` piped. Used only by the `git apply` wrappers.
+/// Run git with `stdin` piped: the `git apply` wrappers and index blame.
+///
+/// A broken pipe while writing means git exited before it read all of
+/// `stdin`; the exit status then says why, so that is not an `Err`.
 fn run_with_stdin(
     args: &[&str],
     cwd: &Path,
@@ -74,7 +77,10 @@ fn run_with_stdin(
         .env("GIT_TERMINAL_PROMPT", "0");
     let mut child = cmd.spawn()?;
     let write_err = match child.stdin.take() {
-        Some(mut pipe) => pipe.write_all(stdin).err(),
+        Some(mut pipe) => pipe
+            .write_all(stdin)
+            .err()
+            .filter(|err| err.kind() != std::io::ErrorKind::BrokenPipe),
         None => None,
     };
     let out = child.wait_with_output()?;
@@ -1124,6 +1130,70 @@ pub fn diff_compare_file_ctx(
     }
 }
 
+/// `git diff` argv for one path, commit `base_sha` against the working tree.
+///
+/// `diff [-U<n>] -M <base> -- [<old>] <path>`: git's own commit-vs-worktree
+/// form, so no revision stands for the working tree. `old_path` joins the
+/// pathspec when it differs from `path`, so `-M` can pair a rename.
+pub fn git_worktree_compare_diff_args(
+    base_sha: &str,
+    path: &str,
+    old_path: Option<&str>,
+    context: Option<u32>,
+) -> Vec<String> {
+    let mut args = vec!["diff".to_string()];
+    if let Some(n) = context {
+        args.push(format!("-U{n}"));
+    }
+    args.push("-M".into());
+    args.push(base_sha.into());
+    args.push("--".into());
+    args.extend(
+        compare_revert_paths(path, old_path)
+            .into_iter()
+            .map(String::from),
+    );
+    args
+}
+
+/// The one path of a commit-vs-working-tree compare, as a name-status row.
+///
+/// Runs `diff --name-status -M <base> -- [<old>] <path>`, then the same with
+/// `--numstat -z` for line counts (its failure leaves `stat` as `None`).
+/// Empty stdout (the worktree file equals the commit) is an empty list.
+pub fn list_worktree_vs_commit_name_status(
+    cwd: &Path,
+    base_sha: &str,
+    path: &str,
+    old_path: Option<&str>,
+) -> Result<Vec<NameStatus>, String> {
+    let paths = compare_revert_paths(path, old_path);
+    let mut args = vec!["diff", "--name-status", "-M", base_sha, "--"];
+    args.extend_from_slice(&paths);
+    let mut files = parse_name_status_lines(&exec_git_stdout(&args, cwd)?);
+    let mut numstat_args = vec!["diff", "--numstat", "-z", "-M", base_sha, "--"];
+    numstat_args.extend_from_slice(&paths);
+    let numstat = exec_git_stdout(&numstat_args, cwd).unwrap_or_default();
+    attach_numstat(&mut files, &numstat);
+    Ok(files)
+}
+
+/// Unified diff of one path, commit `base_sha` against the working tree.
+///
+/// Argv from [`git_worktree_compare_diff_args`]. Success with empty stdout
+/// is `(no diff)`.
+pub fn diff_worktree_vs_commit_file_ctx(
+    cwd: &Path,
+    base_sha: &str,
+    path: &str,
+    old_path: Option<&str>,
+    context: Option<u32>,
+) -> Result<Vec<String>, String> {
+    let args = git_worktree_compare_diff_args(base_sha, path, old_path, context);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    Ok(lines_or_empty_diff(&exec_git_stdout(&refs, cwd)?))
+}
+
 /// Local branches plus `origin/*`, excluding `origin/HEAD` and the current local.
 pub fn list_compare_picker_branches(cwd: &Path) -> Result<Vec<LocalBranch>, String> {
     let raw = exec_git_stdout(
@@ -1245,6 +1315,266 @@ pub fn diff_stash_file_ctx(
     let parent = format!("{stash_ref}^1");
     let args = git_diff_args(&["diff", &parent, stash_ref], path, context);
     lines_or_empty_diff(&exec_git_owned(&args, cwd))
+}
+
+/// Which version of a file [`blame_line`] reads.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum BlameRev {
+    /// The working-tree file (no revision).
+    Worktree,
+    /// The index blob `:<path>`, fed through `--contents -`.
+    Index,
+    /// A revision git can resolve (`HEAD`, a full sha, `<sha>^`, a stash ref).
+    Commit(String),
+}
+
+/// Who last changed one line, from `git blame --porcelain`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineBlame {
+    /// Full commit id. All zeros when the line is not committed.
+    pub sha: String,
+    /// `author` header. For an uncommitted line it is a git placeholder;
+    /// use [`LineBlame::uncommitted`], not this name, to detect that case.
+    pub author: String,
+    /// `author-time`, unix seconds.
+    pub author_time: i64,
+    /// `summary` header: the commit subject.
+    pub summary: String,
+    /// 1-based line number in that commit's version of the file.
+    pub orig_line: u32,
+    /// Path of the file in that commit (differs after a rename).
+    pub filename: String,
+    /// `previous <sha> <path>`: the commit blame looked at before `sha`
+    /// and the file's path there. `None` when the file was added in `sha`.
+    pub previous: Option<(String, String)>,
+    /// `boundary`: git did not look past `sha` (a root commit here).
+    pub boundary: bool,
+    /// The line is not committed yet (all-zero sha).
+    pub uncommitted: bool,
+}
+
+/// Parse `git blame --porcelain` output for one line. `None` when malformed.
+///
+/// Reads the first entry only: `<sha> <orig> <final> [<count>]`, then
+/// headers up to the tab-prefixed content line.
+pub fn parse_blame_porcelain(stdout: &str) -> Option<LineBlame> {
+    let mut lines = stdout.lines();
+    let mut head = lines.next()?.split_whitespace();
+    let sha = head.next()?.to_string();
+    if sha.len() < 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let orig_line = head.next()?.parse().ok()?;
+    let mut blame = LineBlame {
+        uncommitted: sha.bytes().all(|b| b == b'0'),
+        sha,
+        author: String::new(),
+        author_time: 0,
+        summary: String::new(),
+        orig_line,
+        filename: String::new(),
+        previous: None,
+        boundary: false,
+    };
+    for line in lines {
+        if line.starts_with('\t') {
+            break;
+        }
+        let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+        match key {
+            "author" => blame.author = value.to_string(),
+            "author-time" => blame.author_time = value.parse().unwrap_or(0),
+            "summary" => blame.summary = value.to_string(),
+            "filename" => blame.filename = unquote_c_path(value),
+            "boundary" => blame.boundary = true,
+            "previous" => {
+                blame.previous = value
+                    .split_once(' ')
+                    .map(|(sha, path)| (sha.to_string(), unquote_c_path(path)));
+            }
+            _ => {}
+        }
+    }
+    (!blame.filename.is_empty()).then_some(blame)
+}
+
+/// Undo git's C-style path quoting (`"na\303\257ve.txt"` → `naïve.txt`).
+///
+/// Git quotes a path that holds `"`, `\`, or a control character (and
+/// any non-ASCII byte unless `core.quotePath=false`). Octal escapes are
+/// raw bytes, decoded as UTF-8 (lossy). An unquoted value is returned as is.
+fn unquote_c_path(value: &str) -> String {
+    let Some(inner) = value
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    else {
+        return value.to_string();
+    };
+    let mut bytes = Vec::with_capacity(inner.len());
+    let mut iter = inner.bytes().peekable();
+    while let Some(b) = iter.next() {
+        if b != b'\\' {
+            bytes.push(b);
+            continue;
+        }
+        let Some(esc) = iter.next() else {
+            bytes.push(b);
+            break;
+        };
+        let decoded = match esc {
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b't' => b'\t',
+            b'n' => b'\n',
+            b'v' => 0x0b,
+            b'f' => 0x0c,
+            b'r' => b'\r',
+            b'0'..=b'7' => {
+                let mut n = u32::from(esc - b'0');
+                for _ in 0..2 {
+                    match iter.peek() {
+                        Some(d @ b'0'..=b'7') => {
+                            n = n * 8 + u32::from(d - b'0');
+                            iter.next();
+                        }
+                        _ => break,
+                    }
+                }
+                n as u8
+            }
+            other => other,
+        };
+        bytes.push(decoded);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Blame line `line` (1-based) of `path` in `rev`.
+///
+/// Runs `git -c blame.showRoot=false -c core.quotePath=false blame
+/// --porcelain -L n,n [<rev>] -- <path>`. Paths in the result are unquoted.
+/// [`BlameRev::Index`] feeds the index blob through `--contents -`, so lines
+/// that differ from HEAD come back uncommitted. `Ok(None)` when git exits
+/// non-zero (untracked or missing path, unborn HEAD, line out of range) or
+/// the path has no index entry. `Err` only when git cannot start.
+/// TTY callers must run this on `spawn_blocking`, not the event loop.
+pub fn blame_line(
+    cwd: &Path,
+    rev: &BlameRev,
+    path: &str,
+    line: u32,
+) -> Result<Option<LineBlame>, String> {
+    if line == 0 {
+        return Ok(None);
+    }
+    let range = format!("{line},{line}");
+    let mut args = vec![
+        "-c",
+        "blame.showRoot=false",
+        "-c",
+        "core.quotePath=false",
+        "blame",
+        "--porcelain",
+        "-L",
+        &range,
+    ];
+    match rev {
+        BlameRev::Worktree => {}
+        BlameRev::Index => args.extend_from_slice(&["--contents", "-"]),
+        BlameRev::Commit(rev) => args.push(rev),
+    }
+    args.extend_from_slice(&["--", path]);
+    let out = match rev {
+        BlameRev::Index => {
+            let Some(blob) = blob_bytes(cwd, "", path) else {
+                return Ok(None);
+            };
+            run_with_stdin(&args, cwd, &blob)
+        }
+        _ => run(&args, cwd),
+    }
+    .map_err(|err| err.to_string())?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    Ok(parse_blame_porcelain(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Where the change before a blamed line's commit came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PreviousLineChange {
+    /// Blame of the matching line in the earlier version. A `boundary`
+    /// result is a root commit: it has no parent of its own.
+    Found(LineBlame),
+    /// The blamed commit added the line (or the whole file).
+    AddedIn,
+}
+
+/// The change to `blamed`'s line before `blamed.sha`.
+///
+/// Uses porcelain `previous <prev-sha> <prev-path>` (no `previous` means
+/// the file was added). Then `diff -U0 -M <prev-sha> <sha> -- <prev-path>
+/// <path>` maps the line into the earlier version with
+/// [`map_line_to_parent`], and [`blame_line`] blames it there. For a
+/// non-merge commit `<prev-sha>` is `<sha>^`. `Err` for an uncommitted
+/// line or a failed git call.
+pub fn previous_line_change(cwd: &Path, blamed: &LineBlame) -> Result<PreviousLineChange, String> {
+    if blamed.uncommitted {
+        return Err("line is not committed yet".into());
+    }
+    let Some((prev_sha, prev_path)) = &blamed.previous else {
+        return Ok(PreviousLineChange::AddedIn);
+    };
+    let paths = compare_revert_paths(&blamed.filename, Some(prev_path.as_str()));
+    let mut args = vec!["diff", "-U0", "-M", prev_sha, &blamed.sha, "--"];
+    args.extend_from_slice(&paths);
+    let diff = exec_git_stdout(&args, cwd)?;
+    let Some(mapped) = map_line_to_parent(&diff, blamed.orig_line) else {
+        return Ok(PreviousLineChange::AddedIn);
+    };
+    match blame_line(cwd, &BlameRev::Commit(prev_sha.clone()), prev_path, mapped)? {
+        Some(earlier) => Ok(PreviousLineChange::Found(earlier)),
+        None => Err(format!("no blame for {prev_path}:{mapped}")),
+    }
+}
+
+/// Map new-side line `line` of a `diff -U0` onto the old side.
+///
+/// A line outside every hunk shifts by the line-count change of the
+/// hunks above it. A line inside a hunk maps to the old line at the same
+/// offset when the hunk's old side is that long. `None` when the line has
+/// no old counterpart (pure insertion, or past the end of a grown hunk).
+pub fn map_line_to_parent(diff_u0: &str, line: u32) -> Option<u32> {
+    let mut delta: i64 = 0;
+    for header in diff_u0.lines().filter(|l| l.starts_with("@@")) {
+        let mut parts = header.split_whitespace().skip(1);
+        let (old_start, old_count) = hunk_range(parts.next()?.strip_prefix('-')?)?;
+        let (new_start, new_count) = hunk_range(parts.next()?.strip_prefix('+')?)?;
+        // A pure deletion (`+n,0`) sits after new line `n`.
+        let below = if new_count == 0 {
+            line > new_start
+        } else {
+            line >= new_start + new_count
+        };
+        if below {
+            delta += i64::from(old_count) - i64::from(new_count);
+            continue;
+        }
+        if line < new_start || new_count == 0 {
+            break;
+        }
+        let offset = line - new_start;
+        return (offset < old_count).then_some(old_start + offset);
+    }
+    u32::try_from(i64::from(line) + delta).ok()
+}
+
+/// `n` or `n,count` from a hunk header side. A bare `n` counts one line.
+fn hunk_range(token: &str) -> Option<(u32, u32)> {
+    match token.split_once(',') {
+        Some((start, count)) => Some((start.parse().ok()?, count.parse().ok()?)),
+        None => Some((token.parse().ok()?, 1)),
+    }
 }
 
 #[cfg(test)]
@@ -2245,6 +2575,357 @@ keep-z
         init_repo(&dir);
         git(&dir, &["checkout", "-q", "--detach"]);
         assert_eq!(push_quiet(&dir).unwrap_err(), "detached HEAD cannot push");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn commit_file(dir: &std::path::Path, path: &str, text: &str, msg: &str) -> String {
+        fs::write(dir.join(path), text).unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", msg]);
+        exec_git(&["rev-parse", "HEAD"], dir)
+    }
+
+    fn blame(dir: &std::path::Path, rev: BlameRev, path: &str, line: u32) -> LineBlame {
+        blame_line(dir, &rev, path, line)
+            .expect("git starts")
+            .unwrap_or_else(|| panic!("blame {path}:{line}"))
+    }
+
+    #[test]
+    fn parse_blame_porcelain_reads_headers_previous_and_boundary() {
+        let renamed = "\
+63b08ad4823cc8096b108736af6268306d1c5328 2 2 1
+author Ada Lovelace
+author-mail <ada@example.invalid>
+author-time 1791204822
+author-tz +0000
+summary rename and fix
+previous 3ef72304f100a91bb7f85a6f16253820cd51d07d old name.txt
+filename new.txt
+\tB
+";
+        let blame = parse_blame_porcelain(renamed).expect("parses");
+        assert_eq!(blame.sha, "63b08ad4823cc8096b108736af6268306d1c5328");
+        assert_eq!(blame.author, "Ada Lovelace");
+        assert_eq!(blame.author_time, 1_791_204_822);
+        assert_eq!(blame.summary, "rename and fix");
+        assert_eq!(blame.orig_line, 2);
+        assert_eq!(blame.filename, "new.txt");
+        assert_eq!(
+            blame.previous,
+            Some((
+                "3ef72304f100a91bb7f85a6f16253820cd51d07d".into(),
+                "old name.txt".into()
+            ))
+        );
+        assert!(!blame.boundary && !blame.uncommitted);
+
+        let root = "3ef72304f100a91bb7f85a6f16253820cd51d07d 1 1 1\nauthor T\nsummary first\nboundary\nfilename f\n\ta\n";
+        let root = parse_blame_porcelain(root).expect("parses");
+        assert!(root.boundary && root.previous.is_none());
+
+        let zero = format!(
+            "{} 4 4 1\nauthor Not Committed Yet\nfilename f\n\tz\n",
+            "0".repeat(40)
+        );
+        assert!(parse_blame_porcelain(&zero).expect("parses").uncommitted);
+
+        assert_eq!(parse_blame_porcelain(""), None);
+        assert_eq!(parse_blame_porcelain("not-a-sha 1 1 1\nfilename f\n"), None);
+        assert_eq!(
+            parse_blame_porcelain("3ef72304f100a91bb7f85a6f16253820cd51d07d 1 1 1\n\ta\n"),
+            None,
+            "no filename"
+        );
+    }
+
+    #[test]
+    fn blame_line_reads_commit_worktree_and_index_versions() {
+        let dir = unique_dir("ws-git-blame");
+        init_repo(&dir);
+        let first = commit_file(&dir, "f.txt", "a\nb\nc\n", "first");
+
+        let committed = blame(&dir, BlameRev::Worktree, "f.txt", 2);
+        assert_eq!(committed.sha, first);
+        assert_eq!(committed.summary, "first");
+        assert_eq!(committed.author, "workspace-status test");
+        assert_eq!(
+            (committed.orig_line, committed.filename.as_str()),
+            (2, "f.txt")
+        );
+        assert!(!committed.boundary && !committed.uncommitted);
+        assert!(committed.author_time > 0);
+
+        // A worktree edit is uncommitted; the index and HEAD still blame `first`.
+        fs::write(dir.join("f.txt"), "a\nB\nc\n").unwrap();
+        assert!(blame(&dir, BlameRev::Worktree, "f.txt", 2).uncommitted);
+        assert_eq!(blame(&dir, BlameRev::Index, "f.txt", 2).sha, first);
+        assert_eq!(
+            blame(&dir, BlameRev::Commit("HEAD".into()), "f.txt", 2).sha,
+            first
+        );
+
+        // Staged, the index copy differs from HEAD; line 1 still matches.
+        git(&dir, &["add", "f.txt"]);
+        fs::write(dir.join("f.txt"), "a\nb\nc\n").unwrap();
+        assert!(blame(&dir, BlameRev::Index, "f.txt", 2).uncommitted);
+        assert_eq!(blame(&dir, BlameRev::Index, "f.txt", 1).sha, first);
+        assert!(!blame(&dir, BlameRev::Worktree, "f.txt", 2).uncommitted);
+
+        // The seed commit is the root: porcelain marks it `boundary`.
+        let root = blame(&dir, BlameRev::Commit(first.clone()), "README.md", 1);
+        assert!(root.boundary && root.previous.is_none(), "{root:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn blame_line_is_none_when_git_has_no_answer() {
+        let dir = unique_dir("ws-git-blame-none");
+        init_repo(&dir);
+        fs::write(dir.join("untracked.txt"), "u\n").unwrap();
+        for (rev, path, line) in [
+            (BlameRev::Worktree, "untracked.txt", 1),
+            (BlameRev::Index, "untracked.txt", 1),
+            (BlameRev::Worktree, "missing.txt", 1),
+            (BlameRev::Worktree, "README.md", 9),
+            (BlameRev::Worktree, "README.md", 0),
+            (BlameRev::Commit("no-such-ref".into()), "README.md", 1),
+        ] {
+            assert_eq!(
+                blame_line(&dir, &rev, path, line),
+                Ok(None),
+                "{rev:?} {path}:{line}"
+            );
+        }
+        let unborn = unique_dir("ws-git-blame-unborn");
+        init_repo_empty(&unborn);
+        fs::write(unborn.join("f.txt"), "a\n").unwrap();
+        git(&unborn, &["add", "f.txt"]);
+        assert_eq!(
+            blame_line(&unborn, &BlameRev::Worktree, "f.txt", 1),
+            Ok(None)
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&unborn);
+    }
+
+    #[test]
+    fn blame_line_follows_a_rename_through_previous() {
+        let dir = unique_dir("ws-git-blame-rename");
+        init_repo(&dir);
+        let first = commit_file(&dir, "old.txt", "a\nb\n", "first");
+        git(&dir, &["mv", "old.txt", "new.txt"]);
+        let second = commit_file(&dir, "new.txt", "a\nB\n", "rename and fix");
+        let changed = blame(&dir, BlameRev::Worktree, "new.txt", 2);
+        assert_eq!(changed.sha, second);
+        assert_eq!(changed.filename, "new.txt");
+        assert_eq!(changed.previous, Some((first.clone(), "old.txt".into())));
+        let kept = blame(&dir, BlameRev::Worktree, "new.txt", 1);
+        assert_eq!(
+            (kept.sha.as_str(), kept.filename.as_str()),
+            (first.as_str(), "old.txt")
+        );
+        // The previous change of the renamed line is `first`, under the old name.
+        match previous_line_change(&dir, &changed).unwrap() {
+            PreviousLineChange::Found(earlier) => {
+                assert_eq!(earlier.sha, first);
+                assert_eq!(
+                    (earlier.filename.as_str(), earlier.orig_line),
+                    ("old.txt", 2)
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn previous_line_change_finds_the_older_edit_or_the_adding_commit() {
+        let dir = unique_dir("ws-git-blame-previous");
+        init_repo(&dir);
+        commit_file(&dir, "f.txt", "a\nb\nc\n", "first");
+        let second = commit_file(&dir, "f.txt", "a\nB\nc\n", "second");
+        // `third` inserts a line above, edits B again, and appends `d`.
+        let third = commit_file(&dir, "f.txt", "top\na\nBB\nc\nd\n", "third");
+
+        let line = blame(&dir, BlameRev::Worktree, "f.txt", 3);
+        assert_eq!((line.sha.as_str(), line.orig_line), (third.as_str(), 3));
+        match previous_line_change(&dir, &line).unwrap() {
+            PreviousLineChange::Found(earlier) => {
+                assert_eq!(
+                    (earlier.sha.as_str(), earlier.orig_line),
+                    (second.as_str(), 2)
+                );
+                assert!(!earlier.boundary);
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let appended = blame(&dir, BlameRev::Worktree, "f.txt", 5);
+        assert_eq!(appended.sha, third);
+        assert_eq!(
+            previous_line_change(&dir, &appended),
+            Ok(PreviousLineChange::AddedIn)
+        );
+
+        let new_file_sha = commit_file(&dir, "g.txt", "g\n", "add g");
+        let new_file = blame(&dir, BlameRev::Worktree, "g.txt", 1);
+        assert_eq!(
+            (new_file.sha.as_str(), new_file.previous.as_ref()),
+            (new_file_sha.as_str(), None)
+        );
+        assert_eq!(
+            previous_line_change(&dir, &new_file),
+            Ok(PreviousLineChange::AddedIn)
+        );
+
+        // Editing the seed line: the earlier change is the root commit.
+        commit_file(&dir, "README.md", "# edited\n", "edit readme");
+        let readme = blame(&dir, BlameRev::Worktree, "README.md", 1);
+        match previous_line_change(&dir, &readme).unwrap() {
+            PreviousLineChange::Found(earlier) => assert!(earlier.boundary, "{earlier:?}"),
+            other => panic!("{other:?}"),
+        }
+
+        fs::write(dir.join("f.txt"), "top\na\nzz\nc\nd\n").unwrap();
+        let dirty = blame(&dir, BlameRev::Worktree, "f.txt", 3);
+        assert_eq!(
+            previous_line_change(&dir, &dirty),
+            Err("line is not committed yet".into())
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn map_line_to_parent_follows_u0_hunks() {
+        // Line 2 modified in place.
+        let modified = "@@ -2 +2 @@\n-b\n+B\n";
+        assert_eq!(map_line_to_parent(modified, 2), Some(2));
+        assert_eq!(map_line_to_parent(modified, 1), Some(1));
+        assert_eq!(map_line_to_parent(modified, 3), Some(3));
+        // Lines 2..3 became 2..5: only the first two map back.
+        let grown = "@@ -2,2 +2,4 @@\n-b\n-c\n+B\n+C\n+D\n+E\n";
+        assert_eq!(map_line_to_parent(grown, 3), Some(3));
+        assert_eq!(map_line_to_parent(grown, 4), None);
+        assert_eq!(map_line_to_parent(grown, 6), Some(4), "shifted by -2");
+        // Pure insertion after line 1, then a pure deletion after new line 5.
+        let mixed = "@@ -1,0 +2,2 @@\n+x\n+y\n@@ -4,3 +5,0 @@\n-p\n-q\n-r\n";
+        assert_eq!(map_line_to_parent(mixed, 1), Some(1));
+        assert_eq!(map_line_to_parent(mixed, 2), None);
+        assert_eq!(map_line_to_parent(mixed, 3), None);
+        assert_eq!(map_line_to_parent(mixed, 4), Some(2));
+        assert_eq!(map_line_to_parent(mixed, 5), Some(3));
+        assert_eq!(map_line_to_parent(mixed, 6), Some(7));
+        assert_eq!(map_line_to_parent("", 4), Some(4));
+    }
+
+    #[test]
+    fn git_worktree_compare_diff_args_adds_context_and_rename_path() {
+        assert_eq!(
+            git_worktree_compare_diff_args("abc", "new.txt", Some("old.txt"), Some(3)),
+            ["diff", "-U3", "-M", "abc", "--", "old.txt", "new.txt"]
+        );
+        assert_eq!(
+            git_worktree_compare_diff_args("abc", "f.txt", Some("f.txt"), None),
+            ["diff", "-M", "abc", "--", "f.txt"]
+        );
+    }
+
+    #[test]
+    fn worktree_vs_commit_lists_and_diffs_one_path() {
+        let dir = unique_dir("ws-git-worktree-compare");
+        init_repo(&dir);
+        let base = commit_file(&dir, "old.txt", "one\ntwo\nthree\n", "base");
+        commit_file(&dir, "f.txt", "x\n", "later");
+
+        let clean = list_worktree_vs_commit_name_status(&dir, &base, "old.txt", None).unwrap();
+        assert!(clean.is_empty(), "{clean:?}");
+        assert_eq!(
+            diff_worktree_vs_commit_file_ctx(&dir, &base, "old.txt", None, None).unwrap(),
+            ["(no diff)"]
+        );
+
+        // Rename in the index, edit in the worktree only: both count.
+        git(&dir, &["mv", "old.txt", "new.txt"]);
+        fs::write(dir.join("new.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        let rows =
+            list_worktree_vs_commit_name_status(&dir, &base, "new.txt", Some("old.txt")).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].status, "R");
+        assert_eq!(rows[0].path, "new.txt");
+        assert_eq!(rows[0].old_path.as_deref(), Some("old.txt"));
+        assert_eq!(rows[0].stat, counts(1, 0));
+        let diff =
+            diff_worktree_vs_commit_file_ctx(&dir, &base, "new.txt", Some("old.txt"), Some(0))
+                .unwrap();
+        assert!(diff.iter().any(|l| l == "rename from old.txt"), "{diff:?}");
+        assert!(diff.iter().any(|l| l == "+four"), "{diff:?}");
+
+        let added = list_worktree_vs_commit_name_status(&dir, &base, "f.txt", None).unwrap();
+        assert_eq!(added[0].status, "A", "f.txt is newer than base: {added:?}");
+        assert!(
+            diff_worktree_vs_commit_file_ctx(&dir, "no-such-ref", "f.txt", None, None).is_err()
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unquote_c_path_decodes_git_quoting() {
+        assert_eq!(unquote_c_path(r#""na\303\257ve.txt""#), "naïve.txt");
+        assert_eq!(unquote_c_path(r#""a \"q\" b\\c\td""#), "a \"q\" b\\c\td");
+        assert_eq!(unquote_c_path("plain name.txt"), "plain name.txt");
+        assert_eq!(unquote_c_path("naïve.txt"), "naïve.txt");
+        let porcelain = "63b08ad4823cc8096b108736af6268306d1c5328 1 1 1\n\
+            previous 3ef72304f100a91bb7f85a6f16253820cd51d07d \"old\\303\\251.txt\"\n\
+            filename \"na\\303\\257ve.txt\"\n\tx\n";
+        let blame = parse_blame_porcelain(porcelain).expect("parses");
+        assert_eq!(blame.filename, "naïve.txt");
+        assert_eq!(
+            blame.previous.map(|(_, path)| path).as_deref(),
+            Some("oldé.txt")
+        );
+    }
+
+    /// Non-ASCII, a space, and a `"` (git quotes that one even with
+    /// `core.quotePath=false`) survive blame and the previous-change walk.
+    #[cfg(unix)]
+    #[test]
+    fn blame_line_unquotes_non_ascii_and_quoted_paths() {
+        let dir = unique_dir("ws-git-blame-quoted");
+        init_repo(&dir);
+        let old = "old \"q\" näme.txt";
+        let new = "naïve file.txt";
+        let first = commit_file(&dir, old, "a\nb\n", "first");
+        assert_eq!(blame(&dir, BlameRev::Worktree, old, 2).filename, old);
+        git(&dir, &["mv", old, new]);
+        let second = commit_file(&dir, new, "a\nB\n", "rename");
+        let changed = blame(&dir, BlameRev::Worktree, new, 2);
+        assert_eq!(
+            (changed.sha.as_str(), changed.filename.as_str()),
+            (second.as_str(), new)
+        );
+        assert_eq!(changed.previous, Some((first.clone(), old.to_string())));
+        assert_eq!(blame(&dir, BlameRev::Index, new, 1).filename, old);
+        match previous_line_change(&dir, &changed).unwrap() {
+            PreviousLineChange::Found(earlier) => {
+                assert_eq!(earlier.sha, first);
+                assert_eq!((earlier.filename.as_str(), earlier.orig_line), (old, 2));
+            }
+            other => panic!("{other:?}"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Git exits on an unborn HEAD before it reads `--contents -`; the
+    /// broken pipe is not an error.
+    #[test]
+    fn index_blame_on_unborn_head_with_a_large_blob_is_none() {
+        let dir = unique_dir("ws-git-blame-epipe");
+        init_repo_empty(&dir);
+        let big: String = format!("{}\n", "a".repeat(79)).repeat(50_000);
+        fs::write(dir.join("big.txt"), big).unwrap();
+        git(&dir, &["add", "big.txt"]);
+        assert_eq!(blame_line(&dir, &BlameRev::Index, "big.txt", 1), Ok(None));
         let _ = fs::remove_dir_all(&dir);
     }
 }

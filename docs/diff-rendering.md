@@ -2,7 +2,7 @@
 
 `crates/workspace-status/src/tui/diff.rs` (paint in `tui/render.rs`, syntax in
 `tui/syntax.rs`, word ranges in `tui/word_diff.rs`). Path header, line-number gutter, and
-STAGED / UNSTAGED / NEW / COMMITTED labels. Changed words on a paired modified line get a
+STAGED / UNSTAGED / NEW / COMMITTED / WORKING TREE labels. Changed words on a paired modified line get a
 stronger background (see [Word highlight](#word-highlight)).
 
 ## Pipeline
@@ -23,6 +23,8 @@ word_diff.rs (paint time, on a span-cache miss) ──► word ranges per paired
 render.rs paints section headers, line-number gutter, and cells
 
 A compare tab uses `DiffContent::from_compare_lines`. The single section label is `COMMITTED`, not staged or unstaged. Header text is `<base-ref>...HEAD` (`abc1234^...abc1234` on a tab with a pinned head). `V` visual highlight paints on the compare diff the same way as on a Workspace file diff. `build_partial_patch` reads only that COMMITTED section for `PartialPatchKind::RevertCommitted` (compare `x` in a highlight, a reverse apply onto the worktree that restores the merge-base lines) and refuses a committed diff for every other kind. See [git-operations.md](./git-operations.md).
+
+A commit-vs-working-tree compare tab uses `DiffContent::from_worktree_compare_lines` (`vs_worktree`). Its one section label is `WORKING TREE`: the new side is the file on disk. Header text is `abc1234 ↔ working tree`. `build_partial_patch` refuses that content for every kind.
 ```
 
 `parse_unified_diff` skips file-level headers (`diff --git`, `index`, `---`, `+++`) until the first `@@`, tracks 1-based `old_no` / `new_no` per line, turns `\ No newline at end of file` into a `meta` line, and turns a `Binary files … differ` line into a single meta hunk with no header. Empty input returns no hunks, which is how "no diff" is detected upstream. A worktree `git diff` that fails keeps git's reason line in `DiffContent::error`, and the pane paints `git diff failed: <reason>` instead of `(no diff)`. When the other side loaded (staged ok, unstaged failed), `build_diff_rows` ends with a `DiffRow::Error` row carrying that text in the `deleted` colour.
@@ -97,6 +99,22 @@ The path header sits above the diff body in `draw_diff_pane`. A path wider than 
 ## Focused row
 
 A focused file-diff row (section, hunk, or line) paints the same cursor bar as other lists. An unfocused file-diff still marks that row with the thinner inactive marker and `cursorBgInactive`. `j` / `k`, PageUp / PageDown, Ctrl-u / Ctrl-d, click, search, and vertical wheel move that row. The viewport keeps it near the vertical middle (`list_viewport_start`, same helper as the workspace tree). `gg` / `G` and Home / End jump to the first / last row.
+
+## Row to source line
+
+`row_line_ref(content, mode, row)` gives the source line behind a painted row: section, kind (add / del / context), and old / new line numbers. It walks the same row list as `build_diff_rows`, so `row` is the diff cursor. A split row that pairs a deleted and an added line gives the added (new-side) line; a row with only a deleted line gives that line. Section labels, hunk headers, `\ No newline` and binary markers, and error rows give none. The file path comes from the caller.
+
+## Current-line blame
+
+With line blame on (`B`, `viewDefaults.lineBlame`), the focused line ends with a dimmed (`palette.muted`) note: `{author}, {age} · {sha7} · {subject}`. Rules:
+
+- Only the focused row of a focused diff pane, or the cursor line of a file tab. A row the cursor is not on, and a diff whose pane does not have focus, paint none.
+- It paints as `"  " + text` inside the row's trailing blank pad and keeps the pad's width, so row heights, the gutter, wrap, and the pan range do not change. With wrap on it goes on the last wrap row of the cell. No pad (the code fills the width or is panned across it) or fewer than 12 free columns paints none. A cut text ends in `…`; the subject is cut first.
+- Split mode paints it in the blamed side's cell: the new (right) cell for an added or context line, the old (left) cell for a deleted line.
+- An added line in UNSTAGED reads `You · uncommitted`, and in STAGED `You · staged`, with no git call. NEW (untracked), binary, meta, hunk, and error rows paint none. While git runs, and when git has no blame for the line, the row paints none.
+- No note paints while a mouse drag selection is active, because release copies the painted screen cells.
+
+`AppState::focused_line_annotation` (`tui/state/line_blame.rs`) picks the text; `render.rs` `put_line_annotation` paints it.
 
 ## Soft wrap
 

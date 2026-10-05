@@ -96,6 +96,11 @@ pub enum Action {
     /// The graph selection footer and the commit-files footer wrap the
     /// full subject plus body when this is on.
     ToggleCommitMsgExpand,
+    /// Toggle the current-line blame annotation (`B`).
+    ///
+    /// Session-only, like wrap. `viewDefaults.lineBlame` sets the launch
+    /// value. Runs on file tabs too.
+    ToggleLineBlame,
     /// Mouse wheel. Positive `delta` is down / right.
     ///
     /// Vertical (`horizontal: false`) moves the list cursor under the
@@ -221,6 +226,28 @@ pub enum Action {
     /// Open or focus a compare tab of the focused graph commit versus its
     /// first parent (`<sha>^...<sha>`, head pinned to `<sha>`).
     CompareCommitVsParent,
+    /// Open or focus a compare tab of the focused line's blame commit
+    /// versus its first parent (`<sha>^...<sha>`, head pinned to `<sha>`).
+    BlameCommitVsParent,
+    /// Find the commit that changed the focused line before its blame
+    /// commit, then open that commit versus its first parent.
+    BlamePreviousChange,
+    /// Open or focus a compare tab of the focused line's file at its blame
+    /// commit against that file in the working tree now.
+    BlameCommitVsWorktree,
+    /// Select the focused line's blame commit in the Workspace graph,
+    /// loading older pages until it shows.
+    BlameRevealGraph,
+    /// Open the `A` blame-actions menu for the focused line. Refused with
+    /// the blame actions' copy when the line has no committed blame.
+    BlameMenu,
+    /// A key typed in the blame-actions menu (`c` / `p` / `w` / `g` pick a
+    /// row; any other key is ignored).
+    BlameMenuChar(char),
+    /// Enter in the blame-actions menu: run the first row.
+    BlameMenuEnter,
+    /// Esc or `q` in the blame-actions menu: close it.
+    BlameMenuCancel,
     /// Close the active compare or file tab.
     CloseTab,
     /// Cycle to the next tab (`gt`).
@@ -455,6 +482,16 @@ pub enum Effect {
         source: CommitFileSource,
         path: String,
         old_path: Option<String>,
+    },
+    /// Find the change to a blamed line before its commit
+    /// ([`crate::git::previous_line_change`]). `gen` is the session's
+    /// latest request; a stale result is dropped.
+    LoadBlamePrevious {
+        gen: u64,
+        /// Checkout path (snapshot `repo`).
+        repo: String,
+        /// Blame of the focused line.
+        blame: Box<crate::git::LineBlame>,
     },
     /// List the compare picker rows (no checkout): local + `origin/*`
     /// branches, or HEAD's ancestors, by `kind`.

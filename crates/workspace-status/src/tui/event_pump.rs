@@ -168,6 +168,7 @@ mod tests {
         assert!(overlay_blocks_background_ticks(InputMode::HelpSearch));
         assert!(overlay_blocks_background_ticks(InputMode::SearchPrompt));
         assert!(overlay_blocks_background_ticks(InputMode::StashMenu));
+        assert!(overlay_blocks_background_ticks(InputMode::BlameMenu));
         assert!(overlay_blocks_background_ticks(InputMode::BranchPicker));
         assert!(overlay_blocks_background_ticks(InputMode::GraphFocusPicker));
         assert!(overlay_blocks_background_ticks(InputMode::CreateBranch));
@@ -184,6 +185,31 @@ mod tests {
         }));
         assert!(!overlay_blocks_background_ticks(InputMode::DiffVisual));
         assert!(overlay_blocks_background_ticks(InputMode::QuickOpen));
+    }
+
+    /// The blame menu's keys stay live like the stash menu's letters and
+    /// Esc. Unlike stash Enter, a blame pick only reads git, so its Enter
+    /// stays live too.
+    #[test]
+    fn busy_loop_keeps_the_blame_menu_live() {
+        for action in [
+            Action::BlameMenu,
+            Action::BlameMenuChar('c'),
+            Action::BlameMenuEnter,
+            Action::BlameMenuCancel,
+            Action::BlameCommitVsParent,
+            Action::BlamePreviousChange,
+            Action::BlameCommitVsWorktree,
+            Action::BlameRevealGraph,
+            Action::StashMenuChar('s'),
+            Action::StashMenuCancel,
+        ] {
+            assert_eq!(
+                classify_busy_action(&action),
+                BusyAction::Handle,
+                "{action:?}"
+            );
+        }
     }
 
     #[test]
@@ -387,12 +413,29 @@ mod tests {
             "prepare_worktree_diff(",
             "prepare_rev_diff(",
             "prepare_rev_diff_paths(",
+            "blame_line(",
+            "previous_line_change(",
         ] {
             assert!(
                 !app.contains(banned) && !loop_src.contains(banned),
                 "{banned} must not run on the TTY loop thread"
             );
         }
+        let render = include_str!("render.rs");
+        let blame_state = include_str!("state/line_blame.rs");
+        assert!(
+            !render.contains("blame_line(") && !blame_state.contains("blame_line("),
+            "line blame paint and state must read the cache, never run git"
+        );
+        assert!(
+            !blame_state.contains("previous_line_change(")
+                && effect.contains("previous_line_change(&dir"),
+            "blame previous-change git runs on spawn_blocking via Interpreter"
+        );
+        assert!(
+            effect.contains("blame_line(") && effect.contains("UserTag::LineBlame"),
+            "focused-line blame must run on spawn_blocking via Interpreter"
+        );
         assert!(
             effect.contains("prepare_worktree_diff(")
                 && effect.contains("prepare_rev_diff_paths(")

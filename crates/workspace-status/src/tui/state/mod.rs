@@ -6,6 +6,7 @@ mod dispatch_keymap;
 mod dispatch_quick_open;
 mod dispatch_write;
 mod file_tab;
+mod line_blame;
 mod pan;
 
 use std::cell::RefCell;
@@ -68,6 +69,7 @@ use super::gates::{
 use super::graph_focus::GraphFocusPickerState;
 use super::icons::comment_mark_cols;
 use super::keys::{expire_stale_g_chord_echo, GChordEchoState, InputMode, DOUBLE_TAP_MS};
+use super::line_blame::{GraphReveal, LineBlameState};
 use super::ops::{
     collect_write_files, format_running_op, op_is_kind_noop, op_kind_noop_reason, op_targets,
     push_targets, refresh_target, Op, RevertScope, RunningOp, ScopedFile,
@@ -93,9 +95,10 @@ use super::stash::{
 use super::status::StatusMessage;
 use super::tabs::{
     compare_file_dirty, compare_range_label, CommitPickerState, ComparePickerKind,
-    ComparePickerState, OpenCompare, TabStrip, CANNOT_REVERT_COMMITTED_DIFF, COMPARE_FOCUS_A_FILE,
-    COMPARE_HEAD_MOVED, COMPARE_HEAD_REF, COMPARE_STILL_LOADING, FOCUS_A_COMMIT_TO_DIFF,
-    ROOT_COMMIT_HAS_NO_PARENT, SWITCH_TO_WORKSPACE_TAB, WORKSPACE_TAB_CANNOT_CLOSE,
+    ComparePickerState, OpenCompare, TabStrip, WorktreeFile, CANNOT_REVERT_COMMITTED_DIFF,
+    CANNOT_REVERT_WORKTREE_COMPARE, COMPARE_FOCUS_A_FILE, COMPARE_HEAD_MOVED, COMPARE_HEAD_REF,
+    COMPARE_STILL_LOADING, FOCUS_A_COMMIT_TO_DIFF, ROOT_COMMIT_HAS_NO_PARENT,
+    SWITCH_TO_WORKSPACE_TAB, WORKSPACE_TAB_CANNOT_CLOSE,
 };
 use super::theme::{cycle_theme_id, theme_from_env, ThemeId};
 use super::tree::{
@@ -583,6 +586,9 @@ pub struct AppState {
     pub confirm: Option<PendingConfirm>,
     pub stash_menu: Option<Vec<StashOp>>,
     pub stash_repo: Option<String>,
+    /// The `A` blame-actions menu is open. Its header reads the focused
+    /// line's annotation live, so it holds no copy of the blame.
+    pub blame_menu: bool,
     pub branch_picker: Option<BranchPickerState>,
     pub graph_focus_picker: Option<GraphFocusPickerState>,
     /// Per-repo local branch names whose ancestors the graph shows. `None` = `--all`.
@@ -645,6 +651,17 @@ pub struct AppState {
     /// File tab search hits for one (tab id, load generation, case-folded
     /// query), so the status pill and the paint do not rescan the file.
     file_search_memo: RefCell<Option<FileSearchMemo>>,
+    /// Current-line blame toggle and answer cache.
+    pub line_blame: LineBlameState,
+    /// Focused diff row's source line, so the blame hook does not rebuild
+    /// the diff rows after every schedule and apply.
+    line_blame_row_memo: RefCell<line_blame::RowLineMemo>,
+    /// Pending blame "show commit in graph": selected once the graph
+    /// holds the commit. Dropped when the graph repo changes.
+    pub graph_reveal: Option<GraphReveal>,
+    /// Latest blame "previous line change" request; an older result is
+    /// dropped.
+    blame_previous_gen: u64,
     /// [`Self::current_diff_rows`] calls, so tests can bound the row
     /// builds a frame or keypress costs on a large diff.
     #[cfg(test)]
@@ -736,6 +753,7 @@ impl AppState {
             confirm: None,
             stash_menu: None,
             stash_repo: None,
+            blame_menu: false,
             branch_picker: None,
             graph_focus_picker: None,
             graph_branch_focus: None,
@@ -773,6 +791,10 @@ impl AppState {
             last_click: None,
             diff_search_memo: RefCell::new(None),
             file_search_memo: RefCell::new(None),
+            line_blame: LineBlameState::default(),
+            line_blame_row_memo: RefCell::new(None),
+            graph_reveal: None,
+            blame_previous_gen: 0,
             #[cfg(test)]
             diff_row_builds: std::cell::Cell::new(0),
         };
@@ -817,6 +839,9 @@ impl AppState {
         if let Some(expand) = defaults.commit_message_expand {
             self.commit_msg_expand = expand;
         }
+        if let Some(on) = defaults.line_blame {
+            self.line_blame.set_enabled(on);
+        }
     }
 
     pub fn input_mode(&self) -> InputMode {
@@ -824,6 +849,8 @@ impl AppState {
             InputMode::Confirm
         } else if self.stash_menu.is_some() {
             InputMode::StashMenu
+        } else if self.blame_menu {
+            InputMode::BlameMenu
         } else if self.comment.is_some() {
             InputMode::Comment
         } else if self.comment_export.is_some() {
@@ -1361,25 +1388,29 @@ impl AppState {
         }
     }
 
-    fn external_diff_kind(&self) -> ExternalDiffKind {
+    /// LEFT / RIGHT pair for `E`, or `None` for a commit-vs-working-tree
+    /// diff: neither kind is a commit against the working tree.
+    fn external_diff_kind(&self) -> Option<ExternalDiffKind> {
         if let Some(tab) = self.tabs.active_compare() {
             return match &tab.source {
                 Some(CommitFileSource::Compare {
                     merge_base, head, ..
-                }) => ExternalDiffKind::Rev {
+                }) => Some(ExternalDiffKind::Rev {
                     left_rev: merge_base.clone(),
                     right_rev: head.clone(),
                     left_path: self.focused_compare_old_path(),
-                },
-                _ => ExternalDiffKind::Worktree,
+                }),
+                Some(CommitFileSource::CommitVsWorktree { .. }) => None,
+                _ => Some(ExternalDiffKind::Worktree),
             };
         }
         let source = match &self.drill {
             DrillView::Files { source, .. } | DrillView::Diff { source, .. } => source,
-            DrillView::Graph => return ExternalDiffKind::Worktree,
+            DrillView::Graph => return Some(ExternalDiffKind::Worktree),
         };
-        match source {
+        Some(match source {
             CommitFileSource::Worktree => ExternalDiffKind::Worktree,
+            CommitFileSource::CommitVsWorktree { .. } => return None,
             CommitFileSource::Commit { commit_id } => ExternalDiffKind::Rev {
                 left_rev: format!("{commit_id}^"),
                 right_rev: commit_id.clone(),
@@ -1397,7 +1428,7 @@ impl AppState {
                 right_rev: head.clone(),
                 left_path: self.focused_compare_old_path(),
             },
-        }
+        })
     }
 
     pub(crate) fn commit_detail_meta(&self) -> (String, Option<String>) {
@@ -1432,6 +1463,7 @@ impl AppState {
             CommitFileSource::Compare {
                 base_ref, head_ref, ..
             } => Some(compare_range_label(base_ref, head_ref)),
+            CommitFileSource::CommitVsWorktree { .. } => Some(source.short_label()),
             CommitFileSource::Commit { commit_id } => {
                 let short = if commit_id.len() >= 7 {
                     &commit_id[..7]
@@ -1577,7 +1609,9 @@ impl AppState {
                     format_commit_message(&stash.subject, &stash.body),
                 ))
             }
-            CommitFileSource::Worktree | CommitFileSource::Compare { .. } => None,
+            CommitFileSource::Worktree
+            | CommitFileSource::Compare { .. }
+            | CommitFileSource::CommitVsWorktree { .. } => None,
         }
     }
 
@@ -2702,6 +2736,7 @@ impl AppState {
             previous_row_id.as_deref(),
             previous_cursor,
         );
+        self.retry_graph_reveal(&repo, true);
         if self.drill.is_graph() {
             self.diff_content = DiffContent::default();
             self.diff_repo = None;
@@ -3574,8 +3609,9 @@ impl AppState {
 
     /// The compare-tab file that `x` would revert, or why it may not.
     ///
-    /// A tab with a pinned head refuses first (`cannot revert a committed
-    /// diff`).
+    /// A commit-vs-working-tree tab refuses first (`cannot revert a
+    /// working-tree compare`), then a tab with a pinned head (`cannot
+    /// revert a committed diff`).
     /// With a `V` highlight, or with the diff focused, the target is the
     /// open diff, and only once its content is loaded for the current
     /// range and path, and never while a folder summary hides it. On the
@@ -3585,6 +3621,10 @@ impl AppState {
         let Some(tab) = self.tabs.active_compare() else {
             return Err(SWITCH_TO_WORKSPACE_TAB.into());
         };
+        // The new side already is the working tree: nothing to restore.
+        if tab.worktree_file.is_some() {
+            return Err(CANNOT_REVERT_WORKTREE_COMPARE.into());
+        }
         // A pinned head is a commit in history, never the working tree.
         if tab.is_pinned() {
             return Err(CANNOT_REVERT_COMMITTED_DIFF.into());
@@ -5439,7 +5479,8 @@ impl AppState {
         self.park_active_session();
         self.tabs.active = index;
         self.apply_active_session();
-        Effect::None
+        // A working-tree tab may have missed watch reloads while inactive.
+        self.active_worktree_compare_reload()
     }
 
     /// Drop the visual-line highlight and any pending confirm.
@@ -5511,18 +5552,52 @@ impl AppState {
     }
 
     fn open_compare_tab(&mut self, checkout: String, base_ref: String, head_ref: String) -> Effect {
+        self.open_compare_tab_for(checkout, base_ref, head_ref, None)
+    }
+
+    /// Open or focus the commit-vs-working-tree tab of commit `base` (a
+    /// full id) and `file` in `checkout`. A new tab records the file's
+    /// [`Self::worktree_compare_stamp`] and loads.
+    pub(super) fn open_worktree_compare_tab(
+        &mut self,
+        checkout: String,
+        base: String,
+        file: WorktreeFile,
+    ) -> Effect {
+        self.open_compare_tab_for(checkout, base, COMPARE_HEAD_REF.into(), Some(file))
+    }
+
+    fn open_compare_tab_for(
+        &mut self,
+        checkout: String,
+        base_ref: String,
+        head_ref: String,
+        worktree_file: Option<WorktreeFile>,
+    ) -> Effect {
         let before = self.tabs.active;
         self.park_active_session();
-        let opened = self
-            .tabs
-            .open_or_focus(checkout.clone(), base_ref.clone(), head_ref.clone());
+        let stamp = worktree_file
+            .as_ref()
+            .and_then(|file| self.worktree_compare_stamp(&checkout, file));
+        let opened = match worktree_file {
+            Some(file) => {
+                self.tabs
+                    .open_or_focus_worktree(checkout.clone(), base_ref.clone(), file)
+            }
+            None => self
+                .tabs
+                .open_or_focus(checkout.clone(), base_ref.clone(), head_ref.clone()),
+        };
+        if let (OpenCompare::Created(_), Some(tab)) = (opened, self.tabs.active_compare_mut()) {
+            tab.worktree_stamp = stamp;
+        }
         if self.tabs.active != before {
             self.clear_tab_transients();
         }
         match opened {
             OpenCompare::Focused => {
                 self.apply_active_session();
-                Effect::None
+                self.active_worktree_compare_reload()
             }
             OpenCompare::Created(tab_id) => {
                 self.apply_active_session();
@@ -5721,7 +5796,7 @@ impl AppState {
             };
             tab.error = None;
             tab.source = Some(load.source.clone());
-            tab.last_head = Some(load.head);
+            tab.last_head = load.head;
             tab.last_base_tip = Some(load.base_tip);
             let previous_cursor = tab.file_cursor;
             let had_path = tab.path.is_some();
@@ -5906,10 +5981,12 @@ impl AppState {
         }
     }
 
+    /// HEAD probes for loaded compare tabs. A commit-vs-working-tree tab
+    /// is never probed: [`Self::worktree_compare_reload`] watches it.
     pub(crate) fn compare_probe_effects(&self) -> Vec<Effect> {
         self.tabs
             .compare_tabs()
-            .filter(|tab| !tab.loading)
+            .filter(|tab| !tab.loading && tab.worktree_file.is_none())
             .map(|tab| Effect::ProbeCompareTab {
                 tab_id: tab.id,
                 repo: tab.checkout_path.clone(),
@@ -5919,6 +5996,81 @@ impl AppState {
                 last_base_tip: tab.last_base_tip.clone(),
             })
             .collect()
+    }
+
+    /// What a commit-vs-working-tree tab of `file` in `checkout` watches:
+    /// the checkout's HEAD, plus the workspace-snapshot change row and the
+    /// tree row signature (status, size, mtime) of the file's path and old
+    /// path. Reads loaded state only. `None` when the checkout is not in
+    /// the snapshot.
+    fn worktree_compare_stamp(&self, checkout: &str, file: &WorktreeFile) -> Option<String> {
+        let snap = self
+            .snapshot
+            .repos
+            .iter()
+            .find(|row| row.repo == checkout)?;
+        let mut stamp = snap.head.clone();
+        for path in [Some(file.path.as_str()), file.old_path.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            let change = snap
+                .changes
+                .iter()
+                .find(|change| change.path == path || change.old_path.as_deref() == Some(path));
+            stamp.push_str(&format!("|{change:?}"));
+            for id in [
+                format!("file:{checkout}:{path}"),
+                format!("file:{checkout}:{path}#unstaged"),
+            ] {
+                stamp.push('|');
+                stamp.push_str(self.signatures.get(&id).map_or("", String::as_str));
+            }
+        }
+        Some(stamp)
+    }
+
+    /// Reload the active commit-vs-working-tree tab of `checkout` when its
+    /// [`Self::worktree_compare_stamp`] moved since the last load. Runs
+    /// after each checkout status load, and when such a tab becomes active
+    /// again ([`Self::active_worktree_compare_reload`]).
+    ///
+    /// Reloads the file list, so the row's status follows the disk; the
+    /// range apply keeps the open path and reloads its diff in place (the
+    /// viewport stays). No git runs here.
+    pub(crate) fn worktree_compare_reload(&mut self, checkout: &str) -> Option<Effect> {
+        let tab = self.tabs.active_compare()?;
+        let file = tab.worktree_file.as_ref()?;
+        if tab.loading || tab.checkout_path != checkout {
+            return None;
+        }
+        let stamp = self.worktree_compare_stamp(checkout, file);
+        let tab = self.tabs.active_compare_mut()?;
+        if tab.worktree_stamp == stamp {
+            return None;
+        }
+        tab.worktree_stamp = stamp;
+        Some(Effect::LoadCompareRange {
+            tab_id: tab.id,
+            repo: tab.checkout_path.clone(),
+            base_ref: tab.base_ref.clone(),
+            head_ref: tab.head_ref.clone(),
+            force: true,
+        })
+    }
+
+    /// [`Self::worktree_compare_reload`] for the active tab's checkout, or
+    /// [`Effect::None`].
+    fn active_worktree_compare_reload(&mut self) -> Effect {
+        let Some(checkout) = self
+            .tabs
+            .active_compare()
+            .map(|tab| tab.checkout_path.clone())
+        else {
+            return Effect::None;
+        };
+        self.worktree_compare_reload(&checkout)
+            .unwrap_or(Effect::None)
     }
 }
 
@@ -7879,7 +8031,7 @@ mod tests {
                     stat: None,
                 })
                 .collect(),
-            head: "ccc".into(),
+            head: Some("ccc".into()),
             base_tip: "bbb".into(),
         }
     }
@@ -8849,6 +9001,31 @@ mod tests {
             "Comment is open on compare; this tab has no loaded file yet"
         );
         assert_eq!(palette_reason(&app, "Copy comments"), None);
+
+        // Blame actions run on a compare tab; with the file list focused
+        // they refuse with the blame gate's copy, key and palette alike.
+        app.focus = FocusPane::Left;
+        for (title, action) in [
+            ("Blame: open commit changes", Action::BlameCommitVsParent),
+            (
+                "Blame: open previous line change",
+                Action::BlamePreviousChange,
+            ),
+            ("Blame: show commit in graph", Action::BlameRevealGraph),
+        ] {
+            assert_eq!(
+                palette_reason(&app, title).as_deref(),
+                Some(super::super::line_blame::FOCUS_A_DIFF_OR_FILE_LINE),
+                "{title}"
+            );
+            app.status.clear();
+            assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
+            assert_eq!(
+                app.status,
+                super::super::line_blame::FOCUS_A_DIFF_OR_FILE_LINE,
+                "{action:?}"
+            );
+        }
     }
 
     #[test]
@@ -13886,6 +14063,7 @@ mod tests {
             diff_split: Some(false),
             wrap: Some(false),
             commit_message_expand: Some(false),
+            line_blame: None,
         });
         assert!(!app.tree_mode);
         assert!(app.rows.iter().all(|row| row.kind != NodeKind::Dir));
@@ -15939,6 +16117,7 @@ diff --git a/README.md b/README.md
             unstaged: patch,
             is_new: false,
             is_committed: false,
+            vs_worktree: false,
             error: None,
         }
     }
@@ -15983,6 +16162,7 @@ diff --git a/README.md b/README.md
                 unstaged: String::new(),
                 is_new: false,
                 is_committed: false,
+                vs_worktree: false,
                 error: None,
             },
         );

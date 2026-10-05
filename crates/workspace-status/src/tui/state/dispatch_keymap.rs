@@ -15,7 +15,9 @@ use super::super::graph_focus::GRAPH_FOCUS_NEED_CONTEXT;
 use super::super::ops::{collect_write_files, op_is_kind_noop, op_kind_noop_reason, Op};
 use super::super::split::SplitDrag;
 use super::super::status::StatusMessage;
-use super::super::tabs::{ComparePickerKind, ONLY_WORKSPACE_TAB_OPEN, WORKSPACE_TAB_CANNOT_CLOSE};
+use super::super::tabs::{
+    ComparePickerKind, NOT_ON_WORKTREE_COMPARE, ONLY_WORKSPACE_TAB_OPEN, WORKSPACE_TAB_CANNOT_CLOSE,
+};
 use super::super::tree::NodeKind;
 use super::{AppState, FileWrite, FocusPane, FoldOp};
 
@@ -152,6 +154,7 @@ impl AppState {
             Action::ToggleDiffMode => self.toggle_diff_mode(),
             Action::ToggleDiffWrap => self.toggle_diff_wrap(),
             Action::ToggleCommitMsgExpand => self.toggle_commit_msg_expand(),
+            Action::ToggleLineBlame => self.toggle_line_blame(),
             Action::ToggleMouse => {
                 self.cancel_mouse_drag();
                 self.mouse_enabled = !self.mouse_enabled;
@@ -283,7 +286,10 @@ impl AppState {
             }
             Action::ExternalDiff => {
                 if let Some((repo, path)) = self.focused_commit_edit_path() {
-                    let kind = self.external_diff_kind();
+                    let Some(kind) = self.external_diff_kind() else {
+                        self.status = StatusMessage::warn(NOT_ON_WORKTREE_COMPARE);
+                        return Effect::None;
+                    };
                     self.status = StatusMessage::progress(format!("opening diff {path}…"));
                     Effect::ExternalDiff { repo, path, kind }
                 } else if self.is_compare_tab() {
@@ -404,6 +410,18 @@ impl AppState {
             Action::CompareVsBranch => self.prepare_compare_picker(ComparePickerKind::Branch),
             Action::CompareVsCommit => self.prepare_compare_picker(ComparePickerKind::Commit),
             Action::CompareCommitVsParent => self.compare_commit_vs_parent(),
+            Action::BlameCommitVsParent => self.blame_commit_vs_parent(),
+            Action::BlamePreviousChange => self.blame_previous_change(),
+            Action::BlameCommitVsWorktree => self.blame_commit_vs_worktree(),
+            Action::BlameRevealGraph => self.blame_reveal_graph(),
+            Action::BlameMenu => self.open_blame_menu(),
+            Action::BlameMenuChar(key) => self.blame_menu_pick(Some(key)),
+            Action::BlameMenuEnter => self.blame_menu_pick(None),
+            Action::BlameMenuCancel => {
+                self.blame_menu = false;
+                self.status.clear();
+                Effect::None
+            }
             Action::CloseTab => self.close_active_tab(),
             Action::NextTab => self.activate_relative_tab(1),
             Action::PreviousTab => self.activate_relative_tab(-1),
@@ -443,9 +461,10 @@ impl AppState {
 
     /// Why palette row `command` cannot run, or `None` if Enter should dispatch.
     ///
-    /// On a file tab: [`Self::file_tab_refusal`], then
-    /// [`Self::file_tab_palette_reason`]. Otherwise: compare refusal ([`Self::compare_refusal`], which also gates
-    /// the compare open commands on every tab), folder-summary refusal
+    /// On a file tab: [`Self::file_tab_refusal`], the blame gate
+    /// ([`Self::blame_refusal`]), then [`Self::file_tab_palette_reason`].
+    /// Otherwise: compare refusal ([`Self::compare_refusal`], which also gates
+    /// the compare open commands on every tab), the blame gate, folder-summary refusal
     /// ([`Self::summary_refusal`]), then the row's
     /// highlight scope, then the range patch (highlighted stage / unstage /
     /// revert), then the action gate.
@@ -454,10 +473,12 @@ impl AppState {
         if self.is_file_tab() {
             return self
                 .file_tab_refusal(action)
+                .or_else(|| self.blame_refusal(action))
                 .or_else(|| self.file_tab_palette_reason(command));
         }
         if let Some(reason) = self
             .compare_refusal(action)
+            .or_else(|| self.blame_refusal(action))
             .or_else(|| self.summary_refusal(action))
         {
             return Some(reason);

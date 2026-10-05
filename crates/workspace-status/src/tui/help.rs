@@ -143,14 +143,18 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 keys: "a p D",
                 desc: "focused stash apply/pop/drop",
             },
+            HelpEntry {
+                keys: "A",
+                desc: "blame menu",
+            },
         ],
     },
     HelpGroup {
         title: "VIEW",
         entries: &[
             HelpEntry {
-                keys: "i \\ M",
-                desc: "inline / split · wrap · msg",
+                keys: "i \\ M B",
+                desc: "inline / split · wrap · msg · blame",
             },
             HelpEntry {
                 keys: "< >",
@@ -277,6 +281,10 @@ pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
             desc: "editor · diff tool",
         },
         HelpEntry {
+            keys: "A",
+            desc: "blame menu",
+        },
+        HelpEntry {
             keys: super::render::TAB_CLOSE_GLYPH,
             desc: "close tab (or Ctrl-k)",
         },
@@ -322,8 +330,12 @@ pub const HELP_FILE_GROUP: HelpGroup = HelpGroup {
             desc: "search",
         },
         HelpEntry {
-            keys: "\\",
-            desc: "wrap",
+            keys: "\\ B",
+            desc: "wrap · line blame",
+        },
+        HelpEntry {
+            keys: "A",
+            desc: "blame menu",
         },
         HelpEntry {
             keys: "'",
@@ -843,6 +855,14 @@ mod tests {
         assert!(keys.contains(&"Home End"));
         let git_keys: Vec<&str> = HELP_GROUPS[1].entries.iter().map(|e| e.keys).collect();
         assert!(git_keys.contains(&"m"));
+        assert!(git_keys.contains(&"A"));
+        for group in [&HELP_COMPARE_GROUP, &HELP_FILE_GROUP] {
+            assert!(
+                group.entries.iter().any(|e| e.keys == "A"),
+                "{}",
+                group.title
+            );
+        }
         assert!(git_keys.contains(&"e E"));
         let move_keys: Vec<&str> = HELP_GROUPS[0].entries.iter().map(|e| e.keys).collect();
         let view_keys: Vec<&str> = HELP_GROUPS[2].entries.iter().map(|e| e.keys).collect();
@@ -857,7 +877,7 @@ mod tests {
         assert!(view_keys.contains(&"Ctrl-u Ctrl-d"));
         assert!(view_keys.contains(&"."));
         assert!(view_keys.contains(&"T"));
-        assert!(view_keys.contains(&"i \\ M"));
+        assert!(view_keys.contains(&"i \\ M B"));
         assert!(!view_keys.contains(&"i \\"));
         assert!(!view_keys.contains(&"i"));
         assert!(view_keys.contains(&"Ctrl-o"));
@@ -1136,7 +1156,8 @@ mod tests {
             rows,
             [
                 "/ n N search",
-                "\\ wrap",
+                "\\ B wrap · line blame",
+                "A blame menu",
                 "' copy reference",
                 "e editor at line",
                 "r reload",

@@ -714,7 +714,7 @@ mod tests {
                 old_path: None,
                 stat: None,
             }],
-            head: "ccc".into(),
+            head: Some("ccc".into()),
             base_tip: "bbb".into(),
         };
         let follow = app.apply_compare_range(tab_id, gen, Ok(load));

@@ -27,6 +27,17 @@ pub enum CommitFileSource {
         merge_base: String,
         head: String,
     },
+    /// One file at commit `base` against that file in the working tree now
+    /// (Blame: diff commit to working tree).
+    ///
+    /// `base` is a full commit id. `path` is the file on disk; `old_path`
+    /// is its path at `base` when that differs. No revision stands for the
+    /// working tree.
+    CommitVsWorktree {
+        base: String,
+        path: String,
+        old_path: Option<String>,
+    },
 }
 
 impl CommitFileSource {
@@ -35,18 +46,19 @@ impl CommitFileSource {
     /// A commit diff uses that commit. A compare diff uses its `head`: the
     /// new side of `base...HEAD` is the head commit's blob, so compare line
     /// comments share the commit-line key with a commit drill of `head`.
-    /// Stash and worktree sources have no single commit.
+    /// Stash, worktree, and commit-vs-working-tree sources have no single
+    /// commit.
     pub fn line_commit(&self) -> Option<&str> {
         match self {
             Self::Commit { commit_id } => Some(commit_id),
             Self::Compare { head, .. } => Some(head),
-            Self::Stash { .. } | Self::Worktree => None,
+            Self::Stash { .. } | Self::Worktree | Self::CommitVsWorktree { .. } => None,
         }
     }
 
     /// Short name for chrome and status copy: a 7-char commit id,
     /// `stash@{n}`, `base...HEAD` (`abc1234^...abc1234` for a pinned head),
-    /// or `uncommitted`.
+    /// `abc1234 vs working tree`, or `uncommitted`.
     pub fn short_label(&self) -> String {
         match self {
             Self::Worktree => "uncommitted".into(),
@@ -55,6 +67,9 @@ impl CommitFileSource {
             Self::Compare {
                 base_ref, head_ref, ..
             } => super::tabs::compare_range_label(base_ref, head_ref),
+            Self::CommitVsWorktree { base, .. } => {
+                format!("{} vs working tree", super::tabs::short_rev(base))
+            }
         }
     }
 

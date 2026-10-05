@@ -47,6 +47,7 @@ use super::icons::{
     icon_merged_into_default, icon_move, icon_open_vs_default, truncate_visible, CURSOR_BAR,
     CURSOR_BAR_INACTIVE, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
 };
+use super::line_blame::{fit_annotation, BlameSide, BLAME_MENU_ROWS};
 use super::ops::RevertScope;
 use super::quick_open::{files_row_shows_status, FileIndexState, QuickOpenMode, QuickOpenState};
 use super::search::{
@@ -63,8 +64,8 @@ use super::syntax::{
     CodeSpan, DiffBackgrounds, DiffSyntaxKey,
 };
 use super::tabs::{
-    compare_picker_empty, file_gutter_width, file_too_large, no_committed_changes_vs,
-    ComparePickerState, FileTab, FILE_IS_BINARY, NO_COMMITTED_CHANGES,
+    compare_picker_empty, file_gutter_width, file_too_large, ComparePickerState, FileTab,
+    FILE_IS_BINARY,
 };
 use super::theme::ThemeId;
 use super::theme::{hex_color, Palette, Pill};
@@ -213,6 +214,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
             }
             DialogKind::Confirm => draw_confirm(frame, rect, state),
             DialogKind::StashMenu => draw_stash_menu(frame, rect, state),
+            DialogKind::BlameMenu => draw_blame_menu(frame, rect, state),
             DialogKind::CreateBranch => draw_create_branch(frame, rect, state),
             DialogKind::Comment => draw_comment(frame, rect, state),
             DialogKind::CommentExport => draw_comment_export(frame, rect, state),
@@ -496,6 +498,7 @@ fn draw_file_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let search = state.theme.pills().filter;
     let gutter_style = diff_gutter_style(palette);
     let col_offset = if wrap { 0 } else { tab.col_offset as usize };
+    let blame = state.painted_line_annotation();
     let mut painted: Vec<Line> = Vec::with_capacity(height);
     let mut row_lines = Vec::with_capacity(height);
     for (line, text) in lines.iter().enumerate().take(end).skip(scroll) {
@@ -531,6 +534,11 @@ fn draw_file_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                     " ".repeat(code_w - used),
                     with_bg(Style::default()),
                 ));
+                if selected && part + 1 == starts.len() {
+                    if let Some((text, _)) = &blame {
+                        put_line_annotation(&mut row, text, palette);
+                    }
+                }
             }
             painted.push(Line::from(row));
             row_lines.push(line);
@@ -1233,7 +1241,7 @@ fn draw_commit_file_list(
             let copy = if tab.loading {
                 LOADING_FILES
             } else {
-                NO_COMMITTED_CHANGES
+                tab.empty_files_copy()
             };
             frame.render_widget(Paragraph::new(muted_copy(copy, palette)), area);
             return;
@@ -1465,9 +1473,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if rows.is_empty() {
         let mut color = palette.muted;
         let msg = if let Some(tab) = state.tabs.active_compare() {
-            tab.error
-                .clone()
-                .unwrap_or_else(|| no_committed_changes_vs(&tab.base_ref))
+            tab.error.clone().unwrap_or_else(|| tab.empty_diff_copy())
         } else if path.is_empty() {
             "select a dirty file".to_string()
         } else if let Some(err) = state.current_diff_content().error.as_deref() {
@@ -1640,6 +1646,12 @@ fn paint_diff_row(
     right_syntax: &[CodeSpan],
 ) -> Vec<Line<'static>> {
     let palette = state.theme.palette();
+    // Current-line blame: only the focused row of a focused diff pane.
+    let blame = if selected && focused {
+        state.painted_line_annotation()
+    } else {
+        None
+    };
     let parts: Vec<Line<'static>> = match row {
         DiffRow::Section(section) => {
             let color = section_style(*section, palette);
@@ -1680,7 +1692,7 @@ fn paint_diff_row(
         }
         DiffRow::Line { left, right } if split && right.is_some() => {
             let cols = side_by_side_column_widths(width, state.diff_split_fraction);
-            let n = if wrap {
+            let (left_h, right_h) = if wrap {
                 let mark = comment_mark_cols(state.ascii);
                 let gutter_with_mark = gutter.saturating_add(mark);
                 let left_h = wrap_col_starts(
@@ -1695,11 +1707,11 @@ fn paint_diff_row(
                 )
                 .len()
                 .max(1);
-                left_h.max(right_h)
+                (left_h, right_h)
             } else {
-                1
+                (1, 1)
             };
-            (0..n)
+            (0..left_h.max(right_h))
                 .map(|part| {
                     let mut spans = paint_cell_spans(
                         left,
@@ -1713,11 +1725,16 @@ fn paint_diff_row(
                         state.ascii,
                         left_syntax,
                     );
+                    if let Some((text, BlameSide::Old)) = &blame {
+                        if part + 1 == left_h {
+                            put_line_annotation(&mut spans, text, palette);
+                        }
+                    }
                     spans.push(Span::styled(
                         DIFF_RULE.to_string(),
                         Style::default().fg(Color::DarkGray),
                     ));
-                    spans.extend(paint_cell_spans(
+                    let mut right_spans = paint_cell_spans(
                         right.as_ref().unwrap(),
                         cols.right_width,
                         gutter,
@@ -1728,7 +1745,13 @@ fn paint_diff_row(
                         state,
                         state.ascii,
                         right_syntax,
-                    ));
+                    );
+                    if let Some((text, BlameSide::New)) = &blame {
+                        if part + 1 == right_h {
+                            put_line_annotation(&mut right_spans, text, palette);
+                        }
+                    }
+                    spans.extend(right_spans);
                     Line::from(spans)
                 })
                 .collect()
@@ -1747,7 +1770,7 @@ fn paint_diff_row(
             };
             (0..n)
                 .map(|part| {
-                    Line::from(paint_cell_spans(
+                    let mut spans = paint_cell_spans(
                         left,
                         width,
                         gutter,
@@ -1758,7 +1781,13 @@ fn paint_diff_row(
                         state,
                         state.ascii,
                         left_syntax,
-                    ))
+                    );
+                    if let Some((text, _)) = &blame {
+                        if part + 1 == n {
+                            put_line_annotation(&mut spans, text, palette);
+                        }
+                    }
+                    Line::from(spans)
                 })
                 .collect()
         }
@@ -1767,6 +1796,32 @@ fn paint_diff_row(
         .into_iter()
         .map(|line| finish_diff_line(line, selected, focused, visual, search, palette))
         .collect()
+}
+
+/// Paint `text` dimmed at the end of a cell or file line, inside its
+/// trailing blank pad, as `"  " + text` cut to fit.
+///
+/// The pad keeps its width, so row heights, the gutter, and the pan range
+/// never change. No pad (code fills the width, or the line is panned) or
+/// fewer than 12 free columns paints nothing.
+fn put_line_annotation(spans: &mut Vec<Span<'static>>, text: &str, palette: Palette) {
+    let Some(pad) = spans.last() else {
+        return;
+    };
+    if pad.content.is_empty() || pad.content.chars().any(|c| c != ' ') {
+        return;
+    }
+    let pad_w = pad.content.len();
+    let Some(fitted) = fit_annotation(text, pad_w.saturating_sub(2)) else {
+        return;
+    };
+    let style = pad.style;
+    let rest = pad_w - 2 - fitted.width();
+    spans.pop();
+    spans.push(Span::styled(format!("  {fitted}"), style.fg(palette.muted)));
+    if rest > 0 {
+        spans.push(Span::styled(" ".repeat(rest), style));
+    }
 }
 
 fn finish_diff_line(
@@ -1823,7 +1878,9 @@ fn section_style(section: DiffSection, palette: Palette) -> Style {
     match section {
         DiffSection::Staged => Style::default().fg(palette.added),
         DiffSection::Unstaged => Style::default().fg(palette.modified),
-        DiffSection::New | DiffSection::Committed => Style::default().fg(palette.heading),
+        DiffSection::New | DiffSection::Committed | DiffSection::Worktree => {
+            Style::default().fg(palette.heading)
+        }
     }
 }
 
@@ -2748,6 +2805,44 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+/// `A` blame-actions menu: the focused line's annotation (the same text
+/// the pane paints at the line's end, cut to one row), then one row per
+/// action with its key.
+fn draw_blame_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let palette = state.theme.palette();
+    let surface = overlay_surface(state);
+    let accent = palette.modified;
+    const TITLE: &str = "Blame ";
+    // Inside the border, after the title.
+    let room = usize::from(area.width.saturating_sub(2)).saturating_sub(TITLE.len());
+    let header = state
+        .painted_line_annotation()
+        .and_then(|(text, _)| fit_annotation(&text, room))
+        .unwrap_or_default();
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            TITLE,
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(header, Style::default().fg(palette.muted)),
+    ])];
+    for row in &BLAME_MENU_ROWS {
+        lines.push(Line::from(vec![
+            key_chip(&row.key.to_string(), accent, surface),
+            Span::styled(format!(" {}", row.label), Style::default().fg(palette.file)),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
+        "Esc cancel",
+        Style::default().fg(palette.muted),
+    )));
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
 }
 
 /// Compare-tab close control as painted and hit-tested: brackets around
@@ -9169,6 +9264,130 @@ mod tests {
         let crumb = buffer_text(&terminal);
         assert!(crumb.contains("app › README.md"), "{crumb}");
         assert!(crumb.contains("edit") && crumb.contains("quit"), "{crumb}");
+    }
+
+    /// Cache `summary` as the blame of the line `state` focuses now.
+    fn cache_focused_blame(state: &mut AppState, summary: &str) {
+        let key = state.line_blame_want().expect("focused line asks");
+        state.line_blame.insert(
+            key,
+            Some(crate::git::LineBlame {
+                sha: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                author: "Ada".into(),
+                author_time: 0,
+                summary: summary.into(),
+                orig_line: 1,
+                filename: "README.md".into(),
+                previous: None,
+                boundary: false,
+                uncommitted: false,
+            }),
+        );
+    }
+
+    #[test]
+    fn focused_diff_row_ends_with_the_dimmed_blame_annotation() {
+        for mode in [DiffMode::Inline, DiffMode::SideBySide] {
+            let mut state = two_pane_diff_state();
+            state.diff_mode = mode;
+            state.set_diff(
+                "app".into(),
+                "README.md".into(),
+                super::super::diff::DiffContent::from_unified(
+                    "@@ -1,3 +1,3 @@\n keep one\n-old line\n+new line\n keep two\n",
+                ),
+            );
+            state.focus = FocusPane::Right;
+            let palette = state.theme.palette();
+            let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            state.diff_cursor = diff_row_index(&state, "keep one");
+            cache_focused_blame(&mut state, "fix the parser");
+            draw_state(&mut terminal, &mut state);
+            let buf = terminal.backend().buffer();
+            let text = buffer_text(&terminal);
+            let y = first_row_with(buf, "keep one").expect("focused row");
+            let row = buf_line(buf, y);
+            assert!(
+                row.contains("Ada, ") && row.contains(" · aaa1111 · fix the parser"),
+                "{mode:?}:\n{text}"
+            );
+            let sha = find_cell_col(buf, y, "aaa1111").unwrap();
+            assert_eq!(buf[(sha, y)].fg, palette.muted, "{mode:?}");
+            assert_eq!(
+                text.matches("aaa1111").count(),
+                1,
+                "only the focused row:\n{text}"
+            );
+            if mode == DiffMode::SideBySide {
+                let rule = row.find(DIFF_RULE).expect("split rule");
+                assert!(row.find("aaa1111").unwrap() > rule, "new side: {row}");
+            }
+
+            // A drag selection copies screen cells: no annotation then.
+            state.text_selection = Some(super::super::selection::TextSelection {
+                pane: Rect::default(),
+                anchor: (0, 0),
+                head: (0, 0),
+            });
+            draw_state(&mut terminal, &mut state);
+            assert!(!buffer_text(&terminal).contains("aaa1111"), "{mode:?}");
+            state.text_selection = None;
+
+            // The left pane focused: the diff row is not focused.
+            state.focus = FocusPane::Left;
+            draw_state(&mut terminal, &mut state);
+            assert!(!buffer_text(&terminal).contains("aaa1111"), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn file_tab_cursor_line_ends_with_the_blame_annotation() {
+        let mut state = file_tab_state(&["# app", "dirty"]);
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        cache_focused_blame(&mut state, "seed");
+        draw_state(&mut terminal, &mut state);
+        let buf = terminal.backend().buffer();
+        assert!(
+            buf_line(buf, 2).contains(" · aaa1111 · seed"),
+            "{}",
+            buf_line(buf, 2)
+        );
+        assert!(!buf_line(buf, 3).contains("aaa1111"));
+        state.dispatch(Action::ToggleLineBlame);
+        draw_state(&mut terminal, &mut state);
+        assert!(!buffer_text(&terminal).contains("aaa1111"), "B hides it");
+    }
+
+    #[test]
+    fn blame_menu_shows_the_annotation_and_one_row_per_action() {
+        let mut state = file_tab_state(&["# app", "dirty"]);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        cache_focused_blame(&mut state, "seed the app");
+        assert_eq!(state.dispatch(Action::BlameMenu), Effect::None);
+        assert_eq!(open_dialog(&state), Some(DialogKind::BlameMenu));
+        draw_state(&mut terminal, &mut state);
+        let buf = terminal.backend().buffer();
+        let text = buffer_text(&terminal);
+        let (note, _) = state.painted_line_annotation().expect("annotation");
+        let header = first_row_with(buf, "Blame ").expect("menu header");
+        assert!(buf_line(buf, header).contains(&note), "{text}");
+        for (offset, row) in BLAME_MENU_ROWS.iter().enumerate() {
+            let line = buf_line(buf, header + 1 + offset as u16);
+            assert!(
+                line.contains(&format!(" {}  {}", row.key, row.label)),
+                "{text}"
+            );
+        }
+        assert!(
+            buf_line(buf, header + 1 + BLAME_MENU_ROWS.len() as u16).contains("Esc cancel"),
+            "{text}"
+        );
+        assert_eq!(state.dispatch(Action::BlameMenuCancel), Effect::None);
+        draw_state(&mut terminal, &mut state);
+        assert!(!buffer_text(&terminal).contains("Esc cancel"));
     }
 
     #[test]

@@ -25,6 +25,7 @@ mod graph_load;
 mod help;
 mod icons;
 mod keys;
+mod line_blame;
 mod ops;
 pub(crate) mod persist;
 mod quick_open;

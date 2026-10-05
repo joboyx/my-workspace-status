@@ -26,10 +26,10 @@ use crate::config::WorkspaceStatusConfig;
 use crate::discovery::{collect_snapshots, process_repo, RepoCheckoutMeta};
 use crate::git::{
     ahead_behind, checkout_branch, diff_commit_file_ctx, diff_compare_file_ctx,
-    diff_stash_file_ctx, fast_forward_to_remote_ref, git_diff_args, list_commit_name_status,
-    list_compare_name_status, list_stash_name_status, list_worktree_name_status, merge_base,
-    merge_into_head, repo_has_local_changes, rev_parse_commit, rev_parse_quiet,
-    MergeIntoHeadResult, NameStatus,
+    diff_stash_file_ctx, diff_worktree_vs_commit_file_ctx, fast_forward_to_remote_ref,
+    git_diff_args, list_commit_name_status, list_compare_name_status, list_stash_name_status,
+    list_worktree_name_status, list_worktree_vs_commit_name_status, merge_base, merge_into_head,
+    repo_has_local_changes, rev_parse_commit, rev_parse_quiet, MergeIntoHeadResult, NameStatus,
 };
 use crate::snapshot::{
     build_workspace_snapshot, repo_snapshots_from_workspace, CheckoutKind, FileChange,
@@ -51,7 +51,8 @@ use super::keys::{event_to_action_with, is_held_nav_backlog};
 use super::state::AppState;
 use super::status::StatusMessage;
 use super::tabs::{
-    base_ref_not_found, head_ref_not_found, no_merge_base, COMPARE_HEAD_REF, HEAD_HAS_NO_COMMIT,
+    base_ref_not_found, head_ref_not_found, no_merge_base, WorktreeFile, COMPARE_HEAD_REF,
+    HEAD_HAS_NO_COMMIT,
 };
 use super::tty::{disable_mouse, enable_mouse, poll_event, read_event, read_event_origin};
 #[cfg(test)]
@@ -661,7 +662,7 @@ pub(crate) fn compute_commit_files(dir: &Path, source: &CommitFileSource) -> Vec
         CommitFileSource::Commit { commit_id } => list_commit_name_status(dir, commit_id),
         CommitFileSource::Stash { stash_ref } => list_stash_name_status(dir, stash_ref),
         CommitFileSource::Worktree => list_worktree_name_status(dir),
-        CommitFileSource::Compare { .. } => Vec::new(),
+        CommitFileSource::Compare { .. } | CommitFileSource::CommitVsWorktree { .. } => Vec::new(),
     }
 }
 
@@ -671,10 +672,38 @@ pub(crate) struct CompareRangeLoad {
     pub source: CommitFileSource,
     /// Committed `base...HEAD` paths.
     pub files: Vec<super::drill::CommitFile>,
-    /// HEAD SHA at load time.
-    pub head: String,
+    /// HEAD SHA at load time. `None` for a commit-vs-working-tree load,
+    /// which is never probed.
+    pub head: Option<String>,
     /// Base tip SHA at load time.
     pub base_tip: String,
+}
+
+/// Resolve `base_ref` and list the one file of a commit-vs-working-tree
+/// compare (`diff --name-status -M <base> -- [<old>] <path>`).
+///
+/// A file on disk that equals the commit lists nothing.
+pub(crate) fn compute_worktree_compare_range(
+    dir: &Path,
+    base_ref: &str,
+    file: &WorktreeFile,
+) -> Result<CompareRangeLoad, String> {
+    let base = rev_parse_commit(dir, base_ref)?.ok_or_else(|| base_ref_not_found(base_ref))?;
+    let files =
+        list_worktree_vs_commit_name_status(dir, &base, &file.path, file.old_path.as_deref())?
+            .into_iter()
+            .map(Into::into)
+            .collect();
+    Ok(CompareRangeLoad {
+        source: CommitFileSource::CommitVsWorktree {
+            base: base.clone(),
+            path: file.path.clone(),
+            old_path: file.old_path.clone(),
+        },
+        files,
+        head: None,
+        base_tip: base,
+    })
 }
 
 /// Resolve head / base / merge-base and list committed compare files.
@@ -709,7 +738,7 @@ pub(crate) fn compute_compare_range(
             head: head.clone(),
         },
         files,
-        head,
+        head: Some(head),
         base_tip,
     })
 }
@@ -770,11 +799,16 @@ pub(crate) fn compute_commit_diff(
             }
             head_file_diff(&dir, path, context)
         }
-        CommitFileSource::Compare { .. } => DiffContent::default(),
+        CommitFileSource::Compare { .. } | CommitFileSource::CommitVsWorktree { .. } => {
+            DiffContent::default()
+        }
     }
 }
 
 /// Unified compare diff for one path. Failure is `Err`.
+///
+/// A commit-vs-working-tree source diffs its base commit against the file
+/// on disk (`diff -M <base> -- [<old>] <path>`).
 pub(crate) fn compute_compare_diff(
     dir: &Path,
     source: &CommitFileSource,
@@ -782,11 +816,17 @@ pub(crate) fn compute_compare_diff(
     old_path: Option<&str>,
     context: Option<u32>,
 ) -> Result<DiffContent, String> {
-    let CommitFileSource::Compare { base_tip, head, .. } = source else {
-        return Ok(DiffContent::default());
-    };
-    let lines = diff_compare_file_ctx(dir, base_tip, head, path, old_path, context)?;
-    Ok(DiffContent::from_compare_lines(lines))
+    match source {
+        CommitFileSource::Compare { base_tip, head, .. } => {
+            let lines = diff_compare_file_ctx(dir, base_tip, head, path, old_path, context)?;
+            Ok(DiffContent::from_compare_lines(lines))
+        }
+        CommitFileSource::CommitVsWorktree { base, .. } => {
+            let lines = diff_worktree_vs_commit_file_ctx(dir, base, path, old_path, context)?;
+            Ok(DiffContent::from_worktree_compare_lines(lines))
+        }
+        _ => Ok(DiffContent::default()),
+    }
 }
 
 fn head_file_diff(dir: &Path, path: &str, context: Option<u32>) -> DiffContent {
@@ -1869,7 +1909,7 @@ mod tests {
 
         let load = compute_compare_range(&dir, &format!("{first}^"), &first).unwrap();
         assert_eq!(compare_paths(&load), vec![("A".into(), "a.txt".into())]);
-        assert_eq!(load.head, first);
+        assert_eq!(load.head.as_deref(), Some(first.as_str()));
         match &load.source {
             CommitFileSource::Compare {
                 base_ref,
@@ -1900,6 +1940,49 @@ mod tests {
         assert_eq!(
             compute_compare_range(&dir, "main", &"0".repeat(40)).err(),
             Some(head_ref_not_found(&"0".repeat(40)))
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn worktree_range_lists_and_diffs_the_one_file_against_the_commit() {
+        let dir = crate::testutil::unique_dir("ws-compare-worktree");
+        init_repo(&dir);
+        let base = commit_file(&dir, "old.txt");
+        commit_file(&dir, "other.txt");
+        let file = WorktreeFile {
+            path: "old.txt".into(),
+            old_path: None,
+        };
+        let clean = compute_worktree_compare_range(&dir, &base, &file).unwrap();
+        assert!(clean.files.is_empty(), "disk equals the commit");
+
+        // Renamed and edited after `base`; other.txt changes are not listed.
+        git(&dir, &["mv", "old.txt", "new.txt"]);
+        fs::write(dir.join("new.txt"), "old.txt\nmore\n").unwrap();
+        fs::write(dir.join("other.txt"), "changed\n").unwrap();
+        let file = WorktreeFile {
+            path: "new.txt".into(),
+            old_path: Some("old.txt".into()),
+        };
+        let load = compute_worktree_compare_range(&dir, &base, &file).unwrap();
+        assert_eq!(compare_paths(&load), vec![("R".into(), "new.txt".into())]);
+        assert_eq!(
+            load.source,
+            CommitFileSource::CommitVsWorktree {
+                base: base.clone(),
+                path: "new.txt".into(),
+                old_path: Some("old.txt".into()),
+            }
+        );
+        let content =
+            compute_compare_diff(&dir, &load.source, "new.txt", Some("old.txt"), None).unwrap();
+        assert!(content.vs_worktree && !content.is_committed);
+        assert!(content.unstaged.contains("+more"), "{content:?}");
+
+        assert_eq!(
+            compute_worktree_compare_range(&dir, &"0".repeat(40), &file).err(),
+            Some(base_ref_not_found(&"0".repeat(40)))
         );
         let _ = fs::remove_dir_all(&dir);
     }

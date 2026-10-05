@@ -43,7 +43,7 @@ const HELP_GIT_ROWS: &[(&str, &str)] = &[
 ];
 
 const HELP_VIEW_ROWS: &[(&str, &str)] = &[
-    ("i \\ M", "inline / split · wrap · msg"),
+    ("i \\ M B", "inline / split · wrap · msg · blame"),
     ("< >", "narrow / widen the tree pane"),
     ("t", "flat / tree · Staged split"),
     (".", "show / hide ignored repos"),

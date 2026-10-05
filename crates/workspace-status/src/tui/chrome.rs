@@ -74,6 +74,7 @@ use super::drill::DrillView;
 use super::help::{help_status_lines, HelpTab};
 use super::icons::truncate_visible;
 use super::keys::DOUBLE_TAP_MS;
+use super::line_blame::BLAME_MENU_ROWS;
 use super::ops::{collect_write_files, op_targets, push_targets, Op};
 use super::split::DiffMode;
 use super::stash::{stash_ops_for_context, StashOpsContext};
@@ -460,6 +461,8 @@ pub enum DialogKind {
     Confirm,
     /// Stash operations menu.
     StashMenu,
+    /// `A` blame-actions menu for the focused line.
+    BlameMenu,
     /// Graph `c` create-branch prompt.
     CreateBranch,
     /// Comment textarea.
@@ -479,8 +482,8 @@ pub enum DialogKind {
 /// The dialog that paints this frame, or `None` when only the panes and
 /// the bottom chrome paint.
 ///
-/// Same order as the render if-chain: help, confirm, stash, create
-/// branch, comment, export, then the list pickers and the palette.
+/// Same order as the render if-chain: help, confirm, stash, blame menu,
+/// create branch, comment, export, then the list pickers and the palette.
 pub fn open_dialog(state: &AppState) -> Option<DialogKind> {
     if state.help_open {
         Some(DialogKind::Help)
@@ -488,6 +491,8 @@ pub fn open_dialog(state: &AppState) -> Option<DialogKind> {
         Some(DialogKind::Confirm)
     } else if state.stash_menu.is_some() {
         Some(DialogKind::StashMenu)
+    } else if state.blame_menu {
+        Some(DialogKind::BlameMenu)
     } else if state.create_branch.is_some() {
         Some(DialogKind::CreateBranch)
     } else if state.comment.is_some() {
@@ -582,6 +587,8 @@ pub fn dialog_height(state: &AppState, kind: DialogKind, width: u16) -> u16 {
             let ops = state.stash_menu.as_ref().map_or(0, Vec::len) as u16;
             4u16.saturating_add(ops).saturating_add(1)
         }
+        // Border, the annotation header, one row per action, and the footer.
+        DialogKind::BlameMenu => 4 + BLAME_MENU_ROWS.len() as u16,
         // Border, title, name, the status row (`create {name}`), and the footer.
         DialogKind::CreateBranch => 6,
         // Room for the most body lines; fewer lines leave blank rows.
@@ -2227,6 +2234,18 @@ mod tests {
         assert_eq!(dialog_height(&app, DialogKind::StashMenu, 96), 5);
         app.status = "stash  s stash".into();
         assert_eq!(dialog_height(&app, DialogKind::StashMenu, 96), 5);
+    }
+
+    #[test]
+    fn blame_menu_paints_after_the_stash_menu_at_a_fixed_height() {
+        let mut app = state();
+        assert_eq!(open_dialog(&app), None);
+        app.blame_menu = true;
+        assert_eq!(open_dialog(&app), Some(DialogKind::BlameMenu));
+        // Border, header, four actions, footer.
+        assert_eq!(dialog_height(&app, DialogKind::BlameMenu, 96), 8);
+        app.stash_menu = Some(Vec::new());
+        assert_eq!(open_dialog(&app), Some(DialogKind::StashMenu));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Session tab strip: permanent Workspace plus compare and file tabs.
 //!
-//! Compare identity is `(checkout_path, base_ref, head_ref)`; file identity
+//! Compare identity is `(checkout_path, base_ref, head_ref, worktree_file)`
+//! (`worktree_file` only on a commit-vs-working-tree tab); file identity
 //! is `(checkout, rel)`. Both kinds share one strip in creation order and
 //! one id counter. Tabs are session-only.
 
@@ -25,6 +26,13 @@ pub const FOCUS_A_COMMIT_TO_DIFF: &str = "focus a commit to diff";
 pub const ROOT_COMMIT_HAS_NO_PARENT: &str = "root commit has no parent";
 /// Compare `x` refusal on a tab with a pinned head: the diff is history.
 pub const CANNOT_REVERT_COMMITTED_DIFF: &str = "cannot revert a committed diff";
+/// Compare `x` refusal on a commit-vs-working-tree tab.
+pub const CANNOT_REVERT_WORKTREE_COMPARE: &str = "cannot revert a working-tree compare";
+/// Space refusal on a commit-vs-working-tree tab: a mark keys on a range.
+pub const REVIEWED_MARKS_NEED_A_COMMIT_RANGE: &str = "reviewed marks need a commit range";
+/// Comment, reference, export, and external-diff refusal on a
+/// commit-vs-working-tree tab.
+pub const NOT_ON_WORKTREE_COMPARE: &str = "not available on a working-tree compare";
 /// Palette copy when Close is run on the Workspace tab.
 pub const WORKSPACE_TAB_CANNOT_CLOSE: &str = "Workspace tab cannot be closed";
 
@@ -59,6 +67,9 @@ pub fn compare_file_dirty(path: &str) -> String {
 
 /// Empty compare file list.
 pub const NO_COMMITTED_CHANGES: &str = "No committed changes";
+/// Empty commit-vs-working-tree file list: the file on disk equals the
+/// commit.
+pub const NO_CHANGES: &str = "No changes";
 /// Empty compare picker.
 pub const NO_BRANCHES_TO_COMPARE: &str = "No branches to compare";
 /// Empty compare commit picker: HEAD has no ancestor (a root commit).
@@ -264,6 +275,12 @@ pub fn no_committed_changes_vs(base_ref: &str) -> String {
     format!("No committed changes vs {}", short_rev(base_ref))
 }
 
+/// Right-pane empty copy for a commit-vs-working-tree tab whose file on
+/// disk equals the commit.
+pub fn no_changes_vs(base_ref: &str) -> String {
+    format!("No changes vs {}", short_rev(base_ref))
+}
+
 /// Missing base after the tab already exists.
 pub fn base_ref_not_found(base_ref: &str) -> String {
     format!("Base ref not found: {}", short_rev(base_ref))
@@ -322,6 +339,15 @@ pub fn compare_tab_label(checkout_path: &str, base_ref: &str) -> String {
     )
 }
 
+/// The one file a commit-vs-working-tree compare tab diffs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorktreeFile {
+    /// Path on disk, relative to the checkout.
+    pub path: String,
+    /// Path at the base commit when it differs from [`Self::path`].
+    pub old_path: Option<String>,
+}
+
 /// Last path component of a checkout path.
 pub fn checkout_leaf(checkout_path: &str) -> String {
     Path::new(checkout_path)
@@ -345,6 +371,15 @@ pub struct CompareTab {
     /// [`COMPARE_HEAD_REF`] for a live tab, else the full commit id that
     /// pins the head (Diff commit vs parent).
     pub head_ref: String,
+    /// Set on a commit-vs-working-tree tab: [`Self::base_ref`] (a full
+    /// commit id) against this file on disk. Part of the tab identity, so
+    /// it never shares a tab with `<sha>...HEAD`. [`Self::head_ref`] stays
+    /// [`COMPARE_HEAD_REF`].
+    pub worktree_file: Option<WorktreeFile>,
+    /// Commit-vs-working-tree only: the checkout's HEAD and the file's
+    /// workspace-snapshot entry when the diff last loaded. A watch tick
+    /// that sees another stamp reloads the diff.
+    pub worktree_stamp: Option<String>,
     /// Immutable endpoints for the current load, when resolved.
     pub source: Option<CommitFileSource>,
     /// Load or probe error. Tab stays open.
@@ -390,6 +425,7 @@ impl CompareTab {
         checkout_path: String,
         base_ref: String,
         head_ref: String,
+        worktree_file: Option<WorktreeFile>,
         tree_mode: bool,
     ) -> Self {
         Self {
@@ -397,6 +433,8 @@ impl CompareTab {
             checkout_path,
             base_ref,
             head_ref,
+            worktree_file,
+            worktree_stamp: None,
             source: None,
             error: None,
             files: Vec::new(),
@@ -424,9 +462,17 @@ impl CompareTab {
         }
     }
 
-    /// Strip label.
+    /// Strip label: [`compare_tab_label`], or `<file-leaf> ↔ <short base>`
+    /// on a commit-vs-working-tree tab (one file, so the file names it).
     pub fn label(&self) -> String {
-        compare_tab_label(&self.checkout_path, &self.base_ref)
+        match &self.worktree_file {
+            Some(file) => format!(
+                "{}{COMPARE_TAB_SEP}{}",
+                checkout_leaf(&file.path),
+                short_rev(&self.base_ref)
+            ),
+            None => compare_tab_label(&self.checkout_path, &self.base_ref),
+        }
     }
 
     /// Bump the load generation and mark the tab loading.
@@ -441,10 +487,32 @@ impl CompareTab {
         self.head_ref != COMPARE_HEAD_REF
     }
 
-    /// Diff pane header range (`<base-ref>...HEAD`, or
-    /// `abc1234^...abc1234` for a pinned head).
+    /// Diff pane header range (`<base-ref>...HEAD`,
+    /// `abc1234^...abc1234` for a pinned head, or
+    /// `abc1234 ↔ working tree` for a commit-vs-working-tree tab).
     pub fn range_header(&self) -> String {
+        if self.worktree_file.is_some() {
+            return format!("{}{COMPARE_TAB_SEP}working tree", short_rev(&self.base_ref));
+        }
         compare_range_label(&self.base_ref, &self.head_ref)
+    }
+
+    /// File list copy when the loaded range lists no file.
+    pub fn empty_files_copy(&self) -> &'static str {
+        if self.worktree_file.is_some() {
+            NO_CHANGES
+        } else {
+            NO_COMMITTED_CHANGES
+        }
+    }
+
+    /// Diff pane copy when the loaded range lists no file.
+    pub fn empty_diff_copy(&self) -> String {
+        if self.worktree_file.is_some() {
+            no_changes_vs(&self.base_ref)
+        } else {
+            no_committed_changes_vs(&self.base_ref)
+        }
     }
 
     /// Path of the open diff when [`Self::content`] is loaded for the
@@ -708,8 +776,21 @@ impl TabStrip {
         out
     }
 
-    /// Find a compare tab by identity. `0` is never returned (Workspace).
+    #[cfg(test)]
+    /// Find a commit-range compare tab by identity. `0` is never returned
+    /// (Workspace). A commit-vs-working-tree tab never matches.
     pub fn find(&self, checkout_path: &str, base_ref: &str, head_ref: &str) -> Option<usize> {
+        self.find_compare(checkout_path, base_ref, head_ref, None)
+    }
+
+    /// Find a compare tab by its full identity, `worktree_file` included.
+    fn find_compare(
+        &self,
+        checkout_path: &str,
+        base_ref: &str,
+        head_ref: &str,
+        worktree_file: Option<&WorktreeFile>,
+    ) -> Option<usize> {
         self.tabs
             .iter()
             .position(|tab| {
@@ -717,6 +798,7 @@ impl TabStrip {
                     tab.checkout_path == checkout_path
                         && tab.base_ref == base_ref
                         && tab.head_ref == head_ref
+                        && tab.worktree_file.as_ref() == worktree_file
                 })
             })
             .map(|i| i + 1)
@@ -739,14 +821,37 @@ impl TabStrip {
         id
     }
 
-    /// Focus an existing identity or append a new compare tab.
+    /// Focus an existing identity or append a new commit-range compare tab.
     pub fn open_or_focus(
         &mut self,
         checkout_path: String,
         base_ref: String,
         head_ref: String,
     ) -> OpenCompare {
-        if let Some(index) = self.find(&checkout_path, &base_ref, &head_ref) {
+        self.open_or_focus_compare(checkout_path, base_ref, head_ref, None)
+    }
+
+    /// Focus or append the commit-vs-working-tree tab for commit `base`
+    /// (a full id) and `file` in `checkout_path`.
+    pub fn open_or_focus_worktree(
+        &mut self,
+        checkout_path: String,
+        base: String,
+        file: WorktreeFile,
+    ) -> OpenCompare {
+        self.open_or_focus_compare(checkout_path, base, COMPARE_HEAD_REF.into(), Some(file))
+    }
+
+    fn open_or_focus_compare(
+        &mut self,
+        checkout_path: String,
+        base_ref: String,
+        head_ref: String,
+        worktree_file: Option<WorktreeFile>,
+    ) -> OpenCompare {
+        if let Some(index) =
+            self.find_compare(&checkout_path, &base_ref, &head_ref, worktree_file.as_ref())
+        {
             self.active = index;
             return OpenCompare::Focused;
         }
@@ -756,6 +861,7 @@ impl TabStrip {
             checkout_path,
             base_ref,
             head_ref,
+            worktree_file,
             self.commit_tree_default,
         )));
         self.active = self.tabs.len();
@@ -1127,6 +1233,7 @@ mod tests {
             "app".into(),
             "main".into(),
             COMPARE_HEAD_REF.into(),
+            None,
             true,
         );
         tab.source = Some(CommitFileSource::Compare {
@@ -1171,5 +1278,50 @@ mod tests {
         assert!(!new_head.is_reviewed("src/a.rs"));
         new_head.toggle_reviewed("src/a.rs");
         assert!(new_head.is_reviewed("src/a.rs"), "stale mark re-marks");
+    }
+
+    #[test]
+    fn worktree_tab_identity_never_meets_a_sha_head_tab() {
+        let mut tabs = TabStrip::default();
+        let file = |path: &str| WorktreeFile {
+            path: path.into(),
+            old_path: None,
+        };
+        assert_eq!(
+            tabs.open_or_focus("app".into(), SHA.into(), COMPARE_HEAD_REF.into()),
+            OpenCompare::Created(1)
+        );
+        assert_eq!(
+            tabs.open_or_focus_worktree("app".into(), SHA.into(), file("a.rs")),
+            OpenCompare::Created(2)
+        );
+        assert_eq!(
+            tabs.open_or_focus_worktree("app".into(), SHA.into(), file("b.rs")),
+            OpenCompare::Created(3)
+        );
+        assert_eq!(
+            tabs.open_or_focus_worktree("app".into(), SHA.into(), file("a.rs")),
+            OpenCompare::Focused
+        );
+        assert_eq!(tabs.active, 2);
+        assert_eq!(tabs.find("app", SHA, COMPARE_HEAD_REF), Some(1));
+        assert_eq!(
+            tabs.open_or_focus("app".into(), SHA.into(), COMPARE_HEAD_REF.into()),
+            OpenCompare::Focused
+        );
+        assert_eq!(tabs.active, 1);
+
+        let live = tabs.get_id(1).unwrap();
+        let worktree = tabs.get_id(2).unwrap();
+        assert_eq!(live.range_header(), "abc1234...HEAD");
+        assert_eq!(worktree.range_header(), "abc1234 ↔ working tree");
+        assert_eq!(worktree.label(), "a.rs ↔ abc1234");
+        assert_eq!(tabs.get_id(3).unwrap().label(), "b.rs ↔ abc1234");
+        assert_eq!(live.label(), "app ↔ abc1234");
+        assert!(!worktree.is_pinned());
+        assert_eq!(live.empty_files_copy(), NO_COMMITTED_CHANGES);
+        assert_eq!(worktree.empty_files_copy(), NO_CHANGES);
+        assert_eq!(live.empty_diff_copy(), "No committed changes vs abc1234");
+        assert_eq!(worktree.empty_diff_copy(), "No changes vs abc1234");
     }
 }
