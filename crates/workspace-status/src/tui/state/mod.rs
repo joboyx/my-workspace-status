@@ -72,7 +72,7 @@ use super::ops::{
     push_targets, refresh_target, Op, RevertScope, RunningOp, ScopedFile,
 };
 use super::search::{
-    collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids,
+    collect_graph_match_indices, collect_match_ids, commit_file_row_match_indices,
     focus_commit_file_search, focus_diff_search, focus_graph_search, focus_tree_search,
     match_diff_line_indices, SearchPane,
 };
@@ -122,8 +122,16 @@ pub(crate) const BUSY_WRITE_RUNNING: &str = "busy: a git write is running";
 /// `n` / `N` with no armed search.
 pub(crate) const NO_SEARCH_ARMED: &str = "no search — press / first";
 
-/// `n` / `N` stepped past the last (or first) match and started over.
-pub(crate) const SEARCH_WRAPPED: &str = "search wrapped";
+/// A forward search step (`/` typing, Enter, `n`) ran past the last match
+/// and started over at the top.
+pub(crate) const SEARCH_WRAPPED_TO_TOP: &str = "search wrapped to top";
+
+/// A backward search step (`N`) ran past the first match and started over
+/// at the bottom.
+pub(crate) const SEARCH_WRAPPED_TO_BOTTOM: &str = "search wrapped to bottom";
+
+/// The `/` query matches nothing in the bound pane.
+pub(crate) const SEARCH_NO_MATCH: &str = "no match";
 
 /// `z` where nothing folds (graph list, file diff).
 pub(crate) const Z_FOLDS_TREE_ROWS: &str = "z folds tree rows";
@@ -273,9 +281,10 @@ fn hit_tab_box(hits: &[(u16, u16, usize)], tab_y: u16, col: u16, row: u16) -> Op
         .map(|(_, _, index)| *index)
 }
 
-/// Cursor, scroll, and folds saved when `/` opens. Esc while typing
-/// restores the bound pane from it, so an incremental search that moved
-/// the cursor leaves no trace.
+/// Cursor, scroll, and folds saved when `/` opens. Every query change and
+/// Enter step forward from it, so typing never walks further per key. Esc
+/// while typing restores the bound pane from it, so an incremental search
+/// that moved the cursor leaves no trace.
 #[derive(Clone, Debug)]
 struct SearchOrigin {
     tree_row: Option<String>,
@@ -2900,14 +2909,6 @@ impl AppState {
         }
     }
 
-    fn search_load_effect(&self) -> Effect {
-        if self.search_target == SearchPane::Tree {
-            Effect::LoadRightPane
-        } else {
-            Effect::None
-        }
-    }
-
     fn current_search_pane(&self) -> SearchPane {
         match self.list_focus_target() {
             ListFocusTarget::Tree => SearchPane::Tree,
@@ -2974,24 +2975,36 @@ impl AppState {
             // Armed query is a `/query` chip on the idle bar, not `n next N prev`.
             self.status.clear();
         } else {
-            self.status = StatusMessage::warn("no match");
+            self.status = StatusMessage::warn(SEARCH_NO_MATCH);
         }
     }
 
+    /// Step the bound pane to a match, vim `/` style.
+    ///
+    /// `dir` `0` (each typed key, Enter) first puts the pane back at the
+    /// [`SearchOrigin`] and steps forward from there, so the result only
+    /// depends on the query. `1` / `-1` (`n` / `N`) step from the pane's
+    /// cursor. A step that wraps says which way, after the match status.
     fn apply_search(&mut self, dir: i32) -> Effect {
-        let before = if dir == 0 {
-            None
-        } else {
-            self.search_match_position().and_then(|(pos, _)| pos)
-        };
-        let effect = self.apply_search_step(dir);
-        let after = before.and_then(|_| self.search_match_position().and_then(|(pos, _)| pos));
-        if let (Some(before), Some(after)) = (before, after) {
-            if (dir > 0 && after <= before) || (dir < 0 && after >= before) {
-                self.status = StatusMessage::info(SEARCH_WRAPPED);
+        if dir == 0 {
+            if let Some(origin) = self.search_origin.clone() {
+                self.put_pane_at_search_origin(origin);
             }
         }
-        effect
+        let wrapped = match self.search_target {
+            SearchPane::Tree => self.apply_tree_search(dir),
+            SearchPane::Graph => self.apply_graph_search(dir),
+            SearchPane::CommitFiles => self.apply_commit_file_search(dir),
+            SearchPane::Diff => self.apply_diff_search(dir),
+        };
+        if wrapped {
+            self.status = StatusMessage::info(if dir < 0 {
+                SEARCH_WRAPPED_TO_BOTTOM
+            } else {
+                SEARCH_WRAPPED_TO_TOP
+            });
+        }
+        self.search_pane_effect()
     }
 
     /// Diff row indices whose search text contains `query` (case-folded),
@@ -3030,8 +3043,9 @@ impl AppState {
     /// 1-based match position of the bound pane's cursor (`None` when the
     /// cursor is off a match) and the match count, for the `/q 3/7` pill.
     ///
-    /// `None` with no query. Reads the same "current" each pane's `n` / `N`
-    /// steps from: tree row, graph cursor, commit file, diff search hit.
+    /// `None` with no query. Hits follow each pane's search order; the
+    /// current match is the tree row, graph cursor, commit-file row, or the
+    /// diff search hit (the row the last step landed on).
     pub fn search_match_position(&self) -> Option<(Option<usize>, usize)> {
         let query = self.search_query.trim();
         if query.is_empty() {
@@ -3052,11 +3066,9 @@ impl AppState {
                 )
             }
             SearchPane::CommitFiles => {
-                let files = self.commit_drill_files()?;
-                let current = self
-                    .focused_commit_file_row()
-                    .and_then(|row| files.iter().position(|file| file.path == row.path));
-                (current, collect_commit_file_match_indices(files, query))
+                let rows = self.commit_file_search_rows()?;
+                let current = self.commit_file_search_anchor(&rows);
+                (current, commit_file_row_match_indices(&rows, query))
             }
             SearchPane::Diff => (self.search_hit, self.diff_search_hits(query)),
         };
@@ -3083,6 +3095,12 @@ impl AppState {
         let Some(origin) = self.search_origin.take() else {
             return Effect::None;
         };
+        self.put_pane_at_search_origin(origin);
+        self.search_pane_effect()
+    }
+
+    /// Cursor, scroll, and folds of the bound pane back to `origin`.
+    fn put_pane_at_search_origin(&mut self, origin: SearchOrigin) {
         match self.search_target {
             SearchPane::Tree => {
                 self.folds = origin.folds;
@@ -3093,50 +3111,36 @@ impl AppState {
                 {
                     self.cursor = idx;
                 }
-                Effect::LoadRightPane
             }
             SearchPane::Graph => {
                 self.graph_cursor = origin.graph_cursor;
                 self.graph_scroll = origin.graph_scroll;
-                self.follow_graph_files()
             }
             SearchPane::CommitFiles => {
                 self.commit_file_folds = origin.commit_file_folds;
                 self.set_commit_file_cursor(origin.commit_file_cursor);
-                self.maybe_load_focused_commit_diff()
             }
             SearchPane::Diff => {
                 self.diff_cursor = origin.diff_cursor;
                 self.diff_scroll = origin.diff_scroll;
-                Effect::None
             }
         }
     }
 
-    fn apply_search_step(&mut self, dir: i32) -> Effect {
+    /// Load that follows the bound pane's cursor after a search move.
+    fn search_pane_effect(&self) -> Effect {
         match self.search_target {
-            SearchPane::Tree => {
-                self.apply_tree_search(dir);
-                self.search_load_effect()
-            }
-            SearchPane::Graph => {
-                self.apply_graph_search(dir);
-                self.follow_graph_files()
-            }
-            SearchPane::CommitFiles => {
-                self.apply_commit_file_search(dir);
-                self.maybe_load_focused_commit_diff()
-            }
-            SearchPane::Diff => {
-                self.apply_diff_search(dir);
-                Effect::None
-            }
+            SearchPane::Tree => Effect::LoadRightPane,
+            SearchPane::Graph => self.follow_graph_files(),
+            SearchPane::CommitFiles => self.maybe_load_focused_commit_diff(),
+            SearchPane::Diff => Effect::None,
         }
     }
 
-    fn apply_tree_search(&mut self, dir: i32) {
+    /// Tree search step. Returns true when it wrapped.
+    fn apply_tree_search(&mut self, dir: i32) -> bool {
         let current = self.focused_row().map(|r| r.id.clone());
-        let (folds, focus_id) = focus_tree_search(
+        let (folds, landing) = focus_tree_search(
             &self.tree,
             &self.folds,
             &self.search_query,
@@ -3145,77 +3149,82 @@ impl AppState {
         );
         self.folds = folds;
         self.rebuild_rows();
-        if let Some(id) = focus_id {
-            if let Some(idx) = self.rows.iter().position(|r| r.id == id) {
-                self.cursor = idx;
-            }
-            self.set_search_status(true);
-        } else {
+        let Some(landing) = landing else {
             self.set_search_status(false);
+            return false;
+        };
+        if let Some(idx) = self.rows.iter().position(|r| r.id == landing.target) {
+            self.cursor = idx;
         }
+        self.set_search_status(true);
+        landing.wrapped
     }
 
-    fn apply_graph_search(&mut self, dir: i32) {
+    /// Graph search step from the graph cursor. Returns true when it wrapped.
+    fn apply_graph_search(&mut self, dir: i32) -> bool {
         let Some(model) = self.graph.as_ref() else {
             self.set_search_status(false);
-            return;
+            return false;
         };
         let rows = model.visible_rows();
-        let Some(idx) = focus_graph_search(&rows, &self.search_query, self.graph_cursor, dir)
+        let Some(landing) = focus_graph_search(&rows, &self.search_query, self.graph_cursor, dir)
         else {
             self.set_search_status(false);
-            return;
+            return false;
         };
-        self.graph_cursor = idx;
+        self.graph_cursor = landing.target;
         self.sync_graph_scroll();
         self.set_search_status(true);
+        landing.wrapped
     }
 
-    fn apply_commit_file_search(&mut self, dir: i32) {
-        let Some(files) = self.commit_drill_files() else {
+    /// Commit-file list flattened with no folds: the search order.
+    fn commit_file_search_rows(&self) -> Option<Vec<CommitFileRow>> {
+        Some(self.unfolded_commit_file_rows(self.commit_drill_files()?))
+    }
+
+    /// Position of the focused commit-file row (file or folder) in `rows`.
+    fn commit_file_search_anchor(&self, rows: &[CommitFileRow]) -> Option<usize> {
+        let focused = self.focused_commit_file_row()?;
+        rows.iter().position(|row| row.id == focused.id)
+    }
+
+    /// Commit-file search step from the focused row. Returns true when it
+    /// wrapped.
+    fn apply_commit_file_search(&mut self, dir: i32) -> bool {
+        let Some(rows) = self.commit_file_search_rows() else {
             self.set_search_status(false);
-            return;
+            return false;
         };
-        let files = files.to_vec();
-        let cursor = self.commit_files_cursor();
-        let current_path = flatten_commit_files(
-            &files,
-            self.commit_tree_mode,
-            &self.commit_file_folds,
-            self.ascii,
-        )
-        .get(cursor)
-        .map(|row| row.path.clone());
-        let current_file_idx = current_path
-            .as_deref()
-            .and_then(|path| files.iter().position(|file| file.path == path))
-            .unwrap_or(cursor);
-        let Some(file_idx) =
-            focus_commit_file_search(&files, &self.search_query, current_file_idx, dir)
-        else {
+        let anchor = self.commit_file_search_anchor(&rows);
+        let Some(landing) = focus_commit_file_search(&rows, &self.search_query, anchor, dir) else {
             self.set_search_status(false);
-            return;
+            return false;
         };
-        let path = files[file_idx].path.clone();
+        let path = rows[landing.target].path.clone();
         for id in ancestor_dir_ids(&path) {
             self.commit_file_folds.remove(&id);
         }
         self.restore_commit_file_cursor(Some(&path));
         self.set_search_status(true);
+        landing.wrapped
     }
 
-    fn apply_diff_search(&mut self, dir: i32) {
+    /// Diff search step from the diff cursor. Returns true when it wrapped.
+    fn apply_diff_search(&mut self, dir: i32) -> bool {
         let rows = self.current_diff_rows();
         let texts: Vec<String> = rows.iter().map(row_search_text).collect();
-        let Some(idx) = focus_diff_search(&texts, &self.search_query, self.search_hit, dir) else {
+        let Some(landing) = focus_diff_search(&texts, &self.search_query, self.diff_cursor, dir)
+        else {
             self.search_hit = None;
             self.set_search_status(false);
-            return;
+            return false;
         };
-        self.search_hit = Some(idx);
-        self.diff_cursor = idx;
-        self.sync_diff_scroll();
+        self.search_hit = Some(landing.target);
+        self.diff_cursor = landing.target;
+        self.sync_diff_scroll_for(&rows);
         self.set_search_status(true);
+        landing.wrapped
     }
 
     fn file_context_id(repo: &str, path: &str) -> String {
@@ -12827,13 +12836,123 @@ mod tests {
         assert_eq!(app.search_match_position(), Some((Some(2), 3)));
         assert!(app.status.is_empty(), "{}", &*app.status);
         app.dispatch(Action::SearchNext);
+        assert_eq!(app.search_match_position(), Some((Some(3), 3)));
+        assert!(app.status.is_empty(), "{}", &*app.status);
         app.dispatch(Action::SearchNext);
         assert_eq!(app.search_match_position(), Some((Some(1), 3)));
-        assert_eq!(app.status, SEARCH_WRAPPED);
+        assert_eq!(app.status, SEARCH_WRAPPED_TO_TOP);
         assert_eq!(app.status.kind(), StatusKind::Info);
         app.dispatch(Action::SearchPrev);
         assert_eq!(app.search_match_position(), Some((Some(3), 3)));
-        assert_eq!(app.status, SEARCH_WRAPPED);
+        assert_eq!(app.status, SEARCH_WRAPPED_TO_BOTTOM);
+        assert_eq!(app.status.kind(), StatusKind::Info);
+    }
+
+    /// Typing `/needle` with the diff cursor in the middle.
+    fn type_diff_search_from(app: &mut AppState, cursor: usize, query: &str) {
+        app.diff_cursor = cursor;
+        type_search(app, query);
+    }
+
+    #[test]
+    fn diff_enter_lands_on_the_next_match_below_the_cursor() {
+        let mut app = state();
+        needle_diff(&mut app);
+        let hits = app.diff_search_hits("needle");
+        assert_eq!(hits.len(), 3);
+        // Mid-list non-match: next match below, not the first.
+        type_diff_search_from(&mut app, hits[1] - 1, "needle");
+        assert_eq!(app.diff_cursor, hits[1]);
+        assert_eq!(app.search_hit, Some(hits[1]));
+        assert_eq!(app.search_match_position(), Some((Some(2), 3)));
+        assert!(app.status.is_empty(), "{}", &*app.status);
+        // The origin row's own match is skipped.
+        type_diff_search_from(&mut app, hits[1], "needle");
+        assert_eq!(app.diff_cursor, hits[2]);
+        assert_eq!(app.search_match_position(), Some((Some(3), 3)));
+        // Below the last match: Enter wraps to the top and says so.
+        type_diff_search_from(&mut app, hits[2] + 1, "needle");
+        assert_eq!(app.diff_cursor, hits[0]);
+        assert_eq!(app.search_match_position(), Some((Some(1), 3)));
+        assert_eq!(app.status, SEARCH_WRAPPED_TO_TOP);
+    }
+
+    #[test]
+    fn diff_n_steps_from_the_moved_cursor_not_the_stale_hit() {
+        let mut app = state();
+        needle_diff(&mut app);
+        let hits = app.diff_search_hits("needle");
+        type_diff_search_from(&mut app, 0, "needle");
+        assert_eq!(app.search_hit, Some(hits[0]));
+        // The user moves past the second match: `n` goes on from there.
+        app.diff_cursor = hits[1] + 1;
+        app.dispatch(Action::SearchNext);
+        assert_eq!(app.diff_cursor, hits[2]);
+        assert_eq!(app.search_match_position(), Some((Some(3), 3)));
+        app.diff_cursor = hits[1] + 1;
+        app.dispatch(Action::SearchPrev);
+        assert_eq!(app.diff_cursor, hits[1]);
+        assert_eq!(app.search_match_position(), Some((Some(2), 3)));
+        assert!(app.status.is_empty(), "{}", &*app.status);
+    }
+
+    #[test]
+    fn diff_typing_recomputes_from_the_origin_and_no_hit_stays_there() {
+        let mut app = state();
+        needle_diff(&mut app);
+        let hits = app.diff_search_hits("needle");
+        app.diff_cursor = 0;
+        app.dispatch(Action::SearchStart);
+        for c in "needle".chars() {
+            app.dispatch(Action::SearchChar(c));
+            // Each key starts again from the origin: no walk per char.
+            assert_eq!(app.diff_cursor, hits[0], "after {c}");
+        }
+        app.dispatch(Action::SearchChar('X'));
+        assert_eq!(app.diff_cursor, 0, "no hit: back at the origin");
+        assert_eq!(app.status, SEARCH_NO_MATCH);
+        assert_eq!(app.status.kind(), StatusKind::Warn);
+        app.dispatch(Action::SearchBackspace);
+        assert_eq!(app.diff_cursor, hits[0]);
+        app.dispatch(Action::SearchSubmit);
+        assert_eq!(app.diff_cursor, hits[0], "Enter matches the preview");
+        assert!(app.search_origin.is_none(), "Enter drops the origin");
+    }
+
+    #[test]
+    fn diff_search_with_no_match_says_so_without_a_wrap_notice() {
+        let mut app = state();
+        needle_diff(&mut app);
+        type_diff_search_from(&mut app, 3, "zzz-missing");
+        assert_eq!(app.diff_cursor, 3);
+        assert_eq!(app.status, SEARCH_NO_MATCH);
+        app.dispatch(Action::SearchNext);
+        assert_eq!(app.diff_cursor, 3);
+        assert_eq!(app.status, SEARCH_NO_MATCH);
+        app.dispatch(Action::SearchPrev);
+        assert_eq!(app.status, SEARCH_NO_MATCH);
+    }
+
+    #[test]
+    fn compare_tab_diff_search_steps_from_the_diff_cursor() {
+        let mut app = summary_compare_app();
+        app.focus = FocusPane::Right;
+        let hits = app.diff_search_hits("e");
+        assert!(hits.len() >= 2, "{hits:?}");
+        type_diff_search_from(&mut app, hits[0], "e");
+        assert_eq!(app.search_target, SearchPane::Diff);
+        assert_eq!(app.diff_cursor, hits[1], "origin match skipped");
+        assert_eq!(app.search_match_position(), Some((Some(2), hits.len())));
+        app.diff_cursor = *hits.last().unwrap();
+        app.dispatch(Action::SearchNext);
+        assert_eq!(app.diff_cursor, hits[0]);
+        assert_eq!(app.status, SEARCH_WRAPPED_TO_TOP);
+        // The tab parks and restores the diff cursor `n` steps from.
+        let _ = app.activate_tab(0);
+        let _ = app.activate_tab(1);
+        assert_eq!(app.diff_cursor, hits[0]);
+        app.dispatch(Action::SearchNext);
+        assert_eq!(app.diff_cursor, hits[1]);
     }
 
     #[test]
@@ -13826,17 +13945,121 @@ mod tests {
         let mut app = graph_state(false);
         focus_repo(&mut app, "app");
         install_two_graph_commits(&mut app);
+        assert_eq!(app.graph_cursor, 0);
         type_search(&mut app, "unique");
         assert!(app.search_active);
         assert_eq!(app.search_target, SearchPane::Graph);
-        assert_eq!(app.graph_cursor, 0);
+        assert_eq!(app.graph_cursor, 1, "the origin row's own match is skipped");
         app.dispatch(Action::SearchNext);
+        assert_eq!(app.graph_cursor, 0);
+        assert_eq!(app.status, SEARCH_WRAPPED_TO_TOP);
+        app.dispatch(Action::SearchPrev);
         assert_eq!(app.graph_cursor, 1);
+        assert_eq!(app.status, SEARCH_WRAPPED_TO_BOTTOM);
         app.dispatch(Action::SearchPrev);
         assert_eq!(app.graph_cursor, 0);
+        assert!(app.status.is_empty(), "{}", &*app.status);
+    }
+
+    /// Graph of `subjects`, top to bottom, on the right pane.
+    fn install_graph_subjects(app: &mut AppState, subjects: &[&str]) {
+        let commits: Vec<Commit> = subjects
+            .iter()
+            .enumerate()
+            .map(|(i, subject)| graph_commit(&format!("{:040x}", i + 1), subject))
+            .collect();
+        let head = commits[0].id.clone();
+        let model = GraphModel {
+            commits,
+            head_id: Some(head.clone()),
+            show_ignored: app.show_ignored,
+            ..GraphModel::default()
+        };
+        app.set_graph(model, "app".into(), head);
+        app.focus = FocusPane::Right;
+        app.drill = DrillView::Graph;
+    }
+
+    fn four_graph_rows() -> AppState {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_graph_subjects(
+            &mut app,
+            &["one unique", "two plain", "three unique", "four unique"],
+        );
+        app
+    }
+
+    #[test]
+    fn graph_search_steps_from_the_cursor_and_wraps_both_ways() {
+        let mut app = four_graph_rows();
+        app.graph_cursor = 1;
+        app.dispatch(Action::SearchStart);
+        for c in "uni".chars() {
+            app.dispatch(Action::SearchChar(c));
+            assert_eq!(app.graph_cursor, 2, "preview from the origin after {c}");
+        }
+        for c in "que".chars() {
+            app.dispatch(Action::SearchChar(c));
+        }
+        assert_eq!(app.graph_cursor, 2);
+        app.dispatch(Action::SearchSubmit);
+        assert_eq!(
+            app.graph_cursor, 2,
+            "Enter keeps the preview, no extra step"
+        );
+        assert_eq!(app.search_match_position(), Some((Some(2), 3)));
         app.dispatch(Action::SearchNext);
+        assert_eq!(app.graph_cursor, 3);
+        assert_eq!(app.search_match_position(), Some((Some(3), 3)));
         app.dispatch(Action::SearchNext);
         assert_eq!(app.graph_cursor, 0);
+        assert_eq!(app.status, SEARCH_WRAPPED_TO_TOP);
+        assert_eq!(app.search_match_position(), Some((Some(1), 3)));
+        app.dispatch(Action::SearchPrev);
+        assert_eq!(app.graph_cursor, 3);
+        assert_eq!(app.status, SEARCH_WRAPPED_TO_BOTTOM);
+        // From a non-match the user moved to: next below, previous above.
+        app.graph_cursor = 1;
+        app.dispatch(Action::SearchNext);
+        assert_eq!(app.graph_cursor, 2);
+        assert!(app.status.is_empty(), "{}", &*app.status);
+        app.graph_cursor = 1;
+        app.dispatch(Action::SearchPrev);
+        assert_eq!(app.graph_cursor, 0);
+        // Esc on the armed search clears it and leaves the cursor there.
+        app.dispatch(Action::NavEsc);
+        assert!(!app.search_active);
+        assert_eq!(app.graph_cursor, 0);
+    }
+
+    #[test]
+    fn graph_typing_with_no_hit_leaves_the_cursor_at_the_origin() {
+        let mut app = four_graph_rows();
+        app.graph_cursor = 1;
+        app.dispatch(Action::SearchStart);
+        for c in "three".chars() {
+            app.dispatch(Action::SearchChar(c));
+        }
+        assert_eq!(app.graph_cursor, 2);
+        app.dispatch(Action::SearchChar('Z'));
+        assert_eq!(app.graph_cursor, 1);
+        assert_eq!(app.status, SEARCH_NO_MATCH);
+        app.dispatch(Action::SearchCancel);
+        assert_eq!(app.graph_cursor, 1);
+    }
+
+    #[test]
+    fn graph_only_match_on_the_cursor_counts_as_a_wrap() {
+        let mut app = four_graph_rows();
+        app.graph_cursor = 2;
+        type_search(&mut app, "three");
+        assert_eq!(app.graph_cursor, 2);
+        assert_eq!(app.status, SEARCH_WRAPPED_TO_TOP);
+        assert_eq!(app.search_match_position(), Some((Some(1), 1)));
+        app.dispatch(Action::SearchPrev);
+        assert_eq!(app.graph_cursor, 2);
+        assert_eq!(app.status, SEARCH_WRAPPED_TO_BOTTOM);
     }
 
     #[test]
@@ -13910,6 +14133,93 @@ mod tests {
             .expect("search row");
         assert_eq!(row.path, "src/lib.rs");
         assert_eq!(app.search_target, SearchPane::CommitFiles);
+    }
+
+    #[test]
+    fn commit_files_search_walks_the_painted_tree_order() {
+        let mut app = summary_drill_app();
+        assert!(app.commit_tree_mode);
+        let focused = |app: &AppState| app.focused_commit_file_row().map(|row| row.path);
+        // Painted: src/, src/deep/, c.rs, a.rs, b.rs, README.md — not the
+        // `files` order README, a, b, c.
+        assert_eq!(focused(&app).as_deref(), Some("src/a.rs"));
+        type_search(&mut app, ".rs");
+        assert_eq!(app.search_target, SearchPane::CommitFiles);
+        assert_eq!(focused(&app).as_deref(), Some("src/b.rs"));
+        assert_eq!(app.search_match_position(), Some((Some(3), 3)));
+        app.dispatch(Action::SearchNext);
+        assert_eq!(focused(&app).as_deref(), Some("src/deep/c.rs"));
+        assert_eq!(app.status, SEARCH_WRAPPED_TO_TOP);
+        assert_eq!(app.search_match_position(), Some((Some(1), 3)));
+        app.dispatch(Action::SearchNext);
+        assert_eq!(focused(&app).as_deref(), Some("src/a.rs"));
+        assert_eq!(app.search_match_position(), Some((Some(2), 3)));
+        app.dispatch(Action::SearchPrev);
+        app.dispatch(Action::SearchPrev);
+        assert_eq!(focused(&app).as_deref(), Some("src/b.rs"));
+        assert_eq!(app.status, SEARCH_WRAPPED_TO_BOTTOM);
+        // A folder row anchors at its own place in that order.
+        let _ = summary_move_to(&mut app, "src");
+        app.dispatch(Action::SearchNext);
+        assert_eq!(focused(&app).as_deref(), Some("src/deep/c.rs"));
+        assert!(app.status.is_empty(), "{}", &*app.status);
+        let _ = summary_move_to(&mut app, "src");
+        app.dispatch(Action::SearchPrev);
+        assert_eq!(focused(&app).as_deref(), Some("src/b.rs"));
+        assert_eq!(app.status, SEARCH_WRAPPED_TO_BOTTOM);
+    }
+
+    #[test]
+    fn tree_search_steps_from_the_focused_row() {
+        let snapshot = build_workspace_snapshot(
+            &[repo("app", true), repo("lib", true), repo("web", true)],
+            &[],
+            false,
+            &[],
+        );
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let readme = |repo: &str| format!("file:{repo}:README.md");
+        let focused = |app: &AppState| app.focused_row().map(|row| row.id.clone());
+        let order: Vec<String> = crate::tui::tree::flatten(&app.tree, &HashSet::new())
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        let at = |id: &str| order.iter().position(|x| x == id).expect(id);
+        focus_repo(&mut app, "lib");
+        let lib_repo = focused(&app).expect("lib row");
+        assert!(at(&readme("app")) < at(&lib_repo) && at(&lib_repo) < at(&readme("lib")));
+        type_search(&mut app, "README");
+        assert_eq!(focused(&app), Some(readme("lib")), "next below, not first");
+        assert_eq!(app.search_match_position(), Some((Some(2), 3)));
+        app.dispatch(Action::SearchNext);
+        assert_eq!(focused(&app), Some(readme("web")));
+        app.dispatch(Action::SearchNext);
+        assert_eq!(focused(&app), Some(readme("app")));
+        assert_eq!(app.status, SEARCH_WRAPPED_TO_TOP);
+        app.dispatch(Action::SearchPrev);
+        assert_eq!(focused(&app), Some(readme("web")));
+        assert_eq!(app.status, SEARCH_WRAPPED_TO_BOTTOM);
+        focus_repo(&mut app, "lib");
+        app.dispatch(Action::SearchPrev);
+        assert_eq!(focused(&app), Some(readme("app")), "previous above");
+    }
+
+    #[test]
+    fn tree_typing_recomputes_folds_from_the_origin() {
+        let mut app = state();
+        app.folds.insert("repo:app".into());
+        app.rebuild_rows();
+        let origin = app.focused_row().map(|row| row.id.clone());
+        app.dispatch(Action::SearchStart);
+        for c in "README".chars() {
+            app.dispatch(Action::SearchChar(c));
+        }
+        assert!(app.rows.iter().any(|r| r.id == "file:app:README.md"));
+        app.dispatch(Action::SearchChar('Z'));
+        assert!(app.folds.contains("repo:app"), "no stray unfold");
+        assert!(app.rows.iter().all(|r| r.id != "file:app:README.md"));
+        assert_eq!(app.focused_row().map(|row| row.id.clone()), origin);
+        assert_eq!(app.status, SEARCH_NO_MATCH);
     }
 
     #[test]
@@ -14505,6 +14815,7 @@ mod tests {
     #[test]
     fn help_then_slash_starts_help_search_not_pane_search() {
         let mut app = state();
+        let cursor = app.cursor;
         app.dispatch(Action::ToggleHelp);
         assert!(app.help_open);
         assert_eq!(app.input_mode(), InputMode::Help);
@@ -14540,6 +14851,9 @@ mod tests {
         app.dispatch(Action::SearchCancel);
         assert!(app.help_open);
         assert!(app.help_search_query.is_none());
+        assert_eq!(app.cursor, cursor, "help search never moves a pane cursor");
+        assert!(!app.search_is_armed());
+        assert!(app.search_origin.is_none());
     }
 
     #[test]
