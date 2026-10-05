@@ -102,6 +102,18 @@ A focused file-diff row (section, hunk, or line) paints the same cursor bar as o
 
 `row_line_ref(content, mode, row)` gives the source line behind a painted row: section, kind (add / del / context), and old / new line numbers. It walks the same row list as `build_diff_rows`, so `row` is the diff cursor. A split row that pairs a deleted and an added line gives the added (new-side) line; a row with only a deleted line gives that line. Section labels, hunk headers, `\ No newline` and binary markers, and error rows give none. The file path comes from the caller.
 
+## Current-line blame
+
+With line blame on (`B`, `viewDefaults.lineBlame`), the focused line ends with a dimmed (`palette.muted`) note: `{author}, {age} · {sha7} · {subject}`. Rules:
+
+- Only the focused row of a focused diff pane, or the cursor line of a file tab. A row the cursor is not on, and a diff whose pane does not have focus, paint none.
+- It paints as `"  " + text` inside the row's trailing blank pad and keeps the pad's width, so row heights, the gutter, wrap, and the pan range do not change. With wrap on it goes on the last wrap row of the cell. No pad (the code fills the width or is panned across it) or fewer than 12 free columns paints none. A cut text ends in `…`; the subject is cut first.
+- Split mode paints it in the blamed side's cell: the new (right) cell for an added or context line, the old (left) cell for a deleted line.
+- An added line in UNSTAGED reads `You · uncommitted`, and in STAGED `You · staged`, with no git call. NEW (untracked), binary, meta, hunk, and error rows paint none. While git runs, and when git has no blame for the line, the row paints none.
+- No note paints while a mouse drag selection is active, because release copies the painted screen cells.
+
+`AppState::focused_line_annotation` (`tui/state/line_blame.rs`) picks the text; `render.rs` `put_line_annotation` paints it.
+
 ## Soft wrap
 
 `\` toggles soft word-wrap on any file-diff body that uses `draw_diff_pane` (workspace dirty files, compare tabs, commit / stash drills). Wrap is on by default. `viewDefaults.wrap` in `.workspace-status-config.json` (`wrap` or `unwrap`) sets the launch state, applied once at TUI start (see [configuration.md](./configuration.md)). The toggle changes the current session only: it lives on `AppState.diff_wrap` and nothing writes the config file. Status toasts `wrap on` / `wrap off`. The path header adds ` · wrap` while wrap is on.

@@ -39,6 +39,8 @@ pub struct ViewDefaults {
     pub wrap: Option<bool>,
     /// `commitMessage`: `Some(true)` for `"expand"`, `Some(false)` for `"collapse"`.
     pub commit_message_expand: Option<bool>,
+    /// `lineBlame`: `Some(true)` for `"show"`, `Some(false)` for `"hide"`.
+    pub line_blame: Option<bool>,
 }
 
 impl WorkspaceStatusConfig {
@@ -126,7 +128,14 @@ fn parse_view_defaults(value: Option<serde_json::Value>) -> Result<ViewDefaults,
     let Some(obj) = v.as_object() else {
         return Err(format!("{CONFIG_FILENAME} viewDefaults must be an object"));
     };
-    const KEYS: [&str; 5] = ["tree", "commitTree", "diff", "wrap", "commitMessage"];
+    const KEYS: [&str; 6] = [
+        "tree",
+        "commitTree",
+        "diff",
+        "wrap",
+        "commitMessage",
+        "lineBlame",
+    ];
     if let Some(key) = obj.keys().find(|k| !KEYS.contains(&k.as_str())) {
         return Err(format!(
             "{CONFIG_FILENAME} viewDefaults has unknown key \"{key}\""
@@ -138,6 +147,7 @@ fn parse_view_defaults(value: Option<serde_json::Value>) -> Result<ViewDefaults,
         diff_split: parse_view_choice(obj, "diff", "split", "inline")?,
         wrap: parse_view_choice(obj, "wrap", "wrap", "unwrap")?,
         commit_message_expand: parse_view_choice(obj, "commitMessage", "expand", "collapse")?,
+        line_blame: parse_view_choice(obj, "lineBlame", "show", "hide")?,
     })
 }
 
@@ -373,7 +383,7 @@ mod tests {
     #[test]
     fn view_defaults_first_values_are_true() {
         let got = load_view_defaults(
-            r#"{"ignoredRepos":[],"viewDefaults":{"tree":"tree","commitTree":"tree","diff":"split","wrap":"wrap","commitMessage":"expand"}}"#,
+            r#"{"ignoredRepos":[],"viewDefaults":{"tree":"tree","commitTree":"tree","diff":"split","wrap":"wrap","commitMessage":"expand","lineBlame":"show"}}"#,
         )
         .unwrap();
         assert_eq!(
@@ -384,6 +394,7 @@ mod tests {
                 diff_split: Some(true),
                 wrap: Some(true),
                 commit_message_expand: Some(true),
+                line_blame: Some(true),
             }
         );
     }
@@ -391,7 +402,7 @@ mod tests {
     #[test]
     fn view_defaults_second_values_are_false() {
         let got = load_view_defaults(
-            r#"{"ignoredRepos":[],"viewDefaults":{"tree":"flat","commitTree":"flat","diff":"inline","wrap":"unwrap","commitMessage":"collapse"}}"#,
+            r#"{"ignoredRepos":[],"viewDefaults":{"tree":"flat","commitTree":"flat","diff":"inline","wrap":"unwrap","commitMessage":"collapse","lineBlame":"hide"}}"#,
         )
         .unwrap();
         assert_eq!(
@@ -402,6 +413,7 @@ mod tests {
                 diff_split: Some(false),
                 wrap: Some(false),
                 commit_message_expand: Some(false),
+                line_blame: Some(false),
             }
         );
     }
@@ -439,6 +451,8 @@ mod tests {
             ("wrap", "false", r#""wrap" or "unwrap""#),
             ("commitMessage", r#""open""#, r#""expand" or "collapse""#),
             ("commitMessage", "null", r#""expand" or "collapse""#),
+            ("lineBlame", r#""on""#, r#""show" or "hide""#),
+            ("lineBlame", "true", r#""show" or "hide""#),
         ];
         for (key, raw, choices) in cases {
             let err = load_view_defaults(&format!(

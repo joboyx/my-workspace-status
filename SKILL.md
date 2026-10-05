@@ -75,7 +75,7 @@ The CLI produces:
 
 The TUI requires a **Nerd Font** — recommended `MesloLGM Nerd Font Mono` (the **Mono** variant; the proportional build breaks column alignment). In VS Code / Cursor set `terminal.integrated.fontFamily` in **User Settings**, since the terminal font is resolved on the client rather than in WSL. `WS_STATUS_GLYPHS=ascii` swaps in plain markers.
 
-Defaults: directory tree (`t` toggles flat), split diff (`i` toggles inline), wrap on (`\` toggles wrap), commit messages expanded (`M` collapses), ignored repos hidden (`.` toggles; `-a` starts shown), and live refresh polling every 3s (`WS_STATUS_WATCH_MS=0` disables). `viewDefaults` in `.workspace-status-config.json` sets the launch tree, diff, wrap, and commit-message modes; toggles change the session only. Tree status letters are `A` added, `M` modified, `S` staged, `MS` staged+modified, `D` deleted, `R` renamed, `C` copied, `U` conflicted. The emoji legend above applies to the plain report only.
+Defaults: directory tree (`t` toggles flat), split diff (`i` toggles inline), wrap on (`\` toggles wrap), commit messages expanded (`M` collapses), line blame on (`B` hides the note at the end of the focused line), ignored repos hidden (`.` toggles; `-a` starts shown), and live refresh polling every 3s (`WS_STATUS_WATCH_MS=0` disables). `viewDefaults` in `.workspace-status-config.json` sets the launch tree, diff, wrap, commit-message, and line-blame modes; toggles change the session only. Tree status letters are `A` added, `M` modified, `S` staged, `MS` staged+modified, `D` deleted, `R` renamed, `C` copied, `U` conflicted. The emoji legend above applies to the plain report only.
 
 Live TUI keymap (full overlay detail in [docs/configuration.md](./docs/configuration.md)):
 

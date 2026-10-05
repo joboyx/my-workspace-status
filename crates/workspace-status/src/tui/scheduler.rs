@@ -57,6 +57,8 @@ pub enum UserTag {
     Autoload,
     /// Quick Open file index load or fuzzy score (latest-only slots).
     QuickOpen,
+    /// Focused-line `git blame -L n,n` (latest-only slot).
+    LineBlame,
 }
 
 /// A job the loop should `spawn_blocking`.

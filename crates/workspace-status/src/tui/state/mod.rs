@@ -6,6 +6,7 @@ mod dispatch_keymap;
 mod dispatch_quick_open;
 mod dispatch_write;
 mod file_tab;
+mod line_blame;
 mod pan;
 
 use std::cell::RefCell;
@@ -68,6 +69,7 @@ use super::gates::{
 use super::graph_focus::GraphFocusPickerState;
 use super::icons::comment_mark_cols;
 use super::keys::{expire_stale_g_chord_echo, GChordEchoState, InputMode, DOUBLE_TAP_MS};
+use super::line_blame::LineBlameState;
 use super::ops::{
     collect_write_files, format_running_op, op_is_kind_noop, op_kind_noop_reason, op_targets,
     push_targets, refresh_target, Op, RevertScope, RunningOp, ScopedFile,
@@ -645,6 +647,11 @@ pub struct AppState {
     /// File tab search hits for one (tab id, load generation, case-folded
     /// query), so the status pill and the paint do not rescan the file.
     file_search_memo: RefCell<Option<FileSearchMemo>>,
+    /// Current-line blame toggle and answer cache.
+    pub line_blame: LineBlameState,
+    /// Focused diff row's source line, so the blame hook does not rebuild
+    /// the diff rows after every schedule and apply.
+    line_blame_row_memo: RefCell<line_blame::RowLineMemo>,
     /// [`Self::current_diff_rows`] calls, so tests can bound the row
     /// builds a frame or keypress costs on a large diff.
     #[cfg(test)]
@@ -773,6 +780,8 @@ impl AppState {
             last_click: None,
             diff_search_memo: RefCell::new(None),
             file_search_memo: RefCell::new(None),
+            line_blame: LineBlameState::default(),
+            line_blame_row_memo: RefCell::new(None),
             #[cfg(test)]
             diff_row_builds: std::cell::Cell::new(0),
         };
@@ -816,6 +825,9 @@ impl AppState {
         }
         if let Some(expand) = defaults.commit_message_expand {
             self.commit_msg_expand = expand;
+        }
+        if let Some(on) = defaults.line_blame {
+            self.line_blame.set_enabled(on);
         }
     }
 
@@ -13886,6 +13898,7 @@ mod tests {
             diff_split: Some(false),
             wrap: Some(false),
             commit_message_expand: Some(false),
+            line_blame: None,
         });
         assert!(!app.tree_mode);
         assert!(app.rows.iter().all(|row| row.kind != NodeKind::Dir));

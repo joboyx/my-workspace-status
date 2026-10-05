@@ -427,6 +427,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
+        title: "Line blame on / off",
+        keys: "B",
+        group: CommandGroup::View,
+        action: Action::ToggleLineBlame,
+        aliases: &["blame", "gitlens"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
         title: "Toggle mouse",
         keys: "m",
         group: CommandGroup::View,
@@ -973,6 +981,13 @@ mod tests {
                 CommandScope::NoHighlight,
             ),
             (
+                "Line blame on / off",
+                "B",
+                CommandGroup::View,
+                Action::ToggleLineBlame,
+                CommandScope::NoHighlight,
+            ),
+            (
                 "Toggle mouse",
                 "m",
                 CommandGroup::View,
@@ -1133,6 +1148,12 @@ mod tests {
         let catalog: Vec<_> = PALETTE_COMMANDS.iter().map(|c| c.title).collect();
         let close = catalog.iter().position(|t| *t == "Close tab").unwrap();
         assert_eq!(catalog[close - 4..close], diff_rows[..]);
+    }
+
+    #[test]
+    fn blame_filter_finds_the_line_blame_toggle() {
+        assert!(titles("blame").contains(&"Line blame on / off"));
+        assert!(titles("gitlens").contains(&"Line blame on / off"));
     }
 
     #[test]

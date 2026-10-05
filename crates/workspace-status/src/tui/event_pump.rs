@@ -387,12 +387,23 @@ mod tests {
             "prepare_worktree_diff(",
             "prepare_rev_diff(",
             "prepare_rev_diff_paths(",
+            "blame_line(",
         ] {
             assert!(
                 !app.contains(banned) && !loop_src.contains(banned),
                 "{banned} must not run on the TTY loop thread"
             );
         }
+        let render = include_str!("render.rs");
+        let blame_state = include_str!("state/line_blame.rs");
+        assert!(
+            !render.contains("blame_line(") && !blame_state.contains("blame_line("),
+            "line blame paint and state must read the cache, never run git"
+        );
+        assert!(
+            effect.contains("blame_line(") && effect.contains("UserTag::LineBlame"),
+            "focused-line blame must run on spawn_blocking via Interpreter"
+        );
         assert!(
             effect.contains("prepare_worktree_diff(")
                 && effect.contains("prepare_rev_diff_paths(")

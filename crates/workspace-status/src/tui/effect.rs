@@ -24,11 +24,12 @@ use crate::file_index::{
     MAX_FILE_BYTES, MAX_INDEX_ENTRIES, MAX_RESULTS,
 };
 use crate::git::{
-    apply_cached_patch, apply_worktree_patch_reverse, create_branch_at, create_branch_checkout,
-    exec_git_checked, latest_stash_ref, list_compare_picker_branches, list_compare_picker_commits,
-    list_local_branches, pull_quiet_detailed, push_quiet, remove_untracked_file, remove_worktree,
-    revert_compare_file, revert_compare_patch, revert_tracked_file, stage_file, stash_apply,
-    stash_drop, stash_pop, stash_push, unstage_file, COMPARE_REVERT_ABORTED,
+    apply_cached_patch, apply_worktree_patch_reverse, blame_line, create_branch_at,
+    create_branch_checkout, exec_git_checked, latest_stash_ref, list_compare_picker_branches,
+    list_compare_picker_commits, list_local_branches, pull_quiet_detailed, push_quiet,
+    remove_untracked_file, remove_worktree, revert_compare_file, revert_compare_patch,
+    revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop, stash_push, unstage_file,
+    COMPARE_REVERT_ABORTED,
 };
 use crate::parallel::env_fetch_concurrency;
 use crate::snapshot::RepoSnapshot;
@@ -53,6 +54,7 @@ use super::graph_load::{
     autoload_limit, autoload_skip, load_graph_model_window, merge_autoload, should_autoload,
     GraphIdentity, ShouldAutoload,
 };
+use super::line_blame::BlameKey;
 use super::ops::{
     format_completed_op, format_mixed_running_op, format_running_op, op_targets, Op, OpTally,
     RepoOpResult, RunningOp,
@@ -190,6 +192,11 @@ pub(crate) enum JobOutcome {
         tab_id: u64,
         gen: u64,
         body: FileRead,
+    },
+    /// `git blame -L n,n` answer for one focused line.
+    LineBlame {
+        key: BlameKey,
+        result: Result<Option<crate::git::LineBlame>, String>,
     },
 }
 
@@ -506,6 +513,11 @@ pub(crate) struct Interpreter {
     file_score_job: Option<(u64, Arc<FileIndex>, String)>,
     /// Queued file tab reads: tab id, load generation, checkout, path.
     file_tab_jobs: VecDeque<(u64, u64, String, String)>,
+    /// Latest focused-line blame question; a newer one replaces it
+    /// before spawn, so cursor moves never queue a blame per line.
+    line_blame_slot: Option<BlameKey>,
+    /// A [`UserTag::LineBlame`] job is queued or running.
+    line_blame_inflight: bool,
     exclusive_inflight: HashMap<u64, Vec<String>>,
     /// Name of the exclusive write or default-branch job on a worker.
     running_write: Option<&'static str>,
@@ -544,6 +556,8 @@ impl Interpreter {
             file_index_job: None,
             file_score_job: None,
             file_tab_jobs: VecDeque::new(),
+            line_blame_slot: None,
+            line_blame_inflight: false,
             exclusive_inflight: HashMap::new(),
             running_write: None,
             dirty: false,
@@ -661,8 +675,20 @@ impl Interpreter {
         self.pump_sync(state, opts);
     }
 
-    /// Enqueue work for `effect`. Does not spawn.
+    /// Enqueue work for `effect`, then the focused line's blame if it
+    /// needs one. Does not spawn.
     pub(crate) fn schedule(
+        &mut self,
+        state: &mut AppState,
+        opts: &TuiOpts,
+        effect: Effect,
+        action: &Action,
+    ) {
+        self.schedule_effect(state, opts, effect, action);
+        self.maybe_queue_line_blame(state);
+    }
+
+    fn schedule_effect(
         &mut self,
         state: &mut AppState,
         opts: &TuiOpts,
@@ -681,7 +707,7 @@ impl Interpreter {
             }
             Effect::Batch(effects) => {
                 for child in effects {
-                    self.schedule(state, opts, child, action);
+                    self.schedule_effect(state, opts, child, action);
                 }
             }
             Effect::WatchRefresh => {
@@ -1120,6 +1146,26 @@ impl Interpreter {
         }
     }
 
+    /// Queue a blame for the focused line when the cache has no answer.
+    ///
+    /// Latest-only: the slot holds the newest question, and at most one
+    /// job is queued or running. Its apply calls this again, so a cursor
+    /// that moved on while git ran gets its own answer next.
+    fn maybe_queue_line_blame(&mut self, state: &AppState) {
+        let Some(key) = state.line_blame_want() else {
+            self.line_blame_slot = None;
+            return;
+        };
+        if state.line_blame.cached(&key).is_some() {
+            return;
+        }
+        self.line_blame_slot = Some(key);
+        if !self.line_blame_inflight {
+            self.line_blame_inflight = true;
+            self.sched.enqueue_user(UserTag::LineBlame);
+        }
+    }
+
     /// Queue graph autoload when the cursor sits on the last loaded row.
     pub(crate) fn maybe_queue_autoload(&mut self, state: &mut AppState) {
         if !state.tabs.is_workspace() {
@@ -1268,8 +1314,20 @@ impl Interpreter {
         }
     }
 
-    /// Apply one worker result. May enqueue follow-up jobs.
+    /// Apply one worker result. May enqueue follow-up jobs, then the
+    /// focused line's blame if it needs one.
     pub(crate) fn apply(
+        &mut self,
+        state: &mut AppState,
+        opts: &TuiOpts,
+        id: u64,
+        outcome: JobOutcome,
+    ) {
+        self.apply_outcome(state, opts, id, outcome);
+        self.maybe_queue_line_blame(state);
+    }
+
+    fn apply_outcome(
         &mut self,
         state: &mut AppState,
         opts: &TuiOpts,
@@ -1612,6 +1670,12 @@ impl Interpreter {
             }
             JobOutcome::FileTab { tab_id, gen, body } => {
                 if state.apply_file_tab(tab_id, gen, body) {
+                    self.mark();
+                }
+            }
+            JobOutcome::LineBlame { key, result } => {
+                self.line_blame_inflight = false;
+                if state.apply_line_blame(key, result) {
                     self.mark();
                 }
             }
@@ -2436,6 +2500,22 @@ impl Interpreter {
                 }
                 self.sched.note_job_finished(id);
             }
+            UserTag::LineBlame => {
+                let Some(key) = self.line_blame_slot.take() else {
+                    // The focused line moved off every blame target.
+                    self.line_blame_inflight = false;
+                    self.sched.note_job_finished(id);
+                    return;
+                };
+                let dir = opts.cwd.join(&key.repo);
+                spawn(
+                    id,
+                    Box::new(move || {
+                        let result = blame_line(&dir, &key.rev, &key.path, key.line);
+                        JobOutcome::LineBlame { key, result }
+                    }),
+                );
+            }
             UserTag::Autoload => {
                 let Some((gen, identity)) = self.autoload.take() else {
                     // A graph pane load cancelled it and already reset the
@@ -2509,6 +2589,7 @@ mod tests {
     use crate::tui::diff::DiffContent;
     use crate::tui::drill::{CommitFile, CommitFileSource, DrillView};
     use crate::tui::graph_load::GraphIdentity;
+    use crate::tui::line_blame::BlameSide;
     use crate::tui::state::{AppState, FocusPane};
 
     use super::*;
@@ -5537,6 +5618,106 @@ mod tests {
         run_jobs(&mut interp, &mut state);
         assert_eq!(state.status, "Switched 1 repo (1 skipped: dirty)");
         assert_eq!(state.status.kind(), StatusKind::Warn);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Real repo `app` whose README.md has committed lines `a b c` and a
+    /// worktree edit of line 2, with that diff focused (inline).
+    fn blame_fixture(tag: &str) -> (PathBuf, AppState) {
+        let root = crate::testutil::unique_dir(tag);
+        let dir = root.join("app");
+        crate::testutil::init_repo(&dir);
+        std::fs::write(dir.join("README.md"), "a\nb\nc\n").unwrap();
+        crate::testutil::git(&dir, &["commit", "-q", "-am", "three lines"]);
+        std::fs::write(dir.join("README.md"), "a\nB\nc\n").unwrap();
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(root.clone(), snapshot, true);
+        state.diff_mode = crate::tui::split::DiffMode::Inline;
+        state.cursor = state
+            .rows
+            .iter()
+            .position(|row| row.label.contains("README.md"))
+            .expect("README row");
+        // Inline rows: 2 ` a` (1), 3 `-b`, 4 `+B`, 5 ` c` (3).
+        state.set_diff(
+            "app".into(),
+            "README.md".into(),
+            DiffContent::from_unified("@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"),
+        );
+        state.focus = FocusPane::Right;
+        (root, state)
+    }
+
+    fn move_diff_cursor(interp: &mut Interpreter, state: &mut AppState, row: usize) {
+        state.diff_cursor = row;
+        schedule_effect(interp, state, Effect::None, &Action::Move(1));
+    }
+
+    #[test]
+    fn line_blame_runs_one_job_at_a_time_for_the_latest_line() {
+        let (root, mut state) = blame_fixture("ws-effect-line-blame");
+        let mut interp = Interpreter::with_cap(4);
+        move_diff_cursor(&mut interp, &mut state, 2);
+        let first = state.line_blame_want().expect("context line asks");
+        let mut jobs = capture_jobs(&mut interp, &mut state);
+        assert_eq!(jobs.len(), 1, "one blame job");
+
+        // Two more moves while git runs: no new job, the slot keeps the latest.
+        move_diff_cursor(&mut interp, &mut state, 3);
+        move_diff_cursor(&mut interp, &mut state, 5);
+        let latest = state.line_blame_want().expect("context line asks");
+        assert!(capture_jobs(&mut interp, &mut state).is_empty());
+
+        // The stale answer fills the cache, then the latest line runs.
+        let (id, work) = jobs.remove(0);
+        let _ = interp.take_dirty();
+        apply_id(&mut interp, &mut state, id, work());
+        assert!(!interp.take_dirty(), "stale answer needs no paint");
+        let cached = state.line_blame.cached(&first).flatten().expect("cached");
+        assert_eq!(cached.summary, "three lines");
+        let next = capture_jobs(&mut interp, &mut state);
+        assert_eq!(next.len(), 1, "the latest line runs after the first apply");
+        for (id, work) in next {
+            apply_id(&mut interp, &mut state, id, work());
+        }
+        assert!(interp.take_dirty(), "the focused line's answer paints");
+        assert!(state.line_blame.cached(&latest).is_some());
+        let (text, side) = state.painted_line_annotation().expect("annotation");
+        assert_eq!(side, BlameSide::New);
+        assert!(text.ends_with(" · three lines"), "{text}");
+
+        // Back on a cached line: no git.
+        move_diff_cursor(&mut interp, &mut state, 2);
+        assert!(capture_jobs(&mut interp, &mut state).is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn line_blame_off_or_unfocused_spawns_nothing() {
+        let (root, mut state) = blame_fixture("ws-effect-line-blame-off");
+        let mut interp = Interpreter::with_cap(4);
+        let effect = state.dispatch(Action::ToggleLineBlame);
+        assert_eq!(state.status, "line blame off");
+        schedule_effect(&mut interp, &mut state, effect, &Action::ToggleLineBlame);
+        move_diff_cursor(&mut interp, &mut state, 2);
+        assert!(capture_jobs(&mut interp, &mut state).is_empty(), "off");
+
+        let effect = state.dispatch(Action::ToggleLineBlame);
+        state.focus = FocusPane::Left;
+        schedule_effect(&mut interp, &mut state, effect, &Action::ToggleLineBlame);
+        assert!(
+            capture_jobs(&mut interp, &mut state).is_empty(),
+            "tree focus never blames"
+        );
+
+        // An added line shows its text with no git call.
+        state.focus = FocusPane::Right;
+        move_diff_cursor(&mut interp, &mut state, 4);
+        assert!(capture_jobs(&mut interp, &mut state).is_empty());
+        assert_eq!(
+            state.painted_line_annotation(),
+            Some(("You · uncommitted".into(), BlameSide::New))
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

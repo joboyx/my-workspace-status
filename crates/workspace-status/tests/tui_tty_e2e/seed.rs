@@ -25,11 +25,24 @@ use super::common::seed::{
 /// workspace config. Wrap is on by default; pan and h-scroll tests need a
 /// clipped long line.
 pub fn unwrap_diffs_at_launch(workspace: &Path) {
+    set_view_default(workspace, "wrap", "unwrap");
+}
+
+/// Set one `viewDefaults` key in the workspace config, keeping the others.
+/// Writes a minimal config when the workspace has none.
+pub fn set_view_default(workspace: &Path, key: &str, value: &str) {
     let path = workspace.join(".workspace-status-config.json");
-    let text = fs::read_to_string(&path).expect("read workspace config");
+    let text = if path.exists() {
+        fs::read_to_string(&path).expect("read workspace config")
+    } else {
+        r#"{"ignoredRepos":[]}"#.to_string()
+    };
     let mut config: serde_json::Value =
         serde_json::from_str(&text).expect("parse workspace config");
-    config["viewDefaults"] = serde_json::json!({ "wrap": "unwrap" });
+    if !config["viewDefaults"].is_object() {
+        config["viewDefaults"] = serde_json::json!({});
+    }
+    config["viewDefaults"][key] = serde_json::Value::String(value.into());
     fs::write(
         &path,
         serde_json::to_string_pretty(&config).expect("encode workspace config"),

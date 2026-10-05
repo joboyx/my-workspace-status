@@ -149,8 +149,8 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
         title: "VIEW",
         entries: &[
             HelpEntry {
-                keys: "i \\ M",
-                desc: "inline / split · wrap · msg",
+                keys: "i \\ M B",
+                desc: "inline / split · wrap · msg · blame",
             },
             HelpEntry {
                 keys: "< >",
@@ -322,8 +322,8 @@ pub const HELP_FILE_GROUP: HelpGroup = HelpGroup {
             desc: "search",
         },
         HelpEntry {
-            keys: "\\",
-            desc: "wrap",
+            keys: "\\ B",
+            desc: "wrap · line blame",
         },
         HelpEntry {
             keys: "'",
@@ -857,7 +857,7 @@ mod tests {
         assert!(view_keys.contains(&"Ctrl-u Ctrl-d"));
         assert!(view_keys.contains(&"."));
         assert!(view_keys.contains(&"T"));
-        assert!(view_keys.contains(&"i \\ M"));
+        assert!(view_keys.contains(&"i \\ M B"));
         assert!(!view_keys.contains(&"i \\"));
         assert!(!view_keys.contains(&"i"));
         assert!(view_keys.contains(&"Ctrl-o"));
@@ -1136,7 +1136,7 @@ mod tests {
             rows,
             [
                 "/ n N search",
-                "\\ wrap",
+                "\\ B wrap · line blame",
                 "' copy reference",
                 "e editor at line",
                 "r reload",

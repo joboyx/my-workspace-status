@@ -152,6 +152,7 @@ impl AppState {
             Action::ToggleDiffMode => self.toggle_diff_mode(),
             Action::ToggleDiffWrap => self.toggle_diff_wrap(),
             Action::ToggleCommitMsgExpand => self.toggle_commit_msg_expand(),
+            Action::ToggleLineBlame => self.toggle_line_blame(),
             Action::ToggleMouse => {
                 self.cancel_mouse_drag();
                 self.mouse_enabled = !self.mouse_enabled;

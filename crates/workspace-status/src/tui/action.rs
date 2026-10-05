@@ -96,6 +96,11 @@ pub enum Action {
     /// The graph selection footer and the commit-files footer wrap the
     /// full subject plus body when this is on.
     ToggleCommitMsgExpand,
+    /// Toggle the current-line blame annotation (`B`).
+    ///
+    /// Session-only, like wrap. `viewDefaults.lineBlame` sets the launch
+    /// value. Runs on file tabs too.
+    ToggleLineBlame,
     /// Mouse wheel. Positive `delta` is down / right.
     ///
     /// Vertical (`horizontal: false`) moves the list cursor under the

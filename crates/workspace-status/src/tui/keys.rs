@@ -932,6 +932,7 @@ fn normal_key(
         KeyCode::Char('>') => Action::ResizeTree(1),
         KeyCode::Char('\\') => Action::ToggleDiffWrap,
         KeyCode::Char('M') => Action::ToggleCommitMsgExpand,
+        KeyCode::Char('B') => Action::ToggleLineBlame,
         KeyCode::Char('m') => Action::ToggleMouse,
         KeyCode::Char(';') => Action::CommentStart,
         KeyCode::Char('V') => Action::DiffVisualStart,
@@ -1752,6 +1753,17 @@ mod tests {
             event_to_action(&key(KeyCode::Char('M')), normal(), true, true),
             Action::ToggleCommitMsgExpand
         );
+        for (right_is_diff, focus_right) in [(false, false), (true, true)] {
+            assert_eq!(
+                event_to_action(
+                    &key(KeyCode::Char('B')),
+                    normal(),
+                    right_is_diff,
+                    focus_right
+                ),
+                Action::ToggleLineBlame
+            );
+        }
         assert_eq!(
             event_to_action(
                 &mouse(MouseEventKind::Drag(MouseButton::Left), 40, 4),
@@ -3172,6 +3184,7 @@ mod tests {
             (n, 0, Char('>'), Action::ResizeTree(1)),
             (n, 0, Char('\\'), Action::ToggleDiffWrap),
             (n, 0, Char('M'), Action::ToggleCommitMsgExpand),
+            (n, 0, Char('B'), Action::ToggleLineBlame),
             (n, 0, Char('m'), Action::ToggleMouse),
             (n, 0, Char(';'), Action::CommentStart),
             (n, 0, Char('V'), Action::DiffVisualStart),

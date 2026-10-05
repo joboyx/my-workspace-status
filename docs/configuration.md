@@ -116,7 +116,8 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
   "commitTree": "tree",
   "diff": "inline",
   "wrap": "unwrap",
-  "commitMessage": "collapse"
+  "commitMessage": "collapse",
+  "lineBlame": "hide"
 }
 ```
 
@@ -127,6 +128,7 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
 | `diff`          | `split` \| `inline`    | `split`        | `i`                      |
 | `wrap`          | `wrap` \| `unwrap`     | `wrap`         | `\`                      |
 | `commitMessage` | `expand` \| `collapse` | `expand`       | `M`                      |
+| `lineBlame`     | `show` \| `hide`       | `show`         | `B`                      |
 
 - Values are trimmed, then matched case-sensitively.
 - A value of the wrong type, an unknown value, or a blank value is an error: `.workspace-status-config.json viewDefaults.<key> must be "<a>" or "<b>"`. A `viewDefaults` that is not an object is an error. An unknown key inside it is an error that names the key. A typo never falls back silently.
@@ -212,6 +214,7 @@ On many macOS setups there is no dedicated PageUp key. `Fn+Up` and `Fn+Down` oft
 | Diff layout      | Split. `viewDefaults.diff` overrides at launch                                                                                                    | `i`                                                  |
 | Diff wrap        | On. `viewDefaults.wrap` overrides at launch                                                                                                       | `\`                                                  |
 | Commit message   | Expanded. `viewDefaults.commitMessage` overrides at launch                                                                                        | `M`                                                  |
+| Line blame       | On. `viewDefaults.lineBlame` overrides at launch                                                                                                  | `B`                                                  |
 | Theme            | Tokyo Night                                                                                                                                       | `T` cycles / `WS_STATUS_THEME`                       |
 | Live refresh     | On, 3 s                                                                                                                                           | `WS_STATUS_WATCH_MS=0`                               |
 | Background fetch | On, 5 min                                                                                                                                         | `WS_STATUS_FETCH_MS=0`                               |
@@ -271,6 +274,7 @@ See [tui-rust.md](./tui-rust.md) for the same keys with layout notes. In Normal,
 | `i`                                        | inline ↔ split. `viewDefaults.diff` sets the launch state; the toggle changes this session only. Split needs a painted diff width of 100 columns (the right pane less its scrollbar column); narrower, the diff paints inline and `i` says `split needs a ≥100-col diff pane (now N) — widen it with < or drag`                                                                                                                                                                                                                                                                                                                                                                                           |
 | `<` / `>`                                  | narrow / widen the tree pane by 5% of the terminal width (same clamp as a divider drag; session-only). Palette: Narrow tree / Widen tree                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `\`                                        | wrap ↔ unwrap file-diff lines (display columns). Wrap is on by default; `viewDefaults.wrap` sets the launch state. The toggle changes this session only. Continuation rows keep a blank gutter and sign. Horizontal pan is a no-op while wrap is on |
+| `B`                                        | line blame on ↔ off: a dimmed `{author}, {age} · {sha7} · {subject}` note at the end of the focused diff or file-tab line. On by default; `viewDefaults.lineBlame` sets the launch state. The toggle changes this session only (`line blame on` / `line blame off`) and runs on file tabs too |
 | `M`                                        | collapse ↔ expand the selected commit / stash message. Expanded by default; `viewDefaults.commitMessage` sets the launch state. The toggle changes this session only. Graph list rows stay one line. Expanded, the graph selection footer and the commit-files footer (bottom of the depth-2 left pane, under the file list) wrap subject plus body (`msg on` / `msg off`). Wheel over an overflowing graph footer scrolls the message. Graph `m` stays merge / mouse |
 | `r`                                        | refresh the focused repo; the whole workspace when on the workspace row or the "No updates" group                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `f`                                        | `git fetch --quiet` for the focused checkout, or primary checkouts on the workspace / family row. Linked worktrees are included only when that worktree row is focused. Hidden ignored repos are skipped. Shown ignored repos follow the same primary / focused-worktree rule. The background fetch timer is separate: every snapshot except hidden ignored, including linked worktrees and shown ignored.                                                                                                                                                                                                              |

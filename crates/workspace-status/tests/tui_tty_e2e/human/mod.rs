@@ -91,6 +91,7 @@ mod pty_key_repeat_q_z_g_ignored;
 mod pty_launch_paints_tree_diff_and_chrome;
 mod pty_left_pane_move_after_drill_updates_right;
 mod pty_left_pane_sgr_hscroll_pans_long_diff;
+mod pty_line_blame_shows_commit_on_focused_row;
 mod pty_m_toggles_mouse_capture;
 mod pty_m_toggles_terminal_mouse_tracking;
 mod pty_merge_mark_default_tip_is_open;
