@@ -462,9 +462,17 @@ impl CompareTab {
         }
     }
 
-    /// Strip label.
+    /// Strip label: [`compare_tab_label`], or `<file-leaf> ↔ <short base>`
+    /// on a commit-vs-working-tree tab (one file, so the file names it).
     pub fn label(&self) -> String {
-        compare_tab_label(&self.checkout_path, &self.base_ref)
+        match &self.worktree_file {
+            Some(file) => format!(
+                "{}{COMPARE_TAB_SEP}{}",
+                checkout_leaf(&file.path),
+                short_rev(&self.base_ref)
+            ),
+            None => compare_tab_label(&self.checkout_path, &self.base_ref),
+        }
     }
 
     /// Bump the load generation and mark the tab loading.
@@ -1307,7 +1315,9 @@ mod tests {
         let worktree = tabs.get_id(2).unwrap();
         assert_eq!(live.range_header(), "abc1234...HEAD");
         assert_eq!(worktree.range_header(), "abc1234 ↔ working tree");
-        assert_eq!(worktree.label(), "app ↔ abc1234");
+        assert_eq!(worktree.label(), "a.rs ↔ abc1234");
+        assert_eq!(tabs.get_id(3).unwrap().label(), "b.rs ↔ abc1234");
+        assert_eq!(live.label(), "app ↔ abc1234");
         assert!(!worktree.is_pinned());
         assert_eq!(live.empty_files_copy(), NO_COMMITTED_CHANGES);
         assert_eq!(worktree.empty_files_copy(), NO_CHANGES);

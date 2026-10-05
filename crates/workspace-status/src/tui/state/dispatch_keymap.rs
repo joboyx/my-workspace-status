@@ -15,7 +15,9 @@ use super::super::graph_focus::GRAPH_FOCUS_NEED_CONTEXT;
 use super::super::ops::{collect_write_files, op_is_kind_noop, op_kind_noop_reason, Op};
 use super::super::split::SplitDrag;
 use super::super::status::StatusMessage;
-use super::super::tabs::{ComparePickerKind, ONLY_WORKSPACE_TAB_OPEN, WORKSPACE_TAB_CANNOT_CLOSE};
+use super::super::tabs::{
+    ComparePickerKind, NOT_ON_WORKTREE_COMPARE, ONLY_WORKSPACE_TAB_OPEN, WORKSPACE_TAB_CANNOT_CLOSE,
+};
 use super::super::tree::NodeKind;
 use super::{AppState, FileWrite, FocusPane, FoldOp};
 
@@ -284,7 +286,10 @@ impl AppState {
             }
             Action::ExternalDiff => {
                 if let Some((repo, path)) = self.focused_commit_edit_path() {
-                    let kind = self.external_diff_kind();
+                    let Some(kind) = self.external_diff_kind() else {
+                        self.status = StatusMessage::warn(NOT_ON_WORKTREE_COMPARE);
+                        return Effect::None;
+                    };
                     self.status = StatusMessage::progress(format!("opening diff {path}…"));
                     Effect::ExternalDiff { repo, path, kind }
                 } else if self.is_compare_tab() {

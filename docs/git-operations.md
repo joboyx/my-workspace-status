@@ -107,7 +107,7 @@ git diff <base-sha>...<head-sha> -- <path>
 
 `E` on a compare file uses LEFT `<merge-base>:<old-path-or-path>` and RIGHT `<head>:<path>`. Compare never changes HEAD or the index. The only compare write is `x` (below), which changes the worktree. The picker never checkouts, creates, or fetches. A watch probe reloads only after both SHAs are recorded and the head or the base-tip SHA then changes. The probe resolves `<head-ref>`, so a pinned tab never reloads when HEAD moves.
 
-A commit-vs-working-tree tab (`Blame: diff commit to working tree`) resolves its base with `rev-parse`, lists its one path with `list_worktree_vs_commit_name_status`, and diffs it with `diff_worktree_vs_commit_file_ctx`: git's own `diff -M <base> -- [<old>] <path>` form, so the working tree is never named as a revision. It never writes (`x` refuses) and is never probed. A checkout status load whose HEAD or snapshot entry for the path changed reloads its diff.
+A commit-vs-working-tree tab (`Blame: diff commit to working tree`) resolves its base with `rev-parse`, lists its one path with `list_worktree_vs_commit_name_status`, and diffs it with `diff_worktree_vs_commit_file_ctx`: git's own `diff -M <base> -- [<old>] <path>` form, so the working tree is never named as a revision. It never writes (`x` refuses) and is never probed. Only the active working-tree tab reloads: a checkout status load whose HEAD or snapshot entry for the path changed reloads its file list and diff. An inactive tab catches up when it becomes active again.
 
 ## TUI writes (`tui/ops.rs`, `tui/fetch.rs`, `tui/effect.rs`)
 

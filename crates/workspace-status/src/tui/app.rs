@@ -672,9 +672,9 @@ pub(crate) struct CompareRangeLoad {
     pub source: CommitFileSource,
     /// Committed `base...HEAD` paths.
     pub files: Vec<super::drill::CommitFile>,
-    /// HEAD SHA at load time. Empty for a commit-vs-working-tree load,
+    /// HEAD SHA at load time. `None` for a commit-vs-working-tree load,
     /// which is never probed.
-    pub head: String,
+    pub head: Option<String>,
     /// Base tip SHA at load time.
     pub base_tip: String,
 }
@@ -701,7 +701,7 @@ pub(crate) fn compute_worktree_compare_range(
             old_path: file.old_path.clone(),
         },
         files,
-        head: String::new(),
+        head: None,
         base_tip: base,
     })
 }
@@ -738,7 +738,7 @@ pub(crate) fn compute_compare_range(
             head: head.clone(),
         },
         files,
-        head,
+        head: Some(head),
         base_tip,
     })
 }
@@ -1909,7 +1909,7 @@ mod tests {
 
         let load = compute_compare_range(&dir, &format!("{first}^"), &first).unwrap();
         assert_eq!(compare_paths(&load), vec![("A".into(), "a.txt".into())]);
-        assert_eq!(load.head, first);
+        assert_eq!(load.head.as_deref(), Some(first.as_str()));
         match &load.source {
             CommitFileSource::Compare {
                 base_ref,

@@ -2954,7 +2954,7 @@ mod tests {
         CompareRangeLoad {
             source: compare_source(),
             files: files.iter().map(|path| commit_file(path)).collect(),
-            head: "ccc".into(),
+            head: Some("ccc".into()),
             base_tip: "bbb".into(),
         }
     }

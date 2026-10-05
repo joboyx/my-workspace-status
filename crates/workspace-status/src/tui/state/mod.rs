@@ -1382,29 +1382,29 @@ impl AppState {
         }
     }
 
-    fn external_diff_kind(&self) -> ExternalDiffKind {
+    /// LEFT / RIGHT pair for `E`, or `None` for a commit-vs-working-tree
+    /// diff: neither kind is a commit against the working tree.
+    fn external_diff_kind(&self) -> Option<ExternalDiffKind> {
         if let Some(tab) = self.tabs.active_compare() {
             return match &tab.source {
                 Some(CommitFileSource::Compare {
                     merge_base, head, ..
-                }) => ExternalDiffKind::Rev {
+                }) => Some(ExternalDiffKind::Rev {
                     left_rev: merge_base.clone(),
                     right_rev: head.clone(),
                     left_path: self.focused_compare_old_path(),
-                },
-                _ => ExternalDiffKind::Worktree,
+                }),
+                Some(CommitFileSource::CommitVsWorktree { .. }) => None,
+                _ => Some(ExternalDiffKind::Worktree),
             };
         }
         let source = match &self.drill {
             DrillView::Files { source, .. } | DrillView::Diff { source, .. } => source,
-            DrillView::Graph => return ExternalDiffKind::Worktree,
+            DrillView::Graph => return Some(ExternalDiffKind::Worktree),
         };
-        match source {
-            // Only a compare tab holds `CommitVsWorktree`, and `E` refuses
-            // there (`compare_refusal`).
-            CommitFileSource::Worktree | CommitFileSource::CommitVsWorktree { .. } => {
-                ExternalDiffKind::Worktree
-            }
+        Some(match source {
+            CommitFileSource::Worktree => ExternalDiffKind::Worktree,
+            CommitFileSource::CommitVsWorktree { .. } => return None,
             CommitFileSource::Commit { commit_id } => ExternalDiffKind::Rev {
                 left_rev: format!("{commit_id}^"),
                 right_rev: commit_id.clone(),
@@ -1422,7 +1422,7 @@ impl AppState {
                 right_rev: head.clone(),
                 left_path: self.focused_compare_old_path(),
             },
-        }
+        })
     }
 
     pub(crate) fn commit_detail_meta(&self) -> (String, Option<String>) {
@@ -5473,7 +5473,8 @@ impl AppState {
         self.park_active_session();
         self.tabs.active = index;
         self.apply_active_session();
-        Effect::None
+        // A working-tree tab may have missed watch reloads while inactive.
+        self.active_worktree_compare_reload()
     }
 
     /// Drop the visual-line highlight and any pending confirm.
@@ -5590,7 +5591,7 @@ impl AppState {
         match opened {
             OpenCompare::Focused => {
                 self.apply_active_session();
-                Effect::None
+                self.active_worktree_compare_reload()
             }
             OpenCompare::Created(tab_id) => {
                 self.apply_active_session();
@@ -5789,7 +5790,7 @@ impl AppState {
             };
             tab.error = None;
             tab.source = Some(load.source.clone());
-            tab.last_head = Some(load.head);
+            tab.last_head = load.head;
             tab.last_base_tip = Some(load.base_tip);
             let previous_cursor = tab.file_cursor;
             let had_path = tab.path.is_some();
@@ -6023,11 +6024,14 @@ impl AppState {
         Some(stamp)
     }
 
-    /// Watch: reload the active commit-vs-working-tree tab of `checkout`
-    /// when its [`Self::worktree_compare_stamp`] moved since the last load.
+    /// Reload the active commit-vs-working-tree tab of `checkout` when its
+    /// [`Self::worktree_compare_stamp`] moved since the last load. Runs
+    /// after each checkout status load, and when such a tab becomes active
+    /// again ([`Self::active_worktree_compare_reload`]).
     ///
-    /// Reloads the open file's diff in place (the viewport stays), or the
-    /// file list when it was empty. No git runs here.
+    /// Reloads the file list, so the row's status follows the disk; the
+    /// range apply keeps the open path and reloads its diff in place (the
+    /// viewport stays). No git runs here.
     pub(crate) fn worktree_compare_reload(&mut self, checkout: &str) -> Option<Effect> {
         let tab = self.tabs.active_compare()?;
         let file = tab.worktree_file.as_ref()?;
@@ -6040,31 +6044,27 @@ impl AppState {
             return None;
         }
         tab.worktree_stamp = stamp;
-        let repo = tab.checkout_path.clone();
-        let open = tab.path.clone().zip(tab.source.clone());
-        match open {
-            Some((path, source)) => {
-                let old_path = tab
-                    .files
-                    .iter()
-                    .find(|row| row.path == path)
-                    .and_then(|row| row.old_path.clone());
-                Some(Effect::LoadCompareDiff {
-                    tab_id: tab.id,
-                    repo,
-                    source,
-                    path,
-                    old_path,
-                })
-            }
-            None => Some(Effect::LoadCompareRange {
-                tab_id: tab.id,
-                repo,
-                base_ref: tab.base_ref.clone(),
-                head_ref: tab.head_ref.clone(),
-                force: true,
-            }),
-        }
+        Some(Effect::LoadCompareRange {
+            tab_id: tab.id,
+            repo: tab.checkout_path.clone(),
+            base_ref: tab.base_ref.clone(),
+            head_ref: tab.head_ref.clone(),
+            force: true,
+        })
+    }
+
+    /// [`Self::worktree_compare_reload`] for the active tab's checkout, or
+    /// [`Effect::None`].
+    fn active_worktree_compare_reload(&mut self) -> Effect {
+        let Some(checkout) = self
+            .tabs
+            .active_compare()
+            .map(|tab| tab.checkout_path.clone())
+        else {
+            return Effect::None;
+        };
+        self.worktree_compare_reload(&checkout)
+            .unwrap_or(Effect::None)
     }
 }
 
@@ -8025,7 +8025,7 @@ mod tests {
                     stat: None,
                 })
                 .collect(),
-            head: "ccc".into(),
+            head: Some("ccc".into()),
             base_tip: "bbb".into(),
         }
     }

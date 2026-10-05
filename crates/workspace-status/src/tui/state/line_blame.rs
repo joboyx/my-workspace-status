@@ -1560,7 +1560,8 @@ mod tests {
         assert_eq!(tab.id, tab_id);
         assert_eq!(tab.worktree_file.as_ref(), Some(&file));
         assert!(!tab.is_pinned());
-        assert_eq!(tab.label(), format!("app ↔ {}", &sha[..7]));
+        let leaf = file.path.rsplit('/').next().unwrap();
+        assert_eq!(tab.label(), format!("{leaf} ↔ {}", &sha[..7]));
         assert_eq!(tab.range_header(), format!("{} ↔ working tree", &sha[..7]));
         tab_id
     }
@@ -1792,15 +1793,36 @@ mod tests {
         .is_err());
     }
 
+    fn expect_range_reload(effect: Option<Effect>, tab_id: u64) {
+        match effect {
+            Some(Effect::LoadCompareRange {
+                tab_id: id,
+                repo,
+                base_ref,
+                head_ref,
+                force,
+            }) => {
+                assert_eq!(id, tab_id);
+                assert_eq!(
+                    (repo.as_str(), base_ref.as_str(), head_ref.as_str(), force),
+                    ("app", SHA, "HEAD", true)
+                );
+            }
+            other => panic!("expected a range reload, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn worktree_compare_tab_reloads_its_diff_when_the_file_changes_on_watch() {
+    fn worktree_compare_tab_reloads_when_the_file_changes_on_watch() {
         let mut app = state();
         app.open_worktree_compare_tab("app".into(), SHA.into(), disk_file("README.md", None));
         load_worktree_tab(&mut app);
+        let tab_id = app.tabs.active_compare().unwrap().id;
         assert!(app.compare_probe_effects().is_empty(), "never HEAD-probed");
         assert_eq!(app.worktree_compare_reload("app"), None, "nothing moved");
 
-        // README.md leaves the dirty set: its entry changed.
+        // README.md leaves the dirty set: its entry changed. The list
+        // reloads too, so the row's status follows the disk.
         let clean = RepoSnapshot {
             changes: Vec::new(),
             has_unstaged: false,
@@ -1808,40 +1830,29 @@ mod tests {
         };
         app.apply_watch_snapshot(build_workspace_snapshot(&[clean], &[], false, &[]));
         assert_eq!(app.worktree_compare_reload("lib"), None, "another checkout");
-        let Some(Effect::LoadCompareDiff {
-            repo: checkout,
-            source,
-            path,
-            old_path,
-            ..
-        }) = app.worktree_compare_reload("app")
-        else {
-            panic!("expected a diff reload");
-        };
-        assert_eq!(
-            (checkout.as_str(), path.as_str(), old_path.as_deref()),
-            ("app", "README.md", Some("OLD.md"))
-        );
-        assert!(matches!(source, CommitFileSource::CommitVsWorktree { .. }));
+        expect_range_reload(app.worktree_compare_reload("app"), tab_id);
         assert_eq!(app.worktree_compare_reload("app"), None, "reloaded once");
 
-        // A new HEAD with an empty list reloads the list.
-        let tab = app.tabs.active_compare_mut().unwrap();
-        tab.files.clear();
-        tab.path = None;
+        // Inactive: the watch skips it; activating it again catches up.
+        assert_eq!(app.activate_tab(0), Effect::None);
         let moved = RepoSnapshot {
             head: "def".into(),
             ..repo("app")
         };
         app.apply_watch_snapshot(build_workspace_snapshot(&[moved], &[], false, &[]));
-        assert!(matches!(
-            app.worktree_compare_reload("app"),
-            Some(Effect::LoadCompareRange { force: true, .. })
-        ));
-
-        // Only the active tab reloads.
+        assert_eq!(app.worktree_compare_reload("app"), None, "not active");
+        let back = app.activate_tab(1);
+        expect_range_reload(Some(back), tab_id);
+        app.tabs.active_compare_mut().unwrap().loading = false;
         assert_eq!(app.activate_tab(0), Effect::None);
-        app.apply_watch_snapshot(build_workspace_snapshot(&[repo("app")], &[], false, &[]));
-        assert_eq!(app.worktree_compare_reload("app"), None);
+        assert_eq!(app.activate_tab(1), Effect::None, "stamp unchanged");
+    }
+
+    #[test]
+    fn worktree_compare_tab_has_no_external_diff_pair() {
+        let mut app = state();
+        app.open_worktree_compare_tab("app".into(), SHA.into(), disk_file("README.md", None));
+        load_worktree_tab(&mut app);
+        assert_eq!(app.external_diff_kind(), None);
     }
 }
