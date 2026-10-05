@@ -45,6 +45,7 @@ mod pty_compare_vs_commit_picker_opens_tab;
 mod pty_ctrl_c_prompts_before_quit;
 mod pty_ctrl_c_second_quit;
 mod pty_ctrl_o_full_file_context;
+mod pty_ctrl_p_does_not_pull;
 mod pty_ctrl_r_resolves_comment_and_copy_tags;
 mod pty_ctrl_u_d_jumps_workspace_tree;
 mod pty_d_switches_to_default_branch;

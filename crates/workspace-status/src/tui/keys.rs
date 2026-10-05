@@ -324,7 +324,7 @@ fn key_event_to_action(
     graph_commit_focused: bool,
     hl_folds: bool,
 ) -> Action {
-    let key = fold_shift_letter(fold_kitty_csi_u_arrows(key));
+    let key = fold_shift_letter(fold_altgr_symbol(fold_kitty_csi_u_arrows(key)));
     match key.kind {
         KeyEventKind::Release => Action::None,
         KeyEventKind::Press => key_to_action(
@@ -372,6 +372,59 @@ fn fold_kitty_csi_u_arrows(mut key: KeyEvent) -> KeyEvent {
     key
 }
 
+/// Modifiers that turn a key into a command chord.
+///
+/// SHIFT is not one of them: it selects the shifted binding (`P`, `O`, …).
+const COMMAND_MODIFIERS: KeyModifiers = KeyModifiers::CONTROL
+    .union(KeyModifiers::ALT)
+    .union(KeyModifiers::SUPER)
+    .union(KeyModifiers::HYPER)
+    .union(KeyModifiers::META);
+
+/// True when `key` carries Ctrl, Alt, Super, Hyper, or Meta.
+fn has_command_modifier(key: KeyEvent) -> bool {
+    key.modifiers.intersects(COMMAND_MODIFIERS)
+}
+
+/// True when `key` is a modifier chord with no explicit binding in a
+/// plain-key mode, so it must not run the plain-key action.
+///
+/// Esc is exempt: Esc with a modifier still cancels or closes.
+fn is_unbound_chord(key: KeyEvent) -> bool {
+    key.code != KeyCode::Esc && has_command_modifier(key)
+}
+
+/// True for Ctrl+`c` with no Alt, Super, Hyper, or Meta (Shift is ignored).
+fn is_ctrl_chord(key: KeyEvent, c: char) -> bool {
+    key.code == KeyCode::Char(c)
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key
+            .modifiers
+            .intersects(COMMAND_MODIFIERS.difference(KeyModifiers::CONTROL))
+}
+
+/// Windows `event::read` reports a character typed with AltGr (`\`, `@`,
+/// `{` on many European layouts) as that character plus Ctrl+Alt.
+///
+/// Fold exactly Ctrl+Alt on a symbol back to the plain character so it
+/// still acts and types. Letters, digits, whitespace, and control
+/// characters keep Ctrl+Alt, so Ctrl+Alt+p stays an unbound chord.
+fn fold_altgr_symbol(mut key: KeyEvent) -> KeyEvent {
+    let KeyCode::Char(c) = key.code else {
+        return key;
+    };
+    let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+    if key.modifiers.intersection(COMMAND_MODIFIERS) != altgr
+        || c.is_ascii_alphanumeric()
+        || c.is_whitespace()
+        || c.is_control()
+    {
+        return key;
+    }
+    key.modifiers.remove(altgr);
+    key
+}
+
 /// Keyboard enhancement reports Shift+letter as the unshifted codepoint plus
 /// [`KeyModifiers::SHIFT`] (`Char('o')` + SHIFT, not `Char('O')`).
 ///
@@ -384,10 +437,7 @@ fn fold_shift_letter(mut key: KeyEvent) -> KeyEvent {
     if !c.is_ascii_lowercase() || !key.modifiers.contains(KeyModifiers::SHIFT) {
         return key;
     }
-    if key
-        .modifiers
-        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
-    {
+    if has_command_modifier(key) {
         return key;
     }
     key.code = KeyCode::Char(c.to_ascii_uppercase());
@@ -495,6 +545,13 @@ pub(crate) fn held_nav_key(event: &Event) -> Option<KeyEvent> {
     }
 }
 
+/// Map one folded key press in `mode` to an [`Action`].
+///
+/// Explicit chords (Ctrl-c, Ctrl-k, and the per-mode Ctrl bindings) match
+/// first. In Normal, pending `z` / `g`, Help, Confirm, the stash menu,
+/// comment export, and visual highlight a key with Ctrl / Alt / Super /
+/// Hyper / Meta never runs the plain-key action ([`is_unbound_chord`]).
+/// Text overlays keep their own matching.
 fn key_to_action(
     key: KeyEvent,
     mode: InputMode,
@@ -529,6 +586,7 @@ fn key_to_action(
     }
     match mode {
         InputMode::Help => match key.code {
+            _ if is_unbound_chord(key) => Action::None,
             KeyCode::Char('/') => Action::SearchStart,
             KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc | KeyCode::Char('?') => {
                 Action::ToggleHelp
@@ -546,8 +604,9 @@ fn key_to_action(
             }
             _ => Action::None,
         },
+        // A modifier chord falls through to `normal_key` (see GPending).
         InputMode::ZPending { .. } => match key.code {
-            KeyCode::Char('z') => Action::FoldToggleSubtree,
+            KeyCode::Char('z') if !has_command_modifier(key) => Action::FoldToggleSubtree,
             KeyCode::Esc => Action::None,
             _ => normal_key(
                 key,
@@ -558,11 +617,15 @@ fn key_to_action(
                 hl_folds,
             ),
         },
+        // A modifier chord falls through to `normal_key`, which keeps
+        // Ctrl-o / Ctrl-u / Ctrl-d and maps the rest to None.
         InputMode::GPending { .. } => match key.code {
-            KeyCode::Char('g') => Action::MoveToStart,
-            KeyCode::Char('t') => Action::NextTab,
-            KeyCode::Char('T') => Action::PreviousTab,
-            KeyCode::Char(c @ '1'..='9') => Action::JumpToTab(c as u8 - b'0'),
+            KeyCode::Char('g') if !has_command_modifier(key) => Action::MoveToStart,
+            KeyCode::Char('t') if !has_command_modifier(key) => Action::NextTab,
+            KeyCode::Char('T') if !has_command_modifier(key) => Action::PreviousTab,
+            KeyCode::Char(c @ '1'..='9') if !has_command_modifier(key) => {
+                Action::JumpToTab(c as u8 - b'0')
+            }
             KeyCode::Esc => Action::None,
             _ => normal_key(
                 key,
@@ -574,6 +637,8 @@ fn key_to_action(
             ),
         },
         InputMode::Confirm => match key.code {
+            // Ctrl-y / Alt-y never confirm a write.
+            _ if is_unbound_chord(key) => Action::None,
             KeyCode::Char('Y') => Action::ConfirmYesClean,
             KeyCode::Char('y') => Action::ConfirmYes,
             // Enter never confirms: a write needs the key the box shows.
@@ -594,6 +659,8 @@ fn key_to_action(
             _ => Action::None,
         },
         InputMode::StashMenu => match key.code {
+            // Menu letters are hotkeys (pop, apply, drop), not typed text.
+            _ if is_unbound_chord(key) => Action::None,
             KeyCode::Esc => Action::StashMenuCancel,
             KeyCode::Enter => Action::StashMenuEnter,
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -666,6 +733,7 @@ fn key_to_action(
             }
         }
         InputMode::CommentExport => match key.code {
+            _ if is_unbound_chord(key) => Action::None,
             KeyCode::Esc | KeyCode::Enter => Action::ExportCommentsCancel,
             _ => Action::None,
         },
@@ -686,7 +754,7 @@ fn palette_open_key(key: KeyEvent) -> Option<PaletteOpenedBy> {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('k') {
         return Some(PaletteOpenedBy::CtrlK);
     }
-    if !key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char(':') {
+    if !has_command_modifier(key) && key.code == KeyCode::Char(':') {
         return Some(PaletteOpenedBy::Colon);
     }
     None
@@ -732,13 +800,18 @@ fn command_palette_key(key: KeyEvent) -> Action {
 /// reference for the highlighted span. `?`, `q`, `T`, and `m` act as in
 /// normal mode. Esc or a second `V` leaves highlight without commenting.
 /// Any other key is [`Action::DiffVisualUnmapped`] so the status can say
-/// how to leave. `Ctrl-k` / `:` open the command palette before this map
+/// how to leave; an unbound modifier chord on a non-character key is
+/// [`Action::None`]. `Ctrl-k` / `:` open the command palette before this map
 /// runs; the highlight stays.
 fn diff_visual_key(key: KeyEvent) -> Action {
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
+    if is_ctrl_chord(key, 'u') {
+        return Action::Move(-5);
+    }
+    if is_ctrl_chord(key, 'd') {
+        return Action::Move(5);
+    }
+    if is_unbound_chord(key) {
         return match key.code {
-            KeyCode::Char('u') => Action::Move(-5),
-            KeyCode::Char('d') => Action::Move(5),
             KeyCode::Char(_) => Action::DiffVisualUnmapped,
             _ => Action::None,
         };
@@ -775,6 +848,11 @@ fn diff_visual_key(key: KeyEvent) -> Action {
     }
 }
 
+/// Normal-mode keys, including the graph-stash and graph-commit row keys.
+///
+/// Ctrl-o / Ctrl-u / Ctrl-d match first. Any other key with Ctrl / Alt /
+/// Super / Hyper / Meta is [`Action::None`], so Ctrl-p is not `p` pull.
+/// Shift alone still selects the shifted binding (`P` push).
 fn normal_key(
     key: KeyEvent,
     _right_is_diff: bool,
@@ -783,6 +861,18 @@ fn normal_key(
     graph_commit_focused: bool,
     hl_folds: bool,
 ) -> Action {
+    if is_ctrl_chord(key, 'o') {
+        return Action::ToggleFullContext;
+    }
+    if is_ctrl_chord(key, 'u') {
+        return Action::Move(-5);
+    }
+    if is_ctrl_chord(key, 'd') {
+        return Action::Move(5);
+    }
+    if is_unbound_chord(key) {
+        return Action::None;
+    }
     if graph_stash_focused {
         match key.code {
             KeyCode::Char('a') => return Action::GraphStashApply,
@@ -798,15 +888,6 @@ fn normal_key(
             KeyCode::Char('m') => return Action::GraphMerge,
             _ => {}
         }
-    }
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o') {
-        return Action::ToggleFullContext;
-    }
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
-        return Action::Move(-5);
-    }
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d') {
-        return Action::Move(5);
     }
     match key.code {
         KeyCode::Char('T') => Action::CycleTheme,
@@ -3008,11 +3089,315 @@ mod tests {
         }
     }
 
+    /// Every plain binding in Normal, the graph row keys, Help, Confirm,
+    /// pending `z` / `g`, and highlight, with and without a command modifier.
     #[test]
-    fn ctrl_p_is_still_pull_not_palette() {
+    fn unbound_modifier_chords_do_not_run_plain_bindings() {
+        use KeyCode::{Char, Down, End, Enter, Home, Left, PageDown, Right, Tab, Up};
+        const STASH: u8 = 1;
+        const COMMIT: u8 = 2;
+        let pending_z = InputMode::ZPending {
+            search_active: false,
+        };
+        let n = normal();
+        let rows: Vec<(InputMode, u8, KeyCode, Action)> = vec![
+            (n, 0, Char('T'), Action::CycleTheme),
+            (n, 0, Char('t'), Action::ToggleTreeMode),
+            (n, 0, Char('q'), Action::Quit),
+            (n, 0, Char('?'), Action::ToggleHelp),
+            (n, 0, Char('.'), Action::ToggleShowIgnored),
+            (
+                n,
+                0,
+                Char(':'),
+                Action::ToggleCommandPalette(PaletteOpenedBy::Colon),
+            ),
+            (n, 0, Char('f'), Action::Fetch),
+            (n, 0, Char('p'), Action::Pull),
+            (n, 0, Char('d'), Action::DefaultBranch),
+            (n, 0, Char('r'), Action::Refresh),
+            (n, 0, Char(' '), Action::ToggleReviewed),
+            (n, 0, Char('z'), Action::FoldToggle),
+            (n, 0, Char('/'), Action::SearchStart),
+            (n, 0, Char('s'), Action::Stage),
+            (n, 0, Char('u'), Action::Unstage),
+            (n, 0, Char('x'), Action::Revert),
+            (n, 0, Char('e'), Action::Edit),
+            (n, 0, Char('E'), Action::ExternalDiff),
+            (n, 0, Char('P'), Action::Push),
+            (n, 0, Char('S'), Action::StashMenu),
+            (n, 0, Char('b'), Action::Branch),
+            (n, 0, Char('o'), Action::GraphFocusBranches),
+            (n, 0, Char('O'), Action::GraphFocusClear),
+            (n, 0, Char('W'), Action::RemoveWorktree),
+            (n, 0, Char('i'), Action::ToggleDiffMode),
+            (n, 0, Char('<'), Action::ResizeTree(-1)),
+            (n, 0, Char('>'), Action::ResizeTree(1)),
+            (n, 0, Char('\\'), Action::ToggleDiffWrap),
+            (n, 0, Char('M'), Action::ToggleCommitMsgExpand),
+            (n, 0, Char('m'), Action::ToggleMouse),
+            (n, 0, Char(';'), Action::CommentStart),
+            (n, 0, Char('V'), Action::DiffVisualStart),
+            (n, 0, Char('y'), Action::ExportComments),
+            (n, 0, Char('\''), Action::CopyEntityReference),
+            (n, 0, Char('n'), Action::SearchNext),
+            (n, 0, Char('N'), Action::SearchPrev),
+            (n, 0, Char('G'), Action::MoveToEnd),
+            (n, 0, Char('g'), Action::ArmGChord),
+            (n, 0, Char('j'), Action::Move(1)),
+            (n, 0, Char('J'), Action::Move(1)),
+            (n, 0, Char('k'), Action::Move(-1)),
+            (n, 0, Char('K'), Action::Move(-1)),
+            (n, 0, Char('h'), Action::FoldClose),
+            (n, 0, Char('H'), Action::FoldClose),
+            (n, 0, Char('l'), Action::FoldOpen),
+            (n, 0, Char('L'), Action::FoldOpen),
+            (n, 0, Tab, Action::FocusRight),
+            (n, 0, Enter, Action::NavEnter),
+            (n, 0, Home, Action::MoveToStart),
+            (n, 0, End, Action::MoveToEnd),
+            (n, 0, PageDown, Action::PageMove(1)),
+            (n, 0, Down, Action::Move(1)),
+            (n, 0, Up, Action::Move(-1)),
+            (n, 0, Left, Action::FoldClose),
+            (n, 0, Right, Action::FoldOpen),
+            (n, STASH, Char('a'), Action::GraphStashApply),
+            (n, STASH, Char('p'), Action::GraphStashPop),
+            (n, STASH, Char('D'), Action::GraphStashDrop),
+            (n, COMMIT, Char('b'), Action::GraphCheckout),
+            (n, COMMIT, Char('c'), Action::GraphCreateBranch),
+            (n, COMMIT, Char('m'), Action::GraphMerge),
+            (InputMode::Help, 0, Char('q'), Action::ToggleHelp),
+            (InputMode::Help, 0, Char('Q'), Action::ToggleHelp),
+            (InputMode::Help, 0, Char('?'), Action::ToggleHelp),
+            (InputMode::Help, 0, Char('/'), Action::SearchStart),
+            (InputMode::Confirm, 0, Char('y'), Action::ConfirmYes),
+            (InputMode::Confirm, 0, Char('Y'), Action::ConfirmYesClean),
+            (InputMode::Confirm, 0, Char('n'), Action::ConfirmNo),
+            (InputMode::Confirm, 0, Char('N'), Action::ConfirmNo),
+            (InputMode::Confirm, 0, Enter, Action::ConfirmEnter),
+            (
+                InputMode::StashMenu,
+                0,
+                Char('s'),
+                Action::StashMenuChar('s'),
+            ),
+            (
+                InputMode::StashMenu,
+                0,
+                Char('a'),
+                Action::StashMenuChar('a'),
+            ),
+            (
+                InputMode::StashMenu,
+                0,
+                Char('p'),
+                Action::StashMenuChar('p'),
+            ),
+            (
+                InputMode::StashMenu,
+                0,
+                Char('D'),
+                Action::StashMenuChar('D'),
+            ),
+            (
+                InputMode::StashMenu,
+                0,
+                Char('d'),
+                Action::StashMenuChar('d'),
+            ),
+            (InputMode::StashMenu, 0, Enter, Action::StashMenuEnter),
+            (
+                InputMode::CommentExport,
+                0,
+                Enter,
+                Action::ExportCommentsCancel,
+            ),
+            (pending_z, 0, Char('z'), Action::FoldToggleSubtree),
+            (pending_z, 0, Char('p'), Action::Pull),
+            (pending_g(), 0, Char('g'), Action::MoveToStart),
+            (pending_g(), 0, Char('t'), Action::NextTab),
+            (pending_g(), 0, Char('T'), Action::PreviousTab),
+            (pending_g(), 0, Char('1'), Action::JumpToTab(1)),
+            (pending_g(), 0, Char('9'), Action::JumpToTab(9)),
+            (pending_g(), 0, Char('p'), Action::Pull),
+            (InputMode::DiffVisual, 0, Char('s'), Action::Stage),
+            (InputMode::DiffVisual, 0, Char('x'), Action::Revert),
+            (InputMode::DiffVisual, 0, Char('q'), Action::Quit),
+            (
+                InputMode::DiffVisual,
+                0,
+                Char('V'),
+                Action::DiffVisualCancel,
+            ),
+            (InputMode::DiffVisual, 0, Char('j'), Action::Move(1)),
+            (InputMode::DiffVisual, 0, Enter, Action::DiffVisualUnmapped),
+            (InputMode::DiffVisual, 0, Down, Action::Move(1)),
+        ];
+        let map = |mode: InputMode, graph: u8, code: KeyCode, mods: KeyModifiers| {
+            event_to_action_ex(
+                &Event::Key(KeyEvent::new(code, mods)),
+                mode,
+                false,
+                false,
+                graph == STASH,
+                graph == COMMIT,
+            )
+        };
+        let command = [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SUPER,
+            KeyModifiers::HYPER,
+            KeyModifiers::META,
+        ];
+        for (mode, graph, code, plain) in rows {
+            assert_eq!(
+                map(mode, graph, code, KeyModifiers::NONE),
+                plain,
+                "{mode:?} {code:?}"
+            );
+            let mut chords: Vec<(KeyCode, KeyModifiers)> =
+                command.iter().map(|&m| (code, m)).collect();
+            if let Char(c) = code {
+                if c.is_ascii_alphabetic() {
+                    for m in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+                        let m = m | KeyModifiers::SHIFT;
+                        chords.push((Char(c.to_ascii_lowercase()), m));
+                        chords.push((Char(c.to_ascii_uppercase()), m));
+                    }
+                }
+            }
+            for (code, mods) in chords {
+                // Explicit Ctrl chords keep their own bindings: Ctrl-c
+                // everywhere, Ctrl-k where the palette opens, Ctrl-o / u / d
+                // in Normal and pending chords, Ctrl-u / d in highlight.
+                let ctrl_only = !mods.intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+                    && mods.contains(KeyModifiers::CONTROL);
+                let normal_like = matches!(
+                    mode,
+                    InputMode::Normal { .. }
+                        | InputMode::ZPending { .. }
+                        | InputMode::GPending { .. }
+                );
+                let visual = mode == InputMode::DiffVisual;
+                let bound = match code {
+                    Char('c') => true,
+                    Char('k') => normal_like || visual,
+                    Char('o') => normal_like,
+                    Char('u' | 'd') => normal_like || visual,
+                    _ => false,
+                };
+                if ctrl_only && bound {
+                    continue;
+                }
+                let want = match (mode, code) {
+                    (InputMode::DiffVisual, Char(_)) => Action::DiffVisualUnmapped,
+                    _ => Action::None,
+                };
+                assert_eq!(
+                    map(mode, graph, code, mods),
+                    want,
+                    "{mode:?} {code:?} {mods:?}"
+                );
+            }
+        }
+
+        // The reported cases, spelled out.
+        let ev = |code, mods| Event::Key(KeyEvent::new(code, mods));
+        for mods in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SUPER,
+        ] {
+            assert_ne!(
+                event_to_action(&ev(Char('p'), mods), n, false, false),
+                Action::Pull
+            );
+        }
+        let ctrl_p = event_to_action(&ctrl(Char('p')), n, false, false);
+        assert_eq!(ctrl_p, Action::None);
+        for push in [key(Char('P')), shift(Char('P')), shift(Char('p'))] {
+            assert_eq!(event_to_action(&push, n, false, false), Action::Push);
+        }
+        assert_ne!(
+            event_to_action(&ctrl(Char('y')), InputMode::Confirm, false, false),
+            Action::ConfirmYes
+        );
+        assert_ne!(
+            event_to_action(&ctrl(Char('q')), InputMode::Help, false, false),
+            Action::ToggleHelp
+        );
+        assert_ne!(
+            event_to_action_ex(&ctrl(Char('p')), n, false, false, true, false),
+            Action::GraphStashPop
+        );
+        // Shift alone still pans; Esc with a modifier still cancels.
         assert_eq!(
-            event_to_action(&ctrl(KeyCode::Char('p')), normal(), false, false),
-            Action::Pull
+            event_to_action(&shift(Left), n, false, false),
+            Action::PanDiff(-1)
+        );
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Esc), InputMode::Confirm, false, false),
+            Action::ConfirmNo
+        );
+        // Explicit chords still win in pending modes.
+        assert_eq!(
+            event_to_action(&ctrl(Char('u')), pending_z, false, false),
+            Action::Move(-5)
+        );
+        assert_eq!(
+            event_to_action(&ctrl(Char('d')), pending_g(), false, false),
+            Action::Move(5)
+        );
+        assert_eq!(
+            event_to_action(&ctrl(Char('o')), pending_g(), true, true),
+            Action::ToggleFullContext
+        );
+        assert_eq!(
+            event_to_action(&ctrl(Char('u')), InputMode::DiffVisual, true, true),
+            Action::Move(-5)
+        );
+    }
+
+    /// Windows AltGr symbols arrive as the char plus Ctrl+Alt.
+    #[test]
+    fn altgr_symbols_act_and_type_as_the_plain_char() {
+        let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        let ev = |c: char, mods| Event::Key(KeyEvent::new(KeyCode::Char(c), mods));
+        assert_eq!(
+            event_to_action(&ev('\\', altgr), normal(), false, false),
+            Action::ToggleDiffWrap
+        );
+        assert_eq!(
+            event_to_action(&ev('@', altgr), InputMode::SearchPrompt, false, false),
+            Action::SearchChar('@')
+        );
+        assert_eq!(
+            event_to_action(
+                &ev('{', altgr | KeyModifiers::SHIFT),
+                palette(),
+                false,
+                false
+            ),
+            Action::CommandPaletteChar('{')
+        );
+        assert_eq!(
+            event_to_action(&ev('p', altgr), normal(), false, false),
+            Action::None
+        );
+        assert_eq!(
+            event_to_action(&ev('1', altgr), pending_g(), false, false),
+            Action::None
+        );
+        assert_eq!(
+            event_to_action(
+                &ev('\\', altgr | KeyModifiers::SUPER),
+                normal(),
+                false,
+                false
+            ),
+            Action::None
         );
     }
 }
