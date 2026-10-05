@@ -93,13 +93,22 @@ fn pty_colon_quick_open_opens_file_tab() {
     );
 }
 
-/// `:` then `>` switches to commands; Esc closes both modes and keeps the
-/// tree cursor on README.md.
+/// Esc closes files mode; `:` then `>` switches to commands; Esc closes
+/// commands mode. The tree cursor stays on README.md throughout.
 #[test]
 fn pty_colon_quick_open_esc_closes_and_gt_switches_to_commands() {
     let (_root, workspace) = daily_workspace();
     let mut tui = PtySession::open(&workspace);
     wait_first_paint(&tui);
+
+    tui.key(':');
+    tui.wait_pred(files_open, ": opens Quick Open on files (Go to file)", WAIT);
+    tui.esc();
+    tui.wait_pred(
+        |screen| !screen.contains("Go to file") && tree_cursor_on(screen, "README.md"),
+        "Esc closes files mode and leaves the tree cursor on README.md",
+        WAIT,
+    );
 
     tui.key(':');
     tui.wait_pred(
@@ -119,10 +128,8 @@ fn pty_colon_quick_open_esc_closes_and_gt_switches_to_commands() {
             !screen.contains("Go to file")
                 && !commands_open(screen)
                 && tree_cursor_on(screen, "README.md")
-                && !tree_cursor_on(screen, "app")
-                && !tree_cursor_on(screen, "workspace")
         },
-        "Esc closes Quick Open and leaves the tree cursor on README.md",
+        "Esc closes commands mode and leaves the tree cursor on README.md",
         WAIT,
     );
 }

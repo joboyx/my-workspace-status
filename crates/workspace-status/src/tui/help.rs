@@ -278,7 +278,7 @@ pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
         },
         HelpEntry {
             keys: super::render::TAB_CLOSE_GLYPH,
-            desc: "close tab (or palette)",
+            desc: "close tab (or Ctrl-k)",
         },
         HelpEntry {
             keys: "s u",

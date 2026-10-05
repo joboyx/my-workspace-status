@@ -172,6 +172,8 @@ impl QuickOpenState {
                     NO_FILE_MATCHES.to_string()
                 } else if index.truncated {
                     format!("first {MAX_INDEX_ENTRIES} files")
+                } else if index.entries.len() == 1 {
+                    "1 file".to_string()
                 } else {
                     format!("{} files", index.entries.len())
                 }
@@ -275,6 +277,8 @@ mod tests {
         assert_eq!(state.file_status_text(), "no file matches");
         state.hits = vec![hit(0)];
         assert_eq!(state.file_status_text(), "2 files");
+        state.index = ready(&["a.rs"], false);
+        assert_eq!(state.file_status_text(), "1 file");
         state.index = ready(&["a.rs"], true);
         assert_eq!(
             state.file_status_text(),

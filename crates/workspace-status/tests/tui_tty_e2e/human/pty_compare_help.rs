@@ -51,7 +51,7 @@ fn compare_help_open(screen: &str) -> bool {
         && !help_header_has(screen, "GIT")
         && column.contains("x revert to merge base (only if head checked out, file clean)")
         && column.contains("Workspace tab only")
-        && column.contains("[✗] close tab (or palette)")
+        && column.contains("[✗] close tab (or Ctrl-k)")
         && screen.contains("/ search help")
         && !screen.contains("stage scope")
         && !screen.contains("fetch remotes")
