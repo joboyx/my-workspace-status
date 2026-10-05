@@ -1,6 +1,6 @@
 use crate::common::hscroll::DIFF_HSCROLL_TAIL;
 use crate::harness::{left_tree, PtySession};
-use crate::seed::{daily_workspace, seed_long_diff_file};
+use crate::seed::{daily_workspace, seed_long_diff_file, unwrap_diffs_at_launch};
 use crate::support::{
     crumb_row, launch_breadcrumb_workspace_app, no_updates_group_folded, no_wrong_overlays,
     panes_tree_focused_diff_unfocused, panes_tree_unfocused_diff_focused, right_pane,
@@ -171,6 +171,7 @@ fn csi_u_hold_letter(tui: &mut PtySession, letter: char, repeats: usize) {
 fn pty_h_l_pan_graph_or_file_diff() {
     let (_root, workspace) = daily_workspace();
     seed_long_diff_file(&workspace, FILE, DIFF_HSCROLL_TAIL);
+    unwrap_diffs_at_launch(&workspace);
     let mut tui = PtySession::open(&workspace);
     tui.wait_contains("README.md", WAIT);
 

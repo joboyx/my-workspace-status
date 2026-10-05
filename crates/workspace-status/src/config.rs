@@ -18,6 +18,27 @@ pub struct WorkspaceStatusConfig {
     pub editor: Option<String>,
     /// External diff command (`diffTool`). Blank/omit means default `vimdiff` at resolve time.
     pub diff_tool: Option<String>,
+    /// TUI launch view modes (`viewDefaults`). Omitted keys keep the in-app defaults.
+    pub view_defaults: ViewDefaults,
+}
+
+/// TUI launch view modes from `viewDefaults`.
+///
+/// Each field is `None` when its key is omitted, so the in-app default
+/// (set where the TUI state is built) applies. Session toggles never write
+/// these back to the config file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ViewDefaults {
+    /// `tree`: `Some(true)` for `"tree"`, `Some(false)` for `"flat"` (workspace tree at depth 0).
+    pub tree: Option<bool>,
+    /// `commitTree`: `Some(true)` for `"tree"`, `Some(false)` for `"flat"` (commit file list at depth >= 1).
+    pub commit_tree: Option<bool>,
+    /// `diff`: `Some(true)` for `"split"` (side-by-side), `Some(false)` for `"inline"`.
+    pub diff_split: Option<bool>,
+    /// `wrap`: `Some(true)` for `"wrap"`, `Some(false)` for `"unwrap"`.
+    pub wrap: Option<bool>,
+    /// `commitMessage`: `Some(true)` for `"expand"`, `Some(false)` for `"collapse"`.
+    pub commit_message_expand: Option<bool>,
 }
 
 impl WorkspaceStatusConfig {
@@ -28,6 +49,7 @@ impl WorkspaceStatusConfig {
             default_branches: BTreeMap::new(),
             editor: None,
             diff_tool: None,
+            view_defaults: ViewDefaults::default(),
         }
     }
 }
@@ -40,6 +62,7 @@ struct RawConfig {
     default_branches: Option<serde_json::Value>,
     editor: Option<serde_json::Value>,
     diff_tool: Option<serde_json::Value>,
+    view_defaults: Option<serde_json::Value>,
 }
 
 fn normalize_ignored(repos: &[String]) -> Vec<String> {
@@ -75,6 +98,47 @@ pub fn default_branch_override_for(
         .get(&normalized)
         .filter(|b| !b.is_empty())
         .cloned()
+}
+
+/// Parse one two-value `viewDefaults` key: `Some(true)` for `on`, `Some(false)` for `off`.
+fn parse_view_choice(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    on: &str,
+    off: &str,
+) -> Result<Option<bool>, String> {
+    let Some(v) = obj.get(key) else {
+        return Ok(None);
+    };
+    match v.as_str().map(str::trim) {
+        Some(s) if s == on => Ok(Some(true)),
+        Some(s) if s == off => Ok(Some(false)),
+        _ => Err(format!(
+            "{CONFIG_FILENAME} viewDefaults.{key} must be \"{on}\" or \"{off}\""
+        )),
+    }
+}
+
+fn parse_view_defaults(value: Option<serde_json::Value>) -> Result<ViewDefaults, String> {
+    let Some(v) = value else {
+        return Ok(ViewDefaults::default());
+    };
+    let Some(obj) = v.as_object() else {
+        return Err(format!("{CONFIG_FILENAME} viewDefaults must be an object"));
+    };
+    const KEYS: [&str; 5] = ["tree", "commitTree", "diff", "wrap", "commitMessage"];
+    if let Some(key) = obj.keys().find(|k| !KEYS.contains(&k.as_str())) {
+        return Err(format!(
+            "{CONFIG_FILENAME} viewDefaults has unknown key \"{key}\""
+        ));
+    }
+    Ok(ViewDefaults {
+        tree: parse_view_choice(obj, "tree", "tree", "flat")?,
+        commit_tree: parse_view_choice(obj, "commitTree", "tree", "flat")?,
+        diff_split: parse_view_choice(obj, "diff", "split", "inline")?,
+        wrap: parse_view_choice(obj, "wrap", "wrap", "unwrap")?,
+        commit_message_expand: parse_view_choice(obj, "commitMessage", "expand", "collapse")?,
+    })
 }
 
 /// Load workspace-status config. Missing file means empty ignore and maxDepth 3.
@@ -165,12 +229,15 @@ pub fn load_workspace_status_config(cwd: &Path) -> Result<WorkspaceStatusConfig,
         }
     };
 
+    let view_defaults = parse_view_defaults(parsed.view_defaults)?;
+
     Ok(WorkspaceStatusConfig {
         ignored_repos: normalize_ignored(&ignored),
         max_depth,
         default_branches,
         editor,
         diff_tool,
+        view_defaults,
     })
 }
 
@@ -219,8 +286,12 @@ mod tests {
     }
 
     fn write_config(dir_prefix: &str, json: &str) -> std::path::PathBuf {
+        // Tests share a prefix and run in parallel: a counter keeps each dir unique.
+        static NEXT_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "{dir_prefix}-{}",
+            "{dir_prefix}-{}-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -270,5 +341,127 @@ mod tests {
             "unexpected error: {err}"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn load_view_defaults(json: &str) -> Result<ViewDefaults, String> {
+        let dir = write_config("ws-config-view", json);
+        let out = load_workspace_status_config(&dir).map(|cfg| cfg.view_defaults);
+        let _ = fs::remove_dir_all(&dir);
+        out
+    }
+
+    #[test]
+    fn omitted_view_defaults_are_all_none() {
+        assert_eq!(
+            load_view_defaults(r#"{"ignoredRepos":[]}"#).unwrap(),
+            ViewDefaults::default()
+        );
+        assert_eq!(
+            WorkspaceStatusConfig::with_defaults().view_defaults,
+            ViewDefaults::default()
+        );
+    }
+
+    #[test]
+    fn empty_view_defaults_object_is_all_none() {
+        assert_eq!(
+            load_view_defaults(r#"{"ignoredRepos":[],"viewDefaults":{}}"#).unwrap(),
+            ViewDefaults::default()
+        );
+    }
+
+    #[test]
+    fn view_defaults_first_values_are_true() {
+        let got = load_view_defaults(
+            r#"{"ignoredRepos":[],"viewDefaults":{"tree":"tree","commitTree":"tree","diff":"split","wrap":"wrap","commitMessage":"expand"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            ViewDefaults {
+                tree: Some(true),
+                commit_tree: Some(true),
+                diff_split: Some(true),
+                wrap: Some(true),
+                commit_message_expand: Some(true),
+            }
+        );
+    }
+
+    #[test]
+    fn view_defaults_second_values_are_false() {
+        let got = load_view_defaults(
+            r#"{"ignoredRepos":[],"viewDefaults":{"tree":"flat","commitTree":"flat","diff":"inline","wrap":"unwrap","commitMessage":"collapse"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            ViewDefaults {
+                tree: Some(false),
+                commit_tree: Some(false),
+                diff_split: Some(false),
+                wrap: Some(false),
+                commit_message_expand: Some(false),
+            }
+        );
+    }
+
+    #[test]
+    fn view_defaults_value_is_trimmed() {
+        let got = load_view_defaults(r#"{"ignoredRepos":[],"viewDefaults":{"wrap":"  unwrap "}}"#)
+            .unwrap();
+        assert_eq!(got.wrap, Some(false));
+        assert_eq!(got.tree, None);
+    }
+
+    #[test]
+    fn view_defaults_not_an_object_is_error() {
+        for raw in [r#"[]"#, r#""wrap""#, "1"] {
+            let err = load_view_defaults(&format!(r#"{{"ignoredRepos":[],"viewDefaults":{raw}}}"#))
+                .unwrap_err();
+            assert_eq!(
+                err, ".workspace-status-config.json viewDefaults must be an object",
+                "viewDefaults: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn view_defaults_bad_value_names_the_key_and_choices() {
+        let cases = [
+            ("tree", "1", r#""tree" or "flat""#),
+            ("tree", r#""Tree""#, r#""tree" or "flat""#),
+            ("commitTree", r#""list""#, r#""tree" or "flat""#),
+            ("diff", r#""sbs""#, r#""split" or "inline""#),
+            ("diff", "true", r#""split" or "inline""#),
+            ("wrap", r#""""#, r#""wrap" or "unwrap""#),
+            ("wrap", r#""   ""#, r#""wrap" or "unwrap""#),
+            ("wrap", "false", r#""wrap" or "unwrap""#),
+            ("commitMessage", r#""open""#, r#""expand" or "collapse""#),
+            ("commitMessage", "null", r#""expand" or "collapse""#),
+        ];
+        for (key, raw, choices) in cases {
+            let err = load_view_defaults(&format!(
+                r#"{{"ignoredRepos":[],"viewDefaults":{{"{key}":{raw}}}}}"#
+            ))
+            .unwrap_err();
+            assert_eq!(
+                err,
+                format!(".workspace-status-config.json viewDefaults.{key} must be {choices}"),
+                "{key}: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn view_defaults_unknown_key_is_error() {
+        let err = load_view_defaults(
+            r#"{"ignoredRepos":[],"viewDefaults":{"wrap":"wrap","theme":"dark"}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            r#".workspace-status-config.json viewDefaults has unknown key "theme""#
+        );
     }
 }

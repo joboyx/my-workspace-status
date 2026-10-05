@@ -372,7 +372,13 @@ pub struct CompareTab {
 }
 
 impl CompareTab {
-    fn new(id: u64, checkout_path: String, base_ref: String, head_ref: String) -> Self {
+    fn new(
+        id: u64,
+        checkout_path: String,
+        base_ref: String,
+        head_ref: String,
+        tree_mode: bool,
+    ) -> Self {
         Self {
             id,
             checkout_path,
@@ -387,7 +393,7 @@ impl CompareTab {
             content_for: None,
             focus_right: false,
             folds: HashSet::new(),
-            tree_mode: true,
+            tree_mode,
             left_col_offset: 0,
             diff_col_offset: 0,
             diff_cursor: 0,
@@ -483,6 +489,10 @@ pub struct TabStrip {
     /// 0 is Workspace. Compare tabs follow.
     pub active: usize,
     pub compare: Vec<CompareTab>,
+    /// Commit-file list mode a new compare tab opens in: directory tree
+    /// (`true`) or flat paths. The launch `viewDefaults.commitTree`, else
+    /// `true`. The `t` toggle changes one tab only, never this default.
+    pub commit_tree_default: bool,
     next_id: u64,
 }
 
@@ -491,6 +501,7 @@ impl Default for TabStrip {
         Self {
             active: 0,
             compare: Vec::new(),
+            commit_tree_default: true,
             next_id: 1,
         }
     }
@@ -551,8 +562,13 @@ impl TabStrip {
         }
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
-        self.compare
-            .push(CompareTab::new(id, checkout_path, base_ref, head_ref));
+        self.compare.push(CompareTab::new(
+            id,
+            checkout_path,
+            base_ref,
+            head_ref,
+            self.commit_tree_default,
+        ));
         self.active = self.compare.len();
         OpenCompare::Created(id)
     }
@@ -804,7 +820,13 @@ mod tests {
     }
 
     fn loaded_tab(merge_base: &str, head: &str, base_tip: &str) -> CompareTab {
-        let mut tab = CompareTab::new(1, "app".into(), "main".into(), COMPARE_HEAD_REF.into());
+        let mut tab = CompareTab::new(
+            1,
+            "app".into(),
+            "main".into(),
+            COMPARE_HEAD_REF.into(),
+            true,
+        );
         tab.source = Some(CommitFileSource::Compare {
             base_ref: "main".into(),
             head_ref: "HEAD".into(),

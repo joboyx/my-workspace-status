@@ -1,5 +1,5 @@
 use crate::harness::PtySession;
-use crate::seed::{daily_workspace, seed_two_tall_commit_files};
+use crate::seed::{daily_workspace, seed_two_tall_commit_files, unwrap_diffs_at_launch};
 use crate::support::{
     graph_cursor_on, panes_files_focused, panes_files_focused_diff_unfocused,
     panes_files_unfocused_diff_focused, panes_tree_unfocused_graph_focused, right_pane,
@@ -151,6 +151,7 @@ fn unfocus_right(
 fn pty_depth_2_new_commit_file_resets_diff_viewport() {
     let (_root, workspace) = daily_workspace();
     seed_two_tall_commit_files(&workspace);
+    unwrap_diffs_at_launch(&workspace);
     let mut tui = PtySession::open_size(&workspace, 80, 24);
     tui.wait_contains("README.md", WAIT);
 
