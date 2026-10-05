@@ -39,8 +39,9 @@ use super::app::{
     apply_checkout_compute, apply_merge_compute, apply_one_repo_snapshot, apply_right_pane_load,
     commit_diff_list, compute_checkout, compute_commit_diff, compute_commit_files,
     compute_compare_diff, compute_compare_range, compute_merge, compute_reload_repo,
-    discover_config, drop_undiscovered_checkouts, filter_repo_set, focused_repo_needs_pane,
-    probe_compare_range, RightPaneLoad, RightPaneRequest, RightPaneTarget, TuiOpts,
+    compute_worktree_compare_range, discover_config, drop_undiscovered_checkouts, filter_repo_set,
+    focused_repo_needs_pane, probe_compare_range, RightPaneLoad, RightPaneRequest, RightPaneTarget,
+    TuiOpts,
 };
 use super::chrome::{is_idle_pull_status, STATUS_COPIED, STATUS_COPY_FAILED};
 use super::comments;
@@ -63,7 +64,7 @@ use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
 use super::stash::{resolve_stash_menu_key, StashMenuKeyResult, StashOpId};
 use super::state::{revert_scope, AppState, PendingConfirm};
 use super::status::StatusMessage;
-use super::tabs::{ComparePickerKind, ComparePickerRows};
+use super::tabs::{ComparePickerKind, ComparePickerRows, WorktreeFile};
 
 /// Blocking work that produces one [`JobOutcome`].
 pub(crate) type JobWork = Box<dyn FnOnce() -> JobOutcome + Send>;
@@ -379,6 +380,8 @@ struct CompareRangeJob {
     repo: String,
     base_ref: String,
     head_ref: String,
+    /// The tab's file on disk when it is a commit-vs-working-tree tab.
+    worktree_file: Option<WorktreeFile>,
 }
 
 struct CompareDiffJob {
@@ -1060,12 +1063,17 @@ impl Interpreter {
                 force,
             } => {
                 if let Some(gen) = state.begin_compare_range(tab_id, force) {
+                    let worktree_file = state
+                        .tabs
+                        .get_id(tab_id)
+                        .and_then(|tab| tab.worktree_file.clone());
                     self.compare_range.push_back(CompareRangeJob {
                         gen,
                         tab_id,
                         repo,
                         base_ref,
                         head_ref,
+                        worktree_file,
                     });
                     self.sched.enqueue_user_front(UserTag::Pane);
                     self.mark();
@@ -1396,6 +1404,9 @@ impl Interpreter {
                 let before_snap = state.snapshot.clone();
                 let focused = state.focused_checkout_path();
                 apply_one_repo_snapshot(state, &path, snap);
+                if let Some(reload) = state.worktree_compare_reload(&path) {
+                    self.schedule(state, opts, reload, &Action::None);
+                }
                 let decision = self.sched.note_repo_done(gen, &path);
                 if focused.as_deref() == Some(path.as_str())
                     && focused_repo_needs_pane(&before_sigs, &before_snap, state, &path)
@@ -2424,7 +2435,12 @@ impl Interpreter {
                         Box::new(move || JobOutcome::CompareRange {
                             tab_id: job.tab_id,
                             gen: job.gen,
-                            result: compute_compare_range(&dir, &job.base_ref, &job.head_ref),
+                            result: match &job.worktree_file {
+                                Some(file) => {
+                                    compute_worktree_compare_range(&dir, &job.base_ref, file)
+                                }
+                                None => compute_compare_range(&dir, &job.base_ref, &job.head_ref),
+                            },
                         }),
                     );
                     return;
@@ -5961,6 +5977,59 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["README.md"]
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn blame_vs_worktree_loads_one_file_and_reloads_after_a_disk_edit() {
+        let root = crate::testutil::unique_dir("ws-effect-blame-worktree");
+        let dir = root.join("app");
+        crate::testutil::init_repo(&dir);
+        let rev = |rev: &str| crate::git::exec_git(&["rev-parse", rev], &dir);
+        std::fs::write(dir.join("README.md"), "a\nb\n").unwrap();
+        crate::testutil::git(&dir, &["commit", "-q", "-am", "one"]);
+        let one = rev("HEAD");
+        std::fs::write(dir.join("README.md"), "a\nB\n").unwrap();
+        crate::testutil::git(&dir, &["commit", "-q", "-am", "two"]);
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(root.clone(), snapshot, true);
+        let opts = opts(&state);
+        let mut interp = Interpreter::with_cap(4);
+
+        // File tab on README.md, cursor on line 1 (`a`, from `one`).
+        let open = state.open_file_tab("app".into(), "README.md".into());
+        interp.interpret_sync(&mut state, &opts, open, &Action::None);
+        interp.interpret_sync(&mut state, &opts, Effect::None, &Action::None);
+        let (text, _) = state.painted_line_annotation().expect("line 1 blamed");
+        assert!(text.ends_with(" · one"), "{text}");
+
+        let effect = state.dispatch(Action::BlameCommitVsWorktree);
+        interp.interpret_sync(&mut state, &opts, effect, &Action::BlameCommitVsWorktree);
+        let tab = state.tabs.active_compare().expect("worktree tab");
+        assert_eq!(tab.base_ref, one);
+        assert!(!tab.loading, "the range load ran");
+        assert_eq!(tab.error, None);
+        assert_eq!(
+            tab.files
+                .iter()
+                .map(|f| (f.status.as_str(), f.path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("M", "README.md")]
+        );
+        assert_eq!(tab.loaded_diff_path(), Some("README.md"), "the diff loaded");
+        assert!(tab.content.vs_worktree);
+        assert!(tab.content.unstaged.contains("+B"), "{:?}", tab.content);
+
+        // A disk edit shows after the checkout's next status load.
+        std::fs::write(dir.join("README.md"), "a\nB\nC\n").unwrap();
+        interp.interpret_sync(
+            &mut state,
+            &opts,
+            Effect::ReloadRepo { repo: "app".into() },
+            &Action::None,
+        );
+        let tab = state.tabs.active_compare().unwrap();
+        assert!(tab.content.unstaged.contains("+C"), "{:?}", tab.content);
         let _ = std::fs::remove_dir_all(root);
     }
 }

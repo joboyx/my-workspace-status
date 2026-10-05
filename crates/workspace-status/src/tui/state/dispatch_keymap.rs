@@ -407,6 +407,7 @@ impl AppState {
             Action::CompareCommitVsParent => self.compare_commit_vs_parent(),
             Action::BlameCommitVsParent => self.blame_commit_vs_parent(),
             Action::BlamePreviousChange => self.blame_previous_change(),
+            Action::BlameCommitVsWorktree => self.blame_commit_vs_worktree(),
             Action::BlameRevealGraph => self.blame_reveal_graph(),
             Action::CloseTab => self.close_active_tab(),
             Action::NextTab => self.activate_relative_tab(1),

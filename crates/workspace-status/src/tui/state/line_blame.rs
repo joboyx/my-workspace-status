@@ -24,7 +24,7 @@ use super::super::line_blame::{
 use super::super::search::unfold_ancestors;
 use super::super::split::DiffMode;
 use super::super::status::StatusMessage;
-use super::super::tabs::ROOT_COMMIT_HAS_NO_PARENT;
+use super::super::tabs::{WorktreeFile, ROOT_COMMIT_HAS_NO_PARENT};
 use super::super::tree::NodeKind;
 use super::super::watch::graph_row_id;
 use super::{single_or_batch, AppState, FocusPane};
@@ -132,7 +132,10 @@ impl AppState {
     pub(crate) fn blame_refusal(&self, action: &Action) -> Option<String> {
         if !matches!(
             action,
-            Action::BlameCommitVsParent | Action::BlamePreviousChange | Action::BlameRevealGraph
+            Action::BlameCommitVsParent
+                | Action::BlamePreviousChange
+                | Action::BlameCommitVsWorktree
+                | Action::BlameRevealGraph
         ) {
             return None;
         }
@@ -182,6 +185,30 @@ impl AppState {
             return Effect::None;
         };
         self.open_compare_tab(repo, format!("{}^", blame.sha), blame.sha)
+    }
+
+    /// Blame: diff commit to working tree. Open or focus the tab of the
+    /// focused line's file at its blame commit (under the file's path
+    /// there) against the file on disk at the surface's path now.
+    pub(super) fn blame_commit_vs_worktree(&mut self) -> Effect {
+        let Ok((repo, blame)) = self.blamed_line() else {
+            return Effect::None;
+        };
+        let Some(path) = self.blamed_disk_path() else {
+            return Effect::None;
+        };
+        let old_path =
+            (!blame.filename.is_empty() && blame.filename != path).then_some(blame.filename);
+        self.open_worktree_compare_tab(repo, blame.sha, WorktreeFile { path, old_path })
+    }
+
+    /// The focused line's file on disk: the file tab's file, else the open
+    /// diff's path.
+    fn blamed_disk_path(&self) -> Option<String> {
+        if let Some(tab) = self.tabs.active_file() {
+            return Some(tab.rel.clone());
+        }
+        self.open_diff_target().map(|(_, path, _)| path.to_string())
     }
 
     /// Blame: open previous line change. Starts the
@@ -480,6 +507,16 @@ impl AppState {
             Some(CommitFileSource::Compare {
                 merge_base, head, ..
             }) => self.commit_side_blame(&line, path, head, merge_base, 0, ask),
+            // The new side is the file on disk now; the old side is the
+            // base commit under the file's path there.
+            Some(CommitFileSource::CommitVsWorktree { base, .. }) => {
+                if line.kind == DiffCellKind::Del {
+                    let old_path = self.listed_old_path(path).unwrap_or(path);
+                    ask(BlameRev::Commit(base.clone()), old_path, line.old_no, 0)
+                } else {
+                    ask(BlameRev::Worktree, path, line.new_no, fingerprint)
+                }
+            }
         }?;
         Some((blame, side))
     }
@@ -497,11 +534,7 @@ impl AppState {
         ask: impl Fn(BlameRev, &str, Option<u32>, u64) -> Option<FocusedBlame>,
     ) -> Option<FocusedBlame> {
         if line.kind == DiffCellKind::Del {
-            let old_path = self
-                .commit_drill_files()
-                .and_then(|files| files.iter().find(|file| file.path == path))
-                .and_then(|file| file.old_path.as_deref())
-                .unwrap_or(path);
+            let old_path = self.listed_old_path(path).unwrap_or(path);
             ask(
                 BlameRev::Commit(old_rev.into()),
                 old_path,
@@ -511,6 +544,16 @@ impl AppState {
         } else {
             ask(BlameRev::Commit(new_rev.into()), path, line.new_no, epoch)
         }
+    }
+
+    /// Old path of `path`'s row in the shown commit-file list, when the
+    /// row is a rename.
+    fn listed_old_path(&self, path: &str) -> Option<&str> {
+        self.commit_drill_files()?
+            .iter()
+            .find(|file| file.path == path)?
+            .old_path
+            .as_deref()
     }
 
     /// [`row_line_ref`] of the focused diff row, memoised by content
@@ -617,6 +660,7 @@ mod tests {
                 unstaged: unstaged.into(),
                 is_new,
                 is_committed: false,
+                vs_worktree: false,
                 error: None,
             },
         );
@@ -944,11 +988,15 @@ mod tests {
     }
 
     const OTHER: &str = "ddd4444eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-    const BLAME_ACTIONS: [(&str, Action); 3] = [
+    const BLAME_ACTIONS: [(&str, Action); 4] = [
         ("Blame: open commit changes", Action::BlameCommitVsParent),
         (
             "Blame: open previous line change",
             Action::BlamePreviousChange,
+        ),
+        (
+            "Blame: diff commit to working tree",
+            Action::BlameCommitVsWorktree,
         ),
         ("Blame: show commit in graph", Action::BlameRevealGraph),
     ];
@@ -1481,5 +1529,319 @@ mod tests {
         assert!(!app.graph_reveal_wants_older(), "history ends");
         assert_eq!(app.status, "aaa1111 is not in the loaded graph");
         assert_eq!(app.graph_reveal, None);
+    }
+
+    fn readme_row(status: &str, old_path: Option<&str>) -> CommitFile {
+        CommitFile {
+            status: status.into(),
+            path: "README.md".into(),
+            old_path: old_path.map(String::from),
+            stat: None,
+        }
+    }
+
+    /// Expect the load of a new commit-vs-working-tree tab of `sha`.
+    fn expect_worktree_tab(app: &AppState, effect: Effect, sha: &str, file: WorktreeFile) -> u64 {
+        let Effect::LoadCompareRange {
+            tab_id,
+            repo,
+            base_ref,
+            head_ref,
+            force,
+        } = effect
+        else {
+            panic!("expected a compare load, got {effect:?}");
+        };
+        assert_eq!(
+            (repo.as_str(), base_ref.as_str(), head_ref.as_str(), force),
+            ("app", sha, "HEAD", true)
+        );
+        let tab = app.tabs.active_compare().expect("compare tab");
+        assert_eq!(tab.id, tab_id);
+        assert_eq!(tab.worktree_file.as_ref(), Some(&file));
+        assert!(!tab.is_pinned());
+        assert_eq!(tab.label(), format!("app ↔ {}", &sha[..7]));
+        assert_eq!(tab.range_header(), format!("{} ↔ working tree", &sha[..7]));
+        tab_id
+    }
+
+    fn disk_file(path: &str, old_path: Option<&str>) -> WorktreeFile {
+        WorktreeFile {
+            path: path.into(),
+            old_path: old_path.map(String::from),
+        }
+    }
+
+    /// Make the active compare tab a loaded commit-vs-working-tree diff of
+    /// README.md (at `OLD.md` in the base) with [`BODY`] open.
+    fn load_worktree_tab(app: &mut AppState) {
+        let tab = app.tabs.active_compare_mut().unwrap();
+        tab.loading = false;
+        tab.source = Some(CommitFileSource::CommitVsWorktree {
+            base: SHA.into(),
+            path: "README.md".into(),
+            old_path: Some("OLD.md".into()),
+        });
+        tab.files = vec![readme_row("R", Some("OLD.md"))];
+        tab.path = Some("README.md".into());
+        tab.content =
+            DiffContent::from_worktree_compare_lines(BODY.lines().map(String::from).collect());
+        tab.content_for = Some((tab.source.clone().unwrap(), "README.md".into()));
+        app.focus = FocusPane::Right;
+    }
+
+    #[test]
+    fn blame_vs_worktree_opens_one_tab_per_commit_and_file() {
+        // Workspace diff: the disk path is the diff's path.
+        let mut app = worktree_diff("", BODY, false);
+        app.diff_cursor = 2;
+        answer(&mut app, Some(blamed(SHA)));
+        assert_eq!(
+            palette_reason(&app, "Blame: diff commit to working tree"),
+            None
+        );
+        let effect = app.dispatch(Action::BlameCommitVsWorktree);
+        let tab_id = expect_worktree_tab(&app, effect, SHA, disk_file("README.md", None));
+
+        // `<sha>...HEAD` (Diff vs commit) is another identity.
+        assert!(matches!(
+            app.open_compare_tab("app".into(), SHA.into(), "HEAD".into()),
+            Effect::LoadCompareRange { .. }
+        ));
+        assert_eq!(app.tabs.compare_count(), 2);
+        assert_eq!(app.tabs.active_compare().unwrap().worktree_file, None);
+
+        // The same line again focuses the first tab.
+        assert_eq!(app.activate_tab(0), Effect::None);
+        app.focus = FocusPane::Right;
+        assert_eq!(app.dispatch(Action::BlameCommitVsWorktree), Effect::None);
+        assert_eq!(app.tabs.compare_count(), 2);
+        assert_eq!(app.tabs.active_compare().unwrap().id, tab_id);
+
+        // A root commit still has a file to diff.
+        let mut root = worktree_diff("", BODY, false);
+        root.diff_cursor = 2;
+        answer(
+            &mut root,
+            Some(LineBlame {
+                boundary: true,
+                ..blamed(SHA)
+            }),
+        );
+        assert_eq!(
+            palette_reason(&root, "Blame: diff commit to working tree"),
+            None
+        );
+    }
+
+    #[test]
+    fn blame_vs_worktree_from_drill_compare_and_file_tab_keeps_the_commit_path() {
+        // Commit drill of a rename: the line blames OLD.md at the commit.
+        let mut app = state();
+        app.open_commit_diff(
+            "app".into(),
+            CommitFileSource::Commit {
+                commit_id: OTHER.into(),
+            },
+            vec![readme_row("R", Some("OLD.md"))],
+            0,
+            "README.md".into(),
+            DiffContent::from_unified(BODY),
+        );
+        app.focus = FocusPane::Right;
+        app.diff_cursor = 4;
+        answer(
+            &mut app,
+            Some(LineBlame {
+                filename: "OLD.md".into(),
+                ..blamed(SHA)
+            }),
+        );
+        let effect = app.dispatch(Action::BlameCommitVsWorktree);
+        expect_worktree_tab(&app, effect, SHA, disk_file("README.md", Some("OLD.md")));
+
+        // A commit-range compare tab: the open path is the disk path.
+        let mut app = state();
+        app.open_compare_tab("app".into(), "main".into(), "HEAD".into());
+        let tab = app.tabs.active_compare_mut().unwrap();
+        tab.source = Some(CommitFileSource::Compare {
+            base_ref: "main".into(),
+            head_ref: "HEAD".into(),
+            base_tip: "bbb".into(),
+            merge_base: "bbb".into(),
+            head: "ccc".into(),
+        });
+        tab.files = vec![readme_row("M", None)];
+        tab.path = Some("README.md".into());
+        tab.content = DiffContent::from_compare_lines(BODY.lines().map(String::from).collect());
+        app.focus = FocusPane::Right;
+        app.diff_cursor = 2;
+        answer(&mut app, Some(blamed(OTHER)));
+        let effect = app.dispatch(Action::BlameCommitVsWorktree);
+        expect_worktree_tab(&app, effect, OTHER, disk_file("README.md", None));
+        assert_eq!(app.tabs.compare_count(), 2);
+
+        // A file tab: its own file.
+        let Effect::LoadFileTab { tab_id, gen, .. } =
+            app.open_file_tab("app".into(), "src/lib.rs".into())
+        else {
+            panic!("expected a load");
+        };
+        assert!(app.apply_file_tab(
+            tab_id,
+            gen,
+            FileRead::Text {
+                lines: vec!["a".into()],
+                max_cols: 1,
+            }
+        ));
+        answer(
+            &mut app,
+            Some(LineBlame {
+                filename: "src/lib.rs".into(),
+                ..blamed(SHA)
+            }),
+        );
+        let effect = app.dispatch(Action::BlameCommitVsWorktree);
+        expect_worktree_tab(&app, effect, SHA, disk_file("src/lib.rs", None));
+    }
+
+    #[test]
+    fn worktree_compare_tab_blames_disk_lines_and_the_base_commit() {
+        let mut app = state();
+        app.open_worktree_compare_tab("app".into(), SHA.into(), disk_file("README.md", None));
+        load_worktree_tab(&mut app);
+        let fingerprint = app.current_diff_content().syntax_fingerprint();
+        let add = at(&mut app, 4).expect("added line asks");
+        assert_eq!(add.epoch, fingerprint, "the working tree can change");
+        assert_eq!(
+            rev_line_path(Some(add)),
+            Some((BlameRev::Worktree, 2, "README.md".into()))
+        );
+        assert_eq!(
+            rev_line_path(at(&mut app, 2)),
+            Some((BlameRev::Worktree, 1, "README.md".into()))
+        );
+        let del = at(&mut app, 3).expect("deleted line asks");
+        assert_eq!(del.epoch, 0);
+        assert_eq!(
+            rev_line_path(Some(del)),
+            Some((commit(SHA), 2, "OLD.md".into())),
+            "the base side keeps the file's path at the commit"
+        );
+        app.focus = FocusPane::Left;
+        assert_eq!(app.line_blame_want(), None, "file list moves never blame");
+    }
+
+    #[test]
+    fn worktree_compare_tab_refuses_revert_marks_comments_and_e() {
+        use super::super::super::tabs::{
+            CANNOT_REVERT_WORKTREE_COMPARE, NOT_ON_WORKTREE_COMPARE,
+            REVIEWED_MARKS_NEED_A_COMMIT_RANGE,
+        };
+        let mut app = state();
+        app.open_worktree_compare_tab("app".into(), SHA.into(), disk_file("README.md", None));
+        load_worktree_tab(&mut app);
+        for (title, action, reason) in [
+            ("Revert", Action::Revert, CANNOT_REVERT_WORKTREE_COMPARE),
+            (
+                "Mark reviewed",
+                Action::ToggleReviewed,
+                REVIEWED_MARKS_NEED_A_COMMIT_RANGE,
+            ),
+            ("Comment", Action::CommentStart, NOT_ON_WORKTREE_COMPARE),
+            (
+                "Copy entity reference",
+                Action::CopyEntityReference,
+                NOT_ON_WORKTREE_COMPARE,
+            ),
+            (
+                "Copy comments",
+                Action::ExportComments,
+                NOT_ON_WORKTREE_COMPARE,
+            ),
+            (
+                "Open in diff tool",
+                Action::ExternalDiff,
+                NOT_ON_WORKTREE_COMPARE,
+            ),
+        ] {
+            assert_eq!(
+                palette_reason(&app, title).as_deref(),
+                Some(reason),
+                "{title}"
+            );
+            app.status.clear();
+            assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
+            assert_eq!(app.status, reason, "{action:?}");
+        }
+        // The file list refuses the same way.
+        app.focus = FocusPane::Left;
+        assert_eq!(app.dispatch(Action::Revert), Effect::None);
+        assert_eq!(app.status, CANNOT_REVERT_WORKTREE_COMPARE);
+        // A `V` highlight on the WORKING TREE section never builds a patch.
+        let content = app.current_diff_content().clone();
+        assert!(super::super::super::diff::build_partial_patch(
+            &content,
+            DiffMode::Inline,
+            3,
+            4,
+            super::super::super::diff::PartialPatchKind::RevertCommitted,
+            "README.md",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn worktree_compare_tab_reloads_its_diff_when_the_file_changes_on_watch() {
+        let mut app = state();
+        app.open_worktree_compare_tab("app".into(), SHA.into(), disk_file("README.md", None));
+        load_worktree_tab(&mut app);
+        assert!(app.compare_probe_effects().is_empty(), "never HEAD-probed");
+        assert_eq!(app.worktree_compare_reload("app"), None, "nothing moved");
+
+        // README.md leaves the dirty set: its entry changed.
+        let clean = RepoSnapshot {
+            changes: Vec::new(),
+            has_unstaged: false,
+            ..repo("app")
+        };
+        app.apply_watch_snapshot(build_workspace_snapshot(&[clean], &[], false, &[]));
+        assert_eq!(app.worktree_compare_reload("lib"), None, "another checkout");
+        let Some(Effect::LoadCompareDiff {
+            repo: checkout,
+            source,
+            path,
+            old_path,
+            ..
+        }) = app.worktree_compare_reload("app")
+        else {
+            panic!("expected a diff reload");
+        };
+        assert_eq!(
+            (checkout.as_str(), path.as_str(), old_path.as_deref()),
+            ("app", "README.md", Some("OLD.md"))
+        );
+        assert!(matches!(source, CommitFileSource::CommitVsWorktree { .. }));
+        assert_eq!(app.worktree_compare_reload("app"), None, "reloaded once");
+
+        // A new HEAD with an empty list reloads the list.
+        let tab = app.tabs.active_compare_mut().unwrap();
+        tab.files.clear();
+        tab.path = None;
+        let moved = RepoSnapshot {
+            head: "def".into(),
+            ..repo("app")
+        };
+        app.apply_watch_snapshot(build_workspace_snapshot(&[moved], &[], false, &[]));
+        assert!(matches!(
+            app.worktree_compare_reload("app"),
+            Some(Effect::LoadCompareRange { force: true, .. })
+        ));
+
+        // Only the active tab reloads.
+        assert_eq!(app.activate_tab(0), Effect::None);
+        app.apply_watch_snapshot(build_workspace_snapshot(&[repo("app")], &[], false, &[]));
+        assert_eq!(app.worktree_compare_reload("app"), None);
     }
 }

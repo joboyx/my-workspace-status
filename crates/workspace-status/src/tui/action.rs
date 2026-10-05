@@ -232,6 +232,9 @@ pub enum Action {
     /// Find the commit that changed the focused line before its blame
     /// commit, then open that commit versus its first parent.
     BlamePreviousChange,
+    /// Open or focus a compare tab of the focused line's file at its blame
+    /// commit against that file in the working tree now.
+    BlameCommitVsWorktree,
     /// Select the focused line's blame commit in the Workspace graph,
     /// loading older pages until it shows.
     BlameRevealGraph,

@@ -95,9 +95,10 @@ use super::stash::{
 use super::status::StatusMessage;
 use super::tabs::{
     compare_file_dirty, compare_range_label, CommitPickerState, ComparePickerKind,
-    ComparePickerState, OpenCompare, TabStrip, CANNOT_REVERT_COMMITTED_DIFF, COMPARE_FOCUS_A_FILE,
-    COMPARE_HEAD_MOVED, COMPARE_HEAD_REF, COMPARE_STILL_LOADING, FOCUS_A_COMMIT_TO_DIFF,
-    ROOT_COMMIT_HAS_NO_PARENT, SWITCH_TO_WORKSPACE_TAB, WORKSPACE_TAB_CANNOT_CLOSE,
+    ComparePickerState, OpenCompare, TabStrip, WorktreeFile, CANNOT_REVERT_COMMITTED_DIFF,
+    CANNOT_REVERT_WORKTREE_COMPARE, COMPARE_FOCUS_A_FILE, COMPARE_HEAD_MOVED, COMPARE_HEAD_REF,
+    COMPARE_STILL_LOADING, FOCUS_A_COMMIT_TO_DIFF, ROOT_COMMIT_HAS_NO_PARENT,
+    SWITCH_TO_WORKSPACE_TAB, WORKSPACE_TAB_CANNOT_CLOSE,
 };
 use super::theme::{cycle_theme_id, theme_from_env, ThemeId};
 use super::tree::{
@@ -1399,7 +1400,11 @@ impl AppState {
             DrillView::Graph => return ExternalDiffKind::Worktree,
         };
         match source {
-            CommitFileSource::Worktree => ExternalDiffKind::Worktree,
+            // Only a compare tab holds `CommitVsWorktree`, and `E` refuses
+            // there (`compare_refusal`).
+            CommitFileSource::Worktree | CommitFileSource::CommitVsWorktree { .. } => {
+                ExternalDiffKind::Worktree
+            }
             CommitFileSource::Commit { commit_id } => ExternalDiffKind::Rev {
                 left_rev: format!("{commit_id}^"),
                 right_rev: commit_id.clone(),
@@ -1452,6 +1457,7 @@ impl AppState {
             CommitFileSource::Compare {
                 base_ref, head_ref, ..
             } => Some(compare_range_label(base_ref, head_ref)),
+            CommitFileSource::CommitVsWorktree { .. } => Some(source.short_label()),
             CommitFileSource::Commit { commit_id } => {
                 let short = if commit_id.len() >= 7 {
                     &commit_id[..7]
@@ -1597,7 +1603,9 @@ impl AppState {
                     format_commit_message(&stash.subject, &stash.body),
                 ))
             }
-            CommitFileSource::Worktree | CommitFileSource::Compare { .. } => None,
+            CommitFileSource::Worktree
+            | CommitFileSource::Compare { .. }
+            | CommitFileSource::CommitVsWorktree { .. } => None,
         }
     }
 
@@ -3595,8 +3603,9 @@ impl AppState {
 
     /// The compare-tab file that `x` would revert, or why it may not.
     ///
-    /// A tab with a pinned head refuses first (`cannot revert a committed
-    /// diff`).
+    /// A commit-vs-working-tree tab refuses first (`cannot revert a
+    /// working-tree compare`), then a tab with a pinned head (`cannot
+    /// revert a committed diff`).
     /// With a `V` highlight, or with the diff focused, the target is the
     /// open diff, and only once its content is loaded for the current
     /// range and path, and never while a folder summary hides it. On the
@@ -3606,6 +3615,10 @@ impl AppState {
         let Some(tab) = self.tabs.active_compare() else {
             return Err(SWITCH_TO_WORKSPACE_TAB.into());
         };
+        // The new side already is the working tree: nothing to restore.
+        if tab.worktree_file.is_some() {
+            return Err(CANNOT_REVERT_WORKTREE_COMPARE.into());
+        }
         // A pinned head is a commit in history, never the working tree.
         if tab.is_pinned() {
             return Err(CANNOT_REVERT_COMMITTED_DIFF.into());
@@ -5532,11 +5545,45 @@ impl AppState {
     }
 
     fn open_compare_tab(&mut self, checkout: String, base_ref: String, head_ref: String) -> Effect {
+        self.open_compare_tab_for(checkout, base_ref, head_ref, None)
+    }
+
+    /// Open or focus the commit-vs-working-tree tab of commit `base` (a
+    /// full id) and `file` in `checkout`. A new tab records the file's
+    /// [`Self::worktree_compare_stamp`] and loads.
+    pub(super) fn open_worktree_compare_tab(
+        &mut self,
+        checkout: String,
+        base: String,
+        file: WorktreeFile,
+    ) -> Effect {
+        self.open_compare_tab_for(checkout, base, COMPARE_HEAD_REF.into(), Some(file))
+    }
+
+    fn open_compare_tab_for(
+        &mut self,
+        checkout: String,
+        base_ref: String,
+        head_ref: String,
+        worktree_file: Option<WorktreeFile>,
+    ) -> Effect {
         let before = self.tabs.active;
         self.park_active_session();
-        let opened = self
-            .tabs
-            .open_or_focus(checkout.clone(), base_ref.clone(), head_ref.clone());
+        let stamp = worktree_file
+            .as_ref()
+            .and_then(|file| self.worktree_compare_stamp(&checkout, file));
+        let opened = match worktree_file {
+            Some(file) => {
+                self.tabs
+                    .open_or_focus_worktree(checkout.clone(), base_ref.clone(), file)
+            }
+            None => self
+                .tabs
+                .open_or_focus(checkout.clone(), base_ref.clone(), head_ref.clone()),
+        };
+        if let (OpenCompare::Created(_), Some(tab)) = (opened, self.tabs.active_compare_mut()) {
+            tab.worktree_stamp = stamp;
+        }
         if self.tabs.active != before {
             self.clear_tab_transients();
         }
@@ -5927,10 +5974,12 @@ impl AppState {
         }
     }
 
+    /// HEAD probes for loaded compare tabs. A commit-vs-working-tree tab
+    /// is never probed: [`Self::worktree_compare_reload`] watches it.
     pub(crate) fn compare_probe_effects(&self) -> Vec<Effect> {
         self.tabs
             .compare_tabs()
-            .filter(|tab| !tab.loading)
+            .filter(|tab| !tab.loading && tab.worktree_file.is_none())
             .map(|tab| Effect::ProbeCompareTab {
                 tab_id: tab.id,
                 repo: tab.checkout_path.clone(),
@@ -5940,6 +5989,82 @@ impl AppState {
                 last_base_tip: tab.last_base_tip.clone(),
             })
             .collect()
+    }
+
+    /// What a commit-vs-working-tree tab of `file` in `checkout` watches:
+    /// the checkout's HEAD, plus the workspace-snapshot change row and the
+    /// tree row signature (status, size, mtime) of the file's path and old
+    /// path. Reads loaded state only. `None` when the checkout is not in
+    /// the snapshot.
+    fn worktree_compare_stamp(&self, checkout: &str, file: &WorktreeFile) -> Option<String> {
+        let snap = self
+            .snapshot
+            .repos
+            .iter()
+            .find(|row| row.repo == checkout)?;
+        let mut stamp = snap.head.clone();
+        for path in [Some(file.path.as_str()), file.old_path.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            let change = snap
+                .changes
+                .iter()
+                .find(|change| change.path == path || change.old_path.as_deref() == Some(path));
+            stamp.push_str(&format!("|{change:?}"));
+            for id in [
+                format!("file:{checkout}:{path}"),
+                format!("file:{checkout}:{path}#unstaged"),
+            ] {
+                stamp.push('|');
+                stamp.push_str(self.signatures.get(&id).map_or("", String::as_str));
+            }
+        }
+        Some(stamp)
+    }
+
+    /// Watch: reload the active commit-vs-working-tree tab of `checkout`
+    /// when its [`Self::worktree_compare_stamp`] moved since the last load.
+    ///
+    /// Reloads the open file's diff in place (the viewport stays), or the
+    /// file list when it was empty. No git runs here.
+    pub(crate) fn worktree_compare_reload(&mut self, checkout: &str) -> Option<Effect> {
+        let tab = self.tabs.active_compare()?;
+        let file = tab.worktree_file.as_ref()?;
+        if tab.loading || tab.checkout_path != checkout {
+            return None;
+        }
+        let stamp = self.worktree_compare_stamp(checkout, file);
+        let tab = self.tabs.active_compare_mut()?;
+        if tab.worktree_stamp == stamp {
+            return None;
+        }
+        tab.worktree_stamp = stamp;
+        let repo = tab.checkout_path.clone();
+        let open = tab.path.clone().zip(tab.source.clone());
+        match open {
+            Some((path, source)) => {
+                let old_path = tab
+                    .files
+                    .iter()
+                    .find(|row| row.path == path)
+                    .and_then(|row| row.old_path.clone());
+                Some(Effect::LoadCompareDiff {
+                    tab_id: tab.id,
+                    repo,
+                    source,
+                    path,
+                    old_path,
+                })
+            }
+            None => Some(Effect::LoadCompareRange {
+                tab_id: tab.id,
+                repo,
+                base_ref: tab.base_ref.clone(),
+                head_ref: tab.head_ref.clone(),
+                force: true,
+            }),
+        }
     }
 }
 
@@ -15986,6 +16111,7 @@ diff --git a/README.md b/README.md
             unstaged: patch,
             is_new: false,
             is_committed: false,
+            vs_worktree: false,
             error: None,
         }
     }
@@ -16030,6 +16156,7 @@ diff --git a/README.md b/README.md
                 unstaged: String::new(),
                 is_new: false,
                 is_committed: false,
+                vs_worktree: false,
                 error: None,
             },
         );

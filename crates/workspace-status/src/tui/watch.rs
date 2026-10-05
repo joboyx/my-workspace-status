@@ -507,6 +507,9 @@ fn commit_file_source_key(source: &CommitFileSource) -> String {
             head,
             ..
         } => format!("compare:{base_ref}:{base_tip}:{merge_base}:{head}"),
+        CommitFileSource::CommitVsWorktree { base, path, .. } => {
+            format!("worktree-compare:{base}:{path}")
+        }
     }
 }
 

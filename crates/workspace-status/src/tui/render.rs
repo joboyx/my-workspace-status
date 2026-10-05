@@ -64,8 +64,8 @@ use super::syntax::{
     CodeSpan, DiffBackgrounds, DiffSyntaxKey,
 };
 use super::tabs::{
-    compare_picker_empty, file_gutter_width, file_too_large, no_committed_changes_vs,
-    ComparePickerState, FileTab, FILE_IS_BINARY, NO_COMMITTED_CHANGES,
+    compare_picker_empty, file_gutter_width, file_too_large, ComparePickerState, FileTab,
+    FILE_IS_BINARY,
 };
 use super::theme::ThemeId;
 use super::theme::{hex_color, Palette, Pill};
@@ -1240,7 +1240,7 @@ fn draw_commit_file_list(
             let copy = if tab.loading {
                 LOADING_FILES
             } else {
-                NO_COMMITTED_CHANGES
+                tab.empty_files_copy()
             };
             frame.render_widget(Paragraph::new(muted_copy(copy, palette)), area);
             return;
@@ -1472,9 +1472,7 @@ fn draw_diff_pane(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if rows.is_empty() {
         let mut color = palette.muted;
         let msg = if let Some(tab) = state.tabs.active_compare() {
-            tab.error
-                .clone()
-                .unwrap_or_else(|| no_committed_changes_vs(&tab.base_ref))
+            tab.error.clone().unwrap_or_else(|| tab.empty_diff_copy())
         } else if path.is_empty() {
             "select a dirty file".to_string()
         } else if let Some(err) = state.current_diff_content().error.as_deref() {
@@ -1879,7 +1877,9 @@ fn section_style(section: DiffSection, palette: Palette) -> Style {
     match section {
         DiffSection::Staged => Style::default().fg(palette.added),
         DiffSection::Unstaged => Style::default().fg(palette.modified),
-        DiffSection::New | DiffSection::Committed => Style::default().fg(palette.heading),
+        DiffSection::New | DiffSection::Committed | DiffSection::Worktree => {
+            Style::default().fg(palette.heading)
+        }
     }
 }
 

@@ -323,6 +323,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
+        title: "Blame: diff commit to working tree",
+        keys: "",
+        group: CommandGroup::Git,
+        action: Action::BlameCommitVsWorktree,
+        aliases: &["blame", "compare", "gitlens"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
         title: "Blame: show commit in graph",
         keys: "",
         group: CommandGroup::Git,
@@ -914,6 +922,13 @@ mod tests {
                 CommandScope::NoHighlight,
             ),
             (
+                "Blame: diff commit to working tree",
+                "",
+                CommandGroup::Git,
+                Action::BlameCommitVsWorktree,
+                CommandScope::NoHighlight,
+            ),
+            (
                 "Blame: show commit in graph",
                 "",
                 CommandGroup::Git,
@@ -1200,20 +1215,22 @@ mod tests {
         let blame_rows = vec![
             "Blame: open commit changes",
             "Blame: open previous line change",
+            "Blame: diff commit to working tree",
             "Blame: show commit in graph",
             "Line blame on / off",
         ];
         assert_eq!(titles("blame"), blame_rows);
         assert_eq!(titles("gitlens"), blame_rows);
         assert_eq!(titles("previous revision"), vec![blame_rows[1]]);
-        assert_eq!(titles("reveal"), vec![blame_rows[2]]);
+        assert_eq!(titles("working tree"), vec![blame_rows[2]]);
+        assert_eq!(titles("reveal"), vec![blame_rows[3]]);
         // The Blame rows sit right before the Diff … in new tab rows.
         let catalog: Vec<_> = PALETTE_COMMANDS.iter().map(|c| c.title).collect();
         let diff = catalog
             .iter()
             .position(|t| *t == "Diff vs default in new tab")
             .unwrap();
-        assert_eq!(catalog[diff - 3..diff], blame_rows[..3]);
+        assert_eq!(catalog[diff - 4..diff], blame_rows[..4]);
     }
 
     #[test]

@@ -12,7 +12,8 @@ use super::super::gates::{
 use super::super::status::StatusMessage;
 use super::super::tabs::{
     CANNOT_STAGE_COMPARE, CANNOT_UNSTAGE_COMPARE, DEFAULT_BRANCH_NOT_FOUND, FOCUS_A_CHECKOUT,
-    HEAD_HAS_NO_COMMIT, SWITCH_TO_WORKSPACE_TAB,
+    HEAD_HAS_NO_COMMIT, NOT_ON_WORKTREE_COMPARE, REVIEWED_MARKS_NEED_A_COMMIT_RANGE,
+    SWITCH_TO_WORKSPACE_TAB,
 };
 use super::{AppState, FocusPane};
 
@@ -33,7 +34,22 @@ impl AppState {
         if !self.is_compare_tab() {
             return None;
         }
+        let worktree_tab = self
+            .tabs
+            .active_compare()
+            .is_some_and(|tab| tab.worktree_file.is_some());
         let reason = match action {
+            // A commit-vs-working-tree tab has no commit range to key a
+            // mark, a comment, or a reference on, and no blob pair for `E`.
+            Action::ToggleReviewed if worktree_tab => REVIEWED_MARKS_NEED_A_COMMIT_RANGE,
+            Action::CommentStart
+            | Action::CopyEntityReference
+            | Action::ExportComments
+            | Action::ExternalDiff
+                if worktree_tab =>
+            {
+                NOT_ON_WORKTREE_COMPARE
+            }
             // A compare diff is commits only: there is no index side to write.
             Action::Stage => CANNOT_STAGE_COMPARE,
             Action::Unstage => CANNOT_UNSTAGE_COMPARE,
@@ -311,6 +327,7 @@ impl AppState {
             | Action::CompareCommitVsParent
             | Action::BlameCommitVsParent
             | Action::BlamePreviousChange
+            | Action::BlameCommitVsWorktree
             | Action::BlameRevealGraph
             | Action::CloseTab
             | Action::NextTab

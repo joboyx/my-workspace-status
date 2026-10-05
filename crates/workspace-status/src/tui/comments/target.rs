@@ -322,8 +322,10 @@ fn checkout_primary<'a>(
     })
 }
 
-fn entity_diff_source(source: Option<&CommitFileSource>) -> DiffSource {
-    match source {
+/// Comment source of a diff, or `None` for a commit-vs-working-tree
+/// compare, which has no comment key (its comment actions refuse).
+fn entity_diff_source(source: Option<&CommitFileSource>) -> Option<DiffSource> {
+    Some(match source {
         Some(CommitFileSource::Commit { commit_id }) => DiffSource::Commit {
             sha: commit_id.clone(),
         },
@@ -335,7 +337,8 @@ fn entity_diff_source(source: Option<&CommitFileSource>) -> DiffSource {
             base_ref: base_ref.clone(),
             head: head.clone(),
         },
-    }
+        Some(CommitFileSource::CommitVsWorktree { .. }) => return None,
+    })
 }
 
 fn resolve_diff_entity(
@@ -358,7 +361,7 @@ fn resolve_diff_entity(
         normalize_viewed_path(path),
         start_line,
         end_line,
-        entity_diff_source(diff_source),
+        entity_diff_source(diff_source)?,
         side,
     ))
 }

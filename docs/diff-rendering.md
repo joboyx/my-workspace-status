@@ -2,7 +2,7 @@
 
 `crates/workspace-status/src/tui/diff.rs` (paint in `tui/render.rs`, syntax in
 `tui/syntax.rs`, word ranges in `tui/word_diff.rs`). Path header, line-number gutter, and
-STAGED / UNSTAGED / NEW / COMMITTED labels. Changed words on a paired modified line get a
+STAGED / UNSTAGED / NEW / COMMITTED / WORKING TREE labels. Changed words on a paired modified line get a
 stronger background (see [Word highlight](#word-highlight)).
 
 ## Pipeline
@@ -23,6 +23,8 @@ word_diff.rs (paint time, on a span-cache miss) ──► word ranges per paired
 render.rs paints section headers, line-number gutter, and cells
 
 A compare tab uses `DiffContent::from_compare_lines`. The single section label is `COMMITTED`, not staged or unstaged. Header text is `<base-ref>...HEAD` (`abc1234^...abc1234` on a tab with a pinned head). `V` visual highlight paints on the compare diff the same way as on a Workspace file diff. `build_partial_patch` reads only that COMMITTED section for `PartialPatchKind::RevertCommitted` (compare `x` in a highlight, a reverse apply onto the worktree that restores the merge-base lines) and refuses a committed diff for every other kind. See [git-operations.md](./git-operations.md).
+
+A commit-vs-working-tree compare tab uses `DiffContent::from_worktree_compare_lines` (`vs_worktree`). Its one section label is `WORKING TREE`: the new side is the file on disk. Header text is `abc1234 ↔ working tree`. `build_partial_patch` refuses that content for every kind.
 ```
 
 `parse_unified_diff` skips file-level headers (`diff --git`, `index`, `---`, `+++`) until the first `@@`, tracks 1-based `old_no` / `new_no` per line, turns `\ No newline at end of file` into a `meta` line, and turns a `Binary files … differ` line into a single meta hunk with no header. Empty input returns no hunks, which is how "no diff" is detected upstream. A worktree `git diff` that fails keeps git's reason line in `DiffContent::error`, and the pane paints `git diff failed: <reason>` instead of `(no diff)`. When the other side loaded (staged ok, unstaged failed), `build_diff_rows` ends with a `DiffRow::Error` row carrying that text in the `deleted` colour.
