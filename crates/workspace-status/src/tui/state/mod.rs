@@ -3,6 +3,7 @@
 mod dispatch;
 mod dispatch_drill;
 mod dispatch_keymap;
+mod dispatch_quick_open;
 mod dispatch_write;
 mod pan;
 
@@ -33,7 +34,6 @@ use super::branches::{
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
 };
 use super::chrome::{diverged_pull_status, status_uses_status_text, STATUS_NO_COMMENTS};
-use super::command_palette::CommandPaletteState;
 #[cfg(not(test))]
 use super::comments::comment_store_path;
 use super::comments::{
@@ -70,6 +70,7 @@ use super::ops::{
     collect_write_files, format_running_op, op_is_kind_noop, op_kind_noop_reason, op_targets,
     push_targets, refresh_target, Op, RevertScope, RunningOp, ScopedFile,
 };
+use super::quick_open::QuickOpenState;
 use super::search::{
     collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids,
     focus_commit_file_search, focus_diff_search, focus_graph_search, focus_tree_search,
@@ -549,7 +550,10 @@ pub struct AppState {
     /// Per-repo local branch names whose ancestors the graph shows. `None` = `--all`.
     pub graph_branch_focus: Option<(String, Vec<String>)>,
     pub create_branch: Option<CreateBranchState>,
-    pub command_palette: Option<CommandPaletteState>,
+    /// Open Quick Open overlay (`:` files, Ctrl-k / `>` commands).
+    pub quick_open: Option<QuickOpenState>,
+    /// Session counter for Quick Open index and score generations.
+    quick_open_gen: u64,
     /// Permanent Workspace plus session compare tabs.
     pub tabs: TabStrip,
     pub compare_picker: Option<ComparePickerState>,
@@ -694,7 +698,8 @@ impl AppState {
             graph_focus_picker: None,
             graph_branch_focus: None,
             create_branch: None,
-            command_palette: None,
+            quick_open: None,
+            quick_open_gen: 0,
             tabs: TabStrip::default(),
             compare_picker: None,
             compare_picker_pending: None,
@@ -750,8 +755,8 @@ impl AppState {
             InputMode::ComparePicker
         } else if self.graph_focus_picker.is_some() {
             InputMode::GraphFocusPicker
-        } else if self.command_palette.is_some() {
-            InputMode::CommandPalette
+        } else if self.quick_open.is_some() {
+            InputMode::QuickOpen
         } else if self.help_open {
             if self.help_search_query.is_some() {
                 InputMode::HelpSearch
@@ -15590,16 +15595,17 @@ diff --git a/README.md b/README.md
         assert_eq!(app.status, "nothing to revert in highlight");
     }
 
-    /// Open the palette, filter to `title`, and put the cursor on that row.
+    /// Open Quick Open in commands mode, filter to `title`, and put the
+    /// cursor on that row.
     fn palette_select(app: &mut AppState, title: &str) {
-        use super::super::action::PaletteOpenedBy;
-        if app.command_palette.is_none() {
-            app.dispatch(Action::ToggleCommandPalette(PaletteOpenedBy::Colon));
+        use super::super::action::QuickOpenEntry;
+        if app.quick_open.is_none() {
+            app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
         }
         for c in title.chars() {
-            app.dispatch(Action::CommandPaletteChar(c));
+            app.dispatch(Action::QuickOpenChar(c));
         }
-        let palette = app.command_palette.as_mut().expect("palette open");
+        let palette = app.command_palette_mut().expect("palette open");
         let index = palette
             .visible()
             .iter()
@@ -15616,13 +15622,13 @@ diff --git a/README.md b/README.md
         let anchor = app.diff_visual_anchor;
         let cursor = app.diff_cursor;
         assert_eq!(app.input_mode(), InputMode::DiffVisual);
-        app.dispatch(Action::ToggleCommandPalette(
-            super::super::action::PaletteOpenedBy::CtrlK,
+        app.dispatch(Action::ToggleQuickOpen(
+            super::super::action::QuickOpenEntry::Commands,
         ));
-        assert_eq!(app.input_mode(), InputMode::CommandPalette);
+        assert_eq!(app.input_mode(), InputMode::QuickOpen);
         assert_eq!(app.diff_visual_anchor, anchor, "open keeps the anchor");
-        app.dispatch(Action::CommandPaletteCancel);
-        assert!(app.command_palette.is_none());
+        app.dispatch(Action::QuickOpenCancel);
+        assert!(app.quick_open.is_none());
         assert_eq!(app.diff_visual_anchor, anchor, "Esc keeps the anchor");
         assert_eq!(app.diff_cursor, cursor);
         assert_eq!(app.input_mode(), InputMode::DiffVisual);
@@ -15630,13 +15636,13 @@ diff --git a/README.md b/README.md
 
     /// Open the palette, type `filter`, and return the row under the cursor.
     fn palette_cursor_title(app: &mut AppState, filter: &str) -> &'static str {
-        app.dispatch(Action::ToggleCommandPalette(
-            super::super::action::PaletteOpenedBy::CtrlK,
+        app.dispatch(Action::ToggleQuickOpen(
+            super::super::action::QuickOpenEntry::Commands,
         ));
         for c in filter.chars() {
-            app.dispatch(Action::CommandPaletteChar(c));
+            app.dispatch(Action::QuickOpenChar(c));
         }
-        let palette = app.command_palette.as_ref().expect("palette open");
+        let palette = app.command_palette().expect("palette open");
         palette.selected().expect("a visible row").title
     }
 
@@ -15654,16 +15660,16 @@ diff --git a/README.md b/README.md
             .expect("catalog row");
         assert_ne!(command.group, CommandGroup::Highlight, "{first}");
         assert_eq!(app.palette_disabled_reason(command), None, "{first}");
-        app.command_palette = None;
+        app.quick_open = None;
 
         assert_eq!(palette_cursor_title(&mut app, "revert"), "Revert");
         // Backspace re-lands the cursor on the wider list too.
-        app.dispatch(Action::CommandPaletteBackspace);
-        let palette = app.command_palette.as_ref().expect("palette open");
+        app.dispatch(Action::QuickOpenBackspace);
+        let palette = app.command_palette().expect("palette open");
         assert_eq!(palette.selected().map(|c| c.title), Some("Revert"));
         // j / k still reach the disabled HIGHLIGHT row.
-        app.dispatch(Action::CommandPaletteMove(-1));
-        let palette = app.command_palette.as_ref().expect("palette open");
+        app.dispatch(Action::QuickOpenMove(-1));
+        let palette = app.command_palette().expect("palette open");
         assert_eq!(
             palette.selected().map(|c| c.title),
             Some("Revert highlighted lines")
@@ -15705,9 +15711,9 @@ diff --git a/README.md b/README.md
             assert_eq!(palette_reason(&app, title), None, "{title}");
         }
         palette_select(&mut app, "Fetch remotes");
-        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
         assert!(
-            app.command_palette.is_some(),
+            app.command_palette().is_some(),
             "a disabled row keeps the palette open"
         );
         assert_eq!(app.status, "exit highlight first (Esc)");
@@ -15788,14 +15794,14 @@ diff --git a/README.md b/README.md
         focus_repo(&mut app, "app");
         assert_eq!(app.focus, FocusPane::Left);
         palette_select(&mut app, "Other pane");
-        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
-        assert!(app.command_palette.is_none());
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.quick_open.is_none());
         assert_eq!(app.focus, FocusPane::Right);
         palette_select(&mut app, "Other pane");
-        app.dispatch(Action::CommandPaletteSubmit);
+        app.dispatch(Action::QuickOpenSubmit);
         assert_eq!(app.focus, FocusPane::Left, "Tab goes back from the right");
         palette_select(&mut app, "Quit");
-        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::Quit);
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::Quit);
     }
 
     #[test]
@@ -15804,8 +15810,8 @@ diff --git a/README.md b/README.md
         focus_id(&mut app, "repo:app");
         assert!(!app.folds.contains("repo:app"));
         palette_select(&mut app, "Fold subtree");
-        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
-        assert!(app.command_palette.is_none());
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.quick_open.is_none());
         assert!(app.folds.contains("repo:app"), "the focused parent folds");
         assert!(app.folds.contains("dir:app:src"), "its children fold too");
         assert!(
@@ -15814,7 +15820,7 @@ diff --git a/README.md b/README.md
         );
 
         palette_select(&mut app, "Fold subtree");
-        app.dispatch(Action::CommandPaletteSubmit);
+        app.dispatch(Action::QuickOpenSubmit);
         assert!(!app.folds.contains("repo:app"), "a second run opens it");
         assert!(!app.folds.contains("dir:app:src"));
         assert!(app.rows.iter().any(|r| r.id == "file:app:src/lib.rs"));
@@ -15822,17 +15828,17 @@ diff --git a/README.md b/README.md
 
     #[test]
     fn palette_alias_finds_a_row_and_runs_it() {
-        use super::super::action::PaletteOpenedBy;
+        use super::super::action::QuickOpenEntry;
         let mut app = state();
         focus_repo(&mut app, "app");
-        app.dispatch(Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK));
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
         for c in "exit".chars() {
-            app.dispatch(Action::CommandPaletteChar(c));
+            app.dispatch(Action::QuickOpenChar(c));
         }
-        let palette = app.command_palette.as_ref().expect("palette open");
+        let palette = app.command_palette().expect("palette open");
         assert_eq!(palette.filter, "exit");
         assert_eq!(palette.selected().map(|c| c.title), Some("Quit"));
-        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::Quit);
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::Quit);
     }
 
     #[test]
@@ -15846,9 +15852,9 @@ diff --git a/README.md b/README.md
             app.diff_visual_anchor.is_none(),
             "the reload drops the range"
         );
-        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
         assert!(
-            app.command_palette.is_some(),
+            app.command_palette().is_some(),
             "a disabled row keeps it open"
         );
         assert_eq!(app.status, "highlight diff lines first (V)");
@@ -15860,16 +15866,16 @@ diff --git a/README.md b/README.md
         focus_readme_diff(&mut app, two_hunk_readme());
         highlight_first_readme_hunk(&mut app);
         palette_select(&mut app, "Fetch remotes");
-        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
         assert_eq!(app.status, "exit highlight first (Esc)");
-        app.dispatch(Action::CommandPaletteCancel);
+        app.dispatch(Action::QuickOpenCancel);
         assert_eq!(app.input_mode(), InputMode::DiffVisual);
         assert_eq!(app.status, "", "the reason does not linger in highlight");
 
         // A status the palette did not set stays.
         app.status = "staged range README.md".into();
         palette_select(&mut app, "Fetch remotes");
-        app.dispatch(Action::CommandPaletteCancel);
+        app.dispatch(Action::QuickOpenCancel);
         assert_eq!(app.status, "staged range README.md");
     }
 
@@ -15880,8 +15886,8 @@ diff --git a/README.md b/README.md
         highlight_first_readme_hunk(&mut app);
         assert_eq!(palette_reason(&app, "Exit highlight"), None);
         palette_select(&mut app, "Exit highlight");
-        assert_eq!(app.dispatch(Action::CommandPaletteSubmit), Effect::None);
-        assert!(app.command_palette.is_none());
+        assert_eq!(app.dispatch(Action::QuickOpenSubmit), Effect::None);
+        assert!(app.quick_open.is_none());
         assert!(app.diff_visual_anchor.is_none());
     }
 
@@ -15896,7 +15902,7 @@ diff --git a/README.md b/README.md
             Some("nothing to unstage in highlight")
         );
         palette_select(&mut app, "Stage highlighted lines");
-        match app.dispatch(Action::CommandPaletteSubmit) {
+        match app.dispatch(Action::QuickOpenSubmit) {
             Effect::ApplyCachedPatch { patch, reverse, .. } => {
                 assert!(!reverse);
                 assert!(

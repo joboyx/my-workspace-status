@@ -194,23 +194,23 @@ pub enum Action {
     GraphFocusCancel,
     CycleTheme,
     ToggleMouse,
-    /// Open or close the command palette (`Ctrl-k` or `:`).
+    /// Open or close the Quick Open overlay (`:` files, `Ctrl-k` commands).
     ///
-    /// Stores [`PaletteOpenedBy`] on open so the prompt prefix matches the
-    /// key that opened it. The keymap sends it only while the palette is
-    /// closed (inside it Ctrl-k moves and `:` types); a dispatch while it is
-    /// up closes it with no run.
-    ToggleCommandPalette(PaletteOpenedBy),
-    /// Move the command-palette highlight (`j` / `k` / arrows).
-    CommandPaletteMove(i32),
-    /// Append a filter character. `j` / `k` are moves, not chars.
-    CommandPaletteChar(char),
-    /// Delete the last filter character.
-    CommandPaletteBackspace,
-    /// Close the palette, then dispatch the highlighted enabled command.
-    CommandPaletteSubmit,
+    /// [`QuickOpenEntry`] picks the starting mode on open. The keymap sends
+    /// it only while the overlay is closed (inside it Ctrl-k moves and `:`
+    /// types); a dispatch while it is up closes it with no run.
+    ToggleQuickOpen(QuickOpenEntry),
+    /// Move the Quick Open highlight (arrows, Ctrl-n / Ctrl-p).
+    QuickOpenMove(i32),
+    /// Append a query character (`>` first switches to commands mode).
+    QuickOpenChar(char),
+    /// Delete the last query character.
+    QuickOpenBackspace,
+    /// Commands mode: close, then dispatch the highlighted enabled command.
+    /// Files mode: act on the highlighted file hit.
+    QuickOpenSubmit,
     /// Esc close. No run.
-    CommandPaletteCancel,
+    QuickOpenCancel,
     /// Open or focus a compare tab versus the checkout default tip.
     CompareVsDefault,
     /// Open the compare-only branch picker.
@@ -248,13 +248,14 @@ pub enum Action {
     None,
 }
 
-/// Which key opened the command palette.
+/// Mode the Quick Open overlay starts in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PaletteOpenedBy {
-    /// `:` from Normal or a pending `z` / `g` chord.
-    Colon,
-    /// Ctrl-K from Normal or a pending `z` / `g` chord.
-    CtrlK,
+pub enum QuickOpenEntry {
+    /// `:` from Normal or a pending `z` / `g` chord: files mode, empty query.
+    Files,
+    /// Ctrl-k from Normal or a pending `z` / `g` chord: commands mode with
+    /// `>` already in the query.
+    Commands,
 }
 
 /// LEFT/RIGHT pair for [`Effect::ExternalDiff`].
@@ -464,6 +465,19 @@ pub enum Effect {
         head_ref: String,
         last_head: Option<String>,
         last_base_tip: Option<String>,
+    },
+    /// List the files of `roots` for Quick Open (`git ls-files` per root).
+    /// `gen` is the overlay's index generation; a stale result is dropped.
+    LoadFileIndex {
+        gen: u64,
+        roots: Vec<crate::file_index::IndexRoot>,
+    },
+    /// Fuzzy-rank `index` against `query` for Quick Open. `gen` is the
+    /// overlay's score generation; a stale result is dropped.
+    ScoreFiles {
+        gen: u64,
+        index: std::sync::Arc<crate::file_index::FileIndex>,
+        query: String,
     },
     /// Copy `text` to the clipboard (OSC 52 / host tool).
     CopyClipboard {

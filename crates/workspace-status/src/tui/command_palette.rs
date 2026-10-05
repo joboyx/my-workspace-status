@@ -1,10 +1,10 @@
-//! Named-command overlay (`Ctrl-k` / `:`).
+//! The commands mode of Quick Open (`Ctrl-k`, or `>` typed first after `:`).
 //!
 //! Filter is case-insensitive substring on title, key chips, group, and
 //! aliases (`exit` finds Quit, `compare` the Diff … in new tab rows).
 //! Execute is close-then-dispatch through [`super::state::AppState::dispatch`].
 
-use super::action::{Action, PaletteOpenedBy};
+use super::action::Action;
 
 /// Palette group names (HIGHLIGHT, then the help columns MOVE / GIT / VIEW).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -543,10 +543,8 @@ pub fn visible_groups(query: &str) -> Vec<CommandGroup> {
 }
 
 /// Interactive palette state (filter + highlight).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CommandPaletteState {
-    /// Key that opened the overlay (`:` vs Ctrl-k prompt prefix).
-    pub opened_by: PaletteOpenedBy,
     /// Filter query (substring).
     pub filter: String,
     /// Highlight index into [`Self::visible`].
@@ -559,9 +557,8 @@ pub struct CommandPaletteState {
 impl CommandPaletteState {
     /// Empty filter, cursor on row 0. `AppState` then moves it to the first
     /// enabled row.
-    pub fn new(opened_by: PaletteOpenedBy) -> Self {
+    pub fn new() -> Self {
         Self {
-            opened_by,
             filter: String::new(),
             cursor: 0,
             shown_reason: None,
@@ -594,15 +591,9 @@ impl CommandPaletteState {
         self.cursor = next.clamp(0, len as i32 - 1) as usize;
     }
 
-    /// Append a filter character and clamp the highlight.
-    pub fn push_char(&mut self, c: char) {
-        self.filter.push(c);
-        self.clamp_cursor();
-    }
-
-    /// Delete the last filter character and clamp the highlight.
-    pub fn backspace(&mut self) {
-        self.filter.pop();
+    /// Replace the filter query and clamp the highlight.
+    pub fn set_filter(&mut self, filter: &str) {
+        self.filter = filter.to_string();
         self.clamp_cursor();
     }
 
@@ -1110,14 +1101,11 @@ mod tests {
 
     #[test]
     fn filter_typing_j_and_k_matches_rows_like_any_letter() {
-        let mut palette = CommandPaletteState::new(PaletteOpenedBy::Colon);
-        for c in "keymap".chars() {
-            palette.push_char(c);
-        }
+        let mut palette = CommandPaletteState::new();
+        palette.set_filter("keymap");
         assert_eq!(palette.filter, "keymap");
         assert_eq!(palette.selected().map(|c| c.title), Some("Keymap help"));
-        palette.filter = String::new();
-        palette.push_char('j');
+        palette.set_filter("j");
         assert!(palette.visible().is_empty(), "no row names a j");
     }
 
@@ -1176,7 +1164,7 @@ mod tests {
 
     #[test]
     fn highlight_group_paints_first() {
-        let palette = CommandPaletteState::new(PaletteOpenedBy::Colon);
+        let palette = CommandPaletteState::new();
         let headers: Vec<&str> = palette
             .paint_rows()
             .into_iter()
@@ -1205,7 +1193,7 @@ mod tests {
 
     #[test]
     fn cursor_clamps_like_branch_picker() {
-        let mut palette = CommandPaletteState::new(PaletteOpenedBy::Colon);
+        let mut palette = CommandPaletteState::new();
         palette.filter = "keymap".into();
         palette.clamp_cursor();
         palette.move_cursor(20);

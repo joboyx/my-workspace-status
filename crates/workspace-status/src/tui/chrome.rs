@@ -430,7 +430,7 @@ pub fn ctrl_c_prompt_pinned(state: &AppState) -> bool {
         && state.create_branch.is_none()
         && state.comment.is_none()
         && state.comment_export.is_none()
-        && state.command_palette.is_none()
+        && state.quick_open.is_none()
 }
 
 /// Bold quit-prompt line painted between the breadcrumb and the status / overlay.
@@ -468,8 +468,8 @@ pub enum DialogKind {
     ComparePicker,
     /// Graph branch focus picker.
     GraphFocusPicker,
-    /// `:` / Ctrl-k command palette.
-    CommandPalette,
+    /// Quick Open: `:` files, Ctrl-k / `>` commands.
+    QuickOpen,
 }
 
 /// The dialog that paints this frame, or `None` when only the panes and
@@ -496,8 +496,8 @@ pub fn open_dialog(state: &AppState) -> Option<DialogKind> {
         Some(DialogKind::ComparePicker)
     } else if state.graph_focus_picker.is_some() {
         Some(DialogKind::GraphFocusPicker)
-    } else if state.command_palette.is_some() {
-        Some(DialogKind::CommandPalette)
+    } else if state.quick_open.is_some() {
+        Some(DialogKind::QuickOpen)
     } else {
         None
     }
@@ -516,7 +516,7 @@ const LIST_OVERLAY_CHROME_ROWS: u16 = 4;
 /// The cursor row stays in the window.
 pub const LIST_OVERLAY_MAX_ROWS: usize = 12;
 
-/// Fixed height of a list dialog (pickers and the command palette).
+/// Fixed height of a list dialog (pickers and Quick Open).
 ///
 /// Border (2), query / title row, [`LIST_OVERLAY_MAX_ROWS`] rows, the
 /// reserved status row, and the footer. The result count never changes it.
@@ -575,7 +575,7 @@ pub fn dialog_height(state: &AppState, kind: DialogKind, width: u16) -> u16 {
         DialogKind::BranchPicker
         | DialogKind::ComparePicker
         | DialogKind::GraphFocusPicker
-        | DialogKind::CommandPalette => LIST_DIALOG_ROWS,
+        | DialogKind::QuickOpen => LIST_DIALOG_ROWS,
     }
 }
 
@@ -1154,7 +1154,7 @@ pub(crate) fn status_uses_status_text(state: &AppState) -> bool {
         || state.create_branch.is_some()
         || state.comment.is_some()
         || state.comment_export.is_some()
-        || state.command_palette.is_some()
+        || state.quick_open.is_some()
 }
 
 fn breadcrumb_op_status(state: &AppState) -> String {
@@ -1879,7 +1879,7 @@ mod tests {
     #[test]
     fn dialog_rect_centers_inside_pane_area() {
         let area = Rect::new(0, 1, 120, 30);
-        let width = dialog_width(area, DialogKind::CommandPalette);
+        let width = dialog_width(area, DialogKind::QuickOpen);
         assert_eq!(width, DIALOG_MAX_WIDTH);
         let rect = dialog_rect(area, width, LIST_DIALOG_ROWS);
         assert_eq!(rect.width, 96);
@@ -2131,15 +2131,18 @@ mod tests {
     }
 
     #[test]
-    fn command_palette_uses_list_dialog_height() {
-        use crate::tui::action::PaletteOpenedBy;
-        use crate::tui::command_palette::CommandPaletteState;
+    fn quick_open_uses_list_dialog_height() {
+        use crate::tui::action::QuickOpenEntry;
+        use crate::tui::quick_open::{QuickOpenScope, QuickOpenState};
         let mut app = state();
-        app.command_palette = Some(CommandPaletteState::new(PaletteOpenedBy::CtrlK));
-        assert_eq!(open_dialog(&app), Some(DialogKind::CommandPalette));
+        app.quick_open = Some(QuickOpenState::new(
+            QuickOpenEntry::Commands,
+            QuickOpenScope::Workspace,
+        ));
+        assert_eq!(open_dialog(&app), Some(DialogKind::QuickOpen));
         assert_eq!(LIST_DIALOG_ROWS, 17);
         assert_eq!(
-            dialog_height(&app, DialogKind::CommandPalette, 96),
+            dialog_height(&app, DialogKind::QuickOpen, 96),
             LIST_DIALOG_ROWS
         );
         assert_eq!(line_plain(&status_line(&app, 80)), "");
@@ -2147,7 +2150,7 @@ mod tests {
         assert_eq!(
             ctrl_c_prompt_rows(&app),
             0,
-            "palette shows the quit prompt inline"
+            "Quick Open shows the quit prompt inline"
         );
     }
 

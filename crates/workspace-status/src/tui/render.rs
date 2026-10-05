@@ -22,6 +22,7 @@ use super::chrome::{
     dialog_rect, dialog_width, export_shows_status, open_dialog, status_line, DialogKind,
     LIST_OVERLAY_MAX_ROWS,
 };
+use super::command_palette::{CommandPaletteState, PalettePaintRow};
 use super::comments::{
     comment_overlay_footer_save, commit_file_row_comments_resolved, commit_file_row_has_comment,
     graph_row_comments_resolved, graph_row_has_comment, tree_row_comments_resolved,
@@ -46,6 +47,7 @@ use super::icons::{
     CURSOR_BAR_INACTIVE, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
 };
 use super::ops::RevertScope;
+use super::quick_open::{FileIndexState, QuickOpenMode, QuickOpenState};
 use super::search::{
     collect_commit_file_match_indices, collect_graph_match_indices, collect_match_ids, slice_cols,
     wrap_col_starts, wrap_cols, SearchPane,
@@ -312,7 +314,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
             DialogKind::BranchPicker => draw_branch_picker(frame, rect, state),
             DialogKind::ComparePicker => draw_compare_picker(frame, rect, state),
             DialogKind::GraphFocusPicker => draw_graph_focus_picker(frame, rect, state),
-            DialogKind::CommandPalette => draw_command_palette(frame, rect, state),
+            DialogKind::QuickOpen => draw_quick_open(frame, rect, state),
         }
     }
 
@@ -3229,8 +3231,8 @@ fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
     );
 }
 
-fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let Some(palette) = state.command_palette.as_ref() else {
+fn draw_quick_open(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let Some(quick) = state.quick_open.as_ref() else {
         return;
     };
     if area.width == 0 || area.height == 0 {
@@ -3238,13 +3240,184 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     }
     let palette_theme = state.theme.palette();
     let accent = palette_theme.cursor;
-    let surface = overlay_surface(state);
-    let paint_rows = palette.paint_rows();
+    let muted = Style::default().fg(palette_theme.muted);
     // Rounded border plus one column of padding on each side.
     let inner_width = area.width.saturating_sub(4) as usize;
     let max_rows = list_dialog_rows(area.height.saturating_sub(2));
+    let files = quick.mode() == QuickOpenMode::Files;
+    let title = if files {
+        quick.scope.title()
+    } else {
+        "Commands".to_string()
+    };
+    let block = overlay_block(accent).title(Span::styled(
+        title,
+        Style::default()
+            .fg(palette_theme.heading)
+            .add_modifier(Modifier::BOLD),
+    ));
+    let caret = Span::styled("▏", Style::default().fg(accent));
+    let header = if files && quick.query.is_empty() {
+        Line::from(vec![caret, Span::styled("type a file name…", muted)])
+    } else {
+        let (query, _) = cut_left(&quick.query, inner_width.saturating_sub(1));
+        Line::from(vec![
+            Span::styled(query, Style::default().fg(accent)),
+            caret,
+        ])
+    };
+    let (rows, status, footer) = if files {
+        let status = if state.status.is_empty() {
+            Line::from(Span::styled(quick.file_status_text(), muted))
+        } else {
+            list_dialog_status(state, palette_theme)
+        };
+        (
+            quick_open_file_rows(quick, palette_theme, max_rows, inner_width),
+            status,
+            "↑↓ move · Enter open · > commands · Esc close".to_string(),
+        )
+    } else {
+        let commands = &quick.commands;
+        let reason = commands
+            .selected()
+            .and_then(|command| state.palette_disabled_reason(command));
+        let footer = match reason {
+            Some(why) => format!("Enter run · Esc close · {why}"),
+            None => "Enter run · Esc close".into(),
+        };
+        (
+            quick_open_command_rows(state, commands, max_rows, inner_width),
+            list_dialog_status(state, palette_theme),
+            footer,
+        )
+    };
+    paint_list_dialog(
+        frame,
+        area,
+        block,
+        header,
+        rows,
+        status,
+        Line::from(Span::styled(footer, muted)),
+    );
+}
+
+/// `text` cut from the left to `width` columns, a leading `…` in place of
+/// the dropped head. Also returns how many chars were dropped.
+fn cut_left(text: &str, width: usize) -> (String, usize) {
+    if visible_width(text) <= width {
+        return (text.to_string(), 0);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let budget = width.saturating_sub(1);
+    let mut used = 0;
+    let mut keep_from = chars.len();
+    let mut buf = [0u8; 4];
+    while keep_from > 0 {
+        let w = visible_width(chars[keep_from - 1].encode_utf8(&mut buf));
+        if used + w > budget {
+            break;
+        }
+        used += w;
+        keep_from -= 1;
+    }
+    let kept: String = chars[keep_from..].iter().collect();
+    (format!("…{kept}"), keep_from)
+}
+
+/// Files-mode rows: `❯ ` on the cursor row, each path cut from the left so
+/// the file name stays, matched chars bold in the accent color.
+fn quick_open_file_rows(
+    quick: &QuickOpenState,
+    palette: Palette,
+    max_rows: usize,
+    inner_width: usize,
+) -> Vec<Line<'static>> {
+    let FileIndexState::Ready(index) = &quick.index else {
+        return Vec::new();
+    };
+    let len = quick.hits.len();
+    let start = if len <= max_rows {
+        0
+    } else {
+        quick
+            .file_cursor
+            .saturating_sub(max_rows / 2)
+            .min(len - max_rows)
+    };
+    let path_cols = inner_width.saturating_sub(2);
+    let mut rows = Vec::new();
+    for (offset, hit) in quick.hits.iter().skip(start).take(max_rows).enumerate() {
+        let Some(entry) = index.entries.get(hit.entry) else {
+            continue;
+        };
+        let selected = start + offset == quick.file_cursor;
+        let row_bg = if selected {
+            palette.cursor_bg
+        } else {
+            Color::Reset
+        };
+        let plain = Style::default()
+            .fg(if selected {
+                palette.file
+            } else {
+                palette.muted
+            })
+            .bg(row_bg);
+        let matched = Style::default()
+            .fg(palette.cursor)
+            .bg(row_bg)
+            .add_modifier(Modifier::BOLD);
+        let mut spans = vec![Span::styled(
+            if selected { "❯ " } else { "  " },
+            Style::default()
+                .fg(if selected {
+                    palette.cursor
+                } else {
+                    palette.muted
+                })
+                .bg(row_bg),
+        )];
+        let (shown, dropped) = cut_left(&entry.display, path_cols);
+        // With a cut, painted char 0 is the `…` and char i is source char
+        // `i - 1 + dropped`.
+        let skip = usize::from(dropped > 0);
+        let mut run = String::new();
+        let mut run_matched = false;
+        for (i, ch) in shown.chars().enumerate() {
+            let is_match = i >= skip
+                && u32::try_from(i - skip + dropped)
+                    .is_ok_and(|pos| hit.indices.binary_search(&pos).is_ok());
+            if is_match != run_matched && !run.is_empty() {
+                let style = if run_matched { matched } else { plain };
+                spans.push(Span::styled(std::mem::take(&mut run), style));
+            }
+            run_matched = is_match;
+            run.push(ch);
+        }
+        if !run.is_empty() {
+            spans.push(Span::styled(run, if run_matched { matched } else { plain }));
+        }
+        rows.push(Line::from(spans));
+    }
+    rows
+}
+
+/// Commands-mode rows: group headers, command titles, key chips, and the
+/// disabled reason at the right edge when it fits.
+fn quick_open_command_rows(
+    state: &AppState,
+    palette: &CommandPaletteState,
+    max_rows: usize,
+    inner_width: usize,
+) -> Vec<Line<'static>> {
+    let palette_theme = state.theme.palette();
+    let accent = palette_theme.cursor;
+    let surface = overlay_surface(state);
+    let paint_rows = palette.paint_rows();
     let cursor_paint = paint_rows.iter().position(|row| match row {
-        super::command_palette::PalettePaintRow::Command { index, .. } => *index == palette.cursor,
+        PalettePaintRow::Command { index, .. } => *index == palette.cursor,
         _ => false,
     });
     let start = if paint_rows.len() <= max_rows {
@@ -3255,33 +3428,7 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             .saturating_sub(max_rows / 2)
             .min(paint_rows.len() - max_rows)
     };
-    let window = if paint_rows.is_empty() {
-        Vec::new()
-    } else {
-        paint_rows
-            .iter()
-            .skip(start)
-            .take(max_rows)
-            .cloned()
-            .collect()
-    };
-    let prefix = match palette.opened_by {
-        super::action::PaletteOpenedBy::Colon => ":",
-        super::action::PaletteOpenedBy::CtrlK => "Ctrl-k",
-    };
-    let query = if palette.filter.is_empty() {
-        "…"
-    } else {
-        palette.filter.as_str()
-    };
-    let header = Line::from(vec![
-        Span::styled(
-            prefix.to_string(),
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" ", Style::default()),
-        Span::styled(query.to_string(), Style::default().fg(accent)),
-    ]);
+    let window: Vec<PalettePaintRow> = paint_rows.into_iter().skip(start).take(max_rows).collect();
     let mut lines = Vec::new();
     if window.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -3295,7 +3442,7 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         let mut header_painted = false;
         for row in window {
             match row {
-                super::command_palette::PalettePaintRow::Header(title) => {
+                PalettePaintRow::Header(title) => {
                     header_painted = true;
                     lines.push(Line::from(Span::styled(
                         title.to_string(),
@@ -3304,7 +3451,7 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                             .add_modifier(Modifier::BOLD),
                     )));
                 }
-                super::command_palette::PalettePaintRow::Command { command, index } => {
+                PalettePaintRow::Command { command, index } => {
                     let selected = index == palette.cursor;
                     let reason = state.palette_disabled_reason(command);
                     let disabled = reason.is_some();
@@ -3385,25 +3532,7 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             }
         }
     }
-    let reason = palette
-        .selected()
-        .and_then(|command| state.palette_disabled_reason(command));
-    let footer = match reason {
-        Some(why) => format!("Enter run · Esc close · {why}"),
-        None => "Enter run · Esc close".into(),
-    };
-    paint_list_dialog(
-        frame,
-        area,
-        overlay_block(accent),
-        header,
-        lines,
-        list_dialog_status(state, palette_theme),
-        Line::from(Span::styled(
-            footer,
-            Style::default().fg(palette_theme.muted),
-        )),
-    );
+    lines
 }
 
 fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -7983,13 +8112,13 @@ mod tests {
 
     #[test]
     fn palette_rows_paint_their_reason_and_skip_empty_chips() {
-        use crate::tui::action::{Action, PaletteOpenedBy};
+        use crate::tui::action::{Action, QuickOpenEntry};
         use crate::tui::tabs::{ONLY_WORKSPACE_TAB_OPEN, WORKSPACE_TAB_CANNOT_CLOSE};
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
-        state.dispatch(Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK));
+        state.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
         for c in "tab".chars() {
-            state.dispatch(Action::CommandPaletteChar(c));
+            state.dispatch(Action::QuickOpenChar(c));
         }
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         draw_state(&mut terminal, &mut state);
@@ -8039,21 +8168,21 @@ mod tests {
     /// group's header, so its top rows keep the group label.
     #[test]
     fn palette_rows_keep_their_group_when_the_header_scrolled_off() {
-        use crate::tui::action::{Action, PaletteOpenedBy};
+        use crate::tui::action::{Action, QuickOpenEntry};
         const GROUPS: [&str; 4] = ["HIGHLIGHT", "MOVE", "GIT", "VIEW"];
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
-        state.dispatch(Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK));
+        state.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         for _ in 0..60 {
-            state.dispatch(Action::CommandPaletteMove(1));
+            state.dispatch(Action::QuickOpenMove(1));
             draw_state(&mut terminal, &mut state);
             let text = buffer_text(&terminal);
             let lines: Vec<&str> = text.lines().collect();
             let prompt = lines
                 .iter()
-                .position(|line| line.contains("Ctrl-k …"))
-                .unwrap_or_else(|| panic!("no palette prompt:\n{text}"));
+                .position(|line| line.contains(">▏"))
+                .unwrap_or_else(|| panic!("no `>` query row:\n{text}"));
             let first = lines[prompt + 1];
             if GROUPS.contains(&first.trim_matches(['│', ' '])) {
                 continue;
@@ -8142,8 +8271,8 @@ mod tests {
 
     #[test]
     fn dialog_open_keeps_pane_height() {
-        use crate::tui::action::PaletteOpenedBy;
-        use crate::tui::command_palette::CommandPaletteState;
+        use crate::tui::action::QuickOpenEntry;
+        use crate::tui::quick_open::{QuickOpenScope, QuickOpenState};
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
@@ -8160,18 +8289,158 @@ mod tests {
         draw_state(&mut terminal, &mut state);
         assert_eq!(state.layout.pane_height, idle, "confirm");
         state.confirm = None;
-        state.command_palette = Some(CommandPaletteState::new(PaletteOpenedBy::CtrlK));
+        state.quick_open = Some(QuickOpenState::new(
+            QuickOpenEntry::Commands,
+            QuickOpenScope::Workspace,
+        ));
         draw_state(&mut terminal, &mut state);
         assert_eq!(state.layout.pane_height, idle, "palette");
     }
 
+    /// Files-mode Quick Open on `app` with 50 indexed paths, `hits` of them
+    /// ranked for the query `file`.
+    fn quick_open_files_state(hits: usize) -> AppState {
+        use crate::file_index::{FileEntry, FileHit, FileIndex, IndexRoot};
+        use crate::tui::action::QuickOpenEntry;
+        use crate::tui::quick_open::QuickOpenScope;
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let index = FileIndex {
+            roots: vec![IndexRoot {
+                checkout: "app".into(),
+                prefix: String::new(),
+            }],
+            entries: (0..50)
+                .map(|i| FileEntry {
+                    root: 0,
+                    display: format!("src/file{i:02}.rs"),
+                    rel_start: 0,
+                })
+                .collect(),
+            truncated: false,
+            errors: Vec::new(),
+        };
+        let mut quick = QuickOpenState::new(
+            QuickOpenEntry::Files,
+            QuickOpenScope::Checkout("app".into()),
+        );
+        quick.query = "file".into();
+        quick.index = FileIndexState::Ready(std::sync::Arc::new(index));
+        quick.hits = (0..hits)
+            .map(|entry| FileHit {
+                entry,
+                score: 1,
+                indices: vec![4, 5, 6, 7],
+            })
+            .collect();
+        state.quick_open = Some(quick);
+        state
+    }
+
+    #[test]
+    fn quick_open_input_row_stays_when_hit_count_changes() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let mut state = quick_open_files_state(1);
+        draw_state(&mut terminal, &mut state);
+        let few = buffer_text(&terminal);
+        let mut state = quick_open_files_state(50);
+        draw_state(&mut terminal, &mut state);
+        let many = buffer_text(&terminal);
+        assert!(few.contains("Go to file · app"), "{few}");
+        assert_eq!(
+            row_of(&few, "file▏"),
+            row_of(&many, "file▏"),
+            "query row moved:\n{few}\n{many}"
+        );
+        assert_eq!(
+            row_of(&few, "Enter open"),
+            row_of(&many, "Enter open"),
+            "footer row moved:\n{few}\n{many}"
+        );
+        assert!(few.contains("50 files"), "status row: {few}");
+        assert!(many.contains("src/file11.rs"), "{many}");
+        assert!(!many.contains("src/file12.rs"), "12 rows at most:\n{many}");
+    }
+
+    #[test]
+    fn quick_open_files_footer_is_not_enter_run() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let mut state = quick_open_files_state(3);
+        draw_state(&mut terminal, &mut state);
+        let files = buffer_text(&terminal);
+        assert!(files.contains("Enter open"), "{files}");
+        assert!(!files.contains("Enter run"), "{files}");
+        state.dispatch(Action::QuickOpenBackspace);
+        state.dispatch(Action::QuickOpenBackspace);
+        state.dispatch(Action::QuickOpenBackspace);
+        state.dispatch(Action::QuickOpenBackspace);
+        state.dispatch(Action::QuickOpenChar('>'));
+        draw_state(&mut terminal, &mut state);
+        let commands = buffer_text(&terminal);
+        assert!(commands.contains("Enter run"), "{commands}");
+        assert!(!commands.contains("Enter open"), "{commands}");
+        assert!(commands.contains(">▏"), "the `>` stays in the query row");
+    }
+
+    #[test]
+    fn quick_open_cuts_long_paths_from_the_left_and_bolds_matches() {
+        use crate::file_index::{FileEntry, FileHit};
+        let mut state = quick_open_files_state(0);
+        let long = format!("{}/main.rs", "deep".repeat(40));
+        let quick = state.quick_open.as_mut().unwrap();
+        let FileIndexState::Ready(index) = &mut quick.index else {
+            unreachable!()
+        };
+        std::sync::Arc::make_mut(index).entries.push(FileEntry {
+            root: 0,
+            display: long.clone(),
+            rel_start: 0,
+        });
+        let last = long.chars().count() as u32;
+        quick.query = "main".into();
+        quick.hits = vec![FileHit {
+            entry: 50,
+            score: 1,
+            indices: (last - 7..last - 3).collect(),
+        }];
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        let y = row_of(&text, "/main.rs") as u16;
+        let line = text.lines().nth(y as usize).unwrap();
+        assert!(
+            line.contains("❯ …"),
+            "head cut with a leading ellipsis: {line}"
+        );
+        assert!(!line.contains(&"deep".repeat(40)), "{line}");
+        let buf = terminal.backend().buffer();
+        let x = (0..buf.area().width)
+            .find(|&x| {
+                (0..7u16).all(|i| buf[(x + i, y)].symbol() == &"main.rs"[i as usize..=i as usize])
+            })
+            .expect("main.rs cells");
+        for i in 0..4 {
+            assert!(
+                buf[(x + i, y)].modifier.contains(Modifier::BOLD),
+                "matched char {i} is bold"
+            );
+        }
+        assert!(
+            !buf[(x + 4, y)].modifier.contains(Modifier::BOLD),
+            "`.` is not"
+        );
+    }
+
     #[test]
     fn status_row_stays_last_with_dialog_open() {
-        use crate::tui::action::PaletteOpenedBy;
-        use crate::tui::command_palette::CommandPaletteState;
+        use crate::tui::action::QuickOpenEntry;
+        use crate::tui::quick_open::{QuickOpenScope, QuickOpenState};
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
-        state.command_palette = Some(CommandPaletteState::new(PaletteOpenedBy::CtrlK));
+        state.quick_open = Some(QuickOpenState::new(
+            QuickOpenEntry::Commands,
+            QuickOpenScope::Workspace,
+        ));
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         draw_state(&mut terminal, &mut state);
         let text = buffer_text(&terminal);

@@ -282,12 +282,12 @@ impl AppState {
             | Action::ExportComments
             | Action::ExportCommentsCancel
             | Action::CopyEntityReference
-            | Action::ToggleCommandPalette(_)
-            | Action::CommandPaletteMove(_)
-            | Action::CommandPaletteChar(_)
-            | Action::CommandPaletteBackspace
-            | Action::CommandPaletteSubmit
-            | Action::CommandPaletteCancel
+            | Action::ToggleQuickOpen(_)
+            | Action::QuickOpenMove(_)
+            | Action::QuickOpenChar(_)
+            | Action::QuickOpenBackspace
+            | Action::QuickOpenSubmit
+            | Action::QuickOpenCancel
             | Action::CompareVsDefault
             | Action::CompareVsBranch
             | Action::CompareVsCommit

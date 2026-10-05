@@ -1213,7 +1213,7 @@ pub fn open_compare_regions_in(tui: &mut PtySession) {
     tui.ctrl_letter('k');
     tui.wait_pred(
         |screen| screen.contains("Enter run"),
-        "Ctrl-k opens the command palette",
+        "Ctrl-k opens Quick Open commands",
         WAIT,
     );
     type_palette_filter(tui, "vs default");

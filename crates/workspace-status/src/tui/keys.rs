@@ -6,7 +6,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
-use super::action::{Action, PaletteOpenedBy};
+use super::action::{Action, QuickOpenEntry};
 
 /// Rows PgUp / PgDn scroll the `?` help body.
 ///
@@ -96,8 +96,8 @@ pub enum InputMode {
     DiffVisual,
     /// `y` markdown export overlay (Esc closes).
     CommentExport,
-    /// Command palette (`Ctrl-k` / `:`). Named commands, filter, Enter run.
-    CommandPalette,
+    /// Quick Open (`:` files, `Ctrl-k` / `>` commands). Query, list, Enter.
+    QuickOpen,
 }
 
 fn same_g_chord_key(last: Option<(KeyCode, KeyModifiers)>, key: &KeyEvent) -> bool {
@@ -136,7 +136,7 @@ pub fn drop_protocol_dup_g_chord_press(
 /// dropped. A later protocol same-key Press is a new tap. A
 /// [`KeyStrokeOrigin::LegacyByte`] same-key Press is a new tap. A real
 /// [`KeyEventKind::Release`] clears the echo so the next protocol Press
-/// is a new tap. Search, palette, and other overlays do not record a
+/// is a new tap. Search, Quick Open, and other overlays do not record a
 /// typed `g`.
 ///
 /// Returns true when the caller must not dispatch (echo or Release).
@@ -294,7 +294,7 @@ pub fn event_to_action_with(
                     | InputMode::CreateBranch
                     | InputMode::Comment
                     | InputMode::CommentExport
-                    | InputMode::CommandPalette,
+                    | InputMode::QuickOpen,
             ) {
                 Action::None
             } else if matches!(
@@ -502,7 +502,7 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
             KeyCode::Char(_) => typing,
             _ => false,
         },
-        InputMode::CommandPalette => match key.code {
+        InputMode::QuickOpen => match key.code {
             _ if list_overlay_move(key).is_some() => true,
             KeyCode::Backspace => true,
             KeyCode::Char(_) => typing,
@@ -569,15 +569,15 @@ fn key_to_action(
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Action::CtrlC;
     }
-    if let Some(opened_by) = palette_open_key(key) {
+    if let Some(opened_by) = quick_open_key(key) {
         match mode {
             InputMode::Normal { .. }
             | InputMode::ZPending { .. }
             | InputMode::GPending { .. }
             | InputMode::DiffVisual => {
-                return Action::ToggleCommandPalette(opened_by);
+                return Action::ToggleQuickOpen(opened_by);
             }
-            InputMode::CommandPalette
+            InputMode::QuickOpen
             | InputMode::SearchPrompt
             | InputMode::HelpSearch
             | InputMode::Comment
@@ -751,7 +751,7 @@ fn key_to_action(
             KeyCode::Esc | KeyCode::Enter => Action::ExportCommentsCancel,
             _ => Action::None,
         },
-        InputMode::CommandPalette => command_palette_key(key),
+        InputMode::QuickOpen => quick_open_key_action(key),
         InputMode::DiffVisual => diff_visual_key(key),
         InputMode::Normal { .. } => normal_key(
             key,
@@ -764,20 +764,20 @@ fn key_to_action(
     }
 }
 
-fn palette_open_key(key: KeyEvent) -> Option<PaletteOpenedBy> {
+fn quick_open_key(key: KeyEvent) -> Option<QuickOpenEntry> {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('k') {
-        return Some(PaletteOpenedBy::CtrlK);
+        return Some(QuickOpenEntry::Commands);
     }
     if !has_command_modifier(key) && key.code == KeyCode::Char(':') {
-        return Some(PaletteOpenedBy::Colon);
+        return Some(QuickOpenEntry::Files);
     }
     None
 }
 
-/// Cursor step for a list overlay key (palette and every picker), if any.
+/// Cursor step for a list overlay key (Quick Open and every picker), if any.
 ///
 /// Up / Down, Ctrl-n / Ctrl-p, and Ctrl-j / Ctrl-k move. Letters never move,
-/// so every printable character types into the filter. The palette follows
+/// so every printable character types into the filter. Quick Open follows
 /// the same rule: Ctrl-k moves up, `:` types, and only Esc closes it.
 fn list_overlay_move(key: KeyEvent) -> Option<i32> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -790,16 +790,16 @@ fn list_overlay_move(key: KeyEvent) -> Option<i32> {
     }
 }
 
-fn command_palette_key(key: KeyEvent) -> Action {
+fn quick_open_key_action(key: KeyEvent) -> Action {
     if let Some(delta) = list_overlay_move(key) {
-        return Action::CommandPaletteMove(delta);
+        return Action::QuickOpenMove(delta);
     }
     match key.code {
-        KeyCode::Esc => Action::CommandPaletteCancel,
-        KeyCode::Enter => Action::CommandPaletteSubmit,
-        KeyCode::Backspace => Action::CommandPaletteBackspace,
+        KeyCode::Esc => Action::QuickOpenCancel,
+        KeyCode::Enter => Action::QuickOpenSubmit,
+        KeyCode::Backspace => Action::QuickOpenBackspace,
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Action::CommandPaletteChar(c)
+            Action::QuickOpenChar(c)
         }
         _ => Action::None,
     }
@@ -815,7 +815,7 @@ fn command_palette_key(key: KeyEvent) -> Action {
 /// normal mode. Esc or a second `V` leaves highlight without commenting.
 /// Any other key is [`Action::DiffVisualUnmapped`] so the status can say
 /// how to leave; an unbound modifier chord on a non-character key is
-/// [`Action::None`]. `Ctrl-k` / `:` open the command palette before this map
+/// [`Action::None`]. `Ctrl-k` / `:` open Quick Open before this map
 /// runs; the highlight stays.
 fn diff_visual_key(key: KeyEvent) -> Action {
     if is_ctrl_chord(key, 'u') {
@@ -1104,7 +1104,7 @@ mod tests {
             InputMode::Help,
             InputMode::Confirm,
             InputMode::BranchPicker,
-            InputMode::CommandPalette,
+            InputMode::QuickOpen,
             InputMode::SearchPrompt,
         ] {
             assert_eq!(event_to_action(&right, mode, false, true), Action::None);
@@ -1915,7 +1915,7 @@ mod tests {
             Action::PointerMove { col: 30, row: 0 }
         );
         assert_eq!(
-            event_to_action(&moved, InputMode::CommandPalette, false, false),
+            event_to_action(&moved, InputMode::QuickOpen, false, false),
             Action::None
         );
     }
@@ -2754,51 +2754,67 @@ mod tests {
         assert!(held_nav_key(&key_kind(KeyCode::Char('j'), KeyEventKind::Release)).is_none());
     }
 
-    fn palette() -> InputMode {
-        InputMode::CommandPalette
+    fn quick_open() -> InputMode {
+        InputMode::QuickOpen
     }
 
     #[test]
-    fn ctrl_k_and_colon_open_command_palette_from_normal() {
+    fn colon_opens_quick_open_files_and_ctrl_k_commands() {
+        use super::super::action::QuickOpenEntry;
+        let openers = [
+            normal(),
+            InputMode::ZPending {
+                search_active: false,
+            },
+            InputMode::GPending {
+                search_active: false,
+            },
+            InputMode::DiffVisual,
+        ];
+        for mode in openers {
+            assert_eq!(
+                event_to_action(&key(KeyCode::Char(':')), mode, true, true),
+                Action::ToggleQuickOpen(QuickOpenEntry::Files),
+                "{mode:?} `:`"
+            );
+            assert_eq!(
+                event_to_action(&ctrl(KeyCode::Char('k')), mode, true, true),
+                Action::ToggleQuickOpen(QuickOpenEntry::Commands),
+                "{mode:?} Ctrl-k"
+            );
+        }
+        for c in [':', '>', '<'] {
+            assert_eq!(
+                event_to_action(&key(KeyCode::Char(c)), quick_open(), false, false),
+                Action::QuickOpenChar(c),
+                "`{c}` types inside Quick Open"
+            );
+        }
         assert_eq!(
-            event_to_action(&ctrl(KeyCode::Char('k')), normal(), false, false),
-            Action::ToggleCommandPalette(super::super::action::PaletteOpenedBy::CtrlK)
+            event_to_action(&ctrl(KeyCode::Char('k')), quick_open(), false, false),
+            Action::QuickOpenMove(-1)
         );
         assert_eq!(
-            event_to_action(&key(KeyCode::Char(':')), normal(), false, false),
-            Action::ToggleCommandPalette(super::super::action::PaletteOpenedBy::Colon)
+            event_to_action(&ctrl(KeyCode::Char('p')), quick_open(), false, false),
+            Action::QuickOpenMove(-1)
         );
     }
 
     #[test]
-    fn ctrl_k_and_colon_open_from_pending_chords() {
-        let z = InputMode::ZPending {
-            search_active: false,
-        };
-        let g = InputMode::GPending {
-            search_active: false,
-        };
+    fn angle_keys_resize_tree_when_quick_open_closed() {
         assert_eq!(
-            event_to_action(&ctrl(KeyCode::Char('k')), z, false, false),
-            Action::ToggleCommandPalette(super::super::action::PaletteOpenedBy::CtrlK)
+            event_to_action(&key(KeyCode::Char('<')), normal(), false, false),
+            Action::ResizeTree(-1)
         );
         assert_eq!(
-            event_to_action(&key(KeyCode::Char(':')), z, false, false),
-            Action::ToggleCommandPalette(super::super::action::PaletteOpenedBy::Colon)
-        );
-        assert_eq!(
-            event_to_action(&ctrl(KeyCode::Char('k')), g, false, false),
-            Action::ToggleCommandPalette(super::super::action::PaletteOpenedBy::CtrlK)
-        );
-        assert_eq!(
-            event_to_action(&key(KeyCode::Char(':')), g, false, false),
-            Action::ToggleCommandPalette(super::super::action::PaletteOpenedBy::Colon)
+            event_to_action(&key(KeyCode::Char('>')), normal(), false, false),
+            Action::ResizeTree(1)
         );
     }
 
     #[test]
-    fn overlays_do_not_open_palette_on_ctrl_k_or_colon() {
-        use super::super::action::PaletteOpenedBy;
+    fn overlays_do_not_open_quick_open_on_ctrl_k_or_colon() {
+        use super::super::action::QuickOpenEntry;
         let overlays = [
             InputMode::Help,
             InputMode::HelpSearch,
@@ -2811,20 +2827,20 @@ mod tests {
             InputMode::CreateBranch,
             InputMode::StashMenu,
             InputMode::CommentExport,
-            InputMode::CommandPalette,
+            InputMode::QuickOpen,
         ];
         for mode in overlays {
             let ctrl_k = event_to_action(&ctrl(KeyCode::Char('k')), mode, false, false);
             assert_ne!(
                 ctrl_k,
-                Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK),
-                "{mode:?} must not open the palette"
+                Action::ToggleQuickOpen(QuickOpenEntry::Commands),
+                "{mode:?} must not open Quick Open"
             );
             let colon = event_to_action(&key(KeyCode::Char(':')), mode, false, false);
             assert_ne!(
                 colon,
-                Action::ToggleCommandPalette(PaletteOpenedBy::Colon),
-                "{mode:?} must not open the palette"
+                Action::ToggleQuickOpen(QuickOpenEntry::Files),
+                "{mode:?} must not open Quick Open"
             );
         }
     }
@@ -2928,102 +2944,89 @@ mod tests {
     }
 
     #[test]
-    fn diff_visual_opens_palette_on_ctrl_k_and_colon() {
-        use super::super::action::PaletteOpenedBy;
+    fn quick_open_keys_move_filter_submit_and_only_esc_cancels() {
         assert_eq!(
-            event_to_action(&ctrl(KeyCode::Char('k')), InputMode::DiffVisual, true, true),
-            Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK)
+            event_to_action(&key(KeyCode::Char('j')), quick_open(), false, false),
+            Action::QuickOpenChar('j')
         );
         assert_eq!(
-            event_to_action(&key(KeyCode::Char(':')), InputMode::DiffVisual, true, true),
-            Action::ToggleCommandPalette(PaletteOpenedBy::Colon)
-        );
-    }
-
-    #[test]
-    fn command_palette_keys_move_filter_submit_and_only_esc_cancels() {
-        assert_eq!(
-            event_to_action(&key(KeyCode::Char('j')), palette(), false, false),
-            Action::CommandPaletteChar('j')
+            event_to_action(&key(KeyCode::Down), quick_open(), false, false),
+            Action::QuickOpenMove(1)
         );
         assert_eq!(
-            event_to_action(&key(KeyCode::Down), palette(), false, false),
-            Action::CommandPaletteMove(1)
+            event_to_action(&key(KeyCode::Char('k')), quick_open(), false, false),
+            Action::QuickOpenChar('k')
         );
         assert_eq!(
-            event_to_action(&key(KeyCode::Char('k')), palette(), false, false),
-            Action::CommandPaletteChar('k')
+            event_to_action(&key(KeyCode::Up), quick_open(), false, false),
+            Action::QuickOpenMove(-1)
         );
         assert_eq!(
-            event_to_action(&key(KeyCode::Up), palette(), false, false),
-            Action::CommandPaletteMove(-1)
+            event_to_action(&key(KeyCode::Char('p')), quick_open(), false, false),
+            Action::QuickOpenChar('p')
         );
         assert_eq!(
-            event_to_action(&key(KeyCode::Char('p')), palette(), false, false),
-            Action::CommandPaletteChar('p')
+            event_to_action(&key(KeyCode::Backspace), quick_open(), false, false),
+            Action::QuickOpenBackspace
         );
         assert_eq!(
-            event_to_action(&key(KeyCode::Backspace), palette(), false, false),
-            Action::CommandPaletteBackspace
+            event_to_action(&key(KeyCode::Enter), quick_open(), false, false),
+            Action::QuickOpenSubmit
         );
         assert_eq!(
-            event_to_action(&key(KeyCode::Enter), palette(), false, false),
-            Action::CommandPaletteSubmit
+            event_to_action(&key(KeyCode::Esc), quick_open(), false, false),
+            Action::QuickOpenCancel
         );
         assert_eq!(
-            event_to_action(&key(KeyCode::Esc), palette(), false, false),
-            Action::CommandPaletteCancel
-        );
-        assert_eq!(
-            event_to_action(&ctrl(KeyCode::Char('c')), palette(), false, false),
+            event_to_action(&ctrl(KeyCode::Char('c')), quick_open(), false, false),
             Action::CtrlC
         );
         assert_eq!(
-            event_to_action(&ctrl(KeyCode::Char('k')), palette(), false, false),
-            Action::CommandPaletteMove(-1),
+            event_to_action(&ctrl(KeyCode::Char('k')), quick_open(), false, false),
+            Action::QuickOpenMove(-1),
             "Ctrl-k moves up like every picker; it does not close"
         );
         assert_eq!(
-            event_to_action(&key(KeyCode::Char(':')), palette(), false, false),
-            Action::CommandPaletteChar(':'),
+            event_to_action(&key(KeyCode::Char(':')), quick_open(), false, false),
+            Action::QuickOpenChar(':'),
             "`:` types into the filter; it does not close"
         );
     }
 
     #[test]
-    fn command_palette_repeat_types_and_moves_but_not_enter_or_esc() {
-        use super::super::action::PaletteOpenedBy;
+    fn quick_open_repeat_types_and_moves_but_not_enter_or_esc() {
+        use super::super::action::QuickOpenEntry;
         assert_eq!(
             event_to_action(
                 &key_kind(KeyCode::Char('a'), KeyEventKind::Repeat),
-                palette(),
+                quick_open(),
                 false,
                 false
             ),
-            Action::CommandPaletteChar('a')
+            Action::QuickOpenChar('a')
         );
         assert_eq!(
             event_to_action(
                 &key_kind(KeyCode::Backspace, KeyEventKind::Repeat),
-                palette(),
+                quick_open(),
                 false,
                 false
             ),
-            Action::CommandPaletteBackspace
+            Action::QuickOpenBackspace
         );
         assert_eq!(
             event_to_action(
                 &key_kind(KeyCode::Char('j'), KeyEventKind::Repeat),
-                palette(),
+                quick_open(),
                 false,
                 false
             ),
-            Action::CommandPaletteChar('j')
+            Action::QuickOpenChar('j')
         );
         assert_eq!(
             event_to_action(
                 &key_kind(KeyCode::Enter, KeyEventKind::Repeat),
-                palette(),
+                quick_open(),
                 false,
                 false
             ),
@@ -3032,7 +3035,7 @@ mod tests {
         assert_eq!(
             event_to_action(
                 &key_kind(KeyCode::Esc, KeyEventKind::Repeat),
-                palette(),
+                quick_open(),
                 false,
                 false
             ),
@@ -3041,11 +3044,11 @@ mod tests {
         assert_eq!(
             event_to_action(
                 &key_kind(KeyCode::Char(':'), KeyEventKind::Repeat),
-                palette(),
+                quick_open(),
                 false,
                 false
             ),
-            Action::CommandPaletteChar(':')
+            Action::QuickOpenChar(':')
         );
         assert_eq!(
             event_to_action(
@@ -3054,11 +3057,11 @@ mod tests {
                     KeyModifiers::CONTROL,
                     KeyEventKind::Repeat
                 )),
-                palette(),
+                quick_open(),
                 false,
                 false
             ),
-            Action::CommandPaletteMove(-1)
+            Action::QuickOpenMove(-1)
         );
         assert_ne!(
             event_to_action(
@@ -3071,26 +3074,26 @@ mod tests {
                 false,
                 false
             ),
-            Action::ToggleCommandPalette(PaletteOpenedBy::CtrlK)
+            Action::ToggleQuickOpen(QuickOpenEntry::Commands)
         );
     }
 
     #[test]
     fn list_overlays_type_every_letter_and_move_on_arrows_and_ctrl() {
         let modes = [
-            InputMode::CommandPalette,
+            InputMode::QuickOpen,
             InputMode::BranchPicker,
             InputMode::ComparePicker,
             InputMode::GraphFocusPicker,
         ];
         let moved = |mode: InputMode, delta: i32| match mode {
-            InputMode::CommandPalette => Action::CommandPaletteMove(delta),
+            InputMode::QuickOpen => Action::QuickOpenMove(delta),
             InputMode::BranchPicker => Action::BranchMove(delta),
             InputMode::ComparePicker => Action::ComparePickerMove(delta),
             _ => Action::GraphFocusMove(delta),
         };
         let typed = |mode: InputMode, c: char| match mode {
-            InputMode::CommandPalette => Action::CommandPaletteChar(c),
+            InputMode::QuickOpen => Action::QuickOpenChar(c),
             InputMode::BranchPicker => Action::BranchChar(c),
             InputMode::ComparePicker => Action::ComparePickerChar(c),
             _ => Action::GraphFocusChar(c),
@@ -3156,7 +3159,7 @@ mod tests {
                 n,
                 0,
                 Char(':'),
-                Action::ToggleCommandPalette(PaletteOpenedBy::Colon),
+                Action::ToggleQuickOpen(QuickOpenEntry::Files),
             ),
             (n, 0, Char('f'), Action::Fetch),
             (n, 0, Char('p'), Action::Pull),
@@ -3316,7 +3319,7 @@ mod tests {
             }
             for (code, mods) in chords {
                 // Explicit Ctrl chords keep their own bindings: Ctrl-c
-                // everywhere, Ctrl-k where the palette opens, Ctrl-o / u / d
+                // everywhere, Ctrl-k where Quick Open opens, Ctrl-o / u / d
                 // in Normal and pending chords, Ctrl-u / d in highlight.
                 let ctrl_only = !mods.intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
                     && mods.contains(KeyModifiers::CONTROL);
@@ -3422,11 +3425,11 @@ mod tests {
         assert_eq!(
             event_to_action(
                 &ev('{', altgr | KeyModifiers::SHIFT),
-                palette(),
+                quick_open(),
                 false,
                 false
             ),
-            Action::CommandPaletteChar('{')
+            Action::QuickOpenChar('{')
         );
         assert_eq!(
             event_to_action(&ev('p', altgr), normal(), false, false),

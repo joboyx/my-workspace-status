@@ -353,10 +353,9 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
         return;
     }
     if ctx.interp.busy_for_writes() {
-        let palette_submit = if matches!(action, Action::CommandPaletteSubmit) {
+        let palette_submit = if matches!(action, Action::QuickOpenSubmit) {
             ctx.state
-                .command_palette
-                .as_ref()
+                .command_palette()
                 .and_then(|palette| palette.selected_action())
         } else {
             None

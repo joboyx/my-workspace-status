@@ -193,7 +193,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: "V",
-                desc: "highlight diff lines for ; / s / u / x / :",
+                desc: "highlight diff lines for ; / s / u / x / Ctrl-k",
             },
             HelpEntry {
                 keys: "y",
@@ -212,8 +212,12 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "focus right / drill",
             },
             HelpEntry {
-                keys: "? Ctrl-k :",
-                desc: "help · command palette",
+                keys: ": Ctrl-k",
+                desc: "go to file · commands (> in : switches)",
+            },
+            HelpEntry {
+                keys: "?",
+                desc: "help",
             },
             HelpEntry {
                 keys: "Tab",
@@ -241,7 +245,7 @@ pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
     entries: &[
         HelpEntry {
             keys: "V",
-            desc: "highlight for ; x ' :",
+            desc: "highlight for ; x ' Ctrl-k",
         },
         HelpEntry {
             keys: ";",
@@ -800,8 +804,9 @@ mod tests {
         assert!(!view_keys.contains(&"i \\"));
         assert!(!view_keys.contains(&"i"));
         assert!(view_keys.contains(&"Ctrl-o"));
-        assert!(view_keys.contains(&"? Ctrl-k :"));
-        assert!(!view_keys.contains(&"?"));
+        assert!(view_keys.contains(&": Ctrl-k"));
+        assert!(view_keys.contains(&"?"));
+        assert!(!view_keys.contains(&"? Ctrl-k :"));
         assert!(view_keys.contains(&"o O"));
         assert!(view_keys.contains(&"m"));
         assert!(view_keys.contains(&";"));
@@ -888,8 +893,8 @@ mod tests {
         );
         let at_140 = help_status_lines(140, false);
         assert!(
-            at_140 <= 24,
-            "at 140×40 the tree keeps ≥ 13 rows \
+            at_140 <= 26,
+            "at 140×40 the help dialog fits without scrolling \
              (render `help_columns_keep_a_gutter_and_the_panes_rows`): {at_140}"
         );
     }
@@ -999,11 +1004,11 @@ mod tests {
         // (terminal cols, compare tab, row-aligned body rows, reflow body
         // rows as measured).
         for (term, compare, row_aligned, measured) in [
-            (60usize, false, 60usize, 52usize),
-            (64, true, 251, 52),
-            (80, false, 86, 40),
+            (60usize, false, 60usize, 56usize),
+            (64, true, 251, 56),
+            (80, false, 86, 42),
             (100, false, 47, 30),
-            (140, false, 28, 20),
+            (140, false, 28, 22),
         ] {
             let groups = help_groups(compare);
             let widths = help_column_widths(groups, help_inner_width(term));

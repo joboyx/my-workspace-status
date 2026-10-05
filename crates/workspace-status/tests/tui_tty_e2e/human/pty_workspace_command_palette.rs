@@ -44,7 +44,7 @@ fn wait_first_paint(tui: &PtySession) {
                 && !tree_cursor_on(screen, "app")
                 && palette_closed(screen)
         },
-        "first paint: tree cursor on README.md; command palette is closed",
+        "first paint: tree cursor on README.md; Quick Open is closed",
         WAIT,
     );
 }
@@ -79,8 +79,8 @@ fn type_palette_filter(tui: &mut PtySession, query: &str) {
 fn open_ctrl_k_filter(tui: &mut PtySession, query: &str, title: &str) {
     tui.ctrl_letter('k');
     tui.wait_pred(
-        |screen| palette_open(screen) && screen.contains("Ctrl-k"),
-        "Ctrl-k opens the command palette (a no-op leaves idle chrome without Enter run)",
+        |screen| palette_open(screen) && screen.contains(">▏"),
+        "Ctrl-k opens Quick Open commands (a no-op leaves idle chrome without Enter run)",
         WAIT,
     );
     type_palette_filter(tui, query);
@@ -108,7 +108,7 @@ fn esc_closes_palette(tui: &mut PtySession) {
     tui.esc();
     tui.wait_pred(
         palette_closed,
-        "Esc closes the command palette (a stuck overlay keeps Enter run)",
+        "Esc closes Quick Open (a stuck overlay keeps Enter run)",
         WAIT,
     );
 }
@@ -170,11 +170,13 @@ fn pty_workspace_palette_filter_help_enter_opens_keymap_help() {
     );
 }
 
-/// `:` opens the palette; filter then Esc dismisses and keeps the README cursor.
+/// `:` opens Quick Open on files, `>` switches to commands; filter then Esc
+/// dismisses and keeps the README cursor.
 ///
 /// Search to README first. Fail if the cursor jumps to `app` or workspace,
-/// or if Enter run stays. This is the colon open path (Ctrl-k is the other
-/// tests) and the open + filter + Esc dismiss path.
+/// if `:` paints the commands footer (`Enter run`), or if Enter run stays
+/// after Esc. This is the colon + `>` open path (Ctrl-k is the other tests)
+/// and the open + filter + Esc dismiss path.
 #[test]
 fn pty_workspace_palette_colon_esc_keeps_readme_cursor() {
     let (_root, workspace) = daily_workspace();
@@ -184,25 +186,32 @@ fn pty_workspace_palette_colon_esc_keeps_readme_cursor() {
 
     tui.key(':');
     tui.wait_pred(
+        |screen| screen.contains("Go to file") && palette_closed(screen),
+        ": opens Quick Open on files (Go to file), not the commands list (Enter run)",
+        WAIT,
+    );
+    tui.key('>');
+    tui.wait_pred(
         palette_open,
-        ": opens the command palette (a no-op leaves idle chrome without Enter run)",
+        "> as the first char switches Quick Open to commands (Enter run)",
         WAIT,
     );
     type_palette_filter(&mut tui, "pull");
     tui.wait_pred(
         |screen| palette_open(screen) && screen.contains("Pull behind") && screen.contains("pull"),
-        "colon palette filter `pull` shows Pull behind before Esc",
+        "`>pull` shows Pull behind before Esc",
         WAIT,
     );
     tui.esc();
     tui.wait_pred(
         |screen| {
             palette_closed(screen)
+                && !screen.contains("Go to file")
                 && tree_cursor_on(screen, "README.md")
                 && !tree_cursor_on(screen, "app")
                 && !tree_cursor_on(screen, "workspace")
         },
-        "Esc closes the palette and leaves the tree cursor on README.md (not app / workspace)",
+        "Esc closes Quick Open and leaves the tree cursor on README.md (not app / workspace)",
         WAIT,
     );
 }
@@ -385,7 +394,7 @@ fn pty_workspace_palette_does_not_steal_daily_keys() {
     tui.key('?');
     tui.wait_pred(
         |screen| screen.contains("MOVE") && palette_closed(screen),
-        "? opens keymap help (MOVE), not the command palette (Enter run)",
+        "? opens keymap help (MOVE), not Quick Open (Enter run)",
         WAIT,
     );
     tui.esc();
@@ -398,7 +407,7 @@ fn pty_workspace_palette_does_not_steal_daily_keys() {
     tui.key('/');
     tui.wait_pred(
         |screen| screen.contains("SEARCH") && palette_closed(screen),
-        "/ opens pane search (SEARCH), not the command palette",
+        "/ opens pane search (SEARCH), not Quick Open",
         WAIT,
     );
     tui.esc();
@@ -412,13 +421,13 @@ fn pty_workspace_palette_does_not_steal_daily_keys() {
     tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
         palette_closed,
-        "bare p does not open the command palette",
+        "bare p does not open Quick Open",
         WAIT,
     );
     tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
         palette_closed,
-        "bare p still does not open the command palette",
+        "bare p still does not open Quick Open",
         WAIT,
     );
 
@@ -426,13 +435,13 @@ fn pty_workspace_palette_does_not_steal_daily_keys() {
     tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
         palette_closed,
-        "CSI-u Shift+P does not open the command palette",
+        "CSI-u Shift+P does not open Quick Open",
         WAIT,
     );
     tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
         palette_closed,
-        "CSI-u Shift+P still does not open the command palette",
+        "CSI-u Shift+P still does not open Quick Open",
         WAIT,
     );
 }

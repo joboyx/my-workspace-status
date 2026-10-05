@@ -13,11 +13,15 @@
 //! then enqueues blob/temp prepare on `spawn_blocking` before spawning the tool.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use workspace_status_graph::LOADING_OLDER;
 
 use crate::actions::{switch_repo_to_default_branch, SwitchOutcome};
 use crate::discovery::{discover_checkouts, process_repo, RepoCheckoutMeta};
+use crate::file_index::{
+    build_file_index, score_files, FileHit, FileIndex, IndexRoot, MAX_INDEX_ENTRIES, MAX_RESULTS,
+};
 use crate::git::{
     apply_cached_patch, apply_worktree_patch_reverse, create_branch_at, create_branch_checkout,
     exec_git_checked, latest_stash_ref, list_compare_picker_branches, list_compare_picker_commits,
@@ -169,6 +173,16 @@ pub(crate) enum JobOutcome {
     CompareProbe {
         tab_id: u64,
         result: Result<bool, String>,
+    },
+    /// Quick Open file listing for index generation `gen`.
+    FileIndex {
+        gen: u64,
+        index: FileIndex,
+    },
+    /// Quick Open ranked hits for score generation `gen`.
+    FileScore {
+        gen: u64,
+        hits: Vec<FileHit>,
     },
 }
 
@@ -479,6 +493,10 @@ pub(crate) struct Interpreter {
     pending_diff: Option<(String, String, ExternalDiffKind)>,
     diff_prepare: Option<DiffPrepareJob>,
     pending_diff_launch: Option<DiffLaunch>,
+    /// Latest Quick Open index request; a newer one replaces it before spawn.
+    file_index_job: Option<(u64, Vec<IndexRoot>)>,
+    /// Latest Quick Open score request; a newer one replaces it before spawn.
+    file_score_job: Option<(u64, Arc<FileIndex>, String)>,
     exclusive_inflight: HashMap<u64, Vec<String>>,
     /// Name of the exclusive write or default-branch job on a worker.
     running_write: Option<&'static str>,
@@ -514,6 +532,8 @@ impl Interpreter {
             pending_diff: None,
             diff_prepare: None,
             pending_diff_launch: None,
+            file_index_job: None,
+            file_score_job: None,
             exclusive_inflight: HashMap::new(),
             running_write: None,
             dirty: false,
@@ -1048,6 +1068,14 @@ impl Interpreter {
                 });
                 self.sched.enqueue_user(UserTag::Pane);
             }
+            Effect::LoadFileIndex { gen, roots } => {
+                self.file_index_job = Some((gen, roots));
+                self.sched.enqueue_user(UserTag::QuickOpen);
+            }
+            Effect::ScoreFiles { gen, index, query } => {
+                self.file_score_job = Some((gen, index, query));
+                self.sched.enqueue_user(UserTag::QuickOpen);
+            }
             Effect::CopyClipboard { text, announce } => {
                 let ok = comments::copy_to_clipboard(&text);
                 // `y` opens the export overlay right before this copy; its
@@ -1542,6 +1570,20 @@ impl Interpreter {
                 });
                 if accepted {
                     state.apply_compare_diff(tab_id, gen, &source, &path, content);
+                    self.mark();
+                }
+            }
+            JobOutcome::FileIndex { gen, index } => {
+                let open_gen = state.quick_open.as_ref().map(|quick| quick.index_gen);
+                let follow = state.apply_file_index(gen, index);
+                if open_gen == Some(gen) {
+                    self.schedule(state, opts, follow, &Action::None);
+                    self.mark();
+                }
+            }
+            JobOutcome::FileScore { gen, hits } => {
+                if state.quick_open.as_ref().map(|quick| quick.score_gen) == Some(gen) {
+                    state.apply_file_score(gen, hits);
                     self.mark();
                 }
             }
@@ -2322,6 +2364,30 @@ impl Interpreter {
                                 path,
                                 content,
                             }
+                        }),
+                    );
+                    return;
+                }
+                self.sched.note_job_finished(id);
+            }
+            UserTag::QuickOpen => {
+                if let Some((gen, roots)) = self.file_index_job.take() {
+                    let cwd = opts.cwd.clone();
+                    spawn(
+                        id,
+                        Box::new(move || JobOutcome::FileIndex {
+                            gen,
+                            index: build_file_index(&cwd, roots, MAX_INDEX_ENTRIES),
+                        }),
+                    );
+                    return;
+                }
+                if let Some((gen, index, query)) = self.file_score_job.take() {
+                    spawn(
+                        id,
+                        Box::new(move || JobOutcome::FileScore {
+                            gen,
+                            hits: score_files(&index, &query, MAX_RESULTS),
                         }),
                     );
                     return;
@@ -5219,6 +5285,39 @@ mod tests {
             let outcome = work();
             apply_id(interp, state, id, outcome);
         }
+    }
+
+    #[test]
+    fn quick_open_pipeline_indexes_and_scores_real_checkout() {
+        use crate::tui::action::QuickOpenEntry;
+        use crate::tui::quick_open::FileIndexState;
+        let (root, mut state) = git_app_state("ws-effect-quick-open", "main", true);
+        std::fs::create_dir_all(root.join("app/src")).unwrap();
+        std::fs::write(root.join("app/src/main.rs"), "fn main() {}\n").unwrap();
+        state.cursor = state
+            .rows
+            .iter()
+            .position(|row| row.repo.as_deref() == Some("app"))
+            .expect("app row");
+        let opts = opts(&state);
+        let mut interp = Interpreter::with_cap(4);
+        let open = Action::ToggleQuickOpen(QuickOpenEntry::Files);
+        let effect = state.dispatch(open.clone());
+        assert!(matches!(effect, Effect::LoadFileIndex { .. }), "{effect:?}");
+        interp.interpret_sync(&mut state, &opts, effect, &open);
+        for c in "main".chars() {
+            let typed = Action::QuickOpenChar(c);
+            let effect = state.dispatch(typed.clone());
+            interp.interpret_sync(&mut state, &opts, effect, &typed);
+        }
+        let quick = state.quick_open.as_ref().expect("Quick Open open");
+        let FileIndexState::Ready(index) = &quick.index else {
+            panic!("index not ready: {:?}", quick.index);
+        };
+        assert!(!quick.score_pending);
+        let top = quick.hits.first().expect("a hit for main");
+        assert_eq!(index.entries[top.entry].display, "src/main.rs");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
