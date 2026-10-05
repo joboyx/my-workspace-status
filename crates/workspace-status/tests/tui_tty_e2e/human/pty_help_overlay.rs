@@ -67,7 +67,8 @@ const HELP_VIEW_ROWS: &[(&str, &str)] = &[
 
 /// Split the painted overlay into MOVE / GIT / VIEW columns.
 ///
-/// Columns are not even (`help_column_widths` widens the long one), so
+/// The help dialog is centered with a two-column margin, so its inner
+/// text starts at x = 4 and is `COLS - 8` wide. Columns are not even (`help_column_widths` widens the long one), so
 /// each column starts at its title icon (`{icon}  {title}`) on the header
 /// row. Footer is excluded so `/ search help` does not leak into the
 /// keymap columns.
@@ -76,8 +77,8 @@ fn help_group_columns(screen: &str) -> Option<[String; 3]> {
     let start = lines
         .iter()
         .position(|line| line.contains("MOVE") && line.contains("GIT") && line.contains("VIEW"))?;
-    let inner_w = (COLS as usize).saturating_sub(4);
-    let header: Vec<char> = lines[start].chars().skip(2).take(inner_w).collect();
+    let inner_w = (COLS as usize).saturating_sub(8);
+    let header: Vec<char> = lines[start].chars().skip(4).take(inner_w).collect();
     let title_at = |title: &str| -> Option<usize> {
         let title: Vec<char> = title.chars().collect();
         header
@@ -91,7 +92,7 @@ fn help_group_columns(screen: &str) -> Option<[String; 3]> {
         if line.contains("/ search help") || line.contains("Esc closes") {
             break;
         }
-        let inner: Vec<char> = line.chars().skip(2).take(inner_w).collect();
+        let inner: Vec<char> = line.chars().skip(4).take(inner_w).collect();
         for (idx, col) in cols.iter_mut().enumerate() {
             let from = bounds[idx].min(inner.len());
             let to = bounds[idx + 1].min(inner.len());

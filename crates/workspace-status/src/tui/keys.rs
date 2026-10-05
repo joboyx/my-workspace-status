@@ -8,6 +8,11 @@ use crossterm::event::{
 
 use super::action::{Action, PaletteOpenedBy};
 
+/// Rows PgUp / PgDn scroll the `?` help body.
+///
+/// The help dialog has no page height of its own in the key map.
+pub const HELP_PAGE_ROWS: i32 = 10;
+
 /// Window for `zz` / `gg` after the first key.
 pub const DOUBLE_TAP_MS: u64 = 400;
 
@@ -591,10 +596,19 @@ fn key_to_action(
             KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc | KeyCode::Char('?') => {
                 Action::ToggleHelp
             }
+            KeyCode::Char('j') | KeyCode::Down => Action::HelpScroll(1),
+            KeyCode::Char('k') | KeyCode::Up => Action::HelpScroll(-1),
+            KeyCode::PageDown => Action::HelpScroll(HELP_PAGE_ROWS),
+            KeyCode::PageUp => Action::HelpScroll(-HELP_PAGE_ROWS),
             _ => Action::None,
         },
+        // Letters type into the query; only the arrows and paging scroll.
         InputMode::HelpSearch => match key.code {
             KeyCode::Esc => Action::SearchCancel,
+            KeyCode::Down => Action::HelpScroll(1),
+            KeyCode::Up => Action::HelpScroll(-1),
+            KeyCode::PageDown => Action::HelpScroll(HELP_PAGE_ROWS),
+            KeyCode::PageUp => Action::HelpScroll(-HELP_PAGE_ROWS),
             KeyCode::Backspace => Action::SearchBackspace,
             KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Action::SearchBackspace
@@ -2132,6 +2146,38 @@ mod tests {
             ),
             Action::PanDiff(1)
         );
+    }
+
+    #[test]
+    fn help_j_k_pgup_pgdn_scroll() {
+        let help = InputMode::Help;
+        for (event, action) in [
+            (key(KeyCode::Char('j')), Action::HelpScroll(1)),
+            (key(KeyCode::Down), Action::HelpScroll(1)),
+            (key(KeyCode::Char('k')), Action::HelpScroll(-1)),
+            (key(KeyCode::Up), Action::HelpScroll(-1)),
+            (key(KeyCode::PageDown), Action::HelpScroll(HELP_PAGE_ROWS)),
+            (key(KeyCode::PageUp), Action::HelpScroll(-HELP_PAGE_ROWS)),
+        ] {
+            assert_eq!(event_to_action(&event, help, false, false), action);
+        }
+        let searching = InputMode::HelpSearch;
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('j')), searching, false, false),
+            Action::SearchChar('j')
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('k')), searching, false, false),
+            Action::SearchChar('k')
+        );
+        for (event, action) in [
+            (key(KeyCode::Down), Action::HelpScroll(1)),
+            (key(KeyCode::Up), Action::HelpScroll(-1)),
+            (key(KeyCode::PageDown), Action::HelpScroll(HELP_PAGE_ROWS)),
+            (key(KeyCode::PageUp), Action::HelpScroll(-HELP_PAGE_ROWS)),
+        ] {
+            assert_eq!(event_to_action(&event, searching, false, false), action);
+        }
     }
 
     #[test]

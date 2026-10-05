@@ -7,8 +7,8 @@
 //! short as it can be. The footer shows [`crate::APP_VERSION`] in the
 //! lower-right. On a compare tab [`help_groups`] swaps GIT for
 //! [`HELP_COMPARE_GROUP`] (what acts on the compare diff and what needs the
-//! Workspace tab); [`help_status_lines`] reserves the rows of the columns
-//! that paint.
+//! Workspace tab); [`help_status_lines`] sizes the help dialog for the
+//! columns that paint. A dialog shorter than that scrolls its body.
 
 /// One help row: key chips plus a short description.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -729,7 +729,7 @@ pub fn help_overlay_height(groups: &[HelpGroup], term_width: usize, footer: &str
     help_overlay_row_count(body, footer_lines.len().max(1))
 }
 
-/// Overlay rows reserved for `?` help at `term_cols`, for the columns
+/// Help dialog height at box width `term_cols`, for the columns
 /// [`help_groups`] paints (`compare` on a compare tab).
 pub fn help_status_lines(term_cols: u16, compare: bool) -> u16 {
     help_overlay_height(

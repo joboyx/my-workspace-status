@@ -8,12 +8,17 @@ use crate::support::{
 /// Overlay chrome from the tree. Graph-pane `o` stays on
 /// `pty_graph_branch_focus_overlay`.
 fn tree_graph_focus_overlay_open(screen: &str) -> bool {
+    tree_graph_focus_overlay_chrome(screen) && screen.contains("topic/noise")
+}
+
+/// Dialog chrome whatever the filter hides: the centered dialog covers the
+/// graph rows behind it, so `topic/noise` shows only while the list has it.
+fn tree_graph_focus_overlay_chrome(screen: &str) -> bool {
     panes_tree_focused_graph_unfocused(screen)
         && tree_cursor_on(screen, "focusbox")
         && screen.contains("Focus branches")
         && screen.contains("filter:")
         && screen.contains("* feature/keep")
-        && screen.contains("topic/noise")
         && screen.contains("Enter apply")
         && screen.contains("Ctrl-o clear")
         && screen.contains("Esc cancel")
@@ -25,7 +30,7 @@ fn tree_graph_focus_overlay_open(screen: &str) -> bool {
 }
 
 fn tree_graph_focus_overlay_filtered_keep(screen: &str) -> bool {
-    tree_graph_focus_overlay_open(screen)
+    tree_graph_focus_overlay_chrome(screen)
         && screen.contains("filter: feature")
         && screen
             .lines()

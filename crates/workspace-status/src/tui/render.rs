@@ -18,8 +18,9 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 
 use super::chrome::{
-    breadcrumb_line, breadcrumb_rows, ctrl_c_prompt_line, ctrl_c_prompt_rows, export_shows_status,
-    overlay_status_rows_for, status_line,
+    breadcrumb_line, breadcrumb_rows, ctrl_c_prompt_line, ctrl_c_prompt_rows, dialog_height,
+    dialog_rect, dialog_width, export_shows_status, open_dialog, status_line, DialogKind,
+    LIST_OVERLAY_MAX_ROWS,
 };
 use super::comments::{
     comment_overlay_footer_save, commit_file_row_comments_resolved, commit_file_row_has_comment,
@@ -34,9 +35,10 @@ use super::diff::{
 };
 use super::drill::DrillView;
 use super::help::{
-    help_chip_gap_spaces, help_column_content_width, help_column_widths, help_entry_matches,
-    help_entry_visual_lines, help_groups, help_idle_footer_lines, help_inner_width, help_key_width,
-    help_version_label, HELP_SEARCH_ESC_HINT,
+    attach_help_version, help_chip_gap_spaces, help_column_content_width, help_column_widths,
+    help_entry_matches, help_entry_visual_lines, help_groups, help_idle_footer,
+    help_idle_footer_lines, help_inner_width, help_key_width, help_version_label, wrap_help_footer,
+    HELP_SEARCH_ESC_HINT,
 };
 use super::icons::{
     comment_mark_cols, glyph, icon_branch, icon_comment, icon_comment_resolved, icon_diff,
@@ -135,30 +137,18 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         draw_too_small(frame, area, state.theme.palette());
         return;
     }
-    let overlay_h = overlay_status_rows_for(state, area.width);
+    // Dialogs paint over the panes (see the end of this fn), so no open
+    // overlay changes these rows.
     let crumb_h = breadcrumb_rows(state);
     let prompt_h = ctrl_c_prompt_rows(state);
-    let tab_h = 1u16;
-    let chrome_h = crumb_h
-        .saturating_add(prompt_h)
-        .saturating_add(overlay_h)
-        .saturating_add(tab_h);
-    // Help keeps its wrapped row budget. Panes take leftover rows (this
-    // can be fewer than the idle Min(3)). A fixed Min(3) clips the last
-    // GIT wrap at the default 140×32 PTY.
-    let pane_min = if state.help_open {
-        area.height.saturating_sub(chrome_h)
-    } else {
-        3
-    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(tab_h),
-            Constraint::Min(pane_min),
+            Constraint::Length(1),
+            Constraint::Min(3),
             Constraint::Length(crumb_h),
             Constraint::Length(prompt_h),
-            Constraint::Length(overlay_h),
+            Constraint::Length(1),
         ])
         .split(area);
     draw_tab_strip(frame, chunks[0], state);
@@ -236,42 +226,20 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
     frame.render_widget(right_block, panes[1]);
     draw_right(frame, right_inner, state);
 
-    if crumb_h > 0 {
-        frame.render_widget(
-            Paragraph::new(breadcrumb_line(state, chunks[2].width)),
-            chunks[2],
-        );
-    }
+    frame.render_widget(
+        Paragraph::new(breadcrumb_line(state, chunks[2].width)),
+        chunks[2],
+    );
     if prompt_h > 0 {
         frame.render_widget(
             Paragraph::new(ctrl_c_prompt_line(state, chunks[3].width)),
             chunks[3],
         );
     }
-    let overlay = chunks[4];
-    if state.help_open {
-        draw_help(frame, overlay, state);
-    } else if state.confirm.is_some() {
-        draw_confirm(frame, overlay, state);
-    } else if state.stash_menu.is_some() {
-        draw_stash_menu(frame, overlay, state);
-    } else if state.create_branch.is_some() {
-        draw_create_branch(frame, overlay, state);
-    } else if state.comment.is_some() {
-        draw_comment(frame, overlay, state);
-    } else if state.comment_export.is_some() {
-        draw_comment_export(frame, overlay, state);
-    } else if state.branch_picker.is_some() {
-        draw_branch_picker(frame, overlay, state);
-    } else if state.compare_picker.is_some() {
-        draw_compare_picker(frame, overlay, state);
-    } else if state.graph_focus_picker.is_some() {
-        draw_graph_focus_picker(frame, overlay, state);
-    } else if state.command_palette.is_some() {
-        draw_command_palette(frame, overlay, state);
-    } else {
-        frame.render_widget(Paragraph::new(status_line(state, overlay.width)), overlay);
-    }
+    frame.render_widget(
+        Paragraph::new(status_line(state, chunks[4].width)),
+        chunks[4],
+    );
 
     state.layout.tree_x = tree_inner.x;
     state.layout.tree_y = tree_inner.y;
@@ -322,6 +290,25 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState) {
         let painted_n = state.painted_commit_file_rows().len();
         let (start, _) = visible_window(painted_n, *cursor, list_h);
         state.layout.files_list_offset = start;
+    }
+
+    // Dialogs paint last: a fixed-height box centered over the panes.
+    state.layout.help_scroll_max = 0;
+    if let Some(kind) = open_dialog(state) {
+        let width = dialog_width(chunks[1], kind);
+        let rect = dialog_rect(chunks[1], width, dialog_height(state, kind, width));
+        match kind {
+            DialogKind::Help => state.layout.help_scroll_max = draw_help(frame, rect, state),
+            DialogKind::Confirm => draw_confirm(frame, rect, state),
+            DialogKind::StashMenu => draw_stash_menu(frame, rect, state),
+            DialogKind::CreateBranch => draw_create_branch(frame, rect, state),
+            DialogKind::Comment => draw_comment(frame, rect, state),
+            DialogKind::CommentExport => draw_comment_export(frame, rect, state),
+            DialogKind::BranchPicker => draw_branch_picker(frame, rect, state),
+            DialogKind::ComparePicker => draw_compare_picker(frame, rect, state),
+            DialogKind::GraphFocusPicker => draw_graph_focus_picker(frame, rect, state),
+            DialogKind::CommandPalette => draw_command_palette(frame, rect, state),
+        }
     }
 
     // Keep the frame as painted so a mouse release copies what is on screen,
@@ -1958,9 +1945,11 @@ fn overlay_block(accent: Color) -> Block<'static> {
         .padding(Padding::horizontal(1))
 }
 
-fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+/// Paint `?` help in `area` and return its max body scroll (0 when every
+/// body row fits). The group-title row stays pinned above the scrolled body.
+fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
     if area.width == 0 || area.height == 0 {
-        return;
+        return 0;
     }
     let query = state.help_search_query.as_deref().unwrap_or("");
     let searching = state.help_search_query.is_some();
@@ -2034,7 +2023,13 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         lines.push(Line::from(spans));
     }
 
-    let footer = if searching {
+    let idle_footer = |parts: Vec<String>| -> Vec<Line<'static>> {
+        parts
+            .into_iter()
+            .map(|part| Line::from(Span::styled(part, Style::default().fg(palette.muted))))
+            .collect()
+    };
+    let mut footer = if searching {
         let q = state.help_search_query.as_deref().unwrap_or("");
         help_footer_with_version(
             vec![
@@ -2050,10 +2045,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             palette.muted,
         )
     } else {
-        help_idle_footer_lines(inner)
-            .into_iter()
-            .map(|part| Line::from(Span::styled(part, Style::default().fg(palette.muted))))
-            .collect()
+        idle_footer(help_idle_footer_lines(inner))
     };
 
     frame.render_widget(Clear, area);
@@ -2061,13 +2053,31 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
     if inner_area.width == 0 || inner_area.height == 0 {
-        return;
+        return 0;
+    }
+    // Body rows under the pinned title row once `footer` takes its rows.
+    let body_room = |footer: &[Line<'static>]| {
+        let footer_h = (footer.len() as u16).min(inner_area.height).max(1);
+        usize::from(inner_area.height.saturating_sub(footer_h).saturating_sub(1))
+    };
+    let mut scroll_max = body_rows.saturating_sub(body_room(&footer));
+    if scroll_max > 0 && !searching {
+        let mut parts = wrap_help_footer(&format!("j/k scroll · {}", help_idle_footer()), inner);
+        attach_help_version(&mut parts, inner);
+        footer = idle_footer(parts);
+        scroll_max = body_rows.saturating_sub(body_room(&footer));
     }
     let footer_h = (footer.len() as u16).min(inner_area.height).max(1);
     let body_h = inner_area.height.saturating_sub(footer_h);
     if body_h > 0 {
+        let scroll = state.help_scroll.min(scroll_max);
+        let mut lines = lines.into_iter();
+        let title = lines.next().into_iter();
+        let visible: Vec<Line> = title
+            .chain(lines.skip(scroll).take(usize::from(body_h) - 1))
+            .collect();
         frame.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            Paragraph::new(visible),
             Rect {
                 x: inner_area.x,
                 y: inner_area.y,
@@ -2085,6 +2095,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             height: footer_h,
         },
     );
+    scroll_max
 }
 
 fn files_word(n: usize) -> &'static str {
@@ -2497,12 +2508,11 @@ fn draw_stash_menu(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         }
         lines.push(Line::from(spans));
     }
-    if !state.status.is_empty() {
-        lines.push(Line::from(Span::styled(
-            state.status.to_string(),
-            Style::default().fg(state.status.kind().color(palette)),
-        )));
-    }
+    // The status row is always there, so typing never grows the box.
+    lines.push(Line::from(Span::styled(
+        state.status.to_string(),
+        Style::default().fg(state.status.kind().color(palette)),
+    )));
     lines.push(Line::from(Span::styled(
         "Esc cancel",
         Style::default().fg(palette.muted),
@@ -2739,6 +2749,58 @@ fn fit_with_ellipsis(value: &str, width: usize) -> String {
     }
 }
 
+/// List rows a list dialog paints at inner height `inner_h`: the box less
+/// its query, status, and footer rows, capped at [`LIST_OVERLAY_MAX_ROWS`].
+fn list_dialog_rows(inner_h: u16) -> usize {
+    usize::from(inner_h.saturating_sub(3)).min(LIST_OVERLAY_MAX_ROWS)
+}
+
+/// Status row of a list dialog: `state.status`, blank when empty.
+fn list_dialog_status(state: &AppState, palette: Palette) -> Line<'static> {
+    Line::from(Span::styled(
+        state.status.to_string(),
+        Style::default().fg(state.status.kind().color(palette)),
+    ))
+}
+
+/// Paint a list dialog at fixed rows: `header` (the query / title row) on
+/// the first inner row, `rows` under it (cut to fit), `status` on the row
+/// above the last, and `footer` on the last. Result count never moves the
+/// header or the footer.
+fn paint_list_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    block: Block<'static>,
+    header: Line<'static>,
+    rows: Vec<Line<'static>>,
+    status: Line<'static>,
+    footer: Line<'static>,
+) {
+    frame.render_widget(Clear, area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let row_at = |offset: u16| Rect {
+        x: inner.x,
+        y: inner.y + offset,
+        width: inner.width,
+        height: 1,
+    };
+    let h = inner.height;
+    frame.render_widget(Paragraph::new(header), row_at(0));
+    for (offset, line) in (1..h.saturating_sub(2)).zip(rows) {
+        frame.render_widget(Paragraph::new(line), row_at(offset));
+    }
+    if h >= 3 {
+        frame.render_widget(Paragraph::new(status), row_at(h - 2));
+    }
+    if h >= 2 {
+        frame.render_widget(Paragraph::new(footer), row_at(h - 1));
+    }
+}
+
 fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let Some(picker) = state.compare_picker.as_ref() else {
         return;
@@ -2749,7 +2811,7 @@ fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let palette = state.theme.palette();
     let accent = palette.branch_feature;
     let visible_len = picker.visible_len();
-    let max_rows = 12usize;
+    let max_rows = list_dialog_rows(area.height.saturating_sub(2));
     let start = if visible_len <= max_rows {
         0
     } else {
@@ -2781,9 +2843,9 @@ fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Span::styled("  filter: ", Style::default().fg(palette.muted)),
         Span::styled(filter.to_string(), Style::default().fg(palette.cursor)),
     ];
-    let mut lines = vec![Line::from(title)];
+    let mut rows = Vec::new();
     if window.is_empty() {
-        lines.push(Line::from(Span::styled(
+        rows.push(Line::from(Span::styled(
             format!("  {}", compare_picker_empty(picker)),
             Style::default().fg(palette.muted),
         )));
@@ -2802,7 +2864,7 @@ fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             } else {
                 palette.muted
             };
-            lines.push(Line::from(vec![
+            rows.push(Line::from(vec![
                 Span::styled(
                     cursor.to_string(),
                     Style::default()
@@ -2820,22 +2882,18 @@ fn draw_compare_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ]));
         }
     }
-    if !state.status.is_empty() {
-        lines.push(Line::from(Span::styled(
-            state.status.to_string(),
-            Style::default().fg(state.status.kind().color(palette)),
-        )));
-    }
-    lines.push(Line::from(Span::styled(
+    let footer = Line::from(Span::styled(
         "↑↓ move · type to filter · Enter compare · Esc close",
         Style::default().fg(palette.muted),
-    )));
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(overlay_block(accent))
-            .wrap(Wrap { trim: false }),
+    ));
+    paint_list_dialog(
+        frame,
         area,
+        overlay_block(accent),
+        Line::from(title),
+        rows,
+        list_dialog_status(state, palette),
+        footer,
     );
 }
 
@@ -2850,15 +2908,15 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let accent = palette.branch_feature;
     let visible = picker.visible();
     let create = picker.create_name();
-    let rows = picker.row_count();
-    let max_rows = 12usize;
-    let start = if rows <= max_rows {
+    let row_count = picker.row_count();
+    let max_rows = list_dialog_rows(area.height.saturating_sub(2));
+    let start = if row_count <= max_rows {
         0
     } else {
         picker
             .cursor
             .saturating_sub(max_rows / 2)
-            .min(rows - max_rows)
+            .min(row_count - max_rows)
     };
     let window = visible
         .iter()
@@ -2908,9 +2966,9 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(palette.cursor),
         ));
     }
-    let mut lines = vec![Line::from(title)];
+    let mut rows = Vec::new();
     if window.is_empty() && !create_painted {
-        lines.push(Line::from(Span::styled(
+        rows.push(Line::from(Span::styled(
             "  No matching branches",
             Style::default().fg(palette.muted),
         )));
@@ -2932,7 +2990,7 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             } else {
                 palette.muted
             };
-            lines.push(Line::from(vec![
+            rows.push(Line::from(vec![
                 Span::styled(
                     cursor.to_string(),
                     Style::default()
@@ -2950,7 +3008,7 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ]));
         }
         if let Some(name) = create.filter(|_| create_painted) {
-            lines.push(branch_create_row(
+            rows.push(branch_create_row(
                 name,
                 picker.commit_id.as_deref(),
                 picker.on_create_row(),
@@ -2958,12 +3016,6 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 accent,
             ));
         }
-    }
-    if !state.status.is_empty() {
-        lines.push(Line::from(Span::styled(
-            state.status.to_string(),
-            Style::default().fg(state.status.kind().color(palette)),
-        )));
     }
     // Enter names what it does on the cursor row: the create row makes a
     // branch (tree: and checks it out; graph: at the commit, no checkout).
@@ -2979,16 +3031,14 @@ fn draw_branch_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     } else {
         format!("↑↓ move · type to filter · {enter} · Esc close")
     };
-    lines.push(Line::from(Span::styled(
-        footer,
-        Style::default().fg(palette.muted),
-    )));
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(overlay_block(accent))
-            .wrap(Wrap { trim: false }),
+    paint_list_dialog(
+        frame,
         area,
+        overlay_block(accent),
+        Line::from(title),
+        rows,
+        list_dialog_status(state, palette),
+        Line::from(Span::styled(footer, Style::default().fg(palette.muted))),
     );
 }
 
@@ -3049,7 +3099,7 @@ fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
     let palette = state.theme.palette();
     let accent = palette.branch_feature;
     let visible = picker.visible();
-    let max_rows = 12usize;
+    let max_rows = list_dialog_rows(area.height.saturating_sub(2));
     let start = if visible.len() <= max_rows {
         0
     } else {
@@ -3073,7 +3123,7 @@ fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
     } else {
         picker.filter.as_str()
     };
-    let mut lines = vec![Line::from(vec![
+    let header = Line::from(vec![
         Span::styled(
             "Focus branches ",
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
@@ -3081,9 +3131,10 @@ fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
         Span::styled(picker.repo.clone(), Style::default().fg(palette.repo)),
         Span::styled("  filter: ", Style::default().fg(palette.muted)),
         Span::styled(filter.to_string(), Style::default().fg(palette.cursor)),
-    ])];
+    ]);
+    let mut rows = Vec::new();
     if window.is_empty() {
-        lines.push(Line::from(Span::styled(
+        rows.push(Line::from(Span::styled(
             "  No matching branches",
             Style::default().fg(palette.muted),
         )));
@@ -3107,7 +3158,7 @@ fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
             } else {
                 palette.muted
             };
-            lines.push(Line::from(vec![
+            rows.push(Line::from(vec![
                 Span::styled(
                     cursor.to_string(),
                     Style::default()
@@ -3125,22 +3176,18 @@ fn draw_graph_focus_picker(frame: &mut Frame<'_>, area: Rect, state: &AppState) 
             ]));
         }
     }
-    if !state.status.is_empty() {
-        lines.push(Line::from(Span::styled(
-            state.status.to_string(),
-            Style::default().fg(state.status.kind().color(palette)),
-        )));
-    }
-    lines.push(Line::from(Span::styled(
+    let footer = Line::from(Span::styled(
         "↑↓ move · type to filter · space toggle · Enter apply · Ctrl-o clear · Esc cancel",
         Style::default().fg(palette.muted),
-    )));
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(overlay_block(accent))
-            .wrap(Wrap { trim: false }),
+    ));
+    paint_list_dialog(
+        frame,
         area,
+        overlay_block(accent),
+        header,
+        rows,
+        list_dialog_status(state, palette),
+        footer,
     );
 }
 
@@ -3154,26 +3201,31 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let palette_theme = state.theme.palette();
     let accent = palette_theme.cursor;
     let surface = overlay_surface(state);
-    let rows = palette.paint_rows();
+    let paint_rows = palette.paint_rows();
     // Rounded border plus one column of padding on each side.
     let inner_width = area.width.saturating_sub(4) as usize;
-    let max_rows = 12usize;
-    let cursor_paint = rows.iter().position(|row| match row {
+    let max_rows = list_dialog_rows(area.height.saturating_sub(2));
+    let cursor_paint = paint_rows.iter().position(|row| match row {
         super::command_palette::PalettePaintRow::Command { index, .. } => *index == palette.cursor,
         _ => false,
     });
-    let start = if rows.len() <= max_rows {
+    let start = if paint_rows.len() <= max_rows {
         0
     } else {
         let focus = cursor_paint.unwrap_or(0);
         focus
             .saturating_sub(max_rows / 2)
-            .min(rows.len() - max_rows)
+            .min(paint_rows.len() - max_rows)
     };
-    let window = if rows.is_empty() {
+    let window = if paint_rows.is_empty() {
         Vec::new()
     } else {
-        rows.iter().skip(start).take(max_rows).cloned().collect()
+        paint_rows
+            .iter()
+            .skip(start)
+            .take(max_rows)
+            .cloned()
+            .collect()
     };
     let prefix = match palette.opened_by {
         super::action::PaletteOpenedBy::Colon => ":",
@@ -3184,14 +3236,15 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     } else {
         palette.filter.as_str()
     };
-    let mut lines = vec![Line::from(vec![
+    let header = Line::from(vec![
         Span::styled(
             prefix.to_string(),
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ),
         Span::styled(" ", Style::default()),
         Span::styled(query.to_string(), Style::default().fg(accent)),
-    ])];
+    ]);
+    let mut lines = Vec::new();
     if window.is_empty() {
         lines.push(Line::from(Span::styled(
             "  No matching commands",
@@ -3294,12 +3347,6 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             }
         }
     }
-    if !state.status.is_empty() {
-        lines.push(Line::from(Span::styled(
-            state.status.to_string(),
-            Style::default().fg(state.status.kind().color(palette_theme)),
-        )));
-    }
     let reason = palette
         .selected()
         .and_then(|command| state.palette_disabled_reason(command));
@@ -3307,16 +3354,17 @@ fn draw_command_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Some(why) => format!("Enter run · Esc close · {why}"),
         None => "Enter run · Esc close".into(),
     };
-    lines.push(Line::from(Span::styled(
-        footer,
-        Style::default().fg(palette_theme.muted),
-    )));
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(overlay_block(accent))
-            .wrap(Wrap { trim: false }),
+    paint_list_dialog(
+        frame,
         area,
+        overlay_block(accent),
+        header,
+        lines,
+        list_dialog_status(state, palette_theme),
+        Line::from(Span::styled(
+            footer,
+            Style::default().fg(palette_theme.muted),
+        )),
     );
 }
 
@@ -3350,12 +3398,11 @@ fn draw_create_branch(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Span::styled(name.to_string(), Style::default().fg(palette.cursor)),
         ]),
     ];
-    if !state.status.is_empty() {
-        lines.push(Line::from(Span::styled(
-            state.status.to_string(),
-            Style::default().fg(state.status.kind().color(palette)),
-        )));
-    }
+    // The status row is always there, so typing never grows the box.
+    lines.push(Line::from(Span::styled(
+        state.status.to_string(),
+        Style::default().fg(state.status.kind().color(palette)),
+    )));
     lines.push(Line::from(Span::styled(
         footer,
         Style::default().fg(palette.muted),
@@ -3405,6 +3452,40 @@ fn comment_body_lines(prompt: &CommentPrompt, palette: Palette) -> Vec<Line<'sta
         .collect()
 }
 
+/// Paint `body` from the top of a text dialog and pin `footer` to its last
+/// inner rows. A body taller than the room left is cut at the bottom.
+fn paint_text_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    block: Block<'static>,
+    body: Vec<Line<'static>>,
+    footer: Vec<Line<'static>>,
+) {
+    frame.render_widget(Clear, area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let footer_h = (footer.len() as u16).min(inner.height);
+    let body_h = inner.height - footer_h;
+    frame.render_widget(
+        Paragraph::new(body).wrap(Wrap { trim: false }),
+        Rect {
+            height: body_h,
+            ..inner
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(footer),
+        Rect {
+            y: inner.y + body_h,
+            height: footer_h,
+            ..inner
+        },
+    );
+}
+
 fn draw_comment(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let Some(prompt) = state.comment.as_ref() else {
         return;
@@ -3431,20 +3512,22 @@ fn draw_comment(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         )),
     ];
     lines.extend(comment_body_lines(prompt, palette));
-    lines.push(Line::from(Span::styled(
-        comment_overlay_footer_save(prompt.resolved),
-        Style::default().fg(palette.muted),
-    )));
-    lines.push(Line::from(Span::styled(
-        COMMENT_OVERLAY_FOOTER_EDIT,
-        Style::default().fg(palette.muted),
-    )));
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(overlay_block_filled(accent, surface))
-            .wrap(Wrap { trim: false }),
+    let footer = vec![
+        Line::from(Span::styled(
+            comment_overlay_footer_save(prompt.resolved),
+            Style::default().fg(palette.muted),
+        )),
+        Line::from(Span::styled(
+            COMMENT_OVERLAY_FOOTER_EDIT,
+            Style::default().fg(palette.muted),
+        )),
+    ];
+    paint_text_dialog(
+        frame,
         area,
+        overlay_block_filled(accent, surface),
+        lines,
+        footer,
     );
 }
 
@@ -3486,17 +3569,11 @@ fn draw_comment_export(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(state.status.kind().color(palette)),
         )));
     }
-    lines.push(Line::from(Span::styled(
+    let footer = vec![Line::from(Span::styled(
         "Esc close",
         Style::default().fg(palette.muted),
-    )));
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(overlay_block(accent))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+    ))];
+    paint_text_dialog(frame, area, overlay_block(accent), lines, footer);
 }
 
 #[cfg(test)]
@@ -6162,10 +6239,9 @@ mod tests {
         assert_help_version_lower_right(&text);
     }
 
-    /// At 140×40 the help takes at most 24 rows and the tree keeps 13
-    /// (row-aligned columns left 5), and no column's text runs into the
-    /// next column. `overlay_height_grows_when_columns_narrow` holds the
-    /// same 24-row bound.
+    /// At 140×40 the help dialog fits over the panes without scrolling,
+    /// the panes keep their full height under it, and no column's text
+    /// runs into the next column.
     #[test]
     fn help_columns_keep_a_gutter_and_the_panes_rows() {
         use super::super::help::{help_column_widths, HELP_GROUPS};
@@ -6186,20 +6262,21 @@ mod tests {
             .unwrap_or_else(|| panic!("help footer:\n{text}"));
         let overlay_rows = footer + 2 - (header - 1);
         assert!(
-            overlay_rows <= 24,
+            overlay_rows <= usize::from(state.layout.pane_height),
             "help takes {overlay_rows} rows:\n{text}"
         );
-        assert!(
-            state.layout.tree_height >= 13,
-            "panes keep {} rows:\n{text}",
-            state.layout.tree_height
+        assert_eq!(state.layout.help_scroll_max, 0, "{text}");
+        assert_eq!(
+            state.layout.tree_height,
+            40 - 3 - 2,
+            "panes keep every row under the dialog:\n{text}"
         );
         assert!(text.contains("quit (press twice)"), "{text}");
         assert!(text.contains("apply/pop/drop"), "{text}");
 
-        // Border + padding put the first column at x = 2.
-        let widths = help_column_widths(HELP_GROUPS, help_inner_width(140));
-        let mut starts = vec![2usize];
+        // The box sits at x = 2; border + padding put the first column at x = 4.
+        let widths = help_column_widths(HELP_GROUPS, help_inner_width(136));
+        let mut starts = vec![4usize];
         for width in &widths[..widths.len() - 1] {
             starts.push(starts.last().unwrap() + width);
         }
@@ -6218,14 +6295,21 @@ mod tests {
         }
     }
 
-    /// On a compare tab the overlay paints exactly the rows
-    /// `help_status_lines(cols, true)` reserves: the box, title row, the
-    /// tallest COMPARE / MOVE / VIEW column, and the footer, with the last
-    /// entry of each column on screen.
+    /// Cells `x0..x1` of buffer row `y`.
+    fn buffer_row(terminal: &Terminal<TestBackend>, y: u16, x0: u16, x1: u16) -> String {
+        let buf = terminal.backend().buffer();
+        (x0..x1).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    /// On a compare tab help paints centered over the panes at the box
+    /// width: the rows `help_status_lines(box, true)` reserves when they
+    /// fit, and on a short terminal every body row is reachable by scroll.
     #[test]
-    fn compare_help_paints_its_reserved_rows() {
+    fn compare_help_paints_centered_and_scrolls_every_body_row() {
+        use super::super::chrome::{dialog_height, dialog_rect, dialog_width, DialogKind};
         use super::super::help::{help_body_line_count, help_status_lines, HELP_COMPARE_GROUPS};
-        for cols in [64u16, 100, 140] {
+        // Box widths 64, 100, and 140.
+        for cols in [68u16, 104, 144] {
             let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
             let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
             state
@@ -6242,13 +6326,22 @@ mod tests {
                 .position(|l| l.contains("MOVE") && l.contains("COMPARE") && l.contains("VIEW"))
                 .unwrap_or_else(|| panic!("{cols} cols, compare help header:\n{text}"));
             let top = header - 1;
-            assert!(lines[top].starts_with('╭'), "{cols} cols:\n{text}");
+            let box_w = cols - 4;
+            let panes = Rect::new(0, 1, cols, state.layout.pane_height);
+            assert_eq!(dialog_width(panes, DialogKind::Help), box_w);
+            let rect = dialog_rect(panes, box_w, dialog_height(&state, DialogKind::Help, box_w));
+            assert_eq!(rect.y as usize, top, "{cols} cols:\n{text}");
+            assert_eq!(
+                buffer_row(&terminal, rect.y, 2, 3),
+                "╭",
+                "{cols} cols:\n{text}"
+            );
             let bottom = (header..lines.len())
-                .find(|&y| lines[y].starts_with('╰'))
+                .find(|&y| buffer_row(&terminal, y as u16, 2, 3) == "╰")
                 .unwrap_or_else(|| panic!("{cols} cols, help bottom border:\n{text}"));
-            let reserved = usize::from(help_status_lines(cols, true));
+            let reserved = usize::from(help_status_lines(box_w, true));
             assert_eq!(bottom + 1 - top, reserved, "{cols} cols:\n{text}");
-            let inner = help_inner_width(usize::from(cols));
+            let inner = help_inner_width(usize::from(box_w));
             let body = help_body_line_count(
                 HELP_COMPARE_GROUPS,
                 &help_column_widths(HELP_COMPARE_GROUPS, inner),
@@ -6259,13 +6352,41 @@ mod tests {
                 body + footer_rows,
                 "{cols} cols:\n{text}"
             );
-            let last_body = lines[header + body];
+            assert_eq!(state.layout.help_scroll_max, 0, "{cols} cols fits");
+            let (x0, x1) = (rect.x + 2, rect.right() - 2);
+            let full: Vec<String> = (0..body)
+                .map(|row| buffer_row(&terminal, (header + 1 + row) as u16, x0, x1))
+                .collect();
             assert!(
-                !last_body.trim_matches(|c| c == '│' || c == ' ').is_empty(),
+                !full[body - 1].trim().is_empty(),
                 "{cols} cols: last body row is blank:\n{text}"
             );
             for needle in ["refresh now", "(1=Workspace)", "(press twice)"] {
                 assert!(text.contains(needle), "{cols} cols {needle}:\n{text}");
+            }
+
+            // A short terminal clips the box; scrolling shows every row.
+            let mut terminal = Terminal::new(TestBackend::new(cols, 20)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let max = state.layout.help_scroll_max;
+            assert!(max > 0, "{cols} cols × 20 rows scrolls");
+            let short = buffer_text(&terminal);
+            let header = short
+                .lines()
+                .position(|l| l.contains("MOVE") && l.contains("COMPARE"))
+                .unwrap_or_else(|| panic!("{cols} cols short header:\n{short}"));
+            let visible = body - max;
+            for scroll in 0..=max {
+                state.help_scroll = scroll;
+                terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+                for row in 0..visible {
+                    assert_eq!(
+                        buffer_row(&terminal, (header + 1 + row) as u16, x0, x1),
+                        full[scroll + row],
+                        "{cols} cols, scroll {scroll}, row {row}:\n{}",
+                        buffer_text(&terminal)
+                    );
+                }
             }
         }
     }
@@ -6683,12 +6804,15 @@ mod tests {
         assert!(text.contains("Ctrl-r resolve"), "{text}");
         assert!(!text.contains("Comment · resolved"), "{text}");
         assert!(!text.contains("▏hello"), "{text}");
+        // The comment box has no status row; `status` stays on the last row.
+        let rows: Vec<&str> = text.lines().collect();
+        let (last, boxed) = rows.split_last().expect("rows");
         assert_eq!(
-            text.matches("hello").count(),
+            boxed.concat().matches("hello").count(),
             1,
             "typed body must not also echo as status inside the overlay:\n{text}"
         );
-        let last = text.lines().last().unwrap_or("");
+        assert_eq!(last.trim(), "body: hello", "{text}");
         assert!(
             !last.contains("? help") && !last.contains("focus right"),
             "idle status must not paint on the last row:\n{last}"
@@ -7936,6 +8060,126 @@ mod tests {
         state.open_compare_commit_picker("app".into(), Vec::new());
         draw_state(&mut terminal, &mut state);
         assert!(buffer_text(&terminal).contains("No commits to compare"));
+    }
+
+    /// Row index of the first buffer line that contains `needle`.
+    fn row_of(text: &str, needle: &str) -> usize {
+        text.lines()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("no row with {needle:?}:\n{text}"))
+    }
+
+    #[test]
+    fn list_dialog_input_row_stays_when_results_change() {
+        let commits = |n: usize| {
+            (0..n)
+                .map(|i| crate::git::AncestorCommit {
+                    id: format!("{i:02}{}", "a".repeat(38)),
+                    subject: format!("commit {i}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        state.open_compare_commit_picker("app".into(), commits(2));
+        draw_state(&mut terminal, &mut state);
+        let few = buffer_text(&terminal);
+        state.open_compare_commit_picker("app".into(), commits(30));
+        draw_state(&mut terminal, &mut state);
+        let many = buffer_text(&terminal);
+        assert_eq!(
+            row_of(&few, "Compare vs commit"),
+            row_of(&many, "Compare vs commit"),
+            "input row moved:\n{few}\n{many}"
+        );
+        assert_eq!(
+            row_of(&few, "Enter compare"),
+            row_of(&many, "Enter compare"),
+            "footer row moved:\n{few}\n{many}"
+        );
+        assert!(many.contains("commit 11"), "{many}");
+        assert!(!many.contains("commit 12"), "12 rows at most:\n{many}");
+    }
+
+    #[test]
+    fn dialog_open_keeps_pane_height() {
+        use crate::tui::action::PaletteOpenedBy;
+        use crate::tui::command_palette::CommandPaletteState;
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let idle = state.layout.pane_height;
+        state.help_open = true;
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.layout.pane_height, idle, "help");
+        state.help_open = false;
+        state.confirm = Some(PendingConfirm::StashDrop {
+            repo: "app".into(),
+            stash_ref: "stash@{0}".into(),
+        });
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.layout.pane_height, idle, "confirm");
+        state.confirm = None;
+        state.command_palette = Some(CommandPaletteState::new(PaletteOpenedBy::CtrlK));
+        draw_state(&mut terminal, &mut state);
+        assert_eq!(state.layout.pane_height, idle, "palette");
+    }
+
+    #[test]
+    fn status_row_stays_last_with_dialog_open() {
+        use crate::tui::action::PaletteOpenedBy;
+        use crate::tui::command_palette::CommandPaletteState;
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.command_palette = Some(CommandPaletteState::new(PaletteOpenedBy::CtrlK));
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let text = buffer_text(&terminal);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(text.contains("Enter run"), "{text}");
+        assert_eq!(lines[29].trim(), "", "status row is blank:\n{text}");
+        let crumb: String = breadcrumb_line(&state, 120)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(!crumb.trim().is_empty());
+        assert_eq!(
+            lines[28].trim_end(),
+            crumb.trim_end(),
+            "breadcrumb row:\n{text}"
+        );
+    }
+
+    #[test]
+    fn help_dialog_scrolls_when_columns_exceed_box() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        assert_eq!(state.dispatch(Action::ToggleHelp), Effect::None);
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        draw_state(&mut terminal, &mut state);
+        let max = state.layout.help_scroll_max;
+        assert!(max > 3, "help is taller than 16 rows: {max}");
+        let text = buffer_text(&terminal);
+        assert!(text.contains("j/k scroll"), "{text}");
+        let header = row_of(&text, "MOVE");
+        let first = text.lines().nth(header + 1).unwrap().to_string();
+        assert_eq!(state.dispatch(Action::HelpScroll(3)), Effect::None);
+        assert_eq!(state.help_scroll, 3);
+        draw_state(&mut terminal, &mut state);
+        let scrolled = buffer_text(&terminal);
+        assert_eq!(row_of(&scrolled, "MOVE"), header, "title row stays pinned");
+        assert_ne!(
+            scrolled.lines().nth(header + 1).unwrap(),
+            first,
+            "body scrolled:\n{text}\n{scrolled}"
+        );
+        state.dispatch(Action::HelpScroll(1000));
+        assert_eq!(state.help_scroll, max);
+        state.dispatch(Action::HelpScroll(-1000));
+        assert_eq!(state.help_scroll, 0);
     }
 
     #[test]

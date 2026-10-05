@@ -227,6 +227,7 @@ impl AppState {
             | Action::Quit
             | Action::CtrlC
             | Action::ToggleHelp
+            | Action::HelpScroll(_)
             | Action::Move(_)
             | Action::MoveToStart
             | Action::MoveToEnd

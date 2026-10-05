@@ -34,7 +34,8 @@ fn help_overlay_open(screen: &str) -> bool {
         && screen.contains("search focused")
         && screen.contains("press twice")
         && screen.contains("never quit")
-        && screen.contains("next / prev match")
+        && screen.contains("next / prev")
+        && screen.contains("match (after")
 }
 
 fn help_searching(screen: &str, query: &str) -> bool {

@@ -46,8 +46,15 @@ impl AppState {
                 self.help_open = !self.help_open;
                 self.clear_help_search();
                 if self.help_open {
+                    self.help_scroll = 0;
                     self.clear_diff_visual();
                 }
+                Effect::None
+            }
+            Action::HelpScroll(delta) => {
+                let max = self.layout.help_scroll_max as i64;
+                self.help_scroll =
+                    (self.help_scroll as i64 + i64::from(delta)).clamp(0, max) as usize;
                 Effect::None
             }
             Action::Move(delta) => self.move_focused(delta),
@@ -178,6 +185,7 @@ impl AppState {
                     if let Some(q) = &mut self.help_search_query {
                         q.push(c);
                     }
+                    self.help_scroll = 0;
                     Effect::None
                 } else if self.search_mode {
                     self.search_query.push(c);
@@ -191,6 +199,7 @@ impl AppState {
                     if let Some(q) = &mut self.help_search_query {
                         q.pop();
                     }
+                    self.help_scroll = 0;
                     Effect::None
                 } else if self.search_mode {
                     self.search_query.pop();

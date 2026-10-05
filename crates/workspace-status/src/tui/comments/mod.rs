@@ -17,7 +17,7 @@ mod target;
 pub use export::{copy_to_clipboard, export_markdown};
 pub use overlay::{
     comment_key_label, comment_overlay_footer_save, CommentExport, CommentPrompt,
-    COMMENT_OVERLAY_FOOTER_EDIT,
+    COMMENT_OVERLAY_CHROME_ROWS, COMMENT_OVERLAY_FOOTER_EDIT, COMMENT_OVERLAY_MAX_BODY_LINES,
 };
 pub use reference::{format_entity_reference, DiffSide, EntityRef};
 #[cfg(not(test))]

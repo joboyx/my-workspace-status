@@ -213,6 +213,9 @@ pub struct LayoutHit {
     /// First tab the strip painted. Kept across paints so the window only
     /// scrolls when the active tab would leave it. `0` when every tab fits.
     pub tab_scroll: usize,
+    /// Max help body scroll the last paint allowed. `0` when help is closed
+    /// or every body row fits.
+    pub help_scroll_max: usize,
 }
 
 impl Default for LayoutHit {
@@ -259,6 +262,7 @@ impl Default for LayoutHit {
             tab_hits: Vec::new(),
             tab_close_hits: Vec::new(),
             tab_scroll: 0,
+            help_scroll_max: 0,
         }
     }
 }
@@ -480,6 +484,9 @@ pub struct AppState {
     pub cursor: usize,
     pub help_open: bool,
     pub help_search_query: Option<String>,
+    /// Help body rows scrolled off the top when the columns are taller
+    /// than the help dialog. Clamped to [`LayoutHit::help_scroll_max`].
+    pub help_scroll: usize,
     pub focus: FocusPane,
     /// Breadcrumb trailing slot / overlay status row ([`StatusMessage`]).
     pub status: StatusMessage,
@@ -642,6 +649,7 @@ impl AppState {
             cursor,
             help_open: false,
             help_search_query: None,
+            help_scroll: 0,
             focus: FocusPane::Left,
             status: StatusMessage::default(),
             graph: None,
@@ -1683,8 +1691,8 @@ impl AppState {
     /// Milliseconds until an info / ok status clears. Starts its clock the
     /// first time it is visible. `None` while an overlay paints `status`
     /// as its own text, or when the message does not expire. While `?`
-    /// help hides the breadcrumb the clock restarts, so the message gets
-    /// its full time once help closes.
+    /// help is open the clock restarts, so the message gets its full time
+    /// once help closes.
     pub fn status_expiry_ms(&mut self, now: Instant) -> Option<u64> {
         if self.help_open {
             self.status.restart_clock();

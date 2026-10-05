@@ -14,6 +14,11 @@ pub enum Action {
      */
     CtrlC,
     ToggleHelp,
+    /// Scroll the `?` help body by this many rows (positive is down).
+    ///
+    /// Clamped to the last painted
+    /// [`super::state::LayoutHit::help_scroll_max`].
+    HelpScroll(i32),
     Move(i32),
     MoveToStart,
     MoveToEnd,
