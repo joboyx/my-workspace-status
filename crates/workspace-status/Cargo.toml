@@ -33,6 +33,9 @@ fs4 = "0.13"
 # 0.4.5 stays on rustc 1.85. 0.5 needs a newer compiler. Cargo.lock pins
 # plist 1.7.4 and time 0.3.36 so syntect 5.3 does not pull 1.88-only crates.
 two-face = { version = "0.4.5", default-features = false, features = ["syntect-default-fancy"] }
+# 0.3.1 declares no rust-version; deps memchr / unicode-segmentation are
+# already locked at versions that build on 1.85.
+nucleo-matcher = "0.3.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
