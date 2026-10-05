@@ -132,6 +132,7 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
 - A value of the wrong type, an unknown value, or a blank value is an error: `.workspace-status-config.json viewDefaults.<key> must be "<a>" or "<b>"`. A `viewDefaults` that is not an object is an error. An unknown key inside it is an error that names the key. A typo never falls back silently.
 - `"viewDefaults": null` counts as omitted.
 - The config loads before the CLI picks a mode, so an invalid `viewDefaults` also fails `--plain` and `--json`. Valid values do not change that output.
+- `commitTree` sets the commit file list in commit drills and in each new compare tab. A `t` toggle changes the current tab only. The next compare tab opens in the `commitTree` mode again.
 - `-a` / `--all` and positional repo paths keep `viewDefaults`.
 - `diff: "split"` does not force side-by-side in a narrow pane. The split to inline fallback below `NARROW_SXS` still applies (see **Defaults**).
 - There are no keys for theme, mouse, ignored visibility, pane widths, or folds. The theme stays `WS_STATUS_THEME` / `T`.

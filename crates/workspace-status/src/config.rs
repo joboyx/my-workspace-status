@@ -286,8 +286,12 @@ mod tests {
     }
 
     fn write_config(dir_prefix: &str, json: &str) -> std::path::PathBuf {
+        // Tests share a prefix and run in parallel: a counter keeps each dir unique.
+        static NEXT_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "{dir_prefix}-{}",
+            "{dir_prefix}-{}-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()

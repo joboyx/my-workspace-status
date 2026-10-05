@@ -732,7 +732,8 @@ impl AppState {
     /// Sets each key that is present and leaves omitted keys at the in-app
     /// defaults from [`Self::new`]. A `tree` change rebuilds the workspace
     /// tree, folds, rows, cursor, and signatures like the `t` toggle, with
-    /// no status message.
+    /// no status message. `commitTree` also sets the file list mode that
+    /// each new compare tab opens in.
     pub fn apply_view_defaults(&mut self, defaults: &ViewDefaults) {
         if let Some(tree) = defaults.tree {
             if tree != self.tree_mode {
@@ -747,6 +748,7 @@ impl AppState {
         }
         if let Some(commit_tree) = defaults.commit_tree {
             self.commit_tree_mode = commit_tree;
+            self.tabs.commit_tree_default = commit_tree;
         }
         if let Some(split) = defaults.diff_split {
             self.diff_mode = if split {
@@ -8564,6 +8566,57 @@ mod tests {
         let row = app.focused_commit_file_row().expect("tree row");
         assert!(row.is_file());
         assert_eq!(row.path, "src/view.rs");
+    }
+
+    #[test]
+    fn new_compare_tab_opens_in_launch_commit_tree_default() {
+        fn compare_ready(app: &mut AppState) {
+            let repo = app
+                .snapshot
+                .repos
+                .iter_mut()
+                .find(|row| row.repo == "app")
+                .expect("app");
+            repo.head = "ccc".into();
+            repo.default_tip_ref = Some("origin/main".into());
+        }
+
+        let mut app = state();
+        compare_ready(&mut app);
+        assert!(matches!(
+            app.dispatch(Action::CompareVsDefault),
+            Effect::LoadCompareRange { .. }
+        ));
+        assert!(app.is_compare_tab());
+        assert!(app.commit_tree_mode, "no config: compare tab opens as tree");
+
+        let mut app = state();
+        compare_ready(&mut app);
+        app.apply_view_defaults(&ViewDefaults {
+            commit_tree: Some(false),
+            ..ViewDefaults::default()
+        });
+        assert!(matches!(
+            app.dispatch(Action::CompareVsDefault),
+            Effect::LoadCompareRange { .. }
+        ));
+        assert!(app.is_compare_tab());
+        assert!(
+            !app.commit_tree_mode,
+            "commitTree flat: compare tab is flat"
+        );
+        assert!(!app.tabs.active_compare().unwrap().tree_mode);
+
+        app.dispatch(Action::ToggleTreeMode);
+        assert!(app.commit_tree_mode, "t stays tab-local");
+        app.open_compare_tab("app".into(), "develop".into(), COMPARE_HEAD_REF.into());
+        assert_eq!(app.tabs.active, 2);
+        assert!(
+            !app.commit_tree_mode,
+            "next tab opens in the launch default, not the toggled value"
+        );
+        app.dispatch(Action::JumpToTab(2));
+        assert!(app.commit_tree_mode, "first tab keeps its toggle");
     }
 
     #[test]
