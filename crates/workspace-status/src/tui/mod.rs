@@ -25,6 +25,7 @@ mod graph_load;
 mod help;
 mod icons;
 mod keys;
+pub mod line_blame;
 mod ops;
 pub(crate) mod persist;
 mod quick_open;
@@ -46,6 +47,7 @@ pub(crate) mod watch;
 mod word_diff;
 
 pub use app::{collect_full_snapshot, run_tui, TuiOpts};
+pub use diff::{row_line_ref, RowLineRef};
 pub use keys::InputMode;
 pub use viewed::workspace_store_id;
 

@@ -629,6 +629,59 @@ pub fn build_diff_rows(content: &DiffContent, mode: DiffMode) -> Vec<DiffRow> {
         .collect()
 }
 
+/// The source line behind one painted diff row: its section, kind, and
+/// line numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowLineRef {
+    /// Section the row sits in (STAGED, UNSTAGED, NEW, COMMITTED).
+    pub section: DiffSection,
+    /// [`DiffCellKind::Add`], [`DiffCellKind::Del`], or [`DiffCellKind::Ctx`].
+    pub kind: DiffCellKind,
+    /// 1-based line in the old side. `None` for an added line.
+    pub old_no: Option<u32>,
+    /// 1-based line in the new side. `None` for a deleted line.
+    pub new_no: Option<u32>,
+}
+
+/// The source line behind painted row `row` of `content` in `mode`.
+///
+/// Uses the same row list as [`build_diff_rows`], so `row` is the diff
+/// cursor index. A split row that pairs a deleted and an added line
+/// gives the added (new-side) line; a row with only a deleted line gives
+/// that line. Section labels, hunk headers, `\ No newline` and binary
+/// markers, error rows, and out-of-range rows give `None`.
+pub fn row_line_ref(content: &DiffContent, mode: DiffMode, row: usize) -> Option<RowLineRef> {
+    let rows = annotated_diff_rows(content, mode);
+    let (
+        _,
+        RowBind::Line {
+            section,
+            hunk,
+            parsed,
+        },
+    ) = rows.get(row)?
+    else {
+        return None;
+    };
+    let text = match section {
+        DiffSection::Staged => &content.staged,
+        _ => &content.unstaged,
+    };
+    let hunks = parse_unified_diff(text);
+    let lines = &hunks.get(*hunk)?.lines;
+    let picked: Vec<&ParsedLine> = parsed.iter().filter_map(|&i| lines.get(i)).collect();
+    let line = picked
+        .iter()
+        .find(|l| matches!(l.kind, DiffCellKind::Add | DiffCellKind::Ctx))
+        .or_else(|| picked.iter().find(|l| l.kind == DiffCellKind::Del))?;
+    Some(RowLineRef {
+        section: *section,
+        kind: line.kind,
+        old_no: line.old_no,
+        new_no: line.new_no,
+    })
+}
+
 /// Build a `git apply` patch for painted rows `start..=end`.
 ///
 /// Stage reads the unstaged (or NEW) section. Unstage reads STAGED. Revert
@@ -1435,6 +1488,94 @@ index 1111111..2222222 100644
         let hunks = parse_unified_diff("@@ garbage @@\n+a\n");
         assert_eq!(hunks[0].lines[0].kind, DiffCellKind::Add);
         assert_eq!(hunks[0].lines[0].new_no, Some(0));
+    }
+
+    fn line_ref(
+        section: DiffSection,
+        kind: DiffCellKind,
+        old_no: Option<u32>,
+        new_no: Option<u32>,
+    ) -> Option<RowLineRef> {
+        Some(RowLineRef {
+            section,
+            kind,
+            old_no,
+            new_no,
+        })
+    }
+
+    #[test]
+    fn row_line_ref_inline_maps_each_line_and_skips_headers() {
+        let content = DiffContent::from_unified(FIXTURE);
+        let at = |row| row_line_ref(&content, DiffMode::Inline, row);
+        let s = DiffSection::Unstaged;
+        assert_eq!(at(0), None, "section label");
+        assert_eq!(at(1), None, "hunk header");
+        assert_eq!(at(2), line_ref(s, DiffCellKind::Ctx, Some(10), Some(10)));
+        assert_eq!(at(3), line_ref(s, DiffCellKind::Del, Some(11), None));
+        assert_eq!(at(4), line_ref(s, DiffCellKind::Add, None, Some(11)));
+        assert_eq!(at(6), line_ref(s, DiffCellKind::Add, None, Some(13)));
+        assert_eq!(at(7), None, "past the end");
+    }
+
+    #[test]
+    fn row_line_ref_split_prefers_the_new_side_then_the_deleted_line() {
+        let content = DiffContent::from_unified("@@ -1,2 +1,1 @@\n-a\n-b\n+c\n");
+        let at = |row| row_line_ref(&content, DiffMode::SideBySide, row);
+        let s = DiffSection::Unstaged;
+        // Row 2 pairs `-a` with `+c`; row 3 is `-b` beside an empty cell.
+        assert_eq!(at(2), line_ref(s, DiffCellKind::Add, None, Some(1)));
+        assert_eq!(at(3), line_ref(s, DiffCellKind::Del, Some(2), None));
+        let fixture = DiffContent::from_unified(FIXTURE);
+        assert_eq!(
+            row_line_ref(&fixture, DiffMode::SideBySide, 2),
+            line_ref(s, DiffCellKind::Ctx, Some(10), Some(10))
+        );
+    }
+
+    #[test]
+    fn row_line_ref_tells_staged_from_unstaged() {
+        let content = DiffContent {
+            staged: FIXTURE.into(),
+            unstaged: "@@ -5 +5 @@\n-old\n+new\n".into(),
+            is_new: false,
+            is_committed: false,
+            error: None,
+        };
+        let at = |row| row_line_ref(&content, DiffMode::Inline, row);
+        assert_eq!(
+            at(3),
+            line_ref(DiffSection::Staged, DiffCellKind::Del, Some(11), None)
+        );
+        // Staged rows 0..=6, then the UNSTAGED label (7) and hunk (8).
+        assert_eq!(at(7), None);
+        assert_eq!(
+            at(10),
+            line_ref(DiffSection::Unstaged, DiffCellKind::Add, None, Some(5))
+        );
+        let committed = DiffContent::from_compare_lines(vec!["@@ -1 +1 @@".into(), "+x".into()]);
+        assert_eq!(
+            row_line_ref(&committed, DiffMode::Inline, 2),
+            line_ref(DiffSection::Committed, DiffCellKind::Add, None, Some(1))
+        );
+    }
+
+    #[test]
+    fn row_line_ref_is_none_for_binary_meta_and_error_rows() {
+        let binary = DiffContent::from_unified("Binary files a/x and b/x differ\n");
+        for mode in [DiffMode::Inline, DiffMode::SideBySide] {
+            assert_eq!(build_diff_rows(&binary, mode).len(), 2);
+            assert_eq!(row_line_ref(&binary, mode, 1), None);
+        }
+        let no_eol =
+            DiffContent::from_unified("@@ -1 +1 @@\n-a\n+b\n\\ No newline at end of file\n");
+        assert_eq!(row_line_ref(&no_eol, DiffMode::Inline, 4), None);
+        let failed = DiffContent {
+            error: Some("fatal: bad object".into()),
+            ..DiffContent::from_unified(FIXTURE)
+        };
+        let last = build_diff_rows(&failed, DiffMode::Inline).len() - 1;
+        assert_eq!(row_line_ref(&failed, DiffMode::Inline, last), None);
     }
 
     /// A staged diff that loaded beside a failed unstaged `git diff` ends

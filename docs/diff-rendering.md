@@ -98,6 +98,10 @@ The path header sits above the diff body in `draw_diff_pane`. A path wider than 
 
 A focused file-diff row (section, hunk, or line) paints the same cursor bar as other lists. An unfocused file-diff still marks that row with the thinner inactive marker and `cursorBgInactive`. `j` / `k`, PageUp / PageDown, Ctrl-u / Ctrl-d, click, search, and vertical wheel move that row. The viewport keeps it near the vertical middle (`list_viewport_start`, same helper as the workspace tree). `gg` / `G` and Home / End jump to the first / last row.
 
+## Row to source line
+
+`row_line_ref(content, mode, row)` gives the source line behind a painted row: section, kind (add / del / context), and old / new line numbers. It walks the same row list as `build_diff_rows`, so `row` is the diff cursor. A split row that pairs a deleted and an added line gives the added (new-side) line; a row with only a deleted line gives that line. Section labels, hunk headers, `\ No newline` and binary markers, and error rows give none. The file path comes from the caller.
+
 ## Soft wrap
 
 `\` toggles soft word-wrap on any file-diff body that uses `draw_diff_pane` (workspace dirty files, compare tabs, commit / stash drills). Wrap is on by default. `viewDefaults.wrap` in `.workspace-status-config.json` (`wrap` or `unwrap`) sets the launch state, applied once at TUI start (see [configuration.md](./configuration.md)). The toggle changes the current session only: it lives on `AppState.diff_wrap` and nothing writes the config file. Status toasts `wrap on` / `wrap off`. The path header adds ` · wrap` while wrap is on.
