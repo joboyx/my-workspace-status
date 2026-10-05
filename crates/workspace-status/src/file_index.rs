@@ -19,6 +19,7 @@
 //! Every function here does blocking I/O or a full scan. Call them off the
 //! TUI draw/event thread.
 
+use std::io::Read;
 use std::path::Path;
 
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
@@ -161,9 +162,8 @@ pub struct FileHit {
     pub entry: usize,
     /// Fuzzy score; higher ranks first. `0` for a blank query.
     pub score: u32,
-    /// Matched positions in `display`, sorted and deduplicated. The matcher
-    /// counts one grapheme cluster as one position, so these are char
-    /// indices unless the path holds combining sequences.
+    /// Char indices into `display` (`display.chars()` positions) of the
+    /// matched characters, sorted and deduplicated. Empty for a blank query.
     pub indices: Vec<u32>,
 }
 
@@ -173,8 +173,8 @@ pub struct FileHit {
 /// score 0 and no indices. Otherwise each whitespace-separated word is a
 /// fuzzy atom (`nucleo-matcher` with path bonuses, smart case: an
 /// uppercase letter makes that word case-sensitive). Ties break on the
-/// shorter `display`, then `display` order. Match indices are computed for
-/// the kept hits only.
+/// shorter `display`, then `display` order. Only the best `limit` hits are
+/// fully sorted, and match indices are computed for those hits only.
 pub fn score_files(index: &FileIndex, query: &str, limit: usize) -> Vec<FileHit> {
     if query.trim().is_empty() {
         return (0..index.entries.len().min(limit))
@@ -203,23 +203,34 @@ pub fn score_files(index: &FileIndex, query: &str, limit: usize) -> Vec<FileHit>
                 .map(|score| (score, idx))
         })
         .collect();
-    scored.sort_by(|(score_a, a), (score_b, b)| {
-        let (a, b) = (&index.entries[*a].display, &index.entries[*b].display);
-        score_b
-            .cmp(score_a)
-            .then(a.len().cmp(&b.len()))
-            .then(a.cmp(b))
-    });
-    scored.truncate(limit);
+    let rank = |(score_a, a): &(u32, usize), (score_b, b): &(u32, usize)| {
+        score_b.cmp(score_a).then_with(|| {
+            let (a, b) = (&index.entries[*a].display, &index.entries[*b].display);
+            a.len().cmp(&b.len()).then_with(|| a.cmp(b))
+        })
+    };
+    if limit < scored.len() {
+        scored.select_nth_unstable_by(limit, rank);
+        scored.truncate(limit);
+    }
+    scored.sort_unstable_by(rank);
+    let mut chars: Vec<char> = Vec::new();
     scored
         .into_iter()
         .map(|(score, entry)| {
+            // Indices come from a per-char haystack, not `Utf32Str::new`
+            // (which folds a grapheme cluster into one position), so they
+            // line up with `display.chars()`.
+            let display = &index.entries[entry].display;
+            let haystack = if display.is_ascii() {
+                Utf32Str::Ascii(display.as_bytes())
+            } else {
+                chars.clear();
+                chars.extend(display.chars());
+                Utf32Str::Unicode(&chars)
+            };
             let mut indices = Vec::new();
-            pattern.indices(
-                Utf32Str::new(&index.entries[entry].display, &mut buf),
-                &mut matcher,
-                &mut indices,
-            );
+            pattern.indices(haystack, &mut matcher, &mut indices);
             indices.sort_unstable();
             indices.dedup();
             FileHit {
@@ -249,11 +260,15 @@ pub enum FileRead {
         /// File size on disk.
         bytes: u64,
     },
-    /// Metadata or read error, as text.
+    /// Not a regular file, or a metadata / read error, as text.
     Failed(String),
 }
 
 /// Read `path` as plain text for the file tab, refusing files over `max_bytes`.
+///
+/// Only a regular file (after following symlinks) is read, and never more
+/// than `max_bytes + 1` bytes, so a device, FIFO, or growing file cannot
+/// block the caller or exhaust memory.
 ///
 /// A NUL in the first 8000 bytes means binary. Invalid UTF-8 is replaced
 /// lossily. Lines split on `\n` with a trailing `\r` stripped; a final
@@ -261,19 +276,31 @@ pub enum FileRead {
 /// the next multiple of 4 columns; other control characters become U+FFFD
 /// so they cannot drive the terminal.
 pub fn read_text_file(path: &Path, max_bytes: u64) -> FileRead {
-    let bytes_on_disk = match std::fs::metadata(path) {
-        Ok(meta) => meta.len(),
+    // `metadata` follows symlinks. Check the target before `open`: opening
+    // a FIFO blocks, and a device such as `/dev/zero` reports length 0 but
+    // never ends.
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
         Err(err) => return FileRead::Failed(err.to_string()),
     };
-    if bytes_on_disk > max_bytes {
+    if !meta.is_file() {
+        return FileRead::Failed("not a regular file".into());
+    }
+    if meta.len() > max_bytes {
+        return FileRead::TooLarge { bytes: meta.len() };
+    }
+    let mut raw = Vec::new();
+    let read = std::fs::File::open(path)
+        .and_then(|file| file.take(max_bytes.saturating_add(1)).read_to_end(&mut raw));
+    if let Err(err) = read {
+        return FileRead::Failed(err.to_string());
+    }
+    // The file grew after the metadata call.
+    if raw.len() as u64 > max_bytes {
         return FileRead::TooLarge {
-            bytes: bytes_on_disk,
+            bytes: meta.len().max(raw.len() as u64),
         };
     }
-    let raw = match std::fs::read(path) {
-        Ok(raw) => raw,
-        Err(err) => return FileRead::Failed(err.to_string()),
-    };
     if raw[..raw.len().min(BINARY_SNIFF_BYTES)].contains(&0) {
         return FileRead::Binary;
     }
@@ -397,6 +424,24 @@ mod tests {
         git(&app, &["commit", "-q", "-m", "files"]);
         write(&app, "new.txt", "untracked\n");
         write(&app, "node_modules/m.js", "vendored\n");
+        write(&app, "pkg/node_modules/n.js", "nested vendored\n");
+        write(&app, "crates/a/target/y.rs", "nested build output\n");
+        write(&app, "src/target.rs", "a file named target\n");
+
+        // git itself drops the trees (pathspec), before the backstop filter.
+        let raw = git::list_checkout_files(&app).expect("ls-files");
+        for gone in [
+            "a.log",
+            "target/x.rs",
+            "node_modules/m.js",
+            "pkg/node_modules/n.js",
+            "crates/a/target/y.rs",
+        ] {
+            assert!(!raw.iter().any(|p| p == gone), "{gone} listed in {raw:?}");
+        }
+        for want in ["src/main.rs", "src/target.rs", "new.txt", "README.md"] {
+            assert!(raw.iter().any(|p| p == want), "{want} missing from {raw:?}");
+        }
 
         let index = build_file_index(&cwd, vec![root("app", "")], MAX_INDEX_ENTRIES);
         let shown = displays(&index);
@@ -520,10 +565,10 @@ mod tests {
     #[test]
     fn camel_case_boundary_beats_mid_word() {
         assert_outranks(
-            &["src/afbx.ts", "src/FooBar.ts"],
+            &["src/foobar.ts", "src/fooBar.ts"],
             "fb",
-            "src/FooBar.ts",
-            "src/afbx.ts",
+            "src/fooBar.ts",
+            "src/foobar.ts",
         );
     }
 
@@ -553,6 +598,23 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].indices, vec![4, 5, 6, 7]);
         assert!(hits[0].score > 0);
+    }
+
+    #[test]
+    fn indices_are_char_positions_past_combining_marks() {
+        let display = "cafe\u{301}/main.rs";
+        let index = index_of(&[display]);
+        let hits = score_files(&index, "main", MAX_RESULTS);
+        assert_eq!(hits.len(), 1);
+        let want: Vec<u32> = display
+            .chars()
+            .enumerate()
+            .skip_while(|(_, c)| *c != 'm')
+            .take(4)
+            .map(|(i, _)| i as u32)
+            .collect();
+        assert_eq!(want, vec![6, 7, 8, 9]);
+        assert_eq!(hits[0].indices, want);
     }
 
     #[test]
@@ -588,6 +650,26 @@ mod tests {
             read_text_file(&dir.join("missing.txt"), MAX_FILE_BYTES),
             FileRead::Failed(_)
         ));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_text_file_refuses_symlinks_to_non_regular_files() {
+        let dir = unique_dir("ws-file-index-special");
+        fs::create_dir_all(dir.join("sub")).expect("mkdir");
+        let to_dir = dir.join("to_dir");
+        std::os::unix::fs::symlink(dir.join("sub"), &to_dir).expect("symlink dir");
+        let to_null = dir.join("to_null");
+        std::os::unix::fs::symlink("/dev/null", &to_null).expect("symlink null");
+        let to_zero = dir.join("to_zero");
+        std::os::unix::fs::symlink("/dev/zero", &to_zero).expect("symlink zero");
+
+        let refused = FileRead::Failed("not a regular file".into());
+        assert_eq!(read_text_file(&to_dir, MAX_FILE_BYTES), refused);
+        assert_eq!(read_text_file(&to_null, MAX_FILE_BYTES), refused);
+        assert_eq!(read_text_file(&to_zero, MAX_FILE_BYTES), refused);
+        assert_eq!(read_text_file(&dir.join("sub"), MAX_FILE_BYTES), refused);
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -999,8 +999,10 @@ pub fn exec_git_stdout(args: &[&str], cwd: &Path) -> Result<String, String> {
 /// Files git would show in a checkout: tracked plus untracked, minus ignored.
 ///
 /// Runs `ls-files -z --cached --others --exclude-standard`, so `.gitignore`,
-/// `.git/info/exclude`, and `core.excludesFile` apply. Paths are relative to
-/// `cwd` and decoded lossily. Failure is git's reason line, or
+/// `.git/info/exclude`, and `core.excludesFile` apply. Exclude pathspecs keep
+/// `target/` and `node_modules/` trees (at any depth) out of the listing
+/// even when they are tracked or not ignored. Paths are relative to `cwd`
+/// and decoded lossily. Failure is git's reason line, or
 /// `git ls-files exited with code N`.
 pub fn list_checkout_files(cwd: &Path) -> Result<Vec<String>, String> {
     let args = [
@@ -1009,6 +1011,10 @@ pub fn list_checkout_files(cwd: &Path) -> Result<Vec<String>, String> {
         "--cached",
         "--others",
         "--exclude-standard",
+        "--",
+        ".",
+        ":(exclude,glob)**/target/**",
+        ":(exclude,glob)**/node_modules/**",
     ];
     match run(&args, cwd) {
         Ok(out) if out.status.success() => Ok(out
