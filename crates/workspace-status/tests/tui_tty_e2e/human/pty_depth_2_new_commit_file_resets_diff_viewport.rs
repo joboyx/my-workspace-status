@@ -1,5 +1,5 @@
 use crate::harness::PtySession;
-use crate::seed::{daily_workspace, seed_two_tall_commit_files};
+use crate::seed::{daily_workspace, seed_two_tall_commit_files, unwrap_diffs_at_launch};
 use crate::support::{
     graph_cursor_on, panes_files_focused, panes_files_focused_diff_unfocused,
     panes_files_unfocused_diff_focused, panes_tree_unfocused_graph_focused, right_pane,
@@ -12,6 +12,11 @@ const BETA: &str = "beta.rs";
 const ALPHA_TOP: &str = "alpha-line-0";
 const COMMIT: &str = "tall-pair-scroll-reset";
 const REPO: &str = "scrollbox";
+/// `/` queries for [`REPO`] and [`COMMIT`] with no doubled `l`. The input
+/// thread drops a queued second `l` (held-nav backlog) when both bytes
+/// land in one read, which turns `scrollbox` into `scrolbox`.
+const REPO_QUERY: &str = "box";
+const COMMIT_QUERY: &str = "-pair-";
 /// Repeats after the first CSI-u press.
 const PAN_REPEATS: usize = 40;
 /// Gap so the input thread does not drain the held-nav backlog as one move.
@@ -151,10 +156,11 @@ fn unfocus_right(
 fn pty_depth_2_new_commit_file_resets_diff_viewport() {
     let (_root, workspace) = daily_workspace();
     seed_two_tall_commit_files(&workspace);
+    unwrap_diffs_at_launch(&workspace);
     let mut tui = PtySession::open_size(&workspace, 80, 24);
     tui.wait_contains("README.md", WAIT);
 
-    tui.search(REPO);
+    tui.search(REPO_QUERY);
     tui.wait_pred(
         scrollbox_graph_loaded,
         "search lands on scrollbox and loads its graph",
@@ -167,7 +173,7 @@ fn pty_depth_2_new_commit_file_resets_diff_viewport() {
         WAIT,
     );
 
-    tui.search(COMMIT);
+    tui.search(COMMIT_QUERY);
     tui.wait_pred(
         tall_pair_commit_selected,
         "search selects the tall-pair commit (not working tree)",

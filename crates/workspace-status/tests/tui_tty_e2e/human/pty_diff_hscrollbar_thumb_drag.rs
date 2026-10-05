@@ -4,7 +4,7 @@ use crate::common::hscroll::DIFF_HSCROLL_TAIL;
 use crate::harness::{
     left_tree, tree_cursor_bar_on_row, tree_row_containing, PtySession, SGR_WHEEL_RIGHT,
 };
-use crate::seed::{daily_workspace, seed_long_diff_file};
+use crate::seed::{daily_workspace, seed_long_diff_file, unwrap_diffs_at_launch};
 use crate::support::{
     no_mouse_toggle_toast, no_wrong_overlays, panes_tree_focused_diff_unfocused,
     panes_tree_unfocused_diff_focused, right_pane, right_vbar_at_top, status_row, title_has_files,
@@ -148,6 +148,7 @@ fn sgr_release(tui: &mut PtySession, col: u16, row: u16) {
 fn pty_diff_hscrollbar_thumb_drag() {
     let (_root, workspace) = daily_workspace();
     seed_long_diff_file(&workspace, FILE, DIFF_HSCROLL_TAIL);
+    unwrap_diffs_at_launch(&workspace);
     let mut tui = PtySession::open_size(&workspace, 80, 24);
     tui.search("unique-diffline");
     tui.wait_pred(

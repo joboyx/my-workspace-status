@@ -34,9 +34,12 @@ fn search_hit_on(screen: &str, name: &str, graph_subject: &str) -> bool {
 /// Help `n N`, then armed `/` `n` / CSI-u `N` next / prev on that pane.
 ///
 /// Docs + MOVE: next / prev match after Enter. Tab is other pane. While
-/// typing, `n` appends (`mainn`) and must not next. Three `main` checkouts
-/// so wrap-`n` cannot pass as `N`. Cursor bar, breadcrumb, and `seed {name}`
-/// must all move. Stay armed and left (`/main`, `focus right`, no `[…]`).
+/// typing, `n` appends (`mainn`) and must not next. `/` steps from the
+/// cursor like vim: from the launch README (under `app`) the first `main`
+/// hit below is `lib`, so `app` is only reached by a wrap. Three `main`
+/// checkouts so wrap-`n` cannot pass as `N`. Cursor bar, breadcrumb, and
+/// `seed {name}` must all move. Stay armed and left (`/main`,
+/// `focus right`, no `[…]`).
 #[test]
 fn pty_n_and_n_pane_next_prev() {
     let (_root, workspace) = daily_workspace();
@@ -89,12 +92,13 @@ fn pty_n_and_n_pane_next_prev() {
                 && screen.contains("Enter arms query")
                 && screen.contains("n/N after Enter")
                 && !screen.contains("/main")
-                && tree_cursor_on(screen, "app")
-                && !tree_has(screen, "lib")
-                && screen.contains("workspace › app")
-                && !screen.contains("[app]")
+                && tree_cursor_on(screen, "lib")
+                && !tree_cursor_on(screen, "app")
+                && screen.contains("workspace › lib")
+                && screen.contains("seed lib")
+                && !screen.contains("[lib]")
         },
-        "typing /main jumps to app; n/N are not live until Enter",
+        "typing /main jumps to lib, the first hit below README (not app above)",
         GIT_WAIT,
     );
 
@@ -103,19 +107,21 @@ fn pty_n_and_n_pane_next_prev() {
         |screen| {
             screen.contains("SEARCH")
                 && screen.contains("mainn")
-                && screen.contains("Enter arms query")
-                && tree_cursor_on(screen, "app")
+                && screen.contains("no match")
+                && tree_cursor_on(screen, "README.md")
                 && !tree_has(screen, "lib")
-                && !screen.contains("seed lib")
+                && !tree_cursor_on(screen, "tools")
                 && !screen.contains("[app]")
                 && !screen.contains("drill")
         },
-        "n while typing appends; it must not next or switch panes",
+        "n while typing appends; no hit puts the cursor back on README, not next",
         WAIT,
     );
     tui.send_bytes(b"\x7f");
     tui.wait_pred(
-        |screen| screen.contains("SEARCH") && !screen.contains("mainn"),
+        |screen| {
+            screen.contains("SEARCH") && !screen.contains("mainn") && tree_cursor_on(screen, "lib")
+        },
         "Backspace drops the extra n so Enter can arm /main",
         WAIT,
     );
@@ -123,29 +129,12 @@ fn pty_n_and_n_pane_next_prev() {
     tui.enter();
     tui.wait_pred(
         |screen| {
-            search_hit_on(screen, "app", "seed app")
-                && screen.contains("Uncommitted changes")
-                && !tree_has(screen, "lib")
-                && !tree_cursor_on(screen, "lib")
-                && !tree_cursor_on(screen, "tools")
-        },
-        "Enter arms /main on dirty app; lib stays folded",
-        GIT_WAIT,
-    );
-
-    tui.key('n');
-    tui.wait_pred(
-        |screen| {
             search_hit_on(screen, "lib", "seed lib")
                 && screen.contains("Working tree clean")
                 && !tree_cursor_on(screen, "app")
                 && !tree_cursor_on(screen, "tools")
-                && !screen.contains("seed app")
-                && !screen.contains("seed tools")
-                && !screen.contains("workspace › app")
-                && !screen.contains("workspace › tools")
         },
-        "n jumps to lib (a no-op stays on app; skip lands on tools; Tab is [lib])",
+        "Enter arms /main on lib, where the preview landed",
         GIT_WAIT,
     );
 
@@ -158,7 +147,45 @@ fn pty_n_and_n_pane_next_prev() {
                 && !screen.contains("seed lib")
                 && !screen.contains("workspace › lib")
         },
-        "second n jumps to tools (a no-op stays on lib; wrap-n would return to app)",
+        "n jumps to tools (a no-op stays on lib; wrap-n would land on app)",
+        GIT_WAIT,
+    );
+
+    tui.key('n');
+    // The wrap notice is a timed toast: check it before the graph loads.
+    tui.wait_pred(
+        |screen| tree_cursor_on(screen, "app") && screen.contains("search wrapped to top"),
+        "second n wraps to app and toasts search wrapped to top",
+        WAIT,
+    );
+    tui.wait_pred(
+        |screen| {
+            search_hit_on(screen, "app", "seed app")
+                && screen.contains("Uncommitted changes")
+                && !tree_cursor_on(screen, "lib")
+                && !tree_cursor_on(screen, "tools")
+                && !screen.contains("seed tools")
+                && !screen.contains("workspace › tools")
+        },
+        "second n lands on app (a no-op stays on tools)",
+        GIT_WAIT,
+    );
+
+    tui.shift_letter('N');
+    tui.wait_pred(
+        |screen| tree_cursor_on(screen, "tools") && screen.contains("search wrapped to bottom"),
+        "CSI-u N wraps back to tools and toasts search wrapped to bottom",
+        WAIT,
+    );
+    tui.wait_pred(
+        |screen| {
+            search_hit_on(screen, "tools", "seed tools")
+                && !tree_cursor_on(screen, "app")
+                && !tree_cursor_on(screen, "lib")
+                && !screen.contains("seed app")
+                && !screen.contains("workspace › app")
+        },
+        "CSI-u N lands on tools (a no-op stays on app; n would land on lib)",
         GIT_WAIT,
     );
 
@@ -172,22 +199,7 @@ fn pty_n_and_n_pane_next_prev() {
                 && !screen.contains("workspace › tools")
                 && !screen.contains("workspace › app")
         },
-        "CSI-u N returns to lib (a no-op stays on tools; wrap-n would land on app)",
-        GIT_WAIT,
-    );
-
-    tui.shift_letter('N');
-    tui.wait_pred(
-        |screen| {
-            search_hit_on(screen, "app", "seed app")
-                && screen.contains("Uncommitted changes")
-                && !tree_cursor_on(screen, "lib")
-                && !tree_cursor_on(screen, "tools")
-                && !screen.contains("seed lib")
-                && !screen.contains("workspace › lib")
-                && !screen.contains("workspace › tools")
-        },
-        "second CSI-u N returns to app (a no-op stays on lib; wrap-n would land on tools)",
+        "second CSI-u N returns to lib (a no-op stays on tools; wrap would land on app)",
         GIT_WAIT,
     );
 }

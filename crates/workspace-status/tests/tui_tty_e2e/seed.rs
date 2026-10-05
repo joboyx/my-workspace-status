@@ -21,6 +21,22 @@ use super::common::seed::{
     seed_compare_unrelated,
 };
 
+/// Start file diffs unwrapped: add `viewDefaults.wrap: "unwrap"` to the
+/// workspace config. Wrap is on by default; pan and h-scroll tests need a
+/// clipped long line.
+pub fn unwrap_diffs_at_launch(workspace: &Path) {
+    let path = workspace.join(".workspace-status-config.json");
+    let text = fs::read_to_string(&path).expect("read workspace config");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&text).expect("parse workspace config");
+    config["viewDefaults"] = serde_json::json!({ "wrap": "unwrap" });
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&config).expect("encode workspace config"),
+    )
+    .expect("write workspace config");
+}
+
 fn git_path_arg(path: &Path) -> String {
     path.to_str().expect("utf-8 path").to_string()
 }

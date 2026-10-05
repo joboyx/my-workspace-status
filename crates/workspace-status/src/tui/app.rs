@@ -71,6 +71,7 @@ pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
         .map(|v| v == "ascii")
         .unwrap_or(false);
     let mut state = AppState::new(opts.cwd.clone(), opts.snapshot.clone(), ascii);
+    state.apply_view_defaults(&opts.config.view_defaults);
     enable_raw_mode().map_err(|_| 1u8)?;
     let mut out = stdout();
     if execute!(out, EnterAlternateScreen).is_err() || enable_mouse(&mut out).is_err() {
@@ -957,6 +958,7 @@ pub fn collect_full_snapshot(
         default_branches: config.default_branches.clone(),
         editor: config.editor.clone(),
         diff_tool: config.diff_tool.clone(),
+        view_defaults: config.view_defaults,
     };
     let only: Option<BTreeSet<String>> = if filter_repos.is_empty() {
         None
@@ -980,6 +982,7 @@ pub(crate) fn discover_config(config: &WorkspaceStatusConfig) -> WorkspaceStatus
         default_branches: config.default_branches.clone(),
         editor: config.editor.clone(),
         diff_tool: config.diff_tool.clone(),
+        view_defaults: config.view_defaults,
     }
 }
 

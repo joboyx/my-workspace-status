@@ -4117,6 +4117,7 @@ mod tests {
             "unique-diffline.rs".into(),
             super::super::diff::DiffContent::from_unified(body),
         );
+        state.diff_wrap = false;
         state.diff_col_offset = offset;
         state
     }
@@ -4767,6 +4768,7 @@ mod tests {
             ),
             DiffMode::Inline,
         );
+        state.diff_wrap = false;
         let palette = state.theme.palette();
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
         for offset in [0u16, 1, 2, 5] {

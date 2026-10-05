@@ -213,16 +213,19 @@ impl AppState {
                     Effect::None
                 } else {
                     self.search_mode = false;
-                    self.search_origin = None;
                     if self.search_query.trim().is_empty() {
+                        self.search_origin = None;
                         self.search_active = false;
                         self.search_query.clear();
                         self.search_hit = None;
                         self.status = "search cleared".into();
                         Effect::None
                     } else {
+                        // Enter steps forward from the `/` origin, like typing.
                         self.search_active = true;
-                        self.apply_search(0)
+                        let effect = self.apply_search(0);
+                        self.search_origin = None;
+                        effect
                     }
                 }
             }

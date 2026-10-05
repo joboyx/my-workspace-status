@@ -14,14 +14,14 @@ use crate::file_index::FileRead;
 
 use super::super::action::{Action, Effect};
 use super::super::command_palette::{CommandScope, PaletteCommand};
-use super::super::search::{apply_pan, match_diff_line_indices};
+use super::super::search::{apply_pan, match_diff_line_indices, step_from_anchor};
 use super::super::selection::TextSelection;
 use super::super::split::SplitDrag;
 use super::super::status::StatusMessage;
 use super::super::tabs::{
     checkout_leaf, file_gutter_width, OpenFile, ONLY_WORKSPACE_TAB_OPEN, SWITCH_TO_WORKSPACE_TAB,
 };
-use super::{AppState, FileSearchMemo, NO_SEARCH_ARMED, SEARCH_WRAPPED, Z_FOLDS_TREE_ROWS};
+use super::{AppState, FileSearchMemo, NO_SEARCH_ARMED, Z_FOLDS_TREE_ROWS};
 
 impl AppState {
     /// Open or focus the file tab for `rel` in `checkout`.
@@ -345,42 +345,24 @@ impl AppState {
         hits
     }
 
-    /// Move the file cursor to a matching line: from the cursor itself
-    /// (`dir` 0), or the next / previous one, wrapping at the ends.
-    pub(super) fn apply_file_search(&mut self, dir: i32) {
+    /// File search step from the file cursor, like the diff pane: the
+    /// first matching line after it (`dir` 0 / 1) or the last one before
+    /// it (`dir` -1). Returns true when it wrapped.
+    pub(super) fn apply_file_search(&mut self, dir: i32) -> bool {
         let hits = self.file_search_hits(&self.search_query);
-        let Some(cursor) = self.tabs.active_file().map(|tab| tab.cursor) else {
-            self.set_search_status(false);
-            return;
-        };
-        let (Some(&first), Some(&last)) = (hits.first(), hits.last()) else {
+        let cursor = self.tabs.active_file().map(|tab| tab.cursor);
+        let Some(landing) = cursor.and_then(|cursor| step_from_anchor(&hits, Some(cursor), dir))
+        else {
             self.search_hit = None;
             self.set_search_status(false);
-            return;
-        };
-        let (line, wrapped) = match dir {
-            0 => hits
-                .iter()
-                .find(|&&hit| hit >= cursor)
-                .map_or((first, true), |&hit| (hit, false)),
-            d if d > 0 => hits
-                .iter()
-                .find(|&&hit| hit > cursor)
-                .map_or((first, true), |&hit| (hit, false)),
-            _ => hits
-                .iter()
-                .rev()
-                .find(|&&hit| hit < cursor)
-                .map_or((last, true), |&hit| (hit, false)),
+            return false;
         };
         if let Some(tab) = self.tabs.active_file_mut() {
-            tab.cursor = line;
+            tab.cursor = landing.target;
         }
-        self.search_hit = Some(line);
+        self.search_hit = Some(landing.target);
         self.set_search_status(true);
-        if wrapped && dir != 0 {
-            self.status = StatusMessage::info(SEARCH_WRAPPED);
-        }
+        landing.wrapped
     }
 }
 
@@ -391,7 +373,7 @@ mod tests {
     use super::super::super::action::QuickOpenEntry;
     use super::super::super::command_palette::PALETTE_COMMANDS;
     use super::super::super::quick_open::{FileIndexState, QuickOpenScope, QuickOpenState};
-    use super::super::FocusPane;
+    use super::super::{FocusPane, SEARCH_WRAPPED_TO_BOTTOM, SEARCH_WRAPPED_TO_TOP};
     use super::*;
     use crate::file_index::{FileEntry, FileHit, FileIndex, IndexRoot};
     use crate::snapshot::{
@@ -610,7 +592,7 @@ mod tests {
             app.dispatch(Action::SearchChar(c));
         }
         app.dispatch(Action::SearchSubmit);
-        assert_eq!(cursor(&app), 1, "first match from the cursor");
+        assert_eq!(cursor(&app), 1, "first match after the cursor");
         assert_eq!(app.search_match_position(), Some((Some(1), 2)));
         assert_eq!(
             crate::tui::chrome::search_pill_label(&app).as_deref(),
@@ -618,12 +600,26 @@ mod tests {
         );
         app.dispatch(Action::SearchNext);
         assert_eq!(cursor(&app), 3);
+        assert!(app.status.is_empty(), "{}", &*app.status);
         app.dispatch(Action::SearchNext);
         assert_eq!(cursor(&app), 1);
-        assert_eq!(app.status, SEARCH_WRAPPED);
+        assert_eq!(app.status, SEARCH_WRAPPED_TO_TOP);
         app.dispatch(Action::SearchPrev);
         assert_eq!(cursor(&app), 3);
-        assert_eq!(app.status, SEARCH_WRAPPED);
+        assert_eq!(app.status, SEARCH_WRAPPED_TO_BOTTOM);
+
+        // `n` / `N` step from wherever the cursor moved, not the last hit.
+        app.dispatch(Action::MoveToStart);
+        app.dispatch(Action::Move(2));
+        app.dispatch(Action::SearchNext);
+        assert_eq!(cursor(&app), 3, "next below line 2");
+        app.dispatch(Action::MoveToEnd);
+        app.dispatch(Action::SearchPrev);
+        assert_eq!(cursor(&app), 3, "previous above the last line");
+        assert!(app.status.is_empty(), "{}", &*app.status);
+        app.dispatch(Action::SearchNext);
+        assert_eq!(cursor(&app), 1);
+        assert_eq!(app.status, SEARCH_WRAPPED_TO_TOP);
 
         app.dispatch(Action::NavEsc);
         assert!(!app.search_active, "Esc clears the armed search");

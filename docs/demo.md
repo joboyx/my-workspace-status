@@ -78,7 +78,7 @@ Mid still: after `u` (`unstaged src/session.ts`).
 
 Keys: `/` `auth` (typed), Enter, `n`.
 
-Show: matches highlight while the query is typed. Enter arms `/auth` on the `feature/auth-refresh` row. `n` steps to `auth.ts` and its diff (chip `/auth 2/2 · tree`). Rows stay visible.
+Show: matches highlight while the query is typed. Enter jumps from the `session.ts` cursor to the first match after it, `auth.ts`, and arms `/auth` (chip `/auth 2/2 · tree`). `n` wraps to the `feature/auth-refresh` row (`search wrapped to top`, `1/2`). Rows stay visible.
 
 ## 05 — reviewed marks
 
@@ -156,9 +156,9 @@ Mid still: the split diff.
 
 Keys: `/` `auth` (typed), Enter, `n`, `n`.
 
-Show: the armed chip `/auth 1/2 · tree` (position, count, bound pane), then `2/2` on `auth.ts`, then `search wrapped` back to `1/2`.
+Show: the armed chip `/auth 2/2 · tree` (position, count, bound pane) on `auth.ts`, the first match after the `session.ts` cursor. `n` wraps to `1/2` on the `feature/auth-refresh` row with `search wrapped to top`, then the next `n` returns to `2/2`.
 
-Mid still: `/auth 2/2` on `auth.ts`.
+Mid still: `/auth 1/2` after the wrap.
 
 ## Skip as clips
 

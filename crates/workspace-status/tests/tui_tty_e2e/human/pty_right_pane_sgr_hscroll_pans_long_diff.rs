@@ -3,7 +3,7 @@ use crate::harness::{
     left_tree, tree_cursor_bar_on_row, tree_row_containing, PtySession, SGR_WHEEL_LEFT,
     SGR_WHEEL_RIGHT, SGR_WHEEL_RIGHT_MOTION,
 };
-use crate::seed::{daily_workspace, seed_long_diff_file};
+use crate::seed::{daily_workspace, seed_long_diff_file, unwrap_diffs_at_launch};
 use crate::support::{
     no_wrong_overlays, panes_tree_focused_diff_unfocused, right_pane, right_vbar_at_top,
     status_row, title_has_files, tree_cursor_on, tree_has, SETTLE_MS, WAIT,
@@ -91,6 +91,7 @@ fn documented_right_pane_sgr_hscroll_panned(screen: &str) -> bool {
 fn pty_right_pane_sgr_hscroll_pans_long_diff() {
     let (_root, workspace) = daily_workspace();
     seed_long_diff_file(&workspace, FILE, DIFF_HSCROLL_TAIL);
+    unwrap_diffs_at_launch(&workspace);
     let mut tui = PtySession::open_size(&workspace, 80, 24);
     tui.search("unique-diffline");
     tui.wait_pred(

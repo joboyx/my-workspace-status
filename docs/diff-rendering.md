@@ -58,7 +58,7 @@ Tokens are words (letters, digits, `_`), whitespace runs, and each other char (p
 
 Syntax foregrounds stay; word highlight sets the background only. The 3.0 contrast floor is checked against the background behind the glyph (word or row background). A failing colour falls back to `repo`. Cursor, visual-line, and search overlays still replace the whole row background, word spans included.
 
-Wrap off: spans clip and pan with the line by display columns and stay on the changed glyphs. Emoji are not split. Wrap on: continuation rows keep the word highlight on their slice of the line. `j` / `k` still move by logical row.
+Unwrapped: spans clip and pan with the line by display columns and stay on the changed glyphs. Emoji are not split. Wrapped: continuation rows keep the word highlight on their slice of the line. `j` / `k` still move by logical row.
 
 Word ranges are computed with the syntax spans on a cache miss and live in the same span cache. A repaint with the same text reuses them. A watch or compare reload that replaces same-length text computes them again.
 
@@ -100,7 +100,7 @@ A focused file-diff row (section, hunk, or line) paints the same cursor bar as o
 
 ## Soft wrap
 
-`\` toggles soft word-wrap on any file-diff body that uses `draw_diff_pane` (workspace dirty files, compare tabs, commit / stash drills). The preference is session-only, like theme (`T`) and mouse (`m`): it lives on `AppState.diff_wrap` and is not written to disk. Status toasts `wrap on` / `wrap off`. The path header adds ` · wrap` while wrap is on.
+`\` toggles soft word-wrap on any file-diff body that uses `draw_diff_pane` (workspace dirty files, compare tabs, commit / stash drills). Wrap is on by default. `viewDefaults.wrap` in `.workspace-status-config.json` (`wrap` or `unwrap`) sets the launch state, applied once at TUI start (see [configuration.md](./configuration.md)). The toggle changes the current session only: it lives on `AppState.diff_wrap` and nothing writes the config file. Status toasts `wrap on` / `wrap off`. The path header adds ` · wrap` while wrap is on.
 
 Wrap uses **display columns** (same Meslo `visible_width` rules as clip), not Unicode scalar count. Long lines wrap inside the code column. Line numbers, the comment mark, the gutter rule, and the `+` / `-` sign paint on the first visual row of a logical line. Continuation rows keep the same add/del background and a blank gutter / sign so the code column stays aligned. `j` / `k` still move by logical row. Side-by-side rows wrap each cell and take the taller side.
 
