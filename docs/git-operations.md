@@ -18,7 +18,7 @@ Every git subprocess also runs with `GIT_OPTIONAL_LOCKS=0` (set by `git::git_pro
 | `diff_compare_file_ctx` | `diff <base>...<head> -- <path>` | `Result<lines>` | One compare path. Empty stdout is `(no diff)`. |
 | `list_worktree_vs_commit_name_status` | `diff --name-status -M <base> -- [<old>] <path>`, then `diff --numstat -z -M <base> -- [<old>] <path>` | `Result<NameStatus[]>` | One path, commit against the working tree. Empty list when they match. |
 | `diff_worktree_vs_commit_file_ctx` | `diff [-U<n>] -M <base> -- [<old>] <path>` (`git_worktree_compare_diff_args`) | `Result<lines>` | Commit against the working tree for one path. Empty stdout is `(no diff)`. |
-| `blame_line(cwd, rev, path, line)` | `-c blame.showRoot=false blame --porcelain -L <n>,<n> [<rev> \| --contents -] -- <path>` | `Result<Option<LineBlame>>` | Who last changed one line. See **Line blame**. |
+| `blame_line(cwd, rev, path, line)` | `-c blame.showRoot=false -c core.quotePath=false blame --porcelain -L <n>,<n> [<rev> \| --contents -] -- <path>` | `Result<Option<LineBlame>>` | Who last changed one line. See **Line blame**. |
 | `previous_line_change(cwd, blamed)` | `diff -U0 -M <prev> <sha> -- [<prev-path>] <path>`, then `blame_line` at `<prev>` | `Result<PreviousLineChange>` | The change before the blamed commit. See **Line blame**. |
 | `list_compare_picker_branches` | `for-each-ref` on `refs/heads/` + `refs/remotes/origin/` | `Result<LocalBranch[]>` | Drops `origin/HEAD` and the current local. No checkout. |
 | `list_compare_picker_commits` | `log --format=%H%x09%s --max-count=<limit+1> HEAD --` | `Result<AncestorCommit[]>` | Diff vs commit picker. Read-only. Drops the first row (HEAD), so a root HEAD lists none and at most `limit` rows remain. `limit` is `COMPARE_PICKER_COMMIT_LIMIT` (10,000 newest ancestors). Does not use `HEAD^@`: on a root commit it expands to nothing and `git log` falls back to HEAD. |
@@ -136,13 +136,14 @@ Manual `f` / `p` / `P` / `d` paint a trailing breadcrumb counter (`Fetching n/Nâ
 ## Line blame (`git.rs` `blame_line` / `previous_line_change`)
 
 ```
-git -c blame.showRoot=false blame --porcelain -L <n>,<n> [<rev>] -- <path>
+git -c blame.showRoot=false -c core.quotePath=false blame --porcelain -L <n>,<n> [<rev>] -- <path>
 ```
 
 - **Revision.** No `<rev>` blames the working-tree file. A commit, `<sha>^`, or a stash ref blames that version. The index has no revision name, so `blame_line` reads the blob `:<path>` (`blob_bytes`) and feeds it on stdin with `--contents -`. Lines that differ from HEAD come back uncommitted.
 - **Root commits.** `blame.showRoot=false` keeps a user's `showRoot=true` out, so porcelain marks a root commit `boundary`. A boundary commit has no parent to compare against.
-- **Uncommitted.** An all-zero sha (`Not Committed Yet`) is `uncommitted`.
-- **No answer.** A non-zero exit (untracked or missing path, unborn HEAD, line past the end) is `Ok(None)`. Only a spawn failure is `Err`.
+- **Uncommitted.** An all-zero sha is `uncommitted`. Only the sha is reliable; the author and summary are git placeholders.
+- **Paths.** `core.quotePath=false` keeps non-ASCII paths as UTF-8. Git still C-quotes a path that holds `"`, `\`, or a control character, so `filename` and `previous` values that start with `"` are unquoted (octal escapes are UTF-8 bytes).
+- **No answer.** A non-zero exit (untracked or missing path, unborn HEAD, line past the end) is `Ok(None)`. Only a failure to run git is `Err`. With `--contents -`, git can exit before it reads the blob; that broken pipe is not an error, the exit status decides.
 - **Previous line change.** Porcelain `previous <prev> <prev-path>` names the commit blame looked at before `<sha>` and the file's path there (`<sha>^` for a non-merge commit). No `previous` means the commit added the file. `diff -U0 -M <prev> <sha> -- <prev-path> <path>` maps the line back (`map_line_to_parent`): a line inside a hunk maps to the old line at the same offset when the old side is that long; a line outside every hunk shifts by the hunks above it. No old line means the commit added the line. Then `blame -L <m>,<m> <prev> -- <prev-path>` gives the earlier commit.
 - **Why not `git log -L`.** Line-log walks the full history of the range before it prints the first commit. On a large repo that is slow, and only one step back is needed.
 

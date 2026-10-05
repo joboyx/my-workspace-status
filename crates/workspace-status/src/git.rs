@@ -60,6 +60,9 @@ fn run(args: &[&str], cwd: &Path) -> std::io::Result<std::process::Output> {
 }
 
 /// Run git with `stdin` piped: the `git apply` wrappers and index blame.
+///
+/// A broken pipe while writing means git exited before it read all of
+/// `stdin`; the exit status then says why, so that is not an `Err`.
 fn run_with_stdin(
     args: &[&str],
     cwd: &Path,
@@ -74,7 +77,10 @@ fn run_with_stdin(
         .env("GIT_TERMINAL_PROMPT", "0");
     let mut child = cmd.spawn()?;
     let write_err = match child.stdin.take() {
-        Some(mut pipe) => pipe.write_all(stdin).err(),
+        Some(mut pipe) => pipe
+            .write_all(stdin)
+            .err()
+            .filter(|err| err.kind() != std::io::ErrorKind::BrokenPipe),
         None => None,
     };
     let out = child.wait_with_output()?;
@@ -1327,7 +1333,8 @@ pub enum BlameRev {
 pub struct LineBlame {
     /// Full commit id. All zeros when the line is not committed.
     pub sha: String,
-    /// `author` header (`Not Committed Yet` for an uncommitted line).
+    /// `author` header. For an uncommitted line it is a git placeholder;
+    /// use [`LineBlame::uncommitted`], not this name, to detect that case.
     pub author: String,
     /// `author-time`, unix seconds.
     pub author_time: i64,
@@ -1378,12 +1385,12 @@ pub fn parse_blame_porcelain(stdout: &str) -> Option<LineBlame> {
             "author" => blame.author = value.to_string(),
             "author-time" => blame.author_time = value.parse().unwrap_or(0),
             "summary" => blame.summary = value.to_string(),
-            "filename" => blame.filename = value.to_string(),
+            "filename" => blame.filename = unquote_c_path(value),
             "boundary" => blame.boundary = true,
             "previous" => {
                 blame.previous = value
                     .split_once(' ')
-                    .map(|(sha, path)| (sha.to_string(), path.to_string()));
+                    .map(|(sha, path)| (sha.to_string(), unquote_c_path(path)));
             }
             _ => {}
         }
@@ -1391,9 +1398,61 @@ pub fn parse_blame_porcelain(stdout: &str) -> Option<LineBlame> {
     (!blame.filename.is_empty()).then_some(blame)
 }
 
+/// Undo git's C-style path quoting (`"na\303\257ve.txt"` → `naïve.txt`).
+///
+/// Git quotes a path that holds `"`, `\`, or a control character (and
+/// any non-ASCII byte unless `core.quotePath=false`). Octal escapes are
+/// raw bytes, decoded as UTF-8 (lossy). An unquoted value is returned as is.
+fn unquote_c_path(value: &str) -> String {
+    let Some(inner) = value
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    else {
+        return value.to_string();
+    };
+    let mut bytes = Vec::with_capacity(inner.len());
+    let mut iter = inner.bytes().peekable();
+    while let Some(b) = iter.next() {
+        if b != b'\\' {
+            bytes.push(b);
+            continue;
+        }
+        let Some(esc) = iter.next() else {
+            bytes.push(b);
+            break;
+        };
+        let decoded = match esc {
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b't' => b'\t',
+            b'n' => b'\n',
+            b'v' => 0x0b,
+            b'f' => 0x0c,
+            b'r' => b'\r',
+            b'0'..=b'7' => {
+                let mut n = u32::from(esc - b'0');
+                for _ in 0..2 {
+                    match iter.peek() {
+                        Some(d @ b'0'..=b'7') => {
+                            n = n * 8 + u32::from(d - b'0');
+                            iter.next();
+                        }
+                        _ => break,
+                    }
+                }
+                n as u8
+            }
+            other => other,
+        };
+        bytes.push(decoded);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 /// Blame line `line` (1-based) of `path` in `rev`.
 ///
-/// Runs `git -c blame.showRoot=false blame --porcelain -L n,n [<rev>] -- <path>`.
+/// Runs `git -c blame.showRoot=false -c core.quotePath=false blame
+/// --porcelain -L n,n [<rev>] -- <path>`. Paths in the result are unquoted.
 /// [`BlameRev::Index`] feeds the index blob through `--contents -`, so lines
 /// that differ from HEAD come back uncommitted. `Ok(None)` when git exits
 /// non-zero (untracked or missing path, unborn HEAD, line out of range) or
@@ -1412,6 +1471,8 @@ pub fn blame_line(
     let mut args = vec![
         "-c",
         "blame.showRoot=false",
+        "-c",
+        "core.quotePath=false",
         "blame",
         "--porcelain",
         "-L",
@@ -2800,14 +2861,71 @@ filename new.txt
         assert!(diff.iter().any(|l| l == "rename from old.txt"), "{diff:?}");
         assert!(diff.iter().any(|l| l == "+four"), "{diff:?}");
 
-        let modified = list_worktree_vs_commit_name_status(&dir, &base, "f.txt", None).unwrap();
-        assert_eq!(
-            modified[0].status, "A",
-            "f.txt is newer than base: {modified:?}"
-        );
+        let added = list_worktree_vs_commit_name_status(&dir, &base, "f.txt", None).unwrap();
+        assert_eq!(added[0].status, "A", "f.txt is newer than base: {added:?}");
         assert!(
             diff_worktree_vs_commit_file_ctx(&dir, "no-such-ref", "f.txt", None, None).is_err()
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unquote_c_path_decodes_git_quoting() {
+        assert_eq!(unquote_c_path(r#""na\303\257ve.txt""#), "naïve.txt");
+        assert_eq!(unquote_c_path(r#""a \"q\" b\\c\td""#), "a \"q\" b\\c\td");
+        assert_eq!(unquote_c_path("plain name.txt"), "plain name.txt");
+        assert_eq!(unquote_c_path("naïve.txt"), "naïve.txt");
+        let porcelain = "63b08ad4823cc8096b108736af6268306d1c5328 1 1 1\n\
+            previous 3ef72304f100a91bb7f85a6f16253820cd51d07d \"old\\303\\251.txt\"\n\
+            filename \"na\\303\\257ve.txt\"\n\tx\n";
+        let blame = parse_blame_porcelain(porcelain).expect("parses");
+        assert_eq!(blame.filename, "naïve.txt");
+        assert_eq!(
+            blame.previous.map(|(_, path)| path).as_deref(),
+            Some("oldé.txt")
+        );
+    }
+
+    /// Non-ASCII, a space, and a `"` (git quotes that one even with
+    /// `core.quotePath=false`) survive blame and the previous-change walk.
+    #[cfg(unix)]
+    #[test]
+    fn blame_line_unquotes_non_ascii_and_quoted_paths() {
+        let dir = unique_dir("ws-git-blame-quoted");
+        init_repo(&dir);
+        let old = "old \"q\" näme.txt";
+        let new = "naïve file.txt";
+        let first = commit_file(&dir, old, "a\nb\n", "first");
+        assert_eq!(blame(&dir, BlameRev::Worktree, old, 2).filename, old);
+        git(&dir, &["mv", old, new]);
+        let second = commit_file(&dir, new, "a\nB\n", "rename");
+        let changed = blame(&dir, BlameRev::Worktree, new, 2);
+        assert_eq!(
+            (changed.sha.as_str(), changed.filename.as_str()),
+            (second.as_str(), new)
+        );
+        assert_eq!(changed.previous, Some((first.clone(), old.to_string())));
+        assert_eq!(blame(&dir, BlameRev::Index, new, 1).filename, old);
+        match previous_line_change(&dir, &changed).unwrap() {
+            PreviousLineChange::Found(earlier) => {
+                assert_eq!(earlier.sha, first);
+                assert_eq!((earlier.filename.as_str(), earlier.orig_line), (old, 2));
+            }
+            other => panic!("{other:?}"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Git exits on an unborn HEAD before it reads `--contents -`; the
+    /// broken pipe is not an error.
+    #[test]
+    fn index_blame_on_unborn_head_with_a_large_blob_is_none() {
+        let dir = unique_dir("ws-git-blame-epipe");
+        init_repo_empty(&dir);
+        let big: String = format!("{}\n", "a".repeat(79)).repeat(50_000);
+        fs::write(dir.join("big.txt"), big).unwrap();
+        git(&dir, &["add", "big.txt"]);
+        assert_eq!(blame_line(&dir, &BlameRev::Index, "big.txt", 1), Ok(None));
         let _ = fs::remove_dir_all(&dir);
     }
 }
