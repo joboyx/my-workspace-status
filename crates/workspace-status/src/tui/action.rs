@@ -198,6 +198,24 @@ pub enum Action {
     /// The target is a tree checkout row or a graph worktree row with a
     /// branch. Any other row sets the status `no PR for this row`.
     OpenPullRequest,
+    /// Pin a popover over every icon of the focused row (`gh`).
+    ///
+    /// One section per icon, in paint order. A row with no icon sets the
+    /// status `no icons on this row`.
+    PopoverOpenFocused,
+    /// Move the pinned popover focus to the next (`1`) or previous (`-1`)
+    /// field or action line (`j` / `k`).
+    PopoverMove(i32),
+    /// Run the focused action line of the pinned popover (Enter).
+    ///
+    /// The popover closes, then the line's own [`Action`] dispatches through
+    /// the usual gates. A disabled line keeps the popover open and puts the
+    /// gate reason on the status line.
+    PopoverRun,
+    /// Copy the focused line of the pinned popover (`y`).
+    PopoverCopyLine,
+    /// Close the pinned popover (Esc, right click).
+    PopoverClose,
     NavEnter,
     NavEsc,
     GraphStashApply,
@@ -572,6 +590,23 @@ pub enum Effect {
     LookupPullRequests {
         /// Checkout path (snapshot `repo`) and the branch to look up.
         targets: Vec<(PathBuf, String)>,
+    },
+    /// Fetch the popover detail of PR `number` for `branch` of checkout
+    /// `repo` at `remote` on a worker.
+    ///
+    /// Shares the badge lookup slots and the quit cancel flag. The answer
+    /// lands only while the cache still waits for it.
+    LookupPullRequestDetail {
+        /// Checkout path (snapshot `repo`).
+        repo: PathBuf,
+        /// Branch checked out there.
+        branch: String,
+        /// Remote URL the badge lookup resolved.
+        remote: String,
+        /// GitHub PR number or GitLab MR iid from the badge answer.
+        number: u64,
+        /// Request id; only the answer to the newest request lands.
+        request: u64,
     },
     /// Copy `text` to the clipboard (OSC 52 / host tool).
     CopyClipboard {

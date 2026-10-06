@@ -1,6 +1,6 @@
 use crate::harness::{PtySession, COLS};
 use crate::seed::daily_workspace;
-use crate::support::WAIT;
+use crate::support::{SETTLE_MS, WAIT};
 
 /// Compact painted help text so wrapped description fragments rejoin.
 fn help_compact(text: &str) -> String {
@@ -71,8 +71,9 @@ const HELP_VIEW_ROWS: &[(&str, &str)] = &[
 /// The help dialog is centered with a two-column margin, so its inner
 /// text starts at x = 4 and is `COLS - 8` wide. Columns are not even
 /// (`help_column_widths` widens the long one), so each column starts at
-/// its title icon (`{icon}  {title}`) on the header row. Footer is
-/// excluded so `/ search help` does not leak into the keymap columns.
+/// its title icon (`{icon}  {title}`) on the header row. Footer and the
+/// `ICONS` legend under the columns are excluded so neither leaks into
+/// the keymap columns.
 fn help_group_columns(screen: &str) -> Option<[String; 3]> {
     let lines: Vec<&str> = screen.lines().collect();
     let start = lines
@@ -94,6 +95,9 @@ fn help_group_columns(screen: &str) -> Option<[String; 3]> {
             break;
         }
         let inner: Vec<char> = line.chars().skip(4).take(inner_w).collect();
+        if inner.iter().collect::<String>().trim() == "ICONS" {
+            break;
+        }
         for (idx, col) in cols.iter_mut().enumerate() {
             let from = bounds[idx].min(inner.len());
             let to = bounds[idx + 1].min(inner.len());
@@ -197,11 +201,32 @@ fn documented_help_overlay(screen: &str) -> bool {
         && help_version_lower_right(screen)
 }
 
-/// `?` paints the documented MOVE / GIT / VIEW overlay on a live TTY.
+/// Icon legend rows under the key columns, scrolled into view: title,
+/// group headings, and catalog name + meaning (glyphs depend on the mode).
+fn help_legend_top(screen: &str) -> bool {
+    let compact = help_compact(screen);
+    screen.lines().any(|line| line.contains("│ ICONS "))
+        && compact.contains("Tree")
+        && compact.contains("worktree Linked git worktree")
+        && compact.contains("Workspace root")
+}
+
+/// The last legend rows (Chrome is last in the catalog) at the bottom.
+fn help_legend_bottom(screen: &str) -> bool {
+    let compact = help_compact(screen);
+    compact.contains("Chrome")
+        && compact.contains("rails Graph lanes from")
+        && compact.contains("selection Selected row")
+        && help_version_lower_right(screen)
+}
+
+/// `?` paints the documented MOVE / GIT / VIEW overlay on a live TTY, and
+/// PgDn scrolls the `ICONS` legend under it into view.
 ///
-/// Fail if `?` is a no-op, if the groups are wrong, or if a documented
-/// key row is missing (including a clipped last GIT wrap). Help `/`
-/// search and Enter-arm stay on `pty_help_enter_does_not_arm_pane_search`.
+/// Fail if `?` is a no-op, if the groups are wrong, if a documented key
+/// row is missing (including a clipped last GIT wrap), or if the legend
+/// is missing or cannot be scrolled to. Help `/` search and Enter-arm
+/// stay on `pty_help_enter_does_not_arm_pane_search`.
 #[test]
 fn pty_help_overlay() {
     let (_root, workspace) = daily_workspace();
@@ -223,6 +248,34 @@ fn pty_help_overlay() {
     tui.wait_pred(
         documented_help_overlay,
         "documented MOVE / GIT / VIEW overlay (groups, key rows, footer, version)",
+        WAIT,
+    );
+
+    assert!(
+        !help_legend_bottom(&tui.screen()),
+        "legend bottom must sit below the fold before PgDn:\n{}",
+        tui.screen()
+    );
+    tui.page_down();
+    tui.wait_pred(
+        help_legend_top,
+        "PgDn scrolls the ICONS legend title and Tree rows into view",
+        WAIT,
+    );
+    // One PgDn at a time until the bottom shows. PgDn is a held
+    // navigation key: the event loop drops queued copies of it
+    // (`discard_held_nav_backlog` in `tui/app.rs`), so a burst of presses
+    // can count as one. PgDn past the end clamps.
+    for _ in 0..10 {
+        if help_legend_bottom(&tui.screen()) {
+            break;
+        }
+        tui.page_down();
+        tui.wait_ms(SETTLE_MS);
+    }
+    tui.wait_pred(
+        help_legend_bottom,
+        "more PgDn reaches the Graph and Chrome legend rows",
         WAIT,
     );
 

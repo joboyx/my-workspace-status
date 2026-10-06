@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::harness::{left_tree, PtySession};
+use crate::harness::{left_tree, tree_row_containing, PtySession};
 use crate::seed::{REGIONS_ALPHA, REGIONS_OMEGA};
 
 pub const WAIT: Duration = Duration::from_secs(12);
@@ -560,6 +560,17 @@ pub const TREE_DEPTH1_CHEVRON_COL: u16 = 4;
 
 /// Label column past the chevron (same as the tree-hscroll setup click).
 pub const TREE_LABEL_COL: u16 = 8;
+
+/// Column of the first cell of `needle` on its left-tree row, for a click
+/// on a row's name. On a depth-2 file row [`TREE_LABEL_COL`] is the file
+/// devicon, and a click on an icon pins its popover instead.
+pub fn tree_label_col(screen: &str, needle: &str) -> u16 {
+    tree_row_containing(screen, needle)
+        .and_then(|row| screen.lines().nth(usize::from(row)))
+        .and_then(|line| line.find(needle).map(|at| line[..at].chars().count()))
+        .and_then(|col| u16::try_from(col).ok())
+        .unwrap_or_else(|| panic!("{needle} on the left tree:\n{screen}"))
+}
 
 /// Right pane on the default 140-col layout (tree fraction 0.4).
 pub const RIGHT_PANE_COL: u16 = 90;

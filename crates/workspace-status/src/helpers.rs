@@ -33,11 +33,15 @@ pub fn normalize_filter_repo(arg: &str) -> String {
     s
 }
 
+/// Branch names [`is_default_branch`] treats as the default with no
+/// override, in the order a lookup of the default branch tries them.
+pub const DEFAULT_BRANCH_NAMES: [&str; 3] = ["main", "master", "develop"];
+
 pub fn is_default_branch(branch: &str, override_name: Option<&str>) -> bool {
     if let Some(name) = override_name {
         return branch == name;
     }
-    matches!(branch, "main" | "master" | "develop")
+    DEFAULT_BRANCH_NAMES.contains(&branch)
 }
 
 pub fn get_branch_kind(branch: &str, override_name: Option<&str>) -> BranchKind {

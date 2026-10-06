@@ -133,6 +133,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
+        title: "Fold row",
+        keys: "z",
+        group: CommandGroup::Move,
+        action: Action::FoldToggle,
+        aliases: &["collapse", "expand", "unfold"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
         title: "Fold subtree",
         keys: "zz",
         group: CommandGroup::Move,
@@ -420,6 +428,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
+        title: "Icon popover",
+        keys: "gh",
+        group: CommandGroup::View,
+        action: Action::PopoverOpenFocused,
+        aliases: &["icons", "details"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
         title: "Cycle theme",
         keys: "T",
         group: CommandGroup::View,
@@ -580,6 +596,26 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::Any,
     },
 ];
+
+/// The catalog row that runs `action`, if any.
+///
+/// Icon popovers take an action line's title, key chip, and disabled
+/// reason from this row, so a popover never names a key the palette does
+/// not. A row that runs only on highlighted diff lines (`Stage highlighted
+/// lines`) gives way to the plain row for the same action (`Stage`).
+pub fn command_for(action: &Action) -> Option<&'static PaletteCommand> {
+    let mut rows = PALETTE_COMMANDS
+        .iter()
+        .filter(|command| &command.action == action);
+    let first = rows.next()?;
+    if first.scope != CommandScope::Highlight {
+        return Some(first);
+    }
+    Some(
+        rows.find(|command| command.scope != CommandScope::Highlight)
+            .unwrap_or(first),
+    )
+}
 
 /// Case-insensitive substring on title, key chips, group, and aliases.
 pub fn command_matches(command: &PaletteCommand, query: &str) -> bool {
@@ -818,6 +854,13 @@ mod tests {
                 "N",
                 CommandGroup::Move,
                 Action::SearchPrev,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Fold row",
+                "z",
+                CommandGroup::Move,
+                Action::FoldToggle,
                 CommandScope::NoHighlight,
             ),
             (
@@ -1063,6 +1106,13 @@ mod tests {
                 "?",
                 CommandGroup::View,
                 Action::ToggleHelp,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Icon popover",
+                "gh",
+                CommandGroup::View,
+                Action::PopoverOpenFocused,
                 CommandScope::NoHighlight,
             ),
             (

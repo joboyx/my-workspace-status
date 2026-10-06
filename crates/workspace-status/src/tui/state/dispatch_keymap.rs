@@ -143,7 +143,7 @@ impl AppState {
                     Effect::None
                 } else {
                     self.drag = SplitDrag::None;
-                    self.finish_text_selection()
+                    self.release_mouse()
                 }
             }
             Action::BackClick => {
@@ -167,6 +167,7 @@ impl AppState {
                 self.cancel_mouse_drag();
                 self.mouse_enabled = !self.mouse_enabled;
                 self.pointer = None;
+                self.drop_peek();
                 self.status = if self.mouse_enabled {
                     "Mouse on".into()
                 } else {
@@ -519,7 +520,7 @@ impl AppState {
         ) && !self.compare_revert_runs(action)
         {
             // Only list moves and folds have no gate reason; the palette's
-            // one such row is Fold subtree.
+            // such rows are Fold row and Fold subtree.
             return dispatch_noop_reason(
                 action,
                 self.nav_depth(),

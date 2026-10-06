@@ -11,20 +11,55 @@ const AUTHOR_COL_MAX: usize = 16;
 
 /// Format the sync header line (`branch` plus ahead/behind marks).
 pub fn format_sync(sync: &SyncState, glyphs: &GlyphSet) -> String {
-    let mut parts = vec![sync.branch.clone()];
+    parts_text(&format_sync_parts(sync, glyphs, None))
+}
+
+/// [`format_sync`] as coloured runs: the branch as a branch chip kind
+/// (default or local), then [`LabelKind::SyncAhead`] /
+/// [`LabelKind::SyncBehind`], or `no-upstream` as meta.
+pub(crate) fn format_sync_parts(
+    sync: &SyncState,
+    glyphs: &GlyphSet,
+    default_branch_override: Option<&str>,
+) -> Vec<LabelPart> {
+    let branch = if is_default_branch(&sync.branch, default_branch_override) {
+        LabelKind::ChipDefault
+    } else {
+        LabelKind::ChipLocal
+    };
+    let mut parts = vec![plain_part(sync.branch.clone(), branch)];
+    let mut push = |text: String, kind: LabelKind| {
+        parts.push(plain_part(" ".into(), LabelKind::Meta));
+        parts.push(plain_part(text, kind));
+    };
     match sync.status {
-        SyncStatus::NoUpstream => parts.push("no-upstream".to_string()),
+        SyncStatus::NoUpstream => push("no-upstream".into(), LabelKind::Meta),
         SyncStatus::UpToDate => {}
         SyncStatus::Ahead | SyncStatus::Behind | SyncStatus::Diverged => {
             if sync.ahead > 0 {
-                parts.push(format!("{}{}", glyphs.ahead, sync.ahead));
+                push(
+                    format!("{}{}", glyphs.ahead, sync.ahead),
+                    LabelKind::SyncAhead,
+                );
             }
             if sync.behind > 0 {
-                parts.push(format!("{}{}", glyphs.behind, sync.behind));
+                push(
+                    format!("{}{}", glyphs.behind, sync.behind),
+                    LabelKind::SyncBehind,
+                );
             }
         }
     }
-    parts.join(" ")
+    parts
+}
+
+/// A run with no chip target.
+fn plain_part(text: String, kind: LabelKind) -> LabelPart {
+    LabelPart {
+        text,
+        kind,
+        target: None,
+    }
 }
 
 /// Relative ages only up to 3 hours (iOS notification style). Older
@@ -38,6 +73,62 @@ pub struct LabelPart {
     pub text: String,
     /// How the widget should colour this run.
     pub kind: LabelKind,
+    /// The ref chip, mark run, or overflow chip this run belongs to. Every
+    /// run of one chip carries the same target, and fit, truncation, and
+    /// slicing keep it. `None` for subjects, meta, and padding.
+    pub target: Option<PartTarget>,
+}
+
+impl LabelPart {
+    /// The icon this run paints and its part identity
+    /// ([`crate::IconSpan::part`]): a row glyph ([`LabelKind::icon`]) or a
+    /// chip ([`PartTarget::icon`]). `None` for text runs.
+    pub fn icon(&self) -> Option<(crate::GraphIconKind, Option<usize>)> {
+        self.kind
+            .icon()
+            .or_else(|| Some((self.target.as_ref()?.icon(self.kind), None)))
+    }
+}
+
+/// What a chip run stands for: the identity a popover reads.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum PartTarget {
+    /// A ref chip. One ref, or a local branch and then its same-name
+    /// remote-tracking ref (a merged chip).
+    Chip(Vec<GraphRef>),
+    /// The checkout and sync marks inside the chip of local branch
+    /// `branch`. One run: `checkout` when HEAD is on it, `remote` (the
+    /// same-name remote-tracking ref) when the marks include the sync mark.
+    Marks {
+        /// Local branch of the chip.
+        branch: String,
+        /// HEAD is on `branch`.
+        checkout: bool,
+        /// Remote-tracking ref on the same commit, when synced.
+        remote: Option<String>,
+    },
+    /// Detached `[HEAD]` chip.
+    DetachedHead,
+    /// `[+N]`: the target of each chip it hides, in chip order.
+    Overflow(Vec<PartTarget>),
+}
+
+impl PartTarget {
+    /// Icon kind of a chip run with this target painted as `kind`.
+    pub fn icon(&self, kind: LabelKind) -> crate::GraphIconKind {
+        use crate::GraphIconKind as G;
+        match self {
+            Self::Marks { .. } => G::ChipMarks,
+            Self::DetachedHead => G::DetachedHeadChip,
+            Self::Overflow(_) => G::OverflowChip,
+            Self::Chip(_) => match kind {
+                LabelKind::ChipDefault => G::DefaultChip,
+                LabelKind::ChipRemote => G::RemoteChip,
+                LabelKind::ChipTag => G::TagChip,
+                _ => G::LocalChip,
+            },
+        }
+    }
 }
 
 /// Semantic colour role for a [`LabelPart`].
@@ -60,6 +151,36 @@ pub enum LabelKind {
     /// Fully hidden leftover branch/tag count (`[+N]`). Truncated chips
     /// are visible and do not count toward `N`.
     Overflow,
+    /// Uncommitted-row glyph (`○` / `o`). `dirty` is true when the
+    /// worktree or index has changes.
+    UncommittedMark {
+        /// The row reads `uncommitted changes`, not `working tree clean`.
+        dirty: bool,
+    },
+    /// Linked-worktree glyph (U+F481 / `L`) of a worktree row or of a
+    /// worktree mark on a commit spacer.
+    WorktreeMark {
+        /// Index into the commit row's `worktrees`. `0` on a worktree row.
+        worktree: usize,
+    },
+    /// Sync header ahead count (ahead glyph and number).
+    SyncAhead,
+    /// Sync header behind count (behind glyph and number).
+    SyncBehind,
+}
+
+impl LabelKind {
+    /// The icon a part of this kind paints, and its part identity
+    /// ([`crate::IconSpan::part`]). `None` for text runs.
+    pub fn icon(self) -> Option<(crate::GraphIconKind, Option<usize>)> {
+        match self {
+            Self::UncommittedMark { .. } => Some((crate::GraphIconKind::Uncommitted, None)),
+            Self::WorktreeMark { worktree } => {
+                Some((crate::GraphIconKind::Worktree, Some(worktree)))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Ellipsis inside a truncated chip name. Brackets stay (`[feat…]`).
@@ -232,6 +353,61 @@ pub fn format_label(row: &GraphRow, glyphs: &GlyphSet) -> String {
     }
 }
 
+/// [`format_label`] as coloured runs.
+///
+/// The uncommitted glyph and the worktree glyph are their own parts
+/// ([`LabelKind::UncommittedMark`], [`LabelKind::WorktreeMark`]). A
+/// worktree row paints `[ignored]` as meta and `[HEAD]` as the head mark.
+/// Every other label is one subject run. The text is [`format_label`].
+pub(crate) fn format_label_parts(row: &GraphRow, glyphs: &GlyphSet) -> Vec<LabelPart> {
+    match row {
+        GraphRow::Uncommitted { has_changes } => {
+            let text = if *has_changes {
+                " uncommitted changes"
+            } else {
+                " working tree clean"
+            };
+            vec![
+                LabelPart {
+                    text: glyphs.uncommitted.to_string(),
+                    kind: LabelKind::UncommittedMark {
+                        dirty: *has_changes,
+                    },
+                    target: None,
+                },
+                LabelPart {
+                    text: text.to_string(),
+                    kind: LabelKind::Subject,
+                    target: None,
+                },
+            ]
+        }
+        GraphRow::Worktree(worktree) => {
+            let mut parts = worktree_mark_parts(worktree, glyphs, 0, LabelKind::Subject);
+            if worktree.is_current {
+                parts.push(LabelPart {
+                    text: "  [HEAD]".into(),
+                    kind: LabelKind::ChipHead,
+                    target: None,
+                });
+            }
+            parts
+        }
+        GraphRow::Stash(_) | GraphRow::Commit { .. } => {
+            let text = format_label(row, glyphs);
+            if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![LabelPart {
+                    text,
+                    kind: LabelKind::Subject,
+                    target: None,
+                }]
+            }
+        }
+    }
+}
+
 /// Inputs for [`format_commit_spacer`].
 pub struct CommitSpacerOpts<'a> {
     /// Commit whose spacer is painted.
@@ -385,17 +561,16 @@ pub fn assemble_commit_spacer(opts: CommitSpacerOpts<'_>) -> (String, Vec<LabelP
         opts.now_unix,
     );
     let mut prefix = Vec::new();
-    for worktree in opts.worktrees {
+    for (index, worktree) in opts.worktrees.iter().enumerate() {
         if worktree_covered_by_ref_chip(worktree, opts.commit, opts.is_head, opts.head_branch) {
             continue;
         }
-        let mark = worktree_mark(worktree, opts.glyphs);
-        if !mark.is_empty() {
-            prefix.push(vec![LabelPart {
-                text: mark,
-                kind: LabelKind::Meta,
-            }]);
-        }
+        prefix.push(worktree_mark_parts(
+            worktree,
+            opts.glyphs,
+            index,
+            LabelKind::Meta,
+        ));
     }
     let refs = commit_ref_chip_groups(
         &opts.commit.refs,
@@ -443,6 +618,7 @@ pub fn assemble_stash_spacer(opts: StashSpacerOpts<'_>) -> (String, Vec<LabelPar
         &[vec![LabelPart {
             text: opts.stash.stash_ref.clone(),
             kind: LabelKind::Meta,
+            target: None,
         }]],
         &[],
         &hash,
@@ -497,6 +673,7 @@ fn assemble_spacer_parts(
             left.push(LabelPart {
                 text: " ".into(),
                 kind: LabelKind::Meta,
+                target: None,
             });
         }
         left.extend(chips);
@@ -512,12 +689,14 @@ fn assemble_spacer_parts(
         left.push(LabelPart {
             text: " ".repeat(pad),
             kind: LabelKind::Meta,
+            target: None,
         });
     }
     if !meta.is_empty() {
         left.push(LabelPart {
             text: meta,
             kind: LabelKind::Meta,
+            target: None,
         });
     }
     clamp_parts_to_width(left, available)
@@ -530,6 +709,7 @@ fn join_chip_groups(groups: &[Vec<LabelPart>]) -> Vec<LabelPart> {
             out.push(LabelPart {
                 text: " ".into(),
                 kind: LabelKind::Meta,
+                target: None,
             });
         }
         out.extend(g.iter().cloned());
@@ -616,12 +796,14 @@ pub(crate) fn trunc_label_parts(parts: &[LabelPart], max: usize) -> Vec<LabelPar
         return vec![LabelPart {
             text: "…".into(),
             kind: LabelKind::Meta,
+            target: None,
         }];
     }
     let mut out = slice_label_parts(parts, 0, max - 1);
     out.push(LabelPart {
         text: "…".into(),
         kind: LabelKind::Meta,
+        target: None,
     });
     out
 }
@@ -632,6 +814,7 @@ fn pad_parts_right(parts: &mut Vec<LabelPart>, available: usize) {
         parts.push(LabelPart {
             text: " ".repeat(available - len),
             kind: LabelKind::Meta,
+            target: None,
         });
     }
 }
@@ -670,7 +853,7 @@ fn fit_chip_groups(groups: &[Vec<LabelPart>], budget: usize) -> Vec<LabelPart> {
             out.extend(truncated);
             if hidden_after_trunc > 0 {
                 out.push(space_part());
-                out.push(overflow_part(hidden_after_trunc));
+                out.push(overflow_part(&groups[k + 1..]));
             }
             return out;
         }
@@ -683,7 +866,7 @@ fn fit_chip_groups(groups: &[Vec<LabelPart>], budget: usize) -> Vec<LabelPart> {
                 if k > 0 {
                     out.push(space_part());
                 }
-                out.push(overflow_part(hidden));
+                out.push(overflow_part(&groups[k..]));
             }
             return out;
         }
@@ -692,6 +875,7 @@ fn fit_chip_groups(groups: &[Vec<LabelPart>], budget: usize) -> Vec<LabelPart> {
         Some(token) => vec![LabelPart {
             text: token,
             kind: LabelKind::Overflow,
+            target: Some(overflow_target(groups)),
         }],
         None => Vec::new(),
     }
@@ -701,14 +885,28 @@ fn space_part() -> LabelPart {
     LabelPart {
         text: " ".into(),
         kind: LabelKind::Meta,
+        target: None,
     }
 }
 
-fn overflow_part(hidden: usize) -> LabelPart {
+/// `[+N]` for the fully hidden chip groups `hidden`.
+fn overflow_part(hidden: &[Vec<LabelPart>]) -> LabelPart {
     LabelPart {
-        text: overflow_chip_text(hidden),
+        text: overflow_chip_text(hidden.len()),
         kind: LabelKind::Overflow,
+        target: Some(overflow_target(hidden)),
     }
+}
+
+/// [`PartTarget::Overflow`] of the hidden chip groups `hidden`: the target
+/// of each group's first run.
+fn overflow_target(hidden: &[Vec<LabelPart>]) -> PartTarget {
+    PartTarget::Overflow(
+        hidden
+            .iter()
+            .filter_map(|group| group.iter().find_map(|part| part.target.clone()))
+            .collect(),
+    )
 }
 
 fn overflow_reserve(hidden: usize, preceded: bool) -> usize {
@@ -785,6 +983,7 @@ fn truncate_chip_group(group: &[LabelPart], budget: usize) -> Option<Vec<LabelPa
     Some(vec![LabelPart {
         text: format!("[{prefix}{CHIP_NAME_ELLIPSIS}]"),
         kind: part.kind,
+        target: part.target.clone(),
     }])
 }
 
@@ -817,6 +1016,7 @@ fn truncate_named_chip(
     out.push(LabelPart {
         text: format!("{prefix}{CHIP_NAME_ELLIPSIS}"),
         kind: name.kind,
+        target: name.target.clone(),
     });
     out.push(close.clone());
     if parts_width(&out) > budget {
@@ -976,6 +1176,7 @@ fn commit_ref_chip_groups(
         groups.push(vec![LabelPart {
             text: "[HEAD]".into(),
             kind: LabelKind::ChipHead,
+            target: Some(PartTarget::DetachedHead),
         }]);
     }
     for chip in merge_commit_ref_chips(refs, is_head, head_branch, default_branch_override) {
@@ -1009,15 +1210,42 @@ fn format_worktree(worktree: &Worktree, glyphs: &GlyphSet) -> String {
 }
 
 fn worktree_mark(worktree: &Worktree, glyphs: &GlyphSet) -> String {
-    let mut mark = format!("{} {}", glyphs.worktree, worktree.path);
+    parts_text(&worktree_mark_parts(worktree, glyphs, 0, LabelKind::Meta))
+}
+
+/// Worktree mark as parts: the glyph ([`LabelKind::WorktreeMark`] with
+/// `index`), ` path branch` as `text`, then `  [ignored]` as meta.
+fn worktree_mark_parts(
+    worktree: &Worktree,
+    glyphs: &GlyphSet,
+    index: usize,
+    text: LabelKind,
+) -> Vec<LabelPart> {
+    let mut name = format!(" {}", worktree.path);
     if let Some(branch) = &worktree.branch {
-        mark.push(' ');
-        mark.push_str(branch);
+        name.push(' ');
+        name.push_str(branch);
     }
+    let mut parts = vec![
+        LabelPart {
+            text: glyphs.worktree.to_string(),
+            kind: LabelKind::WorktreeMark { worktree: index },
+            target: None,
+        },
+        LabelPart {
+            text: name,
+            kind: text,
+            target: None,
+        },
+    ];
     if worktree.ignored {
-        mark.push_str("  [ignored]");
+        parts.push(LabelPart {
+            text: "  [ignored]".into(),
+            kind: LabelKind::Meta,
+            target: None,
+        });
     }
-    mark
+    parts
 }
 
 /// True when the footer branch chip already represents this checkout.
@@ -1101,7 +1329,8 @@ fn show_detached_head_chip(head_branch: Option<&str>, is_head: bool) -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum MergedRefChip {
-    Merged(String),
+    /// Local branch and its same-name remote-tracking ref.
+    Merged(String, String),
     Local(String),
     Remote(String),
     Tag(String),
@@ -1110,14 +1339,31 @@ enum MergedRefChip {
 impl MergedRefChip {
     fn name(&self) -> &str {
         match self {
-            Self::Merged(n) | Self::Local(n) | Self::Remote(n) | Self::Tag(n) => n,
+            Self::Merged(n, _) | Self::Local(n) | Self::Remote(n) | Self::Tag(n) => n,
+        }
+    }
+
+    /// The refs the chip stands for: a merged chip lists its local branch,
+    /// then its remote.
+    fn refs(&self) -> Vec<GraphRef> {
+        let one = |kind, name: &String| GraphRef {
+            kind,
+            name: name.clone(),
+        };
+        match self {
+            Self::Merged(local, remote) => {
+                vec![one(RefKind::Local, local), one(RefKind::Remote, remote)]
+            }
+            Self::Local(name) => vec![one(RefKind::Local, name)],
+            Self::Remote(name) => vec![one(RefKind::Remote, name)],
+            Self::Tag(name) => vec![one(RefKind::Tag, name)],
         }
     }
 
     /// Rank after checkout: default branch, other locals, unmatched remotes, tags.
     fn sort_key(&self, default_branch_override: Option<&str>) -> u8 {
         match self {
-            Self::Merged(n) | Self::Local(n) => {
+            Self::Merged(n, _) | Self::Local(n) => {
                 if is_default_branch(n, default_branch_override) {
                     0
                 } else {
@@ -1159,7 +1405,10 @@ fn merge_commit_ref_chips(
         });
         if let Some(i) = hit {
             used_remote[i] = true;
-            chips.push(MergedRefChip::Merged(local.name.clone()));
+            chips.push(MergedRefChip::Merged(
+                local.name.clone(),
+                remotes[i].name.clone(),
+            ));
         } else {
             chips.push(MergedRefChip::Local(local.name.clone()));
         }
@@ -1208,7 +1457,7 @@ fn chip_is_checkout(chip: &MergedRefChip, head_branch: Option<&str>, is_head: bo
         return false;
     }
     match chip {
-        MergedRefChip::Local(name) | MergedRefChip::Merged(name) => name == branch,
+        MergedRefChip::Local(name) | MergedRefChip::Merged(name, _) => name == branch,
         MergedRefChip::Remote(_) | MergedRefChip::Tag(_) => false,
     }
 }
@@ -1228,7 +1477,7 @@ fn merged_chip_parts(
                 LabelKind::ChipRemote
             }
         }
-        MergedRefChip::Local(n) | MergedRefChip::Merged(n) => {
+        MergedRefChip::Local(n) | MergedRefChip::Merged(n, _) => {
             if is_default_branch(n, default_branch_override) {
                 LabelKind::ChipDefault
             } else {
@@ -1236,23 +1485,29 @@ fn merged_chip_parts(
             }
         }
     };
+    let target = Some(PartTarget::Chip(chip.refs()));
+    let part = |text: String, kind: LabelKind| LabelPart {
+        text,
+        kind,
+        target: target.clone(),
+    };
     match chip {
-        MergedRefChip::Tag(_) | MergedRefChip::Remote(_) => vec![LabelPart {
-            text: format!("[{}]", chip.name()),
-            kind,
-        }],
-        MergedRefChip::Local(_) | MergedRefChip::Merged(_) => {
-            let mut parts = vec![LabelPart {
-                text: "[".into(),
-                kind,
-            }];
+        MergedRefChip::Tag(_) | MergedRefChip::Remote(_) => {
+            vec![part(format!("[{}]", chip.name()), kind)]
+        }
+        MergedRefChip::Local(_) | MergedRefChip::Merged(..) => {
+            let mut parts = vec![part("[".into(), kind)];
             // Checkout + sync must be one run so paint cannot emit two icon
             // spans. Footer already concatenates them as `[checkout][sync][name]`.
+            let remote = match chip {
+                MergedRefChip::Merged(_, remote) => Some(remote.clone()),
+                _ => None,
+            };
             let mut marks = String::new();
             if is_checkout {
                 marks.push_str(glyphs.checkout_mark);
             }
-            if matches!(chip, MergedRefChip::Merged(_)) {
+            if remote.is_some() {
                 marks.push_str(glyphs.sync_mark);
             }
             if !marks.is_empty() {
@@ -1263,16 +1518,15 @@ fn merged_chip_parts(
                     } else {
                         LabelKind::ChipRemote
                     },
+                    target: Some(PartTarget::Marks {
+                        branch: chip.name().to_string(),
+                        checkout: is_checkout,
+                        remote,
+                    }),
                 });
             }
-            parts.push(LabelPart {
-                text: chip.name().to_string(),
-                kind,
-            });
-            parts.push(LabelPart {
-                text: "]".into(),
-                kind,
-            });
+            parts.push(part(chip.name().to_string(), kind));
+            parts.push(part("]".into(), kind));
             parts
         }
     }
@@ -1749,6 +2003,132 @@ mod tests {
     }
 
     #[test]
+    fn label_parts_split_the_row_glyph_and_keep_the_label_text() {
+        let worktree = |ignored, is_current, branch: Option<&str>| {
+            GraphRow::Worktree(Worktree {
+                path: "notes".into(),
+                head_id: None,
+                branch: branch.map(Into::into),
+                ignored,
+                is_current,
+            })
+        };
+        let rows = [
+            GraphRow::Uncommitted { has_changes: true },
+            GraphRow::Uncommitted { has_changes: false },
+            worktree(true, false, None),
+            worktree(false, true, Some("feat")),
+            worktree(true, true, Some("feat")),
+            GraphRow::Stash(Stash {
+                subject: "WIP on main".into(),
+                ..Stash::default()
+            }),
+            GraphRow::Commit {
+                commit: Commit {
+                    subject: "add graph".into(),
+                    ..Commit::default()
+                },
+                is_head: false,
+                worktrees: Vec::new(),
+            },
+        ];
+        for glyphs in [&UNICODE, &ASCII] {
+            for row in &rows {
+                let parts = format_label_parts(row, glyphs);
+                assert_eq!(parts_text(&parts), format_label(row, glyphs), "{row:?}");
+                let icons: Vec<_> = parts.iter().filter_map(|part| part.kind.icon()).collect();
+                match row {
+                    GraphRow::Uncommitted { has_changes } => {
+                        assert_eq!(parts[0].text, glyphs.uncommitted);
+                        assert_eq!(
+                            parts[0].kind,
+                            LabelKind::UncommittedMark {
+                                dirty: *has_changes
+                            }
+                        );
+                        assert_eq!(icons, vec![(crate::GraphIconKind::Uncommitted, None)]);
+                    }
+                    GraphRow::Worktree(wt) => {
+                        assert_eq!(parts[0].text, glyphs.worktree);
+                        assert_eq!(icons, vec![(crate::GraphIconKind::Worktree, Some(0))]);
+                        let kind_of = |text: &str| {
+                            parts
+                                .iter()
+                                .find(|part| part.text.contains(text))
+                                .map(|part| part.kind)
+                        };
+                        assert_eq!(kind_of("notes"), Some(LabelKind::Subject));
+                        assert_eq!(kind_of("[ignored]"), wt.ignored.then_some(LabelKind::Meta));
+                        assert_eq!(
+                            kind_of("[HEAD]"),
+                            wt.is_current.then_some(LabelKind::ChipHead)
+                        );
+                    }
+                    _ => {
+                        assert!(icons.is_empty());
+                        assert!(parts.iter().all(|part| part.kind == LabelKind::Subject));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn commit_spacer_worktree_marks_name_their_worktree() {
+        let commit = Commit {
+            id: "abcdefg".into(),
+            subject: "topic".into(),
+            refs: vec!["feat".into()],
+            ..Commit::default()
+        };
+        let wt = |path: &str, branch: &str, ignored: bool| Worktree {
+            path: path.into(),
+            head_id: Some("abcdefg".into()),
+            branch: Some(branch.into()),
+            ignored,
+            is_current: false,
+        };
+        // `feat` is already a ref chip, so only `b` and `c` paint a mark.
+        let worktrees = [
+            wt("a", "feat", false),
+            wt("b", "other", false),
+            wt("c", "notes", true),
+        ];
+        let (text, parts) = assemble_commit_spacer(CommitSpacerOpts {
+            commit: &commit,
+            is_head: false,
+            worktrees: &worktrees,
+            head_branch: None,
+            glyphs: &ASCII,
+            available: 80,
+            date_width: 0,
+            author_width: 0,
+            now_unix: 0,
+            default_branch_override: None,
+        });
+        assert!(
+            text.starts_with("L b other L c notes  [ignored] [feat]"),
+            "{text}"
+        );
+        let marks: Vec<_> = parts.iter().filter_map(|part| part.kind.icon()).collect();
+        assert_eq!(
+            marks,
+            vec![
+                (crate::GraphIconKind::Worktree, Some(1)),
+                (crate::GraphIconKind::Worktree, Some(2)),
+            ]
+        );
+        for text in [" b other", " c notes", "  [ignored]"] {
+            assert!(
+                parts
+                    .iter()
+                    .any(|part| part.text == text && part.kind == LabelKind::Meta),
+                "{text}: {parts:?}"
+            );
+        }
+    }
+
+    #[test]
     fn format_commit_spacer_hides_overflow_chips_with_count() {
         let commit = Commit {
             id: "abcdefg".into(),
@@ -1955,6 +2335,200 @@ mod tests {
             !line.contains("[feature/x]") || !line.contains("[v2]"),
             "some refs hide: {line}"
         );
+        // The worktree mark keeps its own identity; `[+N]` names exactly
+        // the chips it hides.
+        let overflow = parts
+            .iter()
+            .find(|p| p.kind == LabelKind::Overflow)
+            .expect("overflow part");
+        let Some(PartTarget::Overflow(hidden)) = &overflow.target else {
+            panic!("overflow target: {overflow:?}");
+        };
+        assert_eq!(overflow.text, overflow_chip_text(hidden.len()));
+        let shown: Vec<&PartTarget> = parts.iter().filter_map(|p| p.target.as_ref()).collect();
+        for chip in hidden {
+            assert!(!shown.contains(&chip), "{chip:?} is hidden, not shown");
+        }
+        assert!(parts
+            .iter()
+            .any(|p| p.kind == LabelKind::WorktreeMark { worktree: 0 } && p.target.is_none()));
+    }
+
+    #[test]
+    fn chip_runs_name_their_refs_and_marks_stay_one_run() {
+        let refs = [
+            GraphRef::local("main"),
+            GraphRef::remote("origin/main"),
+            GraphRef::local("feat"),
+            GraphRef::remote("origin/side"),
+            GraphRef::tag("v1"),
+        ];
+        let parts = commit_ref_chip_parts(&refs, true, Some("main"), &ASCII, None);
+        assert_eq!(
+            parts_text(&parts),
+            format_commit_ref_chips(&refs, true, Some("main"), &ASCII),
+            "targets do not change the text"
+        );
+        let target_of = |text: &str| {
+            parts
+                .iter()
+                .find(|p| p.text == text)
+                .and_then(|p| p.target.clone())
+        };
+        assert_eq!(
+            target_of("main"),
+            Some(PartTarget::Chip(vec![
+                GraphRef::local("main"),
+                GraphRef::remote("origin/main")
+            ]))
+        );
+        let marks: Vec<&LabelPart> = parts
+            .iter()
+            .filter(|p| matches!(p.target, Some(PartTarget::Marks { .. })))
+            .collect();
+        assert_eq!(marks.len(), 1, "checkout + sync is one run: {parts:?}");
+        assert_eq!(marks[0].text, "+=");
+        assert_eq!(
+            marks[0].target,
+            Some(PartTarget::Marks {
+                branch: "main".into(),
+                checkout: true,
+                remote: Some("origin/main".into()),
+            })
+        );
+        assert_eq!(
+            marks[0].icon(),
+            Some((crate::GraphIconKind::ChipMarks, None))
+        );
+        assert_eq!(
+            target_of("feat"),
+            Some(PartTarget::Chip(vec![GraphRef::local("feat")]))
+        );
+        assert_eq!(
+            target_of("[origin/side]"),
+            Some(PartTarget::Chip(vec![GraphRef::remote("origin/side")]))
+        );
+        assert_eq!(
+            target_of("[v1]"),
+            Some(PartTarget::Chip(vec![GraphRef::tag("v1")]))
+        );
+        // Every chip run carries a target; only the gaps are plain.
+        for part in &parts {
+            assert_eq!(part.target.is_none(), part.text == " ", "{part:?}");
+        }
+        let icon = |text: &str| {
+            parts
+                .iter()
+                .find(|p| p.text == text)
+                .and_then(LabelPart::icon)
+                .map(|(kind, _)| kind)
+        };
+        assert_eq!(icon("main"), Some(crate::GraphIconKind::DefaultChip));
+        assert_eq!(icon("feat"), Some(crate::GraphIconKind::LocalChip));
+        assert_eq!(
+            icon("[origin/side]"),
+            Some(crate::GraphIconKind::RemoteChip)
+        );
+        assert_eq!(icon("[v1]"), Some(crate::GraphIconKind::TagChip));
+        let detached = commit_ref_chip_parts(&refs, true, None, &ASCII, None);
+        assert_eq!(detached[0].text, "[HEAD]");
+        assert_eq!(detached[0].target, Some(PartTarget::DetachedHead));
+    }
+
+    #[test]
+    fn chip_targets_survive_truncation_overflow_and_slicing() {
+        let commit = topic_commit(vec![
+            GraphRef::local("main"),
+            GraphRef::local("feature/long-name"),
+            GraphRef::tag("v1"),
+            GraphRef::tag("v2"),
+        ]);
+        let (line, parts) = ascii_spacer(&commit, 32);
+        let truncated = parts
+            .iter()
+            .find(|p| p.text.ends_with('…'))
+            .unwrap_or_else(|| panic!("truncated chip name: {line}"));
+        let feature = Some(PartTarget::Chip(vec![GraphRef::local("feature/long-name")]));
+        assert_eq!(truncated.target, feature);
+        let overflow = parts
+            .iter()
+            .find(|p| p.kind == LabelKind::Overflow)
+            .unwrap_or_else(|| panic!("[+N]: {line}"));
+        assert_eq!(overflow.text, "[+2]");
+        assert_eq!(
+            overflow.target,
+            Some(PartTarget::Overflow(vec![
+                PartTarget::Chip(vec![GraphRef::tag("v1")]),
+                PartTarget::Chip(vec![GraphRef::tag("v2")]),
+            ]))
+        );
+        // Slicing (pan) and truncation (footer) keep every target.
+        let sliced = slice_label_parts(&parts, 3, 20);
+        for part in &sliced {
+            let whole = parts
+                .iter()
+                .find(|p| p.text.contains(part.text.as_str()) && p.kind == part.kind)
+                .expect("sliced from a part");
+            assert_eq!(part.target, whole.target, "{part:?}");
+        }
+        let cut = trunc_label_parts(&parts, 10);
+        assert_eq!(cut.last().map(|p| p.text.as_str()), Some("…"));
+        assert_eq!(cut.last().and_then(|p| p.target.clone()), None);
+        assert!(cut
+            .iter()
+            .any(|p| p.target == Some(PartTarget::Chip(vec![GraphRef::local("main")]))));
+        // A lone chip too narrow for its name still truncates with a target.
+        let lone = topic_commit(vec![GraphRef::tag("release-candidate")]);
+        let (_, lone_parts) = ascii_spacer(&lone, 18);
+        let tag = lone_parts
+            .iter()
+            .find(|p| p.kind == LabelKind::ChipTag)
+            .expect("tag chip");
+        assert!(tag.text.ends_with("…]"), "{tag:?}");
+        assert_eq!(
+            tag.target,
+            Some(PartTarget::Chip(vec![GraphRef::tag("release-candidate")]))
+        );
+    }
+
+    #[test]
+    fn sync_header_parts_colour_the_marks_and_keep_the_text() {
+        let sync = |status, ahead, behind| SyncState {
+            branch: "main".into(),
+            status,
+            ahead,
+            behind,
+        };
+        for (state, glyphs) in [
+            (sync(SyncStatus::Diverged, 2, 3), &ASCII),
+            (sync(SyncStatus::Ahead, 1, 0), &UNICODE),
+            (sync(SyncStatus::NoUpstream, 0, 0), &UNICODE),
+            (sync(SyncStatus::UpToDate, 0, 0), &ASCII),
+        ] {
+            let parts = format_sync_parts(&state, glyphs, None);
+            assert_eq!(parts_text(&parts), format_sync(&state, glyphs));
+            assert_eq!(parts[0].kind, LabelKind::ChipDefault);
+        }
+        let parts = format_sync_parts(&sync(SyncStatus::Diverged, 2, 3), &UNICODE, None);
+        let kinds: Vec<(&str, LabelKind)> =
+            parts.iter().map(|p| (p.text.as_str(), p.kind)).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("main", LabelKind::ChipDefault),
+                (" ", LabelKind::Meta),
+                ("\u{f062}2", LabelKind::SyncAhead),
+                (" ", LabelKind::Meta),
+                ("\u{f063}3", LabelKind::SyncBehind),
+            ]
+        );
+        let feature = SyncState {
+            branch: "feat".into(),
+            ..sync(SyncStatus::NoUpstream, 0, 0)
+        };
+        let parts = format_sync_parts(&feature, &ASCII, None);
+        assert_eq!(parts[0].kind, LabelKind::ChipLocal);
+        assert_eq!(parts_text(&parts), "feat no-upstream");
     }
 
     #[test]

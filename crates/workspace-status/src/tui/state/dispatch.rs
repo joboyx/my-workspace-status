@@ -222,6 +222,11 @@ impl AppState {
                 self.dispatch_hscroll(action)
             }
             action @ (Action::NavEnter | Action::NavEsc) => self.dispatch_drill(action),
+            action @ (Action::PopoverOpenFocused
+            | Action::PopoverMove(_)
+            | Action::PopoverRun
+            | Action::PopoverCopyLine
+            | Action::PopoverClose) => self.dispatch_popover(action),
             action @ (Action::Fetch
             | Action::Pull
             | Action::DefaultBranch

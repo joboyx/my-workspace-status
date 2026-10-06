@@ -61,7 +61,7 @@ use super::ops::{
     format_completed_op, format_mixed_running_op, format_running_op, op_targets, Op, OpTally,
     RepoOpResult, RunningOp,
 };
-use super::pull_request::{lookup, PrLookup};
+use super::pull_request::{lookup, lookup_detail, PrDetailLookup, PrLookup};
 #[cfg(not(test))]
 use super::pull_request::{open_in_browser, run_cli};
 use super::scheduler::{ApplyDecision, Scheduler, SpawnKind, UserTag};
@@ -219,6 +219,12 @@ pub(crate) enum JobOutcome {
         remote: Option<String>,
         lookup: PrLookup,
     },
+    /// Popover detail fetch of PR `number` for `branch` of checkout `repo`
+    /// at `remote`.
+    PullRequestDetail {
+        job: PrDetailJob,
+        lookup: PrDetailLookup,
+    },
     /// `gx` lookup of `branch` in checkout `repo`, then the browser open.
     /// `opened` is true when the browser started for a found PR.
     PullRequestOpen {
@@ -228,6 +234,17 @@ pub(crate) enum JobOutcome {
         lookup: PrLookup,
         opened: bool,
     },
+}
+
+/// One popover detail fetch: the fields of
+/// [`Effect::LookupPullRequestDetail`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PrDetailJob {
+    repo: PathBuf,
+    branch: String,
+    remote: String,
+    number: u64,
+    request: u64,
 }
 
 /// Forge CLI runner for PR lookups: argv and the quit flag in, stdout out.
@@ -254,8 +271,8 @@ const DEFAULT_PR_OPENER: PrUrlOpener = open_in_browser;
 #[cfg(test)]
 const DEFAULT_PR_OPENER: PrUrlOpener = |_, _| Err(());
 
-/// Most badge lookups on workers at once, so pane loads are not starved.
-/// A `gx` open does not wait for this cap.
+/// Most badge lookups and popover detail fetches on workers at once, so
+/// pane loads are not starved. A `gx` open does not wait for this cap.
 const PR_BADGE_LOOKUPS_MAX: usize = 2;
 
 /// Live TTY launch after [`JobOutcome::DiffPrepared`].
@@ -585,7 +602,11 @@ pub(crate) struct Interpreter {
     pr_opens: VecDeque<(PathBuf, String)>,
     /// Queued badge lookups: checkout, branch.
     pr_badges: VecDeque<(PathBuf, String)>,
-    /// Badge lookups on a worker (at most [`PR_BADGE_LOOKUPS_MAX`]).
+    /// Queued popover detail fetches. They run before waiting badge
+    /// lookups.
+    pr_details: VecDeque<PrDetailJob>,
+    /// Badge lookups and detail fetches on a worker (at most
+    /// [`PR_BADGE_LOOKUPS_MAX`]).
     pr_badges_running: usize,
     /// Forge CLI runner ([`DEFAULT_PR_CLI`]; tests swap in a fake).
     pr_cli: PrCliRunner,
@@ -644,6 +665,7 @@ impl Interpreter {
             blame_previous: None,
             pr_opens: VecDeque::new(),
             pr_badges: VecDeque::new(),
+            pr_details: VecDeque::new(),
             pr_badges_running: 0,
             pr_cli: DEFAULT_PR_CLI,
             pr_opener: DEFAULT_PR_OPENER,
@@ -1240,6 +1262,22 @@ impl Interpreter {
             }
             Effect::LookupPullRequests { targets } => {
                 self.pr_badges.extend(targets);
+                self.fill_pr_badge_slots();
+            }
+            Effect::LookupPullRequestDetail {
+                repo,
+                branch,
+                remote,
+                number,
+                request,
+            } => {
+                self.pr_details.push_back(PrDetailJob {
+                    repo,
+                    branch,
+                    remote,
+                    number,
+                    request,
+                });
                 self.fill_pr_badge_slots();
             }
             Effect::CopyClipboard { text, announce } => {
@@ -1847,6 +1885,20 @@ impl Interpreter {
                 }
                 self.fill_pr_badge_slots();
             }
+            JobOutcome::PullRequestDetail { job, lookup } => {
+                self.pr_badges_running = self.pr_badges_running.saturating_sub(1);
+                let PrDetailJob {
+                    repo,
+                    branch,
+                    remote,
+                    number,
+                    request,
+                } = job;
+                if state.apply_pr_detail(&repo, &branch, &remote, number, request, lookup) {
+                    self.mark();
+                }
+                self.fill_pr_badge_slots();
+            }
             JobOutcome::PullRequestOpen {
                 repo,
                 branch,
@@ -1922,11 +1974,13 @@ impl Interpreter {
         }
     }
 
-    /// Queue `UserTag::PullRequest` slots for waiting badge lookups, up to
-    /// [`PR_BADGE_LOOKUPS_MAX`] on workers. `gx` opens queue their own slot.
+    /// Queue `UserTag::PullRequest` slots for waiting badge lookups and
+    /// detail fetches, up to [`PR_BADGE_LOOKUPS_MAX`] on workers. `gx` opens
+    /// queue their own slot.
     fn fill_pr_badge_slots(&mut self) {
         let free = PR_BADGE_LOOKUPS_MAX.saturating_sub(self.pr_badges_running);
-        let wanted = self.pr_opens.len() + self.pr_badges.len().min(free);
+        let waiting = self.pr_badges.len() + self.pr_details.len();
+        let wanted = self.pr_opens.len() + waiting.min(free);
         for _ in self.sched.queued_user_tag(UserTag::PullRequest)..wanted {
             self.sched.enqueue_user(UserTag::PullRequest);
         }
@@ -2766,6 +2820,23 @@ impl Interpreter {
                     return;
                 }
                 if self.pr_badges_running < PR_BADGE_LOOKUPS_MAX {
+                    // A fetch the cache no longer waits on would land
+                    // nothing: skip it.
+                    while let Some(job) = self.pr_details.pop_front() {
+                        if !state.pr_detail_awaited(&job.remote, &job.branch, job.request) {
+                            continue;
+                        }
+                        self.pr_badges_running += 1;
+                        spawn(
+                            id,
+                            Box::new(move || {
+                                let run = |argv: &[String]| cli(argv, &cancel);
+                                let lookup = lookup_detail(&job.remote, job.number, &run);
+                                JobOutcome::PullRequestDetail { job, lookup }
+                            }),
+                        );
+                        return;
+                    }
                     if let Some((repo, branch)) = self.pr_badges.pop_front() {
                         self.pr_badges_running += 1;
                         spawn(
@@ -6450,6 +6521,153 @@ mod tests {
         }
         assert_eq!(capture_jobs(&mut interp, &mut state).len(), 2);
         assert_eq!(interp.pr_badges.len(), 1);
+    }
+
+    const DETAIL_REMOTE: &str = "git@github.com:octo/demo.git";
+
+    /// Answers `gh pr view` for PR 7 until the quit flag is set, then fails
+    /// as a killed CLI would.
+    fn gh_view_until_cancelled(argv: &[String], cancel: &AtomicBool) -> Result<String, ()> {
+        assert_eq!(
+            argv.get(..3),
+            Some(&["gh".to_string(), "pr".into(), "view".into()][..])
+        );
+        if cancel.load(Ordering::Relaxed) {
+            return Err(());
+        }
+        Ok(format!(
+            r#"{{"number":7,"title":"Add login","state":"OPEN","url":"{PR_URL}","statusCheckRollup":[{{"status":"COMPLETED","conclusion":"SUCCESS"}}]}}"#
+        ))
+    }
+
+    /// Fixture `app` (on `main`) with a ready PR #7 and a pinned popover
+    /// that asked for its detail.
+    fn detail_state() -> (AppState, Effect) {
+        let mut state = fixture_state();
+        let _ = state.due_pr_lookups();
+        assert!(state.apply_pr_lookup(
+            Path::new("app"),
+            "main",
+            Some(DETAIL_REMOTE.into()),
+            PrLookup::Found(crate::tui::pull_request::PullRequest {
+                number: 7,
+                url: PR_URL.into(),
+                state: crate::tui::pull_request::PrState::Open,
+            }),
+        ));
+        focus_repo(&mut state, "app");
+        let effect = state.dispatch(Action::PopoverOpenFocused);
+        assert_eq!(
+            effect,
+            Effect::LookupPullRequestDetail {
+                repo: PathBuf::from("app"),
+                branch: "main".into(),
+                remote: DETAIL_REMOTE.into(),
+                number: 7,
+                request: 1,
+            }
+        );
+        (state, effect)
+    }
+
+    #[test]
+    fn detail_fetches_share_the_badge_slots_and_run_before_waiting_badges() {
+        let (mut state, detail) = detail_state();
+        let mut interp = Interpreter::with_cap(8);
+        interp.pr_cli = gh_view_until_cancelled;
+        let targets: Vec<(PathBuf, String)> = (0..3)
+            .map(|i| (PathBuf::from(format!("missing-{i}")), "feature".to_string()))
+            .collect();
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::LookupPullRequests { targets },
+            &Action::None,
+        );
+        let badges = capture_jobs(&mut interp, &mut state);
+        assert_eq!(badges.len(), 2, "both slots busy");
+        schedule_effect(&mut interp, &mut state, detail, &Action::None);
+        assert!(
+            capture_jobs(&mut interp, &mut state).is_empty(),
+            "the detail waits for a slot"
+        );
+        assert_eq!(interp.pr_details.len(), 1);
+
+        let (id, work) = badges.into_iter().next().expect("badge job");
+        interp.pr_cli = cli_must_not_run;
+        apply_id(&mut interp, &mut state, id, work());
+        interp.pr_cli = gh_view_until_cancelled;
+        let next = capture_jobs(&mut interp, &mut state);
+        assert_eq!(next.len(), 1, "one slot freed");
+        assert!(interp.pr_details.is_empty(), "the detail goes first");
+        assert_eq!(interp.pr_badges.len(), 1, "the badge still waits");
+        let (id, work) = next.into_iter().next().expect("detail job");
+        let outcome = work();
+        assert!(matches!(outcome, JobOutcome::PullRequestDetail { .. }));
+        apply_id(&mut interp, &mut state, id, outcome);
+        match state.pull_request_detail_for(Path::new("app")) {
+            Some(crate::tui::state::PrDetailState::Ready(detail)) => {
+                assert_eq!(detail.title, "Add login");
+                assert_eq!(detail.checks.pass, 1);
+            }
+            other => panic!("ready detail expected: {other:?}"),
+        }
+        assert_eq!(
+            capture_jobs(&mut interp, &mut state).len(),
+            1,
+            "the freed slot takes the waiting badge"
+        );
+    }
+
+    #[test]
+    fn a_queued_detail_fetch_the_cache_dropped_never_runs() {
+        let (mut state, detail) = detail_state();
+        let mut interp = Interpreter::with_cap(8);
+        interp.pr_cli = gh_view_until_cancelled;
+        let targets: Vec<(PathBuf, String)> = (0..2)
+            .map(|i| (PathBuf::from(format!("missing-{i}")), "feature".to_string()))
+            .collect();
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::LookupPullRequests { targets },
+            &Action::None,
+        );
+        let badges = capture_jobs(&mut interp, &mut state);
+        assert_eq!(badges.len(), 2, "both slots busy");
+        schedule_effect(&mut interp, &mut state, detail, &Action::None);
+        assert_eq!(interp.pr_details.len(), 1, "the detail waits for a slot");
+
+        // `r` drops the Loading entry while the fetch still waits.
+        state.forget_pr_lookups(None);
+        let (id, work) = badges.into_iter().next().expect("badge job");
+        interp.pr_cli = cli_must_not_run;
+        apply_id(&mut interp, &mut state, id, work());
+        assert!(
+            capture_jobs(&mut interp, &mut state).is_empty(),
+            "the dropped detail does not run"
+        );
+        assert!(interp.pr_details.is_empty());
+        assert_eq!(
+            interp.pr_badges_running, 1,
+            "only the other badge holds a slot"
+        );
+    }
+
+    #[test]
+    fn a_detail_fetch_after_quit_fails_without_an_answer() {
+        let (mut state, detail) = detail_state();
+        let mut interp = Interpreter::with_cap(4);
+        interp.pr_cli = gh_view_until_cancelled;
+        interp.cancel_pull_request_jobs();
+        let opts = opts(&state);
+        interp.interpret_sync(&mut state, &opts, detail, &Action::None);
+        assert_eq!(
+            state.pull_request_detail_for(Path::new("app")),
+            Some(&crate::tui::state::PrDetailState::Failed),
+            "the job saw the set cancel flag"
+        );
+        assert_eq!(interp.pr_badges_running, 0, "the slot is released");
     }
 
     /// Land a fresh status for checkout `app` on `branch` (collect `gen`).

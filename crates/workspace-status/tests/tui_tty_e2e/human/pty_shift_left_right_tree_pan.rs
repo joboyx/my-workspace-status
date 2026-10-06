@@ -6,7 +6,7 @@ use crate::harness::{
 use crate::seed::{daily_workspace, seed_long_path_file};
 use crate::support::{
     launch_panes_left_tree_right_diff, no_updates_group_folded, no_wrong_overlays, status_row,
-    tree_cursor_on, tree_dir_expanded, tree_has, GIT_WAIT, SETTLE_MS, TREE_LABEL_COL, WAIT,
+    tree_cursor_on, tree_dir_expanded, tree_has, tree_label_col, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 /// Kitty CSI-u Left. Crossterm 0.28 `event::read` yields Char U+E006.
@@ -133,7 +133,7 @@ fn pty_shift_left_right_tree_pan() {
     // tree. Click is setup, not the click-to-select claim.
     let readme_hit = tree_row_containing(&tui.screen(), "README.md")
         .unwrap_or_else(|| panic!("README row at launch:\n{}", tui.screen()));
-    tui.sgr_click(TREE_LABEL_COL, readme_hit);
+    tui.sgr_click(tree_label_col(&tui.screen(), "README.md"), readme_hit);
     tui.wait_pred(
         |screen| {
             tree_cursor_on(screen, "README.md")

@@ -968,6 +968,69 @@ mod tests {
         );
     }
 
+    /// Icon popover and `?` legend text. Both paint on the theme surface:
+    /// popover headings and field values in their pane colour roles,
+    /// muted labels and notes, legend glyphs in the colour their pane
+    /// paints them (`head_mark` for the checkout mark and `[HEAD]`,
+    /// `cursor` for the cursor bar), and the `❯` focus marker and cues in
+    /// `cursor`. Every role meets AA on the surface (`deleted` its 4.0
+    /// floor). A pinned popover's focused line puts the same text on
+    /// `cursor_bg`: 3.5, and `deleted` 2.5 like the hovered tab close.
+    /// Key chips paint the surface on `cursor` (enabled) or `muted`
+    /// (disabled): AA.
+    #[test]
+    fn popover_and_legend_text_meets_floors_on_surface_and_focus() {
+        const AA: f64 = 4.5;
+        const DELETED_ON_SURFACE: f64 = 4.0;
+        const ON_FOCUS: f64 = 3.5;
+        const DELETED_ON_FOCUS: f64 = 2.5;
+        for id in THEME_IDS {
+            let pal = id.palette();
+            let surface = hex_color(id.theme().surface);
+            let roles = [
+                ("heading", pal.heading),
+                ("repo", pal.repo),
+                ("dir", pal.dir),
+                ("file", pal.file),
+                ("muted", pal.muted),
+                ("added", pal.added),
+                ("modified", pal.modified),
+                ("deleted", pal.deleted),
+                ("renamed", pal.renamed),
+                ("viewed", pal.viewed),
+                ("branch_default", pal.branch_default),
+                ("branch_feature", pal.branch_feature),
+                ("head_mark", pal.head_mark),
+                ("cursor", pal.cursor),
+            ];
+            for (name, fg) in roles {
+                let deleted = name == "deleted";
+                for (bg_name, bg, floor) in [
+                    (
+                        "surface",
+                        surface,
+                        if deleted { DELETED_ON_SURFACE } else { AA },
+                    ),
+                    (
+                        "cursor_bg",
+                        pal.cursor_bg,
+                        if deleted { DELETED_ON_FOCUS } else { ON_FOCUS },
+                    ),
+                ] {
+                    let ratio = contrast_ratio(fg, bg);
+                    assert!(
+                        ratio >= floor,
+                        "{id:?} popover {name} on {bg_name} {ratio:.2} < {floor}"
+                    );
+                }
+            }
+            for (name, chip_bg) in [("enabled", pal.cursor), ("disabled", pal.muted)] {
+                let ratio = contrast_ratio(surface, chip_bg);
+                assert!(ratio >= AA, "{id:?} {name} key chip {ratio:.2} < {AA}");
+            }
+        }
+    }
+
     #[test]
     fn cursor_tint_keeps_word_highlight_and_text_readable() {
         const TEXT_FLOOR: f64 = 3.0;

@@ -38,7 +38,7 @@ pub struct GraphModel {
 }
 
 /// Kind of annotated ref on a commit. Same set as `GraphRefKind`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RefKind {
     /// `refs/heads/*`
     Local,
@@ -49,7 +49,7 @@ pub enum RefKind {
 }
 
 /// A branch or tag label pointing at a commit.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct GraphRef {
     /// Local, remote, or tag.
     pub kind: RefKind,
@@ -262,64 +262,138 @@ impl GraphModel {
     /// Stashes sit immediately above their `parent_id` commit. Orphan stashes
     /// sit after the uncommitted row. Hidden ignored worktrees are omitted.
     pub fn visible_rows(&self) -> Vec<GraphRow> {
-        let commit_ids: Vec<&str> = self.commits.iter().map(|c| c.id.as_str()).collect();
-        let mut rows = Vec::new();
+        self.visible_row_refs()
+            .map(|row| self.owned_row(row))
+            .collect()
+    }
 
-        if let Some(has_changes) = self.uncommitted {
-            rows.push(GraphRow::Uncommitted { has_changes });
-        }
+    /// Row `index` of [`Self::visible_rows`], cloning only that row.
+    pub fn visible_row_at(&self, index: usize) -> Option<GraphRow> {
+        self.visible_row_refs()
+            .nth(index)
+            .map(|row| self.owned_row(row))
+    }
 
-        for stash in &self.stashes {
-            let attached = stash
-                .parent_id
-                .as_deref()
-                .is_some_and(|parent| commit_ids.contains(&parent));
-            if !attached {
-                rows.push(GraphRow::Stash(stash.clone()));
-            }
-        }
-
-        for commit in &self.commits {
-            for stash in &self.stashes {
-                if stash.parent_id.as_deref() == Some(commit.id.as_str()) {
-                    rows.push(GraphRow::Stash(stash.clone()));
-                }
-            }
-            let worktrees = self
-                .worktrees
+    /// The [`Self::visible_rows`] order, borrowed from the model.
+    fn visible_row_refs(&self) -> impl Iterator<Item = RowRef<'_>> + '_ {
+        let in_window = move |id: Option<&str>| {
+            id.is_some_and(|id| self.commits.iter().any(|commit| commit.id == id))
+        };
+        let orphan_stashes = self
+            .stashes
+            .iter()
+            .filter(move |stash| !in_window(stash.parent_id.as_deref()))
+            .map(RowRef::Stash);
+        let commits = self.commits.iter().flat_map(move |commit| {
+            self.stashes
                 .iter()
-                .filter(|wt| wt.head_id.as_deref() == Some(commit.id.as_str()))
-                .filter(|wt| self.show_ignored || !wt.ignored)
-                .cloned()
-                .collect();
-            rows.push(GraphRow::Commit {
+                .filter(move |stash| stash.parent_id.as_deref() == Some(commit.id.as_str()))
+                .map(RowRef::Stash)
+                .chain(std::iter::once(RowRef::Commit(commit)))
+        });
+        let orphan_worktrees = self
+            .worktrees
+            .iter()
+            .filter(move |worktree| !in_window(worktree.head_id.as_deref()))
+            .filter(move |worktree| self.show_ignored || !worktree.ignored)
+            .map(RowRef::Worktree);
+        self.uncommitted
+            .map(RowRef::Uncommitted)
+            .into_iter()
+            .chain(orphan_stashes)
+            .chain(commits)
+            .chain(orphan_worktrees)
+    }
+
+    /// Owned [`GraphRow`] for a borrowed row.
+    fn owned_row(&self, row: RowRef<'_>) -> GraphRow {
+        match row {
+            RowRef::Uncommitted(has_changes) => GraphRow::Uncommitted { has_changes },
+            RowRef::Stash(stash) => GraphRow::Stash(stash.clone()),
+            RowRef::Commit(commit) => GraphRow::Commit {
                 is_head: self.head_id.as_deref() == Some(commit.id.as_str()),
                 commit: commit.clone(),
-                worktrees,
-            });
+                worktrees: self
+                    .worktrees
+                    .iter()
+                    .filter(|wt| wt.head_id.as_deref() == Some(commit.id.as_str()))
+                    .filter(|wt| self.show_ignored || !wt.ignored)
+                    .cloned()
+                    .collect(),
+            },
+            RowRef::Worktree(worktree) => GraphRow::Worktree(worktree.clone()),
         }
-
-        for worktree in &self.worktrees {
-            let attached = worktree
-                .head_id
-                .as_deref()
-                .is_some_and(|id| commit_ids.contains(&id));
-            if attached {
-                continue;
-            }
-            if !self.show_ignored && worktree.ignored {
-                continue;
-            }
-            rows.push(GraphRow::Worktree(worktree.clone()));
-        }
-
-        rows
     }
+}
+
+/// A [`GraphRow`] borrowed from its [`GraphModel`].
+#[derive(Clone, Copy)]
+enum RowRef<'a> {
+    Uncommitted(bool),
+    Stash(&'a Stash),
+    Commit(&'a Commit),
+    Worktree(&'a Worktree),
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{cap_commit_body, COMMIT_BODY_MAX_BYTES};
+    use super::{
+        cap_commit_body, Commit, GraphModel, GraphRow, Stash, Worktree, COMMIT_BODY_MAX_BYTES,
+    };
+
+    fn worktree(path: &str, head: Option<&str>, ignored: bool) -> Worktree {
+        Worktree {
+            path: path.into(),
+            head_id: head.map(Into::into),
+            branch: None,
+            ignored,
+            is_current: false,
+        }
+    }
+
+    #[test]
+    fn visible_row_at_matches_visible_rows() {
+        let commit = |id: &str| Commit {
+            id: id.into(),
+            ..Commit::default()
+        };
+        let stash = |id: &str, parent: &str| Stash {
+            id: id.into(),
+            parent_id: Some(parent.into()),
+            ..Stash::default()
+        };
+        let mut model = GraphModel {
+            commits: vec![commit("c1"), commit("c2")],
+            stashes: vec![stash("s1", "c2"), stash("s2", "gone")],
+            worktrees: vec![
+                worktree("/w/on-c1", Some("c1"), false),
+                worktree("/w/orphan", Some("gone"), false),
+                worktree("/w/ignored", None, true),
+            ],
+            head_id: Some("c1".into()),
+            uncommitted: Some(true),
+            ..GraphModel::default()
+        };
+        for show_ignored in [false, true] {
+            model.show_ignored = show_ignored;
+            let rows = model.visible_rows();
+            assert_eq!(rows.len(), if show_ignored { 7 } else { 6 });
+            assert!(matches!(
+                rows[0],
+                GraphRow::Uncommitted { has_changes: true }
+            ));
+            assert!(matches!(&rows[1], GraphRow::Stash(s) if s.id == "s2"));
+            assert!(
+                matches!(&rows[2], GraphRow::Commit { commit, is_head: true, worktrees }
+                    if commit.id == "c1" && worktrees.len() == 1)
+            );
+            assert!(matches!(&rows[3], GraphRow::Stash(s) if s.id == "s1"));
+            for (index, row) in rows.iter().enumerate() {
+                assert_eq!(model.visible_row_at(index).as_ref(), Some(row));
+            }
+            assert_eq!(model.visible_row_at(rows.len()), None);
+        }
+    }
 
     #[test]
     fn cap_commit_body_keeps_short_and_truncates_huge() {

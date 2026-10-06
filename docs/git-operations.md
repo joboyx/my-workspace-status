@@ -124,7 +124,7 @@ After `p` / `P` / `d` / `f`, the TUI refreshes the affected repos and stamps tho
 
 ## Pull request lookup (`tui/pull_request.rs`, `tui/effect.rs`)
 
-The TUI finds the PR of a branch with the forge's own CLI and opens it in the operator's browser. It reads no token and never writes to git or to the forge. Everything here runs on a worker thread, never on the TTY event thread. Background badge lookups and `gx` / Ctrl+click share it.
+The TUI finds the PR of a branch with the forge's own CLI and opens it in the operator's browser. It reads no token and never writes to git or to the forge. Everything here runs on a worker thread, never on the TTY event thread. Background badge lookups, the PR popover detail, and `gx` / Ctrl+click share it.
 
 **Remote.** `git::remote_url_for_branch` (above) gives the URL. A branch with no usable remote has no PR.
 
@@ -137,12 +137,16 @@ The TUI finds the PR of a branch with the forge's own CLI and opens it in the op
 | GitHub | PR list | `gh pr list -R <host>/<owner>/<repo> --head <branch> --state all --json number,state,url,headRefName,isCrossRepository,reviewDecision,updatedAt --limit 30` |
 | GitLab | MR list (a GitLab merge request is a PR in the UI) | `glab api --hostname <host> "projects/<url-encoded path>/merge_requests?source_branch=<url-encoded branch>&state=all&per_page=30"` |
 | GitLab | approvals, only for the open MR that was picked | `glab api --hostname <host> "projects/<url-encoded path>/merge_requests/<iid>/approvals"` |
+| GitHub | PR detail (popover) | `gh pr view <number> -R <host>/<owner>/<repo> --json number,title,state,isDraft,author,headRefName,baseRefName,reviewDecision,statusCheckRollup,updatedAt` |
+| GitLab | MR detail (popover) | `glab api --hostname <host> "projects/<url-encoded path>/merge_requests/<iid>"`, then the approvals call above when the MR is open |
 
 The GitLab project path and the branch are percent-encoded (everything except letters, digits, `-`, `.`, `_`, `~`), so `group/sub/demo` becomes `group%2Fsub%2Fdemo`.
 
 **Which PR counts.** From the list, in order: an open PR, else a merged PR. A closed PR that was not merged is ignored (GitHub `CLOSED`, GitLab `closed` and `locked`). Among PRs of the same kind, an exact head-branch match wins, then the latest `updatedAt` / `updated_at` (compared as text; both forges print fixed-layout UTC). A PR from a fork is ignored (GitHub `isCrossRepository`; GitLab `source_project_id` differs from `target_project_id`), because `--head` and `source_branch` match the branch name alone. A list that holds no counted PR is "no PR".
 
 **Approved.** Only an open PR can be approved, and only when the forge says so: GitHub `reviewDecision == "APPROVED"`; GitLab approvals `approved == true`. Anything else (`REVIEW_REQUIRED`, `CHANGES_REQUESTED`, no decision, a failed or unreadable approvals call, a missing field) stays open. The TUI never infers approval. A merged PR is never approved. GitLab reports an MR as approved when its approval rules are met, and that can include rules that need zero approvals.
+
+**PR detail.** The PR popover asks for the detail of the PR the badge already found (`lookup_detail`), by its number and the remote URL the badge lookup resolved. It asks once per (remote URL, branch), when a peek opens or a popover pins on that PR; ticks never ask. Fields: title, state, draft (GitHub `isDraft`; GitLab `draft`, else the older `work_in_progress`), author (`author.login` / `author.username`), head and base branch, review decision, checks, and update time (the popover's URL stays the badge's). Every field but the number may be missing or `null`. Review is the GitHub `reviewDecision` (`APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED`, else none); a GitLab MR that is open shows `APPROVED` or `NOT_APPROVED` from the approvals call (a failed approvals call reads as not approved). Checks: each GitHub `statusCheckRollup` entry counts once. A status context reads `state` (`SUCCESS` passes, `FAILURE` / `ERROR` fail, anything else is pending). A check run that is not `COMPLETED` is pending; a completed one passes on `SUCCESS` / `NEUTRAL` / `SKIPPED`, fails on `FAILURE` / `CANCELLED` / `TIMED_OUT` / `ACTION_REQUIRED` / `STARTUP_FAILURE` / `STALE`, and is pending otherwise. GitLab has one `head_pipeline.status`: `success` / `skipped` pass, `failed` / `canceled` fail, any other status is pending, and no pipeline counts nothing. A CLI failure or JSON that does not parse is a failed detail; the popover says `could not load details` and does not ask again until the detail is dropped.
 
 **Failure.** A CLI that cannot start, is not logged in, exits non-zero, is killed by the time limit, or prints JSON that does not fit the expected list is a failed lookup, not "no PR". A failed lookup shows no badge. On `gx` it says `could not look up PR for <branch>`.
 

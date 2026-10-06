@@ -80,21 +80,29 @@ pub fn classify_busy_action(action: &Action) -> BusyAction {
     }
 }
 
-/// Classify one input while a git write is in flight, including Quick Open Enter.
+/// Classify one input while a git write is in flight, including Quick Open
+/// and popover Enter.
 ///
 /// In commands mode [`Action::QuickOpenSubmit`] then dispatches the
-/// highlighted catalog action, so busy classification uses that inner action
-/// when provided. Quick Open nav / typing stay [`BusyAction::Handle`]. Submit
-/// with no inner action (files mode, empty list) stays Handle (same as
-/// [`classify_busy_action`]).
+/// highlighted catalog action, [`Action::PopoverRun`] the focused popover
+/// action, and an [`Action::Release`] on a pinned popover action line runs
+/// that line, so busy classification uses that inner action when
+/// provided. Quick Open nav / typing stay [`BusyAction::Handle`]. Submit
+/// with no inner action (files mode, empty list, a field line) stays Handle
+/// (same as [`classify_busy_action`]).
 pub fn classify_busy_dispatch(action: &Action, palette_submit: Option<&Action>) -> BusyAction {
     match (action, palette_submit) {
-        (Action::QuickOpenSubmit, Some(inner)) => classify_busy_action(inner),
+        (Action::QuickOpenSubmit | Action::PopoverRun | Action::Release, Some(inner)) => {
+            classify_busy_action(inner)
+        }
         _ => classify_busy_action(action),
     }
 }
 
 /// True when fetch/watch timers must not start (confirm, help, pickers, …).
+///
+/// A pinned icon popover does not block them: it is read-only, rebuilds
+/// its content every frame, and may stay open a long time.
 pub fn overlay_blocks_background_ticks(mode: InputMode) -> bool {
     !matches!(
         mode,
@@ -102,6 +110,7 @@ pub fn overlay_blocks_background_ticks(mode: InputMode) -> bool {
             | InputMode::ZPending { .. }
             | InputMode::GPending { .. }
             | InputMode::DiffVisual
+            | InputMode::Popover
     )
 }
 
@@ -194,6 +203,10 @@ mod tests {
         }));
         assert!(!overlay_blocks_background_ticks(InputMode::DiffVisual));
         assert!(overlay_blocks_background_ticks(InputMode::QuickOpen));
+        assert!(
+            !overlay_blocks_background_ticks(InputMode::Popover),
+            "a pinned popover lets watch and fetch ticks run"
+        );
     }
 
     /// The blame menu's keys stay live like the stash menu's letters and
@@ -319,6 +332,41 @@ mod tests {
             classify_busy_dispatch(&Action::QuickOpenSubmit, None),
             BusyAction::Handle
         );
+    }
+
+    #[test]
+    fn popover_enter_classifies_as_the_focused_action() {
+        assert_eq!(
+            classify_busy_dispatch(&Action::PopoverRun, Some(&Action::Pull)),
+            BusyAction::Handle
+        );
+        assert_eq!(
+            classify_busy_dispatch(&Action::PopoverRun, Some(&Action::DefaultBranch)),
+            BusyAction::Ignore
+        );
+        assert_eq!(
+            classify_busy_dispatch(&Action::PopoverRun, None),
+            BusyAction::Handle,
+            "a field line runs nothing"
+        );
+        assert_eq!(
+            classify_busy_dispatch(&Action::Release, Some(&Action::DefaultBranch)),
+            BusyAction::Ignore,
+            "a click on an exclusive popover line is drained like its key"
+        );
+        assert_eq!(
+            classify_busy_dispatch(&Action::Release, None),
+            BusyAction::Handle,
+            "a release that runs nothing stays live"
+        );
+        for action in [
+            Action::PopoverOpenFocused,
+            Action::PopoverMove(1),
+            Action::PopoverCopyLine,
+            Action::PopoverClose,
+        ] {
+            assert_eq!(classify_busy_dispatch(&action, None), BusyAction::Handle);
+        }
     }
 
     /// Fails CI if the live TTY path grows a nested pump or a sync pane /

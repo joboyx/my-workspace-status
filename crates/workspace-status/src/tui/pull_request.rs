@@ -16,6 +16,10 @@
 //! repository (a fork PR whose branch has the same name does not count). A
 //! closed PR that was not merged counts as none. Among several candidates of the same kind, an exact
 //! head-branch match wins, then the most recently updated one.
+//!
+//! [`lookup_detail`] fetches the rich fields of one known PR (title, review,
+//! author, branches, checks, update time) for the PR popover, with the same
+//! runner and argv-builder style.
 
 use std::io::Read;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -93,6 +97,81 @@ pub enum PrLookup {
     NoPr,
     /// No answer: the CLI is missing, is not authenticated, exited non-zero,
     /// or printed output that does not parse.
+    Failed,
+}
+
+/// Review decision of a PR, as the PR popover shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrReview {
+    /// GitHub `APPROVED`, or a GitLab MR whose approval rules are met.
+    Approved,
+    /// GitHub `CHANGES_REQUESTED`.
+    ChangesRequested,
+    /// GitHub `REVIEW_REQUIRED`.
+    ReviewRequired,
+    /// An open GitLab MR whose approval rules are not met (or whose
+    /// approvals could not be read).
+    NotApproved,
+}
+
+impl PrReview {
+    /// Upper-case label, in the GitHub words.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Approved => "APPROVED",
+            Self::ChangesRequested => "CHANGES_REQUESTED",
+            Self::ReviewRequired => "REVIEW_REQUIRED",
+            Self::NotApproved => "NOT_APPROVED",
+        }
+    }
+}
+
+/// Checks of a PR head, counted per outcome.
+///
+/// GitHub counts each `statusCheckRollup` entry. GitLab has one head
+/// pipeline status, so at most one bucket is 1.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChecksSummary {
+    /// Passed, neutral, or skipped.
+    pub pass: usize,
+    /// Failed, errored, cancelled, or timed out.
+    pub fail: usize,
+    /// Queued, running, or waiting.
+    pub pending: usize,
+}
+
+/// Rich fields of one PR, for the PR popover.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequestDetail {
+    /// GitHub PR number or GitLab MR iid.
+    pub number: u64,
+    /// Title; empty when the forge sent none.
+    pub title: String,
+    /// `OPEN`, `MERGED`, `CLOSED`, or another forge state in upper case.
+    pub state: String,
+    /// True for a draft PR.
+    pub draft: bool,
+    /// Author login (GitHub) or username (GitLab).
+    pub author: Option<String>,
+    /// Head (source) branch.
+    pub head: Option<String>,
+    /// Base (target) branch.
+    pub base: Option<String>,
+    /// Review decision; `None` when the forge reports none.
+    pub review: Option<PrReview>,
+    /// Checks of the head commit.
+    pub checks: ChecksSummary,
+    /// Last update, in Unix seconds.
+    pub updated_at: Option<i64>,
+}
+
+/// Result of one PR detail fetch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrDetailLookup {
+    /// The forge described the PR.
+    Found(PullRequestDetail),
+    /// No answer: unsupported remote, CLI missing or failed, or output that
+    /// does not parse.
     Failed,
 }
 
@@ -208,6 +287,32 @@ pub fn gitlab_list_argv(repo: &ForgeRepo, branch: &str) -> Vec<String> {
 pub fn gitlab_approvals_argv(repo: &ForgeRepo, iid: u64) -> Vec<String> {
     let endpoint = format!(
         "projects/{}/merge_requests/{iid}/approvals",
+        percent_encode(&repo.path)
+    );
+    gitlab_api_argv(repo, endpoint)
+}
+
+/// `gh pr view` argv (program first) for the detail fields of PR `number`.
+pub fn github_view_argv(repo: &ForgeRepo, number: u64) -> Vec<String> {
+    [
+        "gh",
+        "pr",
+        "view",
+        &number.to_string(),
+        "-R",
+        &format!("{}/{}", repo.host, repo.path),
+        "--json",
+        "number,title,state,isDraft,author,headRefName,baseRefName,\
+         reviewDecision,statusCheckRollup,updatedAt",
+    ]
+    .map(str::to_string)
+    .to_vec()
+}
+
+/// `glab api` argv (program first) for MR `iid` with its detail fields.
+pub fn gitlab_mr_argv(repo: &ForgeRepo, iid: u64) -> Vec<String> {
+    let endpoint = format!(
+        "projects/{}/merge_requests/{iid}",
         percent_encode(&repo.path)
     );
     gitlab_api_argv(repo, endpoint)
@@ -404,6 +509,290 @@ fn gitlab_approved(
         .and_then(|json| serde_json::from_str::<GitLabApprovals>(&json).ok())
         .and_then(|approvals| approvals.approved)
         .unwrap_or(false)
+}
+
+/// `gh pr view --json` detail object. Every field but the number may be
+/// missing or `null`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubPrView {
+    number: u64,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    is_draft: Option<bool>,
+    #[serde(default)]
+    author: Option<ForgeUser>,
+    #[serde(default)]
+    head_ref_name: Option<String>,
+    #[serde(default)]
+    base_ref_name: Option<String>,
+    #[serde(default)]
+    review_decision: Option<String>,
+    #[serde(default)]
+    status_check_rollup: Option<Vec<GitHubCheck>>,
+    #[serde(default)]
+    updated_at: Option<String>,
+}
+
+/// Author object: `login` on GitHub, `username` on GitLab.
+#[derive(Deserialize)]
+struct ForgeUser {
+    #[serde(default)]
+    login: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+}
+
+impl ForgeUser {
+    fn name(self) -> Option<String> {
+        self.login.or(self.username).filter(|name| !name.is_empty())
+    }
+}
+
+/// One `statusCheckRollup` entry: a check run (`status`, `conclusion`) or a
+/// commit status context (`state`).
+#[derive(Deserialize)]
+struct GitHubCheck {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    conclusion: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+}
+
+/// GitLab `merge_requests/<iid>` object. Every field but the iid may be
+/// missing or `null`.
+#[derive(Deserialize)]
+struct GitLabMrView {
+    iid: u64,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    draft: Option<bool>,
+    /// Older GitLab name of `draft`.
+    #[serde(default)]
+    work_in_progress: Option<bool>,
+    #[serde(default)]
+    author: Option<ForgeUser>,
+    #[serde(default)]
+    source_branch: Option<String>,
+    #[serde(default)]
+    target_branch: Option<String>,
+    #[serde(default)]
+    head_pipeline: Option<GitLabPipeline>,
+    #[serde(default)]
+    updated_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GitLabPipeline {
+    #[serde(default)]
+    status: Option<String>,
+}
+
+/// Outcome bucket of one check.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CheckBucket {
+    Pass,
+    Fail,
+    Pending,
+}
+
+impl ChecksSummary {
+    fn add(&mut self, bucket: CheckBucket) {
+        match bucket {
+            CheckBucket::Pass => self.pass += 1,
+            CheckBucket::Fail => self.fail += 1,
+            CheckBucket::Pending => self.pending += 1,
+        }
+    }
+}
+
+/// Bucket of one GitHub rollup entry. A status context reads `state`; a
+/// check run that is not `COMPLETED`, or has no conclusion yet, is
+/// pending.
+fn github_check_bucket(check: &GitHubCheck) -> CheckBucket {
+    if let Some(state) = check.state.as_deref() {
+        return match state {
+            "SUCCESS" => CheckBucket::Pass,
+            "FAILURE" | "ERROR" => CheckBucket::Fail,
+            _ => CheckBucket::Pending,
+        };
+    }
+    if check
+        .status
+        .as_deref()
+        .is_some_and(|status| status != "COMPLETED")
+    {
+        return CheckBucket::Pending;
+    }
+    match check.conclusion.as_deref() {
+        Some("SUCCESS" | "NEUTRAL" | "SKIPPED") => CheckBucket::Pass,
+        Some(
+            "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE" | "STALE",
+        ) => CheckBucket::Fail,
+        _ => CheckBucket::Pending,
+    }
+}
+
+/// Bucket of a GitLab head pipeline status; `None` for no pipeline.
+fn gitlab_pipeline_bucket(status: &str) -> Option<CheckBucket> {
+    match status {
+        "" => None,
+        "success" | "skipped" => Some(CheckBucket::Pass),
+        "failed" | "canceled" => Some(CheckBucket::Fail),
+        _ => Some(CheckBucket::Pending),
+    }
+}
+
+fn github_review(decision: &str) -> Option<PrReview> {
+    match decision {
+        "APPROVED" => Some(PrReview::Approved),
+        "CHANGES_REQUESTED" => Some(PrReview::ChangesRequested),
+        "REVIEW_REQUIRED" => Some(PrReview::ReviewRequired),
+        _ => None,
+    }
+}
+
+fn github_detail(json: &str) -> Result<PullRequestDetail, ()> {
+    let pr: GitHubPrView = serde_json::from_str(json).map_err(|_| ())?;
+    let mut checks = ChecksSummary::default();
+    for check in pr.status_check_rollup.unwrap_or_default() {
+        checks.add(github_check_bucket(&check));
+    }
+    Ok(PullRequestDetail {
+        number: pr.number,
+        title: pr.title.unwrap_or_default(),
+        state: pr.state.unwrap_or_default().to_ascii_uppercase(),
+        draft: pr.is_draft.unwrap_or(false),
+        author: pr.author.and_then(ForgeUser::name),
+        head: pr.head_ref_name.filter(|name| !name.is_empty()),
+        base: pr.base_ref_name.filter(|name| !name.is_empty()),
+        review: pr.review_decision.as_deref().and_then(github_review),
+        checks,
+        updated_at: pr.updated_at.as_deref().and_then(rfc3339_unix),
+    })
+}
+
+fn gitlab_detail(json: &str) -> Result<(PullRequestDetail, bool), ()> {
+    let mr: GitLabMrView = serde_json::from_str(json).map_err(|_| ())?;
+    let state = mr.state.unwrap_or_default();
+    let open = state == "opened";
+    let mut checks = ChecksSummary::default();
+    if let Some(bucket) = mr
+        .head_pipeline
+        .and_then(|pipeline| pipeline.status)
+        .as_deref()
+        .and_then(gitlab_pipeline_bucket)
+    {
+        checks.add(bucket);
+    }
+    let detail = PullRequestDetail {
+        number: mr.iid,
+        title: mr.title.unwrap_or_default(),
+        state: if open {
+            "OPEN".to_string()
+        } else {
+            state.to_ascii_uppercase()
+        },
+        draft: mr.draft.or(mr.work_in_progress).unwrap_or(false),
+        author: mr.author.and_then(ForgeUser::name),
+        head: mr.source_branch.filter(|name| !name.is_empty()),
+        base: mr.target_branch.filter(|name| !name.is_empty()),
+        review: None,
+        checks,
+        updated_at: mr.updated_at.as_deref().and_then(rfc3339_unix),
+    };
+    Ok((detail, open))
+}
+
+/// Fetch the detail fields of PR `number` on the forge behind `remote_url`.
+///
+/// Blocks on the forge CLI through `run`, the same injectable runner as
+/// [`lookup`]. GitHub is one `gh pr view`. GitLab is the MR endpoint, then,
+/// for an open MR, the approvals endpoint ([`PrReview::Approved`] or
+/// [`PrReview::NotApproved`]). An unsupported remote fails without a CLI
+/// call.
+pub fn lookup_detail(
+    remote_url: &str,
+    number: u64,
+    run: &dyn Fn(&[String]) -> Result<String, ()>,
+) -> PrDetailLookup {
+    let Some(repo) = parse_remote(remote_url) else {
+        return PrDetailLookup::Failed;
+    };
+    let detail = match repo.forge {
+        Forge::GitHub => {
+            run(&github_view_argv(&repo, number)).and_then(|json| github_detail(&json))
+        }
+        Forge::GitLab => run(&gitlab_mr_argv(&repo, number))
+            .and_then(|json| gitlab_detail(&json))
+            .map(|(mut detail, open)| {
+                if open {
+                    detail.review = Some(if gitlab_approved(&repo, number, run) {
+                        PrReview::Approved
+                    } else {
+                        PrReview::NotApproved
+                    });
+                }
+                detail
+            }),
+    };
+    match detail {
+        Ok(detail) => PrDetailLookup::Found(detail),
+        Err(()) => PrDetailLookup::Failed,
+    }
+}
+
+/// Unix seconds of an RFC 3339 timestamp as the forges print it
+/// (`2026-01-02T03:04:05Z`, fractional seconds, or a `±HH:MM` offset).
+fn rfc3339_unix(text: &str) -> Option<i64> {
+    let (date, rest) = text.trim().split_once(['T', 't', ' '])?;
+    let mut ymd = date.splitn(3, '-');
+    let year: i64 = ymd.next()?.parse().ok()?;
+    let month: i64 = ymd.next()?.parse().ok()?;
+    let day: i64 = ymd.next()?.parse().ok()?;
+    let (clock, offset) = match rest.strip_suffix(['Z', 'z']) {
+        Some(clock) => (clock, 0),
+        None => {
+            let at = rest.rfind(['+', '-'])?;
+            let (clock, zone) = rest.split_at(at);
+            let (hours, minutes) = zone[1..].split_once(':')?;
+            let secs = hours.parse::<i64>().ok()? * 3600 + minutes.parse::<i64>().ok()? * 60;
+            (clock, if zone.starts_with('-') { -secs } else { secs })
+        }
+    };
+    let clock = clock.split('.').next()?;
+    let mut hms = clock.splitn(3, ':');
+    let hour: i64 = hms.next()?.parse().ok()?;
+    let minute: i64 = hms.next()?.parse().ok()?;
+    let second: i64 = hms.next()?.parse().ok()?;
+    let valid = (1..=12).contains(&month)
+        && (1..=31).contains(&day)
+        && hour < 24
+        && minute < 60
+        && second <= 60;
+    if !valid {
+        return None;
+    }
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second - offset)
+}
+
+/// Days from 1970-01-01 to a proleptic Gregorian date.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month_index = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
 }
 
 /// Longest a forge CLI may run before [`run_cli`] kills it.
@@ -1013,6 +1402,271 @@ mod tests {
             Ok(r#"{"message":"404 Project Not Found"}"#.to_string())
         });
         assert_eq!(result, PrLookup::Failed);
+    }
+
+    // ---- lookup_detail ----
+
+    #[test]
+    fn detail_argv_names_repo_number_and_fields() {
+        let r = repo(Forge::GitHub, "github.com", "octo/demo");
+        assert_eq!(
+            github_view_argv(&r, 7),
+            strings(&[
+                "gh",
+                "pr",
+                "view",
+                "7",
+                "-R",
+                "github.com/octo/demo",
+                "--json",
+                "number,title,state,isDraft,author,headRefName,baseRefName,\
+                 reviewDecision,statusCheckRollup,updatedAt",
+            ])
+        );
+        let r = repo(Forge::GitLab, "gitlab.example.com", "group/sub/demo");
+        assert_eq!(
+            gitlab_mr_argv(&r, 42),
+            strings(&[
+                "glab",
+                "api",
+                "--hostname",
+                "gitlab.example.com",
+                "projects/group%2Fsub%2Fdemo/merge_requests/42",
+            ])
+        );
+    }
+
+    /// Runs a GitHub detail fetch of PR 7 that answers `json`.
+    fn gh_detail(json: &str) -> PrDetailLookup {
+        let calls = RefCell::new(Vec::new());
+        let result = lookup_detail(GH_REMOTE, 7, &|argv: &[String]| {
+            calls.borrow_mut().push(argv.to_vec());
+            Ok(json.to_string())
+        });
+        let r = repo(Forge::GitHub, "github.com", "octo/demo");
+        assert_eq!(calls.into_inner(), vec![github_view_argv(&r, 7)]);
+        result
+    }
+
+    fn detail(result: PrDetailLookup) -> PullRequestDetail {
+        match result {
+            PrDetailLookup::Found(detail) => detail,
+            PrDetailLookup::Failed => panic!("detail expected"),
+        }
+    }
+
+    #[test]
+    fn github_detail_reads_every_field_and_buckets_checks() {
+        let json = r#"{"number":7,"title":"Add login","state":"OPEN","isDraft":false,
+            "author":{"login":"octocat"},"headRefName":"feature/login","baseRefName":"main",
+            "reviewDecision":"CHANGES_REQUESTED","updatedAt":"2026-01-02T00:00:00Z",
+            "url":"https://github.com/octo/demo/pull/7","statusCheckRollup":[
+              {"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"},
+              {"__typename":"CheckRun","status":"COMPLETED","conclusion":"SKIPPED"},
+              {"__typename":"CheckRun","status":"COMPLETED","conclusion":"NEUTRAL"},
+              {"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE"},
+              {"__typename":"CheckRun","status":"COMPLETED","conclusion":"TIMED_OUT"},
+              {"__typename":"CheckRun","status":"IN_PROGRESS","conclusion":""},
+              {"__typename":"CheckRun","status":"QUEUED","conclusion":null},
+              {"__typename":"StatusContext","state":"SUCCESS"},
+              {"__typename":"StatusContext","state":"ERROR"},
+              {"__typename":"StatusContext","state":"PENDING"}]}"#;
+        assert_eq!(
+            detail(gh_detail(json)),
+            PullRequestDetail {
+                number: 7,
+                title: "Add login".into(),
+                state: "OPEN".into(),
+                draft: false,
+                author: Some("octocat".into()),
+                head: Some("feature/login".into()),
+                base: Some("main".into()),
+                review: Some(PrReview::ChangesRequested),
+                checks: ChecksSummary {
+                    pass: 4,
+                    fail: 3,
+                    pending: 3,
+                },
+                updated_at: Some(1_767_312_000),
+            }
+        );
+    }
+
+    #[test]
+    fn github_detail_tolerates_null_and_missing_fields() {
+        let partial = detail(gh_detail(
+            r#"{"number":7,"state":"MERGED","isDraft":true,"author":null,
+                "reviewDecision":null,"statusCheckRollup":null,"updatedAt":null}"#,
+        ));
+        assert_eq!(
+            partial,
+            PullRequestDetail {
+                number: 7,
+                title: String::new(),
+                state: "MERGED".into(),
+                draft: true,
+                author: None,
+                head: None,
+                base: None,
+                review: None,
+                checks: ChecksSummary::default(),
+                updated_at: None,
+            }
+        );
+        let empty_checks = detail(gh_detail(
+            r#"{"number":7,"statusCheckRollup":[],"reviewDecision":"","author":{}}"#,
+        ));
+        assert_eq!(empty_checks.checks, ChecksSummary::default());
+        assert_eq!(empty_checks.review, None);
+        assert_eq!(empty_checks.author, None);
+        for decision in ["APPROVED", "REVIEW_REQUIRED"] {
+            let json = format!(r#"{{"number":7,"reviewDecision":"{decision}"}}"#);
+            let review = detail(gh_detail(&json)).review.expect("review");
+            assert_eq!(review.label(), decision);
+        }
+    }
+
+    #[test]
+    fn detail_failures_are_failed() {
+        assert_eq!(
+            lookup_detail(GH_REMOTE, 7, &|_: &[String]| Err(())),
+            PrDetailLookup::Failed
+        );
+        for bad in [
+            "",
+            "not json",
+            "[]",
+            r#"{"title":"x"}"#,
+            r#"{"number":"7"}"#,
+        ] {
+            assert_eq!(gh_detail(bad), PrDetailLookup::Failed, "{bad:?}");
+        }
+        let run = |_: &[String]| -> Result<String, ()> { panic!("no CLI call expected") };
+        assert_eq!(
+            lookup_detail("git@bitbucket.org:octo/demo.git", 7, &run),
+            PrDetailLookup::Failed
+        );
+        assert_eq!(
+            lookup_detail(GL_REMOTE, 21, &|_: &[String]| Err(())),
+            PrDetailLookup::Failed
+        );
+    }
+
+    /// Runs a GitLab detail fetch of MR 21; `approvals` answers the
+    /// approvals endpoint.
+    fn gl_detail(json: &str, approvals: Result<&str, ()>) -> (PrDetailLookup, Vec<Vec<String>>) {
+        let calls = RefCell::new(Vec::new());
+        let result = lookup_detail(GL_REMOTE, 21, &|argv: &[String]| {
+            calls.borrow_mut().push(argv.to_vec());
+            if argv.last().expect("endpoint").ends_with("/approvals") {
+                approvals.map(str::to_string)
+            } else {
+                Ok(json.to_string())
+            }
+        });
+        (result, calls.into_inner())
+    }
+
+    #[test]
+    fn gitlab_detail_reads_the_mr_and_asks_approvals_when_open() {
+        let r = repo(Forge::GitLab, "gitlab.com", "group/sub/demo");
+        let json = r#"{"iid":21,"title":"Add login","state":"opened","draft":true,
+            "author":{"username":"octo"},"source_branch":"feature/login","target_branch":"main",
+            "head_pipeline":{"status":"running"},"updated_at":"2026-03-04T13:06:07.000+08:00",
+            "web_url":"https://gitlab.com/group/sub/demo/-/merge_requests/21"}"#;
+        let (result, calls) = gl_detail(json, Ok(r#"{"approved":true}"#));
+        assert_eq!(
+            calls,
+            vec![gitlab_mr_argv(&r, 21), gitlab_approvals_argv(&r, 21)]
+        );
+        assert_eq!(
+            detail(result),
+            PullRequestDetail {
+                number: 21,
+                title: "Add login".into(),
+                state: "OPEN".into(),
+                draft: true,
+                author: Some("octo".into()),
+                head: Some("feature/login".into()),
+                base: Some("main".into()),
+                review: Some(PrReview::Approved),
+                checks: ChecksSummary {
+                    pass: 0,
+                    fail: 0,
+                    pending: 1,
+                },
+                updated_at: Some(1_772_600_767),
+            }
+        );
+        let (result, _) = gl_detail(json, Err(()));
+        assert_eq!(detail(result).review, Some(PrReview::NotApproved));
+    }
+
+    #[test]
+    fn gitlab_detail_of_a_merged_mr_skips_approvals_and_tolerates_nulls() {
+        let (result, calls) = gl_detail(
+            r#"{"iid":21,"state":"merged","work_in_progress":true,"author":null,
+                "head_pipeline":null,"updated_at":null}"#,
+            Ok(r#"{"approved":true}"#),
+        );
+        assert_eq!(calls.len(), 1, "no approvals call for a merged MR");
+        let merged = detail(result);
+        assert_eq!(merged.state, "MERGED");
+        assert!(merged.draft, "older work_in_progress flag");
+        assert_eq!(merged.review, None);
+        assert_eq!(merged.author, None);
+        assert_eq!(merged.checks, ChecksSummary::default());
+        assert_eq!(merged.updated_at, None);
+    }
+
+    #[test]
+    fn gitlab_pipeline_status_maps_to_one_bucket() {
+        let bucket = |status: &str| {
+            let json =
+                format!(r#"{{"iid":21,"state":"merged","head_pipeline":{{"status":"{status}"}}}}"#);
+            detail(gl_detail(&json, Err(())).0).checks
+        };
+        let one = |pass, fail, pending| ChecksSummary {
+            pass,
+            fail,
+            pending,
+        };
+        for status in ["success", "skipped"] {
+            assert_eq!(bucket(status), one(1, 0, 0), "{status}");
+        }
+        for status in ["failed", "canceled"] {
+            assert_eq!(bucket(status), one(0, 1, 0), "{status}");
+        }
+        for status in ["running", "pending", "created", "manual", "scheduled"] {
+            assert_eq!(bucket(status), one(0, 0, 1), "{status}");
+        }
+        assert_eq!(bucket(""), ChecksSummary::default());
+    }
+
+    #[test]
+    fn rfc3339_reads_utc_fractions_and_offsets() {
+        assert_eq!(rfc3339_unix("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(rfc3339_unix("2026-01-02T00:00:00Z"), Some(1_767_312_000));
+        assert_eq!(
+            rfc3339_unix("2026-03-04T05:06:07.123Z"),
+            Some(1_772_600_767)
+        );
+        assert_eq!(
+            rfc3339_unix("2026-03-04T00:06:07-05:00"),
+            Some(1_772_600_767)
+        );
+        assert_eq!(rfc3339_unix("2024-02-29T23:59:59Z"), Some(1_709_251_199));
+        assert_eq!(rfc3339_unix("1969-12-31T23:00:00Z"), Some(-3600));
+        for bad in [
+            "",
+            "2026-01-02",
+            "2026-01-02T00:00:00",
+            "2026-13-02T00:00:00Z",
+            "2026-01-02T24:00:00Z",
+            "yesterday",
+        ] {
+            assert_eq!(rfc3339_unix(bad), None, "{bad:?}");
+        }
     }
 
     // ---- run_cli / opener (real processes, never gh or glab) ----

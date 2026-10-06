@@ -8,8 +8,18 @@
 //! lower-right. On a compare tab [`help_groups`] swaps GIT for
 //! [`HELP_COMPARE_GROUP`] (what acts on the compare diff and what needs the
 //! Workspace tab), on a file tab for [`HELP_FILE_GROUP`];
-//! [`help_status_lines`] sizes the help dialog for the columns that paint.
-//! A dialog shorter than that scrolls its body.
+//! [`help_status_lines`] sizes the help dialog for the columns that paint
+//! plus the icon legend under them. A dialog shorter than that scrolls its
+//! body.
+//!
+//! The legend ([`help_legend_layout`]) lists the icon catalog rows that
+//! have a legend group (Tree / Graph / Chrome): glyph, muted name, meaning.
+//! It flows into up to [`HELP_LEGEND_MAX_COLUMNS`] even columns inside the
+//! same scroll body, so the three key columns stay three.
+
+use std::sync::LazyLock;
+
+use super::icons::{IconGroup, IconSpec, ICON_CATALOG};
 
 /// One help row: key chips plus a short description.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -229,6 +239,10 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "help",
             },
             HelpEntry {
+                keys: "gh",
+                desc: "icon popover",
+            },
+            HelpEntry {
                 keys: "Tab",
                 desc: "other pane",
             },
@@ -405,7 +419,7 @@ pub fn help_version_label() -> String {
 }
 
 /// Flattened help rows in column order (MOVE, then GIT, then VIEW).
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn help_entries() -> impl Iterator<Item = &'static HelpEntry> {
     HELP_GROUPS.iter().flat_map(|group| group.entries.iter())
 }
@@ -425,13 +439,22 @@ pub fn help_entry_matches(keys: &str, desc: &str, query: &str) -> bool {
     help_entry_label(keys, desc).to_lowercase().contains(&q)
 }
 
-/// Indices of flattened help entries that match `query`, in order.
-#[allow(dead_code)]
+/// Indices of flattened help entries that match `query`, in order, then
+/// matching legend rows numbered on after the entries (`entries + i` for
+/// the `i`-th row of [`help_legend_specs`]).
+#[cfg(test)]
 pub fn help_match_indices(query: &str) -> Vec<usize> {
+    let entries = help_entries().count();
     help_entries()
         .enumerate()
         .filter(|(_, e)| help_entry_matches(e.keys, e.desc, query))
         .map(|(i, _)| i)
+        .chain(
+            help_legend_specs()
+                .enumerate()
+                .filter(|(_, spec)| help_legend_matches(spec, query))
+                .map(|(i, _)| entries + i),
+        )
         .collect()
 }
 
@@ -790,6 +813,219 @@ pub fn help_body_line_count(groups: &[HelpGroup], widths: &[usize]) -> usize {
         .unwrap_or(0)
 }
 
+/// Legend title row under the key columns.
+pub const HELP_LEGEND_TITLE: &str = "ICONS";
+
+/// The legend flows into at most this many columns.
+pub const HELP_LEGEND_MAX_COLUMNS: usize = 3;
+
+/// Narrowest legend column. The legend uses as many columns of at least
+/// this width as fit, up to [`HELP_LEGEND_MAX_COLUMNS`].
+pub const HELP_LEGEND_MIN_COLUMN_WIDTH: usize = 40;
+
+/// Rows above the legend columns: one blank row, then the title.
+pub const HELP_LEGEND_HEAD_ROWS: usize = 2;
+
+/// Catalog rows the legend lists, in catalog order (Tree, Graph, Chrome).
+pub fn help_legend_specs() -> impl Iterator<Item = &'static IconSpec> {
+    ICON_CATALOG.iter().filter(|spec| spec.group.is_some())
+}
+
+/// Case-insensitive match on a legend row's name and meaning.
+pub fn help_legend_matches(spec: &IconSpec, query: &str) -> bool {
+    help_entry_matches(spec.name, spec.meaning, query)
+}
+
+/// Legend column widths, measured once from the static catalog.
+struct HelpLegendWidths {
+    /// Widest glyph of each legend group in either glyph mode, in
+    /// [`IconGroup`] order (Tree, Graph, Chrome).
+    glyph: [usize; 3],
+    /// Longest legend name.
+    name: usize,
+}
+
+static HELP_LEGEND_WIDTHS: LazyLock<HelpLegendWidths> = LazyLock::new(|| {
+    use crate::helpers::visible_width;
+    let mut glyph = [0; 3];
+    for spec in help_legend_specs() {
+        if let Some(group) = spec.group {
+            let width = visible_width(spec.nerd).max(visible_width(spec.ascii));
+            let slot = &mut glyph[group_slot(group)];
+            *slot = (*slot).max(width);
+        }
+    }
+    HelpLegendWidths {
+        glyph,
+        name: help_legend_specs()
+            .map(|spec| spec.name.chars().count())
+            .max()
+            .unwrap_or(0),
+    }
+});
+
+fn group_slot(group: IconGroup) -> usize {
+    match group {
+        IconGroup::Tree => 0,
+        IconGroup::Graph => 1,
+        IconGroup::Chrome => 2,
+    }
+}
+
+/// Glyph column of legend group `group`: its widest glyph in either glyph
+/// mode, so one-column glyphs do not pad to the graph's chip samples.
+pub fn help_legend_glyph_width(group: IconGroup) -> usize {
+    HELP_LEGEND_WIDTHS.glyph[group_slot(group)]
+}
+
+/// Name column: the longest legend name.
+pub fn help_legend_name_width() -> usize {
+    HELP_LEGEND_WIDTHS.name
+}
+
+/// Columns before a legend meaning in group `group`: glyph, gap, name,
+/// gap.
+pub fn help_legend_key_width(group: IconGroup) -> usize {
+    help_legend_glyph_width(group) + 1 + help_legend_name_width() + 1
+}
+
+/// [`help_legend_key_width`] of the group `spec` is listed under.
+fn spec_key_width(spec: &IconSpec) -> usize {
+    spec.group.map_or(0, help_legend_key_width)
+}
+
+/// One legend block: an optional group heading row, then one catalog row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HelpLegendBlock {
+    /// Heading painted above the row when it starts its group.
+    pub heading: Option<IconGroup>,
+    /// The catalog row.
+    pub spec: &'static IconSpec,
+}
+
+/// Legend columns at one inner width.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HelpLegendLayout {
+    /// Width of every legend column (the rest of the inner width is blank).
+    pub column_width: usize,
+    /// Blocks per column, top to bottom.
+    pub columns: Vec<Vec<HelpLegendBlock>>,
+}
+
+/// Visual lines of one legend row in a column `column_width` wide.
+///
+/// The meaning sits beside the glyph and name and wraps under the meaning
+/// column, never under the glyph. Only a column too narrow for
+/// [`HELP_MIN_DESC_WIDTH`] beside them puts the meaning on its own lines.
+pub fn help_legend_visual_lines(spec: &IconSpec, column_width: usize) -> Vec<HelpVisualLine> {
+    let content = help_column_content_width(column_width);
+    let key_width = spec_key_width(spec);
+    let beside = content.saturating_sub(key_width);
+    if beside >= HELP_MIN_DESC_WIDTH {
+        return wrap_help_description(spec.meaning, beside)
+            .into_iter()
+            .enumerate()
+            .map(|(i, text)| HelpVisualLine {
+                chips: i == 0,
+                indent: if i == 0 { 0 } else { key_width },
+                text,
+            })
+            .collect();
+    }
+    let mut lines = vec![HelpVisualLine {
+        chips: true,
+        indent: 0,
+        text: String::new(),
+    }];
+    lines.extend(
+        wrap_help_description(spec.meaning, content)
+            .into_iter()
+            .filter(|text| !text.is_empty())
+            .map(|text| HelpVisualLine {
+                chips: false,
+                indent: 0,
+                text,
+            }),
+    );
+    lines
+}
+
+/// Painted rows of `block` in a column `column_width` wide.
+pub fn help_legend_block_rows(block: &HelpLegendBlock, column_width: usize) -> usize {
+    usize::from(block.heading.is_some()) + help_legend_visual_lines(block.spec, column_width).len()
+}
+
+/// Lay the legend out at `inner_width`: as many even columns as fit, each
+/// filled top to bottom, as short as the blocks allow. A heading never
+/// sits alone at the foot of a column.
+pub fn help_legend_layout(inner_width: usize) -> HelpLegendLayout {
+    let count = (inner_width / HELP_LEGEND_MIN_COLUMN_WIDTH).clamp(1, HELP_LEGEND_MAX_COLUMNS);
+    let column_width = (inner_width / count).max(1);
+    let mut prev = None;
+    let blocks: Vec<HelpLegendBlock> = help_legend_specs()
+        .map(|spec| {
+            let heading = (spec.group != prev).then_some(spec.group).flatten();
+            prev = spec.group;
+            HelpLegendBlock { heading, spec }
+        })
+        .collect();
+    let rows: Vec<usize> = blocks
+        .iter()
+        .map(|block| help_legend_block_rows(block, column_width))
+        .collect();
+    let total: usize = rows.iter().sum();
+    let tallest = rows.iter().copied().max().unwrap_or(0);
+    // Greedy fill at height `cap`; the first cap that needs no more than
+    // `count` columns is the shortest.
+    let fill = |cap: usize| -> Vec<Vec<HelpLegendBlock>> {
+        let mut columns: Vec<Vec<HelpLegendBlock>> = vec![Vec::new()];
+        let mut used = 0usize;
+        for (block, &h) in blocks.iter().zip(&rows) {
+            if used + h > cap && !columns.last().is_some_and(Vec::is_empty) {
+                columns.push(Vec::new());
+                used = 0;
+            }
+            used += h;
+            columns.last_mut().expect("column").push(*block);
+        }
+        columns
+    };
+    let mut cap = tallest.max(total.div_ceil(count));
+    let columns = loop {
+        let columns = fill(cap);
+        if columns.len() <= count {
+            break columns;
+        }
+        cap += 1;
+    };
+    HelpLegendLayout {
+        column_width,
+        columns,
+    }
+}
+
+/// Legend rows at `inner_width`: [`HELP_LEGEND_HEAD_ROWS`] plus the
+/// tallest legend column.
+pub fn help_legend_line_count(inner_width: usize) -> usize {
+    let layout = help_legend_layout(inner_width);
+    let tallest = layout
+        .columns
+        .iter()
+        .map(|column| {
+            column
+                .iter()
+                .map(|block| help_legend_block_rows(block, layout.column_width))
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0);
+    if tallest == 0 {
+        0
+    } else {
+        HELP_LEGEND_HEAD_ROWS + tallest
+    }
+}
+
 /// Overlay rows: border (2) + title + wrapped body + footer.
 pub fn help_overlay_row_count(body_rows: usize, footer_rows: usize) -> usize {
     2 + 1 + body_rows + footer_rows
@@ -797,10 +1033,12 @@ pub fn help_overlay_row_count(body_rows: usize, footer_rows: usize) -> usize {
 
 /// Full overlay height for `groups` at `term_width` with a wrappable footer.
 ///
-/// The lower-right package version is part of the footer row budget.
+/// The body is the key columns plus the icon legend. The lower-right
+/// package version is part of the footer row budget.
 pub fn help_overlay_height(groups: &[HelpGroup], term_width: usize, footer: &str) -> usize {
     let inner = help_inner_width(term_width).max(1);
-    let body = help_body_line_count(groups, &help_column_widths(groups, inner));
+    let body = help_body_line_count(groups, &help_column_widths(groups, inner))
+        + help_legend_line_count(inner);
     let mut footer_lines = wrap_help_footer(footer, inner);
     attach_help_version(&mut footer_lines, inner);
     help_overlay_row_count(body, footer_lines.len().max(1))
@@ -889,6 +1127,7 @@ mod tests {
         assert!(view_keys.contains(&"Ctrl-u Ctrl-d"));
         assert!(view_keys.contains(&"."));
         assert!(view_keys.contains(&"T"));
+        assert!(view_keys.contains(&"gh"), "the icon popover chord");
         assert!(view_keys.contains(&"i \\ M B"));
         assert!(!view_keys.contains(&"i \\"));
         assert!(!view_keys.contains(&"i"));
@@ -971,20 +1210,24 @@ mod tests {
             .map(|group| group.entries.len())
             .max()
             .unwrap_or(0);
+        let legend = |cols: usize| help_legend_line_count(help_inner_width(cols)) as u16;
         let wide = help_status_lines(300, HelpTab::Workspace);
         let mid = help_status_lines(128, HelpTab::Workspace);
         let narrow = help_status_lines(80, HelpTab::Workspace);
-        assert_eq!(wide, (2 + 1 + row_count + 1) as u16);
-        assert!(mid > wide, "128 cols still wraps some descriptions");
+        assert_eq!(wide, (2 + 1 + row_count + 1) as u16 + legend(300));
         assert!(
-            narrow > mid,
+            mid - legend(128) > wide - legend(300),
+            "128 cols still wraps some descriptions"
+        );
+        assert!(
+            narrow - legend(80) > mid - legend(128),
             "narrow terminals wrap more and take more rows"
         );
-        let at_140 = help_status_lines(140, HelpTab::Workspace);
+        let at_140 = help_status_lines(140, HelpTab::Workspace) - legend(140);
         assert!(
             at_140 <= 26,
-            "at 140×40 the help dialog fits without scrolling \
-             (render `help_columns_keep_a_gutter_and_the_panes_rows`): {at_140}"
+            "at 140×40 the key columns fit without scrolling; only the legend \
+             scrolls (render `help_columns_keep_a_gutter_and_the_panes_rows`): {at_140}"
         );
     }
 
@@ -1095,7 +1338,7 @@ mod tests {
         for (term, tab, row_aligned, measured) in [
             (60usize, HelpTab::Workspace, 60usize, 56usize),
             (64, HelpTab::Compare, 251, 56),
-            (80, HelpTab::Workspace, 86, 42),
+            (80, HelpTab::Workspace, 86, 45),
             (100, HelpTab::Workspace, 47, 30),
             (140, HelpTab::Workspace, 28, 22),
         ] {
@@ -1229,6 +1472,154 @@ mod tests {
             .filter(|e| e.keys.split(' ').any(|k| k == "x"))
             .count();
         assert_eq!(x_rows, 1, "one `x` chip: {text}");
+    }
+
+    /// The legend lists every catalog row with a legend group, under one
+    /// heading per group in Tree / Graph / Chrome order, and never adds a
+    /// key column.
+    #[test]
+    fn legend_lists_grouped_catalog_rows_under_headings() {
+        use crate::tui::icons::IconKind;
+        assert_eq!(HELP_GROUPS.len(), HELP_COLUMN_COUNT);
+        let grouped = ICON_CATALOG.iter().filter(|s| s.group.is_some()).count();
+        assert_eq!(help_legend_specs().count(), grouped);
+        for kind in [
+            IconKind::LinkedWorktree,
+            IconKind::StatusConflict,
+            IconKind::GraphStash,
+            IconKind::ChipOverflow,
+            IconKind::GraphRails,
+        ] {
+            assert!(help_legend_specs().any(|s| s.kind == kind), "{kind:?}");
+        }
+        for kind in [IconKind::Synced, IconKind::HelpMove, IconKind::FolderOpen] {
+            assert!(!help_legend_specs().any(|s| s.kind == kind), "{kind:?}");
+        }
+        for inner in [42usize, 76, 96, 136, 296] {
+            let layout = help_legend_layout(inner);
+            let blocks: Vec<&HelpLegendBlock> = layout.columns.iter().flatten().collect();
+            assert_eq!(blocks.len(), grouped, "{inner}");
+            let headings: Vec<IconGroup> = blocks.iter().filter_map(|b| b.heading).collect();
+            assert_eq!(
+                headings,
+                [IconGroup::Tree, IconGroup::Graph, IconGroup::Chrome],
+                "{inner}"
+            );
+        }
+    }
+
+    /// The legend uses as many even columns as fit, up to three, and the
+    /// shortest fill: no column is taller than it must be.
+    #[test]
+    fn legend_flows_into_even_columns() {
+        for (inner, count) in [
+            (38usize, 1usize),
+            (42, 1),
+            (79, 1),
+            (80, 2),
+            (96, 2),
+            (136, 3),
+            (296, 3),
+        ] {
+            let layout = help_legend_layout(inner);
+            assert_eq!(layout.columns.len(), count, "{inner}");
+            assert_eq!(layout.column_width, inner / count, "{inner}");
+            let heights: Vec<usize> = layout
+                .columns
+                .iter()
+                .map(|c| {
+                    c.iter()
+                        .map(|b| help_legend_block_rows(b, layout.column_width))
+                        .sum()
+                })
+                .collect();
+            let tallest = *heights.iter().max().unwrap();
+            assert_eq!(
+                help_legend_line_count(inner),
+                HELP_LEGEND_HEAD_ROWS + tallest,
+                "{inner}"
+            );
+            let total: usize = heights.iter().sum();
+            assert!(tallest < total.div_ceil(count) + 8, "{inner}: {heights:?}");
+        }
+    }
+
+    /// Legend text stays inside its column and leaves the gutter blank;
+    /// the meaning wraps under the meaning column, not under the glyph.
+    #[test]
+    fn legend_text_stays_in_its_column() {
+        let widest = [IconGroup::Tree, IconGroup::Graph, IconGroup::Chrome]
+            .into_iter()
+            .map(help_legend_key_width)
+            .max()
+            .unwrap_or(0);
+        for term in [46usize, 60, 64, 80, 100, 120, 140, 200] {
+            let inner = help_inner_width(term);
+            let layout = help_legend_layout(inner);
+            let content = help_column_content_width(layout.column_width);
+            // Every painted width (46 columns and up) fits the meaning beside.
+            assert!(content >= widest + HELP_MIN_DESC_WIDTH, "{term}");
+            for block in layout.columns.iter().flatten() {
+                let key_width = help_legend_key_width(block.spec.group.expect("legend row"));
+                let lines = help_legend_visual_lines(block.spec, layout.column_width);
+                assert!(!lines[0].text.is_empty(), "{term} {block:?}");
+                for line in &lines {
+                    let start = if line.chips { key_width } else { line.indent };
+                    assert!(
+                        start + line.text.chars().count() + HELP_COLUMN_GUTTER
+                            <= layout.column_width,
+                        "{term} {block:?}: {line:?}"
+                    );
+                    if !line.chips {
+                        assert_eq!(line.indent, key_width, "{term} {block:?}");
+                    }
+                }
+            }
+        }
+        // Below that the meaning drops under the glyph and name.
+        let tree = help_legend_key_width(IconGroup::Tree);
+        let narrow = help_legend_visual_lines(&ICON_CATALOG[0], tree + 4);
+        assert!(narrow[0].chips && narrow[0].text.is_empty(), "{narrow:?}");
+        assert!(narrow[1..].iter().all(|l| !l.chips && l.indent == 0));
+    }
+
+    /// `/` help search matches legend names and meanings; the legend rows
+    /// count after the key entries.
+    #[test]
+    fn help_search_matches_legend_rows() {
+        use crate::tui::icons::IconKind;
+        let entries = help_entries().count();
+        let at = |kind: IconKind| {
+            entries
+                + help_legend_specs()
+                    .position(|s| s.kind == kind)
+                    .expect("legend row")
+        };
+        let hits = help_match_indices("worktree");
+        assert!(hits.contains(&at(IconKind::LinkedWorktree)), "{hits:?}");
+        let hits = help_match_indices("STASH");
+        assert!(hits.contains(&at(IconKind::GraphStash)), "{hits:?}");
+        assert!(hits.iter().any(|&i| i < entries), "key rows still match");
+        assert!(help_match_indices("conflict").contains(&at(IconKind::StatusConflict)));
+        assert!(help_match_indices("").is_empty());
+    }
+
+    /// The dialog height counts the legend under the key columns.
+    #[test]
+    fn status_lines_count_the_legend() {
+        for term in [60usize, 100, 140, 200] {
+            for tab in [HelpTab::Workspace, HelpTab::Compare, HelpTab::File] {
+                let groups = help_groups(tab);
+                let inner = help_inner_width(term);
+                let keys = help_body_line_count(groups, &help_column_widths(groups, inner));
+                let footer = help_idle_footer_lines(inner).len();
+                assert_eq!(
+                    usize::from(help_status_lines(term as u16, tab)),
+                    help_overlay_row_count(keys + help_legend_line_count(inner), footer),
+                    "{term} {tab:?}"
+                );
+            }
+        }
     }
 
     #[test]
