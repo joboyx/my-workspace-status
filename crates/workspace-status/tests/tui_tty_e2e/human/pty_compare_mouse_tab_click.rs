@@ -19,7 +19,7 @@ fn pty_compare_mouse_tab_click() {
     let mut tui = PtySession::open(&workspace);
     tui.wait_contains("app", WAIT);
     tui.search("app");
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.keys("vs default");
     tui.enter();
     tui.wait_contains("app ↔ origin/main", GIT_WAIT);

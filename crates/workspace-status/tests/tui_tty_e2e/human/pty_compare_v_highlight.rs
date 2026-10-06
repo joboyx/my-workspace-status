@@ -199,7 +199,7 @@ fn pty_compare_v_apostrophe_copies_range_reference() {
 
 /// Palette and `s` / `u` while lines are highlighted on a compare diff.
 ///
-/// Ctrl-k shows the HIGHLIGHT rows. Stage / Unstage highlighted lines are
+/// `:` shows the HIGHLIGHT rows. Stage / Unstage highlighted lines are
 /// disabled and name the compare reason. On this clean checkout at the
 /// compare head, Revert highlighted lines (to the merge base) is the first
 /// enabled row, so the cursor lands there. `s` and `u` in the
@@ -218,7 +218,7 @@ fn pty_compare_highlight_palette_refuses_stage_and_unstage() {
         WAIT,
     );
 
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.wait_pred(
         |screen| {
             palette_open(screen)
@@ -229,7 +229,7 @@ fn pty_compare_highlight_palette_refuses_stage_and_unstage() {
                 && screen.contains("❯ Revert highlighted lines")
                 && screen.contains("Exit highlight")
         },
-        "Ctrl-k shows the HIGHLIGHT rows with the cursor on Revert highlighted lines",
+        "`:` shows the HIGHLIGHT rows with the cursor on Revert highlighted lines",
         WAIT,
     );
     type_palette_filter(&mut tui, "stage highlighted");
@@ -256,8 +256,8 @@ fn pty_compare_highlight_palette_refuses_stage_and_unstage() {
         WAIT,
     );
 
-    tui.ctrl_letter('k');
-    tui.wait_pred(palette_open, "Ctrl-k reopens the palette", WAIT);
+    tui.key(':');
+    tui.wait_pred(palette_open, "`:` reopens the palette", WAIT);
     type_palette_filter(&mut tui, "unstage highlighted");
     tui.wait_pred(
         |screen| {
@@ -323,8 +323,8 @@ fn pty_compare_fetch_and_stash_menu_stay_refused() {
     );
 
     let mut tui = open_compare_regions_diff(&workspace);
-    tui.ctrl_letter('k');
-    tui.wait_pred(palette_open, "Ctrl-k opens the palette", WAIT);
+    tui.key(':');
+    tui.wait_pred(palette_open, "`:` opens the palette", WAIT);
     type_palette_filter(&mut tui, "fetch");
     tui.wait_pred(
         |screen| {

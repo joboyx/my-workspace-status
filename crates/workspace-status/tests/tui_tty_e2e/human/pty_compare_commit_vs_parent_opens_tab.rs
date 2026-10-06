@@ -41,7 +41,7 @@ fn pty_compare_commit_vs_parent_opens_tab() {
         WAIT,
     );
 
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.keys("vs parent");
     tui.wait_contains("Diff commit vs parent in new tab", WAIT);
     tui.enter();

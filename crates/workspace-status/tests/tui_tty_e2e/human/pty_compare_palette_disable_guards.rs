@@ -45,11 +45,11 @@ fn type_palette_filter(tui: &mut PtySession, query: &str) {
     }
 }
 
-fn open_ctrl_k_filter(tui: &mut PtySession, query: &str, title: &str) {
-    tui.ctrl_letter('k');
+fn open_commands_filter(tui: &mut PtySession, query: &str, title: &str) {
+    tui.key(':');
     tui.wait_pred(
         |screen| palette_open(screen) && screen.contains(">▏"),
-        "Ctrl-k opens Quick Open commands (a no-op leaves idle chrome without Enter run)",
+        "`:` opens Quick Open commands (a no-op leaves idle chrome without Enter run)",
         WAIT,
     );
     type_palette_filter(tui, query);
@@ -108,7 +108,7 @@ fn pty_compare_missing_default_and_unborn_disable_open() {
         "/topic keeps the tree cursor on topic (a miss jumps to empty or workspace)",
         WAIT,
     );
-    open_ctrl_k_filter(&mut tui, "vs default", "Diff vs default in new tab");
+    open_commands_filter(&mut tui, "vs default", "Diff vs default in new tab");
     tui.wait_pred(
         |screen| {
             palette_open(screen)
@@ -144,7 +144,7 @@ fn pty_compare_missing_default_and_unborn_disable_open() {
         "/empty keeps the tree cursor on empty (a miss jumps to topic or workspace)",
         WAIT,
     );
-    open_ctrl_k_filter(&mut tui, "vs default", "Diff vs default in new tab");
+    open_commands_filter(&mut tui, "vs default", "Diff vs default in new tab");
     tui.wait_pred(
         |screen| {
             palette_open(screen)
@@ -161,7 +161,7 @@ fn pty_compare_missing_default_and_unborn_disable_open() {
         "Esc leaves the cursor on empty with the palette closed",
         WAIT,
     );
-    open_ctrl_k_filter(&mut tui, "vs branch", "Diff vs branch in new tab…");
+    open_commands_filter(&mut tui, "vs branch", "Diff vs branch in new tab…");
     tui.wait_pred(
         |screen| {
             palette_open(screen)
@@ -210,7 +210,7 @@ fn pty_compare_workspace_and_family_are_not_targets() {
         "gg moves the tree cursor to the workspace row (not app or a checkout leaf)",
         WAIT,
     );
-    open_ctrl_k_filter(&mut tui, "vs default", "Diff vs default in new tab");
+    open_commands_filter(&mut tui, "vs default", "Diff vs default in new tab");
     tui.wait_pred(
         |screen| {
             palette_open(screen)
@@ -228,7 +228,7 @@ fn pty_compare_workspace_and_family_are_not_targets() {
         "/app lands on the family row, not a checkout leaf or workspace",
         WAIT,
     );
-    open_ctrl_k_filter(&mut tui, "vs default", "Diff vs default in new tab");
+    open_commands_filter(&mut tui, "vs default", "Diff vs default in new tab");
     tui.wait_pred(
         |screen| {
             palette_open(screen)
@@ -240,7 +240,7 @@ fn pty_compare_workspace_and_family_are_not_targets() {
     );
     esc_closes_palette(&mut tui);
 
-    open_ctrl_k_filter(&mut tui, "close tab", "Close tab");
+    open_commands_filter(&mut tui, "close tab", "Close tab");
     tui.wait_pred(
         |screen| {
             palette_open(screen)

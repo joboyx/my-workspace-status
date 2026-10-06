@@ -33,12 +33,12 @@ fn csi_u_gg(tui: &mut PtySession) {
 
 fn open_default_and_main(tui: &mut PtySession) {
     tui.search("app");
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.keys("vs default");
     tui.wait_contains("Diff vs default in new tab", WAIT);
     tui.enter();
     tui.wait_contains("app ↔ origin/main", GIT_WAIT);
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.keys("vs branch");
     tui.enter();
     tui.wait_contains("Compare", WAIT);

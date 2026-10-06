@@ -43,7 +43,7 @@ fn pty_blame_palette_opens_commit_changes() {
         GIT_WAIT,
     );
 
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.keys("blame");
     tui.wait_contains("Blame: open commit changes", WAIT);
     tui.enter();

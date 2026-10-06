@@ -43,12 +43,12 @@ fn csi_u_enter(tui: &mut PtySession) {
 
 fn open_default_and_main(tui: &mut PtySession) {
     tui.search("app");
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.keys("vs default");
     tui.wait_contains("Diff vs default in new tab", WAIT);
     tui.enter();
     tui.wait_contains("app ↔ origin/main", GIT_WAIT);
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.keys("vs branch");
     tui.enter();
     tui.wait_contains("Compare", WAIT);
@@ -233,10 +233,10 @@ fn type_palette_filter(tui: &mut PtySession, query: &str) {
 }
 
 fn open_vs_default(tui: &mut PtySession) {
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.wait_pred(
         |screen| palette_open(screen) && screen.contains(">▏"),
-        "Ctrl-k opens Quick Open commands (a no-op leaves idle chrome without Enter run)",
+        "`:` opens Quick Open commands (a no-op leaves idle chrome without Enter run)",
         WAIT,
     );
     type_palette_filter(tui, "vs default");

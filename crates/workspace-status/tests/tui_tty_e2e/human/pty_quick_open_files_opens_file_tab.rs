@@ -51,21 +51,22 @@ fn hit_row_on(screen: &str, needle: &str) -> bool {
         .any(|line| line.contains('❯') && line.contains(needle))
 }
 
-/// `:`, type `readme`, Enter opens `app/README.md` in a new read-only tab.
+/// `F` (CSI-u Shift+F), type `readme`, Enter opens `app/README.md` in a
+/// new read-only tab.
 ///
-/// Fail if `:` paints the commands list, if no `❯ README.md` hit row shows,
+/// Fail if `F` paints the commands list, if no `❯ README.md` hit row shows,
 /// or if Enter leaves the overlay up, keeps the Workspace tab active, or
 /// paints a tab without the file body.
 #[test]
-fn pty_colon_quick_open_opens_file_tab() {
+fn pty_shift_f_quick_open_opens_file_tab() {
     let (_root, workspace) = daily_workspace();
     let mut tui = PtySession::open(&workspace);
     wait_first_paint(&tui);
 
-    tui.key(':');
+    tui.shift_letter('F');
     tui.wait_pred(
         |screen| files_open(screen) && !commands_open(screen),
-        ": opens Quick Open on files (Go to file + Enter open), not the commands list",
+        "F opens Quick Open on files (Go to file + Enter open), not the commands list",
         WAIT,
     );
     type_query(&mut tui, "readme");
@@ -93,16 +94,21 @@ fn pty_colon_quick_open_opens_file_tab() {
     );
 }
 
-/// Esc closes files mode; `:` then `>` switches to commands; Esc closes
-/// commands mode. The tree cursor stays on README.md throughout.
+/// Ctrl-p opens files mode and Esc closes it; Ctrl-p then `>` as the first
+/// char switches to commands; Esc closes commands mode. The tree cursor
+/// stays on README.md throughout.
 #[test]
-fn pty_colon_quick_open_esc_closes_and_gt_switches_to_commands() {
+fn pty_ctrl_p_quick_open_esc_closes_and_gt_switches_to_commands() {
     let (_root, workspace) = daily_workspace();
     let mut tui = PtySession::open(&workspace);
     wait_first_paint(&tui);
 
-    tui.key(':');
-    tui.wait_pred(files_open, ": opens Quick Open on files (Go to file)", WAIT);
+    tui.ctrl_letter('p');
+    tui.wait_pred(
+        files_open,
+        "Ctrl-p opens Quick Open on files (Go to file)",
+        WAIT,
+    );
     tui.esc();
     tui.wait_pred(
         |screen| !screen.contains("Go to file") && tree_cursor_on(screen, "README.md"),
@@ -110,10 +116,10 @@ fn pty_colon_quick_open_esc_closes_and_gt_switches_to_commands() {
         WAIT,
     );
 
-    tui.key(':');
+    tui.ctrl_letter('p');
     tui.wait_pred(
         |screen| files_open(screen) && !commands_open(screen),
-        ": opens Quick Open on files (Go to file), not the commands list",
+        "Ctrl-p opens Quick Open on files (Go to file), not the commands list",
         WAIT,
     );
     tui.key('>');

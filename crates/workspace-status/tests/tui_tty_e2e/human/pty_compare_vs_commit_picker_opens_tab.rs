@@ -21,7 +21,7 @@ fn pty_compare_vs_commit_picker_opens_tab() {
     tui.wait_contains("app", WAIT);
     tui.search("app");
     tui.wait_contains("feature/history", GIT_WAIT);
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.keys("vs commit");
     tui.wait_contains("Diff vs commit in new tab", WAIT);
     tui.enter();

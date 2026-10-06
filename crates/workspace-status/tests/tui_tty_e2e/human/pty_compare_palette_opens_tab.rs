@@ -25,7 +25,7 @@ fn pty_compare_palette_opens_tab() {
     tui.wait_contains("app", WAIT);
     tui.search("app");
     tui.wait_contains("feature/ahead", GIT_WAIT);
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.keys("vs branch");
     tui.wait_contains("Diff vs branch in new tab", WAIT);
     tui.enter();

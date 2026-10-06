@@ -10,7 +10,7 @@ fn pty_compare_esc_keeps_tab() {
     let mut tui = PtySession::open(&workspace);
     tui.wait_contains("app", WAIT);
     tui.search("app");
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.keys("vs default");
     tui.enter();
     tui.wait_contains("app ↔ origin/main", GIT_WAIT);
@@ -30,7 +30,7 @@ fn pty_compare_esc_keeps_tab() {
         "Esc on compare left keeps the tab:\n{screen}"
     );
 
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.wait_contains(">▏", WAIT);
     for c in "close tab".chars() {
         tui.key(c);

@@ -21,7 +21,7 @@ fn pty_compare_bare_t_still_tree_flat() {
     let mut tui = PtySession::open(&workspace);
     tui.wait_contains("README.md", WAIT);
     tui.search("app");
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.keys("vs default");
     tui.enter();
     tui.wait_contains("app ↔ main", GIT_WAIT);

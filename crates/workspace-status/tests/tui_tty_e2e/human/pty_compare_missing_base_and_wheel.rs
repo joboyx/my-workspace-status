@@ -27,10 +27,10 @@ fn type_palette_filter(tui: &mut PtySession, query: &str) {
 }
 
 fn open_vs_default(tui: &mut PtySession) {
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.wait_pred(
         |screen| palette_open(screen) && screen.contains(">▏"),
-        "Ctrl-k opens Quick Open commands (a no-op leaves idle chrome without Enter run)",
+        "`:` opens Quick Open commands (a no-op leaves idle chrome without Enter run)",
         WAIT,
     );
     type_palette_filter(tui, "vs default");

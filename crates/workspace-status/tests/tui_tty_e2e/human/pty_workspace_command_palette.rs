@@ -76,11 +76,11 @@ fn type_palette_filter(tui: &mut PtySession, query: &str) {
     }
 }
 
-fn open_ctrl_k_filter(tui: &mut PtySession, query: &str, title: &str) {
-    tui.ctrl_letter('k');
+fn open_commands_filter(tui: &mut PtySession, query: &str, title: &str) {
+    tui.key(':');
     tui.wait_pred(
         |screen| palette_open(screen) && screen.contains(">▏"),
-        "Ctrl-k opens Quick Open commands (a no-op leaves idle chrome without Enter run)",
+        "`:` opens Quick Open commands (a no-op leaves idle chrome without Enter run)",
         WAIT,
     );
     type_palette_filter(tui, query);
@@ -113,7 +113,7 @@ fn esc_closes_palette(tui: &mut PtySession) {
     );
 }
 
-/// Ctrl-k, filter Pull behind, Enter runs pull and closes the palette.
+/// `:`, filter Pull behind, Enter runs pull and closes the palette.
 ///
 /// Docs: Enter closes then dispatches the highlighted enabled command.
 /// Daily seed is current, so the toast is `nothing behind to pull` (or a
@@ -136,7 +136,7 @@ fn pty_workspace_palette_filter_pull_enter_closes_palette() {
         WAIT,
     );
 
-    open_ctrl_k_filter(&mut tui, "pull", "Pull behind");
+    open_commands_filter(&mut tui, "pull", "Pull behind");
     tui.enter();
     tui.wait_pred(
         |screen| {
@@ -148,7 +148,7 @@ fn pty_workspace_palette_filter_pull_enter_closes_palette() {
     );
 }
 
-/// Ctrl-k, filter Keymap help, Enter closes the palette and paints `?` help.
+/// `:`, filter Keymap help, Enter closes the palette and paints `?` help.
 ///
 /// MOVE plus the package version in the lower-right is the bar (same idea
 /// as `pty_help_overlay`). A no-op, a stay-open palette, or help without
@@ -159,7 +159,7 @@ fn pty_workspace_palette_filter_help_enter_opens_keymap_help() {
     let mut tui = PtySession::open(&workspace);
     wait_first_paint(&tui);
 
-    open_ctrl_k_filter(&mut tui, "help", "Keymap help");
+    open_commands_filter(&mut tui, "help", "Keymap help");
     tui.enter();
     tui.wait_pred(
         |screen| {
@@ -170,13 +170,12 @@ fn pty_workspace_palette_filter_help_enter_opens_keymap_help() {
     );
 }
 
-/// `:` opens Quick Open on files, `>` switches to commands; filter then Esc
+/// `:` opens Quick Open on commands with `>` typed; filter then Esc
 /// dismisses and keeps the README cursor.
 ///
 /// Search to README first. Fail if the cursor jumps to `app` or workspace,
-/// if `:` paints the commands footer (`Enter run`), or if Enter run stays
-/// after Esc. This is the colon + `>` open path (Ctrl-k is the other tests)
-/// and the open + filter + Esc dismiss path.
+/// if `:` paints the files list (`Go to file`) or a `>>` query, or if
+/// Enter run stays after Esc. This is the open + filter + Esc dismiss path.
 #[test]
 fn pty_workspace_palette_colon_esc_keeps_readme_cursor() {
     let (_root, workspace) = daily_workspace();
@@ -186,19 +185,18 @@ fn pty_workspace_palette_colon_esc_keeps_readme_cursor() {
 
     tui.key(':');
     tui.wait_pred(
-        |screen| screen.contains("Go to file") && palette_closed(screen),
-        ": opens Quick Open on files (Go to file), not the commands list (Enter run)",
-        WAIT,
-    );
-    tui.key('>');
-    tui.wait_pred(
-        palette_open,
-        "> as the first char switches Quick Open to commands (Enter run)",
+        |screen| palette_open(screen) && screen.contains(">▏") && !screen.contains("Go to file"),
+        ": opens Quick Open on commands (Enter run, `>` typed), not files (Go to file)",
         WAIT,
     );
     type_palette_filter(&mut tui, "pull");
     tui.wait_pred(
-        |screen| palette_open(screen) && screen.contains("Pull behind") && screen.contains("pull"),
+        |screen| {
+            palette_open(screen)
+                && screen.contains("Pull behind")
+                && screen.contains(">pull")
+                && !screen.contains(">>")
+        },
         "`>pull` shows Pull behind before Esc",
         WAIT,
     );
@@ -216,6 +214,97 @@ fn pty_workspace_palette_colon_esc_keeps_readme_cursor() {
     );
 }
 
+/// `:` opens commands with `>` typed; Backspace over that `>` lands in
+/// files mode; Esc closes Quick Open.
+///
+/// Fail if `:` opens files, if Backspace closes the overlay or leaves the
+/// commands footer (`Enter run`), or if Esc leaves either mode painted.
+#[test]
+fn pty_workspace_palette_colon_backspace_lands_in_files() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = PtySession::open(&workspace);
+    wait_first_paint(&tui);
+
+    tui.key(':');
+    tui.wait_pred(
+        |screen| palette_open(screen) && screen.contains(">▏") && !screen.contains("Go to file"),
+        ": opens Quick Open on commands with `>` typed (Enter run, >▏)",
+        WAIT,
+    );
+    tui.send_bytes(b"\x7f");
+    tui.wait_pred(
+        |screen| screen.contains("Go to file") && palette_closed(screen),
+        "Backspace over the leading `>` switches Quick Open to files (Go to file, no Enter run)",
+        WAIT,
+    );
+    tui.esc();
+    tui.wait_pred(
+        |screen| {
+            palette_closed(screen)
+                && !screen.contains("Go to file")
+                && tree_cursor_on(screen, "README.md")
+        },
+        "Esc closes files mode and leaves the tree cursor on README.md",
+        WAIT,
+    );
+}
+
+/// CSI-u Shift+F and Ctrl-p each open Quick Open on files; Ctrl-k in
+/// normal mode opens nothing.
+///
+/// Fail if either opener paints the commands footer (`Enter run`) or no
+/// `Go to file` title, or if Ctrl-k paints any Quick Open chrome.
+#[test]
+fn pty_workspace_quick_open_shift_f_and_ctrl_p_open_files_ctrl_k_does_not() {
+    let (_root, workspace) = daily_workspace();
+    let mut tui = PtySession::open(&workspace);
+    wait_first_paint(&tui);
+
+    tui.shift_letter('F');
+    tui.wait_pred(
+        |screen| screen.contains("Go to file") && palette_closed(screen),
+        "CSI-u Shift+F opens Quick Open on files (Go to file), not commands or Fetch",
+        WAIT,
+    );
+    tui.esc();
+    tui.wait_pred(
+        |screen| !screen.contains("Go to file") && palette_closed(screen),
+        "Esc closes the F file picker",
+        WAIT,
+    );
+
+    tui.ctrl_letter('p');
+    tui.wait_pred(
+        |screen| screen.contains("Go to file") && palette_closed(screen),
+        "Ctrl-p opens Quick Open on files (Go to file), not commands or Pull",
+        WAIT,
+    );
+    tui.esc();
+    tui.wait_pred(
+        |screen| !screen.contains("Go to file") && palette_closed(screen),
+        "Esc closes the Ctrl-p file picker",
+        WAIT,
+    );
+
+    tui.ctrl_letter('k');
+    tui.wait_ms(SETTLE_MS);
+    tui.wait_pred(
+        |screen| {
+            palette_closed(screen)
+                && !screen.contains("Go to file")
+                && tree_cursor_on(screen, "README.md")
+        },
+        "Ctrl-k in normal mode does not open Quick Open",
+        WAIT,
+    );
+    tui.wait_ms(SETTLE_MS);
+    tui.wait_pred(
+        |screen| palette_closed(screen) && !screen.contains("Go to file"),
+        "Ctrl-k still does not open Quick Open",
+        WAIT,
+    );
+}
+
 /// Pull behind on a file row stays dimmed: Enter keeps the palette open.
 ///
 /// No pull toast. Cursor stays on README. A dispatch that closes the
@@ -227,7 +316,7 @@ fn pty_workspace_palette_disabled_pull_on_file_keeps_open() {
     wait_first_paint(&tui);
     wait_readme_cursor(&mut tui);
 
-    open_ctrl_k_filter(&mut tui, "pull", "Pull behind");
+    open_commands_filter(&mut tui, "pull", "Pull behind");
     tui.enter();
     tui.wait_pred(
         |screen| {
@@ -260,7 +349,7 @@ fn pty_workspace_palette_disabled_push_on_file_keeps_open() {
     wait_first_paint(&tui);
     wait_readme_cursor(&mut tui);
 
-    open_ctrl_k_filter(&mut tui, "push", "Push");
+    open_commands_filter(&mut tui, "push", "Push");
     tui.wait_pred(
         |screen| {
             palette_open(screen)
@@ -305,14 +394,14 @@ fn pty_workspace_palette_disabled_view_gates_keep_open() {
     wait_first_paint(&tui);
     wait_readme_cursor(&mut tui);
 
-    open_ctrl_k_filter(&mut tui, "focus branches", "Graph focus branches");
+    open_commands_filter(&mut tui, "focus branches", "Graph focus branches");
     enter_keeps_palette_open(
         &mut tui,
         "Enter on Graph focus branches on a file row keeps the palette",
     );
     esc_closes_palette(&mut tui);
 
-    open_ctrl_k_filter(&mut tui, "highlight", "Highlight diff lines");
+    open_commands_filter(&mut tui, "highlight", "Highlight diff lines");
     enter_keeps_palette_open(
         &mut tui,
         "Enter on Highlight diff lines on a file row keeps the palette",
@@ -330,14 +419,14 @@ fn pty_workspace_palette_disabled_view_gates_keep_open() {
         WAIT,
     );
 
-    open_ctrl_k_filter(&mut tui, "full-file", "Full-file context");
+    open_commands_filter(&mut tui, "full-file", "Full-file context");
     enter_keeps_palette_open(
         &mut tui,
         "Enter on Full-file context on the workspace row keeps the palette",
     );
     esc_closes_palette(&mut tui);
 
-    open_ctrl_k_filter(&mut tui, "reviewed", "Mark reviewed");
+    open_commands_filter(&mut tui, "reviewed", "Mark reviewed");
     enter_keeps_palette_open(
         &mut tui,
         "Enter on Mark reviewed on the workspace row keeps the palette",
@@ -355,7 +444,7 @@ fn pty_workspace_palette_revert_opens_boxed_confirm() {
     wait_first_paint(&tui);
     wait_readme_cursor(&mut tui);
 
-    open_ctrl_k_filter(&mut tui, "revert", "Revert");
+    open_commands_filter(&mut tui, "revert", "Revert");
     tui.enter();
     tui.wait_pred(
         |screen| {
