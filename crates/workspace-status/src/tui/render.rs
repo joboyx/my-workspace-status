@@ -64,8 +64,8 @@ use super::state::{
     revert_scope, AppState, CompareRevertTarget, FocusPane, PendingConfirm, PrBadgeHit,
 };
 use super::syntax::{
-    cached_highlight_diff_rows, highlight_file_window, slice_styled_cols, CachedDiffSyntax,
-    CodeSpan, DiffBackgrounds, DiffSyntaxKey,
+    cached_highlight_diff_rows, highlight_file_window, readable_fg, slice_styled_cols,
+    CachedDiffSyntax, CodeSpan, DiffBackgrounds, DiffSyntaxKey,
 };
 use super::tabs::{
     compare_picker_empty, file_gutter_width, file_too_large, ComparePickerState, FileTab,
@@ -1754,6 +1754,7 @@ fn paint_diff_row(
     right_syntax: &[CodeSpan],
 ) -> Vec<Line<'static>> {
     let palette = state.theme.palette();
+    let overlay = diff_row_overlay(selected, focused, visual, palette);
     // Current-line blame: only the focused row of a focused diff pane.
     let blame = if selected && focused {
         state.painted_line_annotation()
@@ -1830,7 +1831,7 @@ fn paint_diff_row(
                         part,
                         palette,
                         state,
-                        state.ascii,
+                        overlay,
                         left_syntax,
                     );
                     if let Some((text, BlameSide::Old)) = &blame {
@@ -1851,7 +1852,7 @@ fn paint_diff_row(
                         part,
                         palette,
                         state,
-                        state.ascii,
+                        overlay,
                         right_syntax,
                     );
                     if let Some((text, BlameSide::New)) = &blame {
@@ -1887,7 +1888,7 @@ fn paint_diff_row(
                         part,
                         palette,
                         state,
-                        state.ascii,
+                        overlay,
                         left_syntax,
                     );
                     if let Some((text, _)) = &blame {
@@ -1943,26 +1944,27 @@ fn finish_diff_line(
     // A search match off the cursor paints the filter pill; its foreground
     // replaces syntax colours so the text stays readable on that background.
     let match_pill = search.filter(|_| !selected && !visual);
-    let bg = if selected && focused {
-        Some(palette.cursor_bg)
-    } else if selected {
-        Some(palette.cursor_bg_inactive)
-    } else if visual {
-        Some(palette.cursor_bg)
-    } else {
-        match_pill.map(|pill| pill.bg)
-    };
-    if let Some(bg) = bg {
+    let overlay = diff_row_overlay(selected, focused, visual, palette);
+    let bg = overlay.or(match_pill.map(|pill| pill.bg));
+    if let Some(overlay) = overlay {
+        // `paint_cell_spans` already tinted add/del code and pad; every
+        // other span takes the flat overlay.
         line.spans = line
             .spans
             .into_iter()
             .map(|span| {
-                let mut style = span.style.bg(bg);
-                if let Some(pill) = match_pill {
-                    style = style.fg(pill.fg);
-                }
+                let style = match span.style.bg {
+                    Some(bg) if is_tinted_change_bg(bg, overlay, palette) => span.style,
+                    _ => span.style.bg(overlay),
+                };
                 Span::styled(span.content.to_string(), style)
             })
+            .collect();
+    } else if let Some(pill) = match_pill {
+        line.spans = line
+            .spans
+            .into_iter()
+            .map(|span| Span::styled(span.content.to_string(), span.style.bg(pill.bg).fg(pill.fg)))
             .collect();
     }
     let edge = selection_marker(selected, focused);
@@ -1980,6 +1982,37 @@ fn finish_diff_line(
     let mut spans = vec![Span::styled(edge, edge_style)];
     spans.extend(line.spans);
     Line::from(spans)
+}
+
+/// Cursor bar over a diff row: [`Palette::cursor_bg`] on the focused cursor
+/// row and on visual-line rows, [`Palette::cursor_bg_inactive`] on the
+/// selected row of an unfocused pane, none otherwise.
+fn diff_row_overlay(
+    selected: bool,
+    focused: bool,
+    visual: bool,
+    palette: Palette,
+) -> Option<Color> {
+    if (selected && focused) || visual {
+        Some(palette.cursor_bg)
+    } else if selected {
+        Some(palette.cursor_bg_inactive)
+    } else {
+        None
+    }
+}
+
+/// True when `bg` is an add/del row or changed-word background tinted with
+/// `overlay` by [`Palette::cursor_tint`].
+fn is_tinted_change_bg(bg: Color, overlay: Color, palette: Palette) -> bool {
+    [
+        palette.diff_add_bg,
+        palette.diff_del_bg,
+        palette.diff_add_word_bg,
+        palette.diff_del_word_bg,
+    ]
+    .into_iter()
+    .any(|change| palette.cursor_tint(change, overlay) == bg)
 }
 
 fn section_style(section: DiffSection, palette: Palette) -> Style {
@@ -2001,9 +2034,10 @@ fn paint_cell_spans(
     wrap_part: usize,
     palette: Palette,
     state: &AppState,
-    ascii: bool,
+    overlay: Option<Color>,
     syntax: &[CodeSpan],
 ) -> Vec<Span<'static>> {
+    let ascii = state.ascii;
     let width = width as usize;
     let mark_w = comment_mark_cols(ascii);
     let code_w = cell_code_width(width, gutter.saturating_add(mark_w));
@@ -2021,12 +2055,20 @@ fn paint_cell_spans(
     );
     let sign = if first { cell_sign(cell.kind) } else { ' ' };
     let accent = cell_accent(cell.kind, palette);
-    let row_bg = cell_row_bg(cell.kind, palette);
-    let word_bg = cell_word_bg(cell.kind, palette).or(row_bg);
-    let gutter_style = with_row_bg(diff_gutter_style(palette), row_bg);
+    // Under a cursor overlay the gutter and sign take the flat cursor bar;
+    // add/del code and pad keep their row and word bg, tinted.
+    let tint = |bg: Option<Color>| match (bg, overlay) {
+        (Some(bg), Some(overlay)) => Some(palette.cursor_tint(bg, overlay)),
+        _ => bg,
+    };
+    let plain_row_bg = cell_row_bg(cell.kind, palette);
+    let chrome_bg = overlay.or(plain_row_bg);
+    let row_bg = tint(plain_row_bg);
+    let word_bg = tint(cell_word_bg(cell.kind, palette).or(plain_row_bg));
+    let gutter_style = with_row_bg(diff_gutter_style(palette), chrome_bg);
     let sign_style = with_row_bg(
         accent.unwrap_or_default().add_modifier(Modifier::BOLD),
-        row_bg,
+        chrome_bg,
     );
     let code_off = if wrap {
         wrap_col_starts(&cell.text, code_w)
@@ -2055,9 +2097,16 @@ fn paint_cell_spans(
     ];
     for part in code_parts {
         let bg = if part.word { word_bg } else { row_bg };
+        // Syntax fg met the contrast floor on the plain bg; check it again
+        // on the tinted one.
+        let fg = if overlay.is_some() {
+            readable_fg(part.fg, bg, palette.repo)
+        } else {
+            part.fg
+        };
         spans.push(Span::styled(
             part.text,
-            with_row_bg(Style::default().fg(part.fg), bg),
+            with_row_bg(Style::default().fg(fg), bg),
         ));
     }
     spans.push(Span::styled(
@@ -4460,7 +4509,10 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
         draw_state(&mut terminal, &mut state);
         let pill = state.theme.pills().filter;
-        let cursor_bg = state.theme.palette().cursor_bg;
+        let palette = state.theme.palette();
+        // The current hit is the paired del row; its first glyph is the
+        // changed word `old`, which the cursor tints.
+        let cursor_bg = palette.cursor_tint(palette.diff_del_word_bg, palette.cursor_bg);
         let buf = terminal.backend().buffer();
         let mut seen = Vec::new();
         for y in 0..buf.area().height {
@@ -5005,33 +5057,368 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cursor_row_overlay_replaces_the_word_bg() {
-        let mut state = word_diff_state(word_diff_lines(QTY_LINE, COUNT_LINE), DiffMode::Inline);
-        let palette = state.theme.palette();
-        state.focus = FocusPane::Right;
-        state.diff_cursor = diff_row_index(&state, "price * count");
-        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
-        draw_state(&mut terminal, &mut state);
-        let buf = terminal.backend().buffer();
-        let text = buffer_text(&terminal);
-        let add_y = first_row_with(buf, "price * count").expect("add line");
-        let del_y = first_row_with(buf, "price * qty").expect("del line");
-        assert!(
-            cols_with_bg(buf, add_y, palette.diff_add_word_bg).is_empty(),
-            "cursor row has no word bg:\n{text}"
-        );
-        assert!(
-            needle_cells(buf, add_y, "count")
-                .iter()
-                .all(|cell| cell.bg == palette.cursor_bg),
-            "cursor bg wins over the word bg:\n{text}"
-        );
+    /// Assert row `y` of a paired line keeps its changed `word` on the
+    /// tinted word bg, a shade apart from the tinted row bg under the
+    /// unchanged `let total = price * `, and that the word is not on the
+    /// flat `overlay`.
+    fn assert_tinted_word_row(
+        buf: &ratatui::buffer::Buffer,
+        y: u16,
+        word: &str,
+        (row_bg, word_bg): (Color, Color),
+        overlay: Color,
+        palette: Palette,
+        ctx: &str,
+    ) {
+        let tinted_row = palette.cursor_tint(row_bg, overlay);
+        let tinted_word = palette.cursor_tint(word_bg, overlay);
+        assert_ne!(tinted_word, overlay, "{ctx}: word tint must not be flat");
+        assert_ne!(tinted_word, tinted_row, "{ctx}: word tint vs row tint");
         assert_eq!(
-            cols_with_bg(buf, del_y, palette.diff_del_word_bg),
-            needle_cols(buf, del_y, "qty"),
-            "non-cursor row keeps its word bg:\n{text}"
+            cols_with_bg(buf, y, tinted_word),
+            needle_cols(buf, y, word),
+            "{ctx}: only `{word}` sits on the tinted word bg"
         );
+        assert!(
+            needle_cells(buf, y, "let total = price * ")
+                .iter()
+                .all(|cell| cell.bg == tinted_row),
+            "{ctx}: unchanged text sits on the tinted row bg"
+        );
+    }
+
+    /// Focused tint stays apart from the plain row and the unfocused tint.
+    fn assert_focus_visible(palette: Palette, row_bg: Color, ctx: &str) {
+        let focused = palette.cursor_tint(row_bg, palette.cursor_bg);
+        assert_ne!(focused, row_bg, "{ctx}: focused tint vs plain row");
+        assert_ne!(
+            focused,
+            palette.cursor_tint(row_bg, palette.cursor_bg_inactive),
+            "{ctx}: focused tint vs inactive tint"
+        );
+    }
+
+    /// Assert the line-number gutter, rule, and sign of inline row `y` sit
+    /// on the flat `overlay` with their own fg, and the code on the tinted
+    /// `row_bg`.
+    fn assert_flat_chrome(
+        buf: &ratatui::buffer::Buffer,
+        y: u16,
+        x0: u16,
+        (row_bg, sign_fg): (Color, Color),
+        overlay: Color,
+        palette: Palette,
+        ctx: &str,
+    ) {
+        let code_x = find_cell_col(buf, y, "let total").expect("code");
+        let sign = &buf[(code_x - 1, y)];
+        assert_eq!((sign.bg, sign.fg), (overlay, sign_fg), "{ctx}: sign cell");
+        let digits: Vec<u16> = (x0..code_x - 1)
+            .filter(|&x| {
+                let sym = buf[(x, y)].symbol();
+                !sym.is_empty() && sym.chars().all(|c| c.is_ascii_digit())
+            })
+            .collect();
+        assert!(!digits.is_empty(), "{ctx}: line number in the gutter");
+        for x in x0..code_x - 1 {
+            assert_eq!(buf[(x, y)].bg, overlay, "{ctx}: gutter col {x}");
+        }
+        for x in digits {
+            assert_eq!(buf[(x, y)].fg, palette.muted, "{ctx}: line number col {x}");
+        }
+        let tinted_row = palette.cursor_tint(row_bg, overlay);
+        assert_eq!(buf[(code_x, y)].bg, tinted_row, "{ctx}: code cell");
+    }
+
+    #[test]
+    fn tinted_cursor_rows_keep_flat_gutter_and_sign_colours() {
+        for id in crate::tui::theme::THEME_IDS {
+            let palette = id.palette();
+            for (needle, row_bg, sign_fg) in [
+                ("price * count", palette.diff_add_bg, palette.added),
+                ("price * qty", palette.diff_del_bg, palette.deleted),
+            ] {
+                for (focus, overlay) in [
+                    (FocusPane::Right, palette.cursor_bg),
+                    (FocusPane::Left, palette.cursor_bg_inactive),
+                ] {
+                    let mut state =
+                        word_diff_state(word_diff_lines(QTY_LINE, COUNT_LINE), DiffMode::Inline);
+                    state.theme = id;
+                    state.focus = focus;
+                    state.diff_cursor = diff_row_index(&state, needle);
+                    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+                    draw_state(&mut terminal, &mut state);
+                    let buf = terminal.backend().buffer();
+                    let text = buffer_text(&terminal);
+                    let y = first_row_with(buf, needle).expect(needle);
+                    assert_flat_chrome(
+                        buf,
+                        y,
+                        state.layout.diff_content_x + 1,
+                        (row_bg, sign_fg),
+                        overlay,
+                        palette,
+                        &format!("{id:?} {needle} {focus:?}\n{text}"),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn focused_cursor_row_tints_the_word_bg_inline() {
+        for id in crate::tui::theme::THEME_IDS {
+            let mut state =
+                word_diff_state(word_diff_lines(QTY_LINE, COUNT_LINE), DiffMode::Inline);
+            state.theme = id;
+            let palette = id.palette();
+            state.focus = FocusPane::Right;
+            state.diff_cursor = diff_row_index(&state, "price * count");
+            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let buf = terminal.backend().buffer();
+            let text = buffer_text(&terminal);
+            let add_y = first_row_with(buf, "price * count").expect("add line");
+            let del_y = first_row_with(buf, "price * qty").expect("del line");
+            let ctx = format!("{id:?} cursor row\n{text}");
+            assert_tinted_word_row(
+                buf,
+                add_y,
+                "count",
+                (palette.diff_add_bg, palette.diff_add_word_bg),
+                palette.cursor_bg,
+                palette,
+                &ctx,
+            );
+            assert_focus_visible(palette, palette.diff_add_bg, &ctx);
+            assert_focus_visible(palette, palette.diff_add_word_bg, &ctx);
+            assert_eq!(
+                cols_with_bg(buf, del_y, palette.diff_del_word_bg),
+                needle_cols(buf, del_y, "qty"),
+                "{id:?} non-cursor row keeps its plain word bg:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn focused_cursor_row_tints_the_word_bg_on_both_split_sides() {
+        for id in crate::tui::theme::THEME_IDS {
+            let mut state =
+                word_diff_state(word_diff_lines(QTY_LINE, COUNT_LINE), DiffMode::SideBySide);
+            state.theme = id;
+            let palette = id.palette();
+            state.focus = FocusPane::Right;
+            let mut terminal = Terminal::new(TestBackend::new(220, 24)).unwrap();
+            // The first paint settles the split layout and its paired rows.
+            draw_state(&mut terminal, &mut state);
+            assert_eq!(state.diff_layout(), DiffMode::SideBySide);
+            state.diff_cursor = diff_row_index(&state, "price * count");
+            draw_state(&mut terminal, &mut state);
+            let buf = terminal.backend().buffer();
+            let text = buffer_text(&terminal);
+            let y = first_row_with(buf, "price * count").expect("split row");
+            assert!(buf_line(buf, y).contains("price * qty"), "{text}");
+            let ctx = format!("{id:?} split cursor row\n{text}");
+            for (word, bgs) in [
+                ("qty", (palette.diff_del_bg, palette.diff_del_word_bg)),
+                ("count", (palette.diff_add_bg, palette.diff_add_word_bg)),
+            ] {
+                let needle = format!("let total = price * {word}");
+                let start = find_cell_col(buf, y, &needle).expect("code");
+                let prefix_cells: Vec<_> = (0..20u16).map(|i| &buf[(start + i, y)]).collect();
+                let tinted_row = palette.cursor_tint(bgs.0, palette.cursor_bg);
+                let tinted_word = palette.cursor_tint(bgs.1, palette.cursor_bg);
+                assert!(
+                    prefix_cells.iter().all(|c| c.bg == tinted_row),
+                    "{ctx}: `{word}` side unchanged text on tinted row bg"
+                );
+                assert!(
+                    needle_cells(buf, y, word)
+                        .iter()
+                        .all(|c| c.bg == tinted_word),
+                    "{ctx}: `{word}` on tinted word bg"
+                );
+                assert_eq!(cols_with_bg(buf, y, tinted_word), needle_cols(buf, y, word));
+                assert_ne!(tinted_word, palette.cursor_bg, "{ctx}");
+                assert_ne!(tinted_word, tinted_row, "{ctx}");
+            }
+        }
+    }
+
+    #[test]
+    fn focused_wrapped_continuation_row_keeps_the_tinted_word_bg() {
+        for id in [ThemeId::TokyoNight, ThemeId::GruvboxDark] {
+            let shared = format!("let total = {}", "price + ".repeat(14));
+            let mut state = word_diff_state(
+                word_diff_lines(&format!("{shared}qty;"), &format!("{shared}count;")),
+                DiffMode::Inline,
+            );
+            state.theme = id;
+            state.diff_wrap = true;
+            state.focus = FocusPane::Right;
+            state.diff_cursor = diff_row_index(&state, "count;");
+            let palette = id.palette();
+            let tinted_row = palette.cursor_tint(palette.diff_add_bg, palette.cursor_bg);
+            let tinted_word = palette.cursor_tint(palette.diff_add_word_bg, palette.cursor_bg);
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let buf = terminal.backend().buffer();
+            let text = buffer_text(&terminal);
+            let add_first_y = (0..buf.area().height)
+                .find(|&y| {
+                    buf_line(buf, y).contains("let total = price")
+                        && cols_with_bg(buf, y, tinted_row).len() > 1
+                })
+                .expect("cursor add line first row");
+            let word_rows = rows_with_bg(buf, tinted_word);
+            assert!(!word_rows.is_empty(), "{id:?}:\n{text}");
+            assert!(
+                word_rows.iter().all(|&y| y > add_first_y),
+                "{id:?} the changed word wraps onto a continuation row: {word_rows:?}\n{text}"
+            );
+            let painted: String = word_rows
+                .iter()
+                .flat_map(|&y| {
+                    cols_with_bg(buf, y, tinted_word)
+                        .into_iter()
+                        .map(move |x| buf[(x, y)].symbol().to_string())
+                })
+                .collect();
+            assert_eq!(painted, "count", "{id:?}:\n{text}");
+            let y = word_rows[0];
+            let first_word = cols_with_bg(buf, y, tinted_word)[0];
+            let x0 = state.layout.diff_content_x + 1;
+            let code_x = cols_with_bg(buf, y, tinted_row)[0];
+            assert!(code_x > x0, "{id:?} continuation gutter:\n{text}");
+            for x in x0..code_x {
+                assert_eq!(
+                    buf[(x, y)].bg,
+                    palette.cursor_bg,
+                    "{id:?} continuation gutter col {x} on the flat cursor bar:\n{text}"
+                );
+            }
+            for x in code_x..first_word {
+                assert_eq!(
+                    buf[(x, y)].bg,
+                    tinted_row,
+                    "{id:?} continuation code col {x} on the tinted row bg:\n{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn visual_line_row_tints_the_word_bg() {
+        for id in crate::tui::theme::THEME_IDS {
+            let mut state =
+                word_diff_state(word_diff_lines(QTY_LINE, COUNT_LINE), DiffMode::Inline);
+            state.theme = id;
+            let palette = id.palette();
+            state.focus = FocusPane::Right;
+            let count_row = diff_row_index(&state, "price * count");
+            state.diff_cursor = count_row;
+            state.dispatch(Action::DiffVisualStart);
+            assert_eq!(state.diff_visual_anchor, Some(count_row));
+            // Cursor moves off: the paired row stays in the selection only.
+            state.diff_cursor = diff_row_index(&state, "fresh_only");
+            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            assert!(state.diff_visual_contains(count_row));
+            let buf = terminal.backend().buffer();
+            let text = buffer_text(&terminal);
+            let add_y = first_row_with(buf, "price * count").expect("add line");
+            assert_tinted_word_row(
+                buf,
+                add_y,
+                "count",
+                (palette.diff_add_bg, palette.diff_add_word_bg),
+                palette.cursor_bg,
+                palette,
+                &format!("{id:?} visual row\n{text}"),
+            );
+        }
+    }
+
+    #[test]
+    fn unfocused_selected_row_tints_the_word_bg_with_the_inactive_cursor() {
+        for id in crate::tui::theme::THEME_IDS {
+            let mut state =
+                word_diff_state(word_diff_lines(QTY_LINE, COUNT_LINE), DiffMode::Inline);
+            state.theme = id;
+            let palette = id.palette();
+            assert_eq!(state.focus, FocusPane::Left);
+            state.diff_cursor = diff_row_index(&state, "price * count");
+            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let buf = terminal.backend().buffer();
+            let text = buffer_text(&terminal);
+            let add_y = first_row_with(buf, "price * count").expect("add line");
+            assert_tinted_word_row(
+                buf,
+                add_y,
+                "count",
+                (palette.diff_add_bg, palette.diff_add_word_bg),
+                palette.cursor_bg_inactive,
+                palette,
+                &format!("{id:?} unfocused selected row\n{text}"),
+            );
+        }
+    }
+
+    #[test]
+    fn search_match_off_the_cursor_still_paints_the_pill_over_word_bg() {
+        for id in [ThemeId::TokyoNight, ThemeId::Dracula] {
+            let mut state =
+                word_diff_state(word_diff_lines(QTY_LINE, COUNT_LINE), DiffMode::Inline);
+            state.theme = id;
+            state.focus = FocusPane::Right;
+            state.dispatch(super::super::action::Action::SearchStart);
+            for c in "let total".chars() {
+                state.dispatch(super::super::action::Action::SearchChar(c));
+            }
+            assert_eq!(state.search_target, SearchPane::Diff);
+            let count_row = diff_row_index(&state, "price * count");
+            assert_ne!(
+                state.diff_cursor, count_row,
+                "match must sit off the cursor"
+            );
+            let pill = id.pills().filter;
+            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let buf = terminal.backend().buffer();
+            let text = buffer_text(&terminal);
+            let add_y = first_row_with(buf, "price * count").expect("add line");
+            assert!(
+                needle_cells(buf, add_y, COUNT_LINE)
+                    .iter()
+                    .all(|c| (c.bg, c.fg) == (pill.bg, pill.fg)),
+                "{id:?} search pill replaces the whole row:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn focused_context_row_keeps_the_flat_cursor_bg() {
+        for id in crate::tui::theme::THEME_IDS {
+            let mut state =
+                word_diff_state(word_diff_lines(QTY_LINE, COUNT_LINE), DiffMode::Inline);
+            state.theme = id;
+            let palette = id.palette();
+            state.focus = FocusPane::Right;
+            state.diff_cursor = diff_row_index(&state, "let keep");
+            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            let buf = terminal.backend().buffer();
+            let text = buffer_text(&terminal);
+            let y = first_row_with(buf, "let keep = 0;").expect("context line");
+            assert!(
+                needle_cells(buf, y, "let keep = 0;")
+                    .iter()
+                    .all(|c| c.bg == palette.cursor_bg),
+                "{id:?} context cursor row is the flat cursor bar:\n{text}"
+            );
+        }
     }
 
     #[test]

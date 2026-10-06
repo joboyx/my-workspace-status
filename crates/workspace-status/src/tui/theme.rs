@@ -60,16 +60,27 @@ pub struct Palette {
     pub cursor_bg: Color,
     /// Selected-row background on an unfocused list. Darker than [`Self::cursor_bg`].
     pub cursor_bg_inactive: Color,
+    /// Pane surface (background). The base that [`Self::cursor_tint`]
+    /// measures the cursor shift from.
+    pub surface: Color,
     pub diff_hunk: Color,
-    /// Add-line row background. Syntax fg paints on top. Cursor overlay wins.
+    /// Add-line row background. Syntax fg paints on top. The cursor,
+    /// visual-line, and unfocused selected overlays tint it with
+    /// [`Self::cursor_tint`]; the search overlay replaces it.
     pub diff_add_bg: Color,
-    /// Del-line row background. Syntax fg paints on top. Cursor overlay wins.
+    /// Del-line row background. Syntax fg paints on top. The cursor,
+    /// visual-line, and unfocused selected overlays tint it with
+    /// [`Self::cursor_tint`]; the search overlay replaces it.
     pub diff_del_bg: Color,
     /// Changed-word background on a paired add line. Stronger shade of
-    /// [`Self::diff_add_bg`]. Syntax fg paints on top. Cursor overlay wins.
+    /// [`Self::diff_add_bg`]. Syntax fg paints on top. The cursor,
+    /// visual-line, and unfocused selected overlays tint it with
+    /// [`Self::cursor_tint`]; the search overlay replaces it.
     pub diff_add_word_bg: Color,
     /// Changed-word background on a paired del line. Stronger shade of
-    /// [`Self::diff_del_bg`]. Syntax fg paints on top. Cursor overlay wins.
+    /// [`Self::diff_del_bg`]. Syntax fg paints on top. The cursor,
+    /// visual-line, and unfocused selected overlays tint it with
+    /// [`Self::cursor_tint`]; the search overlay replaces it.
     pub diff_del_word_bg: Color,
     /// Add-flash peak. Equals index 0 of [`Self::flash_ramp`].
     pub flash: Color,
@@ -216,7 +227,8 @@ impl ThemeId {
 
     /// Ratatui colours for paint.
     pub fn palette(self) -> Palette {
-        let p = self.theme().palette;
+        let theme = self.theme();
+        let p = theme.palette;
         Palette {
             heading: hex_color(p.heading),
             repo: hex_color(p.repo),
@@ -237,6 +249,7 @@ impl ThemeId {
             cursor: hex_color(p.cursor),
             cursor_bg: hex_color(p.cursor_bg),
             cursor_bg_inactive: hex_color(p.cursor_bg_inactive),
+            surface: hex_color(theme.surface),
             diff_hunk: hex_color(p.diff_hunk),
             diff_add_bg: hex_color(p.diff_add_bg),
             diff_del_bg: hex_color(p.diff_del_bg),
@@ -562,7 +575,47 @@ pub fn hex_color(hex: &str) -> Color {
     Color::Rgb(r, g, b)
 }
 
+/// Share of the theme's cursor shift (`cursor - surface`) that
+/// [`Palette::cursor_tint`] adds, in percent. Full strength drops default
+/// text ([`Palette::repo`]) below 3:1 on the tinted Tokyo Night add word
+/// background; 3/4 keeps it at 3:1 or more on every shipped theme while the
+/// shift stays visible.
+const CURSOR_TINT_PERCENT: i32 = 75;
+
+/// `num / den` rounded to the nearest integer (halves away from zero).
+fn div_round(num: i32, den: i32) -> i32 {
+    if num >= 0 {
+        (num + den / 2) / den
+    } else {
+        (num - den / 2) / den
+    }
+}
+
 impl Palette {
+    /// Tint `bg` with a cursor overlay instead of replacing it.
+    ///
+    /// Adds 3/4 of the theme's own cursor shift (`cursor - surface`) to
+    /// each RGB channel of `bg`, clamped to `0..=255`. `cursor` is [`Self::cursor_bg`] or
+    /// [`Self::cursor_bg_inactive`]. The shift follows the theme: a cursor bar
+    /// darker than the surface darkens `bg`. The same shift lands on a row bg
+    /// and its word bg, so the word highlight keeps its contrast against the
+    /// row. A non-RGB `bg`, `cursor`, or surface returns `cursor` unchanged.
+    pub fn cursor_tint(self, bg: Color, cursor: Color) -> Color {
+        let (Color::Rgb(r, g, b), Color::Rgb(cr, cg, cb), Color::Rgb(sr, sg, sb)) =
+            (bg, cursor, self.surface)
+        else {
+            return cursor;
+        };
+        let channel = |base: u8, cur: u8, surf: u8| -> u8 {
+            let shift = div_round(
+                (i32::from(cur) - i32::from(surf)) * CURSOR_TINT_PERCENT,
+                100,
+            );
+            (i32::from(base) + shift).clamp(0, 255) as u8
+        };
+        Color::Rgb(channel(r, cr, sr), channel(g, cg, sg), channel(b, cb, sb))
+    }
+
     fn ramp_for(self, kind: FlashKind) -> [Color; 4] {
         match kind {
             FlashKind::Add => self.flash_ramp,
@@ -770,6 +823,9 @@ mod tests {
         (hue, sat)
     }
 
+    /// Minimum contrast between a changed-word bg and its row bg.
+    const WORD_VS_ROW_FLOOR: f64 = 1.25;
+
     #[test]
     fn dark_surface_foregrounds_meet_aa_contrast() {
         const AA: f64 = 4.5;
@@ -857,7 +913,6 @@ mod tests {
             );
             // Word bg reads as a highlight on its row: visibly different,
             // same hue family, at least as saturated.
-            const WORD_VS_ROW_FLOOR: f64 = 1.25;
             const WORD_HUE_MAX_DEG: f64 = 20.0;
             for (name, word, row) in [
                 ("add", pal.diff_add_word_bg, pal.diff_add_bg),
@@ -891,6 +946,79 @@ mod tests {
             unique.len(),
             muteds.len(),
             "muted hexes must stay unique for TTY e2e theme chrome: {muteds:?}"
+        );
+    }
+
+    #[test]
+    fn cursor_tint_keeps_word_highlight_and_text_readable() {
+        const TEXT_FLOOR: f64 = 3.0;
+        for id in THEME_IDS {
+            let pal = id.palette();
+            assert_eq!(pal.surface, hex_color(id.theme().surface), "{id:?}");
+            for (name, row, word) in [
+                ("add", pal.diff_add_bg, pal.diff_add_word_bg),
+                ("del", pal.diff_del_bg, pal.diff_del_word_bg),
+            ] {
+                for (overlay_name, overlay) in [
+                    ("cursor_bg", pal.cursor_bg),
+                    ("cursor_bg_inactive", pal.cursor_bg_inactive),
+                ] {
+                    let tinted_row = pal.cursor_tint(row, overlay);
+                    let tinted_word = pal.cursor_tint(word, overlay);
+                    let ctx = format!("{id:?} {name} on {overlay_name}");
+                    let ratio = contrast_ratio(tinted_word, tinted_row);
+                    assert!(
+                        ratio >= WORD_VS_ROW_FLOOR,
+                        "{ctx}: tinted word vs row {ratio:.2} < {WORD_VS_ROW_FLOOR}"
+                    );
+                    for (bg_name, bg) in [("row", tinted_row), ("word", tinted_word)] {
+                        let ratio = contrast_ratio(pal.repo, bg);
+                        assert!(
+                            ratio >= TEXT_FLOOR,
+                            "{ctx}: repo on tinted {bg_name} {ratio:.2} < {TEXT_FLOOR}"
+                        );
+                    }
+                    assert_ne!(tinted_row, row, "{ctx}: tint must move the row bg");
+                    assert_ne!(tinted_word, word, "{ctx}: tint must move the word bg");
+                }
+                assert_ne!(
+                    pal.cursor_tint(row, pal.cursor_bg),
+                    pal.cursor_tint(row, pal.cursor_bg_inactive),
+                    "{id:?} {name}: focused and inactive tints must differ"
+                );
+                assert_ne!(
+                    pal.cursor_tint(word, pal.cursor_bg),
+                    pal.cursor_tint(word, pal.cursor_bg_inactive),
+                    "{id:?} {name}: focused and inactive word tints must differ"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_tint_follows_the_theme_shift_and_clamps() {
+        let mut pal = ThemeId::TokyoNight.palette();
+        pal.surface = Color::Rgb(100, 100, 100);
+        // Lighter cursor bar: +8 per channel at full strength, +6 at 3/4.
+        assert_eq!(
+            pal.cursor_tint(Color::Rgb(10, 20, 250), Color::Rgb(108, 108, 108)),
+            Color::Rgb(16, 26, 255)
+        );
+        // Darker cursor bar darkens the bg and clamps at 0.
+        assert_eq!(
+            pal.cursor_tint(Color::Rgb(4, 50, 50), Color::Rgb(92, 92, 92)),
+            Color::Rgb(0, 44, 44)
+        );
+        assert_eq!(
+            pal.cursor_tint(Color::Reset, pal.cursor_bg),
+            pal.cursor_bg,
+            "non-RGB bg falls back to the flat cursor bg"
+        );
+        pal.surface = Color::Reset;
+        assert_eq!(
+            pal.cursor_tint(pal.diff_add_bg, pal.cursor_bg),
+            pal.cursor_bg,
+            "non-RGB surface falls back to the flat cursor bg"
         );
     }
 
