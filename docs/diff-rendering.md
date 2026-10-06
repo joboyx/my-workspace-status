@@ -112,6 +112,7 @@ With line blame on (`B`, `viewDefaults.lineBlame`), the focused line ends with a
 - It paints as `"  " + text` inside the row's trailing blank pad and keeps the pad's width, so row heights, the gutter, wrap, and the pan range do not change. With wrap on it goes on the last wrap row of the cell. No pad (the code fills the width or is panned across it) or fewer than 12 free columns paints none. A cut text ends in `…`; the subject is cut first.
 - Split mode paints it in the blamed side's cell: the new (right) cell for an added or context line, the old (left) cell for a deleted line.
 - An added line in UNSTAGED reads `You · uncommitted`, and in STAGED `You · staged`, with no git call. NEW (untracked), binary, meta, hunk, and error rows paint none. While git runs, and when git has no blame for the line, the row paints none.
+- On an add/del row the note and the pad after it sit on the flat cursor bar, not on the tinted row background, so the muted text stays readable.
 - No note paints while a mouse drag selection is active, because release copies the painted screen cells.
 
 `AppState::focused_line_annotation` (`tui/state/line_blame.rs`) picks the text; `render.rs` `put_line_annotation` paints it.

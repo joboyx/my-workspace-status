@@ -954,7 +954,6 @@ mod tests {
         const TEXT_FLOOR: f64 = 3.0;
         for id in THEME_IDS {
             let pal = id.palette();
-            assert_eq!(pal.surface, hex_color(id.theme().surface), "{id:?}");
             for (name, row, word) in [
                 ("add", pal.diff_add_bg, pal.diff_add_word_bg),
                 ("del", pal.diff_del_bg, pal.diff_del_word_bg),

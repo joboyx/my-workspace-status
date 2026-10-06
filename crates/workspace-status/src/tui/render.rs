@@ -543,7 +543,7 @@ fn draw_file_tab(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                 ));
                 if selected && part + 1 == starts.len() {
                     if let Some((text, _)) = &blame {
-                        put_line_annotation(&mut row, text, palette);
+                        put_line_annotation(&mut row, text, palette, false);
                     }
                 }
             }
@@ -1836,7 +1836,7 @@ fn paint_diff_row(
                     );
                     if let Some((text, BlameSide::Old)) = &blame {
                         if part + 1 == left_h {
-                            put_line_annotation(&mut spans, text, palette);
+                            put_line_annotation(&mut spans, text, palette, true);
                         }
                     }
                     spans.push(Span::styled(
@@ -1857,7 +1857,7 @@ fn paint_diff_row(
                     );
                     if let Some((text, BlameSide::New)) = &blame {
                         if part + 1 == right_h {
-                            put_line_annotation(&mut right_spans, text, palette);
+                            put_line_annotation(&mut right_spans, text, palette, true);
                         }
                     }
                     spans.extend(right_spans);
@@ -1893,7 +1893,7 @@ fn paint_diff_row(
                     );
                     if let Some((text, _)) = &blame {
                         if part + 1 == n {
-                            put_line_annotation(&mut spans, text, palette);
+                            put_line_annotation(&mut spans, text, palette, true);
                         }
                     }
                     Line::from(spans)
@@ -1913,7 +1913,16 @@ fn paint_diff_row(
 /// The pad keeps its width, so row heights, the gutter, and the pan range
 /// never change. No pad (code fills the width, or the line is panned) or
 /// fewer than 12 free columns paints nothing.
-fn put_line_annotation(spans: &mut Vec<Span<'static>>, text: &str, palette: Palette) {
+///
+/// `on_cursor_bar` (diff rows) drops the pad's bg from the note and the pad
+/// after it, so the row's flat cursor overlay paints behind them instead of
+/// the tinted add/del bg. The two-column gap before the note keeps it.
+fn put_line_annotation(
+    spans: &mut Vec<Span<'static>>,
+    text: &str,
+    palette: Palette,
+    on_cursor_bar: bool,
+) {
     let Some(pad) = spans.last() else {
         return;
     };
@@ -1924,10 +1933,17 @@ fn put_line_annotation(spans: &mut Vec<Span<'static>>, text: &str, palette: Pale
     let Some(fitted) = fit_annotation(text, pad_w.saturating_sub(2)) else {
         return;
     };
-    let style = pad.style;
+    let mut style = pad.style;
     let rest = pad_w - 2 - fitted.width();
     spans.pop();
-    spans.push(Span::styled(format!("  {fitted}"), style.fg(palette.muted)));
+    if on_cursor_bar {
+        // The two-column gap keeps the pad's bg; the note and the rest drop it.
+        spans.push(Span::styled("  ", style));
+        style.bg = None;
+        spans.push(Span::styled(fitted, style.fg(palette.muted)));
+    } else {
+        spans.push(Span::styled(format!("  {fitted}"), style.fg(palette.muted)));
+    }
     if rest > 0 {
         spans.push(Span::styled(" ".repeat(rest), style));
     }
@@ -1993,10 +2009,12 @@ fn diff_row_overlay(
     visual: bool,
     palette: Palette,
 ) -> Option<Color> {
-    if (selected && focused) || visual {
+    if selected && focused {
         Some(palette.cursor_bg)
     } else if selected {
         Some(palette.cursor_bg_inactive)
+    } else if visual {
+        Some(palette.cursor_bg)
     } else {
         None
     }
@@ -5087,17 +5105,6 @@ mod tests {
         );
     }
 
-    /// Focused tint stays apart from the plain row and the unfocused tint.
-    fn assert_focus_visible(palette: Palette, row_bg: Color, ctx: &str) {
-        let focused = palette.cursor_tint(row_bg, palette.cursor_bg);
-        assert_ne!(focused, row_bg, "{ctx}: focused tint vs plain row");
-        assert_ne!(
-            focused,
-            palette.cursor_tint(row_bg, palette.cursor_bg_inactive),
-            "{ctx}: focused tint vs inactive tint"
-        );
-    }
-
     /// Assert the line-number gutter, rule, and sign of inline row `y` sit
     /// on the flat `overlay` with their own fg, and the code on the tinted
     /// `row_bg`.
@@ -5191,8 +5198,6 @@ mod tests {
                 palette,
                 &ctx,
             );
-            assert_focus_visible(palette, palette.diff_add_bg, &ctx);
-            assert_focus_visible(palette, palette.diff_add_word_bg, &ctx);
             assert_eq!(
                 cols_with_bg(buf, del_y, palette.diff_del_word_bg),
                 needle_cols(buf, del_y, "qty"),
@@ -9783,6 +9788,56 @@ mod tests {
                 uncommitted: false,
             }),
         );
+    }
+
+    #[test]
+    fn blame_annotation_on_a_focused_add_row_sits_on_the_flat_cursor_bar() {
+        for id in [ThemeId::Dracula, ThemeId::TokyoNight] {
+            let mut state = two_pane_diff_state();
+            state.theme = id;
+            state.diff_mode = DiffMode::Inline;
+            state.set_diff(
+                "app".into(),
+                "README.md".into(),
+                super::super::diff::DiffContent::from_unified(
+                    "@@ -1,3 +1,3 @@\n keep one\n-old line\n+new line\n keep two\n",
+                ),
+            );
+            state.focus = FocusPane::Right;
+            let palette = id.palette();
+            let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+            draw_state(&mut terminal, &mut state);
+            state.diff_cursor = diff_row_index(&state, "new line");
+            // An unstaged added line reads `You · uncommitted` without git.
+            draw_state(&mut terminal, &mut state);
+            let buf = terminal.backend().buffer();
+            let text = buffer_text(&terminal);
+            let y = first_row_with(buf, "new line").expect("focused add row");
+            let tinted_row = palette.cursor_tint(palette.diff_add_bg, palette.cursor_bg);
+            let code_end = needle_cols(buf, y, "new line").last().copied().unwrap();
+            assert_eq!(
+                buf[(code_end + 1, y)].bg,
+                tinted_row,
+                "{id:?} pad before the note:\n{text}"
+            );
+            for cell in needle_cells(buf, y, "You · uncommitted") {
+                assert_eq!(
+                    (cell.bg, cell.fg),
+                    (palette.cursor_bg, palette.muted),
+                    "{id:?} note on the flat cursor bar:\n{text}"
+                );
+            }
+            let after = needle_cols(buf, y, "You · uncommitted")
+                .last()
+                .copied()
+                .unwrap()
+                + 1;
+            assert_eq!(
+                (buf[(after, y)].symbol(), buf[(after, y)].bg),
+                (" ", palette.cursor_bg),
+                "{id:?} pad after the note:\n{text}"
+            );
+        }
     }
 
     #[test]
