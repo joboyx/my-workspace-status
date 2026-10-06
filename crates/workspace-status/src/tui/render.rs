@@ -1098,7 +1098,6 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .cursor_bar(graph_focused)
         .scroll(state.graph_scroll)
         .col_offset(col_offset)
-        .loading_older(state.graph_loading_older)
         .search_matches(
             &matches,
             state.theme.pills().filter.bg,
@@ -1229,10 +1228,7 @@ fn record_graph_scrollbar(
         chrome.footer_height,
     );
     if chrome.footer && footer_scroll_max > 0 {
-        let bottom = area
-            .y
-            .saturating_add(area.height)
-            .saturating_sub(u16::from(chrome.older));
+        let bottom = area.y.saturating_add(area.height);
         state.layout.graph_footer_y = Some(bottom.saturating_sub(chrome.footer_height));
         state.layout.graph_footer_x = area.x;
         state.layout.graph_footer_width = area.width;

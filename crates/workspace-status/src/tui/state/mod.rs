@@ -1231,7 +1231,6 @@ impl AppState {
     pub(crate) fn graph_chrome_in(&self, height: u16) -> GraphChromeBudget {
         graph_chrome_budget_for(
             height,
-            self.graph_loading_older,
             self.graph.as_ref().is_some_and(|g| g.sync.is_some()),
             graph_footer_request(self.commit_msg_expand, self.commit_msg_lines),
         )
@@ -15668,6 +15667,22 @@ mod tests {
             .join("\n");
         if let Some(model) = app.graph.as_mut() {
             model.commits[3].body = body;
+        }
+    }
+
+    #[test]
+    fn graph_list_height_ignores_loading_older() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        for height in [3, 12, 40] {
+            app.layout.tree_height = height;
+            for expand in [true, false] {
+                app.commit_msg_expand = expand;
+                app.graph_loading_older = false;
+                let idle = app.graph_chrome();
+                app.graph_loading_older = true;
+                assert_eq!(app.graph_chrome(), idle, "height {height} expand {expand}");
+            }
         }
     }
 

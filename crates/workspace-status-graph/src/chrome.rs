@@ -63,8 +63,6 @@ pub struct GraphChromeBudget {
     pub footer_height: u16,
     /// Rows left for the commit list (at least 1).
     pub list_height: u16,
-    /// Extra row for [`LOADING_OLDER`].
-    pub older: bool,
 }
 
 /// Requested selection-footer height for [`graph_chrome_budget_for`].
@@ -98,12 +96,8 @@ pub fn footer_message_scroll_max(line_count: usize, footer_height: u16) -> usize
 }
 
 /// Footer first, then header. Collapsed footer is 2 lines.
-pub fn graph_chrome_budget(
-    height: u16,
-    loading_older: bool,
-    want_header: bool,
-) -> GraphChromeBudget {
-    graph_chrome_budget_for(height, loading_older, want_header, 2)
+pub fn graph_chrome_budget(height: u16, want_header: bool) -> GraphChromeBudget {
+    graph_chrome_budget_for(height, want_header, 2)
 }
 
 /// Like [`graph_chrome_budget`] with a requested footer height.
@@ -118,12 +112,10 @@ pub fn graph_chrome_budget(
 /// the request.
 pub fn graph_chrome_budget_for(
     height: u16,
-    loading_older: bool,
     want_header: bool,
     footer_lines: u16,
 ) -> GraphChromeBudget {
-    let older = loading_older;
-    let mut avail = height.saturating_sub(u16::from(older)).max(1);
+    let mut avail = height.max(1);
     let footer = avail >= 3;
     let footer_height = if footer {
         let cap = (avail / 2).max(2);
@@ -142,7 +134,6 @@ pub fn graph_chrome_budget_for(
         footer,
         footer_height,
         list_height: avail.max(1),
-        older,
     }
 }
 
@@ -394,7 +385,7 @@ mod tests {
 
     #[test]
     fn budget_prefers_footer_over_header() {
-        let chrome = graph_chrome_budget(3, false, true);
+        let chrome = graph_chrome_budget(3, true);
         assert!(chrome.footer);
         assert!(!chrome.header);
         assert_eq!(chrome.footer_height, 2);
@@ -403,7 +394,7 @@ mod tests {
 
     #[test]
     fn budget_keeps_header_when_tall() {
-        let chrome = graph_chrome_budget(16, false, true);
+        let chrome = graph_chrome_budget(16, true);
         assert!(chrome.header);
         assert!(chrome.footer);
         assert_eq!(chrome.list_height, 13);
@@ -429,20 +420,20 @@ mod tests {
 
     #[test]
     fn budget_gives_the_requested_footer_capped_at_half_the_pane() {
-        let tall = graph_chrome_budget_for(40, false, false, graph_footer_request(true, 8));
+        let tall = graph_chrome_budget_for(40, false, graph_footer_request(true, 8));
         assert_eq!(tall.footer_height, 9);
         assert_eq!(tall.list_height, 31);
-        let max = graph_chrome_budget_for(60, false, false, graph_footer_request(true, 20));
+        let max = graph_chrome_budget_for(60, false, graph_footer_request(true, 20));
         assert_eq!(max.footer_height, 21, "N=20 fits a 60-row pane");
         assert_eq!(max.list_height, 39);
-        let short = graph_chrome_budget_for(10, false, false, graph_footer_request(true, 8));
+        let short = graph_chrome_budget_for(10, false, graph_footer_request(true, 8));
         assert_eq!(short.footer_height, 5, "half the pane");
         assert_eq!(short.list_height, 5);
-        let tiny = graph_chrome_budget_for(3, false, false, graph_footer_request(true, 8));
+        let tiny = graph_chrome_budget_for(3, false, graph_footer_request(true, 8));
         assert!(tiny.footer);
         assert_eq!(tiny.footer_height, 2);
         assert_eq!(tiny.list_height, 1);
-        let small_n = graph_chrome_budget_for(40, false, false, graph_footer_request(true, 1));
+        let small_n = graph_chrome_budget_for(40, false, graph_footer_request(true, 1));
         assert_eq!(small_n.footer_height, 2, "N=1: one message row plus meta");
         assert_eq!(small_n.list_height, 38);
     }
@@ -450,23 +441,19 @@ mod tests {
     #[test]
     fn budget_drops_footer_below_three_rows() {
         for height in [1, 2] {
-            let chrome =
-                graph_chrome_budget_for(height, false, false, graph_footer_request(true, 8));
+            let chrome = graph_chrome_budget_for(height, false, graph_footer_request(true, 8));
             assert!(!chrome.footer, "{height}: {chrome:?}");
             assert_eq!(chrome.footer_height, 0);
             assert_eq!(chrome.list_height, height);
         }
-        let older = graph_chrome_budget_for(3, true, false, graph_footer_request(true, 8));
-        assert!(!older.footer, "loading-older row leaves 2: {older:?}");
     }
 
     #[test]
     fn budget_collapsed_footer_is_two_rows() {
         for height in [3, 10, 40] {
-            let chrome =
-                graph_chrome_budget_for(height, false, false, graph_footer_request(false, 8));
+            let chrome = graph_chrome_budget_for(height, false, graph_footer_request(false, 8));
             assert_eq!(chrome.footer_height, 2, "{height}: {chrome:?}");
-            assert_eq!(chrome, graph_chrome_budget(height, false, false));
+            assert_eq!(chrome, graph_chrome_budget(height, false));
         }
     }
 
@@ -516,13 +503,6 @@ mod tests {
             lines[..22].iter().all(|l| l.chars().count() <= 39),
             "message wraps one column short for the scrollbar: {lines:?}"
         );
-    }
-
-    #[test]
-    fn budget_reserves_loading_older() {
-        let chrome = graph_chrome_budget(16, true, true);
-        assert!(chrome.older);
-        assert_eq!(chrome.list_height, 12);
     }
 
     #[test]
@@ -931,7 +911,7 @@ mod tests {
             "expanded shows body: {expanded:?}"
         );
 
-        let chrome = graph_chrome_budget_for(16, false, true, graph_footer_request(true, 8));
+        let chrome = graph_chrome_budget_for(16, true, graph_footer_request(true, 8));
         assert!(chrome.footer);
         assert_eq!(chrome.footer_height, 8, "half of 16, not the message size");
         assert!(chrome.list_height >= 1);

@@ -47,8 +47,7 @@ its hit boxes, so a graph frame paints the model once. The TUI pan clamp
 reads the count the last frame recorded (`graph_content_len`).
 
 `GraphWidget::gutter_width` caps painted gutter columns. Topology still
-uses the full lane model; every row shares the same left-aligned clip. `GraphWidget::loading_older` paints
-`loading older…` under the list. `GraphWidget::lane_colors` colours each
+uses the full lane model; every row shares the same left-aligned clip. `GraphWidget::lane_colors` colours each
 gutter cell from `GraphCell.color_lane`; an empty slice uses
 `DEFAULT_LANE_COLORS`. The TUI passes the active built-in theme's eight
 colours (`T` cycles).
@@ -139,7 +138,8 @@ moving between commits never changes the list height:
   the message text under it. At the end of the message there is no hint.
 
 List rows stay one line.
-`loading older…` takes one extra row while the next log page loads.
+The pane has no `loading older…` row: the status line shows it while the next
+log page loads, and the list keeps its height.
 
 Footer copy (`selection_detail_lines` / `selection_detail_parts`; do not invent
 other strings):

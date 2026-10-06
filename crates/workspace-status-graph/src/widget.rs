@@ -8,7 +8,7 @@ use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, Stateful
 
 use crate::chrome::{
     footer_message_scroll_max, graph_chrome_budget_for, graph_footer_request,
-    selection_footer_parts, GraphFooterSelection, LOADING_OLDER,
+    selection_footer_parts, GraphFooterSelection,
 };
 use crate::format::{
     format_label, format_sync, slice_label_parts, LabelKind, LabelPart, COMMIT_MSG_LINES_DEFAULT,
@@ -70,7 +70,6 @@ pub struct GraphWidget<'a> {
     selected: Option<usize>,
     scroll: u16,
     now_unix: Option<i64>,
-    loading_older: bool,
     lane_colors: &'a [Color],
     search_matches: &'a [usize],
     search_bg: Option<Color>,
@@ -116,7 +115,6 @@ impl<'a> GraphWidget<'a> {
             selected: None,
             scroll: 0,
             now_unix: None,
-            loading_older: false,
             lane_colors: &[],
             search_matches: &[],
             search_bg: None,
@@ -168,12 +166,6 @@ impl<'a> GraphWidget<'a> {
     /// Freeze the relative-date clock (unix seconds). Tests pass a fixed instant.
     pub fn now_unix(mut self, unix: i64) -> Self {
         self.now_unix = Some(unix);
-        self
-    }
-
-    /// Paint `loading older…` under the list while the next window loads.
-    pub fn loading_older(mut self, loading: bool) -> Self {
-        self.loading_older = loading;
         self
     }
 
@@ -450,7 +442,6 @@ impl GraphWidget<'_> {
         );
         let chrome = graph_chrome_budget_for(
             area.height,
-            self.loading_older,
             self.model.sync.is_some(),
             graph_footer_request(self.commit_msg_expand, self.commit_msg_lines),
         );
@@ -618,18 +609,6 @@ impl GraphWidget<'_> {
         }
 
         let mut footer_y = area.y.saturating_add(area.height);
-        if chrome.older {
-            footer_y = footer_y.saturating_sub(1);
-            put_text_line(
-                buf,
-                area.x,
-                footer_y,
-                area.width,
-                LOADING_OLDER,
-                false,
-                fallback,
-            );
-        }
         if chrome.footer {
             let h = chrome.footer_height.max(1);
             footer_y = footer_y.saturating_sub(h);
@@ -2022,33 +2001,6 @@ mod tests {
     }
 
     #[test]
-    fn paints_loading_older_status() {
-        let model = sample_model();
-        let backend = TestBackend::new(80, 16);
-        let mut terminal = Terminal::new(backend).expect("test backend");
-        terminal
-            .draw(|frame| {
-                GraphWidget::new(&model)
-                    .loading_older(true)
-                    .now_unix(NOW)
-                    .render(frame.area(), frame.buffer_mut());
-            })
-            .expect("draw");
-        let buffer = terminal.backend().buffer();
-        let mut joined = String::new();
-        for y in 0..16u16 {
-            for x in 0..80u16 {
-                joined.push_str(buffer[(x, y)].symbol());
-            }
-            joined.push('\n');
-        }
-        assert!(
-            joined.contains("loading older…"),
-            "loading older status: {joined}"
-        );
-    }
-
-    #[test]
     fn search_match_paints_bg_on_selectable_row_not_cursor() {
         let model = sample_model();
         let rows = model.visible_rows();
@@ -2310,7 +2262,7 @@ mod tests {
             })
             .expect("draw");
         let buffer = terminal.backend().buffer();
-        let chrome = graph_chrome_budget(height, false, false);
+        let chrome = graph_chrome_budget(height, false);
         let list_top = u16::from(chrome.header);
         let painted = paint_model_with(
             &model,
@@ -2391,7 +2343,7 @@ mod tests {
         let model = tall_linear_model(24);
         let width = 40u16;
         let height = 16u16;
-        let chrome = graph_chrome_budget(height, false, false);
+        let chrome = graph_chrome_budget(height, false);
         let sb_x = width.saturating_sub(1);
         let painted = paint_model_with(
             &model,
@@ -2440,7 +2392,7 @@ mod tests {
         };
         let width = 36u16;
         let height = 8u16;
-        let chrome = graph_chrome_budget(height, false, false);
+        let chrome = graph_chrome_budget(height, false);
         let list_bottom = u16::from(chrome.header) + chrome.list_height;
         let h_y = list_bottom.saturating_sub(1);
         let at_left = render_graph(&model, width, height, 0, 0);
@@ -2550,7 +2502,7 @@ mod tests {
             })
             .expect("draw");
         let buffer = terminal.backend().buffer();
-        let chrome = graph_chrome_budget(height, false, false);
+        let chrome = graph_chrome_budget(height, false);
         let list_bottom = u16::from(chrome.header) + chrome.list_height;
         let mut spine_x: Option<u16> = None;
         for y in u16::from(chrome.header)..list_bottom {
