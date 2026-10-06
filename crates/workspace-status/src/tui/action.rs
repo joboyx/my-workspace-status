@@ -107,6 +107,13 @@ pub enum Action {
     /// The graph selection footer and the commit-files footer wrap the
     /// full subject plus body when this is on.
     ToggleCommitMsgExpand,
+    /// Change the expanded commit-message footer height by this many
+    /// message rows (`-` / `+`, `=` same as `+`).
+    ///
+    /// Session-only, like `<` / `>`. `viewDefaults.commitMessageLines` sets
+    /// the launch value. Clamped to 1..=20 rows. The footer keeps this height
+    /// whatever the selected message is.
+    ResizeCommitMsg(i32),
     /// Toggle the current-line blame annotation (`B`).
     ///
     /// Session-only, like wrap. `viewDefaults.lineBlame` sets the launch

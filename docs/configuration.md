@@ -117,21 +117,24 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
   "diff": "inline",
   "wrap": "unwrap",
   "commitMessage": "collapse",
+  "commitMessageLines": 12,
   "lineBlame": "hide"
 }
 ```
 
-| Key             | Values                 | In-app default | Session toggle           |
-| --------------- | ---------------------- | -------------- | ------------------------ |
-| `tree`          | `tree` \| `flat`       | `tree`         | `t` at workspace depth 0 |
-| `commitTree`    | `tree` \| `flat`       | `tree`         | `t` at depth ≥ 1         |
-| `diff`          | `split` \| `inline`    | `split`        | `i`                      |
-| `wrap`          | `wrap` \| `unwrap`     | `wrap`         | `\`                      |
-| `commitMessage` | `expand` \| `collapse` | `expand`       | `M`                      |
-| `lineBlame`     | `show` \| `hide`       | `show`         | `B`                      |
+| Key                  | Values                 | In-app default | Session toggle               |
+| -------------------- | ---------------------- | -------------- | ---------------------------- |
+| `tree`               | `tree` \| `flat`       | `tree`         | `t` at workspace depth 0     |
+| `commitTree`         | `tree` \| `flat`       | `tree`         | `t` at depth ≥ 1             |
+| `diff`               | `split` \| `inline`    | `split`        | `i`                          |
+| `wrap`               | `wrap` \| `unwrap`     | `wrap`         | `\`                          |
+| `commitMessage`      | `expand` \| `collapse` | `expand`       | `M`                          |
+| `commitMessageLines` | integer `1` to `20`    | `8`            | `-` / `+` (`=` is `+`)       |
+| `lineBlame`          | `show` \| `hide`       | `show`         | `B`                          |
 
-- Values are trimmed, then matched case-sensitively.
-- A value of the wrong type, an unknown value, or a blank value is an error: `.workspace-status-config.json viewDefaults.<key> must be "<a>" or "<b>"`. A `viewDefaults` that is not an object is an error. An unknown key inside it is an error that names the key. A typo never falls back silently.
+- String values are trimmed, then matched case-sensitively.
+- A string key with a value of the wrong type, an unknown value, or a blank value is an error: `.workspace-status-config.json viewDefaults.<key> must be "<a>" or "<b>"`. A `viewDefaults` that is not an object is an error. An unknown key inside it is an error that names the key. A typo never falls back silently.
+- `commitMessageLines` is the number of message rows in the expanded commit-message footer (graph pane and commit-files pane). It must be a JSON integer from 1 to 20. A string, a fraction (`8.5`, also `8.0`), a bool, `null`, or a number out of range is an error: `.workspace-status-config.json viewDefaults.commitMessageLines must be an integer from 1 to 20`.
 - `"viewDefaults": null` counts as omitted.
 - The config loads before the CLI picks a mode, so an invalid `viewDefaults` also fails `--plain` and `--json`. Valid values do not change that output.
 - `commitTree` sets the commit file list in commit drills and in each new compare tab. A `t` toggle changes the current tab only. The next compare tab opens in the `commitTree` mode again.
@@ -215,6 +218,7 @@ On many macOS setups there is no dedicated PageUp key. `Fn+Up` and `Fn+Down` oft
 | Diff layout      | Split. `viewDefaults.diff` overrides at launch                                                                                                    | `i`                                                  |
 | Diff wrap        | On. `viewDefaults.wrap` overrides at launch                                                                                                       | `\`                                                  |
 | Commit message   | Expanded. `viewDefaults.commitMessage` overrides at launch                                                                                        | `M`                                                  |
+| Message rows     | 8 rows in the expanded commit-message footer, whatever the message length. `viewDefaults.commitMessageLines` overrides at launch (1 to 20)        | `-` / `+` (`=` is `+`)                               |
 | Line blame       | On. `viewDefaults.lineBlame` overrides at launch                                                                                                  | `B`                                                  |
 | Theme            | Tokyo Night                                                                                                                                       | `T` cycles / `WS_STATUS_THEME`                       |
 | Live refresh     | On, 3 s                                                                                                                                           | `WS_STATUS_WATCH_MS=0`                               |
@@ -278,7 +282,8 @@ See [tui-rust.md](./tui-rust.md) for the same keys with layout notes. In Normal,
 | `\`                                        | wrap ↔ unwrap file-diff lines (display columns). Wrap is on by default; `viewDefaults.wrap` sets the launch state. The toggle changes this session only. Continuation rows keep a blank gutter and sign. Horizontal pan is a no-op while wrap is on |
 | `B`                                        | line blame on ↔ off: a dimmed `{author}, {age} · {sha7} · {subject}` note at the end of the focused diff or file-tab line. On by default; `viewDefaults.lineBlame` sets the launch state. The toggle changes this session only (`line blame on` / `line blame off`) and runs on file tabs too |
 | `A`                                        | blame menu on a focused committed line: `c` commit changes, `p` previous line change, `w` commit vs working tree, `g` show in graph. Enter runs `c`, Esc / `q` close. Same refusals as the palette `Blame:` rows |
-| `M`                                        | collapse ↔ expand the selected commit / stash message. Expanded by default; `viewDefaults.commitMessage` sets the launch state. The toggle changes this session only. Graph list rows stay one line. Expanded, the graph selection footer and the commit-files footer (bottom of the depth-2 left pane, under the file list) wrap subject plus body (`msg on` / `msg off`). Wheel over an overflowing graph footer scrolls the message. Graph `m` stays merge / mouse |
+| `M`                                        | collapse ↔ expand the selected commit / stash message. Expanded by default; `viewDefaults.commitMessage` sets the launch state. The toggle changes this session only. Graph list rows stay one line. Expanded, the graph selection footer and the commit-files footer (bottom of the depth-2 left pane, under the file list) wrap subject plus body (`msg on` / `msg off`) into a fixed N message rows (`-` / `+`): a short message leaves blank rows, so moving between commits never changes the list height. Collapsed is a fixed 2 rows. Wheel over an overflowing graph footer scrolls the message; while lines are hidden below, its last message row ends with `↓<K>` (`v<K>` with ASCII glyphs). The commit-files footer clips a long message with `…`. Arrows and `j` / `k` stay on the list. Graph `m` stays merge / mouse |
+| `-` / `+` / `=`                            | one fewer / one more message row in the expanded commit-message footer (graph and commit-files panes), clamped to 1–20; `=` is an unshifted `+`. Status `msg lines <N>`, also at the clamp. Default 8; `viewDefaults.commitMessageLines` sets the launch value. The keys change this session only. The focused graph row stays in view. On a file tab they say `Switch to Workspace tab` in Quick Open. Palette: Shorter commit message / Taller commit message |
 | `r`                                        | refresh the focused repo; the whole workspace when on the workspace row or the "No updates" group                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `f`                                        | `git fetch --quiet` for the focused checkout, or primary checkouts on the workspace / family row. Linked worktrees are included only when that worktree row is focused. Hidden ignored repos are skipped. Shown ignored repos follow the same primary / focused-worktree rule. The background fetch timer is separate: every snapshot except hidden ignored, including linked worktrees and shown ignored.                                                                                                                                                                                                              |
 | `p`                                        | pull: workspace / family → primary checkouts with `syncStatus` `behind`; focused checkout (including a linked worktree) → that path only. Dirty trees auto-stash around pull. On a file / dir / section row the status says `focus a repo or checkout to pull`. |

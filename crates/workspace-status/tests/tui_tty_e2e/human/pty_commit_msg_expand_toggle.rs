@@ -87,6 +87,23 @@ fn footer_cell(screen: &str, needle: &str) -> (u16, u16) {
         .unwrap_or_else(|| panic!("{needle} on screen:\n{screen}"))
 }
 
+/// Right-pane row of the graph footer's first line: the first row with
+/// `subject` that is not the cursor list row.
+fn footer_top(screen: &str, subject: &str) -> Option<usize> {
+    right_pane(screen)
+        .lines()
+        .position(|line| line.contains(subject) && !line.contains('\u{258C}'))
+}
+
+/// The one-line `root` commit is selected with its footer painted.
+fn root_selected(screen: &str) -> bool {
+    panes_tree_unfocused_graph_focused(screen)
+        && graph_cursor_on(screen, "root")
+        && footer_top(screen, "root").is_some()
+        && !right_pane(screen).contains(COMMIT_MSG_BODY)
+        && no_wrong_overlays(screen)
+}
+
 fn graph_msg_expanded(screen: &str) -> bool {
     panes_tree_unfocused_graph_focused(screen)
         && tree_inactive_selection_on(screen, REPO)
@@ -157,7 +174,9 @@ fn diff_msg_collapsed(screen: &str) -> bool {
 /// Docs + help VIEW: `M` is the commit-message toggle. Graph list rows stay
 /// one line. With no key, `j` onto the commit paints `UNIQUE_MSG_BODY_LINE`
 /// but not `UNIQUE_MSG_BODY_TAIL`. Wheel down over the footer brings the
-/// tail in without moving the list cursor; wheel up goes back. `M` hides the
+/// tail in without moving the list cursor; wheel up goes back. `j` onto the
+/// one-line `root` commit keeps the footer top row (fixed height); `+` / `-`
+/// move it by one row with `msg lines <N>`. `M` hides the
 /// body (`msg off`), `M` again shows it (`msg on`). Enter (depth 1) keeps
 /// expand on the left graph footer; the right files pane shows no message,
 /// and `M` toggles the graph footer the same way. Enter on `wip.txt` (depth
@@ -224,6 +243,45 @@ fn pty_commit_msg_expand_toggle() {
     tui.wait_pred(
         graph_msg_default_expanded,
         "wheel up scrolls the footer back to the first body line",
+        WAIT,
+    );
+
+    // Fixed height: the footer starts on the same row for the long message
+    // and for the one-line `root` commit below it.
+    let long_top = footer_top(&tui.screen(), "nnnn").expect("long footer top");
+    tui.key('j');
+    tui.wait_pred(root_selected, "j onto the one-line root commit", WAIT);
+    assert_eq!(
+        footer_top(&tui.screen(), "root"),
+        Some(long_top),
+        "a one-line message keeps the footer height:\n{}",
+        tui.screen()
+    );
+    tui.key('k');
+    tui.wait_pred(
+        graph_msg_default_expanded,
+        "k back onto the long message",
+        WAIT,
+    );
+    assert_eq!(footer_top(&tui.screen(), "nnnn"), Some(long_top));
+
+    // `+` grows the footer by one row, `-` shrinks it back.
+    tui.key('+');
+    tui.wait_pred(
+        |screen| {
+            crumb_row(screen).contains("msg lines 9")
+                && footer_top(screen, "nnnn") == Some(long_top - 1)
+        },
+        "+ grows the footer by one message row",
+        WAIT,
+    );
+    tui.key('-');
+    tui.wait_pred(
+        |screen| {
+            crumb_row(screen).contains("msg lines 8")
+                && footer_top(screen, "nnnn") == Some(long_top)
+        },
+        "- shrinks the footer back",
         WAIT,
     );
 

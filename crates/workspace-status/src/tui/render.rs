@@ -330,10 +330,8 @@ fn draw_panes(frame: &mut Frame<'_>, pane_area: Rect, state: &mut AppState) {
         state.layout.files_list_offset = start;
     } else if let super::drill::DrillView::Diff { file_cursor, .. } = &state.drill {
         let cursor = *file_cursor;
-        let footer_len = state
-            .commit_detail_footer_lines(tree_inner.width as usize)
-            .len();
-        let footer_h = commit_detail_footer_height(footer_len, tree_inner.height);
+        let footer_h =
+            commit_detail_footer_height(state.commit_detail_footer_request(), tree_inner.height);
         let list_h = tree_inner.height.saturating_sub(footer_h);
         state.layout.files_list_y = tree_inner.y;
         state.layout.files_list_height = list_h;
@@ -1114,6 +1112,7 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         .cursor_style(pal.cursor, pal.cursor_bg)
         .cursor_inactive_style(pal.muted, pal.cursor_bg_inactive)
         .commit_msg_expand(state.commit_msg_expand)
+        .commit_msg_lines(state.commit_msg_lines)
         .commit_msg_scroll(state.graph_footer_msg_scroll())
         .lane_colors(&lane_colors)
         .label_palette(GraphLabelPalette {
@@ -1259,7 +1258,8 @@ fn record_graph_scrollbar(
 }
 
 /// Rows the commit-message footer takes at the bottom of a commit-files pane
-/// `pane_h` rows tall, for a footer of `footer_len` lines.
+/// `pane_h` rows tall, for a footer request of `footer_len` rows
+/// ([`AppState::commit_detail_footer_request`], fixed whatever the message).
 ///
 /// The file list keeps at least one row whenever the pane has two or more,
 /// so a short terminal never hides the list for the message. Draw and
@@ -1284,7 +1284,7 @@ fn draw_commit_detail(
     col_offset: usize,
 ) {
     let footer = state.commit_detail_footer_lines(area.width as usize);
-    let footer_h = commit_detail_footer_height(footer.len(), area.height);
+    let footer_h = commit_detail_footer_height(state.commit_detail_footer_request(), area.height);
     let list_h = area.height.saturating_sub(footer_h);
     if list_h > 0 {
         let list_area = Rect {
@@ -6154,11 +6154,13 @@ mod tests {
         assert!(token_row > file_row, "footer sits under the list:\n{left}");
 
         let layout = &state.layout;
-        let footer_len = state
-            .commit_detail_footer_lines(layout.tree_width as usize)
-            .len();
-        let footer_h = commit_detail_footer_height(footer_len, layout.tree_height);
-        assert!(footer_h > 0);
+        let footer_h =
+            commit_detail_footer_height(state.commit_detail_footer_request(), layout.tree_height);
+        assert_eq!(
+            footer_h as usize,
+            2 + workspace_status_graph::COMMIT_MSG_LINES_DEFAULT,
+            "title + meta + N message rows for a one-line body"
+        );
         assert_eq!(layout.files_list_y, layout.tree_y);
         assert_eq!(
             layout.files_list_height,
@@ -6182,9 +6184,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, MIN_TERM_ROWS)).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let layout = &state.layout;
-        let footer_len = state
-            .commit_detail_footer_lines(layout.tree_width as usize)
-            .len();
+        let footer_len = state.commit_detail_footer_request();
         assert!(
             footer_len >= layout.tree_height as usize,
             "footer is taller than the pane ({footer_len} >= {})",
@@ -6195,6 +6195,53 @@ mod tests {
         let first = left.lines().next().unwrap_or_default();
         assert!(first.contains("README.md"), "list row paints:\n{left}");
         assert!(left.contains(FOOTER_BODY_TOKEN), "footer paints:\n{left}");
+    }
+
+    /// The depth-2 commit-files footer keeps one fixed height whatever the
+    /// message: a one-line subject pads, a long body clips with `…`, in
+    /// both expand states, and `+` grows it by one row.
+    #[test]
+    fn depth_2_left_footer_height_is_fixed_for_short_and_long_messages() {
+        let long = (0..30)
+            .map(|i| format!("{FOOTER_BODY_TOKEN}{i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let list_height = |body: &str, expand: bool, lines: usize| {
+            let mut state = two_pane_commit_diff_state();
+            set_seed_commit_body(&mut state, body);
+            state.commit_msg_expand = expand;
+            state.commit_msg_lines = lines;
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let footer = state.commit_detail_footer_lines(state.layout.tree_width as usize);
+            assert_eq!(footer.len(), state.commit_detail_footer_request());
+            let left = left_inner_text(&terminal, &state);
+            (
+                state.layout.tree_height,
+                state.layout.files_list_height,
+                left,
+            )
+        };
+        let n = workspace_status_graph::COMMIT_MSG_LINES_DEFAULT;
+        let (pane, short_h, _) = list_height("", true, n);
+        let (_, long_h, left) = list_height(&long, true, n);
+        assert_eq!(short_h, long_h, "expanded: same list height");
+        assert_eq!(
+            short_h as usize,
+            pane as usize - (2 + n),
+            "title + meta + N"
+        );
+        assert!(left.contains('…'), "a long body clips with …:\n{left}");
+        assert!(
+            !left.contains(&format!("{FOOTER_BODY_TOKEN}{n:02}")),
+            "rows past N stay hidden:\n{left}"
+        );
+        let (_, short_c, _) = list_height("", false, n);
+        let (_, long_c, _) = list_height(&long, false, n);
+        assert_eq!(short_c, long_c, "collapsed: same list height");
+        assert_eq!(short_c, pane - 2, "collapsed: title + subtitle");
+        let (_, grown, _) = list_height("", true, n + 1);
+        assert_eq!(grown + 1, short_h, "one more message row");
     }
 
     fn assert_titles_heading_borders_split(state: &mut AppState) {

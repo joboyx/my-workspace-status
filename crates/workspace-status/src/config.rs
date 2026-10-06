@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::helpers::normalize_filter_repo;
 use serde::Deserialize;
+use workspace_status_graph::{COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN};
 
 pub const CONFIG_FILENAME: &str = ".workspace-status-config.json";
 pub const DEFAULT_MAX_DEPTH: u32 = 3;
@@ -41,6 +42,10 @@ pub struct ViewDefaults {
     pub commit_message_expand: Option<bool>,
     /// `lineBlame`: `Some(true)` for `"show"`, `Some(false)` for `"hide"`.
     pub line_blame: Option<bool>,
+    /// `commitMessageLines`: message rows of the expanded commit-message
+    /// footer, an integer from [`COMMIT_MSG_LINES_MIN`] to
+    /// [`COMMIT_MSG_LINES_MAX`].
+    pub commit_message_lines: Option<usize>,
 }
 
 impl WorkspaceStatusConfig {
@@ -121,6 +126,25 @@ fn parse_view_choice(
     }
 }
 
+/// Parse `viewDefaults.commitMessageLines`: a JSON integer from
+/// [`COMMIT_MSG_LINES_MIN`] to [`COMMIT_MSG_LINES_MAX`]. Omitted is `None`.
+fn parse_view_msg_lines(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<usize>, String> {
+    const KEY: &str = "commitMessageLines";
+    let Some(v) = obj.get(KEY) else {
+        return Ok(None);
+    };
+    match v.as_u64() {
+        Some(n) if (COMMIT_MSG_LINES_MIN as u64..=COMMIT_MSG_LINES_MAX as u64).contains(&n) => {
+            Ok(Some(n as usize))
+        }
+        _ => Err(format!(
+            "{CONFIG_FILENAME} viewDefaults.{KEY} must be an integer from {COMMIT_MSG_LINES_MIN} to {COMMIT_MSG_LINES_MAX}"
+        )),
+    }
+}
+
 fn parse_view_defaults(value: Option<serde_json::Value>) -> Result<ViewDefaults, String> {
     let Some(v) = value else {
         return Ok(ViewDefaults::default());
@@ -128,12 +152,13 @@ fn parse_view_defaults(value: Option<serde_json::Value>) -> Result<ViewDefaults,
     let Some(obj) = v.as_object() else {
         return Err(format!("{CONFIG_FILENAME} viewDefaults must be an object"));
     };
-    const KEYS: [&str; 6] = [
+    const KEYS: [&str; 7] = [
         "tree",
         "commitTree",
         "diff",
         "wrap",
         "commitMessage",
+        "commitMessageLines",
         "lineBlame",
     ];
     if let Some(key) = obj.keys().find(|k| !KEYS.contains(&k.as_str())) {
@@ -148,6 +173,7 @@ fn parse_view_defaults(value: Option<serde_json::Value>) -> Result<ViewDefaults,
         wrap: parse_view_choice(obj, "wrap", "wrap", "unwrap")?,
         commit_message_expand: parse_view_choice(obj, "commitMessage", "expand", "collapse")?,
         line_blame: parse_view_choice(obj, "lineBlame", "show", "hide")?,
+        commit_message_lines: parse_view_msg_lines(obj)?,
     })
 }
 
@@ -395,6 +421,7 @@ mod tests {
                 wrap: Some(true),
                 commit_message_expand: Some(true),
                 line_blame: Some(true),
+                commit_message_lines: None,
             }
         );
     }
@@ -414,6 +441,7 @@ mod tests {
                 wrap: Some(false),
                 commit_message_expand: Some(false),
                 line_blame: Some(false),
+                commit_message_lines: None,
             }
         );
     }
@@ -463,6 +491,42 @@ mod tests {
                 err,
                 format!(".workspace-status-config.json viewDefaults.{key} must be {choices}"),
                 "{key}: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn view_defaults_commit_message_lines_accepts_min_max_and_default() {
+        for n in [1usize, 8, 20] {
+            let got = load_view_defaults(&format!(
+                r#"{{"ignoredRepos":[],"viewDefaults":{{"commitMessageLines":{n}}}}}"#
+            ))
+            .unwrap();
+            assert_eq!(got.commit_message_lines, Some(n));
+            assert_eq!(got.commit_message_expand, None);
+        }
+        assert_eq!(
+            load_view_defaults(r#"{"ignoredRepos":[],"viewDefaults":{"wrap":"wrap"}}"#)
+                .unwrap()
+                .commit_message_lines,
+            None,
+            "omitted key keeps the in-app default"
+        );
+    }
+
+    #[test]
+    fn view_defaults_commit_message_lines_rejects_bad_values() {
+        for raw in [
+            "0", "21", "-1", r#""8""#, "8.5", "8.0", "true", "null", "[8]",
+        ] {
+            let err = load_view_defaults(&format!(
+                r#"{{"ignoredRepos":[],"viewDefaults":{{"commitMessageLines":{raw}}}}}"#
+            ))
+            .unwrap_err();
+            assert_eq!(
+                err,
+                ".workspace-status-config.json viewDefaults.commitMessageLines must be an integer from 1 to 20",
+                "commitMessageLines: {raw}"
             );
         }
     }

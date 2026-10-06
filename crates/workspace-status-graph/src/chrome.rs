@@ -1,4 +1,4 @@
-//! GraphPane chrome: header / list / 2-line selection footer / loading older.
+//! GraphPane chrome: header / list / fixed-height selection footer / loading older.
 //!
 //! Header / footer budget (`graph_chrome_budget`) and selection footer copy.
 //! Footer ref chips are the same [`LabelPart`] runs as the commit spacer.
@@ -32,7 +32,7 @@ pub const FOOTER_ROOT_COMMIT: &str = "root commit";
 /// Spacer footer subject.
 pub const FOOTER_SPACER_SUBJECT: &str = "…";
 
-/// What GraphPane's 2-line selection footer describes.
+/// What GraphPane's selection footer describes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphFooterSelection<'a> {
     /// No focused list row.

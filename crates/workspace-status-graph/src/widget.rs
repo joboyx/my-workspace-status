@@ -1437,6 +1437,70 @@ mod tests {
         assert!((0..height).all(|y| !buf_row(&short, y).contains('↓')));
     }
 
+    /// A message of exactly N lines fits: no hint, no footer scrollbar.
+    /// One more line overflows: `↓1` hint and the footer scrollbar.
+    #[test]
+    fn footer_hint_and_scrollbar_start_at_n_plus_one_lines() {
+        let n = COMMIT_MSG_LINES_DEFAULT;
+        let mut model = tall_linear_model(40);
+        model.uncommitted = None;
+        let body = |count: usize| {
+            (0..count)
+                .map(|i| format!("B{i:02}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // Subject + blank + body: commit 2 is exactly N lines, commit 3 N+1.
+        model.commits[2].body = body(n - 2);
+        model.commits[3].body = body(n - 1);
+        let (width, height) = (40u16, 30u16);
+        let render = |selected| {
+            render_footer(
+                &model,
+                width,
+                height,
+                FooterRender {
+                    selected,
+                    expand: true,
+                    msg_scroll: 0,
+                    msg_lines: None,
+                    ascii: false,
+                },
+            )
+        };
+        let top = height - 1 - n as u16;
+        let bar_x = width - 1;
+        let last_msg_row = height - 2;
+        let bar_painted =
+            |buf: &Buffer| (top..height - 1).any(|y| buf[(bar_x, y)].symbol().trim() != "");
+
+        let exact = render(2);
+        let exact_last = buf_row(&exact, last_msg_row);
+        assert!(
+            exact_last.starts_with(&format!("B{:02}", n - 3)),
+            "{exact_last:?}"
+        );
+        assert!(!exact_last.contains('↓'), "{exact_last:?}");
+        assert!(!bar_painted(&exact), "exactly N lines: no footer scrollbar");
+
+        let over = render(3);
+        let over_last = buf_row(&over, last_msg_row);
+        assert!(
+            over_last.starts_with(&format!("B{:02}", n - 3)),
+            "{over_last:?}"
+        );
+        let hint_start = usize::from(bar_x) - "↓1".chars().count();
+        let cols: Vec<&str> = (0..width)
+            .map(|x| over[(x, last_msg_row)].symbol())
+            .collect();
+        assert_eq!(cols[hint_start..usize::from(bar_x)].concat(), "↓1");
+        assert!(bar_painted(&over), "N+1 lines: footer scrollbar");
+        assert!(
+            buf_row(&over, height - 1).contains("c03aaaa"),
+            "meta pinned"
+        );
+    }
+
     #[test]
     fn expanded_footer_paints_body_collapsed_hides_it() {
         let body = "UNIQUE_GRAPH_BODY";
