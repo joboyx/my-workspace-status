@@ -1,4 +1,4 @@
-//! Quick Open overlay state: `:` goes to a file, `>` runs a command.
+//! Quick Open overlay state: Ctrl-p / `F` go to a file, `:` / `>` run a command.
 //!
 //! One query line drives two modes. A query that starts with `>` is the
 //! commands mode ([`CommandPaletteState`], substring filter on the rest);

@@ -222,11 +222,11 @@ pub enum Action {
     GraphFocusCancel,
     CycleTheme,
     ToggleMouse,
-    /// Open or close the Quick Open overlay (`:` files, `Ctrl-k` commands).
+    /// Open or close the Quick Open overlay (`:` commands, Ctrl-p / `F` files).
     ///
     /// [`QuickOpenEntry`] picks the starting mode on open. The keymap sends
-    /// it only while the overlay is closed (inside it Ctrl-k moves and `:`
-    /// types); a dispatch while it is up closes it with no run.
+    /// it only while the overlay is closed (inside it Ctrl-p moves and `:` /
+    /// `F` type); a dispatch while it is up closes it with no run.
     ToggleQuickOpen(QuickOpenEntry),
     /// Move the Quick Open highlight (arrows, Ctrl-n / Ctrl-p).
     QuickOpenMove(i32),
@@ -301,10 +301,11 @@ pub enum Action {
 /// Mode the Quick Open overlay starts in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuickOpenEntry {
-    /// `:` from Normal or a pending `z` / `g` chord: files mode, empty query.
+    /// Ctrl-p or `F` from Normal, highlight, or a pending `z` / `g` chord:
+    /// files mode, empty query.
     Files,
-    /// Ctrl-k from Normal or a pending `z` / `g` chord: commands mode with
-    /// `>` already in the query.
+    /// `:` from Normal, highlight, or a pending `z` / `g` chord: commands
+    /// mode with `>` already in the query.
     Commands,
 }
 

@@ -1,4 +1,4 @@
-//! The commands mode of Quick Open (`Ctrl-k`, or `>` typed first after `:`).
+//! The commands mode of Quick Open (`:`, or `>` typed first in files mode).
 //!
 //! Filter is case-insensitive substring on title, key chips, group, and
 //! aliases (`exit` finds Quit, `compare` the Diff … in new tab rows).
