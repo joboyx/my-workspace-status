@@ -6,8 +6,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::format::{
-    assemble_commit_spacer, assemble_stash_spacer, format_label, meta_column_widths_with_stashes,
-    CommitSpacerOpts, LabelKind, LabelPart, StashSpacerOpts,
+    assemble_commit_spacer, assemble_stash_spacer, format_label, format_label_parts,
+    meta_column_widths_with_stashes, CommitSpacerOpts, StashSpacerOpts,
 };
 use crate::glyphs::GlyphSet;
 use crate::gutter::clip_gutter_shared;
@@ -88,17 +88,6 @@ fn now_unix_seconds() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
-}
-
-fn subject_parts(label: &str) -> Vec<LabelPart> {
-    if label.is_empty() {
-        Vec::new()
-    } else {
-        vec![LabelPart {
-            text: label.to_string(),
-            kind: LabelKind::Subject,
-        }]
-    }
 }
 
 fn spacer_available(gutter: &[GraphCell], line_width: usize) -> usize {
@@ -253,7 +242,7 @@ pub fn paint_model_with(
                 let label = format_label(row, glyphs);
                 out.push(PaintedLine {
                     gutter: blank_gutter(paint_width),
-                    parts: subject_parts(&label),
+                    parts: format_label_parts(row, glyphs),
                     label,
                     row_index: Some(i),
                     selectable: true,
@@ -269,7 +258,7 @@ pub fn paint_model_with(
                 let label = format_label(row, glyphs);
                 out.push(PaintedLine {
                     gutter,
-                    parts: subject_parts(&label),
+                    parts: format_label_parts(row, glyphs),
                     label,
                     row_index: Some(i),
                     selectable: true,
@@ -302,7 +291,7 @@ pub fn paint_model_with(
                     let label = format_label(row, glyphs);
                     out.push(PaintedLine {
                         gutter: blank_gutter(paint_width),
-                        parts: subject_parts(&label),
+                        parts: format_label_parts(row, glyphs),
                         label,
                         row_index: Some(i),
                         selectable: true,
@@ -325,7 +314,7 @@ pub fn paint_model_with(
                 let label = format_label(row, glyphs);
                 out.push(PaintedLine {
                     gutter: cells,
-                    parts: subject_parts(&label),
+                    parts: format_label_parts(row, glyphs),
                     label,
                     row_index: Some(i),
                     selectable: true,

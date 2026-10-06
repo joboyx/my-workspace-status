@@ -81,6 +81,7 @@ mod pty_graph_focus_unmark_enter_clears;
 mod pty_graph_footer_shows_commit_parents;
 mod pty_graph_h_l_pans_long_subject;
 mod pty_graph_hscrollbar_thumb_drag;
+mod pty_graph_icon_popover;
 mod pty_graph_merge_creates_commit;
 mod pty_h_l_pan_graph_or_file_diff;
 mod pty_help_enter_does_not_arm_pane_search;

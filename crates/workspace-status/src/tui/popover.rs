@@ -1,7 +1,7 @@
 //! Icon popovers: a hover peek, a pinned popover, and their content.
 //!
 //! Paint records one [`super::state::IconHit`] per painted icon (a tagged
-//! tree segment, a PR badge). The pointer resting on a hit for
+//! tree segment, a graph node, row glyph, or comment mark, a PR badge). The pointer resting on a hit for
 //! [`PEEK_DWELL_MS`] opens a peek: paint only, never an input mode, so it
 //! never takes a key. The pointer leaving both the icon and the peek starts
 //! a [`PEEK_GRACE_MS`] grace, then the peek closes.
@@ -22,6 +22,10 @@
 use std::path::{Path, PathBuf};
 
 use ratatui::layout::Rect;
+use workspace_status_graph::{
+    format_local_timestamp, format_relative_date, short_id, Commit, GraphIconKind, GraphRow, Stash,
+    SyncStatus, Worktree, ASCII, UNICODE,
+};
 
 use crate::helpers::{is_default_branch, is_detached_head_branch};
 use crate::snapshot::{CheckoutKind, FileChange, WorkspaceRepoSnapshot};
@@ -64,6 +68,12 @@ pub enum IconTarget {
     /// An icon on the shown commit-file or compare file list row with this
     /// [`CommitFileRow::id`].
     CommitFileRow(String),
+    /// An icon on the graph row with this [`graph_row_id`]: a node, the
+    /// uncommitted glyph, or the comment mark.
+    GraphRow(String),
+    /// The linked-worktree glyph of the graph worktree with this path, on
+    /// its worktree row or as a worktree mark on a commit spacer.
+    GraphWorktree(String),
 }
 
 /// How a popover opened.
@@ -83,7 +93,7 @@ pub struct PopoverOwner {
     pub tab: usize,
     /// Focused list.
     pub list: ListFocusTarget,
-    /// Focused tree row id, commit-file row id, graph cursor index, or
+    /// Focused tree row id, commit-file row id, [`graph_row_id`], or
     /// empty.
     pub row: String,
 }
@@ -176,19 +186,73 @@ pub fn tree_icon_target(kind: IconKind, row: &VisibleRow) -> IconTarget {
     }
 }
 
+/// Stable id of a graph row: it names the same row across a reload and a
+/// cursor move. `uncommitted`, `commit:<id>`, `stash:<id>` (the stash
+/// ref when git gave no id), or `worktree:<path>`.
+pub fn graph_row_id(row: &GraphRow) -> String {
+    match row {
+        GraphRow::Uncommitted { .. } => "uncommitted".into(),
+        GraphRow::Commit { commit, .. } => format!("commit:{}", commit.id),
+        GraphRow::Stash(stash) if stash.id.is_empty() => format!("stash:{}", stash.stash_ref),
+        GraphRow::Stash(stash) => format!("stash:{}", stash.id),
+        GraphRow::Worktree(worktree) => format!("worktree:{}", worktree.path),
+    }
+}
+
+/// Catalog kind and target of graph icon `kind` painted for `row`. `part`
+/// is the [`workspace_status_graph::IconSpan::part`]. `None` for a PR
+/// badge (its checkout comes from the badge list) and for a worktree mark
+/// whose index is not on the row.
+pub fn graph_icon(
+    kind: GraphIconKind,
+    part: Option<usize>,
+    row: &GraphRow,
+) -> Option<(IconKind, IconTarget)> {
+    let on_row = |icon: IconKind| Some((icon, IconTarget::GraphRow(graph_row_id(row))));
+    match kind {
+        GraphIconKind::CommitNode => on_row(IconKind::GraphCommit),
+        GraphIconKind::HeadNode => on_row(IconKind::GraphHeadCommit),
+        GraphIconKind::StashNode => on_row(IconKind::GraphStash),
+        GraphIconKind::Uncommitted => on_row(IconKind::GraphUncommitted),
+        GraphIconKind::Comment => on_row(IconKind::Comment),
+        GraphIconKind::ResolvedComment => on_row(IconKind::CommentResolved),
+        GraphIconKind::Worktree => {
+            let path = match row {
+                GraphRow::Worktree(worktree) => &worktree.path,
+                GraphRow::Commit { worktrees, .. } => &worktrees.get(part?)?.path,
+                GraphRow::Uncommitted { .. } | GraphRow::Stash(_) => return None,
+            };
+            Some((
+                IconKind::LinkedWorktree,
+                IconTarget::GraphWorktree(path.clone()),
+            ))
+        }
+        GraphIconKind::Badge => None,
+    }
+}
+
 /// Sections of `targets` from live state, in order. A target whose icon is
 /// gone (row removed, PR answer dropped, sync mark cleared) has none.
+///
+/// `now_unix` is the clock for relative ages (graph commit and stash
+/// dates), the same clock the graph paint reads.
 pub fn popover_sections(
     state: &AppState,
     targets: &[(IconKind, IconTarget)],
+    now_unix: i64,
 ) -> Vec<PopoverSection> {
     targets
         .iter()
-        .filter_map(|(kind, target)| section(state, *kind, target))
+        .filter_map(|(kind, target)| section(state, *kind, target, now_unix))
         .collect()
 }
 
-fn section(state: &AppState, kind: IconKind, target: &IconTarget) -> Option<PopoverSection> {
+fn section(
+    state: &AppState,
+    kind: IconKind,
+    target: &IconTarget,
+    now_unix: i64,
+) -> Option<PopoverSection> {
     match target {
         IconTarget::TreeRow(id) => {
             let row = state.rows.iter().find(|row| &row.id == id)?;
@@ -202,6 +266,8 @@ fn section(state: &AppState, kind: IconKind, target: &IconTarget) -> Option<Popo
                 .find(|row| &row.id == id)?;
             commit_file_section(state, kind, &row)
         }
+        IconTarget::GraphRow(id) => graph_row_section(state, kind, id, now_unix),
+        IconTarget::GraphWorktree(path) => graph_worktree_section(state, path),
     }
 }
 
@@ -245,7 +311,16 @@ fn tree_section(state: &AppState, kind: IconKind, row: &VisibleRow) -> Option<Po
             vec![Action::Fetch, Action::Pull, Action::Push, Action::Branch]
         }
         IconKind::LinkedWorktree => {
-            worktree_fields(row, &mut lines);
+            worktree_fields(
+                &WorktreeFacts {
+                    path: &row.chrome.path,
+                    primary: row.primary_repo.as_deref(),
+                    branch: Some(&row.chrome.branch),
+                    current: false,
+                    ignored: row.ignored,
+                },
+                &mut lines,
+            );
             vec![
                 Action::RemoveWorktree,
                 Action::CompareVsDefault,
@@ -565,13 +640,38 @@ fn repo_fields(state: &AppState, row: &VisibleRow, lines: &mut Vec<PopoverLine>)
     ));
 }
 
-/// Linked worktree: path, primary checkout, branch or detached.
-fn worktree_fields(row: &VisibleRow, lines: &mut Vec<PopoverLine>) {
-    lines.push(field("path", row.chrome.path.clone()));
-    if let Some(primary) = row.primary_repo.as_deref() {
+/// What a linked-worktree popover shows, from a tree row or the graph.
+struct WorktreeFacts<'a> {
+    /// Checkout path.
+    path: &'a str,
+    /// Primary checkout of the repository, when known.
+    primary: Option<&'a str>,
+    /// Checked-out branch; `None` or a detached name is detached.
+    branch: Option<&'a str>,
+    /// The graph's current checkout.
+    current: bool,
+    /// Listed as ignored in config.
+    ignored: bool,
+}
+
+/// Linked worktree: path, primary checkout, branch or detached, then
+/// `current` and `ignored` when they hold. The tree and the graph share
+/// it.
+fn worktree_fields(facts: &WorktreeFacts<'_>, lines: &mut Vec<PopoverLine>) {
+    lines.push(field("path", facts.path));
+    if let Some(primary) = facts.primary {
         lines.push(field("primary", primary));
     }
-    lines.push(field("branch", branch_or_detached(&row.chrome.branch)));
+    lines.push(field(
+        "branch",
+        branch_or_detached(facts.branch.unwrap_or_default()),
+    ));
+    if facts.current {
+        lines.push(field("checkout", "current"));
+    }
+    if facts.ignored {
+        lines.push(field("config", "ignored"));
+    }
 }
 
 fn branch_or_detached(branch: &str) -> String {
@@ -780,6 +880,253 @@ fn pr_section(state: &AppState, repo: &Path) -> Option<PopoverSection> {
         icon: kind,
         role,
         target: IconTarget::PullRequest(repo.to_path_buf()),
+        lines,
+    })
+}
+
+/// Section of icon `kind` on the graph row with [`graph_row_id`] `id`:
+/// a node, the uncommitted glyph, or the comment mark. `None` when the row
+/// is gone or no longer paints the icon.
+///
+/// The commit and HEAD nodes are one slot, and so are both comment marks:
+/// HEAD moving or the last comment resolving keeps the section and shows
+/// the new kind.
+fn graph_row_section(
+    state: &AppState,
+    kind: IconKind,
+    id: &str,
+    now_unix: i64,
+) -> Option<PopoverSection> {
+    let model = state.graph.as_ref()?;
+    let rows = model.visible_rows();
+    let row = rows.iter().find(|row| graph_row_id(row) == id)?;
+    let comments;
+    let (kind, role) = if is_comment_kind(kind) {
+        comments = state.graph_row_comments(row);
+        if comments.is_empty() {
+            return None;
+        }
+        if comments.iter().all(|entry| entry.resolved) {
+            (IconKind::CommentResolved, SegRole::Muted)
+        } else {
+            (IconKind::Comment, SegRole::Heading)
+        }
+    } else {
+        comments = Vec::new();
+        match (kind, row) {
+            (
+                IconKind::GraphCommit | IconKind::GraphHeadCommit,
+                GraphRow::Commit { is_head, .. },
+            ) => {
+                let kind = if *is_head {
+                    IconKind::GraphHeadCommit
+                } else {
+                    IconKind::GraphCommit
+                };
+                (kind, SegRole::Heading)
+            }
+            (IconKind::GraphStash, GraphRow::Stash(_)) => (kind, SegRole::Heading),
+            (IconKind::GraphUncommitted, GraphRow::Uncommitted { has_changes }) => {
+                let role = if *has_changes {
+                    SegRole::Modified
+                } else {
+                    SegRole::Muted
+                };
+                (kind, role)
+            }
+            _ => return None,
+        }
+    };
+    let mut lines = vec![PopoverLine::Text(spec(kind).meaning.to_string())];
+    let actions = match row {
+        _ if is_comment_kind(kind) => comment_fields(&comments, &mut lines),
+        GraphRow::Commit { commit, .. } if kind == IconKind::GraphHeadCommit => {
+            commit_fields(commit, now_unix, &mut lines);
+            if let Some(sync) = model.sync.as_ref() {
+                lines.push(field("head", format!("on {}", sync.branch)));
+                lines.push(field("sync", graph_sync_text(state, sync)));
+            }
+            vec![Action::CompareCommitVsParent, Action::GraphCreateBranch]
+        }
+        GraphRow::Commit { commit, .. } => {
+            commit_fields(commit, now_unix, &mut lines);
+            vec![
+                Action::CompareCommitVsParent,
+                Action::GraphCreateBranch,
+                Action::GraphCheckout,
+                Action::GraphMerge,
+            ]
+        }
+        GraphRow::Stash(stash) => {
+            stash_fields(stash, now_unix, &mut lines);
+            vec![
+                Action::GraphStashApply,
+                Action::GraphStashPop,
+                Action::GraphStashDrop,
+            ]
+        }
+        GraphRow::Uncommitted { has_changes } => {
+            let words = if *has_changes {
+                "uncommitted changes"
+            } else {
+                "working tree clean"
+            };
+            lines.push(field("state", words));
+            let repo: Vec<String> = state
+                .graph_identity
+                .iter()
+                .map(|(repo, _)| repo.clone())
+                .collect();
+            let (staged, unstaged, untracked) = change_counts(state, &repo);
+            lines.extend([
+                field("staged", staged.to_string()),
+                field("unstaged", unstaged.to_string()),
+                field("untracked", untracked.to_string()),
+            ]);
+            vec![Action::StashMenu, Action::Refresh]
+        }
+        GraphRow::Worktree(_) => return None,
+    };
+    lines.extend(actions.iter().filter_map(PopoverLine::action));
+    Some(PopoverSection {
+        icon: kind,
+        role,
+        target: IconTarget::GraphRow(id.to_string()),
+        lines,
+    })
+}
+
+/// Commit node fields: short id, subject, author, date, parents, refs.
+fn commit_fields(commit: &Commit, now_unix: i64, lines: &mut Vec<PopoverLine>) {
+    lines.push(field("id", short_id(&commit.id)));
+    lines.push(field("subject", commit.subject.clone()));
+    author_and_date(
+        &commit.author_name,
+        commit.author_date_unix,
+        now_unix,
+        lines,
+    );
+    let parents: Vec<&str> = commit.parents.iter().map(|id| short_id(id)).collect();
+    lines.push(field(
+        "parents",
+        match parents.len() {
+            0 => "none (root commit)".to_string(),
+            1 => parents[0].to_string(),
+            _ => format!("{} (merge)", parents.join(" ")),
+        },
+    ));
+    if !commit.refs.is_empty() {
+        let names: Vec<&str> = commit.refs.iter().map(|r| r.name.as_str()).collect();
+        lines.push(field("refs", names.join(", ")));
+    }
+}
+
+/// Stash tip fields: `stash@{n}`, subject, author, date, parent.
+fn stash_fields(stash: &Stash, now_unix: i64, lines: &mut Vec<PopoverLine>) {
+    lines.push(field("ref", stash.stash_ref.clone()));
+    lines.push(field("subject", stash.subject.clone()));
+    author_and_date(&stash.author_name, stash.author_date_unix, now_unix, lines);
+    if let Some(parent) = stash.parent_id.as_deref() {
+        lines.push(field("parent", short_id(parent)));
+    }
+}
+
+/// `author` and `date` fields, each when git reported it. The date is the
+/// local time, then the relative age at `now_unix` when the graph paints
+/// one.
+fn author_and_date(author: &str, unix: i64, now_unix: i64, lines: &mut Vec<PopoverLine>) {
+    if !author.is_empty() {
+        lines.push(field("author", author));
+    }
+    if unix == 0 {
+        return;
+    }
+    let local = format_local_timestamp(unix);
+    let relative = format_relative_date(unix, now_unix);
+    lines.push(field(
+        "date",
+        if relative == local {
+            local
+        } else {
+            format!("{local} ({relative})")
+        },
+    ));
+}
+
+/// HEAD sync from the graph header state: `↑A ↓B` in the graph glyphs, or
+/// `up to date` / `no upstream`.
+fn graph_sync_text(state: &AppState, sync: &workspace_status_graph::SyncState) -> String {
+    let glyphs = if state.ascii { &ASCII } else { &UNICODE };
+    match sync.status {
+        SyncStatus::NoUpstream => "no upstream".into(),
+        SyncStatus::UpToDate => "up to date".into(),
+        SyncStatus::Ahead | SyncStatus::Behind | SyncStatus::Diverged => format!(
+            "{}{} {}{}",
+            glyphs.ahead, sync.ahead, glyphs.behind, sync.behind
+        ),
+    }
+}
+
+/// The graph worktree with `path`, and true when it is its own worktree
+/// row (false: a mark on a commit row's spacer).
+fn graph_worktree(state: &AppState, path: &str) -> Option<(Worktree, bool)> {
+    state
+        .graph
+        .as_ref()?
+        .visible_rows()
+        .into_iter()
+        .find_map(|row| match row {
+            GraphRow::Worktree(worktree) => (worktree.path == path).then_some((worktree, true)),
+            GraphRow::Commit { worktrees, .. } => worktrees
+                .into_iter()
+                .find(|worktree| worktree.path == path)
+                .map(|worktree| (worktree, false)),
+            GraphRow::Uncommitted { .. } | GraphRow::Stash(_) => None,
+        })
+}
+
+/// Linked-worktree glyph on the graph: the shared worktree fields. On a
+/// worktree row, Open PR when a branch is checked out, Remove worktree,
+/// and Copy entity reference. A worktree mark on a commit spacer lists no
+/// action: selecting it selects the commit row, so those keys would act on
+/// the commit, not on the worktree.
+fn graph_worktree_section(state: &AppState, path: &str) -> Option<PopoverSection> {
+    let (worktree, own_row) = graph_worktree(state, path)?;
+    let primary = state
+        .snapshot
+        .repos
+        .iter()
+        .find(|repo| repo.repo == path)
+        .and_then(|repo| repo.primary_repo.as_deref());
+    let mut lines = vec![PopoverLine::Text(
+        spec(IconKind::LinkedWorktree).meaning.to_string(),
+    )];
+    worktree_fields(
+        &WorktreeFacts {
+            path,
+            primary,
+            branch: worktree.branch.as_deref(),
+            current: worktree.is_current,
+            ignored: worktree.ignored,
+        },
+        &mut lines,
+    );
+    let mut actions = Vec::new();
+    if own_row {
+        if worktree
+            .branch
+            .as_deref()
+            .is_some_and(|branch| !is_detached_head_branch(branch))
+        {
+            actions.push(Action::OpenPullRequest);
+        }
+        actions.extend([Action::RemoveWorktree, Action::CopyEntityReference]);
+    }
+    lines.extend(actions.iter().filter_map(PopoverLine::action));
+    Some(PopoverSection {
+        icon: IconKind::LinkedWorktree,
+        role: SegRole::Heading,
+        target: IconTarget::GraphWorktree(path.to_string()),
         lines,
     })
 }

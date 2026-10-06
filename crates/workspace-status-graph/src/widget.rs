@@ -17,8 +17,9 @@ use crate::format::{
 use crate::glyphs::{ASCII, UNICODE};
 use crate::gutter::graph_gutter_cap;
 use crate::lane_colors::{default_lane_colors, lane_fg};
-use crate::model::GraphModel;
+use crate::model::{GraphModel, GraphRow};
 use crate::paint::{paint_model_with, painted_line_count, PaintOpts, PaintedLine};
+use crate::topology::CellRole;
 
 /// Subject, meta, and ref-chip colours for graph labels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,22 +41,73 @@ pub struct GraphLabelPalette {
     /// Fully hidden leftover branch/tag chip (`[+N]`). Distinct from muted
     /// meta. Omitted when the last painted chip is only truncated.
     pub overflow: Color,
+    /// Linked-worktree glyph on a worktree row or a spacer worktree mark.
+    pub worktree: Color,
+    /// Uncommitted glyph on a dirty working tree. A clean one is [`Self::meta`].
+    pub dirty: Color,
+    /// Open comment mark ([`GraphWidget::commented_rows`]).
+    pub comment: Color,
+    /// Resolved comment mark ([`GraphWidget::resolved_comment_rows`]).
+    pub comment_resolved: Color,
 }
 
-/// Painted cells of one row badge (see [`GraphWidget::row_badges`]).
+/// What a painted graph icon is (see [`IconSpan`]).
 ///
-/// [`GraphWidget::render_with_badge_spans`] returns one per badge that is
-/// on screen. Coordinates are absolute buffer cells.
+/// Nodes are the selectable line's gutter cell with
+/// [`crate::CellRole::Node`]. Rails, junctions, spacer cells, and blanks are
+/// chrome and have no icon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GraphIconKind {
+    /// Commit node (`●` / `*`).
+    CommitNode,
+    /// HEAD commit node (`⊙` / `@`).
+    HeadNode,
+    /// Stash tip (`◇` / `s`).
+    StashNode,
+    /// Uncommitted-row glyph (`○` / `o`).
+    Uncommitted,
+    /// Linked-worktree glyph on a worktree row or a spacer worktree mark.
+    Worktree,
+    /// Open comment mark after the gutter.
+    Comment,
+    /// Resolved comment mark after the gutter.
+    ResolvedComment,
+    /// A [`GraphWidget::row_badges`] glyph.
+    Badge,
+}
+
+/// Painted cells of one graph icon.
+///
+/// [`GraphWidget::render_with_icon_spans`] returns one per icon that is on
+/// screen. Coordinates are absolute buffer cells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RowBadgeSpan {
-    /// [`GraphModel::visible_rows`] index of the badged row.
+pub struct IconSpan {
+    /// What the icon is.
+    pub kind: GraphIconKind,
+    /// [`GraphModel::visible_rows`] index of the row. A spacer worktree mark
+    /// carries its commit row.
     pub row_index: usize,
-    /// First painted column of the badge glyph.
+    /// First painted column of the glyph.
     pub x: u16,
-    /// Buffer row of the badge.
+    /// Buffer row of the glyph.
     pub y: u16,
-    /// Painted width of the badge glyph in columns.
+    /// Painted width of the glyph in columns.
     pub width: u16,
+    /// Which part of the row the icon stands for, when a row can paint more
+    /// than one of its kind: for [`GraphIconKind::Worktree`], the index into
+    /// the commit row's `worktrees` (`0` on a worktree row). `None` for the
+    /// other kinds.
+    pub part: Option<usize>,
+}
+
+/// Node icon of `row`'s selectable line: commit, HEAD, or stash.
+fn node_icon_kind(row: &GraphRow) -> Option<GraphIconKind> {
+    match row {
+        GraphRow::Commit { is_head: true, .. } => Some(GraphIconKind::HeadNode),
+        GraphRow::Commit { .. } => Some(GraphIconKind::CommitNode),
+        GraphRow::Stash(_) => Some(GraphIconKind::StashNode),
+        GraphRow::Uncommitted { .. } | GraphRow::Worktree(_) => None,
+    }
 }
 
 /// Renderable git-graph widget.
@@ -202,7 +254,11 @@ impl<'a> GraphWidget<'a> {
     ///
     /// `indices` are [`GraphModel::visible_rows`] indexes. Selected rows keep
     /// `▌`. The comment glyph stays visible on the selected row. Spacers
-    /// stay unmarked. Uncommented rows do not reserve a column.
+    /// stay unmarked. Uncommented rows do not reserve a column. With a
+    /// [`Self::label_palette`] the mark paints in
+    /// [`GraphLabelPalette::comment`] (resolved:
+    /// [`GraphLabelPalette::comment_resolved`]); without one it paints in
+    /// the bold cursor colour.
     pub fn commented_rows(mut self, indices: &'a [usize]) -> Self {
         self.commented_rows = indices;
         self
@@ -238,8 +294,8 @@ impl<'a> GraphWidget<'a> {
     /// and scrolls and clips with it ([`Self::col_offset`], pane width). The
     /// gutter is not touched. Spacers and rows not listed get no badge and
     /// reserve no column. A search-match row paints the glyph in the search
-    /// foreground, like its label. Use [`Self::render_with_badge_spans`] to
-    /// learn where each badge landed.
+    /// foreground, like its label. The [`GraphIconKind::Badge`] spans of
+    /// [`Self::render_with_icon_spans`] tell where each badge landed.
     pub fn row_badges(mut self, badges: &'a [(usize, &'a str, Color)]) -> Self {
         self.row_badges = badges;
         self
@@ -404,21 +460,25 @@ pub fn graph_col_max(
 
 impl Widget for GraphWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        self.render_with_badge_spans(area, buf);
+        self.render_with_icon_spans(area, buf);
     }
 }
 
 impl GraphWidget<'_> {
     /// Paint like [`Widget::render`] and return the painted cells of every
-    /// [`Self::row_badges`] glyph that is on screen.
+    /// graph icon that is on screen, in paint order (top to bottom; per
+    /// line: node, comment mark, label glyphs, badge).
     ///
-    /// A badge scrolled out of the list, cut by [`Self::col_offset`], or
-    /// clipped by the pane width is left out. Callers use the spans for
-    /// mouse hit tests.
-    pub fn render_with_badge_spans(self, area: Rect, buf: &mut Buffer) -> Vec<RowBadgeSpan> {
-        let mut badge_spans = Vec::new();
+    /// Icons are the selectable line's node cell, the comment mark, the
+    /// uncommitted and worktree glyphs (worktree rows and spacer worktree
+    /// marks), and [`Self::row_badges`]. Rails and junctions are not icons.
+    /// An icon scrolled out of the list, cut by [`Self::col_offset`],
+    /// clipped by the gutter cap or the pane width, or under the horizontal
+    /// scrollbar row is left out. Callers use the spans for mouse hit tests.
+    pub fn render_with_icon_spans(self, area: Rect, buf: &mut Buffer) -> Vec<IconSpan> {
+        let mut icon_spans = Vec::new();
         if area.width == 0 || area.height == 0 {
-            return badge_spans;
+            return icon_spans;
         }
         let glyphs = if self.ascii { &ASCII } else { &UNICODE };
         let default_colors = default_lane_colors();
@@ -513,6 +573,11 @@ impl GraphWidget<'_> {
                     .row_index
                     .is_some_and(|i| self.resolved_comment_rows.contains(&i));
             let commented = open_comment || resolved_comment;
+            let node = line
+                .row_index
+                .filter(|_| line.selectable)
+                .and_then(|i| rows.get(i))
+                .and_then(node_icon_kind);
             let flash_bg = line.row_index.and_then(|i| {
                 self.flash_rows
                     .iter()
@@ -524,7 +589,7 @@ impl GraphWidget<'_> {
                 .filter(|_| line.selectable)
                 .and_then(|i| self.row_badges.iter().find(|(idx, _, _)| *idx == i))
                 .map(|(_, glyph, color)| (*glyph, *color));
-            let badge_cells = put_painted_line(
+            let icons = put_painted_line(
                 buf,
                 area.x,
                 y,
@@ -535,6 +600,8 @@ impl GraphWidget<'_> {
                     cursor_bar: self.cursor_bar,
                     search_match,
                     commented,
+                    comment_resolved: resolved_comment,
+                    node,
                 },
                 RowColors {
                     search_bg: self.search_bg,
@@ -556,13 +623,15 @@ impl GraphWidget<'_> {
                 },
                 badge,
             );
-            if let (Some(row_index), Some((x, width))) = (line.row_index, badge_cells) {
-                badge_spans.push(RowBadgeSpan {
+            if let Some(row_index) = line.row_index {
+                icon_spans.extend(icons.into_iter().map(|icon| IconSpan {
+                    kind: icon.kind,
                     row_index,
-                    x,
+                    x: icon.x,
                     y,
-                    width,
-                });
+                    width: icon.width,
+                    part: icon.part,
+                }));
             }
             y = y.saturating_add(1);
         }
@@ -603,8 +672,8 @@ impl GraphWidget<'_> {
                     buf,
                     &mut sb_state,
                 );
-                // The bar paints over the last list row and hides its badge.
-                badge_spans.retain(|span| span.y != sb_area.y);
+                // The bar paints over the last list row and hides its icons.
+                icon_spans.retain(|span| span.y != sb_area.y);
             }
         }
 
@@ -614,7 +683,7 @@ impl GraphWidget<'_> {
             footer_y = footer_y.saturating_sub(h);
             self.paint_footer(buf, area, footer_y, h, footer_lines, glyphs.behind);
         }
-        badge_spans
+        icon_spans
     }
 }
 
@@ -714,13 +783,25 @@ fn now_unix_secs() -> i64 {
 
 /// Per-row state for [`put_painted_line`].
 ///
-/// These four were positional `bool`s in a row, so a transposed pair at the
+/// These were positional `bool`s in a row, so a transposed pair at the
 /// call site compiled and painted the wrong chrome.
 struct RowFlags {
     selected: bool,
     cursor_bar: bool,
     search_match: bool,
     commented: bool,
+    /// Every comment on the row is resolved (with [`Self::commented`]).
+    comment_resolved: bool,
+    /// Node icon of the selectable line, if its row has one.
+    node: Option<GraphIconKind>,
+}
+
+/// One icon [`put_painted_line`] painted on its line.
+struct LineIcon {
+    kind: GraphIconKind,
+    part: Option<usize>,
+    x: u16,
+    width: u16,
 }
 
 /// Colours [`put_painted_line`] paints a row with. All come from the widget.
@@ -737,8 +818,8 @@ struct RowColors<'a> {
     palette: Option<GraphLabelPalette>,
 }
 
-/// Paint one graph line. Returns the painted `(x, width)` of `badge`'s
-/// glyph when it is on screen.
+/// Paint one graph line. Returns the icons painted on screen, in paint
+/// order: the node cell, the comment mark, the label glyphs, the badge.
 fn put_painted_line(
     buf: &mut Buffer,
     x: u16,
@@ -750,12 +831,14 @@ fn put_painted_line(
     col_offset: u16,
     comment_glyph: &str,
     badge: Option<(&str, Color)>,
-) -> Option<(u16, u16)> {
+) -> Vec<LineIcon> {
     let RowFlags {
         selected,
         cursor_bar,
         search_match,
         commented,
+        comment_resolved,
+        node,
     } = flags;
     let RowColors {
         search_bg,
@@ -769,8 +852,9 @@ fn put_painted_line(
         fallback,
         palette,
     } = colors;
+    let mut icons = Vec::new();
     if width == 0 {
-        return None;
+        return icons;
     }
     let row = Rect::new(x, y, width, 1);
     let show_bar = selected && line.selectable;
@@ -826,6 +910,14 @@ fn put_painted_line(
         // continuation so rails stay put when the label clips.
         buf[(col, y)].set_symbol(&cell.ch);
         buf[(col, y)].set_style(style);
+        if let Some(kind) = node.filter(|_| cell.role == CellRole::Node) {
+            icons.push(LineIcon {
+                kind,
+                part: None,
+                x: col,
+                width: 1,
+            });
+        }
         col = col.saturating_add(1);
     }
     if !line.gutter.is_empty() && col < end {
@@ -843,16 +935,35 @@ fn put_painted_line(
         } else {
             comment_glyph
         };
-        // The cursor colour can equal the search background, so a match row
+        // The mark colour can equal the search background, so a match row
         // paints the mark in the search foreground like its rails and label.
-        let mut mark_style = Style::default()
-            .fg(match_fg.unwrap_or(cursor_fg))
-            .add_modifier(Modifier::BOLD);
+        // With a label palette it matches the tree's comment mark (heading
+        // open, muted resolved); without one it is the bold cursor colour.
+        let mut mark_style = match palette {
+            Some(pal) => Style::default().fg(match_fg.unwrap_or(if comment_resolved {
+                pal.comment_resolved
+            } else {
+                pal.comment
+            })),
+            None => Style::default()
+                .fg(match_fg.unwrap_or(cursor_fg))
+                .add_modifier(Modifier::BOLD),
+        };
         if let Some(bg) = row_bg {
             mark_style = mark_style.bg(bg);
         }
         buf[(col, y)].set_symbol(glyph);
         buf[(col, y)].set_style(mark_style);
+        icons.push(LineIcon {
+            kind: if comment_resolved {
+                GraphIconKind::ResolvedComment
+            } else {
+                GraphIconKind::Comment
+            },
+            part: None,
+            x: col,
+            width: u16::try_from(Span::raw(glyph).width()).unwrap_or(1),
+        });
         col = col.saturating_add(1);
         if col < end {
             let mut gap = Style::default();
@@ -866,7 +977,7 @@ fn put_painted_line(
     }
     let label_w = end.saturating_sub(col);
     if label_w == 0 {
-        return None;
+        return icons;
     }
     let sliced = slice_line_label(line, col_offset as usize, label_w as usize);
     let mut spans = label_spans(&sliced, palette, fallback);
@@ -882,18 +993,27 @@ fn put_painted_line(
     painted
         .style(row_style)
         .render(Rect::new(col, y, label_w, 1), buf);
-    let (glyph, color) = badge?;
+    icons.extend(label_icons(
+        line,
+        &sliced,
+        col,
+        col_offset as usize,
+        painted_w,
+    ));
+    let Some((glyph, color)) = badge else {
+        return icons;
+    };
     // Label slicing counts chars: one space after the label, then the glyph.
     let label_chars = line.label.chars().count();
     let gap = match (col_offset as usize).cmp(&(label_chars + 1)) {
         std::cmp::Ordering::Less => 1,
         std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => return None,
+        std::cmp::Ordering::Greater => return icons,
     };
     let glyph_x = col.saturating_add(painted_w).saturating_add(gap);
     let glyph_w = u16::try_from(Span::raw(glyph).width()).unwrap_or(u16::MAX);
     if glyph.is_empty() || glyph_w == 0 || glyph_x.saturating_add(glyph_w) > end {
-        return None;
+        return icons;
     }
     let mut style = Style::default().fg(match_fg.unwrap_or(color));
     if let Some(bg) = row_bg {
@@ -901,7 +1021,53 @@ fn put_painted_line(
     }
     buf[(glyph_x, y)].set_symbol(glyph);
     buf[(glyph_x, y)].set_style(style);
-    Some((glyph_x, glyph_w))
+    icons.push(LineIcon {
+        kind: GraphIconKind::Badge,
+        part: None,
+        x: glyph_x,
+        width: glyph_w,
+    });
+    icons
+}
+
+/// Icons among the label parts of `line` that are wholly on screen.
+///
+/// `sliced` is the label as painted from column `col`: `line` cut by
+/// `offset` columns and `painted_w` wide. A glyph cut by the offset or the
+/// pane edge is left out.
+fn label_icons(
+    line: &PaintedLine,
+    sliced: &PaintedLine,
+    col: u16,
+    offset: usize,
+    painted_w: u16,
+) -> Vec<LineIcon> {
+    let mut icons = Vec::new();
+    let mut start = 0;
+    for part in &line.parts {
+        let chars = part.text.chars().count();
+        let at = start;
+        start += chars;
+        let Some((kind, part_id)) = part.kind.icon() else {
+            continue;
+        };
+        if at < offset || chars == 0 {
+            continue;
+        }
+        let before: String = sliced.label.chars().take(at - offset).collect();
+        let x = u16::try_from(Span::raw(before).width()).unwrap_or(u16::MAX);
+        let width = u16::try_from(Span::raw(part.text.as_str()).width()).unwrap_or(u16::MAX);
+        if width == 0 || x.saturating_add(width) > painted_w {
+            continue;
+        }
+        icons.push(LineIcon {
+            kind,
+            part: part_id,
+            x: col.saturating_add(x),
+            width,
+        });
+    }
+    icons
 }
 
 fn slice_line_label(line: &PaintedLine, offset: usize, width: usize) -> PaintedLine {
@@ -941,6 +1107,9 @@ fn label_kind_color(kind: LabelKind, pal: GraphLabelPalette) -> Color {
         LabelKind::ChipRemote => pal.remote,
         LabelKind::ChipTag => pal.tag,
         LabelKind::Overflow => pal.overflow,
+        LabelKind::UncommittedMark { dirty: true } => pal.dirty,
+        LabelKind::UncommittedMark { dirty: false } => pal.meta,
+        LabelKind::WorktreeMark { .. } => pal.worktree,
     }
 }
 
@@ -2699,19 +2868,27 @@ mod tests {
         (model, worktree_row)
     }
 
+    /// The [`GraphIconKind::Badge`] spans among `spans`.
+    fn badge_spans(spans: Vec<IconSpan>) -> Vec<IconSpan> {
+        spans
+            .into_iter()
+            .filter(|span| span.kind == GraphIconKind::Badge)
+            .collect()
+    }
+
     fn render_badges(
         model: &GraphModel,
         width: u16,
         col_offset: u16,
         badges: &[(usize, &str, Color)],
-    ) -> (Buffer, Vec<RowBadgeSpan>) {
+    ) -> (Buffer, Vec<IconSpan>) {
         let mut buf = Buffer::empty(Rect::new(0, 0, width, 12));
         let spans = GraphWidget::new(model)
             .now_unix(NOW)
             .col_offset(col_offset)
             .row_badges(badges)
-            .render_with_badge_spans(buf.area, &mut buf);
-        (buf, spans)
+            .render_with_icon_spans(buf.area, &mut buf);
+        (buf, badge_spans(spans))
     }
 
     fn buf_row(buf: &Buffer, y: u16) -> String {
@@ -2795,8 +2972,8 @@ mod tests {
                 .now_unix(NOW)
                 .col_offset(col_offset)
                 .row_badges(&badges)
-                .render_with_badge_spans(buf.area, &mut buf);
-            (buf, spans)
+                .render_with_icon_spans(buf.area, &mut buf);
+            (buf, badge_spans(spans))
         };
         let mut covered = 0;
         for height in 3..16 {
@@ -3021,6 +3198,10 @@ mod tests {
             tag: hex_color("#e0af68"),
             head_mark: hex_color("#ff9e64"),
             overflow: hex_color("#7dcfff"),
+            worktree: hex_color("#bb9af7"),
+            dirty: hex_color("#e0af69"),
+            comment: hex_color("#bb9af8"),
+            comment_resolved: hex_color("#565f8a"),
         }
     }
 
@@ -3631,5 +3812,270 @@ mod tests {
             render_lines(&model, 60, height, false);
             assert_eq!(crate::paint::paint_calls() - before, 1, "height {height}");
         }
+    }
+
+    /// Icon spans of `model` in ASCII on a `width` × `height` buffer.
+    fn render_icons(
+        model: &GraphModel,
+        width: u16,
+        height: u16,
+        col_offset: u16,
+        commented: &[usize],
+        resolved: &[usize],
+    ) -> (Buffer, Vec<IconSpan>) {
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
+        let spans = GraphWidget::new(model)
+            .ascii(true)
+            .now_unix(NOW)
+            .col_offset(col_offset)
+            .commented_rows(commented)
+            .resolved_comment_rows(resolved)
+            .render_with_icon_spans(buf.area, &mut buf);
+        (buf, spans)
+    }
+
+    /// ASCII glyph each icon kind paints.
+    fn ascii_icon_glyph(kind: GraphIconKind) -> &'static str {
+        match kind {
+            GraphIconKind::CommitNode => ASCII.commit,
+            GraphIconKind::HeadNode => ASCII.head_commit,
+            GraphIconKind::StashNode => ASCII.stash,
+            GraphIconKind::Uncommitted => ASCII.uncommitted,
+            GraphIconKind::Worktree => ASCII.worktree,
+            GraphIconKind::Comment => "\"",
+            GraphIconKind::ResolvedComment => "'",
+            GraphIconKind::Badge => "P",
+        }
+    }
+
+    /// Sample model with the ignored `notes` worktree shown: rows are
+    /// uncommitted (0), stash (1), HEAD commit with two worktree marks on
+    /// its spacer (2), and the root commit (3).
+    fn icon_model() -> GraphModel {
+        GraphModel {
+            show_ignored: true,
+            ..sample_model()
+        }
+    }
+
+    #[test]
+    fn icon_spans_cover_nodes_label_glyphs_comment_and_spacer_worktree_marks() {
+        let model = icon_model();
+        let (buf, spans) = render_icons(&model, 70, 12, 0, &[2], &[]);
+        let got: Vec<(GraphIconKind, usize, Option<usize>)> = spans
+            .iter()
+            .map(|span| (span.kind, span.row_index, span.part))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (GraphIconKind::Uncommitted, 0, None),
+                (GraphIconKind::StashNode, 1, None),
+                (GraphIconKind::HeadNode, 2, None),
+                (GraphIconKind::Comment, 2, None),
+                (GraphIconKind::Worktree, 2, Some(0)),
+                (GraphIconKind::Worktree, 2, Some(1)),
+                (GraphIconKind::CommitNode, 3, None),
+            ]
+        );
+        for span in &spans {
+            assert_eq!(span.width, 1, "{span:?}");
+            assert_eq!(
+                buf[(span.x, span.y)].symbol(),
+                ascii_icon_glyph(span.kind),
+                "{span:?}"
+            );
+        }
+        // The worktree marks sit on the HEAD spacer, after the gutter.
+        let marks: Vec<&IconSpan> = spans
+            .iter()
+            .filter(|span| span.kind == GraphIconKind::Worktree)
+            .collect();
+        let spacer = buf_row(&buf, marks[0].y);
+        assert!(spacer.contains("L .worktrees/feature/graph feature/graph L notes"));
+        assert_eq!(marks[0].y, marks[1].y);
+        // Rails, junctions, the stash spacer, and the root's meta spacer
+        // carry no icon.
+        let rails = ["|", "-", "/", "\\", "+"];
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if rails.contains(&buf[(x, y)].symbol()) {
+                    assert!(
+                        !spans.iter().any(|span| span.y == y && span.x == x),
+                        "rail cell {x},{y} is chrome"
+                    );
+                }
+            }
+        }
+        let stash_spacer = (0..12)
+            .find(|y| buf_row(&buf, *y).contains("stash@{0}"))
+            .expect("stash spacer");
+        assert!(!spans.iter().any(|span| span.y == stash_spacer));
+    }
+
+    #[test]
+    fn node_spans_stay_put_while_label_glyphs_pan_and_clip() {
+        let model = icon_model();
+        let (_, plain) = render_icons(&model, 70, 12, 0, &[], &[]);
+        let (buf, panned) = render_icons(&model, 70, 12, 1, &[], &[]);
+        let nodes = |spans: &[IconSpan]| -> Vec<IconSpan> {
+            spans
+                .iter()
+                .filter(|span| {
+                    matches!(
+                        span.kind,
+                        GraphIconKind::CommitNode
+                            | GraphIconKind::HeadNode
+                            | GraphIconKind::StashNode
+                    )
+                })
+                .copied()
+                .collect()
+        };
+        assert_eq!(nodes(&plain).len(), 3);
+        assert_eq!(nodes(&plain), nodes(&panned), "the gutter does not pan");
+        // The uncommitted glyph and the first worktree mark start the label:
+        // one column of pan cuts them. The second mark moves left by one.
+        let kinds: Vec<(GraphIconKind, Option<usize>)> = panned
+            .iter()
+            .filter(|span| !nodes(&plain).contains(span))
+            .map(|span| (span.kind, span.part))
+            .collect();
+        assert_eq!(kinds, vec![(GraphIconKind::Worktree, Some(1))]);
+        let before = plain
+            .iter()
+            .find(|span| span.part == Some(1))
+            .expect("second mark");
+        let after = panned
+            .iter()
+            .find(|span| span.part == Some(1))
+            .expect("second mark panned");
+        assert_eq!((after.x, after.y), (before.x - 1, before.y));
+        assert_eq!(buf[(after.x, after.y)].symbol(), ASCII.worktree);
+        // A narrow pane cuts the second mark off the right edge.
+        let (_, narrow) = render_icons(&model, 40, 12, 0, &[], &[]);
+        assert!(!narrow.iter().any(|span| span.part == Some(1)));
+    }
+
+    #[test]
+    fn a_node_clipped_by_the_gutter_cap_has_no_span() {
+        let model = merge_model();
+        let render = |cap: Option<u16>| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 60, 12));
+            let mut widget = GraphWidget::new(&model).ascii(true).now_unix(NOW);
+            if let Some(cap) = cap {
+                widget = widget.gutter_width(cap);
+            }
+            let spans = widget.render_with_icon_spans(buf.area, &mut buf);
+            spans
+                .iter()
+                .map(|span| span.row_index)
+                .collect::<Vec<usize>>()
+        };
+        // `right` (row 2) is on the second lane, gutter column 2.
+        assert_eq!(render(None), vec![0, 1, 2, 3]);
+        assert_eq!(render(Some(2)), vec![0, 1, 3]);
+    }
+
+    #[test]
+    fn icon_spans_under_the_horizontal_bar_are_dropped() {
+        let mut model = icon_model();
+        model.commits[1].subject = "a root subject long enough to overflow the pane".into();
+        let width = 40;
+        assert!(graph_col_max(&model, true, width, true, &[]) > 0);
+        let mut covered = 0;
+        for height in 4..14 {
+            let (_, plain) = render_icons(&model, width, height, 0, &[], &[]);
+            let (buf, panned) = render_icons(&model, width, height, 1, &[], &[]);
+            for span in &panned {
+                assert_eq!(
+                    buf[(span.x, span.y)].symbol(),
+                    ascii_icon_glyph(span.kind),
+                    "height {height}: {span:?}"
+                );
+            }
+            for node in plain.iter().filter(|span| {
+                span.kind == GraphIconKind::CommitNode
+                    || span.kind == GraphIconKind::HeadNode
+                    || span.kind == GraphIconKind::StashNode
+            }) {
+                if !panned.contains(node) {
+                    covered += 1;
+                    assert_ne!(
+                        buf[(node.x, node.y)].symbol(),
+                        ascii_icon_glyph(node.kind),
+                        "height {height}: a dropped node is under the bar"
+                    );
+                }
+            }
+        }
+        assert!(covered > 0, "some height puts a node under the bar");
+    }
+
+    #[test]
+    fn comment_and_row_glyphs_paint_their_palette_colours() {
+        let pal = test_label_palette();
+        let model = GraphModel {
+            commits: vec![commit(
+                "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "seed",
+                &[],
+            )],
+            worktrees: vec![Worktree {
+                path: "notes".into(),
+                head_id: Some("elsewhere".into()),
+                branch: None,
+                ignored: true,
+                is_current: true,
+            }],
+            uncommitted: Some(true),
+            show_ignored: true,
+            ..GraphModel::default()
+        };
+        let render = |model: &GraphModel| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 60, 10));
+            let spans = GraphWidget::new(model)
+                .ascii(true)
+                .now_unix(NOW)
+                .commented_rows(&[1])
+                .resolved_comment_rows(&[2])
+                .label_palette(pal)
+                .render_with_icon_spans(buf.area, &mut buf);
+            (buf, spans)
+        };
+        let (buf, spans) = render(&model);
+        let at = |kind: GraphIconKind| {
+            spans
+                .iter()
+                .find(|span| span.kind == kind)
+                .copied()
+                .unwrap_or_else(|| panic!("{kind:?} in {spans:?}"))
+        };
+        let open = at(GraphIconKind::Comment);
+        assert_eq!(buf[(open.x, open.y)].fg, pal.comment);
+        assert!(!buf[(open.x, open.y)].modifier.contains(Modifier::BOLD));
+        let resolved = at(GraphIconKind::ResolvedComment);
+        assert_eq!(buf[(resolved.x, resolved.y)].fg, pal.comment_resolved);
+        let dirty = at(GraphIconKind::Uncommitted);
+        assert_eq!(buf[(dirty.x, dirty.y)].fg, pal.dirty);
+        assert_eq!(buf[(dirty.x + 2, dirty.y)].fg, pal.subject, "row text");
+        let wt = at(GraphIconKind::Worktree);
+        assert_eq!(buf[(wt.x, wt.y)].fg, pal.worktree);
+        assert_eq!(buf[(wt.x + 2, wt.y)].fg, pal.subject, "path");
+        let row = buf_row(&buf, wt.y);
+        let col = |needle: &str| row[..row.find(needle).expect(needle)].chars().count() as u16;
+        assert_eq!(buf[(col("[ignored]") + 1, wt.y)].fg, pal.meta);
+        assert_eq!(buf[(col("[HEAD]") + 1, wt.y)].fg, pal.head_mark);
+
+        let clean = GraphModel {
+            uncommitted: Some(false),
+            ..model
+        };
+        let (buf, spans) = render(&clean);
+        let glyph = spans
+            .iter()
+            .find(|span| span.kind == GraphIconKind::Uncommitted)
+            .expect("clean glyph");
+        assert_eq!(buf[(glyph.x, glyph.y)].fg, pal.meta);
     }
 }

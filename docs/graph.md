@@ -26,7 +26,9 @@ whatever `visible_rows` the model holds.
 | `GraphCell` | One gutter column: glyph, colour lane, role |
 | `LaidOutCommit` | Lane assignment plus stem metadata for one commit |
 | `GraphWidget` | Ratatui `Widget` over a `GraphModel` |
-| `RowBadgeSpan` | Painted cell of one row badge (row index, x, y, width), from `render_with_badge_spans` |
+| `IconSpan` | Painted cells of one graph icon (`GraphIconKind`, row index, x, y, width, `part`), from `render_with_icon_spans` |
+| `GraphIconKind` | Commit / HEAD / stash node, uncommitted glyph, worktree glyph, open / resolved comment mark, row badge |
+| `GraphLabelPalette` | Label colours: subject, meta, chips, overflow, worktree glyph, dirty uncommitted glyph, open and resolved comment marks |
 | `graph_scrollbar_thumb` | Thumb offset/length matching a painted bar (TUI hit-test, vertical or horizontal) |
 | `graph_col_max` | Max `col_offset` for the longest label in the pane, counting the space and glyph of each `row_badges` entry |
 | `graph_vscroll_visible` / `graph_hscroll_visible` | Show the vertical bar whenever the painted lines overflow the list (or it has left the top); the horizontal bar only after leaving the left edge |
@@ -72,7 +74,10 @@ comment on that row is resolved. Open `commented_rows` win when a row
 is in both lists. The comment glyph stays
 visible on the selected row. Uncommented rows do not reserve a
 column. Spacers stay unmarked. The TUI passes `icon_comment` /
-`icon_comment_resolved` so the glyphs match tree and diff marks.
+`icon_comment_resolved` so the glyphs match tree and diff marks. With a
+`label_palette` the mark paints in `comment` (open) or `comment_resolved`
+(the TUI passes heading and muted, the tree mark's colours); without one it
+paints in the bold cursor colour.
 The widget does not use reverse video for the cursor.
 `GraphWidget::col_offset` skips label columns (gutter stays put) so long
 subjects can pan without growing the row.
@@ -81,15 +86,43 @@ entries and paints the glyph one space after the label of those selectable
 rows. The badge pans and clips with the label (`col_offset`, pane width).
 It does not change the gutter, and rows that are not listed reserve no
 column. A search-match row paints the badge in the filter foreground.
-`GraphWidget::render_with_badge_spans` paints like `render` and returns one
-`RowBadgeSpan` per badge that is on screen, so the caller can hit-test it.
-A badge that is scrolled out, panned past, clipped, or under the
+`GraphWidget::render_with_icon_spans` returns one `GraphIconKind::Badge`
+span per badge that is on screen, so the caller can hit-test it (see
+**Icon spans**). A badge that is scrolled out, panned past, clipped, or under the
 horizontal scrollbar is left out. Pass the same entries to `graph_col_max`
 so panning can bring a badge on a long label into view. The TUI badges
 `GraphRow::Worktree` rows whose painted branch is the checkout's current
 branch and that have a known PR (open, approved, or merged), and records
 the spans for Ctrl+click. A graph loaded before a branch switch paints the
 old branch and gets no badge. Commit rows get no badge.
+
+### Icon spans
+
+`GraphWidget::render_with_icon_spans` paints like `render` and returns one
+`IconSpan` per graph icon on screen, top to bottom, and per line in paint
+order: node, comment mark, label glyphs, badge.
+
+| `GraphIconKind` | Where |
+| --- | --- |
+| `CommitNode` / `HeadNode` / `StashNode` | The gutter cell with `CellRole::Node` on the selectable line of a commit (HEAD) or stash row. It does not pan. |
+| `Uncommitted` | The `○` / `o` glyph that starts the uncommitted row label |
+| `Worktree` | The worktree glyph that starts a worktree row label, and each worktree mark on a commit spacer. `part` is the index into that commit row's `worktrees` (`0` on a worktree row). The span's `row_index` is the commit row. |
+| `Comment` / `ResolvedComment` | The comment mark after the gutter |
+| `Badge` | A `row_badges` glyph |
+
+Rails, junctions, spacer gutter cells, and blanks are chrome: they have
+no span. A node cut by the gutter cap, a label glyph cut by `col_offset` or
+the pane edge, and any icon under the horizontal scrollbar row are left
+out.
+
+The label glyphs are their own `LabelPart`s, so the text of a line
+(`PaintedLine::text`, the label, the spacer) does not change.
+`LabelKind::UncommittedMark { dirty }` paints in `dirty` when the row has
+changes and in `meta` when clean. `LabelKind::WorktreeMark { worktree }`
+paints in `worktree`. On a worktree row the path and branch are the
+subject, `[ignored]` is meta, and `[HEAD]` is the head mark. On a commit
+spacer the worktree mark text stays meta. `LabelKind::icon` maps a part to
+its `GraphIconKind` and `part`.
 
 ## Visible rows
 

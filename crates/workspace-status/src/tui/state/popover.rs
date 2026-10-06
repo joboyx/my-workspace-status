@@ -11,7 +11,7 @@ use super::super::action::{Action, Effect};
 use super::super::chrome::open_dialog;
 use super::super::comments::{
     commit_file_row_comments, commit_file_row_comments_resolved, commit_file_row_has_comment,
-    tree_row_comments_resolved, tree_row_has_comment, CommentEntry,
+    graph_row_comments, tree_row_comments_resolved, tree_row_has_comment, CommentEntry,
 };
 use super::super::commit_files::CommitFileRow;
 use super::super::drill::CommitFileSource;
@@ -19,9 +19,9 @@ use super::super::gates::ListFocusTarget;
 use super::super::icons::IconKind;
 use super::super::keys::InputMode;
 use super::super::popover::{
-    flat_lines, focused_line, landing_line, popover_sections, step_line, tree_icon_target,
-    IconTarget, PopoverLine, PopoverOrigin, PopoverOwner, PopoverSection, PopoverState,
-    PEEK_DWELL_MS, PEEK_GRACE_MS,
+    flat_lines, focused_line, graph_icon, graph_row_id, landing_line, popover_sections, step_line,
+    tree_icon_target, IconTarget, PopoverLine, PopoverOrigin, PopoverOwner, PopoverSection,
+    PopoverState, PEEK_DWELL_MS, PEEK_GRACE_MS,
 };
 use super::super::pull_request::PrState;
 use super::super::selection::TextSelection;
@@ -31,6 +31,7 @@ use super::super::tree::{
     with_viewed_mark, NodeKind, NodeSegments, VisibleRow,
 };
 use super::{AppState, IconHit};
+use workspace_status_graph::{paint_model, GraphRow, ASCII, UNICODE};
 
 /// `gh` on a row that paints no icon.
 pub(crate) const NO_ICONS_ON_ROW: &str = "no icons on this row";
@@ -67,7 +68,10 @@ impl AppState {
                 .get(self.cursor)
                 .map(|row| row.id.clone())
                 .unwrap_or_default(),
-            ListFocusTarget::Graph => self.graph_cursor.to_string(),
+            ListFocusTarget::Graph => self
+                .focused_graph_row()
+                .map(|row| graph_row_id(&row))
+                .unwrap_or_default(),
             ListFocusTarget::CommitFiles => self
                 .focused_commit_file_row()
                 .map(|row| row.id)
@@ -97,7 +101,7 @@ impl AppState {
     pub(crate) fn open_popover_sections(&self) -> Vec<PopoverSection> {
         self.popover
             .as_ref()
-            .map(|popover| popover_sections(self, &popover.targets))
+            .map(|popover| popover_sections(self, &popover.targets, super::unix_now()))
             .unwrap_or_default()
     }
 
@@ -195,12 +199,7 @@ impl AppState {
                     .map(|kind| (kind, tree_icon_target(kind, row)))
                     .collect()
             }
-            ListFocusTarget::Graph => self
-                .graph_pr_badges()
-                .into_iter()
-                .filter(|(index, _, _)| *index == self.graph_cursor)
-                .map(|(_, repo, pr)| (pr_badge_kind(pr), IconTarget::PullRequest(repo)))
-                .collect(),
+            ListFocusTarget::Graph => self.graph_row_icons(self.graph_cursor),
             ListFocusTarget::CommitFiles => {
                 let Some(row) = self.focused_commit_file_row() else {
                     return Vec::new();
@@ -212,6 +211,71 @@ impl AppState {
             }
             ListFocusTarget::None => Vec::new(),
         }
+    }
+
+    /// Comments that paint their mark on graph row `row`, in store order.
+    pub(crate) fn graph_row_comments(&self, row: &GraphRow) -> Vec<&CommentEntry> {
+        let Some((repo, _)) = self.graph_identity.as_ref() else {
+            return Vec::new();
+        };
+        let snap = self.snapshot.repos.iter().find(|r| r.repo == *repo);
+        graph_row_comments(
+            &self.comment_store,
+            repo,
+            snap.and_then(|r| r.primary_repo.as_deref()),
+            row,
+            snap.map(|r| r.branch.as_str()),
+        )
+    }
+
+    /// Icons graph row `index` paints, in paint order: the node, the
+    /// comment mark, the label glyph, the PR badge, then the worktree marks
+    /// of its spacer. Icons clipped by the pane are included.
+    fn graph_row_icons(&self, index: usize) -> Vec<(IconKind, IconTarget)> {
+        let Some(model) = self.graph.as_ref() else {
+            return Vec::new();
+        };
+        let rows = model.visible_rows();
+        let Some(row) = rows.get(index) else {
+            return Vec::new();
+        };
+        let id = graph_row_id(row);
+        let mut icons = Vec::new();
+        let node = match row {
+            GraphRow::Commit { is_head: true, .. } => Some(IconKind::GraphHeadCommit),
+            GraphRow::Commit { .. } => Some(IconKind::GraphCommit),
+            GraphRow::Stash(_) => Some(IconKind::GraphStash),
+            GraphRow::Uncommitted { .. } | GraphRow::Worktree(_) => None,
+        };
+        icons.extend(node.map(|kind| (kind, IconTarget::GraphRow(id.clone()))));
+        let comments = self.graph_row_comments(row);
+        if !comments.is_empty() {
+            let kind = if comments.iter().all(|entry| entry.resolved) {
+                IconKind::CommentResolved
+            } else {
+                IconKind::Comment
+            };
+            icons.push((kind, IconTarget::GraphRow(id)));
+        }
+        let glyphs = if self.ascii { &ASCII } else { &UNICODE };
+        for line in paint_model(model, glyphs, None)
+            .iter()
+            .filter(|line| line.row_index == Some(index))
+        {
+            icons.extend(line.parts.iter().filter_map(|part| {
+                let (kind, part) = part.kind.icon()?;
+                graph_icon(kind, part, row)
+            }));
+            if line.selectable {
+                icons.extend(
+                    self.graph_pr_badges()
+                        .into_iter()
+                        .filter(|(badged, _, _)| *badged == index)
+                        .map(|(_, repo, pr)| (pr_badge_kind(pr), IconTarget::PullRequest(repo))),
+                );
+            }
+        }
+        icons
     }
 
     /// True when `target` is on the focused row, so its action lines act
@@ -231,6 +295,22 @@ impl AppState {
             IconTarget::PullRequest(repo) => self
                 .pr_target_for_focus()
                 .is_some_and(|(focused, _)| &focused == repo),
+            IconTarget::GraphRow(id) => {
+                self.list_focus_target() == ListFocusTarget::Graph
+                    && self
+                        .focused_graph_row()
+                        .is_some_and(|row| graph_row_id(&row) == *id)
+            }
+            IconTarget::GraphWorktree(path) => {
+                self.list_focus_target() == ListFocusTarget::Graph
+                    && self.focused_graph_row().is_some_and(|row| match row {
+                        GraphRow::Worktree(worktree) => worktree.path == *path,
+                        GraphRow::Commit { worktrees, .. } => {
+                            worktrees.iter().any(|worktree| worktree.path == *path)
+                        }
+                        GraphRow::Uncommitted { .. } | GraphRow::Stash(_) => false,
+                    })
+            }
         }
     }
 
@@ -266,7 +346,11 @@ impl AppState {
     fn pin(&mut self, targets: Vec<(IconKind, IconTarget)>, anchor: Option<Rect>) {
         self.peek = PeekTimers::default();
         self.popover_press = None;
-        let focus_line = landing_line(&flat_lines(&popover_sections(self, &targets)));
+        let focus_line = landing_line(&flat_lines(&popover_sections(
+            self,
+            &targets,
+            super::unix_now(),
+        )));
         self.popover = Some(PopoverState {
             origin: PopoverOrigin::Pinned,
             targets,
@@ -316,7 +400,7 @@ impl AppState {
     /// The focused line of the pinned popover, rebuilt from live state.
     fn focused_popover_line(&self) -> Option<PopoverLine> {
         let popover = self.popover.as_ref().filter(|_| self.popover_pinned())?;
-        let sections = popover_sections(self, &popover.targets);
+        let sections = popover_sections(self, &popover.targets, super::unix_now());
         let lines = flat_lines(&sections);
         let index = focused_line(&lines, popover.focus_line)?;
         Some(lines[index].clone())
@@ -651,6 +735,11 @@ mod tests {
     use crate::helpers::STATUS_FAILED_NOTE;
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
+    };
+    use crate::tui::comments::{put_comment, CommentKey};
+    use workspace_status_graph::{
+        format_local_timestamp, format_relative_date, Commit, GraphModel, Stash, SyncState,
+        SyncStatus as GraphSyncStatus, Worktree,
     };
 
     const PR_REMOTE: &str = "https://github.com/octo/demo.git";
@@ -1890,5 +1979,359 @@ mod tests {
         );
         assert_eq!(app.focus, FocusPane::Left, "no drill");
         assert!(app.popover_pinned());
+    }
+
+    const G_HEAD: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const G_ROOT: &str = "bbb2222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const G_STASH: &str = "ccc3333ccccccccccccccccccccccccccccccccc";
+    /// Author date of every graph fixture entry: old enough to paint as a
+    /// local timestamp.
+    const G_WHEN: i64 = 1_700_000_000;
+
+    fn g_worktree(path: &str, head: &str, branch: &str, current: bool) -> Worktree {
+        Worktree {
+            path: path.into(),
+            head_id: Some(head.into()),
+            branch: Some(branch.into()),
+            ignored: false,
+            is_current: current,
+        }
+    }
+
+    fn g_stash(id: &str, stash_ref: &str) -> Stash {
+        Stash {
+            id: id.into(),
+            stash_ref: stash_ref.into(),
+            subject: "WIP on main".into(),
+            body: String::new(),
+            author_name: "Ada".into(),
+            author_date_unix: G_WHEN,
+            parent_id: Some(G_HEAD.into()),
+        }
+    }
+
+    /// Graph of `app`: uncommitted (0), a stash on HEAD (1), HEAD (2) with
+    /// the linked `app/.worktrees/feat` mark on its spacer and an open
+    /// comment, the root (3), and the worktree row `app/.worktrees/old`
+    /// (4). The graph pane is focused on HEAD.
+    fn graph_app() -> AppState {
+        let mut app = app();
+        let commit = |id: &str, subject: &str, parents: &[&str], refs: &[&str]| Commit {
+            id: id.into(),
+            subject: subject.into(),
+            parents: parents.iter().map(|p| (*p).to_string()).collect(),
+            refs: refs.iter().map(|r| (*r).into()).collect(),
+            author_name: "Ada".into(),
+            author_date_unix: G_WHEN,
+            ..Commit::default()
+        };
+        app.graph = Some(GraphModel {
+            commits: vec![
+                commit(G_HEAD, "add graph", &[G_ROOT], &["main"]),
+                commit(G_ROOT, "root", &[], &[]),
+            ],
+            stashes: vec![g_stash(G_STASH, "stash@{0}")],
+            worktrees: vec![
+                g_worktree("app", G_HEAD, "main", true),
+                g_worktree("app/.worktrees/feat", G_HEAD, "feat", false),
+                g_worktree("app/.worktrees/old", "elsewhere", "old", false),
+            ],
+            head_id: Some(G_HEAD.into()),
+            sync: Some(SyncState {
+                branch: "main".into(),
+                status: GraphSyncStatus::Ahead,
+                ahead: 1,
+                behind: 0,
+            }),
+            uncommitted: Some(true),
+            ..GraphModel::default()
+        });
+        app.graph_identity = Some(("app".into(), G_HEAD.into()));
+        app.comment_store = put_comment(
+            &app.comment_store,
+            CommentKey::Commit {
+                repo: "app".into(),
+                sha: G_HEAD.into(),
+            },
+            "check this\nsecond line",
+        );
+        app.focus = FocusPane::Right;
+        app.graph_cursor = 2;
+        app
+    }
+
+    /// `gh` on graph row `index`: each section's icon and line texts.
+    fn gh_on_graph(app: &mut AppState, index: usize) -> Vec<(IconKind, Vec<String>)> {
+        app.close_popover();
+        app.graph_cursor = index;
+        app.dispatch(Action::PopoverOpenFocused);
+        assert!(app.popover_pinned(), "gh pins on graph row {index}");
+        app.open_popover_sections()
+            .into_iter()
+            .map(|section| {
+                let lines = section.lines.iter().map(PopoverLine::copy_text).collect();
+                (section.icon, lines)
+            })
+            .collect()
+    }
+
+    fn title(action: Action) -> &'static str {
+        command_for(&action).expect("palette row").title
+    }
+
+    #[test]
+    fn every_graph_row_icon_has_its_fields_and_actions() {
+        use IconKind as K;
+        let mut app = graph_app();
+        let date = format_local_timestamp(G_WHEN);
+        let date = date.as_str();
+        let head = gh_on_graph(&mut app, 2);
+        assert_eq!(
+            head,
+            vec![
+                (
+                    K::GraphHeadCommit,
+                    texts(&[
+                        meaning(K::GraphHeadCommit),
+                        "aaa1111",
+                        "add graph",
+                        "Ada",
+                        date,
+                        "bbb2222",
+                        "main",
+                        "on main",
+                        "^1 v0",
+                        title(Action::CompareCommitVsParent),
+                        title(Action::GraphCreateBranch),
+                    ])
+                ),
+                (
+                    K::Comment,
+                    texts(&[
+                        meaning(K::Comment),
+                        "1 open · 0 resolved",
+                        "check this",
+                        title(Action::CommentStart),
+                        title(Action::ExportComments),
+                    ])
+                ),
+                // A mark on the HEAD spacer: fields only. Its keys would act
+                // on the focused commit row, not on the worktree.
+                (
+                    K::LinkedWorktree,
+                    texts(&[meaning(K::LinkedWorktree), "app/.worktrees/feat", "feat"])
+                ),
+            ]
+        );
+        assert_eq!(app.popover_owner().row, format!("commit:{G_HEAD}"));
+        assert_eq!(
+            gh_on_graph(&mut app, 1),
+            vec![(
+                K::GraphStash,
+                texts(&[
+                    meaning(K::GraphStash),
+                    "stash@{0}",
+                    "WIP on main",
+                    "Ada",
+                    date,
+                    "aaa1111",
+                    title(Action::GraphStashApply),
+                    title(Action::GraphStashPop),
+                    title(Action::GraphStashDrop),
+                ])
+            )]
+        );
+        assert_eq!(
+            gh_on_graph(&mut app, 0),
+            vec![(
+                K::GraphUncommitted,
+                texts(&[
+                    meaning(K::GraphUncommitted),
+                    "uncommitted changes",
+                    "0",
+                    "1",
+                    "0",
+                    title(Action::StashMenu),
+                    title(Action::Refresh),
+                ])
+            )]
+        );
+        assert_eq!(
+            gh_on_graph(&mut app, 3),
+            vec![(
+                K::GraphCommit,
+                texts(&[
+                    meaning(K::GraphCommit),
+                    "bbb2222",
+                    "root",
+                    "Ada",
+                    date,
+                    "none (root commit)",
+                    title(Action::CompareCommitVsParent),
+                    title(Action::GraphCreateBranch),
+                    title(Action::GraphCheckout),
+                    title(Action::GraphMerge),
+                ])
+            )]
+        );
+        // Its own worktree row keeps the worktree actions.
+        let row = gh_on_graph(&mut app, 4);
+        assert_eq!(
+            row,
+            vec![(
+                K::LinkedWorktree,
+                texts(&[
+                    meaning(K::LinkedWorktree),
+                    "app/.worktrees/old",
+                    "old",
+                    title(Action::OpenPullRequest),
+                    title(Action::RemoveWorktree),
+                    title(Action::CopyEntityReference),
+                ])
+            )]
+        );
+        // Disabled lines keep their gate reason: Drop stash off a stash row.
+        let drop = command_for(&Action::GraphStashDrop).unwrap();
+        assert!(app.palette_disabled_reason(drop).is_some());
+        app.graph_cursor = 1;
+        app.close_popover();
+        assert_eq!(app.palette_disabled_reason(drop), None);
+    }
+
+    #[test]
+    fn graph_dates_read_the_given_clock() {
+        let app = graph_app();
+        let date = |now: i64| -> String {
+            let sections = popover_sections(
+                &app,
+                &[(
+                    IconKind::GraphHeadCommit,
+                    IconTarget::GraphRow(format!("commit:{G_HEAD}")),
+                )],
+                now,
+            );
+            let lines = flat_lines(&sections);
+            match lines
+                .iter()
+                .find(|line| matches!(line, PopoverLine::Field { label, .. } if *label == "date"))
+            {
+                Some(PopoverLine::Field { value, .. }) => value.clone(),
+                _ => panic!("no date field"),
+            }
+        };
+        let local = format_local_timestamp(G_WHEN);
+        // Two minutes old: the local time, then the relative age.
+        let relative = format_relative_date(G_WHEN, G_WHEN + 120);
+        assert_ne!(relative, local);
+        assert_eq!(date(G_WHEN + 120), format!("{local} ({relative})"));
+        // A day old: the graph paints the local time only.
+        assert_eq!(date(G_WHEN + 86_400), local);
+    }
+
+    #[test]
+    fn a_graph_popover_belongs_to_its_row_not_the_cursor_index() {
+        let mut app = graph_app();
+        app.dispatch(Action::PopoverOpenFocused);
+        assert!(app.popover_pinned());
+        // A reload adds a stash: HEAD moves to index 3 and the cursor
+        // follows it. The popover stays on HEAD.
+        let model = app.graph.as_mut().unwrap();
+        model.stashes.insert(0, g_stash("ddd4444", "stash@{0}"));
+        model.stashes[1].stash_ref = "stash@{1}".into();
+        app.graph_cursor = 3;
+        assert!(app.popover_pinned(), "same row, new index");
+        paint(&mut app);
+        assert!(app.popover.is_some());
+        // The cursor index stays put but names another row now: closed.
+        app.graph_cursor = 2;
+        assert!(!app.popover_pinned(), "index 2 is a stash now");
+        paint(&mut app);
+        assert!(app.popover.is_none());
+    }
+
+    #[test]
+    fn graph_icons_record_hits_and_a_click_pins_the_node_alone() {
+        use IconKind as K;
+        let mut app = graph_app();
+        let terminal = paint(&mut app);
+        let graph: Vec<(IconKind, IconTarget)> = app
+            .layout
+            .icon_hits
+            .iter()
+            .filter(|hit| hit.x >= app.layout.right_x)
+            .map(|hit| (hit.kind, hit.target.clone()))
+            .collect();
+        let row = |id: &str| IconTarget::GraphRow(id.into());
+        assert_eq!(
+            graph,
+            vec![
+                (K::GraphUncommitted, row("uncommitted")),
+                (K::GraphStash, row(&format!("stash:{G_STASH}"))),
+                (K::GraphHeadCommit, row(&format!("commit:{G_HEAD}"))),
+                (K::Comment, row(&format!("commit:{G_HEAD}"))),
+                (
+                    K::LinkedWorktree,
+                    IconTarget::GraphWorktree("app/.worktrees/feat".into())
+                ),
+                (K::GraphCommit, row(&format!("commit:{G_ROOT}"))),
+                (
+                    K::LinkedWorktree,
+                    IconTarget::GraphWorktree("app/.worktrees/old".into())
+                ),
+            ]
+        );
+        let buf = terminal.backend().buffer();
+        let hit_of = |app: &AppState, kind: IconKind| {
+            app.layout
+                .icon_hits
+                .iter()
+                .find(|hit| hit.kind == kind)
+                .cloned()
+                .expect("hit")
+        };
+        let comment = hit_of(&app, K::Comment);
+        let palette = app.theme.palette();
+        assert_eq!(buf[(comment.x, comment.y)].symbol(), "\"");
+        assert_eq!(buf[(comment.x, comment.y)].fg, palette.heading);
+        let dirty = hit_of(&app, K::GraphUncommitted);
+        assert_eq!(buf[(dirty.x, dirty.y)].symbol(), "o");
+        assert_eq!(buf[(dirty.x, dirty.y)].fg, palette.modified);
+        let mark = hit_of(&app, K::LinkedWorktree);
+        assert_eq!(buf[(mark.x, mark.y)].symbol(), "L");
+        assert_eq!(buf[(mark.x, mark.y)].fg, palette.heading);
+
+        // A click on the stash node selects its row and pins its popover.
+        let stash = hit_of(&app, K::GraphStash);
+        assert_eq!(buf[(stash.x, stash.y)].symbol(), "s");
+        app.dispatch(Action::Click {
+            col: stash.x,
+            row: stash.y,
+        });
+        assert_eq!(app.graph_cursor, 1);
+        assert!(app.last_click.is_none(), "an icon click never drills");
+        assert!(app.popover_pinned());
+        assert_eq!(
+            app.popover.as_ref().unwrap().targets,
+            vec![(K::GraphStash, row(&format!("stash:{G_STASH}")))]
+        );
+        // Enter on the landing line (Apply stash) runs the existing action.
+        assert_eq!(
+            app.popover_run_action(),
+            Some(Action::GraphStashApply),
+            "landing line"
+        );
+        app.dispatch(Action::PopoverClose);
+        // The worktree mark on the HEAD spacer selects HEAD.
+        paint(&mut app);
+        let mark = hit_of(&app, K::LinkedWorktree);
+        app.dispatch(Action::Click {
+            col: mark.x,
+            row: mark.y,
+        });
+        assert_eq!(app.graph_cursor, 2);
+        assert_eq!(
+            app.open_popover_sections()[0].target,
+            IconTarget::GraphWorktree("app/.worktrees/feat".into())
+        );
     }
 }

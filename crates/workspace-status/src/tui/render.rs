@@ -11,7 +11,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 use workspace_status_graph::{
     footer_message_scroll_max, graph_col_max, graph_hscroll_visible, graph_vscroll_visible,
-    painted_line_count, short_id, GraphLabelPalette, GraphWidget,
+    painted_line_count, short_id, GraphIconKind, GraphLabelPalette, GraphWidget,
 };
 
 use std::cell::RefCell;
@@ -53,7 +53,7 @@ use super::icons::{
 use super::line_blame::{fit_annotation, BlameSide, BLAME_MENU_ROWS};
 use super::ops::RevertScope;
 use super::popover::{
-    flat_lines, focused_line, popover_rect, tree_icon_target, IconTarget, PopoverLine,
+    flat_lines, focused_line, graph_icon, popover_rect, tree_icon_target, IconTarget, PopoverLine,
     POPOVER_FOOTER, POPOVER_MAX_WIDTH,
 };
 use super::pull_request::PrState;
@@ -1212,20 +1212,35 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
             tag: pal.modified,
             head_mark: pal.head_mark,
             overflow: pal.heading,
+            worktree: pal.heading,
+            dirty: pal.modified,
+            comment: pal.heading,
+            comment_resolved: pal.muted,
         })
         .row_badges(&badges)
-        .render_with_badge_spans(area, frame.buffer_mut());
-    for span in spans {
-        if let Some((_, repo, pr, _, _)) = badge_rows.iter().find(|row| row.0 == span.row_index) {
-            state.layout.icon_hits.push(IconHit {
+        .render_with_icon_spans(area, frame.buffer_mut());
+    let rows = model.visible_rows();
+    let hits: Vec<IconHit> = spans
+        .iter()
+        .filter_map(|span| {
+            let (kind, target) = match span.kind {
+                GraphIconKind::Badge => badge_rows.iter().find(|row| row.0 == span.row_index).map(
+                    |(_, repo, pr, _, _)| {
+                        (pr_badge_kind(*pr), IconTarget::PullRequest(repo.clone()))
+                    },
+                )?,
+                kind => graph_icon(kind, span.part, rows.get(span.row_index)?)?,
+            };
+            Some(IconHit {
                 y: span.y,
                 x: span.x,
                 width: span.width,
-                kind: pr_badge_kind(*pr),
-                target: IconTarget::PullRequest(repo.clone()),
-            });
-        }
-    }
+                kind,
+                target,
+            })
+        })
+        .collect();
+    state.layout.icon_hits.extend(hits);
     record_graph_scrollbar(state, area, col_offset, &badges);
 }
 

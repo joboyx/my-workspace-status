@@ -30,8 +30,8 @@ pub use store::{
 pub use target::{
     collect_live_set, comments_in_focus_scope, commit_file_row_comments,
     commit_file_row_comments_resolved, commit_file_row_has_comment, covering_line_comment,
-    diff_focus_side, diff_line_comment_state, gc_comments, graph_row_comments_resolved,
-    graph_row_has_comment, resolve_comment_target, resolve_entity_reference, tree_row_comments,
-    tree_row_comments_resolved, tree_row_has_comment, viewport_line_number, viewport_line_range,
-    CommentExportList,
+    diff_focus_side, diff_line_comment_state, gc_comments, graph_row_comments,
+    graph_row_comments_resolved, graph_row_has_comment, resolve_comment_target,
+    resolve_entity_reference, tree_row_comments, tree_row_comments_resolved, tree_row_has_comment,
+    viewport_line_number, viewport_line_range, CommentExportList,
 };

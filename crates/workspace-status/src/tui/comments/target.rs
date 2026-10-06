@@ -1136,6 +1136,21 @@ pub fn graph_row_comments_resolved(
     .unwrap_or(false)
 }
 
+/// Comments that paint their mark on graph row `row`, in store order.
+pub fn graph_row_comments<'a>(
+    store: &'a CommentStore,
+    repo: &str,
+    primary: Option<&str>,
+    row: &GraphRow,
+    branch: Option<&str>,
+) -> Vec<&'a CommentEntry> {
+    store
+        .iter()
+        .filter(|(key, _)| graph_key_on_row(repo, primary, row, branch, key))
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
 fn graph_key_on_row(
     repo: &str,
     primary: Option<&str>,

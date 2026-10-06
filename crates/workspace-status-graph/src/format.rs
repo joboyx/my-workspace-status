@@ -60,6 +60,32 @@ pub enum LabelKind {
     /// Fully hidden leftover branch/tag count (`[+N]`). Truncated chips
     /// are visible and do not count toward `N`.
     Overflow,
+    /// Uncommitted-row glyph (`○` / `o`). `dirty` is true when the
+    /// worktree or index has changes.
+    UncommittedMark {
+        /// The row reads `uncommitted changes`, not `working tree clean`.
+        dirty: bool,
+    },
+    /// Linked-worktree glyph (U+F481 / `L`) of a worktree row or of a
+    /// worktree mark on a commit spacer.
+    WorktreeMark {
+        /// Index into the commit row's `worktrees`. `0` on a worktree row.
+        worktree: usize,
+    },
+}
+
+impl LabelKind {
+    /// The icon a part of this kind paints, and its part identity
+    /// ([`crate::IconSpan::part`]). `None` for text runs.
+    pub fn icon(self) -> Option<(crate::GraphIconKind, Option<usize>)> {
+        match self {
+            Self::UncommittedMark { .. } => Some((crate::GraphIconKind::Uncommitted, None)),
+            Self::WorktreeMark { worktree } => {
+                Some((crate::GraphIconKind::Worktree, Some(worktree)))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Ellipsis inside a truncated chip name. Brackets stay (`[feat…]`).
@@ -232,6 +258,57 @@ pub fn format_label(row: &GraphRow, glyphs: &GlyphSet) -> String {
     }
 }
 
+/// [`format_label`] as coloured runs.
+///
+/// The uncommitted glyph and the worktree glyph are their own parts
+/// ([`LabelKind::UncommittedMark`], [`LabelKind::WorktreeMark`]). A
+/// worktree row paints `[ignored]` as meta and `[HEAD]` as the head mark.
+/// Every other label is one subject run. The text is [`format_label`].
+pub(crate) fn format_label_parts(row: &GraphRow, glyphs: &GlyphSet) -> Vec<LabelPart> {
+    match row {
+        GraphRow::Uncommitted { has_changes } => {
+            let text = if *has_changes {
+                " uncommitted changes"
+            } else {
+                " working tree clean"
+            };
+            vec![
+                LabelPart {
+                    text: glyphs.uncommitted.to_string(),
+                    kind: LabelKind::UncommittedMark {
+                        dirty: *has_changes,
+                    },
+                },
+                LabelPart {
+                    text: text.to_string(),
+                    kind: LabelKind::Subject,
+                },
+            ]
+        }
+        GraphRow::Worktree(worktree) => {
+            let mut parts = worktree_mark_parts(worktree, glyphs, 0, LabelKind::Subject);
+            if worktree.is_current {
+                parts.push(LabelPart {
+                    text: "  [HEAD]".into(),
+                    kind: LabelKind::ChipHead,
+                });
+            }
+            parts
+        }
+        GraphRow::Stash(_) | GraphRow::Commit { .. } => {
+            let text = format_label(row, glyphs);
+            if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![LabelPart {
+                    text,
+                    kind: LabelKind::Subject,
+                }]
+            }
+        }
+    }
+}
+
 /// Inputs for [`format_commit_spacer`].
 pub struct CommitSpacerOpts<'a> {
     /// Commit whose spacer is painted.
@@ -385,17 +462,16 @@ pub fn assemble_commit_spacer(opts: CommitSpacerOpts<'_>) -> (String, Vec<LabelP
         opts.now_unix,
     );
     let mut prefix = Vec::new();
-    for worktree in opts.worktrees {
+    for (index, worktree) in opts.worktrees.iter().enumerate() {
         if worktree_covered_by_ref_chip(worktree, opts.commit, opts.is_head, opts.head_branch) {
             continue;
         }
-        let mark = worktree_mark(worktree, opts.glyphs);
-        if !mark.is_empty() {
-            prefix.push(vec![LabelPart {
-                text: mark,
-                kind: LabelKind::Meta,
-            }]);
-        }
+        prefix.push(worktree_mark_parts(
+            worktree,
+            opts.glyphs,
+            index,
+            LabelKind::Meta,
+        ));
     }
     let refs = commit_ref_chip_groups(
         &opts.commit.refs,
@@ -1009,15 +1085,39 @@ fn format_worktree(worktree: &Worktree, glyphs: &GlyphSet) -> String {
 }
 
 fn worktree_mark(worktree: &Worktree, glyphs: &GlyphSet) -> String {
-    let mut mark = format!("{} {}", glyphs.worktree, worktree.path);
+    parts_text(&worktree_mark_parts(worktree, glyphs, 0, LabelKind::Meta))
+}
+
+/// Worktree mark as parts: the glyph ([`LabelKind::WorktreeMark`] with
+/// `index`), ` path branch` as `text`, then `  [ignored]` as meta.
+fn worktree_mark_parts(
+    worktree: &Worktree,
+    glyphs: &GlyphSet,
+    index: usize,
+    text: LabelKind,
+) -> Vec<LabelPart> {
+    let mut name = format!(" {}", worktree.path);
     if let Some(branch) = &worktree.branch {
-        mark.push(' ');
-        mark.push_str(branch);
+        name.push(' ');
+        name.push_str(branch);
     }
+    let mut parts = vec![
+        LabelPart {
+            text: glyphs.worktree.to_string(),
+            kind: LabelKind::WorktreeMark { worktree: index },
+        },
+        LabelPart {
+            text: name,
+            kind: text,
+        },
+    ];
     if worktree.ignored {
-        mark.push_str("  [ignored]");
+        parts.push(LabelPart {
+            text: "  [ignored]".into(),
+            kind: LabelKind::Meta,
+        });
     }
-    mark
+    parts
 }
 
 /// True when the footer branch chip already represents this checkout.
@@ -1746,6 +1846,132 @@ mod tests {
         assert_eq!(format_row(&row, &UNICODE), " notes  [ignored]");
         assert_eq!(format_row(&row, &ASCII), "L notes  [ignored]");
         assert!(!format_row(&row, &UNICODE).contains("🔗"));
+    }
+
+    #[test]
+    fn label_parts_split_the_row_glyph_and_keep_the_label_text() {
+        let worktree = |ignored, is_current, branch: Option<&str>| {
+            GraphRow::Worktree(Worktree {
+                path: "notes".into(),
+                head_id: None,
+                branch: branch.map(Into::into),
+                ignored,
+                is_current,
+            })
+        };
+        let rows = [
+            GraphRow::Uncommitted { has_changes: true },
+            GraphRow::Uncommitted { has_changes: false },
+            worktree(true, false, None),
+            worktree(false, true, Some("feat")),
+            worktree(true, true, Some("feat")),
+            GraphRow::Stash(Stash {
+                subject: "WIP on main".into(),
+                ..Stash::default()
+            }),
+            GraphRow::Commit {
+                commit: Commit {
+                    subject: "add graph".into(),
+                    ..Commit::default()
+                },
+                is_head: false,
+                worktrees: Vec::new(),
+            },
+        ];
+        for glyphs in [&UNICODE, &ASCII] {
+            for row in &rows {
+                let parts = format_label_parts(row, glyphs);
+                assert_eq!(parts_text(&parts), format_label(row, glyphs), "{row:?}");
+                let icons: Vec<_> = parts.iter().filter_map(|part| part.kind.icon()).collect();
+                match row {
+                    GraphRow::Uncommitted { has_changes } => {
+                        assert_eq!(parts[0].text, glyphs.uncommitted);
+                        assert_eq!(
+                            parts[0].kind,
+                            LabelKind::UncommittedMark {
+                                dirty: *has_changes
+                            }
+                        );
+                        assert_eq!(icons, vec![(crate::GraphIconKind::Uncommitted, None)]);
+                    }
+                    GraphRow::Worktree(wt) => {
+                        assert_eq!(parts[0].text, glyphs.worktree);
+                        assert_eq!(icons, vec![(crate::GraphIconKind::Worktree, Some(0))]);
+                        let kind_of = |text: &str| {
+                            parts
+                                .iter()
+                                .find(|part| part.text.contains(text))
+                                .map(|part| part.kind)
+                        };
+                        assert_eq!(kind_of("notes"), Some(LabelKind::Subject));
+                        assert_eq!(kind_of("[ignored]"), wt.ignored.then_some(LabelKind::Meta));
+                        assert_eq!(
+                            kind_of("[HEAD]"),
+                            wt.is_current.then_some(LabelKind::ChipHead)
+                        );
+                    }
+                    _ => {
+                        assert!(icons.is_empty());
+                        assert!(parts.iter().all(|part| part.kind == LabelKind::Subject));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn commit_spacer_worktree_marks_name_their_worktree() {
+        let commit = Commit {
+            id: "abcdefg".into(),
+            subject: "topic".into(),
+            refs: vec!["feat".into()],
+            ..Commit::default()
+        };
+        let wt = |path: &str, branch: &str, ignored: bool| Worktree {
+            path: path.into(),
+            head_id: Some("abcdefg".into()),
+            branch: Some(branch.into()),
+            ignored,
+            is_current: false,
+        };
+        // `feat` is already a ref chip, so only `b` and `c` paint a mark.
+        let worktrees = [
+            wt("a", "feat", false),
+            wt("b", "other", false),
+            wt("c", "notes", true),
+        ];
+        let (text, parts) = assemble_commit_spacer(CommitSpacerOpts {
+            commit: &commit,
+            is_head: false,
+            worktrees: &worktrees,
+            head_branch: None,
+            glyphs: &ASCII,
+            available: 80,
+            date_width: 0,
+            author_width: 0,
+            now_unix: 0,
+            default_branch_override: None,
+        });
+        assert!(
+            text.starts_with("L b other L c notes  [ignored] [feat]"),
+            "{text}"
+        );
+        let marks: Vec<_> = parts.iter().filter_map(|part| part.kind.icon()).collect();
+        assert_eq!(
+            marks,
+            vec![
+                (crate::GraphIconKind::Worktree, Some(1)),
+                (crate::GraphIconKind::Worktree, Some(2)),
+            ]
+        );
+        for text in [" b other", " c notes", "  [ignored]"] {
+            assert!(
+                parts
+                    .iter()
+                    .any(|part| part.text == text && part.kind == LabelKind::Meta),
+                "{text}: {parts:?}"
+            );
+        }
     }
 
     #[test]
