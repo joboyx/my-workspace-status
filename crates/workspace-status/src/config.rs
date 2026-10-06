@@ -71,7 +71,7 @@ impl WorkspaceStatusConfig {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawConfig {
-    ignored_repos: Vec<serde_json::Value>,
+    ignored_repos: Option<serde_json::Value>,
     max_depth: Option<serde_json::Value>,
     default_branches: Option<serde_json::Value>,
     editor: Option<serde_json::Value>,
@@ -269,18 +269,45 @@ fn parse_command_key(
     Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
 }
 
-/// Parse the JSON text of one config file. `file` labels the file in errors.
-fn parse_config_file(file: &str, text: &str) -> Result<ConfigFileSettings, String> {
-    let parsed: RawConfig = serde_json::from_str(text)
-        .map_err(|_| format!("{file} must contain an ignoredRepos string array"))?;
+/// Which config file is parsed. Only the workspace file must set `ignoredRepos`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigFileKind {
+    User,
+    Workspace,
+}
 
+/// Parse `ignoredRepos`. The workspace file requires it (`null` counts as
+/// missing); in the user file an omitted or `null` key is `None`.
+fn parse_ignored_repos(
+    file: &str,
+    kind: ConfigFileKind,
+    value: Option<serde_json::Value>,
+) -> Result<Option<Vec<String>>, String> {
+    let missing = || format!("{file} must contain an ignoredRepos string array");
+    let repos = match value {
+        Some(serde_json::Value::Array(repos)) => repos,
+        None | Some(serde_json::Value::Null) if kind == ConfigFileKind::User => return Ok(None),
+        _ => return Err(missing()),
+    };
     let mut ignored = Vec::new();
-    for repo in parsed.ignored_repos {
+    for repo in repos {
         let Some(s) = repo.as_str() else {
             return Err(format!("{file} ignoredRepos must contain only strings"));
         };
         ignored.push(s.to_string());
     }
+    Ok(Some(normalize_ignored(&ignored)))
+}
+
+/// Parse the JSON text of one config file. `file` labels the file in errors.
+fn parse_config_file(
+    file: &str,
+    kind: ConfigFileKind,
+    text: &str,
+) -> Result<ConfigFileSettings, String> {
+    let parsed: RawConfig = serde_json::from_str(text)
+        .map_err(|_| format!("{file} must contain an ignoredRepos string array"))?;
+    let ignored_repos = parse_ignored_repos(file, kind, parsed.ignored_repos)?;
 
     let max_depth = match parsed.max_depth {
         None => None,
@@ -310,7 +337,7 @@ fn parse_config_file(file: &str, text: &str) -> Result<ConfigFileSettings, Strin
     };
 
     Ok(ConfigFileSettings {
-        ignored_repos: Some(normalize_ignored(&ignored)),
+        ignored_repos,
         max_depth,
         default_branches,
         editor: parse_command_key(file, "editor", parsed.editor)?,
@@ -320,12 +347,16 @@ fn parse_config_file(file: &str, text: &str) -> Result<ConfigFileSettings, Strin
 }
 
 /// Read and parse one config file. A missing file is `Ok(None)`.
-fn read_config_file(path: &Path, file: &str) -> Result<Option<ConfigFileSettings>, String> {
+fn read_config_file(
+    path: &Path,
+    file: &str,
+    kind: ConfigFileKind,
+) -> Result<Option<ConfigFileSettings>, String> {
     if !path.exists() {
         return Ok(None);
     }
     let text = fs::read_to_string(path).map_err(|e| format!("{file}: {e}"))?;
-    parse_config_file(file, &text).map(Some)
+    parse_config_file(file, kind, &text).map(Some)
 }
 
 /// Path of the user config file from the real environment.
@@ -364,7 +395,8 @@ where
 /// [`CONFIG_FILENAME`] under `workspace_root`. The workspace file wins per
 /// top-level key; `viewDefaults` and `defaultBranches` merge per sub-key
 /// (workspace wins); `ignoredRepos` is replaced, not joined. Keys that no
-/// file sets keep the built-in defaults. An invalid file is an error that
+/// file sets keep the built-in defaults. `ignoredRepos` is required in the
+/// workspace file and optional in the user file. An invalid file is an error that
 /// names that file (the full path for the user file, [`CONFIG_FILENAME`]
 /// for the workspace file).
 pub fn load_config_files(
@@ -372,10 +404,14 @@ pub fn load_config_files(
     workspace_root: &Path,
 ) -> Result<WorkspaceStatusConfig, String> {
     let user = match user_file {
-        Some(path) => read_config_file(path, &path.display().to_string())?,
+        Some(path) => read_config_file(path, &path.display().to_string(), ConfigFileKind::User)?,
         None => None,
     };
-    let workspace = read_config_file(&workspace_root.join(CONFIG_FILENAME), CONFIG_FILENAME)?;
+    let workspace = read_config_file(
+        &workspace_root.join(CONFIG_FILENAME),
+        CONFIG_FILENAME,
+        ConfigFileKind::Workspace,
+    )?;
     let merged = user
         .unwrap_or_default()
         .overlay(workspace.unwrap_or_default());
@@ -825,8 +861,16 @@ mod tests {
         let cases = [
             ("{", "must contain an ignoredRepos string array"),
             (
-                r#"{"maxDepth":2}"#,
+                r#"{"ignoredRepos":"notes"}"#,
                 "must contain an ignoredRepos string array",
+            ),
+            (
+                r#"{"ignoredRepos":{"notes":true}}"#,
+                "must contain an ignoredRepos string array",
+            ),
+            (
+                r#"{"ignoredRepos":["notes",1]}"#,
+                "ignoredRepos must contain only strings",
             ),
             (
                 r#"{"ignoredRepos":[],"maxDepth":0}"#,
@@ -932,5 +976,42 @@ mod tests {
         let cfg = load_config_files(path.as_deref(), &workspace).unwrap();
         assert_eq!(cfg.max_depth, 7);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn layered_user_file_without_ignored_repos_loads() {
+        for json in [
+            r#"{"viewDefaults":{"wrap":"unwrap"}}"#,
+            r#"{"ignoredRepos":null,"viewDefaults":{"wrap":"unwrap"}}"#,
+        ] {
+            let cfg = load_layered(Some(json), None).unwrap();
+            assert!(cfg.ignored_repos.is_empty(), "{json}");
+            assert_eq!(cfg.view_defaults.wrap, Some(false), "{json}");
+
+            let cfg = load_layered(Some(json), Some(r#"{"ignoredRepos":["vendor"]}"#)).unwrap();
+            assert_eq!(cfg.ignored_repos, vec!["vendor"], "{json}");
+            assert_eq!(cfg.view_defaults.wrap, Some(false), "{json}");
+        }
+        assert_eq!(
+            load_layered(Some("{}"), None).unwrap().max_depth,
+            DEFAULT_MAX_DEPTH
+        );
+    }
+
+    #[test]
+    fn layered_user_ignored_repos_apply_without_workspace_file() {
+        let cfg = load_layered(Some(r#"{"ignoredRepos":["./notes/","vendor"]}"#), None).unwrap();
+        assert_eq!(cfg.ignored_repos, vec!["notes", "vendor"]);
+    }
+
+    #[test]
+    fn workspace_file_still_requires_ignored_repos() {
+        for json in [r#"{}"#, r#"{"ignoredRepos":null}"#, r#"{"maxDepth":2}"#] {
+            let err = load_layered(Some(r#"{"ignoredRepos":["notes"]}"#), Some(json)).unwrap_err();
+            assert_eq!(
+                err, ".workspace-status-config.json must contain an ignoredRepos string array",
+                "{json}"
+            );
+        }
     }
 }

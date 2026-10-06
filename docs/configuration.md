@@ -4,7 +4,7 @@ Precedence for a setting: CLI flag > environment variable > config file > built-
 
 ## Config files
 
-Two files use the same schema. `load_workspace_status_config` in `crates/workspace-status/src/config.rs` reads both and merges them.
+Two files use the same keys. `load_workspace_status_config` in `crates/workspace-status/src/config.rs` reads both and merges them.
 
 | File | Path | Role |
 | --- | --- | --- |
@@ -19,7 +19,7 @@ Merge rules:
 - Arrays are replaced, not joined. A workspace `ignoredRepos` (also `[]`) replaces the user list.
 - A `null` value, and a blank `editor` / `diffTool`, count as omitted, so the user file value applies.
 - Both files are strict. An invalid user file fails the same way as an invalid workspace file. The error starts with the file: the full path for the user file, `.workspace-status-config.json` for the workspace file. Example: `~/.config/my-workspace-status/config.json maxDepth must be a positive integer` (with your real home path).
-- `ignoredRepos` is required in each file that exists, also the user file (use `"ignoredRepos": []`).
+- `ignoredRepos` is required in the workspace file when that file exists. In the user file it is optional; an omitted or `null` user `ignoredRepos` sets nothing. A wrong type is an error in both files.
 - Nothing writes either file.
 
 Tests that run the binary, PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` point `XDG_CONFIG_HOME` at an empty temp dir, so a user file cannot change their results. CI: `tty_spawn_paths_isolate_user_config` in `crates/workspace-status/tests/release_watch.rs`.
@@ -49,7 +49,7 @@ The keys below apply to both files. A missing file means nothing is ignored and 
 
 | Key               | Required                   | Default                       | Meaning                                                                                        |
 | ----------------- | -------------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------- |
-| `ignoredRepos`    | yes (when the file exists) | `[]` when file is missing     | Repo paths relative to the workspace root to skip                                              |
+| `ignoredRepos`    | workspace file: yes; user file: no | `[]` when no file sets it     | Repo paths relative to the workspace root to skip                                              |
 | `maxDepth`        | no                         | `3`                           | Walk depth for primary `.git` dirs/gitfiles (dot dirs skipped; linked via `git worktree list`) |
 | `defaultBranches` | no                         | `{}`                          | Map of workspace-relative repo path → sole default branch for that repo                        |
 | `editor`          | no                         | unset (`vim` at resolve)      | Command string for TUI `e` (same shape as `$EDITOR`). Overrides `$VISUAL` / `$EDITOR`.         |
