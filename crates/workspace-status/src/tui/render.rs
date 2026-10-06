@@ -1214,7 +1214,7 @@ fn record_graph_scrollbar(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let chrome = state.graph_chrome_in(area.height, area.width);
+    let chrome = state.graph_chrome_in(area.height);
     let Some(model) = state.graph.as_ref() else {
         return;
     };
@@ -5842,10 +5842,11 @@ mod tests {
     }
 
     #[test]
-    fn right_graph_chrome_wraps_the_footer_at_the_painted_width() {
+    fn right_graph_footer_wraps_at_the_painted_width_and_keeps_a_fixed_height() {
         let mut state = two_pane_graph_state();
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let fixed = state.graph_chrome();
         let inner = state.layout.diff_pane_width as usize;
         assert!(inner > 10);
         // Exactly the inner width: the widget wraps at inner - 1, so the
@@ -5857,8 +5858,9 @@ mod tests {
         }
         state.graph_cursor = 1;
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-        // subject (2) + blank + b1 + b2 + meta
-        assert_eq!(state.graph_chrome().footer_height, 6);
+        // The footer height is fixed: subject (2) + blank + b1 + b2 + meta
+        // does not change it, nor the list height.
+        assert_eq!(state.graph_chrome(), fixed);
         let text = buffer_text(&terminal);
         assert!(
             text.lines().any(|line| line.contains("│Z")),

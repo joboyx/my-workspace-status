@@ -845,11 +845,20 @@ pub fn format_commit_subject(commit: &Commit) -> String {
     commit.subject.clone()
 }
 
-/// Visible lines of an expanded commit message (not counting footer meta).
+/// Default message rows of an expanded commit-message footer (not counting
+/// the footer meta row).
 ///
-/// The graph footer scrolls past this. The commit-files footer ends the
-/// last visible line with `…`.
-pub const COMMIT_MSG_EXPAND_MAX_LINES: usize = 8;
+/// This is the fixed expanded height, not a grow-up-to cap: a 1-line message
+/// still takes this many rows (blank padding), so moving between commits
+/// never changes the list height. The graph footer scrolls a longer message.
+/// The commit-files footer ends the last visible line with `…`.
+pub const COMMIT_MSG_LINES_DEFAULT: usize = 8;
+
+/// Fewest message rows an expanded commit-message footer can be set to.
+pub const COMMIT_MSG_LINES_MIN: usize = 1;
+
+/// Most message rows an expanded commit-message footer can be set to.
+pub const COMMIT_MSG_LINES_MAX: usize = 20;
 
 /// Subject plus body for expand chrome. Empty body keeps the subject only.
 pub fn format_commit_message(subject: &str, body: &str) -> String {

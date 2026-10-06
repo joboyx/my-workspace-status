@@ -113,11 +113,30 @@ selection footer when height ≥ 3 (2 lines collapsed), then a 1-line sync heade
 space remains (footer wins when tight; no header when `sync` is unset).
 The footer wraps the full subject plus body by default
 (`commit_msg_expand`, `selection_footer_parts`); `M` collapses it to the
-two clipped lines. The expanded footer shows at most
-`COMMIT_MSG_EXPAND_MAX_LINES` message rows plus the meta row, and at most
-half the pane. A taller message scrolls: `commit_msg_scroll` sets the first
-message row, the meta row stays pinned, and a 1-column scrollbar marks the
-position (`footer_message_scroll_max`). List rows stay one line.
+two clipped lines.
+
+The footer height is fixed. It does not follow the selected message, so
+moving between commits never changes the list height:
+
+- Expanded requests N message rows plus the meta row
+  (`graph_footer_request`, N from `GraphWidget::commit_msg_lines`, default
+  `COMMIT_MSG_LINES_DEFAULT` = 8, clamped to `COMMIT_MSG_LINES_MIN`..=
+  `COMMIT_MSG_LINES_MAX`, 1..=20). Collapsed requests 2.
+- `graph_chrome_budget_for` clamps the request to at most half the pane
+  (never under 2) and leaves the list at least one row. A pane under 3
+  rows drops the footer. The budget depends only on the pane and the
+  request. The app calls the same `graph_footer_request`, so its layout
+  matches the paint.
+- The meta row is always on the footer's bottom row. A short message
+  paints from the top and leaves blank rows above the meta row.
+- A taller message scrolls: `commit_msg_scroll` sets the first message
+  row and a 1-column scrollbar marks the position
+  (`footer_message_scroll_max`). While lines are hidden below, the last
+  visible message row ends with a muted `↓<K>` hint (`v<K>` with ASCII
+  glyphs; K = hidden lines below) left of the scrollbar column. It covers
+  the message text under it. At the end of the message there is no hint.
+
+List rows stay one line.
 `loading older…` takes one extra row while the next log page loads.
 
 Footer copy (`selection_detail_lines` / `selection_detail_parts`; do not invent

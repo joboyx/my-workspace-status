@@ -19,10 +19,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 use workspace_status_graph::{
-    format_commit_message, format_relative_date, graph_chrome_budget_for, graph_vscroll_visible,
-    paint_model, selection_footer_parts, wrap_commit_message, GraphChromeBudget,
-    GraphFooterSelection, GraphModel, GraphRow, PaintedLine, ASCII, COMMIT_MSG_EXPAND_MAX_LINES,
-    UNICODE,
+    format_commit_message, format_relative_date, graph_chrome_budget_for, graph_footer_request,
+    graph_vscroll_visible, paint_model, selection_footer_parts, wrap_commit_message,
+    GraphChromeBudget, GraphFooterSelection, GraphModel, GraphRow, PaintedLine, ASCII,
+    COMMIT_MSG_LINES_DEFAULT, UNICODE,
 };
 
 use crate::config::ViewDefaults;
@@ -1210,34 +1210,21 @@ impl AppState {
 
     /// Header / footer / list split for the graph pane.
     pub fn graph_chrome(&self) -> GraphChromeBudget {
-        self.graph_chrome_in(
-            self.layout.tree_height.max(1),
-            self.graph_pane_inner_width(),
-        )
+        self.graph_chrome_in(self.layout.tree_height.max(1))
     }
 
-    pub(crate) fn graph_chrome_in(&self, height: u16, width: u16) -> GraphChromeBudget {
+    /// Header / footer / list split for a graph pane of `height` rows.
+    ///
+    /// The footer request is fixed ([`graph_footer_request`], same call as
+    /// the widget), so the split does not depend on the selected message or
+    /// the pane width.
+    pub(crate) fn graph_chrome_in(&self, height: u16) -> GraphChromeBudget {
         graph_chrome_budget_for(
             height,
             self.graph_loading_older,
             self.graph.as_ref().is_some_and(|g| g.sync.is_some()),
-            self.graph_footer_desired_lines(width as usize),
+            graph_footer_request(self.commit_msg_expand, COMMIT_MSG_LINES_DEFAULT),
         )
-    }
-
-    /// Painted graph width: the left pane's inner width in a files drill,
-    /// else the right pane's inner width (borders excluded, same `Rect` the
-    /// widget paints into), so footer wrap and list height match the paint.
-    fn graph_pane_inner_width(&self) -> u16 {
-        if self.drill.is_files() {
-            self.layout.tree_width.max(1)
-        } else {
-            self.layout.diff_pane_width.max(1)
-        }
-    }
-
-    fn graph_footer_desired_lines(&self, width: usize) -> u16 {
-        self.graph_footer_line_count(width).min(u16::MAX as usize) as u16
     }
 
     /// Painted selection-footer lines at `width`, before the footer budget.
@@ -1570,7 +1557,7 @@ impl AppState {
                 footer.extend(wrap_commit_message(
                     &message,
                     width.max(1),
-                    COMMIT_MSG_EXPAND_MAX_LINES,
+                    COMMIT_MSG_LINES_DEFAULT,
                 ));
             }
             None => {
@@ -15561,7 +15548,9 @@ mod tests {
         let mut app = graph_state(false);
         focus_repo(&mut app, "app");
         install_linear_graph(&mut app, 20);
-        // height 12, no sync header → list_height 10, page = 9 painted lines
+        // Collapsed 2-row footer, height 12, no sync header → list_height 10,
+        // page = 9 painted lines.
+        app.commit_msg_expand = false;
         app.layout.tree_height = 12;
         let list_h = app.graph_chrome().list_height.max(1) as usize;
         assert_eq!(list_h, 10, "list_height from chrome budget");
@@ -15607,6 +15596,8 @@ mod tests {
         let mut app = graph_state(false);
         focus_repo(&mut app, "app");
         install_linear_graph(&mut app, 40);
+        // Collapsed 2-row footer keeps a 10-row list.
+        app.commit_msg_expand = false;
         app.layout.tree_height = 12;
         let list_h = app.graph_chrome().list_height.max(1) as usize;
         assert_eq!(list_h, 10, "list_height from chrome budget");
