@@ -40,13 +40,15 @@ use super::drill::DrillView;
 use super::help::{
     attach_help_version, help_chip_gap_spaces, help_column_content_width, help_column_widths,
     help_entry_matches, help_entry_visual_lines, help_groups, help_idle_footer,
-    help_idle_footer_lines, help_inner_width, help_key_width, help_version_label, wrap_help_footer,
-    HELP_SEARCH_ESC_HINT,
+    help_idle_footer_lines, help_inner_width, help_key_width, help_legend_glyph_width,
+    help_legend_layout, help_legend_matches, help_legend_name_width, help_legend_visual_lines,
+    help_version_label, wrap_help_footer, HELP_LEGEND_TITLE, HELP_SEARCH_ESC_HINT,
 };
 use super::icons::{
     comment_mark_cols, glyph, icon_branch, icon_comment, icon_comment_resolved, icon_diff,
-    icon_merged_into_default, icon_move, icon_open_vs_default, truncate_visible, CURSOR_BAR,
-    CURSOR_BAR_INACTIVE, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED, FOLD_EXPANDED_ASCII,
+    icon_merged_into_default, icon_move, icon_open_vs_default, truncate_visible, IconSpec,
+    CURSOR_BAR, CURSOR_BAR_INACTIVE, FOLD_COLLAPSED, FOLD_COLLAPSED_ASCII, FOLD_EXPANDED,
+    FOLD_EXPANDED_ASCII,
 };
 use super::line_blame::{fit_annotation, BlameSide, BLAME_MENU_ROWS};
 use super::ops::RevertScope;
@@ -2397,6 +2399,110 @@ fn overlay_block(accent: Color) -> Block<'static> {
         .padding(Padding::horizontal(1))
 }
 
+/// One painted line of an icon legend row, cut or padded to `width`:
+/// glyph and muted name on the first line, the meaning beside them or
+/// under them (`vis.indent`).
+fn help_legend_cell_spans(
+    spec: &IconSpec,
+    vis: &super::help::HelpVisualLine,
+    ascii: bool,
+    palette: Palette,
+    width: usize,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    if vis.chips {
+        let glyph = spec.glyph(ascii);
+        let glyph_pad = help_legend_glyph_width().saturating_sub(visible_width(glyph)) + 1;
+        let name_pad = help_legend_name_width().saturating_sub(spec.name.chars().count()) + 1;
+        spans.push(Span::styled(glyph, Style::default().fg(palette.heading)));
+        spans.push(Span::raw(" ".repeat(glyph_pad)));
+        spans.push(Span::styled(spec.name, Style::default().fg(palette.muted)));
+        if !vis.text.is_empty() {
+            spans.push(Span::raw(" ".repeat(name_pad)));
+        }
+    } else if vis.indent > 0 {
+        spans.push(Span::raw(" ".repeat(vis.indent)));
+    }
+    if !vis.text.is_empty() {
+        spans.push(Span::styled(
+            vis.text.clone(),
+            Style::default().fg(palette.file),
+        ));
+    }
+    clamp_spans(spans, width)
+}
+
+/// Icon legend rows under the help key columns: a blank row, the
+/// `ICONS` title, then [`help_legend_layout`] columns. Row count is
+/// [`help_legend_line_count`].
+fn help_legend_lines(
+    state: &AppState,
+    inner: usize,
+    query: &str,
+    searching: bool,
+) -> Vec<Line<'static>> {
+    let palette = state.theme.palette();
+    let pills = state.theme.pills();
+    let legend = help_legend_layout(inner);
+    let col_w = legend.column_width;
+    let content = help_column_content_width(col_w);
+    let gutter = col_w.saturating_sub(content);
+    let columns: Vec<Vec<Vec<Span<'static>>>> = legend
+        .columns
+        .iter()
+        .map(|column| {
+            let mut rows = Vec::new();
+            for block in column {
+                if let Some(group) = block.heading {
+                    rows.push(clamp_spans(
+                        vec![Span::styled(
+                            group.title(),
+                            Style::default()
+                                .fg(palette.repo)
+                                .add_modifier(Modifier::BOLD),
+                        )],
+                        col_w,
+                    ));
+                }
+                let hit = searching && help_legend_matches(block.spec, query);
+                for vis in help_legend_visual_lines(block.spec, col_w) {
+                    let mut spans = with_search_pill(
+                        help_legend_cell_spans(block.spec, &vis, state.ascii, palette, content),
+                        hit.then_some(pills.filter),
+                    );
+                    spans.push(Span::raw(" ".repeat(gutter)));
+                    rows.push(spans);
+                }
+            }
+            rows
+        })
+        .collect();
+    let tallest = columns.iter().map(Vec::len).max().unwrap_or(0);
+    if tallest == 0 {
+        return Vec::new();
+    }
+    let mut lines = vec![
+        Line::default(),
+        Line::from(Span::styled(
+            HELP_LEGEND_TITLE,
+            Style::default()
+                .fg(palette.heading)
+                .add_modifier(Modifier::BOLD),
+        )),
+    ];
+    for row in 0..tallest {
+        let mut spans = Vec::new();
+        for column in &columns {
+            match column.get(row) {
+                Some(cell) => spans.extend(cell.iter().cloned()),
+                None => spans.push(Span::raw(" ".repeat(col_w))),
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
 /// Paint `?` help in `area` and return its max body scroll (0 when every
 /// body row fits). The group-title row stays pinned above the scrolled body.
 fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
@@ -2463,8 +2569,8 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
             rows
         })
         .collect();
-    let body_rows = columns.iter().map(Vec::len).max().unwrap_or(0);
-    for row in 0..body_rows {
+    let key_rows = columns.iter().map(Vec::len).max().unwrap_or(0);
+    for row in 0..key_rows {
         let mut spans = Vec::new();
         for (column, &col_w) in columns.iter().zip(&widths) {
             match column.get(row) {
@@ -2474,6 +2580,8 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
         }
         lines.push(Line::from(spans));
     }
+    lines.extend(help_legend_lines(state, inner, query, searching));
+    let body_rows = lines.len() - 1;
 
     let idle_footer = |parts: Vec<String>| -> Vec<Line<'static>> {
         parts
@@ -7266,12 +7374,14 @@ mod tests {
         assert_help_version_lower_right(&text);
     }
 
-    /// At 140×40 the help dialog fits over the panes without scrolling,
-    /// the panes keep their full height under it, and no column's text
-    /// runs into the next column.
+    /// At 140×40 every key row of the help dialog paints without scrolling
+    /// (only the icon legend sits below the fold), the panes keep their
+    /// full height under it, and no column's text runs into the next column.
     #[test]
     fn help_columns_keep_a_gutter_and_the_panes_rows() {
-        use super::super::help::{help_column_widths, HELP_GROUPS};
+        use super::super::help::{
+            help_body_line_count, help_column_widths, help_legend_line_count, HELP_GROUPS,
+        };
         let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
         let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
         state.help_open = true;
@@ -7292,7 +7402,15 @@ mod tests {
             overlay_rows <= usize::from(state.layout.pane_height),
             "help takes {overlay_rows} rows:\n{text}"
         );
-        assert_eq!(state.layout.help_scroll_max, 0, "{text}");
+        let inner = help_inner_width(136);
+        let key_rows = help_body_line_count(HELP_GROUPS, &help_column_widths(HELP_GROUPS, inner));
+        let legend_rows = help_legend_line_count(inner);
+        assert!(
+            state.layout.help_scroll_max > 0 && state.layout.help_scroll_max <= legend_rows,
+            "only legend rows scroll: {}\n{text}",
+            state.layout.help_scroll_max
+        );
+        assert!(footer > header + key_rows, "{text}");
         assert_eq!(
             state.layout.tree_height,
             40 - 3 - 2,
@@ -7302,13 +7420,13 @@ mod tests {
         assert!(text.contains("apply/pop/drop"), "{text}");
 
         // The box sits at x = 2; border + padding put the first column at x = 4.
-        let widths = help_column_widths(HELP_GROUPS, help_inner_width(136));
+        let widths = help_column_widths(HELP_GROUPS, inner);
         let mut starts = vec![4usize];
         for width in &widths[..widths.len() - 1] {
             starts.push(starts.last().unwrap() + width);
         }
         let buf = terminal.backend().buffer();
-        for y in header + 1..footer {
+        for y in header + 1..=header + key_rows {
             for &start in &starts[1..] {
                 for x in start - 2..start {
                     assert_eq!(
@@ -7334,7 +7452,9 @@ mod tests {
     #[test]
     fn compare_help_paints_centered_and_scrolls_every_body_row() {
         use super::super::chrome::{dialog_height, dialog_rect, dialog_width, DialogKind};
-        use super::super::help::{help_body_line_count, help_status_lines, HELP_COMPARE_GROUPS};
+        use super::super::help::{
+            help_body_line_count, help_legend_line_count, help_status_lines, HELP_COMPARE_GROUPS,
+        };
         // Box widths 64, 100, and 140.
         for cols in [68u16, 104, 144] {
             let snapshot = build_workspace_snapshot(&[repo("app", false)], &[], false, &[]);
@@ -7344,7 +7464,7 @@ mod tests {
                 .open_or_focus("alpha".into(), "main".into(), "HEAD".into());
             assert!(state.is_compare_tab());
             state.help_open = true;
-            let mut terminal = Terminal::new(TestBackend::new(cols, 120)).unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(cols, 200)).unwrap();
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
             let text = buffer_text(&terminal);
             let lines: Vec<&str> = text.lines().collect();
@@ -7373,7 +7493,7 @@ mod tests {
             let body = help_body_line_count(
                 HELP_COMPARE_GROUPS,
                 &help_column_widths(HELP_COMPARE_GROUPS, inner),
-            );
+            ) + help_legend_line_count(inner);
             let footer_rows = help_idle_footer_lines(inner).len();
             assert_eq!(
                 bottom - header - 1,
@@ -7416,6 +7536,88 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The `?` legend paints under the key columns in the same scroll
+    /// body: an ICONS title, Tree / Graph / Chrome headings, and glyph,
+    /// name, and meaning per row in the active glyph mode. A help search
+    /// hit on a legend row takes the filter pill.
+    #[test]
+    fn help_legend_paints_under_the_columns() {
+        use super::super::icons::IconKind;
+        for ascii in [true, false] {
+            let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, ascii);
+            state.help_open = true;
+            let mut terminal = Terminal::new(TestBackend::new(200, 120)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let text = buffer_text(&terminal);
+            assert_eq!(state.layout.help_scroll_max, 0, "{text}");
+            let lines: Vec<&str> = text.lines().collect();
+            let header = lines
+                .iter()
+                .position(|l| l.contains("MOVE") && l.contains("GIT") && l.contains("VIEW"))
+                .expect("help header");
+            let title = lines
+                .iter()
+                .position(|l| l.trim_matches(|c| c == '│' || c == ' ') == HELP_LEGEND_TITLE)
+                .unwrap_or_else(|| panic!("ICONS title:\n{text}"));
+            assert!(title > header, "{text}");
+            assert!(
+                lines[title - 1]
+                    .trim_matches(|c| c == '│' || c == ' ')
+                    .is_empty(),
+                "blank row above ICONS:\n{text}"
+            );
+            for heading in ["Tree", "Graph", "Chrome"] {
+                assert!(
+                    lines[title..].iter().any(|l| l.contains(heading)),
+                    "{heading}:\n{text}"
+                );
+            }
+            for kind in [
+                IconKind::LinkedWorktree,
+                IconKind::GraphStash,
+                IconKind::FoldCollapsed,
+            ] {
+                let spec = kind.spec();
+                let row = lines[title..]
+                    .iter()
+                    .find(|l| l.contains(spec.name) && l.contains(spec.meaning))
+                    .unwrap_or_else(|| panic!("{kind:?} row:\n{text}"));
+                assert!(
+                    row.contains(&format!("{} ", spec.glyph(ascii))),
+                    "{kind:?} glyph ascii={ascii}: {row}"
+                );
+            }
+            assert_help_version_lower_right(&text);
+        }
+
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.help_open = true;
+        state.help_search_query = Some("worktree".into());
+        let mut terminal = Terminal::new(TestBackend::new(200, 120)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        let pill = state.theme.pills().filter;
+        let buf = terminal.backend().buffer();
+        let meaning = IconKind::LinkedWorktree.spec().meaning;
+        let y = text
+            .lines()
+            .position(|l| l.contains(meaning))
+            .expect("legend hit row") as u16;
+        for x in needle_cols(buf, y, meaning) {
+            assert_eq!(buf[(x, y)].bg, pill.bg, "legend hit cell {x}");
+        }
+        let miss = IconKind::GraphStash.spec().meaning;
+        let y = text
+            .lines()
+            .position(|l| l.contains(miss))
+            .expect("miss row") as u16;
+        for x in needle_cols(buf, y, miss) {
+            assert_ne!(buf[(x, y)].bg, pill.bg, "legend miss cell {x}");
         }
     }
 
@@ -10119,12 +10321,13 @@ mod tests {
     fn file_help_paints_its_reserved_rows() {
         use super::super::chrome::{dialog_height, dialog_rect, dialog_width, DialogKind};
         use super::super::help::{
-            help_body_line_count, help_status_lines, HelpTab, HELP_FILE_GROUPS,
+            help_body_line_count, help_legend_line_count, help_status_lines, HelpTab,
+            HELP_FILE_GROUPS,
         };
         for cols in [68u16, 104, 144] {
             let mut state = file_tab_state(&["# app"]);
             state.help_open = true;
-            let mut terminal = Terminal::new(TestBackend::new(cols, 120)).unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(cols, 200)).unwrap();
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
             let text = buffer_text(&terminal);
             let lines: Vec<&str> = text.lines().collect();
@@ -10147,7 +10350,7 @@ mod tests {
             let body = help_body_line_count(
                 HELP_FILE_GROUPS,
                 &help_column_widths(HELP_FILE_GROUPS, inner),
-            );
+            ) + help_legend_line_count(inner);
             let footer_rows = help_idle_footer_lines(inner).len();
             assert_eq!(
                 bottom - header - 1,
