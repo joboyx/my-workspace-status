@@ -21,9 +21,15 @@ pub fn git_binary() -> &'static Path {
 
 /// Set the git binary for this process. Call it once at startup, before
 /// the first git call. A later call (after the first git call, or a second
-/// call) does not change the binary.
+/// call) cannot change the binary: debug builds panic, so a git call that
+/// moves ahead of startup init fails the CLI tests instead of silently
+/// ignoring the config `git` key.
 pub fn init_git_binary(bin: PathBuf) {
-    let _ = GIT_BINARY.set(bin);
+    let set = GIT_BINARY.set(bin).is_ok();
+    debug_assert!(
+        set,
+        "init_git_binary called after the git binary was already resolved"
+    );
 }
 
 /// Resolve the git binary: a non-empty `WORKSPACE_STATUS_GIT` (`env_value`)

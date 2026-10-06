@@ -197,6 +197,12 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
         }
     };
 
+    // Resolve the env-backed settings once, right after the config loads and
+    // before the first git call (repo-filter validation runs git), so the
+    // `git` key applies to every git spawn.
+    let settings = Settings::from_env(&loaded.runtime);
+    crate::git::init_git_binary(settings.git.clone());
+
     if let Some(only) = &only_repos {
         let named: Vec<String> = only.iter().cloned().collect();
         if let Err(unknown) = validate_filter_repos(&cwd, &loaded, &named) {
@@ -204,11 +210,6 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
             return Err(1);
         }
     }
-
-    // Resolve the env-backed settings once, before the update check and the
-    // first git call that needs the `git` override.
-    let settings = Settings::from_env(&loaded.runtime);
-    crate::git::init_git_binary(settings.git.clone());
 
     let mut config = loaded.clone();
     if cli.all {

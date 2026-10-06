@@ -2,8 +2,9 @@
 //!
 //! The timer fires [`super::action::Action::FetchTick`]. Manual `f` and that
 //! tick enqueue on the per-gitdir remote queue in [`super::effect`]
-//! (`FETCH_CONCURRENCY` = 10; `WS_STATUS_FETCH_CONCURRENCY`) so independent
-//! gitdirs overlap.
+//! (cap: `WS_STATUS_FETCH_CONCURRENCY`, else the config key
+//! `fetchConcurrency`, else `FETCH_CONCURRENCY` = 10) so independent gitdirs
+//! overlap.
 
 use crate::snapshot::{checkout_is_hidden_ignored, WorkspaceSnapshot};
 

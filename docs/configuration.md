@@ -16,6 +16,8 @@ Two files use the same keys. `load_workspace_status_config` in `crates/workspace
 Merge rules:
 
 - A missing file sets nothing. With neither file, nothing is ignored and discovery uses the default depth.
+- A file that exists but cannot be read is an error in both files, not a missing file: `<file>: <io error>` (no permission, a directory), or `<file>: symlink target is missing: <io error>` for a dangling symlink.
+- A user file that is not valid JSON, or whose top level is not an object, is an error: `<path> is not a valid JSON object: <parser message>`. For the workspace file the error stays `.workspace-status-config.json must contain an ignoredRepos string array`.
 - The workspace file wins per top-level key. A key that the workspace file omits keeps the user file value.
 - `viewDefaults` and `defaultBranches` merge per sub-key. The workspace sub-key wins.
 - Arrays are replaced, not joined. A workspace `ignoredRepos` (also `[]`) replaces the user list.

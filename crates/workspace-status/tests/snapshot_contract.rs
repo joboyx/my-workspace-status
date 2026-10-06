@@ -445,11 +445,11 @@ fn config_git_key_drives_json_and_env_overrides_it() {
         format!("{{\"git\": \"{}\"}}\n", cfg_git.display()),
     )
     .unwrap();
-    let run = |env_git_value: Option<&str>| {
+    let run_args = |args: &[&str], env_git_value: Option<&str>| {
         let _ = fs::remove_file(&cfg_marker);
         let _ = fs::remove_file(&env_marker);
         let mut cmd = Command::new(bin());
-        cmd.args(["--json"])
+        cmd.args(args)
             .current_dir(&workspace)
             .env("TERM", "dumb")
             .env_remove("WORKSPACE_STATUS_GIT");
@@ -465,6 +465,7 @@ fn config_git_key_drives_json_and_env_overrides_it() {
         );
         (cfg_marker.exists(), env_marker.exists())
     };
+    let run = |env_git_value: Option<&str>| run_args(&["--json"], env_git_value);
 
     assert_eq!(run(None), (true, false), "config git used when env unset");
     assert_eq!(
@@ -476,6 +477,17 @@ fn config_git_key_drives_json_and_env_overrides_it() {
         run(Some("")),
         (true, false),
         "empty WORKSPACE_STATUS_GIT falls through to config git"
+    );
+    // A named repo runs git (linked-worktree lookup) before any collect.
+    assert_eq!(
+        run_args(&["--json", "app"], None),
+        (true, false),
+        "config git used with a repo filter"
+    );
+    assert_eq!(
+        run_args(&["--json", "app"], Some(env_git.to_str().unwrap())),
+        (false, true),
+        "WORKSPACE_STATUS_GIT wins with a repo filter"
     );
     let _ = fs::remove_dir_all(root);
 }
