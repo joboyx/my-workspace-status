@@ -418,4 +418,5 @@ A checkout row with a branch (tree) and a worktree row with a branch (graph) sho
 - Lookups use `gh` for GitHub hosts and `glab` for GitLab hosts. Install and log in to the CLI yourself (`gh auth login`, `glab auth login`). The TUI never asks for a login, and never passes a token. Without a working CLI there is no badge, and `gx` says `could not look up PR for <branch>`.
 - A remote whose host contains neither `github` nor `gitlab` gets no badge, and `gx` says `no PR for <branch>`.
 - A badge lookup runs when a branch first appears or changes, on `r`, and on a full reload. A watch tick on the same branch does not look again, so a PR that is opened or merged later shows after `r`. `gx` and Ctrl+click always look up fresh.
+- The PR popover (hover or click a badge, or `gh`) fetches the PR's title, state, review, author, branches, checks, and update time once per branch, with the same CLI (`gh pr view`, or `glab api` on the MR). It shows `loading…` until the answer lands and `could not load details` when the CLI fails. `r` drops the detail so the next popover fetches it again.
 - Git details: [git-operations.md](./git-operations.md) → **Pull request lookup**.

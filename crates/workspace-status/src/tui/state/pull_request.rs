@@ -9,6 +9,12 @@
 //! A checkout is looked up again only when its branch is new or changed, and
 //! after `r` forgets it. A watch tick that re-applies the same branch does
 //! not ask the forge again.
+//!
+//! The PR popover shows richer fields ([`PullRequestDetail`]). They are
+//! fetched once per (remote URL, branch), when a peek or pin first shows
+//! that PR ([`AppState::request_popover_pr_details`]), never on a tick. A
+//! branch switch, `r`, a vanished checkout, or a new answer for the branch
+//! drops the detail.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -19,8 +25,10 @@ use crate::helpers::is_counted_local_branch;
 
 use super::super::action::Effect;
 use super::super::gates::ListFocusTarget;
+use super::super::popover::IconTarget;
 use super::super::pull_request::{
-    lookup_failed_status, no_pr_status, PrLookup, PrState, PullRequest, NO_PR_FOR_ROW, OPEN_FAILED,
+    lookup_failed_status, no_pr_status, PrDetailLookup, PrLookup, PrState, PullRequest,
+    PullRequestDetail, NO_PR_FOR_ROW, OPEN_FAILED,
 };
 use super::super::status::StatusMessage;
 use super::super::tree::NodeKind;
@@ -54,25 +62,62 @@ struct CheckoutPr {
     remote: Option<String>,
 }
 
-/// PR answers for the badge on branch rows.
+/// Detail fetch of one PR for the PR popover.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PrDetailState {
+    /// Request with this id is out; the worker has not answered. Only the
+    /// answer to this request lands.
+    Loading(u64),
+    /// The forge described the PR.
+    Ready(PullRequestDetail),
+    /// The fetch failed. Not retried until the detail is dropped.
+    Failed,
+}
+
+impl From<PrDetailLookup> for PrDetailState {
+    fn from(lookup: PrDetailLookup) -> Self {
+        match lookup {
+            PrDetailLookup::Found(detail) => Self::Ready(detail),
+            PrDetailLookup::Failed => Self::Failed,
+        }
+    }
+}
+
+/// PR answers for the badge on branch rows, and PR details for the popover.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PrCache {
     /// Checkout path (snapshot `repo`) to the branch it was looked up for.
     checkouts: HashMap<PathBuf, CheckoutPr>,
     /// (remote URL, branch) to the forge's answer.
     answers: HashMap<(String, String), BranchPr>,
+    /// (remote URL, branch) to the detail of the PR its answer names.
+    details: HashMap<(String, String), PrDetailState>,
+    /// Id of the last detail request.
+    last_detail_request: u64,
 }
 
 impl PrCache {
-    /// Drop answers that no checkout points at any more.
+    /// Drop answers and details that no checkout points at any more.
     fn prune_answers(&mut self) {
         let live: HashSet<(&str, &str)> = self
             .checkouts
             .values()
             .filter_map(|checkout| Some((checkout.remote.as_deref()?, checkout.branch.as_str())))
             .collect();
-        self.answers
-            .retain(|(remote, branch), _| live.contains(&(remote.as_str(), branch.as_str())));
+        let keep = |(remote, branch): &(String, String)| {
+            live.contains(&(remote.as_str(), branch.as_str()))
+        };
+        self.answers.retain(|key, _| keep(key));
+        self.details.retain(|key, _| keep(key));
+    }
+
+    /// Store `answer` for `key`. A different answer drops the detail, which
+    /// described the old one.
+    fn set_answer(&mut self, key: (String, String), answer: BranchPr) {
+        if self.answers.get(&key) != Some(&answer) {
+            self.details.remove(&key);
+        }
+        self.answers.insert(key, answer);
     }
 }
 
@@ -161,10 +206,7 @@ impl AppState {
                 return selected;
             }
         };
-        match selected {
-            Effect::None => open,
-            selected => Effect::Batch(vec![selected, open]),
-        }
+        super::popover::then(selected, open)
     }
 
     /// The PR the badge of checkout `repo` shows, under the same rule as
@@ -234,14 +276,27 @@ impl AppState {
     ///
     /// `r` on a checkout passes it; a full reload passes `None` (every
     /// checkout).
+    ///
+    /// The PR detail of that checkout is dropped too, so the next peek or
+    /// pin fetches it again.
     pub(crate) fn forget_pr_lookups(&mut self, repo: Option<&Path>) {
+        let cache = &mut self.pr_cache;
         match repo {
             Some(repo) => {
-                self.pr_cache.checkouts.remove(repo);
+                if let Some(CheckoutPr {
+                    branch,
+                    remote: Some(remote),
+                }) = cache.checkouts.remove(repo)
+                {
+                    cache.details.remove(&(remote, branch));
+                }
             }
-            None => self.pr_cache.checkouts.clear(),
+            None => {
+                cache.checkouts.clear();
+                cache.details.clear();
+            }
         }
-        self.pr_cache.prune_answers();
+        cache.prune_answers();
     }
 
     /// Land a badge lookup of `branch` in checkout `repo`.
@@ -270,8 +325,7 @@ impl AppState {
         checkout.remote.clone_from(&remote);
         if let Some(remote) = remote {
             self.pr_cache
-                .answers
-                .insert((remote, branch.to_string()), lookup.into());
+                .set_answer((remote, branch.to_string()), lookup.into());
         }
         true
     }
@@ -304,9 +358,110 @@ impl AppState {
         }
         if let Some(remote) = remote {
             self.pr_cache
-                .answers
-                .insert((remote, branch.to_string()), lookup.into());
+                .set_answer((remote, branch.to_string()), lookup.into());
         }
+    }
+
+    /// Detail state of the PR the badge of checkout `repo` shows, under the
+    /// rule of [`Self::pull_request_for`]. `None` when no detail was
+    /// requested since the last drop.
+    pub(crate) fn pull_request_detail_for(&self, repo: &Path) -> Option<&PrDetailState> {
+        self.pull_request_for(repo)?;
+        let checkout = self.pr_cache.checkouts.get(repo)?;
+        let key = (checkout.remote.clone()?, checkout.branch.clone());
+        self.pr_cache.details.get(&key)
+    }
+
+    /// Detail fetches for the PRs the open popover shows, each marked
+    /// loading.
+    ///
+    /// A PR whose (remote URL, branch) already has a detail (loading, ready,
+    /// or failed) is not asked again, so a later peek or pin reads the
+    /// cache. Called when a peek opens or a popover pins; never on a tick.
+    pub(crate) fn request_popover_pr_details(&mut self) -> Effect {
+        let Some(popover) = self.popover.as_ref() else {
+            return Effect::None;
+        };
+        let repos: Vec<PathBuf> = popover
+            .targets
+            .iter()
+            .filter_map(|(_, target)| match target {
+                IconTarget::PullRequest(repo) => Some(repo.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut effects = Vec::new();
+        for repo in repos {
+            let Some(number) = self.pull_request_for(&repo).map(|pr| pr.number) else {
+                continue;
+            };
+            let Some(CheckoutPr {
+                branch,
+                remote: Some(remote),
+            }) = self.pr_cache.checkouts.get(&repo).cloned()
+            else {
+                continue;
+            };
+            let key = (remote.clone(), branch.clone());
+            if self.pr_cache.details.contains_key(&key) {
+                continue;
+            }
+            self.pr_cache.last_detail_request += 1;
+            let request = self.pr_cache.last_detail_request;
+            self.pr_cache
+                .details
+                .insert(key, PrDetailState::Loading(request));
+            effects.push(Effect::LookupPullRequestDetail {
+                repo,
+                branch,
+                remote,
+                number,
+                request,
+            });
+        }
+        match effects.len() {
+            0 => Effect::None,
+            1 => effects.remove(0),
+            _ => Effect::Batch(effects),
+        }
+    }
+
+    /// Land detail request `request` of PR `number` for `branch` of
+    /// checkout `repo` at `remote`.
+    ///
+    /// Dropped when the checkout is on another branch now, was forgotten,
+    /// resolves another remote, its answer names another PR, or the
+    /// detail no longer waits for this request (dropped since, or asked
+    /// again: a newer request wins over a late older one). Returns true
+    /// when the cache changed.
+    pub(crate) fn apply_pr_detail(
+        &mut self,
+        repo: &Path,
+        branch: &str,
+        remote: &str,
+        number: u64,
+        request: u64,
+        lookup: PrDetailLookup,
+    ) -> bool {
+        if self.pull_request_for(repo).map(|pr| pr.number) != Some(number) {
+            return false;
+        }
+        let current = self.pr_cache.checkouts.get(repo).is_some_and(|checkout| {
+            checkout.branch == branch && checkout.remote.as_deref() == Some(remote)
+        });
+        if !current {
+            return false;
+        }
+        let key = (remote.to_string(), branch.to_string());
+        if self.pr_cache.details.get(&key) != Some(&PrDetailState::Loading(request)) {
+            return false;
+        }
+        // The detail adds lines above Open PR: keep the pinned focus on
+        // the line it was on.
+        let focus = self.popover_focus_key();
+        self.pr_cache.details.insert(key, lookup.into());
+        self.restore_popover_focus(focus);
+        true
     }
 
     /// Graph worktree rows that show a PR badge: visible-row index,
@@ -796,6 +951,356 @@ mod tests {
         assert_eq!(focused_id(&app), "repo:app");
         assert_eq!(app.status, NO_PR_FOR_ROW);
         assert_eq!(app.status.kind(), StatusKind::Warn);
+    }
+
+    // ---- PR detail for the popover ----
+
+    use super::super::super::popover::PEEK_DWELL_MS;
+    use super::super::super::pull_request::{ChecksSummary, PullRequestDetail};
+
+    /// `app` on `feature` with a ready open PR #`number` in the badge cache.
+    fn app_with_pr(number: u64) -> AppState {
+        let mut app = app_with(&[repo("app", "feature"), repo("lib", "main")], &[]);
+        let _ = app.due_pr_lookups();
+        set_answer(&mut app, number, PrState::Open);
+        app
+    }
+
+    fn set_answer(app: &mut AppState, number: u64, state: PrState) {
+        let pr = PullRequest {
+            number,
+            url: format!("https://github.com/octo/demo/pull/{number}"),
+            state,
+        };
+        assert!(app.apply_pr_lookup(
+            Path::new("app"),
+            "feature",
+            Some(REMOTE.into()),
+            PrLookup::Found(pr)
+        ));
+    }
+
+    fn fetch(number: u64, request: u64) -> Effect {
+        Effect::LookupPullRequestDetail {
+            repo: PathBuf::from("app"),
+            branch: "feature".into(),
+            remote: REMOTE.into(),
+            number,
+            request,
+        }
+    }
+
+    fn pr_detail(number: u64) -> PrDetailLookup {
+        PrDetailLookup::Found(PullRequestDetail {
+            number,
+            title: "Add login".into(),
+            state: "OPEN".into(),
+            draft: false,
+            author: Some("octocat".into()),
+            head: Some("feature".into()),
+            base: Some("main".into()),
+            review: None,
+            checks: ChecksSummary::default(),
+            updated_at: None,
+        })
+    }
+
+    /// Land the answer to the request the cache waits for (0 when it
+    /// waits for none).
+    fn land(app: &mut AppState, branch: &str, number: u64, lookup: PrDetailLookup) -> bool {
+        let request = app
+            .pr_cache
+            .details
+            .values()
+            .find_map(|detail| match detail {
+                PrDetailState::Loading(request) => Some(*request),
+                _ => None,
+            })
+            .unwrap_or(0);
+        land_request(app, branch, number, request, lookup)
+    }
+
+    fn land_request(
+        app: &mut AppState,
+        branch: &str,
+        number: u64,
+        request: u64,
+        lookup: PrDetailLookup,
+    ) -> bool {
+        app.apply_pr_detail(Path::new("app"), branch, REMOTE, number, request, lookup)
+    }
+
+    fn detail_of(app: &AppState) -> Option<PrDetailState> {
+        app.pull_request_detail_for(Path::new("app")).cloned()
+    }
+
+    /// Pin the PR badge popover of `app` with a click on its badge.
+    fn click_badge(app: &mut AppState) -> Effect {
+        let y = tree_y(app, "repo:app");
+        badge_at(app, "app", 20, y);
+        app.close_popover();
+        app.dispatch(Action::Click { col: 20, row: y })
+    }
+
+    #[test]
+    fn a_peek_or_pin_requests_the_detail_once_and_later_ones_read_the_cache() {
+        let mut app = app_with_pr(7);
+        assert_eq!(detail_of(&app), None, "nothing asked before a popover");
+
+        // A peek that opens on the badge asks once.
+        let y = tree_y(&app, "repo:app");
+        badge_at(&mut app, "app", 20, y);
+        let at = std::time::Instant::now();
+        app.set_pointer_at(Some((20, y)), at);
+        assert_eq!(
+            app.expire_peek_with_details(at + std::time::Duration::from_millis(PEEK_DWELL_MS)),
+            (true, fetch(7, 1))
+        );
+        assert!(app.popover.is_some(), "peek open");
+        assert_eq!(detail_of(&app), Some(PrDetailState::Loading(1)));
+        assert_eq!(
+            app.request_popover_pr_details(),
+            Effect::None,
+            "a later peek reads the cache"
+        );
+
+        // Pinning the same PR while it loads asks nothing.
+        assert_eq!(click_badge(&mut app), Effect::LoadRightPane);
+        assert!(land(&mut app, "feature", 7, pr_detail(7)));
+        assert!(matches!(detail_of(&app), Some(PrDetailState::Ready(_))));
+        assert_eq!(
+            click_badge(&mut app),
+            Effect::LoadRightPane,
+            "ready: cached"
+        );
+
+        // A failure is cached too; it is not retried on the next pin.
+        app.forget_pr_lookups(Some(Path::new("app")));
+        let _ = app.due_pr_lookups();
+        set_answer(&mut app, 7, PrState::Open);
+        assert_eq!(
+            click_badge(&mut app),
+            Effect::Batch(vec![Effect::LoadRightPane, fetch(7, 2)]),
+            "a pin on a fresh answer asks"
+        );
+        assert!(land(&mut app, "feature", 7, PrDetailLookup::Failed));
+        assert_eq!(detail_of(&app), Some(PrDetailState::Failed));
+        assert_eq!(click_badge(&mut app), Effect::LoadRightPane);
+    }
+
+    #[test]
+    fn a_second_peek_dwell_on_the_badge_asks_nothing() {
+        use super::super::super::popover::PEEK_GRACE_MS;
+        use std::time::{Duration, Instant};
+        let mut app = app_with_pr(7);
+        let y = tree_y(&app, "repo:app");
+        badge_at(&mut app, "app", 20, y);
+        let dwell = Duration::from_millis(PEEK_DWELL_MS);
+        let t0 = Instant::now();
+        app.set_pointer_at(Some((20, y)), t0);
+        assert_eq!(
+            app.expire_peek_with_details(t0 + dwell),
+            (true, fetch(7, 1)),
+            "the first dwell opens the peek and asks once"
+        );
+        // Leave: the grace closes the peek and asks nothing.
+        let t1 = t0 + dwell;
+        app.set_pointer_at(None, t1);
+        assert_eq!(
+            app.expire_peek_with_details(t1 + Duration::from_millis(PEEK_GRACE_MS)),
+            (true, Effect::None)
+        );
+        assert!(app.popover.is_none());
+        // Back on the badge: a second peek reads the cache.
+        let t2 = t1 + Duration::from_secs(1);
+        app.set_pointer_at(Some((20, y)), t2);
+        assert_eq!(
+            app.expire_peek_with_details(t2 + dwell),
+            (true, Effect::None)
+        );
+        assert!(app.popover.is_some(), "second peek open");
+        assert_eq!(
+            app.expire_peek_with_details(t2 + dwell),
+            (false, Effect::None),
+            "nothing due"
+        );
+    }
+
+    #[test]
+    fn a_late_answer_to_an_older_request_loses_to_the_newer_one() {
+        let mut app = app_with_pr(7);
+        assert_eq!(
+            click_badge(&mut app),
+            Effect::Batch(vec![Effect::LoadRightPane, fetch(7, 1)])
+        );
+        // `r` while request 1 hangs, then a pin asks again.
+        app.forget_pr_lookups(Some(Path::new("app")));
+        let _ = app.due_pr_lookups();
+        set_answer(&mut app, 7, PrState::Open);
+        assert_eq!(
+            click_badge(&mut app),
+            Effect::Batch(vec![Effect::LoadRightPane, fetch(7, 2)])
+        );
+        assert!(
+            !land_request(&mut app, "feature", 7, 1, PrDetailLookup::Failed),
+            "the old request times out late: dropped"
+        );
+        assert_eq!(detail_of(&app), Some(PrDetailState::Loading(2)));
+        assert!(land_request(&mut app, "feature", 7, 2, pr_detail(7)));
+        assert!(matches!(detail_of(&app), Some(PrDetailState::Ready(_))));
+        assert!(
+            !land_request(&mut app, "feature", 7, 1, PrDetailLookup::Failed),
+            "and never replaces the fresh one"
+        );
+    }
+
+    #[test]
+    fn no_detail_is_requested_without_a_pr_answer() {
+        let mut app = app_with(&[repo("app", "feature"), repo("lib", "main")], &[]);
+        let _ = app.due_pr_lookups();
+        assert_eq!(click_badge(&mut app), Effect::LoadRightPane, "in flight");
+        assert!(app.apply_pr_lookup(
+            Path::new("app"),
+            "feature",
+            Some(REMOTE.into()),
+            PrLookup::NoPr
+        ));
+        assert_eq!(click_badge(&mut app), Effect::LoadRightPane, "no PR");
+        assert!(app.pr_cache.details.is_empty());
+    }
+
+    #[test]
+    fn a_branch_switch_r_and_a_changed_answer_drop_the_detail() {
+        let mut app = app_with_pr(7);
+        let _ = click_badge(&mut app);
+        assert!(land(&mut app, "feature", 7, pr_detail(7)));
+
+        // `gx` with the same answer keeps the detail; a new one drops it.
+        app.apply_pr_open(
+            Path::new("app"),
+            "feature",
+            Some(REMOTE.into()),
+            found(PrState::Open),
+            true,
+        );
+        assert!(matches!(detail_of(&app), Some(PrDetailState::Ready(_))));
+        app.apply_pr_open(
+            Path::new("app"),
+            "feature",
+            Some(REMOTE.into()),
+            found(PrState::Approved),
+            true,
+        );
+        assert_eq!(detail_of(&app), None, "the answer changed under gx");
+        assert!(app.pr_cache.details.is_empty());
+        assert_eq!(
+            click_badge(&mut app),
+            Effect::Batch(vec![Effect::LoadRightPane, fetch(7, 2)])
+        );
+
+        // `r` forgets the checkout and its detail.
+        assert!(land(&mut app, "feature", 7, pr_detail(7)));
+        app.forget_pr_lookups(Some(Path::new("app")));
+        assert!(app.pr_cache.details.is_empty(), "r drops the detail");
+        let _ = app.due_pr_lookups();
+        set_answer(&mut app, 7, PrState::Open);
+        let _ = click_badge(&mut app);
+        assert!(land(&mut app, "feature", 7, pr_detail(7)));
+        app.forget_pr_lookups(None);
+        assert!(app.pr_cache.details.is_empty(), "a full reload drops all");
+
+        // A branch switch drops the old branch's detail.
+        let _ = app.due_pr_lookups();
+        set_answer(&mut app, 7, PrState::Open);
+        let _ = click_badge(&mut app);
+        assert!(land(&mut app, "feature", 7, pr_detail(7)));
+        apply_one_repo_snapshot(&mut app, "app", Some(repo("app", "other")));
+        assert_eq!(detail_of(&app), None, "hidden at once");
+        let _ = app.due_pr_lookups();
+        assert!(app.pr_cache.details.is_empty(), "pruned with the answer");
+    }
+
+    #[test]
+    fn a_late_detail_for_an_old_branch_or_a_forgotten_checkout_is_dropped() {
+        let mut app = app_with_pr(7);
+        let _ = click_badge(&mut app);
+        apply_one_repo_snapshot(&mut app, "app", Some(repo("app", "other")));
+        assert!(!land(&mut app, "feature", 7, pr_detail(7)), "old branch");
+
+        let mut app = app_with_pr(7);
+        let _ = click_badge(&mut app);
+        app.forget_pr_lookups(Some(Path::new("app")));
+        assert!(!land(&mut app, "feature", 7, pr_detail(7)), "forgotten");
+        assert_eq!(detail_of(&app), None);
+
+        let mut app = app_with_pr(7);
+        let _ = click_badge(&mut app);
+        set_answer(&mut app, 8, PrState::Open);
+        assert!(
+            !land(&mut app, "feature", 7, pr_detail(7)),
+            "another PR now"
+        );
+        assert_eq!(detail_of(&app), None);
+
+        let mut app = app_with_pr(7);
+        assert!(!land(&mut app, "feature", 7, pr_detail(7)), "never asked");
+        let _ = click_badge(&mut app);
+        assert!(land(&mut app, "feature", 7, pr_detail(7)));
+        assert!(
+            !land(&mut app, "feature", 7, PrDetailLookup::Failed),
+            "a second answer does not replace the first"
+        );
+        assert!(matches!(detail_of(&app), Some(PrDetailState::Ready(_))));
+    }
+
+    #[test]
+    fn the_pinned_focus_stays_on_its_line_when_the_detail_lands() {
+        let mut app = app_with_pr(7);
+        let _ = click_badge(&mut app);
+        assert_eq!(
+            app.popover_run_action(),
+            Some(Action::OpenPullRequest),
+            "lands on Open PR below the loading line"
+        );
+        assert!(land(&mut app, "feature", 7, pr_detail(7)));
+        assert_eq!(app.popover_run_action(), Some(Action::OpenPullRequest));
+
+        // A field keeps the focus too: the URL moves down past the new
+        // fields and `y` still copies it.
+        let copy_url = Effect::CopyClipboard {
+            text: "https://github.com/octo/demo/pull/7".into(),
+            announce: true,
+        };
+        let mut app = app_with_pr(7);
+        let _ = click_badge(&mut app);
+        app.dispatch(Action::PopoverMove(-1));
+        assert_eq!(app.dispatch(Action::PopoverCopyLine), copy_url);
+        assert!(land(&mut app, "feature", 7, pr_detail(7)));
+        assert_eq!(app.dispatch(Action::PopoverCopyLine), copy_url);
+    }
+
+    #[test]
+    fn watch_ticks_never_request_a_detail() {
+        let mut app = app_with_pr(7);
+        focus(&mut app, "repo:app");
+        let _ = click_badge(&mut app);
+        assert!(app.popover_pinned());
+        // The detail is dropped while the popover stays pinned.
+        set_answer(&mut app, 7, PrState::Approved);
+        assert_eq!(detail_of(&app), None);
+        for tick in [Action::WatchTick, Action::FetchTick] {
+            let effect = app.dispatch(tick.clone());
+            assert!(
+                !format!("{effect:?}").contains("LookupPullRequestDetail"),
+                "{tick:?}: {effect:?}"
+            );
+        }
+        assert!(app.pr_cache.details.is_empty());
+        let _ = app.due_pr_lookups();
+        assert!(
+            app.pr_cache.details.is_empty(),
+            "a status apply asks nothing"
+        );
     }
 
     #[test]

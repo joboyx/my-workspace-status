@@ -591,6 +591,23 @@ pub enum Effect {
         /// Checkout path (snapshot `repo`) and the branch to look up.
         targets: Vec<(PathBuf, String)>,
     },
+    /// Fetch the popover detail of PR `number` for `branch` of checkout
+    /// `repo` at `remote` on a worker.
+    ///
+    /// Shares the badge lookup slots and the quit cancel flag. The answer
+    /// lands only while the cache still waits for it.
+    LookupPullRequestDetail {
+        /// Checkout path (snapshot `repo`).
+        repo: PathBuf,
+        /// Branch checked out there.
+        branch: String,
+        /// Remote URL the badge lookup resolved.
+        remote: String,
+        /// GitHub PR number or GitLab MR iid from the badge answer.
+        number: u64,
+        /// Request id; only the answer to the newest request lands.
+        request: u64,
+    },
     /// Copy `text` to the clipboard (OSC 52 / host tool).
     CopyClipboard {
         text: String,

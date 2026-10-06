@@ -4354,7 +4354,7 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
             }
             PopoverRow::Line(index) => {
                 2 + match lines[index] {
-                    PopoverLine::Text(text) => visible_width(text),
+                    PopoverLine::Text(text) | PopoverLine::Note(text) => visible_width(text),
                     PopoverLine::Field { value, .. } => label_width + 1 + visible_width(value),
                     PopoverLine::Action(command) => {
                         visible_width(command.title)
@@ -4417,6 +4417,9 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
                             text.clone(),
                             Style::default().fg(palette.file),
                         ));
+                    }
+                    PopoverLine::Note(text) => {
+                        spans.push(Span::styled(text.clone(), muted));
                     }
                     PopoverLine::Field { label, value } => {
                         let pad = label_width.saturating_sub(visible_width(label));
@@ -11600,6 +11603,126 @@ mod tests {
             painted.lines
         );
         assert!(rect.width <= POPOVER_MAX_WIDTH);
+    }
+
+    /// Popover text of `state` after one frame.
+    fn popover_text(state: &mut AppState, terminal: &mut Terminal<TestBackend>) -> String {
+        terminal.draw(|frame| draw(frame, state)).unwrap();
+        let rect = state.layout.popover.as_ref().expect("popover").rect;
+        rect_lines(&state.painted_frame, rect).join("\n")
+    }
+
+    #[test]
+    fn pr_popover_shows_loading_then_the_detail() {
+        use crate::tui::pull_request::{
+            ChecksSummary, PrDetailLookup, PrReview, PullRequestDetail,
+        };
+        for ascii in [true, false] {
+            let mut state = pr_state(&[branch_repo("app", "feature")], ascii);
+            set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+            focus_tree_row(&mut state, "repo:app");
+            let mut terminal = Terminal::new(TestBackend::new(120, 60)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let effect = state.dispatch(Action::PopoverOpenFocused);
+            assert!(matches!(
+                effect,
+                Effect::LookupPullRequestDetail { number: 7, .. }
+            ));
+            let text = popover_text(&mut state, &mut terminal);
+            for want in [
+                "number  #7",
+                "loading…",
+                "url     https://github.com/octo/demo/pull/7",
+                "Open PR",
+            ] {
+                assert!(text.contains(want), "{want:?} in\n{text}");
+            }
+            let buf = &state.painted_frame;
+            let rect = state.layout.popover.as_ref().unwrap().rect;
+            let y = (rect.y..rect.bottom())
+                .find(|y| buf_line(buf, *y).contains("loading…"))
+                .expect("loading row");
+            let x = (rect.x..rect.right())
+                .find(|x| buf[(*x, y)].symbol() == "l")
+                .expect("loading text");
+            assert_eq!(buf[(x, y)].fg, state.theme.palette().muted, "muted");
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            assert!(state.apply_pr_detail(
+                Path::new("app"),
+                "feature",
+                PR_REMOTE,
+                7,
+                1,
+                PrDetailLookup::Found(PullRequestDetail {
+                    number: 7,
+                    title: "Add login".into(),
+                    state: "OPEN".into(),
+                    draft: true,
+                    author: Some("octocat".into()),
+                    head: Some("feature".into()),
+                    base: Some("main".into()),
+                    review: Some(PrReview::ReviewRequired),
+                    checks: ChecksSummary {
+                        pass: 3,
+                        fail: 1,
+                        pending: 2,
+                    },
+                    updated_at: Some(now - 2 * 3600),
+                }),
+            ));
+            let text = popover_text(&mut state, &mut terminal);
+            let (arrow, checks) = if ascii {
+                ("->", "3 pass · 1 fail · 2 pending")
+            } else {
+                ("→", "✓ 3 · ✗ 1 · … 2")
+            };
+            for want in [
+                "number  #7 Add login".to_string(),
+                "state   OPEN · DRAFT · REVIEW_REQUIRED".into(),
+                "author  octocat".into(),
+                format!("branch  feature {arrow} main"),
+                format!("checks  {checks}"),
+                "(2h)".into(),
+                "url     https://github.com/octo/demo/pull/7".into(),
+                "Open PR".into(),
+            ] {
+                assert!(text.contains(&want), "{want:?} in\n{text}");
+            }
+            assert!(!text.contains("loading…"), "{text}");
+        }
+    }
+
+    #[test]
+    fn pr_popover_says_when_the_detail_could_not_load() {
+        use crate::tui::pull_request::PrDetailLookup;
+        let mut state = pr_state(&[branch_repo("app", "feature")], true);
+        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        focus_tree_row(&mut state, "repo:app");
+        let mut terminal = Terminal::new(TestBackend::new(120, 60)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let _ = state.dispatch(Action::PopoverOpenFocused);
+        assert!(state.apply_pr_detail(
+            Path::new("app"),
+            "feature",
+            PR_REMOTE,
+            7,
+            1,
+            PrDetailLookup::Failed
+        ));
+        let text = popover_text(&mut state, &mut terminal);
+        for want in [
+            "number  #7",
+            "could not load details",
+            "url     https://github.com/octo/demo/pull/7",
+            "Open PR",
+        ] {
+            assert!(text.contains(want), "{want:?} in\n{text}");
+        }
+        assert!(!text.contains("loading…"), "{text}");
     }
 
     #[test]

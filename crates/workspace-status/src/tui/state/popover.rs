@@ -359,31 +359,62 @@ impl AppState {
             self.status = StatusMessage::warn(NO_ICONS_ON_ROW);
             return Effect::None;
         }
-        self.pin(targets, None);
-        Effect::None
+        self.pin(targets, None)
     }
 
-    fn pin(&mut self, targets: Vec<(IconKind, IconTarget)>, anchor: Option<Rect>) {
+    /// Pin a popover on `targets`. Returns the PR detail fetches it starts
+    /// ([`Self::request_popover_pr_details`]).
+    ///
+    /// The landing line is picked after the request, so it counts the
+    /// `loading…` line the request adds.
+    fn pin(&mut self, targets: Vec<(IconKind, IconTarget)>, anchor: Option<Rect>) -> Effect {
         self.peek = PeekTimers::default();
         self.popover_press = None;
-        let focus_line = landing_line(&flat_lines(&popover_sections(
-            self,
-            &targets,
-            super::unix_now(),
-        )));
         self.popover = Some(PopoverState {
             origin: PopoverOrigin::Pinned,
             targets,
             anchor,
-            focus_line,
+            focus_line: 0,
             owner: self.popover_owner(),
         });
+        let details = self.request_popover_pr_details();
+        let landing = landing_line(&flat_lines(&self.open_popover_sections()));
+        if let Some(popover) = self.popover.as_mut() {
+            popover.focus_line = landing;
+        }
+        details
+    }
+
+    /// The focused line of the pinned popover as its section target and
+    /// line key (a field's label or an action's title), or `None`.
+    pub(crate) fn popover_focus_key(&self) -> Option<(IconTarget, PopoverLineKey)> {
+        let popover = self.popover.as_ref().filter(|_| self.popover_pinned())?;
+        let sections = self.open_popover_sections();
+        let focus = focused_line(&flat_lines(&sections), popover.focus_line)?;
+        let (_, section, line) = section_lines(&sections).find(|(index, _, _)| *index == focus)?;
+        Some((section.target.clone(), line_key(line)?))
+    }
+
+    /// Point the pinned popover's focus back at the line `key` named
+    /// before its content changed (a PR detail landed and the section grew).
+    /// A line that is gone leaves the focus where it is.
+    pub(crate) fn restore_popover_focus(&mut self, key: Option<(IconTarget, PopoverLineKey)>) {
+        let Some((target, key)) = key else {
+            return;
+        };
+        let sections = self.open_popover_sections();
+        let found = section_lines(&sections)
+            .find(|(_, section, line)| section.target == target && line_key(line) == Some(key))
+            .map(|(index, _, _)| index);
+        if let (Some(index), Some(popover)) = (found, self.popover.as_mut()) {
+            popover.focus_line = index;
+        }
     }
 
     /// Pin the popover of the clicked icon `hit`. Its row is already
-    /// selected.
-    pub(super) fn pin_icon(&mut self, hit: &IconHit) {
-        self.pin(icon_targets(hit.kind, &hit.target), Some(hit.rect()));
+    /// selected. Returns the PR detail fetches it starts.
+    pub(super) fn pin_icon(&mut self, hit: &IconHit) -> Effect {
+        self.pin(icon_targets(hit.kind, &hit.target), Some(hit.rect()))
     }
 
     /// Close any popover and drop the peek timers.
@@ -431,7 +462,7 @@ impl AppState {
     pub(crate) fn popover_run_action(&self) -> Option<Action> {
         match self.focused_popover_line()? {
             PopoverLine::Action(command) => Some(command.action.clone()),
-            PopoverLine::Text(_) | PopoverLine::Field { .. } => None,
+            PopoverLine::Text(_) | PopoverLine::Note(_) | PopoverLine::Field { .. } => None,
         }
     }
 
@@ -446,7 +477,7 @@ impl AppState {
         let sections = self.open_popover_sections();
         match flat_lines(&sections).get(line)? {
             PopoverLine::Action(command) => Some(command.action.clone()),
-            PopoverLine::Text(_) | PopoverLine::Field { .. } => None,
+            PopoverLine::Text(_) | PopoverLine::Note(_) | PopoverLine::Field { .. } => None,
         }
     }
 
@@ -563,6 +594,19 @@ impl AppState {
         }
     }
 
+    /// [`Self::expire_peek`], then the PR detail fetch of the peek it
+    /// opened ([`Self::request_popover_pr_details`]).
+    ///
+    /// The first value is true when the popover changed (the live loop
+    /// redraws); the effect is what the loop schedules. A peek on a PR
+    /// whose detail is already cached or loading asks nothing.
+    pub(crate) fn expire_peek_with_details(&mut self, now: Instant) -> (bool, Effect) {
+        if !self.expire_peek(now) {
+            return (false, Effect::None);
+        }
+        (true, self.request_popover_pr_details())
+    }
+
     /// Milliseconds until the next peek dwell or grace deadline, or `None`
     /// when neither is armed.
     pub fn peek_remaining_ms(&self, now: Instant) -> Option<u64> {
@@ -589,7 +633,8 @@ impl AppState {
 
     /// Open the peek whose dwell ended, close the peek whose grace ended.
     ///
-    /// Returns true when the popover changed, so the live loop redraws.
+    /// Returns true when the popover changed. The live loop calls it
+    /// through [`Self::expire_peek_with_details`].
     pub fn expire_peek(&mut self, now: Instant) -> bool {
         let mut changed = false;
         if self.peek.dwell.as_ref().is_some_and(|(_, at)| *at <= now) {
@@ -719,8 +764,8 @@ impl AppState {
         let selected = self.click_at(anchor.x, anchor.y);
         self.last_click = None;
         self.text_selection = None;
-        self.pin(targets, Some(anchor));
-        Some(selected)
+        let details = self.pin(targets, Some(anchor));
+        Some(then(selected, details))
     }
 
     /// Left release: copy a drag selection, or run the popover action line
@@ -733,6 +778,38 @@ impl AppState {
             Some(line) if !dragged => self.run_popover_line(Some(line)),
             _ => copied,
         }
+    }
+}
+
+/// What identifies a focusable popover line inside its section: `true`
+/// and the title for an action, `false` and the label for a field.
+pub(crate) type PopoverLineKey = (bool, &'static str);
+
+fn line_key(line: &PopoverLine) -> Option<PopoverLineKey> {
+    match line {
+        PopoverLine::Field { label, .. } => Some((false, label)),
+        PopoverLine::Action(command) => Some((true, command.title)),
+        PopoverLine::Text(_) | PopoverLine::Note(_) => None,
+    }
+}
+
+/// Every line of `sections` with its [`flat_lines`] index and section.
+fn section_lines(
+    sections: &[PopoverSection],
+) -> impl Iterator<Item = (usize, &PopoverSection, &PopoverLine)> {
+    sections
+        .iter()
+        .flat_map(|section| section.lines.iter().map(move |line| (section, line)))
+        .enumerate()
+        .map(|(index, (section, line))| (index, section, line))
+}
+
+/// `first`, then `second`, as one effect.
+pub(super) fn then(first: Effect, second: Effect) -> Effect {
+    match (first, second) {
+        (Effect::None, second) => second,
+        (first, Effect::None) => first,
+        (first, second) => Effect::Batch(vec![first, second]),
     }
 }
 
@@ -1121,7 +1198,17 @@ mod tests {
             }),
         ));
         focus(&mut app, "repo:app");
-        assert_eq!(app.dispatch(Action::PopoverOpenFocused), Effect::None);
+        assert_eq!(
+            app.dispatch(Action::PopoverOpenFocused),
+            Effect::LookupPullRequestDetail {
+                repo: PathBuf::from("app"),
+                branch: "feature".into(),
+                remote: PR_REMOTE.into(),
+                number: 7,
+                request: 1,
+            },
+            "the pin starts the PR detail fetch"
+        );
         let sections = app.open_popover_sections();
         let icons: Vec<IconKind> = sections.iter().map(|section| section.icon).collect();
         assert_eq!(
@@ -1143,6 +1230,7 @@ mod tests {
             vec![
                 IconKind::PrOpen.spec().meaning.to_string(),
                 "#7".into(),
+                "loading…".into(),
                 "https://github.com/octo/demo/pull/7".into(),
                 "Open PR".into(),
             ]

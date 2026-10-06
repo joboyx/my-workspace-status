@@ -320,7 +320,10 @@ pub async fn run(
                 }
             }
             _ = sleep_ms(peek_remain) => {
-                if ctx.state.expire_peek(Instant::now()) {
+                let (redraw, effect) = ctx.state.expire_peek_with_details(Instant::now());
+                if redraw {
+                    ctx.interp.schedule(ctx.state, ctx.opts, effect, &Action::None);
+                    let _ = ctx.interp.take_dirty();
                     ctx.presenter.mark();
                 }
             }

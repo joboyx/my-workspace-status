@@ -11,6 +11,8 @@ mod pan;
 mod popover;
 mod pull_request;
 
+pub(crate) use pull_request::PrDetailState;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -2435,8 +2437,8 @@ impl AppState {
         let selected = self.click_at(col, row);
         self.last_click = None;
         self.text_selection = None;
-        self.pin_icon(&hit);
-        selected
+        let details = self.pin_icon(&hit);
+        popover::then(selected, details)
     }
 
     /// Plain left press: tabs, dividers, scrollbars, then the row under it.

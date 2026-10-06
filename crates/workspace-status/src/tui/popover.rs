@@ -36,7 +36,8 @@ use super::comments::{tree_row_comments, CommentEntry};
 use super::commit_files::CommitFileRow;
 use super::gates::ListFocusTarget;
 use super::icons::{capture_count, file_type_name, spec, status_letter_from_change, IconKind};
-use super::state::AppState;
+use super::pull_request::{ChecksSummary, PullRequestDetail};
+use super::state::{AppState, PrDetailState};
 use super::tree::{
     file_change_from_name_status, find_node, is_merge_mark_kind, path_under_dir, pr_badge_kind,
     pr_badge_mark, NodeKind, NodeSegments, SegRole, TextSeg, TreeNode, VisibleRow,
@@ -141,6 +142,8 @@ impl PopoverState {
 pub enum PopoverLine {
     /// Plain text (the catalog meaning). Not focusable.
     Text(String),
+    /// Muted status text, such as `loading…`. Not focusable.
+    Note(String),
     /// A muted label and a value. `y` copies the value.
     Field {
         /// Short lower-case label.
@@ -161,13 +164,13 @@ impl PopoverLine {
 
     /// True for a line `j` / `k` can focus: a field or an action.
     pub fn focusable(&self) -> bool {
-        !matches!(self, Self::Text(_))
+        !matches!(self, Self::Text(_) | Self::Note(_))
     }
 
     /// Text `y` copies: the value of a field, the title of an action.
     pub fn copy_text(&self) -> String {
         match self {
-            Self::Text(text) => text.clone(),
+            Self::Text(text) | Self::Note(text) => text.clone(),
             Self::Field { value, .. } => value.clone(),
             Self::Action(command) => command.title.to_string(),
         }
@@ -329,7 +332,7 @@ fn section(
             let row = state.rows.iter().find(|row| &row.id == id)?;
             tree_section(state, kind, row)
         }
-        IconTarget::PullRequest(repo) => pr_section(state, repo),
+        IconTarget::PullRequest(repo) => pr_section(state, repo, now_unix),
         IconTarget::CommitFileRow(id) => {
             let row = state
                 .commit_file_rows()
@@ -933,22 +936,42 @@ fn commits(count: Option<u64>, tail: &str) -> String {
     }
 }
 
-/// PR badge: meaning, number, URL (`y` copies it), and Open PR (`gx`).
-fn pr_section(state: &AppState, repo: &Path) -> Option<PopoverSection> {
+/// Shown while the PR detail fetch runs.
+pub const PR_DETAIL_LOADING: &str = "loading…";
+
+/// Shown when the PR detail fetch failed.
+pub const PR_DETAIL_FAILED: &str = "could not load details";
+
+/// PR badge: meaning, number, the fetched detail, URL (`y` copies it), and
+/// Open PR (`gx`).
+///
+/// The number and URL come from the badge answer at once. The detail adds
+/// the title, state and review, author, `head → base`, checks, and update
+/// time once it lands. While it loads, or when it failed, a muted line says
+/// so.
+fn pr_section(state: &AppState, repo: &Path, now_unix: i64) -> Option<PopoverSection> {
     let pr = state.pull_request_for(repo)?;
     let (_, role) = pr_badge_mark(state.ascii, pr.state);
     let kind = pr_badge_kind(pr.state);
-    let mut lines = vec![
-        PopoverLine::Text(spec(kind).meaning.to_string()),
-        PopoverLine::Field {
-            label: "number",
-            value: format!("#{}", pr.number),
-        },
-        PopoverLine::Field {
-            label: "url",
-            value: pr.url.clone(),
-        },
-    ];
+    let mut lines = vec![PopoverLine::Text(spec(kind).meaning.to_string())];
+    match state.pull_request_detail_for(repo) {
+        Some(PrDetailState::Ready(detail)) => {
+            pr_detail_fields(state.ascii, detail, now_unix, &mut lines)
+        }
+        other => {
+            lines.push(field("number", format!("#{}", pr.number)));
+            match other {
+                Some(PrDetailState::Loading(_)) => {
+                    lines.push(PopoverLine::Note(PR_DETAIL_LOADING.into()))
+                }
+                Some(PrDetailState::Failed) => {
+                    lines.push(PopoverLine::Note(PR_DETAIL_FAILED.into()))
+                }
+                Some(PrDetailState::Ready(_)) | None => {}
+            }
+        }
+    }
+    lines.push(field("url", pr.url.clone()));
     lines.extend(PopoverLine::action(&Action::OpenPullRequest));
     Some(PopoverSection {
         icon: kind,
@@ -956,6 +979,77 @@ fn pr_section(state: &AppState, repo: &Path) -> Option<PopoverSection> {
         target: IconTarget::PullRequest(repo.to_path_buf()),
         lines,
     })
+}
+
+/// Fields of a fetched PR detail: `#N title`, state (draft, review),
+/// author, branches, checks, and update time. Each optional one shows when
+/// the forge sent it.
+fn pr_detail_fields(
+    ascii: bool,
+    detail: &PullRequestDetail,
+    now_unix: i64,
+    lines: &mut Vec<PopoverLine>,
+) {
+    let number = format!("#{}", detail.number);
+    lines.push(field(
+        "number",
+        if detail.title.is_empty() {
+            number
+        } else {
+            format!("{number} {}", detail.title)
+        },
+    ));
+    let mut state = Vec::new();
+    if !detail.state.is_empty() {
+        state.push(detail.state.as_str());
+    }
+    if detail.draft {
+        state.push("DRAFT");
+    }
+    if let Some(review) = detail.review {
+        state.push(review.label());
+    }
+    if !state.is_empty() {
+        lines.push(field("state", state.join(" · ")));
+    }
+    if let Some(author) = &detail.author {
+        lines.push(field("author", author.clone()));
+    }
+    if let (Some(head), Some(base)) = (&detail.head, &detail.base) {
+        let arrow = if ascii { "->" } else { "→" };
+        lines.push(field("branch", format!("{head} {arrow} {base}")));
+    }
+    lines.push(field("checks", checks_text(ascii, &detail.checks)));
+    if let Some(unix) = detail.updated_at {
+        let local = format_local_timestamp(unix);
+        let relative = format_relative_date(unix, now_unix);
+        lines.push(field(
+            "updated",
+            if relative == local {
+                local
+            } else {
+                format!("{local} ({relative})")
+            },
+        ));
+    }
+}
+
+/// `✓ P · ✗ F · … N` (ASCII: `P pass · F fail · N pending`), or `none`.
+fn checks_text(ascii: bool, checks: &ChecksSummary) -> String {
+    if *checks == ChecksSummary::default() {
+        return "none".into();
+    }
+    if ascii {
+        format!(
+            "{} pass · {} fail · {} pending",
+            checks.pass, checks.fail, checks.pending
+        )
+    } else {
+        format!(
+            "✓ {} · ✗ {} · … {}",
+            checks.pass, checks.fail, checks.pending
+        )
+    }
 }
 
 /// Section of icon `kind` on the graph row with [`graph_row_id`] `id`:
