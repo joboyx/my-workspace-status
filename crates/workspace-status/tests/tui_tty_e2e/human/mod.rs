@@ -87,6 +87,7 @@ mod pty_help_enter_does_not_arm_pane_search;
 mod pty_help_overlay;
 mod pty_help_search_keeps_app_version;
 mod pty_home_and_end_jump_workspace_tree;
+mod pty_icon_popover_peek_pin_esc;
 mod pty_key_repeat_j_reaches_no_updates;
 mod pty_key_repeat_q_z_g_ignored;
 mod pty_launch_paints_tree_diff_and_chrome;

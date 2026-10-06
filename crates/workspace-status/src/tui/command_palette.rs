@@ -581,6 +581,17 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     },
 ];
 
+/// The catalog row that runs `action`, if any.
+///
+/// Icon popovers take an action line's title, key chip, and disabled
+/// reason from this row, so a popover never names a key the palette does
+/// not.
+pub fn command_for(action: &Action) -> Option<&'static PaletteCommand> {
+    PALETTE_COMMANDS
+        .iter()
+        .find(|command| &command.action == action)
+}
+
 /// Case-insensitive substring on title, key chips, group, and aliases.
 pub fn command_matches(command: &PaletteCommand, query: &str) -> bool {
     let q = query.trim().to_ascii_lowercase();

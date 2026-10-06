@@ -198,6 +198,24 @@ pub enum Action {
     /// The target is a tree checkout row or a graph worktree row with a
     /// branch. Any other row sets the status `no PR for this row`.
     OpenPullRequest,
+    /// Pin a popover over every icon of the focused row (`gh`).
+    ///
+    /// One section per icon, in paint order. A row with no icon sets the
+    /// status `no icons on this row`.
+    PopoverOpenFocused,
+    /// Move the pinned popover focus to the next (`1`) or previous (`-1`)
+    /// field or action line (`j` / `k`).
+    PopoverMove(i32),
+    /// Run the focused action line of the pinned popover (Enter).
+    ///
+    /// The popover closes, then the line's own [`Action`] dispatches through
+    /// the usual gates. A disabled line keeps the popover open and puts the
+    /// gate reason on the status line.
+    PopoverRun,
+    /// Copy the focused line of the pinned popover (`y`).
+    PopoverCopyLine,
+    /// Close the pinned popover (Esc, right click).
+    PopoverClose,
     NavEnter,
     NavEsc,
     GraphStashApply,

@@ -101,6 +101,10 @@ pub enum InputMode {
     CommentExport,
     /// Quick Open (`:` / `>` commands, Ctrl-p / `F` files). Query, list, Enter.
     QuickOpen,
+    /// Pinned icon popover (click on an icon, or `gh`): `j` / `k` move,
+    /// Enter runs, `y` copies the focused line, Esc closes. The mouse stays
+    /// live (click, drag-select, wheel). A hover peek is not a mode.
+    Popover,
 }
 
 fn same_g_chord_key(last: Option<(KeyCode, KeyModifiers)>, key: &KeyEvent) -> bool {
@@ -301,6 +305,11 @@ pub fn event_to_action_with(
                     | InputMode::QuickOpen,
             ) {
                 Action::None
+            } else if mode == InputMode::Popover
+                && mouse.kind == MouseEventKind::Down(MouseButton::Right)
+            {
+                // Right-click is Esc: it closes the pinned popover.
+                Action::PopoverClose
             } else if matches!(
                 mode,
                 InputMode::ZPending { .. } | InputMode::GPending { .. }
@@ -520,7 +529,8 @@ fn repeat_maps_to_action(key: KeyEvent, mode: InputMode) -> bool {
         | InputMode::Help
         | InputMode::StashMenu
         | InputMode::BlameMenu
-        | InputMode::CommentExport => false,
+        | InputMode::CommentExport
+        | InputMode::Popover => false,
     }
 }
 
@@ -645,6 +655,7 @@ fn key_to_action(
             KeyCode::Char('t') if !has_command_modifier(key) => Action::NextTab,
             KeyCode::Char('T') if !has_command_modifier(key) => Action::PreviousTab,
             KeyCode::Char('x') if !has_command_modifier(key) => Action::OpenPullRequest,
+            KeyCode::Char('h') if !has_command_modifier(key) => Action::PopoverOpenFocused,
             KeyCode::Char(c @ '1'..='9') if !has_command_modifier(key) => {
                 Action::JumpToTab(c as u8 - b'0')
             }
@@ -765,6 +776,15 @@ fn key_to_action(
         InputMode::CommentExport => match key.code {
             _ if is_unbound_chord(key) => Action::None,
             KeyCode::Esc | KeyCode::Enter => Action::ExportCommentsCancel,
+            _ => Action::None,
+        },
+        InputMode::Popover => match key.code {
+            _ if is_unbound_chord(key) => Action::None,
+            KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => Action::PopoverMove(1),
+            KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => Action::PopoverMove(-1),
+            KeyCode::Enter => Action::PopoverRun,
+            KeyCode::Char('y') => Action::PopoverCopyLine,
+            KeyCode::Esc => Action::PopoverClose,
             _ => Action::None,
         },
         InputMode::QuickOpen => quick_open_key_action(key),
@@ -2712,6 +2732,70 @@ mod tests {
         InputMode::GPending {
             search_active: false,
         }
+    }
+
+    #[test]
+    fn gh_pins_the_icon_popover_and_bare_h_still_folds() {
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('h')), pending_g(), false, false),
+            Action::PopoverOpenFocused
+        );
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('h')), pending_g(), false, false),
+            event_to_action(&ctrl(KeyCode::Char('h')), normal(), false, false),
+            "a modifier chord falls through"
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('h')), normal(), false, false),
+            Action::FoldClose,
+            "bare h folds the tree"
+        );
+    }
+
+    #[test]
+    fn popover_mode_keys() {
+        let at = |event: Event| event_to_action(&event, InputMode::Popover, false, false);
+        for (event, want) in [
+            (key(KeyCode::Char('j')), Action::PopoverMove(1)),
+            (shift(KeyCode::Char('J')), Action::PopoverMove(1)),
+            (key(KeyCode::Down), Action::PopoverMove(1)),
+            (key(KeyCode::Char('k')), Action::PopoverMove(-1)),
+            (shift(KeyCode::Char('K')), Action::PopoverMove(-1)),
+            (key(KeyCode::Up), Action::PopoverMove(-1)),
+            (key(KeyCode::Enter), Action::PopoverRun),
+            (key(KeyCode::Char('y')), Action::PopoverCopyLine),
+            (key(KeyCode::Esc), Action::PopoverClose),
+            (key(KeyCode::Char('p')), Action::None),
+            (key(KeyCode::Char('q')), Action::None),
+            (key(KeyCode::Char(':')), Action::None),
+            (ctrl(KeyCode::Char('j')), Action::None),
+            (ctrl(KeyCode::Char('p')), Action::None),
+            (ctrl(KeyCode::Char('c')), Action::CtrlC),
+        ] {
+            assert_eq!(at(event.clone()), want, "{event:?}");
+        }
+    }
+
+    #[test]
+    fn popover_mode_keeps_the_mouse_and_right_click_closes() {
+        let at = |kind| event_to_action(&mouse(kind, 40, 4), InputMode::Popover, false, false);
+        assert_eq!(
+            at(MouseEventKind::Down(MouseButton::Left)),
+            Action::Click { col: 40, row: 4 }
+        );
+        assert_eq!(
+            at(MouseEventKind::Drag(MouseButton::Left)),
+            Action::Drag { col: 40, row: 4 }
+        );
+        assert_eq!(at(MouseEventKind::Up(MouseButton::Left)), Action::Release);
+        assert_eq!(
+            at(MouseEventKind::Moved),
+            Action::PointerMove { col: 40, row: 4 }
+        );
+        assert_eq!(
+            at(MouseEventKind::Down(MouseButton::Right)),
+            Action::PopoverClose
+        );
     }
 
     #[test]

@@ -83,7 +83,7 @@ impl AppState {
     /// graph worktree row with a branch. A file or compare tab, commit files,
     /// a diff, a commit, stash, dir, or file row, a repo that groups several
     /// checkouts, and a detached HEAD have no target.
-    fn pr_target_for_focus(&self) -> Option<(PathBuf, String)> {
+    pub(super) fn pr_target_for_focus(&self) -> Option<(PathBuf, String)> {
         if self.is_file_tab() || self.is_compare_tab() {
             return None;
         }
@@ -132,19 +132,23 @@ impl AppState {
     /// Ctrl+click: on a painted PR badge, select the row and open its PR.
     ///
     /// The row is selected exactly as a plain click selects it, and the
-    /// click's own effect (the right-pane load) still runs. Off every badge
-    /// this is a plain click and never opens a browser.
+    /// click's own effect (the right-pane load) still runs. It pins no
+    /// popover. Off every badge this is a plain click and never opens a
+    /// browser.
     pub(super) fn ctrl_click(&mut self, col: u16, row: u16) -> Effect {
         let badge = self
             .layout
-            .pr_badge_hits
-            .iter()
+            .pr_badge_hits()
+            .into_iter()
             .find(|hit| hit.contains(col, row))
-            .map(|hit| hit.repo.clone());
-        let selected = self.click(col, row);
+            .map(|hit| hit.repo);
         let Some(repo) = badge else {
-            return selected;
+            return self.click(col, row);
         };
+        if let Some(effect) = self.popover_click(col, row) {
+            return effect;
+        }
+        let selected = self.click_at(col, row);
         let open = match self.pr_target_for_repo(&repo) {
             Some((repo, branch)) => {
                 // A second Ctrl+click on the badge opens again; it is not
@@ -163,21 +167,27 @@ impl AppState {
         }
     }
 
-    /// PR state for the badge of checkout `repo`.
-    ///
-    /// `Some` only when the cached answer is for the branch the checkout has
-    /// now and names a PR. A lookup in flight, a failed lookup, no PR, or an
-    /// answer for another branch give `None`.
-    pub(crate) fn pr_badge(&self, repo: &Path) -> Option<PrState> {
+    /// The PR the badge of checkout `repo` shows, under the same rule as
+    /// [`Self::pr_badge`].
+    pub(crate) fn pull_request_for(&self, repo: &Path) -> Option<&PullRequest> {
         let checkout = self.pr_cache.checkouts.get(repo)?;
         if self.snapshot_branch(repo) != Some(checkout.branch.as_str()) {
             return None;
         }
         let key = (checkout.remote.clone()?, checkout.branch.clone());
         match self.pr_cache.answers.get(&key)? {
-            BranchPr::Ready(Some(pr)) => Some(pr.state),
+            BranchPr::Ready(Some(pr)) => Some(pr),
             BranchPr::Ready(None) | BranchPr::Failed => None,
         }
+    }
+
+    /// PR state for the badge of checkout `repo`.
+    ///
+    /// `Some` only when the cached answer is for the branch the checkout has
+    /// now and names a PR. A lookup in flight, a failed lookup, no PR, or an
+    /// answer for another branch give `None`.
+    pub(crate) fn pr_badge(&self, repo: &Path) -> Option<PrState> {
+        self.pull_request_for(repo).map(|pr| pr.state)
     }
 
     /// Checkouts whose PR badge needs a lookup now, marked in flight.
@@ -352,8 +362,10 @@ mod tests {
     use workspace_status_graph::{Commit, GraphModel, Worktree};
 
     use super::super::super::app::apply_one_repo_snapshot;
+    use super::super::super::icons::IconKind;
+    use super::super::super::popover::IconTarget;
     use super::super::super::status::StatusKind;
-    use super::super::{FocusPane, PrBadgeHit};
+    use super::super::{FocusPane, IconHit};
     use super::*;
     use crate::helpers::DETACHED_HEAD_BRANCH;
     use crate::snapshot::{
@@ -647,11 +659,12 @@ mod tests {
     }
 
     fn badge_at(app: &mut AppState, repo: &str, x: u16, y: u16) {
-        app.layout.pr_badge_hits = vec![PrBadgeHit {
+        app.layout.icon_hits = vec![IconHit {
             y,
             x,
             width: 2,
-            repo: PathBuf::from(repo),
+            kind: IconKind::PrOpen,
+            target: IconTarget::PullRequest(PathBuf::from(repo)),
         }];
     }
 
@@ -687,9 +700,10 @@ mod tests {
         focus(&mut app, "repo:lib");
         app.last_click = None;
         // Control: two plain clicks in the window are a double-click, which
-        // moves focus to the right pane.
-        app.dispatch(Action::Click { col: 20, row: y });
-        app.dispatch(Action::Click { col: 20, row: y });
+        // moves focus to the right pane. They land off the badge: a plain
+        // click on an icon pins its popover and never drills.
+        app.dispatch(Action::Click { col: 10, row: y });
+        app.dispatch(Action::Click { col: 10, row: y });
         assert_eq!(app.focus, FocusPane::Right);
 
         focus(&mut app, "repo:lib");

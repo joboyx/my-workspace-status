@@ -263,6 +263,7 @@ pub async fn run(
             };
         let ctrl_remain = ctx.state.ctrl_c_remaining_ms(now).unwrap_or(u64::MAX);
         let status_remain = ctx.state.status_expiry_ms(now).unwrap_or(u64::MAX);
+        let peek_remain = ctx.state.peek_remaining_ms(now).unwrap_or(u64::MAX);
         let present_remain = ctx.presenter.remain_ms(ctx.state.has_active_flashes());
         let join_empty = ctx.join.is_empty();
 
@@ -318,6 +319,11 @@ pub async fn run(
                     ctx.presenter.mark();
                 }
             }
+            _ = sleep_ms(peek_remain) => {
+                if ctx.state.expire_peek(Instant::now()) {
+                    ctx.presenter.mark();
+                }
+            }
             _ = sleep_ms(present_remain) => {
                 ctx.state.prune_expired_flashes();
                 if ctx.presenter.should_draw() || ctx.state.has_active_flashes() {
@@ -361,21 +367,25 @@ fn handle_input(ctx: &mut LoopCtx<'_>, event: crossterm::event::Event, origin: K
     if let Some(pointer) = pointer_motion(&event, &action) {
         // Any-event motion (DECSET 1003) arrives on every cell the pointer
         // crosses. Store it without dispatch: no chord reset, no status,
-        // no effect. Redraw only when the hovered tab `[✗]` changes.
+        // no effect. Redraw only when the hovered tab `[✗]` or icon
+        // changes. The icon peek dwell and grace run on `peek_remain`.
         if ctx.state.set_pointer(pointer) {
             ctx.presenter.mark();
         }
         return;
     }
     if ctx.interp.busy_for_writes() {
-        let palette_submit = if matches!(action, Action::QuickOpenSubmit) {
-            ctx.state
+        let palette_submit = match action {
+            Action::QuickOpenSubmit => ctx
+                .state
                 .command_palette()
                 .and_then(|palette| palette.selected_action())
-        } else {
-            None
+                .cloned(),
+            Action::PopoverRun => ctx.state.popover_run_action(),
+            Action::Release => ctx.state.popover_release_action(),
+            _ => None,
         };
-        match classify_busy_dispatch(&action, palette_submit) {
+        match classify_busy_dispatch(&action, palette_submit.as_ref()) {
             BusyAction::Quit => {
                 // `q` mid-write arms the same press-again window as Ctrl-C.
                 if matches!(ctx.state.quit_while_busy(Instant::now()), Effect::Quit) {

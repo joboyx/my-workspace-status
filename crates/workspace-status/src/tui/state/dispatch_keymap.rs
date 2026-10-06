@@ -143,7 +143,7 @@ impl AppState {
                     Effect::None
                 } else {
                     self.drag = SplitDrag::None;
-                    self.finish_text_selection()
+                    self.release_mouse()
                 }
             }
             Action::BackClick => {
@@ -167,6 +167,7 @@ impl AppState {
                 self.cancel_mouse_drag();
                 self.mouse_enabled = !self.mouse_enabled;
                 self.pointer = None;
+                self.drop_peek();
                 self.status = if self.mouse_enabled {
                     "Mouse on".into()
                 } else {

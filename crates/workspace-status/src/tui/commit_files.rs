@@ -259,6 +259,7 @@ fn commit_file_segments(node: &CommitFileNode, tree_mode: bool, ascii: bool) -> 
                     hex: None,
                     bold: false,
                     dim: false,
+                    icon: None,
                 }],
                 trailing: Vec::new(),
             },

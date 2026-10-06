@@ -8,6 +8,7 @@ mod dispatch_write;
 mod file_tab;
 mod line_blame;
 mod pan;
+mod popover;
 mod pull_request;
 
 use std::cell::RefCell;
@@ -67,13 +68,14 @@ use super::gates::{
     REVIEWED_MARKS_ARE_FOR_TREE_FILES,
 };
 use super::graph_focus::GraphFocusPickerState;
-use super::icons::comment_mark_cols;
+use super::icons::{comment_mark_cols, IconKind};
 use super::keys::{expire_stale_g_chord_echo, GChordEchoState, InputMode, DOUBLE_TAP_MS};
 use super::line_blame::{GraphReveal, LineBlameState};
 use super::ops::{
     collect_write_files, format_running_op, op_is_kind_noop, op_kind_noop_reason, op_targets,
     push_targets, refresh_target, Op, RevertScope, RunningOp, ScopedFile,
 };
+use super::popover::{IconTarget, PopoverState};
 use super::quick_open::QuickOpenState;
 use super::search::{
     collect_graph_match_indices, collect_match_ids, commit_file_row_match_indices,
@@ -151,7 +153,38 @@ pub enum FocusPane {
     Right,
 }
 
-/// One painted PR badge, for Ctrl+click hit testing.
+/// One painted icon, for hover peek, click pin, and Ctrl+click.
+///
+/// Paint records one span per icon it paints (a tagged tree segment, a PR
+/// badge on a tree or graph row), rebuilt every frame. The span is the
+/// glyph columns only, clipped to what is on screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IconHit {
+    /// 0-based screen row of the icon.
+    pub y: u16,
+    /// 0-based first screen column of the icon.
+    pub x: u16,
+    /// Painted width in display columns.
+    pub width: u16,
+    /// Catalog kind of the icon.
+    pub kind: IconKind,
+    /// What the icon describes.
+    pub target: IconTarget,
+}
+
+impl IconHit {
+    /// True when screen cell (`col`, `row`) is inside this icon.
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        row == self.y && col >= self.x && col < self.x.saturating_add(self.width)
+    }
+
+    /// Screen cells of the icon.
+    pub fn rect(&self) -> Rect {
+        Rect::new(self.x, self.y, self.width, 1)
+    }
+}
+
+/// A painted PR badge: the PR view of an [`IconHit`].
 ///
 /// A tree repo / checkout row and a graph worktree row each record one
 /// span. Ctrl+click inside it opens the PR of [`Self::repo`].
@@ -247,10 +280,13 @@ pub struct LayoutHit {
     pub tab_hits: Vec<(u16, u16, usize)>,
     /// Close `[✗]` hit boxes for compare and file tabs. Workspace never has one.
     pub tab_close_hits: Vec<(u16, u16, usize)>,
-    /// PR badge spans painted on tree and graph rows, rebuilt every paint.
+    /// Icon spans painted on tree and graph rows, rebuilt every paint.
     ///
-    /// Empty when no row shows a badge.
-    pub pr_badge_hits: Vec<PrBadgeHit>,
+    /// Empty when no row shows an icon. [`Self::pr_badge_hits`] reads the
+    /// PR badges from it.
+    pub icon_hits: Vec<IconHit>,
+    /// The popover painted last frame, if any.
+    pub popover: Option<PopoverHit>,
     /// First tab the strip painted. Kept across paints so the window only
     /// scrolls when the active tab would leave it. `0` when every tab fits.
     pub tab_scroll: usize,
@@ -313,7 +349,8 @@ impl Default for LayoutHit {
             tab_y: 0,
             tab_hits: Vec::new(),
             tab_close_hits: Vec::new(),
-            pr_badge_hits: Vec::new(),
+            icon_hits: Vec::new(),
+            popover: None,
             tab_scroll: 0,
             help_scroll_max: 0,
             file_view_x: 0,
@@ -323,6 +360,36 @@ impl Default for LayoutHit {
             file_view_row_lines: Vec::new(),
         }
     }
+}
+
+impl LayoutHit {
+    /// The PR badges among [`Self::icon_hits`], in paint order.
+    pub fn pr_badge_hits(&self) -> Vec<PrBadgeHit> {
+        self.icon_hits
+            .iter()
+            .filter_map(|hit| match &hit.target {
+                IconTarget::PullRequest(repo) => Some(PrBadgeHit {
+                    y: hit.y,
+                    x: hit.x,
+                    width: hit.width,
+                    repo: repo.clone(),
+                }),
+                IconTarget::TreeRow(_) => None,
+            })
+            .collect()
+    }
+}
+
+/// Where the last frame painted the popover, for clicks and drags.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PopoverHit {
+    /// Box, border included.
+    pub rect: Rect,
+    /// Text area inside the border and padding. A drag selects in here.
+    pub inner: Rect,
+    /// `(screen row, line index)` of each painted field or action line.
+    /// The index is into [`super::popover::flat_lines`].
+    pub lines: Vec<(u16, usize)>,
 }
 
 fn hit_tab_box(hits: &[(u16, u16, usize)], tab_y: u16, col: u16, row: u16) -> Option<usize> {
@@ -673,6 +740,13 @@ pub struct AppState {
     /// unknown or mouse capture is off. Paint derives the tab `[✗]` hover
     /// from it, so a stale layout never keeps a stale highlight.
     pub pointer: Option<(u16, u16)>,
+    /// Open icon popover: a hover peek or a pinned popover.
+    pub popover: Option<PopoverState>,
+    /// Hover dwell and leave grace of the icon peek.
+    pub(crate) peek: popover::PeekTimers,
+    /// Pinned popover line a left press landed on. Release runs it unless
+    /// the press turned into a drag.
+    popover_press: Option<usize>,
     pub(crate) z_pending_at: Option<Instant>,
     pub(crate) g_pending_at: Option<Instant>,
     /// Typeless CSI-u release-as-press for `g`-chord keys.
@@ -856,6 +930,9 @@ impl AppState {
             theme,
             mouse_enabled: true,
             pointer: None,
+            popover: None,
+            peek: popover::PeekTimers::default(),
+            popover_press: None,
             z_pending_at: None,
             g_pending_at: None,
             g_chord_echo: GChordEchoState::default(),
@@ -947,6 +1024,8 @@ impl AppState {
             } else {
                 InputMode::Help
             }
+        } else if self.popover_pinned() {
+            InputMode::Popover
         } else if self.search_mode {
             InputMode::SearchPrompt
         } else if self.diff_visual_anchor.is_some()
@@ -2310,7 +2389,31 @@ impl AppState {
         );
     }
 
+    /// Left press at (`col`, `row`).
+    ///
+    /// An open popover takes the press first ([`Self::popover_click`]). A
+    /// press on a painted icon selects its row like any click, then pins
+    /// the icon's popover; it never counts toward a double-click. Anything
+    /// else is [`Self::click_at`].
     fn click(&mut self, col: u16, row: u16) -> Effect {
+        if let Some(effect) = self.popover_click(col, row) {
+            return effect;
+        }
+        let Some(hit) = self.icon_hit_at(col, row).cloned() else {
+            return self.click_at(col, row);
+        };
+        // Cleared before the select too, so an earlier press on this cell
+        // (a Ctrl+click that found no PR) never makes this click a drill.
+        self.last_click = None;
+        let selected = self.click_at(col, row);
+        self.last_click = None;
+        self.text_selection = None;
+        self.pin_icon(&hit);
+        selected
+    }
+
+    /// Plain left press: tabs, dividers, scrollbars, then the row under it.
+    fn click_at(&mut self, col: u16, row: u16) -> Effect {
         self.text_selection = None;
         if let Some(index) = self.hit_tab_close(col, row) {
             return self.close_tab_at(index);
@@ -5443,14 +5546,24 @@ impl AppState {
 
     /// Store the pointer from any-event motion.
     ///
-    /// Returns `true` when the hovered tab `[✗]` changed, so the live loop
-    /// redraws only then. Ignored while mouse capture is off. Chords,
-    /// status, and effects are untouched.
+    /// Returns `true` when the hovered tab `[✗]` or the hovered icon
+    /// changed, so the live loop redraws only then. Arms or drops the icon
+    /// peek dwell and leave grace ([`Self::peek_remaining_ms`]). Ignored
+    /// while mouse capture is off. Chords, status, and effects are
+    /// untouched.
     pub fn set_pointer(&mut self, pointer: Option<(u16, u16)>) -> bool {
+        self.set_pointer_at(pointer, Instant::now())
+    }
+
+    /// [`Self::set_pointer`] at time `now`.
+    pub(crate) fn set_pointer_at(&mut self, pointer: Option<(u16, u16)>, now: Instant) -> bool {
         let pointer = pointer.filter(|_| self.mouse_enabled);
         let before = self.hovered_tab_close();
+        let icon_before = self.hovered_icon().cloned();
         self.pointer = pointer;
-        self.hovered_tab_close() != before
+        let icon = self.hovered_icon().cloned();
+        self.track_peek(icon.as_ref(), now);
+        self.hovered_tab_close() != before || icon != icon_before
     }
 
     fn park_active_session(&mut self) {

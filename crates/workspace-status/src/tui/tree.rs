@@ -16,7 +16,8 @@ use super::icons::{
     file_icon, icon_branch, icon_changes, icon_clean, icon_comment, icon_comment_resolved,
     icon_folder, icon_ignored, icon_linked_worktree, icon_pr_approved, icon_pr_merged,
     icon_pr_open, icon_repo, icon_staged, icon_status_failed, icon_viewed, icon_workspace,
-    status_letter_from_change, tui_file_badge, tui_merge_mark, tui_sync_mark, StatusColorRole,
+    status_letter_from_change, tui_file_badge, tui_merge_mark, tui_sync_mark, IconKind,
+    StatusColorRole,
 };
 use super::pull_request::PrState;
 
@@ -76,6 +77,10 @@ pub struct TextSeg {
     pub hex: Option<&'static str>,
     pub bold: bool,
     pub dim: bool,
+    /// Catalog icon this segment paints, if any. Paint records an icon hit
+    /// for its glyph columns (spaces around the glyph excluded), and `gh`
+    /// lists one popover section per tagged segment.
+    pub icon: Option<IconKind>,
 }
 
 /// Semantic colour token for a tree segment.
@@ -820,6 +825,7 @@ fn icon_seg(text: &str, role: SegRole) -> TextSeg {
         hex: None,
         bold: false,
         dim: false,
+        icon: None,
     }
 }
 
@@ -830,6 +836,29 @@ fn text_seg(text: impl Into<String>, role: SegRole) -> TextSeg {
         hex: None,
         bold: false,
         dim: false,
+        icon: None,
+    }
+}
+
+/// [`text_seg`] tagged with the catalog icon it paints.
+fn icon_text_seg(text: impl Into<String>, role: SegRole, kind: IconKind) -> TextSeg {
+    TextSeg {
+        icon: Some(kind),
+        ..text_seg(text, role)
+    }
+}
+
+/// Catalog kind of the sync mark for `status`.
+///
+/// Up to date maps to [`IconKind::Clean`]: the only up-to-date mark the
+/// tree paints is the clean check under No updates.
+pub fn sync_icon_kind(status: SyncStatus) -> IconKind {
+    match status {
+        SyncStatus::Ahead => IconKind::Ahead,
+        SyncStatus::Behind => IconKind::Behind,
+        SyncStatus::Diverged => IconKind::Diverged,
+        SyncStatus::NoUpstream => IconKind::NoUpstream,
+        SyncStatus::UpToDate => IconKind::Clean,
     }
 }
 
@@ -869,15 +898,17 @@ fn sync_trailing(chrome: &NodeChrome, in_no_updates: bool, ascii: bool) -> Vec<T
         ];
     }
     let role = SegRole::from(super::icons::sync_color_role(status));
+    let kind = sync_icon_kind(status);
     if status == SyncStatus::UpToDate {
         if !show_clean_check(in_no_updates) {
             return Vec::new();
         }
-        return vec![text_seg(icon_clean(ascii), role)];
+        return vec![icon_text_seg(icon_clean(ascii), role, kind)];
     }
-    vec![text_seg(
+    vec![icon_text_seg(
         tui_sync_mark(ascii, status, &chrome.sync_note),
         role,
+        kind,
     )]
 }
 
@@ -948,6 +979,7 @@ fn file_segments(change: &FileChange, tree_mode: bool, ascii: bool) -> NodeSegme
         hex: icon.color,
         bold: false,
         dim: false,
+        icon: None,
     }];
     if let Some(old) = change.old_path.as_deref() {
         let old_name = if tree_mode {
@@ -966,6 +998,7 @@ fn file_segments(change: &FileChange, tree_mode: bool, ascii: bool) -> NodeSegme
         hex: None,
         bold: false,
         dim: false,
+        icon: None,
     });
     if !tree_mode && !dir.is_empty() {
         segments.push(TextSeg {
@@ -974,6 +1007,7 @@ fn file_segments(change: &FileChange, tree_mode: bool, ascii: bool) -> NodeSegme
             hex: None,
             bold: false,
             dim: true,
+            icon: None,
         });
     }
 
@@ -983,6 +1017,7 @@ fn file_segments(change: &FileChange, tree_mode: bool, ascii: bool) -> NodeSegme
         hex: None,
         bold: true,
         dim: false,
+        icon: None,
     }];
     NodeSegments { segments, trailing }
 }
@@ -1023,6 +1058,7 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
             hex: None,
             bold: true,
             dim: false,
+            icon: None,
         }];
         if node.ignored {
             segments.push(text_seg(
@@ -1069,6 +1105,7 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
             hex: None,
             bold: true,
             dim: false,
+            icon: None,
         });
         if let Some(primary) = node.primary_repo.as_deref() {
             segments.push(TextSeg {
@@ -1077,6 +1114,7 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
                 hex: None,
                 bold: false,
                 dim: true,
+                icon: None,
             });
         }
     } else {
@@ -1086,6 +1124,7 @@ fn repo_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeSegme
             hex: None,
             bold: true,
             dim: false,
+            icon: None,
         });
     }
     if node.ignored {
@@ -1152,6 +1191,7 @@ fn checkout_segments(node: &TreeNode, in_no_updates: bool, ascii: bool) -> NodeS
             hex: None,
             bold: true,
             dim: false,
+            icon: None,
         },
     ];
     let mut trailing = sync_trailing(&node.chrome, in_no_updates, ascii);
@@ -1174,6 +1214,7 @@ fn workspace_segments(node: &TreeNode, ascii: bool) -> NodeSegments {
                 hex: None,
                 bold: true,
                 dim: false,
+                icon: None,
             },
         ],
         trailing: vec![text_seg(
@@ -1270,6 +1311,7 @@ pub fn with_comment_mark(
             hex: None,
             bold: false,
             dim: false,
+            icon: None,
         },
         text_seg(" ", SegRole::Muted),
     ];
@@ -1310,6 +1352,7 @@ pub fn with_viewed_mark(mut trailing: Vec<TextSeg>, ascii: bool, viewed: bool) -
             hex: None,
             bold: true,
             dim: false,
+            icon: None,
         },
         text_seg(" ", SegRole::Muted),
     ];
@@ -1328,6 +1371,15 @@ pub fn pr_badge_mark(ascii: bool, state: PrState) -> (&'static str, SegRole) {
         PrState::Open => (icon_pr_open(ascii), SegRole::BranchFeature),
         PrState::Approved => (icon_pr_approved(ascii), SegRole::Added),
         PrState::Merged => (icon_pr_merged(ascii), SegRole::Muted),
+    }
+}
+
+/// Catalog kind of the PR badge for `state`.
+pub fn pr_badge_kind(state: PrState) -> IconKind {
+    match state {
+        PrState::Open => IconKind::PrOpen,
+        PrState::Approved => IconKind::PrApproved,
+        PrState::Merged => IconKind::PrMerged,
     }
 }
 
@@ -1361,8 +1413,36 @@ pub fn with_pr_badge(
     let (glyph, role) = pr_badge_mark(ascii, state);
     let at = branch + 1;
     segments.insert(at, text_seg(" ", SegRole::Muted));
-    segments.insert(at + 1, text_seg(glyph, role));
+    segments.insert(at + 1, icon_text_seg(glyph, role, pr_badge_kind(state)));
     Some(at + 1)
+}
+
+/// Every segment one tree row paints: [`row_segments`] plus the PR badge.
+///
+/// Paint and `gh` both read this, so the icons `gh` lists are the icons
+/// the row paints, in paint order (label first, then the trailing run).
+pub fn painted_row_segments(
+    row: &VisibleRow,
+    ascii: bool,
+    viewed: bool,
+    commented: bool,
+    resolved: bool,
+    pr: Option<PrState>,
+) -> NodeSegments {
+    let mut segs = row_segments(row, ascii, viewed, commented, resolved);
+    if pr_badge_repo(row).is_some() {
+        with_pr_badge(&mut segs.segments, ascii, pr);
+    }
+    segs
+}
+
+/// Icons of `segs` in paint order: the label, then the trailing run.
+pub fn segment_icons(segs: &NodeSegments) -> Vec<IconKind> {
+    segs.segments
+        .iter()
+        .chain(&segs.trailing)
+        .filter_map(|seg| seg.icon)
+        .collect()
 }
 
 /// Visible snapshot used for the tree: hidden ignored stay out, including
@@ -1397,6 +1477,87 @@ mod tests {
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
+
+    #[test]
+    fn sync_marks_and_pr_badges_carry_their_icon_kind() {
+        for (status, note, kind, text) in [
+            (
+                SyncStatus::Ahead,
+                "ahead by 3 commits",
+                IconKind::Ahead,
+                "^3",
+            ),
+            (
+                SyncStatus::Behind,
+                "behind by 2 commits",
+                IconKind::Behind,
+                "v2",
+            ),
+            (
+                SyncStatus::Diverged,
+                "diverged (ahead 1, behind 2)",
+                IconKind::Diverged,
+                "Y",
+            ),
+            (SyncStatus::NoUpstream, "", IconKind::NoUpstream, "?"),
+        ] {
+            let chrome = NodeChrome {
+                sync_status: Some(status),
+                sync_note: note.into(),
+                ..NodeChrome::default()
+            };
+            let segs = sync_trailing(&chrome, false, true);
+            assert_eq!(segs.len(), 1, "{status:?}");
+            assert_eq!(segs[0].text, text, "{status:?}: paint text unchanged");
+            assert_eq!(segs[0].icon, Some(kind), "{status:?}");
+        }
+        let clean = NodeChrome {
+            sync_status: Some(SyncStatus::UpToDate),
+            ..NodeChrome::default()
+        };
+        assert!(sync_trailing(&clean, false, true).is_empty());
+        assert_eq!(
+            sync_trailing(&clean, true, true)[0].icon,
+            Some(IconKind::Clean),
+            "the clean check under No updates"
+        );
+        let failed = NodeChrome {
+            sync_status: Some(SyncStatus::NoUpstream),
+            sync_note: STATUS_FAILED_NOTE.into(),
+            ..NodeChrome::default()
+        };
+        assert!(
+            sync_trailing(&failed, false, true)
+                .iter()
+                .all(|seg| seg.icon.is_none()),
+            "status failed is not a sync mark"
+        );
+
+        let mut segments = vec![
+            text_seg("app", SegRole::Repo),
+            text_seg("feature", SegRole::BranchFeature),
+        ];
+        let at = with_pr_badge(&mut segments, true, Some(PrState::Approved)).expect("badge");
+        assert_eq!(segments[at].icon, Some(IconKind::PrApproved));
+        assert_eq!(segments[at].text, "A");
+        let segs = NodeSegments {
+            segments,
+            trailing: sync_trailing(
+                &NodeChrome {
+                    sync_status: Some(SyncStatus::Behind),
+                    sync_note: "behind by 1 commits".into(),
+                    ..NodeChrome::default()
+                },
+                false,
+                true,
+            ),
+        };
+        assert_eq!(
+            segment_icons(&segs),
+            vec![IconKind::PrApproved, IconKind::Behind],
+            "label first, then the trailing run"
+        );
+    }
 
     fn repo(name: &str, ignored_dirty: bool, linked: bool) -> RepoSnapshot {
         RepoSnapshot {

@@ -237,6 +237,10 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "help",
             },
             HelpEntry {
+                keys: "gh",
+                desc: "icon popover",
+            },
+            HelpEntry {
                 keys: "Tab",
                 desc: "other pane",
             },
@@ -1085,6 +1089,7 @@ mod tests {
         assert!(view_keys.contains(&"Ctrl-u Ctrl-d"));
         assert!(view_keys.contains(&"."));
         assert!(view_keys.contains(&"T"));
+        assert!(view_keys.contains(&"gh"), "the icon popover chord");
         assert!(view_keys.contains(&"i \\ M B"));
         assert!(!view_keys.contains(&"i \\"));
         assert!(!view_keys.contains(&"i"));
@@ -1295,7 +1300,7 @@ mod tests {
         for (term, tab, row_aligned, measured) in [
             (60usize, HelpTab::Workspace, 60usize, 56usize),
             (64, HelpTab::Compare, 251, 56),
-            (80, HelpTab::Workspace, 86, 42),
+            (80, HelpTab::Workspace, 86, 45),
             (100, HelpTab::Workspace, 47, 30),
             (140, HelpTab::Workspace, 28, 22),
         ] {

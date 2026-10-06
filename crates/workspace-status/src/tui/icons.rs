@@ -1064,7 +1064,9 @@ pub fn tui_sync_mark(ascii: bool, status: SyncStatus, note: &str) -> String {
     }
 }
 
-fn capture_count<'a>(note: &'a str, prefix: &str) -> &'a str {
+/// The digits right after `prefix` in a sync note (`ahead by 3 commits`
+/// gives `3`), or empty.
+pub(crate) fn capture_count<'a>(note: &'a str, prefix: &str) -> &'a str {
     let Some(idx) = note.find(prefix) else {
         return "";
     };
