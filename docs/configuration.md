@@ -1,8 +1,36 @@
 # Configuration
 
+Precedence for a setting: CLI flag > environment variable > config file > built-in default.
+
+An env value that the env parser accepts wins. An env value that it ignores (unset, blank, unknown, or non-numeric) falls through to the config value, then to the default. With no config keys set, each env var works as before. The binary resolves these settings once at startup, before the TUI-startup update check and the first git call (`crates/workspace-status/src/settings.rs`). `--plain` and `--json` use them too (`git`, `fetchConcurrency`).
+
+## Config files
+
+Two files use the same keys, except that `git`, `updateCheckStore`, `commentStore`, and `viewedStore` are user file only (see [Env-backed keys](#env-backed-keys)). `load_workspace_status_config` in `crates/workspace-status/src/config.rs` reads both and merges them.
+
+| File | Path | Role |
+| --- | --- | --- |
+| User file | `$XDG_CONFIG_HOME/my-workspace-status/config.json`. When `XDG_CONFIG_HOME` is unset or blank: `~/.config/my-workspace-status/config.json` | Your settings for every workspace |
+| Workspace file | `.workspace-status-config.json` in the resolved workspace root (CLI `-C` / `--workspace` > env `WS_STATUS_WORKSPACE` > process cwd) | Settings for this workspace |
+
+Merge rules:
+
+- A missing file sets nothing. With neither file, nothing is ignored and discovery uses the default depth.
+- A file that exists but cannot be read is an error in both files, not a missing file: `<file>: <io error>` (no permission, a directory), or `<file>: symlink target is missing: <io error>` for a dangling symlink.
+- A user file that is not valid JSON, or whose top level is not an object, is an error: `<path> is not a valid JSON object: <parser message>`. For the workspace file the error stays `.workspace-status-config.json must contain an ignoredRepos string array`.
+- The workspace file wins per top-level key. A key that the workspace file omits keeps the user file value.
+- `viewDefaults` and `defaultBranches` merge per sub-key. The workspace sub-key wins.
+- Arrays are replaced, not joined. A workspace `ignoredRepos` (also `[]`) replaces the user list.
+- A `null` value, and a blank `editor` / `diffTool`, count as omitted, so the user file value applies.
+- Both files are strict. An invalid user file fails the same way as an invalid workspace file. The error starts with the file: the full path for the user file, `.workspace-status-config.json` for the workspace file. Example: `~/.config/my-workspace-status/config.json maxDepth must be a positive integer` (with your real home path).
+- `ignoredRepos` is required in the workspace file when that file exists. In the user file it is optional; an omitted or `null` user `ignoredRepos` sets nothing. A wrong type is an error in both files.
+- Nothing writes either file.
+
+PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` point `XDG_CONFIG_HOME` at an empty temp dir, so a user file cannot change their results. CI guards those TTY spawn paths only: `tty_spawn_paths_isolate_user_config` in `crates/workspace-status/tests/release_watch.rs`. The CLI integration tests that run the binary (`snapshot_contract.rs`, `update.rs`, `seed_demo_workspace.rs`) also set `XDG_CONFIG_HOME`, but no CI guard checks them.
+
 ## `.workspace-status-config.json`
 
-Read from the resolved workspace root (CLI `-C` / `--workspace` > env `WS_STATUS_WORKSPACE` > process cwd), by `load_workspace_status_config` in `crates/workspace-status/src/config.rs`. A missing file means nothing is ignored and discovery uses the default depth.
+The keys below apply to both files. A missing file means nothing is ignored and discovery uses the default depth.
 
 `--plain` and `--json` read one workspace snapshot. See [snapshot.md](./snapshot.md).
 
@@ -19,18 +47,37 @@ Read from the resolved workspace root (CLI `-C` / `--workspace` > env `WS_STATUS
     "tree": "tree",
     "diff": "split",
     "wrap": "unwrap"
-  }
+  },
+  "theme": "dracula",
+  "glyphs": "nerd",
+  "watchMs": 3000,
+  "fetchMs": 300000,
+  "fetchConcurrency": 10,
+  "updateCheck": true
+}
+```
+
+User file only (a workspace file that sets these keys fails to load):
+
+```json
+{
+  "updateCheckStore": "~/.local/state/my-workspace-status/update-check.json",
+  "commentStore": "~/.local/state/my-workspace-status/comments.json",
+  "viewedStore": "~/.local/state/my-workspace-status/viewed-files.json",
+  "git": "/usr/bin/git"
 }
 ```
 
 | Key               | Required                   | Default                       | Meaning                                                                                        |
 | ----------------- | -------------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------- |
-| `ignoredRepos`    | yes (when the file exists) | `[]` when file is missing     | Repo paths relative to the workspace root to skip                                              |
+| `ignoredRepos`    | workspace file: yes; user file: no | `[]` when no file sets it     | Repo paths relative to the workspace root to skip                                              |
 | `maxDepth`        | no                         | `3`                           | Walk depth for primary `.git` dirs/gitfiles (dot dirs skipped; linked via `git worktree list`) |
 | `defaultBranches` | no                         | `{}`                          | Map of workspace-relative repo path → sole default branch for that repo                        |
 | `editor`          | no                         | unset (`vim` at resolve)      | Command string for TUI `e` (same shape as `$EDITOR`). Overrides `$VISUAL` / `$EDITOR`.         |
 | `diffTool`        | no                         | unset (`vimdiff` at resolve) | Command string for TUI `E`. No `$EDITOR` / `$VISUAL` / `$GIT_EXTERNAL_DIFF` fallback.          |
 | `viewDefaults`    | no                         | `{}` (in-app defaults)        | TUI launch view modes. See [`viewDefaults`](#viewdefaults)                                     |
+| `theme`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck` | no | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
+| `updateCheckStore`, `commentStore`, `viewedStore`, `git` | no; user file or env only | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
 
 ### `ignoredRepos`
 
@@ -101,10 +148,35 @@ Commit and stash file rows: LEFT is the first-parent blob (`rev^:path`), or an e
 
 | Override              | Effect                                                                                                                                                                                                       |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `-a` / `--all`        | `ignoredRepos` is replaced with `[]` for that run; `maxDepth` / `defaultBranches` / `editor` / `diffTool` / `viewDefaults` from config are kept                                                                                |
+| `-a` / `--all`        | `ignoredRepos` is replaced with `[]` for that run, whichever file set it; `maxDepth` / `defaultBranches` / `editor` / `diffTool` / `viewDefaults` from config are kept                                                                                |
 | Positional repo paths | Only those repos are processed, and they bypass `ignoredRepos` entirely. Naming a primary includes its linked children under cwd; naming a linked path (e.g. `app/.worktrees/feat`) includes only that path. |
 
 The two overrides differ in the TUI. `-a` replaces the ignored list before the TUI sees it, so the ignored set is empty and the surfaced repos render and fold like any other repo — expanded, no muted name, no ignored glyph. Positional paths leave the loaded config intact, so a named repo that is also in `ignoredRepos` renders with a muted name plus the ignored glyph and starts collapsed.
+
+### Env-backed keys
+
+These top-level keys set the same settings as the env vars in [Environment variables](#environment-variables). A valid env var wins over the key.
+
+| Key | Env var | Value |
+| --- | --- | --- |
+| `theme` | `WS_STATUS_THEME` | one of `"tokyo-night"`, `"monokai"`, `"dracula"`, `"gruvbox-dark"`, `"catppuccin-mocha"` |
+| `glyphs` | `WS_STATUS_GLYPHS` | `"nerd"` \| `"ascii"` |
+| `watchMs` | `WS_STATUS_WATCH_MS` | integer >= 0. `0` turns the poll off. `1` to `499` clamp up to `500`, like the env var |
+| `fetchMs` | `WS_STATUS_FETCH_MS` | integer >= 0. `0` turns the background fetch off. `1` to `29999` clamp up to `30000`, like the env var |
+| `fetchConcurrency` | `WS_STATUS_FETCH_CONCURRENCY` | integer >= 1 |
+| `updateCheck` | `WS_STATUS_UPDATE_CHECK` | `true` \| `false`. `false` turns the TUI-startup release check off |
+| `updateCheckStore` | `WS_STATUS_UPDATE_CHECK_STORE` | path. User file or env only |
+| `commentStore` | `WS_STATUS_COMMENT_STORE` | path. User file or env only |
+| `viewedStore` | `WS_STATUS_VIEWED_STORE` | path. User file or env only |
+| `git` | `WORKSPACE_STATUS_GIT` | path, or a command name without `/` (looked up on `PATH`). User file or env only |
+
+`updateCheckStore`, `commentStore`, `viewedStore`, and `git` are allowed only in the user file (or the env var), because a workspace file can be committed to a repo and must not pick a program to run or a file to write. A workspace file that sets one fails to load: `.workspace-status-config.json git is only allowed in the user config file (<user file path>) or WORKSPACE_STATUS_GIT`. `null` counts as omitted and is allowed.
+
+- Values are strict, like `viewDefaults`. A wrong type, an unknown value, a blank string, or a fraction is an error that names the file, the key, and the allowed values. Example: `.workspace-status-config.json glyphs must be "nerd" or "ascii"`. String values are trimmed, then matched case-sensitively.
+- A path must be absolute or start with `~/`. `~/` expands with `$HOME`. A relative path is an error: `<file> commentStore must be an absolute path or a path that starts with ~/`. When `$HOME` is unset, a `~/` path is an error.
+- `git` also accepts a bare command name (`"git"`). A relative path with `/` (`"bin/git"`) is an error.
+- `null` counts as omitted, so the user file value or the default applies.
+- Env-only settings have no key: see the **Config key** column in [Environment variables](#environment-variables).
 
 ### `viewDefaults`
 
@@ -117,51 +189,57 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
   "diff": "inline",
   "wrap": "unwrap",
   "commitMessage": "collapse",
+  "commitMessageLines": 12,
   "lineBlame": "hide"
 }
 ```
 
-| Key             | Values                 | In-app default | Session toggle           |
-| --------------- | ---------------------- | -------------- | ------------------------ |
-| `tree`          | `tree` \| `flat`       | `tree`         | `t` at workspace depth 0 |
-| `commitTree`    | `tree` \| `flat`       | `tree`         | `t` at depth ≥ 1         |
-| `diff`          | `split` \| `inline`    | `split`        | `i`                      |
-| `wrap`          | `wrap` \| `unwrap`     | `wrap`         | `\`                      |
-| `commitMessage` | `expand` \| `collapse` | `expand`       | `M`                      |
-| `lineBlame`     | `show` \| `hide`       | `show`         | `B`                      |
+| Key                  | Values                 | In-app default | Session toggle               |
+| -------------------- | ---------------------- | -------------- | ---------------------------- |
+| `tree`               | `tree` \| `flat`       | `tree`         | `t` at workspace depth 0     |
+| `commitTree`         | `tree` \| `flat`       | `tree`         | `t` at depth ≥ 1             |
+| `diff`               | `split` \| `inline`    | `split`        | `i`                          |
+| `wrap`               | `wrap` \| `unwrap`     | `wrap`         | `\`                          |
+| `commitMessage`      | `expand` \| `collapse` | `expand`       | `M`                          |
+| `commitMessageLines` | integer `1` to `20`    | `8`            | `-` / `+` (`=` is `+`)       |
+| `lineBlame`          | `show` \| `hide`       | `show`         | `B`                          |
 
-- Values are trimmed, then matched case-sensitively.
-- A value of the wrong type, an unknown value, or a blank value is an error: `.workspace-status-config.json viewDefaults.<key> must be "<a>" or "<b>"`. A `viewDefaults` that is not an object is an error. An unknown key inside it is an error that names the key. A typo never falls back silently.
+- String values are trimmed, then matched case-sensitively.
+- A string key with a value of the wrong type, an unknown value, or a blank value is an error: `<file> viewDefaults.<key> must be "<a>" or "<b>"`. `<file>` is `.workspace-status-config.json` for the workspace file, or the full path of the user file. A `viewDefaults` that is not an object is an error. An unknown key inside it is an error that names the key. A typo never falls back silently.
+- `commitMessageLines` is the number of message rows in the expanded commit-message footer (graph pane and commit-files pane). It must be a JSON integer from 1 to 20. A string, a fraction (`8.5`, also `8.0`), a bool, `null`, or a number out of range is an error: `<file> viewDefaults.commitMessageLines must be an integer from 1 to 20` (same `<file>` label).
 - `"viewDefaults": null` counts as omitted.
 - The config loads before the CLI picks a mode, so an invalid `viewDefaults` also fails `--plain` and `--json`. Valid values do not change that output.
 - `commitTree` sets the commit file list in commit drills and in each new compare tab. A `t` toggle changes the current tab only. The next compare tab opens in the `commitTree` mode again.
 - `-a` / `--all` and positional repo paths keep `viewDefaults`.
 - `diff: "split"` does not force side-by-side in a narrow pane. The split to inline fallback below `NARROW_SXS` still applies (see **Defaults**).
-- There are no keys for theme, mouse, ignored visibility, pane widths, or folds. The theme stays `WS_STATUS_THEME` / `T`.
+- There are no keys for mouse, ignored visibility, pane widths, or folds.
 
 ## Environment variables
 
-| Variable                  | Default                                                 | Effect                                                                                                                                                                                            |
-| ------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WS_STATUS_WORKSPACE`     | unset (process cwd)                                     | Pin the workspace root used for config, discovery, and comment/viewed identity. Absolute or relative (relative to process cwd, then canonicalized). Blank / whitespace-only is unset. CLI `-C` / `--workspace` overrides this. Missing or non-directory path: error on stderr, exit 1; no silent fallback. `--update` and `--help` do not require a valid workspace. PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` must unset this so the fixture cwd wins. CI: `crates/workspace-status/tests/release_watch.rs`. |
-| `WS_STATUS_GLYPHS`        | unset                                                   | `ascii` replaces every Nerd Font glyph with a one-column ASCII marker (`tui/icons.rs`). Any other value is ignored.                                                                               |
-| `WS_STATUS_WATCH_MS`      | `3000` (`DEFAULT_WATCH_MS`)                             | Live-refresh poll period. `0` disables the poll. Values below `MIN_WATCH_MS` (500) are clamped up. Non-numeric, negative, or empty falls back to the default. File, graph, and commit-file rows flash (~800ms background fade) on add/update/remove of the same row identity. Add is green (`flash` / `flash_ramp`), update is amber (`flash_update` / `flash_update_ramp`), remove is red/magenta (`flash_remove` / `flash_remove_ramp`). Flash background wins over cursor and search. The cursor bar stays. File signatures use status letter or worktree `size:mtimeMs`. Chrome identity includes `HEAD` and `sync_note` so a new local commit or ahead 2→3 reloads status / graph without `r`. A disjoint identity set (repo switch / first paint) seeds and does not flash. The TUI polls local git only (no fetch) and keeps fold, focus, and scroll. Unchanged polls skip the right-pane `git log` / diff reload. The next tick is scheduled from the start of the interval, not after collect finishes. The live loop applies each checkout as it finishes; keys cannot starve the tick. |
-| `WS_STATUS_FETCH_MS`      | `300000` (`DEFAULT_FETCH_MS`)                           | Background `git fetch` period for the TUI. `0` disables. Values below `MIN_FETCH_MS` (30000) are clamped up when enabled. Non-numeric, negative, or empty falls back to the default. The tick paints no progress or summary line; it writes the status slot only when a repo fails. |
-| `WS_STATUS_FETCH_CONCURRENCY` | `10` (`FETCH_CONCURRENCY`)                            | In-flight cap for independent per-repo fetch / pull / push on the TTY Scheduler JoinSet, and for CLI `collect_snapshots` / `process_repo`. Remotes queue per gitdir when that gitdir is occupied. Missing, empty, `0`, negative, or non-numeric → 10. Values below 1 clamp to 1. Exclusive writes (stage, commit, merge into HEAD) stay serial. |
-| `WS_STATUS_THEME`         | `tokyo-night`                                           | Built-in TUI theme id: `tokyo-night`, `monokai`, `dracula`, `gruvbox-dark`, `catppuccin-mocha`. Unknown values fall back to `tokyo-night`. Seeds the TUI at launch. `T` cycles the same list in the current session only; there is no theme file. Palettes assume a dark terminal. See **Theme flash tokens**. |
-| `EDITOR`                  | unset                                                   | Used for `e` when config `editor` and `VISUAL` are unset or blank. Blank values are ignored. May include fixed args (`code --wait`, `nvim -p`); simple quoting is supported for paths with spaces. |
-| `VISUAL`                  | unset                                                   | Fallback editor for `e` when config `editor` is omitted or blank; wins over `EDITOR` (same argv parsing).                                                                                         |
-| _(editor fallback)_       | `vim`                                                   | When config `editor`, `VISUAL`, and `EDITOR` are all unset/blank, `resolve_editor` returns `vim`.                                                                                                 |
-| `BROWSER`                 | unset                                                   | Command used to open a PR (`gx`, palette `Open PR`, Ctrl+click on a badge). The first non-empty `:`-separated entry is split on spaces; `%s` in it is replaced by the URL, otherwise the URL is appended. Blank is unset. Unset or blank: `open` on macOS, `cmd /c start` on Windows, `xdg-open` elsewhere. The command runs with no terminal access, so a text browser does not work here. |
-| `WORKSPACE_STATUS_GIT`    | `/usr/bin/git` if present, else `git`                   | Git binary. Exists to avoid a Windows `git.exe` shadowing the Linux one on WSL2, and as a test seam.                                                                                              |
-| `WS_STATUS_VIEWED_STORE`  | `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` | JSON store for TUI space-reviewed marks (identity = repo path + file path; fingerprint = snapshot status letters on both git sides + worktree bytes). Version 2 namespaces entries by workspace identity (SHA-256 hex of the canonical cwd) inside the file. GC and save replace only the current workspace bucket. Version-1 files keep a flat `entries` map under `workspaces.__legacy__` on first persist (see **Version-1 persist upgrade**). A missing file starts empty. A present file that is not valid v1/v2 UTF-8 JSON is left unchanged and persist returns an error. Tests should set this to a temp file.                                              |
-| `WS_STATUS_COMMENT_STORE` | `$XDG_STATE_HOME/my-workspace-status/comments.json` | JSON store for TUI line and object comments. `WS_STATUS_COMMENT_STORE` overrides. Version 2 namespaces records by workspace identity inside the file. GC cannot drop other workspaces. Version-1 files keep a flat `entries` list under `workspaces.__legacy__` on first persist (see **Version-1 persist upgrade**). A missing file starts empty. A present file that is not valid v1/v2 UTF-8 JSON is left unchanged and persist returns an error. Tests, desktop e2e, and `scripts/capture-demo-stills.sh` should set this to a temp file. Comments never write into user git repos. GC uses snapshot local branches and checkout paths. A primary detached HEAD is a worktree path key. |
-| `WS_STATUS_UPDATE_CHECK_STORE` | `$XDG_STATE_HOME/my-workspace-status/update-check.json` | Last GitHub Release check time for the TUI startup prompt (`lastCheckUnix`). Tests, desktop e2e, and `scripts/capture-demo-stills.sh` must set this to a temp file with a fresh `lastCheckUnix`. A TTY launch without that override writes the default XDG file. A TTY `ws` launch checks at most every 6 hours; `--plain` / `--json` / `--update` never read or write it. CI: `crates/workspace-status/tests/release_watch.rs`. |
-| `WS_STATUS_UPDATE_CHECK` | unset (check on) | `0`, `false`, or `off` turns off the TUI-startup GitHub Release check: no fetch, no prompt, no store write. Any other value leaves it on. |
-| `WORKSPACE_STATUS_GITHUB_TOKEN` | unset | Optional Bearer token for GitHub Releases API (`curl`). Used by the TUI startup check and by `ws --update` when fetching notes. Unset is fine for the public repo rate limit. |
-| `WS_STATUS_DEV_BUILD`     | unset                                                   | **Build time** (`option_env!`, `DEV_BUILD` in `lib.rs`). `scripts/install-dev.sh` sets it to the short git sha, plus `-dirty` for a dirty tree. A dev build shows `-dev (sha)` in `--version` and the help footer, skips the TUI-startup release prompt, and makes `--update` exec `workspace-status-update-dev` with no release notes. Has no effect at run time. |
-| `WS_DEV_BIN_DIR`          | `$HOME/.local/bin`                                      | `scripts/install-dev.sh` only: where `ws-dev`, `workspace-status-dev`, and `workspace-status-update-dev` go (and what `--uninstall` cleans). The generated `workspace-status-update-dev` keeps the directory it was installed with. |
-| `WS_DEV_TARGET_DIR`       | `<repo>/target/dev-install`                             | `scripts/install-dev.sh` only: `CARGO_TARGET_DIR` for the dev build. Kept apart from `target/release` so the dev marker never reaches a release or demo build. The generated `workspace-status-update-dev` keeps the target dir it was installed with. |
+| Variable | Config key | Default | Effect |
+| --- | --- | --- | --- |
+| `WS_STATUS_WORKSPACE` | — (it picks the workspace file) | unset (process cwd)                                     | Pin the workspace root used for config, discovery, and comment/viewed identity. Absolute or relative (relative to process cwd, then canonicalized). Blank / whitespace-only is unset. CLI `-C` / `--workspace` overrides this. Missing or non-directory path: error on stderr, exit 1; no silent fallback. `--update` and `--help` do not require a valid workspace. PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` must unset this so the fixture cwd wins. CI: `crates/workspace-status/tests/release_watch.rs`. |
+| `WS_STATUS_GLYPHS` | `glyphs` | unset                                                   | `ascii` replaces every Nerd Font glyph with a one-column ASCII marker (`tui/icons.rs`). `nerd` keeps Nerd Font glyphs. Any other value is ignored and falls through to config `glyphs`.                                                                               |
+| `WS_STATUS_WATCH_MS` | `watchMs` | `3000` (`DEFAULT_WATCH_MS`)                             | Live-refresh poll period. `0` disables the poll. Values below `MIN_WATCH_MS` (500) are clamped up. Non-numeric, negative, or empty falls through to config `watchMs`, then the default. File, graph, and commit-file rows flash (~800ms background fade) on add/update/remove of the same row identity. Add is green (`flash` / `flash_ramp`), update is amber (`flash_update` / `flash_update_ramp`), remove is red/magenta (`flash_remove` / `flash_remove_ramp`). Flash background wins over cursor and search. The cursor bar stays. File signatures use status letter or worktree `size:mtimeMs`. Chrome identity includes `HEAD` and `sync_note` so a new local commit or ahead 2→3 reloads status / graph without `r`. A disjoint identity set (repo switch / first paint) seeds and does not flash. The TUI polls local git only (no fetch) and keeps fold, focus, and scroll. Unchanged polls skip the right-pane `git log` / diff reload. The next tick is scheduled from the start of the interval, not after collect finishes. The live loop applies each checkout as it finishes; keys cannot starve the tick. |
+| `WS_STATUS_FETCH_MS` | `fetchMs` | `300000` (`DEFAULT_FETCH_MS`)                           | Background `git fetch` period for the TUI. `0` disables. Values below `MIN_FETCH_MS` (30000) are clamped up when enabled. Non-numeric, negative, or empty falls through to config `fetchMs`, then the default. The tick paints no progress or summary line; it writes the status slot only when a repo fails. |
+| `WS_STATUS_FETCH_CONCURRENCY` | `fetchConcurrency` | `10` (`FETCH_CONCURRENCY`)                            | In-flight cap for independent per-repo fetch / pull / push on the TTY Scheduler JoinSet, and for CLI `collect_snapshots` / `process_repo`. Remotes queue per gitdir when that gitdir is occupied. Missing, empty, `0`, negative, or non-numeric falls through to config `fetchConcurrency`, then 10. Exclusive writes (stage, commit, merge into HEAD) stay serial. |
+| `WS_STATUS_THEME` | `theme` | `tokyo-night`                                           | Built-in TUI theme id: `tokyo-night`, `monokai`, `dracula`, `gruvbox-dark`, `catppuccin-mocha`. Unknown values fall through to config `theme`, then `tokyo-night`. Seeds the TUI at launch. `T` cycles the same list in the current session only; there is no theme file. Palettes assume a dark terminal. See **Theme flash tokens**. |
+| `EDITOR` | — (system var; use `editor`) | unset                                                   | Used for `e` when config `editor` and `VISUAL` are unset or blank. Blank values are ignored. May include fixed args (`code --wait`, `nvim -p`); simple quoting is supported for paths with spaces. |
+| `VISUAL` | — (system var; use `editor`) | unset                                                   | Fallback editor for `e` when config `editor` is omitted or blank; wins over `EDITOR` (same argv parsing).                                                                                         |
+| _(editor fallback)_ | `editor` | `vim`                                                   | When config `editor`, `VISUAL`, and `EDITOR` are all unset/blank, `resolve_editor` returns `vim`.                                                                                                 |
+| `BROWSER` | — (system var) | unset                                                   | Command used to open a PR (`gx`, palette `Open PR`, Ctrl+click on a badge). The first non-empty `:`-separated entry is split on spaces; `%s` in it is replaced by the URL, otherwise the URL is appended. Blank is unset. Unset or blank: `open` on macOS, `cmd /c start` on Windows, `xdg-open` elsewhere. The command runs with no terminal access, so a text browser does not work here. |
+| `WORKSPACE_STATUS_GIT` | `git` (user file only) | `/usr/bin/git` if present, else `git`                   | Git binary. Exists to avoid a Windows `git.exe` shadowing the Linux one on WSL2, and as a test seam.                                                                                              |
+| `WS_STATUS_VIEWED_STORE` | `viewedStore` (user file only) | `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` | JSON store for TUI space-reviewed marks (identity = repo path + file path; fingerprint = snapshot status letters on both git sides + worktree bytes). Version 2 namespaces entries by workspace identity (SHA-256 hex of the canonical cwd) inside the file. GC and save replace only the current workspace bucket. Version-1 files keep a flat `entries` map under `workspaces.__legacy__` on first persist (see **Version-1 persist upgrade**). A missing file starts empty. A present file that is not valid v1/v2 UTF-8 JSON is left unchanged and persist returns an error. Tests should set this to a temp file.                                              |
+| `WS_STATUS_COMMENT_STORE` | `commentStore` (user file only) | `$XDG_STATE_HOME/my-workspace-status/comments.json` | JSON store for TUI line and object comments. `WS_STATUS_COMMENT_STORE` overrides. Version 2 namespaces records by workspace identity inside the file. GC cannot drop other workspaces. Version-1 files keep a flat `entries` list under `workspaces.__legacy__` on first persist (see **Version-1 persist upgrade**). A missing file starts empty. A present file that is not valid v1/v2 UTF-8 JSON is left unchanged and persist returns an error. Tests, desktop e2e, and `scripts/capture-demo-stills.sh` should set this to a temp file. Comments never write into user git repos. GC uses snapshot local branches and checkout paths. A primary detached HEAD is a worktree path key. |
+| `WS_STATUS_UPDATE_CHECK_STORE` | `updateCheckStore` (user file only) | `$XDG_STATE_HOME/my-workspace-status/update-check.json` | Last GitHub Release check time for the TUI startup prompt (`lastCheckUnix`). An existing file that is not this store is never overwritten: the save is skipped and stderr shows `update-check save failed: <path>: not an update-check store, left unchanged`; startup goes on. Tests, desktop e2e, and `scripts/capture-demo-stills.sh` must set this to a temp file with a fresh `lastCheckUnix`. A TTY launch without that override writes the default XDG file. A TTY `ws` launch checks at most every 6 hours; `--plain` / `--json` / `--update` never read or write it. CI: `crates/workspace-status/tests/release_watch.rs`. |
+| `WS_STATUS_UPDATE_CHECK` | `updateCheck` | unset (check on) | `0`, `false`, or `off` turns off the TUI-startup GitHub Release check: no fetch, no prompt, no store write. `1`, `true`, or `on` turns it on. Any other value is ignored and falls through to config `updateCheck`, then on. |
+| `WORKSPACE_STATUS_GITHUB_TOKEN` | — (secret; a workspace file may be committed) | unset | Optional Bearer token for GitHub Releases API (`curl`). Used by the TUI startup check and by `ws --update` when fetching notes. Unset is fine for the public repo rate limit. |
+| `WS_STATUS_DEV_BUILD` | — (build time) | unset                                                   | **Build time** (`option_env!`, `DEV_BUILD` in `lib.rs`). `scripts/install-dev.sh` sets it to the short git sha, plus `-dirty` for a dirty tree. A dev build shows `-dev (sha)` in `--version` and the help footer, skips the TUI-startup release prompt, and makes `--update` exec `workspace-status-update-dev` with no release notes. Has no effect at run time. |
+| `WS_DEV_BIN_DIR` | — (`scripts/install-dev.sh` only) | `$HOME/.local/bin`                                      | `scripts/install-dev.sh` only: where `ws-dev`, `workspace-status-dev`, and `workspace-status-update-dev` go (and what `--uninstall` cleans). The generated `workspace-status-update-dev` keeps the directory it was installed with. |
+| `WS_DEV_TARGET_DIR` | — (`scripts/install-dev.sh` only) | `<repo>/target/dev-install`                             | `scripts/install-dev.sh` only: `CARGO_TARGET_DIR` for the dev build. Kept apart from `target/release` so the dev marker never reaches a release or demo build. The generated `workspace-status-update-dev` keeps the target dir it was installed with. |
+
+
+A **Config key** sets the same setting from a config file; a valid env var wins over it (see [Env-backed keys](#env-backed-keys)). For the store paths and `WORKSPACE_STATUS_GIT`, a blank (store) or empty (git) env value falls through to the config key. Env-only, with no config key: `WS_STATUS_WORKSPACE` (it picks the workspace file), `WORKSPACE_STATUS_GITHUB_TOKEN` (a secret, and a workspace file may be committed), the test-harness vars `WS_STATUS_E2E_*` and `WS_E2E_REAL_GIT`, `WS_STATUS_DEV_BUILD` (build time), `WS_DEV_BIN_DIR` / `WS_DEV_TARGET_DIR` (`scripts/install-dev.sh` only), and the system vars `EDITOR`, `VISUAL`, `BROWSER`, `DISPLAY`, `PATH`, `XDG_*`, and `HOME`.
 
 ### Theme flash tokens
 
@@ -215,6 +293,7 @@ On many macOS setups there is no dedicated PageUp key. `Fn+Up` and `Fn+Down` oft
 | Diff layout      | Split. `viewDefaults.diff` overrides at launch                                                                                                    | `i`                                                  |
 | Diff wrap        | On. `viewDefaults.wrap` overrides at launch                                                                                                       | `\`                                                  |
 | Commit message   | Expanded. `viewDefaults.commitMessage` overrides at launch                                                                                        | `M`                                                  |
+| Message rows     | 8 rows in the expanded commit-message footer, whatever the message length. `viewDefaults.commitMessageLines` overrides at launch (1 to 20)        | `-` / `+` (`=` is `+`)                               |
 | Line blame       | On. `viewDefaults.lineBlame` overrides at launch                                                                                                  | `B`                                                  |
 | Theme            | Tokyo Night                                                                                                                                       | `T` cycles / `WS_STATUS_THEME`                       |
 | Live refresh     | On, 3 s                                                                                                                                           | `WS_STATUS_WATCH_MS=0`                               |
@@ -278,7 +357,8 @@ See [tui-rust.md](./tui-rust.md) for the same keys with layout notes. In Normal,
 | `\`                                        | wrap ↔ unwrap file-diff lines (display columns). Wrap is on by default; `viewDefaults.wrap` sets the launch state. The toggle changes this session only. Continuation rows keep a blank gutter and sign. Horizontal pan is a no-op while wrap is on |
 | `B`                                        | line blame on ↔ off: a dimmed `{author}, {age} · {sha7} · {subject}` note at the end of the focused diff or file-tab line. On by default; `viewDefaults.lineBlame` sets the launch state. The toggle changes this session only (`line blame on` / `line blame off`) and runs on file tabs too |
 | `A`                                        | blame menu on a focused committed line: `c` commit changes, `p` previous line change, `w` commit vs working tree, `g` show in graph. Enter runs `c`, Esc / `q` close. Same refusals as the palette `Blame:` rows |
-| `M`                                        | collapse ↔ expand the selected commit / stash message. Expanded by default; `viewDefaults.commitMessage` sets the launch state. The toggle changes this session only. Graph list rows stay one line. Expanded, the graph selection footer and the commit-files footer (bottom of the depth-2 left pane, under the file list) wrap subject plus body (`msg on` / `msg off`). Wheel over an overflowing graph footer scrolls the message. Graph `m` stays merge / mouse |
+| `M`                                        | collapse ↔ expand the selected commit / stash message. Expanded by default; `viewDefaults.commitMessage` sets the launch state. The toggle changes this session only. Graph list rows stay one line. Expanded, the graph selection footer and the commit-files footer (bottom of the depth-2 left pane, under the file list) wrap subject plus body (`msg on` / `msg off`) into a fixed N message rows (`-` / `+`): a short message leaves blank rows, so moving between commits never changes the list height. Collapsed is a fixed 2 rows. Wheel over an overflowing graph footer scrolls the message; while lines are hidden below, its last message row ends with `↓<K>` (`v<K>` with ASCII glyphs). The commit-files footer clips a long message with `…`. Arrows and `j` / `k` stay on the list. Graph `m` stays merge / mouse |
+| `-` / `+` / `=`                            | one fewer / one more message row in the expanded commit-message footer (graph and commit-files panes), clamped to 1–20; `=` is an unshifted `+`. Status `msg lines <N>`, also at the clamp. Default 8; `viewDefaults.commitMessageLines` sets the launch value. The keys change this session only. The focused graph row stays in view. On a file tab they say `Switch to Workspace tab` in Quick Open. Palette: Shorter commit message / Taller commit message |
 | `r`                                        | refresh the focused repo; the whole workspace when on the workspace row or the "No updates" group                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `f`                                        | `git fetch --quiet` for the focused checkout, or primary checkouts on the workspace / family row. Linked worktrees are included only when that worktree row is focused. Hidden ignored repos are skipped. Shown ignored repos follow the same primary / focused-worktree rule. The background fetch timer is separate: every snapshot except hidden ignored, including linked worktrees and shown ignored.                                                                                                                                                                                                              |
 | `p`                                        | pull: workspace / family → primary checkouts with `syncStatus` `behind`; focused checkout (including a linked worktree) → that path only. Dirty trees auto-stash around pull. On a file / dir / section row the status says `focus a repo or checkout to pull`. |

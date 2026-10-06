@@ -484,6 +484,22 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
+        title: "Shorter commit message",
+        keys: "-",
+        group: CommandGroup::View,
+        action: Action::ResizeCommitMsg(-1),
+        aliases: &["message height", "msg lines", "shrink"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
+        title: "Taller commit message",
+        keys: "+",
+        group: CommandGroup::View,
+        action: Action::ResizeCommitMsg(1),
+        aliases: &["message height", "msg lines", "grow"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
         title: "Line blame on / off",
         keys: "B",
         group: CommandGroup::View,
@@ -1103,6 +1119,20 @@ mod tests {
                 "M",
                 CommandGroup::View,
                 Action::ToggleCommitMsgExpand,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Shorter commit message",
+                "-",
+                CommandGroup::View,
+                Action::ResizeCommitMsg(-1),
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Taller commit message",
+                "+",
+                CommandGroup::View,
+                Action::ResizeCommitMsg(1),
                 CommandScope::NoHighlight,
             ),
             (

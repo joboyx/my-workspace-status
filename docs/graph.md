@@ -47,8 +47,7 @@ its hit boxes, so a graph frame paints the model once. The TUI pan clamp
 reads the count the last frame recorded (`graph_content_len`).
 
 `GraphWidget::gutter_width` caps painted gutter columns. Topology still
-uses the full lane model; every row shares the same left-aligned clip. `GraphWidget::loading_older` paints
-`loading older…` under the list. `GraphWidget::lane_colors` colours each
+uses the full lane model; every row shares the same left-aligned clip. `GraphWidget::lane_colors` colours each
 gutter cell from `GraphCell.color_lane`; an empty slice uses
 `DEFAULT_LANE_COLORS`. The TUI passes the active built-in theme's eight
 colours (`T` cycles).
@@ -113,12 +112,34 @@ selection footer when height ≥ 3 (2 lines collapsed), then a 1-line sync heade
 space remains (footer wins when tight; no header when `sync` is unset).
 The footer wraps the full subject plus body by default
 (`commit_msg_expand`, `selection_footer_parts`); `M` collapses it to the
-two clipped lines. The expanded footer shows at most
-`COMMIT_MSG_EXPAND_MAX_LINES` message rows plus the meta row, and at most
-half the pane. A taller message scrolls: `commit_msg_scroll` sets the first
-message row, the meta row stays pinned, and a 1-column scrollbar marks the
-position (`footer_message_scroll_max`). List rows stay one line.
-`loading older…` takes one extra row while the next log page loads.
+two clipped lines.
+
+The footer height is fixed. It does not follow the selected message, so
+moving between commits never changes the list height:
+
+- Expanded requests N message rows plus the meta row
+  (`graph_footer_request`, N from `GraphWidget::commit_msg_lines`, default
+  `COMMIT_MSG_LINES_DEFAULT` = 8, clamped from `COMMIT_MSG_LINES_MIN` (1)
+  to `COMMIT_MSG_LINES_MAX` (20)). Collapsed requests 2. The TUI passes
+  its session N (`AppState::commit_msg_lines`: `viewDefaults.commitMessageLines`,
+  then `-` / `+`) to both the widget and `graph_footer_request`.
+- `graph_chrome_budget_for` clamps the request to at most half the pane
+  (never under 2) and leaves the list at least one row. A pane under 3
+  rows drops the footer. The budget depends only on the pane and the
+  request. The app calls the same `graph_footer_request`, so its layout
+  matches the paint.
+- The meta row is always on the footer's bottom row. A short message
+  paints from the top and leaves blank rows above the meta row.
+- A taller message scrolls: `commit_msg_scroll` sets the first message
+  row and a 1-column scrollbar marks the position
+  (`footer_message_scroll_max`). While lines are hidden below, the last
+  visible message row ends with a muted `↓<K>` hint (`v<K>` with ASCII
+  glyphs; K = hidden lines below) left of the scrollbar column. It covers
+  the message text under it. At the end of the message there is no hint.
+
+List rows stay one line.
+The pane has no `loading older…` row: the status line shows it while the next
+log page loads, and the list keeps its height.
 
 Footer copy (`selection_detail_lines` / `selection_detail_parts`; do not invent
 other strings):

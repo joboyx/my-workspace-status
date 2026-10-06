@@ -283,6 +283,7 @@ impl AppState {
             | Action::ToggleDiffMode
             | Action::ToggleDiffWrap
             | Action::ToggleCommitMsgExpand
+            | Action::ResizeCommitMsg(_)
             | Action::ToggleLineBlame
             | Action::ToggleMouse
             | Action::SearchStart

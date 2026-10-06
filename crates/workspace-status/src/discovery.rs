@@ -13,7 +13,7 @@ use crate::git::{
 use crate::helpers::{
     is_default_branch, DETACHED_HEAD_BRANCH, STATUS_FAILED_NOTE, UNKNOWN_HEAD_BRANCH,
 };
-use crate::parallel::{env_fetch_concurrency, map_with_concurrency};
+use crate::parallel::map_with_concurrency;
 use crate::snapshot::{CheckoutKind, FileChange, RepoSnapshot, SyncStatus};
 use crate::worktrees::{
     classify_merged_into_default, is_main_worktree_checkout, linked_worktrees_under_cwd,
@@ -586,19 +586,21 @@ pub fn discover_checkouts(
 
 /// Walk primaries and linked worktrees, then [`process_repo`] each checkout.
 ///
-/// Independent checkouts run with a cap of 10 (`FETCH_CONCURRENCY`;
-/// `WS_STATUS_FETCH_CONCURRENCY`). Output order matches discovery order.
+/// Independent checkouts run with at most `fetch_concurrency` in flight (the
+/// resolved `fetchConcurrency`, default 10). Output order matches discovery
+/// order.
 pub fn collect_snapshots(
     cwd: &Path,
     do_fetch: bool,
     config: &WorkspaceStatusConfig,
     only_repos: Option<&BTreeSet<String>>,
+    fetch_concurrency: usize,
 ) -> Vec<RepoSnapshot> {
     let entries = discover_checkouts(cwd, config, only_repos);
     let cwd = cwd.to_path_buf();
     map_with_concurrency(
         entries,
-        env_fetch_concurrency(),
+        fetch_concurrency,
         move |(repo_path, meta, override_name)| {
             process_repo(&repo_path, &cwd, do_fetch, override_name.as_deref(), &meta)
         },
@@ -609,18 +611,20 @@ pub fn collect_snapshots(
 }
 
 /// Exit-style validation: `Err` lists the unknown repo name.
-pub fn validate_filter_repos(cwd: &Path, filter_repos: &[String]) -> Result<(), String> {
+///
+/// `loaded` is the merged config from `load_workspace_status_config`. Named
+/// repos bypass `ignoredRepos`, so the walk here ignores nothing.
+pub fn validate_filter_repos(
+    cwd: &Path,
+    loaded: &WorkspaceStatusConfig,
+    filter_repos: &[String],
+) -> Result<(), String> {
     if filter_repos.is_empty() {
         return Ok(());
     }
-    let loaded = crate::config::load_workspace_status_config(cwd)?;
     let config = WorkspaceStatusConfig {
         ignored_repos: Vec::new(),
-        max_depth: loaded.max_depth,
-        default_branches: loaded.default_branches,
-        editor: loaded.editor,
-        diff_tool: loaded.diff_tool,
-        view_defaults: loaded.view_defaults,
+        ..loaded.clone()
     };
     let walk_primaries = find_repos_with_config(cwd, &config, None);
     let entries = expand_repos_with_linked_worktrees(cwd, &walk_primaries, &config, None);

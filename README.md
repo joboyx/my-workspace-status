@@ -79,7 +79,7 @@ curl -LsSf https://github.com/joboyx/my-workspace-status/releases/latest/downloa
 export PATH="$HOME/.local/bin:$PATH" && hash -r
 ```
 
-Update that install with `ws --update` (same as `workspace-status --update`). That prints GitHub Release notes for versions newer than the installed binary, then runs `workspace-status-update`. The installer also places that sidecar next to the binaries. On a TTY, `ws` also checks GitHub Releases at most every 6 hours and asks `workspace-status <current> → <latest> available. Update? [y/N]` before the TUI if a newer release exists (blank Enter is no). `--plain` and `--json` skip that check; `WS_STATUS_UPDATE_CHECK=0` turns it off.
+Update that install with `ws --update` (same as `workspace-status --update`). That prints GitHub Release notes for versions newer than the installed binary, then runs `workspace-status-update`. The installer also places that sidecar next to the binaries. On a TTY, `ws` also checks GitHub Releases at most every 6 hours and asks `workspace-status <current> → <latest> available. Update? [y/N]` before the TUI if a newer release exists (blank Enter is no). `--plain` and `--json` skip that check; `WS_STATUS_UPDATE_CHECK=0` or the config key `"updateCheck": false` turns it off.
 
 Windows:
 
@@ -123,11 +123,13 @@ On a TTY, `ws` without `--plain` or `--json` opens the TUI and waits for keys. T
 
 The TUI expects a Nerd Font. Use MesloLGS NF (romkatv/powerlevel10k-media).
 MesloLGM Nerd Font Mono letter-spaces in some VTE terminals (xfce4-terminal sizes cells off the widest Nerd glyph).
-Set WS_STATUS_GLYPHS=ascii for plain markers.
+Set `WS_STATUS_GLYPHS=ascii`, or `"glyphs": "ascii"` in a config file, for plain markers.
 
 ## Workspace config
 
 `workspace-status` reads `.workspace-status-config.json` from the workspace root. Pin that root with `-C` / `--workspace <path>` or `WS_STATUS_WORKSPACE` (CLI flag > env > process cwd). Missing or non-directory paths error; they do not fall back to cwd.
+
+An optional user file, `~/.config/my-workspace-status/config.json` (`$XDG_CONFIG_HOME` when set), uses the same keys. The workspace file wins per key; `viewDefaults` and `defaultBranches` merge per sub-key. Most `WS_STATUS_*` env vars also have a config key (`theme`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck`, the store paths, `git`); a valid env var wins over the key. The store paths and `git` are allowed only in the user file. See [docs/configuration.md](./docs/configuration.md).
 
 ```json
 {
@@ -150,7 +152,7 @@ Set WS_STATUS_GLYPHS=ascii for plain markers.
 - `defaultBranches` — optional map of workspace-relative repo path → sole default branch. When set, that branch is used for classification, markers, ordering, and `--default-branch` / TUI `d`. When omitted for a repo, behaviour matches today (classification: `main`/`master`/`develop`; switch target from git).
 - `editor` — optional command for TUI `e` (same shape as `$EDITOR`). Omit the key or set `"editor": "vim"` for vim (the default). `"editor": "cursor"` opens Cursor IDE. Order: config `editor`, `$VISUAL`, `$EDITOR`, then vim (git's order).
 - `diffTool` — optional command for TUI `E` (default vimdiff). `"diffTool": "cursor --diff --wait"` opens Cursor and keeps HEAD temps until the CLI exits. No `$EDITOR` fallback.
-- `viewDefaults` — optional TUI launch modes: `tree` / `commitTree` (`tree` | `flat`), `diff` (`split` | `inline`), `wrap` (`wrap` | `unwrap`, default `wrap`), `commitMessage` (`expand` | `collapse`), `lineBlame` (`show` | `hide`, default `show`). Keys and values are checked; a typo is an error. Toggle keys change the session only. Detail: [docs/configuration.md](docs/configuration.md).
+- `viewDefaults` — optional TUI launch modes: `tree` / `commitTree` (`tree` | `flat`), `diff` (`split` | `inline`), `wrap` (`wrap` | `unwrap`, default `wrap`), `commitMessage` (`expand` | `collapse`), `commitMessageLines` (integer 1 to 20, default 8), `lineBlame` (`show` | `hide`, default `show`). Keys and values are checked; a typo is an error. Toggle keys change the session only. Detail: [docs/configuration.md](docs/configuration.md).
 
 Pass `-a` or `--all` to include repos listed in `ignoredRepos` for that run (`maxDepth` is unchanged). In the TUI, `.` shows or hides those repos at runtime (starts shown with `-a`, hidden without it). Hidden ignored repos stay out of workspace operations unless you show them.
 

@@ -161,8 +161,8 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "inline / split · wrap · msg · blame",
             },
             HelpEntry {
-                keys: "< >",
-                desc: "narrow / widen the tree pane",
+                keys: "< > - +",
+                desc: "tree width · msg rows (= is +)",
             },
             HelpEntry {
                 keys: "t",
@@ -908,7 +908,7 @@ mod tests {
         assert!(view_keys.contains(&"'"));
         assert!(!view_keys.contains(&"y '"));
         assert!(view_keys.contains(&"Esc"));
-        assert!(view_keys.contains(&"< >"));
+        assert!(view_keys.contains(&"< > - +"));
         assert_eq!(
             HELP_GROUPS[2]
                 .entries

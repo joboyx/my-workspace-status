@@ -947,6 +947,8 @@ fn normal_key(
         KeyCode::Char('>') => Action::ResizeTree(1),
         KeyCode::Char('\\') => Action::ToggleDiffWrap,
         KeyCode::Char('M') => Action::ToggleCommitMsgExpand,
+        KeyCode::Char('-') => Action::ResizeCommitMsg(-1),
+        KeyCode::Char('+') | KeyCode::Char('=') => Action::ResizeCommitMsg(1),
         KeyCode::Char('B') => Action::ToggleLineBlame,
         KeyCode::Char('A') => Action::BlameMenu,
         KeyCode::Char('m') => Action::ToggleMouse,
@@ -1106,6 +1108,45 @@ mod tests {
         assert_eq!(
             event_to_action(&key(KeyCode::Char('<')), InputMode::Help, false, false),
             Action::None
+        );
+    }
+
+    #[test]
+    fn minus_plus_equals_resize_the_commit_message_in_normal_mode_only() {
+        for (code, want) in [
+            (KeyCode::Char('-'), Action::ResizeCommitMsg(-1)),
+            (KeyCode::Char('+'), Action::ResizeCommitMsg(1)),
+            (KeyCode::Char('='), Action::ResizeCommitMsg(1)),
+        ] {
+            assert_eq!(event_to_action(&key(code), normal(), false, false), want);
+            assert_eq!(event_to_action(&key(code), normal(), true, true), want);
+        }
+        // Terminals may report `+` with Shift held.
+        assert_eq!(
+            event_to_action(&shift(KeyCode::Char('+')), normal(), false, false),
+            Action::ResizeCommitMsg(1)
+        );
+        assert_eq!(
+            event_to_action(
+                &key(KeyCode::Char('-')),
+                InputMode::SearchPrompt,
+                false,
+                false
+            ),
+            Action::SearchChar('-')
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('+')), InputMode::Help, false, false),
+            Action::None
+        );
+        // The list keys stay on the list.
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('j')), normal(), false, false),
+            Action::Move(1)
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Down), normal(), false, false),
+            Action::Move(1)
         );
     }
 
@@ -3339,6 +3380,9 @@ mod tests {
             (n, 0, Char('>'), Action::ResizeTree(1)),
             (n, 0, Char('\\'), Action::ToggleDiffWrap),
             (n, 0, Char('M'), Action::ToggleCommitMsgExpand),
+            (n, 0, Char('-'), Action::ResizeCommitMsg(-1)),
+            (n, 0, Char('+'), Action::ResizeCommitMsg(1)),
+            (n, 0, Char('='), Action::ResizeCommitMsg(1)),
             (n, 0, Char('B'), Action::ToggleLineBlame),
             (n, 0, Char('A'), Action::BlameMenu),
             (n, 0, Char('m'), Action::ToggleMouse),

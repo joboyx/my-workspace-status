@@ -12,20 +12,21 @@ mod pull_request;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 use workspace_status_graph::{
-    format_commit_message, format_relative_date, graph_chrome_budget_for, graph_vscroll_visible,
-    paint_model, selection_footer_parts, wrap_commit_message, GraphChromeBudget,
-    GraphFooterSelection, GraphModel, GraphRow, PaintedLine, ASCII, COMMIT_MSG_EXPAND_MAX_LINES,
-    UNICODE,
+    format_commit_message, format_relative_date, graph_chrome_budget_for, graph_footer_request,
+    graph_vscroll_visible, paint_model, selection_footer_parts, wrap_commit_message,
+    GraphChromeBudget, GraphFooterSelection, GraphModel, GraphRow, PaintedLine, ASCII,
+    COMMIT_MSG_LINES_DEFAULT, COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN, UNICODE,
 };
 
 use crate::config::ViewDefaults;
+use crate::settings::Settings;
 use crate::snapshot::{
     carry_status_failed_local_branches, CheckoutKind, FileChange, WorkspaceSnapshot,
 };
@@ -38,8 +39,6 @@ use super::branches::{
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
 };
 use super::chrome::{diverged_pull_status, status_uses_status_text, STATUS_NO_COMMENTS};
-#[cfg(not(test))]
-use super::comments::comment_store_path;
 use super::comments::{
     collect_live_set, comment_key_label, comments_in_focus_scope, covering_line_comment,
     diff_focus_side, diff_line_comment_state, export_markdown, format_entity_reference,
@@ -101,13 +100,13 @@ use super::tabs::{
     COMPARE_STILL_LOADING, FOCUS_A_COMMIT_TO_DIFF, ROOT_COMMIT_HAS_NO_PARENT,
     SWITCH_TO_WORKSPACE_TAB, WORKSPACE_TAB_CANNOT_CLOSE,
 };
-use super::theme::{cycle_theme_id, theme_from_env, ThemeId};
+#[cfg(test)]
+use super::theme::DEFAULT_THEME_ID;
+use super::theme::{cycle_theme_id, ThemeId};
 use super::tree::{
     build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
     visible_window, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
 };
-#[cfg(not(test))]
-use super::viewed::viewed_store_path;
 use super::viewed::{
     collect_current_fingerprints, fingerprint_file_change, load_viewed_store, reconcile_viewed,
     save_viewed_store, toggle_viewed, viewed_identity, viewed_row_ids, workspace_store_id,
@@ -650,6 +649,12 @@ pub struct AppState {
     /// header. On by default; `M` collapses for this session (no XDG store).
     /// Graph list rows stay one line.
     pub commit_msg_expand: bool,
+    /// Message rows of the expanded commit-message footer (graph pane and
+    /// commit-files pane). The footer keeps this height whatever the
+    /// selected message is. `viewDefaults.commitMessageLines` sets the launch
+    /// value; `-` / `+` change it for this session (no XDG store). Always in
+    /// [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`].
+    pub commit_msg_lines: usize,
     /// Scroll of an expanded message taller than the graph footer, keyed by
     /// the graph row identity it belongs to. Any other selection reads `0`.
     commit_msg_scroll: Option<(String, usize)>,
@@ -707,15 +712,51 @@ fn unix_now() -> i64 {
 }
 
 impl AppState {
+    /// TUI launch state: glyphs, theme, and the viewed / comment store paths
+    /// come from the resolved `settings`.
+    pub fn launch(cwd: PathBuf, snapshot: WorkspaceSnapshot, settings: &Settings) -> Self {
+        Self::build(
+            cwd,
+            snapshot,
+            settings.ascii,
+            settings.viewed_store.clone(),
+            settings.comment_store.clone(),
+            settings.theme,
+        )
+    }
+
+    /// Test state with a unique temp viewed store and the default theme.
+    #[cfg(test)]
     pub fn new(cwd: PathBuf, snapshot: WorkspaceSnapshot, ascii: bool) -> Self {
         Self::with_viewed_path(cwd, snapshot, ascii, default_viewed_path())
     }
 
+    /// Test state with `viewed_path`; the comment store sits next to it.
+    #[cfg(test)]
     pub(crate) fn with_viewed_path(
         cwd: PathBuf,
         snapshot: WorkspaceSnapshot,
         ascii: bool,
         viewed_path: PathBuf,
+    ) -> Self {
+        let comment_path = viewed_path.with_file_name("comments.json");
+        Self::build(
+            cwd,
+            snapshot,
+            ascii,
+            viewed_path,
+            comment_path,
+            DEFAULT_THEME_ID,
+        )
+    }
+
+    fn build(
+        cwd: PathBuf,
+        snapshot: WorkspaceSnapshot,
+        ascii: bool,
+        viewed_path: PathBuf,
+        comment_path: PathBuf,
+        theme: ThemeId,
     ) -> Self {
         let show_ignored = snapshot.show_ignored;
         let tree_mode = true;
@@ -728,7 +769,6 @@ impl AppState {
         let signatures = tree_signatures(&tree, &cwd);
         let workspace_id = workspace_store_id(&cwd);
         let viewed_store = load_viewed_store(&viewed_path, &workspace_id);
-        let comment_path = comment_path_for(&viewed_path);
         let comment_store = load_comment_store(&comment_path, &workspace_id);
         let mut state = Self {
             cwd,
@@ -807,12 +847,13 @@ impl AppState {
             diff_mode: DiffMode::SideBySide,
             diff_wrap: true,
             commit_msg_expand: true,
+            commit_msg_lines: COMMIT_MSG_LINES_DEFAULT,
             commit_msg_scroll: None,
             drag: SplitDrag::None,
             text_selection: None,
             painted_frame: Buffer::default(),
             too_small: false,
-            theme: theme_from_env(),
+            theme,
             mouse_enabled: true,
             pointer: None,
             z_pending_at: None,
@@ -870,6 +911,9 @@ impl AppState {
         }
         if let Some(expand) = defaults.commit_message_expand {
             self.commit_msg_expand = expand;
+        }
+        if let Some(lines) = defaults.commit_message_lines {
+            self.commit_msg_lines = lines.clamp(COMMIT_MSG_LINES_MIN, COMMIT_MSG_LINES_MAX);
         }
         if let Some(on) = defaults.line_blame {
             self.line_blame.set_enabled(on);
@@ -1210,34 +1254,20 @@ impl AppState {
 
     /// Header / footer / list split for the graph pane.
     pub fn graph_chrome(&self) -> GraphChromeBudget {
-        self.graph_chrome_in(
-            self.layout.tree_height.max(1),
-            self.graph_pane_inner_width(),
-        )
+        self.graph_chrome_in(self.layout.tree_height.max(1))
     }
 
-    pub(crate) fn graph_chrome_in(&self, height: u16, width: u16) -> GraphChromeBudget {
+    /// Header / footer / list split for a graph pane of `height` rows.
+    ///
+    /// The footer request is fixed ([`graph_footer_request`], same call as
+    /// the widget), so the split does not depend on the selected message or
+    /// the pane width.
+    pub(crate) fn graph_chrome_in(&self, height: u16) -> GraphChromeBudget {
         graph_chrome_budget_for(
             height,
-            self.graph_loading_older,
             self.graph.as_ref().is_some_and(|g| g.sync.is_some()),
-            self.graph_footer_desired_lines(width as usize),
+            graph_footer_request(self.commit_msg_expand, self.commit_msg_lines),
         )
-    }
-
-    /// Painted graph width: the left pane's inner width in a files drill,
-    /// else the right pane's inner width (borders excluded, same `Rect` the
-    /// widget paints into), so footer wrap and list height match the paint.
-    fn graph_pane_inner_width(&self) -> u16 {
-        if self.drill.is_files() {
-            self.layout.tree_width.max(1)
-        } else {
-            self.layout.diff_pane_width.max(1)
-        }
-    }
-
-    fn graph_footer_desired_lines(&self, width: usize) -> u16 {
-        self.graph_footer_line_count(width).min(u16::MAX as usize) as u16
     }
 
     /// Painted selection-footer lines at `width`, before the footer budget.
@@ -1538,52 +1568,51 @@ impl AppState {
         (title, subtitle)
     }
 
+    /// Rows the commit-files footer asks for, before the pane-size cap.
+    ///
+    /// Fixed for the expand state and [`Self::commit_msg_lines`], never sized
+    /// by the selected message: expanded is title + meta + N message rows,
+    /// collapsed is title + subtitle. [`Self::commit_detail_footer_lines`]
+    /// returns exactly this many lines.
+    pub(crate) fn commit_detail_footer_request(&self) -> usize {
+        if self.commit_msg_expand {
+            2 + self.commit_msg_lines
+        } else {
+            2
+        }
+    }
+
     /// Title plus subtitle / wrapped message for the commit-files footer.
     ///
     /// The footer sits at the bottom of the left commit-files pane beside a
     /// file diff, under the file list. The depth-1 files pane has no footer
-    /// (the graph pane beside it already shows one). Collapsed is the dense
-    /// one-line subtitle from [`Self::commit_detail_meta`]. Expanded wraps
-    /// subject plus body under a meta line (sha / refs / author). Never empty.
+    /// (the graph pane beside it already shows one). Collapsed is the title
+    /// and the dense one-line subtitle from [`Self::commit_detail_meta`].
+    /// Expanded is the title, a meta line (sha / refs / author), then the
+    /// subject plus body wrapped into [`Self::commit_msg_lines`] rows: blank
+    /// rows pad a short message and `…` ends a clipped long one. Without a
+    /// message the subtitle takes the meta row. Always
+    /// [`Self::commit_detail_footer_request`] lines.
     pub(crate) fn commit_detail_footer_lines(&self, width: usize) -> Vec<String> {
         let (title, subtitle) = self.commit_detail_meta();
-        let mut footer = Vec::new();
-        if !title.is_empty() {
-            footer.push(title);
-        }
+        let subtitle = subtitle.unwrap_or_default();
+        let mut footer = vec![title];
         if !self.commit_msg_expand {
-            if let Some(sub) = subtitle {
-                if !sub.is_empty() {
-                    footer.push(sub);
-                }
-            }
-            if footer.is_empty() {
-                footer.push(String::new());
-            }
-            return footer;
-        }
-        match self.expanded_commit_message() {
-            Some((meta, message)) => {
-                if !meta.is_empty() {
+            footer.push(subtitle);
+        } else {
+            match self.expanded_commit_message() {
+                Some((meta, message)) => {
                     footer.push(meta);
+                    footer.extend(wrap_commit_message(
+                        &message,
+                        width.max(1),
+                        self.commit_msg_lines,
+                    ));
                 }
-                footer.extend(wrap_commit_message(
-                    &message,
-                    width.max(1),
-                    COMMIT_MSG_EXPAND_MAX_LINES,
-                ));
-            }
-            None => {
-                if let Some(sub) = subtitle {
-                    if !sub.is_empty() {
-                        footer.push(sub);
-                    }
-                }
+                None => footer.push(subtitle),
             }
         }
-        if footer.is_empty() {
-            footer.push(String::new());
-        }
+        footer.resize(self.commit_detail_footer_request(), String::new());
         footer
     }
 
@@ -2710,6 +2739,21 @@ impl AppState {
         } else {
             "msg off".into()
         };
+        // The graph list height changed: keep the focused row in view.
+        self.sync_graph_scroll();
+        Effect::None
+    }
+
+    /// `-` / `+`: change the expanded commit-message footer by `delta` rows
+    /// for this session, clamped to
+    /// [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`].
+    fn resize_commit_msg(&mut self, delta: i32) -> Effect {
+        let next = (self.commit_msg_lines as i64).saturating_add(i64::from(delta));
+        self.commit_msg_lines =
+            next.clamp(COMMIT_MSG_LINES_MIN as i64, COMMIT_MSG_LINES_MAX as i64) as usize;
+        self.status = format!("msg lines {}", self.commit_msg_lines).into();
+        // The graph list height changed: keep the focused row in view.
+        self.sync_graph_scroll();
         Effect::None
     }
 
@@ -6255,43 +6299,21 @@ enum FoldOp {
     Open,
 }
 
-#[allow(dead_code)]
+/// Unique temp viewed-store path per test state.
+#[cfg(test)]
 fn default_viewed_path() -> PathBuf {
-    #[cfg(test)]
-    {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static N: AtomicU64 = AtomicU64::new(0);
-        std::env::temp_dir().join(format!(
-            "ws-viewed-test-{}-{}.json",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ))
-    }
-    #[cfg(not(test))]
-    viewed_store_path()
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "ws-viewed-test-{}-{}.json",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 /// Idle / breadcrumb toast when a persist write returns [`std::io::Error`].
 fn persist_failed_status(kind: &str, err: impl std::fmt::Display) -> String {
     format!("{kind} save failed: {err}")
-}
-
-fn comment_path_for(viewed_path: &Path) -> PathBuf {
-    if let Ok(override_path) = std::env::var("WS_STATUS_COMMENT_STORE") {
-        let trimmed = override_path.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
-    }
-    #[cfg(test)]
-    {
-        viewed_path.with_file_name("comments.json")
-    }
-    #[cfg(not(test))]
-    {
-        let _ = viewed_path;
-        comment_store_path()
-    }
 }
 
 /// Ancestor ids to try when a tree-mode row disappears in flat mode.
@@ -6338,7 +6360,7 @@ mod tests {
     use super::super::comments::put_comment;
     use super::super::gates::ListFocusTarget;
     use super::super::keys::InputMode;
-    use super::super::theme::{resolve_theme_id, ThemeId};
+    use super::super::theme::{theme_id_from, ThemeId};
     use super::super::tree::list_viewport_start;
     use super::*;
     use crate::snapshot::{
@@ -7704,8 +7726,8 @@ mod tests {
 
     #[test]
     fn watch_zero_is_disable_and_refresh_keeps_focus() {
-        assert_eq!(watch_interval_ms(Some("0")), 0);
-        assert!(watch_interval_ms(Some("2000")) >= 500);
+        assert_eq!(watch_interval_ms(Some("0"), None), 0);
+        assert!(watch_interval_ms(Some("2000"), None) >= 500);
         let mut app = state();
         focus_file(&mut app, "README.md");
         let id = app.focused_row().unwrap().id.clone();
@@ -10522,6 +10544,7 @@ mod tests {
     fn file_writes_on_git_fixture_honor_revert_confirm() {
         use crate::config::WorkspaceStatusConfig;
         use crate::git::{revert_tracked_file, stage_file, unstage_file};
+        use crate::parallel::FETCH_CONCURRENCY;
         use crate::tui::collect_full_snapshot;
         use std::fs;
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -10539,7 +10562,8 @@ mod tests {
         fs::write(repo_dir.join("README.md"), "# dirty\n").unwrap();
 
         let config = WorkspaceStatusConfig::with_defaults();
-        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let snapshot =
+            collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
         let mut app = AppState::new(workspace.clone(), snapshot, true);
         focus_file(&mut app, "README.md");
         match app.dispatch(Action::Stage) {
@@ -11428,6 +11452,7 @@ mod tests {
             checkout_branch, create_branch_checkout, latest_stash_ref, list_local_branches,
             stash_apply, stash_drop, stash_pop, stash_push,
         };
+        use crate::parallel::FETCH_CONCURRENCY;
         use crate::tui::collect_full_snapshot;
         use std::fs;
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -11445,7 +11470,8 @@ mod tests {
         fs::write(repo_dir.join("README.md"), "# dirty\n").unwrap();
 
         let config = WorkspaceStatusConfig::with_defaults();
-        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let snapshot =
+            collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
         let mut app = AppState::new(workspace.clone(), snapshot, true);
         focus_file(&mut app, "README.md");
         app.open_stash_menu("app".into(), latest_stash_ref(&repo_dir));
@@ -11707,15 +11733,18 @@ mod tests {
         // The background tick leaves the status slot alone.
         assert_eq!(app.status, "");
         assert_eq!(app.dispatch(Action::WatchTick), Effect::WatchRefresh);
-        assert_eq!(watch_interval_ms(Some("0")), 0);
+        assert_eq!(watch_interval_ms(Some("0"), None), 0);
         assert_ne!(
-            crate::tui::fetch::fetch_interval_ms(Some("0")),
-            watch_interval_ms(Some("0")) + 1
+            crate::tui::fetch::fetch_interval_ms(Some("0"), None),
+            watch_interval_ms(Some("0"), None) + 1
         );
-        assert_eq!(crate::tui::fetch::fetch_interval_ms(Some("0")), 0);
-        assert_eq!(watch_interval_ms(None), crate::tui::watch::DEFAULT_WATCH_MS);
+        assert_eq!(crate::tui::fetch::fetch_interval_ms(Some("0"), None), 0);
         assert_eq!(
-            crate::tui::fetch::fetch_interval_ms(None),
+            watch_interval_ms(None, None),
+            crate::tui::watch::DEFAULT_WATCH_MS
+        );
+        assert_eq!(
+            crate::tui::fetch::fetch_interval_ms(None, None),
             crate::tui::fetch::DEFAULT_FETCH_MS
         );
         assert_ne!(
@@ -13422,6 +13451,7 @@ mod tests {
             app.commit_msg_expand = false;
             app.commit_detail_footer_lines(16)
         };
+        assert_eq!(collapsed_files_footer.len(), 2, "title + subtitle");
         let collapsed_join = collapsed_files_footer.join("\n");
         assert!(
             !collapsed_join.contains(body),
@@ -13429,6 +13459,11 @@ mod tests {
         );
         app.commit_msg_expand = true;
         let expanded_files_footer = app.commit_detail_footer_lines(16);
+        assert_eq!(
+            expanded_files_footer.len(),
+            2 + app.commit_msg_lines,
+            "title + meta + N message rows"
+        );
         let expanded_join = expanded_files_footer.join("");
         assert!(
             expanded_join.contains(body),
@@ -13994,8 +14029,11 @@ mod tests {
         app.dispatch(Action::CycleTheme);
         app.dispatch(Action::CycleTheme);
         assert_eq!(app.theme, ThemeId::TokyoNight);
-        assert_eq!(resolve_theme_id(Some("gruvbox-dark")), ThemeId::GruvboxDark);
-        assert_eq!(resolve_theme_id(Some("nope")), ThemeId::TokyoNight);
+        assert_eq!(
+            theme_id_from(Some("gruvbox-dark"), None),
+            ThemeId::GruvboxDark
+        );
+        assert_eq!(theme_id_from(Some("nope"), None), ThemeId::TokyoNight);
     }
 
     fn tree_repo() -> RepoSnapshot {
@@ -14080,6 +14118,7 @@ mod tests {
         assert_eq!(app.diff_mode, DiffMode::SideBySide);
         assert!(app.diff_wrap);
         assert!(app.commit_msg_expand);
+        assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_DEFAULT);
         assert_eq!(
             app.rows
                 .iter()
@@ -14096,6 +14135,7 @@ mod tests {
             wrap: Some(false),
             commit_message_expand: Some(false),
             line_blame: None,
+            commit_message_lines: Some(3),
         });
         assert!(!app.tree_mode);
         assert!(app.rows.iter().all(|row| row.kind != NodeKind::Dir));
@@ -14105,6 +14145,7 @@ mod tests {
         assert_eq!(app.diff_mode, DiffMode::Inline);
         assert!(!app.diff_wrap);
         assert!(!app.commit_msg_expand);
+        assert_eq!(app.commit_msg_lines, 3);
         assert_eq!(app.status, "", "launch defaults post no status");
     }
 
@@ -15561,7 +15602,9 @@ mod tests {
         let mut app = graph_state(false);
         focus_repo(&mut app, "app");
         install_linear_graph(&mut app, 20);
-        // height 12, no sync header → list_height 10, page = 9 painted lines
+        // Collapsed 2-row footer, height 12, no sync header → list_height 10,
+        // page = 9 painted lines.
+        app.commit_msg_expand = false;
         app.layout.tree_height = 12;
         let list_h = app.graph_chrome().list_height.max(1) as usize;
         assert_eq!(list_h, 10, "list_height from chrome budget");
@@ -15603,10 +15646,186 @@ mod tests {
     }
 
     #[test]
+    fn graph_pgdn_pages_with_the_expanded_footer_on_a_short_pane() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_linear_graph(&mut app, 20);
+        // Expanded N = 8 asks for 9 rows; a 12-row pane caps the footer at
+        // half (6), so the list keeps 6 rows and a page is 5 painted lines.
+        assert!(app.commit_msg_expand);
+        app.layout.tree_height = 12;
+        let chrome = app.graph_chrome();
+        assert_eq!((chrome.footer_height, chrome.list_height), (6, 6));
+        let list_h = chrome.list_height as usize;
+        let page = list_h - 1;
+        app.graph_cursor = 0;
+        app.sync_graph_scroll();
+        app.dispatch(Action::PageMove(1));
+        let after = painted_focus_index(&app);
+        let scroll = app.graph_scroll as usize;
+        assert!(
+            after >= scroll && after < scroll + list_h,
+            "focused painted row {after} must stay in [{scroll}, {})",
+            scroll + list_h
+        );
+        assert!(
+            after >= page.saturating_sub(1) && after <= page + 1,
+            "PageDown moves about one painted viewport ({page}), got {after}"
+        );
+        app.dispatch(Action::PageMove(1));
+        let again = painted_focus_index(&app);
+        let scroll = app.graph_scroll as usize;
+        assert!(again > after, "a second page moves on");
+        assert!(again >= scroll && again < scroll + list_h);
+    }
+
+    /// Install a linear graph where commit 2 has a one-line message and
+    /// commit 3 a body far longer than any footer.
+    fn install_short_and_long_messages(app: &mut AppState) {
+        install_linear_graph(app, 20);
+        let body = (0..40)
+            .map(|i| format!("body line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(model) = app.graph.as_mut() {
+            model.commits[3].body = body;
+        }
+    }
+
+    #[test]
+    fn graph_list_height_ignores_loading_older() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        for height in [3, 12, 40] {
+            app.layout.tree_height = height;
+            for expand in [true, false] {
+                app.commit_msg_expand = expand;
+                app.graph_loading_older = false;
+                let idle = app.graph_chrome();
+                app.graph_loading_older = true;
+                assert_eq!(app.graph_chrome(), idle, "height {height} expand {expand}");
+            }
+        }
+    }
+
+    #[test]
+    fn graph_footer_height_does_not_follow_the_selected_message() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_short_and_long_messages(&mut app);
+        app.layout.tree_height = 40;
+        for expand in [true, false] {
+            app.commit_msg_expand = expand;
+            app.graph_cursor = 2;
+            app.sync_graph_scroll();
+            let short = app.graph_chrome();
+            app.dispatch(Action::Move(1));
+            assert_eq!(app.graph_cursor, 3, "expand {expand}");
+            let long = app.graph_chrome();
+            assert_eq!(long.list_height, short.list_height, "expand {expand}");
+            assert_eq!(long.footer_height, short.footer_height, "expand {expand}");
+            app.dispatch(Action::Move(-1));
+            assert_eq!(app.graph_chrome(), short, "expand {expand}");
+            let want = if expand {
+                app.commit_msg_lines as u16 + 1
+            } else {
+                2
+            };
+            assert_eq!(short.footer_height, want, "expand {expand}");
+        }
+    }
+
+    #[test]
+    fn minus_and_plus_resize_the_footer_by_one_row_and_clamp() {
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_short_and_long_messages(&mut app);
+        // Tall enough that the half-pane cap never limits N = 20.
+        app.layout.tree_height = 60;
+        assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_DEFAULT);
+        let base = app.graph_chrome();
+        assert_eq!(base.footer_height as usize, COMMIT_MSG_LINES_DEFAULT + 1);
+
+        assert_eq!(app.dispatch(Action::ResizeCommitMsg(1)), Effect::None);
+        assert_eq!(
+            app.status,
+            format!("msg lines {}", COMMIT_MSG_LINES_DEFAULT + 1)
+        );
+        let grown = app.graph_chrome();
+        assert_eq!(grown.footer_height, base.footer_height + 1);
+        assert_eq!(grown.list_height + 1, base.list_height);
+
+        app.dispatch(Action::ResizeCommitMsg(-1));
+        app.dispatch(Action::ResizeCommitMsg(-1));
+        assert_eq!(
+            app.status,
+            format!("msg lines {}", COMMIT_MSG_LINES_DEFAULT - 1)
+        );
+        assert_eq!(app.graph_chrome().footer_height + 1, base.footer_height);
+
+        for _ in 0..30 {
+            app.dispatch(Action::ResizeCommitMsg(-1));
+        }
+        assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_MIN);
+        assert_eq!(app.status, "msg lines 1", "status also at the clamp");
+        assert_eq!(app.graph_chrome().footer_height, 2);
+        for _ in 0..30 {
+            app.dispatch(Action::ResizeCommitMsg(1));
+        }
+        assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_MAX);
+        assert_eq!(app.status, "msg lines 20", "status also at the clamp");
+        assert_eq!(app.graph_chrome().footer_height, 21);
+
+        // Collapsed keeps its 2 rows; N still changes for the next expand.
+        app.commit_msg_expand = false;
+        app.dispatch(Action::ResizeCommitMsg(-1));
+        assert_eq!(app.commit_msg_lines, COMMIT_MSG_LINES_MAX - 1);
+        assert_eq!(app.graph_chrome().footer_height, 2);
+        assert!(!app.commit_msg_expand, "- / + never toggle expand");
+    }
+
+    #[test]
+    fn footer_budget_changes_keep_the_focused_graph_row_in_view() {
+        let in_view = |app: &AppState| {
+            let idx = painted_focus_index(app);
+            let scroll = app.graph_scroll as usize;
+            let list_h = app.graph_chrome().list_height as usize;
+            assert!(
+                idx >= scroll && idx < scroll + list_h,
+                "focused painted row {idx} outside [{scroll}, {})",
+                scroll + list_h
+            );
+        };
+        let mut app = graph_state(false);
+        focus_repo(&mut app, "app");
+        install_linear_graph(&mut app, 40);
+        app.layout.tree_height = 30;
+        app.commit_msg_lines = COMMIT_MSG_LINES_MIN;
+        app.dispatch(Action::MoveToEnd);
+        in_view(&app);
+        let before = app.graph_chrome().list_height;
+        for _ in 0..13 {
+            app.dispatch(Action::ResizeCommitMsg(1));
+        }
+        assert!(app.graph_chrome().list_height < before, "the list shrank");
+        in_view(&app);
+
+        // `M` from collapsed to expanded shrinks the list too.
+        app.commit_msg_expand = false;
+        app.dispatch(Action::MoveToEnd);
+        in_view(&app);
+        app.dispatch(Action::ToggleCommitMsgExpand);
+        assert!(app.commit_msg_expand);
+        in_view(&app);
+    }
+
+    #[test]
     fn graph_j_past_midpoint_keeps_focus_near_middle() {
         let mut app = graph_state(false);
         focus_repo(&mut app, "app");
         install_linear_graph(&mut app, 40);
+        // Collapsed 2-row footer keeps a 10-row list.
+        app.commit_msg_expand = false;
         app.layout.tree_height = 12;
         let list_h = app.graph_chrome().list_height.max(1) as usize;
         assert_eq!(list_h, 10, "list_height from chrome budget");

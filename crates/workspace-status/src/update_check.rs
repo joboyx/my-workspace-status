@@ -19,6 +19,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::settings::Settings;
+
 /// How long a last-check timestamp stays fresh.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
@@ -96,18 +98,28 @@ pub(crate) struct UpdateCheckHooks<F, P> {
     pub prompt_yes: P,
 }
 
-/// True when this build and environment may run the TUI-startup check.
+/// Startup check on or off from [`UPDATE_CHECK_ENV`] and the config
+/// `updateCheck` value.
+///
+/// Env `0`, `false`, or `off` turn it off; `1`, `true`, or `on` turn it on
+/// (trimmed, any case). Any other env value, or no env var, falls through
+/// to `config`, then to on.
+pub(crate) fn update_check_enabled(env_value: Option<&str>, config: Option<bool>) -> bool {
+    let from_env = env_value.and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+        "0" | "false" | "off" => Some(false),
+        "1" | "true" | "on" => Some(true),
+        _ => None,
+    });
+    from_env.or(config).unwrap_or(true)
+}
+
+/// True when this build and the resolved setting may run the TUI-startup check.
 ///
 /// `dev_build` is [`crate::DEV_BUILD`]; a dev build returns false.
-/// `env_value` is [`UPDATE_CHECK_ENV`]; `0`, `false`, or `off` return false.
-pub(crate) fn startup_check_enabled(dev_build: Option<&str>, env_value: Option<&str>) -> bool {
-    let disabled = env_value.is_some_and(|raw| {
-        matches!(
-            raw.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off"
-        )
-    });
-    dev_build.is_none() && !disabled
+/// `enabled` is [`crate::settings::Settings`] `update_check`
+/// ([`update_check_enabled`]).
+pub(crate) fn startup_check_enabled(dev_build: Option<&str>, enabled: bool) -> bool {
+    dev_build.is_none() && enabled
 }
 
 /// Startup prompt: `workspace-status 0.1.19 → 0.1.20 available. Update? [y/N] `.
@@ -118,11 +130,12 @@ pub fn update_prompt(current: &str, latest_tag: &str) -> String {
 
 /// TUI-startup check using the real clock, store, GitHub fetch, and stdin.
 ///
-/// A dev build, or [`UPDATE_CHECK_ENV`] set to `0`, returns
-/// [`StartupUpdateOffer::Continue`] without a fetch or a store write.
-pub fn offer_startup_update() -> StartupUpdateOffer {
-    let env_value = env::var(UPDATE_CHECK_ENV).ok();
-    if !startup_check_enabled(crate::DEV_BUILD, env_value.as_deref()) {
+/// A dev build, or a resolved `update_check` of false ([`UPDATE_CHECK_ENV`]
+/// `0`, or config `"updateCheck": false`), returns
+/// [`StartupUpdateOffer::Continue`] without a fetch or a store write. The
+/// store path is the resolved `update_check_store`.
+pub fn offer_startup_update(settings: &Settings) -> StartupUpdateOffer {
+    if !startup_check_enabled(crate::DEV_BUILD, settings.update_check) {
         return StartupUpdateOffer::Continue;
     }
     offer_startup_update_with(UpdateCheckHooks {
@@ -130,7 +143,7 @@ pub fn offer_startup_update() -> StartupUpdateOffer {
         stdout_is_tty: io::stdout().is_terminal(),
         now: SystemTime::now(),
         current_version: crate::APP_VERSION,
-        store_path: update_check_store_path(),
+        store_path: settings.update_check_store.clone(),
         fetch_latest: fetch_latest_release_tag,
         prompt_yes: prompt_yes_no,
     })
@@ -150,7 +163,13 @@ where
         return StartupUpdateOffer::Continue;
     }
     let latest = (hooks.fetch_latest)();
-    save_last_check(&hooks.store_path, hooks.now);
+    if let Err(err) = save_last_check(&hooks.store_path, hooks.now) {
+        // Same wording as the viewed / comment store toasts. Startup goes on.
+        eprintln!(
+            "update-check save failed: {}: {err}",
+            hooks.store_path.display()
+        );
+    }
     let Ok(latest) = latest else {
         return StartupUpdateOffer::Continue;
     };
@@ -205,13 +224,11 @@ pub fn interpret_yes_no(line: &str) -> Option<bool> {
     }
 }
 
-/// Default JSON path. `WS_STATUS_UPDATE_CHECK_STORE` wins for tests.
-pub fn update_check_store_path() -> PathBuf {
-    update_check_store_path_from_env(|key| env::var(key).ok())
-}
-
-/// Resolve the store path from an env lookup.
-pub fn update_check_store_path_from_env<F>(mut get: F) -> PathBuf
+/// Resolve the store path from an env lookup and the config `updateCheckStore` value.
+///
+/// A non-blank `WS_STATUS_UPDATE_CHECK_STORE` wins, then `config`, then
+/// `$XDG_STATE_HOME/my-workspace-status/...` (else `$HOME/.local/state/...`).
+pub fn update_check_store_path_from_env<F>(mut get: F, config: Option<&Path>) -> PathBuf
 where
     F: FnMut(&str) -> Option<String>,
 {
@@ -220,6 +237,9 @@ where
         if !trimmed.is_empty() {
             return PathBuf::from(trimmed);
         }
+    }
+    if let Some(path) = config {
+        return path.to_path_buf();
     }
     let state_home = get("XDG_STATE_HOME")
         .map(|s| s.trim().to_string())
@@ -245,8 +265,33 @@ pub fn load_last_check(path: &Path) -> Option<SystemTime> {
     Some(UNIX_EPOCH + Duration::from_secs(parsed.last_check_unix))
 }
 
+/// True when `text` is a JSON object with the store fields (any version).
+fn is_store_file(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .filter(serde_json::Value::is_object)
+        .is_some_and(|value| serde_json::from_value::<StoreFile>(value).is_ok())
+}
+
 /// Persist `now` as the last-check time (success or failure).
-pub fn save_last_check(path: &Path, now: SystemTime) {
+///
+/// A missing file is created. An existing file must parse as the
+/// update-check store; otherwise it is left byte-identical and the result
+/// is an [`io::ErrorKind::InvalidData`] error (like the viewed and comment
+/// stores, a config path that names some other file never overwrites it).
+/// A read error other than not-found is returned as is.
+pub fn save_last_check(path: &Path, now: SystemTime) -> io::Result<()> {
+    match fs::read_to_string(path) {
+        Ok(text) if !is_store_file(&text) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "not an update-check store, left unchanged",
+            ));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
     let unix = now
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -255,22 +300,23 @@ pub fn save_last_check(path: &Path, now: SystemTime) {
         version: STORE_VERSION,
         last_check_unix: unix,
     };
-    let Ok(mut body) = serde_json::to_string_pretty(&file) else {
-        return;
-    };
+    let mut body = serde_json::to_string_pretty(&file).map_err(io::Error::other)?;
     body.push('\n');
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
     let tmp = path.with_extension("json.tmp");
     if let Ok(mut f) = fs::File::create(&tmp) {
-        if f.write_all(body.as_bytes()).is_ok() && f.flush().is_ok() {
-            let _ = fs::rename(&tmp, path);
-            return;
+        if f.write_all(body.as_bytes()).is_ok()
+            && f.flush().is_ok()
+            && fs::rename(&tmp, path).is_ok()
+        {
+            return Ok(());
         }
     }
-    let _ = fs::write(path, body);
+    let written = fs::write(path, body);
     let _ = fs::remove_file(&tmp);
+    written
 }
 
 fn parse_semver_core(raw: &str) -> Option<(u64, u64, u64)> {
@@ -341,7 +387,7 @@ mod tests {
     ) -> UpdateCheckHooks<impl FnOnce() -> Result<String, String>, impl FnOnce(&str) -> bool> {
         let now = SystemTime::now();
         if let Some(age) = last_age {
-            save_last_check(&store, now - age);
+            save_last_check(&store, now - age).unwrap();
         }
         UpdateCheckHooks {
             stdin_is_tty: true,
@@ -420,25 +466,117 @@ mod tests {
     fn store_round_trip() {
         let path = temp_store();
         let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        save_last_check(&path, now);
+        save_last_check(&path, now).unwrap();
         assert_eq!(load_last_check(&path), Some(now));
         let _ = fs::remove_file(&path);
     }
 
     #[test]
+    fn save_never_overwrites_a_file_that_is_not_the_store() {
+        for body in [
+            "export PATH=$HOME/bin:$PATH\n",
+            "",
+            "{\"other\": true}\n",
+            "[1, 2]\n",
+        ] {
+            let path = temp_store();
+            fs::write(&path, body).unwrap();
+            let err = save_last_check(&path, SystemTime::now()).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{body:?}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), body, "byte-identical");
+            assert!(!path.with_extension("json.tmp").exists());
+            let _ = fs::remove_file(&path);
+        }
+        let bytes = [0xff_u8, 0xfe, 0x00];
+        let path = temp_store();
+        fs::write(&path, bytes).unwrap();
+        assert!(save_last_check(&path, SystemTime::now()).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes, "non-UTF-8 left as is");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_creates_a_missing_store_and_replaces_an_old_version() {
+        let dir = temp_store().with_extension("d");
+        let path = dir.join("nested").join("update-check.json");
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        save_last_check(&path, now).unwrap();
+        assert_eq!(load_last_check(&path), Some(now));
+        fs::write(&path, "{\"version\":99,\"lastCheckUnix\":1}\n").unwrap();
+        save_last_check(&path, now).unwrap();
+        assert_eq!(
+            load_last_check(&path),
+            Some(now),
+            "own store, other version"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn startup_check_with_a_non_store_file_continues_and_keeps_it() {
+        let path = temp_store();
+        fs::write(&path, "keep me\n").unwrap();
+        let offer = offer_startup_update_with(hooks(path.clone(), None, fetch_current, false));
+        assert_eq!(offer, StartupUpdateOffer::Continue);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "keep me\n");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn store_path_env_beats_config_then_xdg() {
+        let config = Path::new("/cfg/update-check.json");
+        let env_and_xdg = |k: &str| match k {
+            "WS_STATUS_UPDATE_CHECK_STORE" => Some("/env/update-check.json".into()),
+            "XDG_STATE_HOME" => Some("/xdg/state".into()),
+            _ => None,
+        };
+        assert_eq!(
+            update_check_store_path_from_env(env_and_xdg, Some(config)),
+            PathBuf::from("/env/update-check.json"),
+            "env wins"
+        );
+        for blank in ["", "   "] {
+            let blank_env = |k: &str| match k {
+                "WS_STATUS_UPDATE_CHECK_STORE" => Some(blank.to_string()),
+                "XDG_STATE_HOME" => Some("/xdg/state".into()),
+                _ => None,
+            };
+            assert_eq!(
+                update_check_store_path_from_env(blank_env, Some(config)),
+                config,
+                "blank env {blank:?} falls through to config"
+            );
+        }
+        let xdg_only = |k: &str| match k {
+            "XDG_STATE_HOME" => Some("/xdg/state".into()),
+            _ => None,
+        };
+        assert_eq!(
+            update_check_store_path_from_env(xdg_only, Some(config)),
+            config
+        );
+    }
+
+    #[test]
     fn store_path_override_and_xdg() {
         assert_eq!(
-            update_check_store_path_from_env(|key| match key {
-                "WS_STATUS_UPDATE_CHECK_STORE" => Some("/tmp/custom-check.json".into()),
-                _ => None,
-            }),
+            update_check_store_path_from_env(
+                |key| match key {
+                    "WS_STATUS_UPDATE_CHECK_STORE" => Some("/tmp/custom-check.json".into()),
+                    _ => None,
+                },
+                None
+            ),
             PathBuf::from("/tmp/custom-check.json")
         );
         assert_eq!(
-            update_check_store_path_from_env(|key| match key {
-                "XDG_STATE_HOME" => Some("/tmp/xdg-state".into()),
-                _ => None,
-            }),
+            update_check_store_path_from_env(
+                |key| match key {
+                    "XDG_STATE_HOME" => Some("/tmp/xdg-state".into()),
+                    _ => None,
+                },
+                None
+            ),
             PathBuf::from("/tmp/xdg-state/my-workspace-status/update-check.json")
         );
     }
@@ -499,7 +637,7 @@ mod tests {
     fn recent_check_skips_without_fetch() {
         let path = temp_store();
         let now = SystemTime::now();
-        save_last_check(&path, now - Duration::from_secs(60));
+        save_last_check(&path, now - Duration::from_secs(60)).unwrap();
         let called = std::cell::Cell::new(false);
         let offer = offer_startup_update_with(UpdateCheckHooks {
             stdin_is_tty: true,
@@ -569,19 +707,59 @@ mod tests {
 
     #[test]
     fn dev_build_skips_startup_check() {
-        assert!(startup_check_enabled(None, None));
-        assert!(!startup_check_enabled(Some("abc1234"), None));
-        assert!(!startup_check_enabled(Some("abc1234-dirty"), None));
+        assert!(startup_check_enabled(None, true));
+        assert!(!startup_check_enabled(None, false));
+        assert!(!startup_check_enabled(Some("abc1234"), true));
+        assert!(!startup_check_enabled(Some("abc1234-dirty"), true));
     }
 
     #[test]
     fn env_zero_turns_the_startup_check_off() {
         for off in ["0", "false", "OFF", " 0\n"] {
-            assert!(!startup_check_enabled(None, Some(off)), "{off:?}");
+            assert!(!update_check_enabled(Some(off), None), "{off:?}");
+            assert!(!update_check_enabled(Some(off), Some(true)), "{off:?}");
         }
         for on in ["1", "", "yes"] {
-            assert!(startup_check_enabled(None, Some(on)), "{on:?}");
+            assert!(update_check_enabled(Some(on), None), "{on:?}");
         }
+        assert!(update_check_enabled(None, None));
+    }
+
+    #[test]
+    fn config_update_check_false_turns_the_startup_check_off() {
+        assert!(
+            !update_check_enabled(None, Some(false)),
+            "config when env unset"
+        );
+        assert!(update_check_enabled(None, Some(true)));
+        for on in ["1", "true", " On "] {
+            assert!(
+                update_check_enabled(Some(on), Some(false)),
+                "env {on:?} wins"
+            );
+        }
+        for unknown in ["", "yes", "maybe"] {
+            assert!(
+                !update_check_enabled(Some(unknown), Some(false)),
+                "env {unknown:?} falls through to config"
+            );
+        }
+        let settings = crate::settings::Settings::resolve(
+            &crate::config::RuntimeKeys {
+                update_check: Some(false),
+                update_check_store: Some(temp_store()),
+                ..Default::default()
+            },
+            |_| None,
+        );
+        assert_eq!(
+            offer_startup_update(&settings),
+            StartupUpdateOffer::Continue
+        );
+        assert!(
+            !settings.update_check_store.exists(),
+            "updateCheck false must not write the store"
+        );
     }
 
     #[test]

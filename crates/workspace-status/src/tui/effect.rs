@@ -33,7 +33,6 @@ use crate::git::{
     revert_compare_patch, revert_tracked_file, stage_file, stash_apply, stash_drop, stash_pop,
     stash_push, unstage_file, COMPARE_REVERT_ABORTED,
 };
-use crate::parallel::env_fetch_concurrency;
 use crate::snapshot::RepoSnapshot;
 
 use super::action::{Action, Effect, ExternalDiffKind};
@@ -602,10 +601,17 @@ pub(crate) struct Interpreter {
 }
 
 impl Interpreter {
-    /// Empty interpreter with the live fetch/status cap.
+    /// Empty interpreter with the default fetch/status cap.
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
+        Self::with_fetch_cap(crate::parallel::FETCH_CONCURRENCY)
+    }
+
+    /// Empty interpreter whose Scheduler runs at most `cap` jobs at once
+    /// (the resolved `fetchConcurrency`).
+    pub(crate) fn with_fetch_cap(cap: usize) -> Self {
         Self {
-            sched: Scheduler::new(env_fetch_concurrency()),
+            sched: Scheduler::new(cap),
             metas: HashMap::new(),
             pane_req: None,
             writes: VecDeque::new(),
@@ -2906,6 +2912,7 @@ mod tests {
             cwd: state.cwd.clone(),
             snapshot: state.snapshot.clone(),
             config: WorkspaceStatusConfig::with_defaults(),
+            settings: crate::settings::Settings::resolve(&Default::default(), |_| None),
             start_fetch: false,
         }
     }

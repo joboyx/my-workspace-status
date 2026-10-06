@@ -29,13 +29,12 @@ use super::event_pump::{
     action_triggers_graph_autoload, classify_busy_dispatch, overlay_blocks_background_ticks,
     BusyAction,
 };
-use super::fetch::fetch_interval_ms;
 use super::keys::{drop_g_chord_echo, held_nav_key, KeyStrokeOrigin};
 use super::render::draw;
 use super::state::AppState;
 use super::status::StatusMessage;
 use super::tty::{poll_event, read_event_origin};
-use super::watch::{watch_interval_ms, watch_remain_ms, FLASH_TICK_MS};
+use super::watch::{watch_remain_ms, FLASH_TICK_MS};
 
 const INPUT_BATCH: usize = 8;
 
@@ -222,14 +221,14 @@ pub async fn run(
         terminal,
         state,
         opts,
-        interp: Interpreter::new(),
+        interp: Interpreter::with_fetch_cap(opts.settings.fetch_concurrency),
         join: JoinSet::new(),
         presenter,
         input,
         last_watch: Instant::now(),
         last_fetch: Instant::now(),
-        watch_ms: watch_interval_ms(std::env::var("WS_STATUS_WATCH_MS").ok().as_deref()),
-        fetch_ms: fetch_interval_ms(std::env::var("WS_STATUS_FETCH_MS").ok().as_deref()),
+        watch_ms: opts.settings.watch_ms,
+        fetch_ms: opts.settings.fetch_ms,
         quit: false,
     };
     ctx.interp

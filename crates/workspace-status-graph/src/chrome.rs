@@ -1,4 +1,4 @@
-//! GraphPane chrome: header / list / 2-line selection footer / loading older.
+//! GraphPane chrome: header / list / fixed-height selection footer.
 //!
 //! Header / footer budget (`graph_chrome_budget`) and selection footer copy.
 //! Footer ref chips are the same [`LabelPart`] runs as the commit spacer.
@@ -6,12 +6,13 @@
 use crate::format::{
     commit_ref_chip_parts, format_commit_message, format_relative_date, is_default_branch,
     parts_text, short_id, trunc_label_parts, wrap_commit_message, LabelKind, LabelPart,
-    COMMIT_MSG_EXPAND_MAX_LINES,
+    COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN,
 };
 use crate::glyphs::GlyphSet;
 use crate::model::{GraphModel, GraphRow};
 
-/// Status / pane copy while the next log page loads.
+/// Status-line copy while the next log page loads. The graph pane paints no
+/// loading row, so the list keeps its height.
 pub const LOADING_OLDER: &str = "loading older…";
 
 /// Selection footer lines when no row is focused.
@@ -32,7 +33,7 @@ pub const FOOTER_ROOT_COMMIT: &str = "root commit";
 /// Spacer footer subject.
 pub const FOOTER_SPACER_SUBJECT: &str = "…";
 
-/// What GraphPane's 2-line selection footer describes.
+/// What GraphPane's selection footer describes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphFooterSelection<'a> {
     /// No focused list row.
@@ -63,12 +64,22 @@ pub struct GraphChromeBudget {
     pub footer_height: u16,
     /// Rows left for the commit list (at least 1).
     pub list_height: u16,
-    /// Extra row for [`LOADING_OLDER`].
-    pub older: bool,
 }
 
-/// Tallest selection footer: the expanded message rows plus the meta row.
-const FOOTER_MAX_LINES: u16 = COMMIT_MSG_EXPAND_MAX_LINES as u16 + 1;
+/// Requested selection-footer height for [`graph_chrome_budget_for`].
+///
+/// Expanded is `msg_lines` message rows (clamped to
+/// [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`]) plus the meta row.
+/// Collapsed is 2 (subject + meta). The value never depends on the selected
+/// message, so moving between commits keeps the list height. The app and
+/// [`crate::GraphWidget`] both call this so layout and paint agree.
+pub fn graph_footer_request(expand: bool, msg_lines: usize) -> u16 {
+    if expand {
+        msg_lines.clamp(COMMIT_MSG_LINES_MIN, COMMIT_MSG_LINES_MAX) as u16 + 1
+    } else {
+        2
+    }
+}
 
 /// Max message scroll for a selection footer of `line_count` lines painted
 /// in `footer_height` rows.
@@ -86,32 +97,29 @@ pub fn footer_message_scroll_max(line_count: usize, footer_height: u16) -> usize
 }
 
 /// Footer first, then header. Collapsed footer is 2 lines.
-pub fn graph_chrome_budget(
-    height: u16,
-    loading_older: bool,
-    want_header: bool,
-) -> GraphChromeBudget {
-    graph_chrome_budget_for(height, loading_older, want_header, 2)
+pub fn graph_chrome_budget(height: u16, want_header: bool) -> GraphChromeBudget {
+    graph_chrome_budget_for(height, want_header, 2)
 }
 
 /// Like [`graph_chrome_budget`] with a requested footer height.
 ///
-/// `footer_lines` is the painted footer line count (expanded or collapsed).
-/// The footer gets at most [`COMMIT_MSG_EXPAND_MAX_LINES`] message rows plus
-/// the meta row, and at most half the pane (never under 2). The rest of an
-/// expanded message scrolls ([`footer_message_scroll_max`]). The list keeps
-/// at least one row. A pane shorter than 3 rows still drops the footer.
+/// `footer_lines` is the fixed requested footer height from
+/// [`graph_footer_request`] (expanded: message rows plus the meta row;
+/// collapsed: 2), never the selected message's line count. The footer gets
+/// that height, at most half the pane (never under 2). A message taller
+/// than the footer scrolls ([`footer_message_scroll_max`]); a shorter one
+/// leaves blank rows. The list keeps at least one row. A pane shorter than
+/// 3 rows still drops the footer. The result depends only on the pane and
+/// the request.
 pub fn graph_chrome_budget_for(
     height: u16,
-    loading_older: bool,
     want_header: bool,
     footer_lines: u16,
 ) -> GraphChromeBudget {
-    let older = loading_older;
-    let mut avail = height.saturating_sub(u16::from(older)).max(1);
+    let mut avail = height.max(1);
     let footer = avail >= 3;
     let footer_height = if footer {
-        let cap = (avail / 2).clamp(2, FOOTER_MAX_LINES);
+        let cap = (avail / 2).max(2);
         let h = footer_lines.clamp(2, cap).min(avail.saturating_sub(1));
         avail = avail.saturating_sub(h);
         h
@@ -127,7 +135,6 @@ pub fn graph_chrome_budget_for(
         footer,
         footer_height,
         list_height: avail.max(1),
-        older,
     }
 }
 
@@ -379,7 +386,7 @@ mod tests {
 
     #[test]
     fn budget_prefers_footer_over_header() {
-        let chrome = graph_chrome_budget(3, false, true);
+        let chrome = graph_chrome_budget(3, true);
         assert!(chrome.footer);
         assert!(!chrome.header);
         assert_eq!(chrome.footer_height, 2);
@@ -388,25 +395,67 @@ mod tests {
 
     #[test]
     fn budget_keeps_header_when_tall() {
-        let chrome = graph_chrome_budget(16, false, true);
+        let chrome = graph_chrome_budget(16, true);
         assert!(chrome.header);
         assert!(chrome.footer);
         assert_eq!(chrome.list_height, 13);
     }
 
     #[test]
-    fn budget_caps_expanded_footer_at_max_lines_and_half_the_pane() {
-        let tall = graph_chrome_budget_for(40, false, false, 50);
-        assert_eq!(tall.footer_height, FOOTER_MAX_LINES);
-        assert_eq!(tall.list_height, 40 - FOOTER_MAX_LINES);
-        let short = graph_chrome_budget_for(10, false, false, 50);
+    fn footer_request_is_fixed_n_plus_meta_or_two_collapsed() {
+        use crate::format::COMMIT_MSG_LINES_DEFAULT;
+        assert_eq!(
+            graph_footer_request(true, COMMIT_MSG_LINES_DEFAULT),
+            COMMIT_MSG_LINES_DEFAULT as u16 + 1
+        );
+        assert_eq!(graph_footer_request(true, 3), 4);
+        assert_eq!(graph_footer_request(true, 0), 2, "clamped to the minimum");
+        assert_eq!(
+            graph_footer_request(true, 99),
+            COMMIT_MSG_LINES_MAX as u16 + 1,
+            "clamped to the maximum"
+        );
+        assert_eq!(graph_footer_request(false, 3), 2);
+        assert_eq!(graph_footer_request(false, 20), 2);
+    }
+
+    #[test]
+    fn budget_gives_the_requested_footer_capped_at_half_the_pane() {
+        let tall = graph_chrome_budget_for(40, false, graph_footer_request(true, 8));
+        assert_eq!(tall.footer_height, 9);
+        assert_eq!(tall.list_height, 31);
+        let max = graph_chrome_budget_for(60, false, graph_footer_request(true, 20));
+        assert_eq!(max.footer_height, 21, "N=20 fits a 60-row pane");
+        assert_eq!(max.list_height, 39);
+        let short = graph_chrome_budget_for(10, false, graph_footer_request(true, 8));
         assert_eq!(short.footer_height, 5, "half the pane");
         assert_eq!(short.list_height, 5);
-        let tiny = graph_chrome_budget_for(3, false, false, 50);
+        let tiny = graph_chrome_budget_for(3, false, graph_footer_request(true, 8));
+        assert!(tiny.footer);
         assert_eq!(tiny.footer_height, 2);
         assert_eq!(tiny.list_height, 1);
-        let fits = graph_chrome_budget_for(40, false, false, 4);
-        assert_eq!(fits.footer_height, 4, "a short message is not padded");
+        let small_n = graph_chrome_budget_for(40, false, graph_footer_request(true, 1));
+        assert_eq!(small_n.footer_height, 2, "N=1: one message row plus meta");
+        assert_eq!(small_n.list_height, 38);
+    }
+
+    #[test]
+    fn budget_drops_footer_below_three_rows() {
+        for height in [1, 2] {
+            let chrome = graph_chrome_budget_for(height, false, graph_footer_request(true, 8));
+            assert!(!chrome.footer, "{height}: {chrome:?}");
+            assert_eq!(chrome.footer_height, 0);
+            assert_eq!(chrome.list_height, height);
+        }
+    }
+
+    #[test]
+    fn budget_collapsed_footer_is_two_rows() {
+        for height in [3, 10, 40] {
+            let chrome = graph_chrome_budget_for(height, false, graph_footer_request(false, 8));
+            assert_eq!(chrome.footer_height, 2, "{height}: {chrome:?}");
+            assert_eq!(chrome, graph_chrome_budget(height, false));
+        }
     }
 
     #[test]
@@ -455,13 +504,6 @@ mod tests {
             lines[..22].iter().all(|l| l.chars().count() <= 39),
             "message wraps one column short for the scrollbar: {lines:?}"
         );
-    }
-
-    #[test]
-    fn budget_reserves_loading_older() {
-        let chrome = graph_chrome_budget(16, true, true);
-        assert!(chrome.older);
-        assert_eq!(chrome.list_height, 12);
     }
 
     #[test]
@@ -870,9 +912,9 @@ mod tests {
             "expanded shows body: {expanded:?}"
         );
 
-        let chrome = graph_chrome_budget_for(16, false, true, expanded.len() as u16);
+        let chrome = graph_chrome_budget_for(16, true, graph_footer_request(true, 8));
         assert!(chrome.footer);
-        assert!(chrome.footer_height >= 3, "{chrome:?}");
+        assert_eq!(chrome.footer_height, 8, "half of 16, not the message size");
         assert!(chrome.list_height >= 1);
     }
 

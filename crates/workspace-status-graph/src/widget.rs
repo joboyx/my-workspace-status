@@ -7,10 +7,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget};
 
 use crate::chrome::{
-    footer_message_scroll_max, graph_chrome_budget_for, selection_footer_parts,
-    GraphFooterSelection, LOADING_OLDER,
+    footer_message_scroll_max, graph_chrome_budget_for, graph_footer_request,
+    selection_footer_parts, GraphFooterSelection,
 };
-use crate::format::{format_label, format_sync, slice_label_parts, LabelKind, LabelPart};
+use crate::format::{
+    format_label, format_sync, slice_label_parts, LabelKind, LabelPart, COMMIT_MSG_LINES_DEFAULT,
+    COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN,
+};
 use crate::glyphs::{ASCII, UNICODE};
 use crate::gutter::graph_gutter_cap;
 use crate::lane_colors::{default_lane_colors, lane_fg};
@@ -67,7 +70,6 @@ pub struct GraphWidget<'a> {
     selected: Option<usize>,
     scroll: u16,
     now_unix: Option<i64>,
-    loading_older: bool,
     lane_colors: &'a [Color],
     search_matches: &'a [usize],
     search_bg: Option<Color>,
@@ -98,6 +100,9 @@ pub struct GraphWidget<'a> {
     /// First painted message line when an expanded message is taller than
     /// the footer. Clamped at paint.
     commit_msg_scroll: usize,
+    /// Fixed message rows of the expanded footer (see
+    /// [`Self::commit_msg_lines`]).
+    commit_msg_lines: usize,
 }
 
 impl<'a> GraphWidget<'a> {
@@ -110,7 +115,6 @@ impl<'a> GraphWidget<'a> {
             selected: None,
             scroll: 0,
             now_unix: None,
-            loading_older: false,
             lane_colors: &[],
             search_matches: &[],
             search_bg: None,
@@ -130,6 +134,7 @@ impl<'a> GraphWidget<'a> {
             col_offset: 0,
             commit_msg_expand: false,
             commit_msg_scroll: 0,
+            commit_msg_lines: COMMIT_MSG_LINES_DEFAULT,
         }
     }
 
@@ -161,12 +166,6 @@ impl<'a> GraphWidget<'a> {
     /// Freeze the relative-date clock (unix seconds). Tests pass a fixed instant.
     pub fn now_unix(mut self, unix: i64) -> Self {
         self.now_unix = Some(unix);
-        self
-    }
-
-    /// Paint `loading older…` under the list while the next window loads.
-    pub fn loading_older(mut self, loading: bool) -> Self {
-        self.loading_older = loading;
         self
     }
 
@@ -302,6 +301,18 @@ impl<'a> GraphWidget<'a> {
         self.commit_msg_scroll = offset;
         self
     }
+
+    /// Fixed message rows of the expanded selection footer.
+    ///
+    /// The footer requests `n` message rows plus the meta row
+    /// ([`graph_footer_request`]) whatever the selected message is: a short
+    /// message leaves blank rows, a longer one scrolls. Clamped to
+    /// [`COMMIT_MSG_LINES_MIN`]..=[`COMMIT_MSG_LINES_MAX`]. Default is
+    /// [`COMMIT_MSG_LINES_DEFAULT`]. The collapsed footer ignores it.
+    pub fn commit_msg_lines(mut self, n: usize) -> Self {
+        self.commit_msg_lines = n.clamp(COMMIT_MSG_LINES_MIN, COMMIT_MSG_LINES_MAX);
+        self
+    }
 }
 
 /// Thumb offset from the track top (or left), and thumb length, matching
@@ -431,9 +442,8 @@ impl GraphWidget<'_> {
         );
         let chrome = graph_chrome_budget_for(
             area.height,
-            self.loading_older,
             self.model.sync.is_some(),
-            footer_lines.len() as u16,
+            graph_footer_request(self.commit_msg_expand, self.commit_msg_lines),
         );
         // The painted line count does not depend on the width, so the bar
         // is decided before the one paint at the width it leaves.
@@ -599,65 +609,99 @@ impl GraphWidget<'_> {
         }
 
         let mut footer_y = area.y.saturating_add(area.height);
-        if chrome.older {
-            footer_y = footer_y.saturating_sub(1);
-            put_text_line(
-                buf,
-                area.x,
-                footer_y,
-                area.width,
-                LOADING_OLDER,
-                false,
-                fallback,
-            );
-        }
         if chrome.footer {
             let h = chrome.footer_height.max(1);
             footer_y = footer_y.saturating_sub(h);
-            let mut lines = footer_lines;
-            let keep = h as usize;
-            let scroll_max = footer_message_scroll_max(lines.len(), h);
-            let mut message_bar = None;
-            if lines.len() > keep {
-                let meta = lines.pop().unwrap_or_default();
-                let offset = self.commit_msg_scroll.min(scroll_max);
-                let rows = keep.saturating_sub(1);
-                lines = lines.into_iter().skip(offset).take(rows).collect();
-                lines.push(meta);
-                message_bar = Some((offset, rows));
-            }
-            for (i, line) in lines.iter().take(keep).enumerate() {
-                put_parts_line(
-                    buf,
-                    area.x,
-                    footer_y.saturating_add(i as u16),
-                    area.width,
-                    line,
-                    self.label_palette,
-                    fallback,
-                );
-            }
-            if let Some((offset, rows)) = message_bar.filter(|(_, rows)| *rows > 0) {
-                let mut sb_state = ScrollbarState::new(scroll_max + 1)
-                    .position(offset)
-                    .viewport_content_length(rows);
-                let sb_area = Rect {
-                    x: area.x.saturating_add(area.width.saturating_sub(1)),
-                    y: footer_y,
-                    width: 1,
-                    height: rows as u16,
-                };
-                StatefulWidget::render(
-                    Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                        .begin_symbol(None)
-                        .end_symbol(None),
-                    sb_area,
-                    buf,
-                    &mut sb_state,
-                );
-            }
+            self.paint_footer(buf, area, footer_y, h, footer_lines, glyphs.behind);
         }
         badge_spans
+    }
+}
+
+impl GraphWidget<'_> {
+    /// Paint the selection footer into `h` rows from `top`.
+    ///
+    /// The last line (meta) is pinned on the bottom row. Message lines fill
+    /// the rows above it from the top; a short message leaves blank rows. A
+    /// taller message scrolls by [`Self::commit_msg_scroll`], gets a 1-column
+    /// scrollbar, and ends its last visible row with a muted `<arrow><K>`
+    /// hint (K hidden lines below) left of the scrollbar.
+    fn paint_footer(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        top: u16,
+        h: u16,
+        mut lines: Vec<Vec<LabelPart>>,
+        arrow: &str,
+    ) {
+        let fallback = Color::Reset;
+        let rows = h.saturating_sub(1) as usize;
+        let scroll_max = footer_message_scroll_max(lines.len(), h);
+        let meta = lines.pop().unwrap_or_default();
+        let message_count = lines.len();
+        let offset = self.commit_msg_scroll.min(scroll_max);
+        for (i, line) in lines.iter().skip(offset).take(rows).enumerate() {
+            put_parts_line(
+                buf,
+                area.x,
+                top.saturating_add(i as u16),
+                area.width,
+                line,
+                self.label_palette,
+                fallback,
+            );
+        }
+        put_parts_line(
+            buf,
+            area.x,
+            top.saturating_add(h.saturating_sub(1)),
+            area.width,
+            &meta,
+            self.label_palette,
+            fallback,
+        );
+        if message_count <= rows || rows == 0 {
+            return;
+        }
+        let bar_x = area.x.saturating_add(area.width.saturating_sub(1));
+        let mut sb_state = ScrollbarState::new(scroll_max + 1)
+            .position(offset)
+            .viewport_content_length(rows);
+        StatefulWidget::render(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None),
+            Rect {
+                x: bar_x,
+                y: top,
+                width: 1,
+                height: rows as u16,
+            },
+            buf,
+            &mut sb_state,
+        );
+        let hidden = message_count.saturating_sub(offset + rows);
+        if hidden == 0 {
+            return;
+        }
+        // One leading blank keeps the hint apart from the message text.
+        let hint = format!(" {arrow}{hidden}");
+        let hint_w = hint.chars().count() as u16;
+        let room = area.width.saturating_sub(1);
+        if hint_w > room {
+            return;
+        }
+        let color = self.label_palette.map_or(fallback, |pal| pal.meta);
+        put_text_line(
+            buf,
+            bar_x.saturating_sub(hint_w),
+            top.saturating_add(rows as u16 - 1),
+            hint_w,
+            &hint,
+            false,
+            color,
+        );
     }
 }
 
@@ -1148,6 +1192,291 @@ mod tests {
         assert!(
             footer[7].ends_with('█'),
             "scrollbar thumb at the bottom: {bottom:#?}"
+        );
+    }
+
+    /// 40 linear commits: `commit 0` has a 1-line message, `commit 1` a
+    /// 30-line body (taller than any N). No uncommitted row, so visible row
+    /// `i` is commit `i`.
+    fn fixed_footer_model() -> GraphModel {
+        let mut model = tall_linear_model(40);
+        model.uncommitted = None;
+        model.commits[1].body = (0..30)
+            .map(|i| format!("L{i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        model
+    }
+
+    struct FooterRender {
+        selected: usize,
+        expand: bool,
+        msg_scroll: usize,
+        msg_lines: Option<usize>,
+        ascii: bool,
+    }
+
+    fn render_footer(model: &GraphModel, width: u16, height: u16, opts: FooterRender) -> Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                let mut widget = GraphWidget::new(model)
+                    .ascii(opts.ascii)
+                    .now_unix(NOW)
+                    .selected(Some(opts.selected))
+                    .commit_msg_expand(opts.expand)
+                    .commit_msg_scroll(opts.msg_scroll);
+                if let Some(n) = opts.msg_lines {
+                    widget = widget.commit_msg_lines(n);
+                }
+                widget.render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    /// Rows from the top that paint an ASCII gutter cell (`*` / `@` node or
+    /// `|` rail) in column 1: the painted list height of a linear model that
+    /// overflows the list.
+    fn painted_list_rows(buf: &Buffer) -> Vec<u16> {
+        (0..buf.area.height)
+            .take_while(|&y| matches!(buf[(1, y)].symbol(), "*" | "@" | "|"))
+            .collect()
+    }
+
+    #[test]
+    fn expanded_footer_height_does_not_follow_the_selected_message() {
+        let model = fixed_footer_model();
+        let (width, height) = (40u16, 30u16);
+        let opts = |selected| FooterRender {
+            selected,
+            expand: true,
+            msg_scroll: 0,
+            msg_lines: None,
+            ascii: true,
+        };
+        let short = render_footer(&model, width, height, opts(0));
+        let long = render_footer(&model, width, height, opts(1));
+        let short_list = painted_list_rows(&short);
+        let long_list = painted_list_rows(&long);
+        // Default N=8: footer is 8 message rows + meta.
+        assert_eq!(short_list.len(), usize::from(height - 9), "{short_list:?}");
+        assert_eq!(
+            short_list, long_list,
+            "list height follows N, not the message"
+        );
+        let footer_top = height - 9;
+        assert!(buf_row(&short, footer_top).starts_with("commit 0"));
+        assert!(buf_row(&long, footer_top).starts_with("commit 1"));
+        assert!(
+            buf_row(&short, height - 1).contains("c00aaaa"),
+            "meta on bottom row"
+        );
+        assert!(
+            buf_row(&long, height - 1).contains("c01aaaa"),
+            "meta on bottom row"
+        );
+
+        // A different N moves the split the same way for both messages.
+        let n3 = |selected| FooterRender {
+            msg_lines: Some(3),
+            ..opts(selected)
+        };
+        let short3 = painted_list_rows(&render_footer(&model, width, height, n3(0)));
+        let long3 = painted_list_rows(&render_footer(&model, width, height, n3(1)));
+        assert_eq!(short3.len(), usize::from(height - 4));
+        assert_eq!(short3, long3);
+
+        // N is clamped to 1..=20.
+        let n0 = painted_list_rows(&render_footer(
+            &model,
+            width,
+            60,
+            FooterRender {
+                msg_lines: Some(0),
+                ..opts(0)
+            },
+        ));
+        assert_eq!(n0.len(), 60 - 2, "N=0 clamps to 1 message row + meta");
+        let n99 = painted_list_rows(&render_footer(
+            &model,
+            width,
+            60,
+            FooterRender {
+                msg_lines: Some(99),
+                ..opts(0)
+            },
+        ));
+        assert_eq!(n99.len(), 60 - 21, "N=99 clamps to 20 message rows + meta");
+    }
+
+    #[test]
+    fn expanded_footer_pins_meta_under_blank_rows_for_a_short_message() {
+        let model = fixed_footer_model();
+        let (width, height) = (40u16, 30u16);
+        let buf = render_footer(
+            &model,
+            width,
+            height,
+            FooterRender {
+                selected: 0,
+                expand: true,
+                msg_scroll: 0,
+                msg_lines: None,
+                ascii: true,
+            },
+        );
+        let top = height - 9;
+        assert_eq!(buf_row(&buf, top).trim_end(), "commit 0");
+        for y in top + 1..height - 1 {
+            assert_eq!(buf_row(&buf, y).trim(), "", "blank padding row {y}");
+        }
+        assert!(buf_row(&buf, height - 1).contains("c00aaaa"));
+    }
+
+    #[test]
+    fn collapsed_footer_is_two_rows_for_any_message() {
+        let model = fixed_footer_model();
+        let (width, height) = (40u16, 30u16);
+        for selected in [0, 1] {
+            let buf = render_footer(
+                &model,
+                width,
+                height,
+                FooterRender {
+                    selected,
+                    expand: false,
+                    msg_scroll: 0,
+                    msg_lines: Some(12),
+                    ascii: true,
+                },
+            );
+            assert_eq!(painted_list_rows(&buf).len(), usize::from(height - 2));
+            assert!(buf_row(&buf, height - 2).starts_with(&format!("commit {selected}")));
+        }
+    }
+
+    #[test]
+    fn overflowing_footer_hints_hidden_lines_below() {
+        let model = fixed_footer_model();
+        let (width, height) = (40u16, 30u16);
+        let render = |msg_scroll, ascii| {
+            render_footer(
+                &model,
+                width,
+                height,
+                FooterRender {
+                    selected: 1,
+                    expand: true,
+                    msg_scroll,
+                    msg_lines: None,
+                    ascii,
+                },
+            )
+        };
+        // Message: subject, blank, L00..L29 = 32 lines in 8 rows.
+        let last_msg_row = height - 2;
+        let bar_x = width - 1;
+        let hint_at = |buf: &Buffer, text: &str| {
+            let row = buf_row(buf, last_msg_row);
+            let cols: Vec<&str> = (0..width)
+                .map(|x| buf[(x, last_msg_row)].symbol())
+                .collect();
+            let start = usize::from(bar_x) - text.chars().count();
+            assert_eq!(cols[start..usize::from(bar_x)].concat(), text, "{row:?}");
+        };
+        let top = render(0, false);
+        hint_at(&top, "↓24");
+        assert!(buf_row(&top, last_msg_row).starts_with("L05"));
+        let mid = render(10, false);
+        hint_at(&mid, "↓14");
+        let ascii = render(10, true);
+        hint_at(&ascii, "v14");
+        assert!(!buf_row(&ascii, last_msg_row).contains('↓'));
+        let end = render(999, false);
+        let end_row = buf_row(&end, last_msg_row);
+        assert!(end_row.starts_with("L29"), "{end_row:?}");
+        assert!(!end_row.contains('↓'), "no hint at the end: {end_row:?}");
+        // The hint stays inside the footer: meta still on the bottom row.
+        assert!(buf_row(&top, height - 1).contains("c01aaaa"));
+        // A short message has no hint.
+        let short = render_footer(
+            &model,
+            width,
+            height,
+            FooterRender {
+                selected: 0,
+                expand: true,
+                msg_scroll: 0,
+                msg_lines: None,
+                ascii: false,
+            },
+        );
+        assert!((0..height).all(|y| !buf_row(&short, y).contains('↓')));
+    }
+
+    /// A message of exactly N lines fits: no hint, no footer scrollbar.
+    /// One more line overflows: `↓1` hint and the footer scrollbar.
+    #[test]
+    fn footer_hint_and_scrollbar_start_at_n_plus_one_lines() {
+        let n = COMMIT_MSG_LINES_DEFAULT;
+        let mut model = tall_linear_model(40);
+        model.uncommitted = None;
+        let body = |count: usize| {
+            (0..count)
+                .map(|i| format!("B{i:02}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // Subject + blank + body: commit 2 is exactly N lines, commit 3 N+1.
+        model.commits[2].body = body(n - 2);
+        model.commits[3].body = body(n - 1);
+        let (width, height) = (40u16, 30u16);
+        let render = |selected| {
+            render_footer(
+                &model,
+                width,
+                height,
+                FooterRender {
+                    selected,
+                    expand: true,
+                    msg_scroll: 0,
+                    msg_lines: None,
+                    ascii: false,
+                },
+            )
+        };
+        let top = height - 1 - n as u16;
+        let bar_x = width - 1;
+        let last_msg_row = height - 2;
+        let bar_painted =
+            |buf: &Buffer| (top..height - 1).any(|y| buf[(bar_x, y)].symbol().trim() != "");
+
+        let exact = render(2);
+        let exact_last = buf_row(&exact, last_msg_row);
+        assert!(
+            exact_last.starts_with(&format!("B{:02}", n - 3)),
+            "{exact_last:?}"
+        );
+        assert!(!exact_last.contains('↓'), "{exact_last:?}");
+        assert!(!bar_painted(&exact), "exactly N lines: no footer scrollbar");
+
+        let over = render(3);
+        let over_last = buf_row(&over, last_msg_row);
+        assert!(
+            over_last.starts_with(&format!("B{:02}", n - 3)),
+            "{over_last:?}"
+        );
+        let hint_start = usize::from(bar_x) - "↓1".chars().count();
+        let cols: Vec<&str> = (0..width)
+            .map(|x| over[(x, last_msg_row)].symbol())
+            .collect();
+        assert_eq!(cols[hint_start..usize::from(bar_x)].concat(), "↓1");
+        assert!(bar_painted(&over), "N+1 lines: footer scrollbar");
+        assert!(
+            buf_row(&over, height - 1).contains("c03aaaa"),
+            "meta pinned"
         );
     }
 
@@ -1672,33 +2001,6 @@ mod tests {
     }
 
     #[test]
-    fn paints_loading_older_status() {
-        let model = sample_model();
-        let backend = TestBackend::new(80, 16);
-        let mut terminal = Terminal::new(backend).expect("test backend");
-        terminal
-            .draw(|frame| {
-                GraphWidget::new(&model)
-                    .loading_older(true)
-                    .now_unix(NOW)
-                    .render(frame.area(), frame.buffer_mut());
-            })
-            .expect("draw");
-        let buffer = terminal.backend().buffer();
-        let mut joined = String::new();
-        for y in 0..16u16 {
-            for x in 0..80u16 {
-                joined.push_str(buffer[(x, y)].symbol());
-            }
-            joined.push('\n');
-        }
-        assert!(
-            joined.contains("loading older…"),
-            "loading older status: {joined}"
-        );
-    }
-
-    #[test]
     fn search_match_paints_bg_on_selectable_row_not_cursor() {
         let model = sample_model();
         let rows = model.visible_rows();
@@ -1960,7 +2262,7 @@ mod tests {
             })
             .expect("draw");
         let buffer = terminal.backend().buffer();
-        let chrome = graph_chrome_budget(height, false, false);
+        let chrome = graph_chrome_budget(height, false);
         let list_top = u16::from(chrome.header);
         let painted = paint_model_with(
             &model,
@@ -2041,7 +2343,7 @@ mod tests {
         let model = tall_linear_model(24);
         let width = 40u16;
         let height = 16u16;
-        let chrome = graph_chrome_budget(height, false, false);
+        let chrome = graph_chrome_budget(height, false);
         let sb_x = width.saturating_sub(1);
         let painted = paint_model_with(
             &model,
@@ -2090,7 +2392,7 @@ mod tests {
         };
         let width = 36u16;
         let height = 8u16;
-        let chrome = graph_chrome_budget(height, false, false);
+        let chrome = graph_chrome_budget(height, false);
         let list_bottom = u16::from(chrome.header) + chrome.list_height;
         let h_y = list_bottom.saturating_sub(1);
         let at_left = render_graph(&model, width, height, 0, 0);
@@ -2200,7 +2502,7 @@ mod tests {
             })
             .expect("draw");
         let buffer = terminal.backend().buffer();
-        let chrome = graph_chrome_budget(height, false, false);
+        let chrome = graph_chrome_budget(height, false);
         let list_bottom = u16::from(chrome.header) + chrome.list_height;
         let mut spine_x: Option<u16> = None;
         for y in u16::from(chrome.header)..list_bottom {

@@ -2,8 +2,9 @@
 //!
 //! The timer fires [`super::action::Action::FetchTick`]. Manual `f` and that
 //! tick enqueue on the per-gitdir remote queue in [`super::effect`]
-//! (`FETCH_CONCURRENCY` = 10; `WS_STATUS_FETCH_CONCURRENCY`) so independent
-//! gitdirs overlap.
+//! (cap: `WS_STATUS_FETCH_CONCURRENCY`, else the config key
+//! `fetchConcurrency`, else `FETCH_CONCURRENCY` = 10) so independent gitdirs
+//! overlap.
 
 use crate::snapshot::{checkout_is_hidden_ignored, WorkspaceSnapshot};
 
@@ -12,24 +13,19 @@ pub const DEFAULT_FETCH_MS: u64 = 300_000;
 /// Floor when fetch is enabled.
 pub const MIN_FETCH_MS: u64 = 30_000;
 
-/// Poll period from `WS_STATUS_FETCH_MS`. `0` disables. Missing / invalid → default.
-pub fn fetch_interval_ms(raw: Option<&str>) -> u64 {
-    let Some(raw) = raw else {
-        return DEFAULT_FETCH_MS;
-    };
-    if raw.is_empty() {
-        return DEFAULT_FETCH_MS;
+/// Poll period: a valid `WS_STATUS_FETCH_MS` (`raw`, an integer >= 0) wins, then
+/// the config `fetchMs` value, then [`DEFAULT_FETCH_MS`]. `0` disables. Values below
+/// [`MIN_FETCH_MS`] clamp up. A missing, empty, negative, or non-numeric env
+/// value falls through to the config value.
+pub fn fetch_interval_ms(raw: Option<&str>, config: Option<u64>) -> u64 {
+    let from_env = raw
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .and_then(|n| u64::try_from(n).ok());
+    match from_env.or(config) {
+        None => DEFAULT_FETCH_MS,
+        Some(0) => 0,
+        Some(n) => n.max(MIN_FETCH_MS),
     }
-    let Ok(parsed) = raw.parse::<i64>() else {
-        return DEFAULT_FETCH_MS;
-    };
-    if parsed < 0 {
-        return DEFAULT_FETCH_MS;
-    }
-    if parsed == 0 {
-        return 0;
-    }
-    (parsed as u64).max(MIN_FETCH_MS)
 }
 
 /// Snapshot paths the background fetch timer may touch.
@@ -77,17 +73,44 @@ mod tests {
 
     #[test]
     fn zero_disables() {
-        assert_eq!(fetch_interval_ms(Some("0")), 0);
+        assert_eq!(fetch_interval_ms(Some("0"), None), 0);
     }
 
     #[test]
     fn default_and_clamp() {
-        assert_eq!(fetch_interval_ms(None), DEFAULT_FETCH_MS);
-        assert_eq!(fetch_interval_ms(Some("")), DEFAULT_FETCH_MS);
-        assert_eq!(fetch_interval_ms(Some("-1")), DEFAULT_FETCH_MS);
-        assert_eq!(fetch_interval_ms(Some("nope")), DEFAULT_FETCH_MS);
-        assert_eq!(fetch_interval_ms(Some("1000")), MIN_FETCH_MS);
-        assert_eq!(fetch_interval_ms(Some("600000")), 600_000);
+        assert_eq!(fetch_interval_ms(None, None), DEFAULT_FETCH_MS);
+        assert_eq!(fetch_interval_ms(Some(""), None), DEFAULT_FETCH_MS);
+        assert_eq!(fetch_interval_ms(Some("-1"), None), DEFAULT_FETCH_MS);
+        assert_eq!(fetch_interval_ms(Some("nope"), None), DEFAULT_FETCH_MS);
+        assert_eq!(fetch_interval_ms(Some("1000"), None), MIN_FETCH_MS);
+        assert_eq!(fetch_interval_ms(Some("600000"), None), 600_000);
+    }
+
+    #[test]
+    fn fetch_interval_ms_env_beats_config_and_bad_env_falls_through() {
+        assert_eq!(
+            fetch_interval_ms(None, Some(120000)),
+            120000,
+            "config when env unset"
+        );
+        assert_eq!(fetch_interval_ms(None, Some(0)), 0, "config 0 disables");
+        assert_eq!(
+            fetch_interval_ms(None, Some(1)),
+            MIN_FETCH_MS,
+            "config clamps like env"
+        );
+        assert_eq!(
+            fetch_interval_ms(Some("0"), Some(120000)),
+            0,
+            "valid env wins"
+        );
+        for bad in ["", "abc", "-1"] {
+            assert_eq!(
+                fetch_interval_ms(Some(bad), Some(120000)),
+                120000,
+                "env {bad:?}"
+            );
+        }
     }
 
     #[test]

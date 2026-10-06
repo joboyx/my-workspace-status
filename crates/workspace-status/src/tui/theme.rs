@@ -1,7 +1,8 @@
 //! Built-in TUI colour themes.
 //!
 //! Palettes assume a dark terminal. Secondary tokens (`muted`, line numbers,
-//! graph meta) stay readable on that surface. Launch seed is `WS_STATUS_THEME`.
+//! graph meta) stay readable on that surface. Launch seed is `WS_STATUS_THEME`,
+//! then the config `theme` key.
 //! `T` cycles in the current session only. There is no theme file.
 
 use ratatui::style::Color;
@@ -28,7 +29,7 @@ pub const THEME_IDS: [ThemeId; 5] = [
     ThemeId::CatppuccinMocha,
 ];
 
-/// Default when `WS_STATUS_THEME` is unset or unknown.
+/// Default when neither `WS_STATUS_THEME` nor the config `theme` key sets a theme.
 pub const DEFAULT_THEME_ID: ThemeId = ThemeId::TokyoNight;
 
 /// Ratatui colours for the active theme.
@@ -190,7 +191,6 @@ pub struct Pills {
 
 impl ThemeId {
     /// Env / config slug (`tokyo-night`).
-    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             ThemeId::TokyoNight => "tokyo-night",
@@ -534,27 +534,25 @@ const CATPPUCCIN_MOCHA: Theme = Theme {
     ],
 };
 
-/// Map an env / session string to a built-in theme id.
-pub fn resolve_theme_id(raw: Option<&str>) -> ThemeId {
-    match raw {
-        Some("tokyo-night") => ThemeId::TokyoNight,
-        Some("monokai") => ThemeId::Monokai,
-        Some("dracula") => ThemeId::Dracula,
-        Some("gruvbox-dark") => ThemeId::GruvboxDark,
-        Some("catppuccin-mocha") => ThemeId::CatppuccinMocha,
-        _ => DEFAULT_THEME_ID,
-    }
+/// Built-in theme id for an exact slug (`tokyo-night`). `None` when unknown.
+pub fn parse_theme_id(raw: &str) -> Option<ThemeId> {
+    THEME_IDS.into_iter().find(|id| id.as_str() == raw)
+}
+
+/// Launch theme: a known `WS_STATUS_THEME` slug wins, then the config
+/// `theme` key, then [`DEFAULT_THEME_ID`]. An unset or unknown env value
+/// falls through to the config value.
+pub fn theme_id_from(env_value: Option<&str>, config: Option<ThemeId>) -> ThemeId {
+    env_value
+        .and_then(parse_theme_id)
+        .or(config)
+        .unwrap_or(DEFAULT_THEME_ID)
 }
 
 /// Next theme id in `THEME_IDS` order (wraps).
 pub fn cycle_theme_id(current: ThemeId) -> ThemeId {
     let index = THEME_IDS.iter().position(|id| *id == current).unwrap_or(0);
     THEME_IDS[(index + 1) % THEME_IDS.len()]
-}
-
-/// Launch seed from `WS_STATUS_THEME`. Unknown values fall back to Tokyo Night.
-pub fn theme_from_env() -> ThemeId {
-    resolve_theme_id(std::env::var("WS_STATUS_THEME").ok().as_deref())
 }
 
 /// Parse `#rrggbb` into a ratatui colour. Invalid hex falls back to white.
@@ -688,12 +686,33 @@ mod tests {
     }
 
     #[test]
+    fn theme_env_beats_config_and_unknown_env_falls_through() {
+        assert_eq!(
+            theme_id_from(None, Some(ThemeId::Dracula)),
+            ThemeId::Dracula
+        );
+        assert_eq!(
+            theme_id_from(Some("monokai"), Some(ThemeId::Dracula)),
+            ThemeId::Monokai
+        );
+        for bad in ["", "nope", " monokai"] {
+            assert_eq!(
+                theme_id_from(Some(bad), Some(ThemeId::Dracula)),
+                ThemeId::Dracula,
+                "env {bad:?}"
+            );
+        }
+    }
+
+    #[test]
     fn resolve_known_and_fallback() {
-        assert_eq!(resolve_theme_id(None), ThemeId::TokyoNight);
-        assert_eq!(resolve_theme_id(Some("")), ThemeId::TokyoNight);
-        assert_eq!(resolve_theme_id(Some("nope")), ThemeId::TokyoNight);
+        assert_eq!(theme_id_from(None, None), ThemeId::TokyoNight);
+        assert_eq!(theme_id_from(Some(""), None), ThemeId::TokyoNight);
+        assert_eq!(theme_id_from(Some("nope"), None), ThemeId::TokyoNight);
+        assert_eq!(parse_theme_id("Dracula"), None, "case-sensitive");
         for id in THEME_IDS {
-            assert_eq!(resolve_theme_id(Some(id.as_str())), id);
+            assert_eq!(theme_id_from(Some(id.as_str()), None), id);
+            assert_eq!(parse_theme_id(id.as_str()), Some(id));
             assert!(!id.label().is_empty());
             assert!(id.theme().surface.starts_with('#'));
             let lanes = id.theme().lane_colors;

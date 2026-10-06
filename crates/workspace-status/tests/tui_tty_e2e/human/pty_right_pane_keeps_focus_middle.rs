@@ -147,18 +147,13 @@ fn list_body(screen: &str, kind: RightList) -> Vec<String> {
     let lines = right_inner_lines(screen);
     match kind {
         RightList::Diff => lines.into_iter().skip(1).collect(),
-        RightList::Graph => {
-            let start = lines
-                .iter()
-                .position(|line| is_graph_list_row(line))
-                .unwrap_or(0);
-            let list = &lines[start..];
-            if list.len() >= 3 {
-                list[..list.len() - 2].to_vec()
-            } else {
-                list.to_vec()
-            }
-        }
+        // The selection footer under the list has a fixed height (blank
+        // rows under a short message), so the body is the run of graph rows.
+        RightList::Graph => lines
+            .into_iter()
+            .skip_while(|line| !is_graph_list_row(line))
+            .take_while(|line| is_graph_list_row(line))
+            .collect(),
         // File rows only. Empty inner padding is not list-body height.
         RightList::Files => lines
             .into_iter()

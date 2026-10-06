@@ -127,7 +127,8 @@ impl AppState {
             | Action::ResizeTree(_)
             | Action::FocusLeft
             | Action::FocusRight
-            | Action::ToggleCommitMsgExpand => Some(SWITCH_TO_WORKSPACE_TAB.into()),
+            | Action::ToggleCommitMsgExpand
+            | Action::ResizeCommitMsg(_) => Some(SWITCH_TO_WORKSPACE_TAB.into()),
             _ => None,
         }
     }
@@ -203,6 +204,7 @@ impl AppState {
             | Action::ToggleShowIgnored
             | Action::ToggleDiffMode
             | Action::ToggleCommitMsgExpand
+            | Action::ResizeCommitMsg(_)
             | Action::ResizeTree(_)
             | Action::BackClick => Some(Effect::None),
             _ => None,
@@ -775,6 +777,8 @@ mod tests {
             "Widen tree",
             "Other pane",
             "Collapse / expand commit message",
+            "Shorter commit message",
+            "Taller commit message",
         ] {
             assert_eq!(
                 reason(title).as_deref(),

@@ -40,7 +40,7 @@ mod state;
 mod status;
 pub(crate) mod syntax;
 mod tabs;
-mod theme;
+pub(crate) mod theme;
 mod tree;
 pub(crate) mod tty;
 pub(crate) mod viewed;

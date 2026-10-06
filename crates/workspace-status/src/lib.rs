@@ -40,6 +40,7 @@ pub mod git;
 pub mod helpers;
 pub(crate) mod parallel;
 pub mod render;
+pub mod settings;
 pub mod snapshot;
 #[cfg(test)]
 pub(crate) mod testutil;

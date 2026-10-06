@@ -5,23 +5,49 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
+/// The git binary for this process. [`init_git_binary`] sets it once at
+/// startup from the resolved settings. A process that never calls it (unit
+/// tests, library use) resolves it on the first git call from
+/// `WORKSPACE_STATUS_GIT` alone.
 static GIT_BINARY: OnceLock<PathBuf> = OnceLock::new();
 
-/// Resolve the git binary: `WORKSPACE_STATUS_GIT`, else `/usr/bin/git` if present, else `git`.
+/// The git binary: the value [`init_git_binary`] set, else
+/// [`resolve_git_binary`] from `WORKSPACE_STATUS_GIT` with no config value.
 pub fn git_binary() -> &'static Path {
     GIT_BINARY.get_or_init(|| {
-        if let Ok(override_bin) = std::env::var("WORKSPACE_STATUS_GIT") {
-            if !override_bin.is_empty() {
-                return PathBuf::from(override_bin);
-            }
-        }
-        let usr = PathBuf::from("/usr/bin/git");
-        if usr.is_file() {
-            usr
-        } else {
-            PathBuf::from("git")
-        }
+        resolve_git_binary(std::env::var("WORKSPACE_STATUS_GIT").ok().as_deref(), None)
     })
+}
+
+/// Set the git binary for this process. Call it once at startup, before
+/// the first git call. A later call (after the first git call, or a second
+/// call) cannot change the binary: debug builds panic, so a git call that
+/// moves ahead of startup init fails the CLI tests instead of silently
+/// ignoring the config `git` key.
+pub fn init_git_binary(bin: PathBuf) {
+    let set = GIT_BINARY.set(bin).is_ok();
+    debug_assert!(
+        set,
+        "init_git_binary called after the git binary was already resolved"
+    );
+}
+
+/// Resolve the git binary: a non-empty `WORKSPACE_STATUS_GIT` (`env_value`)
+/// wins, then the config `git` value, then `/usr/bin/git` if present, else
+/// `git` on `PATH`.
+pub fn resolve_git_binary(env_value: Option<&str>, config: Option<&Path>) -> PathBuf {
+    if let Some(bin) = env_value.filter(|v| !v.is_empty()) {
+        return PathBuf::from(bin);
+    }
+    if let Some(bin) = config {
+        return bin.to_path_buf();
+    }
+    let usr = PathBuf::from("/usr/bin/git");
+    if usr.is_file() {
+        usr
+    } else {
+        PathBuf::from("git")
+    }
 }
 
 /// Build a git subprocess for `bin`, with the env every `ws` git spawn needs.
@@ -1598,6 +1624,30 @@ mod tests {
     use std::fs;
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn resolve_git_binary_env_beats_config_then_default() {
+        let config = Path::new("/opt/git/bin/git");
+        assert_eq!(
+            resolve_git_binary(Some("/env/git"), Some(config)),
+            PathBuf::from("/env/git")
+        );
+        assert_eq!(resolve_git_binary(None, Some(config)), config);
+        assert_eq!(
+            resolve_git_binary(Some(""), Some(config)),
+            config,
+            "empty env falls through to config"
+        );
+        assert_eq!(
+            resolve_git_binary(None, Some(Path::new("git-wrapper"))),
+            PathBuf::from("git-wrapper")
+        );
+        let default = resolve_git_binary(None, None);
+        assert!(
+            default == Path::new("/usr/bin/git") || default == Path::new("git"),
+            "{default:?}"
+        );
+    }
 
     #[test]
     fn git_binary_is_nonempty() {
