@@ -428,6 +428,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
+        title: "Icon popover",
+        keys: "gh",
+        group: CommandGroup::View,
+        action: Action::PopoverOpenFocused,
+        aliases: &["icons", "details"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
         title: "Cycle theme",
         keys: "T",
         group: CommandGroup::View,
@@ -1098,6 +1106,13 @@ mod tests {
                 "?",
                 CommandGroup::View,
                 Action::ToggleHelp,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Icon popover",
+                "gh",
+                CommandGroup::View,
+                Action::PopoverOpenFocused,
                 CommandScope::NoHighlight,
             ),
             (

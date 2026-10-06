@@ -754,7 +754,7 @@ pub struct AppState {
     pub(crate) peek: popover::PeekTimers,
     /// Pinned popover line a left press landed on. Release runs it unless
     /// the press turned into a drag.
-    popover_press: Option<usize>,
+    popover_press: Option<popover::PopoverLineRef>,
     pub(crate) z_pending_at: Option<Instant>,
     pub(crate) g_pending_at: Option<Instant>,
     /// Typeless CSI-u release-as-press for `g`-chord keys.
@@ -5196,8 +5196,7 @@ impl AppState {
     }
 
     pub fn focused_graph_row(&self) -> Option<GraphRow> {
-        let rows = self.graph.as_ref()?.visible_rows();
-        rows.get(self.graph_cursor).cloned()
+        self.graph.as_ref()?.visible_row_at(self.graph_cursor)
     }
 
     pub fn focused_graph_stash_ref(&self) -> Option<String> {

@@ -452,16 +452,27 @@ impl AppState {
         if !current {
             return false;
         }
-        let key = (remote.to_string(), branch.to_string());
-        if self.pr_cache.details.get(&key) != Some(&PrDetailState::Loading(request)) {
+        if !self.pr_detail_awaited(remote, branch, request) {
             return false;
         }
+        let key = (remote.to_string(), branch.to_string());
         // The detail adds lines above Open PR: keep the pinned focus on
         // the line it was on.
         let focus = self.popover_focus_key();
         self.pr_cache.details.insert(key, lookup.into());
         self.restore_popover_focus(focus);
         true
+    }
+
+    /// True while the detail cache still waits on request `request` for
+    /// `branch` at `remote`. A refresh, a branch switch, or a changed
+    /// answer drops that `Loading` entry, and a queued fetch for it is
+    /// then skipped.
+    pub(crate) fn pr_detail_awaited(&self, remote: &str, branch: &str, request: u64) -> bool {
+        self.pr_cache
+            .details
+            .get(&(remote.to_string(), branch.to_string()))
+            == Some(&PrDetailState::Loading(request))
     }
 
     /// Graph worktree rows that show a PR badge: visible-row index,
@@ -1277,6 +1288,53 @@ mod tests {
         assert_eq!(app.dispatch(Action::PopoverCopyLine), copy_url);
         assert!(land(&mut app, "feature", 7, pr_detail(7)));
         assert_eq!(app.dispatch(Action::PopoverCopyLine), copy_url);
+    }
+
+    #[test]
+    fn a_release_after_the_detail_lands_runs_the_pressed_line() {
+        use crate::tui::popover::{flat_lines, PopoverLine};
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut app = app_with_pr(7);
+        let _ = click_badge(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::render::draw(frame, &mut app))
+            .unwrap();
+        let painted = app.layout.popover.clone().expect("painted");
+        let sections = app.open_popover_sections();
+        let lines = flat_lines(&sections);
+        let (y, index) = *painted
+            .lines
+            .iter()
+            .find(|(_, index)| {
+                matches!(lines[*index], PopoverLine::Action(command)
+                    if command.action == Action::OpenPullRequest)
+            })
+            .expect("Open PR line");
+        app.dispatch(Action::Click {
+            col: painted.inner.x + 2,
+            row: y,
+        });
+        assert_eq!(app.popover_release_action(), Some(Action::OpenPullRequest));
+
+        // The detail lands between press and release: the lines move.
+        assert!(land(&mut app, "feature", 7, pr_detail(7)));
+        let sections = app.open_popover_sections();
+        assert!(
+            !matches!(flat_lines(&sections)[index], PopoverLine::Action(command)
+                if command.action == Action::OpenPullRequest),
+            "the pressed index now holds another line"
+        );
+        assert_eq!(
+            app.popover_release_action(),
+            Some(Action::OpenPullRequest),
+            "the press follows its line"
+        );
+        let mut twin = app.clone();
+        twin.close_popover();
+        let want = twin.dispatch(Action::OpenPullRequest);
+        assert_eq!(app.dispatch(Action::Release), want);
+        assert!(app.popover.is_none());
     }
 
     #[test]

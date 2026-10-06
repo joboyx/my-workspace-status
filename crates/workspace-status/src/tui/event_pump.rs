@@ -86,7 +86,8 @@ pub fn classify_busy_action(action: &Action) -> BusyAction {
 /// In commands mode [`Action::QuickOpenSubmit`] then dispatches the
 /// highlighted catalog action, [`Action::PopoverRun`] the focused popover
 /// action, and an [`Action::Release`] on a pinned popover action line runs
-/// that line, so busy classification uses that inner action when provided. Quick Open nav / typing stay [`BusyAction::Handle`]. Submit
+/// that line, so busy classification uses that inner action when
+/// provided. Quick Open nav / typing stay [`BusyAction::Handle`]. Submit
 /// with no inner action (files mode, empty list, a field line) stays Handle
 /// (same as [`classify_busy_action`]).
 pub fn classify_busy_dispatch(action: &Action, palette_submit: Option<&Action>) -> BusyAction {

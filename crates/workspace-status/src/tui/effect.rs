@@ -2820,7 +2820,12 @@ impl Interpreter {
                     return;
                 }
                 if self.pr_badges_running < PR_BADGE_LOOKUPS_MAX {
-                    if let Some(job) = self.pr_details.pop_front() {
+                    // A fetch the cache no longer waits on would land
+                    // nothing: skip it.
+                    while let Some(job) = self.pr_details.pop_front() {
+                        if !state.pr_detail_awaited(&job.remote, &job.branch, job.request) {
+                            continue;
+                        }
                         self.pr_badges_running += 1;
                         spawn(
                             id,
@@ -6611,6 +6616,41 @@ mod tests {
             capture_jobs(&mut interp, &mut state).len(),
             1,
             "the freed slot takes the waiting badge"
+        );
+    }
+
+    #[test]
+    fn a_queued_detail_fetch_the_cache_dropped_never_runs() {
+        let (mut state, detail) = detail_state();
+        let mut interp = Interpreter::with_cap(8);
+        interp.pr_cli = gh_view_until_cancelled;
+        let targets: Vec<(PathBuf, String)> = (0..2)
+            .map(|i| (PathBuf::from(format!("missing-{i}")), "feature".to_string()))
+            .collect();
+        schedule_effect(
+            &mut interp,
+            &mut state,
+            Effect::LookupPullRequests { targets },
+            &Action::None,
+        );
+        let badges = capture_jobs(&mut interp, &mut state);
+        assert_eq!(badges.len(), 2, "both slots busy");
+        schedule_effect(&mut interp, &mut state, detail, &Action::None);
+        assert_eq!(interp.pr_details.len(), 1, "the detail waits for a slot");
+
+        // `r` drops the Loading entry while the fetch still waits.
+        state.forget_pr_lookups(None);
+        let (id, work) = badges.into_iter().next().expect("badge job");
+        interp.pr_cli = cli_must_not_run;
+        apply_id(&mut interp, &mut state, id, work());
+        assert!(
+            capture_jobs(&mut interp, &mut state).is_empty(),
+            "the dropped detail does not run"
+        );
+        assert!(interp.pr_details.is_empty());
+        assert_eq!(
+            interp.pr_badges_running, 1,
+            "only the other badge holds a slot"
         );
     }
 

@@ -12,6 +12,8 @@ multi-lane gutter from the same model. The TUI may load a focused
 window (`git log <branches>` instead of `--all`) via `o` on the graph
 list or a highlighted repo / worktree. The widget still paints
 whatever `visible_rows` the model holds.
+`GraphModel::visible_row_at` returns one row in the same order and
+clones only that row (the focused-row lookups use it).
 
 ## Types
 

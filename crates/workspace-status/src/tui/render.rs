@@ -11,7 +11,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 use workspace_status_graph::{
     footer_message_scroll_max, graph_col_max, graph_hscroll_visible, graph_vscroll_visible,
-    painted_line_count, short_id, GraphIconKind, GraphLabelPalette, GraphWidget,
+    painted_line_count, short_id, GraphIconKind, GraphLabelPalette, GraphRow, GraphWidget,
 };
 
 use std::cell::RefCell;
@@ -42,7 +42,8 @@ use super::help::{
     help_entry_matches, help_entry_visual_lines, help_groups, help_idle_footer,
     help_idle_footer_lines, help_inner_width, help_key_width, help_legend_glyph_width,
     help_legend_layout, help_legend_matches, help_legend_name_width, help_legend_visual_lines,
-    help_version_label, wrap_help_footer, HELP_LEGEND_TITLE, HELP_SEARCH_ESC_HINT,
+    help_version_label, wrap_help_footer, HELP_LEGEND_HEAD_ROWS, HELP_LEGEND_TITLE,
+    HELP_SEARCH_ESC_HINT,
 };
 use super::icons::{
     comment_mark_cols, glyph, icon_branch, icon_comment, icon_comment_resolved, icon_diff,
@@ -666,9 +667,9 @@ fn draw_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
 /// and width.
 type IconSpan = (IconKind, usize, usize);
 
-/// Paint one tree row. Also returns the painted span of each icon segment
-/// (the PR badge when `pr` is set, the sync mark) that is on screen after
-/// `col_offset`, the label budget, and the row `width`.
+/// Paint one tree row. Also returns an [`IconSpan`] for each segment the
+/// row paints with a catalog icon tag ([`TextSeg::icon`]) that is still on
+/// screen after `col_offset`, the label budget, and the row `width`.
 fn paint_tree_row(
     row: &VisibleRow,
     width: usize,
@@ -1165,12 +1166,13 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         frame.render_widget(Paragraph::new("focus a repo for the graph"), area);
         return;
     };
-    let matches = graph_search_matches(state);
+    let rows = model.visible_rows();
+    let matches = graph_search_matches(state, &rows);
     let pal = state.theme.palette();
     let flash_rows = state.graph_flash_rows();
     let lane_colors = state.theme.lane_colors();
-    let commented_rows = graph_commented_row_indices(state, false);
-    let resolved_comment_rows = graph_commented_row_indices(state, true);
+    let commented_rows = graph_commented_row_indices(state, &rows, false);
+    let resolved_comment_rows = graph_commented_row_indices(state, &rows, true);
     let graph_focused = if state.drill.is_files() {
         state.focus == FocusPane::Left
     } else {
@@ -1221,7 +1223,6 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
         })
         .row_badges(&badges)
         .render_with_icon_spans(area, frame.buffer_mut());
-    let rows = model.visible_rows();
     let row_of = |span: &workspace_status_graph::IconSpan| rows.get(span.row_index?);
     let hits: Vec<IconHit> = spans
         .iter()
@@ -1273,10 +1274,11 @@ fn graph_pr_badges(state: &AppState) -> Vec<GraphPrBadge> {
         .collect()
 }
 
-fn graph_commented_row_indices(state: &AppState, resolved_only: bool) -> Vec<usize> {
-    let Some(model) = state.graph.as_ref() else {
-        return Vec::new();
-    };
+fn graph_commented_row_indices(
+    state: &AppState,
+    rows: &[GraphRow],
+    resolved_only: bool,
+) -> Vec<usize> {
     let Some((repo, _)) = state.graph_identity.as_ref() else {
         return Vec::new();
     };
@@ -1292,9 +1294,7 @@ fn graph_commented_row_indices(state: &AppState, resolved_only: bool) -> Vec<usi
         .iter()
         .find(|r| r.repo == *repo)
         .map(|r| r.branch.as_str());
-    model
-        .visible_rows()
-        .iter()
+    rows.iter()
         .enumerate()
         .filter_map(|(i, row)| {
             if !graph_row_has_comment(&state.comment_store, repo, primary, row, branch) {
@@ -1311,14 +1311,11 @@ fn graph_commented_row_indices(state: &AppState, resolved_only: bool) -> Vec<usi
         .collect()
 }
 
-fn graph_search_matches(state: &AppState) -> Vec<usize> {
+fn graph_search_matches(state: &AppState, rows: &[GraphRow]) -> Vec<usize> {
     if state.search_target != SearchPane::Graph {
         return Vec::new();
     }
-    let Some(model) = state.graph.as_ref() else {
-        return Vec::new();
-    };
-    collect_graph_match_indices(&model.visible_rows(), &state.search_query)
+    collect_graph_match_indices(rows, &state.search_query)
 }
 
 fn record_graph_scrollbar(
@@ -1508,8 +1505,9 @@ fn draw_commit_file_list(
     };
     let mut lines = Vec::new();
     let mut hits = Vec::new();
+    let comment_scope = state.commit_file_comment_scope();
     for (y, row) in (area.y..).zip(rows.iter().skip(start).take(height)) {
-        let segs = state.commit_file_row_paint_segments(row);
+        let segs = state.commit_file_row_paint_segments_in(row, comment_scope);
         let search_match = searching_files
             && (match_paths.contains(&row.path)
                 || commit_file_label_matches(&row.label, &state.search_query));
@@ -2477,6 +2475,47 @@ fn overlay_block(accent: Color) -> Block<'static> {
         .padding(Padding::horizontal(1))
 }
 
+/// Colour the panes paint icon `kind` in, so legend rows that only colour
+/// tells apart (ref chips, status letters, sync marks, PR badges) read as
+/// they do on screen. Glyphs the panes paint in a lane or neutral colour
+/// use the heading accent.
+fn icon_legend_color(kind: IconKind, palette: Palette) -> Color {
+    use IconKind as K;
+    match kind {
+        K::Branch | K::PrOpen | K::ChipLocal => palette.branch_feature,
+        K::ChipDefault => palette.branch_default,
+        K::MergedIntoDefault | K::PrApproved | K::Ahead => palette.added,
+        K::StatusAdded | K::StatusStaged => palette.added,
+        K::Behind | K::StatusFailed | K::StatusDeleted | K::StatusConflict => palette.deleted,
+        K::Diverged | K::StatusModified | K::StatusStagedModified => palette.modified,
+        K::GraphUncommitted | K::ChipTag => palette.modified,
+        K::StatusRenamed | K::StatusCopied => palette.renamed,
+        K::OpenVsDefault | K::PrMerged | K::NoUpstream | K::Clean | K::Synced => palette.muted,
+        K::Ignored | K::ChangeCount | K::WorktreeCount | K::CommentResolved => palette.muted,
+        K::GraphMoreBelow | K::FoldExpanded | K::FoldCollapsed => palette.muted,
+        K::CursorBarInactive => palette.muted,
+        K::CursorBar => palette.cursor,
+        K::Folder | K::ChipRemote | K::ChipSynced => palette.dir,
+        K::FileType => palette.file,
+        K::Viewed => palette.viewed,
+        K::ChipCheckout | K::ChipDetachedHead => palette.head_mark,
+        K::Workspace
+        | K::Repo
+        | K::LinkedWorktree
+        | K::Staged
+        | K::Changes
+        | K::Comment
+        | K::GraphCommit
+        | K::GraphHeadCommit
+        | K::GraphStash
+        | K::ChipOverflow
+        | K::GraphRails
+        | K::HelpMove
+        | K::HelpView
+        | K::FolderOpen => palette.heading,
+    }
+}
+
 /// One painted line of an icon legend row, cut or padded to `width`:
 /// glyph and muted name on the first line, the meaning beside them or
 /// under them (`vis.indent`).
@@ -2490,9 +2529,13 @@ fn help_legend_cell_spans(
     let mut spans = Vec::new();
     if vis.chips {
         let glyph = spec.glyph(ascii);
-        let glyph_pad = help_legend_glyph_width().saturating_sub(visible_width(glyph)) + 1;
+        let glyph_width = spec.group.map_or(0, help_legend_glyph_width);
+        let glyph_pad = glyph_width.saturating_sub(visible_width(glyph)) + 1;
         let name_pad = help_legend_name_width().saturating_sub(spec.name.chars().count()) + 1;
-        spans.push(Span::styled(glyph, Style::default().fg(palette.heading)));
+        spans.push(Span::styled(
+            glyph,
+            Style::default().fg(icon_legend_color(spec.kind, palette)),
+        ));
         spans.push(Span::raw(" ".repeat(glyph_pad)));
         spans.push(Span::styled(spec.name, Style::default().fg(palette.muted)));
         if !vis.text.is_empty() {
@@ -2512,19 +2555,21 @@ fn help_legend_cell_spans(
 
 /// Icon legend rows under the help key columns: a blank row, the
 /// `ICONS` title, then [`help_legend_layout`] columns. Row count is
-/// [`help_legend_line_count`].
+/// [`help_legend_line_count`]. Also returns the row (index into the
+/// lines) where each search hit starts.
 fn help_legend_lines(
     state: &AppState,
     inner: usize,
     query: &str,
     searching: bool,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<usize>) {
     let palette = state.theme.palette();
     let pills = state.theme.pills();
     let legend = help_legend_layout(inner);
     let col_w = legend.column_width;
     let content = help_column_content_width(col_w);
     let gutter = col_w.saturating_sub(content);
+    let mut hit_rows = Vec::new();
     let columns: Vec<Vec<Vec<Span<'static>>>> = legend
         .columns
         .iter()
@@ -2543,6 +2588,9 @@ fn help_legend_lines(
                     ));
                 }
                 let hit = searching && help_legend_matches(block.spec, query);
+                if hit {
+                    hit_rows.push(HELP_LEGEND_HEAD_ROWS + rows.len());
+                }
                 for vis in help_legend_visual_lines(block.spec, col_w) {
                     let mut spans = with_search_pill(
                         help_legend_cell_spans(block.spec, &vis, state.ascii, palette, content),
@@ -2557,7 +2605,7 @@ fn help_legend_lines(
         .collect();
     let tallest = columns.iter().map(Vec::len).max().unwrap_or(0);
     if tallest == 0 {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let mut lines = vec![
         Line::default(),
@@ -2578,11 +2626,13 @@ fn help_legend_lines(
         }
         lines.push(Line::from(spans));
     }
-    lines
+    (lines, hit_rows)
 }
 
 /// Paint `?` help in `area` and return its max body scroll (0 when every
 /// body row fits). The group-title row stays pinned above the scrolled body.
+/// While a search has hits below the shown rows, the search footer counts
+/// them.
 fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
     if area.width == 0 || area.height == 0 {
         return 0;
@@ -2615,6 +2665,8 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
 
     // Each column stacks its own entries; a wrapped entry never pads the
     // other columns. The gutter stays outside the search highlight.
+    // `hit_rows`: the body row where each search hit starts.
+    let mut hit_rows: Vec<usize> = Vec::new();
     let columns: Vec<Vec<Vec<Span<'static>>>> = groups
         .iter()
         .zip(&widths)
@@ -2626,6 +2678,9 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
             let mut rows = Vec::new();
             for entry in group.entries {
                 let hit = searching && help_entry_matches(entry.keys, entry.desc, query);
+                if hit {
+                    hit_rows.push(rows.len());
+                }
                 let pill = hit.then_some(pills.filter);
                 for vis in help_entry_visual_lines(entry.desc, content, key_width) {
                     let mut spans = with_search_pill(
@@ -2658,7 +2713,9 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
         }
         lines.push(Line::from(spans));
     }
-    lines.extend(help_legend_lines(state, inner, query, searching));
+    let (legend, legend_hits) = help_legend_lines(state, inner, query, searching);
+    lines.extend(legend);
+    hit_rows.extend(legend_hits.into_iter().map(|row| key_rows + row));
     let body_rows = lines.len() - 1;
 
     let idle_footer = |parts: Vec<String>| -> Vec<Line<'static>> {
@@ -2667,21 +2724,31 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
             .map(|part| Line::from(Span::styled(part, Style::default().fg(palette.muted))))
             .collect()
     };
-    let mut footer = if searching {
+    // `below`: search hits that start under the shown body rows.
+    let search_footer = |below: usize| {
         let q = state.help_search_query.as_deref().unwrap_or("");
-        help_footer_with_version(
-            vec![
-                key_chip("HELP", pills.filter.bg, pills.filter.fg),
-                Span::styled(format!(" /{q}"), Style::default().fg(palette.repo)),
-                Span::styled("▏", Style::default().fg(palette.cursor)),
-                Span::styled(
-                    format!("   {HELP_SEARCH_ESC_HINT}"),
-                    Style::default().fg(palette.muted),
+        let mut spans = vec![
+            key_chip("HELP", pills.filter.bg, pills.filter.fg),
+            Span::styled(format!(" /{q}"), Style::default().fg(palette.repo)),
+            Span::styled("▏", Style::default().fg(palette.cursor)),
+            Span::styled(
+                format!("   {HELP_SEARCH_ESC_HINT}"),
+                Style::default().fg(palette.muted),
+            ),
+        ];
+        if below > 0 {
+            spans.push(Span::styled(
+                format!(
+                    "   {}{below} more below · PgDn",
+                    IconKind::GraphMoreBelow.glyph(state.ascii)
                 ),
-            ],
-            inner,
-            palette.muted,
-        )
+                Style::default().fg(palette.cursor),
+            ));
+        }
+        help_footer_with_version(spans, inner, palette.muted)
+    };
+    let mut footer = if searching {
+        search_footer(0)
     } else {
         idle_footer(help_idle_footer_lines(inner))
     };
@@ -2704,6 +2771,19 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, state: &AppState) -> usize {
         attach_help_version(&mut parts, inner);
         footer = idle_footer(parts);
         scroll_max = body_rows.saturating_sub(body_room(&footer));
+    }
+    // Hits under the shown rows. Two passes: the cue can wrap the footer
+    // onto one more row, which shows one body row less.
+    let hits_below = |footer: &[Line<'static>], scroll_max: usize| {
+        let shown_end = state.help_scroll.min(scroll_max) + body_room(footer);
+        hit_rows.iter().filter(|&&row| row >= shown_end).count()
+    };
+    if searching {
+        for _ in 0..2 {
+            let below = hits_below(&footer, scroll_max);
+            footer = search_footer(below);
+            scroll_max = body_rows.saturating_sub(body_room(&footer));
+        }
     }
     let footer_h = (footer.len() as u16).min(inner_area.height).max(1);
     let body_h = inner_area.height.saturating_sub(footer_h);
@@ -4273,11 +4353,13 @@ enum PopoverRow {
 ///
 /// Same rounded surface as Quick Open. Each section paints a heading (the
 /// glyph in the row's colour and the catalog name), the meaning, fields
-/// (muted label, value), and action lines (palette title, key chip at the
-/// right edge; a disabled one dims and names its gate reason when it
-/// fits). A pinned popover marks its focused line with the cursor
-/// background and ends with [`POPOVER_FOOTER`]. Records
-/// [`PopoverHit`] for clicks and drags.
+/// (muted label padded to the section's widest label, value in its role
+/// colour), and action lines (palette title, key chip at the right edge;
+/// a disabled one dims and names its gate reason when it fits). A pinned
+/// popover marks its focused line with the cursor background and ends
+/// with [`POPOVER_FOOTER`]. A box the frame cuts names the rows below the
+/// shown ones on its bottom border. Records [`PopoverHit`] for clicks and
+/// drags.
 fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
     state.sync_popover_with_layout();
     let Some(popover) = state.popover.as_ref() else {
@@ -4318,26 +4400,38 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
     if pinned {
         rows.push(PopoverRow::Footer);
     }
+    // Whether each section's target is the focused row, asked once per
+    // section: only those action lines show their gate reasons.
+    let gated: Vec<bool> = sections
+        .iter()
+        .map(|section| pinned || state.popover_target_focused(&section.target))
+        .collect();
     let reasons: Vec<Option<String>> = lines
         .iter()
         .zip(&line_section)
         .map(|(line, &section)| match line {
-            PopoverLine::Action(command)
-                if pinned || state.popover_target_focused(&sections[section].target) =>
-            {
+            PopoverLine::Action(command) if gated[section] => {
                 state.palette_disabled_reason(command)
             }
             _ => None,
         })
         .collect();
-    let label_width = lines
+    // Field labels pad to the widest label of their own section.
+    let label_widths: Vec<usize> = sections
         .iter()
-        .filter_map(|line| match line {
-            PopoverLine::Field { label, .. } => Some(visible_width(label)),
-            _ => None,
+        .map(|section| {
+            section
+                .lines
+                .iter()
+                .filter_map(|line| match line {
+                    PopoverLine::Field { label, .. } => Some(visible_width(label)),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0)
         })
-        .max()
-        .unwrap_or(0);
+        .collect();
+    let label_width = |index: usize| label_widths[line_section[index]];
     let chip_width = |keys: &str| {
         if keys.is_empty() {
             0
@@ -4355,7 +4449,9 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
             PopoverRow::Line(index) => {
                 2 + match lines[index] {
                     PopoverLine::Text(text) | PopoverLine::Note(text) => visible_width(text),
-                    PopoverLine::Field { value, .. } => label_width + 1 + visible_width(value),
+                    PopoverLine::Field { value, .. } => {
+                        label_width(index) + 1 + visible_width(value)
+                    }
                     PopoverLine::Action(command) => {
                         visible_width(command.title)
                             + reasons[index]
@@ -4421,12 +4517,12 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
                     PopoverLine::Note(text) => {
                         spans.push(Span::styled(text.clone(), muted));
                     }
-                    PopoverLine::Field { label, value } => {
-                        let pad = label_width.saturating_sub(visible_width(label));
+                    PopoverLine::Field { label, value, role } => {
+                        let pad = label_width(index).saturating_sub(visible_width(label));
                         spans.push(Span::styled(format!("{label}{} ", " ".repeat(pad)), muted));
                         spans.push(Span::styled(
                             value.clone(),
-                            Style::default().fg(palette.file),
+                            Style::default().fg(seg_role_color(*role, palette)),
                         ));
                     }
                     PopoverLine::Action(command) => {
@@ -4483,15 +4579,11 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
         })
         .collect();
 
-    frame.render_widget(Clear, rect);
-    let block = overlay_block_filled(accent, surface);
-    let inner = block.inner(rect);
-    frame.render_widget(block, rect);
     // A box cut by the frame scrolls its body around the focused line
     // (a peek shows the top); a pinned footer stays on the last row.
     let footer = usize::from(pinned);
     let body = rows.len() - footer;
-    let body_height = usize::from(inner.height).saturating_sub(footer);
+    let body_height = usize::from(rect.height.saturating_sub(2)).saturating_sub(footer);
     let focus_row = focus
         .and_then(|line| {
             rows.iter()
@@ -4499,6 +4591,24 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
         })
         .unwrap_or(0);
     let (start, shown) = visible_window(body, focus_row, body_height);
+    let mut block = overlay_block_filled(accent, surface);
+    let below = body - (start + shown);
+    if below > 0 {
+        // The rows under the cut: the same glyph the graph footer uses
+        // for message lines below.
+        let more = format!(
+            " {}{below} more ",
+            IconKind::GraphMoreBelow.glyph(state.ascii)
+        );
+        if visible_width(&more) + 2 <= usize::from(rect.width) {
+            block = block.title_bottom(
+                Line::from(Span::styled(more, Style::default().fg(accent))).right_aligned(),
+            );
+        }
+    }
+    frame.render_widget(Clear, rect);
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
     let shown_rows = (start..start + shown).chain(body..rows.len());
     let mut painted: Vec<Option<Line<'static>>> = painted.into_iter().map(Some).collect();
     let mut hit_lines = Vec::new();
@@ -7988,6 +8098,106 @@ mod tests {
         for x in needle_cols(buf, y, miss) {
             assert_ne!(buf[(x, y)].bg, pill.bg, "legend miss cell {x}");
         }
+    }
+
+    /// A help search hit below the shown rows puts a count on the search
+    /// footer; once it scrolls into view the cue goes.
+    #[test]
+    fn help_search_counts_hits_below_the_fold() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.help_open = true;
+        state.help_search_query = Some("rails".into());
+        // The rails meaning's first words (the row wraps at this width).
+        let rails = "Graph lanes";
+        assert!(IconKind::GraphRails.spec().meaning.starts_with(rails));
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(state.layout.help_scroll_max > 0, "{text}");
+        assert!(!text.contains(rails), "below the fold:\n{text}");
+        assert!(text.contains("v1 more below · PgDn"), "{text}");
+        let buf = terminal.backend().buffer();
+        let y = text
+            .lines()
+            .position(|line| line.contains("more below"))
+            .expect("cue row") as u16;
+        let x = find_cell_col(buf, y, "v1 more below").expect("cue");
+        assert_eq!(buf[(x, y)].fg, state.theme.palette().cursor);
+
+        state.help_scroll = state.layout.help_scroll_max;
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains(rails), "scrolled into view:\n{text}");
+        assert!(!text.contains("more below"), "{text}");
+    }
+
+    /// Legend glyphs paint in the colour their pane paints them, so rows
+    /// only colour tells apart (the ref chips) read apart in every theme.
+    /// Each group's glyph column is as wide as its own widest glyph.
+    #[test]
+    fn legend_glyphs_paint_their_pane_colours_per_group_column() {
+        use super::super::help::help_legend_key_width;
+        use super::super::icons::IconGroup;
+        for id in crate::tui::theme::THEME_IDS {
+            let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+            state.theme = id;
+            state.help_open = true;
+            let mut terminal = Terminal::new(TestBackend::new(200, 120)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let text = buffer_text(&terminal);
+            let buf = terminal.backend().buffer();
+            let pal = state.theme.palette();
+            // Glyph cell of legend row `kind`: its group's key width left of
+            // the meaning.
+            let glyph_cell = |kind: IconKind| {
+                let spec = kind.spec();
+                let y = text
+                    .lines()
+                    .position(|line| line.contains(spec.meaning))
+                    .unwrap_or_else(|| panic!("{kind:?} row:\n{text}"))
+                    as u16;
+                let meaning = find_cell_col(buf, y, spec.meaning).expect("meaning");
+                let x = meaning - help_legend_key_width(spec.group.expect("legend")) as u16;
+                let first = spec.glyph(true).chars().next().expect("glyph");
+                assert_eq!(
+                    buf[(x, y)].symbol(),
+                    first.to_string(),
+                    "{id:?} {kind:?} glyph column"
+                );
+                &buf[(x, y)]
+            };
+            let chips = [
+                (IconKind::ChipLocal, pal.branch_feature),
+                (IconKind::ChipDefault, pal.branch_default),
+                (IconKind::ChipRemote, pal.dir),
+                (IconKind::ChipTag, pal.modified),
+                (IconKind::ChipDetachedHead, pal.head_mark),
+            ];
+            for (kind, color) in chips {
+                assert_eq!(glyph_cell(kind).fg, color, "{id:?} {kind:?}");
+            }
+            for (kind, color) in [
+                (IconKind::Behind, pal.deleted),
+                (IconKind::Ahead, pal.added),
+                (IconKind::StatusModified, pal.modified),
+                (IconKind::Viewed, pal.viewed),
+                (IconKind::CursorBar, pal.cursor),
+                (IconKind::Repo, pal.heading),
+            ] {
+                assert_eq!(glyph_cell(kind).fg, color, "{id:?} {kind:?}");
+            }
+            // Some themes share a hex between chip roles (the graph pane
+            // shares it too); the tag chip always stands apart.
+            let colours: HashSet<_> = chips.iter().map(|(_, color)| *color).collect();
+            assert!(colours.len() > 1, "{id:?} chips are not one colour");
+            assert_ne!(pal.modified, pal.branch_feature, "{id:?} tag vs local");
+        }
+        assert!(
+            help_legend_key_width(IconGroup::Tree) < help_legend_key_width(IconGroup::Graph),
+            "one-column tree glyphs do not pad to the chip samples"
+        );
     }
 
     #[test]
@@ -11562,9 +11772,11 @@ mod tests {
             "@ repo",
             "P PR open",
             "Pull request is open",
-            // Labels pad to the widest label of the popover (`changes`).
-            "number  #7",
-            "url     https://github.com/octo/demo/pull/7",
+            // Labels pad to the widest label of their own section: the
+            // PR section to `number`, the repo section to `changes`.
+            "number #7",
+            "url    https://github.com/octo/demo/pull/7",
+            "path    app",
             "changes 0 staged · 0 unstaged · 0 untracked",
             "Open PR",
             " gx ",
@@ -11630,9 +11842,9 @@ mod tests {
             ));
             let text = popover_text(&mut state, &mut terminal);
             for want in [
-                "number  #7",
+                "number #7",
                 "loading…",
-                "url     https://github.com/octo/demo/pull/7",
+                "url    https://github.com/octo/demo/pull/7",
                 "Open PR",
             ] {
                 assert!(text.contains(want), "{want:?} in\n{text}");
@@ -11715,9 +11927,9 @@ mod tests {
         ));
         let text = popover_text(&mut state, &mut terminal);
         for want in [
-            "number  #7",
+            "number #7",
             "could not load details",
-            "url     https://github.com/octo/demo/pull/7",
+            "url    https://github.com/octo/demo/pull/7",
             "Open PR",
         ] {
             assert!(text.contains(want), "{want:?} in\n{text}");
@@ -11774,6 +11986,89 @@ mod tests {
         let rect = state.layout.popover.as_ref().expect("pinned").rect;
         assert!(rect.bottom() <= hit.y, "above the icon: {rect:?} {hit:?}");
         assert!(rect.right() <= 120 && rect.x <= hit.x, "{rect:?}");
+    }
+
+    /// A popover the frame cuts names the rows below the shown ones on
+    /// its bottom border; with the focus on the last line nothing is
+    /// below. Field values paint in their role colour, labels pad per
+    /// section.
+    #[test]
+    fn a_cut_popover_counts_the_rows_below_and_values_take_their_role() {
+        let mut state = pr_state(&[branch_repo("app", "feature")], true);
+        set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
+        focus_tree_row(&mut state, "repo:app");
+        let mut terminal = pr_terminal();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let _ = state.dispatch(Action::PopoverOpenFocused);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let rect = state.layout.popover.as_ref().expect("pinned").rect;
+        let buf = &state.painted_frame;
+        let bottom = buf_line(buf, rect.bottom() - 1);
+        let more = bottom
+            .split(" more ")
+            .next()
+            .and_then(|head| head.rsplit('v').next())
+            .and_then(|count| count.parse::<usize>().ok())
+            .unwrap_or_else(|| panic!("more cue on the bottom border: {bottom:?}"));
+        assert!(more > 0, "{bottom:?}");
+        assert!(bottom.contains(&format!("v{more} more ╯")), "{bottom:?}");
+
+        // Branch name in the feature-branch colour, label padded to `local`.
+        let palette = state.theme.palette();
+        let y = (rect.y..rect.bottom())
+            .find(|y| buf_line(buf, *y).contains("name  feature"))
+            .unwrap_or_else(|| panic!("{}", rect_lines(buf, rect).join("\n")));
+        let x = find_cell_col(buf, y, "name  feature").unwrap() + 6;
+        assert_eq!(buf[(x, y)].symbol(), "f");
+        assert_eq!(buf[(x, y)].fg, palette.branch_feature);
+        assert_eq!(buf[(x - 6, y)].fg, palette.muted, "label");
+
+        state.dispatch(Action::PopoverMove(999));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let rect = state.layout.popover.as_ref().expect("pinned").rect;
+        let bottom = buf_line(&state.painted_frame, rect.bottom() - 1);
+        assert!(!bottom.contains(" more "), "last line in view: {bottom:?}");
+    }
+
+    /// A popover hung from an icon near the right edge moves left so its
+    /// right border sits on the frame's last column, and the key chip
+    /// still ends at the text area's right edge.
+    #[test]
+    fn popover_at_the_right_edge_moves_left_to_the_last_column() {
+        let mut state = pr_graph_state("app/.worktrees/wt", "feat", true);
+        let mut terminal = pr_terminal();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let badge = graph_badge_hits(&state)
+            .into_iter()
+            .next()
+            .expect("graph badge");
+        state.dispatch(Action::Click {
+            col: badge.x,
+            row: badge.y,
+        });
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let painted = state.layout.popover.clone().expect("pinned");
+        let rect = painted.rect;
+        let frame_right = 120;
+        assert!(
+            badge.x + rect.width > frame_right,
+            "the test needs a box that would overflow: {rect:?} {badge:?}"
+        );
+        assert_eq!(rect.right(), frame_right, "right border on the last column");
+        assert_eq!(rect.x, frame_right - rect.width);
+        let buf = &state.painted_frame;
+        assert_eq!(buf[(rect.x, rect.y)].symbol(), "╭");
+        assert_eq!(buf[(rect.right() - 1, rect.y)].symbol(), "╮");
+        assert_eq!(buf[(rect.right() - 1, rect.bottom() - 1)].symbol(), "╯");
+        for y in rect.y + 1..rect.bottom() - 1 {
+            assert_eq!(buf[(rect.right() - 1, y)].symbol(), "│", "row {y}");
+        }
+        let open_y = (rect.y..rect.bottom())
+            .find(|y| buf_line(buf, *y).contains("Open PR"))
+            .expect("Open PR row");
+        let chip_end = painted.inner.right() - 1;
+        assert_eq!(buf[(chip_end - 1, open_y)].symbol(), "x");
+        assert_eq!(buf[(chip_end - 2, open_y)].symbol(), "g");
     }
 
     fn graph_badge_hits(state: &AppState) -> Vec<PrBadgeHit> {

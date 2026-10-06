@@ -51,7 +51,7 @@ pub(crate) type TreeRowMarks = (bool, bool, bool, Option<PrState>);
 
 /// Checkout, primary checkout, branch, and source of the shown commit-file
 /// list: the scope its line comments match in.
-type CommitFileCommentScope<'a> = (
+pub(crate) type CommitFileCommentScope<'a> = (
     &'a str,
     Option<&'a str>,
     Option<&'a str>,
@@ -121,8 +121,10 @@ impl AppState {
         painted_row_segments(row, self.ascii, viewed, commented, resolved, pr)
     }
 
-    /// Scope the line comments of the shown commit-file list match in.
-    fn commit_file_comment_scope(&self) -> Option<CommitFileCommentScope<'_>> {
+    /// Scope the line comments of the shown commit-file list match in. A
+    /// list paint reads it once for every row
+    /// ([`Self::commit_file_row_paint_segments_in`]).
+    pub(crate) fn commit_file_comment_scope(&self) -> Option<CommitFileCommentScope<'_>> {
         let (repo, source) = self.commit_drill_source()?;
         let snap = self.snapshot.repos.iter().find(|r| r.repo == repo);
         Some((
@@ -152,7 +154,17 @@ impl AppState {
     /// Every segment commit-file or compare list row `row` paints: its
     /// label and badge, then the comment mark and the viewed eye.
     pub(crate) fn commit_file_row_paint_segments(&self, row: &CommitFileRow) -> NodeSegments {
-        let scope = self.commit_file_comment_scope().filter(|_| row.is_file());
+        self.commit_file_row_paint_segments_in(row, self.commit_file_comment_scope())
+    }
+
+    /// [`Self::commit_file_row_paint_segments`] with the list's comment
+    /// `scope` already read ([`Self::commit_file_comment_scope`]).
+    pub(crate) fn commit_file_row_paint_segments_in(
+        &self,
+        row: &CommitFileRow,
+        scope: Option<CommitFileCommentScope<'_>>,
+    ) -> NodeSegments {
+        let scope = scope.filter(|_| row.is_file());
         let commented = scope.is_some_and(|(repo, primary, branch, source)| {
             commit_file_row_has_comment(
                 &self.comment_store,
@@ -237,10 +249,10 @@ impl AppState {
         let Some(model) = self.graph.as_ref() else {
             return Vec::new();
         };
-        let rows = model.visible_rows();
-        let Some(row) = rows.get(index) else {
+        let Some(row) = model.visible_row_at(index) else {
             return Vec::new();
         };
+        let row = &row;
         let id = graph_row_id(row);
         let mut icons = Vec::new();
         let node = match row {
@@ -308,13 +320,9 @@ impl AppState {
             IconTarget::PullRequest(repo) => self
                 .pr_target_for_focus()
                 .is_some_and(|(focused, _)| &focused == repo),
-            IconTarget::GraphRow(id) => {
-                self.list_focus_target() == ListFocusTarget::Graph
-                    && self
-                        .focused_graph_row()
-                        .is_some_and(|row| graph_row_id(&row) == *id)
-            }
-            IconTarget::GraphChip { row: id, .. } | IconTarget::GraphMoreLines(id) => {
+            IconTarget::GraphRow(id)
+            | IconTarget::GraphChip { row: id, .. }
+            | IconTarget::GraphMoreLines(id) => {
                 self.list_focus_target() == ListFocusTarget::Graph
                     && self
                         .focused_graph_row()
@@ -387,25 +395,21 @@ impl AppState {
 
     /// The focused line of the pinned popover as its section target and
     /// line key (a field's label or an action's title), or `None`.
-    pub(crate) fn popover_focus_key(&self) -> Option<(IconTarget, PopoverLineKey)> {
+    pub(crate) fn popover_focus_key(&self) -> Option<PopoverLineRef> {
         let popover = self.popover.as_ref().filter(|_| self.popover_pinned())?;
         let sections = self.open_popover_sections();
         let focus = focused_line(&flat_lines(&sections), popover.focus_line)?;
-        let (_, section, line) = section_lines(&sections).find(|(index, _, _)| *index == focus)?;
-        Some((section.target.clone(), line_key(line)?))
+        line_ref(&sections, focus)
     }
 
     /// Point the pinned popover's focus back at the line `key` named
     /// before its content changed (a PR detail landed and the section grew).
     /// A line that is gone leaves the focus where it is.
-    pub(crate) fn restore_popover_focus(&mut self, key: Option<(IconTarget, PopoverLineKey)>) {
-        let Some((target, key)) = key else {
+    pub(crate) fn restore_popover_focus(&mut self, key: Option<PopoverLineRef>) {
+        let Some(key) = key else {
             return;
         };
-        let sections = self.open_popover_sections();
-        let found = section_lines(&sections)
-            .find(|(_, section, line)| section.target == target && line_key(line) == Some(key))
-            .map(|(index, _, _)| index);
+        let found = line_index(&self.open_popover_sections(), &key);
         if let (Some(index), Some(popover)) = (found, self.popover.as_mut()) {
             popover.focus_line = index;
         }
@@ -470,12 +474,12 @@ impl AppState {
     /// popover press landed on, while that press has not become a drag.
     /// Busy gating classifies the release as this action.
     pub(crate) fn popover_release_action(&self) -> Option<Action> {
-        let line = self.popover_press?;
+        let press = self.popover_press.as_ref()?;
         if self.text_selection.is_some_and(|sel| sel.is_active()) || !self.popover_pinned() {
             return None;
         }
         let sections = self.open_popover_sections();
-        match flat_lines(&sections).get(line)? {
+        match flat_lines(&sections).get(line_index(&sections, press)?)? {
             PopoverLine::Action(command) => Some(command.action.clone()),
             PopoverLine::Text(_) | PopoverLine::Note(_) | PopoverLine::Field { .. } => None,
         }
@@ -751,7 +755,9 @@ impl AppState {
                 if let Some(popover) = self.popover.as_mut() {
                     popover.focus_line = line;
                 }
-                self.popover_press = Some(line);
+                // Keyed, not indexed: a PR detail that lands before the
+                // release moves the lines.
+                self.popover_press = line_ref(&self.open_popover_sections(), line);
             }
             return Some(Effect::None);
         }
@@ -774,9 +780,12 @@ impl AppState {
         let press = self.popover_press.take();
         let dragged = self.text_selection.is_some_and(|sel| sel.is_active());
         let copied = self.finish_text_selection();
-        match press {
-            Some(line) if !dragged => self.run_popover_line(Some(line)),
-            _ => copied,
+        let line = press
+            .filter(|_| !dragged)
+            .and_then(|press| line_index(&self.open_popover_sections(), &press));
+        match line {
+            Some(line) => self.run_popover_line(Some(line)),
+            None => copied,
         }
     }
 }
@@ -791,6 +800,24 @@ fn line_key(line: &PopoverLine) -> Option<PopoverLineKey> {
         PopoverLine::Action(command) => Some((true, command.title)),
         PopoverLine::Text(_) | PopoverLine::Note(_) => None,
     }
+}
+
+/// A focusable popover line by its section target and [`PopoverLineKey`]:
+/// it still names the same line after the content above it changes.
+pub(crate) type PopoverLineRef = (IconTarget, PopoverLineKey);
+
+/// The [`PopoverLineRef`] of [`flat_lines`] line `index` of `sections`;
+/// `None` for a line that cannot take the focus.
+fn line_ref(sections: &[PopoverSection], index: usize) -> Option<PopoverLineRef> {
+    let (_, section, line) = section_lines(sections).nth(index)?;
+    Some((section.target.clone(), line_key(line)?))
+}
+
+/// The [`flat_lines`] index of the line `key` names in `sections`.
+fn line_index(sections: &[PopoverSection], (target, key): &PopoverLineRef) -> Option<usize> {
+    section_lines(sections)
+        .find(|(_, section, line)| section.target == *target && line_key(line) == Some(*key))
+        .map(|(index, _, _)| index)
 }
 
 /// Every line of `sections` with its [`flat_lines`] index and section.
@@ -834,6 +861,7 @@ mod tests {
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
     use crate::tui::comments::{put_comment, CommentKey};
+    use crate::tui::tree::SegRole;
     use workspace_status_graph::{
         format_local_timestamp, format_relative_date, Commit, GraphModel, GraphRef, PartTarget,
         Stash, SyncState, SyncStatus as GraphSyncStatus, Worktree,
@@ -1171,6 +1199,22 @@ mod tests {
         app.dispatch(Action::PopoverOpenFocused);
         app.focus = FocusPane::Right;
         assert!(!app.popover_pinned(), "another pane");
+
+        app.focus = FocusPane::Left;
+        app.dispatch(Action::PopoverOpenFocused);
+        assert!(app.popover_pinned());
+        app.open_compare_tab("app".into(), "main".into(), "HEAD".into());
+        assert!(app.is_compare_tab());
+        assert!(!app.popover_pinned(), "another tab");
+        assert_ne!(app.input_mode(), InputMode::Popover);
+
+        // The tab alone is enough: same list and row, other tab.
+        app.dispatch(Action::JumpToTab(1));
+        focus(&mut app, "repo:app");
+        app.dispatch(Action::PopoverOpenFocused);
+        assert!(app.popover_pinned());
+        app.popover.as_mut().unwrap().owner.tab += 1;
+        assert!(!app.popover_pinned(), "pinned on another tab");
     }
 
     #[test]
@@ -2501,6 +2545,20 @@ mod tests {
             .unwrap_or_else(|| panic!("no {kind:?} chip on {row}: {:?}", app.layout.icon_hits))
     }
 
+    /// Text rows of the painted popover box, trailing spaces trimmed.
+    fn popover_rows(app: &AppState) -> Vec<String> {
+        let rect = app.layout.popover.as_ref().expect("painted popover").rect;
+        (rect.y..rect.bottom())
+            .map(|y| {
+                (rect.x..rect.right())
+                    .map(|x| app.painted_frame[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
     fn section_texts(app: &AppState) -> Vec<(IconKind, Vec<String>)> {
         app.open_popover_sections()
             .into_iter()
@@ -2569,12 +2627,19 @@ mod tests {
                 ),
             ]
         );
-        // Off the tree the gates refuse Pull: the line keeps the reason.
+        // Off the tree the gates refuse Pull: the painted line keeps the
+        // reason beside the title.
         let pull = command_for(&Action::Pull).unwrap();
         let reason = app
             .palette_disabled_reason(pull)
             .expect("gated off the tree");
         assert!(reason.contains("to pull"), "{reason}");
+        paint(&mut app);
+        let line = popover_rows(&app)
+            .into_iter()
+            .find(|line| line.contains(pull.title))
+            .expect("painted Pull line");
+        assert!(line.contains(&reason), "{line:?}");
         app.dispatch(Action::PopoverClose);
 
         // A tag chip on the root spacer: its own commit, so Checkout
@@ -2693,8 +2758,39 @@ mod tests {
         );
         // A chip whose ref left the commit drops its section.
         assert!(sections(&app, K::ChipLocal, chip("gone"), &head).is_empty());
+        // The hidden list is the painted one: a ref gone since drops out,
+        // and `[HEAD]` lists only while HEAD is detached here. With none
+        // left, the section goes.
+        let stale = |extra: Vec<PartTarget>| {
+            let mut hidden = vec![chip("gone"), PartTarget::DetachedHead];
+            hidden.extend(extra);
+            PartTarget::Overflow(hidden)
+        };
+        assert_eq!(
+            sections(&app, K::ChipOverflow, stale(vec![chip("feat")]), &head),
+            vec![(
+                K::ChipOverflow,
+                texts(&[
+                    meaning(K::ChipOverflow),
+                    "feat",
+                    title(Action::GraphCheckout),
+                ])
+            )]
+        );
+        assert!(sections(&app, K::ChipOverflow, stale(Vec::new()), &head).is_empty());
         // Detached HEAD.
         app.graph.as_mut().unwrap().sync = None;
+        assert_eq!(
+            sections(&app, K::ChipOverflow, stale(Vec::new()), &head),
+            vec![(
+                K::ChipOverflow,
+                texts(&[
+                    meaning(K::ChipOverflow),
+                    "HEAD",
+                    title(Action::GraphCheckout),
+                ])
+            )]
+        );
         assert_eq!(
             sections(&app, K::ChipDetachedHead, PartTarget::DetachedHead, &head),
             vec![(
@@ -2724,9 +2820,17 @@ mod tests {
             .cloned()
             .unwrap_or_else(|| panic!("hint hit: {:?}", app.layout.icon_hits));
         assert_eq!(hint.target, IconTarget::GraphMoreLines(head.clone()));
-        app.pin_icon(&hint);
-        let below = app.graph_footer_lines_below();
+        // K as the footer paints it: `v<K>` under the hint hit.
+        let painted: String = (hint.x..hint.x + hint.width)
+            .map(|x| app.painted_frame[(x, hint.y)].symbol().to_string())
+            .collect();
+        let below: usize = painted
+            .strip_prefix('v')
+            .and_then(|count| count.parse().ok())
+            .unwrap_or_else(|| panic!("footer hint {painted:?}"));
         assert!(below > 0);
+        assert_eq!(app.graph_footer_lines_below(), below);
+        app.pin_icon(&hint);
         assert_eq!(
             section_texts(&app),
             vec![(
@@ -2744,5 +2848,257 @@ mod tests {
         assert!(!app.commit_msg_expand);
         assert!(app.popover.is_none());
         assert_eq!(app.graph_footer_lines_below(), 0);
+    }
+
+    /// Enter or a click on an action line that a diff highlight disables
+    /// keeps the pinned popover open and puts the gate reason on the
+    /// status line, like the palette. The highlight stays.
+    #[test]
+    fn a_line_the_highlight_disables_keeps_the_popover_on_enter_and_click() {
+        const EXIT_HIGHLIGHT: &str = "exit highlight first (Esc)";
+        let mut app = app();
+        pin_sync(&mut app, "repo:app");
+        app.diff_visual_anchor = Some(0);
+        let fetch = command_for(&Action::Fetch).unwrap();
+        assert_eq!(
+            app.palette_disabled_reason(fetch).as_deref(),
+            Some(EXIT_HIGHLIGHT)
+        );
+        let sections = app.open_popover_sections();
+        let line = flat_lines(&sections)
+            .iter()
+            .position(|line| line.copy_text() == fetch.title)
+            .expect("fetch line");
+        app.popover.as_mut().expect("pinned").focus_line = line;
+        assert_eq!(app.popover_run_action(), Some(Action::Fetch));
+        assert_eq!(app.dispatch(Action::PopoverRun), Effect::None);
+        assert!(app.popover_pinned(), "Enter keeps the popover");
+        assert_eq!(app.status, EXIT_HIGHLIGHT);
+        assert_eq!(app.diff_visual_anchor, Some(0), "the highlight stays");
+
+        app.status = StatusMessage::default();
+        paint(&mut app);
+        let painted = app.layout.popover.clone().expect("painted");
+        let (y, _) = *painted
+            .lines
+            .iter()
+            .find(|(_, index)| *index == line)
+            .expect("painted fetch line");
+        app.dispatch(Action::Click {
+            col: painted.inner.x + 2,
+            row: y,
+        });
+        assert_eq!(app.dispatch(Action::Release), Effect::None);
+        assert!(app.popover_pinned(), "a click keeps the popover");
+        assert_eq!(app.status, EXIT_HIGHLIGHT);
+    }
+
+    /// The `:` palette row Icon popover (`gh`) pins the same popover.
+    #[test]
+    fn the_palette_icon_popover_row_pins_like_gh() {
+        use crate::tui::action::QuickOpenEntry;
+        let mut app = app();
+        focus(&mut app, "repo:app");
+        app.dispatch(Action::PopoverOpenFocused);
+        let want = section_lines(&app);
+        app.close_popover();
+
+        let row = command_for(&Action::PopoverOpenFocused).expect("palette row");
+        assert_eq!((row.title, row.keys), ("Icon popover", "gh"));
+        app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        for c in "icon popover".chars() {
+            app.dispatch(Action::QuickOpenChar(c));
+        }
+        let palette = app.command_palette().expect("palette open");
+        assert_eq!(
+            palette.selected().map(|row| row.title),
+            Some("Icon popover")
+        );
+        app.dispatch(Action::QuickOpenSubmit);
+        assert!(app.command_palette().is_none(), "the palette closes");
+        assert!(app.popover_pinned(), "the row pins the popover");
+        assert_eq!(section_lines(&app), want);
+    }
+
+    /// A detached checkout says `detached HEAD` once. The merge mark
+    /// names a local main, master, or develop when no tip ref or override
+    /// is known.
+    #[test]
+    fn detached_branch_says_it_once_and_the_merge_mark_finds_the_default_name() {
+        use IconKind as K;
+        let mut app = branch_rows_app();
+        let linked = app
+            .snapshot
+            .repos
+            .iter_mut()
+            .find(|repo| repo.repo == "app/.worktrees/feat")
+            .expect("linked checkout");
+        linked.local_branches = vec!["develop".into(), "master".into()];
+        app.rebuild_rows();
+        let sections = gh_on(&mut app, "checkout:app/.worktrees/feat");
+        let merge = sections
+            .iter()
+            .find(|(kind, _)| *kind == K::MergedIntoDefault)
+            .expect("merge section");
+        assert_eq!(merge.1[1], "master", "main, then master, then develop");
+
+        app.snapshot.repos[0].branch = "HEAD".into();
+        app.rebuild_rows();
+        let sections = gh_on(&mut app, "checkout:app");
+        let branch = sections
+            .iter()
+            .find(|(kind, _)| *kind == K::Branch)
+            .expect("branch section");
+        let detached = branch
+            .1
+            .iter()
+            .filter(|line| line.as_str() == "detached HEAD")
+            .count();
+        assert_eq!(detached, 1, "{branch:?}");
+    }
+
+    /// Repo and checkout rows open the comment popover for their object
+    /// comments: open and resolved bodies in their colours.
+    #[test]
+    fn repo_and_checkout_rows_list_their_object_comments() {
+        use IconKind as K;
+        let mut app = branch_rows_app();
+        app.comment_store = crate::tui::comments::put_comment_entry(
+            &app.comment_store,
+            CommentKey::Worktree {
+                path: "app/.worktrees/feat".into(),
+            },
+            "clean up after merge",
+            true,
+        );
+        app.comment_store = crate::tui::comments::put_comment_entry(
+            &app.comment_store,
+            CommentKey::Branch {
+                repo: "notes".into(),
+                branch: "feature".into(),
+            },
+            "release from here\nsecond line",
+            false,
+        );
+        app.rebuild_rows();
+        let comment = |kind: K, app: &mut AppState, id: &str| {
+            gh_on(app, id)
+                .into_iter()
+                .find(|(icon, _)| *icon == kind)
+                .unwrap_or_else(|| panic!("no {kind:?} on {id}"))
+                .1
+        };
+        // The role a body field paints in: resolved bodies are muted.
+        let body_role = |app: &AppState, label: &str| {
+            app.open_popover_sections()
+                .into_iter()
+                .flat_map(|section| section.lines)
+                .find_map(|line| match line {
+                    PopoverLine::Field {
+                        label: found, role, ..
+                    } if found == label => Some(role),
+                    _ => None,
+                })
+        };
+        assert_eq!(
+            comment(K::CommentResolved, &mut app, "checkout:app/.worktrees/feat"),
+            texts(&[
+                meaning(K::CommentResolved),
+                "0 open · 1 resolved",
+                "clean up after merge",
+                "Comment",
+                "Copy comments",
+            ])
+        );
+        assert_eq!(body_role(&app, "resolved"), Some(SegRole::Muted));
+        assert_eq!(
+            comment(K::Comment, &mut app, "repo:notes"),
+            texts(&[
+                meaning(K::Comment),
+                "1 open · 0 resolved",
+                "release from here",
+                "Comment",
+                "Copy comments",
+            ])
+        );
+        assert_eq!(body_role(&app, "open"), Some(SegRole::File));
+    }
+
+    /// A commit-file folder row counts the files under it; a commit-file
+    /// row with a line comment on that commit opens the comment popover.
+    #[test]
+    fn commit_file_folders_count_their_files_and_rows_list_their_comments() {
+        use IconKind as K;
+        const SHA: &str = "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut app = app();
+        app.comment_store = crate::tui::comments::put_comment_entry(
+            &app.comment_store,
+            CommentKey::CommitLine {
+                repo: "app".into(),
+                sha: SHA.into(),
+                path: "src/main.rs".into(),
+                line: 3,
+                end_line: 3,
+            },
+            "why unwrap here?",
+            false,
+        );
+        app.commit_tree_mode = true;
+        app.open_commit_files(
+            "app".into(),
+            crate::tui::drill::CommitFileSource::Commit {
+                commit_id: SHA.into(),
+            },
+            vec![
+                commit_file("A", "src/lib.rs"),
+                commit_file("M", "src/main.rs"),
+                commit_file("M", "README.md"),
+            ],
+        );
+        app.focus = FocusPane::Right;
+        let gh_on_file_row = |app: &mut AppState, id: &str| {
+            app.close_popover();
+            let index = app
+                .commit_file_rows()
+                .iter()
+                .position(|row| row.id == id)
+                .unwrap_or_else(|| panic!("no commit-file row {id}"));
+            if let crate::tui::drill::DrillView::Files { cursor, .. } = &mut app.drill {
+                *cursor = index;
+            }
+            app.dispatch(Action::PopoverOpenFocused);
+            assert!(app.popover_pinned(), "gh pins on {id}");
+            section_texts(app)
+        };
+        assert_eq!(
+            gh_on_file_row(&mut app, "dir:src"),
+            vec![(
+                K::Folder,
+                texts(&[
+                    meaning(K::Folder),
+                    "src",
+                    "2 files",
+                    "Stage",
+                    "Unstage",
+                    "Revert",
+                    "Copy entity reference",
+                ])
+            )]
+        );
+        let sections = gh_on_file_row(&mut app, "file:src/main.rs");
+        assert_eq!(
+            sections.iter().find(|(kind, _)| *kind == K::Comment),
+            Some(&(
+                K::Comment,
+                texts(&[
+                    meaning(K::Comment),
+                    "1 open · 0 resolved",
+                    "why unwrap here?",
+                    "Comment",
+                    "Copy comments",
+                ])
+            )),
+            "{sections:?}"
+        );
     }
 }

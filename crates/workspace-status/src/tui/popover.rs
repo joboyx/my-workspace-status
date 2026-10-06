@@ -1,10 +1,11 @@
 //! Icon popovers: a hover peek, a pinned popover, and their content.
 //!
-//! Paint records one [`super::state::IconHit`] per painted icon (a tagged
-//! tree segment, a graph node, row glyph, or comment mark, a PR badge). The pointer resting on a hit for
-//! [`PEEK_DWELL_MS`] opens a peek: paint only, never an input mode, so it
-//! never takes a key. The pointer leaving both the icon and the peek starts
-//! a [`PEEK_GRACE_MS`] grace, then the peek closes.
+//! Paint records one [`super::state::IconHit`] per painted icon: a tagged
+//! tree segment; a graph node, row glyph, chip, or comment mark; a PR
+//! badge. The pointer resting on a hit for [`PEEK_DWELL_MS`] opens a peek:
+//! paint only, never an input mode, so it never takes a key. The pointer
+//! leaving both the icon and the peek starts a [`PEEK_GRACE_MS`] grace,
+//! then the peek closes.
 //!
 //! A click on an icon, a click inside a peek, or `gh` pins a popover. A
 //! pinned popover is [`super::keys::InputMode::Popover`]: `j` / `k` move
@@ -19,6 +20,7 @@
 //! functions of the [`AppState`] and one target, so a new icon kind adds one
 //! builder arm here and nothing in the core.
 
+use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
 
 use ratatui::layout::Rect;
@@ -27,7 +29,7 @@ use workspace_status_graph::{
     GraphRow, PartTarget, RefKind, Stash, SyncStatus, Worktree, ASCII, UNICODE,
 };
 
-use crate::helpers::{is_default_branch, is_detached_head_branch};
+use crate::helpers::{is_default_branch, is_detached_head_branch, DEFAULT_BRANCH_NAMES};
 use crate::snapshot::{CheckoutKind, FileChange, WorkspaceRepoSnapshot};
 
 use super::action::Action;
@@ -150,6 +152,10 @@ pub enum PopoverLine {
         label: &'static str,
         /// Value text.
         value: String,
+        /// Colour of the value: the role the pane paints the same thing
+        /// in (a branch name, a sync count, a status side), else
+        /// [`SegRole::File`].
+        role: SegRole,
     },
     /// An existing command: title and key chip from the palette catalog.
     /// Enter or a click runs its [`Action`].
@@ -315,14 +321,57 @@ pub fn popover_sections(
     targets: &[(IconKind, IconTarget)],
     now_unix: i64,
 ) -> Vec<PopoverSection> {
+    let rows = SectionRows::new(state);
     targets
         .iter()
-        .filter_map(|(kind, target)| section(state, *kind, target, now_unix))
+        .filter_map(|(kind, target)| section(state, &rows, *kind, target, now_unix))
         .collect()
+}
+
+/// The commit-file rows and graph rows the sections of one popover read.
+/// Each list is built at most once per [`popover_sections`] call, however
+/// many sections read it.
+struct SectionRows<'a> {
+    state: &'a AppState,
+    commit_files: OnceCell<Vec<CommitFileRow>>,
+    graph: OnceCell<Vec<GraphRow>>,
+}
+
+impl<'a> SectionRows<'a> {
+    fn new(state: &'a AppState) -> Self {
+        Self {
+            state,
+            commit_files: OnceCell::new(),
+            graph: OnceCell::new(),
+        }
+    }
+
+    /// The shown commit-file or compare list rows.
+    fn commit_files(&self) -> &[CommitFileRow] {
+        self.commit_files
+            .get_or_init(|| self.state.commit_file_rows())
+    }
+
+    /// The visible graph rows; empty with no graph.
+    fn graph(&self) -> &[GraphRow] {
+        self.graph.get_or_init(|| {
+            self.state
+                .graph
+                .as_ref()
+                .map(|model| model.visible_rows())
+                .unwrap_or_default()
+        })
+    }
+
+    /// The graph row with [`graph_row_id`] `id`.
+    fn graph_row(&self, id: &str) -> Option<&GraphRow> {
+        self.graph().iter().find(|row| graph_row_id(row) == id)
+    }
 }
 
 fn section(
     state: &AppState,
+    rows: &SectionRows<'_>,
     kind: IconKind,
     target: &IconTarget,
     now_unix: i64,
@@ -334,17 +383,14 @@ fn section(
         }
         IconTarget::PullRequest(repo) => pr_section(state, repo, now_unix),
         IconTarget::CommitFileRow(id) => {
-            let row = state
-                .commit_file_rows()
-                .into_iter()
-                .find(|row| &row.id == id)?;
-            commit_file_section(state, kind, &row)
+            let row = rows.commit_files().iter().find(|row| &row.id == id)?;
+            commit_file_section(state, kind, row)
         }
-        IconTarget::GraphRow(id) => graph_row_section(state, kind, id, now_unix),
-        IconTarget::GraphWorktree(path) => graph_worktree_section(state, path),
-        IconTarget::GraphChip { row, chip } => graph_chip_section(state, kind, row, chip),
+        IconTarget::GraphRow(id) => graph_row_section(state, rows, kind, id, now_unix),
+        IconTarget::GraphWorktree(path) => graph_worktree_section(state, rows, path),
+        IconTarget::GraphChip { row, chip } => graph_chip_section(state, rows, kind, row, chip),
         IconTarget::GraphSync => graph_sync_section(state),
-        IconTarget::GraphMoreLines(row) => graph_more_lines_section(state, row),
+        IconTarget::GraphMoreLines(row) => graph_more_lines_section(state, rows, row),
     }
 }
 
@@ -393,6 +439,7 @@ fn tree_section(state: &AppState, kind: IconKind, row: &VisibleRow) -> Option<Po
                     path: &row.chrome.path,
                     primary: row.primary_repo.as_deref(),
                     branch: Some(&row.chrome.branch),
+                    default_override: row.chrome.default_branch_override.as_deref(),
                     current: false,
                     ignored: row.ignored,
                 },
@@ -414,7 +461,11 @@ fn tree_section(state: &AppState, kind: IconKind, row: &VisibleRow) -> Option<Po
             ]
         }
         IconKind::MergedIntoDefault | IconKind::OpenVsDefault => {
-            lines.push(field("vs", default_ref(state, row)));
+            lines.push(role_field(
+                "vs",
+                default_ref(state, row),
+                SegRole::BranchDefault,
+            ));
             let mut actions = vec![Action::CompareVsDefault, Action::DefaultBranch];
             let linked = row.chrome.checkout_kind == Some(CheckoutKind::Linked);
             if kind == IconKind::MergedIntoDefault && linked {
@@ -430,12 +481,8 @@ fn tree_section(state: &AppState, kind: IconKind, row: &VisibleRow) -> Option<Po
         IconKind::StatusFailed => vec![Action::Refresh],
         IconKind::Ignored => vec![Action::ToggleShowIgnored],
         IconKind::ChangeCount => {
-            let (staged, unstaged, untracked) = change_counts(state, &row_checkouts(state, row));
-            lines.extend([
-                field("staged", staged.to_string()),
-                field("unstaged", unstaged.to_string()),
-                field("untracked", untracked.to_string()),
-            ]);
+            let counts = change_counts(state, &row_checkouts(state, row));
+            change_count_fields(counts, &mut lines);
             vec![Action::StashMenu, Action::CompareVsDefault]
         }
         IconKind::WorktreeCount => {
@@ -596,12 +643,12 @@ fn file_fields(
             let mut actions = Vec::new();
             match facts.sides.as_ref() {
                 Some(sides) => {
+                    let (index, index_role) = side_text(sides.staged_status.as_deref(), false);
+                    let (worktree, worktree_role) =
+                        side_text(sides.unstaged_status.as_deref(), sides.untracked);
                     lines.extend([
-                        field("index", side_text(sides.staged_status.as_deref(), false)),
-                        field(
-                            "worktree",
-                            side_text(sides.unstaged_status.as_deref(), sides.untracked),
-                        ),
+                        role_field("index", index, index_role),
+                        role_field("worktree", worktree, worktree_role),
                     ]);
                     if change.unstaged_status.is_some() || change.untracked {
                         actions.push(Action::Stage);
@@ -611,9 +658,11 @@ fn file_fields(
                     }
                 }
                 None => {
-                    lines.push(field(
+                    let letter = status_letter_from_change(change);
+                    lines.push(role_field(
                         "change",
-                        spec(status_letter_from_change(change).icon_kind()).name,
+                        spec(letter.icon_kind()).name,
+                        SegRole::from(letter.color_role()),
                     ));
                     actions.extend([Action::Stage, Action::Unstage]);
                 }
@@ -626,23 +675,24 @@ fn file_fields(
     })
 }
 
-/// One side of a workspace change in words: `modified`, `untracked`, or
-/// `no change`.
-fn side_text(status: Option<&str>, untracked: bool) -> String {
+/// One side of a workspace change in words (`modified`, `untracked`, or
+/// `no change`) and the colour its status letter paints in.
+fn side_text(status: Option<&str>, untracked: bool) -> (String, SegRole) {
     if untracked {
-        return "untracked".into();
+        return ("untracked".into(), SegRole::Added);
     }
-    match status {
-        None => "no change".into(),
-        Some("A") => "added".into(),
-        Some("M") => "modified".into(),
-        Some("D") => "deleted".into(),
-        Some("R") => "renamed".into(),
-        Some("C") => "copied".into(),
-        Some("U") => "conflict".into(),
-        Some("T") => "type changed".into(),
-        Some(other) => other.to_string(),
-    }
+    let (words, role) = match status {
+        None => ("no change", SegRole::Muted),
+        Some("A") => ("added", SegRole::Added),
+        Some("M") => ("modified", SegRole::Modified),
+        Some("D") => ("deleted", SegRole::Deleted),
+        Some("R") => ("renamed", SegRole::Renamed),
+        Some("C") => ("copied", SegRole::Renamed),
+        Some("U") => ("conflict", SegRole::Deleted),
+        Some("T") => ("type changed", SegRole::Modified),
+        Some(other) => return (other.to_string(), SegRole::File),
+    };
+    (words.into(), role)
 }
 
 /// Most comment bodies a comment popover lists.
@@ -658,16 +708,38 @@ fn comment_fields(comments: &[&CommentEntry], lines: &mut Vec<PopoverLine>) -> V
     ));
     for entry in comments.iter().take(COMMENT_BODIES_MAX) {
         let first = entry.body.lines().next().unwrap_or_default().trim();
-        let label = if entry.resolved { "resolved" } else { "open" };
-        lines.push(field(label, first));
+        let (label, role) = if entry.resolved {
+            ("resolved", SegRole::Muted)
+        } else {
+            ("open", SegRole::File)
+        };
+        lines.push(role_field(label, first, role));
     }
     vec![Action::CommentStart, Action::ExportComments]
 }
 
 fn field(label: &'static str, value: impl Into<String>) -> PopoverLine {
+    role_field(label, value, SegRole::File)
+}
+
+/// A field whose value paints in `role`.
+fn role_field(label: &'static str, value: impl Into<String>, role: SegRole) -> PopoverLine {
     PopoverLine::Field {
         label,
         value: value.into(),
+        role,
+    }
+}
+
+/// Colour role of branch `name`: the default-branch colour for the
+/// default branch, else the feature-branch colour. Detached is muted.
+fn branch_role(name: &str, default_override: Option<&str>) -> SegRole {
+    if is_detached_head_branch(name) {
+        SegRole::Muted
+    } else if is_default_branch(name, default_override) {
+        SegRole::BranchDefault
+    } else {
+        SegRole::BranchFeature
     }
 }
 
@@ -707,7 +779,9 @@ fn repo_fields(state: &AppState, row: &VisibleRow, lines: &mut Vec<PopoverLine>)
             format!("family of {}", counted(checkouts, "checkout", "checkouts")),
         ));
     } else {
-        lines.push(field("branch", row.chrome.branch.clone()));
+        let branch = row.chrome.branch.as_str();
+        let role = branch_role(branch, row.chrome.default_branch_override.as_deref());
+        lines.push(role_field("branch", branch, role));
         lines.push(field("kind", "primary checkout"));
     }
     let (staged, unstaged, untracked) = change_counts(state, &row_checkouts(state, row));
@@ -725,6 +799,8 @@ struct WorktreeFacts<'a> {
     primary: Option<&'a str>,
     /// Checked-out branch; `None` or a detached name is detached.
     branch: Option<&'a str>,
+    /// Configured default branch name, when set.
+    default_override: Option<&'a str>,
     /// The graph's current checkout.
     current: bool,
     /// Listed as ignored in config.
@@ -739,15 +815,17 @@ fn worktree_fields(facts: &WorktreeFacts<'_>, lines: &mut Vec<PopoverLine>) {
     if let Some(primary) = facts.primary {
         lines.push(field("primary", primary));
     }
-    lines.push(field(
+    let branch = facts.branch.unwrap_or_default();
+    lines.push(role_field(
         "branch",
-        branch_or_detached(facts.branch.unwrap_or_default()),
+        branch_or_detached(branch),
+        branch_role(branch, facts.default_override),
     ));
     if facts.current {
         lines.push(field("checkout", "current"));
     }
     if facts.ignored {
-        lines.push(field("config", "ignored"));
+        lines.push(role_field("config", "ignored", SegRole::Muted));
     }
 }
 
@@ -759,18 +837,23 @@ fn branch_or_detached(branch: &str) -> String {
     }
 }
 
-/// Branch: name, default or feature, local branch count.
+/// Branch: name, default or feature, local branch count. A detached
+/// checkout has no name: its kind says `detached HEAD` once.
 fn branch_fields(state: &AppState, row: &VisibleRow, lines: &mut Vec<PopoverLine>) {
     let branch = row.chrome.branch.as_str();
-    let kind = if is_detached_head_branch(branch) {
-        "detached HEAD"
-    } else if is_default_branch(branch, row.chrome.default_branch_override.as_deref()) {
-        "default branch"
+    let default_override = row.chrome.default_branch_override.as_deref();
+    let role = branch_role(branch, default_override);
+    if is_detached_head_branch(branch) {
+        lines.push(role_field("kind", "detached HEAD", role));
     } else {
-        "feature branch"
-    };
-    lines.push(field("name", branch_or_detached(branch)));
-    lines.push(field("kind", kind));
+        let kind = if is_default_branch(branch, default_override) {
+            "default branch"
+        } else {
+            "feature branch"
+        };
+        lines.push(role_field("name", branch, role));
+        lines.push(field("kind", kind));
+    }
     if let Some(repo) = row_repo(state, row) {
         lines.push(field(
             "local",
@@ -780,11 +863,20 @@ fn branch_fields(state: &AppState, row: &VisibleRow, lines: &mut Vec<PopoverLine
 }
 
 /// The default-branch ref the merge mark compares with: the cached tip ref
-/// (`origin/<default>` or `<default>`), else the configured default name.
+/// (`origin/<default>` or `<default>`), else the configured default name,
+/// else the first local `main`, `master`, or `develop` (the default-branch
+/// rule), else `the default branch`.
 fn default_ref(state: &AppState, row: &VisibleRow) -> String {
-    row_repo(state, row)
-        .and_then(|repo| repo.default_tip_ref.clone())
+    let repo = row_repo(state, row);
+    repo.and_then(|repo| repo.default_tip_ref.clone())
         .or_else(|| row.chrome.default_branch_override.clone())
+        .or_else(|| {
+            let local = &repo?.local_branches;
+            DEFAULT_BRANCH_NAMES
+                .iter()
+                .find(|name| local.iter().any(|branch| branch == *name))
+                .map(|name| (*name).to_string())
+        })
         .unwrap_or_else(|| "the default branch".into())
 }
 
@@ -857,6 +949,22 @@ fn change_counts(state: &AppState, checkouts: &[String]) -> (usize, usize, usize
     counts
 }
 
+/// `staged`, `unstaged`, and `untracked` count fields in the colours
+/// their status letters paint in; a zero count is muted.
+fn change_count_fields(
+    (staged, unstaged, untracked): (usize, usize, usize),
+    lines: &mut Vec<PopoverLine>,
+) {
+    for (label, n, role) in [
+        ("staged", staged, SegRole::Added),
+        ("unstaged", unstaged, SegRole::Modified),
+        ("untracked", untracked, SegRole::Added),
+    ] {
+        let role = if n == 0 { SegRole::Muted } else { role };
+        lines.push(role_field(label, n.to_string(), role));
+    }
+}
+
 fn is_status_kind(kind: IconKind) -> bool {
     matches!(
         kind,
@@ -891,16 +999,18 @@ fn is_sync_kind(kind: IconKind) -> bool {
 fn sync_fields(kind: IconKind, note: &str, lines: &mut Vec<PopoverLine>) -> Vec<Action> {
     match kind {
         IconKind::Ahead => {
-            lines.push(field(
+            lines.push(role_field(
                 "ahead",
                 commits(note_count(note, "ahead by "), "not pushed"),
+                SegRole::Added,
             ));
             vec![Action::Push, Action::Fetch]
         }
         IconKind::Behind => {
-            lines.push(field(
+            lines.push(role_field(
                 "behind",
                 commits(note_count(note, "behind by "), "to pull"),
+                SegRole::Deleted,
             ));
             vec![Action::Pull, Action::Fetch]
         }
@@ -909,12 +1019,12 @@ fn sync_fields(kind: IconKind, note: &str, lines: &mut Vec<PopoverLine>) -> Vec<
                 .strip_prefix("diverged (")
                 .and_then(|rest| rest.strip_suffix(')'))
                 .unwrap_or(note);
-            lines.push(field("sync", counts));
+            lines.push(role_field("sync", counts, SegRole::Modified));
             vec![Action::Fetch, Action::Pull, Action::Push]
         }
         IconKind::NoUpstream => {
             if !note.is_empty() {
-                lines.push(field("note", note));
+                lines.push(role_field("note", note, SegRole::Muted));
             }
             vec![Action::Push, Action::Fetch]
         }
@@ -956,7 +1066,7 @@ fn pr_section(state: &AppState, repo: &Path, now_unix: i64) -> Option<PopoverSec
     let mut lines = vec![PopoverLine::Text(spec(kind).meaning.to_string())];
     match state.pull_request_detail_for(repo) {
         Some(PrDetailState::Ready(detail)) => {
-            pr_detail_fields(state.ascii, detail, now_unix, &mut lines)
+            pr_detail_fields(state.ascii, detail, role, now_unix, &mut lines)
         }
         other => {
             lines.push(field("number", format!("#{}", pr.number)));
@@ -983,10 +1093,11 @@ fn pr_section(state: &AppState, repo: &Path, now_unix: i64) -> Option<PopoverSec
 
 /// Fields of a fetched PR detail: `#N title`, state (draft, review),
 /// author, branches, checks, and update time. Each optional one shows when
-/// the forge sent it.
+/// the forge sent it. The state paints in the badge colour `badge`.
 fn pr_detail_fields(
     ascii: bool,
     detail: &PullRequestDetail,
+    badge: SegRole,
     now_unix: i64,
     lines: &mut Vec<PopoverLine>,
 ) {
@@ -1010,16 +1121,34 @@ fn pr_detail_fields(
         state.push(review.label());
     }
     if !state.is_empty() {
-        lines.push(field("state", state.join(" · ")));
+        lines.push(role_field("state", state.join(" · "), badge));
     }
     if let Some(author) = &detail.author {
         lines.push(field("author", author.clone()));
     }
     if let (Some(head), Some(base)) = (&detail.head, &detail.base) {
         let arrow = if ascii { "->" } else { "→" };
-        lines.push(field("branch", format!("{head} {arrow} {base}")));
+        lines.push(role_field(
+            "branch",
+            format!("{head} {arrow} {base}"),
+            SegRole::BranchFeature,
+        ));
     }
-    lines.push(field("checks", checks_text(ascii, &detail.checks)));
+    let checks = &detail.checks;
+    let checks_role = if checks.fail > 0 {
+        SegRole::Deleted
+    } else if checks.pending > 0 {
+        SegRole::Modified
+    } else if checks.pass > 0 {
+        SegRole::Added
+    } else {
+        SegRole::Muted
+    };
+    lines.push(role_field(
+        "checks",
+        checks_text(ascii, checks),
+        checks_role,
+    ));
     if let Some(unix) = detail.updated_at {
         let local = format_local_timestamp(unix);
         let relative = format_relative_date(unix, now_unix);
@@ -1061,13 +1190,13 @@ fn checks_text(ascii: bool, checks: &ChecksSummary) -> String {
 /// the new kind.
 fn graph_row_section(
     state: &AppState,
+    rows: &SectionRows<'_>,
     kind: IconKind,
     id: &str,
     now_unix: i64,
 ) -> Option<PopoverSection> {
     let model = state.graph.as_ref()?;
-    let rows = model.visible_rows();
-    let row = rows.iter().find(|row| graph_row_id(row) == id)?;
+    let row = rows.graph_row(id)?;
     let comments;
     let (kind, role) = if is_comment_kind(kind) {
         comments = state.graph_row_comments(row);
@@ -1111,8 +1240,13 @@ fn graph_row_section(
         GraphRow::Commit { commit, .. } if kind == IconKind::GraphHeadCommit => {
             commit_fields(commit, now_unix, &mut lines);
             if let Some(sync) = model.sync.as_ref() {
-                lines.push(field("head", format!("on {}", sync.branch)));
-                lines.push(field("sync", graph_sync_text(state, sync)));
+                let branch = branch_role(&sync.branch, model.default_branch_override.as_deref());
+                lines.push(role_field("head", format!("on {}", sync.branch), branch));
+                lines.push(role_field(
+                    "sync",
+                    graph_sync_text(state, sync),
+                    graph_sync_role(sync.status),
+                ));
             }
             vec![Action::CompareCommitVsParent, Action::GraphCreateBranch]
         }
@@ -1139,18 +1273,13 @@ fn graph_row_section(
             } else {
                 "working tree clean"
             };
-            lines.push(field("state", words));
+            lines.push(role_field("state", words, role));
             let repo: Vec<String> = state
                 .graph_identity
                 .iter()
                 .map(|(repo, _)| repo.clone())
                 .collect();
-            let (staged, unstaged, untracked) = change_counts(state, &repo);
-            lines.extend([
-                field("staged", staged.to_string()),
-                field("unstaged", unstaged.to_string()),
-                field("untracked", untracked.to_string()),
-            ]);
+            change_count_fields(change_counts(state, &repo), &mut lines);
             vec![Action::StashMenu, Action::Refresh]
         }
         GraphRow::Worktree(_) => return None,
@@ -1221,8 +1350,20 @@ fn author_and_date(author: &str, unix: i64, now_unix: i64, lines: &mut Vec<Popov
     ));
 }
 
-/// HEAD sync from the graph header state: `↑A ↓B` in the graph glyphs, or
-/// `up to date` / `no upstream`.
+/// Colour of a graph sync state, as the tree paints its sync mark.
+fn graph_sync_role(status: SyncStatus) -> SegRole {
+    match status {
+        SyncStatus::Ahead => SegRole::Added,
+        SyncStatus::Behind => SegRole::Deleted,
+        SyncStatus::Diverged => SegRole::Modified,
+        SyncStatus::UpToDate | SyncStatus::NoUpstream => SegRole::Muted,
+    }
+}
+
+/// HEAD sync from the graph header state: the ahead and behind counts
+/// after the graph header glyphs ([`IconKind::Ahead`] and
+/// [`IconKind::Behind`] in the active glyph mode), or `up to date` /
+/// `no upstream`.
 fn graph_sync_text(state: &AppState, sync: &workspace_status_graph::SyncState) -> String {
     let glyphs = if state.ascii { &ASCII } else { &UNICODE };
     match sync.status {
@@ -1237,20 +1378,15 @@ fn graph_sync_text(state: &AppState, sync: &workspace_status_graph::SyncState) -
 
 /// The graph worktree with `path`, and true when it is its own worktree
 /// row (false: a mark on a commit row's spacer).
-fn graph_worktree(state: &AppState, path: &str) -> Option<(Worktree, bool)> {
-    state
-        .graph
-        .as_ref()?
-        .visible_rows()
-        .into_iter()
-        .find_map(|row| match row {
-            GraphRow::Worktree(worktree) => (worktree.path == path).then_some((worktree, true)),
-            GraphRow::Commit { worktrees, .. } => worktrees
-                .into_iter()
-                .find(|worktree| worktree.path == path)
-                .map(|worktree| (worktree, false)),
-            GraphRow::Uncommitted { .. } | GraphRow::Stash(_) => None,
-        })
+fn graph_worktree<'a>(rows: &'a SectionRows<'_>, path: &str) -> Option<(&'a Worktree, bool)> {
+    rows.graph().iter().find_map(|row| match row {
+        GraphRow::Worktree(worktree) => (worktree.path == path).then_some((worktree, true)),
+        GraphRow::Commit { worktrees, .. } => worktrees
+            .iter()
+            .find(|worktree| worktree.path == path)
+            .map(|worktree| (worktree, false)),
+        GraphRow::Uncommitted { .. } | GraphRow::Stash(_) => None,
+    })
 }
 
 /// Linked-worktree glyph on the graph: the shared worktree fields. On a
@@ -1258,8 +1394,12 @@ fn graph_worktree(state: &AppState, path: &str) -> Option<(Worktree, bool)> {
 /// and Copy entity reference. A worktree mark on a commit spacer lists no
 /// action: selecting it selects the commit row, so those keys would act on
 /// the commit, not on the worktree.
-fn graph_worktree_section(state: &AppState, path: &str) -> Option<PopoverSection> {
-    let (worktree, own_row) = graph_worktree(state, path)?;
+fn graph_worktree_section(
+    state: &AppState,
+    rows: &SectionRows<'_>,
+    path: &str,
+) -> Option<PopoverSection> {
+    let (worktree, own_row) = graph_worktree(rows, path)?;
     let primary = state
         .snapshot
         .repos
@@ -1274,6 +1414,10 @@ fn graph_worktree_section(state: &AppState, path: &str) -> Option<PopoverSection
             path,
             primary,
             branch: worktree.branch.as_deref(),
+            default_override: state
+                .graph
+                .as_ref()
+                .and_then(|model| model.default_branch_override.as_deref()),
             current: worktree.is_current,
             ignored: worktree.ignored,
         },
@@ -1352,8 +1496,9 @@ fn ref_chip_kind(refs: &[GraphRef], default_override: Option<&str>) -> Option<Ic
     })
 }
 
-/// Field label and value of one hidden chip in a `[+N]` popover.
-fn hidden_chip_field(chip: &PartTarget) -> Option<PopoverLine> {
+/// Field label and value of one hidden chip in a `[+N]` popover, in the
+/// chip's colour.
+fn hidden_chip_field(chip: &PartTarget, default_override: Option<&str>) -> Option<PopoverLine> {
     match chip {
         PartTarget::Chip(refs) => {
             let label = match refs.as_slice() {
@@ -1365,11 +1510,22 @@ fn hidden_chip_field(chip: &PartTarget) -> Option<PopoverLine> {
                 },
                 [] => return None,
             };
+            let role = chip_role(ref_chip_kind(refs, default_override)?);
             let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
-            Some(field(label, names.join(" + ")))
+            Some(role_field(label, names.join(" + "), role))
         }
         PartTarget::DetachedHead => Some(field("detached", "HEAD")),
         PartTarget::Marks { .. } | PartTarget::Overflow(_) => None,
+    }
+}
+
+/// Colour role of a ref chip of `kind`, as the graph paints it.
+fn chip_role(kind: IconKind) -> SegRole {
+    match kind {
+        IconKind::ChipDefault => SegRole::BranchDefault,
+        IconKind::ChipRemote => SegRole::Dir,
+        IconKind::ChipTag => SegRole::Modified,
+        _ => SegRole::BranchFeature,
     }
 }
 
@@ -1386,13 +1542,13 @@ fn hidden_chip_field(chip: &PartTarget) -> Option<PopoverLine> {
 /// with the reason.
 fn graph_chip_section(
     state: &AppState,
+    rows: &SectionRows<'_>,
     kind: IconKind,
     row_id: &str,
     chip: &PartTarget,
 ) -> Option<PopoverSection> {
     let model = state.graph.as_ref()?;
-    let rows = model.visible_rows();
-    let row = rows.iter().find(|row| graph_row_id(row) == row_id)?;
+    let row = rows.graph_row(row_id)?;
     let (refs, is_head, commit) = chip_refs(model, row)?;
     let on_commit_row = matches!(row, GraphRow::Commit { .. });
     let head_branch = model.sync.as_ref().map(|sync| sync.branch.as_str());
@@ -1404,7 +1560,11 @@ fn graph_chip_section(
             if !is_head || head_branch != Some(branch.as_str()) {
                 return None;
             }
-            fields.push(field("head", format!("on {branch}")));
+            fields.push(role_field(
+                "head",
+                format!("on {branch}"),
+                branch_role(branch, default_override),
+            ));
             (
                 kind,
                 SegRole::Heading,
@@ -1422,8 +1582,16 @@ fn graph_chip_section(
             if !has(RefKind::Local, branch) || !has(RefKind::Remote, remote) {
                 return None;
             }
-            fields.push(field("branch", branch.clone()));
-            fields.push(field("sync", format!("in sync with {remote}")));
+            fields.push(role_field(
+                "branch",
+                branch.clone(),
+                branch_role(branch, default_override),
+            ));
+            fields.push(role_field(
+                "sync",
+                format!("in sync with {remote}"),
+                SegRole::Dir,
+            ));
             // With the checkout section above, its Pull / Push / Fetch
             // cover the run. A synced branch that is not checked out only
             // fetches: pull and push act on the checked-out branch.
@@ -1455,14 +1623,26 @@ fn graph_chip_section(
             (kind, SegRole::Heading, actions)
         }
         (IconKind::ChipOverflow, PartTarget::Overflow(hidden)) => {
-            let present = |chip: &PartTarget| match chip {
+            // The hidden list is the one the chip had when it painted. A
+            // ref that is gone since (a fetch pruned it, HEAD left the
+            // detached commit) drops out; with none left, so does the
+            // section.
+            let detached =
+                is_head && head_branch.is_none_or(is_detached_head_branch) && commit.is_some();
+            let present = |chip: &&PartTarget| match chip {
                 PartTarget::Chip(chip_refs) => chip_refs.iter().all(|r| has(r.kind, &r.name)),
-                _ => true,
+                PartTarget::DetachedHead => detached,
+                PartTarget::Marks { .. } | PartTarget::Overflow(_) => false,
             };
-            if !hidden.iter().any(present) {
+            let shown: Vec<PopoverLine> = hidden
+                .iter()
+                .filter(present)
+                .filter_map(|chip| hidden_chip_field(chip, default_override))
+                .collect();
+            if shown.is_empty() {
                 return None;
             }
-            fields.extend(hidden.iter().filter_map(hidden_chip_field));
+            fields.extend(shown);
             let actions = if on_commit_row {
                 vec![Action::GraphCheckout]
             } else {
@@ -1475,8 +1655,9 @@ fn graph_chip_section(
                 return None;
             }
             let kind = ref_chip_kind(chip_refs, default_override)?;
+            let role = chip_role(kind);
             let first = chip_refs.first()?;
-            fields.push(field("name", first.name.clone()));
+            fields.push(role_field("name", first.name.clone(), role));
             let what = match (first.kind, chip_refs.len()) {
                 (RefKind::Local, 1) => "local branch",
                 (RefKind::Local, _) => "local branch and remote",
@@ -1485,7 +1666,7 @@ fn graph_chip_section(
             };
             fields.push(field("kind", what));
             if let Some(remote) = chip_refs.get(1) {
-                fields.push(field("remote", remote.name.clone()));
+                fields.push(role_field("remote", remote.name.clone(), SegRole::Dir));
             }
             if kind == IconKind::ChipDefault {
                 fields.push(field("default", "yes"));
@@ -1498,12 +1679,6 @@ fn graph_chip_section(
             if on_commit_row {
                 actions.push(Action::GraphCheckout);
             }
-            let role = match kind {
-                IconKind::ChipDefault => SegRole::BranchDefault,
-                IconKind::ChipRemote => SegRole::Dir,
-                IconKind::ChipTag => SegRole::Modified,
-                _ => SegRole::BranchFeature,
-            };
             (kind, role, actions)
         }
         _ => return None,
@@ -1529,9 +1704,17 @@ fn graph_chip_section(
 fn graph_sync_section(state: &AppState) -> Option<PopoverSection> {
     let sync = state.graph.as_ref()?.sync.as_ref()?;
     let kind = graph_sync_kind(sync.status);
+    let default_override = state
+        .graph
+        .as_ref()
+        .and_then(|model| model.default_branch_override.as_deref());
     let mut lines = vec![
         PopoverLine::Text(spec(kind).meaning.to_string()),
-        field("branch", sync.branch.clone()),
+        role_field(
+            "branch",
+            sync.branch.clone(),
+            branch_role(&sync.branch, default_override),
+        ),
     ];
     let (words, role) = match sync.status {
         SyncStatus::Ahead => ("ahead", SegRole::Added),
@@ -1544,16 +1727,18 @@ fn graph_sync_section(state: &AppState) -> Option<PopoverSection> {
         sync.status,
         SyncStatus::Ahead | SyncStatus::Behind | SyncStatus::Diverged
     ) {
-        lines.push(field(
+        lines.push(role_field(
             "ahead",
             commits(Some(sync.ahead.into()), "not pushed"),
+            SegRole::Added,
         ));
-        lines.push(field(
+        lines.push(role_field(
             "behind",
             commits(Some(sync.behind.into()), "to pull"),
+            SegRole::Deleted,
         ));
     }
-    lines.push(field("state", words));
+    lines.push(role_field("state", words, role));
     lines.extend(
         [Action::Pull, Action::Push, Action::Fetch]
             .iter()
@@ -1570,8 +1755,12 @@ fn graph_sync_section(state: &AppState) -> Option<PopoverSection> {
 /// The footer hint of graph row `row_id`: how many message lines are
 /// below the shown ones; Collapse / expand and Taller message. `None` once
 /// the row is not selected or every line shows.
-fn graph_more_lines_section(state: &AppState, row_id: &str) -> Option<PopoverSection> {
-    if graph_row_id(&state.focused_graph_row()?) != row_id {
+fn graph_more_lines_section(
+    state: &AppState,
+    rows: &SectionRows<'_>,
+    row_id: &str,
+) -> Option<PopoverSection> {
+    if graph_row_id(rows.graph().get(state.graph_cursor)?) != row_id {
         return None;
     }
     let below = state.graph_footer_lines_below();
@@ -1685,10 +1874,37 @@ mod tests {
     }
 
     fn field(value: &str) -> PopoverLine {
-        PopoverLine::Field {
-            label: "x",
-            value: value.into(),
-        }
+        super::field("x", value)
+    }
+
+    #[test]
+    fn worktree_branch_honours_the_configured_default() {
+        let role = |branch, default_override| {
+            let mut lines = Vec::new();
+            worktree_fields(
+                &WorktreeFacts {
+                    path: "/w/wt",
+                    primary: None,
+                    branch: Some(branch),
+                    default_override,
+                    current: false,
+                    ignored: false,
+                },
+                &mut lines,
+            );
+            lines.iter().find_map(|line| match line {
+                PopoverLine::Field {
+                    label: "branch",
+                    role,
+                    ..
+                } => Some(*role),
+                _ => None,
+            })
+        };
+        assert_eq!(role("trunk", Some("trunk")), Some(SegRole::BranchDefault));
+        assert_eq!(role("main", Some("trunk")), Some(SegRole::BranchFeature));
+        assert_eq!(role("main", None), Some(SegRole::BranchDefault));
+        assert_eq!(role("trunk", None), Some(SegRole::BranchFeature));
     }
 
     #[test]

@@ -17,6 +17,8 @@
 //! It flows into up to [`HELP_LEGEND_MAX_COLUMNS`] even columns inside the
 //! same scroll body, so the three key columns stay three.
 
+use std::sync::LazyLock;
+
 use super::icons::{IconGroup, IconSpec, ICON_CATALOG};
 
 /// One help row: key chips plus a short description.
@@ -417,7 +419,7 @@ pub fn help_version_label() -> String {
 }
 
 /// Flattened help rows in column order (MOVE, then GIT, then VIEW).
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn help_entries() -> impl Iterator<Item = &'static HelpEntry> {
     HELP_GROUPS.iter().flat_map(|group| group.entries.iter())
 }
@@ -440,7 +442,7 @@ pub fn help_entry_matches(keys: &str, desc: &str, query: &str) -> bool {
 /// Indices of flattened help entries that match `query`, in order, then
 /// matching legend rows numbered on after the entries (`entries + i` for
 /// the `i`-th row of [`help_legend_specs`]).
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn help_match_indices(query: &str) -> Vec<usize> {
     let entries = help_entries().count();
     help_entries()
@@ -834,26 +836,62 @@ pub fn help_legend_matches(spec: &IconSpec, query: &str) -> bool {
     help_entry_matches(spec.name, spec.meaning, query)
 }
 
-/// Glyph column: the widest legend glyph in either glyph mode.
-pub fn help_legend_glyph_width() -> usize {
+/// Legend column widths, measured once from the static catalog.
+struct HelpLegendWidths {
+    /// Widest glyph of each legend group in either glyph mode, in
+    /// [`IconGroup`] order (Tree, Graph, Chrome).
+    glyph: [usize; 3],
+    /// Longest legend name.
+    name: usize,
+}
+
+static HELP_LEGEND_WIDTHS: LazyLock<HelpLegendWidths> = LazyLock::new(|| {
     use crate::helpers::visible_width;
-    help_legend_specs()
-        .map(|spec| visible_width(spec.nerd).max(visible_width(spec.ascii)))
-        .max()
-        .unwrap_or(0)
+    let mut glyph = [0; 3];
+    for spec in help_legend_specs() {
+        if let Some(group) = spec.group {
+            let width = visible_width(spec.nerd).max(visible_width(spec.ascii));
+            let slot = &mut glyph[group_slot(group)];
+            *slot = (*slot).max(width);
+        }
+    }
+    HelpLegendWidths {
+        glyph,
+        name: help_legend_specs()
+            .map(|spec| spec.name.chars().count())
+            .max()
+            .unwrap_or(0),
+    }
+});
+
+fn group_slot(group: IconGroup) -> usize {
+    match group {
+        IconGroup::Tree => 0,
+        IconGroup::Graph => 1,
+        IconGroup::Chrome => 2,
+    }
+}
+
+/// Glyph column of legend group `group`: its widest glyph in either glyph
+/// mode, so one-column glyphs do not pad to the graph's chip samples.
+pub fn help_legend_glyph_width(group: IconGroup) -> usize {
+    HELP_LEGEND_WIDTHS.glyph[group_slot(group)]
 }
 
 /// Name column: the longest legend name.
 pub fn help_legend_name_width() -> usize {
-    help_legend_specs()
-        .map(|spec| spec.name.chars().count())
-        .max()
-        .unwrap_or(0)
+    HELP_LEGEND_WIDTHS.name
 }
 
-/// Columns before a legend meaning: glyph, gap, name, gap.
-pub fn help_legend_key_width() -> usize {
-    help_legend_glyph_width() + 1 + help_legend_name_width() + 1
+/// Columns before a legend meaning in group `group`: glyph, gap, name,
+/// gap.
+pub fn help_legend_key_width(group: IconGroup) -> usize {
+    help_legend_glyph_width(group) + 1 + help_legend_name_width() + 1
+}
+
+/// [`help_legend_key_width`] of the group `spec` is listed under.
+fn spec_key_width(spec: &IconSpec) -> usize {
+    spec.group.map_or(0, help_legend_key_width)
 }
 
 /// One legend block: an optional group heading row, then one catalog row.
@@ -881,7 +919,7 @@ pub struct HelpLegendLayout {
 /// [`HELP_MIN_DESC_WIDTH`] beside them puts the meaning on its own lines.
 pub fn help_legend_visual_lines(spec: &IconSpec, column_width: usize) -> Vec<HelpVisualLine> {
     let content = help_column_content_width(column_width);
-    let key_width = help_legend_key_width();
+    let key_width = spec_key_width(spec);
     let beside = content.saturating_sub(key_width);
     if beside >= HELP_MIN_DESC_WIDTH {
         return wrap_help_description(spec.meaning, beside)
@@ -1510,14 +1548,19 @@ mod tests {
     /// the meaning wraps under the meaning column, not under the glyph.
     #[test]
     fn legend_text_stays_in_its_column() {
-        let key_width = help_legend_key_width();
+        let widest = [IconGroup::Tree, IconGroup::Graph, IconGroup::Chrome]
+            .into_iter()
+            .map(help_legend_key_width)
+            .max()
+            .unwrap_or(0);
         for term in [46usize, 60, 64, 80, 100, 120, 140, 200] {
             let inner = help_inner_width(term);
             let layout = help_legend_layout(inner);
             let content = help_column_content_width(layout.column_width);
             // Every painted width (46 columns and up) fits the meaning beside.
-            assert!(content >= key_width + HELP_MIN_DESC_WIDTH, "{term}");
+            assert!(content >= widest + HELP_MIN_DESC_WIDTH, "{term}");
             for block in layout.columns.iter().flatten() {
+                let key_width = help_legend_key_width(block.spec.group.expect("legend row"));
                 let lines = help_legend_visual_lines(block.spec, layout.column_width);
                 assert!(!lines[0].text.is_empty(), "{term} {block:?}");
                 for line in &lines {
@@ -1534,7 +1577,8 @@ mod tests {
             }
         }
         // Below that the meaning drops under the glyph and name.
-        let narrow = help_legend_visual_lines(&ICON_CATALOG[0], key_width + 4);
+        let tree = help_legend_key_width(IconGroup::Tree);
+        let narrow = help_legend_visual_lines(&ICON_CATALOG[0], tree + 4);
         assert!(narrow[0].chips && narrow[0].text.is_empty(), "{narrow:?}");
         assert!(narrow[1..].iter().all(|l| !l.chips && l.indent == 0));
     }

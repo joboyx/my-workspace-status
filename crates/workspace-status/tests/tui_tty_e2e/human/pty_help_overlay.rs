@@ -262,8 +262,10 @@ fn pty_help_overlay() {
         "PgDn scrolls the ICONS legend title and Tree rows into view",
         WAIT,
     );
-    // One PgDn at a time until the bottom shows: a burst of presses
-    // sometimes stops short of it. PgDn past the end clamps.
+    // One PgDn at a time until the bottom shows. PgDn is a held
+    // navigation key: the event loop drops queued copies of it
+    // (`discard_held_nav_backlog` in `tui/app.rs`), so a burst of presses
+    // can count as one. PgDn past the end clamps.
     for _ in 0..10 {
         if help_legend_bottom(&tui.screen()) {
             break;

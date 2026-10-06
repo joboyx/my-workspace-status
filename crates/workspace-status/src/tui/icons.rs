@@ -832,17 +832,15 @@ pub fn file_icon(ascii: bool, file_path: &str) -> FileIcon {
     }
 }
 
-/// File type a popover names for `file_path`: the file name when a
-/// filename rule picks its devicon (`package.json`), else the extension
-/// (`rs`), else `plain`. Same lookup order as [`file_icon`].
+/// File type a popover names for `file_path`: the file name as written
+/// when a filename rule picks its devicon (`package.json`, `README.md`),
+/// else the lower-case extension (`rs`), else `plain`. Same lookup order
+/// as [`file_icon`], which matches names case-insensitively.
 pub fn file_type_name(file_path: &str) -> String {
-    let name = file_path
-        .rsplit('/')
-        .next()
-        .unwrap_or(file_path)
-        .to_ascii_lowercase();
+    let base = file_path.rsplit('/').next().unwrap_or(file_path);
+    let name = base.to_ascii_lowercase();
     if filename_icon(&name).is_some() {
-        return name;
+        return base.to_string();
     }
     match name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => ext.to_string(),
@@ -1699,7 +1697,9 @@ mod tests {
     #[test]
     fn file_type_names_follow_the_devicon_rule() {
         assert_eq!(file_type_name("web/package.json"), "package.json");
-        assert_eq!(file_type_name("README.md"), "readme.md");
+        assert_eq!(file_type_name("README.md"), "README.md");
+        assert_eq!(file_type_name("docs/readme.md"), "readme.md");
+        assert_eq!(file_type_name("src/MAIN.RS"), "rs");
         assert_eq!(file_type_name("src/lib.rs"), "rs");
         assert_eq!(file_type_name("notes.xyz"), "xyz");
         assert_eq!(file_type_name("LICENSE"), "plain");

@@ -208,11 +208,11 @@ fn eye_peek(screen: &str) -> bool {
 /// sections, pinned.
 fn file_row_sections(screen: &str) -> bool {
     screen.contains(FILE_TYPE_MEANING)
-        && screen.contains("readme.md file")
+        && screen.contains("README.md file")
         && screen.contains("Open in editor")
         && screen.contains(VIEWED_MEANING)
         && screen.contains(MODIFIED_MEANING)
-        && screen.contains("worktree")
+        && screen.contains("worktree modified")
         && screen.contains("Revert")
         && screen.contains(PINNED_FOOTER)
 }
@@ -229,9 +229,9 @@ fn file_popover_closed(screen: &str) -> bool {
 ///
 /// Live PTY on the daily seed: the cursor starts on the dirty README.
 /// Space marks it reviewed (`*`). Pointer rest on `*` peeks the viewed
-/// section alone. `gh` pins the devicon (`readme.md file`, Open in
-/// editor), viewed, and modified (`worktree`, Revert) sections with the
-/// footer. Esc closes it and the row stays reviewed.
+/// section alone. `gh` pins the devicon (`README.md file`, Open in
+/// editor), viewed, and modified (`worktree modified`, Revert) sections
+/// with the footer. Esc closes it and the row stays reviewed.
 #[test]
 fn pty_icon_popover_gh_on_a_file_row_lists_devicon_badge_and_viewed() {
     let (_root, workspace) = daily_workspace();
