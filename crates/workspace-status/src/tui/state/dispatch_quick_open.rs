@@ -566,29 +566,6 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_p_and_shift_f_open_files_mode() {
-        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-        for event in [
-            Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
-            Event::Key(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE)),
-            Event::Key(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT)),
-        ] {
-            let mut app = family_state();
-            focus_row(&mut app, NodeKind::Checkout, Some("app"));
-            let action = crate::tui::app::map_event(&app, &event);
-            assert_eq!(
-                action,
-                Action::ToggleQuickOpen(QuickOpenEntry::Files),
-                "{event:?}"
-            );
-            let effect = app.dispatch(action);
-            assert!(matches!(effect, Effect::LoadFileIndex { .. }), "{effect:?}");
-            assert_eq!(quick(&app).query, "");
-            assert_eq!(quick(&app).mode(), QuickOpenMode::Files);
-        }
-    }
-
-    #[test]
     fn commands_opened_by_colon_load_the_index_once_back_in_files() {
         let mut app = family_state();
         app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));

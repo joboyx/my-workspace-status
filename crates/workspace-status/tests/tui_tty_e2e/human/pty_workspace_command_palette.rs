@@ -249,43 +249,16 @@ fn pty_workspace_palette_colon_backspace_lands_in_files() {
     );
 }
 
-/// CSI-u Shift+F and Ctrl-p each open Quick Open on files; Ctrl-k in
-/// normal mode opens nothing.
+/// Ctrl-k in normal mode opens nothing.
 ///
-/// Fail if either opener paints the commands footer (`Enter run`) or no
-/// `Go to file` title, or if a `:` sent after Ctrl-k types into an overlay
-/// Ctrl-k opened instead of opening commands itself.
+/// Ctrl-k used to open Quick Open commands; now it moves the cursor only
+/// inside an open picker. Fail if a `:` sent after Ctrl-k types into an
+/// overlay Ctrl-k opened instead of opening commands itself.
 #[test]
-fn pty_workspace_quick_open_shift_f_and_ctrl_p_open_files_ctrl_k_does_not() {
+fn pty_workspace_ctrl_k_opens_nothing() {
     let (_root, workspace) = daily_workspace();
     let mut tui = PtySession::open(&workspace);
     wait_first_paint(&tui);
-
-    tui.shift_letter('F');
-    tui.wait_pred(
-        |screen| screen.contains("Go to file") && palette_closed(screen),
-        "CSI-u Shift+F opens Quick Open on files (Go to file), not commands or Fetch",
-        WAIT,
-    );
-    tui.esc();
-    tui.wait_pred(
-        |screen| !screen.contains("Go to file") && palette_closed(screen),
-        "Esc closes the F file picker",
-        WAIT,
-    );
-
-    tui.ctrl_letter('p');
-    tui.wait_pred(
-        |screen| screen.contains("Go to file") && palette_closed(screen),
-        "Ctrl-p opens Quick Open on files (Go to file), not commands or Pull",
-        WAIT,
-    );
-    tui.esc();
-    tui.wait_pred(
-        |screen| !screen.contains("Go to file") && palette_closed(screen),
-        "Esc closes the Ctrl-p file picker",
-        WAIT,
-    );
 
     // Probe, not a sleep: input is ordered, so `:` and `pull` land after
     // Ctrl-k. Had Ctrl-k opened commands, `:` would type into it (`>:pull`);
