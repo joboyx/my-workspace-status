@@ -875,54 +875,33 @@ pub fn format_commit_message(subject: &str, body: &str) -> String {
 /// Wrap `text` to `width` columns (char count, same as footer truncate).
 ///
 /// Existing newlines stay. Overlong lines hard-break. Caps at `max_lines`.
-/// A leftover that does not fit ends the last line with `…`.
+/// Any leftover that does not fit (the rest of a line or later lines) ends
+/// the last line with `…`.
 pub fn wrap_commit_message(text: &str, width: usize, max_lines: usize) -> Vec<String> {
     let width = width.max(1);
     let max_lines = max_lines.max(1);
     let mut lines: Vec<String> = Vec::new();
-    let push = |lines: &mut Vec<String>, line: String, more: bool| -> bool {
-        if lines.len() + 1 < max_lines {
-            lines.push(line);
-            return false;
-        }
-        if more {
-            let mut last: String = line.chars().take(width.saturating_sub(1).max(1)).collect();
-            if last.chars().count() >= width && width > 0 {
-                last = last.chars().take(width.saturating_sub(1)).collect();
-            }
-            last.push('…');
-            if last.chars().count() > width {
-                last = last.chars().take(width).collect();
-            }
-            lines.push(last);
-        } else {
-            lines.push(line);
-        }
-        true
-    };
-    for (i, para) in text.split('\n').enumerate() {
-        if i > 0 && para.is_empty() {
-            if push(&mut lines, String::new(), false) {
-                return lines;
-            }
-            continue;
-        }
+    'paras: for para in text.split('\n') {
         if para.is_empty() {
-            if push(&mut lines, String::new(), false) {
-                return lines;
-            }
-            continue;
+            lines.push(String::new());
         }
         let chars: Vec<char> = para.chars().collect();
-        let mut offset = 0;
-        while offset < chars.len() {
-            let end = (offset + width).min(chars.len());
-            let chunk: String = chars[offset..end].iter().collect();
-            offset = end;
-            let more = offset < chars.len();
-            if push(&mut lines, chunk, more) {
-                return lines;
+        for chunk in chars.chunks(width) {
+            lines.push(chunk.iter().collect());
+            if lines.len() > max_lines {
+                break 'paras;
             }
+        }
+        if lines.len() > max_lines {
+            break;
+        }
+    }
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        if let Some(last) = lines.last_mut() {
+            let mut kept: String = last.chars().take(width - 1).collect();
+            kept.push('…');
+            *last = kept;
         }
     }
     if lines.is_empty() {
@@ -2151,5 +2130,17 @@ mod tests {
         assert_eq!(capped.len(), 2);
         assert!(capped[1].ends_with('…'), "{capped:?}");
         assert!(!capped.join("").contains("ij"), "{capped:?}");
+    }
+
+    #[test]
+    fn wrap_commit_message_marks_lines_cut_at_a_newline() {
+        let cut = wrap_commit_message("one\ntwo\nthree", 8, 2);
+        assert_eq!(cut, vec!["one", "two…"]);
+        let blank = wrap_commit_message("one\n\nthree", 8, 2);
+        assert_eq!(blank, vec!["one", "…"]);
+        let full_width = wrap_commit_message("abcd\nefgh\nij", 4, 2);
+        assert_eq!(full_width, vec!["abcd", "efg…"]);
+        let exact = wrap_commit_message("one\ntwo", 8, 2);
+        assert_eq!(exact, vec!["one", "two"], "nothing left: no mark");
     }
 }
