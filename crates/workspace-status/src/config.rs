@@ -547,20 +547,64 @@ fn parse_ignored_repos(
     Ok(Some(normalize_ignored(&ignored)))
 }
 
+/// Inputs that every config file parse shares.
+struct ParseContext<'a> {
+    /// `$HOME` for `~/` expansion in path keys.
+    home: Option<&'a str>,
+    /// User config file path for errors that point there.
+    user_file: &'a str,
+}
+
+/// Keys that pick a program to run or a file to write, with their env var.
+///
+/// A workspace file can be committed to a repo, so only the user file (or
+/// the env var) may set these.
+const USER_ONLY_KEYS: [(&str, &str); 4] = [
+    ("git", "WORKSPACE_STATUS_GIT"),
+    ("updateCheckStore", "WS_STATUS_UPDATE_CHECK_STORE"),
+    ("commentStore", "WS_STATUS_COMMENT_STORE"),
+    ("viewedStore", "WS_STATUS_VIEWED_STORE"),
+];
+
+/// Fail when the workspace file sets a [`USER_ONLY_KEYS`] key. `null`
+/// counts as omitted.
+fn reject_user_only_keys(
+    file: &str,
+    kind: ConfigFileKind,
+    parsed: &RawConfig,
+    user_file: &str,
+) -> Result<(), String> {
+    if kind != ConfigFileKind::Workspace {
+        return Ok(());
+    }
+    let set = [
+        parsed.git.is_some(),
+        parsed.update_check_store.is_some(),
+        parsed.comment_store.is_some(),
+        parsed.viewed_store.is_some(),
+    ];
+    match USER_ONLY_KEYS.iter().zip(set).find(|(_, is_set)| *is_set) {
+        Some(((key, env_var), _)) => Err(format!(
+            "{file} {key} is only allowed in the user config file ({user_file}) or {env_var}"
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Parse the JSON text of one config file. `file` labels the file in errors.
-/// `home` expands `~/` in path keys.
 fn parse_config_file(
     file: &str,
     kind: ConfigFileKind,
     text: &str,
-    home: Option<&str>,
+    ctx: &ParseContext,
 ) -> Result<ConfigFileSettings, String> {
     let mut parsed: RawConfig = serde_json::from_str(text).map_err(|e| match kind {
         ConfigFileKind::User => format!("{file} is not a valid JSON object: {e}"),
         ConfigFileKind::Workspace => format!("{file} must contain an ignoredRepos string array"),
     })?;
     let ignored_repos = parse_ignored_repos(file, kind, parsed.ignored_repos.take())?;
-    let runtime = parse_runtime_keys(file, &mut parsed, home)?;
+    reject_user_only_keys(file, kind, &parsed, ctx.user_file)?;
+    let runtime = parse_runtime_keys(file, &mut parsed, ctx.home)?;
 
     let max_depth = match parsed.max_depth {
         None => None,
@@ -608,7 +652,7 @@ fn read_config_file(
     path: &Path,
     file: &str,
     kind: ConfigFileKind,
-    home: Option<&str>,
+    ctx: &ParseContext,
 ) -> Result<Option<ConfigFileSettings>, String> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
@@ -620,7 +664,7 @@ fn read_config_file(
         }
         Err(e) => return Err(format!("{file}: {e}")),
     };
-    parse_config_file(file, kind, &text, home).map(Some)
+    parse_config_file(file, kind, &text, ctx).map(Some)
 }
 
 /// Path of the user config file from the real environment.
@@ -664,7 +708,9 @@ where
 /// names that file (the full path for the user file, [`CONFIG_FILENAME`]
 /// for the workspace file).
 ///
-/// Path keys that start with `~/` expand with `$HOME`.
+/// Path keys that start with `~/` expand with `$HOME`. The workspace file
+/// must not set `git`, `updateCheckStore`, `commentStore`, or `viewedStore`
+/// (it can be committed to a repo); those keys are user-file only.
 pub fn load_config_files(
     user_file: Option<&Path>,
     workspace_root: &Path,
@@ -678,20 +724,23 @@ fn load_config_files_with_home(
     workspace_root: &Path,
     home: Option<&str>,
 ) -> Result<WorkspaceStatusConfig, String> {
+    let user_label = user_file.map_or_else(
+        || format!("~/.config/{USER_CONFIG_DIR}/{USER_CONFIG_FILENAME}"),
+        |path| path.display().to_string(),
+    );
+    let ctx = ParseContext {
+        home,
+        user_file: &user_label,
+    };
     let user = match user_file {
-        Some(path) => read_config_file(
-            path,
-            &path.display().to_string(),
-            ConfigFileKind::User,
-            home,
-        )?,
+        Some(path) => read_config_file(path, &user_label, ConfigFileKind::User, &ctx)?,
         None => None,
     };
     let workspace = read_config_file(
         &workspace_root.join(CONFIG_FILENAME),
         CONFIG_FILENAME,
         ConfigFileKind::Workspace,
-        home,
+        &ctx,
     )?;
     let merged = user
         .unwrap_or_default()
@@ -1306,14 +1355,15 @@ mod tests {
         out
     }
 
-    /// Load `{"ignoredRepos":[], <key>: <raw>}` as the workspace file.
+    /// Load `{<key>: <raw>}` as the user file (every runtime key is allowed
+    /// there). Errors start with `<user>` in place of the temp user path.
     fn load_runtime_key(key: &str, raw: &str) -> Result<RuntimeKeys, String> {
-        load_layered_home(
-            None,
-            Some(&format!(r#"{{"ignoredRepos":[],"{key}":{raw}}}"#)),
-            Some("/home/demo"),
-        )
-        .map(|cfg| cfg.runtime)
+        let (root, user_file, workspace) = layered(Some(&format!(r#"{{"{key}":{raw}}}"#)), None);
+        let out = load_config_files_with_home(Some(&user_file), &workspace, Some("/home/demo"))
+            .map(|cfg| cfg.runtime)
+            .map_err(|e| e.replace(&user_file.display().to_string(), "<user>"));
+        let _ = fs::remove_dir_all(root);
+        out
     }
 
     #[test]
@@ -1446,12 +1496,14 @@ mod tests {
         ];
         for (key, raw, tail) in cases {
             let err = load_runtime_key(key, raw).unwrap_err();
-            assert_eq!(
-                err,
-                format!(".workspace-status-config.json {key} {tail}"),
-                "{key}: {raw}"
-            );
+            assert_eq!(err, format!("<user> {key} {tail}"), "{key}: {raw}");
         }
+        let err =
+            load_layered(None, Some(r#"{"ignoredRepos":[],"glyphs":"unicode"}"#)).unwrap_err();
+        assert_eq!(
+            err,
+            r#".workspace-status-config.json glyphs must be "nerd" or "ascii""#
+        );
         let (root, user_file, workspace) = layered(Some(r#"{"fetchConcurrency":0}"#), None);
         let err = load_config_files_with_home(Some(&user_file), &workspace, None).unwrap_err();
         assert_eq!(
@@ -1467,17 +1519,18 @@ mod tests {
     #[test]
     fn runtime_path_keys_need_home_for_tilde() {
         for home in [None, Some(""), Some("  ")] {
-            let err = load_layered_home(
-                None,
-                Some(r#"{"ignoredRepos":[],"commentStore":"~/comments.json"}"#),
-                home,
-            )
-            .unwrap_err();
+            let (root, user_file, workspace) =
+                layered(Some(r#"{"commentStore":"~/comments.json"}"#), None);
+            let err = load_config_files_with_home(Some(&user_file), &workspace, home).unwrap_err();
             assert_eq!(
                 err,
-                ".workspace-status-config.json commentStore starts with ~/ but HOME is not set",
+                format!(
+                    "{} commentStore starts with ~/ but HOME is not set",
+                    user_file.display()
+                ),
                 "HOME: {home:?}"
             );
+            let _ = fs::remove_dir_all(root);
         }
     }
 
@@ -1526,5 +1579,78 @@ mod tests {
             "{err}"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_file_rejects_user_only_keys() {
+        for (key, raw, env_var) in [
+            ("git", r#""sh""#, "WORKSPACE_STATUS_GIT"),
+            ("git", r#""/usr/bin/git""#, "WORKSPACE_STATUS_GIT"),
+            ("git", "1", "WORKSPACE_STATUS_GIT"),
+            (
+                "updateCheckStore",
+                r#""~/.bashrc""#,
+                "WS_STATUS_UPDATE_CHECK_STORE",
+            ),
+            (
+                "commentStore",
+                r#""/tmp/c.json""#,
+                "WS_STATUS_COMMENT_STORE",
+            ),
+            ("viewedStore", r#""/tmp/v.json""#, "WS_STATUS_VIEWED_STORE"),
+        ] {
+            let workspace_json = format!(r#"{{"ignoredRepos":[],"{key}":{raw}}}"#);
+            let (root, user_file, workspace) = layered(None, Some(&workspace_json));
+            let err = load_config_files_with_home(Some(&user_file), &workspace, Some("/home/demo"))
+                .unwrap_err();
+            assert_eq!(
+                err,
+                format!(
+                    ".workspace-status-config.json {key} is only allowed in the user config file ({}) or {env_var}",
+                    user_file.display()
+                ),
+                "{key}: {raw}"
+            );
+            let err =
+                load_config_files_with_home(None, &workspace, Some("/home/demo")).unwrap_err();
+            assert_eq!(
+                err,
+                format!(
+                    ".workspace-status-config.json {key} is only allowed in the user config file (~/.config/my-workspace-status/config.json) or {env_var}"
+                ),
+                "no user path: {key}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+        let cfg = load_layered(
+            None,
+            Some(r#"{"ignoredRepos":[],"git":null,"commentStore":null}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.runtime,
+            RuntimeKeys::default(),
+            "null counts as omitted"
+        );
+    }
+
+    #[test]
+    fn user_file_sets_user_only_keys_under_a_workspace_file() {
+        let cfg = load_layered_home(
+            Some(
+                r#"{"git":"git-wrapper","updateCheckStore":"~/u.json","commentStore":"/c.json","viewedStore":"/v.json"}"#,
+            ),
+            Some(r#"{"ignoredRepos":[],"theme":"monokai"}"#),
+            Some("/home/demo"),
+        )
+        .unwrap();
+        assert_eq!(cfg.runtime.git, Some(PathBuf::from("git-wrapper")));
+        assert_eq!(
+            cfg.runtime.update_check_store,
+            Some(PathBuf::from("/home/demo/u.json"))
+        );
+        assert_eq!(cfg.runtime.comment_store, Some(PathBuf::from("/c.json")));
+        assert_eq!(cfg.runtime.viewed_store, Some(PathBuf::from("/v.json")));
+        assert_eq!(cfg.runtime.theme, Some(ThemeId::Monokai));
     }
 }

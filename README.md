@@ -129,7 +129,7 @@ Set `WS_STATUS_GLYPHS=ascii`, or `"glyphs": "ascii"` in a config file, for plain
 
 `workspace-status` reads `.workspace-status-config.json` from the workspace root. Pin that root with `-C` / `--workspace <path>` or `WS_STATUS_WORKSPACE` (CLI flag > env > process cwd). Missing or non-directory paths error; they do not fall back to cwd.
 
-An optional user file, `~/.config/my-workspace-status/config.json` (`$XDG_CONFIG_HOME` when set), uses the same keys. The workspace file wins per key; `viewDefaults` and `defaultBranches` merge per sub-key. Most `WS_STATUS_*` env vars also have a config key (`theme`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck`, the store paths, `git`); a valid env var wins over the key. See [docs/configuration.md](./docs/configuration.md).
+An optional user file, `~/.config/my-workspace-status/config.json` (`$XDG_CONFIG_HOME` when set), uses the same keys. The workspace file wins per key; `viewDefaults` and `defaultBranches` merge per sub-key. Most `WS_STATUS_*` env vars also have a config key (`theme`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck`, the store paths, `git`); a valid env var wins over the key. The store paths and `git` are allowed only in the user file. See [docs/configuration.md](./docs/configuration.md).
 
 ```json
 {

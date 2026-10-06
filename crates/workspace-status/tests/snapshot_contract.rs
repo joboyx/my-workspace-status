@@ -495,21 +495,68 @@ fn config_git_key_drives_json_and_env_overrides_it() {
 #[test]
 fn invalid_config_runtime_key_fails_naming_file_and_key() {
     let (root, workspace) = fixture();
+    let user_file = user_config_home(&workspace)
+        .join("my-workspace-status")
+        .join("config.json");
+    fs::create_dir_all(user_file.parent().unwrap()).unwrap();
+    fs::write(&user_file, "{\"viewedStore\": \"relative/viewed.json\"}\n").unwrap();
+    let run_plain_err = || {
+        let mut cmd = Command::new(bin());
+        cmd.args(["--plain"])
+            .current_dir(&workspace)
+            .env("TERM", "dumb");
+        isolate_env(&mut cmd, &workspace);
+        let out = cmd.output().unwrap();
+        assert!(!out.status.success());
+        String::from_utf8_lossy(&out.stderr).trim_end().to_string()
+    };
+    assert_eq!(
+        run_plain_err(),
+        format!(
+            "{} viewedStore must be an absolute path or a path that starts with ~/",
+            user_file.display()
+        )
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// A committed workspace file must not pick the git binary: `"git": "sh"`
+/// would run a repo file named after the git subcommand.
+#[test]
+fn workspace_file_git_key_is_rejected() {
+    let (root, workspace) = fixture();
+    let marker = workspace.join("app").join("ran");
     fs::write(
-        workspace.join(".workspace-status-config.json"),
-        "{\"ignoredRepos\": [], \"viewedStore\": \"relative/viewed.json\"}\n",
+        workspace.join("app").join("rev-parse"),
+        format!(": > '{}'\n", marker.display()),
     )
     .unwrap();
-    let mut cmd = Command::new(bin());
-    cmd.args(["--plain"])
-        .current_dir(&workspace)
-        .env("TERM", "dumb");
-    isolate_env(&mut cmd, &workspace);
-    let out = cmd.output().unwrap();
-    assert!(!out.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr).trim_end(),
-        ".workspace-status-config.json viewedStore must be an absolute path or a path that starts with ~/"
-    );
+    fs::write(
+        workspace.join(".workspace-status-config.json"),
+        "{\"ignoredRepos\": [], \"git\": \"sh\"}\n",
+    )
+    .unwrap();
+    let user_file = user_config_home(&workspace)
+        .join("my-workspace-status")
+        .join("config.json");
+    for args in [&["--json"][..], &["--plain"][..]] {
+        let mut cmd = Command::new(bin());
+        cmd.args(args)
+            .current_dir(&workspace)
+            .env("TERM", "dumb")
+            .env_remove("WORKSPACE_STATUS_GIT");
+        isolate_env(&mut cmd, &workspace);
+        let out = cmd.output().unwrap();
+        assert!(!out.status.success(), "{args:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr).trim_end(),
+            format!(
+                ".workspace-status-config.json git is only allowed in the user config file ({}) or WORKSPACE_STATUS_GIT",
+                user_file.display()
+            ),
+            "{args:?}"
+        );
+        assert!(!marker.exists(), "no repo file ran ({args:?})");
+    }
     let _ = fs::remove_dir_all(root);
 }

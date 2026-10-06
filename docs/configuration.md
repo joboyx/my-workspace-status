@@ -6,7 +6,7 @@ An env value that the env parser accepts wins. An env value that it ignores (uns
 
 ## Config files
 
-Two files use the same keys. `load_workspace_status_config` in `crates/workspace-status/src/config.rs` reads both and merges them.
+Two files use the same keys, except that `git`, `updateCheckStore`, `commentStore`, and `viewedStore` are user file only (see [Env-backed keys](#env-backed-keys)). `load_workspace_status_config` in `crates/workspace-status/src/config.rs` reads both and merges them.
 
 | File | Path | Role |
 | --- | --- | --- |
@@ -53,7 +53,14 @@ The keys below apply to both files. A missing file means nothing is ignored and 
   "watchMs": 3000,
   "fetchMs": 300000,
   "fetchConcurrency": 10,
-  "updateCheck": true,
+  "updateCheck": true
+}
+```
+
+User file only (a workspace file that sets these keys fails to load):
+
+```json
+{
   "updateCheckStore": "~/.local/state/my-workspace-status/update-check.json",
   "commentStore": "~/.local/state/my-workspace-status/comments.json",
   "viewedStore": "~/.local/state/my-workspace-status/viewed-files.json",
@@ -69,7 +76,8 @@ The keys below apply to both files. A missing file means nothing is ignored and 
 | `editor`          | no                         | unset (`vim` at resolve)      | Command string for TUI `e` (same shape as `$EDITOR`). Overrides `$VISUAL` / `$EDITOR`.         |
 | `diffTool`        | no                         | unset (`vimdiff` at resolve) | Command string for TUI `E`. No `$EDITOR` / `$VISUAL` / `$GIT_EXTERNAL_DIFF` fallback.          |
 | `viewDefaults`    | no                         | `{}` (in-app defaults)        | TUI launch view modes. See [`viewDefaults`](#viewdefaults)                                     |
-| `theme`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck`, `updateCheckStore`, `commentStore`, `viewedStore`, `git` | no | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
+| `theme`, `glyphs`, `watchMs`, `fetchMs`, `fetchConcurrency`, `updateCheck` | no | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
+| `updateCheckStore`, `commentStore`, `viewedStore`, `git` | no; user file or env only | the env var default | Same settings as the env vars. See [Env-backed keys](#env-backed-keys) |
 
 ### `ignoredRepos`
 
@@ -157,10 +165,12 @@ These top-level keys set the same settings as the env vars in [Environment varia
 | `fetchMs` | `WS_STATUS_FETCH_MS` | integer >= 0. `0` turns the background fetch off. `1` to `29999` clamp up to `30000`, like the env var |
 | `fetchConcurrency` | `WS_STATUS_FETCH_CONCURRENCY` | integer >= 1 |
 | `updateCheck` | `WS_STATUS_UPDATE_CHECK` | `true` \| `false`. `false` turns the TUI-startup release check off |
-| `updateCheckStore` | `WS_STATUS_UPDATE_CHECK_STORE` | path |
-| `commentStore` | `WS_STATUS_COMMENT_STORE` | path |
-| `viewedStore` | `WS_STATUS_VIEWED_STORE` | path |
-| `git` | `WORKSPACE_STATUS_GIT` | path, or a command name without `/` (looked up on `PATH`) |
+| `updateCheckStore` | `WS_STATUS_UPDATE_CHECK_STORE` | path. User file or env only |
+| `commentStore` | `WS_STATUS_COMMENT_STORE` | path. User file or env only |
+| `viewedStore` | `WS_STATUS_VIEWED_STORE` | path. User file or env only |
+| `git` | `WORKSPACE_STATUS_GIT` | path, or a command name without `/` (looked up on `PATH`). User file or env only |
+
+`updateCheckStore`, `commentStore`, `viewedStore`, and `git` are allowed only in the user file (or the env var), because a workspace file can be committed to a repo and must not pick a program to run or a file to write. A workspace file that sets one fails to load: `.workspace-status-config.json git is only allowed in the user config file (<user file path>) or WORKSPACE_STATUS_GIT`. `null` counts as omitted and is allowed.
 
 - Values are strict, like `viewDefaults`. A wrong type, an unknown value, a blank string, or a fraction is an error that names the file, the key, and the allowed values. Example: `.workspace-status-config.json glyphs must be "nerd" or "ascii"`. String values are trimmed, then matched case-sensitively.
 - A path must be absolute or start with `~/`. `~/` expands with `$HOME`. A relative path is an error: `<file> commentStore must be an absolute path or a path that starts with ~/`. When `$HOME` is unset, a `~/` path is an error.
@@ -218,10 +228,10 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
 | `VISUAL` | — (system var; use `editor`) | unset                                                   | Fallback editor for `e` when config `editor` is omitted or blank; wins over `EDITOR` (same argv parsing).                                                                                         |
 | _(editor fallback)_ | `editor` | `vim`                                                   | When config `editor`, `VISUAL`, and `EDITOR` are all unset/blank, `resolve_editor` returns `vim`.                                                                                                 |
 | `BROWSER` | — (system var) | unset                                                   | Command used to open a PR (`gx`, palette `Open PR`, Ctrl+click on a badge). The first non-empty `:`-separated entry is split on spaces; `%s` in it is replaced by the URL, otherwise the URL is appended. Blank is unset. Unset or blank: `open` on macOS, `cmd /c start` on Windows, `xdg-open` elsewhere. The command runs with no terminal access, so a text browser does not work here. |
-| `WORKSPACE_STATUS_GIT` | `git` | `/usr/bin/git` if present, else `git`                   | Git binary. Exists to avoid a Windows `git.exe` shadowing the Linux one on WSL2, and as a test seam.                                                                                              |
-| `WS_STATUS_VIEWED_STORE` | `viewedStore` | `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` | JSON store for TUI space-reviewed marks (identity = repo path + file path; fingerprint = snapshot status letters on both git sides + worktree bytes). Version 2 namespaces entries by workspace identity (SHA-256 hex of the canonical cwd) inside the file. GC and save replace only the current workspace bucket. Version-1 files keep a flat `entries` map under `workspaces.__legacy__` on first persist (see **Version-1 persist upgrade**). A missing file starts empty. A present file that is not valid v1/v2 UTF-8 JSON is left unchanged and persist returns an error. Tests should set this to a temp file.                                              |
-| `WS_STATUS_COMMENT_STORE` | `commentStore` | `$XDG_STATE_HOME/my-workspace-status/comments.json` | JSON store for TUI line and object comments. `WS_STATUS_COMMENT_STORE` overrides. Version 2 namespaces records by workspace identity inside the file. GC cannot drop other workspaces. Version-1 files keep a flat `entries` list under `workspaces.__legacy__` on first persist (see **Version-1 persist upgrade**). A missing file starts empty. A present file that is not valid v1/v2 UTF-8 JSON is left unchanged and persist returns an error. Tests, desktop e2e, and `scripts/capture-demo-stills.sh` should set this to a temp file. Comments never write into user git repos. GC uses snapshot local branches and checkout paths. A primary detached HEAD is a worktree path key. |
-| `WS_STATUS_UPDATE_CHECK_STORE` | `updateCheckStore` | `$XDG_STATE_HOME/my-workspace-status/update-check.json` | Last GitHub Release check time for the TUI startup prompt (`lastCheckUnix`). Tests, desktop e2e, and `scripts/capture-demo-stills.sh` must set this to a temp file with a fresh `lastCheckUnix`. A TTY launch without that override writes the default XDG file. A TTY `ws` launch checks at most every 6 hours; `--plain` / `--json` / `--update` never read or write it. CI: `crates/workspace-status/tests/release_watch.rs`. |
+| `WORKSPACE_STATUS_GIT` | `git` (user file only) | `/usr/bin/git` if present, else `git`                   | Git binary. Exists to avoid a Windows `git.exe` shadowing the Linux one on WSL2, and as a test seam.                                                                                              |
+| `WS_STATUS_VIEWED_STORE` | `viewedStore` (user file only) | `$XDG_STATE_HOME/my-workspace-status/viewed-files.json` | JSON store for TUI space-reviewed marks (identity = repo path + file path; fingerprint = snapshot status letters on both git sides + worktree bytes). Version 2 namespaces entries by workspace identity (SHA-256 hex of the canonical cwd) inside the file. GC and save replace only the current workspace bucket. Version-1 files keep a flat `entries` map under `workspaces.__legacy__` on first persist (see **Version-1 persist upgrade**). A missing file starts empty. A present file that is not valid v1/v2 UTF-8 JSON is left unchanged and persist returns an error. Tests should set this to a temp file.                                              |
+| `WS_STATUS_COMMENT_STORE` | `commentStore` (user file only) | `$XDG_STATE_HOME/my-workspace-status/comments.json` | JSON store for TUI line and object comments. `WS_STATUS_COMMENT_STORE` overrides. Version 2 namespaces records by workspace identity inside the file. GC cannot drop other workspaces. Version-1 files keep a flat `entries` list under `workspaces.__legacy__` on first persist (see **Version-1 persist upgrade**). A missing file starts empty. A present file that is not valid v1/v2 UTF-8 JSON is left unchanged and persist returns an error. Tests, desktop e2e, and `scripts/capture-demo-stills.sh` should set this to a temp file. Comments never write into user git repos. GC uses snapshot local branches and checkout paths. A primary detached HEAD is a worktree path key. |
+| `WS_STATUS_UPDATE_CHECK_STORE` | `updateCheckStore` (user file only) | `$XDG_STATE_HOME/my-workspace-status/update-check.json` | Last GitHub Release check time for the TUI startup prompt (`lastCheckUnix`). An existing file that is not this store is never overwritten: the save is skipped and stderr shows `update-check save failed: <path>: not an update-check store, left unchanged`; startup goes on. Tests, desktop e2e, and `scripts/capture-demo-stills.sh` must set this to a temp file with a fresh `lastCheckUnix`. A TTY launch without that override writes the default XDG file. A TTY `ws` launch checks at most every 6 hours; `--plain` / `--json` / `--update` never read or write it. CI: `crates/workspace-status/tests/release_watch.rs`. |
 | `WS_STATUS_UPDATE_CHECK` | `updateCheck` | unset (check on) | `0`, `false`, or `off` turns off the TUI-startup GitHub Release check: no fetch, no prompt, no store write. `1`, `true`, or `on` turns it on. Any other value is ignored and falls through to config `updateCheck`, then on. |
 | `WORKSPACE_STATUS_GITHUB_TOKEN` | — (secret; a workspace file may be committed) | unset | Optional Bearer token for GitHub Releases API (`curl`). Used by the TUI startup check and by `ws --update` when fetching notes. Unset is fine for the public repo rate limit. |
 | `WS_STATUS_DEV_BUILD` | — (build time) | unset                                                   | **Build time** (`option_env!`, `DEV_BUILD` in `lib.rs`). `scripts/install-dev.sh` sets it to the short git sha, plus `-dirty` for a dirty tree. A dev build shows `-dev (sha)` in `--version` and the help footer, skips the TUI-startup release prompt, and makes `--update` exec `workspace-status-update-dev` with no release notes. Has no effect at run time. |

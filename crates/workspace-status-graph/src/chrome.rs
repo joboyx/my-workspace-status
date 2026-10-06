@@ -1,4 +1,4 @@
-//! GraphPane chrome: header / list / fixed-height selection footer / loading older.
+//! GraphPane chrome: header / list / fixed-height selection footer.
 //!
 //! Header / footer budget (`graph_chrome_budget`) and selection footer copy.
 //! Footer ref chips are the same [`LabelPart`] runs as the commit spacer.
@@ -11,7 +11,8 @@ use crate::format::{
 use crate::glyphs::GlyphSet;
 use crate::model::{GraphModel, GraphRow};
 
-/// Status / pane copy while the next log page loads.
+/// Status-line copy while the next log page loads. The graph pane paints no
+/// loading row, so the list keeps its height.
 pub const LOADING_OLDER: &str = "loading older…";
 
 /// Selection footer lines when no row is focused.

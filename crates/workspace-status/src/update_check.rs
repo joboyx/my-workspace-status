@@ -163,7 +163,13 @@ where
         return StartupUpdateOffer::Continue;
     }
     let latest = (hooks.fetch_latest)();
-    save_last_check(&hooks.store_path, hooks.now);
+    if let Err(err) = save_last_check(&hooks.store_path, hooks.now) {
+        // Same wording as the viewed / comment store toasts. Startup goes on.
+        eprintln!(
+            "update-check save failed: {}: {err}",
+            hooks.store_path.display()
+        );
+    }
     let Ok(latest) = latest else {
         return StartupUpdateOffer::Continue;
     };
@@ -259,8 +265,33 @@ pub fn load_last_check(path: &Path) -> Option<SystemTime> {
     Some(UNIX_EPOCH + Duration::from_secs(parsed.last_check_unix))
 }
 
+/// True when `text` is a JSON object with the store fields (any version).
+fn is_store_file(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .filter(serde_json::Value::is_object)
+        .is_some_and(|value| serde_json::from_value::<StoreFile>(value).is_ok())
+}
+
 /// Persist `now` as the last-check time (success or failure).
-pub fn save_last_check(path: &Path, now: SystemTime) {
+///
+/// A missing file is created. An existing file must parse as the
+/// update-check store; otherwise it is left byte-identical and the result
+/// is an [`io::ErrorKind::InvalidData`] error (like the viewed and comment
+/// stores, a config path that names some other file never overwrites it).
+/// A read error other than not-found is returned as is.
+pub fn save_last_check(path: &Path, now: SystemTime) -> io::Result<()> {
+    match fs::read_to_string(path) {
+        Ok(text) if !is_store_file(&text) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "not an update-check store, left unchanged",
+            ));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
     let unix = now
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -269,22 +300,23 @@ pub fn save_last_check(path: &Path, now: SystemTime) {
         version: STORE_VERSION,
         last_check_unix: unix,
     };
-    let Ok(mut body) = serde_json::to_string_pretty(&file) else {
-        return;
-    };
+    let mut body = serde_json::to_string_pretty(&file).map_err(io::Error::other)?;
     body.push('\n');
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
     let tmp = path.with_extension("json.tmp");
     if let Ok(mut f) = fs::File::create(&tmp) {
-        if f.write_all(body.as_bytes()).is_ok() && f.flush().is_ok() {
-            let _ = fs::rename(&tmp, path);
-            return;
+        if f.write_all(body.as_bytes()).is_ok()
+            && f.flush().is_ok()
+            && fs::rename(&tmp, path).is_ok()
+        {
+            return Ok(());
         }
     }
-    let _ = fs::write(path, body);
+    let written = fs::write(path, body);
     let _ = fs::remove_file(&tmp);
+    written
 }
 
 fn parse_semver_core(raw: &str) -> Option<(u64, u64, u64)> {
@@ -355,7 +387,7 @@ mod tests {
     ) -> UpdateCheckHooks<impl FnOnce() -> Result<String, String>, impl FnOnce(&str) -> bool> {
         let now = SystemTime::now();
         if let Some(age) = last_age {
-            save_last_check(&store, now - age);
+            save_last_check(&store, now - age).unwrap();
         }
         UpdateCheckHooks {
             stdin_is_tty: true,
@@ -434,8 +466,59 @@ mod tests {
     fn store_round_trip() {
         let path = temp_store();
         let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        save_last_check(&path, now);
+        save_last_check(&path, now).unwrap();
         assert_eq!(load_last_check(&path), Some(now));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_never_overwrites_a_file_that_is_not_the_store() {
+        for body in [
+            "export PATH=$HOME/bin:$PATH\n",
+            "",
+            "{\"other\": true}\n",
+            "[1, 2]\n",
+        ] {
+            let path = temp_store();
+            fs::write(&path, body).unwrap();
+            let err = save_last_check(&path, SystemTime::now()).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{body:?}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), body, "byte-identical");
+            assert!(!path.with_extension("json.tmp").exists());
+            let _ = fs::remove_file(&path);
+        }
+        let bytes = [0xff_u8, 0xfe, 0x00];
+        let path = temp_store();
+        fs::write(&path, bytes).unwrap();
+        assert!(save_last_check(&path, SystemTime::now()).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes, "non-UTF-8 left as is");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_creates_a_missing_store_and_replaces_an_old_version() {
+        let dir = temp_store().with_extension("d");
+        let path = dir.join("nested").join("update-check.json");
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        save_last_check(&path, now).unwrap();
+        assert_eq!(load_last_check(&path), Some(now));
+        fs::write(&path, "{\"version\":99,\"lastCheckUnix\":1}\n").unwrap();
+        save_last_check(&path, now).unwrap();
+        assert_eq!(
+            load_last_check(&path),
+            Some(now),
+            "own store, other version"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn startup_check_with_a_non_store_file_continues_and_keeps_it() {
+        let path = temp_store();
+        fs::write(&path, "keep me\n").unwrap();
+        let offer = offer_startup_update_with(hooks(path.clone(), None, fetch_current, false));
+        assert_eq!(offer, StartupUpdateOffer::Continue);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "keep me\n");
         let _ = fs::remove_file(&path);
     }
 
@@ -554,7 +637,7 @@ mod tests {
     fn recent_check_skips_without_fetch() {
         let path = temp_store();
         let now = SystemTime::now();
-        save_last_check(&path, now - Duration::from_secs(60));
+        save_last_check(&path, now - Duration::from_secs(60)).unwrap();
         let called = std::cell::Cell::new(false);
         let offer = offer_startup_update_with(UpdateCheckHooks {
             stdin_is_tty: true,
