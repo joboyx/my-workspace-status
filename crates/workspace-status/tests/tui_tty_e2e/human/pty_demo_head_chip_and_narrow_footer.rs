@@ -2,10 +2,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::harness::{PtySession, ROWS};
-use crate::seed::unique_root;
+use crate::seed::{git, unique_root};
 use crate::support::{
-    graph_pane_focused, right_pane, title_has_files, title_has_graph, tree_cursor_on, GIT_WAIT,
-    SETTLE_MS, WAIT,
+    graph_cursor_on, graph_pane_focused, right_pane, title_has_files, title_has_graph,
+    tree_cursor_on, GIT_WAIT, SETTLE_MS, WAIT,
 };
 
 const FULL_REF: &str = "feature/reconciliation";
@@ -267,6 +267,127 @@ fn pty_demo_narrow_graph_truncates_chip_name_footer_keeps_full_ref() {
                 && right_pane(screen) != before_right
         },
         "l pan keeps the full ref in the footer (graph body moved)",
+        WAIT,
+    );
+}
+
+/// SGR pointer motion with no button held (`3 | 32`, any-event tracking).
+const SGR_POINTER_MOVE: u8 = 3 | 32;
+/// Footer of a pinned popover. A peek has none.
+const PINNED_FOOTER: &str = "y copy line · Enter run · Esc close";
+/// Catalog meanings of the checkout and sync marks, and of `[+N]`.
+const CHECKOUT_MEANING: &str = "HEAD is on this branch (head colour)";
+const SYNCED_MEANING: &str = "Local and same-name remote here (remote colour alone)";
+const OVERFLOW_MEANING: &str = "N more refs that do not fit";
+/// Tags added on the demo HEAD so its spacer hides refs behind `[+N]`.
+const HEAD_TAGS: [&str; 3] = ["release-2024", "v1.0.0", "v1.1.0-rc"];
+
+/// 0-based cell of the first `needle` on the demo HEAD spacer row (the
+/// row with the merged chip and the author). ASCII paint: one cell per
+/// char.
+fn head_spacer_cell(screen: &str, needle: &str) -> Option<(u16, u16)> {
+    screen.lines().enumerate().find_map(|(row, line)| {
+        if !line.contains(ASCII_MERGED_CHIP) || !line.contains("Demo User") {
+            return None;
+        }
+        let at = line.find(needle)?;
+        Some((line[..at].chars().count() as u16, row as u16))
+    })
+}
+
+fn checkout_peek(screen: &str) -> bool {
+    screen.contains(CHECKOUT_MEANING)
+        && screen.contains(SYNCED_MEANING)
+        && screen.contains("on feature/reconciliation")
+        && screen.contains("in sync with origin/feature/reconciliation")
+        && !screen.contains(PINNED_FOOTER)
+}
+
+/// A popover field line `tag <name>`: not the bracketed footer chip.
+fn tag_field(screen: &str, name: &str) -> bool {
+    screen.lines().any(|line| {
+        line.split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|pair| pair == ["tag", name])
+    })
+}
+
+/// Demo HEAD chips peek and pin as one popover per chip.
+///
+/// Docs: the checkout and sync marks inside a branch chip are one hit with
+/// two sections; `[+N]` lists the refs it hides with their kinds. A click
+/// on a spacer chip selects its commit and pins the popover.
+///
+/// Live PTY on the demo seed with three tags on HEAD, ASCII glyphs. The
+/// pointer rests on `+=` of `[+=feature/reconciliation]`: the peek shows
+/// the checkout section (`on feature/reconciliation`) and the sync section
+/// (`in sync with origin/feature/reconciliation`) with no pinned footer.
+/// A click on the spacer's `[+N]` moves the graph cursor to HEAD and pins
+/// the overflow popover: one `tag <name>` line per hidden tag. Esc closes
+/// it.
+#[test]
+fn pty_demo_head_chips_peek_marks_and_pin_overflow() {
+    let root = unique_root("ws-tui-demo");
+    let dest = root.join("workspace");
+    seed_demo_workspace(&dest);
+    for tag in HEAD_TAGS {
+        git(&dest.join("merger"), &["tag", tag]);
+    }
+    let mut tui = PtySession::open(&dest);
+    tui.wait_pred(demo_launch_idle, "demo first paint", WAIT);
+    tui.search("merger");
+    tui.wait_pred(
+        |screen| {
+            demo_merger_graph_left(screen)
+                && head_spacer_cell(screen, "[+=").is_some()
+                && head_spacer_cell(screen, "] [+").is_some()
+        },
+        "search merger loads the demo graph with [+N] on the HEAD spacer",
+        GIT_WAIT,
+    );
+    assert!(
+        !checkout_peek(&tui.screen()),
+        "no peek before the pointer rests:\n{}",
+        tui.screen()
+    );
+
+    let (col, row) = head_spacer_cell(&tui.screen(), "[+=")
+        .unwrap_or_else(|| panic!("merged chip:\n{}", tui.screen()));
+    tui.sgr_mouse(SGR_POINTER_MOVE, col + 1, row);
+    tui.wait_pred(
+        checkout_peek,
+        "pointer rest on += peeks the checkout and sync sections",
+        WAIT,
+    );
+    // Onto the pane border, off every icon and the peek: the grace closes
+    // it.
+    tui.sgr_mouse(SGR_POINTER_MOVE, col + 1, 1);
+    tui.wait_pred(
+        |screen| !screen.contains(CHECKOUT_MEANING),
+        "the peek closes after the pointer leaves",
+        WAIT,
+    );
+
+    let (col, row) = head_spacer_cell(&tui.screen(), "] [+")
+        .unwrap_or_else(|| panic!("[+N] chip:\n{}", tui.screen()));
+    tui.sgr_click(col + 2, row);
+    tui.wait_pred(
+        |screen| {
+            screen.contains(OVERFLOW_MEANING)
+                && screen.contains(PINNED_FOOTER)
+                && screen.contains("Checkout commit refs")
+                && tag_field(screen, "v1.0.0")
+                && tag_field(screen, "v1.1.0-rc")
+                && graph_cursor_on(screen, "Start reconciliation job")
+        },
+        "a click on [+N] selects HEAD and pins the hidden tags",
+        WAIT,
+    );
+    tui.esc();
+    tui.wait_pred(
+        |screen| !screen.contains(OVERFLOW_MEANING) && !screen.contains(PINNED_FOOTER),
+        "Esc closes the overflow popover",
         WAIT,
     );
 }

@@ -377,7 +377,10 @@ impl LayoutHit {
                 IconTarget::TreeRow(_)
                 | IconTarget::CommitFileRow(_)
                 | IconTarget::GraphRow(_)
-                | IconTarget::GraphWorktree(_) => None,
+                | IconTarget::GraphWorktree(_)
+                | IconTarget::GraphChip { .. }
+                | IconTarget::GraphSync
+                | IconTarget::GraphMoreLines(_) => None,
             })
             .collect()
     }
@@ -1372,6 +1375,27 @@ impl AppState {
             true,
         )
         .len()
+    }
+
+    /// Message lines of the graph selection footer below the shown ones:
+    /// the count its `more lines below` hint paints. `0` when the footer is
+    /// not painted or every line shows.
+    pub(crate) fn graph_footer_lines_below(&self) -> usize {
+        let layout = &self.layout;
+        if layout.graph_footer_y.is_none() {
+            return 0;
+        }
+        let rows = usize::from(layout.graph_footer_height).saturating_sub(1);
+        let messages = self
+            .graph_footer_line_count(usize::from(layout.graph_footer_width))
+            .saturating_sub(1);
+        if rows == 0 || messages <= rows {
+            return 0;
+        }
+        let offset = self
+            .graph_footer_msg_scroll()
+            .min(layout.graph_footer_scroll_max);
+        messages.saturating_sub(offset + rows)
     }
 
     fn graph_selected_row_identity(&self) -> Option<String> {

@@ -53,8 +53,8 @@ use super::icons::{
 use super::line_blame::{fit_annotation, BlameSide, BLAME_MENU_ROWS};
 use super::ops::RevertScope;
 use super::popover::{
-    flat_lines, focused_line, graph_icon, popover_rect, tree_icon_target, IconTarget, PopoverLine,
-    POPOVER_FOOTER, POPOVER_MAX_WIDTH,
+    flat_lines, focused_line, graph_icon, graph_row_id, graph_sync_kind, popover_rect,
+    tree_icon_target, IconTarget, PopoverLine, POPOVER_FOOTER, POPOVER_MAX_WIDTH,
 };
 use super::pull_request::PrState;
 use super::quick_open::{files_row_shows_status, FileIndexState, QuickOpenMode, QuickOpenState};
@@ -1216,20 +1216,32 @@ fn draw_graph(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, col_offse
             dirty: pal.modified,
             comment: pal.heading,
             comment_resolved: pal.muted,
+            ahead: pal.added,
+            behind: pal.deleted,
         })
         .row_badges(&badges)
         .render_with_icon_spans(area, frame.buffer_mut());
     let rows = model.visible_rows();
+    let row_of = |span: &workspace_status_graph::IconSpan| rows.get(span.row_index?);
     let hits: Vec<IconHit> = spans
         .iter()
         .filter_map(|span| {
             let (kind, target) = match span.kind {
-                GraphIconKind::Badge => badge_rows.iter().find(|row| row.0 == span.row_index).map(
-                    |(_, repo, pr, _, _)| {
+                GraphIconKind::Badge => badge_rows
+                    .iter()
+                    .find(|row| Some(row.0) == span.row_index)
+                    .map(|(_, repo, pr, _, _)| {
                         (pr_badge_kind(*pr), IconTarget::PullRequest(repo.clone()))
-                    },
-                )?,
-                kind => graph_icon(kind, span.part, rows.get(span.row_index)?)?,
+                    })?,
+                GraphIconKind::SyncHeader => (
+                    graph_sync_kind(model.sync.as_ref()?.status),
+                    IconTarget::GraphSync,
+                ),
+                GraphIconKind::MoreBelow => (
+                    IconKind::GraphMoreBelow,
+                    IconTarget::GraphMoreLines(graph_row_id(row_of(span)?)),
+                ),
+                kind => graph_icon(kind, span.part, span.target.as_ref(), row_of(span)?)?,
             };
             Some(IconHit {
                 y: span.y,

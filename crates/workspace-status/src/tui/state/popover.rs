@@ -19,9 +19,9 @@ use super::super::gates::ListFocusTarget;
 use super::super::icons::IconKind;
 use super::super::keys::InputMode;
 use super::super::popover::{
-    flat_lines, focused_line, graph_icon, graph_row_id, landing_line, popover_sections, step_line,
-    tree_icon_target, IconTarget, PopoverLine, PopoverOrigin, PopoverOwner, PopoverSection,
-    PopoverState, PEEK_DWELL_MS, PEEK_GRACE_MS,
+    flat_lines, focused_line, graph_icon, graph_row_id, icon_targets, landing_line,
+    popover_sections, step_line, tree_icon_target, IconTarget, PopoverLine, PopoverOrigin,
+    PopoverOwner, PopoverSection, PopoverState, PEEK_DWELL_MS, PEEK_GRACE_MS,
 };
 use super::super::pull_request::PrState;
 use super::super::selection::TextSelection;
@@ -230,7 +230,9 @@ impl AppState {
 
     /// Icons graph row `index` paints, in paint order: the node, the
     /// comment mark, the label glyph, the PR badge, then the worktree marks
-    /// of its spacer. Icons clipped by the pane are included.
+    /// and ref chips of its spacer (a checkout / sync mark run gives both
+    /// sections). Icons clipped by the pane are included. The sync header
+    /// and the selection footer are not part of the row.
     fn graph_row_icons(&self, index: usize) -> Vec<(IconKind, IconTarget)> {
         let Some(model) = self.graph.as_ref() else {
             return Vec::new();
@@ -262,10 +264,21 @@ impl AppState {
             .iter()
             .filter(|line| line.row_index == Some(index))
         {
-            icons.extend(line.parts.iter().filter_map(|part| {
-                let (kind, part) = part.kind.icon()?;
-                graph_icon(kind, part, row)
-            }));
+            for part in &line.parts {
+                let Some((kind, part_id)) = part.icon() else {
+                    continue;
+                };
+                let Some((kind, target)) = graph_icon(kind, part_id, part.target.as_ref(), row)
+                else {
+                    continue;
+                };
+                // A chip's runs (`[`, name, `]`) share one target.
+                for icon in icon_targets(kind, &target) {
+                    if !icons.contains(&icon) {
+                        icons.push(icon);
+                    }
+                }
+            }
             if line.selectable {
                 icons.extend(
                     self.graph_pr_badges()
@@ -301,6 +314,13 @@ impl AppState {
                         .focused_graph_row()
                         .is_some_and(|row| graph_row_id(&row) == *id)
             }
+            IconTarget::GraphChip { row: id, .. } | IconTarget::GraphMoreLines(id) => {
+                self.list_focus_target() == ListFocusTarget::Graph
+                    && self
+                        .focused_graph_row()
+                        .is_some_and(|row| graph_row_id(&row) == *id)
+            }
+            IconTarget::GraphSync => self.list_focus_target() == ListFocusTarget::Graph,
             IconTarget::GraphWorktree(path) => {
                 self.list_focus_target() == ListFocusTarget::Graph
                     && self.focused_graph_row().is_some_and(|row| match row {
@@ -363,7 +383,7 @@ impl AppState {
     /// Pin the popover of the clicked icon `hit`. Its row is already
     /// selected.
     pub(super) fn pin_icon(&mut self, hit: &IconHit) {
-        self.pin(vec![(hit.kind, hit.target.clone())], Some(hit.rect()));
+        self.pin(icon_targets(hit.kind, &hit.target), Some(hit.rect()));
     }
 
     /// Close any popover and drop the peek timers.
@@ -577,7 +597,7 @@ impl AppState {
             if let Some(hit) = hit.filter(|_| self.peek_allowed()) {
                 self.popover = Some(PopoverState {
                     origin: PopoverOrigin::Peek,
-                    targets: vec![(hit.kind, hit.target.clone())],
+                    targets: icon_targets(hit.kind, &hit.target),
                     anchor: Some(hit.rect()),
                     focus_line: 0,
                     owner: self.popover_owner(),
@@ -738,8 +758,8 @@ mod tests {
     };
     use crate::tui::comments::{put_comment, CommentKey};
     use workspace_status_graph::{
-        format_local_timestamp, format_relative_date, Commit, GraphModel, Stash, SyncState,
-        SyncStatus as GraphSyncStatus, Worktree,
+        format_local_timestamp, format_relative_date, Commit, GraphModel, GraphRef, PartTarget,
+        Stash, SyncState, SyncStatus as GraphSyncStatus, Worktree,
     };
 
     const PR_REMOTE: &str = "https://github.com/octo/demo.git";
@@ -2121,6 +2141,30 @@ mod tests {
                     K::LinkedWorktree,
                     texts(&[meaning(K::LinkedWorktree), "app/.worktrees/feat", "feat"])
                 ),
+                // The spacer's `[+main]` chip: the chip, then its checkout
+                // mark run.
+                (
+                    K::ChipDefault,
+                    texts(&[
+                        meaning(K::ChipDefault),
+                        "main",
+                        "local branch",
+                        "yes",
+                        title(Action::GraphFocusBranches),
+                        title(Action::CompareVsBranch),
+                        title(Action::GraphCheckout),
+                    ])
+                ),
+                (
+                    K::ChipCheckout,
+                    texts(&[
+                        meaning(K::ChipCheckout),
+                        "on main",
+                        title(Action::Pull),
+                        title(Action::Push),
+                        title(Action::Fetch),
+                    ])
+                ),
             ]
         );
         assert_eq!(app.popover_owner().row, format!("commit:{G_HEAD}"));
@@ -2259,6 +2303,14 @@ mod tests {
             .icon_hits
             .iter()
             .filter(|hit| hit.x >= app.layout.right_x)
+            .filter(|hit| {
+                // Chips, the sync header, and the footer hint: see
+                // `graph_chips_header_and_footer_record_hits_and_pin`.
+                matches!(
+                    hit.target,
+                    IconTarget::GraphRow(_) | IconTarget::GraphWorktree(_)
+                )
+            })
             .map(|hit| (hit.kind, hit.target.clone()))
             .collect();
         let row = |id: &str| IconTarget::GraphRow(id.into());
@@ -2333,5 +2385,276 @@ mod tests {
             app.open_popover_sections()[0].target,
             IconTarget::GraphWorktree("app/.worktrees/feat".into())
         );
+    }
+
+    /// [`graph_app`] with HEAD on `main` synced with `origin/main`, a
+    /// `feat` branch, and a `v0` tag on the root.
+    fn chip_graph_app() -> AppState {
+        let mut app = graph_app();
+        let model = app.graph.as_mut().unwrap();
+        model.commits[0].refs = vec![
+            "main".into(),
+            GraphRef::remote("origin/main"),
+            "feat".into(),
+        ];
+        model.commits[1].refs = vec![GraphRef::tag("v0")];
+        app
+    }
+
+    fn chip_hit(app: &AppState, kind: IconKind, row: &str) -> IconHit {
+        app.layout
+            .icon_hits
+            .iter()
+            .find(|hit| {
+                hit.kind == kind
+                    && matches!(&hit.target, IconTarget::GraphChip { row: id, .. } if id == row)
+            })
+            .cloned()
+            .unwrap_or_else(|| panic!("no {kind:?} chip on {row}: {:?}", app.layout.icon_hits))
+    }
+
+    fn section_texts(app: &AppState) -> Vec<(IconKind, Vec<String>)> {
+        app.open_popover_sections()
+            .into_iter()
+            .map(|section| {
+                let lines = section.lines.iter().map(PopoverLine::copy_text).collect();
+                (section.icon, lines)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn graph_chips_header_and_footer_record_hits_and_pin() {
+        use IconKind as K;
+        let mut app = chip_graph_app();
+        let terminal = paint(&mut app);
+        let buf = terminal.backend().buffer();
+        let head = format!("commit:{G_HEAD}");
+        let root = format!("commit:{G_ROOT}");
+        let palette = app.theme.palette();
+
+        // The header is one hit, coloured with the theme.
+        let header = app
+            .layout
+            .icon_hits
+            .iter()
+            .find(|hit| hit.target == IconTarget::GraphSync)
+            .cloned()
+            .expect("sync header hit");
+        assert_eq!(header.kind, K::Ahead);
+        let text: String = (header.x..header.x + header.width)
+            .map(|x| buf[(x, header.y)].symbol())
+            .collect();
+        assert_eq!(text, "main ^1");
+        assert_eq!(buf[(header.x, header.y)].fg, palette.branch_default);
+        assert_eq!(buf[(header.x + 5, header.y)].fg, palette.added);
+
+        // The marks run on the HEAD spacer is one hit; a click selects HEAD
+        // and pins two sections.
+        app.graph_cursor = 3;
+        paint(&mut app);
+        let marks = chip_hit(&app, K::ChipCheckout, &head);
+        assert_eq!(buf[(marks.x, marks.y)].symbol(), "+");
+        assert_eq!(marks.width, 2, "checkout + sync: one hit");
+        app.dispatch(Action::Click {
+            col: marks.x,
+            row: marks.y,
+        });
+        assert_eq!(app.graph_cursor, 2, "the spacer chip selects its commit");
+        assert!(app.last_click.is_none(), "an icon click never drills");
+        assert_eq!(
+            section_texts(&app),
+            vec![
+                (
+                    K::ChipCheckout,
+                    texts(&[
+                        meaning(K::ChipCheckout),
+                        "on main",
+                        title(Action::Pull),
+                        title(Action::Push),
+                        title(Action::Fetch),
+                    ])
+                ),
+                (
+                    K::ChipSynced,
+                    texts(&[meaning(K::ChipSynced), "main", "in sync with origin/main"])
+                ),
+            ]
+        );
+        // Off the tree the gates refuse Pull: the line keeps the reason.
+        let pull = command_for(&Action::Pull).unwrap();
+        let reason = app
+            .palette_disabled_reason(pull)
+            .expect("gated off the tree");
+        assert!(reason.contains("to pull"), "{reason}");
+        app.dispatch(Action::PopoverClose);
+
+        // A tag chip on the root spacer: its own commit, so Checkout
+        // commit refs acts on it.
+        paint(&mut app);
+        let tag = chip_hit(&app, K::ChipTag, &root);
+        app.dispatch(Action::Click {
+            col: tag.x,
+            row: tag.y,
+        });
+        assert_eq!(app.graph_cursor, 3);
+        assert_eq!(
+            section_texts(&app),
+            vec![(
+                K::ChipTag,
+                texts(&[
+                    meaning(K::ChipTag),
+                    "v0",
+                    "tag",
+                    title(Action::GraphCheckout)
+                ])
+            )]
+        );
+        assert_eq!(app.popover_run_action(), Some(Action::GraphCheckout));
+        app.dispatch(Action::PopoverClose);
+
+        // A click on the header pins the sync section.
+        paint(&mut app);
+        app.dispatch(Action::Click {
+            col: header.x + 1,
+            row: header.y,
+        });
+        assert_eq!(
+            section_texts(&app),
+            vec![(
+                K::Ahead,
+                texts(&[
+                    meaning(K::Ahead),
+                    "main",
+                    "1 commit not pushed",
+                    "0 commits to pull",
+                    "ahead",
+                    title(Action::Pull),
+                    title(Action::Push),
+                    title(Action::Fetch),
+                ])
+            )]
+        );
+        app.dispatch(Action::PopoverClose);
+
+        // The uncommitted row's footer lists HEAD's chips: they name HEAD's
+        // refs, and no line acts on the focused commit.
+        app.graph_cursor = 0;
+        paint(&mut app);
+        let footer = chip_hit(&app, K::ChipLocal, "uncommitted");
+        app.pin_icon(&footer);
+        assert_eq!(
+            section_texts(&app),
+            vec![(
+                K::ChipLocal,
+                texts(&[
+                    meaning(K::ChipLocal),
+                    "feat",
+                    "local branch",
+                    title(Action::GraphFocusBranches),
+                    title(Action::CompareVsBranch),
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn overflow_detached_and_more_lines_popovers_read_live_state() {
+        use IconKind as K;
+        let mut app = chip_graph_app();
+        let head = format!("commit:{G_HEAD}");
+        let chip = |name: &str| PartTarget::Chip(vec![GraphRef::local(name)]);
+        let sections = |app: &AppState, kind: IconKind, chip: PartTarget, row: &str| {
+            popover_sections(
+                app,
+                &[(
+                    kind,
+                    IconTarget::GraphChip {
+                        row: row.to_string(),
+                        chip,
+                    },
+                )],
+                0,
+            )
+            .into_iter()
+            .map(|section| {
+                let lines: Vec<String> = section.lines.iter().map(PopoverLine::copy_text).collect();
+                (section.icon, lines)
+            })
+            .collect::<Vec<_>>()
+        };
+        // `[+N]` lists every hidden chip with its kind.
+        let hidden = PartTarget::Overflow(vec![
+            PartTarget::Chip(vec![
+                GraphRef::local("main"),
+                GraphRef::remote("origin/main"),
+            ]),
+            chip("feat"),
+        ]);
+        assert_eq!(
+            sections(&app, K::ChipOverflow, hidden.clone(), &head),
+            vec![(
+                K::ChipOverflow,
+                texts(&[
+                    meaning(K::ChipOverflow),
+                    "main + origin/main",
+                    "feat",
+                    title(Action::GraphCheckout),
+                ])
+            )]
+        );
+        // A chip whose ref left the commit drops its section.
+        assert!(sections(&app, K::ChipLocal, chip("gone"), &head).is_empty());
+        // Detached HEAD.
+        app.graph.as_mut().unwrap().sync = None;
+        assert_eq!(
+            sections(&app, K::ChipDetachedHead, PartTarget::DetachedHead, &head),
+            vec![(
+                K::ChipDetachedHead,
+                texts(&[
+                    meaning(K::ChipDetachedHead),
+                    "detached at aaa1111",
+                    title(Action::Branch),
+                    title(Action::GraphCreateBranch),
+                ])
+            )]
+        );
+
+        // A long message on HEAD: the expanded footer hints the lines below.
+        let mut app = chip_graph_app();
+        app.graph.as_mut().unwrap().commits[0].body = (0..30)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.commit_msg_expand = true;
+        paint(&mut app);
+        let hint = app
+            .layout
+            .icon_hits
+            .iter()
+            .find(|hit| hit.kind == K::GraphMoreBelow)
+            .cloned()
+            .unwrap_or_else(|| panic!("hint hit: {:?}", app.layout.icon_hits));
+        assert_eq!(hint.target, IconTarget::GraphMoreLines(head.clone()));
+        app.pin_icon(&hint);
+        let below = app.graph_footer_lines_below();
+        assert!(below > 0);
+        assert_eq!(
+            section_texts(&app),
+            vec![(
+                K::GraphMoreBelow,
+                texts(&[
+                    meaning(K::GraphMoreBelow),
+                    &format!("{below} more lines"),
+                    title(Action::ToggleCommitMsgExpand),
+                    title(Action::ResizeCommitMsg(1)),
+                ])
+            )]
+        );
+        // Collapsing the message (M) clears the hint and its section.
+        app.dispatch(Action::PopoverRun);
+        assert!(!app.commit_msg_expand);
+        assert!(app.popover.is_none());
+        assert_eq!(app.graph_footer_lines_below(), 0);
     }
 }

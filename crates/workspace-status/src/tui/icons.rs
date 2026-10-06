@@ -141,6 +141,8 @@ pub enum IconKind {
     ChipDetachedHead,
     /// `[+N]` chip for refs that do not fit.
     ChipOverflow,
+    /// Graph selection footer: more message lines below.
+    GraphMoreBelow,
     /// Fold chevron, expanded.
     FoldExpanded,
     /// Fold chevron, collapsed.
@@ -534,7 +536,7 @@ pub const ICON_CATALOG: &[IconSpec] = {
             G_NERD.checkout_mark,
             G_ASCII.checkout_mark,
             "checked out",
-            "HEAD is on this branch",
+            "HEAD is on this branch (head colour)",
             GRAPH,
         ),
         row(
@@ -542,7 +544,7 @@ pub const ICON_CATALOG: &[IconSpec] = {
             G_NERD.sync_mark,
             G_ASCII.sync_mark,
             "same commit",
-            "Local branch and same-name remote on this commit",
+            "Local and same-name remote here (remote colour alone)",
             GRAPH,
         ),
         row(
@@ -584,6 +586,14 @@ pub const ICON_CATALOG: &[IconSpec] = {
             "[+N]",
             "more refs",
             "N more refs that do not fit",
+            GRAPH,
+        ),
+        row(
+            K::GraphMoreBelow,
+            G_NERD.more_below,
+            G_ASCII.more_below,
+            "more lines",
+            "More commit message lines below (count)",
             GRAPH,
         ),
         row(
@@ -1443,13 +1453,14 @@ mod tests {
         }
     }
 
-    /// Graph rows read the graph crate's glyph sets. Ahead / behind keep the
-    /// tree glyphs in Nerd mode; the graph header still paints its own.
+    /// Graph rows read the graph crate's glyph sets. The graph header's
+    /// ahead / behind marks are the tree's catalog glyphs in both modes; the
+    /// footer's more-lines hint has its own glyph.
     #[test]
     fn graph_rows_match_the_graph_glyph_set() {
         use workspace_status_graph::{GlyphSet, ASCII, UNICODE};
         type Field = fn(&GlyphSet) -> &'static str;
-        let pairs: [(IconKind, Field); 7] = [
+        let pairs: [(IconKind, Field); 10] = [
             (IconKind::GraphCommit, |g| g.commit),
             (IconKind::GraphHeadCommit, |g| g.head_commit),
             (IconKind::GraphStash, |g| g.stash),
@@ -1457,13 +1468,19 @@ mod tests {
             (IconKind::LinkedWorktree, |g| g.worktree),
             (IconKind::ChipCheckout, |g| g.checkout_mark),
             (IconKind::ChipSynced, |g| g.sync_mark),
+            (IconKind::Ahead, |g| g.ahead),
+            (IconKind::Behind, |g| g.behind),
+            (IconKind::GraphMoreBelow, |g| g.more_below),
         ];
         for (kind, field) in pairs {
             assert_eq!(kind.glyph(false), field(&UNICODE), "{kind:?}");
             assert_eq!(kind.glyph(true), field(&ASCII), "{kind:?}");
         }
-        assert_eq!(IconKind::Ahead.glyph(true), ASCII.ahead);
-        assert_eq!(IconKind::Behind.glyph(true), ASCII.behind);
+        assert_ne!(
+            IconKind::GraphMoreBelow.glyph(false),
+            IconKind::Behind.glyph(false),
+            "more lines below is not behind upstream"
+        );
         for (set, ascii) in [(UNICODE, false), (ASCII, true)] {
             let rails = [
                 set.vertical,
@@ -1484,7 +1501,7 @@ mod tests {
     #[test]
     fn glyphs_are_unique_within_one_paint_context() {
         use IconKind as K;
-        let contexts: [(&str, &[IconKind]); 6] = [
+        let contexts: [(&str, &[IconKind]); 8] = [
             (
                 "tree workspace / group row",
                 &[K::Workspace, K::Clean, K::Comment, K::CommentResolved],
@@ -1542,11 +1559,23 @@ mod tests {
                     K::LinkedWorktree,
                     K::ChipCheckout,
                     K::ChipSynced,
+                    K::ChipDetachedHead,
+                    K::ChipOverflow,
                     K::PrOpen,
                     K::PrApproved,
                     K::PrMerged,
                     K::Comment,
                     K::CommentResolved,
+                ],
+            ),
+            ("graph sync header", &[K::Ahead, K::Behind]),
+            (
+                "graph selection footer",
+                &[
+                    K::ChipCheckout,
+                    K::ChipSynced,
+                    K::ChipDetachedHead,
+                    K::GraphMoreBelow,
                 ],
             ),
             (
@@ -1559,13 +1588,18 @@ mod tests {
                 ],
             ),
         ];
-        // Every tree legend row paints somewhere, so each sits in a context.
+        // Branch, default, remote, and tag chips share a bracketed sample;
+        // the graph tells them apart by colour, so no glyph check applies.
+        let by_colour = [K::ChipLocal, K::ChipDefault, K::ChipRemote, K::ChipTag];
+        // Every tree and graph legend row paints somewhere, so each sits in
+        // a context.
         for spec in ICON_CATALOG
             .iter()
-            .filter(|spec| spec.group == Some(IconGroup::Tree))
+            .filter(|spec| matches!(spec.group, Some(IconGroup::Tree) | Some(IconGroup::Graph)))
         {
             assert!(
-                contexts.iter().any(|(_, kinds)| kinds.contains(&spec.kind)),
+                by_colour.contains(&spec.kind)
+                    || contexts.iter().any(|(_, kinds)| kinds.contains(&spec.kind)),
                 "{:?} is in no paint context",
                 spec.kind
             );

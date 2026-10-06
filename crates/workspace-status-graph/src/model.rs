@@ -38,7 +38,7 @@ pub struct GraphModel {
 }
 
 /// Kind of annotated ref on a commit. Same set as `GraphRefKind`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RefKind {
     /// `refs/heads/*`
     Local,
@@ -49,7 +49,7 @@ pub enum RefKind {
 }
 
 /// A branch or tag label pointing at a commit.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct GraphRef {
     /// Local, remote, or tag.
     pub kind: RefKind,

@@ -26,9 +26,11 @@ whatever `visible_rows` the model holds.
 | `GraphCell` | One gutter column: glyph, colour lane, role |
 | `LaidOutCommit` | Lane assignment plus stem metadata for one commit |
 | `GraphWidget` | Ratatui `Widget` over a `GraphModel` |
-| `IconSpan` | Painted cells of one graph icon (`GraphIconKind`, row index, x, y, width, `part`), from `render_with_icon_spans` |
-| `GraphIconKind` | Commit / HEAD / stash node, uncommitted glyph, worktree glyph, open / resolved comment mark, row badge |
-| `GraphLabelPalette` | Label colours: subject, meta, chips, overflow, worktree glyph, dirty uncommitted glyph, open and resolved comment marks |
+| `IconSpan` | Painted cells of one graph icon (`GraphIconKind`, row index or `None` for the sync header, x, y, width, `part`, chip `target`), from `render_with_icon_spans` |
+| `GraphIconKind` | Commit / HEAD / stash node, uncommitted glyph, worktree glyph, open / resolved comment mark, row badge, local / default / remote / tag chip, checkout-and-sync mark run, detached `[HEAD]`, `[+N]`, sync header, footer more-lines hint |
+| `LabelPart` | One styled run: text, `LabelKind`, and `target` (`PartTarget`: the chip the run belongs to, or `None`) |
+| `PartTarget` | Chip identity: `Chip(refs)` (one ref, or a local branch and its same-name remote), `Marks { branch, checkout, remote }`, `DetachedHead`, `Overflow(hidden chips)` |
+| `GraphLabelPalette` | Label colours: subject, meta, chips, overflow, worktree glyph, dirty uncommitted glyph, open and resolved comment marks, sync header ahead and behind counts |
 | `graph_scrollbar_thumb` | Thumb offset/length matching a painted bar (TUI hit-test, vertical or horizontal) |
 | `graph_col_max` | Max `col_offset` for the longest label in the pane, counting the space and glyph of each `row_badges` entry |
 | `graph_vscroll_visible` / `graph_hscroll_visible` | Show the vertical bar whenever the painted lines overflow the list (or it has left the top); the horizontal bar only after leaving the left edge |
@@ -99,8 +101,9 @@ old branch and gets no badge. Commit rows get no badge.
 ### Icon spans
 
 `GraphWidget::render_with_icon_spans` paints like `render` and returns one
-`IconSpan` per graph icon on screen, top to bottom, and per line in paint
-order: node, comment mark, label glyphs, badge.
+`IconSpan` per graph icon on screen, top to bottom: the sync header, then
+per list line in paint order (node, comment mark, label glyphs and chips
+left to right, badge), then the selection footer's chips and hint.
 
 | `GraphIconKind` | Where |
 | --- | --- |
@@ -109,11 +112,30 @@ order: node, comment mark, label glyphs, badge.
 | `Worktree` | The worktree glyph that starts a worktree row label, and each worktree mark on a commit spacer. `part` is the index into that commit row's `worktrees` (`0` on a worktree row). The span's `row_index` is the commit row. |
 | `Comment` / `ResolvedComment` | The comment mark after the gutter |
 | `Badge` | A `row_badges` glyph |
+| `LocalChip` / `DefaultChip` / `RemoteChip` / `TagChip` | A ref chip on a commit spacer or in the selection footer. `target` is its `PartTarget::Chip` |
+| `ChipMarks` | The checkout and sync marks inside a branch chip. One run, so one span: `target` is `PartTarget::Marks` with both flags |
+| `DetachedHeadChip` | Detached `[HEAD]` |
+| `OverflowChip` | `[+N]`. `target` is `PartTarget::Overflow` with the target of each hidden chip |
+| `SyncHeader` | The sync header text (branch and marks). `row_index` is `None` |
+| `MoreBelow` | The footer's `<more_below><K>` hint, without its leading blank |
 
 Rails, junctions, spacer gutter cells, and blanks are chrome: they have
 no span. A node cut by the gutter cap, a label glyph cut by `col_offset` or
 the pane edge, and any icon under the horizontal scrollbar row are left
 out.
+
+A chip is one span per run of adjacent parts with the same target, so a
+branch chip with marks reads `[`, the marks, then `name]`. A chip cut by
+`col_offset`, the footer's `…` truncation, or the pane edge keeps a span
+over the cells that show. Spacer chips carry their commit row; footer
+chips and the hint carry the selected row (the uncommitted row's footer
+paints HEAD's chips). `LabelPart::icon` maps a part to its kind: row
+glyphs through `LabelKind::icon`, chips through `PartTarget::icon`.
+
+`LabelPart::target` survives `fit_chip_groups`, chip-name truncation,
+`trunc_label_parts`, and `slice_label_parts`, so a pan, a narrow spacer,
+and the footer keep each run's chip. Targets do not change text: the
+label, the spacer, and `PaintedLine::text` are the same strings.
 
 The label glyphs are their own `LabelPart`s, so the text of a line
 (`PaintedLine::text`, the label, the spacer) does not change.
@@ -166,9 +188,11 @@ moving between commits never changes the list height:
 - A taller message scrolls: `commit_msg_scroll` sets the first message
   row and a 1-column scrollbar marks the position
   (`footer_message_scroll_max`). While lines are hidden below, the last
-  visible message row ends with a muted `↓<K>` hint (`v<K>` with ASCII
-  glyphs; K = hidden lines below) left of the scrollbar column. It covers
-  the message text under it. At the end of the message there is no hint.
+  visible message row ends with a muted `<more_below><K>` hint
+  (`GlyphSet::more_below`: `` U+F103, `v<K>` with ASCII glyphs; K = hidden
+  lines below) left of the scrollbar column. It is not the behind glyph.
+  It covers the message text under it. At the end of the message there is
+  no hint.
 
 List rows stay one line.
 The pane has no `loading older…` row: the status line shows it while the next
@@ -192,9 +216,16 @@ other strings):
   then the same meta line
 
 Footer paint reuses the commit-spacer chip runs (`LabelKind`: HEAD /
-default / local / remote / tag). `GraphWidget::label_palette` colours
+default / local / remote / tag) and their `target`s. A worktree row's
+branch run is a local branch chip. `GraphWidget::label_palette` colours
 those the same as the row chips. Hash, parents, date, and author stay `meta`.
 Do not flatten the footer to one colour.
+
+The sync header is `branch` then the ahead / behind marks
+(`format_sync`), or `branch no-upstream`. With a `label_palette` the
+branch paints in `branch_default` or `branch_local`, the ahead count in
+`ahead`, the behind count in `behind`, and `no-upstream` in `meta`.
+Without a palette it keeps the terminal default colour.
 
 Then one gutter plus label per visible row. Commit and stash rows also
 paint a spacer line under the node (densify rails, or the stash spur).
@@ -229,8 +260,13 @@ lane colour; it does not flatten the gutter to one unstyled span.
 | Uncommitted | `○` | `o` |
 | Stash | `◇` | `s` |
 | Worktree | `` | `L` |
-| Ahead | `↑` | `^` |
-| Behind | `↓` | `v` |
+| Ahead (sync header) | `` U+F062 | `^` |
+| Behind (sync header) | `` U+F063 | `v` |
+| More lines below (footer hint) | `` U+F103 | `v` |
+
+Ahead and behind are the workspace tree's sync glyphs (one catalog entry
+each). The footer hint has its own glyph: it counts message lines, not
+upstream commits.
 
 Junction glyphs use `│─╮╭╯╰┤├┬┴┼` /
 `|-/\+`. Tests paint with ratatui TestBackend. They do not open a TTY.

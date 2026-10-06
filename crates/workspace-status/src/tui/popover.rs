@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 
 use ratatui::layout::Rect;
 use workspace_status_graph::{
-    format_local_timestamp, format_relative_date, short_id, Commit, GraphIconKind, GraphRow, Stash,
-    SyncStatus, Worktree, ASCII, UNICODE,
+    format_local_timestamp, format_relative_date, short_id, Commit, GraphIconKind, GraphRef,
+    GraphRow, PartTarget, RefKind, Stash, SyncStatus, Worktree, ASCII, UNICODE,
 };
 
 use crate::helpers::{is_default_branch, is_detached_head_branch};
@@ -74,6 +74,20 @@ pub enum IconTarget {
     /// The linked-worktree glyph of the graph worktree with this path, on
     /// its worktree row or as a worktree mark on a commit spacer.
     GraphWorktree(String),
+    /// A ref chip, a checkout / sync mark run, `[HEAD]`, or `[+N]` painted
+    /// for the graph row with [`graph_row_id`] `row`: on its commit spacer
+    /// or in the selection footer.
+    GraphChip {
+        /// [`graph_row_id`] of the row the chip is painted for.
+        row: String,
+        /// The chip ([`workspace_status_graph::LabelPart::target`]).
+        chip: PartTarget,
+    },
+    /// The graph sync header: HEAD's branch against its upstream.
+    GraphSync,
+    /// The selection footer's `more lines below` hint of the graph row with
+    /// this [`graph_row_id`].
+    GraphMoreLines(String),
 }
 
 /// How a popover opened.
@@ -200,15 +214,30 @@ pub fn graph_row_id(row: &GraphRow) -> String {
 }
 
 /// Catalog kind and target of graph icon `kind` painted for `row`. `part`
-/// is the [`workspace_status_graph::IconSpan::part`]. `None` for a PR
-/// badge (its checkout comes from the badge list) and for a worktree mark
-/// whose index is not on the row.
+/// is the [`workspace_status_graph::IconSpan::part`] and `chip` its
+/// [`workspace_status_graph::IconSpan::target`]. `None` for a PR badge (its
+/// checkout comes from the badge list), the sync header and the footer
+/// hint (no row icon), and a worktree mark whose index is not on the row.
+///
+/// A checkout / sync mark run is one icon: [`IconKind::ChipCheckout`] when
+/// HEAD is on its branch, else [`IconKind::ChipSynced`].
+/// [`icon_targets`] gives its two sections.
 pub fn graph_icon(
     kind: GraphIconKind,
     part: Option<usize>,
+    chip: Option<&PartTarget>,
     row: &GraphRow,
 ) -> Option<(IconKind, IconTarget)> {
     let on_row = |icon: IconKind| Some((icon, IconTarget::GraphRow(graph_row_id(row))));
+    let on_chip = |icon: IconKind| {
+        Some((
+            icon,
+            IconTarget::GraphChip {
+                row: graph_row_id(row),
+                chip: chip?.clone(),
+            },
+        ))
+    };
     match kind {
         GraphIconKind::CommitNode => on_row(IconKind::GraphCommit),
         GraphIconKind::HeadNode => on_row(IconKind::GraphHeadCommit),
@@ -227,7 +256,49 @@ pub fn graph_icon(
                 IconTarget::GraphWorktree(path.clone()),
             ))
         }
-        GraphIconKind::Badge => None,
+        GraphIconKind::LocalChip => on_chip(IconKind::ChipLocal),
+        GraphIconKind::DefaultChip => on_chip(IconKind::ChipDefault),
+        GraphIconKind::RemoteChip => on_chip(IconKind::ChipRemote),
+        GraphIconKind::TagChip => on_chip(IconKind::ChipTag),
+        GraphIconKind::DetachedHeadChip => on_chip(IconKind::ChipDetachedHead),
+        GraphIconKind::OverflowChip => on_chip(IconKind::ChipOverflow),
+        GraphIconKind::ChipMarks => match chip? {
+            PartTarget::Marks { checkout: true, .. } => on_chip(IconKind::ChipCheckout),
+            _ => on_chip(IconKind::ChipSynced),
+        },
+        GraphIconKind::Badge | GraphIconKind::SyncHeader | GraphIconKind::MoreBelow => None,
+    }
+}
+
+/// The popover sections one painted icon opens: itself, and for a
+/// checkout mark run that also holds the sync mark, the sync section after
+/// the checkout section (one hit, two sections).
+pub fn icon_targets(kind: IconKind, target: &IconTarget) -> Vec<(IconKind, IconTarget)> {
+    let mut targets = vec![(kind, target.clone())];
+    if let IconTarget::GraphChip {
+        chip:
+            PartTarget::Marks {
+                checkout: true,
+                remote: Some(_),
+                ..
+            },
+        ..
+    } = target
+    {
+        targets.push((IconKind::ChipSynced, target.clone()));
+    }
+    targets
+}
+
+/// Catalog kind of the graph sync header in `status`. Up to date reads as
+/// [`IconKind::Synced`]: the header paints no mark then.
+pub fn graph_sync_kind(status: SyncStatus) -> IconKind {
+    match status {
+        SyncStatus::Ahead => IconKind::Ahead,
+        SyncStatus::Behind => IconKind::Behind,
+        SyncStatus::Diverged => IconKind::Diverged,
+        SyncStatus::NoUpstream => IconKind::NoUpstream,
+        SyncStatus::UpToDate => IconKind::Synced,
     }
 }
 
@@ -268,6 +339,9 @@ fn section(
         }
         IconTarget::GraphRow(id) => graph_row_section(state, kind, id, now_unix),
         IconTarget::GraphWorktree(path) => graph_worktree_section(state, path),
+        IconTarget::GraphChip { row, chip } => graph_chip_section(state, kind, row, chip),
+        IconTarget::GraphSync => graph_sync_section(state),
+        IconTarget::GraphMoreLines(row) => graph_more_lines_section(state, row),
     }
 }
 
@@ -1127,6 +1201,302 @@ fn graph_worktree_section(state: &AppState, path: &str) -> Option<PopoverSection
         icon: IconKind::LinkedWorktree,
         role: SegRole::Heading,
         target: IconTarget::GraphWorktree(path.to_string()),
+        lines,
+    })
+}
+
+/// Refs the chips of graph row `row` stand for, whether they are HEAD's,
+/// and the commit they are on. A commit row paints its own; the footer of
+/// the uncommitted row paints HEAD's; a worktree row's footer paints its
+/// branch (no commit). `None` on a stash row.
+fn chip_refs<'a>(
+    model: &'a workspace_status_graph::GraphModel,
+    row: &'a GraphRow,
+) -> Option<(Vec<GraphRef>, bool, Option<&'a Commit>)> {
+    Some(match row {
+        GraphRow::Commit {
+            commit, is_head, ..
+        } => (commit.refs.clone(), *is_head, Some(commit)),
+        GraphRow::Uncommitted { .. } => {
+            let head = model.head_id.as_deref()?;
+            let commit = model.commits.iter().find(|commit| commit.id == head)?;
+            (commit.refs.clone(), true, Some(commit))
+        }
+        GraphRow::Worktree(worktree) => (
+            worktree
+                .branch
+                .iter()
+                .map(|name| GraphRef {
+                    kind: RefKind::Local,
+                    name: name.clone(),
+                })
+                .collect(),
+            false,
+            None,
+        ),
+        GraphRow::Stash(_) => return None,
+    })
+}
+
+/// Catalog kind of a ref chip over `refs`, as the graph colours it: a tag,
+/// a local branch (default or not), or a remote with no local match
+/// (default when its short name is).
+fn ref_chip_kind(refs: &[GraphRef], default_override: Option<&str>) -> Option<IconKind> {
+    let first = refs.first()?;
+    let short = match first.kind {
+        RefKind::Remote => first
+            .name
+            .split_once('/')
+            .map_or(first.name.as_str(), |(_, rest)| rest),
+        RefKind::Local | RefKind::Tag => first.name.as_str(),
+    };
+    Some(match first.kind {
+        RefKind::Tag => IconKind::ChipTag,
+        _ if is_default_branch(short, default_override) => IconKind::ChipDefault,
+        RefKind::Local => IconKind::ChipLocal,
+        RefKind::Remote => IconKind::ChipRemote,
+    })
+}
+
+/// Field label and value of one hidden chip in a `[+N]` popover.
+fn hidden_chip_field(chip: &PartTarget) -> Option<PopoverLine> {
+    match chip {
+        PartTarget::Chip(refs) => {
+            let label = match refs.as_slice() {
+                [_, _, ..] => "branch",
+                [one] => match one.kind {
+                    RefKind::Local => "local",
+                    RefKind::Remote => "remote",
+                    RefKind::Tag => "tag",
+                },
+                [] => return None,
+            };
+            let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
+            Some(field(label, names.join(" + ")))
+        }
+        PartTarget::DetachedHead => Some(field("detached", "HEAD")),
+        PartTarget::Marks { .. } | PartTarget::Overflow(_) => None,
+    }
+}
+
+/// Section of a graph chip on row `row_id`: a ref chip, the checkout or
+/// sync half of a mark run, `[HEAD]`, or `[+N]`. `None` when the row is
+/// gone or no longer holds the refs the chip names.
+///
+/// Actions that act on the focused commit (Checkout commit refs, Create
+/// branch at commit) are listed only when the chip is on its own commit
+/// row: a click on a spacer chip selects that commit. The footer of the
+/// uncommitted row shows HEAD's chips, where those keys would act on the
+/// uncommitted row instead. Pull, Push, Fetch, and the pickers act on the
+/// checkout; off the tree the gates refuse them, and the line shows dim
+/// with the reason.
+fn graph_chip_section(
+    state: &AppState,
+    kind: IconKind,
+    row_id: &str,
+    chip: &PartTarget,
+) -> Option<PopoverSection> {
+    let model = state.graph.as_ref()?;
+    let rows = model.visible_rows();
+    let row = rows.iter().find(|row| graph_row_id(row) == row_id)?;
+    let (refs, is_head, commit) = chip_refs(model, row)?;
+    let on_commit_row = matches!(row, GraphRow::Commit { .. });
+    let head_branch = model.sync.as_ref().map(|sync| sync.branch.as_str());
+    let default_override = model.default_branch_override.as_deref();
+    let has = |kind: RefKind, name: &str| refs.iter().any(|r| r.kind == kind && r.name == name);
+    let mut fields = Vec::new();
+    let (kind, role, actions) = match (kind, chip) {
+        (IconKind::ChipCheckout, PartTarget::Marks { branch, .. }) => {
+            if !is_head || head_branch != Some(branch.as_str()) {
+                return None;
+            }
+            fields.push(field("head", format!("on {branch}")));
+            (
+                kind,
+                SegRole::Heading,
+                vec![Action::Pull, Action::Push, Action::Fetch],
+            )
+        }
+        (
+            IconKind::ChipSynced,
+            PartTarget::Marks {
+                branch,
+                checkout,
+                remote: Some(remote),
+            },
+        ) => {
+            if !has(RefKind::Local, branch) || !has(RefKind::Remote, remote) {
+                return None;
+            }
+            fields.push(field("branch", branch.clone()));
+            fields.push(field("sync", format!("in sync with {remote}")));
+            // With the checkout section above, its Pull / Push / Fetch
+            // cover the run. A synced branch that is not checked out only
+            // fetches: pull and push act on the checked-out branch.
+            let actions = if *checkout {
+                Vec::new()
+            } else {
+                vec![Action::Fetch]
+            };
+            let role = if *checkout {
+                SegRole::Heading
+            } else {
+                SegRole::Dir
+            };
+            (kind, role, actions)
+        }
+        (IconKind::ChipDetachedHead, PartTarget::DetachedHead) => {
+            let commit = commit?;
+            if !is_head || head_branch.is_some_and(|branch| !is_detached_head_branch(branch)) {
+                return None;
+            }
+            fields.push(field(
+                "head",
+                format!("detached at {}", short_id(&commit.id)),
+            ));
+            let mut actions = vec![Action::Branch];
+            if on_commit_row {
+                actions.push(Action::GraphCreateBranch);
+            }
+            (kind, SegRole::Heading, actions)
+        }
+        (IconKind::ChipOverflow, PartTarget::Overflow(hidden)) => {
+            let present = |chip: &PartTarget| match chip {
+                PartTarget::Chip(chip_refs) => chip_refs.iter().all(|r| has(r.kind, &r.name)),
+                _ => true,
+            };
+            if !hidden.iter().any(present) {
+                return None;
+            }
+            fields.extend(hidden.iter().filter_map(hidden_chip_field));
+            let actions = if on_commit_row {
+                vec![Action::GraphCheckout]
+            } else {
+                Vec::new()
+            };
+            (kind, SegRole::Heading, actions)
+        }
+        (_, PartTarget::Chip(chip_refs)) => {
+            if chip_refs.iter().any(|r| !has(r.kind, &r.name)) {
+                return None;
+            }
+            let kind = ref_chip_kind(chip_refs, default_override)?;
+            let first = chip_refs.first()?;
+            fields.push(field("name", first.name.clone()));
+            let what = match (first.kind, chip_refs.len()) {
+                (RefKind::Local, 1) => "local branch",
+                (RefKind::Local, _) => "local branch and remote",
+                (RefKind::Remote, _) => "remote-tracking branch",
+                (RefKind::Tag, _) => "tag",
+            };
+            fields.push(field("kind", what));
+            if let Some(remote) = chip_refs.get(1) {
+                fields.push(field("remote", remote.name.clone()));
+            }
+            if kind == IconKind::ChipDefault {
+                fields.push(field("default", "yes"));
+            }
+            let mut actions = match first.kind {
+                RefKind::Local => vec![Action::GraphFocusBranches, Action::CompareVsBranch],
+                RefKind::Remote => vec![Action::Fetch],
+                RefKind::Tag => Vec::new(),
+            };
+            if on_commit_row {
+                actions.push(Action::GraphCheckout);
+            }
+            let role = match kind {
+                IconKind::ChipDefault => SegRole::BranchDefault,
+                IconKind::ChipRemote => SegRole::Dir,
+                IconKind::ChipTag => SegRole::Modified,
+                _ => SegRole::BranchFeature,
+            };
+            (kind, role, actions)
+        }
+        _ => return None,
+    };
+    let mut lines = vec![PopoverLine::Text(spec(kind).meaning.to_string())];
+    lines.extend(fields);
+    lines.extend(actions.iter().filter_map(PopoverLine::action));
+    Some(PopoverSection {
+        icon: kind,
+        role,
+        target: IconTarget::GraphChip {
+            row: row_id.to_string(),
+            chip: chip.clone(),
+        },
+        lines,
+    })
+}
+
+/// The graph sync header: branch, ahead and behind counts, and the state
+/// in words; Pull, Push, Fetch. The kind follows the live state
+/// ([`graph_sync_kind`]), so a pinned header popover shows a fetch that
+/// moved it.
+fn graph_sync_section(state: &AppState) -> Option<PopoverSection> {
+    let sync = state.graph.as_ref()?.sync.as_ref()?;
+    let kind = graph_sync_kind(sync.status);
+    let mut lines = vec![
+        PopoverLine::Text(spec(kind).meaning.to_string()),
+        field("branch", sync.branch.clone()),
+    ];
+    let (words, role) = match sync.status {
+        SyncStatus::Ahead => ("ahead", SegRole::Added),
+        SyncStatus::Behind => ("behind", SegRole::Deleted),
+        SyncStatus::Diverged => ("diverged", SegRole::Modified),
+        SyncStatus::UpToDate => ("up to date", SegRole::Muted),
+        SyncStatus::NoUpstream => ("no upstream", SegRole::Muted),
+    };
+    if matches!(
+        sync.status,
+        SyncStatus::Ahead | SyncStatus::Behind | SyncStatus::Diverged
+    ) {
+        lines.push(field(
+            "ahead",
+            commits(Some(sync.ahead.into()), "not pushed"),
+        ));
+        lines.push(field(
+            "behind",
+            commits(Some(sync.behind.into()), "to pull"),
+        ));
+    }
+    lines.push(field("state", words));
+    lines.extend(
+        [Action::Pull, Action::Push, Action::Fetch]
+            .iter()
+            .filter_map(PopoverLine::action),
+    );
+    Some(PopoverSection {
+        icon: kind,
+        role,
+        target: IconTarget::GraphSync,
+        lines,
+    })
+}
+
+/// The footer hint of graph row `row_id`: how many message lines are
+/// below the shown ones; Collapse / expand and Taller message. `None` once
+/// the row is not selected or every line shows.
+fn graph_more_lines_section(state: &AppState, row_id: &str) -> Option<PopoverSection> {
+    if graph_row_id(&state.focused_graph_row()?) != row_id {
+        return None;
+    }
+    let below = state.graph_footer_lines_below();
+    if below == 0 {
+        return None;
+    }
+    let mut lines = vec![
+        PopoverLine::Text(spec(IconKind::GraphMoreBelow).meaning.to_string()),
+        field("below", counted(below, "more line", "more lines")),
+    ];
+    lines.extend(
+        [Action::ToggleCommitMsgExpand, Action::ResizeCommitMsg(1)]
+            .iter()
+            .filter_map(PopoverLine::action),
+    );
+    Some(PopoverSection {
+        icon: IconKind::GraphMoreBelow,
+        role: SegRole::Muted,
+        target: IconTarget::GraphMoreLines(row_id.to_string()),
         lines,
     })
 }

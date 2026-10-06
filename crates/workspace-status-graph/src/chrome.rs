@@ -1,15 +1,17 @@
 //! GraphPane chrome: header / list / fixed-height selection footer.
 //!
 //! Header / footer budget (`graph_chrome_budget`) and selection footer copy.
-//! Footer ref chips are the same [`LabelPart`] runs as the commit spacer.
+//! Footer ref chips are the same [`LabelPart`] runs as the commit spacer,
+//! with the same [`LabelPart::target`]s. A worktree row's branch run is a
+//! local branch chip.
 
 use crate::format::{
     commit_ref_chip_parts, format_commit_message, format_relative_date, is_default_branch,
-    parts_text, short_id, trunc_label_parts, wrap_commit_message, LabelKind, LabelPart,
+    parts_text, short_id, trunc_label_parts, wrap_commit_message, LabelKind, LabelPart, PartTarget,
     COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN,
 };
 use crate::glyphs::GlyphSet;
-use crate::model::{GraphModel, GraphRow};
+use crate::model::{GraphModel, GraphRef, GraphRow, RefKind};
 
 /// Status-line copy while the next log page loads. The graph pane paints no
 /// loading row, so the list keeps its height.
@@ -178,6 +180,7 @@ pub fn selection_detail_parts(
                 vec![LabelPart {
                     text: FOOTER_WORKTREE_NOT_A_COMMIT.to_string(),
                     kind: LabelKind::Meta,
+                    target: None,
                 }]
             });
             [subject_parts(line, width), trunc_label_parts(&meta, width)]
@@ -205,6 +208,10 @@ pub fn selection_detail_parts(
                     } else {
                         LabelKind::ChipLocal
                     },
+                    target: Some(PartTarget::Chip(vec![GraphRef {
+                        kind: RefKind::Local,
+                        name: branch.to_string(),
+                    }])),
                 }],
                 _ => Vec::new(),
             };
@@ -228,6 +235,7 @@ pub fn selection_detail_parts(
                 groups.push(vec![LabelPart {
                     text: FOOTER_NO_REFS.into(),
                     kind: LabelKind::Meta,
+                    target: None,
                 }]);
             } else {
                 groups.push(chips);
@@ -285,6 +293,7 @@ pub fn selection_footer_parts(
             vec![LabelPart {
                 text,
                 kind: LabelKind::Subject,
+                target: None,
             }]
         })
         .collect();
@@ -332,6 +341,7 @@ fn subject_parts(text: &str, width: usize) -> Vec<LabelPart> {
         &[LabelPart {
             text: text.to_string(),
             kind: LabelKind::Subject,
+            target: None,
         }],
         width,
     )
@@ -356,6 +366,7 @@ fn meta_part(text: String) -> LabelPart {
     LabelPart {
         text,
         kind: LabelKind::Meta,
+        target: None,
     }
 }
 
@@ -370,6 +381,7 @@ fn join_meta_groups(groups: impl IntoIterator<Item = Vec<LabelPart>>) -> Vec<Lab
             out.push(LabelPart {
                 text: " · ".into(),
                 kind: LabelKind::Meta,
+                target: None,
             });
         }
         first = false;
@@ -844,6 +856,59 @@ mod tests {
         assert!(
             head_meta.iter().any(|p| p.kind == LabelKind::ChipHead),
             "uncommitted footer keeps HEAD mark: {head_meta:?}"
+        );
+        // Footer chips carry the same targets as the spacer chips; hash,
+        // parents, author, and date carry none.
+        let target_of = |needle: &str| {
+            meta.iter()
+                .find(|p| p.text == needle)
+                .and_then(|p| p.target.clone())
+        };
+        assert_eq!(
+            target_of("main"),
+            Some(PartTarget::Chip(vec![GraphRef::local("main")]))
+        );
+        assert_eq!(
+            target_of("[v1]"),
+            Some(PartTarget::Chip(vec![GraphRef::tag("v1")]))
+        );
+        assert!(meta.iter().any(|p| matches!(
+            &p.target,
+            Some(PartTarget::Marks { branch, checkout: true, remote: None }) if branch == "main"
+        )));
+        assert!(meta
+            .iter()
+            .filter(|p| p.text.contains("abcdefg") || p.text.contains("Ada"))
+            .all(|p| p.target.is_none()));
+        assert_eq!(
+            head_meta
+                .iter()
+                .filter_map(|p| p.target.as_ref())
+                .collect::<Vec<_>>(),
+            meta.iter()
+                .filter_map(|p| p.target.as_ref())
+                .collect::<Vec<_>>(),
+            "the uncommitted footer names HEAD's chips"
+        );
+    }
+
+    #[test]
+    fn footer_worktree_branch_is_a_local_branch_chip() {
+        let model = GraphModel::default();
+        let row = GraphRow::Worktree(crate::model::Worktree {
+            path: "app/.worktrees/feat".into(),
+            head_id: None,
+            branch: Some("feat".into()),
+            ignored: false,
+            is_current: false,
+        });
+        let [_, meta] =
+            selection_detail_parts(&model, GraphFooterSelection::Row(&row), &UNICODE, 80, 0);
+        assert_eq!(meta.len(), 1, "{meta:?}");
+        assert_eq!(meta[0].kind, LabelKind::ChipLocal);
+        assert_eq!(
+            meta[0].target,
+            Some(PartTarget::Chip(vec![GraphRef::local("feat")]))
         );
     }
 

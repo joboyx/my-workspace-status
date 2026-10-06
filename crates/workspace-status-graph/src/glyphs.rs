@@ -20,10 +20,15 @@ pub struct GlyphSet {
     pub stash: &'static str,
     /// Linked worktree marker. `ICON_LINKED_WORKTREE` (`` / `L`).
     pub worktree: &'static str,
-    /// Ahead of upstream.
+    /// Ahead of upstream on the sync header. The TUI catalog's ahead glyph
+    /// (U+F062 / `^`), the same mark as the workspace tree.
     pub ahead: &'static str,
-    /// Behind upstream.
+    /// Behind upstream on the sync header. The TUI catalog's behind glyph
+    /// (U+F063 / `v`), the same mark as the workspace tree.
     pub behind: &'static str,
+    /// More selection-footer message lines below the shown ones (U+F103 /
+    /// `v`). Not a sync mark: the behind glyph means upstream commits.
+    pub more_below: &'static str,
     /// Checkout mark on the named HEAD branch chip (`` / `+`).
     pub checkout_mark: &'static str,
     /// Synced local+remote mark inside a merged chip (`` / `=`).
@@ -59,8 +64,9 @@ pub const UNICODE: GlyphSet = GlyphSet {
     uncommitted: "○",
     stash: "◇",
     worktree: "",
-    ahead: "↑",
-    behind: "↓",
+    ahead: "\u{f062}",
+    behind: "\u{f063}",
+    more_below: "\u{f103}",
     checkout_mark: "",
     sync_mark: "",
     vertical: "│",
@@ -85,6 +91,7 @@ pub const ASCII: GlyphSet = GlyphSet {
     worktree: "L",
     ahead: "^",
     behind: "v",
+    more_below: "v",
     checkout_mark: "+",
     sync_mark: "=",
     vertical: "|",
