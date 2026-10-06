@@ -20,8 +20,7 @@ pub use overlay::{
     COMMENT_OVERLAY_CHROME_ROWS, COMMENT_OVERLAY_FOOTER_EDIT, COMMENT_OVERLAY_MAX_BODY_LINES,
 };
 pub use reference::{format_entity_reference, DiffSide, EntityRef};
-#[cfg(not(test))]
-pub use store::comment_store_path;
+pub use store::comment_store_path_from_env;
 #[cfg(test)]
 pub use store::put_comment;
 pub use store::{

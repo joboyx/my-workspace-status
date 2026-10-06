@@ -11,6 +11,7 @@ use crate::config::load_workspace_status_config;
 use crate::discovery::{collect_snapshots, validate_filter_repos};
 use crate::helpers::{normalize_filter_repo, sorted_unique};
 use crate::render::render_workspace_status;
+use crate::settings::Settings;
 use crate::snapshot::{
     build_summary_state, build_verbose_rows, build_workspace_snapshot, non_default_branch_repos,
     repo_snapshots_from_workspace, serialize_workspace_snapshot, visible_workspace_snapshot,
@@ -204,6 +205,11 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
         }
     }
 
+    // Resolve the env-backed settings once, before the update check and the
+    // first git call that needs the `git` override.
+    let settings = Settings::from_env(&loaded.runtime);
+    crate::git::init_git_binary(settings.git.clone());
+
     let mut config = loaded.clone();
     if cli.all {
         config.ignored_repos = Vec::new();
@@ -218,17 +224,24 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
         force_tui: cli.tui,
     };
     if crate::tui::should_open_tui(io::stdout().is_terminal(), flags) {
-        if offer_startup_update() == StartupUpdateOffer::RunUpdater {
+        if offer_startup_update(&settings) == StartupUpdateOffer::RunUpdater {
             // Unix exec replaces the process. If the sidecar returns (Windows, or
             // exec failed), continue into the TUI instead of exiting.
             let _ = run_self_update();
         }
-        let snapshot =
-            crate::tui::collect_full_snapshot(&cwd, &loaded, &filter_repos, cli.all, false);
+        let snapshot = crate::tui::collect_full_snapshot(
+            &cwd,
+            &loaded,
+            &filter_repos,
+            cli.all,
+            false,
+            settings.fetch_concurrency,
+        );
         return crate::tui::run_tui(crate::tui::TuiOpts {
             cwd,
             snapshot,
             config: loaded,
+            settings,
             start_fetch: cli.fetch,
         });
     }
@@ -242,7 +255,13 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
         say(force_json, "");
     }
 
-    let mut snapshots = collect_snapshots(&cwd, cli.fetch, &config, only_repos.as_ref());
+    let mut snapshots = collect_snapshots(
+        &cwd,
+        cli.fetch,
+        &config,
+        only_repos.as_ref(),
+        settings.fetch_concurrency,
+    );
     let mut summary = build_summary_state(&snapshots);
 
     if cli.pull && !summary.sync_behind.is_empty() {
@@ -254,7 +273,13 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
         say(force_json, "");
         say(force_json, "🔄 Re-checking status after pull...");
         say(force_json, "");
-        snapshots = collect_snapshots(&cwd, false, &config, only_repos.as_ref());
+        snapshots = collect_snapshots(
+            &cwd,
+            false,
+            &config,
+            only_repos.as_ref(),
+            settings.fetch_concurrency,
+        );
         summary = build_summary_state(&snapshots);
     }
 
@@ -287,7 +312,13 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
                 say(force_json, "");
                 say(force_json, "🔄 Re-checking status after switch...");
                 say(force_json, "");
-                snapshots = collect_snapshots(&cwd, false, &config, only_repos.as_ref());
+                snapshots = collect_snapshots(
+                    &cwd,
+                    false,
+                    &config,
+                    only_repos.as_ref(),
+                    settings.fetch_concurrency,
+                );
             }
         }
     }

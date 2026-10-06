@@ -17,27 +17,16 @@ use std::vec::IntoIter;
 /// Default in-flight cap for independent per-repo git (Ink `FETCH_CONCURRENCY`).
 pub const FETCH_CONCURRENCY: usize = 10;
 
-/// Cap from `WS_STATUS_FETCH_CONCURRENCY`. Missing / invalid / `0` → [`FETCH_CONCURRENCY`].
-/// Values below 1 clamp to 1.
-pub fn fetch_concurrency(raw: Option<&str>) -> usize {
-    let Some(raw) = raw else {
-        return FETCH_CONCURRENCY;
-    };
-    if raw.is_empty() {
-        return FETCH_CONCURRENCY;
-    }
-    let Ok(parsed) = raw.parse::<i64>() else {
-        return FETCH_CONCURRENCY;
-    };
-    if parsed <= 0 {
-        return FETCH_CONCURRENCY;
-    }
-    (parsed as usize).max(1)
-}
-
-/// Cap from the process environment (`WS_STATUS_FETCH_CONCURRENCY`).
-pub fn env_fetch_concurrency() -> usize {
-    fetch_concurrency(std::env::var("WS_STATUS_FETCH_CONCURRENCY").ok().as_deref())
+/// In-flight cap: a valid `WS_STATUS_FETCH_CONCURRENCY` (`raw`, an integer
+/// of 1 or more) wins, then the config `fetchConcurrency` value, then
+/// [`FETCH_CONCURRENCY`]. A missing, empty, `0`, negative, or non-numeric
+/// env value falls through to the config value.
+pub fn fetch_concurrency(raw: Option<&str>, config: Option<usize>) -> usize {
+    let from_env = raw
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .filter(|n| *n > 0)
+        .map(|n| usize::try_from(n).unwrap_or(usize::MAX));
+    from_env.or(config).unwrap_or(FETCH_CONCURRENCY).max(1)
 }
 
 /// Run `f` on each item with at most `cap` worker threads.
@@ -354,13 +343,22 @@ mod tests {
     #[test]
     fn default_cap_is_ten() {
         assert_eq!(FETCH_CONCURRENCY, 10);
-        assert_eq!(fetch_concurrency(None), 10);
-        assert_eq!(fetch_concurrency(Some("")), 10);
-        assert_eq!(fetch_concurrency(Some("nope")), 10);
-        assert_eq!(fetch_concurrency(Some("0")), 10);
-        assert_eq!(fetch_concurrency(Some("-1")), 10);
-        assert_eq!(fetch_concurrency(Some("8")), 8);
-        assert_eq!(fetch_concurrency(Some("1")), 1);
+        assert_eq!(fetch_concurrency(None, None), 10);
+        assert_eq!(fetch_concurrency(Some(""), None), 10);
+        assert_eq!(fetch_concurrency(Some("nope"), None), 10);
+        assert_eq!(fetch_concurrency(Some("0"), None), 10);
+        assert_eq!(fetch_concurrency(Some("-1"), None), 10);
+        assert_eq!(fetch_concurrency(Some("8"), None), 8);
+        assert_eq!(fetch_concurrency(Some("1"), None), 1);
+    }
+
+    #[test]
+    fn fetch_concurrency_env_beats_config_and_bad_env_falls_through() {
+        assert_eq!(fetch_concurrency(None, Some(4)), 4, "config when env unset");
+        assert_eq!(fetch_concurrency(Some("6"), Some(4)), 6, "valid env wins");
+        for bad in ["", "nope", "0", "-3"] {
+            assert_eq!(fetch_concurrency(Some(bad), Some(4)), 4, "env {bad:?}");
+        }
     }
 
     #[test]
@@ -504,6 +502,7 @@ mod tests {
             true,
             &WorkspaceStatusConfig::with_defaults(),
             None,
+            FETCH_CONCURRENCY,
         );
         let elapsed = start.elapsed();
         assert_eq!(snaps.len(), 4);

@@ -31,6 +31,7 @@ use crate::git::{
     list_worktree_name_status, list_worktree_vs_commit_name_status, merge_base, merge_into_head,
     repo_has_local_changes, rev_parse_commit, rev_parse_quiet, MergeIntoHeadResult, NameStatus,
 };
+use crate::settings::Settings;
 use crate::snapshot::{
     build_workspace_snapshot, repo_snapshots_from_workspace, CheckoutKind, FileChange,
     WorkspaceSnapshot,
@@ -63,15 +64,14 @@ pub struct TuiOpts {
     pub cwd: std::path::PathBuf,
     pub snapshot: WorkspaceSnapshot,
     pub config: WorkspaceStatusConfig,
+    /// Env-backed settings resolved once at startup.
+    pub settings: Settings,
     pub start_fetch: bool,
 }
 
 /// Open the alternate screen and run until quit.
 pub fn run_tui(opts: TuiOpts) -> Result<(), u8> {
-    let ascii = std::env::var("WS_STATUS_GLYPHS")
-        .map(|v| v == "ascii")
-        .unwrap_or(false);
-    let mut state = AppState::new(opts.cwd.clone(), opts.snapshot.clone(), ascii);
+    let mut state = AppState::launch(opts.cwd.clone(), opts.snapshot.clone(), &opts.settings);
     state.apply_view_defaults(&opts.config.view_defaults);
     enable_raw_mode().map_err(|_| 1u8)?;
     let mut out = stdout();
@@ -988,12 +988,16 @@ fn load_right_headless(state: &mut AppState) {
 }
 
 /// Discover every repo (ignored included) so `.` can show them without a walk.
+///
+/// `fetch_concurrency` caps the per-repo git work (resolved
+/// `fetchConcurrency`).
 pub fn collect_full_snapshot(
     cwd: &Path,
     config: &WorkspaceStatusConfig,
     filter_repos: &[String],
     show_ignored: bool,
     do_fetch: bool,
+    fetch_concurrency: usize,
 ) -> WorkspaceSnapshot {
     let discover = WorkspaceStatusConfig {
         ignored_repos: Vec::new(),
@@ -1002,13 +1006,14 @@ pub fn collect_full_snapshot(
         editor: config.editor.clone(),
         diff_tool: config.diff_tool.clone(),
         view_defaults: config.view_defaults,
+        runtime: config.runtime.clone(),
     };
     let only: Option<BTreeSet<String>> = if filter_repos.is_empty() {
         None
     } else {
         Some(filter_repos.iter().cloned().collect())
     };
-    let snapshots = collect_snapshots(cwd, do_fetch, &discover, only.as_ref());
+    let snapshots = collect_snapshots(cwd, do_fetch, &discover, only.as_ref(), fetch_concurrency);
     build_workspace_snapshot(
         &snapshots,
         &config.ignored_repos,
@@ -1026,6 +1031,7 @@ pub(crate) fn discover_config(config: &WorkspaceStatusConfig) -> WorkspaceStatus
         editor: config.editor.clone(),
         diff_tool: config.diff_tool.clone(),
         view_defaults: config.view_defaults,
+        runtime: config.runtime.clone(),
     }
 }
 
@@ -1111,6 +1117,7 @@ mod tests {
     use super::*;
     use crate::config::WorkspaceStatusConfig;
     use crate::git::{exec_git, git_binary, list_local_branches, stage_file};
+    use crate::parallel::FETCH_CONCURRENCY;
     use crate::testutil::{git, init_repo};
     use crate::tui::action::{Action, Effect};
     use crate::tui::branches::DIRTY_WORKTREE_STATUS;
@@ -1178,7 +1185,8 @@ mod tests {
         fs::write(repo_dir.join("untracked.txt"), "u\n").unwrap();
 
         let config = WorkspaceStatusConfig::with_defaults();
-        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let snapshot =
+            collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
         let mut app = AppState::new(workspace.clone(), snapshot, true);
         app.open_branch_picker("app".into(), list_local_branches(&repo_dir));
         app.dispatch(Action::BranchChar('f'));
@@ -1280,7 +1288,8 @@ mod tests {
         assert_ne!(local, remote_sha);
 
         let config = WorkspaceStatusConfig::with_defaults();
-        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let snapshot =
+            collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
         let mut app = AppState::new(workspace.clone(), snapshot, true);
 
         assert!(run_checkout_branch(
@@ -1406,7 +1415,8 @@ mod tests {
         fs::write(repo_dir.join("untracked.txt"), "u\n").unwrap();
 
         let config = WorkspaceStatusConfig::with_defaults();
-        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let snapshot =
+            collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
         let mut app = AppState::new(workspace.clone(), snapshot, true);
         assert!(!run_merge_into_head(
             &mut app,
@@ -1475,7 +1485,8 @@ mod tests {
         init_repo(&repo_dir);
         fs::write(repo_dir.join("README.md"), "# dirty\n").unwrap();
         let config = WorkspaceStatusConfig::with_defaults();
-        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let snapshot =
+            collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
         let mut app = AppState::new(workspace.clone(), snapshot, true);
         let idx = app
             .rows
@@ -1513,7 +1524,8 @@ mod tests {
         git(&repo_dir, &["commit", "-q", "-m", "second"]);
         git(&repo_dir, &["checkout", "-q", "-b", "feature/follow"]);
         let config = WorkspaceStatusConfig::with_defaults();
-        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let snapshot =
+            collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
         let mut app = AppState::new(workspace.clone(), snapshot, true);
         let idx = app
             .rows
@@ -1565,7 +1577,8 @@ mod tests {
         init_repo(&repo_dir);
         fs::write(repo_dir.join("README.md"), "# dirty\n").unwrap();
         let config = WorkspaceStatusConfig::with_defaults();
-        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let snapshot =
+            collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
         let mut app = AppState::new(workspace.clone(), snapshot, true);
         let idx = app
             .rows
@@ -1669,7 +1682,8 @@ mod tests {
         init_repo(&repo_dir);
         fs::write(repo_dir.join("README.md"), "# dirty\n").unwrap();
         let config = WorkspaceStatusConfig::with_defaults();
-        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let snapshot =
+            collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
         let mut app = AppState::new(workspace.clone(), snapshot, true);
         assert!(
             app.rows.len() >= 2,
@@ -1717,7 +1731,8 @@ mod tests {
         let repo_dir = workspace.join("app");
         init_repo(&repo_dir);
         let config = WorkspaceStatusConfig::with_defaults();
-        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let snapshot =
+            collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
         let mut app = AppState::new(workspace.clone(), snapshot.clone(), true);
         let before = app.signatures.clone();
         assert!(
@@ -1748,7 +1763,8 @@ mod tests {
         git(&alpha, &["checkout", "-q", "-b", "feature/watch"]);
         git(&beta, &["checkout", "-q", "-b", "feature/other"]);
         let config = WorkspaceStatusConfig::with_defaults();
-        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let snapshot =
+            collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
         let mut app = AppState::new(workspace.clone(), snapshot, true);
         load_right_headless(&mut app);
         let before_head = app
@@ -1766,7 +1782,7 @@ mod tests {
         let new_head = exec_git(&["rev-parse", "HEAD"], &alpha);
         assert_ne!(before_head, new_head);
 
-        let next = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let next = collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
         let alpha_row = next
             .repos
             .iter()
@@ -1795,7 +1811,8 @@ mod tests {
         );
 
         fs::write(beta.join("dirty.txt"), "flash me\n").unwrap();
-        let dirty = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let dirty =
+            collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
         let changed = app.apply_watch_snapshot(dirty);
         assert!(
             changed.iter().any(|id| id.contains("dirty.txt")),
@@ -1836,7 +1853,8 @@ mod tests {
             git(&tracker, &["commit", "-q", "-m", &format!("ahead {i}")]);
         }
         let config = WorkspaceStatusConfig::with_defaults();
-        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let snapshot =
+            collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
         let tracker_row = snapshot
             .repos
             .iter()
@@ -1852,7 +1870,7 @@ mod tests {
         fs::write(tracker.join("count.txt"), "3\n").unwrap();
         git(&tracker, &["add", "count.txt"]);
         git(&tracker, &["commit", "-q", "-m", "ahead 3"]);
-        let next = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let next = collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
         let after = next
             .repos
             .iter()

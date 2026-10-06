@@ -413,3 +413,91 @@ fn user_config_file_layers_under_workspace_file() {
     );
     let _ = fs::remove_dir_all(root);
 }
+
+/// Write an executable `git` wrapper that touches `marker`, then runs git.
+#[cfg(unix)]
+fn git_wrapper(path: &Path, marker: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::write(
+        path,
+        format!("#!/bin/sh\n: > '{}'\nexec git \"$@\"\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn config_git_key_drives_json_and_env_overrides_it() {
+    let (root, workspace) = fixture();
+    let cfg_git = root.join("cfg-git");
+    let cfg_marker = root.join("cfg-git-used");
+    let env_git = root.join("env-git");
+    let env_marker = root.join("env-git-used");
+    git_wrapper(&cfg_git, &cfg_marker);
+    git_wrapper(&env_git, &env_marker);
+    let user_file = user_config_home(&workspace)
+        .join("my-workspace-status")
+        .join("config.json");
+    fs::create_dir_all(user_file.parent().unwrap()).unwrap();
+    fs::write(
+        &user_file,
+        format!("{{\"git\": \"{}\"}}\n", cfg_git.display()),
+    )
+    .unwrap();
+    let run = |env_git_value: Option<&str>| {
+        let _ = fs::remove_file(&cfg_marker);
+        let _ = fs::remove_file(&env_marker);
+        let mut cmd = Command::new(bin());
+        cmd.args(["--json"])
+            .current_dir(&workspace)
+            .env("TERM", "dumb")
+            .env_remove("WORKSPACE_STATUS_GIT");
+        isolate_env(&mut cmd, &workspace);
+        if let Some(value) = env_git_value {
+            cmd.env("WORKSPACE_STATUS_GIT", value);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (cfg_marker.exists(), env_marker.exists())
+    };
+
+    assert_eq!(run(None), (true, false), "config git used when env unset");
+    assert_eq!(
+        run(Some(env_git.to_str().unwrap())),
+        (false, true),
+        "WORKSPACE_STATUS_GIT wins over config git"
+    );
+    assert_eq!(
+        run(Some("")),
+        (true, false),
+        "empty WORKSPACE_STATUS_GIT falls through to config git"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn invalid_config_runtime_key_fails_naming_file_and_key() {
+    let (root, workspace) = fixture();
+    fs::write(
+        workspace.join(".workspace-status-config.json"),
+        "{\"ignoredRepos\": [], \"viewedStore\": \"relative/viewed.json\"}\n",
+    )
+    .unwrap();
+    let mut cmd = Command::new(bin());
+    cmd.args(["--plain"])
+        .current_dir(&workspace)
+        .env("TERM", "dumb");
+    isolate_env(&mut cmd, &workspace);
+    let out = cmd.output().unwrap();
+    assert!(!out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr).trim_end(),
+        ".workspace-status-config.json viewedStore must be an absolute path or a path that starts with ~/"
+    );
+    let _ = fs::remove_dir_all(root);
+}

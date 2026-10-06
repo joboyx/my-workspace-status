@@ -70,13 +70,11 @@ pub enum CommentKey {
     },
 }
 
-/// Default JSON path. `WS_STATUS_COMMENT_STORE` wins for tests.
-pub fn comment_store_path() -> PathBuf {
-    comment_store_path_from_env(|key| std::env::var(key).ok())
-}
-
-/// Resolve the store path from an env lookup.
-pub fn comment_store_path_from_env<F>(mut get: F) -> PathBuf
+/// Resolve the store path from an env lookup and the config `commentStore` value.
+///
+/// A non-blank `WS_STATUS_COMMENT_STORE` wins, then `config`, then
+/// `$XDG_STATE_HOME/my-workspace-status/...` (else `$HOME/.local/state/...`).
+pub fn comment_store_path_from_env<F>(mut get: F, config: Option<&Path>) -> PathBuf
 where
     F: FnMut(&str) -> Option<String>,
 {
@@ -85,6 +83,9 @@ where
         if !trimmed.is_empty() {
             return PathBuf::from(trimmed);
         }
+    }
+    if let Some(path) = config {
+        return path.to_path_buf();
     }
     let state_home = get("XDG_STATE_HOME")
         .map(|s| s.trim().to_string())
@@ -485,28 +486,68 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn store_path_prefers_override_then_xdg() {
-        let _ = comment_store_path();
+    fn store_path_env_beats_config_then_xdg() {
+        let config = Path::new("/cfg/comments.json");
+        let env_and_xdg = |k: &str| match k {
+            "WS_STATUS_COMMENT_STORE" => Some("/env/comments.json".into()),
+            "XDG_STATE_HOME" => Some("/xdg/state".into()),
+            _ => None,
+        };
         assert_eq!(
-            comment_store_path_from_env(|k| match k {
-                "WS_STATUS_COMMENT_STORE" => Some("/tmp/comments.json".into()),
+            comment_store_path_from_env(env_and_xdg, Some(config)),
+            PathBuf::from("/env/comments.json"),
+            "env wins"
+        );
+        for blank in ["", "   "] {
+            let blank_env = |k: &str| match k {
+                "WS_STATUS_COMMENT_STORE" => Some(blank.to_string()),
+                "XDG_STATE_HOME" => Some("/xdg/state".into()),
                 _ => None,
-            }),
+            };
+            assert_eq!(
+                comment_store_path_from_env(blank_env, Some(config)),
+                config,
+                "blank env {blank:?} falls through to config"
+            );
+        }
+        let xdg_only = |k: &str| match k {
+            "XDG_STATE_HOME" => Some("/xdg/state".into()),
+            _ => None,
+        };
+        assert_eq!(comment_store_path_from_env(xdg_only, Some(config)), config);
+    }
+
+    #[test]
+    fn store_path_prefers_override_then_xdg() {
+        assert_eq!(
+            comment_store_path_from_env(
+                |k| match k {
+                    "WS_STATUS_COMMENT_STORE" => Some("/tmp/comments.json".into()),
+                    _ => None,
+                },
+                None
+            ),
             PathBuf::from("/tmp/comments.json")
         );
         assert_eq!(
-            comment_store_path_from_env(|k| match k {
-                "XDG_STATE_HOME" => Some("/xdg/state".into()),
-                "HOME" => Some("/home/user".into()),
-                _ => None,
-            }),
+            comment_store_path_from_env(
+                |k| match k {
+                    "XDG_STATE_HOME" => Some("/xdg/state".into()),
+                    "HOME" => Some("/home/user".into()),
+                    _ => None,
+                },
+                None
+            ),
             PathBuf::from("/xdg/state/my-workspace-status/comments.json")
         );
         assert_eq!(
-            comment_store_path_from_env(|k| match k {
-                "HOME" => Some("/home/user".into()),
-                _ => None,
-            }),
+            comment_store_path_from_env(
+                |k| match k {
+                    "HOME" => Some("/home/user".into()),
+                    _ => None,
+                },
+                None
+            ),
             PathBuf::from("/home/user/.local/state/my-workspace-status/comments.json")
         );
     }

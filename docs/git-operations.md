@@ -250,7 +250,7 @@ Revert, compare `x`, stash drop, origin-out-of-sync graph checkout, graph merge,
 
 Independent per-repo `git fetch`, `pull`, and `push` share one remote queue per gitdir. Manual `f` / `p` / `P` and the background fetch tick use that queue in `tui/effect.rs` (`RemoteQueue`). Occupy key is snapshot `primary_repo` when set. Otherwise the key is the checkout path. Linked worktrees of one repo share that key.
 
-The Scheduler JoinSet starts a job when that gitdir is free. Cap is `env_fetch_concurrency()` (default 10). Override with `WS_STATUS_FETCH_CONCURRENCY`. `CappedBatch` is CLI `collect_snapshots` and tests. The live TTY path is Scheduler JoinSet `spawn_blocking`.
+The Scheduler JoinSet starts a job when that gitdir is free. Cap is the resolved `fetchConcurrency` setting (default 10). Override with `WS_STATUS_FETCH_CONCURRENCY` or the config key `fetchConcurrency`. `CappedBatch` is CLI `collect_snapshots` and tests. The live TTY path is Scheduler JoinSet `spawn_blocking`.
 
 Pending jobs coalesce on that checkout only. A second `f` / `p` / `P` enqueues. Duplicate Fetch stays one pending job. A pending Fetch becomes Pull, and Pull drops a later Fetch. Push stays in FIFO order with Fetch and Pull. An inflight same-kind job does not queue a duplicate.
 

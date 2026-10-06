@@ -12,7 +12,7 @@ mod pull_request;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::buffer::Buffer;
@@ -26,6 +26,7 @@ use workspace_status_graph::{
 };
 
 use crate::config::ViewDefaults;
+use crate::settings::Settings;
 use crate::snapshot::{
     carry_status_failed_local_branches, CheckoutKind, FileChange, WorkspaceSnapshot,
 };
@@ -38,8 +39,6 @@ use super::branches::{
     BranchPickerState, CreateBranchState, DIRTY_WORKTREE_STATUS,
 };
 use super::chrome::{diverged_pull_status, status_uses_status_text, STATUS_NO_COMMENTS};
-#[cfg(not(test))]
-use super::comments::comment_store_path;
 use super::comments::{
     collect_live_set, comment_key_label, comments_in_focus_scope, covering_line_comment,
     diff_focus_side, diff_line_comment_state, export_markdown, format_entity_reference,
@@ -101,13 +100,13 @@ use super::tabs::{
     COMPARE_STILL_LOADING, FOCUS_A_COMMIT_TO_DIFF, ROOT_COMMIT_HAS_NO_PARENT,
     SWITCH_TO_WORKSPACE_TAB, WORKSPACE_TAB_CANNOT_CLOSE,
 };
-use super::theme::{cycle_theme_id, theme_from_env, ThemeId};
+#[cfg(test)]
+use super::theme::DEFAULT_THEME_ID;
+use super::theme::{cycle_theme_id, ThemeId};
 use super::tree::{
     build_tree, collect_foldable_subtree_ids, default_folds, flatten_with, visible_for_tree,
     visible_window, workspace_label_from_cwd, NodeKind, TreeNode, VisibleRow,
 };
-#[cfg(not(test))]
-use super::viewed::viewed_store_path;
 use super::viewed::{
     collect_current_fingerprints, fingerprint_file_change, load_viewed_store, reconcile_viewed,
     save_viewed_store, toggle_viewed, viewed_identity, viewed_row_ids, workspace_store_id,
@@ -713,15 +712,51 @@ fn unix_now() -> i64 {
 }
 
 impl AppState {
+    /// TUI launch state: glyphs, theme, and the viewed / comment store paths
+    /// come from the resolved `settings`.
+    pub fn launch(cwd: PathBuf, snapshot: WorkspaceSnapshot, settings: &Settings) -> Self {
+        Self::build(
+            cwd,
+            snapshot,
+            settings.ascii,
+            settings.viewed_store.clone(),
+            settings.comment_store.clone(),
+            settings.theme,
+        )
+    }
+
+    /// Test state with a unique temp viewed store and the default theme.
+    #[cfg(test)]
     pub fn new(cwd: PathBuf, snapshot: WorkspaceSnapshot, ascii: bool) -> Self {
         Self::with_viewed_path(cwd, snapshot, ascii, default_viewed_path())
     }
 
+    /// Test state with `viewed_path`; the comment store sits next to it.
+    #[cfg(test)]
     pub(crate) fn with_viewed_path(
         cwd: PathBuf,
         snapshot: WorkspaceSnapshot,
         ascii: bool,
         viewed_path: PathBuf,
+    ) -> Self {
+        let comment_path = viewed_path.with_file_name("comments.json");
+        Self::build(
+            cwd,
+            snapshot,
+            ascii,
+            viewed_path,
+            comment_path,
+            DEFAULT_THEME_ID,
+        )
+    }
+
+    fn build(
+        cwd: PathBuf,
+        snapshot: WorkspaceSnapshot,
+        ascii: bool,
+        viewed_path: PathBuf,
+        comment_path: PathBuf,
+        theme: ThemeId,
     ) -> Self {
         let show_ignored = snapshot.show_ignored;
         let tree_mode = true;
@@ -734,7 +769,6 @@ impl AppState {
         let signatures = tree_signatures(&tree, &cwd);
         let workspace_id = workspace_store_id(&cwd);
         let viewed_store = load_viewed_store(&viewed_path, &workspace_id);
-        let comment_path = comment_path_for(&viewed_path);
         let comment_store = load_comment_store(&comment_path, &workspace_id);
         let mut state = Self {
             cwd,
@@ -819,7 +853,7 @@ impl AppState {
             text_selection: None,
             painted_frame: Buffer::default(),
             too_small: false,
-            theme: theme_from_env(),
+            theme,
             mouse_enabled: true,
             pointer: None,
             z_pending_at: None,
@@ -6265,43 +6299,21 @@ enum FoldOp {
     Open,
 }
 
-#[allow(dead_code)]
+/// Unique temp viewed-store path per test state.
+#[cfg(test)]
 fn default_viewed_path() -> PathBuf {
-    #[cfg(test)]
-    {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static N: AtomicU64 = AtomicU64::new(0);
-        std::env::temp_dir().join(format!(
-            "ws-viewed-test-{}-{}.json",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ))
-    }
-    #[cfg(not(test))]
-    viewed_store_path()
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "ws-viewed-test-{}-{}.json",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 /// Idle / breadcrumb toast when a persist write returns [`std::io::Error`].
 fn persist_failed_status(kind: &str, err: impl std::fmt::Display) -> String {
     format!("{kind} save failed: {err}")
-}
-
-fn comment_path_for(viewed_path: &Path) -> PathBuf {
-    if let Ok(override_path) = std::env::var("WS_STATUS_COMMENT_STORE") {
-        let trimmed = override_path.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
-    }
-    #[cfg(test)]
-    {
-        viewed_path.with_file_name("comments.json")
-    }
-    #[cfg(not(test))]
-    {
-        let _ = viewed_path;
-        comment_store_path()
-    }
 }
 
 /// Ancestor ids to try when a tree-mode row disappears in flat mode.
@@ -6348,7 +6360,7 @@ mod tests {
     use super::super::comments::put_comment;
     use super::super::gates::ListFocusTarget;
     use super::super::keys::InputMode;
-    use super::super::theme::{resolve_theme_id, ThemeId};
+    use super::super::theme::{theme_id_from, ThemeId};
     use super::super::tree::list_viewport_start;
     use super::*;
     use crate::snapshot::{
@@ -7714,8 +7726,8 @@ mod tests {
 
     #[test]
     fn watch_zero_is_disable_and_refresh_keeps_focus() {
-        assert_eq!(watch_interval_ms(Some("0")), 0);
-        assert!(watch_interval_ms(Some("2000")) >= 500);
+        assert_eq!(watch_interval_ms(Some("0"), None), 0);
+        assert!(watch_interval_ms(Some("2000"), None) >= 500);
         let mut app = state();
         focus_file(&mut app, "README.md");
         let id = app.focused_row().unwrap().id.clone();
@@ -10532,6 +10544,7 @@ mod tests {
     fn file_writes_on_git_fixture_honor_revert_confirm() {
         use crate::config::WorkspaceStatusConfig;
         use crate::git::{revert_tracked_file, stage_file, unstage_file};
+        use crate::parallel::FETCH_CONCURRENCY;
         use crate::tui::collect_full_snapshot;
         use std::fs;
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -10549,7 +10562,8 @@ mod tests {
         fs::write(repo_dir.join("README.md"), "# dirty\n").unwrap();
 
         let config = WorkspaceStatusConfig::with_defaults();
-        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let snapshot =
+            collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
         let mut app = AppState::new(workspace.clone(), snapshot, true);
         focus_file(&mut app, "README.md");
         match app.dispatch(Action::Stage) {
@@ -11438,6 +11452,7 @@ mod tests {
             checkout_branch, create_branch_checkout, latest_stash_ref, list_local_branches,
             stash_apply, stash_drop, stash_pop, stash_push,
         };
+        use crate::parallel::FETCH_CONCURRENCY;
         use crate::tui::collect_full_snapshot;
         use std::fs;
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -11455,7 +11470,8 @@ mod tests {
         fs::write(repo_dir.join("README.md"), "# dirty\n").unwrap();
 
         let config = WorkspaceStatusConfig::with_defaults();
-        let snapshot = collect_full_snapshot(&workspace, &config, &[], false, false);
+        let snapshot =
+            collect_full_snapshot(&workspace, &config, &[], false, false, FETCH_CONCURRENCY);
         let mut app = AppState::new(workspace.clone(), snapshot, true);
         focus_file(&mut app, "README.md");
         app.open_stash_menu("app".into(), latest_stash_ref(&repo_dir));
@@ -11717,15 +11733,18 @@ mod tests {
         // The background tick leaves the status slot alone.
         assert_eq!(app.status, "");
         assert_eq!(app.dispatch(Action::WatchTick), Effect::WatchRefresh);
-        assert_eq!(watch_interval_ms(Some("0")), 0);
+        assert_eq!(watch_interval_ms(Some("0"), None), 0);
         assert_ne!(
-            crate::tui::fetch::fetch_interval_ms(Some("0")),
-            watch_interval_ms(Some("0")) + 1
+            crate::tui::fetch::fetch_interval_ms(Some("0"), None),
+            watch_interval_ms(Some("0"), None) + 1
         );
-        assert_eq!(crate::tui::fetch::fetch_interval_ms(Some("0")), 0);
-        assert_eq!(watch_interval_ms(None), crate::tui::watch::DEFAULT_WATCH_MS);
+        assert_eq!(crate::tui::fetch::fetch_interval_ms(Some("0"), None), 0);
         assert_eq!(
-            crate::tui::fetch::fetch_interval_ms(None),
+            watch_interval_ms(None, None),
+            crate::tui::watch::DEFAULT_WATCH_MS
+        );
+        assert_eq!(
+            crate::tui::fetch::fetch_interval_ms(None, None),
             crate::tui::fetch::DEFAULT_FETCH_MS
         );
         assert_ne!(
@@ -14010,8 +14029,11 @@ mod tests {
         app.dispatch(Action::CycleTheme);
         app.dispatch(Action::CycleTheme);
         assert_eq!(app.theme, ThemeId::TokyoNight);
-        assert_eq!(resolve_theme_id(Some("gruvbox-dark")), ThemeId::GruvboxDark);
-        assert_eq!(resolve_theme_id(Some("nope")), ThemeId::TokyoNight);
+        assert_eq!(
+            theme_id_from(Some("gruvbox-dark"), None),
+            ThemeId::GruvboxDark
+        );
+        assert_eq!(theme_id_from(Some("nope"), None), ThemeId::TokyoNight);
     }
 
     fn tree_repo() -> RepoSnapshot {

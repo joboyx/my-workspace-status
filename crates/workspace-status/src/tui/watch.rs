@@ -25,24 +25,19 @@ pub const FLASH_MS: u64 = 800;
 /// Repaint cadence while a flash is decaying (`FLASH_MS / 8`, floor 120).
 pub const FLASH_TICK_MS: u64 = 120;
 
-/// Poll period from `WS_STATUS_WATCH_MS`. `0` disables. Missing / invalid → default.
-pub fn watch_interval_ms(raw: Option<&str>) -> u64 {
-    let Some(raw) = raw else {
-        return DEFAULT_WATCH_MS;
-    };
-    if raw.is_empty() {
-        return DEFAULT_WATCH_MS;
+/// Poll period: a valid `WS_STATUS_WATCH_MS` (`raw`, an integer >= 0) wins, then
+/// the config `watchMs` value, then [`DEFAULT_WATCH_MS`]. `0` disables. Values below
+/// [`MIN_WATCH_MS`] clamp up. A missing, empty, negative, or non-numeric env
+/// value falls through to the config value.
+pub fn watch_interval_ms(raw: Option<&str>, config: Option<u64>) -> u64 {
+    let from_env = raw
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .and_then(|n| u64::try_from(n).ok());
+    match from_env.or(config) {
+        None => DEFAULT_WATCH_MS,
+        Some(0) => 0,
+        Some(n) => n.max(MIN_WATCH_MS),
     }
-    let Ok(parsed) = raw.parse::<i64>() else {
-        return DEFAULT_WATCH_MS;
-    };
-    if parsed < 0 {
-        return DEFAULT_WATCH_MS;
-    }
-    if parsed == 0 {
-        return 0;
-    }
-    (parsed as u64).max(MIN_WATCH_MS)
 }
 
 /// Remaining milliseconds until the next poll, from when this interval started.
@@ -611,17 +606,44 @@ mod tests {
 
     #[test]
     fn zero_disables() {
-        assert_eq!(watch_interval_ms(Some("0")), 0);
+        assert_eq!(watch_interval_ms(Some("0"), None), 0);
     }
 
     #[test]
     fn default_and_clamp() {
-        assert_eq!(watch_interval_ms(None), DEFAULT_WATCH_MS);
-        assert_eq!(watch_interval_ms(Some("")), DEFAULT_WATCH_MS);
-        assert_eq!(watch_interval_ms(Some("-1")), DEFAULT_WATCH_MS);
-        assert_eq!(watch_interval_ms(Some("abc")), DEFAULT_WATCH_MS);
-        assert_eq!(watch_interval_ms(Some("100")), MIN_WATCH_MS);
-        assert_eq!(watch_interval_ms(Some("5000")), 5000);
+        assert_eq!(watch_interval_ms(None, None), DEFAULT_WATCH_MS);
+        assert_eq!(watch_interval_ms(Some(""), None), DEFAULT_WATCH_MS);
+        assert_eq!(watch_interval_ms(Some("-1"), None), DEFAULT_WATCH_MS);
+        assert_eq!(watch_interval_ms(Some("abc"), None), DEFAULT_WATCH_MS);
+        assert_eq!(watch_interval_ms(Some("100"), None), MIN_WATCH_MS);
+        assert_eq!(watch_interval_ms(Some("5000"), None), 5000);
+    }
+
+    #[test]
+    fn watch_interval_ms_env_beats_config_and_bad_env_falls_through() {
+        assert_eq!(
+            watch_interval_ms(None, Some(4000)),
+            4000,
+            "config when env unset"
+        );
+        assert_eq!(watch_interval_ms(None, Some(0)), 0, "config 0 disables");
+        assert_eq!(
+            watch_interval_ms(None, Some(1)),
+            MIN_WATCH_MS,
+            "config clamps like env"
+        );
+        assert_eq!(
+            watch_interval_ms(Some("0"), Some(4000)),
+            0,
+            "valid env wins"
+        );
+        for bad in ["", "abc", "-1"] {
+            assert_eq!(
+                watch_interval_ms(Some(bad), Some(4000)),
+                4000,
+                "env {bad:?}"
+            );
+        }
     }
 
     fn chrome_row(

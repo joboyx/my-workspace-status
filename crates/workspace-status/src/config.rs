@@ -1,13 +1,18 @@
 //! Workspace-status config: the user config file
 //! (`$XDG_CONFIG_HOME/my-workspace-status/config.json`) under the workspace
 //! file (`.workspace-status-config.json`). Both files use the same schema.
+//!
+//! The keys in [`RuntimeKeys`] also have an env var. [`crate::settings`]
+//! resolves them once at startup (env var > config file > default).
 
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::helpers::normalize_filter_repo;
+use crate::tui::theme::{ThemeId, THEME_IDS};
 use serde::Deserialize;
 use workspace_status_graph::{COMMIT_MSG_LINES_MAX, COMMIT_MSG_LINES_MIN};
 
@@ -28,6 +33,65 @@ pub struct WorkspaceStatusConfig {
     pub diff_tool: Option<String>,
     /// TUI launch view modes (`viewDefaults`). Omitted keys keep the in-app defaults.
     pub view_defaults: ViewDefaults,
+    /// Top-level keys that an env var can override (`theme`, `glyphs`,
+    /// `watchMs`, ...). See [`RuntimeKeys`].
+    pub runtime: RuntimeKeys,
+}
+
+/// Glyph set from the `glyphs` key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlyphSet {
+    /// `"nerd"`: Nerd Font glyphs (the default).
+    Nerd,
+    /// `"ascii"`: one-column ASCII markers.
+    Ascii,
+}
+
+/// Config keys that an env var can also set.
+///
+/// Each field is `None` when no file sets the key. [`crate::settings::Settings`]
+/// resolves each one: a valid env var wins, then this value, then the
+/// built-in default. Path values are already expanded (`~/` with `HOME`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeKeys {
+    /// `theme` (`WS_STATUS_THEME`): a built-in theme id.
+    pub theme: Option<ThemeId>,
+    /// `glyphs` (`WS_STATUS_GLYPHS`): `"nerd"` or `"ascii"`.
+    pub glyphs: Option<GlyphSet>,
+    /// `watchMs` (`WS_STATUS_WATCH_MS`): live-refresh poll period, `0` turns it off.
+    pub watch_ms: Option<u64>,
+    /// `fetchMs` (`WS_STATUS_FETCH_MS`): background fetch period, `0` turns it off.
+    pub fetch_ms: Option<u64>,
+    /// `fetchConcurrency` (`WS_STATUS_FETCH_CONCURRENCY`): in-flight cap, at least 1.
+    pub fetch_concurrency: Option<usize>,
+    /// `updateCheck` (`WS_STATUS_UPDATE_CHECK`): TUI-startup release check on or off.
+    pub update_check: Option<bool>,
+    /// `updateCheckStore` (`WS_STATUS_UPDATE_CHECK_STORE`): last-check JSON file.
+    pub update_check_store: Option<PathBuf>,
+    /// `commentStore` (`WS_STATUS_COMMENT_STORE`): TUI comment JSON file.
+    pub comment_store: Option<PathBuf>,
+    /// `viewedStore` (`WS_STATUS_VIEWED_STORE`): TUI viewed-marks JSON file.
+    pub viewed_store: Option<PathBuf>,
+    /// `git` (`WORKSPACE_STATUS_GIT`): git binary path or command name.
+    pub git: Option<PathBuf>,
+}
+
+impl RuntimeKeys {
+    /// Per-key merge: each key that `over` sets wins; the others keep `self`.
+    fn overlay(self, over: RuntimeKeys) -> RuntimeKeys {
+        RuntimeKeys {
+            theme: over.theme.or(self.theme),
+            glyphs: over.glyphs.or(self.glyphs),
+            watch_ms: over.watch_ms.or(self.watch_ms),
+            fetch_ms: over.fetch_ms.or(self.fetch_ms),
+            fetch_concurrency: over.fetch_concurrency.or(self.fetch_concurrency),
+            update_check: over.update_check.or(self.update_check),
+            update_check_store: over.update_check_store.or(self.update_check_store),
+            comment_store: over.comment_store.or(self.comment_store),
+            viewed_store: over.viewed_store.or(self.viewed_store),
+            git: over.git.or(self.git),
+        }
+    }
 }
 
 /// TUI launch view modes from `viewDefaults`.
@@ -64,6 +128,7 @@ impl WorkspaceStatusConfig {
             editor: None,
             diff_tool: None,
             view_defaults: ViewDefaults::default(),
+            runtime: RuntimeKeys::default(),
         }
     }
 }
@@ -77,6 +142,16 @@ struct RawConfig {
     editor: Option<serde_json::Value>,
     diff_tool: Option<serde_json::Value>,
     view_defaults: Option<serde_json::Value>,
+    theme: Option<serde_json::Value>,
+    glyphs: Option<serde_json::Value>,
+    watch_ms: Option<serde_json::Value>,
+    fetch_ms: Option<serde_json::Value>,
+    fetch_concurrency: Option<serde_json::Value>,
+    update_check: Option<serde_json::Value>,
+    update_check_store: Option<serde_json::Value>,
+    comment_store: Option<serde_json::Value>,
+    viewed_store: Option<serde_json::Value>,
+    git: Option<serde_json::Value>,
 }
 
 fn normalize_ignored(repos: &[String]) -> Vec<String> {
@@ -216,6 +291,7 @@ struct ConfigFileSettings {
     editor: Option<String>,
     diff_tool: Option<String>,
     view_defaults: ViewDefaults,
+    runtime: RuntimeKeys,
 }
 
 impl ConfigFileSettings {
@@ -237,6 +313,7 @@ impl ConfigFileSettings {
             editor: over.editor.or(self.editor),
             diff_tool: over.diff_tool.or(self.diff_tool),
             view_defaults: self.view_defaults.overlay(over.view_defaults),
+            runtime: self.runtime.overlay(over.runtime),
         }
     }
 
@@ -249,6 +326,7 @@ impl ConfigFileSettings {
             editor: self.editor,
             diff_tool: self.diff_tool,
             view_defaults: self.view_defaults,
+            runtime: self.runtime,
         }
     }
 }
@@ -267,6 +345,176 @@ fn parse_command_key(
     };
     let trimmed = s.trim();
     Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
+}
+
+/// Parse an optional string key whose value must be one of `choices`
+/// (trimmed, case-sensitive). `null` is omitted.
+fn parse_choice_key<T: Copy>(
+    file: &str,
+    key: &str,
+    value: Option<serde_json::Value>,
+    choices: &[(&str, T)],
+) -> Result<Option<T>, String> {
+    let Some(v) = value else {
+        return Ok(None);
+    };
+    let picked = v.as_str().map(str::trim).and_then(|s| {
+        choices
+            .iter()
+            .find(|(name, _)| *name == s)
+            .map(|(_, out)| *out)
+    });
+    picked.map(Some).ok_or_else(|| {
+        let names: Vec<String> = choices.iter().map(|(n, _)| format!("\"{n}\"")).collect();
+        match names.as_slice() {
+            [a, b] => format!("{file} {key} must be {a} or {b}"),
+            _ => format!("{file} {key} must be one of {}", names.join(", ")),
+        }
+    })
+}
+
+/// Parse `theme`: one of the built-in theme ids.
+fn parse_theme_key(
+    file: &str,
+    value: Option<serde_json::Value>,
+) -> Result<Option<ThemeId>, String> {
+    let choices: Vec<(&str, ThemeId)> = THEME_IDS.iter().map(|id| (id.as_str(), *id)).collect();
+    parse_choice_key(file, "theme", value, &choices)
+}
+
+/// Parse an optional JSON integer key that must be at least `min`.
+fn parse_int_key(
+    file: &str,
+    key: &str,
+    value: Option<serde_json::Value>,
+    min: u64,
+) -> Result<Option<u64>, String> {
+    let Some(v) = value else {
+        return Ok(None);
+    };
+    match v.as_u64() {
+        Some(n) if n >= min => Ok(Some(n)),
+        _ => Err(format!("{file} {key} must be an integer >= {min}")),
+    }
+}
+
+/// Parse an optional JSON boolean key.
+fn parse_bool_key(
+    file: &str,
+    key: &str,
+    value: Option<serde_json::Value>,
+) -> Result<Option<bool>, String> {
+    let Some(v) = value else {
+        return Ok(None);
+    };
+    v.as_bool()
+        .map(Some)
+        .ok_or_else(|| format!("{file} {key} must be true or false"))
+}
+
+/// Absolute path, or `~/...` joined to `home`. `Ok(None)` for any other
+/// (relative) path. `Err` when the value needs `HOME` and `home` is unset.
+fn expand_config_path(
+    file: &str,
+    key: &str,
+    raw: &str,
+    home: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        let Some(home) = home.map(str::trim).filter(|h| !h.is_empty()) else {
+            return Err(format!("{file} {key} starts with ~/ but HOME is not set"));
+        };
+        return Ok(Some(PathBuf::from(home).join(rest)));
+    }
+    let path = PathBuf::from(raw);
+    Ok(path.is_absolute().then_some(path))
+}
+
+/// Parse a store path key (`updateCheckStore`, `commentStore`,
+/// `viewedStore`): absolute, or `~/...` expanded with `home`.
+fn parse_path_key(
+    file: &str,
+    key: &str,
+    value: Option<serde_json::Value>,
+    home: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(v) = value else {
+        return Ok(None);
+    };
+    let bad = || format!("{file} {key} must be an absolute path or a path that starts with ~/");
+    let raw = v
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(bad)?;
+    expand_config_path(file, key, raw, home)?
+        .map(Some)
+        .ok_or_else(bad)
+}
+
+/// Parse `git`: an absolute path, `~/...` expanded with `home`, or a bare
+/// command name (no `/` or `\\`) that is looked up on `PATH`.
+fn parse_git_key(
+    file: &str,
+    value: Option<serde_json::Value>,
+    home: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
+    const KEY: &str = "git";
+    let Some(v) = value else {
+        return Ok(None);
+    };
+    let bad = || {
+        format!(
+            "{file} {KEY} must be an absolute path, a path that starts with ~/, or a command name without /"
+        )
+    };
+    let raw = v
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(bad)?;
+    if !raw.contains(['/', '\\']) && !raw.starts_with('~') {
+        return Ok(Some(PathBuf::from(raw)));
+    }
+    expand_config_path(file, KEY, raw, home)?
+        .map(Some)
+        .ok_or_else(bad)
+}
+
+/// Parse the [`RuntimeKeys`] of one config file.
+fn parse_runtime_keys(
+    file: &str,
+    parsed: &mut RawConfig,
+    home: Option<&str>,
+) -> Result<RuntimeKeys, String> {
+    Ok(RuntimeKeys {
+        theme: parse_theme_key(file, parsed.theme.take())?,
+        glyphs: parse_choice_key(
+            file,
+            "glyphs",
+            parsed.glyphs.take(),
+            &[("nerd", GlyphSet::Nerd), ("ascii", GlyphSet::Ascii)],
+        )?,
+        watch_ms: parse_int_key(file, "watchMs", parsed.watch_ms.take(), 0)?,
+        fetch_ms: parse_int_key(file, "fetchMs", parsed.fetch_ms.take(), 0)?,
+        fetch_concurrency: parse_int_key(
+            file,
+            "fetchConcurrency",
+            parsed.fetch_concurrency.take(),
+            1,
+        )?
+        .map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
+        update_check: parse_bool_key(file, "updateCheck", parsed.update_check.take())?,
+        update_check_store: parse_path_key(
+            file,
+            "updateCheckStore",
+            parsed.update_check_store.take(),
+            home,
+        )?,
+        comment_store: parse_path_key(file, "commentStore", parsed.comment_store.take(), home)?,
+        viewed_store: parse_path_key(file, "viewedStore", parsed.viewed_store.take(), home)?,
+        git: parse_git_key(file, parsed.git.take(), home)?,
+    })
 }
 
 /// Which config file is parsed. Only the workspace file must set `ignoredRepos`.
@@ -300,14 +548,19 @@ fn parse_ignored_repos(
 }
 
 /// Parse the JSON text of one config file. `file` labels the file in errors.
+/// `home` expands `~/` in path keys.
 fn parse_config_file(
     file: &str,
     kind: ConfigFileKind,
     text: &str,
+    home: Option<&str>,
 ) -> Result<ConfigFileSettings, String> {
-    let parsed: RawConfig = serde_json::from_str(text)
-        .map_err(|_| format!("{file} must contain an ignoredRepos string array"))?;
-    let ignored_repos = parse_ignored_repos(file, kind, parsed.ignored_repos)?;
+    let mut parsed: RawConfig = serde_json::from_str(text).map_err(|e| match kind {
+        ConfigFileKind::User => format!("{file} is not a valid JSON object: {e}"),
+        ConfigFileKind::Workspace => format!("{file} must contain an ignoredRepos string array"),
+    })?;
+    let ignored_repos = parse_ignored_repos(file, kind, parsed.ignored_repos.take())?;
+    let runtime = parse_runtime_keys(file, &mut parsed, home)?;
 
     let max_depth = match parsed.max_depth {
         None => None,
@@ -343,20 +596,31 @@ fn parse_config_file(
         editor: parse_command_key(file, "editor", parsed.editor)?,
         diff_tool: parse_command_key(file, "diffTool", parsed.diff_tool)?,
         view_defaults: parse_view_defaults(file, parsed.view_defaults)?,
+        runtime,
     })
 }
 
-/// Read and parse one config file. A missing file is `Ok(None)`.
+/// Read and parse one config file. A missing file is `Ok(None)`. Any other
+/// read error names the file: no permission, a directory, or a symlink
+/// whose target is missing (that read is also `NotFound`, so the link
+/// itself is checked).
 fn read_config_file(
     path: &Path,
     file: &str,
     kind: ConfigFileKind,
+    home: Option<&str>,
 ) -> Result<Option<ConfigFileSettings>, String> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let text = fs::read_to_string(path).map_err(|e| format!("{file}: {e}"))?;
-    parse_config_file(file, kind, &text).map(Some)
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            if fs::symlink_metadata(path).is_ok() {
+                return Err(format!("{file}: symlink target is missing: {e}"));
+            }
+            return Ok(None);
+        }
+        Err(e) => return Err(format!("{file}: {e}")),
+    };
+    parse_config_file(file, kind, &text, home).map(Some)
 }
 
 /// Path of the user config file from the real environment.
@@ -399,18 +663,35 @@ where
 /// workspace file and optional in the user file. An invalid file is an error that
 /// names that file (the full path for the user file, [`CONFIG_FILENAME`]
 /// for the workspace file).
+///
+/// Path keys that start with `~/` expand with `$HOME`.
 pub fn load_config_files(
     user_file: Option<&Path>,
     workspace_root: &Path,
 ) -> Result<WorkspaceStatusConfig, String> {
+    load_config_files_with_home(user_file, workspace_root, env::var("HOME").ok().as_deref())
+}
+
+/// [`load_config_files`] with an injected `HOME` for `~/` expansion.
+fn load_config_files_with_home(
+    user_file: Option<&Path>,
+    workspace_root: &Path,
+    home: Option<&str>,
+) -> Result<WorkspaceStatusConfig, String> {
     let user = match user_file {
-        Some(path) => read_config_file(path, &path.display().to_string(), ConfigFileKind::User)?,
+        Some(path) => read_config_file(
+            path,
+            &path.display().to_string(),
+            ConfigFileKind::User,
+            home,
+        )?,
         None => None,
     };
     let workspace = read_config_file(
         &workspace_root.join(CONFIG_FILENAME),
         CONFIG_FILENAME,
         ConfigFileKind::Workspace,
+        home,
     )?;
     let merged = user
         .unwrap_or_default()
@@ -859,7 +1140,6 @@ mod tests {
     #[test]
     fn layered_invalid_user_file_names_the_user_path() {
         let cases = [
-            ("{", "must contain an ignoredRepos string array"),
             (
                 r#"{"ignoredRepos":"notes"}"#,
                 "must contain an ignoredRepos string array",
@@ -1013,5 +1293,238 @@ mod tests {
                 "{json}"
             );
         }
+    }
+
+    fn load_layered_home(
+        user_json: Option<&str>,
+        workspace_json: Option<&str>,
+        home: Option<&str>,
+    ) -> Result<WorkspaceStatusConfig, String> {
+        let (root, user_file, workspace) = layered(user_json, workspace_json);
+        let out = load_config_files_with_home(Some(&user_file), &workspace, home);
+        let _ = fs::remove_dir_all(root);
+        out
+    }
+
+    /// Load `{"ignoredRepos":[], <key>: <raw>}` as the workspace file.
+    fn load_runtime_key(key: &str, raw: &str) -> Result<RuntimeKeys, String> {
+        load_layered_home(
+            None,
+            Some(&format!(r#"{{"ignoredRepos":[],"{key}":{raw}}}"#)),
+            Some("/home/demo"),
+        )
+        .map(|cfg| cfg.runtime)
+    }
+
+    #[test]
+    fn runtime_keys_omitted_or_null_are_none() {
+        assert_eq!(
+            load_runtime_key("theme", "null").unwrap(),
+            RuntimeKeys::default()
+        );
+        let cfg = load_layered(None, Some(r#"{"ignoredRepos":[]}"#)).unwrap();
+        assert_eq!(cfg.runtime, RuntimeKeys::default());
+        assert_eq!(
+            WorkspaceStatusConfig::with_defaults().runtime,
+            RuntimeKeys::default()
+        );
+    }
+
+    #[test]
+    fn runtime_keys_parse_valid_values() {
+        let cfg = load_layered_home(
+            Some(
+                r#"{"theme":" dracula ","glyphs":"ascii","watchMs":0,"fetchMs":60000,"fetchConcurrency":4,"updateCheck":false,"updateCheckStore":"~/state/update-check.json","commentStore":"/var/ws/comments.json","viewedStore":"~/viewed.json","git":"git-wrapper"}"#,
+            ),
+            None,
+            Some("/home/demo"),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.runtime,
+            RuntimeKeys {
+                theme: Some(ThemeId::Dracula),
+                glyphs: Some(GlyphSet::Ascii),
+                watch_ms: Some(0),
+                fetch_ms: Some(60000),
+                fetch_concurrency: Some(4),
+                update_check: Some(false),
+                update_check_store: Some(PathBuf::from("/home/demo/state/update-check.json")),
+                comment_store: Some(PathBuf::from("/var/ws/comments.json")),
+                viewed_store: Some(PathBuf::from("/home/demo/viewed.json")),
+                git: Some(PathBuf::from("git-wrapper")),
+            }
+        );
+        assert_eq!(
+            load_runtime_key("glyphs", r#""nerd""#).unwrap().glyphs,
+            Some(GlyphSet::Nerd)
+        );
+        assert_eq!(
+            load_runtime_key("updateCheck", "true")
+                .unwrap()
+                .update_check,
+            Some(true)
+        );
+        for (raw, want) in [
+            (r#""/usr/local/bin/git""#, "/usr/local/bin/git"),
+            (r#""~/bin/git""#, "/home/demo/bin/git"),
+            (r#""git""#, "git"),
+        ] {
+            assert_eq!(
+                load_runtime_key("git", raw).unwrap().git,
+                Some(PathBuf::from(want)),
+                "git: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_keys_bad_values_name_the_file_key_and_choices() {
+        let themes = r#"must be one of "tokyo-night", "monokai", "dracula", "gruvbox-dark", "catppuccin-mocha""#;
+        let path_rule = "must be an absolute path or a path that starts with ~/";
+        let git_rule =
+            "must be an absolute path, a path that starts with ~/, or a command name without /";
+        let cases: Vec<(&str, &str, String)> = vec![
+            ("theme", r#""solarized""#, themes.to_string()),
+            ("theme", r#""Dracula""#, themes.to_string()),
+            ("theme", r#""""#, themes.to_string()),
+            ("theme", "1", themes.to_string()),
+            (
+                "glyphs",
+                r#""unicode""#,
+                r#"must be "nerd" or "ascii""#.to_string(),
+            ),
+            (
+                "glyphs",
+                r#""  ""#,
+                r#"must be "nerd" or "ascii""#.to_string(),
+            ),
+            ("glyphs", "true", r#"must be "nerd" or "ascii""#.to_string()),
+            ("watchMs", "-1", "must be an integer >= 0".to_string()),
+            (
+                "watchMs",
+                r#""3000""#,
+                "must be an integer >= 0".to_string(),
+            ),
+            ("watchMs", "1.5", "must be an integer >= 0".to_string()),
+            ("fetchMs", "-5", "must be an integer >= 0".to_string()),
+            ("fetchMs", "false", "must be an integer >= 0".to_string()),
+            (
+                "fetchConcurrency",
+                "0",
+                "must be an integer >= 1".to_string(),
+            ),
+            (
+                "fetchConcurrency",
+                r#""8""#,
+                "must be an integer >= 1".to_string(),
+            ),
+            ("updateCheck", "0", "must be true or false".to_string()),
+            (
+                "updateCheck",
+                r#""false""#,
+                "must be true or false".to_string(),
+            ),
+            (
+                "updateCheckStore",
+                r#""state/check.json""#,
+                path_rule.to_string(),
+            ),
+            ("updateCheckStore", r#""""#, path_rule.to_string()),
+            (
+                "commentStore",
+                r#""./comments.json""#,
+                path_rule.to_string(),
+            ),
+            ("commentStore", "1", path_rule.to_string()),
+            ("viewedStore", r#""~viewed.json""#, path_rule.to_string()),
+            ("git", r#""bin/git""#, git_rule.to_string()),
+            ("git", r#""./git""#, git_rule.to_string()),
+            ("git", r#""~""#, git_rule.to_string()),
+            ("git", r#""   ""#, git_rule.to_string()),
+            ("git", "[]", git_rule.to_string()),
+        ];
+        for (key, raw, tail) in cases {
+            let err = load_runtime_key(key, raw).unwrap_err();
+            assert_eq!(
+                err,
+                format!(".workspace-status-config.json {key} {tail}"),
+                "{key}: {raw}"
+            );
+        }
+        let (root, user_file, workspace) = layered(Some(r#"{"fetchConcurrency":0}"#), None);
+        let err = load_config_files_with_home(Some(&user_file), &workspace, None).unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "{} fetchConcurrency must be an integer >= 1",
+                user_file.display()
+            )
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_path_keys_need_home_for_tilde() {
+        for home in [None, Some(""), Some("  ")] {
+            let err = load_layered_home(
+                None,
+                Some(r#"{"ignoredRepos":[],"commentStore":"~/comments.json"}"#),
+                home,
+            )
+            .unwrap_err();
+            assert_eq!(
+                err,
+                ".workspace-status-config.json commentStore starts with ~/ but HOME is not set",
+                "HOME: {home:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_keys_merge_per_key_workspace_wins() {
+        let cfg = load_layered_home(
+            Some(r#"{"theme":"dracula","watchMs":4000,"git":"/opt/git"}"#),
+            Some(r#"{"ignoredRepos":[],"theme":"monokai","fetchMs":0}"#),
+            Some("/home/demo"),
+        )
+        .unwrap();
+        assert_eq!(cfg.runtime.theme, Some(ThemeId::Monokai), "workspace wins");
+        assert_eq!(cfg.runtime.watch_ms, Some(4000), "user key kept");
+        assert_eq!(cfg.runtime.fetch_ms, Some(0));
+        assert_eq!(cfg.runtime.git, Some(PathBuf::from("/opt/git")));
+    }
+
+    #[test]
+    fn invalid_user_json_is_a_json_error_naming_the_path() {
+        for json in ["{", "[]", r#""notes""#, "{\"theme\": }"] {
+            let (root, user_file, workspace) = layered(Some(json), None);
+            let err = load_config_files(Some(&user_file), &workspace).unwrap_err();
+            let prefix = format!("{} is not a valid JSON object: ", user_file.display());
+            assert!(err.starts_with(&prefix), "{json}: {err}");
+            assert!(err.len() > prefix.len(), "{json}: serde message missing");
+            let _ = fs::remove_dir_all(root);
+        }
+        let err = load_layered(None, Some("{")).unwrap_err();
+        assert_eq!(
+            err, ".workspace-status-config.json must contain an ignoredRepos string array",
+            "workspace file keeps its message"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_user_file_symlink_is_an_error_not_a_missing_file() {
+        let (root, user_file, workspace) = layered(None, None);
+        std::os::unix::fs::symlink(root.join("no-such-target.json"), &user_file).unwrap();
+        let err = load_config_files(Some(&user_file), &workspace).unwrap_err();
+        assert!(
+            err.starts_with(&format!(
+                "{}: symlink target is missing: ",
+                user_file.display()
+            )),
+            "{err}"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 }
