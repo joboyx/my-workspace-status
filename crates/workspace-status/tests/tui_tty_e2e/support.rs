@@ -1194,7 +1194,7 @@ pub fn compare_regions_diff_focused(screen: &str) -> bool {
 /// Open `app ↔ origin/main` by real input on
 /// `seed::compare_regions_workspace` and focus the regions.txt diff.
 ///
-/// `/app`, `Ctrl-k`, "vs default", Enter opens the tab on regions.txt (the
+/// `/app`, `:`, "vs default", Enter opens the tab on regions.txt (the
 /// first file). A second Enter focuses the compare diff.
 pub fn open_compare_regions_diff(workspace: &Path) -> PtySession {
     let mut tui = PtySession::open(workspace);
@@ -1210,10 +1210,10 @@ pub fn open_compare_regions_diff(workspace: &Path) -> PtySession {
 /// The Workspace tree must hold focus on a row of `app` (the repo row or
 /// one of its files): "Diff vs default in new tab" compares the focused checkout.
 pub fn open_compare_regions_in(tui: &mut PtySession) {
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.wait_pred(
         |screen| screen.contains("Enter run"),
-        "Ctrl-k opens Quick Open commands",
+        "`:` opens Quick Open commands",
         WAIT,
     );
     type_palette_filter(tui, "vs default");

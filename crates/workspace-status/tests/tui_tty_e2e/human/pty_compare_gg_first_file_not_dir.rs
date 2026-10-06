@@ -71,7 +71,7 @@ fn pty_compare_gg_first_file_not_dir() {
     let mut tui = PtySession::open(&workspace);
     tui.wait_contains("app", WAIT);
     tui.search("app");
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.keys("vs default");
     tui.enter();
     tui.wait_pred(

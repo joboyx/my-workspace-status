@@ -475,7 +475,7 @@ pub enum DialogKind {
     ComparePicker,
     /// Graph branch focus picker.
     GraphFocusPicker,
-    /// Quick Open: `:` files, Ctrl-k / `>` commands.
+    /// Quick Open: `:` / `>` commands, Ctrl-p / `F` files.
     QuickOpen,
 }
 
@@ -1294,7 +1294,7 @@ pub fn file_tab_hint_segments() -> Vec<HintSegment> {
         hint("\\", "wrap", false),
         hint("'", "copy ref", false),
         hint("r", "reload", false),
-        hint(":", "go to file", false),
+        hint("F", "go to file", false),
     ]
 }
 

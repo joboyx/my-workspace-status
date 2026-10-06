@@ -39,7 +39,7 @@ fn pty_line_blame_shows_commit_on_focused_row() {
         "graph cursor on the middle commit",
         WAIT,
     );
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.keys("vs parent");
     tui.wait_contains("Diff commit vs parent in new tab", WAIT);
     tui.enter();

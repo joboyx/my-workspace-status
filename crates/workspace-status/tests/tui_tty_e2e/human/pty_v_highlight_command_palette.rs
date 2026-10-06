@@ -41,10 +41,10 @@ fn fetch_row_shows(screen: &str, reason: &str) -> bool {
         .any(|line| line.contains("Fetch remotes") && line.contains(reason))
 }
 
-/// `V` over the first hunk, `:` then `>` (commands), then "Revert highlighted lines".
+/// `V` over the first hunk, `:` (commands), then "Revert highlighted lines".
 ///
-/// Highlight mode opens Quick Open; `>` switches it to commands. The
-/// HIGHLIGHT rows show first. A whole-file row shows why it waits
+/// `:` in highlight mode opens Quick Open on commands. The HIGHLIGHT rows
+/// show first. A whole-file row shows why it waits
 /// (`exit highlight first`) on the row and in the footer. Esc returns to
 /// highlight with the same range. Enter on "Revert highlighted lines"
 /// opens the range confirm (`pty_v_x_y_reverts_one_hunk` covers the git
@@ -55,10 +55,9 @@ fn pty_v_colon_palette_revert_opens_range_confirm() {
     let mut tui = open_regions_first_hunk_highlight(&workspace);
 
     tui.key(':');
-    tui.key('>');
     tui.wait_pred(
         palette_highlight_rows,
-        "`:` then `>` in highlight opens the commands with the HIGHLIGHT rows",
+        "`:` in highlight opens the commands with the HIGHLIGHT rows",
         WAIT,
     );
     type_filter(&mut tui, "fetch");
@@ -93,12 +92,7 @@ fn pty_v_colon_palette_revert_opens_range_confirm() {
     );
 
     tui.key(':');
-    tui.key('>');
-    tui.wait_pred(
-        palette_highlight_rows,
-        "`:` then `>` reopens the commands",
-        WAIT,
-    );
+    tui.wait_pred(palette_highlight_rows, "`:` reopens the commands", WAIT);
     type_filter(&mut tui, "revert highlighted");
     tui.wait_pred(
         |screen| {
@@ -118,7 +112,7 @@ fn pty_v_colon_palette_revert_opens_range_confirm() {
     );
 }
 
-/// `V` over the first hunk, `:` then `>` (commands), then "Stage highlighted lines".
+/// `V` over the first hunk, `:` (commands), then "Stage highlighted lines".
 ///
 /// Enter stages only the highlighted hunk. Git on disk is the oracle: the
 /// index gains ALPHA only, and OMEGA stays unstaged.
@@ -129,10 +123,9 @@ fn pty_v_colon_palette_stages_highlighted_range() {
     let mut tui = open_regions_first_hunk_highlight(&workspace);
 
     tui.key(':');
-    tui.key('>');
     tui.wait_pred(
         palette_highlight_rows,
-        "`:` then `>` in highlight opens the commands with the HIGHLIGHT rows",
+        "`:` in highlight opens the commands with the HIGHLIGHT rows",
         WAIT,
     );
     type_filter(&mut tui, "stage highlighted");

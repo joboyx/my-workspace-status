@@ -275,10 +275,10 @@ fn pty_compare_x_refuses_dirty_file() {
         WAIT,
     );
 
-    tui.ctrl_letter('k');
+    tui.key(':');
     tui.wait_pred(
         |screen| screen.contains("Enter run"),
-        "Ctrl-k opens the palette",
+        "`:` opens the palette",
         WAIT,
     );
     type_palette_filter(&mut tui, "revert");

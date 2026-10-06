@@ -487,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn colon_opens_files_mode_and_requests_index() {
+    fn files_entry_opens_files_mode_and_requests_index() {
         let mut app = family_state();
         focus_row(&mut app, NodeKind::Checkout, Some("app"));
         let effect = app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Files));
@@ -511,9 +511,11 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_k_opens_commands_mode_with_gt_pretyped() {
+    fn colon_opens_commands_mode_with_gt_pretyped() {
         let mut app = family_state();
-        let effect = app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        let action = press_action(&app, ':');
+        assert_eq!(action, Action::ToggleQuickOpen(QuickOpenEntry::Commands));
+        let effect = app.dispatch(action);
         assert_eq!(effect, Effect::None, "no index load in commands mode");
         assert_eq!(quick(&app).query, ">");
         assert_eq!(quick(&app).mode(), QuickOpenMode::Commands);
@@ -564,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn commands_opened_by_ctrl_k_load_the_index_once_back_in_files() {
+    fn commands_opened_by_colon_load_the_index_once_back_in_files() {
         let mut app = family_state();
         app.dispatch(Action::ToggleQuickOpen(QuickOpenEntry::Commands));
         let effect = app.dispatch(Action::QuickOpenBackspace);
@@ -647,11 +649,16 @@ mod tests {
         );
     }
 
-    /// Map a plain key press the way the event loop does, then dispatch it.
-    fn press(app: &mut AppState, c: char) {
+    /// Map a plain key press the way the event loop does.
+    fn press_action(app: &AppState, c: char) -> Action {
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         let event = Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
-        let action = crate::tui::app::map_event(app, &event);
+        crate::tui::app::map_event(app, &event)
+    }
+
+    /// Map a plain key press the way the event loop does, then dispatch it.
+    fn press(app: &mut AppState, c: char) {
+        let action = press_action(app, c);
         app.dispatch(action);
     }
 
@@ -662,8 +669,8 @@ mod tests {
         app.layout.term_cols = 140;
         let fraction = app.tree_fraction;
 
-        press(&mut app, ':');
-        assert!(app.quick_open.is_some(), "`:` opens Quick Open");
+        press(&mut app, 'F');
+        assert!(app.quick_open.is_some(), "`F` opens Quick Open");
         press(&mut app, '>');
         press(&mut app, '<');
         assert_eq!(quick(&app).query, "><", "both keys type into the query");

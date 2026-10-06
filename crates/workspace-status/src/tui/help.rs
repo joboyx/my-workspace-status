@@ -202,7 +202,7 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
             },
             HelpEntry {
                 keys: "V",
-                desc: "highlight diff lines for ; / s / u / x / Ctrl-k",
+                desc: "highlight diff lines for ; / s / u / x / :",
             },
             HelpEntry {
                 keys: "y",
@@ -221,8 +221,8 @@ pub const HELP_GROUPS: &[HelpGroup] = &[
                 desc: "focus right / drill",
             },
             HelpEntry {
-                keys: ": Ctrl-k",
-                desc: "go to file · commands (> in : switches)",
+                keys: ": Ctrl-p F",
+                desc: "commands · go to file (> first switches)",
             },
             HelpEntry {
                 keys: "?",
@@ -254,7 +254,7 @@ pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
     entries: &[
         HelpEntry {
             keys: "V",
-            desc: "highlight for ; x ' Ctrl-k",
+            desc: "highlight for ; x ' :",
         },
         HelpEntry {
             keys: ";",
@@ -290,7 +290,7 @@ pub const HELP_COMPARE_GROUP: HelpGroup = HelpGroup {
         },
         HelpEntry {
             keys: super::render::TAB_CLOSE_GLYPH,
-            desc: "close tab (or Ctrl-k)",
+            desc: "close tab (or :)",
         },
         HelpEntry {
             keys: "s u",
@@ -893,9 +893,9 @@ mod tests {
         assert!(!view_keys.contains(&"i \\"));
         assert!(!view_keys.contains(&"i"));
         assert!(view_keys.contains(&"Ctrl-o"));
-        assert!(view_keys.contains(&": Ctrl-k"));
+        assert!(view_keys.contains(&": Ctrl-p F"));
         assert!(view_keys.contains(&"?"));
-        assert!(!view_keys.contains(&"? Ctrl-k :"));
+        assert!(!view_keys.iter().any(|keys| keys.contains("Ctrl-k")));
         assert!(view_keys.contains(&"o O"));
         assert!(view_keys.contains(&"m"));
         assert!(view_keys.contains(&";"));

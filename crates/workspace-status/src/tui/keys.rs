@@ -99,7 +99,7 @@ pub enum InputMode {
     DiffVisual,
     /// `y` markdown export overlay (Esc closes).
     CommentExport,
-    /// Quick Open (`:` files, `Ctrl-k` / `>` commands). Query, list, Enter.
+    /// Quick Open (`:` / `>` commands, Ctrl-p / `F` files). Query, list, Enter.
     QuickOpen,
 }
 
@@ -557,10 +557,11 @@ pub(crate) fn held_nav_key(event: &Event) -> Option<KeyEvent> {
 
 /// Map one folded key press in `mode` to an [`Action`].
 ///
-/// Explicit chords (Ctrl-c, Ctrl-k, and the per-mode Ctrl bindings) match
-/// first. In Normal, pending `z` / `g`, Help, Confirm, the stash and blame
-/// menus, comment export, and visual highlight a key with Ctrl / Alt / Super /
-/// Hyper / Meta never runs the plain-key action ([`is_unbound_chord`]).
+/// Explicit chords (Ctrl-c, the Ctrl-p Quick Open opener, and the per-mode
+/// Ctrl bindings) match first. In Normal, pending `z` / `g`, Help, Confirm,
+/// the stash and blame menus, comment export, and visual highlight a key
+/// with Ctrl / Alt / Super / Hyper / Meta never runs the plain-key action
+/// ([`is_unbound_chord`]).
 /// Text overlays keep their own matching.
 fn key_to_action(
     key: KeyEvent,
@@ -779,21 +780,32 @@ fn key_to_action(
     }
 }
 
+/// Quick Open opener for `key`, if any: `:` opens commands (vim command
+/// line), Ctrl-p and `F` open files.
+///
+/// `F` matches with or without SHIFT; a command modifier (Ctrl+Shift+F,
+/// Alt+F) never opens. Ctrl-p matches only Ctrl alone, so Ctrl+Shift+P
+/// stays unbound.
 fn quick_open_key(key: KeyEvent) -> Option<QuickOpenEntry> {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('k') {
-        return Some(QuickOpenEntry::Commands);
-    }
-    if !has_command_modifier(key) && key.code == KeyCode::Char(':') {
+    if key.code == KeyCode::Char('p') && key.modifiers == KeyModifiers::CONTROL {
         return Some(QuickOpenEntry::Files);
     }
-    None
+    if has_command_modifier(key) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char(':') => Some(QuickOpenEntry::Commands),
+        KeyCode::Char('F') => Some(QuickOpenEntry::Files),
+        _ => None,
+    }
 }
 
 /// Cursor step for a list overlay key (Quick Open and every picker), if any.
 ///
 /// Up / Down, Ctrl-n / Ctrl-p, and Ctrl-j / Ctrl-k move. Letters never move,
 /// so every printable character types into the filter. Quick Open follows
-/// the same rule: Ctrl-k moves up, `:` types, and only Esc closes it.
+/// the same rule: Ctrl-p / Ctrl-k move up, `:` and `F` type, and only Esc
+/// closes it.
 fn list_overlay_move(key: KeyEvent) -> Option<i32> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
@@ -830,8 +842,8 @@ fn quick_open_key_action(key: KeyEvent) -> Action {
 /// normal mode. Esc or a second `V` leaves highlight without commenting.
 /// Any other key is [`Action::DiffVisualUnmapped`] so the status can say
 /// how to leave; an unbound modifier chord on a non-character key is
-/// [`Action::None`]. `Ctrl-k` / `:` open Quick Open before this map
-/// runs; the highlight stays.
+/// [`Action::None`]. `:` (commands) and Ctrl-p / `F` (files) open Quick
+/// Open before this map runs; the highlight stays.
 fn diff_visual_key(key: KeyEvent) -> Action {
     if is_ctrl_chord(key, 'u') {
         return Action::Move(-5);
@@ -880,8 +892,9 @@ fn diff_visual_key(key: KeyEvent) -> Action {
 /// Normal-mode keys, including the graph-stash and graph-commit row keys.
 ///
 /// Ctrl-o / Ctrl-u / Ctrl-d match first. Any other key with Ctrl / Alt /
-/// Super / Hyper / Meta is [`Action::None`], so Ctrl-p is not `p` pull.
-/// Shift alone still selects the shifted binding (`P` push).
+/// Super / Hyper / Meta is [`Action::None`], so Ctrl-f is not `f` fetch
+/// (Ctrl-p opens Quick Open files before this map runs). Shift alone still
+/// selects the shifted binding (`P` push).
 fn normal_key(
     key: KeyEvent,
     _right_is_diff: bool,
@@ -2967,7 +2980,7 @@ mod tests {
     }
 
     #[test]
-    fn colon_opens_quick_open_files_and_ctrl_k_commands() {
+    fn colon_opens_quick_open_commands_and_ctrl_p_or_shift_f_files() {
         use super::super::action::QuickOpenEntry;
         let openers = [
             normal(),
@@ -2979,19 +2992,74 @@ mod tests {
             },
             InputMode::DiffVisual,
         ];
+        let files = Action::ToggleQuickOpen(QuickOpenEntry::Files);
         for mode in openers {
             assert_eq!(
                 event_to_action(&key(KeyCode::Char(':')), mode, true, true),
-                Action::ToggleQuickOpen(QuickOpenEntry::Files),
+                Action::ToggleQuickOpen(QuickOpenEntry::Commands),
                 "{mode:?} `:`"
             );
-            assert_eq!(
-                event_to_action(&ctrl(KeyCode::Char('k')), mode, true, true),
-                Action::ToggleQuickOpen(QuickOpenEntry::Commands),
-                "{mode:?} Ctrl-k"
+            for event in [
+                ctrl(KeyCode::Char('p')),
+                key(KeyCode::Char('F')),
+                shift(KeyCode::Char('F')),
+                shift(KeyCode::Char('f')),
+            ] {
+                assert_eq!(
+                    event_to_action(&event, mode, true, true),
+                    files,
+                    "{mode:?} {event:?}"
+                );
+            }
+            let ctrl_k = event_to_action(&ctrl(KeyCode::Char('k')), mode, true, true);
+            assert!(
+                !matches!(ctrl_k, Action::ToggleQuickOpen(_)),
+                "{mode:?} Ctrl-k no longer opens Quick Open, got {ctrl_k:?}"
             );
+            let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+            for (c, mods) in [
+                ('F', ctrl_shift),
+                ('f', ctrl_shift),
+                ('F', KeyModifiers::ALT),
+                ('f', KeyModifiers::ALT),
+                ('P', ctrl_shift),
+                ('p', ctrl_shift),
+            ] {
+                let chord = Event::Key(KeyEvent::new(KeyCode::Char(c), mods));
+                let got = event_to_action(&chord, mode, true, true);
+                assert!(
+                    !matches!(got, Action::ToggleQuickOpen(_)),
+                    "{mode:?} {c} {mods:?} must not open Quick Open, got {got:?}"
+                );
+            }
         }
-        for c in [':', '>', '<'] {
+        // Lowercase `f` / `p` and Shift `P` keep their remote bindings.
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('f')), normal(), false, false),
+            Action::Fetch
+        );
+        assert_eq!(
+            event_to_action(&key(KeyCode::Char('p')), normal(), false, false),
+            Action::Pull
+        );
+        assert_eq!(
+            event_to_action(&shift(KeyCode::Char('P')), normal(), false, false),
+            Action::Push
+        );
+        assert_eq!(
+            event_to_action(&ctrl(KeyCode::Char('k')), normal(), false, false),
+            Action::None
+        );
+        assert_eq!(
+            event_to_action(
+                &ctrl(KeyCode::Char('k')),
+                InputMode::DiffVisual,
+                false,
+                false
+            ),
+            Action::DiffVisualUnmapped
+        );
+        for c in [':', '>', '<', 'F'] {
             assert_eq!(
                 event_to_action(&key(KeyCode::Char(c)), quick_open(), false, false),
                 Action::QuickOpenChar(c),
@@ -3009,8 +3077,7 @@ mod tests {
     }
 
     #[test]
-    fn overlays_do_not_open_quick_open_on_ctrl_k_or_colon() {
-        use super::super::action::QuickOpenEntry;
+    fn overlays_do_not_open_quick_open_on_colon_ctrl_p_or_shift_f() {
         let overlays = [
             InputMode::Help,
             InputMode::HelpSearch,
@@ -3022,79 +3089,45 @@ mod tests {
             InputMode::GraphFocusPicker,
             InputMode::CreateBranch,
             InputMode::StashMenu,
+            InputMode::BlameMenu,
             InputMode::CommentExport,
             InputMode::QuickOpen,
         ];
         for mode in overlays {
-            let ctrl_k = event_to_action(&ctrl(KeyCode::Char('k')), mode, false, false);
-            assert_ne!(
-                ctrl_k,
-                Action::ToggleQuickOpen(QuickOpenEntry::Commands),
-                "{mode:?} must not open Quick Open"
-            );
-            let colon = event_to_action(&key(KeyCode::Char(':')), mode, false, false);
-            assert_ne!(
-                colon,
-                Action::ToggleQuickOpen(QuickOpenEntry::Files),
-                "{mode:?} must not open Quick Open"
-            );
+            for event in [
+                key(KeyCode::Char(':')),
+                ctrl(KeyCode::Char('p')),
+                ctrl(KeyCode::Char('k')),
+                key(KeyCode::Char('F')),
+                shift(KeyCode::Char('F')),
+            ] {
+                let got = event_to_action(&event, mode, false, false);
+                assert!(
+                    !matches!(got, Action::ToggleQuickOpen(_)),
+                    "{mode:?} {event:?} must not open Quick Open, got {got:?}"
+                );
+            }
         }
     }
 
     #[test]
-    fn text_overlays_type_colon() {
-        assert_eq!(
-            event_to_action(
-                &key(KeyCode::Char(':')),
-                InputMode::SearchPrompt,
-                false,
-                false
-            ),
-            Action::SearchChar(':')
-        );
-        assert_eq!(
-            event_to_action(
-                &key(KeyCode::Char(':')),
-                InputMode::HelpSearch,
-                false,
-                false
-            ),
-            Action::SearchChar(':')
-        );
-        assert_eq!(
-            event_to_action(
-                &key(KeyCode::Char(':')),
-                InputMode::CreateBranch,
-                false,
-                false
-            ),
-            Action::CreateBranchChar(':')
-        );
-        assert_eq!(
-            event_to_action(
-                &key(KeyCode::Char(':')),
-                InputMode::BranchPicker,
-                false,
-                false
-            ),
-            Action::BranchChar(':')
-        );
-        assert_eq!(
-            event_to_action(
-                &key(KeyCode::Char(':')),
-                InputMode::GraphFocusPicker,
-                false,
-                false
-            ),
-            Action::GraphFocusChar(':')
-        );
-        assert_eq!(
-            event_to_action(&key(KeyCode::Char(':')), InputMode::StashMenu, false, false),
-            Action::StashMenuChar(':')
-        );
-        match event_to_action(&key(KeyCode::Char(':')), InputMode::Comment, false, false) {
-            Action::CommentInput(key) => assert_eq!(key.code, KeyCode::Char(':')),
-            other => panic!("Comment colon must be CommentInput, got {other:?}"),
+    fn text_overlays_type_colon_and_shift_f() {
+        for c in [':', 'F'] {
+            let typed = key(KeyCode::Char(c));
+            let at = |mode| event_to_action(&typed, mode, false, false);
+            assert_eq!(at(InputMode::SearchPrompt), Action::SearchChar(c));
+            assert_eq!(at(InputMode::HelpSearch), Action::SearchChar(c));
+            assert_eq!(at(InputMode::CreateBranch), Action::CreateBranchChar(c));
+            assert_eq!(at(InputMode::BranchPicker), Action::BranchChar(c));
+            assert_eq!(at(InputMode::ComparePicker), Action::ComparePickerChar(c));
+            assert_eq!(at(InputMode::GraphFocusPicker), Action::GraphFocusChar(c));
+            assert_eq!(at(InputMode::StashMenu), Action::StashMenuChar(c));
+            assert_eq!(at(InputMode::BlameMenu), Action::BlameMenuChar(c));
+            assert_eq!(at(InputMode::QuickOpen), Action::QuickOpenChar(c));
+            match at(InputMode::Comment) {
+                Action::CommentInput(key) => assert_eq!(key.code, KeyCode::Char(c)),
+                other => panic!("Comment `{c}` must be CommentInput, got {other:?}"),
+            }
         }
     }
 
@@ -3110,22 +3143,25 @@ mod tests {
     }
 
     #[test]
-    fn help_confirm_comment_export_swallow_ctrl_k_and_colon() {
+    fn help_confirm_comment_export_swallow_quick_open_keys() {
         for mode in [
             InputMode::Help,
             InputMode::Confirm,
             InputMode::CommentExport,
         ] {
-            assert_eq!(
-                event_to_action(&ctrl(KeyCode::Char('k')), mode, false, false),
-                Action::None,
-                "{mode:?} Ctrl-K"
-            );
-            assert_eq!(
-                event_to_action(&key(KeyCode::Char(':')), mode, false, false),
-                Action::None,
-                "{mode:?} colon"
-            );
+            for event in [
+                ctrl(KeyCode::Char('k')),
+                ctrl(KeyCode::Char('p')),
+                key(KeyCode::Char(':')),
+                key(KeyCode::Char('F')),
+                shift(KeyCode::Char('F')),
+            ] {
+                assert_eq!(
+                    event_to_action(&event, mode, false, false),
+                    Action::None,
+                    "{mode:?} {event:?}"
+                );
+            }
         }
         assert_eq!(
             event_to_action(
@@ -3259,10 +3295,11 @@ mod tests {
             ),
             Action::QuickOpenMove(-1)
         );
+        // A held opener does not toggle Quick Open shut again.
         assert_ne!(
             event_to_action(
                 &Event::Key(KeyEvent::new_with_kind(
-                    KeyCode::Char('k'),
+                    KeyCode::Char('p'),
                     KeyModifiers::CONTROL,
                     KeyEventKind::Repeat
                 )),
@@ -3270,7 +3307,7 @@ mod tests {
                 false,
                 false
             ),
-            Action::ToggleQuickOpen(QuickOpenEntry::Commands)
+            Action::ToggleQuickOpen(QuickOpenEntry::Files)
         );
     }
 
@@ -3355,6 +3392,12 @@ mod tests {
                 n,
                 0,
                 Char(':'),
+                Action::ToggleQuickOpen(QuickOpenEntry::Commands),
+            ),
+            (
+                n,
+                0,
+                Char('F'),
                 Action::ToggleQuickOpen(QuickOpenEntry::Files),
             ),
             (n, 0, Char('f'), Action::Fetch),
@@ -3498,6 +3541,24 @@ mod tests {
             (pending_g(), 0, Char('1'), Action::JumpToTab(1)),
             (pending_g(), 0, Char('9'), Action::JumpToTab(9)),
             (pending_g(), 0, Char('p'), Action::Pull),
+            (
+                pending_z,
+                0,
+                Char('F'),
+                Action::ToggleQuickOpen(QuickOpenEntry::Files),
+            ),
+            (
+                pending_g(),
+                0,
+                Char(':'),
+                Action::ToggleQuickOpen(QuickOpenEntry::Commands),
+            ),
+            (
+                InputMode::DiffVisual,
+                0,
+                Char('F'),
+                Action::ToggleQuickOpen(QuickOpenEntry::Files),
+            ),
             (InputMode::DiffVisual, 0, Char('s'), Action::Stage),
             (InputMode::DiffVisual, 0, Char('x'), Action::Revert),
             (InputMode::DiffVisual, 0, Char('q'), Action::Quit),
@@ -3547,8 +3608,9 @@ mod tests {
             }
             for (code, mods) in chords {
                 // Explicit Ctrl chords keep their own bindings: Ctrl-c
-                // everywhere, Ctrl-k where Quick Open opens, Ctrl-o / u / d
-                // in Normal and pending chords, Ctrl-u / d in highlight.
+                // everywhere, Ctrl-p (Ctrl alone) where Quick Open opens,
+                // Ctrl-o / u / d in Normal and pending chords, Ctrl-u / d in
+                // highlight.
                 let ctrl_only = !mods.intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
                     && mods.contains(KeyModifiers::CONTROL);
                 let normal_like = matches!(
@@ -3560,7 +3622,7 @@ mod tests {
                 let visual = mode == InputMode::DiffVisual;
                 let bound = match code {
                     Char('c') => true,
-                    Char('k') => normal_like || visual,
+                    Char('p') => (normal_like || visual) && mods == KeyModifiers::CONTROL,
                     Char('o') => normal_like,
                     Char('u' | 'd') => normal_like || visual,
                     _ => false,
@@ -3593,7 +3655,7 @@ mod tests {
             );
         }
         let ctrl_p = event_to_action(&ctrl(Char('p')), n, false, false);
-        assert_eq!(ctrl_p, Action::None);
+        assert_eq!(ctrl_p, Action::ToggleQuickOpen(QuickOpenEntry::Files));
         for push in [key(Char('P')), shift(Char('P')), shift(Char('p'))] {
             assert_eq!(event_to_action(&push, n, false, false), Action::Push);
         }

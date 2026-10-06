@@ -622,7 +622,7 @@ pub struct AppState {
     /// Per-repo local branch names whose ancestors the graph shows. `None` = `--all`.
     pub graph_branch_focus: Option<(String, Vec<String>)>,
     pub create_branch: Option<CreateBranchState>,
-    /// Open Quick Open overlay (`:` files, Ctrl-k / `>` commands).
+    /// Open Quick Open overlay (`:` / `>` commands, Ctrl-p / `F` files).
     pub quick_open: Option<QuickOpenState>,
     /// Session counter for Quick Open index and score generations.
     quick_open_gen: u64,
@@ -16580,6 +16580,13 @@ diff --git a/README.md b/README.md
         palette.cursor = index;
     }
 
+    /// Map `key` with no modifier the way the event loop does.
+    fn plain_key_action(app: &AppState, key: char) -> Action {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let event = Event::Key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+        super::super::app::map_event(app, &event)
+    }
+
     #[test]
     fn palette_opens_over_highlight_and_esc_keeps_the_range() {
         let mut app = state();
@@ -16588,16 +16595,82 @@ diff --git a/README.md b/README.md
         let anchor = app.diff_visual_anchor;
         let cursor = app.diff_cursor;
         assert_eq!(app.input_mode(), InputMode::DiffVisual);
-        app.dispatch(Action::ToggleQuickOpen(
-            super::super::action::QuickOpenEntry::Commands,
-        ));
+        let colon = plain_key_action(&app, ':');
+        assert_eq!(
+            colon,
+            Action::ToggleQuickOpen(super::super::action::QuickOpenEntry::Commands),
+            "`:` in highlight opens commands"
+        );
+        app.dispatch(colon);
         assert_eq!(app.input_mode(), InputMode::QuickOpen);
+        assert_eq!(
+            app.quick_open.as_ref().map(|quick| quick.query.as_str()),
+            Some(">")
+        );
         assert_eq!(app.diff_visual_anchor, anchor, "open keeps the anchor");
         app.dispatch(Action::QuickOpenCancel);
         assert!(app.quick_open.is_none());
         assert_eq!(app.diff_visual_anchor, anchor, "Esc keeps the anchor");
         assert_eq!(app.diff_cursor, cursor);
         assert_eq!(app.input_mode(), InputMode::DiffVisual);
+    }
+
+    #[test]
+    fn opening_a_file_from_highlight_drops_the_range() {
+        use crate::file_index::{score_files, FileEntry, FileIndex, IndexRoot, MAX_RESULTS};
+        let mut app = state();
+        focus_readme_diff(&mut app, two_hunk_readme());
+        highlight_first_readme_hunk(&mut app);
+        assert_eq!(app.input_mode(), InputMode::DiffVisual);
+
+        let open = plain_key_action(&app, 'F');
+        assert_eq!(
+            open,
+            Action::ToggleQuickOpen(super::super::action::QuickOpenEntry::Files),
+            "`F` in highlight opens files"
+        );
+        let Effect::LoadFileIndex { gen, .. } = app.dispatch(open) else {
+            panic!("expected an index load");
+        };
+        assert!(
+            app.diff_visual_anchor.is_some(),
+            "opening files keeps the range while the overlay is up"
+        );
+        let index = FileIndex {
+            roots: vec![IndexRoot {
+                checkout: "app".into(),
+                prefix: String::new(),
+            }],
+            entries: vec![FileEntry {
+                root: 0,
+                display: "src/lib.rs".into(),
+                rel_start: 0,
+            }],
+            truncated: false,
+            errors: Vec::new(),
+        };
+        let Some(Effect::ScoreFiles { gen, index, query }) = app.apply_file_index(gen, index)
+        else {
+            panic!("expected a score");
+        };
+        app.apply_file_score(gen, score_files(&index, &query, MAX_RESULTS));
+
+        let effect = app.dispatch(Action::QuickOpenSubmit);
+        assert!(
+            matches!(effect, Effect::LoadFileTab { ref repo, ref path, .. }
+                if repo == "app" && path == "src/lib.rs"),
+            "{effect:?}"
+        );
+        assert!(app.tabs.active_file().is_some(), "the file tab is active");
+        assert_eq!(app.diff_visual_anchor, None, "the range is dropped");
+        assert_ne!(app.input_mode(), InputMode::DiffVisual);
+
+        app.dispatch(Action::JumpToTab(1));
+        assert!(app.tabs.active_file().is_none(), "back on Workspace");
+        assert_eq!(
+            app.diff_visual_anchor, None,
+            "the range does not come back with the Workspace tab"
+        );
     }
 
     /// Open the palette, type `filter`, and return the row under the cursor.

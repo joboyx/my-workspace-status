@@ -76,7 +76,7 @@ MAX_GIF_BYTES=$((4 * 1024 * 1024))
 # 06 S, Esc, / merger Enter, Tab, j onto stash, D, n
 # 07 . .
 # 08 ?, Esc
-# 09 Ctrl-k, compare, Backspace x7, checkout, Esc
+# 09 :, compare, Backspace x7, checkout, Esc
 # 10 k k k unrecorded (app checkout row), then b, login, Backspace x5, fix/banner, Esc
 # 11 j j j unrecorded (auth.ts), then x, Enter, n
 # 12 Tab, s, Tab, / zzz Enter, Esc
@@ -692,7 +692,7 @@ clip_commit 08-help
 # 09 command palette: an alias match, then letters that used to move the cursor.
 launch_tui
 clip_start 09-palette
-send ctrl+k
+send shift+semicolon
 send type:compare
 mark_mid
 send BackSpace BackSpace BackSpace BackSpace BackSpace BackSpace BackSpace

@@ -67,15 +67,15 @@ fn pty_m_toggles_terminal_mouse_tracking() {
         "second `m` re-enables any-event tracking with SGR encoding",
     );
 
-    // Palette path: Ctrl-k, filter, Enter.
+    // Palette path: `:`, filter, Enter.
     for (want_paint, want_mode) in [
         ("Mouse off", MouseProtocolMode::None),
         ("Mouse on", MouseProtocolMode::AnyMotion),
     ] {
-        tui.ctrl_letter('k');
+        tui.key(':');
         tui.wait_pred(
             |screen| screen.contains("Enter run"),
-            "Ctrl-k opens Quick Open commands",
+            "`:` opens Quick Open commands",
             WAIT,
         );
         for c in "toggle mouse".chars() {
