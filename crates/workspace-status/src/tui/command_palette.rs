@@ -133,6 +133,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         scope: CommandScope::NoHighlight,
     },
     PaletteCommand {
+        title: "Fold row",
+        keys: "z",
+        group: CommandGroup::Move,
+        action: Action::FoldToggle,
+        aliases: &["collapse", "expand", "unfold"],
+        scope: CommandScope::NoHighlight,
+    },
+    PaletteCommand {
         title: "Fold subtree",
         keys: "zz",
         group: CommandGroup::Move,
@@ -829,6 +837,13 @@ mod tests {
                 "N",
                 CommandGroup::Move,
                 Action::SearchPrev,
+                CommandScope::NoHighlight,
+            ),
+            (
+                "Fold row",
+                "z",
+                CommandGroup::Move,
+                Action::FoldToggle,
                 CommandScope::NoHighlight,
             ),
             (

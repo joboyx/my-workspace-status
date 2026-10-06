@@ -275,7 +275,7 @@ impl AppState {
             return Effect::None;
         }
         self.close_popover();
-        self.dispatch(command.action.clone())
+        self.dispatch_palette_action(command.action.clone())
     }
 
     /// `y`: copy the focused line of the pinned popover. It stays open.
@@ -431,13 +431,22 @@ impl AppState {
         let Some(popover) = self.popover.as_ref() else {
             return;
         };
-        let hit_of = |(kind, target): &(IconKind, IconTarget)| {
+        // Cells of every painted icon of `target` (a kind can tag two
+        // segments of a row: the workspace glyph and its summary).
+        let rects_of = |(kind, target): &(IconKind, IconTarget)| -> Vec<Rect> {
             self.layout
                 .icon_hits
                 .iter()
-                .find(|hit| hit.kind == *kind && hit.target == *target)
+                .filter(|hit| hit.kind == *kind && hit.target == *target)
                 .map(IconHit::rect)
+                .collect()
         };
+        let at_anchor = popover.anchor.is_some_and(|anchor| {
+            popover
+                .targets
+                .iter()
+                .any(|target| rects_of(target).contains(&anchor))
+        });
         if popover.is_pinned() {
             // A dialog that opened under it (a confirm from a popover
             // action, a picker that loaded later) owns the keys: close.
@@ -445,14 +454,21 @@ impl AppState {
                 self.close_popover();
                 return;
             }
-            let anchor = popover.targets.iter().find_map(hit_of);
-            if let (Some(anchor), Some(popover)) = (anchor, self.popover.as_mut()) {
+            let anchor = popover
+                .targets
+                .iter()
+                .find_map(|target| rects_of(target).first().copied());
+            if let (false, Some(anchor), Some(popover)) = (at_anchor, anchor, self.popover.as_mut())
+            {
                 popover.anchor = Some(anchor);
             }
             return;
         }
-        let painted_at = popover.targets.first().and_then(hit_of);
-        let still_there = painted_at.is_some() && painted_at == popover.anchor;
+        let still_there = popover
+            .targets
+            .first()
+            .zip(popover.anchor)
+            .is_some_and(|(target, anchor)| rects_of(target).contains(&anchor));
         if !still_there || !self.peek_allowed() {
             self.drop_peek();
         }
@@ -529,12 +545,14 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
+    use super::super::super::command_palette::command_for;
     use super::super::super::event_pump::overlay_blocks_background_ticks;
     use super::super::super::keys::event_to_action;
     use super::super::super::pull_request::{PrLookup, PullRequest};
     use super::super::super::render::draw;
     use super::super::FocusPane;
     use super::*;
+    use crate::helpers::STATUS_FAILED_NOTE;
     use crate::snapshot::{
         build_workspace_snapshot, CheckoutKind, FileChange, RepoSnapshot, SyncStatus,
     };
@@ -597,11 +615,15 @@ mod tests {
         terminal
     }
 
+    /// The sync mark hit on tree row `id`.
     fn sync_hit(app: &AppState, id: &str) -> IconHit {
         app.layout
             .icon_hits
             .iter()
-            .find(|hit| hit.target == IconTarget::TreeRow(id.into()))
+            .find(|hit| {
+                hit.target == IconTarget::TreeRow(id.into())
+                    && matches!(hit.kind, IconKind::Ahead | IconKind::Behind)
+            })
             .cloned()
             .unwrap_or_else(|| panic!("no icon hit on {id}: {:?}", app.layout.icon_hits))
     }
@@ -629,6 +651,16 @@ mod tests {
             .into_iter()
             .map(|section| section.lines)
             .collect()
+    }
+
+    /// Pin the popover of the sync mark on tree row `id`, as a click on it
+    /// does.
+    fn pin_sync(app: &mut AppState, id: &str) {
+        focus(app, id);
+        paint(app);
+        let hit = sync_hit(app, id);
+        app.pin_icon(&hit);
+        assert!(app.popover_pinned());
     }
 
     fn copy(text: &str) -> Effect {
@@ -887,13 +919,22 @@ mod tests {
         assert_eq!(app.dispatch(Action::PopoverOpenFocused), Effect::None);
         let sections = app.open_popover_sections();
         let icons: Vec<IconKind> = sections.iter().map(|section| section.icon).collect();
-        assert_eq!(icons, vec![IconKind::PrOpen, IconKind::Behind]);
+        assert_eq!(
+            icons,
+            vec![
+                IconKind::Branch,
+                IconKind::PrOpen,
+                IconKind::Repo,
+                IconKind::Behind,
+                IconKind::ChangeCount,
+            ]
+        );
         let titles = |lines: &[PopoverLine]| -> Vec<String> {
             lines.iter().map(PopoverLine::copy_text).collect()
         };
         let lines = section_lines(&app);
         assert_eq!(
-            titles(&lines[0]),
+            titles(&lines[1]),
             vec![
                 IconKind::PrOpen.spec().meaning.to_string(),
                 "#7".into(),
@@ -902,7 +943,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            titles(&lines[1]),
+            titles(&lines[3]),
             vec![
                 IconKind::Behind.spec().meaning.to_string(),
                 "2 commits to pull".into(),
@@ -910,14 +951,17 @@ mod tests {
                 "Fetch remotes".into(),
             ]
         );
-        // The landing line is the first action: Open PR.
+        // The landing line is the first action: the branch picker.
         let focus = app.popover.as_ref().unwrap().focus_line;
-        assert_eq!(flat_lines(&sections)[focus].copy_text(), "Open PR");
+        assert_eq!(flat_lines(&sections)[focus].copy_text(), "Branch picker");
 
         app.close_popover();
         app.status.clear();
-        app.cursor = 0;
-        assert_eq!(focused_id(&app), "workspace");
+        app.cursor = app
+            .rows
+            .iter()
+            .position(|row| row.kind == NodeKind::File)
+            .expect("file row");
         app.dispatch(Action::PopoverOpenFocused);
         assert!(app.popover.is_none());
         assert_eq!(app.status, NO_ICONS_ON_ROW);
@@ -926,8 +970,7 @@ mod tests {
     #[test]
     fn popover_keys_move_copy_and_run() {
         let mut app = app();
-        focus(&mut app, "repo:app");
-        app.dispatch(Action::PopoverOpenFocused);
+        pin_sync(&mut app, "repo:app");
         assert_eq!(app.dispatch(Action::PopoverCopyLine), copy("Pull behind"));
         app.dispatch(Action::PopoverMove(1));
         assert_eq!(app.dispatch(Action::PopoverCopyLine), copy("Fetch remotes"));
@@ -959,8 +1002,7 @@ mod tests {
     #[test]
     fn release_on_an_action_line_runs_it_and_a_drag_copies_instead() {
         let mut app = app();
-        focus(&mut app, "repo:app");
-        app.dispatch(Action::PopoverOpenFocused);
+        pin_sync(&mut app, "repo:app");
         paint(&mut app);
         let painted = app.layout.popover.clone().expect("painted");
         let sections = app.open_popover_sections();
@@ -1006,8 +1048,7 @@ mod tests {
     #[test]
     fn a_dialog_that_opens_closes_the_pinned_popover() {
         let mut app = app();
-        focus(&mut app, "repo:app");
-        app.dispatch(Action::PopoverOpenFocused);
+        pin_sync(&mut app, "repo:app");
         paint(&mut app);
         assert!(app.layout.popover.is_some());
         // A dialog that opens without a key (a picker that loaded, a
@@ -1025,8 +1066,7 @@ mod tests {
     fn a_press_on_an_action_line_exposes_the_action_the_release_runs() {
         use super::super::super::event_pump::{classify_busy_dispatch, BusyAction};
         let mut app = app();
-        focus(&mut app, "repo:app");
-        app.dispatch(Action::PopoverOpenFocused);
+        pin_sync(&mut app, "repo:app");
         paint(&mut app);
         let painted = app.layout.popover.clone().expect("painted");
         let sections = app.open_popover_sections();
@@ -1063,6 +1103,354 @@ mod tests {
             row: field_y,
         });
         assert_eq!(app.popover_release_action(), None, "a field runs nothing");
+    }
+
+    /// A family (`app` primary merged and dirty, linked `feat` merged and
+    /// behind), a repo whose status failed, an ignored dirty repo shown,
+    /// and an idle repo under No updates.
+    fn branch_rows_app() -> AppState {
+        let mut primary = repo("app", SyncStatus::NoUpstream, "");
+        primary.branch = "feature/landed".into();
+        primary.merged_into_default = Some(true);
+        primary.default_tip_ref = Some("origin/main".into());
+        primary.local_branches = vec!["main".into(), "feature/landed".into()];
+        primary.has_staged = true;
+        primary.has_untracked = true;
+        primary.changes.extend([
+            FileChange {
+                path: "src/staged.rs".into(),
+                staged_status: Some("M".into()),
+                unstaged_status: Some("M".into()),
+                untracked: false,
+                old_path: None,
+            },
+            FileChange {
+                path: "new.txt".into(),
+                staged_status: None,
+                unstaged_status: None,
+                untracked: true,
+                old_path: None,
+            },
+        ]);
+        let mut linked = repo(
+            "app/.worktrees/feat",
+            SyncStatus::Behind,
+            "behind by 3 commits",
+        );
+        linked.branch = "feature/side".into();
+        linked.checkout_kind = CheckoutKind::Linked;
+        linked.primary_repo = Some("app".into());
+        linked.merged_into_default = Some(true);
+        linked.changes.clear();
+        linked.has_unstaged = false;
+        let mut broken = repo("broken", SyncStatus::NoUpstream, STATUS_FAILED_NOTE);
+        broken.changes.clear();
+        broken.has_unstaged = false;
+        let notes = repo("notes", SyncStatus::NoUpstream, "");
+        let mut idle = repo("idle", SyncStatus::UpToDate, "");
+        idle.branch = "main".into();
+        idle.changes.clear();
+        idle.has_unstaged = false;
+        let snapshot = build_workspace_snapshot(
+            &[primary, linked, broken, notes, idle],
+            &["notes".into()],
+            true,
+            &[],
+        );
+        let mut app = AppState::new(PathBuf::from("/tmp/ws"), snapshot, true);
+        app.show_ignored = true;
+        app.rebuild_rows();
+        app
+    }
+
+    /// `gh` on row `id`: each section's icon and the copy text of each line.
+    fn gh_on(app: &mut AppState, id: &str) -> Vec<(IconKind, Vec<String>)> {
+        app.close_popover();
+        focus(app, id);
+        app.dispatch(Action::PopoverOpenFocused);
+        assert!(app.popover_pinned(), "gh pins on {id}");
+        app.open_popover_sections()
+            .into_iter()
+            .map(|section| {
+                let lines = section.lines.iter().map(PopoverLine::copy_text).collect();
+                (section.icon, lines)
+            })
+            .collect()
+    }
+
+    fn texts(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| (*line).to_string()).collect()
+    }
+
+    fn meaning(kind: IconKind) -> &'static str {
+        kind.spec().meaning
+    }
+
+    #[test]
+    fn every_branch_row_icon_has_its_fields_and_actions() {
+        use IconKind as K;
+        let mut app = branch_rows_app();
+        let diff = "Diff vs default in new tab";
+        assert_eq!(
+            gh_on(&mut app, "workspace"),
+            vec![(
+                K::Workspace,
+                texts(&[
+                    meaning(K::Workspace),
+                    "ws",
+                    "4 changed",
+                    "1 behind, 1 attention",
+                    "4 repos",
+                    "Fetch remotes",
+                    "Refresh",
+                    "Show ignored",
+                ])
+            )]
+        );
+        assert_eq!(
+            gh_on(&mut app, "repo:app"),
+            vec![
+                (
+                    K::Repo,
+                    texts(&[
+                        meaning(K::Repo),
+                        "app",
+                        "family of 2 checkouts",
+                        "1 staged · 2 unstaged · 1 untracked",
+                        "Fetch remotes",
+                        "Pull behind",
+                        "Push",
+                        "Branch picker",
+                    ])
+                ),
+                (
+                    K::Behind,
+                    texts(&[
+                        meaning(K::Behind),
+                        "3 commits to pull",
+                        "Pull behind",
+                        "Fetch remotes"
+                    ])
+                ),
+                (
+                    K::WorktreeCount,
+                    texts(&[
+                        meaning(K::WorktreeCount),
+                        "feature/landed",
+                        "feature/side",
+                        "Fold row",
+                        "Fold subtree",
+                    ])
+                ),
+                (
+                    K::ChangeCount,
+                    texts(&[meaning(K::ChangeCount), "1", "2", "1", "Stash menu", diff])
+                ),
+            ]
+        );
+        assert_eq!(
+            gh_on(&mut app, "checkout:app"),
+            vec![
+                (
+                    K::Branch,
+                    texts(&[
+                        meaning(K::Branch),
+                        "feature/landed",
+                        "feature branch",
+                        "2 branches",
+                        "Branch picker",
+                        "Default branch",
+                        "Graph focus branches",
+                        diff,
+                    ])
+                ),
+                (
+                    K::MergedIntoDefault,
+                    texts(&[
+                        meaning(K::MergedIntoDefault),
+                        "origin/main",
+                        diff,
+                        "Default branch"
+                    ])
+                ),
+                (
+                    K::NoUpstream,
+                    texts(&[meaning(K::NoUpstream), "Push", "Fetch remotes"])
+                ),
+                (
+                    K::ChangeCount,
+                    texts(&[meaning(K::ChangeCount), "1", "2", "1", "Stash menu", diff])
+                ),
+            ]
+        );
+        assert_eq!(
+            gh_on(&mut app, "checkout:app/.worktrees/feat"),
+            vec![
+                (
+                    K::LinkedWorktree,
+                    texts(&[
+                        meaning(K::LinkedWorktree),
+                        "app/.worktrees/feat",
+                        "app",
+                        "feature/side",
+                        "Remove worktree",
+                        diff,
+                        "Copy entity reference",
+                    ])
+                ),
+                (
+                    K::MergedIntoDefault,
+                    texts(&[
+                        meaning(K::MergedIntoDefault),
+                        "the default branch",
+                        diff,
+                        "Default branch",
+                        "Remove worktree",
+                    ])
+                ),
+                (
+                    K::Behind,
+                    texts(&[
+                        meaning(K::Behind),
+                        "3 commits to pull",
+                        "Pull behind",
+                        "Fetch remotes"
+                    ])
+                ),
+            ]
+        );
+        let broken = gh_on(&mut app, "repo:broken");
+        assert_eq!(
+            broken.last(),
+            Some(&(
+                K::StatusFailed,
+                texts(&[meaning(K::StatusFailed), "Refresh"])
+            ))
+        );
+        let notes = gh_on(&mut app, "repo:notes");
+        assert_eq!(
+            notes.first(),
+            Some(&(K::Ignored, texts(&[meaning(K::Ignored), "Show ignored"])))
+        );
+        assert_eq!(
+            gh_on(&mut app, "group:no-updates"),
+            vec![(
+                K::Clean,
+                texts(&[
+                    meaning(K::Clean),
+                    "1 repo",
+                    "idle",
+                    "Fold row",
+                    "Fold subtree"
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn a_disabled_action_line_shows_and_keeps_the_gate_reason() {
+        let mut app = branch_rows_app();
+        // No HEAD sha: the compare gate refuses Diff vs default.
+        app.snapshot.repos[0].head.clear();
+        app.rebuild_rows();
+        focus(&mut app, "checkout:app");
+        let diff = command_for(&Action::CompareVsDefault).expect("diff row");
+        let reason = app.palette_disabled_reason(diff).expect("gate refuses");
+        app.dispatch(Action::PopoverOpenFocused);
+        let terminal = paint(&mut app);
+        let painted = app.layout.popover.clone().expect("painted");
+        let buf = terminal.backend().buffer();
+        let text: String = (painted.rect.y..painted.rect.bottom())
+            .map(|y| {
+                (painted.rect.x..painted.rect.right())
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains(&format!("{}  {reason}", diff.title)),
+            "{reason:?} beside the line:\n{text}"
+        );
+        let sections = app.open_popover_sections();
+        let line = flat_lines(&sections)
+            .iter()
+            .position(|line| line.copy_text() == diff.title)
+            .expect("diff line");
+        app.popover.as_mut().expect("pinned").focus_line = line;
+        assert_eq!(app.dispatch(Action::PopoverRun), Effect::None);
+        assert!(app.popover_pinned(), "a refused line keeps the popover");
+        assert_eq!(app.status, reason.as_str());
+    }
+
+    #[test]
+    fn a_peek_on_the_second_segment_of_a_kind_stays_open() {
+        let mut app = branch_rows_app();
+        paint(&mut app);
+        let workspace: Vec<IconHit> = app
+            .layout
+            .icon_hits
+            .iter()
+            .filter(|hit| hit.kind == IconKind::Workspace)
+            .cloned()
+            .collect();
+        assert_eq!(workspace.len(), 2, "glyph and summary: {workspace:?}");
+        let summary = &workspace[1];
+        assert!(summary.width > 1, "the summary text is one hit");
+        peek_at(&mut app, summary, Instant::now());
+        paint(&mut app);
+        let popover = app.popover.as_ref().expect("peek survives paint");
+        assert_eq!(
+            popover.anchor,
+            Some(summary.rect()),
+            "hangs from the summary"
+        );
+        assert_eq!(app.open_popover_sections().len(), 1);
+
+        // Pinned from the summary, it keeps that anchor across paints.
+        app.close_popover();
+        app.pin_icon(summary);
+        paint(&mut app);
+        assert_eq!(app.popover.as_ref().unwrap().anchor, Some(summary.rect()));
+    }
+
+    #[test]
+    fn fold_lines_run_like_z_and_zz() {
+        let mut app = branch_rows_app();
+        focus(&mut app, "repo:app");
+        let mut twin = app.clone();
+        paint(&mut app);
+        let hit = app
+            .layout
+            .icon_hits
+            .iter()
+            .find(|hit| hit.kind == IconKind::WorktreeCount)
+            .cloned()
+            .expect("N wt hit");
+        app.pin_icon(&hit);
+        assert_eq!(app.popover_run_action(), Some(Action::FoldToggle));
+        app.dispatch(Action::PopoverRun);
+        twin.dispatch(Action::FoldToggle);
+        assert_eq!(app.rows, twin.rows, "Fold row folds like z");
+        assert!(app.z_pending_at.is_none(), "and arms no zz");
+        assert!(app.popover.is_none());
+
+        let mut twin = app.clone();
+        paint(&mut app);
+        let hit = app
+            .layout
+            .icon_hits
+            .iter()
+            .find(|hit| hit.kind == IconKind::WorktreeCount)
+            .cloned()
+            .expect("N wt hit");
+        app.pin_icon(&hit);
+        app.dispatch(Action::PopoverMove(1));
+        assert_eq!(app.popover_run_action(), Some(Action::FoldToggleSubtree));
+        app.dispatch(Action::PopoverRun);
+        twin.dispatch(Action::FoldToggle);
+        twin.dispatch(Action::FoldToggleSubtree);
+        assert_eq!(app.rows, twin.rows, "Fold subtree runs like zz");
     }
 
     #[test]

@@ -83,6 +83,10 @@ pub enum IconKind {
     StatusFailed,
     /// Repo listed as ignored in config.
     Ignored,
+    /// Muted count of changed paths on a repo or checkout row.
+    ChangeCount,
+    /// Muted `N wt` count of checkouts on a repo family row.
+    WorktreeCount,
     /// Staged section header.
     Staged,
     /// Unstaged changes section header.
@@ -363,7 +367,7 @@ pub const ICON_CATALOG: &[IconSpec] = {
             "\u{f00c}",
             ".",
             "clean",
-            "No local changes and in sync (No updates group)",
+            "In sync, no local changes; shown under No updates",
             TREE,
         ),
         // Same Nerd glyph as `Clean`; kept out of the legend while no row
@@ -390,6 +394,22 @@ pub const ICON_CATALOG: &[IconSpec] = {
             "~",
             "ignored",
             "Ignored in config; . shows or hides it",
+            TREE,
+        ),
+        row(
+            K::ChangeCount,
+            "N",
+            "N",
+            "change count",
+            "Paths with local changes (staged, unstaged, untracked)",
+            TREE,
+        ),
+        row(
+            K::WorktreeCount,
+            "N wt",
+            "N wt",
+            "worktrees",
+            "Checkouts in this repo family",
             TREE,
         ),
         row(K::Staged, "\u{f487}", "#", "staged", "Staged section", TREE),
@@ -1351,6 +1371,7 @@ mod tests {
                 | IconKind::ChipDetachedHead
                 | IconKind::ChipOverflow
                 | IconKind::GraphRails
+                | IconKind::WorktreeCount
         )
     }
 
@@ -1430,7 +1451,11 @@ mod tests {
     #[test]
     fn glyphs_are_unique_within_one_paint_context() {
         use IconKind as K;
-        let contexts: [(&str, &[IconKind]); 5] = [
+        let contexts: [(&str, &[IconKind]); 6] = [
+            (
+                "tree workspace / group row",
+                &[K::Workspace, K::Clean, K::Comment, K::CommentResolved],
+            ),
             (
                 "tree repo / checkout row",
                 &[
@@ -1449,6 +1474,8 @@ mod tests {
                     K::Clean,
                     K::StatusFailed,
                     K::Ignored,
+                    K::ChangeCount,
+                    K::WorktreeCount,
                     K::Comment,
                     K::CommentResolved,
                 ],
@@ -1499,6 +1526,17 @@ mod tests {
                 ],
             ),
         ];
+        // Every tree legend row paints somewhere, so each sits in a context.
+        for spec in ICON_CATALOG
+            .iter()
+            .filter(|spec| spec.group == Some(IconGroup::Tree))
+        {
+            assert!(
+                contexts.iter().any(|(_, kinds)| kinds.contains(&spec.kind)),
+                "{:?} is in no paint context",
+                spec.kind
+            );
+        }
         for (name, kinds) in contexts {
             for ascii in [false, true] {
                 let mut seen = std::collections::HashMap::new();

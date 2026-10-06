@@ -1,6 +1,6 @@
 use crate::harness::{PtySession, COLS};
 use crate::seed::daily_workspace;
-use crate::support::WAIT;
+use crate::support::{SETTLE_MS, WAIT};
 
 /// Compact painted help text so wrapped description fragments rejoin.
 fn help_compact(text: &str) -> String {
@@ -262,8 +262,14 @@ fn pty_help_overlay() {
         "PgDn scrolls the ICONS legend title and Tree rows into view",
         WAIT,
     );
-    for _ in 0..4 {
+    // One PgDn at a time until the bottom shows: a burst of presses
+    // sometimes stops short of it. PgDn past the end clamps.
+    for _ in 0..10 {
+        if help_legend_bottom(&tui.screen()) {
+            break;
+        }
         tui.page_down();
+        tui.wait_ms(SETTLE_MS);
     }
     tui.wait_pred(
         help_legend_bottom,

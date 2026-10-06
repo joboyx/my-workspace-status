@@ -520,7 +520,7 @@ impl AppState {
         ) && !self.compare_revert_runs(action)
         {
             // Only list moves and folds have no gate reason; the palette's
-            // one such row is Fold subtree.
+            // such rows are Fold row and Fold subtree.
             return dispatch_noop_reason(
                 action,
                 self.nav_depth(),

@@ -769,14 +769,28 @@ fn segmented_icon_spans(
         if let Some(kind) = seg.icon {
             let (lead, core, _) = split_seg_padding(seg);
             let start = x + visible_width(&lead.text);
-            let end = (start + visible_width(&core.text)).min(width);
-            if start < end {
-                spans.push((kind, start, end - start));
+            let shown = clipped_width(&core.text, width.saturating_sub(start));
+            if shown > 0 {
+                spans.push((kind, start, shown));
             }
         }
         x += seg_width;
     }
     spans
+}
+
+/// Columns of `text` that fit in `room`, less the spaces a cut leaves at
+/// the end (`2 wt` cut after `2 ` is one column).
+fn clipped_width(text: &str, room: usize) -> usize {
+    let (mut used, mut end) = (0, 0);
+    for (at, ch) in text.char_indices() {
+        used += visible_width(ch.encode_utf8(&mut [0; 4]));
+        if used > room {
+            break;
+        }
+        end = at + ch.len_utf8();
+    }
+    visible_width(text[..end].trim_end())
 }
 
 /// `seg` as leading spaces, the text between, and trailing spaces, each
@@ -4484,8 +4498,25 @@ fn draw_popover(frame: &mut Frame<'_>, bounds: Rect, state: &mut AppState) {
     let block = overlay_block_filled(accent, surface);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
+    // A box cut by the frame scrolls its body around the focused line
+    // (a peek shows the top); a pinned footer stays on the last row.
+    let footer = usize::from(pinned);
+    let body = rows.len() - footer;
+    let body_height = usize::from(inner.height).saturating_sub(footer);
+    let focus_row = focus
+        .and_then(|line| {
+            rows.iter()
+                .position(|row| matches!(row, PopoverRow::Line(index) if *index == line))
+        })
+        .unwrap_or(0);
+    let (start, shown) = visible_window(body, focus_row, body_height);
+    let shown_rows = (start..start + shown).chain(body..rows.len());
+    let mut painted: Vec<Option<Line<'static>>> = painted.into_iter().map(Some).collect();
     let mut hit_lines = Vec::new();
-    for (offset, (row, line)) in rows.iter().zip(painted).enumerate() {
+    for (offset, index) in shown_rows.enumerate() {
+        let (row, Some(line)) = (&rows[index], painted[index].take()) else {
+            continue;
+        };
         let Ok(offset) = u16::try_from(offset) else {
             break;
         };
@@ -9497,7 +9528,9 @@ mod tests {
         let baseline = reversed_cells(&terminal);
         let (x, y) = (state.layout.tree_x, state.layout.tree_y);
         let right = x + state.layout.tree_width - 1;
-        state.dispatch(Action::Click { col: x + 3, row: y });
+        // Column 5 is the workspace name: column 3 is its glyph, an icon
+        // whose click pins a popover.
+        state.dispatch(Action::Click { col: x + 5, row: y });
         state.dispatch(Action::Drag {
             col: x + 1,
             row: y + 1,
@@ -9507,7 +9540,7 @@ mod tests {
             .difference(&baseline)
             .copied()
             .collect();
-        let expected: HashSet<(u16, u16)> = (x + 3..=right)
+        let expected: HashSet<(u16, u16)> = (x + 5..=right)
             .map(|c| (c, y))
             .chain((x..=x + 1).map(|c| (c, y + 1)))
             .collect();
@@ -11236,10 +11269,16 @@ mod tests {
                     match kind {
                         IconKind::Behind => assert!("v12".starts_with(&cells), "{what}"),
                         IconKind::PrMerged => assert_eq!(cells, "m", "{what}"),
+                        IconKind::Branch => assert_eq!(cells, "&", "{what}"),
+                        IconKind::Repo => assert_eq!(cells, "@", "{what}"),
                         other => panic!("{other:?}: {what}"),
                     }
                 }
-                let kinds: Vec<IconKind> = icons.iter().map(|icon| icon.0).collect();
+                let kinds: Vec<IconKind> = icons
+                    .iter()
+                    .map(|icon| icon.0)
+                    .filter(|kind| matches!(kind, IconKind::PrMerged | IconKind::Behind))
+                    .collect();
                 if kinds == [IconKind::PrMerged, IconKind::Behind] {
                     both += 1;
                 } else if kinds == [IconKind::Behind] {
@@ -11258,29 +11297,184 @@ mod tests {
         );
     }
 
+    /// Every branch-level icon kind on screen: a family with a merged
+    /// primary and an open linked checkout, a repo whose status failed, an
+    /// ignored dirty repo, and an idle repo under an open No updates group.
+    fn branch_rows_state() -> AppState {
+        let mut primary = branch_repo("app", "feature/landed");
+        primary.merged_into_default = Some(true);
+        primary.sync_status = SyncStatus::Behind;
+        primary.sync_note = "behind by 12 commits".into();
+        let mut linked = linked_repo("app/.worktrees/feat", "app", "feature/side");
+        linked.merged_into_default = Some(false);
+        let mut broken = repo("broken", false);
+        broken.sync_note = crate::helpers::STATUS_FAILED_NOTE.into();
+        let mut idle = repo("idle", false);
+        idle.sync_status = SyncStatus::UpToDate;
+        let snapshot = build_workspace_snapshot(
+            &[primary, linked, broken, repo("notes", true), idle],
+            &["notes".into()],
+            true,
+            &[],
+        );
+        let mut state = AppState::new(PathBuf::from("/tmp/ws"), snapshot, true);
+        state.show_ignored = true;
+        state.folds.clear();
+        state.rebuild_rows();
+        state
+    }
+
+    #[test]
+    fn branch_row_icon_spans_match_paint_at_every_width_and_offset() {
+        let state = branch_rows_state();
+        let palette = ThemeId::TokyoNight.palette();
+        let mut seen = HashSet::new();
+        for row in &state.rows {
+            let cores: Vec<(IconKind, String)> = row
+                .segments
+                .iter()
+                .chain(&row.trailing_segs)
+                .filter_map(|seg| seg.icon.map(|kind| (kind, seg.text.trim().to_string())))
+                .collect();
+            for width in 6..72 {
+                for col_offset in [0, 3, 11, 40] {
+                    let (line, icons) = paint_tree_row(
+                        row,
+                        width,
+                        false,
+                        false,
+                        None,
+                        false,
+                        search_bg_unused(),
+                        true,
+                        false,
+                        false,
+                        false,
+                        None,
+                        palette,
+                        col_offset,
+                    );
+                    // ASCII rows: one column per char.
+                    let text: Vec<char> = line_text(&line).chars().collect();
+                    let what = format!("{} width {width} offset {col_offset}: {text:?}", row.id);
+                    for &(kind, x, w) in &icons {
+                        assert!(w > 0 && x + w <= width, "{kind:?} {what}");
+                        let cells: String = text[x..x + w].iter().collect();
+                        assert!(
+                            !cells.starts_with(' ') && !cells.ends_with(' '),
+                            "{kind:?} span is the glyph only: {cells:?} {what}"
+                        );
+                        assert!(
+                            cores
+                                .iter()
+                                .any(|(tag, core)| *tag == kind && core.contains(&cells)),
+                            "{kind:?} {cells:?} {what}"
+                        );
+                        seen.insert(kind);
+                    }
+                }
+            }
+        }
+        use IconKind as K;
+        for kind in [
+            K::Workspace,
+            K::Repo,
+            K::LinkedWorktree,
+            K::Branch,
+            K::MergedIntoDefault,
+            K::OpenVsDefault,
+            K::Behind,
+            K::NoUpstream,
+            K::Clean,
+            K::StatusFailed,
+            K::Ignored,
+            K::ChangeCount,
+            K::WorktreeCount,
+        ] {
+            assert!(seen.contains(&kind), "{kind:?} never painted");
+        }
+    }
+
+    #[test]
+    fn merge_mark_paints_its_own_colour_and_hit_after_the_branch() {
+        let mut state = branch_rows_state();
+        let mut terminal = pr_terminal();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let palette = state.theme.palette();
+        let buf = terminal.backend().buffer();
+        for (id, branch, kind, mark, fg) in [
+            (
+                "checkout:app",
+                "feature/landed",
+                IconKind::MergedIntoDefault,
+                "M",
+                palette.added,
+            ),
+            (
+                "checkout:app/.worktrees/feat",
+                "feature/side",
+                IconKind::OpenVsDefault,
+                "o",
+                palette.muted,
+            ),
+        ] {
+            let y = tree_row_y(&state, id);
+            let x = find_cell_col(buf, y, branch).expect("branch") + branch.len() as u16 + 1;
+            assert_eq!(buf[(x - 1, y)].symbol(), " ", "{id}");
+            assert_eq!(buf[(x, y)].symbol(), mark, "{id}");
+            assert_eq!(buf[(x, y)].fg, fg, "{id}: the mark's own role");
+            assert_ne!(buf[(x - 2, y)].fg, fg, "{id}: the branch keeps its colour");
+            let hit = state
+                .layout
+                .icon_hits
+                .iter()
+                .find(|hit| hit.kind == kind)
+                .cloned()
+                .expect("merge hit");
+            assert_eq!(
+                (hit.x, hit.y, hit.width),
+                (x, y, 1),
+                "{id}: glyph cell only"
+            );
+        }
+    }
+
     #[test]
     fn pinned_popover_paints_its_sections_chips_and_footer() {
         let mut state = pr_state(&[branch_repo("app", "feature")], true);
         set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
         focus_tree_row(&mut state, "repo:app");
-        let mut terminal = pr_terminal();
+        // Tall enough for every section of the row: no scroll.
+        let mut terminal = Terminal::new(TestBackend::new(120, 60)).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-        let badge = state.layout.pr_badge_hits()[0].clone();
+        let first = state
+            .layout
+            .icon_hits
+            .iter()
+            .find(|hit| hit.target == IconTarget::TreeRow("repo:app".into()))
+            .cloned()
+            .expect("repo row icon");
+        assert_eq!(first.kind, IconKind::Branch, "the row's first icon");
         state.dispatch(Action::PopoverOpenFocused);
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let painted = state.layout.popover.clone().expect("painted popover");
         let rect = painted.rect;
         assert_eq!(
             (rect.x, rect.y),
-            (badge.x, badge.y + 1),
-            "hangs below the badge"
+            (first.x, first.y + 1),
+            "hangs below the row's first icon"
         );
         let text = rect_lines(&state.painted_frame, rect).join("\n");
         for want in [
+            "& branch",
+            "Branch picker",
+            "@ repo",
             "P PR open",
             "Pull request is open",
-            "number #7",
-            "url    https://github.com/octo/demo/pull/7",
+            // Labels pad to the widest label of the popover (`changes`).
+            "number  #7",
+            "url     https://github.com/octo/demo/pull/7",
+            "changes 0 staged · 0 unstaged · 0 untracked",
             "Open PR",
             " gx ",
             "? no upstream",
@@ -11291,8 +11485,11 @@ mod tests {
         ] {
             assert!(text.contains(want), "{want:?} in\n{text}");
         }
-        let buf = &state.painted_frame;
         let palette = state.theme.palette();
+        // From the branch picker past the branch actions and the PR fields.
+        state.dispatch(Action::PopoverMove(6));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let buf = &state.painted_frame;
         let open_y = (rect.y..rect.bottom())
             .find(|y| buf_line(buf, *y).contains("Open PR"))
             .expect("Open PR row");
@@ -11304,10 +11501,14 @@ mod tests {
         assert_eq!(buf[(chip_end - 1, open_y)].symbol(), "x");
         assert_eq!(buf[(chip_end - 2, open_y)].symbol(), "g");
         assert_eq!(buf[(chip_end - 2, open_y)].bg, palette.cursor);
+        let sections = state.open_popover_sections();
         assert_eq!(
             painted.lines.len(),
-            5,
-            "number, url, Open PR, Push, and Fetch rows are clickable: {:?}",
+            flat_lines(&sections)
+                .iter()
+                .filter(|line| line.focusable())
+                .count(),
+            "every field and action row is clickable: {:?}",
             painted.lines
         );
         assert!(rect.width <= POPOVER_MAX_WIDTH);
@@ -11319,7 +11520,7 @@ mod tests {
         set_pr(&mut state, "app", "feature", found_pr(PrState::Open));
         let mut terminal = pr_terminal();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-        let badge = state.layout.icon_hits[0].clone();
+        let badge = state.layout.pr_badge_hits()[0].clone();
         let at = std::time::Instant::now();
         state.set_pointer_at(Some((badge.x, badge.y)), at);
         assert!(state.expire_peek(at + std::time::Duration::from_secs(1)));
@@ -11343,6 +11544,7 @@ mod tests {
             .layout
             .icon_hits
             .iter()
+            .filter(|hit| hit.kind == IconKind::NoUpstream)
             .max_by_key(|hit| hit.y)
             .cloned()
             .expect("sync marks");
@@ -11355,7 +11557,7 @@ mod tests {
             .layout
             .icon_hits
             .iter()
-            .find(|hit| hit.target == last.target)
+            .find(|hit| hit.target == last.target && hit.kind == last.kind)
             .cloned()
             .expect("icon still painted");
         let rect = state.layout.popover.as_ref().expect("pinned").rect;

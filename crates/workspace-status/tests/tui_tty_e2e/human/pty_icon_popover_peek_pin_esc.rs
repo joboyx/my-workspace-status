@@ -1,6 +1,8 @@
 use crate::harness::{tree_row_containing, PtySession};
-use crate::seed::behind_workspace;
-use crate::support::{crumb_row, syncbox_row_behind, GIT_WAIT, SETTLE_MS, WAIT};
+use crate::seed::{behind_workspace, primary_merged_workspace};
+use crate::support::{
+    crumb_row, syncbox_row_behind, tree_cursor_on, tree_has, GIT_WAIT, SETTLE_MS, WAIT,
+};
 
 /// SGR pointer motion with no button held (`3 | 32`, any-event tracking).
 const SGR_POINTER_MOVE: u8 = 3 | 32;
@@ -87,4 +89,93 @@ fn pty_icon_popover_peek_pin_esc() {
     tui.esc();
     tui.wait_pred(closed, "Esc closes the pinned popover", WAIT);
     tui.wait_pred(syncbox_row_behind, "the row is still behind", WAIT);
+}
+
+/// Nested primary checkout of the merged family seed.
+const PRIMARY: &str = "feature/primary-merged";
+/// Catalog meanings: the first line of each section.
+const BRANCH_MEANING: &str = "Checked-out branch";
+const MERGED_MEANING: &str = "HEAD is merged into the default branch";
+const NO_UPSTREAM_MEANING: &str = "Branch has no upstream";
+
+/// `gh` on the primary checkout: branch, merge mark, and sync sections.
+fn checkout_sections(screen: &str) -> bool {
+    screen.contains(BRANCH_MEANING)
+        && screen.contains("feature branch")
+        && screen.contains("Branch picker")
+        && screen.contains(MERGED_MEANING)
+        && screen.contains("Diff vs default in new tab")
+        && screen.contains(NO_UPSTREAM_MEANING)
+        && screen.contains(PINNED_FOOTER)
+}
+
+/// A pinned popover of the merge mark alone.
+fn merge_only(screen: &str) -> bool {
+    screen.contains(MERGED_MEANING)
+        && screen.contains("vs main")
+        && screen.contains(PINNED_FOOTER)
+        && !screen.contains(BRANCH_MEANING)
+        && !screen.contains(NO_UPSTREAM_MEANING)
+}
+
+fn no_popover(screen: &str) -> bool {
+    !screen.contains(PINNED_FOOTER) && !screen.contains(MERGED_MEANING)
+}
+
+/// 0-based cell of the `M` merge mark after the primary branch name.
+fn merge_mark_cell(screen: &str) -> Option<(u16, u16)> {
+    let row = tree_row_containing(screen, PRIMARY)?;
+    let line = screen.lines().nth(usize::from(row))?;
+    let at = line.find(&format!("{PRIMARY} M"))? + PRIMARY.len() + 1;
+    // ASCII glyph mode: one column per char.
+    Some((line[..at].chars().count() as u16, row))
+}
+
+/// `gh` on a checkout row lists one section per icon; the merge mark is
+/// its own icon.
+///
+/// Docs: every icon on a branch-level tree row has a popover. `gh` pins
+/// one section per icon of the focused row. The merge mark after a branch
+/// is its own icon: a click on it pins its popover alone.
+///
+/// Live PTY on the merged family seed: `j` focuses `& feature/primary-merged
+/// M`. `gh` paints the branch section (meaning, `feature branch`, Branch
+/// picker), the merge mark section (meaning, Diff vs default), and the
+/// no-upstream section, with the pinned footer. Esc closes it. A click on
+/// the `M` cell pins the merge mark popover alone (`vs main`). Esc closes.
+#[test]
+fn pty_icon_popover_gh_on_a_checkout_row_lists_branch_merge_and_sync() {
+    let (_root, workspace) = primary_merged_workspace();
+    let mut tui = PtySession::open_size(&workspace, 120, 40);
+    tui.wait_pred(
+        |screen| tree_cursor_on(screen, "app") && tree_has(screen, &format!("{PRIMARY} M")),
+        "first paint: family with the merged primary checkout",
+        WAIT,
+    );
+    tui.key('j');
+    tui.wait_pred(
+        |screen| tree_cursor_on(screen, PRIMARY),
+        "j focuses the primary checkout",
+        WAIT,
+    );
+    tui.keys("gh");
+    tui.wait_pred(
+        checkout_sections,
+        "gh lists the branch, merge mark, and sync sections",
+        WAIT,
+    );
+    tui.esc();
+    tui.wait_pred(no_popover, "Esc closes the gh popover", WAIT);
+
+    let (col, row) = merge_mark_cell(&tui.screen())
+        .unwrap_or_else(|| panic!("merge mark cell:\n{}", tui.screen()));
+    tui.sgr_click(col, row);
+    tui.wait_pred(merge_only, "a click on M pins the merge mark popover", WAIT);
+    tui.esc();
+    tui.wait_pred(no_popover, "Esc closes the merge mark popover", WAIT);
+    tui.wait_pred(
+        |screen| tree_cursor_on(screen, PRIMARY),
+        "the primary checkout stays focused",
+        WAIT,
+    );
 }

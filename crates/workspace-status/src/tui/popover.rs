@@ -23,12 +23,18 @@ use std::path::{Path, PathBuf};
 
 use ratatui::layout::Rect;
 
+use crate::helpers::{is_default_branch, is_detached_head_branch};
+use crate::snapshot::{CheckoutKind, WorkspaceRepoSnapshot};
+
 use super::action::Action;
 use super::command_palette::{command_for, PaletteCommand};
 use super::gates::ListFocusTarget;
 use super::icons::{capture_count, spec, IconKind};
 use super::state::AppState;
-use super::tree::{pr_badge_kind, pr_badge_mark, SegRole, VisibleRow};
+use super::tree::{
+    find_node, is_merge_mark_kind, pr_badge_kind, pr_badge_mark, NodeKind, SegRole, TextSeg,
+    TreeNode, VisibleRow,
+};
 
 /// Pointer rest on an icon before its peek opens, in milliseconds.
 pub const PEEK_DWELL_MS: u64 = 400;
@@ -180,14 +186,275 @@ fn section(state: &AppState, kind: IconKind, target: &IconTarget) -> Option<Popo
     match target {
         IconTarget::TreeRow(id) => {
             let row = state.rows.iter().find(|row| &row.id == id)?;
-            if is_sync_kind(kind) {
-                sync_section(row)
-            } else {
-                None
-            }
+            tree_section(state, kind, row)
         }
         IconTarget::PullRequest(repo) => pr_section(state, repo),
     }
+}
+
+/// The segment of `row` that paints `kind` now.
+///
+/// A sync mark stands for every sync kind and a merge mark for both merge
+/// kinds, so a tick that turns behind into ahead, or open into merged,
+/// keeps the section and shows the new mark.
+fn painted_seg(row: &VisibleRow, kind: IconKind) -> Option<&TextSeg> {
+    let same_slot = |other: IconKind| {
+        other == kind
+            || (is_sync_kind(kind) && is_sync_kind(other))
+            || (is_merge_mark_kind(kind) && is_merge_mark_kind(other))
+    };
+    row.segments
+        .iter()
+        .chain(&row.trailing_segs)
+        .find(|seg| seg.icon.is_some_and(same_slot))
+}
+
+/// Section of icon `kind` on tree row `row`: the catalog meaning, the
+/// fields for that icon, then its actions. `None` when the row no longer
+/// paints the icon.
+fn tree_section(state: &AppState, kind: IconKind, row: &VisibleRow) -> Option<PopoverSection> {
+    let seg = painted_seg(row, kind)?;
+    let kind = seg.icon?;
+    let mut lines = vec![PopoverLine::Text(spec(kind).meaning.to_string())];
+    let actions: Vec<Action> = match kind {
+        IconKind::Workspace => {
+            workspace_fields(state, row, &mut lines);
+            vec![Action::Fetch, Action::Refresh, Action::ToggleShowIgnored]
+        }
+        IconKind::Repo => {
+            repo_fields(state, row, &mut lines);
+            vec![Action::Fetch, Action::Pull, Action::Push, Action::Branch]
+        }
+        IconKind::LinkedWorktree => {
+            worktree_fields(row, &mut lines);
+            vec![
+                Action::RemoveWorktree,
+                Action::CompareVsDefault,
+                Action::CopyEntityReference,
+            ]
+        }
+        IconKind::Branch => {
+            branch_fields(state, row, &mut lines);
+            vec![
+                Action::Branch,
+                Action::DefaultBranch,
+                Action::GraphFocusBranches,
+                Action::CompareVsDefault,
+            ]
+        }
+        IconKind::MergedIntoDefault | IconKind::OpenVsDefault => {
+            lines.push(field("vs", default_ref(state, row)));
+            let mut actions = vec![Action::CompareVsDefault, Action::DefaultBranch];
+            let linked = row.chrome.checkout_kind == Some(CheckoutKind::Linked);
+            if kind == IconKind::MergedIntoDefault && linked {
+                actions.push(Action::RemoveWorktree);
+            }
+            actions
+        }
+        IconKind::Clean if row.kind == NodeKind::Group => {
+            group_fields(state, row, &mut lines);
+            vec![Action::FoldToggle, Action::FoldToggleSubtree]
+        }
+        kind if is_sync_kind(kind) => sync_fields(kind, &row.chrome.sync_note, &mut lines),
+        IconKind::StatusFailed => vec![Action::Refresh],
+        IconKind::Ignored => vec![Action::ToggleShowIgnored],
+        IconKind::ChangeCount => {
+            let (staged, unstaged, untracked) = change_counts(state, &row_checkouts(state, row));
+            lines.extend([
+                field("staged", staged.to_string()),
+                field("unstaged", unstaged.to_string()),
+                field("untracked", untracked.to_string()),
+            ]);
+            vec![Action::StashMenu, Action::CompareVsDefault]
+        }
+        IconKind::WorktreeCount => {
+            for checkout in family_checkouts(state, row) {
+                let label = if checkout.chrome.checkout_kind == Some(CheckoutKind::Linked) {
+                    "linked"
+                } else {
+                    "primary"
+                };
+                lines.push(field(label, checkout.label.clone()));
+            }
+            vec![Action::FoldToggle, Action::FoldToggleSubtree]
+        }
+        _ => return None,
+    };
+    lines.extend(actions.iter().filter_map(PopoverLine::action));
+    Some(PopoverSection {
+        icon: kind,
+        role: seg.role,
+        target: IconTarget::TreeRow(row.id.clone()),
+        lines,
+    })
+}
+
+fn field(label: &'static str, value: impl Into<String>) -> PopoverLine {
+    PopoverLine::Field {
+        label,
+        value: value.into(),
+    }
+}
+
+/// `n <one>` or `n <many>`.
+fn counted(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// Workspace root: name, change total, sync summary, repo count.
+fn workspace_fields(state: &AppState, row: &VisibleRow, lines: &mut Vec<PopoverLine>) {
+    lines.extend([
+        field("name", state.tree.label.clone()),
+        field("changes", format!("{} changed", row.chrome.change_count)),
+        field("sync", row.chrome.sync_summary.clone()),
+        field("repos", counted(repo_count(&state.tree), "repo", "repos")),
+    ]);
+}
+
+/// Repo rows in the tree: a family counts once.
+fn repo_count(node: &TreeNode) -> usize {
+    usize::from(node.kind == NodeKind::Repo)
+        + node
+            .children
+            .iter()
+            .filter(|child| matches!(child.kind, NodeKind::Repo | NodeKind::Group))
+            .map(repo_count)
+            .sum::<usize>()
+}
+
+/// Repo row: path, branch (a single checkout), kind, change breakdown.
+fn repo_fields(state: &AppState, row: &VisibleRow, lines: &mut Vec<PopoverLine>) {
+    lines.push(field("path", row.chrome.path.clone()));
+    if row.chrome.is_family {
+        let checkouts = family_checkouts(state, row).len();
+        lines.push(field(
+            "kind",
+            format!("family of {}", counted(checkouts, "checkout", "checkouts")),
+        ));
+    } else {
+        lines.push(field("branch", row.chrome.branch.clone()));
+        lines.push(field("kind", "primary checkout"));
+    }
+    let (staged, unstaged, untracked) = change_counts(state, &row_checkouts(state, row));
+    lines.push(field(
+        "changes",
+        format!("{staged} staged · {unstaged} unstaged · {untracked} untracked"),
+    ));
+}
+
+/// Linked worktree: path, primary checkout, branch or detached.
+fn worktree_fields(row: &VisibleRow, lines: &mut Vec<PopoverLine>) {
+    lines.push(field("path", row.chrome.path.clone()));
+    if let Some(primary) = row.primary_repo.as_deref() {
+        lines.push(field("primary", primary));
+    }
+    lines.push(field("branch", branch_or_detached(&row.chrome.branch)));
+}
+
+fn branch_or_detached(branch: &str) -> String {
+    if is_detached_head_branch(branch) {
+        "detached HEAD".into()
+    } else {
+        branch.to_string()
+    }
+}
+
+/// Branch: name, default or feature, local branch count.
+fn branch_fields(state: &AppState, row: &VisibleRow, lines: &mut Vec<PopoverLine>) {
+    let branch = row.chrome.branch.as_str();
+    let kind = if is_detached_head_branch(branch) {
+        "detached HEAD"
+    } else if is_default_branch(branch, row.chrome.default_branch_override.as_deref()) {
+        "default branch"
+    } else {
+        "feature branch"
+    };
+    lines.push(field("name", branch_or_detached(branch)));
+    lines.push(field("kind", kind));
+    if let Some(repo) = row_repo(state, row) {
+        lines.push(field(
+            "local",
+            counted(repo.local_branches.len(), "branch", "branches"),
+        ));
+    }
+}
+
+/// The default-branch ref the merge mark compares with: the cached tip ref
+/// (`origin/<default>` or `<default>`), else the configured default name.
+fn default_ref(state: &AppState, row: &VisibleRow) -> String {
+    row_repo(state, row)
+        .and_then(|repo| repo.default_tip_ref.clone())
+        .or_else(|| row.chrome.default_branch_override.clone())
+        .unwrap_or_else(|| "the default branch".into())
+}
+
+/// No updates group: repo count and names.
+fn group_fields(state: &AppState, row: &VisibleRow, lines: &mut Vec<PopoverLine>) {
+    let names: Vec<&str> = find_node(&state.tree, &row.id)
+        .map(|group| {
+            group
+                .children
+                .iter()
+                .map(|child| child.label.as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    lines.push(field("repos", counted(names.len(), "repo", "repos")));
+    if !names.is_empty() {
+        lines.push(field("names", names.join(", ")));
+    }
+}
+
+/// Snapshot row of the checkout `row` stands for.
+fn row_repo<'a>(state: &'a AppState, row: &VisibleRow) -> Option<&'a WorkspaceRepoSnapshot> {
+    let path = row.repo.as_deref()?;
+    state.snapshot.repos.iter().find(|repo| repo.repo == path)
+}
+
+/// Checkout rows under a repo family row, in tree order.
+fn family_checkouts<'a>(state: &'a AppState, row: &VisibleRow) -> Vec<&'a TreeNode> {
+    find_node(&state.tree, &row.id)
+        .map(|node| {
+            node.children
+                .iter()
+                .filter(|child| child.kind == NodeKind::Checkout)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Checkout paths whose changes `row` counts: every checkout of a family,
+/// else the row's own checkout.
+fn row_checkouts(state: &AppState, row: &VisibleRow) -> Vec<String> {
+    if row.chrome.is_family {
+        family_checkouts(state, row)
+            .into_iter()
+            .filter_map(|checkout| checkout.repo.clone())
+            .collect()
+    } else {
+        row.repo.iter().cloned().collect()
+    }
+}
+
+/// Staged, unstaged, and untracked path counts of `checkouts`. A path
+/// staged and changed again counts in both.
+fn change_counts(state: &AppState, checkouts: &[String]) -> (usize, usize, usize) {
+    let mut counts = (0, 0, 0);
+    let changes = state
+        .snapshot
+        .repos
+        .iter()
+        .filter(|repo| checkouts.contains(&repo.repo))
+        .flat_map(|repo| &repo.changes);
+    for change in changes {
+        if change.untracked {
+            counts.2 += 1;
+            continue;
+        }
+        counts.0 += usize::from(change.staged_status.is_some());
+        counts.1 += usize::from(change.unstaged_status.is_some());
+    }
+    counts
 }
 
 fn is_sync_kind(kind: IconKind) -> bool {
@@ -201,60 +468,40 @@ fn is_sync_kind(kind: IconKind) -> bool {
     )
 }
 
-/// Sync mark: meaning, the counts from `sync_note`, then Pull / Push /
-/// Fetch as the state calls for. The kind is the mark the row paints now.
-fn sync_section(row: &VisibleRow) -> Option<PopoverSection> {
-    let mark = row
-        .trailing_segs
-        .iter()
-        .find(|seg| seg.icon.is_some_and(is_sync_kind))?;
-    let kind = mark.icon?;
-    let note = row.chrome.sync_note.as_str();
-    let mut lines = vec![PopoverLine::Text(spec(kind).meaning.to_string())];
-    let actions: &[Action] = match kind {
+/// Sync mark fields from `sync_note` and its actions: Pull / Push /
+/// Fetch as the state calls for.
+fn sync_fields(kind: IconKind, note: &str, lines: &mut Vec<PopoverLine>) -> Vec<Action> {
+    match kind {
         IconKind::Ahead => {
-            lines.push(PopoverLine::Field {
-                label: "ahead",
-                value: commits(note_count(note, "ahead by "), "not pushed"),
-            });
-            &[Action::Push, Action::Fetch]
+            lines.push(field(
+                "ahead",
+                commits(note_count(note, "ahead by "), "not pushed"),
+            ));
+            vec![Action::Push, Action::Fetch]
         }
         IconKind::Behind => {
-            lines.push(PopoverLine::Field {
-                label: "behind",
-                value: commits(note_count(note, "behind by "), "to pull"),
-            });
-            &[Action::Pull, Action::Fetch]
+            lines.push(field(
+                "behind",
+                commits(note_count(note, "behind by "), "to pull"),
+            ));
+            vec![Action::Pull, Action::Fetch]
         }
         IconKind::Diverged => {
             let counts = note
                 .strip_prefix("diverged (")
                 .and_then(|rest| rest.strip_suffix(')'))
                 .unwrap_or(note);
-            lines.push(PopoverLine::Field {
-                label: "sync",
-                value: counts.to_string(),
-            });
-            &[Action::Fetch, Action::Pull, Action::Push]
+            lines.push(field("sync", counts));
+            vec![Action::Fetch, Action::Pull, Action::Push]
         }
         IconKind::NoUpstream => {
             if !note.is_empty() {
-                lines.push(PopoverLine::Field {
-                    label: "note",
-                    value: note.to_string(),
-                });
+                lines.push(field("note", note));
             }
-            &[Action::Push, Action::Fetch]
+            vec![Action::Push, Action::Fetch]
         }
-        _ => &[Action::Fetch],
-    };
-    lines.extend(actions.iter().filter_map(PopoverLine::action));
-    Some(PopoverSection {
-        icon: kind,
-        role: mark.role,
-        target: IconTarget::TreeRow(row.id.clone()),
-        lines,
-    })
+        _ => vec![Action::Fetch],
+    }
 }
 
 /// The number after `prefix` in a sync note (`ahead by 3 commits`).

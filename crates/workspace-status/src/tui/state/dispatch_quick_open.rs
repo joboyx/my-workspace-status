@@ -330,12 +330,28 @@ impl AppState {
             ref action => action.clone(),
         };
         self.quick_open = None;
-        if action == Action::FoldToggleSubtree {
-            // Fold subtree is `zz`: toggle this row, then match its
-            // descendants. Both fold actions return `Effect::None`.
-            self.dispatch(Action::FoldToggle);
+        self.dispatch_palette_action(action)
+    }
+
+    /// Run the action of a palette row picked outside its key (Quick Open,
+    /// an icon popover line).
+    ///
+    /// Fold subtree is `zz`: toggle this row, then match its descendants.
+    /// Fold row is one `z` with no chord after it, so it arms no `zz`.
+    pub(crate) fn dispatch_palette_action(&mut self, action: Action) -> Effect {
+        match action {
+            Action::FoldToggleSubtree => {
+                // Both fold actions return `Effect::None`.
+                self.dispatch(Action::FoldToggle);
+                self.dispatch(action)
+            }
+            Action::FoldToggle => {
+                let effect = self.dispatch(action);
+                self.z_pending_at = None;
+                effect
+            }
+            action => self.dispatch(action),
         }
-        self.dispatch(action)
     }
 
     /// Accept a finished index load for generation `gen`.
