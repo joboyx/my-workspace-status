@@ -822,6 +822,24 @@ pub fn file_icon(ascii: bool, file_path: &str) -> FileIcon {
     }
 }
 
+/// File type a popover names for `file_path`: the file name when a
+/// filename rule picks its devicon (`package.json`), else the extension
+/// (`rs`), else `plain`. Same lookup order as [`file_icon`].
+pub fn file_type_name(file_path: &str) -> String {
+    let name = file_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(file_path)
+        .to_ascii_lowercase();
+    if filename_icon(&name).is_some() {
+        return name;
+    }
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => ext.to_string(),
+        _ => "plain".into(),
+    }
+}
+
 /// Nerd file glyph plus optional hex colour (theme `file` when `None`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileIcon {
@@ -992,6 +1010,20 @@ impl FileStatusLetter {
             Self::R => "R ",
             Self::U => "U ",
             Self::C => "C ",
+        }
+    }
+
+    /// Catalog kind of this letter's badge.
+    pub fn icon_kind(self) -> IconKind {
+        match self {
+            Self::A => IconKind::StatusAdded,
+            Self::M => IconKind::StatusModified,
+            Self::S => IconKind::StatusStaged,
+            Self::Ms => IconKind::StatusStagedModified,
+            Self::D => IconKind::StatusDeleted,
+            Self::R => IconKind::StatusRenamed,
+            Self::U => IconKind::StatusConflict,
+            Self::C => IconKind::StatusCopied,
         }
     }
 
@@ -1404,6 +1436,7 @@ mod tests {
             (FileStatusLetter::U, IconKind::StatusConflict),
             (FileStatusLetter::C, IconKind::StatusCopied),
         ] {
+            assert_eq!(letter.icon_kind(), kind);
             assert_eq!(kind.glyph(false), letter.as_str());
             assert_eq!(kind.glyph(true), letter.as_str());
             assert_eq!(kind.spec().group, Some(IconGroup::Tree));
@@ -1627,6 +1660,16 @@ mod tests {
         assert_ne!(nerd, '\u{25c9}'); // ◉
         assert_ne!(nerd, '\u{f07a}'); // other PUA eye/search lookalike
         assert_eq!(visible_width(icon_viewed(false)), 1);
+    }
+
+    #[test]
+    fn file_type_names_follow_the_devicon_rule() {
+        assert_eq!(file_type_name("web/package.json"), "package.json");
+        assert_eq!(file_type_name("README.md"), "readme.md");
+        assert_eq!(file_type_name("src/lib.rs"), "rs");
+        assert_eq!(file_type_name("notes.xyz"), "xyz");
+        assert_eq!(file_type_name("LICENSE"), "plain");
+        assert_eq!(file_type_name(".hidden"), "plain");
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crate::harness::{
     SGR_WHEEL_LEFT, SGR_WHEEL_RIGHT, SGR_WHEEL_RIGHT_MOTION,
 };
 use crate::seed::{daily_workspace, seed_long_path_file};
-use crate::support::{tree_cursor_on, GIT_WAIT, SETTLE_MS, TREE_LABEL_COL, WAIT};
+use crate::support::{tree_cursor_on, tree_label_col, GIT_WAIT, SETTLE_MS, WAIT};
 
 /// Default mouse-on: clipped tree row, README short diff, cursor stays.
 fn tree_sgr_hscroll_clipped_readme_focus(screen: &str, readme_row: u16) -> bool {
@@ -66,7 +66,7 @@ fn pty_tree_sgr_hscroll_pans_clipped_path() {
     // long file-diff. Click is setup, not the click-to-select claim.
     let readme_hit = tree_row_containing(&tui.screen(), "README.md")
         .unwrap_or_else(|| panic!("README row at launch:\n{}", tui.screen()));
-    tui.sgr_click(TREE_LABEL_COL, readme_hit);
+    tui.sgr_click(tree_label_col(&tui.screen(), "README.md"), readme_hit);
     tui.wait_pred(
         |screen| {
             tree_cursor_on(screen, "README.md")

@@ -26,8 +26,8 @@ use super::chrome::{
 };
 use super::command_palette::{CommandPaletteState, PalettePaintRow};
 use super::comments::{
-    comment_overlay_footer_save, commit_file_row_comments_resolved, commit_file_row_has_comment,
-    graph_row_comments_resolved, graph_row_has_comment, CommentPrompt, COMMENT_OVERLAY_FOOTER_EDIT,
+    comment_overlay_footer_save, graph_row_comments_resolved, graph_row_has_comment, CommentPrompt,
+    COMMENT_OVERLAY_FOOTER_EDIT,
 };
 use super::commit_files::FolderSummary;
 use super::diff::{
@@ -81,8 +81,8 @@ use super::theme::ThemeId;
 use super::theme::{hex_color, Palette, Pill};
 use super::tree::{
     file_change_from_name_status, file_change_segments, painted_row_segments, pr_badge_kind,
-    pr_badge_mark, visible_window, with_comment_mark, with_viewed_mark, workspace_trailing_fit,
-    NodeKind, NodeSegments, SegRole, TextSeg, VisibleRow,
+    pr_badge_mark, visible_window, workspace_trailing_fit, NodeKind, NodeSegments, SegRole,
+    TextSeg, VisibleRow,
 };
 use crate::file_index::FileRead;
 use crate::helpers::{is_detached_head_branch, visible_width};
@@ -1474,86 +1474,45 @@ fn draw_commit_file_list(
     let searching_files =
         state.search_target == SearchPane::CommitFiles && !state.search_query.trim().is_empty();
     let match_paths = commit_file_search_match_paths(state);
-    let comment_scope = commit_file_comment_scope(state);
     let files_focused = if state.drill.is_diff() || state.is_compare_tab() {
         state.focus == FocusPane::Left
     } else {
         state.focus == FocusPane::Right
     };
-    let lines: Vec<Line> = rows
-        .iter()
-        .skip(start)
-        .take(height)
-        .map(|row| {
-            let commented = comment_scope.is_some_and(|(repo, primary, branch, source)| {
-                row.is_file()
-                    && commit_file_row_has_comment(
-                        &state.comment_store,
-                        repo,
-                        primary,
-                        source,
-                        &row.path,
-                        branch,
-                    )
+    let mut lines = Vec::new();
+    let mut hits = Vec::new();
+    for (y, row) in (area.y..).zip(rows.iter().skip(start).take(height)) {
+        let segs = state.commit_file_row_paint_segments(row);
+        let search_match = searching_files
+            && (match_paths.contains(&row.path)
+                || commit_file_label_matches(&row.label, &state.search_query));
+        for (kind, x, w) in segmented_icon_spans(row.depth, &segs, width, col_offset) {
+            hits.push(IconHit {
+                y,
+                x: area.x.saturating_add(u16::try_from(x).unwrap_or(u16::MAX)),
+                width: u16::try_from(w).unwrap_or(u16::MAX),
+                kind,
+                target: IconTarget::CommitFileRow(row.id.clone()),
             });
-            let resolved = commented
-                && comment_scope.is_some_and(|(repo, primary, branch, source)| {
-                    commit_file_row_comments_resolved(
-                        &state.comment_store,
-                        repo,
-                        primary,
-                        source,
-                        &row.path,
-                        branch,
-                    )
-                });
-            let segs = NodeSegments {
-                segments: row.segments.clone(),
-                trailing: with_viewed_mark(
-                    with_comment_mark(row.trailing_segs.clone(), state.ascii, commented, resolved),
-                    state.ascii,
-                    state.compare_file_reviewed(row),
-                ),
-            };
-            let search_match = searching_files
-                && (match_paths.contains(&row.path)
-                    || commit_file_label_matches(&row.label, &state.search_query));
-            paint_segmented_row(
-                row.depth,
-                row.foldable,
-                row.folded,
-                &segs,
-                width,
-                Some(row.id.as_str()) == focus_id.as_deref(),
-                files_focused,
-                state.commit_file_flash_color(&row.id),
-                search_match,
-                search,
-                state.ascii,
-                palette,
-                col_offset,
-            )
-        })
-        .collect();
+        }
+        lines.push(paint_segmented_row(
+            row.depth,
+            row.foldable,
+            row.folded,
+            &segs,
+            width,
+            Some(row.id.as_str()) == focus_id.as_deref(),
+            files_focused,
+            state.commit_file_flash_color(&row.id),
+            search_match,
+            search,
+            state.ascii,
+            palette,
+            col_offset,
+        ));
+    }
+    state.layout.icon_hits.extend(hits);
     frame.render_widget(Paragraph::new(lines), area);
-}
-
-fn commit_file_comment_scope(
-    state: &AppState,
-) -> Option<(
-    &str,
-    Option<&str>,
-    Option<&str>,
-    &super::drill::CommitFileSource,
-)> {
-    let (repo, source) = state.commit_drill_source()?;
-    let snap = state.snapshot.repos.iter().find(|r| r.repo == repo);
-    Some((
-        repo,
-        snap.and_then(|r| r.primary_repo.as_deref()),
-        snap.map(|r| r.branch.as_str()),
-        source,
-    ))
 }
 
 fn commit_file_search_match_paths(state: &AppState) -> HashSet<String> {
@@ -11437,6 +11396,108 @@ mod tests {
                 "{id}: glyph cell only"
             );
         }
+    }
+
+    /// The icon hits of `target`, as (kind, cells under the hit, width).
+    fn hit_cells(
+        state: &AppState,
+        terminal: &Terminal<TestBackend>,
+        target: &IconTarget,
+    ) -> Vec<(IconKind, String, u16)> {
+        let buf = terminal.backend().buffer();
+        state
+            .layout
+            .icon_hits
+            .iter()
+            .filter(|hit| &hit.target == target)
+            .map(|hit| {
+                let cells: String = (hit.x..hit.x + hit.width)
+                    .map(|x| buf[(x, hit.y)].symbol().to_string())
+                    .collect();
+                (hit.kind, cells, hit.width)
+            })
+            .collect()
+    }
+
+    /// A badge hit is its letter, not the pad column; a devicon hit is the
+    /// glyph, not the space after it. Nerd and ASCII glyph modes.
+    #[test]
+    fn file_row_badge_and_devicon_hits_cover_the_glyph_only() {
+        for ascii in [true, false] {
+            let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+            let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, ascii);
+            focus_tree_row(&mut state, "file:app:README.md");
+            let mut terminal = pr_terminal();
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let target = IconTarget::TreeRow("file:app:README.md".into());
+            let hits = hit_cells(&state, &terminal, &target);
+            let devicon = crate::tui::icons::file_icon(ascii, "README.md")
+                .glyph
+                .to_string();
+            assert_eq!(
+                hits,
+                vec![
+                    (IconKind::FileType, devicon, 1),
+                    (IconKind::StatusModified, "M".to_string(), 1),
+                ],
+                "ascii={ascii}"
+            );
+            let badge = state
+                .layout
+                .icon_hits
+                .iter()
+                .find(|hit| hit.kind == IconKind::StatusModified)
+                .expect("badge hit");
+            let buf = terminal.backend().buffer();
+            assert_eq!(buf[(badge.x + 1, badge.y)].symbol(), " ", "pad stays out");
+        }
+    }
+
+    /// Commit-file list rows record icon hits on their own row ids: the
+    /// folder, devicon, and status letter.
+    #[test]
+    fn commit_file_rows_record_icon_hits() {
+        let snapshot = build_workspace_snapshot(&[repo("app", true)], &[], false, &[]);
+        let mut state = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        state.commit_tree_mode = true;
+        state.open_commit_files(
+            "app".into(),
+            super::super::drill::CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![
+                super::super::drill::CommitFile {
+                    status: "A".into(),
+                    path: "src/lib.rs".into(),
+                    old_path: None,
+                    stat: None,
+                },
+                super::super::drill::CommitFile {
+                    status: "M".into(),
+                    path: "src/main.rs".into(),
+                    old_path: None,
+                    stat: None,
+                },
+            ],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let row = |id: &str| IconTarget::CommitFileRow(id.into());
+        assert_eq!(
+            hit_cells(&state, &terminal, &row("dir:src")),
+            vec![(IconKind::Folder, "/".to_string(), 1)]
+        );
+        assert_eq!(
+            hit_cells(&state, &terminal, &row("file:src/lib.rs")),
+            vec![
+                (IconKind::FileType, "·".to_string(), 1),
+                (IconKind::StatusAdded, "A".to_string(), 1),
+            ]
+        );
+        assert_eq!(
+            hit_cells(&state, &terminal, &row("file:src/main.rs"))[1],
+            (IconKind::StatusModified, "M".to_string(), 1)
+        );
     }
 
     #[test]

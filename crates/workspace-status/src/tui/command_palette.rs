@@ -593,11 +593,20 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
 ///
 /// Icon popovers take an action line's title, key chip, and disabled
 /// reason from this row, so a popover never names a key the palette does
-/// not.
+/// not. A row that runs only on highlighted diff lines (`Stage highlighted
+/// lines`) gives way to the plain row for the same action (`Stage`).
 pub fn command_for(action: &Action) -> Option<&'static PaletteCommand> {
-    PALETTE_COMMANDS
+    let mut rows = PALETTE_COMMANDS
         .iter()
-        .find(|command| &command.action == action)
+        .filter(|command| &command.action == action);
+    let first = rows.next()?;
+    if first.scope != CommandScope::Highlight {
+        return Some(first);
+    }
+    Some(
+        rows.find(|command| command.scope != CommandScope::Highlight)
+            .unwrap_or(first),
+    )
 }
 
 /// Case-insensitive substring on title, key chips, group, and aliases.

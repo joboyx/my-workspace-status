@@ -9,7 +9,12 @@ use ratatui::layout::{Position, Rect};
 
 use super::super::action::{Action, Effect};
 use super::super::chrome::open_dialog;
-use super::super::comments::{tree_row_comments_resolved, tree_row_has_comment};
+use super::super::comments::{
+    commit_file_row_comments, commit_file_row_comments_resolved, commit_file_row_has_comment,
+    tree_row_comments_resolved, tree_row_has_comment, CommentEntry,
+};
+use super::super::commit_files::CommitFileRow;
+use super::super::drill::CommitFileSource;
 use super::super::gates::ListFocusTarget;
 use super::super::icons::IconKind;
 use super::super::keys::InputMode;
@@ -22,8 +27,8 @@ use super::super::pull_request::PrState;
 use super::super::selection::TextSelection;
 use super::super::status::StatusMessage;
 use super::super::tree::{
-    painted_row_segments, pr_badge_kind, pr_badge_repo, segment_icons, NodeKind, NodeSegments,
-    VisibleRow,
+    painted_row_segments, pr_badge_kind, pr_badge_repo, segment_icons, with_comment_mark,
+    with_viewed_mark, NodeKind, NodeSegments, VisibleRow,
 };
 use super::{AppState, IconHit};
 
@@ -43,6 +48,15 @@ pub(crate) struct PeekTimers {
 /// Viewed, commented, resolved, and PR badge state of one tree row.
 pub(crate) type TreeRowMarks = (bool, bool, bool, Option<PrState>);
 
+/// Checkout, primary checkout, branch, and source of the shown commit-file
+/// list: the scope its line comments match in.
+type CommitFileCommentScope<'a> = (
+    &'a str,
+    Option<&'a str>,
+    Option<&'a str>,
+    &'a CommitFileSource,
+);
+
 impl AppState {
     /// Tab, list, and row the focus is on now.
     pub(crate) fn popover_owner(&self) -> PopoverOwner {
@@ -54,7 +68,11 @@ impl AppState {
                 .map(|row| row.id.clone())
                 .unwrap_or_default(),
             ListFocusTarget::Graph => self.graph_cursor.to_string(),
-            ListFocusTarget::CommitFiles | ListFocusTarget::None => String::new(),
+            ListFocusTarget::CommitFiles => self
+                .focused_commit_file_row()
+                .map(|row| row.id)
+                .unwrap_or_default(),
+            ListFocusTarget::None => String::new(),
         };
         PopoverOwner {
             tab: self.tabs.active,
@@ -94,9 +112,72 @@ impl AppState {
     }
 
     /// Every segment tree row `row` paints this frame.
-    fn tree_row_paint_segments(&self, row: &VisibleRow) -> NodeSegments {
+    pub(crate) fn tree_row_paint_segments(&self, row: &VisibleRow) -> NodeSegments {
         let (viewed, commented, resolved, pr) = self.tree_row_marks(row);
         painted_row_segments(row, self.ascii, viewed, commented, resolved, pr)
+    }
+
+    /// Scope the line comments of the shown commit-file list match in.
+    fn commit_file_comment_scope(&self) -> Option<CommitFileCommentScope<'_>> {
+        let (repo, source) = self.commit_drill_source()?;
+        let snap = self.snapshot.repos.iter().find(|r| r.repo == repo);
+        Some((
+            repo,
+            snap.and_then(|r| r.primary_repo.as_deref()),
+            snap.map(|r| r.branch.as_str()),
+            source,
+        ))
+    }
+
+    /// Comments on commit-file row `row`, in store order. A folder row has
+    /// none.
+    pub(crate) fn commit_file_row_comments(&self, row: &CommitFileRow) -> Vec<&CommentEntry> {
+        match self.commit_file_comment_scope().filter(|_| row.is_file()) {
+            Some((repo, primary, branch, source)) => commit_file_row_comments(
+                &self.comment_store,
+                repo,
+                primary,
+                source,
+                &row.path,
+                branch,
+            ),
+            None => Vec::new(),
+        }
+    }
+
+    /// Every segment commit-file or compare list row `row` paints: its
+    /// label and badge, then the comment mark and the viewed eye.
+    pub(crate) fn commit_file_row_paint_segments(&self, row: &CommitFileRow) -> NodeSegments {
+        let scope = self.commit_file_comment_scope().filter(|_| row.is_file());
+        let commented = scope.is_some_and(|(repo, primary, branch, source)| {
+            commit_file_row_has_comment(
+                &self.comment_store,
+                repo,
+                primary,
+                source,
+                &row.path,
+                branch,
+            )
+        });
+        let resolved = commented
+            && scope.is_some_and(|(repo, primary, branch, source)| {
+                commit_file_row_comments_resolved(
+                    &self.comment_store,
+                    repo,
+                    primary,
+                    source,
+                    &row.path,
+                    branch,
+                )
+            });
+        NodeSegments {
+            segments: row.segments.clone(),
+            trailing: with_viewed_mark(
+                with_comment_mark(row.trailing_segs.clone(), self.ascii, commented, resolved),
+                self.ascii,
+                self.compare_file_reviewed(row),
+            ),
+        }
     }
 
     /// Icons of the focused row in paint order, clipped ones included.
@@ -120,7 +201,16 @@ impl AppState {
                 .filter(|(index, _, _)| *index == self.graph_cursor)
                 .map(|(_, repo, pr)| (pr_badge_kind(pr), IconTarget::PullRequest(repo)))
                 .collect(),
-            ListFocusTarget::CommitFiles | ListFocusTarget::None => Vec::new(),
+            ListFocusTarget::CommitFiles => {
+                let Some(row) = self.focused_commit_file_row() else {
+                    return Vec::new();
+                };
+                segment_icons(&self.commit_file_row_paint_segments(&row))
+                    .into_iter()
+                    .map(|kind| (kind, IconTarget::CommitFileRow(row.id.clone())))
+                    .collect()
+            }
+            ListFocusTarget::None => Vec::new(),
         }
     }
 
@@ -131,6 +221,12 @@ impl AppState {
             IconTarget::TreeRow(id) => {
                 self.list_focus_target() == ListFocusTarget::Tree
                     && self.focused_row().is_some_and(|row| &row.id == id)
+            }
+            IconTarget::CommitFileRow(id) => {
+                self.list_focus_target() == ListFocusTarget::CommitFiles
+                    && self
+                        .focused_commit_file_row()
+                        .is_some_and(|row| &row.id == id)
             }
             IconTarget::PullRequest(repo) => self
                 .pr_target_for_focus()
@@ -963,6 +1059,20 @@ mod tests {
             .position(|row| row.kind == NodeKind::File)
             .expect("file row");
         app.dispatch(Action::PopoverOpenFocused);
+        let kinds: Vec<IconKind> = app
+            .popover
+            .as_ref()
+            .expect("file row popover")
+            .targets
+            .iter()
+            .map(|(kind, _)| *kind)
+            .collect();
+        assert_eq!(kinds, vec![IconKind::FileType, IconKind::StatusModified]);
+
+        // The right pane with no graph paints no icon.
+        app.close_popover();
+        app.focus = FocusPane::Right;
+        app.dispatch(Action::PopoverOpenFocused);
         assert!(app.popover.is_none());
         assert_eq!(app.status, NO_ICONS_ON_ROW);
     }
@@ -1345,6 +1455,302 @@ mod tests {
                 ])
             )]
         );
+    }
+
+    fn change(path: &str, staged: Option<&str>, unstaged: Option<&str>) -> FileChange {
+        FileChange {
+            path: path.into(),
+            staged_status: staged.map(str::to_string),
+            unstaged_status: unstaged.map(str::to_string),
+            untracked: false,
+            old_path: None,
+        }
+    }
+
+    /// `app` with staged `src/a.rs` (M) and `src/c.rs` (renamed from
+    /// `old.rs`), unstaged `src/b.rs` (M, reviewed, four comments: one
+    /// resolved), and untracked `new.ts`.
+    fn file_rows_app() -> AppState {
+        let mut snap = repo("app", SyncStatus::NoUpstream, "");
+        let mut renamed = change("src/c.rs", Some("R"), None);
+        renamed.old_path = Some("old.rs".into());
+        let mut untracked = change("new.ts", None, None);
+        untracked.untracked = true;
+        snap.changes = vec![
+            change("src/a.rs", Some("M"), None),
+            change("src/b.rs", None, Some("M")),
+            renamed,
+            untracked,
+        ];
+        snap.has_staged = true;
+        snap.has_untracked = true;
+        let snapshot = build_workspace_snapshot(&[snap], &[], false, &[]);
+        let mut app = AppState::new(PathBuf::from("/tmp"), snapshot, true);
+        for (line, body, resolved) in [
+            (1, "first\nsecond line", false),
+            (2, "fixed", true),
+            (3, "third", false),
+            (4, "fourth", false),
+        ] {
+            let key = crate::tui::comments::CommentKey::CommitLine {
+                repo: "app".into(),
+                sha: "abc".into(),
+                path: "src/b.rs".into(),
+                line,
+                end_line: line,
+            };
+            app.comment_store =
+                crate::tui::comments::put_comment_entry(&app.comment_store, key, body, resolved);
+        }
+        app.reviewed.insert("file:app:src/b.rs".into());
+        app
+    }
+
+    #[test]
+    fn every_file_row_icon_has_its_fields_and_actions() {
+        use IconKind as K;
+        let mut app = file_rows_app();
+        let actions = ["Stage", "Unstage", "Revert", "Copy entity reference"];
+        assert_eq!(
+            gh_on(&mut app, "section:app:staged"),
+            vec![(
+                K::Staged,
+                texts(&[meaning(K::Staged), "2 files", "Unstage", "Stash menu"])
+            )]
+        );
+        assert_eq!(
+            gh_on(&mut app, "section:app:changes"),
+            vec![(
+                K::Changes,
+                texts(&[meaning(K::Changes), "2 files", "Stage", "Stash menu"])
+            )]
+        );
+        let mut folder = texts(&[meaning(K::Folder), "src", "2 files"]);
+        folder.extend(texts(&actions));
+        assert_eq!(gh_on(&mut app, "dir:app:src"), vec![(K::Folder, folder)]);
+        let devicon = |path: &str, kind: &str| {
+            (
+                K::FileType,
+                texts(&[
+                    meaning(K::FileType),
+                    kind,
+                    path,
+                    "Open in editor",
+                    "Open in diff tool",
+                    "Copy entity reference",
+                ]),
+            )
+        };
+        assert_eq!(
+            gh_on(&mut app, "file:app:src/b.rs"),
+            vec![
+                devicon("src/b.rs", "rs file"),
+                (K::Viewed, texts(&[meaning(K::Viewed), "Mark reviewed"])),
+                (
+                    K::Comment,
+                    texts(&[
+                        meaning(K::Comment),
+                        "3 open · 1 resolved",
+                        "first",
+                        "fixed",
+                        "third",
+                        "Comment",
+                        "Copy comments",
+                    ])
+                ),
+                (
+                    K::StatusModified,
+                    texts(&[
+                        meaning(K::StatusModified),
+                        "src/b.rs",
+                        "no change",
+                        "modified",
+                        "Stage",
+                        "Revert",
+                        "Mark reviewed",
+                    ])
+                ),
+            ]
+        );
+        assert_eq!(
+            gh_on(&mut app, "file:app:src/a.rs")[1],
+            (
+                K::StatusStaged,
+                texts(&[
+                    meaning(K::StatusStaged),
+                    "src/a.rs",
+                    "modified",
+                    "no change",
+                    "Unstage",
+                    "Revert",
+                    "Mark reviewed",
+                ])
+            )
+        );
+        assert_eq!(
+            gh_on(&mut app, "file:app:src/c.rs")[1],
+            (
+                K::StatusRenamed,
+                texts(&[
+                    meaning(K::StatusRenamed),
+                    "old.rs → src/c.rs",
+                    "renamed",
+                    "no change",
+                    "Unstage",
+                    "Revert",
+                    "Mark reviewed",
+                ])
+            )
+        );
+        assert_eq!(
+            gh_on(&mut app, "file:app:new.ts"),
+            vec![
+                devicon("new.ts", "ts file"),
+                (
+                    K::StatusAdded,
+                    texts(&[
+                        meaning(K::StatusAdded),
+                        "new.ts",
+                        "no change",
+                        "untracked",
+                        "Stage",
+                        "Revert",
+                        "Mark reviewed",
+                    ])
+                ),
+            ]
+        );
+    }
+
+    /// Resolving every comment turns the mark into the resolved one and
+    /// keeps the pinned section.
+    #[test]
+    fn a_resolved_comment_keeps_its_section() {
+        let mut app = file_rows_app();
+        focus(&mut app, "file:app:src/b.rs");
+        paint(&mut app);
+        let hit = app
+            .layout
+            .icon_hits
+            .iter()
+            .find(|hit| hit.kind == IconKind::Comment)
+            .cloned()
+            .expect("comment hit");
+        app.pin_icon(&hit);
+        for entry in app.comment_store.values_mut() {
+            entry.resolved = true;
+        }
+        let sections = app.open_popover_sections();
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].icon, IconKind::CommentResolved);
+        assert_eq!(sections[0].lines[1].copy_text(), "0 open · 4 resolved");
+    }
+
+    fn commit_file(status: &str, path: &str) -> crate::tui::drill::CommitFile {
+        crate::tui::drill::CommitFile {
+            status: status.into(),
+            path: path.into(),
+            old_path: None,
+            stat: None,
+        }
+    }
+
+    /// A commit-file list row has the same popovers. Stage, Unstage, and
+    /// Revert show their gate reason; a focused-row change closes the
+    /// pinned popover.
+    #[test]
+    fn commit_file_rows_share_the_file_popovers_and_own_their_row() {
+        use IconKind as K;
+        let mut app = app();
+        app.commit_tree_mode = true;
+        app.open_commit_files(
+            "app".into(),
+            crate::tui::drill::CommitFileSource::Commit {
+                commit_id: "aaa1111bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            },
+            vec![
+                commit_file("A", "src/lib.rs"),
+                commit_file("M", "src/main.rs"),
+            ],
+        );
+        app.focus = FocusPane::Right;
+        app.dispatch(Action::Move(1));
+        assert_eq!(
+            app.focused_commit_file_row().expect("row").id,
+            "file:src/lib.rs"
+        );
+        app.dispatch(Action::PopoverOpenFocused);
+        assert!(app.popover_pinned(), "gh pins on a commit-file row");
+        assert_eq!(app.popover_owner().row, "file:src/lib.rs");
+        let sections: Vec<(IconKind, Vec<String>)> = app
+            .open_popover_sections()
+            .into_iter()
+            .map(|section| {
+                let lines = section.lines.iter().map(PopoverLine::copy_text).collect();
+                (section.icon, lines)
+            })
+            .collect();
+        assert_eq!(sections[0].0, K::FileType);
+        assert_eq!(
+            sections[1],
+            (
+                K::StatusAdded,
+                texts(&[
+                    meaning(K::StatusAdded),
+                    "src/lib.rs",
+                    "added",
+                    "Stage",
+                    "Unstage",
+                    "Revert",
+                    "Mark reviewed",
+                ])
+            )
+        );
+        for action in [Action::Stage, Action::Unstage, Action::Revert] {
+            let command = command_for(&action).expect("row");
+            assert_eq!(
+                command.scope,
+                crate::tui::command_palette::CommandScope::NoHighlight
+            );
+            assert!(
+                app.palette_disabled_reason(command).is_some(),
+                "{action:?} is refused on a commit-file list"
+            );
+        }
+        let terminal = paint(&mut app);
+        let painted = app.layout.popover.clone().expect("painted");
+        let buf = terminal.backend().buffer();
+        let stage = command_for(&Action::Stage).unwrap();
+        let reason = app.palette_disabled_reason(stage).unwrap();
+        let text: String = (painted.rect.y..painted.rect.bottom())
+            .map(|y| {
+                (painted.rect.x..painted.rect.right())
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains(&format!("Stage  {reason}")),
+            "{reason:?} beside Stage:\n{text}"
+        );
+        assert!(app.popover_pinned(), "paint keeps it");
+
+        app.dispatch(Action::PopoverClose);
+        app.dispatch(Action::PopoverOpenFocused);
+        assert!(app.popover_pinned());
+        if let Some(tab_cursor) = match &mut app.drill {
+            crate::tui::drill::DrillView::Files { cursor, .. } => Some(cursor),
+            _ => None,
+        } {
+            *tab_cursor += 1;
+        }
+        assert!(
+            !app.popover_pinned(),
+            "another focused commit-file row closes the popover"
+        );
+        paint(&mut app);
+        assert!(app.popover.is_none());
     }
 
     #[test]

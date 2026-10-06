@@ -24,16 +24,18 @@ use std::path::{Path, PathBuf};
 use ratatui::layout::Rect;
 
 use crate::helpers::{is_default_branch, is_detached_head_branch};
-use crate::snapshot::{CheckoutKind, WorkspaceRepoSnapshot};
+use crate::snapshot::{CheckoutKind, FileChange, WorkspaceRepoSnapshot};
 
 use super::action::Action;
 use super::command_palette::{command_for, PaletteCommand};
+use super::comments::{tree_row_comments, CommentEntry};
+use super::commit_files::CommitFileRow;
 use super::gates::ListFocusTarget;
-use super::icons::{capture_count, spec, IconKind};
+use super::icons::{capture_count, file_type_name, spec, status_letter_from_change, IconKind};
 use super::state::AppState;
 use super::tree::{
-    find_node, is_merge_mark_kind, pr_badge_kind, pr_badge_mark, NodeKind, SegRole, TextSeg,
-    TreeNode, VisibleRow,
+    file_change_from_name_status, find_node, is_merge_mark_kind, path_under_dir, pr_badge_kind,
+    pr_badge_mark, NodeKind, NodeSegments, SegRole, TextSeg, TreeNode, VisibleRow,
 };
 
 /// Pointer rest on an icon before its peek opens, in milliseconds.
@@ -59,6 +61,9 @@ pub enum IconTarget {
     /// The PR badge of this checkout (snapshot `repo`), on a tree row or a
     /// graph worktree row.
     PullRequest(PathBuf),
+    /// An icon on the shown commit-file or compare file list row with this
+    /// [`CommitFileRow::id`].
+    CommitFileRow(String),
 }
 
 /// How a popover opened.
@@ -78,7 +83,8 @@ pub struct PopoverOwner {
     pub tab: usize,
     /// Focused list.
     pub list: ListFocusTarget,
-    /// Focused tree row id, graph cursor index, or empty.
+    /// Focused tree row id, commit-file row id, graph cursor index, or
+    /// empty.
     pub row: String,
 }
 
@@ -189,31 +195,44 @@ fn section(state: &AppState, kind: IconKind, target: &IconTarget) -> Option<Popo
             tree_section(state, kind, row)
         }
         IconTarget::PullRequest(repo) => pr_section(state, repo),
+        IconTarget::CommitFileRow(id) => {
+            let row = state
+                .commit_file_rows()
+                .into_iter()
+                .find(|row| &row.id == id)?;
+            commit_file_section(state, kind, &row)
+        }
     }
 }
 
-/// The segment of `row` that paints `kind` now.
+/// The segment of `segs` (every segment a row paints) that paints `kind`
+/// now.
 ///
-/// A sync mark stands for every sync kind and a merge mark for both merge
-/// kinds, so a tick that turns behind into ahead, or open into merged,
+/// One slot stands for every sync kind, both merge kinds, every status
+/// letter, and both comment marks, so a tick that turns behind into
+/// ahead, open into merged, `M` into `S`, or open comments into resolved
 /// keeps the section and shows the new mark.
-fn painted_seg(row: &VisibleRow, kind: IconKind) -> Option<&TextSeg> {
-    let same_slot = |other: IconKind| {
-        other == kind
-            || (is_sync_kind(kind) && is_sync_kind(other))
-            || (is_merge_mark_kind(kind) && is_merge_mark_kind(other))
-    };
-    row.segments
+fn painted_seg(segs: &NodeSegments, kind: IconKind) -> Option<TextSeg> {
+    let slots: [fn(IconKind) -> bool; 4] = [
+        is_sync_kind,
+        is_merge_mark_kind,
+        is_status_kind,
+        is_comment_kind,
+    ];
+    let same_slot =
+        |other: IconKind| other == kind || slots.iter().any(|slot| slot(kind) && slot(other));
+    segs.segments
         .iter()
-        .chain(&row.trailing_segs)
+        .chain(&segs.trailing)
         .find(|seg| seg.icon.is_some_and(same_slot))
+        .cloned()
 }
 
 /// Section of icon `kind` on tree row `row`: the catalog meaning, the
 /// fields for that icon, then its actions. `None` when the row no longer
 /// paints the icon.
 fn tree_section(state: &AppState, kind: IconKind, row: &VisibleRow) -> Option<PopoverSection> {
-    let seg = painted_seg(row, kind)?;
+    let seg = painted_seg(&state.tree_row_paint_segments(row), kind)?;
     let kind = seg.icon?;
     let mut lines = vec![PopoverLine::Text(spec(kind).meaning.to_string())];
     let actions: Vec<Action> = match kind {
@@ -278,7 +297,11 @@ fn tree_section(state: &AppState, kind: IconKind, row: &VisibleRow) -> Option<Po
             }
             vec![Action::FoldToggle, Action::FoldToggleSubtree]
         }
-        _ => return None,
+        kind if is_comment_kind(kind) => {
+            let comments = tree_row_comments(&state.comment_store, &state.snapshot, row);
+            comment_fields(&comments, &mut lines)
+        }
+        kind => file_fields(kind, &tree_file_facts(state, row), &mut lines)?,
     };
     lines.extend(actions.iter().filter_map(PopoverLine::action));
     Some(PopoverSection {
@@ -287,6 +310,206 @@ fn tree_section(state: &AppState, kind: IconKind, row: &VisibleRow) -> Option<Po
         target: IconTarget::TreeRow(row.id.clone()),
         lines,
     })
+}
+
+/// Section of icon `kind` on commit-file or compare list row `row`. Same
+/// builders as a workspace tree file row; `None` when the row no longer
+/// paints the icon.
+fn commit_file_section(
+    state: &AppState,
+    kind: IconKind,
+    row: &CommitFileRow,
+) -> Option<PopoverSection> {
+    let seg = painted_seg(&state.commit_file_row_paint_segments(row), kind)?;
+    let kind = seg.icon?;
+    let mut lines = vec![PopoverLine::Text(spec(kind).meaning.to_string())];
+    let actions = if is_comment_kind(kind) {
+        comment_fields(&state.commit_file_row_comments(row), &mut lines)
+    } else {
+        file_fields(kind, &commit_file_facts(state, row), &mut lines)?
+    };
+    lines.extend(actions.iter().filter_map(PopoverLine::action));
+    Some(PopoverSection {
+        icon: kind,
+        role: seg.role,
+        target: IconTarget::CommitFileRow(row.id.clone()),
+        lines,
+    })
+}
+
+/// What a file-level popover reads from its row, from the workspace tree
+/// or a commit-file list.
+struct FileFacts {
+    /// Folder or file path (a section: the checkout path).
+    path: String,
+    /// The file row's change.
+    change: Option<FileChange>,
+    /// The checkout's own change for this path: index and worktree sides.
+    /// `None` on a commit-file list, whose rows have one name-status
+    /// letter.
+    sides: Option<FileChange>,
+    /// Changed files under a section or folder row.
+    files: usize,
+}
+
+/// Files under tree node `id`, at any depth.
+fn tree_file_count(state: &AppState, id: &str) -> usize {
+    fn count(node: &TreeNode) -> usize {
+        usize::from(node.kind == NodeKind::File) + node.children.iter().map(count).sum::<usize>()
+    }
+    find_node(&state.tree, id).map_or(0, count)
+}
+
+fn tree_file_facts(state: &AppState, row: &VisibleRow) -> FileFacts {
+    let sides = row.file.as_ref().and_then(|file| {
+        row_repo(state, row)?
+            .changes
+            .iter()
+            .find(|change| change.path == file.path)
+            .cloned()
+    });
+    FileFacts {
+        path: row.chrome.path.clone(),
+        change: row.file.clone(),
+        sides,
+        files: tree_file_count(state, &row.id),
+    }
+}
+
+fn commit_file_facts(state: &AppState, row: &CommitFileRow) -> FileFacts {
+    let change = row.file.as_ref().map(|file| {
+        file_change_from_name_status(&file.status, file.path.clone(), file.old_path.clone())
+    });
+    let files = state.commit_drill_files().map_or(0, |files| {
+        files
+            .iter()
+            .filter(|file| row.is_dir() && path_under_dir(&file.path, &row.path))
+            .count()
+    });
+    FileFacts {
+        path: row.path.clone(),
+        change,
+        sides: None,
+        files,
+    }
+}
+
+/// Fields of a file-level icon (section, folder, file type, status
+/// letter, viewed eye) and its actions. `None` for any other kind.
+///
+/// Stage, Unstage, and Revert stay listed on a commit-file list: the gates
+/// refuse them there, and the popover shows the line dim with the reason.
+fn file_fields(
+    kind: IconKind,
+    facts: &FileFacts,
+    lines: &mut Vec<PopoverLine>,
+) -> Option<Vec<Action>> {
+    let files = || field("files", counted(facts.files, "file", "files"));
+    Some(match kind {
+        IconKind::Staged => {
+            lines.push(files());
+            vec![Action::Unstage, Action::StashMenu]
+        }
+        IconKind::Changes => {
+            lines.push(files());
+            vec![Action::Stage, Action::StashMenu]
+        }
+        IconKind::Folder => {
+            lines.extend([field("path", facts.path.clone()), files()]);
+            vec![
+                Action::Stage,
+                Action::Unstage,
+                Action::Revert,
+                Action::CopyEntityReference,
+            ]
+        }
+        IconKind::FileType => {
+            lines.extend([
+                field("type", format!("{} file", file_type_name(&facts.path))),
+                field("path", facts.path.clone()),
+            ]);
+            vec![
+                Action::Edit,
+                Action::ExternalDiff,
+                Action::CopyEntityReference,
+            ]
+        }
+        kind if is_status_kind(kind) => {
+            let change = facts.change.as_ref()?;
+            let path = match change.old_path.as_deref() {
+                Some(old) => format!("{old} → {}", change.path),
+                None => change.path.clone(),
+            };
+            lines.push(field("path", path));
+            let mut actions = Vec::new();
+            match facts.sides.as_ref() {
+                Some(sides) => {
+                    lines.extend([
+                        field("index", side_text(sides.staged_status.as_deref(), false)),
+                        field(
+                            "worktree",
+                            side_text(sides.unstaged_status.as_deref(), sides.untracked),
+                        ),
+                    ]);
+                    if change.unstaged_status.is_some() || change.untracked {
+                        actions.push(Action::Stage);
+                    }
+                    if change.staged_status.is_some() {
+                        actions.push(Action::Unstage);
+                    }
+                }
+                None => {
+                    lines.push(field(
+                        "change",
+                        spec(status_letter_from_change(change).icon_kind()).name,
+                    ));
+                    actions.extend([Action::Stage, Action::Unstage]);
+                }
+            }
+            actions.extend([Action::Revert, Action::ToggleReviewed]);
+            actions
+        }
+        IconKind::Viewed => vec![Action::ToggleReviewed],
+        _ => return None,
+    })
+}
+
+/// One side of a workspace change in words: `modified`, `untracked`, or
+/// `no change`.
+fn side_text(status: Option<&str>, untracked: bool) -> String {
+    if untracked {
+        return "untracked".into();
+    }
+    match status {
+        None => "no change".into(),
+        Some("A") => "added".into(),
+        Some("M") => "modified".into(),
+        Some("D") => "deleted".into(),
+        Some("R") => "renamed".into(),
+        Some("C") => "copied".into(),
+        Some("U") => "conflict".into(),
+        Some("T") => "type changed".into(),
+        Some(other) => other.to_string(),
+    }
+}
+
+/// Most comment bodies a comment popover lists.
+const COMMENT_BODIES_MAX: usize = 3;
+
+/// Comment counts and the first line of the first
+/// [`COMMENT_BODIES_MAX`] bodies; actions Comment and Copy comments.
+fn comment_fields(comments: &[&CommentEntry], lines: &mut Vec<PopoverLine>) -> Vec<Action> {
+    let resolved = comments.iter().filter(|entry| entry.resolved).count();
+    lines.push(field(
+        "comments",
+        format!("{} open · {resolved} resolved", comments.len() - resolved),
+    ));
+    for entry in comments.iter().take(COMMENT_BODIES_MAX) {
+        let first = entry.body.lines().next().unwrap_or_default().trim();
+        let label = if entry.resolved { "resolved" } else { "open" };
+        lines.push(field(label, first));
+    }
+    vec![Action::CommentStart, Action::ExportComments]
 }
 
 fn field(label: &'static str, value: impl Into<String>) -> PopoverLine {
@@ -455,6 +678,24 @@ fn change_counts(state: &AppState, checkouts: &[String]) -> (usize, usize, usize
         counts.1 += usize::from(change.unstaged_status.is_some());
     }
     counts
+}
+
+fn is_status_kind(kind: IconKind) -> bool {
+    matches!(
+        kind,
+        IconKind::StatusAdded
+            | IconKind::StatusStaged
+            | IconKind::StatusStagedModified
+            | IconKind::StatusModified
+            | IconKind::StatusDeleted
+            | IconKind::StatusRenamed
+            | IconKind::StatusConflict
+            | IconKind::StatusCopied
+    )
+}
+
+fn is_comment_kind(kind: IconKind) -> bool {
+    matches!(kind, IconKind::Comment | IconKind::CommentResolved)
 }
 
 fn is_sync_kind(kind: IconKind) -> bool {

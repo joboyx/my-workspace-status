@@ -24,12 +24,14 @@ pub use store::comment_store_path_from_env;
 #[cfg(test)]
 pub use store::put_comment;
 pub use store::{
-    load_comment_store, put_comment_entry, save_comment_store, CommentKey, CommentStore,
+    load_comment_store, put_comment_entry, save_comment_store, CommentEntry, CommentKey,
+    CommentStore,
 };
 pub use target::{
-    collect_live_set, comments_in_focus_scope, commit_file_row_comments_resolved,
-    commit_file_row_has_comment, covering_line_comment, diff_focus_side, diff_line_comment_state,
-    gc_comments, graph_row_comments_resolved, graph_row_has_comment, resolve_comment_target,
-    resolve_entity_reference, tree_row_comments_resolved, tree_row_has_comment,
-    viewport_line_number, viewport_line_range, CommentExportList,
+    collect_live_set, comments_in_focus_scope, commit_file_row_comments,
+    commit_file_row_comments_resolved, commit_file_row_has_comment, covering_line_comment,
+    diff_focus_side, diff_line_comment_state, gc_comments, graph_row_comments_resolved,
+    graph_row_has_comment, resolve_comment_target, resolve_entity_reference, tree_row_comments,
+    tree_row_comments_resolved, tree_row_has_comment, viewport_line_number, viewport_line_range,
+    CommentExportList,
 };

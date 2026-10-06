@@ -954,7 +954,7 @@ pub fn file_change_segments(change: &FileChange, tree_mode: bool, ascii: bool) -
 pub fn dir_name_segments(name: &str, ascii: bool) -> NodeSegments {
     NodeSegments {
         segments: vec![
-            icon_seg(icon_folder(ascii), SegRole::Dir),
+            tagged(icon_seg(icon_folder(ascii), SegRole::Dir), IconKind::Folder),
             text_seg(name, SegRole::Dir),
         ],
         trailing: Vec::new(),
@@ -993,7 +993,7 @@ fn file_segments(change: &FileChange, tree_mode: bool, ascii: bool) -> NodeSegme
         hex: icon.color,
         bold: false,
         dim: false,
-        icon: None,
+        icon: Some(IconKind::FileType),
     }];
     if let Some(old) = change.old_path.as_deref() {
         let old_name = if tree_mode {
@@ -1031,7 +1031,7 @@ fn file_segments(change: &FileChange, tree_mode: bool, ascii: bool) -> NodeSegme
         hex: None,
         bold: true,
         dim: false,
-        icon: None,
+        icon: Some(status.icon_kind()),
     }];
     NodeSegments { segments, trailing }
 }
@@ -1297,14 +1297,14 @@ pub fn node_segments(
             )],
         },
         NodeKind::Section => {
-            let glyph = if node.id.ends_with(":staged") {
-                icon_staged(ascii)
+            let (glyph, kind) = if node.id.ends_with(":staged") {
+                (icon_staged(ascii), IconKind::Staged)
             } else {
-                icon_changes(ascii)
+                (icon_changes(ascii), IconKind::Changes)
             };
             NodeSegments {
                 segments: vec![
-                    icon_seg(glyph, SegRole::Heading),
+                    tagged(icon_seg(glyph, SegRole::Heading), kind),
                     text_seg(node.label.clone(), SegRole::Heading),
                 ],
                 trailing: Vec::new(),
@@ -1334,10 +1334,14 @@ pub fn with_comment_mark(
     if !commented {
         return trailing;
     }
-    let (glyph, role) = if resolved {
-        (icon_comment_resolved(ascii), SegRole::Muted)
+    let (glyph, role, kind) = if resolved {
+        (
+            icon_comment_resolved(ascii),
+            SegRole::Muted,
+            IconKind::CommentResolved,
+        )
     } else {
-        (icon_comment(ascii), SegRole::Heading)
+        (icon_comment(ascii), SegRole::Heading, IconKind::Comment)
     };
     let mut marked = vec![
         TextSeg {
@@ -1346,7 +1350,7 @@ pub fn with_comment_mark(
             hex: None,
             bold: false,
             dim: false,
-            icon: None,
+            icon: Some(kind),
         },
         text_seg(" ", SegRole::Muted),
     ];
@@ -1387,7 +1391,7 @@ pub fn with_viewed_mark(mut trailing: Vec<TextSeg>, ascii: bool, viewed: bool) -
             hex: None,
             bold: true,
             dim: false,
-            icon: None,
+            icon: Some(IconKind::Viewed),
         },
         text_seg(" ", SegRole::Muted),
     ];
@@ -2620,6 +2624,84 @@ mod tests {
         let resolved_trail: String = resolved.trailing.iter().map(|s| s.text.as_str()).collect();
         assert!(resolved_trail.contains('\''), "{resolved_trail}");
         assert!(!resolved_trail.contains('"'), "{resolved_trail}");
+    }
+
+    /// Section, folder, devicon, status letter, viewed eye, and comment
+    /// marks each carry their catalog kind. The badge seg keeps its pad
+    /// (paint hits trim it); the text is unchanged.
+    #[test]
+    fn file_level_rows_tag_every_icon_and_indicator() {
+        let tree = built_tree(
+            vec![
+                fc("src/a.rs", Some("M"), None, false),
+                fc("src/b.rs", None, Some("M"), false),
+                fc("new.ts", None, None, true),
+            ],
+            true,
+        );
+        let rows = flatten_with(&tree, &HashSet::new(), true);
+        let row = |id: &str| rows.iter().find(|r| r.id == id).expect(id);
+        assert_eq!(
+            tagged_segs(row("section:app:staged")),
+            vec![(IconKind::Staged, "# ".to_string())]
+        );
+        assert_eq!(
+            tagged_segs(row("section:app:changes")),
+            vec![(IconKind::Changes, "~ ".to_string())]
+        );
+        assert_eq!(
+            tagged_segs(row("dir:app:src")),
+            vec![(IconKind::Folder, "/ ".to_string())]
+        );
+        assert_eq!(
+            tagged_segs(row("file:app:src/a.rs")),
+            vec![
+                (IconKind::FileType, "· ".to_string()),
+                (IconKind::StatusStaged, "S ".to_string()),
+            ]
+        );
+        assert_eq!(
+            tagged_segs(row("file:app:new.ts")),
+            vec![
+                (IconKind::FileType, "· ".to_string()),
+                (IconKind::StatusAdded, "A ".to_string()),
+            ]
+        );
+        let file = row("file:app:src/b.rs");
+        let marked = |viewed, commented, resolved| {
+            let segs = row_segments(file, true, viewed, commented, resolved);
+            segs.trailing
+                .iter()
+                .filter_map(|seg| seg.icon.map(|kind| (kind, seg.text.clone())))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            marked(true, true, false),
+            vec![
+                (IconKind::Viewed, "*".to_string()),
+                (IconKind::Comment, "\"".to_string()),
+                (IconKind::StatusModified, "M ".to_string()),
+            ]
+        );
+        assert_eq!(
+            marked(false, true, true)[0],
+            (IconKind::CommentResolved, "'".to_string())
+        );
+        let segs = row_segments(file, true, true, true, false);
+        assert_eq!(
+            segment_icons(&segs),
+            vec![
+                IconKind::FileType,
+                IconKind::Viewed,
+                IconKind::Comment,
+                IconKind::StatusModified
+            ]
+        );
+        let (label, _) = segments_search_label(&segs);
+        assert_eq!(
+            label,
+            format!("{}  * \" M", file.label.split("  ").next().unwrap())
+        );
     }
 
     #[test]

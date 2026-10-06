@@ -16,7 +16,7 @@ use super::super::tree::{
 };
 use super::super::viewed::normalize_viewed_path;
 use super::reference::{DiffSide, DiffSource, EntityRef};
-use super::store::{ordered_line_range, repo_identity, CommentKey, CommentStore};
+use super::store::{ordered_line_range, repo_identity, CommentEntry, CommentKey, CommentStore};
 use workspace_status_graph::GraphRow;
 
 /// Live refs used to drop stale comments on refresh.
@@ -1015,6 +1015,19 @@ pub fn tree_row_comments_resolved(
     comments_resolved_state(store, |key| tree_key_on_row(snapshot, row, key)).unwrap_or(false)
 }
 
+/// Comments that paint their mark on `row`, in store order.
+pub fn tree_row_comments<'a>(
+    store: &'a CommentStore,
+    snapshot: &WorkspaceSnapshot,
+    row: &VisibleRow,
+) -> Vec<&'a CommentEntry> {
+    store
+        .iter()
+        .filter(|(key, _)| tree_key_on_row(snapshot, row, key))
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
 fn tree_key_on_row(snapshot: &WorkspaceSnapshot, row: &VisibleRow, key: &CommentKey) -> bool {
     let Some(repo_path) = row.repo.as_deref() else {
         return false;
@@ -1197,6 +1210,23 @@ pub fn commit_file_row_comments_resolved(
         commit_file_key_on_row(repo, primary, source, path, branch, key)
     })
     .unwrap_or(false)
+}
+
+/// Line comments that paint their mark on this commit-file row, in store
+/// order.
+pub fn commit_file_row_comments<'a>(
+    store: &'a CommentStore,
+    repo: &str,
+    primary: Option<&str>,
+    source: &CommitFileSource,
+    path: &str,
+    branch: Option<&str>,
+) -> Vec<&'a CommentEntry> {
+    store
+        .iter()
+        .filter(|(key, _)| commit_file_key_on_row(repo, primary, source, path, branch, key))
+        .map(|(_, entry)| entry)
+        .collect()
 }
 
 fn commit_file_key_on_row(

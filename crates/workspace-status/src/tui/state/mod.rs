@@ -374,7 +374,7 @@ impl LayoutHit {
                     width: hit.width,
                     repo: repo.clone(),
                 }),
-                IconTarget::TreeRow(_) => None,
+                IconTarget::TreeRow(_) | IconTarget::CommitFileRow(_) => None,
             })
             .collect()
     }

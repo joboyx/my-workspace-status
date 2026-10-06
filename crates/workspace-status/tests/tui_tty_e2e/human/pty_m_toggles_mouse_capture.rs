@@ -3,7 +3,7 @@ use crate::harness::{
     SGR_WHEEL_DOWN, SGR_WHEEL_RIGHT,
 };
 use crate::seed::{daily_workspace, seed_long_path_file};
-use crate::support::{tree_cursor_on, GIT_WAIT, SETTLE_MS, TREE_LABEL_COL, WAIT};
+use crate::support::{tree_cursor_on, tree_label_col, GIT_WAIT, SETTLE_MS, TREE_LABEL_COL, WAIT};
 
 /// Tree `m` toggles mouse reporting. Not graph merge.
 ///
@@ -40,7 +40,7 @@ fn pty_m_toggles_mouse_capture() {
     // over the tree then pans the tree, not a long file-diff).
     let readme_row = tree_row_containing(&tui.screen(), "README.md")
         .unwrap_or_else(|| panic!("README row at launch:\n{}", tui.screen()));
-    tui.sgr_click(TREE_LABEL_COL, readme_row);
+    tui.sgr_click(tree_label_col(&tui.screen(), "README.md"), readme_row);
     tui.wait_pred(
         |screen| tree_cursor_on(screen, "README.md") && screen.contains("UNSTAGED"),
         "default mouse-on SGR click selects README (a default-off or dead mouse never loads that pane)",
@@ -76,7 +76,7 @@ fn pty_m_toggles_mouse_capture() {
 
     let readme_row = tree_row_containing(&tui.screen(), "README.md")
         .unwrap_or_else(|| panic!("README row while mouse off:\n{}", tui.screen()));
-    tui.sgr_click(TREE_LABEL_COL, readme_row);
+    tui.sgr_click(tree_label_col(&tui.screen(), "README.md"), readme_row);
     tui.wait_ms(SETTLE_MS);
     tui.wait_pred(
         |screen| {
@@ -134,7 +134,7 @@ fn pty_m_toggles_mouse_capture() {
     );
     let readme_row = tree_row_containing(&tui.screen(), "README.md")
         .unwrap_or_else(|| panic!("README row after Mouse on:\n{}", tui.screen()));
-    tui.sgr_click(TREE_LABEL_COL, readme_row);
+    tui.sgr_click(tree_label_col(&tui.screen(), "README.md"), readme_row);
     tui.wait_pred(
         |screen| {
             tree_cursor_on(screen, "README.md")
