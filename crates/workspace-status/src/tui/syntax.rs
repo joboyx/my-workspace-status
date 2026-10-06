@@ -620,7 +620,9 @@ fn syntect_fg(color: SyntectColor) -> Option<(u8, u8, u8)> {
     Some((color.r, color.g, color.b))
 }
 
-fn readable_fg(fg: Color, row_bg: Option<Color>, fallback: Color) -> Color {
+/// `fg` when it meets the 3:1 contrast floor on `row_bg`, else `fallback`.
+/// No `row_bg` keeps `fg`.
+pub(crate) fn readable_fg(fg: Color, row_bg: Option<Color>, fallback: Color) -> Color {
     let Some(bg) = row_bg else {
         return fg;
     };
