@@ -188,14 +188,6 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
         Some(filter_repos.iter().cloned().collect())
     };
 
-    if let Some(only) = &only_repos {
-        if let Err(unknown) = validate_filter_repos(&cwd, &only.iter().cloned().collect::<Vec<_>>())
-        {
-            eprintln!("Unknown repo: {unknown}");
-            return Err(1);
-        }
-    }
-
     let loaded = match load_workspace_status_config(&cwd) {
         Ok(cfg) => cfg,
         Err(err) => {
@@ -203,6 +195,14 @@ fn run(cli: Cli, cwd: PathBuf) -> Result<(), u8> {
             return Err(1);
         }
     };
+
+    if let Some(only) = &only_repos {
+        let named: Vec<String> = only.iter().cloned().collect();
+        if let Err(unknown) = validate_filter_repos(&cwd, &loaded, &named) {
+            eprintln!("Unknown repo: {unknown}");
+            return Err(1);
+        }
+    }
 
     let mut config = loaded.clone();
     if cli.all {

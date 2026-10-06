@@ -35,6 +35,8 @@ CI fails if a TTY spawn path drops that assignment: `crates/workspace-status/tes
 
 PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` also unset `WS_STATUS_WORKSPACE` so a parent pin cannot retarget the fixture. CI: `tty_spawn_paths_isolate_workspace_env`.
 
+They also point `XDG_CONFIG_HOME` at an empty temp dir, so the operator user config file (`$XDG_CONFIG_HOME/my-workspace-status/config.json`, else `~/.config/...`) cannot change the fixture's settings. CLI integration tests that run the binary do the same. CI: `tty_spawn_paths_isolate_user_config`.
+
 Env table: [docs/configuration.md](./docs/configuration.md).
 
 ## `dist generate`
@@ -101,7 +103,7 @@ per-module copy.
 - Exported Rust items need rustdoc (`///` or `//!`).
 - The plain-text report is a user-facing contract — changing it means updating `SAMPLE_OUTPUT.md` and the snapshot e2e suite.
 - TTY event loop: do not run git or other blocking I/O on the draw/event thread. The live path is `tui/event_loop.rs` (current-thread Tokio, dedicated input thread, `spawn_blocking` on a `JoinSet`) through `tui/effect.rs`. Fetch / pull / push enqueue on a per-gitdir remote queue (`RemoteQueue`) under `env_fetch_concurrency()`. Exclusive writes stay serial. While an exclusive write or default-branch job is in flight, nav / pane switch / cancel / remotes stay live (`BusyAction::Handle`); keys that would start another exclusive write are drained (`Ignore`). An exclusive write on a gitdir that already has a remote dispatches, then `schedule` refuses with breadcrumb `busy`. `E` blob/temp prepare is `UserTag::DiffPrepare` on that pool; `blob_bytes` must not run on the loop thread. Guard: `tty_event_loop_must_not_call_sync_pane_git` in `tui/event_pump.rs`.
-- After `dist generate`, restore `workflow_dispatch` and host git-cliff on `release.yml`. TTY demo clips and e2e must set `WS_STATUS_UPDATE_CHECK_STORE`. Guard: `tty_spawn_paths_isolate_update_check_store` in `tests/release_watch.rs`.
+- After `dist generate`, restore `workflow_dispatch` and host git-cliff on `release.yml`. TTY demo clips and e2e must set `WS_STATUS_UPDATE_CHECK_STORE` and `XDG_CONFIG_HOME`. Guards: `tty_spawn_paths_isolate_update_check_store` and `tty_spawn_paths_isolate_user_config` in `tests/release_watch.rs`.
 - This repository is public. Do not commit private workspace paths, personal hostnames, unpublished ticket keys, customer/project names from private work, chat transcripts, screenshots of private work, tokens, or credentials. Use `scripts/seed-demo-workspace.sh` for examples and demo clips.
 
 ## Demo / screenshots

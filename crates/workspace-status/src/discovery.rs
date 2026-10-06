@@ -609,18 +609,20 @@ pub fn collect_snapshots(
 }
 
 /// Exit-style validation: `Err` lists the unknown repo name.
-pub fn validate_filter_repos(cwd: &Path, filter_repos: &[String]) -> Result<(), String> {
+///
+/// `loaded` is the merged config from `load_workspace_status_config`. Named
+/// repos bypass `ignoredRepos`, so the walk here ignores nothing.
+pub fn validate_filter_repos(
+    cwd: &Path,
+    loaded: &WorkspaceStatusConfig,
+    filter_repos: &[String],
+) -> Result<(), String> {
     if filter_repos.is_empty() {
         return Ok(());
     }
-    let loaded = crate::config::load_workspace_status_config(cwd)?;
     let config = WorkspaceStatusConfig {
         ignored_repos: Vec::new(),
-        max_depth: loaded.max_depth,
-        default_branches: loaded.default_branches,
-        editor: loaded.editor,
-        diff_tool: loaded.diff_tool,
-        view_defaults: loaded.view_defaults,
+        ..loaded.clone()
     };
     let walk_primaries = find_repos_with_config(cwd, &config, None);
     let entries = expand_repos_with_linked_worktrees(cwd, &walk_primaries, &config, None);

@@ -6,8 +6,10 @@
 //! `$XDG_STATE_HOME/my-workspace-status/update-check.json` (the operator
 //! last-check file) and can block mount on the GitHub Release prompt.
 //! A TTY spawn that inherits `WS_STATUS_WORKSPACE` retargets config and
-//! git writes away from the fixture. These tests fail until both hazards
-//! stay fixed. Recipe:
+//! git writes away from the fixture. A TTY spawn that inherits
+//! `XDG_CONFIG_HOME` / `HOME` reads the operator user config file
+//! (`my-workspace-status/config.json`), which can change the fixture's
+//! settings. These tests fail until those hazards stay fixed. Recipe:
 //! [docs/architecture.md](../../../docs/architecture.md).
 
 const RELEASE_YML: &str = include_str!("../../../.github/workflows/release.yml");
@@ -20,6 +22,10 @@ const DESKTOP_HARNESS: &str = include_str!("tui_tty_e2e/desktop.rs");
 fn assigns_update_check_store(src: &str) -> bool {
     src.contains("env(\"WS_STATUS_UPDATE_CHECK_STORE\"")
         || src.contains("export WS_STATUS_UPDATE_CHECK_STORE=")
+}
+
+fn assigns_user_config_home(src: &str) -> bool {
+    src.contains("env(\"XDG_CONFIG_HOME\"") || src.contains("export XDG_CONFIG_HOME=")
 }
 
 fn isolates_workspace_env(src: &str) -> bool {
@@ -52,6 +58,15 @@ fn isolated_store_assignment_rejects_comment_only() {
     assert!(!isolates_workspace_env("export WS_STATUS_WORKSPACE=/tmp"));
     assert!(isolates_workspace_env(
         "cmd.env_remove(\"WS_STATUS_WORKSPACE\");"
+    ));
+    assert!(!assigns_user_config_home(""));
+    assert!(!assigns_user_config_home("# Points XDG_CONFIG_HOME at tmp"));
+    assert!(!assigns_user_config_home("unset XDG_CONFIG_HOME"));
+    assert!(assigns_user_config_home(
+        "export XDG_CONFIG_HOME=/tmp/config"
+    ));
+    assert!(assigns_user_config_home(
+        "cmd.env(\"XDG_CONFIG_HOME\", &config_home);"
     ));
 }
 
@@ -138,6 +153,21 @@ fn tty_spawn_paths_isolate_update_check_store() {
         STILLS_SH.contains("lastCheckUnix"),
         "capture-demo-stills.sh must stamp a fresh lastCheckUnix so the 6h window is not due"
     );
+}
+
+#[test]
+fn tty_spawn_paths_isolate_user_config() {
+    for (label, src) in [
+        ("tui_tty_e2e/harness.rs", PTY_HARNESS),
+        ("tui_tty_e2e/desktop.rs", DESKTOP_HARNESS),
+        ("scripts/capture-demo-stills.sh", STILLS_SH),
+    ] {
+        assert!(
+            assigns_user_config_home(src),
+            "{label} launches a TTY TUI and must assign XDG_CONFIG_HOME to a temp dir \
+             (or the operator user config file changes the fixture's settings)"
+        );
+    }
 }
 
 #[test]

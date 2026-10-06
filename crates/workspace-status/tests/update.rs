@@ -36,7 +36,9 @@ fn write_script(path: &Path, body: &str) {
 
 #[test]
 fn help_documents_update_flag() {
+    let dir = temp_dir();
     let out = Command::new(bin())
+        .env("XDG_CONFIG_HOME", dir.join("xdg-config"))
         .arg("--help")
         .output()
         .expect("workspace-status --help");
@@ -48,11 +50,14 @@ fn help_documents_update_flag() {
         text.contains("GitHub Release notes") || text.contains("notes since this version"),
         "help should mention Release notes before the updater: {text}"
     );
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
 fn help_documents_workspace_flag() {
+    let dir = temp_dir();
     let out = Command::new(bin())
+        .env("XDG_CONFIG_HOME", dir.join("xdg-config"))
         .arg("--help")
         .output()
         .expect("workspace-status --help");
@@ -60,6 +65,7 @@ fn help_documents_workspace_flag() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("--workspace"), "{text}");
     assert!(text.contains("-C"), "{text}");
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[cfg(unix)]
@@ -71,6 +77,7 @@ fn update_runs_path_sidecar_and_forwards_exit() {
         "#!/bin/sh\necho path-sidecar\nexit 19\n",
     );
     let out = Command::new(bin())
+        .env("XDG_CONFIG_HOME", dir.join("xdg-config"))
         .arg("--update")
         .env("PATH", &dir)
         .output()
@@ -89,6 +96,7 @@ fn ws_update_runs_path_sidecar() {
         "#!/bin/sh\necho ws-sidecar\nexit 0\n",
     );
     let out = Command::new(ws_bin())
+        .env("XDG_CONFIG_HOME", dir.join("xdg-config"))
         .arg("--update")
         .env("PATH", &dir)
         .output()
@@ -117,6 +125,7 @@ fn update_prefers_sibling_over_path() {
         "#!/bin/sh\necho path\nexit 3\n",
     );
     let out = Command::new(&dest)
+        .env("XDG_CONFIG_HOME", dir.join("xdg-config"))
         .arg("--update")
         .env("PATH", &decoy)
         .output()
@@ -135,6 +144,7 @@ fn update_skips_tui_and_repo_filters() {
         "#!/bin/sh\necho updated\nexit 0\n",
     );
     let out = Command::new(bin())
+        .env("XDG_CONFIG_HOME", dir.join("xdg-config"))
         .args(["--update", "--tui", "--plain", "missing-repo"])
         .env("PATH", &dir)
         .output()
@@ -154,6 +164,7 @@ fn update_skips_tui_and_repo_filters() {
 fn update_missing_sidecar_is_nonzero() {
     let empty = temp_dir();
     let out = Command::new(bin())
+        .env("XDG_CONFIG_HOME", empty.join("xdg-config"))
         .arg("--update")
         .env("PATH", &empty)
         .output()
@@ -169,7 +180,9 @@ fn update_missing_sidecar_is_nonzero() {
 
 #[test]
 fn help_documents_startup_release_check() {
+    let dir = temp_dir();
     let out = Command::new(bin())
+        .env("XDG_CONFIG_HOME", dir.join("xdg-config"))
         .arg("--help")
         .output()
         .expect("workspace-status --help");
@@ -183,6 +196,7 @@ fn help_documents_startup_release_check() {
         text.contains("newer published release") || text.contains("GitHub Release"),
         "help should mention the GitHub Release check: {text}"
     );
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -191,6 +205,7 @@ fn plain_does_not_run_startup_update_check() {
     let store = dir.join("update-check.json");
     let state = dir.join("xdg-state");
     let out = Command::new(bin())
+        .env("XDG_CONFIG_HOME", dir.join("xdg-config"))
         .arg("--plain")
         .current_dir(&dir)
         .env("WS_STATUS_UPDATE_CHECK_STORE", &store)
@@ -218,6 +233,7 @@ fn json_does_not_run_startup_update_check() {
     let store = dir.join("update-check.json");
     let state = dir.join("xdg-state");
     let out = Command::new(bin())
+        .env("XDG_CONFIG_HOME", dir.join("xdg-config"))
         .arg("--json")
         .current_dir(&dir)
         .env("WS_STATUS_UPDATE_CHECK_STORE", &store)
@@ -250,6 +266,7 @@ fn update_flag_does_not_run_startup_check() {
         "#!/bin/sh\necho updated\nexit 0\n",
     );
     let out = Command::new(bin())
+        .env("XDG_CONFIG_HOME", dir.join("xdg-config"))
         .arg("--update")
         .env("PATH", &dir)
         .env("WS_STATUS_UPDATE_CHECK_STORE", &store)
@@ -302,6 +319,7 @@ fn update_prints_release_notes_then_runs_sidecar() {
         "#!/bin/sh\necho path-sidecar\nexit 0\n",
     );
     let out = Command::new(bin())
+        .env("XDG_CONFIG_HOME", dir.join("xdg-config"))
         .arg("--update")
         .env("PATH", &dir)
         .output()

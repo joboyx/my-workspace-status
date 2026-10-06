@@ -62,6 +62,10 @@ impl DesktopSession {
         fs::create_dir_all(&state_home).unwrap();
         let update_store = state_home.join("update-check.json");
         write_fresh_update_check(&update_store);
+        // Empty user config dir: an operator user config file cannot change
+        // the fixture's settings.
+        let config_home = workspace.join(".e2e-config");
+        fs::create_dir_all(&config_home).unwrap();
 
         let bin = env!("CARGO_BIN_EXE_workspace-status");
         let launcher = stage.join("run-tui.sh");
@@ -80,6 +84,10 @@ impl DesktopSession {
         script.push_str(&format!(
             "export WS_STATUS_UPDATE_CHECK_STORE={}\n",
             sh_quote(&update_store)
+        ));
+        script.push_str(&format!(
+            "export XDG_CONFIG_HOME={}\n",
+            sh_quote(&config_home)
         ));
         script.push_str(&format!(
             "export WS_STATUS_VIEWED_STORE={}\n",

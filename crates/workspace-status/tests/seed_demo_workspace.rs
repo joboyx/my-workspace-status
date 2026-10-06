@@ -53,6 +53,8 @@ fn run_status(workspace: &Path, args: &[&str]) -> std::process::Output {
         .current_dir(workspace)
         .env("TERM", "dumb")
         .env_remove("WS_STATUS_WORKSPACE")
+        // Missing dir under the seed: an operator user config cannot change the result.
+        .env("XDG_CONFIG_HOME", workspace.join(".xdg-config"))
         .stdin(Stdio::null());
     for (k, v) in git_env() {
         cmd.env(k, v);

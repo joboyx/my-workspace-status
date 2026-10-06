@@ -25,8 +25,10 @@
 # Isolates XDG_STATE_HOME, WS_STATUS_UPDATE_CHECK_STORE,
 # WS_STATUS_VIEWED_STORE, and WS_STATUS_COMMENT_STORE under
 # tmp/demo-stills-stage/state so a TTY launch does not write the operator
-# last-check, reviewed-mark, or comment files. Unsets WS_STATUS_WORKSPACE
-# so the seeded demo dir is the workspace root.
+# last-check, reviewed-mark, or comment files. Points XDG_CONFIG_HOME at the
+# empty tmp/demo-stills-stage/config so an operator user config file cannot
+# change the clips. Unsets WS_STATUS_WORKSPACE so the seeded demo dir is the
+# workspace root.
 set -euo pipefail
 trap '' HUP
 
@@ -40,6 +42,7 @@ STILLS_DIR="$OUT_DIR/stills"
 STAGE_DIR="$REPO_ROOT/tmp/demo-stills-stage"
 STAGE_STILLS="$STAGE_DIR/stills"
 STATE_DIR="$STAGE_DIR/state"
+CONFIG_DIR="$STAGE_DIR/config"
 UPDATE_STORE="$STATE_DIR/update-check.json"
 VIEWED_STORE="$STATE_DIR/viewed-files.json"
 COMMENT_STORE="$STATE_DIR/comments.json"
@@ -132,7 +135,7 @@ ensure_bin() {
 }
 
 write_helpers() {
-  mkdir -p "$STAGE_DIR" "$STATE_DIR"
+  mkdir -p "$STAGE_DIR" "$STATE_DIR" "$CONFIG_DIR"
   # Fresh lastCheckUnix so the 6h GitHub Release prompt is not due.
   printf '{\n  "version": 1,\n  "lastCheckUnix": %s\n}\n' "$(date +%s)" >"$UPDATE_STORE"
   cat >"$LAUNCHER" <<EOF
@@ -143,6 +146,7 @@ export WS_STATUS_WATCH_MS=0
 export WS_STATUS_FETCH_MS=0
 export XDG_STATE_HOME=$(printf '%q' "$STATE_DIR")
 export WS_STATUS_UPDATE_CHECK_STORE=$(printf '%q' "$UPDATE_STORE")
+export XDG_CONFIG_HOME=$(printf '%q' "$CONFIG_DIR")
 export WS_STATUS_VIEWED_STORE=$(printf '%q' "$VIEWED_STORE")
 export WS_STATUS_COMMENT_STORE=$(printf '%q' "$COMMENT_STORE")
 # Seed timestamps are Asia/Manila; pin TZ so clips match that clock.

@@ -129,6 +129,8 @@ Set WS_STATUS_GLYPHS=ascii for plain markers.
 
 `workspace-status` reads `.workspace-status-config.json` from the workspace root. Pin that root with `-C` / `--workspace <path>` or `WS_STATUS_WORKSPACE` (CLI flag > env > process cwd). Missing or non-directory paths error; they do not fall back to cwd.
 
+An optional user file, `~/.config/my-workspace-status/config.json` (`$XDG_CONFIG_HOME` when set), uses the same keys. The workspace file wins per key; `viewDefaults` and `defaultBranches` merge per sub-key. See [docs/configuration.md](./docs/configuration.md).
+
 ```json
 {
   "ignoredRepos": ["notes"],

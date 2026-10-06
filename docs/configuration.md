@@ -1,8 +1,32 @@
 # Configuration
 
+Precedence for a setting: CLI flag > environment variable > config file > built-in default.
+
+## Config files
+
+Two files use the same schema. `load_workspace_status_config` in `crates/workspace-status/src/config.rs` reads both and merges them.
+
+| File | Path | Role |
+| --- | --- | --- |
+| User file | `$XDG_CONFIG_HOME/my-workspace-status/config.json`. When `XDG_CONFIG_HOME` is unset or blank: `~/.config/my-workspace-status/config.json` | Your settings for every workspace |
+| Workspace file | `.workspace-status-config.json` in the resolved workspace root (CLI `-C` / `--workspace` > env `WS_STATUS_WORKSPACE` > process cwd) | Settings for this workspace |
+
+Merge rules:
+
+- A missing file sets nothing. With neither file, nothing is ignored and discovery uses the default depth.
+- The workspace file wins per top-level key. A key that the workspace file omits keeps the user file value.
+- `viewDefaults` and `defaultBranches` merge per sub-key. The workspace sub-key wins.
+- Arrays are replaced, not joined. A workspace `ignoredRepos` (also `[]`) replaces the user list.
+- A `null` value, and a blank `editor` / `diffTool`, count as omitted, so the user file value applies.
+- Both files are strict. An invalid user file fails the same way as an invalid workspace file. The error starts with the file: the full path for the user file, `.workspace-status-config.json` for the workspace file. Example: `~/.config/my-workspace-status/config.json maxDepth must be a positive integer` (with your real home path).
+- `ignoredRepos` is required in each file that exists, also the user file (use `"ignoredRepos": []`).
+- Nothing writes either file.
+
+Tests that run the binary, PTY e2e, desktop e2e, and `scripts/capture-demo-stills.sh` point `XDG_CONFIG_HOME` at an empty temp dir, so a user file cannot change their results. CI: `tty_spawn_paths_isolate_user_config` in `crates/workspace-status/tests/release_watch.rs`.
+
 ## `.workspace-status-config.json`
 
-Read from the resolved workspace root (CLI `-C` / `--workspace` > env `WS_STATUS_WORKSPACE` > process cwd), by `load_workspace_status_config` in `crates/workspace-status/src/config.rs`. A missing file means nothing is ignored and discovery uses the default depth.
+The keys below apply to both files. A missing file means nothing is ignored and discovery uses the default depth.
 
 `--plain` and `--json` read one workspace snapshot. See [snapshot.md](./snapshot.md).
 
@@ -101,7 +125,7 @@ Commit and stash file rows: LEFT is the first-parent blob (`rev^:path`), or an e
 
 | Override              | Effect                                                                                                                                                                                                       |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `-a` / `--all`        | `ignoredRepos` is replaced with `[]` for that run; `maxDepth` / `defaultBranches` / `editor` / `diffTool` / `viewDefaults` from config are kept                                                                                |
+| `-a` / `--all`        | `ignoredRepos` is replaced with `[]` for that run, whichever file set it; `maxDepth` / `defaultBranches` / `editor` / `diffTool` / `viewDefaults` from config are kept                                                                                |
 | Positional repo paths | Only those repos are processed, and they bypass `ignoredRepos` entirely. Naming a primary includes its linked children under cwd; naming a linked path (e.g. `app/.worktrees/feat`) includes only that path. |
 
 The two overrides differ in the TUI. `-a` replaces the ignored list before the TUI sees it, so the ignored set is empty and the surfaced repos render and fold like any other repo — expanded, no muted name, no ignored glyph. Positional paths leave the loaded config intact, so a named repo that is also in `ignoredRepos` renders with a muted name plus the ignored glyph and starts collapsed.
@@ -140,7 +164,7 @@ Optional object. It sets the TUI view modes at launch. Each key is optional. An 
 - `commitTree` sets the commit file list in commit drills and in each new compare tab. A `t` toggle changes the current tab only. The next compare tab opens in the `commitTree` mode again.
 - `-a` / `--all` and positional repo paths keep `viewDefaults`.
 - `diff: "split"` does not force side-by-side in a narrow pane. The split to inline fallback below `NARROW_SXS` still applies (see **Defaults**).
-- There are no keys for theme, mouse, ignored visibility, pane widths, or folds. The theme stays `WS_STATUS_THEME` / `T`.
+- There are no keys for mouse, ignored visibility, pane widths, or folds.
 
 ## Environment variables
 

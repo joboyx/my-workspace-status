@@ -75,14 +75,27 @@ fn fixture() -> (PathBuf, PathBuf) {
     (root, workspace)
 }
 
-fn isolate_workspace_env(cmd: &mut Command) {
+/// Empty `XDG_CONFIG_HOME` beside the workspace (under the test's temp root),
+/// so an operator user config file cannot change the result.
+fn user_config_home(workspace: &Path) -> PathBuf {
+    let dir = workspace
+        .parent()
+        .expect("workspace parent")
+        .join("xdg-config");
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Drop a parent `WS_STATUS_WORKSPACE` and isolate the user config file.
+fn isolate_env(cmd: &mut Command, workspace: &Path) {
     cmd.env_remove("WS_STATUS_WORKSPACE");
+    cmd.env("XDG_CONFIG_HOME", user_config_home(workspace));
 }
 
 fn run_json(workspace: &Path, args: &[&str]) -> serde_json::Value {
     let mut cmd = Command::new(bin());
     cmd.args(args).current_dir(workspace).env("TERM", "dumb");
-    isolate_workspace_env(&mut cmd);
+    isolate_env(&mut cmd, workspace);
     for (k, v) in git_env() {
         cmd.env(k, v);
     }
@@ -99,7 +112,7 @@ fn run_json(workspace: &Path, args: &[&str]) -> serde_json::Value {
 fn run_plain(workspace: &Path, args: &[&str]) -> String {
     let mut cmd = Command::new(bin());
     cmd.args(args).current_dir(workspace).env("TERM", "dumb");
-    isolate_workspace_env(&mut cmd);
+    isolate_env(&mut cmd, workspace);
     for (k, v) in git_env() {
         cmd.env(k, v);
     }
@@ -165,6 +178,7 @@ fn json_and_plain_match_snapshot_fixture() {
             .args(["--json"])
             .current_dir(&workspace)
             .env_remove("WS_STATUS_WORKSPACE")
+            .env("XDG_CONFIG_HOME", user_config_home(&workspace))
             .output()
             .unwrap()
             .stdout
@@ -201,6 +215,7 @@ fn json_fetch_stdout_stays_parseable() {
         .current_dir(&workspace)
         .env("TERM", "dumb")
         .env_remove("WS_STATUS_WORKSPACE")
+        .env("XDG_CONFIG_HOME", user_config_home(&workspace))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -240,7 +255,8 @@ fn named_filter_includes_ignored_and_unknown_exits() {
     let mut cmd = Command::new(bin());
     cmd.args(["--json", "missing-repo"])
         .current_dir(&workspace)
-        .env_remove("WS_STATUS_WORKSPACE");
+        .env_remove("WS_STATUS_WORKSPACE")
+        .env("XDG_CONFIG_HOME", user_config_home(&workspace));
     let out = cmd.output().unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("Unknown repo: missing-repo"));
@@ -254,7 +270,8 @@ fn ws_alias_runs_same_binary() {
     cmd.args(["--json"])
         .current_dir(&workspace)
         .env("TERM", "dumb")
-        .env_remove("WS_STATUS_WORKSPACE");
+        .env_remove("WS_STATUS_WORKSPACE")
+        .env("XDG_CONFIG_HOME", user_config_home(&workspace));
     let out = cmd.output().unwrap();
     assert!(out.status.success());
     let snapshot: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -336,6 +353,63 @@ fn merged_into_default_skips_same_commit_as_default_tip() {
     assert!(
         plain.contains("feature/landed ✅"),
         "plain must keep the merged mark on a strict ancestor:\n{plain}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn user_config_file_layers_under_workspace_file() {
+    let (root, workspace) = fixture();
+    let workspace_file = workspace.join(".workspace-status-config.json");
+    fs::remove_file(&workspace_file).unwrap();
+    let user_file = user_config_home(&workspace)
+        .join("my-workspace-status")
+        .join("config.json");
+    fs::create_dir_all(user_file.parent().unwrap()).unwrap();
+    fs::write(&user_file, "{\"ignoredRepos\": [\"notes\"]}\n").unwrap();
+    let repo_names = |snapshot: &serde_json::Value| -> Vec<String> {
+        snapshot["repos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["repo"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let snapshot = run_json(&workspace, &["--json"]);
+    assert_eq!(snapshot["ignoredRepos"], serde_json::json!(["notes"]));
+    assert_eq!(repo_names(&snapshot), vec!["app", "lib"]);
+
+    let all = run_json(&workspace, &["--json", "--all"]);
+    assert_eq!(
+        repo_names(&all),
+        vec!["app", "lib", "notes"],
+        "-a clears ignoredRepos the user file set"
+    );
+
+    fs::write(&workspace_file, "{\"ignoredRepos\": [\"lib\"]}\n").unwrap();
+    let snapshot = run_json(&workspace, &["--json"]);
+    assert_eq!(
+        snapshot["ignoredRepos"],
+        serde_json::json!(["lib"]),
+        "workspace ignoredRepos replaces the user list"
+    );
+    assert_eq!(repo_names(&snapshot), vec!["app", "notes"]);
+
+    fs::write(&user_file, "{\"ignoredRepos\": [], \"maxDepth\": 0}\n").unwrap();
+    let mut cmd = Command::new(bin());
+    cmd.args(["--json"])
+        .current_dir(&workspace)
+        .env("TERM", "dumb");
+    isolate_env(&mut cmd, &workspace);
+    let out = cmd.output().unwrap();
+    assert!(!out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr).trim_end(),
+        format!(
+            "{} maxDepth must be a positive integer",
+            user_file.display()
+        )
     );
     let _ = fs::remove_dir_all(root);
 }

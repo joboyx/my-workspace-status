@@ -170,6 +170,13 @@ impl PtySession {
         let update_store = state_home.join("update-check.json");
         write_update_check(&update_store, last_check_unix);
         cmd.env("WS_STATUS_UPDATE_CHECK_STORE", &update_store);
+        // Empty user config dir: an operator user config file cannot change
+        // the fixture's settings.
+        if !extra_has("XDG_CONFIG_HOME") {
+            let config_home = workspace.join(".e2e-config");
+            fs::create_dir_all(&config_home).unwrap();
+            cmd.env("XDG_CONFIG_HOME", &config_home);
+        }
 
         let child = pair
             .slave
