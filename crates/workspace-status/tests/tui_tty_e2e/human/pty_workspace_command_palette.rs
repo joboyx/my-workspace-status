@@ -253,7 +253,8 @@ fn pty_workspace_palette_colon_backspace_lands_in_files() {
 /// normal mode opens nothing.
 ///
 /// Fail if either opener paints the commands footer (`Enter run`) or no
-/// `Go to file` title, or if Ctrl-k paints any Quick Open chrome.
+/// `Go to file` title, or if a `:` sent after Ctrl-k types into an overlay
+/// Ctrl-k opened instead of opening commands itself.
 #[test]
 fn pty_workspace_quick_open_shift_f_and_ctrl_p_open_files_ctrl_k_does_not() {
     let (_root, workspace) = daily_workspace();
@@ -286,21 +287,31 @@ fn pty_workspace_quick_open_shift_f_and_ctrl_p_open_files_ctrl_k_does_not() {
         WAIT,
     );
 
+    // Probe, not a sleep: input is ordered, so `:` and `pull` land after
+    // Ctrl-k. Had Ctrl-k opened commands, `:` would type into it (`>:pull`);
+    // had it opened files, the query would be `:pull`. A bare `>▏` is not
+    // enough: a Ctrl-k commands opener would paint that before `:` lands.
     tui.ctrl_letter('k');
-    tui.wait_ms(SETTLE_MS);
+    tui.key(':');
+    type_palette_filter(&mut tui, "pull");
+    tui.wait_pred(
+        |screen| {
+            palette_open(screen)
+                && screen.contains(">pull▏")
+                && !screen.contains(">:")
+                && !screen.contains("Go to file")
+        },
+        "Ctrl-k opens nothing: the next `:` opens commands with query `>pull`, not `>:pull`",
+        WAIT,
+    );
+    tui.esc();
     tui.wait_pred(
         |screen| {
             palette_closed(screen)
                 && !screen.contains("Go to file")
                 && tree_cursor_on(screen, "README.md")
         },
-        "Ctrl-k in normal mode does not open Quick Open",
-        WAIT,
-    );
-    tui.wait_ms(SETTLE_MS);
-    tui.wait_pred(
-        |screen| palette_closed(screen) && !screen.contains("Go to file"),
-        "Ctrl-k still does not open Quick Open",
+        "Esc closes Quick Open and leaves the tree cursor on README.md",
         WAIT,
     );
 }
