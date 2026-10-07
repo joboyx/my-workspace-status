@@ -308,6 +308,9 @@ pub struct LayoutHit {
     /// 0-based file line painted on each body row from
     /// [`Self::file_view_y`] (a wrapped line repeats). Empty off a file tab.
     pub file_view_row_lines: Vec<usize>,
+    /// Results rows the search-in-files dialog painted last; PgUp / PgDn
+    /// move by it.
+    pub search_files_rows: u16,
 }
 
 impl Default for LayoutHit {
@@ -362,6 +365,7 @@ impl Default for LayoutHit {
             file_view_width: 0,
             file_view_height: 0,
             file_view_row_lines: Vec::new(),
+            search_files_rows: 0,
         }
     }
 }

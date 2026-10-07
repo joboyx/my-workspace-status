@@ -866,9 +866,6 @@ fn is_search_files_key(key: KeyEvent) -> bool {
         && key.modifiers.difference(KeyModifiers::SHIFT) == KeyModifiers::CONTROL
 }
 
-/// Results moved by one PgUp / PgDn in the search-in-files dialog.
-const SEARCH_FILES_PAGE: i32 = 10;
-
 /// Cursor step for a list overlay key (Quick Open and every picker), if any.
 ///
 /// Up / Down, Ctrl-n / Ctrl-p, and Ctrl-j / Ctrl-k move. Letters never move,
@@ -918,8 +915,8 @@ fn search_files_key_action(key: KeyEvent, results: bool) -> Action {
         KeyCode::Esc => Action::SearchFilesCancel,
         KeyCode::Enter => Action::SearchFilesSubmit,
         KeyCode::Tab => Action::SearchFilesToggleScope,
-        KeyCode::PageDown => Action::SearchFilesMove(SEARCH_FILES_PAGE),
-        KeyCode::PageUp => Action::SearchFilesMove(-SEARCH_FILES_PAGE),
+        KeyCode::PageDown => Action::SearchFilesPage(1),
+        KeyCode::PageUp => Action::SearchFilesPage(-1),
         KeyCode::Backspace => Action::SearchFilesBackspace,
         KeyCode::Char(c) if alt_only => match c.to_ascii_lowercase() {
             'c' => Action::SearchFilesToggleOption(SearchFilesOption::Case),
@@ -3496,14 +3493,8 @@ mod tests {
                 "Ctrl-{c}"
             );
         }
-        assert_eq!(
-            at(key(KeyCode::PageDown)),
-            Action::SearchFilesMove(SEARCH_FILES_PAGE)
-        );
-        assert_eq!(
-            at(key(KeyCode::PageUp)),
-            Action::SearchFilesMove(-SEARCH_FILES_PAGE)
-        );
+        assert_eq!(at(key(KeyCode::PageDown)), Action::SearchFilesPage(1));
+        assert_eq!(at(key(KeyCode::PageUp)), Action::SearchFilesPage(-1));
         assert_eq!(at(key(KeyCode::Backspace)), Action::SearchFilesBackspace);
         assert_eq!(at(key(KeyCode::Tab)), Action::SearchFilesToggleScope);
         assert_eq!(at(key(KeyCode::Esc)), Action::SearchFilesCancel);

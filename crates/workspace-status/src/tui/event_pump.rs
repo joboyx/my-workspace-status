@@ -352,6 +352,7 @@ mod tests {
             Action::SearchFilesChar('a'),
             Action::SearchFilesBackspace,
             Action::SearchFilesMove(1),
+            Action::SearchFilesPage(1),
             Action::SearchFilesToggleScope,
             Action::SearchFilesToggleOption(SearchFilesOption::Regex),
             Action::SearchFilesCancel,

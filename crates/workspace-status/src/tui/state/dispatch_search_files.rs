@@ -14,14 +14,15 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::file_index::FileIndex;
+use crate::file_index::{FileIndex, FileRead};
 use crate::file_search::MAX_SEARCH_HITS;
 
 use super::super::action::{Action, Effect, SearchFilesOption};
 use super::super::ctrl_c_exit::is_ctrl_c_exit_prompt;
-use super::super::quick_open::{FileIndexState, QuickOpenScope};
+use super::super::quick_open::FileIndexState;
 use super::super::search_files::{
-    query_error, SearchFilesState, SearchZone, NO_SEARCH_MATCHES, SEARCH_DEBOUNCE,
+    query_error, SearchFilesState, SearchPreview, SearchZone, NO_SEARCH_MATCHES, SEARCH_DEBOUNCE,
+    SEARCH_PREVIEW_MIN_COLS,
 };
 use super::super::status::StatusMessage;
 use super::AppState;
@@ -54,6 +55,17 @@ impl AppState {
                 if let Some(dialog) = self.search_files.as_mut() {
                     dialog.zone = SearchZone::Results;
                     dialog.move_cursor(delta);
+                }
+                Effect::None
+            }
+            Action::SearchFilesPage(pages) => {
+                // One row less than the painted height, so the edge hit
+                // stays in view; file headers make a page move a little
+                // further than the rows it shows.
+                let page = i32::from(self.layout.search_files_rows.saturating_sub(1).max(1));
+                if let Some(dialog) = self.search_files.as_mut() {
+                    dialog.zone = SearchZone::Results;
+                    dialog.move_cursor(pages.saturating_mul(page));
                 }
                 Effect::None
             }
@@ -151,7 +163,16 @@ impl AppState {
     /// Close the dialog and park it for the restore rule. Its running
     /// search stops: the live generation goes to 0 with no dialog open.
     fn close_search_files(&mut self) {
-        if let Some(dialog) = self.search_files.take() {
+        if let Some(mut dialog) = self.search_files.take() {
+            // A preview read still running lands after the close and is
+            // dropped; forget it so a restore asks again.
+            if dialog
+                .preview
+                .as_ref()
+                .is_some_and(|preview| preview.body.is_none())
+            {
+                dialog.preview = None;
+            }
             self.search_files_parked = Some(dialog);
         }
     }
@@ -163,12 +184,7 @@ impl AppState {
             return Effect::None;
         };
         let widened = !dialog.widened;
-        let after = if widened {
-            QuickOpenScope::Workspace
-        } else {
-            dialog.focused.clone()
-        };
-        if after == dialog.scope() {
+        if dialog.scope_with(widened) == dialog.scope() {
             return Effect::None;
         }
         dialog.widened = widened;
@@ -288,18 +304,21 @@ impl AppState {
     ///
     /// A literal search also arms the in-file search on the searched text,
     /// so `n` / `N` step its matches; a regex search does not (the in-file
-    /// search matches plain text only). With no hit the dialog stays and
-    /// the status warns `no matches`.
+    /// search matches plain text only). The armed text is the query the
+    /// shown hits came from. With no hit the dialog stays and the status
+    /// warns `no matches` (see [`Self::warn_no_search_hit`]).
     fn submit_search_files(&mut self) -> Effect {
         let Some((checkout, rel, line)) = self.search_files_target() else {
-            self.status = StatusMessage::warn(NO_SEARCH_MATCHES);
+            self.warn_no_search_hit();
             return Effect::None;
         };
+        // Arm what the list shows: during a new search's first chunk the
+        // hits still come from the previous query.
         let search = self
             .search_files
             .as_ref()
-            .filter(|dialog| !dialog.searched_options.regex)
-            .map(|dialog| dialog.searched.clone());
+            .filter(|dialog| !dialog.hits_options.regex)
+            .map(|dialog| dialog.hits_query.clone());
         self.close_search_files();
         let line = usize::try_from(line.saturating_sub(1)).unwrap_or(usize::MAX);
         self.open_file_tab_at_line(checkout, rel, line, search)
@@ -307,10 +326,10 @@ impl AppState {
 
     /// `e`: park the dialog and open the highlighted hit's file in the
     /// editor at the hit line. With no hit the dialog stays and the status
-    /// warns `no matches`.
+    /// warns `no matches` (see [`Self::warn_no_search_hit`]).
     fn edit_search_files_hit(&mut self) -> Effect {
         let Some((repo, path, line)) = self.search_files_target() else {
-            self.status = StatusMessage::warn(NO_SEARCH_MATCHES);
+            self.warn_no_search_hit();
             return Effect::None;
         };
         self.close_search_files();
@@ -320,6 +339,65 @@ impl AppState {
             path,
             line: Some(line),
         }
+    }
+
+    /// Enter or `e` found no hit: warn `no matches`, unless a search is
+    /// still due or running (its `searching…` status stays instead).
+    fn warn_no_search_hit(&mut self) {
+        if self
+            .search_files
+            .as_ref()
+            .is_some_and(SearchFilesState::pending)
+        {
+            return;
+        }
+        self.status = StatusMessage::warn(NO_SEARCH_MATCHES);
+    }
+
+    /// Ask for the highlighted hit's file for the preview pane.
+    ///
+    /// `Some((gen, checkout, rel))` when the dialog is open, the terminal is
+    /// at least [`SEARCH_PREVIEW_MIN_COLS`] wide (the preview paints), and
+    /// the highlighted hit's file is not the one the preview already holds
+    /// or reads; the preview then waits on that read. `None` otherwise. The
+    /// interpreter asks after every change and keeps only the latest read.
+    pub(crate) fn search_preview_request(&mut self) -> Option<(u64, String, String)> {
+        if self.layout.term_cols < SEARCH_PREVIEW_MIN_COLS {
+            return None;
+        }
+        let (checkout, rel, _) = self.search_files_target()?;
+        let dialog = self.search_files.as_ref()?;
+        if dialog
+            .preview
+            .as_ref()
+            .is_some_and(|preview| preview.is_for(&checkout, &rel))
+        {
+            return None;
+        }
+        let gen = self.next_search_files_gen();
+        let dialog = self.search_files.as_mut()?;
+        dialog.preview = Some(SearchPreview {
+            checkout: checkout.clone(),
+            rel: rel.clone(),
+            gen,
+            body: None,
+        });
+        Some((gen, checkout, rel))
+    }
+
+    /// Accept the preview read for generation `gen`. False (dropped)
+    /// unless the dialog is open and still waits on that read.
+    pub(crate) fn apply_search_preview(&mut self, gen: u64, body: FileRead) -> bool {
+        let Some(preview) = self
+            .search_files
+            .as_mut()
+            .and_then(|dialog| dialog.preview.as_mut())
+            .filter(|preview| preview.gen == gen && preview.body.is_none())
+        else {
+            return false;
+        };
+        preview.body = Some(body);
+        true
     }
 
     /// Milliseconds until the debounced search is due (rounded up), or
@@ -394,6 +472,8 @@ impl AppState {
             .filter(|dialog| dialog.searching && dialog.search_gen == gen)?;
         if dialog.stale {
             dialog.clear_results();
+            dialog.hits_query = dialog.searched.clone();
+            dialog.hits_options = dialog.searched_options;
         }
         dialog.hits.extend(chunk.hits);
         dialog.skipped += chunk.skipped;
@@ -423,6 +503,7 @@ mod tests {
 
     use super::super::super::action::QuickOpenEntry;
     use super::super::super::keys::event_to_action;
+    use super::super::super::quick_open::QuickOpenScope;
     use super::super::super::search::SearchPane;
     use super::super::super::search_files::SearchStatus;
     use super::super::super::status::StatusMessage;
@@ -1351,5 +1432,150 @@ mod tests {
         let state = dialog(&app);
         assert_eq!(state.hits, vec![hit(0, 1)], "the list stays");
         assert!(matches!(state.status()[0], SearchStatus::InvalidRegex(_)));
+    }
+
+    #[test]
+    fn enter_in_the_stale_window_arms_the_query_the_list_shows() {
+        let mut app = family_state();
+        let gen = open_and_search(&mut app, "foo");
+        app.apply_search_chunk(gen, chunk(vec![hit(1, 4)], None));
+        type_text(&mut app, "x");
+        search_gen(Some(fire(&mut app)));
+        let state = dialog(&app);
+        assert!(state.stale && state.searching, "`foox` has no hit in yet");
+        assert_eq!(state.hits_query, "foo");
+        let Effect::LoadFileTab { tab_id, gen, .. } = app.dispatch(Action::SearchFilesSubmit)
+        else {
+            panic!("expected a new file tab load");
+        };
+        app.apply_file_tab(tab_id, gen, text(&MAIN_RS));
+        assert_eq!(app.search_query, "foo", "not the newer `foox`");
+        assert_eq!(app.search_hit, Some(3));
+    }
+
+    #[test]
+    fn enter_or_e_while_searching_with_no_hit_stays_quiet() {
+        let mut app = family_state();
+        open_and_search(&mut app, "foo");
+        for action in [Action::SearchFilesSubmit, Action::SearchFilesEdit] {
+            assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
+            assert!(app.search_files.is_some(), "{action:?} keeps the dialog");
+            assert!(app.status.is_empty(), "{action:?}: no early miss");
+            assert_eq!(dialog(&app).status(), vec![SearchStatus::Searching]);
+        }
+        type_text(&mut app, "x");
+        assert!(dialog(&app).due.is_some());
+        app.dispatch(Action::SearchFilesSubmit);
+        assert!(app.status.is_empty(), "a due search counts as running");
+    }
+
+    #[test]
+    fn regex_enter_on_an_open_tab_clears_its_older_search() {
+        let mut app = family_state();
+        let Effect::LoadFileTab { tab_id, gen, .. } =
+            app.open_file_tab("app".into(), "src/main.rs".into())
+        else {
+            panic!("expected a load");
+        };
+        app.apply_file_tab(tab_id, gen, text(&MAIN_RS));
+        app.search_active = true;
+        app.search_query = "main".into();
+        app.search_target = SearchPane::File;
+        app.search_hit = Some(0);
+
+        let (gen, _) = open(&mut app);
+        app.apply_search_index(gen, index_of(&["README.md", "src/main.rs"]));
+        type_text(&mut app, "ba+r");
+        fire(&mut app);
+        let gen = search_gen(Some(
+            app.dispatch(Action::SearchFilesToggleOption(SearchFilesOption::Regex)),
+        ));
+        app.apply_search_chunk(gen, chunk(vec![hit(1, 5)], None));
+        app.dispatch(Action::SearchFilesSubmit);
+        assert_eq!(app.tabs.active_file().map(|tab| tab.id), Some(tab_id));
+        assert_eq!(file_cursor(&app), 4);
+        assert!(!app.search_active, "the `main` search is gone");
+        assert_eq!(app.search_hit, None);
+        assert!(app.search_query.is_empty());
+    }
+
+    #[test]
+    fn page_moves_by_the_painted_results_height() {
+        let mut app = family_state();
+        let gen = open_and_search(&mut app, "a");
+        let hits = (1..=40).map(|line| hit(1, line)).collect();
+        app.apply_search_chunk(gen, chunk(hits, None));
+        app.layout.search_files_rows = 8;
+        app.dispatch(Action::SearchFilesPage(1));
+        assert_eq!(dialog(&app).zone, SearchZone::Results);
+        assert_eq!(dialog(&app).cursor, 7, "one row less than the height");
+        app.dispatch(Action::SearchFilesPage(-1));
+        assert_eq!(dialog(&app).cursor, 0);
+        app.layout.search_files_rows = 0;
+        app.dispatch(Action::SearchFilesPage(1));
+        assert_eq!(dialog(&app).cursor, 1, "before any paint: one hit");
+    }
+
+    #[test]
+    fn preview_reads_the_highlighted_hits_file_once_per_file() {
+        let mut app = family_state();
+        app.layout.term_cols = SEARCH_PREVIEW_MIN_COLS;
+        let gen = open_and_search(&mut app, "a");
+        assert_eq!(app.search_preview_request(), None, "no hit yet");
+        app.apply_search_chunk(gen, chunk(vec![hit(0, 1), hit(1, 2), hit(1, 3)], None));
+        let (first, checkout, rel) = app.search_preview_request().expect("a read");
+        assert_eq!((checkout.as_str(), rel.as_str()), ("app", "README.md"));
+        assert_eq!(app.search_preview_request(), None, "already reading it");
+
+        app.dispatch(Action::SearchFilesMove(1));
+        let (second, _, rel) = app.search_preview_request().expect("new file");
+        assert_eq!(rel, "src/main.rs");
+        assert!(
+            !app.apply_search_preview(first, text(&["readme"])),
+            "the README read is stale"
+        );
+        assert!(app.apply_search_preview(second, text(&MAIN_RS)));
+        assert!(!app.apply_search_preview(second, text(&MAIN_RS)), "once");
+        app.dispatch(Action::SearchFilesMove(1));
+        assert_eq!(app.search_preview_request(), None, "same file, no read");
+        let preview = dialog(&app).preview.as_ref().expect("preview");
+        assert_eq!(preview.body, Some(text(&MAIN_RS)));
+    }
+
+    #[test]
+    fn preview_waits_for_a_wide_terminal() {
+        let mut app = family_state();
+        app.layout.term_cols = SEARCH_PREVIEW_MIN_COLS - 1;
+        let gen = open_and_search(&mut app, "a");
+        app.apply_search_chunk(gen, chunk(vec![hit(1, 2)], None));
+        assert_eq!(app.search_preview_request(), None, "no preview pane");
+        assert_eq!(dialog(&app).preview, None);
+        app.dispatch(Action::Resize {
+            cols: SEARCH_PREVIEW_MIN_COLS,
+            rows: 30,
+        });
+        assert!(app.search_preview_request().is_some(), "now it paints");
+    }
+
+    #[test]
+    fn a_preview_read_in_flight_at_close_is_asked_again_on_restore() {
+        let mut app = family_state();
+        app.layout.term_cols = SEARCH_PREVIEW_MIN_COLS;
+        let gen = open_and_search(&mut app, "a");
+        app.apply_search_chunk(gen, chunk(vec![hit(1, 2)], None));
+        let (read, _, _) = app.search_preview_request().expect("a read");
+        app.dispatch(Action::SearchFilesCancel);
+        assert!(!app.apply_search_preview(read, text(&MAIN_RS)), "closed");
+        assert_eq!(app.dispatch(Action::ToggleSearchFiles), Effect::None);
+        let (again, _, rel) = app.search_preview_request().expect("asked again");
+        assert_ne!(again, read);
+        assert_eq!(rel, "src/main.rs");
+        assert!(app.apply_search_preview(again, text(&MAIN_RS)));
+
+        // A finished preview is parked with the dialog and kept.
+        app.dispatch(Action::SearchFilesCancel);
+        app.dispatch(Action::ToggleSearchFiles);
+        assert_eq!(app.search_preview_request(), None);
+        assert!(dialog(&app).preview.as_ref().unwrap().body.is_some());
     }
 }

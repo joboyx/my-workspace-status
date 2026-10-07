@@ -204,6 +204,11 @@ pub(crate) enum JobOutcome {
         gen: u64,
         chunk: SearchChunk,
     },
+    /// Search-in-files preview body for preview generation `gen`.
+    SearchPreview {
+        gen: u64,
+        body: FileRead,
+    },
     /// File tab body for load generation `gen`.
     FileTab {
         tab_id: u64,
@@ -645,6 +650,9 @@ pub(crate) struct Interpreter {
     /// Latest search-in-files chunk request; a newer one replaces it
     /// before spawn.
     search_chunk_job: Option<SearchChunkJob>,
+    /// Latest search-in-files preview read: generation, checkout, path. A
+    /// newer one replaces it before spawn.
+    search_preview_job: Option<(u64, String, String)>,
     /// Generation of the search that may still run (0: none). Synced from
     /// the state after every change; a running chunk stops between files
     /// once it no longer names the chunk's own generation.
@@ -721,6 +729,7 @@ impl Interpreter {
             file_tab_jobs: VecDeque::new(),
             search_index_job: None,
             search_chunk_job: None,
+            search_preview_job: None,
             search_live: Arc::new(AtomicU64::new(0)),
             line_blame_slot: None,
             line_blame_inflight: false,
@@ -1387,12 +1396,17 @@ impl Interpreter {
         }
     }
 
-    /// Jobs the state asks for after any schedule or apply: the focused
-    /// line's blame, and an older graph page for a pending blame reveal
-    /// (dropped once the graph pane loses focus).
+    /// Jobs the state asks for after any schedule or apply: the
+    /// search-in-files preview read, the focused line's blame, and an older
+    /// graph page for a pending blame reveal (dropped once the graph pane
+    /// loses focus).
     fn after_change(&mut self, state: &mut AppState) {
         self.search_live
             .store(state.search_files_live_gen(), Ordering::Relaxed);
+        if let Some(job) = state.search_preview_request() {
+            self.search_preview_job = Some(job);
+            self.sched.enqueue_user(UserTag::SearchFiles);
+        }
         self.maybe_queue_line_blame(state);
         state.drop_graph_reveal_off_graph();
         if Self::autoload_allowed(state) && state.graph_reveal_wants_older() {
@@ -1948,6 +1962,11 @@ impl Interpreter {
             JobOutcome::SearchChunk { gen, chunk } => {
                 if let Some(follow) = state.apply_search_chunk(gen, chunk) {
                     self.schedule(state, opts, follow, &Action::None);
+                    self.mark();
+                }
+            }
+            JobOutcome::SearchPreview { gen, body } => {
+                if state.apply_search_preview(gen, body) {
                     self.mark();
                 }
             }
@@ -2878,6 +2897,19 @@ impl Interpreter {
                 self.sched.note_job_finished(id);
             }
             UserTag::SearchFiles => {
+                // The preview is one file read: it goes before a chunk so
+                // a moving highlight does not wait on a whole search.
+                if let Some((gen, checkout, rel)) = self.search_preview_job.take() {
+                    let file = opts.cwd.join(checkout).join(rel);
+                    spawn(
+                        id,
+                        Box::new(move || JobOutcome::SearchPreview {
+                            gen,
+                            body: read_text_file(&file, MAX_FILE_BYTES),
+                        }),
+                    );
+                    return;
+                }
                 if let Some((gen, roots)) = self.search_index_job.take() {
                     let cwd = opts.cwd.clone();
                     spawn(
@@ -5974,6 +6006,27 @@ mod tests {
             ]
         );
         assert_eq!(dialog.skipped, 1, "the binary file");
+        // The highlighted hit's file was read for the preview pane on the
+        // pool (the default terminal is wide enough to paint it).
+        let preview = dialog.preview.as_ref().expect("preview requested");
+        assert_eq!(
+            (preview.checkout.as_str(), preview.rel.as_str()),
+            ("app", "src/main.rs")
+        );
+        match &preview.body {
+            Some(FileRead::Text { lines, .. }) => assert_eq!(lines[3], "fn needle() {}"),
+            other => panic!("expected the file text, got {other:?}"),
+        }
+
+        // Below the preview width nothing is read.
+        state.dispatch(Action::SearchFilesCancel);
+        state.search_files_parked.as_mut().expect("parked").preview = None;
+        state.layout.term_cols = crate::tui::search_files::SEARCH_PREVIEW_MIN_COLS - 1;
+        let effect = state.dispatch(Action::ToggleSearchFiles);
+        interp.interpret_sync(&mut state, &opts, effect, &Action::None);
+        let dialog = state.search_files.as_ref().expect("dialog open");
+        assert_eq!(dialog.hits.len(), 2, "restored with its hits");
+        assert_eq!(dialog.preview, None, "no preview below 100 columns");
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -64,7 +64,8 @@ impl AppState {
     ///
     /// With `search`, the in-file search is armed on that text with `line`
     /// as the current hit, as if `/` and Enter had landed there, so `n` /
-    /// `N` step its matches from `line`. A new tab has no lines yet: its
+    /// `N` step its matches from `line`. Without it any in-file search the
+    /// tab had is cleared. A new tab has no lines yet: its
     /// cursor stays on `line` until [`Self::apply_file_tab`] clamps it to
     /// the loaded length.
     pub(crate) fn open_file_tab_at_line(
@@ -84,13 +85,19 @@ impl AppState {
             line
         };
         let cursor = tab.cursor;
+        self.search_mode = false;
+        self.search_origin = None;
         if let Some(query) = search {
-            self.search_mode = false;
-            self.search_origin = None;
             self.search_active = true;
             self.search_query = query;
             self.search_target = SearchPane::File;
             self.search_hit = Some(cursor);
+        } else {
+            // A focused tab may still hold an older search; its hits would
+            // sit beside the moved cursor.
+            self.search_active = false;
+            self.search_query.clear();
+            self.search_hit = None;
         }
         effect
     }

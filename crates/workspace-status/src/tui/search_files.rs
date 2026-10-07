@@ -10,8 +10,10 @@
 
 use std::time::{Duration, Instant};
 
+use crate::file_index::FileRead;
 use crate::file_search::{build_matcher, SearchHit, SearchOptions, MAX_SEARCH_HITS};
 
+use super::ctrl_c_exit::is_ctrl_c_exit_prompt;
 use super::quick_open::{FileIndexState, QuickOpenScope};
 use super::tabs::checkout_leaf;
 
@@ -24,6 +26,39 @@ pub const NO_SEARCH_MATCHES: &str = "no matches";
 /// Wall time one search chunk may spend on the blocking pool before it
 /// returns its hits and the next chunk is scheduled.
 pub const SEARCH_CHUNK_BUDGET: Duration = Duration::from_millis(30);
+
+/// Narrowest terminal, in columns, that paints the preview pane and reads
+/// its file. Below it the results take the dialog's full width.
+pub const SEARCH_PREVIEW_MIN_COLS: u16 = 100;
+
+/// File body the preview pane shows, keyed by checkout and path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchPreview {
+    /// Snapshot `repo` path of the file's checkout.
+    pub checkout: String,
+    /// Checkout-relative path of the file.
+    pub rel: String,
+    /// Generation of the read; a result for another generation is dropped.
+    pub gen: u64,
+    /// The read, or `None` while it runs.
+    pub body: Option<FileRead>,
+}
+
+impl SearchPreview {
+    /// True when this preview is for `rel` in `checkout`.
+    pub fn is_for(&self, checkout: &str, rel: &str) -> bool {
+        self.checkout == checkout && self.rel == rel
+    }
+}
+
+/// One painted row of the results list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchRow {
+    /// File header: index into the file index's entries.
+    Header(usize),
+    /// Hit line: index into [`SearchFilesState::hits`].
+    Hit(usize),
+}
 
 /// Which part of the dialog the keys drive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,10 +90,6 @@ pub enum SearchStatus {
     Skipped(usize),
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the dialog paint shows the status row")
-)]
 impl SearchStatus {
     /// Text the status row paints for this part.
     pub fn text(&self) -> String {
@@ -86,6 +117,13 @@ impl SearchStatus {
     pub fn is_dim(&self) -> bool {
         matches!(self, Self::Skipped(_))
     }
+}
+
+/// Whether the dialog's status row paints the app `status` instead of
+/// [`SearchFilesState::status`]: only the dialog's own [`NO_SEARCH_MATCHES`]
+/// warning and the Ctrl-c quit prompt (shown inline) qualify.
+pub fn search_row_shows_status(status: &str) -> bool {
+    status == NO_SEARCH_MATCHES || is_ctrl_c_exit_prompt(status)
 }
 
 /// Short name of `scope`: `all repos`, or the checkout's leaf.
@@ -130,6 +168,12 @@ pub struct SearchFilesState {
     /// Options the running (or last) search used. A chunk continuation
     /// searches with these, not with a chip flipped since.
     pub searched_options: SearchOptions,
+    /// Query the hits on screen came from. Set when the first chunk of a
+    /// search lands, so Enter arms the in-file search on what the list
+    /// shows, not on a newer search whose hits are not in yet.
+    pub hits_query: String,
+    /// Options the hits on screen came from (see [`Self::hits_query`]).
+    pub hits_options: SearchOptions,
     /// A search of [`Self::search_gen`] is queued or running.
     pub searching: bool,
     /// [`Self::hits`] came from an earlier search. The first chunk of
@@ -150,6 +194,8 @@ pub struct SearchFilesState {
     pub scroll: usize,
     /// When the debounced search of the last query edit starts.
     pub due: Option<Instant>,
+    /// File body of the highlighted hit's file for the preview pane.
+    pub preview: Option<SearchPreview>,
 }
 
 impl SearchFilesState {
@@ -168,6 +214,8 @@ impl SearchFilesState {
             search_gen: 0,
             searched: String::new(),
             searched_options: SearchOptions::default(),
+            hits_query: String::new(),
+            hits_options: SearchOptions::default(),
             searching: false,
             stale: false,
             hits: Vec::new(),
@@ -176,12 +224,18 @@ impl SearchFilesState {
             cursor: 0,
             scroll: 0,
             due: None,
+            preview: None,
         }
     }
 
     /// Checkouts searched: all repos when widened, else the focused scope.
     pub fn scope(&self) -> QuickOpenScope {
-        if self.widened {
+        self.scope_with(self.widened)
+    }
+
+    /// Checkouts searched with `widened` in place of [`Self::widened`].
+    pub fn scope_with(&self, widened: bool) -> QuickOpenScope {
+        if widened {
             QuickOpenScope::Workspace
         } else {
             self.focused.clone()
@@ -189,7 +243,6 @@ impl SearchFilesState {
     }
 
     /// Dialog title: `Search · all repos` or `Search · <checkout leaf>`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the dialog paint shows it"))]
     pub fn title(&self) -> String {
         format!("Search · {}", scope_label(&self.scope()))
     }
@@ -210,6 +263,50 @@ impl SearchFilesState {
         self.cursor = next.clamp(0, len as i64 - 1) as usize;
     }
 
+    /// Highlighted hit, if any.
+    pub fn selected_hit(&self) -> Option<&SearchHit> {
+        self.hits.get(self.cursor)
+    }
+
+    /// Results list rows: a header before the first hit of each file, then
+    /// one row per hit.
+    pub fn result_rows(&self) -> Vec<SearchRow> {
+        let mut rows = Vec::with_capacity(self.hits.len() + 1);
+        let mut last_entry = None;
+        for (idx, hit) in self.hits.iter().enumerate() {
+            if last_entry != Some(hit.entry) {
+                rows.push(SearchRow::Header(hit.entry));
+                last_entry = Some(hit.entry);
+            }
+            rows.push(SearchRow::Hit(idx));
+        }
+        rows
+    }
+
+    /// Move [`Self::scroll`] so the highlighted hit shows in `height`
+    /// painted rows of `rows` ([`Self::result_rows`]), with its file header
+    /// when that fits. Keeps the scroll while the hit already shows and
+    /// never leaves blank rows under the last result.
+    pub fn scroll_to_cursor(&mut self, rows: &[SearchRow], height: usize) {
+        let height = height.max(1);
+        if let Some(at) = rows
+            .iter()
+            .position(|row| *row == SearchRow::Hit(self.cursor))
+        {
+            let top = match at.checked_sub(1).map(|above| rows[above]) {
+                Some(SearchRow::Header(_)) => at - 1,
+                _ => at,
+            };
+            if top < self.scroll {
+                self.scroll = top;
+            }
+            if at >= self.scroll + height {
+                self.scroll = at + 1 - height;
+            }
+        }
+        self.scroll = self.scroll.min(rows.len().saturating_sub(height));
+    }
+
     /// Drop the hits and what was counted with them.
     pub(crate) fn clear_results(&mut self) {
         self.hits.clear();
@@ -220,13 +317,35 @@ impl SearchFilesState {
         self.scroll = 0;
     }
 
+    /// Footer hints for the zone the keys drive, ` · `-separated.
+    ///
+    /// Query zone: `↑↓ move · Enter open · Tab all repos · Alt-c/w/r · Esc
+    /// close`. The results zone moves on `j/k` and adds `e edit`. Once
+    /// widened, Tab names the checkout it goes back to; with focus on the
+    /// workspace Tab changes nothing and has no hint.
+    pub fn footer_hints(&self) -> String {
+        let results = self.zone == SearchZone::Results;
+        let mut hints = vec![if results { "j/k move" } else { "↑↓ move" }.to_string()];
+        hints.push("Enter open".into());
+        if results {
+            hints.push("e edit".into());
+        }
+        match (&self.focused, self.widened) {
+            (QuickOpenScope::Workspace, _) => {}
+            (_, false) => hints.push("Tab all repos".into()),
+            (focused, true) => hints.push(format!("Tab {}", scope_label(focused))),
+        }
+        hints.push("Alt-c/w/r".into());
+        hints.push("Esc close".into());
+        hints.join(" · ")
+    }
+
     /// Status row parts, in paint order.
     ///
     /// `invalid regex: …` first; then `indexing…` or the index error until
     /// the index is ready; then `searching…` while a search is due or
     /// running with none of its hits in yet, else `no matches in <scope>`
     /// once a search came back empty; then the cap and the skipped count.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the dialog paint shows it"))]
     pub fn status(&self) -> Vec<SearchStatus> {
         let mut parts = Vec::new();
         if let Some(err) = &self.error {
@@ -387,6 +506,104 @@ mod tests {
             !texts(&state).iter().any(|t| t.starts_with("no matches")),
             "an invalid query is not a miss"
         );
+    }
+
+    #[test]
+    fn result_rows_put_a_header_before_each_file() {
+        let mut state = SearchFilesState::new(
+            QuickOpenScope::Workspace,
+            "x".into(),
+            SearchOptions::default(),
+        );
+        assert!(state.result_rows().is_empty());
+        state.hits = vec![hit(0, 1), hit(0, 5), hit(3, 2)];
+        assert_eq!(
+            state.result_rows(),
+            vec![
+                SearchRow::Header(0),
+                SearchRow::Hit(0),
+                SearchRow::Hit(1),
+                SearchRow::Header(3),
+                SearchRow::Hit(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn scroll_keeps_the_highlighted_hit_and_its_header_in_view() {
+        let mut state = SearchFilesState::new(
+            QuickOpenScope::Workspace,
+            "x".into(),
+            SearchOptions::default(),
+        );
+        // Files of 3 hits each: rows H h h h H h h h …
+        state.hits = (0..12).map(|i| hit(i / 3, i as u32 + 1)).collect();
+        let rows = state.result_rows();
+        assert_eq!(rows.len(), 16);
+
+        state.cursor = 2;
+        state.scroll_to_cursor(&rows, 5);
+        assert_eq!(state.scroll, 0, "already in view");
+
+        state.cursor = 7; // row 10: the last hit of the third file
+        state.scroll_to_cursor(&rows, 5);
+        assert_eq!(state.scroll, 6, "the hit is the bottom row");
+
+        state.cursor = 3; // row 5, right under its header (row 4)
+        state.scroll_to_cursor(&rows, 5);
+        assert_eq!(state.scroll, 4, "scrolling up shows the header too");
+
+        state.cursor = 11;
+        state.scroll_to_cursor(&rows, 40);
+        assert_eq!(state.scroll, 0, "everything fits: no scroll");
+
+        state.scroll = 14;
+        state.cursor = 0;
+        state.hits.truncate(1);
+        let rows = state.result_rows();
+        state.scroll_to_cursor(&rows, 5);
+        assert_eq!(state.scroll, 0, "a shorter list clamps the scroll");
+
+        state.hits = (0..12).map(|i| hit(i / 3, i as u32 + 1)).collect();
+        let rows = state.result_rows();
+        state.scroll = 0;
+        state.cursor = 3;
+        state.scroll_to_cursor(&rows, 1);
+        assert_eq!(state.scroll, 5, "one row: the hit wins over its header");
+    }
+
+    #[test]
+    fn footer_hints_follow_the_zone_and_scope() {
+        let mut state = SearchFilesState::new(
+            QuickOpenScope::Checkout("apps/web".into()),
+            String::new(),
+            SearchOptions::default(),
+        );
+        assert_eq!(
+            state.footer_hints(),
+            "↑↓ move · Enter open · Tab all repos · Alt-c/w/r · Esc close"
+        );
+        state.zone = SearchZone::Results;
+        assert_eq!(
+            state.footer_hints(),
+            "j/k move · Enter open · e edit · Tab all repos · Alt-c/w/r · Esc close"
+        );
+        state.widened = true;
+        assert!(state.footer_hints().contains("Tab web ·"));
+        state.focused = QuickOpenScope::Workspace;
+        state.widened = false;
+        assert!(
+            !state.footer_hints().contains("Tab"),
+            "Tab has nothing to do"
+        );
+    }
+
+    #[test]
+    fn status_row_shows_only_the_dialogs_own_status() {
+        assert!(search_row_shows_status(NO_SEARCH_MATCHES));
+        assert!(search_row_shows_status("Press Ctrl-c again to exit"));
+        assert!(!search_row_shows_status("Fetched 2 repos"));
+        assert!(!search_row_shows_status(""));
     }
 
     #[test]

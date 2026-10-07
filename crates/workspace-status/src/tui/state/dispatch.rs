@@ -333,6 +333,7 @@ impl AppState {
             | Action::SearchFilesChar(_)
             | Action::SearchFilesBackspace
             | Action::SearchFilesMove(_)
+            | Action::SearchFilesPage(_)
             | Action::SearchFilesToggleScope
             | Action::SearchFilesToggleOption(_)
             | Action::SearchFilesCancel

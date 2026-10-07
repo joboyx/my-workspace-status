@@ -268,9 +268,11 @@ pub enum Action {
     /// Delete the last search query character (back to the query zone).
     SearchFilesBackspace,
     /// Move the highlighted hit by `delta` rows (arrows, Ctrl-n / Ctrl-p,
-    /// `j` / `k` in the results zone, PgUp / PgDn by a page). Enters the
-    /// results zone.
+    /// `j` / `k` in the results zone). Enters the results zone.
     SearchFilesMove(i32),
+    /// PgUp / PgDn: move the highlighted hit by `pages` times the painted
+    /// results height. Enters the results zone.
+    SearchFilesPage(i32),
     /// Tab: widen the dialog to all repos, or back to the focused scope.
     SearchFilesToggleScope,
     /// Alt-c / Alt-w / Alt-r: flip one match option and search again.
