@@ -5,16 +5,13 @@ use crate::harness::PtySession;
 use crate::seed::{daily_workspace, git};
 use crate::support::{tree_cursor_on, tree_has, GIT_WAIT, WAIT};
 
-/// Same gap as `pty_quick_open_files_opens_file_tab`. A same-letter
-/// `h`/`j`/`k`/`l` burst is dropped by `discard_held_nav_backlog` after the
-/// first press.
-const QUERY_NAV_LETTER_GAP_MS: u64 = 50;
-
 /// Clean, committed file under `app` with two hit lines for [`QUERY`].
 const SEARCH_FILE: &str = "search-me.txt";
 /// File tab title on the pane's top border.
 const SEARCH_TITLE: &str = "┌app/search-me.txt";
-/// Search term. It is in no other seeded file.
+/// Search term. It is in no other seeded file. It has no `h`/`j`/`k`/`l`,
+/// so it types in one burst (`discard_held_nav_backlog` drops a held
+/// same-letter nav burst).
 const QUERY: &str = "zorbatron";
 /// Line 2 of [`SEARCH_FILE`]: the first hit.
 const FIRST_HIT: &str = "alpha zorbatron";
@@ -48,16 +45,6 @@ fn first_paint(screen: &str) -> bool {
         && !tree_cursor_on(screen, "workspace")
         && !tree_cursor_on(screen, "app")
         && !screen.contains("Search · ")
-}
-
-/// Type a search query at human key gaps for nav letters.
-fn type_query(tui: &mut PtySession, query: &str) {
-    for c in query.chars() {
-        tui.key(c);
-        if matches!(c, 'h' | 'H' | 'j' | 'J' | 'k' | 'K' | 'l' | 'L') {
-            tui.wait_ms(QUERY_NAV_LETTER_GAP_MS);
-        }
-    }
 }
 
 /// Search hit row: the `❯` cursor chip in front of `needle`. The tree
@@ -112,7 +99,7 @@ fn pty_search_in_files_enter_opens_hit_and_n_steps() {
         "Ctrl-f opens the search dialog titled `Search · app` with an empty query",
         WAIT,
     );
-    type_query(&mut tui, QUERY);
+    tui.keys(QUERY);
     tui.wait_pred(
         |screen| {
             search_open(screen)

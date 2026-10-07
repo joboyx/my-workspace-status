@@ -10590,6 +10590,20 @@ mod tests {
         let files = buffer_text(&terminal);
         assert!(files.contains("Enter open"), "{files}");
         assert!(!files.contains("Enter run"), "{files}");
+        assert!(
+            files.contains("↑↓ move · Enter open · > commands · # search · Esc close"),
+            "{files}"
+        );
+        // A narrow box drops chips from the left; `Esc close` stays.
+        let mut narrow = Terminal::new(TestBackend::new(50, 30)).unwrap();
+        draw_state(&mut narrow, &mut state);
+        let text = buffer_text(&narrow);
+        let footer = text
+            .lines()
+            .find(|line| line.contains("Esc close"))
+            .unwrap_or_else(|| panic!("footer keeps `Esc close`:\n{text}"));
+        assert!(!footer.contains("↑↓ move"), "{text}");
+        assert!(footer.contains("# search"), "{text}");
         state.dispatch(Action::QuickOpenBackspace);
         state.dispatch(Action::QuickOpenBackspace);
         state.dispatch(Action::QuickOpenBackspace);
