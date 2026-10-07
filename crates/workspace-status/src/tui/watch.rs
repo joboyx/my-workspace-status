@@ -111,8 +111,12 @@ pub fn watch_needs_pane_reload(
     before_sigs != after_sigs || before_checkouts != after_checkouts
 }
 
-/// `changeSignatures` disk token: `size:mtimeMs`, or `gone` when missing.
-fn file_disk_token(cwd: &Path, repo: &str, rel: &str) -> String {
+/// [`file_disk_token`] of a file that is missing (or cannot be stat'd).
+pub(crate) const GONE_DISK_TOKEN: &str = "gone";
+
+/// `changeSignatures` disk token: `size:mtimeMs`, or [`GONE_DISK_TOKEN`]
+/// when missing. One `stat`; no read, no git.
+pub(crate) fn file_disk_token(cwd: &Path, repo: &str, rel: &str) -> String {
     let abs = cwd.join(repo).join(rel);
     match fs::metadata(&abs) {
         Ok(meta) => {
@@ -124,7 +128,7 @@ fn file_disk_token(cwd: &Path, repo: &str, rel: &str) -> String {
                 .unwrap_or(0);
             format!("{}:{mtime_ms}", meta.len())
         }
-        Err(_) => "gone".into(),
+        Err(_) => GONE_DISK_TOKEN.into(),
     }
 }
 

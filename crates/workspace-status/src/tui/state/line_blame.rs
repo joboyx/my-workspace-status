@@ -469,7 +469,7 @@ impl AppState {
                 return None;
             }
             let mut hasher = DefaultHasher::new();
-            (tab.id, tab.generation).hash(&mut hasher);
+            (tab.id, tab.body_generation).hash(&mut hasher);
             let key = BlameKey {
                 repo: tab.checkout.clone(),
                 rev: BlameRev::Worktree,
