@@ -38,7 +38,9 @@ pub const MAX_RESULTS: usize = 200;
 pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Bytes [`read_text_file`] checks for a NUL before it calls a file binary.
-const BINARY_SNIFF_BYTES: usize = 8000;
+///
+/// Search in files skips a file by the same rule.
+pub(crate) const BINARY_SNIFF_BYTES: usize = 8000;
 
 /// Tab stop width [`read_text_file`] expands `\t` to.
 const TAB_WIDTH: usize = 4;
@@ -324,19 +326,31 @@ pub fn read_text_file(path: &Path, max_bytes: u64) -> FileRead {
 fn paintable_line(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut col = 0usize;
-    let mut utf8 = [0u8; 4];
     for ch in line.chars() {
-        if ch == '\t' {
-            let pad = TAB_WIDTH - col % TAB_WIDTH;
-            out.extend(std::iter::repeat_n(' ', pad));
-            col += pad;
-            continue;
-        }
-        let ch = if ch.is_control() { '\u{FFFD}' } else { ch };
-        out.push(ch);
-        col += visible_width(ch.encode_utf8(&mut utf8));
+        push_paintable_char(&mut out, &mut col, ch);
     }
     out
+}
+
+/// Append one source character to a paintable line, the way the file tab
+/// paints it.
+///
+/// `col` is the terminal column `out` ends at; it advances by what was
+/// appended. `\t` becomes spaces up to the next multiple of 4 columns, and
+/// any other control character becomes U+FFFD. Search in files builds its
+/// hit lines char by char through this, so a hit line and the file tab line
+/// read the same.
+pub(crate) fn push_paintable_char(out: &mut String, col: &mut usize, ch: char) {
+    if ch == '\t' {
+        let pad = TAB_WIDTH - *col % TAB_WIDTH;
+        out.extend(std::iter::repeat_n(' ', pad));
+        *col += pad;
+        return;
+    }
+    let ch = if ch.is_control() { '\u{FFFD}' } else { ch };
+    let mut utf8 = [0u8; 4];
+    out.push(ch);
+    *col += visible_width(ch.encode_utf8(&mut utf8));
 }
 
 #[cfg(test)]
