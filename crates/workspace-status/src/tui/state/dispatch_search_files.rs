@@ -356,13 +356,17 @@ impl AppState {
     }
 
     /// Enter or `e` found no hit: warn `no matches`, unless a search is
-    /// still due or running (its `searching…` status stays instead).
+    /// still due or running, or will run once the loading index lands
+    /// (the dialog's own `searching…` / `indexing…` status stays instead).
     fn warn_no_search_hit(&mut self) {
-        if self
-            .search_files
-            .as_ref()
-            .is_some_and(SearchFilesState::pending)
-        {
+        if self.search_files.as_ref().is_some_and(|dialog| {
+            dialog.pending()
+                || (matches!(
+                    dialog.index,
+                    FileIndexState::NotLoaded | FileIndexState::Loading
+                ) && !dialog.query.is_empty()
+                    && dialog.error.is_none())
+        }) {
             return;
         }
         self.status = StatusMessage::warn(NO_SEARCH_MATCHES);
@@ -470,7 +474,8 @@ impl AppState {
     ///
     /// Dropped unless the dialog is open, searching, and `gen` is its
     /// latest search. The first chunk of a generation replaces the hits on
-    /// screen; later ones append. The follow-up is the next chunk while the
+    /// screen; later ones append. Hits drop an earlier `no matches`
+    /// warning (see [`Self::warn_no_search_hit`]). The follow-up is the next chunk while the
     /// file list is not done and the cap was not hit, else
     /// [`Effect::None`] and the search is over.
     ///
@@ -488,6 +493,9 @@ impl AppState {
             dialog.clear_results();
             dialog.hits_query = dialog.searched.clone();
             dialog.hits_options = dialog.searched_options;
+        }
+        if !chunk.hits.is_empty() && self.status == NO_SEARCH_MATCHES {
+            self.status.clear();
         }
         dialog.hits.extend(chunk.hits);
         dialog.skipped += chunk.skipped;
@@ -519,7 +527,7 @@ mod tests {
     use super::super::super::keys::event_to_action;
     use super::super::super::quick_open::QuickOpenScope;
     use super::super::super::search::SearchPane;
-    use super::super::super::search_files::SearchStatus;
+    use super::super::super::search_files::{search_row_shows_status, SearchStatus};
     use super::super::super::status::StatusMessage;
     use super::super::super::tree::NodeKind;
     use super::*;
@@ -1107,23 +1115,6 @@ mod tests {
     }
 
     #[test]
-    fn move_enters_results_and_typing_returns_to_the_query() {
-        let mut app = family_state();
-        let gen = open_and_search(&mut app, "a");
-        app.apply_search_chunk(gen, chunk(vec![hit(0, 1), hit(0, 2)], None));
-        app.dispatch(Action::SearchFilesMove(1));
-        assert_eq!(dialog(&app).zone, SearchZone::Results);
-        assert_eq!(dialog(&app).cursor, 1);
-        assert!(matches!(
-            app.input_mode(),
-            crate::tui::InputMode::SearchFiles { results: true }
-        ));
-        app.dispatch(Action::SearchFilesChar('b'));
-        assert_eq!(dialog(&app).zone, SearchZone::Query);
-        assert_eq!(dialog(&app).query, "ab");
-    }
-
-    #[test]
     fn failed_index_reports_the_root_errors() {
         let mut app = family_state();
         focus_row(&mut app, NodeKind::Checkout, Some("app"));
@@ -1322,6 +1313,10 @@ mod tests {
         press(&mut app, KeyCode::Down);
         assert_eq!(dialog(&app).zone, SearchZone::Results);
         assert_eq!(dialog(&app).cursor, 1);
+        assert!(matches!(
+            app.input_mode(),
+            crate::tui::InputMode::SearchFiles { results: true }
+        ));
         press(&mut app, KeyCode::Char('k'));
         assert_eq!(dialog(&app).cursor, 0, "`k` moves in the results zone");
         press(&mut app, KeyCode::Char('x'));
@@ -1591,6 +1586,41 @@ mod tests {
         app.dispatch(Action::ToggleSearchFiles);
         assert_eq!(app.search_preview_request(), None);
         assert!(dialog(&app).preview.as_ref().unwrap().body.is_some());
+    }
+
+    #[test]
+    fn enter_or_e_while_the_index_loads_stays_quiet() {
+        let mut app = family_state();
+        let gen = open_and_search(&mut app, "line");
+        app.apply_search_chunk(gen, chunk(Vec::new(), None));
+        app.dispatch(Action::SearchFilesCancel);
+
+        // A fresh open in another scope carries the query; nothing is due
+        // or running until the index lands, but a search will run then.
+        focus_row(&mut app, NodeKind::Repo, Some("lib"));
+        let (gen, _) = open(&mut app);
+        assert_eq!(dialog(&app).query, "line");
+        assert!(!dialog(&app).pending());
+        for action in [Action::SearchFilesSubmit, Action::SearchFilesEdit] {
+            assert_eq!(app.dispatch(action.clone()), Effect::None, "{action:?}");
+            assert!(app.status.is_empty(), "{action:?} while indexing");
+        }
+
+        let gen = search_gen(app.apply_search_index(gen, index_of(&["lib.rs"])));
+        app.apply_search_chunk(gen, chunk(vec![hit(0, 1)], None));
+        assert!(!search_row_shows_status(&app.status));
+        assert_eq!(dialog(&app).hits.len(), 1);
+    }
+
+    #[test]
+    fn hits_landing_drop_an_earlier_miss_warning() {
+        let mut app = family_state();
+        let gen = open_and_search(&mut app, "line");
+        app.status = StatusMessage::warn(NO_SEARCH_MATCHES);
+        app.apply_search_chunk(gen, chunk(Vec::new(), Some(1)));
+        assert_eq!(app.status, NO_SEARCH_MATCHES, "no hits yet: it stays");
+        app.apply_search_chunk(gen, chunk(vec![hit(1, 3)], None));
+        assert!(app.status.is_empty(), "hits replace the miss");
     }
 
     #[test]

@@ -108,11 +108,12 @@ pub fn build_matcher(query: &str, options: SearchOptions) -> Result<SearchMatche
         .map_err(|err| one_line_error(&err.to_string()))
 }
 
-/// The `error: ...` line of a multi-line regex syntax error, else every
-/// line joined with spaces.
+/// The last `error: ...` line of a multi-line regex syntax error (the
+/// pattern echoed above it may read `error: ` too), else every line
+/// joined with spaces.
 fn one_line_error(message: &str) -> String {
     let lines = message.lines().map(str::trim).filter(|l| !l.is_empty());
-    if let Some(reason) = lines.clone().find_map(|l| l.strip_prefix("error: ")) {
+    if let Some(reason) = lines.clone().rev().find_map(|l| l.strip_prefix("error: ")) {
         return reason.to_string();
     }
     lines.collect::<Vec<_>>().join(" ")
@@ -688,5 +689,14 @@ mod tests {
             }
         )
         .is_ok());
+    }
+
+    #[test]
+    fn regex_error_reason_is_the_last_error_line() {
+        // regex-syntax echoes the pattern above the reason; a pattern that
+        // itself reads `error: ...` must not become the reason.
+        let message = "regex parse error:\n    error: (\n    ^\nerror: unclosed group";
+        assert_eq!(one_line_error(message), "unclosed group");
+        assert_eq!(one_line_error("bad\n  thing "), "bad thing");
     }
 }
