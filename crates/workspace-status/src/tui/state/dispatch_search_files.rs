@@ -71,6 +71,10 @@ impl AppState {
             }
             Action::SearchFilesToggleScope => self.toggle_search_scope(),
             Action::SearchFilesToggleOption(option) => {
+                if self.search_files.is_none() {
+                    return Effect::None;
+                }
+                self.clear_search_miss_warning();
                 let Some(dialog) = self.search_files.as_mut() else {
                     return Effect::None;
                 };
@@ -180,6 +184,10 @@ impl AppState {
     /// Tab: widen to all repos, or back to the focused scope. A scope
     /// change drops the hits and reloads the index; the search follows it.
     fn toggle_search_scope(&mut self) -> Effect {
+        if self.search_files.is_none() {
+            return Effect::None;
+        }
+        self.clear_search_miss_warning();
         let Some(dialog) = self.search_files.as_mut() else {
             return Effect::None;
         };
@@ -217,10 +225,7 @@ impl AppState {
         if self.search_files.is_none() {
             return Effect::None;
         }
-        // Enter's miss warning is about the old query.
-        if self.status == NO_SEARCH_MATCHES {
-            self.status.clear();
-        }
+        self.clear_search_miss_warning();
         let Some(dialog) = self.search_files.as_mut() else {
             return Effect::None;
         };
@@ -338,6 +343,15 @@ impl AppState {
             repo,
             path,
             line: Some(line),
+        }
+    }
+
+    /// Drop the `no matches` warning of an earlier Enter or `e`: it was
+    /// about the query, options, and scope before this change, and while
+    /// it shows it hides the dialog's own status row.
+    fn clear_search_miss_warning(&mut self) {
+        if self.status == NO_SEARCH_MATCHES {
+            self.status.clear();
         }
     }
 
@@ -1577,5 +1591,34 @@ mod tests {
         app.dispatch(Action::ToggleSearchFiles);
         assert_eq!(app.search_preview_request(), None);
         assert!(dialog(&app).preview.as_ref().unwrap().body.is_some());
+    }
+
+    #[test]
+    fn option_and_scope_changes_clear_the_miss_warning() {
+        let mut app = family_state();
+        let gen = open_and_search(&mut app, "foo(");
+        app.apply_search_chunk(gen, chunk(Vec::new(), None));
+        app.dispatch(Action::SearchFilesSubmit);
+        assert_eq!(app.status, NO_SEARCH_MATCHES);
+        app.dispatch(Action::SearchFilesToggleOption(SearchFilesOption::Regex));
+        assert!(app.status.is_empty(), "Alt-r drops the old miss");
+        assert!(matches!(
+            dialog(&app).status()[0],
+            SearchStatus::InvalidRegex(_)
+        ));
+
+        app.dispatch(Action::SearchFilesToggleOption(SearchFilesOption::Regex));
+        let gen = dialog(&app).search_gen;
+        app.apply_search_chunk(gen, chunk(Vec::new(), None));
+        app.dispatch(Action::SearchFilesEdit);
+        assert_eq!(app.status, NO_SEARCH_MATCHES);
+        app.dispatch(Action::SearchFilesToggleScope);
+        assert!(app.status.is_empty(), "Tab drops the old miss");
+        assert!(dialog(&app).widened);
+
+        // The quit prompt is not a miss warning: it stays.
+        app.status = crate::tui::ctrl_c_exit::CTRL_C_EXIT_PROMPT.into();
+        app.dispatch(Action::SearchFilesToggleOption(SearchFilesOption::Case));
+        assert_eq!(app.status, crate::tui::ctrl_c_exit::CTRL_C_EXIT_PROMPT);
     }
 }
