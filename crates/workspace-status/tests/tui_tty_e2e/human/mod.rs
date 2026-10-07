@@ -67,6 +67,7 @@ mod pty_emoji_diff_keeps_column_grid;
 mod pty_enter_from_tree_focuses_right;
 mod pty_expired_ctrl_c_arm_does_not_quit;
 mod pty_fetch_local_remote_marks_behind;
+mod pty_file_tab_live_reload;
 mod pty_fold_h_l_toggles_no_updates_group;
 mod pty_gg_and_g_jump_workspace_tree;
 mod pty_gg_jumps_focused_list_or_file_diff;
